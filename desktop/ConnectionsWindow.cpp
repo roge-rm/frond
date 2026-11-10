@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QActionGroup>
 #include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
@@ -194,6 +195,7 @@ void ConnectionsWindow::showState(const QJsonObject& s) {
         item->setData(Qt::UserRole, c.value("id").toString());
         item->setData(Qt::UserRole + 1, c.value("name").toString());
         item->setData(Qt::UserRole + 2, c.value("address").toString());
+        item->setData(Qt::UserRole + 3, c.value("bluetoothRadio").toString());
         if (item->data(Qt::UserRole).toString() == selected) list->setCurrentItem(item);
     }
     const auto nearSelected = nearbyList->currentItem() ? nearbyList->currentItem()->data(Qt::UserRole).toString() : QString();
@@ -255,6 +257,19 @@ void ConnectionsWindow::rowMenu(const QPoint& at) {
         const auto text = QInputDialog::getText(this, tr("Address"), tr("Address"), QLineEdit::Normal, address, &ok).trimmed();
         if (ok) client->send({{"op", "peer-address"}, {"id", id}, {"address", text}});
     })->setObjectName("connectionAddress");
+    // Bluetooth on this connection uses one side's radio.
+    auto* radio = menu.addMenu(tr("Bluetooth radio"));
+    radio->setObjectName("bluetoothRadio");
+    const bool here = item->data(Qt::UserRole + 3).toString() != "there";
+    auto* group = new QActionGroup(radio);
+    for (const auto& [value, text] : {std::pair<QString, QString>{"here", tr("This Frond's radio")},
+                                      std::pair<QString, QString>{"there", tr("%1's radio").arg(name)}}) {
+        auto* action = radio->addAction(text, this, [this, id, value] { client->send({{"op", "peer-radio"}, {"id", id}, {"radio", value}}); });
+        action->setObjectName(value == "here" ? "bluetoothRadioHere" : "bluetoothRadioThere");
+        action->setCheckable(true);
+        action->setChecked((value == "here") == here);
+        group->addAction(action);
+    }
     menu.addAction(tr("Forget"), this, [this, id, name] {
         QMessageBox box(QMessageBox::Question, tr("Forget"), tr("Forget %1?").arg(name), QMessageBox::Cancel, this);
         auto* forget = box.addButton(tr("Forget"), QMessageBox::DestructiveRole);

@@ -16,7 +16,10 @@ val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
 // The repo root, one above android/. The core is reconstructed there in build/source.
 val repoRoot: File = rootProject.projectDir.parentFile
-val coreSource: File = File(repoRoot, "build/source")
+// An isolated prepared source can be used without replacing another session's build/source.
+val coreSourceOverride = providers.gradleProperty("frond.coreSource").orNull
+val coreSource: File = coreSourceOverride?.let { File(it).let { path -> if (path.isAbsolute) path else File(repoRoot, it) } }
+    ?: File(repoRoot, "build/source")
 
 // SDL2 and SDL2_image match the desktop build (Debian's libsdl2 2.32.4 and
 // libsdl2-image 2.8.8). The tarballs are the GitHub releases, checked against these
@@ -44,7 +47,8 @@ val prepareCore = tasks.register<Exec>("prepareCore") {
     group = "build"
     description = "Reconstructs the patched core in build/source with tools/prepare.py"
     workingDir(repoRoot)
-    commandLine("python3", "tools/prepare.py")
+    if (coreSourceOverride == null) commandLine("python3", "tools/prepare.py")
+    else commandLine("python3", "tools/prepare.py", "--destination", coreSource.absolutePath)
 }
 
 // The Fast engine's Dynarmic source, exported and patched into build/dynarmic-trial/src by the
@@ -78,7 +82,8 @@ tasks.configureEach {
 val checkDeviceData = tasks.register<Exec>("checkDeviceData") {
     dependsOn(prepareCore)
     workingDir(repoRoot)
-    commandLine("python3", "tools/generate-device-data.py", "--check")
+    commandLine("python3", "tools/generate-device-data.py", "--check", "--source", coreSource.absolutePath,
+        "--build-dir", layout.buildDirectory.dir("device-data").get().asFile.absolutePath)
 }
 tasks.named("preBuild") { dependsOn(checkDeviceData) }
 
@@ -171,8 +176,8 @@ android {
         minSdk = 26
         targetSdk = 37
         testInstrumentationRunner = "com.rm.frond.MachineSettingsInstrumentation"
-        versionCode = 11
-        versionName = "0.13.0"
+        versionCode = 12
+        versionName = "0.14.0"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild {
             cmake {
@@ -187,7 +192,7 @@ android {
                     "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
                     "-DFROND_BOOST_INCLUDE=$boostInclude",
                 )
-                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "jit-differential", "benchmark-replay")
+                if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "jit-differential", "benchmark-replay")
             }
         }
     }
@@ -254,3 +259,30 @@ dependencies {
 }
 
 tasks.named("preBuild") { dependsOn(prepareCore, fetchSdl, fetchSdlImage) }
+
+// Unit tests load a host build of the storage library's JNI (CardStorageJni.cpp with miniz) as
+// libfrondcard.so, so the CardFile and FatImage tests run the same C++ as the app. Needs the host's
+// cc and c++, and the JDK's jni.h.
+val hostStorage: File = layout.buildDirectory.dir("host-storage").get().asFile
+val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
+    group = "build"
+    description = "Builds the storage library's JNI for the host, for unit tests"
+    dependsOn(prepareCore)
+    val jni = File(projectDir, "src/main/cpp/CardStorageJni.cpp")
+    val common = File(coreSource, "src/common")
+    val jdk = File(System.getProperty("java.home"))
+    inputs.file(jni)
+    inputs.dir(File(common, "storage"))
+    inputs.file(File(common, "zip/miniz.c"))
+    outputs.file(File(hostStorage, "libfrondcard.so"))
+    doFirst { hostStorage.mkdirs() }
+    commandLine("sh", "-c",
+        "cc -std=gnu99 -O1 -fPIC -I\"$common\" -c \"$common/zip/miniz.c\" -o \"$hostStorage/miniz.o\" && " +
+        "c++ -std=c++17 -O1 -g -fPIC -shared -Wall -Wextra -Wno-unused-parameter " +
+        "-I\"$jdk/include\" -I\"$jdk/include/linux\" -I\"$common\" \"$jni\" \"$hostStorage/miniz.o\" " +
+        "-o \"$hostStorage/libfrondcard.so\"")
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(buildHostStorage)
+    systemProperty("java.library.path", hostStorage.absolutePath)
+}

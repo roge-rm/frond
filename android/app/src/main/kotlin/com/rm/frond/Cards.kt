@@ -164,16 +164,18 @@ object Cards {
 
     fun describedCard(cards: List<Descriptor>, file: String) = cards.firstOrNull { it.kind == descriptorKindOf(file) }
 
-    // The SD or Pro v2 generation, or the classic stick's change counter, and the logical size, from
-    // a card file's header.
+    // The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, and the logical
+    // size, from a card file's header.
+    // A v1 classic stick isn't a container, so only its header is read here.
     fun cardHeader(file: File): Pair<Long, Long>? = try {
-        val h = file.inputStream().use { input -> ByteArray(64).also { if (input.read(it) != 64) return null } }
-        val magic = String(h, 0, 8, Charsets.US_ASCII)
-        when (magic) {
-            "FRONDSD\u0000" -> (if (le32(h, 8) == 2L) le64(h, 28) else 0L) to le64(h, 16)
+        val info = CardFile.info(file)
+        when {
+            info?.kind == 0 -> info.generation to info.payload
             // Each MB is 2048 pages of 512 bytes plus 9.
-            "FRONDMS\u0000" -> le64(h, 32) to le32(h, 12) * le32(h, 16) * 512
-            else -> null
+            info?.classic == true -> info.generation to classicV2Physical(info.payload, info.side) / 521 * 512
+            info != null -> null
+            else -> CardFile.header(file)?.takeIf { String(it, 0, 8, Charsets.US_ASCII) == "FRONDMS\u0000" && le32(it, 8) == 1L }
+                ?.let { h -> le64(h, 32) to le32(h, 12) * le32(h, 16) * 512 }
         }
     } catch (e: IOException) {
         null
@@ -244,20 +246,14 @@ object Cards {
 
     // A machine's <machine>/.run.lock, held by the :emulator process while the machine runs. Others
     // take it for the length of an operation. Null when someone holds it.
-    class RunLock internal constructor(private val file: RandomAccessFile, private val lock: FileLock) : Closeable {
-        override fun close() {
-            try { lock.release() } catch (_: IOException) {}
-            try { file.close() } catch (_: IOException) {}
-        }
+    class RunLock internal constructor(private val held: FileLocks.Held) : Closeable {
+        override fun close() = held.close()
     }
 
+    // Null when this process or another holds it (through FileLocks, so a check never drops a lock
+    // this process holds).
     fun tryRunLock(dir: File): RunLock? = try {
-        if (!dir.isDirectory) null
-        else {
-            val file = RandomAccessFile(File(dir, RUN_LOCK), "rw")
-            val lock = try { file.channel.tryLock() } catch (e: OverlappingFileLockException) { null }
-            if (lock == null) { file.close(); null } else RunLock(file, lock)
-        }
+        if (!dir.isDirectory) null else FileLocks.tryLock(File(dir, RUN_LOCK))?.let { RunLock(it) }
     } catch (e: IOException) {
         null
     }
@@ -324,6 +320,11 @@ object Cards {
     }
 
     const val SAME_DISK = "Cards and sessions have to be on the same disk."
+    const val IN_FILES = "The card is open in Files. Close it first."
+    const val MISMATCH = "The card has an unfinished change that doesn't match it."
+
+    // A card file nobody has open in Files…, with any change a crash cut off finished.
+    fun ready(card: File) = !CardFile.inUse(card) && CardFile.settle(card)
 
     // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
     // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
@@ -332,6 +333,7 @@ object Cards {
         val file = cardFileIn(dir)
         val card = readCard(entryDir(library, id))
         if (file == null || card == null) return "Couldn't move the card."
+        CardFile.notReady(File(dir, file))?.let { return it }
         val slot = readSlot(dir).copy(present = true, swap = true, card = id)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(dir, file).renameTo(File(entryDir(library, id), file))) return "Couldn't move the card into Cards. $SAME_DISK"
@@ -346,6 +348,7 @@ object Cards {
         val file = fileOfKind(card.kind)
         if (cardFileIn(dir) != null) return "Take the machine's card out first."
         if (!File(entryDir(library, id), file).isFile) return "That card is in another machine."
+        CardFile.notReady(File(entryDir(library, id), file))?.let { return it }
         val slot = readSlot(dir).copy(present = true, swap = true, card = id, name = card.name)
         if (!writeSlot(dir, slot)) return "Couldn't move the card."
         if (!File(entryDir(library, id), file).renameTo(File(dir, file))) {
@@ -362,16 +365,14 @@ object Cards {
         val id = newId()
         val dir = File(library, ".new-$id")
         private val lockFile = File(library, ".new-$id.lock")
-        private var raf: RandomAccessFile? = null
-        private var lock: FileLock? = null
+        private var lock: FileLocks.Held? = null
         private var kept = false
         val ok: Boolean
 
         init {
             ok = try {
                 library.mkdirs()
-                raf = RandomAccessFile(lockFile, "rw")
-                lock = raf!!.channel.tryLock()
+                lock = FileLocks.tryLock(lockFile)
                 lock != null && dir.mkdirs()
             } catch (e: Exception) {
                 false
@@ -382,8 +383,7 @@ object Cards {
 
         override fun close() {
             if (!kept) dir.deleteRecursively()
-            try { lock?.release() } catch (_: IOException) {}
-            try { raf?.close() } catch (_: IOException) {}
+            lock?.close()
             lockFile.delete()
         }
     }
@@ -392,12 +392,10 @@ object Cards {
     fun removeStaleNew(library: File, now: Long = System.currentTimeMillis()) {
         library.listFiles { f -> f.isDirectory && f.name.startsWith(".new-") }.orEmpty().forEach { dir ->
             val lockFile = File(library, "${dir.name}.lock")
-            val raf = try { RandomAccessFile(lockFile, "rw") } catch (e: IOException) { return@forEach }
-            raf.use {
-                val lock = try { it.channel.tryLock() } catch (e: OverlappingFileLockException) { null } ?: return@forEach
+            val lock = try { FileLocks.tryLock(lockFile) } catch (e: IOException) { null } ?: return@forEach
+            lock.use {
                 val newest = (listOf(dir) + dir.listFiles().orEmpty()).maxOf { f -> f.lastModified() }
                 if (now - newest > 10 * 60 * 1000) dir.deleteRecursively()
-                lock.release()
             }
             if (!dir.exists()) lockFile.delete()
         }
@@ -498,10 +496,18 @@ object Cards {
                 }
                 machines += Held(dir, lock)
             }
+            settleEdits(library, machines.map { it.dir })
             reconcileMachines(sessions, library, machines.map { it.dir }, skippedClaims, skippedNames)
         } finally {
             machines.forEach { it.lock?.close() }
         }
+    }
+
+    // Finishes Files… changes a crash cut off, in the machines held and the drawer. Cards open in
+    // Files… now are left alone.
+    private fun settleEdits(library: File, dirs: List<File>) {
+        for (dir in dirs) cardFileIn(dir)?.let { CardFile.settle(File(dir, it)) }
+        for (e in entries(library)) CardFile.settle(File(e.dir, fileOfKind(e.card.kind)))
     }
 
     private fun reconcileMachines(sessions: File, library: File, dirs: List<File>, skippedClaims: Set<String>, skippedNames: Set<String>) {
@@ -594,6 +600,8 @@ object Cards {
     fun takeAtStart(sessions: File, dir: File): Start {
         val library = libraryFor(sessions)
         var heldBy: String? = null
+        // The run lock is held, so this machine's card can be settled even if the library is busy.
+        cardFileIn(dir)?.let { CardFile.settle(File(dir, it)) }
         LibraryLock(library).use { lock ->
             if (lock.ok) {
                 reconcileLocked(sessions, dir)
@@ -828,7 +836,7 @@ object Cards {
         return ToolResult(false, parts.getOrElse(1) { "error" }, parts.getOrElse(2) { "Couldn't run the card tool." })
     }
 
-    private fun toolError(r: ToolResult) = if (r.code == "cancelled") COPY_CANCELLED else r.message
+    fun toolError(r: ToolResult) = if (r.code == "cancelled") COPY_CANCELLED else r.message
 
     // ---- Card operations. Each takes the library lock for its changes; copies run outside it. ----
 
@@ -880,10 +888,10 @@ object Cards {
         return null
     }
 
-    // A folder copied once onto a new card named `name` (SD or Memory Stick Pro, `size` in MiB): a
-    // blank FAT16 image, the tree copied in with FatImage, then the card tool makes the card file.
-    // All inside cards/.new-<id>, so a refusal, an error or Cancel leaves nothing. Progress runs
-    // 0 to 1000: the copy is the first half, the card file the second.
+    // A folder copied once onto a new card named `name` (SD or Memory Stick Pro, `size` in MiB): the
+    // card tool makes a new card file, then the tree goes onto it through the storage library in
+    // one commit, as on the desktop. All inside cards/.new-<id>, so a refusal, an error or Cancel
+    // leaves nothing. Progress runs 0 to 1000: the card file to 200, the files the rest.
     fun importFolderCard(sessions: File, root: FolderCard.Node, name: String, kind: String, size: Int,
                          cancelled: () -> Boolean = { false }, progress: ((Long, Long) -> Unit)? = null,
                          made: ((String) -> Unit)? = null): String? {
@@ -897,23 +905,25 @@ object Cards {
         if (!FolderCard.fits(plan, size)) return "The folder doesn't fit on a ${Device.sizeLabel(size)} card."
         val cardBytes = size.toLong() shl 20
         val free = freeSpace(library)
-        if (free >= 0 && free < 2 * cardBytes + plan.bytes + SPARE_BYTES) return spaceMessage(2 * cardBytes + plan.bytes)
+        if (free >= 0 && free < cardBytes + SPARE_BYTES) return spaceMessage(cardBytes)
         NewCopy(library).use { copy ->
             if (!copy.ok) return "Couldn't add the card."
-            val raw = File(copy.dir, ".work.img")
-            try {
-                FolderCard.blank(raw, size)
-            } catch (e: IOException) {
-                return "Couldn't make the card."
-            }
-            FolderCard.copy(raw, root, plan, cancelled) { done, total -> progress?.invoke(done * 500 / total, 1000) }?.let { return it }
-            if (cancelled()) return COPY_CANCELLED
             val file = File(copy.dir, fileOfKind(kind))
-            val r = runTool(arrayOf("import", raw.path, toolKind(kind), file.path), cancelled) { done, total ->
-                progress?.invoke(500 + done * 500 / maxOf(total, 1), 1000)
+            val r = runTool(arrayOf("make", toolKind(kind), size.toString(), file.path), cancelled) { done, total ->
+                progress?.invoke(done * 200 / maxOf(total, 1), 1000)
             }
             if (!r.ok) return toolError(r)
-            raw.delete()
+            if (cancelled()) return COPY_CANCELLED
+            try {
+                CardFile.open(file, true).use { card ->
+                    FatImage.over(card).use { fat ->
+                        FolderCard.fill(fat, root, plan, cancelled) { done, total -> progress?.invoke(200 + done * 800 / total, 1000) }
+                            ?.let { return it }
+                    }
+                }
+            } catch (e: IOException) {
+                return "Couldn't copy the folder: ${e.message ?: "write error"}"
+            }
             val logical = cardHeader(file)?.second ?: return "Couldn't add the card."
             adoptNew(library, copy, Card(copy.id, wanted, kind, now(), null, logical, newIdentity(), false))?.let { return it }
             made?.invoke(copy.id)
@@ -927,13 +937,18 @@ object Cards {
         override fun close() { lock?.close() }
     }
 
-    private fun cardSource(sessions: File, id: String): Pair<Source?, String?> {
+    fun cardSource(sessions: File, id: String): Pair<Source?, String?> {
         val library = libraryFor(sessions)
         val card = readCard(entryDir(library, id)) ?: return null to "Couldn't find that card."
         val file = fileOfKind(card.kind)
-        if (File(entryDir(library, id), file).isFile) return Source(File(entryDir(library, id), file), card, null, null) to null
+        val inDrawer = File(entryDir(library, id), file)
+        if (inDrawer.isFile) {
+            CardFile.notReady(inDrawer)?.let { return null to it }
+            return Source(inDrawer, card, null, null) to null
+        }
         val holder = holderOf(sessions, id) ?: return null to "Couldn't find that card."
         val lock = tryRunLock(holder) ?: return null to "${machineName(holder)} is running. Stop it first."
+        CardFile.notReady(File(holder, file))?.let { lock.close(); return null to it }
         val slot = readSlot(holder)
         if (settled(holder, file, slot.swap)) return Source(File(holder, file), card, holder, lock) to null
         val settle = sdSettleOf(holder)
@@ -1028,6 +1043,7 @@ object Cards {
             if (!lock.ok) return BUSY
             val card = readCard(entryDir(library, id)) ?: return "Couldn't find that card."
             if (!File(entryDir(library, id), fileOfKind(card.kind)).isFile) return "Take the card out of its machine first."
+            CardFile.notReady(File(entryDir(library, id), fileOfKind(card.kind)))?.let { return it }
             if (!entryDir(library, id).deleteRecursively()) return "Couldn't delete the card."
             for (dir in sessions.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty()) {
                 val slot = readSlot(dir)

@@ -1,0 +1,11 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+@@ -646,6 +646,8 @@
+     afterLoad = true;
+ 
+     systemCycles = gSession->GetSystemCycles();
++    // The restored PLL must set the session clock before lazy timers advance.
++    EmHAL::onSystemClockChange.Dispatch();
+     UpdateTimers();
+     powerOffCached = GetAsleep();
+     UpdateBusTiming();

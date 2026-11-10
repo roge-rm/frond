@@ -14,6 +14,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::reserved: return "reserved";
         case DeviceCohort5::ez68k: return "ez68k-rom";
         case DeviceCohort5::zodiacNor: return "zodiac-nor";
+        case DeviceCohort5::vz68k: return "vz68k-rom";
     }
     return "unknown";
 }
@@ -44,9 +45,42 @@ int main() {
                   << ",\"runs_68k\":" << (deviceProfileRuns68k5(p.deviceType) ? "true" : "false")
                   << ",\"hot_sync_button\":" << (deviceProfileHasHotSyncButton5(p.deviceType) ? "true" : "false")
                   << ",\"cpu_hz\":" << p.cpuHz
+                  << ",\"original_mips\":" << deviceProfileOriginalMips5(p.deviceType)
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")
                   << ",\"storage_slot\":" << std::quoted(deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick ? "memory-stick"
                         : deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd ? "sd" : "none");
+        std::cout << ",\"storage_slots\":[";
+        DeviceCardSlotInfo5 slot{};
+        for (unsigned n=0; deviceProfileCardSlot5(p,n,slot); ++n) {
+            if (n) std::cout << ',';
+            std::cout << "{\"id\":" << int(slot.id) << ",\"label\":" << slot.label
+                      << ",\"kind\":" << std::quoted(slot.kind == DeviceStorageSlot5::sd ? "sd" : "memory-stick")
+                      ;
+            if (slot.kind == DeviceStorageSlot5::memoryStick) {
+                std::cout << ",\"legacy_size_fields\":[\"ms_sizes_mb\",\"ms_pro_max_mb\"]}";
+                continue;
+            }
+            std::cout << ",\"media_families\":[";
+            bool firstFamily = true;
+            for (auto family : {DeviceCardFamily5::sdsc, DeviceCardFamily5::legacyMmc}) {
+                DeviceCardRule5 rule;
+                if (!deviceProfileCardRule5(p,slot.id,family,rule)) continue;
+                if (!firstFamily) std::cout << ',';
+                firstFamily = false;
+                std::cout << "{\"family\":" << std::quoted(family == DeviceCardFamily5::sdsc ? "sdsc" : "legacy-mmc-spi")
+                          << ",\"csd_format\":" << std::quoted(family == DeviceCardFamily5::sdsc ? "sd-v1" : "mmc-1.2-spec-3.3")
+                          << ",\"min_bytes\":" << rule.minBytes << ",\"max_bytes\":" << rule.maxBytes
+                          << ",\"block_bytes\":512,\"size_rule\":"
+                          << std::quoted(rule.legacyCsd ? "legacy-csd-fixed-512" : "legacy-profile-aligned-512")
+                          << ",\"runtime_sizes_bytes\":[";
+                for (unsigned i=0;i<rule.sizeCount;++i) std::cout << (i ? "," : "") << rule.sizes[i];
+                std::cout << "],\"guest_qualified_sizes_bytes\":[";
+                for (unsigned i=0;i<rule.guestSizeCount;++i) std::cout << (i ? "," : "") << rule.guestSizes[i];
+                std::cout << "]}";
+            }
+            std::cout << "]}";
+        }
+        std::cout << ']';
         const auto& f = p.frontend;
         std::cout << ",\"device_type\":" << int(p.deviceType)
                   << ",\"detect\":" << int(p.detect)
@@ -82,6 +116,11 @@ int main() {
                   << ",\"usb\":" << (p.capabilities.usb ? "true" : "false")
                   << ",\"infrared\":" << (p.capabilities.infrared ? "true" : "false")
                   << ",\"bluetooth\":" << (p.capabilities.bluetooth ? "true" : "false")
+                  << ",\"modem\":" << (p.capabilities.modem ? "true" : "false")
+                  << ",\"ir_phone\":" << (p.capabilities.irPhone ? "true" : "false")
+                  << ",\"usb_printer\":" << (p.capabilities.usbPrinter ? "true" : "false")
+                  << ",\"usb_wifi\":" << (p.capabilities.usbWifi ? "true" : "false")
+                  << ",\"built_in_wifi\":" << (p.capabilities.builtInWifi ? "true" : "false")
                   << ",\"firmware_variants\":[";
         bool firstVariant = true;
         for (const auto& v : deviceFirmwareVariants5) {

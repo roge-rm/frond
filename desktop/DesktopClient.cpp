@@ -77,12 +77,11 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
     if (line.size() > 32768 || socket->write(line) != line.size()) {
         pending.clear(); emit error(tr("Could not send the emulator command.")); return false;
     }
-    deadline.start(command == "ms-get" || command == "ms-put" ? 240000 : 120000);
+    deadline.start(120000);
     return true;
 }
 bool DesktopClient::cancelFiles() {
-    if (!socket || !QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename",
-                                 "sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
+    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
     const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
     return socket->write(line) == line.size();
 }
@@ -98,6 +97,9 @@ void DesktopClient::receive() {
         if (fields[0] == "0" && fields[1] == "event") {
             if (fields[2] == "ready" && !ready) { ready = true; deadline.stop(); emit started(); }
             else if (fields[2] == "close" && ready) emit closeRequested();
+            else if (fields[2] == "shortcut" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit shortcut(QString::fromUtf8(QByteArray::fromHex(fields[3])));
             else if (fields[2] == "microphone" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit microphoneState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
@@ -113,6 +115,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "bluetooth" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit bluetoothState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "dana-view" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit danaViewState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
             else if (fields[2] == "card" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit cardState(QString::fromUtf8(QByteArray::fromHex(fields[3])));

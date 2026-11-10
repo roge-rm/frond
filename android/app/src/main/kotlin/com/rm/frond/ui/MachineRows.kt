@@ -19,11 +19,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.rm.frond.DanaKeyboard
+import com.rm.frond.DanaPointer
+import com.rm.frond.DanaZoom
+import com.rm.frond.isDana
 import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
+import com.rm.frond.BarMode
 import com.rm.frond.JogControls
 import com.rm.frond.MachineSettings
+import com.rm.frond.RunningModel
 import com.rm.frond.ScreenSize
 import kotlin.math.roundToInt
 
@@ -72,12 +78,25 @@ fun <T> MachineChoiceRow(
     }
 }
 
-// Size, Smooth pixels, Contrast on 68k devices, and on the TG50 Show keyboard and Jog controls.
+// Size, Smooth pixels, Contrast on 68k devices, Top bar, and on the TG50 Show keyboard and Jog controls.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
-    MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
+    if (device.isDana()) {
+        MachineChoiceRow("Keyboard", settings.danaView.keyboard, DanaKeyboard.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(keyboard = it)))
+        }
+        MachineChoiceRow("Screen zoom", settings.danaView.zoom, DanaZoom.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(zoom = it)))
+        }
+        MachineChoiceRow("Screen pointer", settings.danaView.pointer, DanaPointer.entries, { it.label }, listStyle) {
+            onChange(settings.copy(danaView = settings.danaView.copy(pointer = it)))
+        }
+    } else {
+        MachineChoiceRow("Size", settings.size, ScreenSize.entries, { it.label }, listStyle) { onChange(settings.copy(size = it)) }
+    }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
     if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
+    MachineChoiceRow("Top bar", settings.barMode, BarMode.entries, { it.label }, listStyle) { onChange(settings.copy(barMode = it)) }
     if (device.isTg50()) {
         MachineSwitchRow("Show keyboard", settings.showKeyboard, listStyle) { onChange(settings.copy(showKeyboard = it)) }
         MachineChoiceRow("Jog controls", settings.jogControls, JogControls.entries, { it.label }, listStyle) {
@@ -105,7 +124,7 @@ fun MachineAudioPreviewRow(
     }
 }
 
-// Exact or Fast. Only shown in debug builds until the Fast engine is qualified.
+// Exact or Fast, for ARM devices.
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
@@ -136,8 +155,35 @@ fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: 
     }
 }
 
-// Original or Uncapped, for 68k devices.
+// Original or Uncapped. An ARM device takes it at its next start.
 @Composable
 fun MachineSpeedRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Speed", settings.speed, CpuSpeed.entries, { it.label }, listStyle) { onChange(settings.copy(speed = it)) }
+}
+
+// Microphone on or off. Turning it on asks for the permission first when it isn't granted.
+@Composable
+fun MicrophoneRow(model: RunningModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) model.changeMicrophone(true) else model.microphoneDenied() }
+    val enable: (Boolean) -> Unit = { on ->
+        if (!on) model.changeMicrophone(false)
+        else if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED) model.changeMicrophone(true)
+        else permission.launch(android.Manifest.permission.RECORD_AUDIO)
+    }
+    val supported = model.device.microphone
+    val checked = model.microphone == "on" || model.microphone == "pending"
+    ListItem(
+        headlineContent = { Text("Microphone", color = if (supported) Color.Unspecified else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)) },
+        supportingContent = when {
+            model.microphone == "pending" -> ({ Text("Ready on return") })
+            model.microphone.startsWith("off ") -> ({ Text(model.microphone.removePrefix("off ")) })
+            else -> null
+        },
+        trailingContent = { Switch(checked = checked, enabled = supported, onCheckedChange = enable) },
+        modifier = if (supported) Modifier.clickableRow { enable(!checked) } else Modifier,
+    )
 }

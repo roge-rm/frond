@@ -212,6 +212,93 @@ class SessionsLayoutTest {
         }
     }
 
+    // v9 with one NAND descriptor (kind 4) of `units` 528-byte units.
+    private fun v9WithNand(generation: Long, units: Long = 2048): ByteArray {
+        val name = "palm-tx".toByteArray(Charsets.US_ASCII).copyOf(32)
+        val nandName = NAND_FILE.toByteArray(Charsets.US_ASCII).copyOf(32)
+        return put32(0x19800819) + put32(9) + name +
+            put32(0) + put32(0) + ByteArray(40) + put32(1) +
+            put32(4) + nandName + put32(1) + put32(0) + "nand".toByteArray(Charsets.US_ASCII).copyOf(32) +
+            put64(units * 512) + put64(units * 528) + put64(generation)
+    }
+    private fun tinyNand(generation: Long, units: Long = 2048, fill: Byte = 0x5a): ByteArray {
+        val payload = units * 512
+        val side = units * 16
+        val stored = (payload + (1L shl 20) - 1) / (1L shl 20) * (1L shl 20) + side
+        val chunks = (stored + (1L shl 20) - 1) / (1L shl 20)
+        val body = ByteArray(stored.toInt()) { fill }
+        val table = (0 until chunks.toInt()).fold(ByteArray(0)) { t, i ->
+            val crc = java.util.zip.CRC32()
+            crc.update(body, i shl 20, minOf(1 shl 20, body.size - (i shl 20)))
+            t + put32(crc.value)
+        }
+        val header = "FRONDNA".toByteArray(Charsets.US_ASCII) + byteArrayOf(0) + put32(2) + put32(512) + put64(payload) +
+            put32(0) + put64(generation) + put64(64 + stored) + put32(1L shl 20) + put64(side) + ByteArray(8)
+        val crc = java.util.zip.CRC32().apply { update(header); update(table) }
+        put32(crc.value).copyInto(header, 24)
+        return header + body + table
+    }
+
+    @Test fun zipWithPackedNandUnpacks() {
+        val nand = tinyNand(2)
+        fun zipOf(packed: ByteArray): ByteArray {
+            val out = ByteArrayOutputStream()
+            java.util.zip.ZipOutputStream(out).use { zip ->
+                zip.putNextEntry(java.util.zip.ZipEntry("session.frond")); zip.write(v9WithNand(2)); zip.closeEntry()
+                zip.putNextEntry(java.util.zip.ZipEntry("$NAND_FILE.gz")); zip.write(packed); zip.closeEntry()
+            }
+            return out.toByteArray()
+        }
+        val gz = ByteArrayOutputStream().also { o -> java.util.zip.GZIPOutputStream(o).use { it.write(nand) } }.toByteArray()
+        val dest = tmp.newFolder("packed")
+        assertTrue(unzipPackable(ByteArrayInputStream(zipOf(gz)), dest))
+        assertTrue(File(dest, NAND_FILE).readBytes().contentEquals(nand))
+        assertFalse(File(dest, "$NAND_FILE.gz").exists())
+        assertNull(checkImportedSiblings(dest, File(dest, "session.frond")))
+        // A damaged pack is refused.
+        val bad = gz.copyOf().also { it[it.size - 6] = (it[it.size - 6].toInt() xor 1).toByte() }
+        assertFalse(unzipPackable(ByteArrayInputStream(zipOf(bad)), tmp.newFolder("bad")))
+        // One that unpacks past the cap is refused and leaves no part file.
+        val capped = tmp.newFolder("capped")
+        assertFalse(unzipPackable(ByteArrayInputStream(zipOf(gz)), capped, nand.size - 1L))
+        assertFalse(File(capped, NAND_FILE).exists())
+        assertFalse(File(capped, ".$NAND_FILE.tmp-unzip").exists())
+        assertTrue(unzipPackable(ByteArrayInputStream(zipOf(gz)), tmp.newFolder("exact"), nand.size.toLong()))
+        assertEquals(64L + (257L shl 20) + 4L * 257, NAND_FILE_MAX_BYTES)
+        // A NAND whose CRCs don't match its bytes is refused.
+        val flipped = nand.copyOf().also { it[5000] = (it[5000].toInt() xor 1).toByte() }
+        File(dest, NAND_FILE).writeBytes(flipped)
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dest, File(dest, "session.frond")))
+    }
+
+    @Test fun v9NandFile() {
+        val dir = tmp.newFolder("v9")
+        val frond = File(dir, "session.frond").also { it.writeBytes(v9WithNand(2)) }
+        val nand = File(dir, NAND_FILE).also { it.writeBytes(tinyNand(2)) }
+        assertNull(checkImportedSiblings(dir, frond))
+        assertTrue(packableName(NAND_FILE))
+        assertTrue(ignoredName("$NAND_FILE.journal-3"))
+        assertTrue(saveTempName(".x.frondnand.tmp-abc"))
+        // A copy takes the full copy an unfinished save left.
+        nand.writeBytes(tinyNand(1))
+        File(dir, "$NAND_FILE.journal-2.full").writeBytes(tinyNand(2, fill = 0x33))
+        val copy = File(tmp.root, "v9-copy")
+        assertNull(copyMachine(dir, copy, Long.MAX_VALUE, copyCard = false))
+        assertTrue(File(copy, NAND_FILE).readBytes().contentEquals(tinyNand(2, fill = 0x33)))
+        assertNull(checkImportedSiblings(copy, File(copy, "session.frond")))
+        // Behind its descriptor, missing, the wrong size or beside a session with no NAND.
+        File(dir, "$NAND_FILE.journal-2.full").delete()
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        nand.delete()
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        nand.writeBytes(tinyNand(2, 4096))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        frond.writeBytes(v8WithSd(3))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3))
+        nand.writeBytes(tinyNand(2))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+    }
+
     @Test fun v8SiblingNeedsMatchingGeneration() {
         val dir = tmp.newFolder("v8")
         val frond = File(dir, "session.frond").also { it.writeBytes(v8WithSd(3)) }
@@ -229,8 +316,8 @@ class SessionsLayoutTest {
     }
 
     // A journal from `from` to from + 1 over a 512-byte card: one record, then the new table.
-    private fun journalTo(from: Long, offset: Long, data: ByteArray, newPayload: ByteArray): ByteArray {
-        val body = "FRONDJNL".toByteArray(Charsets.US_ASCII) + put32(1) + put32(0) + put64(512) + put64(from) +
+    private fun journalTo(from: Long, offset: Long, data: ByteArray, newPayload: ByteArray, version: Long = 1): ByteArray {
+        val body = "FRONDJNL".toByteArray(Charsets.US_ASCII) + put32(version) + put32(0) + put64(512) + put64(from) +
             put64(from + 1) + put64(1) + put64(1) + ByteArray(8) + put64(offset) + put32(data.size.toLong()) + data +
             put32(CRC32().also { it.update(newPayload) }.value)
         return body + "FRONDEND".toByteArray(Charsets.US_ASCII) + put32(CRC32().also { it.update(body) }.value) + put32(0)
@@ -269,6 +356,19 @@ class SessionsLayoutTest {
         assertArrayEquals(tinyFrondsdV2(1, newPayload), File(copied, "sd.frondsd").readBytes())
         assertEquals(listOf("sd.frondsd", "session.frond"), copied.list()!!.sorted())
         assertNull(checkImportedSiblings(copied, File(copied, "session.frond")))
+    }
+
+    // The core's session saves write version 2 journals.
+    @Test fun exportTakesVersion2Journals() {
+        val oldPayload = ByteArray(512) { 0xa5.toByte() }
+        val newPayload = oldPayload.copyOf().also { "abcd".toByteArray().copyInto(it, 8) }
+        val dir = tmp.newFolder("pending-v2")
+        File(dir, "session.frond").writeBytes(v8WithSd(4))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3, oldPayload))
+        File(dir, "sd.frondsd.journal-4").writeBytes(journalTo(3, 8, "abcd".toByteArray(), newPayload, version = 2))
+        val dest = unpack(dir, "settled-v2")
+        assertArrayEquals(tinyFrondsdV2(4, newPayload), File(dest, "sd.frondsd").readBytes())
+        assertEquals(listOf("sd.frondsd", "session.frond"), dest.list()!!.sorted())
     }
 
     // A recovery left with an unfinished save: adopting it moves the journal it needs along with

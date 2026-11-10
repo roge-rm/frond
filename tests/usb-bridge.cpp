@@ -48,6 +48,8 @@ struct Guest {
     bool outToB = false, silent = false, dropSetup = false;
     uint64_t vendorDelay = 0, vendorAt = 0;  // answer the port list this late
     unsigned vendorLength = 0;
+    unsigned inMps = 64, outMps = 64;
+    std::vector<unsigned> outPackets;
     Guest() {
         device = {18, 1, 0x00, 0x02, 0, 0, 0, 16, 0x30, 0x08, 0x61, 0x00, 0x00, 0x01, 1, 2, 0, 1};
         config = {9, 2, 46, 0, 1, 1, 0, 0xc0, 0, 9, 4, 0, 0, 4, 0xff, 0, 0, 0};
@@ -55,7 +57,7 @@ struct Guest {
         assert(config.size() == 46);
     }
     void enable() {
-        wr(0x404, ccr(true, 1)); wr(0x408, ccr(false, 2)); wr(0x418, ccr(true, 6)); wr(0x41c, ccr(false, 7));
+        wr(0x404, ccr(true, 1)); wr(0x408, ccr(false, 2)); wr(0x418, (ccr(true, 6) & ~(0x3ffu << 2)) | inMps << 2); wr(0x41c, (ccr(false, 7) & ~(0x3ffu << 2)) | outMps << 2);
         wr(0, 1); wr(4, 3); wr(8, (1u << 31) | (1u << 27));
     }
     void send0() {
@@ -89,6 +91,10 @@ struct Guest {
             requests.push_back(std::vector<uint8_t>(req, req + 8));
             const unsigned length = req[6] | req[7] << 8;
             if (req[0] == 0x80 && req[1] == 6 && req[3] == 1) return answer(device, length);
+            if (req[0] == 0x80 && req[1] == 6 && req[3] == 3) {
+                if (req[2] == 0) return answer({4, 3, 9, 4}, length);
+                return answer({6, 3, 'U', 0, uint8_t('0' + req[2]), 0}, length);
+            }
             if (req[0] == 0x80 && req[1] == 6 && req[3] == 2) return answer(config, length);
             if (req[0] == 0xc2 && req[1] == 4 && !stallVendor4 && vendorDelay && !vendorAt) {
                 vendorAt = now + vendorDelay;
@@ -111,14 +117,16 @@ struct Guest {
     void fillIn() {
         while ((rd(0x118) & 1) && !toSend.empty()) {
             unsigned n = 0;
-            while (n < 64 && !toSend.empty()) { wr8(0x318, toSend.front()); toSend.pop_front(); ++n; }
-            if (n < 64) wr(0x118, 0x80);
+            while (n < inMps && !toSend.empty()) { wr8(0x318, toSend.front()); toSend.pop_front(); ++n; }
+            if (n < inMps) wr(0x118, 0x80);
         }
     }
     void epOut() {
+        if (rd(0x11c) & 0x10) wr(0x11c, 0x10);
         if (rd(0x108) & 2) outToB = true;
         for (uint32_t csr; (csr = rd(0x11c)) & 3;) {
             const unsigned count = rd(0x21c);
+            outPackets.push_back(count);
             for (unsigned i = 0; i < count; i += 4) {
                 const uint32_t w = rd(0x31c);
                 for (unsigned b = 0; b < 4 && i + b < count; ++b) received.push_back(uint8_t(w >> (8 * b)));
@@ -159,12 +167,54 @@ struct Guest {
 
 struct Bench {
     Guest guest;
+    struct InEvent { uint64_t ns; UsbPacketResult result; unsigned size; };
+    std::vector<InEvent> inEvents;
+    unsigned timeoutBudget = 0, timedOut = 0, configSetups = 0;
+    bool configStatus = false, outCredit = true;
+    unsigned outCalls = 0, creditQueries = 0;
+    UsbDevicePort port() {
+        using R = UsbPacketResult;
+        static const UsbDevicePort::Operations ops{
+            [](void*) { return UsbDevicePort(udc).Reset(); },
+            [](void*) { return UsbDevicePort(udc).Frame(); },
+            [](void*) { return UsbDevicePort(udc).Enabled(); },
+            [](void*) { return UsbDevicePort(udc).Listening(); },
+            [](void*) { return UsbDevicePort(udc).SofWanted(); },
+            [](void*) { return UsbDevicePort(udc).EnableCount(); },
+            [](void*) { return UsbDevicePort(udc).Address(); },
+            [](void*, void (*notify)(void*), void* ctx) { UsbDevicePort(udc).SetNotify(notify,ctx); },
+            [](void* ctx, const uint8_t* d) {
+                auto& b=*static_cast<Bench*>(ctx);
+                b.configStatus = d[1]==9;
+                if(b.configStatus) ++b.configSetups;
+                return UsbDevicePort(udc).Setup(d);
+            },
+            [](void*, const uint8_t* d, unsigned n) { return UsbDevicePort(udc).Out(d,n); },
+            [](void* ctx, uint8_t* d, unsigned* n) {
+                auto& b=*static_cast<Bench*>(ctx);
+                if(b.configStatus && b.timedOut < b.timeoutBudget) { ++b.timedOut; return R::Timeout; }
+                return UsbDevicePort(udc).In(d,n);
+            },
+            [](void* ctx, uint8_t e, const uint8_t* d, unsigned n) { ++static_cast<Bench*>(ctx)->outCalls; return UsbDevicePort(udc).EpOut(e,d,n); },
+            [](void* ctx, uint8_t e, uint8_t* d, unsigned* n) {
+                auto& b=*static_cast<Bench*>(ctx); auto result=UsbDevicePort(udc).EpIn(e,d,n);
+                b.inEvents.push_back({b.now,result,result==R::Ack?*n:0}); return result;
+            },
+            [](void* ctx, uint8_t e, unsigned* n) {
+                auto& b=*static_cast<Bench*>(ctx);
+                if(!e && b.configStatus && b.timedOut < b.timeoutBudget) return R::Timeout;
+                return UsbDevicePort(udc).PeekIn(e,n);
+            },
+            [](void* ctx, uint8_t, unsigned) { auto& b=*static_cast<Bench*>(ctx); ++b.creditQueries; return b.outCredit; }
+        };
+        return {this,ops};
+    }
     std::deque<uint8_t> fromHost, toHost;  // the host side of the link
     size_t space = 4096;
     std::vector<std::pair<uint64_t, uint64_t>> log;
     UsbBusHost host;
     uint64_t now = 0, nextHostTick = 0;
-    Bench() : host([] { return udc; },
+    Bench() : host([this] { return port(); },
                    UsbBusHost::Link{[this] { return space - std::min(space, toHost.size()); },
                                     [this](const uint8_t* d, size_t n) { toHost.insert(toHost.end(), d, d + n); return n; },
                                     [this](uint8_t* d, size_t n) {
@@ -205,6 +255,26 @@ struct Bench {
 
 static void dump(Bench& b) {
     for (auto& m : b.host.TakeMessages()) std::printf("  %s\n", m.c_str());
+}
+
+static void testControlNoResponseRetry() {
+    {
+        Bench b;
+        b.timeoutBudget=2;
+        b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+        assert(b.timedOut==2 && b.configSetups==1);
+        assert(b.host.GetCounters().enumerations==1);
+    }
+    {
+        Bench b;
+        b.timeoutBudget=1000;
+        b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::failed, 8000000000ull));
+        assert(b.timedOut==3*UsbBusHost::maxAttempts);
+        assert(b.configSetups==UsbBusHost::maxAttempts);
+        assert(b.host.GetCounters().bytesIn==0 && b.host.GetCounters().bytesOut==0);
+    }
 }
 
 static void testEnumerationAndFrames() {
@@ -303,6 +373,9 @@ static void testPortLater() {
     // GET_EXT_CONNECTION_INFORMATION stalls: the Visor request names the HotSync port.
     Bench v;
     v.guest.stallVendor4 = true;
+    // The Visor reply selects both directions of endpoint 6.
+    v.guest.config[2] += 7; v.guest.config[13] += 1;
+    v.guest.config.insert(v.guest.config.end(), {7, 5, 6, 2, 64, 0, 0});
     v.guest.enable();
     v.host.Attach();
     assert(v.runUntil(UsbBusHost::Phase::running, 2000000000ull, "hotsync"));
@@ -379,6 +452,168 @@ static bool waitReadable(int fd) {
     return poll(&p, 1, 2000) == 1;
 }
 
+static void testStringsAndControlOwnership() {
+    Bench b;
+    b.guest.ports = 0;
+    unsigned strings = 0;
+    b.host.controlTrace = [&](const uint8_t* setup, const std::vector<uint8_t>& data, bool ok) {
+        if (setup[1] == 6 && setup[3] == 3) {
+            assert(ok && data.size() >= 4 && data[1] == 3);
+            ++strings;
+        }
+    };
+    b.guest.enable(); b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull));
+    assert(strings == 0 && !b.host.InEndpoint() && !b.host.OutEndpoint());
+    assert(b.host.ReadStringDescriptor(1, 0x0409));
+    assert(!b.host.ReadStringDescriptor(2, 0x0409));
+    b.run(20000000);
+    assert(strings == 1 && !b.host.InEndpoint() && !b.host.OutEndpoint());
+    // A diagnostic completion may submit another diagnostic without replacing enumeration.
+    b.host.controlTrace = [&](const uint8_t* setup, const std::vector<uint8_t>&, bool ok) {
+        if (setup[1] == 6 && setup[3] == 3 && setup[2] == 1) {
+            assert(ok && b.host.ReadStringDescriptor(2, 0x0409));
+        }
+    };
+    assert(b.host.ReadStringDescriptor(1, 0x0409));
+    b.run(20000000);
+    assert(!b.host.InEndpoint() && !b.host.OutEndpoint());
+    b.guest.ports = 1;
+    assert(b.runUntil(UsbBusHost::Phase::running, 1500000000ull, "cnys"));
+    assert(b.host.InEndpoint() == 6 && b.host.OutEndpoint() == 7);
+    puts("PASS: separate diagnostic completion, idle wake, reentrant callback and later real port discovery");
+}
+
+static void testDirectionalMps() {
+    for (unsigned outMps : {8u, 16u, 32u, 64u}) {
+        Bench b;
+        b.guest.outMps = outMps; b.guest.inMps = outMps == 64 ? 16 : 64;
+        b.guest.config[36] = uint8_t(b.guest.inMps);
+        b.guest.config[43] = uint8_t(outMps);
+        b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+        std::vector<uint8_t> expected;
+        for (unsigned round = 0; round < 3; ++round) {
+            std::vector<uint8_t> bytes(4097 + round);
+            for (unsigned i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(i * 73 + round);
+            expected.insert(expected.end(), bytes.begin(), bytes.end());
+            b.fromHost.insert(b.fromHost.end(), bytes.begin(), bytes.end());
+            b.guest.toSend.insert(b.guest.toSend.end(), bytes.begin(), bytes.end());
+            // Hold guest service until both OUT buffers fill and the host retries NAKs.
+            b.log.clear();
+            b.guest.silent = true; b.run(5000000);
+            const uint64_t outNs = ((90 + 8 * outMps) * 1000 + 11) / 12;
+            bool reservedPacket = false;
+            for (const auto& interval : b.log) {
+                const auto ns = interval.second - interval.first;
+                assert(ns == outNs || ns == 4500);
+                reservedPacket |= ns == outNs;
+            }
+            assert(reservedPacket);
+            const auto naks = b.host.GetCounters().naks;
+            b.run(5000000); assert(b.host.GetCounters().naks > naks);
+            b.guest.silent = false;
+            b.space = expected.size() + 64;
+            // At MPS 8, 4097 bytes need over 512 one-packet requests.
+            b.run(1000000000);
+            if (b.guest.received != expected || !b.fromHost.empty()) std::fprintf(stderr, "MPS %u round %u expected %zu received %zu queued %zu\n", outMps, round, expected.size(), b.guest.received.size(), b.fromHost.size());
+            assert(b.guest.received == expected && b.fromHost.empty());
+            assert(std::vector<uint8_t>(b.toHost.begin(), b.toHost.end()) == expected);
+            assert(b.host.GetCounters().bytesOut == expected.size());
+            assert(b.host.GetCounters().bytesIn == expected.size());
+        }
+        // The controller stalls OUT, then the host clears the halt and retries the same bytes.
+        wr(0x11c, 0x20);
+        b.fromHost = {9,8,7,6,5};
+        expected.insert(expected.end(), {9,8,7,6,5});
+        b.run(30000000);
+        assert(b.guest.received == expected && b.fromHost.empty());
+        assert(b.host.GetCounters().bytesOut == expected.size());
+        size_t total = 0;
+        for (unsigned n : b.guest.outPackets) { assert(n && n <= outMps); total += n; }
+        assert(total == expected.size());
+    }
+    puts("PASS: directional bulk MPS 8/16/32/64, asymmetric IN, repeated streams, NAK retention and exact accounting");
+}
+
+static void testInLimits() {
+    for (bool oversized : {false, true}) {
+        Bench b;
+        b.guest.inMps = oversized ? 64 : 16;
+        b.guest.config[36] = 16;
+        b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+        b.space = 16;
+        b.guest.toSend.assign(oversized ? 32 : 16, 0x5a);
+        b.run(1000000);
+        if (oversized) {
+            assert(b.host.GetPhase() == UsbBusHost::Phase::connect);
+            assert(b.toHost.empty() && b.host.GetCounters().bytesIn == 0 && udc->fifo[6].count == 1);
+        } else {
+            assert(b.toHost.size() == 16 && b.host.GetCounters().bytesIn == 16);
+        }
+    }
+    puts("PASS: IN uses its own MPS for queue space and rejects oversized packets before ACK");
+}
+
+static void testPendingReset() {
+    Bench b;
+    b.guest.enable(); b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+    b.guest.silent = true;
+    std::vector<uint8_t> bytes(257);
+    for (unsigned i = 0; i < bytes.size(); ++i) bytes[i] = uint8_t(i);
+    b.fromHost.assign(bytes.begin(), bytes.end());
+    b.run(5000000);
+    const size_t acked = b.host.GetCounters().bytesOut;
+    assert(acked && acked < bytes.size() && b.fromHost.size() < bytes.size() - acked);
+    // Already ACKed FIFO bytes are intentionally lost at reset. Only unsent bytes continue.
+    wr(0, 0);
+    b.guest.outMps = 16; b.guest.config[43] = 16;
+    b.guest.silent = false; b.guest.enable();
+    b.run(300000000);
+    assert(b.host.GetPhase() == UsbBusHost::Phase::running);
+    assert(b.guest.received == std::vector<uint8_t>(bytes.begin() + acked, bytes.end()));
+    assert(b.host.GetCounters().bytesOut == bytes.size() && b.fromHost.empty());
+    for (unsigned n : b.guest.outPackets) assert(n && n <= 16);
+    puts("PASS: reset retains unACKed bytes, resegments 64 to 16 and never replays ACKed bytes");
+}
+
+static void testInvalidDescriptors() {
+    for (unsigned variant = 0; variant < 20; ++variant) {
+        Bench b;
+        auto& c = b.guest.config;
+        switch (variant) {
+            case 0: c[18] = 0; break;
+            case 1: c[18] = 1; break;
+            case 2: c[39] = 8; break; // truncated final descriptor
+            case 3: c[2] = 47; break;
+            case 4: c[2] = 45; break;
+            case 5: c[5] = 0; break;
+            case 6: c[4] = 2; break;
+            case 7: c[13] = 3; break;
+            case 8: c[43] = 17; break;
+            case 9: c[44] = 1; break;
+            case 10: c[41] = 0x87; break; // OUT exists only in wrong direction
+            case 11: c[41] = 8; break; // vendor endpoint absent
+            case 12: c[42] = 3; break; // selected OUT is interrupt
+            case 13: c[12] = 1; break; // no alternate zero
+            case 14: c[41] = 0; break;
+            case 15: c[41] = 0x77; break;
+            case 16: c[41] = 0x86; break; // duplicate active address
+            case 17: c[11] = 1; break; // interface number outside configuration
+            case 18: c[43] = 0; break;
+            case 19: c[42] = 0; break; // selected OUT is control
+        }
+        b.fromHost = {1,2,3,4,5};
+        b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::failed, 7000000000ull));
+        assert(b.fromHost.size() == 5 && b.guest.received.empty());
+        assert(b.host.GetCounters().bytesOut == 0);
+    }
+    puts("PASS: malformed descriptors and invalid directional/vendor endpoints leave queued bytes untouched");
+}
+
 static void testByteLink() {
     HostByteLink link;
     std::string error;
@@ -400,12 +635,85 @@ static void testByteLink() {
     puts("PASS: HostByteLink on a PTY moves bytes both ways and closes");
 }
 
+static void testRequestCadence() {
+    for(unsigned length : {0u, 7u, 64u}) {
+        Bench b; b.guest.enable(); b.host.Attach();
+        assert(b.runUntil(UsbBusHost::Phase::running, 2000000000ull, "cnys"));
+        b.guest.silent=true; b.inEvents.clear();
+        for(unsigned i=0;i<length;++i) wr8(0x318,uint8_t(i));
+        if(length<64) wr(0x118,0x80);
+        for(unsigned i=0;i<2000 && (b.inEvents.empty() || b.inEvents.back().result!=UsbPacketResult::Ack);++i) b.run(1000);
+        assert(!b.inEvents.empty() && b.inEvents.back().result==UsbPacketResult::Ack);
+        const auto ack=b.inEvents.back(); assert(ack.size==length);
+        const auto count=b.inEvents.size();
+        b.fromHost={1,2,3,4};
+        // Pokes and masked guest service cannot change the request submission deadline.
+        for(unsigned i=0;i<500;++i) { b.host.Poke(); b.run(1000); }
+        assert(b.inEvents.size()==count);
+        assert(b.host.GetCounters().bytesOut==4); // OUT remains eligible during IN cooldown.
+        const auto naks=b.host.GetCounters().naks;
+        b.run(3000000);
+        assert(b.inEvents.size()>count && b.inEvents[count].result==UsbPacketResult::Nak);
+        assert(b.inEvents[count].ns>=ack.ns+UsbBusHost::frameNs);
+        assert(b.host.GetCounters().naks>naks); // empty controller is really polled with guest still masked.
+        b.guest.epOut(); assert(b.guest.received==std::vector<uint8_t>({1,2,3,4}));
+        b.guest.silent=false; b.space=0;
+        b.guest.toSend.assign(4096,0x5a); b.run(5000000);
+        assert(b.host.GetCounters().bytesIn==length);
+        b.space=8192; b.run(120000000);
+        assert(b.host.GetCounters().bytesIn==length+4096);
+        uint64_t lastAck=0;
+        for(const auto& e:b.inEvents) if(e.result==UsbPacketResult::Ack) {
+            if(lastAck) assert(e.ns>=lastAck+UsbBusHost::frameNs);
+            lastAck=e.ns;
+        }
+    }
+    puts("PASS: bounded MPS request cadence, short/full/ZLP, masked guest real NAK, poke independence, OUT progress and backpressure/throughput");
+}
+
+static void testCooperativeOutCredit() {
+    Bench b;
+    b.outCredit=false;
+    b.guest.enable();b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running,1000000000));
+    assert(UsbDevicePort(udc).OutReady(7,64)); // Ports without a hook keep normal bus polling.
+    std::vector<uint8_t> expected(130);
+    for(unsigned i=0;i<expected.size();++i) expected[i]=uint8_t(i*37);
+    b.fromHost.assign(expected.begin(),expected.end());
+    b.guest.toSend.assign(97,0x5a);
+    b.run(20000000);
+    assert(b.creditQueries && !b.outCalls && !b.host.GetCounters().bytesOut);
+    assert(b.fromHost.size()==66 && b.guest.received.empty()); // One retained 64-byte request.
+    assert(b.toHost==std::deque<uint8_t>(97,0x5a)); // IN continues while OUT has no credit.
+    assert(b.host.ReadStringDescriptor(1,0x409));b.run(10000000);
+    assert(!b.outCalls && !b.host.GetCounters().bytesOut);
+    b.outCredit=true;b.host.Poke();b.run(30000000);
+    assert(b.guest.received==expected && b.fromHost.empty());
+    assert(b.outCalls==3 && b.host.GetCounters().bytesOut==expected.size());
+    b.run(3000000);assert(b.outCalls==3);
+    b.outCredit=false;b.fromHost.assign(35,0xa5);b.run(3000000);
+    assert(b.fromHost.empty() && b.outCalls==3);
+    b.host.Detach();b.host.Attach();
+    assert(b.runUntil(UsbBusHost::Phase::running,1000000000));
+    b.outCredit=true;b.run(5000000);
+    assert(b.outCalls==3 && b.guest.received==expected); // Detach cancelled only the unacknowledged request.
+    puts("PASS: cooperative OUT credit retains bytes without tokens or ACK accounting, independent IN/control, exact resume and detach cancellation");
+}
+
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    testCooperativeOutCredit();
+    testRequestCadence();
+    testControlNoResponseRetry();
     testEnumerationAndFrames();
     testPortLater();
     testReenableAndLostSetup();
     testFailures();
+    testStringsAndControlOwnership();
+    testDirectionalMps();
+    testInLimits();
+    testPendingReset();
+    testInvalidDescriptors();
     testByteLink();
     free(udc);
 }

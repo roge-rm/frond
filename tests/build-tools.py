@@ -199,6 +199,14 @@ class PackagePolicyTests(unittest.TestCase):
             for name in ('frond-desktop', 'frond-68k'):
                 shutil.copyfile(root / 'out/frond', root / 'out' / name)
                 (root / 'out' / name).chmod(0o755)
+            btvirt = root / 'build/bluetooth-provider/emulator/btvirt'
+            btvirt.parent.mkdir(parents=True)
+            shutil.copyfile(root / 'out/frond', btvirt)
+            btvirt.chmod(0o755)
+            phone = root / 'build/bluetooth-opp-peer/bluetooth-opp-peer'
+            phone.parent.mkdir(parents=True)
+            shutil.copyfile(root / 'out/frond', phone)
+            phone.chmod(0o755)
             # Seed ignored/private data near every tempting broad-copy input.
             for name in ('out/TX.rom', 'out/private.session', 'doc/private.frond', 'firmware.bin'):
                 (root / name).write_text('PRIVATE-MARKER-DO-NOT-PACKAGE')

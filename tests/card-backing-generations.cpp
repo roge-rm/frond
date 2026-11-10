@@ -1,6 +1,7 @@
 #include "CardBacking.h"
 #include "FileCardBacking.h"
 #include "SessionIo.h"
+#include "card-history-limits.h"
 
 #include <cassert>
 #include <cstdint>
@@ -384,6 +385,21 @@ static void JournalApplyReplay() {
         assert(writer.finish(table, done) && done == frondSession::sdJournalPath(dir, 5));
         journal = ReadBytes(done);
     }
+    const auto neighbour = fs::path(sidecar.string() + "-2");
+    WriteAll(neighbour, oldFile);
+    auto peer = OpenV2(neighbour, payload.size()); assert(peer);
+    const auto peerPage = Filled(4096, 0x81);
+    assert(peer->Write(0, peerPage.size(), peerPage.data()) && peer->Commit());
+    assert(peer->Write(8192, peerPage.size(), peerPage.data()));
+    auto peerPending = peer->Snapshot(); assert(peerPending);
+    auto peerFiles = [&] {
+        std::map<fs::path, std::vector<uint8_t>> files;
+        for (const auto& e : fs::directory_iterator(dir))
+            if (e.path() == neighbour || FileCardBacking::GeneratedName(neighbour.filename().string(), e.path().filename().string()))
+                files[e.path()] = ReadBytes(e.path());
+        return files;
+    };
+    const auto peerBefore = peerFiles();
     const auto journalPath = frondSession::sdJournalPath(dir, 5);
     frondSession::SdJournal parsed;
     assert(frondSession::readSdJournal(journalPath, parsed));
@@ -435,6 +451,11 @@ static void JournalApplyReplay() {
     media.contentGeneration = 5;
     assert(!frondSession::settleSdJournal(dir, media) && ReadBytes(sidecar) == oldFile);
 
+    assert(peerFiles() == peerBefore);
+    assert(peer->Commit()); peerPending.reset(); peer.reset();
+    peer = OpenV2(neighbour, payload.size()); assert(peer);
+    ExpectRange(*peer, 8192, peerPage);
+
     // After the in-place write the reopened card reads the new bytes with the new table.
     auto card = OpenV2(sidecar, payload.size());
     std::vector<uint8_t> all(payload.size());
@@ -468,7 +489,11 @@ static void LazyChunkCrc() {
     fs::remove_all(dir);
 }
 
+#include "card-crash-recovery.h"
+
 void CardBackingGenerations() {
+    RootlessCrashRecovery(GenDir());
+    HistoryLimits(GenDir(), false);
     RamGenerations();
     FileSectorsAndRecords();
     NestedAndRefused();

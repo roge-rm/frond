@@ -1,0 +1,350 @@
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -68,7 +68,6 @@
+ 
+ namespace {
+ 
+-constexpr int kInputHeight = 220;  // LCD and silkscreen rows in Palm coordinates.
+ // Frond's session metadata for 68k machines. The savestate blob follows Cloudpilot's pin, so a
+ // session from another pin is refused rather than half loaded.
+ constexpr const char* kSessionFormat = "frond-68k 1";
+@@ -364,7 +363,7 @@
+         string path;
+     };
+ 
+-    bool Load(const string& path, string& error) {
++    bool Load(const string& path, int width, int height, string& error) {
+         ifstream file(path);
+         if (!file) {
+             error = "cannot open input replay: " + path;
+@@ -388,8 +387,8 @@
+             if (!loaded.empty() && event.at < loaded.back().at) return fail();
+             if (command == "pen-down" || command == "pen-move") {
+                 event.kind = Kind::penDown;
+-                if (!(tokens >> event.x >> event.y) || event.x < 0 || event.x >= Lcd68k::kWidth || event.y < 0 ||
+-                    event.y >= kInputHeight)
++                if (!(tokens >> event.x >> event.y) || event.x < 0 || event.x >= width || event.y < 0 ||
++                    event.y >= height)
+                     return fail();
+             } else if (command == "pen-up") {
+                 event.kind = Kind::penUp;
+@@ -540,7 +539,8 @@
+ class Runner {
+    public:
+     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
+-        : options(options), profile(&profile), metadata(metadata) {
++        : options(options), profile(&profile), metadata(metadata),
++          lcd(profile.frontend.width, profile.frontend.height) {
+         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
+         this->metadata.contrast = lcd.Contrast();
+         SetSpeed(options.speed);
+@@ -859,7 +859,7 @@
+     bool LoadReplay(const string& path) {
+         string error;
+         Replay replacement;
+-        if (!replacement.Load(path, error)) {
++        if (!replacement.Load(path, lcd.Width(), InputHeight(), error)) {
+             cerr << error << endl;
+             cout << error << endl;
+             return false;
+@@ -900,18 +900,18 @@
+         else pressed &= ~deviceKeyBit(key);
+     }
+ 
+-    // The LCD as a 160x160 PNG; black with the LCD off, as the ARM runner does.
++    // The LCD as a PNG; black with the LCD off, as the ARM runner does.
+     bool SaveFrame(const string& path, bool& blank) {
+         blank = !lcd.Update();
+         vector<uint8_t> black;
+         const void* pixels = lcd.Pixels();
+         if (blank) {
+-            black.assign(Lcd68k::kWidth * Lcd68k::kHeight * 4, 0);
++            black.assign(lcd.Width() * lcd.Height() * 4, 0);
+             for (size_t i = 3; i < black.size(); i += 4) black[i] = 0xff;
+             pixels = black.data();
+         }
+-        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<void*>(pixels), Lcd68k::kWidth,
+-                                                                  Lcd68k::kHeight, 32, Lcd68k::kWidth * 4,
++        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(const_cast<void*>(pixels), lcd.Width(),
++                                                                  lcd.Height(), 32, lcd.Width() * 4,
+                                                                   SDL_PIXELFORMAT_RGBA32);
+         if (!surface) return false;
+         const bool saved = IMG_SavePNG(surface, path.c_str()) == 0;
+@@ -1253,7 +1253,7 @@
+         if (command == "input-replay") {
+             string error;
+             Replay replacement;
+-            if (!replacement.Load(argument, error)) return {false, "replay", error};
++            if (!replacement.Load(argument, lcd.Width(), InputHeight(), error)) return {false, "replay", error};
+             replay = std::move(replacement);
+             return {true, "loaded", "Input replay loaded."};
+         }
+@@ -1539,8 +1539,8 @@
+     void OpenWindow() {
+         const auto& controls = deviceControls(profile->art);
+         const float s = options.windowScale;
+-        const int width = int(Lcd68k::kWidth * s);
+-        const int height = int((kInputHeight + deviceControlsHeight(controls, Lcd68k::kWidth)) * s);
++        const int width = int(lcd.Width() * s);
++        const int height = int((InputHeight() + deviceControlsHeight(controls, lcd.Width())) * s);
+         window = SDL_CreateWindow(profile->displayName, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
+                                   fit == WindowFit::none ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+         if (!window) {
+@@ -1561,8 +1561,8 @@
+             cerr << "no renderer: " << SDL_GetError() << endl;
+             return;
+         }
+-        lcdTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, Lcd68k::kWidth,
+-                                       Lcd68k::kHeight);
++        lcdTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, lcd.Width(),
++                                       lcd.Height());
+         if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+         Layout();
+     }
+@@ -1577,7 +1577,9 @@
+         CreateRenderer();
+     }
+ 
+-    int DeviceHeight() const { return kInputHeight + deviceControlsHeight(deviceControls(profile->art), Lcd68k::kWidth); }
++    int InputHeight() const { return lcd.Height() + profile->frontend.silkscreenHeight; }
++
++    int DeviceHeight() const { return InputHeight() + deviceControlsHeight(deviceControls(profile->art), lcd.Width()); }
+ 
+     // Where the device goes in the window and the scale the art is drawn at. Fixed: the window
+     // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels through the
+@@ -1591,10 +1593,10 @@
+         pixelsY = windowHeight > 0 ? float(outputHeight) / windowHeight : 1;
+         const float s = options.windowScale;
+         if (fit == WindowFit::none) {
+-            layout = WindowLayout{s, s, 0, 0, int(Lcd68k::kWidth * s), int(DeviceHeight() * s)};
++            layout = WindowLayout{s, s, 0, 0, int(lcd.Width() * s), int(DeviceHeight() * s)};
+             artScale = s;
+         } else {
+-            layout = fitWindowLayout(fit, Lcd68k::kWidth, DeviceHeight(), windowWidth, windowHeight);
++            layout = fitWindowLayout(fit, lcd.Width(), DeviceHeight(), windowWidth, windowHeight);
+             artScale = max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
+         }
+         if (silkscreenTexture) SDL_DestroyTexture(silkscreenTexture);
+@@ -1607,8 +1609,8 @@
+         if (fit != WindowFit::none) {
+             const auto& controls = deviceControls(profile->art);
+             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
+-                                                int(Lcd68k::kWidth * artScale),
+-                                                int(deviceControlsHeight(controls, Lcd68k::kWidth) * artScale));
++                                                int(lcd.Width() * artScale),
++                                                int(deviceControlsHeight(controls, lcd.Width()) * artScale));
+             if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
+         }
+         controlsDirty = true;
+@@ -1633,17 +1635,17 @@
+             SDL_RenderSetScale(renderer, layout.scaleX * pixelsX, layout.scaleY * pixelsY);
+         }
+         if (lcdTexture) {
+-            SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), Lcd68k::kWidth * 4);
+-            const SDL_Rect dest{0, 0, int(Lcd68k::kWidth * s), int(Lcd68k::kHeight * s)};
++            SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), lcd.Width() * 4);
++            const SDL_Rect dest{0, 0, int(lcd.Width() * s), int(lcd.Height() * s)};
+             SDL_RenderCopy(renderer, lcdTexture, nullptr, &dest);
+         }
+         if (silkscreenTexture) {
+-            const SDL_Rect dest{0, int(Lcd68k::kHeight * s), int(Lcd68k::kWidth * s),
+-                                int((kInputHeight - Lcd68k::kHeight) * s)};
++            const SDL_Rect dest{0, int(lcd.Height() * s), int(lcd.Width() * s),
++                                int((InputHeight() - lcd.Height()) * s)};
+             SDL_RenderCopy(renderer, silkscreenTexture, nullptr, &dest);
+         }
+         if (!fitted) {
+-            drawDeviceControls(renderer, controls, Lcd68k::kWidth, kInputHeight, s, pressed);
++            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed);
+         } else if (controlsTexture) {
+             // Drawn once into a texture at the output's pixel size, again when a key changes.
+             if (controlsDirty || pressed != shownPressed) {
+@@ -1653,7 +1655,7 @@
+                 SDL_RenderGetViewport(renderer, &viewport);
+                 if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
+                     SDL_RenderSetScale(renderer, 1, 1);
+-                    drawDeviceControls(renderer, controls, Lcd68k::kWidth, 0, artScale, pressed);
++                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed);
+                     SDL_SetRenderTarget(renderer, nullptr);
+                     SDL_RenderSetScale(renderer, 1, 1);
+                     SDL_RenderSetViewport(renderer, &viewport);
+@@ -1662,10 +1664,10 @@
+                     shownPressed = pressed;
+                 }
+             }
+-            const SDL_Rect dest{0, kInputHeight, Lcd68k::kWidth, deviceControlsHeight(controls, Lcd68k::kWidth)};
++            const SDL_Rect dest{0, InputHeight(), lcd.Width(), deviceControlsHeight(controls, lcd.Width())};
+             SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
+         } else {
+-            drawDeviceControls(renderer, controls, Lcd68k::kWidth, kInputHeight, 1, pressed);
++            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed);
+         }
+         if (present) SDL_RenderPresent(renderer);
+     }
+@@ -1680,7 +1682,7 @@
+         const float fx = (windowX - layout.x) / layout.scaleX, fy = (windowY - layout.y) / layout.scaleY;
+         x = int(floor(fx));
+         y = int(floor(fy));
+-        return fx >= 0 && fy >= 0 && x < Lcd68k::kWidth && y < DeviceHeight();
++        return fx >= 0 && fy >= 0 && x < lcd.Width() && y < DeviceHeight();
+     }
+ 
+     // Lifts the pen and any held key, when the window loses focus or the app is hidden.
+@@ -1749,7 +1751,7 @@
+                     const int my = event.type == SDL_MOUSEMOTION ? event.motion.y : event.button.y;
+                     int x = 0, y = 0;
+                     const bool inside = DevicePoint(mx, my, x, y);
+-                    x = clamp(x, 0, Lcd68k::kWidth - 1);
++                    x = clamp(x, 0, lcd.Width() - 1);
+                     if (event.type == SDL_MOUSEBUTTONUP) {
+                         if (penDown) gSession->QueuePenEvent(PenEvent::up());
+                         if (mouseKey != keyInvalid) Key(mouseKey, false);
+@@ -1757,16 +1759,16 @@
+                         mouseKey = keyInvalid;
+                     } else if (down) {
+                         if (!inside) break;
+-                        if (y < kInputHeight) {
++                        if (y < InputHeight()) {
+                             if (touch.PenActive()) break;
+                             penDown = true;
+                             gSession->QueuePenEvent(PenEvent::down(x, y));
+                         } else {
+-                            mouseKey = deviceControlAt(controls, Lcd68k::kWidth, kInputHeight, x, y);
++                            mouseKey = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y);
+                             if (mouseKey != keyInvalid) Key(mouseKey, true);
+                         }
+                     } else if (penDown) {
+-                        gSession->QueuePenEvent(PenEvent::down(x, clamp(y, 0, kInputHeight - 1)));
++                        gSession->QueuePenEvent(PenEvent::down(x, clamp(y, 0, InputHeight() - 1)));
+                     }
+                     break;
+                 }
+@@ -1841,7 +1843,7 @@
+         explicit TouchHost(Runner& runner) : runner(runner) {}
+         bool DirectTouch(int64_t touch) override { return SDL_GetTouchDeviceType(touch) == SDL_TOUCH_DEVICE_DIRECT; }
+         KeyId KeyAt(int x, int y) override {
+-            return deviceControlAt(deviceControls(runner.profile->art), Lcd68k::kWidth, kInputHeight, x, y);
++            return deviceControlAt(deviceControls(runner.profile->art), runner.lcd.Width(), runner.InputHeight(), x, y);
+         }
+         void PenDown(int x, int y) override { gSession->QueuePenEvent(PenEvent::down(x, y)); }
+         void PenUp() override { gSession->QueuePenEvent(PenEvent::up()); }
+@@ -1849,7 +1851,7 @@
+         void KeyUp(KeyId key) override { runner.Key(key, false); }
+         Runner& runner;
+     } touchHost{*this};
+-    Touch68k touch{touchHost, Lcd68k::kWidth, kInputHeight};
++    Touch68k touch{touchHost, lcd.Width(), InputHeight()};
+     Piezo68k piezo;
+     WavWriter68k wav;
+     bool wavOpen{false};
+--- a/src/cloudpilot/frond/Lcd.h
++++ b/src/cloudpilot/frond/Lcd.h
+@@ -8,6 +8,8 @@
+ #include <algorithm>
+ #include <cstdint>
+ #include <cstring>
++#include <vector>
++#include <stdexcept>
+ 
+ #include "EmHAL.h"
+ #include "EmSession.h"
+@@ -19,7 +21,14 @@
+     static constexpr int kWidth = 160, kHeight = 160;
+     static constexpr int kDefaultContrast = 50;
+ 
+-    Lcd68k() { SetContrast(kDefaultContrast); }
++    Lcd68k(int width = kWidth, int height = kHeight) : width(width), height(height) {
++        if (width <= 0 || width > 1024 || height <= 0 || height > 1024)
++            throw std::invalid_argument("invalid 68k LCD dimensions");
++        pixels.resize(size_t(width) * height * 4);
++        SetContrast(kDefaultContrast);
++    }
++    int Width() const { return width; }
++    int Height() const { return height; }
+ 
+     // 0 (faint) to 100 (dark); 50 shows the guest's greys as they are.
+     void SetContrast(int value) {
+@@ -35,43 +44,47 @@
+     // then show the unlit panel.
+     bool Update() {
+         on = gSession->IsPowerOn() && EmHAL::CopyLCDFrame(frame, true) &&
+-             frame.lineWidth * frame.scaleX == kWidth && frame.lines * frame.scaleY == kHeight &&
+-             frame.scaleX == 1 && frame.scaleY == 1;
++             frame.lineWidth * frame.scaleX == width && frame.lines * frame.scaleY == height &&
++             frame.scaleX == 1 && frame.scaleY == 1 &&
++             (frame.bpp == 1 || frame.bpp == 2 || frame.bpp == 4 || frame.bpp == 24) &&
++             (uint64_t(frame.margin) + width) * (frame.bpp == 24 ? 32 : frame.bpp) <=
++                 uint64_t(frame.bytesPerLine) * 8 &&
++             uint64_t(frame.bytesPerLine) * height <= frame.GetBufferSize();
+         lit = on && EmHAL::GetLCDBacklightOn();
+         const Rgb* palette = this->palette[lit ? 1 : 0];
+         if (!on) {
+-            for (int i = 0; i < kWidth * kHeight; ++i) Put(i, palette[0]);
++            for (int i = 0; i < width * height; ++i) Put(i, palette[0]);
+             return false;
+         }
+         const uint8_t* buffer = frame.GetBuffer();
+         const uint16_t mapping = EmHAL::GetLCD2bitMapping();
+-        for (int y = 0; y < kHeight; ++y) {
++        for (int y = 0; y < height; ++y) {
+             const uint8_t* row = buffer + y * frame.bytesPerLine;
+-            uint8_t* out = pixels + y * kWidth * 4;
++            uint8_t* out = pixels.data() + y * width * 4;
+             switch (frame.bpp) {
+                 case 1: {
+                     Nibbler<1> nibbler;
+                     nibbler.reset(row, frame.margin);
+-                    for (int x = 0; x < kWidth; ++x, out += 4) Copy(out, palette[nibbler.nibble() ? 15 : 0]);
++                    for (int x = 0; x < width; ++x, out += 4) Copy(out, palette[nibbler.nibble() ? 15 : 0]);
+                     break;
+                 }
+                 case 2: {
+                     Nibbler<2> nibbler;
+                     nibbler.reset(row, frame.margin);
+-                    for (int x = 0; x < kWidth; ++x, out += 4)
++                    for (int x = 0; x < width; ++x, out += 4)
+                         Copy(out, palette[(mapping >> (4 * nibbler.nibble())) & 0x0f]);
+                     break;
+                 }
+                 case 4: {
+                     Nibbler<4> nibbler;
+                     nibbler.reset(row, frame.margin);
+-                    for (int x = 0; x < kWidth; ++x, out += 4) Copy(out, palette[nibbler.nibble()]);
++                    for (int x = 0; x < width; ++x, out += 4) Copy(out, palette[nibbler.nibble()]);
+                     break;
+                 }
+-                default: {
++                case 24: {
+                     // 24-bit colour frames don't happen on the EZ; shown as grey levels anyway.
+                     const uint8_t* in = row + 4 * frame.margin;
+-                    for (int x = 0; x < kWidth; ++x, out += 4, in += 4)
++                    for (int x = 0; x < width; ++x, out += 4, in += 4)
+                         Copy(out, palette[15 - (in[0] + in[1] + in[2]) / 48]);
+                     break;
+                 }
+@@ -83,8 +96,8 @@
+     bool On() const { return on; }
+     // The backlight as of the last Update.
+     bool Lit() const { return lit; }
+-    // RGBA bytes, kWidth x kHeight.
+-    const uint8_t* Pixels() const { return pixels; }
++    // RGBA bytes, Width() x Height().
++    const uint8_t* Pixels() const { return pixels.data(); }
+ 
+    private:
+     struct Rgb {
+@@ -112,11 +125,12 @@
+         out[2] = colour.b;
+         out[3] = 0xff;
+     }
+-    void Put(int index, const Rgb& colour) { Copy(pixels + 4 * index, colour); }
++    void Put(int index, const Rgb& colour) { Copy(pixels.data() + 4 * index, colour); }
+ 
+     Frame frame{1024 * 1024};
+     Rgb palette[2][16]{};
+-    uint8_t pixels[kWidth * kHeight * 4]{};
++    int width, height;
++    std::vector<uint8_t> pixels;
+     int contrast{kDefaultContrast};
+     bool on{false};
+     bool lit{false};

@@ -1,0 +1,101 @@
+diff --git a/src/uarm/native/CardReinsert.h b/src/uarm/native/CardReinsert.h
+new file mode 100644
+index 0000000..23de43f
+--- /dev/null
++++ b/src/uarm/native/CardReinsert.h
+@@ -0,0 +1,59 @@
++#ifndef FROND_CARD_REINSERT_H
++#define FROND_CARD_REINSERT_H
++
++#include <algorithm>
++#include <cstdint>
++#include <string>
++
++#include "SoC.h"
++#include "soc_PXA.h"
++
++// A card put in right after an eject: the removal and the insert can both land before the guest
++// runs (the frontend pauses the core while the card's files are edited), and a guest that never
++// saw the card go keeps its old volume. The eject is noted, and the next insert first lets the
++// guest run until it has had delay of awake time since the eject, or limit in all.
++namespace frondNative {
++
++struct EjectWatch {
++    bool pending{false};
++    uint64_t at{0};  // guest time of the eject, ns
++};
++
++inline EjectWatch& ejectWatch() {
++    static EjectWatch watch;
++    return watch;
++}
++
++inline void noteEjected(SoC& soc) { ejectWatch() = {true, soc.GetTime()}; }
++
++inline bool guestAsleep(SoC& soc) {
++    auto* pxa = dynamic_cast<SocPXA*>(&soc);
++    return pxa && pxa->PowerSleeping();
++}
++
++// Runs the guest if an eject is still unseen. Guest cycles are counted at 100 MHz, like the
++// injected calls.
++inline void settleEject(SoC& soc, uint64_t delay = 500000000, uint64_t limit = 5000000000) {
++    auto& watch = ejectWatch();
++    if (!watch.pending) return;
++    watch.pending = false;
++    constexpr uint64_t cyclesPerSecond = 100000000, slice = 2000000;  // 20 ms
++    const uint64_t start = soc.GetTime();
++    uint64_t awake = guestAsleep(soc) ? 0 : std::min(delay, start - watch.at);
++    while (awake < delay && soc.GetTime() - watch.at < limit) {
++        const uint64_t before = soc.GetTime();
++        soc.Run(slice, cyclesPerSecond);
++        const uint64_t after = soc.GetTime();
++        if (after == before) break;
++        if (!guestAsleep(soc)) awake += after - before;
++    }
++}
++
++inline bool insertsCard(const std::string& command) {
++    return command == "sd-insert" || command == "sd-create" || command == "sd-put-in" || command == "sd-reinsert" ||
++           command == "ms-insert" || command == "ms-create" || command == "ms-put-in" || command == "ms-reinsert";
++}
++
++}  // namespace frondNative
++
++#endif
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 0294351..f339d89 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -40,6 +40,7 @@
+ #include "MachineSession.h"
+ #include "MsProCards.h"
+ #include "CardSwap.h"
++#include "CardReinsert.h"
+ 
+ // Private Unix socket, owned by the launcher; DesktopChannel has the framing. Only the emulation
+ // thread dispatches requests.
+@@ -223,6 +224,7 @@ class DesktopControl {
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+         if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (frondNative::insertsCard(command)) frondNative::settleEject(*ctx.soc);
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -482,6 +484,7 @@ class DesktopControl {
+             }
+             if(command=="ms-eject"||command=="ms-reinsert") {
+                 if(!msCtrlrInsert(ms,command=="ms-reinsert"))return {false,"empty","No Memory Stick is available in that state."};
++                if(command=="ms-eject")frondNative::noteEjected(*ctx.soc);
+                 return {true,command=="ms-eject"?"ejected":"inserted",command=="ms-eject"?"Memory Stick ejected. Its contents remain in this session.":"Memory Stick inserted."};
+             }
+             if(command=="ms-read-only") {
+@@ -556,6 +559,7 @@ class DesktopControl {
+         if (command == "sd-eject") {
+             if (!sdCardInitialized() || !ctx.soc->SdInserted()) return {false, "empty", "No card is inserted."};
+             ctx.soc->SdEject();
++            frondNative::noteEjected(*ctx.soc);
+             return {true, "ejected", "SD card ejected. Its contents remain in this session."};
+         }
+         if (command == "sd-reinsert") {

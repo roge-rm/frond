@@ -1,0 +1,73 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -17,6 +17,12 @@
+     void HostAckIn(unsigned endpoint);
+     bool TryHostAckIn(unsigned endpoint);
+     bool PacketIsIn(unsigned endpoint) const { return endpoint<16 && (dcEndpoints[endpoint]&64); }
++    bool HostOutReady(unsigned endpoint, unsigned size) const {
++        // Only a valid full FIFO defers host submission; other states reach HostOut's checks.
++        return endpoint>=16 || PacketIsIn(endpoint) || size>Capacity(endpoint) || !DeviceAttached() ||
++            !deviceEnabled || !allocated || !(dcEndpoints[endpoint]&128) || fifo[endpoint].stalled ||
++            !fifo[endpoint].packet[fifo[endpoint].bus].full;
++    }
+     PacketResult PeekHostIn(unsigned endpoint, std::vector<uint8>&, bool& data1) const;
+     uint64 PacketResetEpoch(unsigned endpoint) const { return packetResetEpoch.at(endpoint); }
+     unsigned PacketCapacity(unsigned endpoint) const { return endpoint<16 ? Capacity(endpoint) : 0; }
+--- a/src/cloudpilot/emulator/hardware/UsbDanaPort.h
++++ b/src/cloudpilot/emulator/hardware/UsbDanaPort.h
+@@ -29,7 +29,11 @@
+             [](void* p,uint8_t* data,unsigned* size) { return Self(p).In(0,data,size,true); },
+             [](void* p,uint8_t ep,const uint8_t* data,unsigned size) { return Self(p).Out(ep,data,size); },
+             [](void* p,uint8_t ep,uint8_t* data,unsigned* size) { return Self(p).In(ep,data,size,true); },
+-            [](void* p,uint8_t ep,unsigned* size) { return Self(p).In(ep,nullptr,size,false); }
++            [](void* p,uint8_t ep,unsigned* size) { return Self(p).In(ep,nullptr,size,false); },
++            [](void* p,uint8_t ep,unsigned size) {
++                return ep>14 || Self(p).resetRequired || !Self(p).dc.DeviceAttached() ||
++                    Self(p).dc.HostOutReady(ep ? ep+1 : 0,size);
++            }
+         };
+         return {this,ops};
+     }
+--- a/src/common/UsbBusHost.cpp
++++ b/src/common/UsbBusHost.cpp
+@@ -372,7 +372,9 @@
+         outPending = outSize != 0;
+     }
+     const bool wantIn = link.sendSpace && link.sendSpace() >= inMps;
+-    if (outPending && now >= outRequestAt && (preferOut || !wantIn || now < inRequestAt)) {
++    // A cooperative adapter may hold this request without putting an OUT token on the bus.
++    const bool outReady = outPending && (!Addressed() || u.OutReady(outEndpoint,std::min<unsigned>(outSize,outMps)));
++    if (outReady && now >= outRequestAt && (preferOut || !wantIn || now < inRequestAt)) {
+         preferOut = false;
+         inFlightEndpoint = outEndpoint;
+         outFlightSize = std::min<unsigned>(outSize, outMps);
+--- a/src/common/UsbBusHost.h
++++ b/src/common/UsbBusHost.h
+@@ -23,6 +23,8 @@
+ //   and then drops it at times while it starts HotSync.
+ // - A control transfer starts on a frame boundary at least 1 ms after the previous one.
+ // - Tokens go to the host's idea of the device address; another address gets no answer.
++// - An optional adapter credit query can defer bulk OUT requests before token submission.
++//   Pending bytes stay owned by the host until an actual OUT ACK. Control and IN are independent.
+ // Nothing here is session state. Every call runs on the emulator thread.
+ class UsbBusHost {
+    public:
+--- a/src/common/UsbDevicePort.h
++++ b/src/common/UsbDevicePort.h
+@@ -19,6 +19,8 @@
+         UsbPacketResult (*EpOut)(void*, uint8_t ep, const uint8_t* data, unsigned size);
+         UsbPacketResult (*EpIn)(void*, uint8_t ep, uint8_t* data, unsigned* size);
+         UsbPacketResult (*PeekIn)(void*, uint8_t ep, unsigned* size);
++        // Optional cooperative host credit; this query never issues a USB token.
++        bool (*OutReady)(void*, uint8_t ep, unsigned size){nullptr};
+     };
+     UsbDevicePort() = default;
+     UsbDevicePort(void* context, const Operations& operations): context(context), ops(&operations) {}
+@@ -76,6 +78,7 @@
+     UsbPacketResult EpOut(uint8_t ep, const uint8_t* data, unsigned size) const { return *this ? ops->EpOut(context, ep, data, size) : UsbPacketResult::Disabled; }
+     UsbPacketResult EpIn(uint8_t ep, uint8_t* data, unsigned* size) const { return *this ? ops->EpIn(context, ep, data, size) : UsbPacketResult::Disabled; }
+     UsbPacketResult PeekIn(uint8_t ep, unsigned* size) const { return *this ? ops->PeekIn(context, ep, size) : UsbPacketResult::Disabled; }
++    bool OutReady(uint8_t ep, unsigned size) const { return !*this || !ops->OutReady || ops->OutReady(context, ep, size); }
+  private:
+     void* context{nullptr};
+     const Operations* ops{nullptr};

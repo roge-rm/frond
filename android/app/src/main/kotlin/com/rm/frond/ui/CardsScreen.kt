@@ -35,6 +35,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import android.widget.Toast
+import androidx.compose.material3.Surface
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.rm.frond.CardChoices
@@ -51,6 +56,7 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
     var making by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<CardChoices.Row?>(null) }
     var deleting by remember { mutableStateOf<CardChoices.Row?>(null) }
+    var discarding by remember { mutableStateOf<CardChoices.Row?>(null) }
     var exporting by remember { mutableStateOf<CardChoices.Row?>(null) }
     val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) model.importImage(uri)
@@ -118,6 +124,7 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
                             exporting = it
                             saveImage.launch(it.card.name + if (it.card.kind == "ms") ".frondms" else ".img")
                         },
+                        onFiles = { model.files.start(it) },
                         onLink = { model.startLink(it) }, onTakeOut = { model.takeOut(it) }, onDelete = { deleting = it })
                 }
             }
@@ -126,6 +133,38 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
     }
 
     CopyingDialog(home)
+    val files = model.files
+    if (files.path != null) {
+        val filesSnackbar = remember { SnackbarHostState() }
+        val context = LocalContext.current
+        LaunchedEffect(files.note) {
+            files.note?.let {
+                Toast.makeText(context, it, Toast.LENGTH_SHORT).show()
+                files.note = null
+            }
+        }
+        Dialog({ if (files.path == "/") files.leaveFiles() else files.up() }, DialogProperties(usePlatformDefaultWidth = false)) {
+            Surface(Modifier.fillMaxSize()) { CardFilesScreen(files, filesSnackbar) }
+        }
+    }
+    files.mismatched?.let { row ->
+        AlertDialog(
+            onDismissRequest = { files.mismatched = null },
+            title = { Text("Files") },
+            text = { Text(Cards.MISMATCH) },
+            confirmButton = { TextButton(onClick = { files.mismatched = null; discarding = row }) { Text("Discard unfinished change") } },
+            dismissButton = { TextButton(onClick = { files.mismatched = null }) { Text("Cancel") } },
+        )
+    }
+    discarding?.let { row ->
+        AlertDialog(
+            onDismissRequest = { discarding = null },
+            title = { Text("Discard unfinished change") },
+            text = { Text("Discard the unfinished change? This can't be undone.") },
+            confirmButton = { TextButton(onClick = { discarding = null; files.discard(row) }) { Text("Discard") } },
+            dismissButton = { TextButton(onClick = { discarding = null }) { Text("Cancel") } },
+        )
+    }
     home.alert?.let { (title, text) ->
         AlertDialog(
             onDismissRequest = { home.alert = null },
@@ -186,6 +225,7 @@ private fun CardRow(
     onRename: (CardChoices.Row) -> Unit,
     onDuplicate: (CardChoices.Row) -> Unit,
     onExport: (CardChoices.Row) -> Unit,
+    onFiles: (CardChoices.Row) -> Unit,
     onLink: (CardChoices.Row) -> Unit,
     onTakeOut: (CardChoices.Row) -> Unit,
     onDelete: (CardChoices.Row) -> Unit,
@@ -200,6 +240,9 @@ private fun CardRow(
                 IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     val stopped = !exchange && !running
+                    DropdownMenuItem(text = { Text("Files…") }, enabled = stopped,
+                        trailingIcon = if (running) ({ Text("In use", style = MaterialTheme.typography.labelMedium) }) else null,
+                        onClick = { menu = false; onFiles(row) })
                     DropdownMenuItem(text = { Text("Rename") }, enabled = !exchange, onClick = { menu = false; onRename(row) })
                     DropdownMenuItem(text = { Text("Duplicate") }, enabled = stopped, onClick = { menu = false; onDuplicate(row) })
                     DropdownMenuItem(text = { Text("Export image") }, enabled = stopped, onClick = { menu = false; onExport(row) })

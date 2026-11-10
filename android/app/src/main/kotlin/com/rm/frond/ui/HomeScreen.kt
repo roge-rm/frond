@@ -110,6 +110,10 @@ fun HomeScreen(model: HomeModel) {
                                 menu = false
                                 model.openCards()
                             })
+                            DropdownMenuItem(text = { Text("Connections") }, onClick = {
+                                menu = false
+                                model.openConnections()
+                            })
                             DropdownMenuItem(text = { Text("Firmware") }, onClick = {
                                 menu = false
                                 model.openFirmware()

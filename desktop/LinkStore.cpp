@@ -84,7 +84,8 @@ QString Store::open(const QString& where) {
             p.goodPort = quint16(e.value("lastPort").toInt());
             p.paired = e.value("paired").toBool(true);
             p.lastSeen = qint64(e.value("lastSeen").toDouble());
-            p.bluetoothRadio = e.value("bluetoothRadio").toString("here");
+            p.bluetoothRadio = e.value("bluetoothRadio").toString("here") == QLatin1String("there") ? "there" : "here";
+            p.bluetoothRadioAt = qint64(e.value("bluetoothRadioAt").toDouble());
             p.keyChanged = e.value("keyChanged").toBool(false);
             if (p.name.isEmpty()) p.name = p.peerName;
             peers.push_back(p);
@@ -103,6 +104,7 @@ bool Store::save() {
         entries.append(QJsonObject{{"id", hexId(p.id)}, {"name", p.name}, {"peerName", p.peerName}, {"key", toHex(p.key)},
                                    {"address", p.address}, {"manual", !p.address.isEmpty()}, {"paired", p.paired},
                                    {"lastSeen", double(p.lastSeen)}, {"bluetoothRadio", p.bluetoothRadio},
+                                   {"bluetoothRadioAt", double(p.bluetoothRadioAt)},
                                    {"keyChanged", p.keyChanged}, {"lastHost", p.goodHost}, {"lastPort", int(p.goodPort)}});
     return writePrivate(folder + "/connections.json", QJsonObject{{"version", 1}, {"entries", entries}});
 }

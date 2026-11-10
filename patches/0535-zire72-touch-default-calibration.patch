@@ -1,0 +1,18 @@
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -370,10 +370,12 @@
+     }
+     if (dev->type == DeviceType5::deviceTypeZire72) {
+         // Same panel scheme as the TX; the panel runs 320x440, the screen and then the silkscreen
+-        // below it. Palm OS calibrates it.
++        // below it. The panel follows the ROM's default calibration (PenResetCalibration): raw X
++        // 3837 to 397 across 0..319 and Y 3676 to 420 down 0..439, measured with the pen probe.
++        // The first-boot calibration then lands every tap where it was made.
+         if (x < 0 || y < 0) wm9712LsetPen(dev->wm9712L, -1, -1, 0);
+-        else wm9712LsetPen(dev->wm9712L, 3800 - (3480 * x + 159) / 319,
+-                           3800 - (3480 * y + 219) / 439, 100);
++        else wm9712LsetPen(dev->wm9712L, 3837 - (3440 * x + 159) / 319,
++                           3676 - (3256 * y + 219) / 439, 100);
+         return;
+     }
+     wm9712LsetPen(dev->wm9712L, (x >= 0 && y >= 0) ? 280 + 10 * x : -1,

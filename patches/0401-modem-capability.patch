@@ -1,0 +1,31 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index 38c299d..0f43f48 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -22,9 +22,11 @@ enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, p
+ enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50 };
+ // Settings and peripherals a device supports; the desktop and core gate on these.
+ // backgroundPanel: the device menu keeps the machine running without drawing and fences its audio.
++// modem: a snap-on Hayes modem for the serial port (the core's own, through PPP to slirp).
+ struct DeviceCapabilities5 {
+     bool network, keyboard, serial, usb, fastAudio, infrared, bluetooth; bool sound{false}; bool microphone{false};
+     bool backgroundPanel{false};
++    bool modem{false};
+ };
+ 
+ // A device's fixed name is what sessions, settings, the control socket and command line use.
+@@ -136,11 +138,12 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+       DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+      4 | 8 | 16 | 32 | 64 | 128, 1886},
+     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
+-    // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial and IrDA; nothing else is on the device.
++    // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else
++    // is on the device.
+     // The desktop and Android run it in their 68k runners (frond-68k, libmain68k.so).
+     {deviceTypeIIIx, "palm-iiix", "Palm IIIx", DeviceCohort5::ez68k, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::romHeader68k, 0x70616c6d /* palm */, 0x73756d6f /* sumo */, DeviceBoard5::ez328, DeviceArt::iiix,
+-     {false, false, true, false, false, true, false, true, false},
++     {false, false, true, false, false, true, false, true, false, false, true},
+      0, 0, 4u << 20, 4u << 20, DisplayMode::mode_160x160, 1u << 1, false,
+      DeviceNorLayout5::any, 0, 0, false, 0, 0,
+      {true, "iiix", 160, 160, 60, 44, "Date Book|Address|To Do List|Memo Pad",

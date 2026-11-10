@@ -43,7 +43,15 @@ def main():
         arm = bytearray(0x128000)
         struct.pack_into('<I', arm, 8, 0xfeedbeef)
         arm[0x10:0x19] = b'PalmCard\0'
+        dana = bytearray(6 << 20)
+        for offset, length in ((0, 0x6000), (0x8000, 0x5c8000)):
+            struct.pack_into('>IIIHH', dana, offset, 0x3000, 0x10000000 + offset + 0x100,
+                             0xfeedbeef, 5, 0x40)
+            dana[offset + 0x10:offset + 0x19] = b'PalmCard\0'
+            struct.pack_into('>I', dana, offset + 0x6c, length)
+            struct.pack_into('>II', dana, offset + 0x7e, 0x61736d74, 0x44616e61)
         cases = {
+            'dana-synthetic': (dana, 'unreadable ROM'),
             'empty': (b'', 'cannot read ROM'),
             'short': (header(0x80), 'not a 68k Palm ROM'),
             'arm': (bytes(arm), 'not a 68k Palm ROM'),
@@ -82,6 +90,7 @@ def main():
             return data[:len(data) - cut]
         sessions = {
             'damaged': (session(cut=3), 'invalid session image'),
+            'dana': (session(name='alphasmart-dana'), 'unsupported display mode'),
             'tx': (session(name='palm-tx'), 'session is not for a 68k device'),
             'nand': (session(nand=bytes(16)), "storage a Palm IIIx doesn't have"),
         }

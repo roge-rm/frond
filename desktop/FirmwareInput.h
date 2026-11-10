@@ -11,6 +11,8 @@ namespace frondFirmware {
 // The devices the desktop starts. Settings and the core get the device's fixed name from
 // device_profile5.h, never this enum.
 enum class Device { automatic = -1, tx = deviceTypeTX, e2 = deviceTypeE2, zire72 = deviceTypeZire72 };
+// The Dana and the Dana Wireless share one board, ROM, art and keyboard.
+inline bool isDana(Device device) { return device != Device::automatic && deviceTypeIsDana5(int(device)); }
 inline const auto devices = [] {
     std::vector<Device> result;
     for (const auto& p : deviceProfiles5)
@@ -40,6 +42,7 @@ inline QString deviceName(Device device) { return QString::fromUtf8(profile(devi
 // Which settings a device supports, from the device table.
 using Capabilities = DeviceCapabilities5;
 inline Capabilities capabilities(Device device) { return profile(device).capabilities; }
+inline bool infraredKeyboard(Device device) { return capabilities(device).keyboard && !isDana(device); }
 
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.
@@ -94,7 +97,9 @@ inline QString validateRom68k(Device device, QFile& rom, const QString& nandPath
     const auto name = deviceName(device);
     if (!info.hasHeader) return QStringLiteral("This file isn't a %1 ROM.").arg(name);
     if (!info.profile) return QStringLiteral("This ROM isn't one the %1 can run.").arg(name);
-    if (info.profile != &profile(device))
+    // The Dana Wireless runs the Dana's ROM, whose header still says Dana.
+    const bool danaRom = int(device) == deviceTypeDanaWireless && info.profile->deviceType == deviceTypeDana;
+    if (info.profile != &profile(device) && !danaRom)
         return QStringLiteral("This is a %1 ROM. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
     if (!nandPath.isEmpty()) return QStringLiteral("The %1 has no NAND. Leave the NAND image empty.").arg(name);
     return {};

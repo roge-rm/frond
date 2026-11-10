@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
 """Runs the same desktop control socket commands against out/frond (an ARM smoke session) and
-out/frond-68k (a IIIx ROM booted to the launcher), checking the replies, the pushed link events, save
-and reload, and that commands a device can't do fail cleanly as "unsupported".
+out/frond-68k (a IIIx ROM booted to the launcher, and the Dana and Dana Wireless USB port and Wi-Fi rows),
+checking the replies, the pushed link events, save and reload, and that commands a device can't do fail
+cleanly as "unsupported".
 
 Private firmware and sessions: --arm-session, else FROND_ARM_SESSION, else the palm-tx smoke machine
 (build/smoke/machines/palm-tx, or an older build/smoke/palm-tx.session); --rom, else the generic OS 3.5 EZ ROM in the
-firmware folder. A side with neither is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
+firmware folder; --dana-rom, else the Dana 1.5 ROM there. A side without its input is skipped. FROND_CORE picks another ARM core binary. Scratch goes in build/core-control-*.
 """
 import argparse
+import fcntl
+import json
 import os
 from pathlib import Path
+import re
 import shutil
+import select
 import socket
 import stat
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import zipfile
 
@@ -25,24 +31,39 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
 PATTERN = ROOT / 'tests/fixtures/frond-pattern.pdb'
+# Devices with a serial port; serial-mode answers unsupported on the others.
+SERIAL = {p['name'] for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles'] if p.get('serial')}
 PATTERN_NAME = 'frond-pattern.sunvox'
 
 
 class Client:
     """One core on a private control socket, as the desktop starts it."""
 
-    def __init__(self, core, args, root, name):
+    def __init__(self, core, args, root, name, piped=False):
+        """piped: stdout and stderr go through a pipe copied to the log, which drop() closes, as the
+        desktop's pipes lose their reader when it dies."""
         self.socket_dir = tempfile.mkdtemp(prefix='frond-control-')
         address = str(Path(self.socket_dir) / 'control')
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(address)
         listener.listen(1)
         self.log = (root / f'{name}.log').open('wb')
+        self.pipe, self.copier, self.copying = None, None, False
+        output = self.log
+        if piped:
+            self.pipe, output = os.pipe()
+            self.copying = True
+            self.copier = threading.Thread(target=self.copy_output, daemon=True)
+            self.copier.start()
         runner = ['heavy', 'emulator'] if shutil.which('heavy') else []
-        self.process = subprocess.Popen([*runner, str(core), *map(str, args), '--no-sound', '--desktop-socket', address],
-                                        stdout=self.log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                        start_new_session=True,
-                                        env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        try:
+            self.process = subprocess.Popen([*runner, str(core), *map(str, args), '--no-sound', '--desktop-socket', address],
+                                            stdout=output, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                            start_new_session=True,
+                                            env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        finally:
+            if piped:
+                os.close(output)
         self.connection = None
         try:
             listener.settimeout(300)  # includes waiting for an emulator slot
@@ -91,10 +112,44 @@ class Client:
             assert time.monotonic() < end, f'{command}: still not ready after {timeout} s'
             time.sleep(1)
 
+    def until_text(self, command, done, timeout=90):
+        """Repeats command until done(text) holds; returns the text."""
+        end = time.monotonic() + timeout
+        while not done(text := self.ok(command)):
+            assert time.monotonic() < end, f'{command}: {text!r} after {timeout} s'
+            time.sleep(0.2)
+        return text
+
     def quit(self):
         self.ok('quit')
         assert self.process.wait(timeout=30) == 0, 'core exit status'
         self.close()
+
+    def copy_output(self):
+        while self.copying:
+            ready, _, _ = select.select([self.pipe], [], [], 0.1)
+            if ready:
+                data = os.read(self.pipe, 65536)
+                if not data:
+                    break
+                self.log.write(data)
+                self.log.flush()
+
+    def close_output(self):
+        """Stops reading the core's output and closes the pipe, so its next write gets EPIPE."""
+        if self.copier:
+            self.copying = False
+            self.copier.join()
+            self.copier = None
+            os.close(self.pipe)
+            self.pipe = None
+
+    def drop(self):
+        """Closes the socket as a killed desktop would, with no quit, and the output pipe if there is one."""
+        self.stream.close()
+        self.connection.close()
+        self.connection = None
+        self.close_output()
 
     def close(self):
         if self.connection:
@@ -102,15 +157,17 @@ class Client:
             self.connection = None
         if self.process.poll() is None:
             palm_boot.stop_guest(self.process)
+        self.close_output()
         self.log.close()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
 
 
-def unix_modes(c):
+def unix_modes(c, serial=True):
     """The unix: endpoint through the live mode commands and their state replies, for serial and infrared."""
     folder = Path(tempfile.mkdtemp(prefix='frond-'))  # short, so the path fits a socket address
+    modes = (('serial-mode', 'serial-state', 'serial'),) if serial else ()
     try:
-        for command, state, code in (('serial-mode', 'serial-state', 'serial'), ('irda-mode', 'irda-state', 'infrared')):
+        for command, state, code in (*modes, ('irda-mode', 'irda-state', 'infrared')):
             path = folder / f'{code}.sock'
 
             def until(text):
@@ -203,11 +260,135 @@ def usb_unix(c, folder, path):
     assert c.ok('usb-mode', 'off', code='usb') == 'off' and not path.exists()
 
 
+def palm_database(path, name, kind, creator, resource):
+    """Writes a minimal .prc (an empty resource database) or a .pdb with one record."""
+    header = name.encode().ljust(32, b'\0') + struct.pack('>HHIIIIII', 1 if resource else 0, 1, 0, 0, 0, 0, 0, 0)
+    header += kind + creator + struct.pack('>IIH', 0, 0, 0 if resource else 1)
+    path.write_bytes(header + (b'' if resource else struct.pack('>IBBBB', 80 + 8, 0, 0, 0, 1) + b'\0\0' + b'data'))
+    return path
+
+
+def delete_application(c, listing_text, app):
+    """What the Android app does for Delete: the application first, then the others with its creator."""
+    entries = [line.split(' ') for line in listing_text.splitlines()]
+    named = [(bytes.fromhex(e[3]).decode('latin-1'), e[1]) for e in entries if len(e) == 4]
+    creator = dict(named)[app]
+    c.ok('delete-db', app, code='deleted')
+    for name, owner in named:
+        if owner == creator and name != app:
+            c.ok('delete-db', name, code='deleted')
+
+
+PEN_PROBE = ROOT / 'build/pen68k-probe/FrondPen68k.prc'
+
+
+def pen_probe():
+    """The pen probe, built when prc-tools and the Palm OS 5 SDK beside the tree are here, else None."""
+    sdk = ROOT.parent / 'palm-os-sdk/sdk-5r3'
+    if not PEN_PROBE.is_file() and shutil.which('m68k-palmos-gcc') and (sdk / 'include/PalmOS.h').is_file():
+        subprocess.run([sys.executable, 'tools/build-palm-probe.py', '--probe', 'pen68k', '--sdk', str(sdk)],
+                       cwd=ROOT, check=True, capture_output=True)
+    return PEN_PROBE if PEN_PROBE.is_file() else None
+
+
+def replay(c, root, name, lines):
+    """Runs an input replay of (ms, event) lines and waits for its end."""
+    path = root / f'{name}.replay'
+    path.write_text(''.join(f'{at} {event}\n' for at, event in lines))
+    c.ok('input-replay', path)
+    end = time.monotonic() + 60
+    while c.request('replay-state')[1] != 'finished':
+        assert time.monotonic() < end, f'{name}: replay still running after 60 s'
+        time.sleep(0.2)
+
+
+def screen_rows(path):
+    """The screen rows of a snapshot (square, as wide as the snapshot) and its width."""
+    rows = palm_boot.png_rows(path)
+    width = len(rows[0]) // 4
+    return rows[:width], width
+
+
+def probe_mark(path):
+    """The centre of the pen probe's dark square, in snapshot pixels."""
+    rows, width = screen_rows(path)
+    dark = [(x, y) for y, row in enumerate(rows) for x in range(width) if sum(row[4 * x:4 * x + 3]) < 200]
+    assert len(dark) == 9, f'{path.name}: no single 3x3 mark ({len(dark)} dark pixels)'
+    return sum(x for x, _ in dark) / 9, sum(y for _, y in dark) / 9
+
+
+def clear_reminder(c, root, device):
+    """Dismisses the Zire's setup reminder, which comes due as soon as an older smoke session loads
+    and keeps install and the other guest calls waiting. OK at (50, 280) clears it, as in smoke.py."""
+    if device != 'palm-zire-72':
+        return
+    time.sleep(3)
+    shot = root / 'reminder.png'
+    replay(c, root, 'reminder', [(0, f'snapshot "{shot}"')])
+    if not palm_boot.zire_reminder(palm_boot.png_rows(shot)):
+        return
+    replay(c, root, 'reminder-ok', [(0, 'pen-down 50 280'), (150, 'pen-up'), (1500, f'snapshot "{shot}"')])
+    assert not palm_boot.zire_reminder(palm_boot.png_rows(shot)), 'setup reminder still showing after OK'
+    print('core-control frond: setup reminder dismissed', flush=True)
+
+
+def check_taps(c, root, points):
+    """Taps land where they're sent: the pen probe marks each tap, in screen pixels. True when checked,
+    False without the probe (no prc-tools or SDK)."""
+    probe = pen_probe()
+    if not probe:
+        return False
+    c.ok('install', probe, code=('installed', 'needs-reset'))
+    c.ok('launch-app', 'Frond pen', code='launched')
+    time.sleep(3)
+    for x, y in points:
+        name = f'tap-{x}-{y}'
+        replay(c, root, name, [(0, f'pen-down {x} {y}'), (100, 'pen-up'), (1000, f'snapshot "{root / (name + ".png")}"')])
+        assert probe_mark(root / f'{name}.png') == (x, y), f'tap at {x},{y} landed at {probe_mark(root / (name + ".png"))}'
+    return True
+
+
+def box_icon(path):
+    """The pen probe's launcher icon, a 32x22 box, shows: a dark run of 30 or more below the title bar."""
+    rows, width = screen_rows(path)
+    for row in rows[16:]:
+        run = 0
+        for x in range(width):
+            run = run + 1 if sum(row[4 * x:4 * x + 3]) < 200 else 0
+            if run >= 30:
+                return True
+    return False
+
+
+def check_launcher_delete(c, root):
+    """Deleting an application and its data with the launcher in front and a tap on its way: the
+    delete waits for the launcher to quit, which is relaunched without the icon (a stale list
+    locked the deleted icons and the launcher failed with Invalid chunk ptr)."""
+    c.ok('launch-app', 'Launcher', code='launched')
+    time.sleep(3)
+    replay(c, root, 'launcher-before', [(0, f'snapshot "{root / "launcher-before.png"}"')])
+    assert box_icon(root / 'launcher-before.png'), 'the pen probe icon is not in the launcher'
+    tap = root / 'launcher-tap.replay'
+    tap.write_text('0 pen-down 157 80\n80 pen-up\n')
+    c.ok('input-replay', tap)
+    c.ok('delete-db', 'Frond pen', code='deleted')
+    c.ok('delete-db', 'FrondPenData', code='deleted')
+    time.sleep(2)
+    replay(c, root, 'launcher-after', [(0, f'snapshot "{root / "launcher-after.png"}"')])
+    assert not box_icon(root / 'launcher-after.png'), 'the launcher still shows the deleted application'
+    listing = c.ok('db-list', code='databases')
+    assert 'Frond pen'.encode().hex() not in listing and 'FrondPenData'.encode().hex() not in listing, listing
+    c.ok('launch-app', 'Memo Pad', code='launched')
+    c.ok('db-list', code='databases')
+
+
 def common(c, root, device, unsupported, saved):
     """The checks both runners share, ending with a save to saved."""
     assert c.ok('device-state', code='device') == device
     c.fails('not-a-command', code='command')
     c.fails('device-state', 'unexpected', code='argument')
+    c.fails('window-id', code='unsupported')  # the dummy video driver has no X11 window
+    c.fails('window-id', 'x', code='argument')
     c.fails('save', 'relative.frond', code='argument')
     blocker = root / 'not-a-folder'
     blocker.write_text('')
@@ -215,14 +396,17 @@ def common(c, root, device, unsupported, saved):
     for command in ('network-state', 'keyboard-state', 'usb-state', 'sd-state', 'speed-state', 'serial-state',
                     'irda-state', 'microphone-state'):
         c.ok(command)
-    c.fails('serial-mode', 'bogus', code='argument')
-    assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
-    c.ok('speed-state')
-    assert any(name == 'serial' and text.startswith('pty ') for name, text in c.events), c.events
-    assert c.ok('serial-mode', 'off', code='serial') == 'off'
+    if device in SERIAL:
+        c.fails('serial-mode', 'bogus', code='argument')
+        assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
+        c.ok('speed-state')
+        assert any(name == 'serial' and text.startswith('pty ') for name, text in c.events), c.events
+        assert c.ok('serial-mode', 'off', code='serial') == 'off'
+    else:
+        c.fails('serial-mode', 'pty', code='unsupported')
     assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
     assert c.ok('irda-mode', 'off', code='infrared') == 'off'
-    unix_modes(c)
+    unix_modes(c, device in SERIAL)
     c.ok('display', 'smooth=on')
     c.fails('display', 'smooth=maybe', code='argument')
     c.fails('display', 'jog=screen', code='argument')
@@ -244,6 +428,44 @@ def common(c, root, device, unsupported, saved):
     before = saved.stat().st_mtime_ns if saved.exists() else 0
     c.ok('save', saved, code='saved')
     assert saved.stat().st_size > 100000 and saved.stat().st_mtime_ns != before, 'session not written'
+    # Delete after the save, so the reload checks still find the database; install it again after.
+    c.fails('delete-db', '', code='argument')
+    c.fails('delete-db', 'No Such Database', code='missing')
+    c.ok('delete-db', PATTERN_NAME, code='deleted')
+    assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'deleted database still listed'
+    assert c.ok('install', PATTERN, code=('installed', 'needs-reset'))
+    # An application and its data go together, and a ROM database is refused.
+    app = palm_database(root / 'frond-test-app.prc', 'frond-test-app', b'appl', b'FTst', True)
+    data = palm_database(root / 'frond-test-data.pdb', 'frond-test-data', b'DATA', b'FTst', False)
+    for name, path in (('frond-test-data', data), ('frond-test-app', app)):
+        c.ok('install', path, code=('installed', 'needs-reset'))
+        assert name.encode().hex() in c.ok('db-list', code='databases'), f'{name} not listed'
+    delete_application(c, c.ok('db-list', code='databases'), 'frond-test-app')
+    left = c.ok('db-list', code='databases')
+    assert 'frond-test-app'.encode().hex() not in left and 'frond-test-data'.encode().hex() not in left, left
+    assert PATTERN_NAME.encode().hex() in left, 'delete took another creator\'s database'
+    refused = [c.request('delete-db', name)[1] for name in ('Launcher', 'Memo Pad', 'Memos-PMem')]
+    assert 'rom' in refused, f'no ROM database refused: {refused}'
+    c.ok('guest-ready')
+
+
+def reset_after_change(c, root, device):
+    """A reset straight after an install or delete keeps the change. The T|X writes a database's
+    last pages to its NAND store up to 2 s later, so the core lets the guest run that far first.
+    Straight after the boot guest-ready can pass while the launcher is still busy and db-list then
+    answers not-ready for about a second, so db-list is retried as the protocol says."""
+    if device not in ('palm-tx', 'palm-e2'):
+        print(f'core-control frond: reset after change skipped, {device} has no NAND store (needs a T|X or E2 session)')
+        return
+    name = 'frond-reset-test'
+    c.ok('install', palm_database(root / f'{name}.pdb', name, b'DATA', b'FRst', False), code=('installed', 'needs-reset'))
+    c.ok('reset', code='done')
+    c.until_ok('guest-ready')
+    assert name.encode().hex() in c.until_ok('db-list', timeout=30), 'install lost by a reset straight after it'
+    c.ok('delete-db', name, code='deleted')
+    c.ok('reset', code='done')
+    c.until_ok('guest-ready')
+    assert name.encode().hex() not in c.until_ok('db-list', timeout=30), 'delete undone by a reset straight after it'
 
 
 def check_arm(core, session, root):
@@ -262,10 +484,29 @@ def check_arm(core, session, root):
             unsupported.append(('hold', 'on'))
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
         # A lone file is extracted to <stem>/ on load, so the save goes to <stem>/<stem>.frond.
+        # A lone v7 or later file runs in the folder it was copied to and saves back to itself.
+        lone = copy.is_file() and copy.read_bytes()[4:8] == struct.pack('<I', 6)
         saved = next((p for p in (copy / (session.name + '.frond'), *sorted(copy.glob('*.frond'))) if p.is_file()),
-                     copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond')
+                     copy) if copy.is_dir() else copy.parent / copy.stem / (copy.stem + '.frond') if lone else copy
+        clear_reminder(c, work, device)
         common(c, work, device, unsupported, saved)
-        if not copy.is_dir():
+        reset_after_change(c, work, device)
+        # The snap-on modem is frond-68k's.
+        c.fails('serial-mode', 'modem', code='argument' if device in SERIAL else 'unsupported')
+        # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
+        c.events.clear()
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        assert c.ok('irda-state', code='infrared') == 'phone idle'
+        assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
+        c.ok('speed-state')
+        assert ('infrared', 'phone idle') in c.events, c.events
+        c.fails('keyboard-attach', 'on', code='infrared')
+        assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
+        assert c.ok('irda-mode', 'off', code='infrared') == 'off'
+        assert c.ok('keyboard-attach', 'on', code='keyboard') == 'attached'
+        c.fails('irda-mode', 'phone', code='infrared')
+        assert c.ok('keyboard-attach', 'off', code='keyboard') == 'detached'
+        if lone:
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
             before, stamp = copy.read_bytes(), saved.stat().st_mtime_ns
             c.ok('save', copy, code='saved')
@@ -299,6 +540,10 @@ def check_arm(core, session, root):
         c.ok('save', old, code='saved')
         assert old.read_bytes() == before, 'lone v6 .frond rewritten'
         assert (v6 / 'old/old.frond').stat().st_size > 100000, 'v6 save not where loading extracts it'
+        # Native pixels on the high-density screens; the T|X's include its status bar row.
+        points = [(8, 8), (100, 120), (312, 300), (157, 233), (55, 11)]
+        if device in ('palm-tx', 'palm-e2', 'palm-zire-72') and not check_taps(c, work, points):
+            print('core-control frond: taps skipped, no pen probe (prc-tools, SDK)')
         c.quit()
     finally:
         c.close()
@@ -329,7 +574,95 @@ def check_arm(core, session, root):
         c.close()
         shutil.rmtree(usb_folder, ignore_errors=True)
     work_folder(core, session, work, root, device)
+    # A copy of the machine folder saved after common(), which still has the pattern database.
+    gone = work / 'gone'
+    shutil.copytree(saved.parent, gone, ignore=shutil.ignore_patterns('*.tmp-*'))
+    disconnect(core, [gone / saved.name], gone / saved.name, root, 'arm')
     return device
+
+
+def core_locked(target):
+    """True while a core holds <target>.core, as the desktop checks it."""
+    try:
+        fd = os.open(f'{target}.core', os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def disconnect(core, args, target, root, name):
+    """With --save-on-disconnect, as the desktop starts the core. The socket closing without a quit
+    saves the session to target and the core exits 0, even with its output pipe closed at the same
+    time. It holds target.core locked for its run. No save after a quit still unread when the socket
+    closed or after a protocol error, and a failed save exits non-zero."""
+    folder = target.parent
+    run = lambda log, piped=False: Client(core, [*args, '--save-on-disconnect', target], root, f'{name}-{log}', piped)
+    stamp = target.stat().st_mtime_ns
+    c = run('gone', piped=True)
+    try:
+        c.until_ok('guest-ready')
+        c.ok('delete-db', PATTERN_NAME, code='deleted')
+        assert core_locked(target), 'target.core not locked while the core runs'
+        # A second core on the same session is refused before it looks for a launcher.
+        short = tempfile.mkdtemp(prefix='frond-')
+        try:
+            second = subprocess.run([str(core), *map(str, args), '--save-on-disconnect', str(target),
+                                     '--desktop-socket', str(Path(short) / 'none')],
+                                    capture_output=True, text=True, timeout=60,
+                                    env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        finally:
+            shutil.rmtree(short, ignore_errors=True)
+        assert second.returncode != 0 and 'another core is running' in second.stderr, second.stderr
+        c.drop()
+        assert c.process.wait(timeout=60) == 0, f'core exit status {c.process.returncode} after the socket and its output closed'
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns != stamp, 'session not saved when the socket closed'
+    assert not core_locked(target), 'target.core still locked after the core exited'
+    c = run('gone-reload')
+    try:
+        c.until_ok('guest-ready')
+        assert PATTERN_NAME.encode().hex() not in c.ok('db-list', code='databases'), 'saved state not the latest'
+        stamp = target.stat().st_mtime_ns
+        # An install keeps the core busy, so the quit sent with it is still unread when the socket closes.
+        c.connection.sendall(f'{c.serial + 1}\tinstall\t{str(PATTERN).encode().hex()}\n{c.serial + 2}\tquit\t\n'.encode())
+        c.drop()
+        assert c.process.wait(timeout=60) == 0, 'core exit status after a quit and a closed socket'
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'a quit then a closed socket saved the session'
+    c = run('gone-protocol')
+    try:
+        c.until_ok('guest-ready')
+        c.connection.sendall(b'not a request\n')
+        c.process.wait(timeout=60)
+        c.drop()
+    finally:
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'a protocol error saved the session'
+    c = run('gone-fails')
+    try:
+        c.until_ok('guest-ready')
+        # The session was saved straight after a delete, whose last NAND pages the T|X writes up to
+        # 2 s on; a page written to the read-only folder would end the core before the save is tried.
+        time.sleep(3)
+        folder.chmod(0o500)
+        c.drop()
+        assert c.process.wait(timeout=60) != 0, 'a failed save on disconnect exited 0'
+    finally:
+        folder.chmod(0o700)
+        c.close()
+    assert target.stat().st_mtime_ns == stamp, 'a save into a read-only folder changed the session'
+    for log, saved in (('gone-reload', False), ('gone-protocol', False), ('gone-fails', False)):
+        text = (root / f'{name}-{log}.log').read_text(errors='replace')
+        assert ('session saved to' in text) == saved, f'{log}: {text[-400:]}'
+    assert 'could not be saved' in (root / f'{name}-gone-fails.log').read_text(errors='replace')
 
 
 def files_of(folder):
@@ -374,6 +707,44 @@ def work_folder(core, session, work, root, device):
         c.close()
 
 
+WIFI_STATE = re.compile(r'(powered|unpowered) link=(up|down) ip=\S+ mac=[0-9a-f:]{17} tx=\d+ rx=\d+ dropped=\d+')
+
+
+def check_dana(core, rom, root):
+    """The USB port and Wi-Fi rows on both Danas, from the ROM at start: the Dana's port takes the
+    printer or the Wi-Fi adapter and has no built-in module; the Wireless's module answers
+    wifi-module-state and network-mode turns its radio off and on, and its port refuses Wi-Fi."""
+    for device in ('alphasmart-dana', 'alphasmart-dana-wireless'):
+        c = Client(core, ['--rom', rom, '--device', device], root, device)
+        try:
+            assert c.ok('device-state', code='device') == device
+            assert c.ok('usb-port-state', code='usb-port') == 'off'
+            assert c.ok('usb-port', 'printer', code='usb-port').startswith('printer ')
+            assert c.ok('usb-port-state', code='usb-port').startswith('printer ')
+            assert c.ok('usb-port', 'off', code='usb-port') == 'off'
+            c.fails('usb-port', 'bogus', code='argument')
+            c.fails('network-mode', 'internet', code='argument')
+            if device == 'alphasmart-dana':
+                assert c.ok('wifi-module-state', code='wifi-module') == 'off'
+                assert WIFI_STATE.fullmatch(c.ok('usb-port', 'wifi', code='usb-port').removeprefix('wifi '))
+                assert c.ok('network-state', code='network') == 'wireless'
+                assert c.ok('network-mode', 'disabled', code='network') == 'disabled'
+                assert c.ok('usb-port-state', code='usb-port') == 'off'
+            else:
+                assert c.ok('network-state', code='network') == 'wireless'
+                assert WIFI_STATE.fullmatch(c.ok('wifi-module-state', code='wifi-module'))
+                assert 'built in' in c.fails('usb-port', 'wifi', code='argument')
+                assert c.ok('usb-port-state', code='usb-port') == 'off'
+                assert c.ok('network-mode', 'disabled', code='network') == 'disabled'
+                assert c.ok('wifi-module-state', code='wifi-module') == 'off'
+                assert c.ok('network-mode', 'wireless', code='network') == 'wireless'
+                assert WIFI_STATE.fullmatch(c.ok('wifi-module-state', code='wifi-module'))
+            c.quit()
+        finally:
+            c.close()
+    return 'Dana and Dana Wireless'
+
+
 def check_68k(core, rom, root):
     work = root / 'iiix'
     work.mkdir()
@@ -390,13 +761,51 @@ def check_68k(core, rom, root):
     try:
         unsupported = [('usb-mode', 'pty'), ('bluetooth-state', ''), ('bluetooth-mode', 'off'), ('hold', 'on'),
                        ('keyboard-attach', 'on'), ('keyboard-key', '1e d'), ('microphone-mode', 'on'),
-                       ('network-mode', 'internet'), ('sd-create', '32'), ('sd-eject', ''), ('ms-state', ''),
+                       ('network-mode', 'internet'), ('network-mode', 'wireless'), ('usb-port', 'wifi'),
+                       ('usb-port', 'printer'), ('sd-create', '32'), ('sd-eject', ''), ('ms-state', ''),
                        ('guest-orientation', ''), ('rotate', ''), ('replay-snapshots', '')]
         assert c.ok('hold-state') == 'unavailable'
+        # The USB host port is the Dana's; the other 68k devices answer it as absent.
+        assert c.ok('usb-port-state', code='usb-port') == 'off'
+        assert c.ok('usb-port', 'off', code='usb-port') == 'off'
+        assert c.ok('network-state', code='network') == 'disabled'
         saved = work / 'saved.frond'
         common(c, work, 'palm-iiix', unsupported, saved)
-        # The IIIx's own: cradle HotSync button, speed, contrast, backlight, launch.
+        # The snap-on modem takes the serial port's place, and a link takes it back.
+        c.events.clear()
+        assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
+        assert c.ok('serial-state', code='serial') == 'modem idle'
+        assert c.ok('serial-mode', 'pty', code='serial').startswith('pty /dev/pts/')
+        assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'
+        c.ok('speed-state')
+        assert ('serial', 'modem idle') in c.events, c.events
+        # The cradle's DTR reaches the modem: HotSync opens the port, gives up on the modem's echo and
+        # closes it again, so DTR rises with the line driver and drops with it.
+        assert c.ok('serial-stats', code='serial') == 'power=off dtr=off dtr_rises=0 dtr_drops=0'
         c.ok('hotsync', code='hotsync')
+
+        def closed(text):
+            fields = dict(word.split('=') for word in text.split())
+            return fields['power'] == 'off' and fields['dtr'] == 'off' and int(fields['dtr_drops']) >= 1
+        # HotSync is done when the port stays closed for a second, as it retries more than once.
+        text = None
+        while (seen := c.until_text('serial-stats', closed)) != text:
+            text = seen
+            time.sleep(1)
+        stats = dict(word.split('=') for word in text.split())
+        assert stats['dtr_rises'] == stats['dtr_drops'], stats
+        assert c.ok('serial-mode', 'off', code='serial') == 'off'
+        # The infrared phone takes the IR port's place, and a link takes it back.
+        c.events.clear()
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        assert c.ok('irda-state', code='infrared') == 'phone idle'
+        assert c.ok('irda-stats', code='infrared').startswith('port=')
+        assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
+        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+        c.ok('speed-state')
+        assert ('infrared', 'phone idle') in c.events, c.events
+        assert c.ok('irda-mode', 'off', code='infrared') == 'off'
+        # The IIIx's own: speed, contrast, backlight, launch. The cradle HotSync button is the row above.
         c.ok('speed', 'uncapped', code='speed')
         assert c.ok('speed-state').endswith('uncapped')
         c.ok('speed', 'original', code='speed')
@@ -406,8 +815,17 @@ def check_68k(core, rom, root):
         assert c.ok('backlight-state') in ('on', 'off')
         c.ok('launch-app', 'Memo Pad', code='launched')
         c.fails('launch-app', '', code='argument')
+        # Each step finishes before the next, as a person would wait: db-list runs at Memo Pad's event
+        # loop, and the save waits for the boot to reach the UI. A reset during the ROM's store header
+        # update (about 2 ms after each key press and every 5 s) formats RAM on a real IIIx too.
+        c.ok('db-list', code='databases')
         c.ok('reset', code='done')
+        c.until_ok('guest-ready')
         c.ok('save', saved, code='saved')
+        if check_taps(c, work, [(20, 30), (80, 56), (140, 140), (79, 60)]):
+            check_launcher_delete(c, work)
+        else:
+            print('core-control frond-68k: taps and launcher delete skipped, no pen probe (prc-tools, SDK)')
         c.quit()
     finally:
         c.close()
@@ -419,6 +837,10 @@ def check_68k(core, rom, root):
         c.quit()
     finally:
         c.close()
+    gone = work / 'gone' / 'gone.frond'
+    gone.parent.mkdir()
+    shutil.copy2(saved, gone)
+    disconnect(core, [gone, '--device', 'palm-iiix'], gone, root, 'iiix')
     # A bad socket path or a missing launcher stops the core with an error, not a hang.
     # The missing socket sits in a short temporary folder so a long work path can't hit the 108-byte limit.
     short = tempfile.mkdtemp(prefix='frond-')
@@ -429,13 +851,26 @@ def check_68k(core, rom, root):
     finally:
         shutil.rmtree(short, ignore_errors=True)
     assert bad.returncode != 0 and 'cannot connect' in bad.stderr, bad.stderr
+    # Palm OS 3.1 has no IrCOMM, so frond-68k refuses the infrared phone there.
+    old = palm_boot.palm_images() / 'Palm/IIIx/Palm-IIIx-3.1-en.rom'
+    if old.is_file():
+        refused = subprocess.run([str(core), '--rom', str(old), '--device', 'palm-iiix', '--irda', 'phone', '--run-for', '1'],
+                                 capture_output=True, text=True, timeout=60,
+                                 env=dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy'))
+        assert refused.returncode != 0 and 'needs Palm OS 3.3 or later' in refused.stderr, refused.stderr
     both = subprocess.run([str(core), str(saved), '--run-for', '1', '--desktop-socket', 'x'],
                           capture_output=True, text=True, timeout=60)
     assert both.returncode == 2, both.stderr
+    alone = subprocess.run([str(core), str(saved), '--run-for', '1', '--save-on-disconnect', str(saved)],
+                           capture_output=True, text=True, timeout=60)
+    assert alone.returncode == 2 and 'needs --desktop-socket' in alone.stderr, alone.stderr
 
 
 def arm_session(given):
     if given:
+        # A machine folder's own session file stands for the folder: <name>/<name>.frond.
+        if given.is_file() and given.name == given.parent.name + '.frond':
+            return given.parent
         return given
     if os.environ.get('FROND_ARM_SESSION'):
         return Path(os.environ['FROND_ARM_SESSION'])
@@ -450,28 +885,38 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--arm-session', type=Path)
     parser.add_argument('--rom', type=Path)
+    parser.add_argument('--dana-rom', type=Path)
     parser.add_argument('--keep', type=Path, help='keep logs, saves and exports here')
     args = parser.parse_args()
     session = arm_session(args.arm_session)
     rom = args.rom or palm_boot.palm_images() / 'Palm/Generic-OS-3.5-EZ/Palm-OS-3.5-en-ez.rom'
+    dana = args.dana_rom or palm_boot.palm_images() / 'AlphaSmart/Dana/AlphaSmart-Dana-1.5.rom'
     (ROOT / 'build').mkdir(exist_ok=True)
-    failed = 0
+    failed = ran = 0
+    skipped = []
     with tempfile.TemporaryDirectory(prefix='core-control-', dir=ROOT / 'build') as work:
         root = (args.keep or Path(work)).resolve()
         root.mkdir(parents=True, exist_ok=True)
         for name, ready, run in (('frond', session and session.exists(),
                                   lambda: check_arm(Path(os.environ.get('FROND_CORE') or ROOT / 'out/frond'), session.resolve(), root)),
-                                 ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root))):
+                                 ('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom.resolve(), root)),
+                                 ('frond-68k dana', dana.is_file(), lambda: check_dana(ROOT / 'out/frond-68k', dana.resolve(), root))):
             if not ready:
-                print(f'core-control {name}: skipped, no {"ARM smoke session" if name == "frond" else "IIIx ROM"}')
+                missing = {'frond': 'ARM smoke session', 'frond-68k': f'IIIx ROM at {rom}'}.get(name, f'Dana ROM at {dana}')
+                print(f'core-control {name}: skipped, no {missing}')
+                skipped.append(name)
                 continue
+            ran += 1
             try:
                 result = run()
                 print(f'core-control {name}: ok' + (f' ({result})' if result else ''), flush=True)
             except AssertionError as error:
                 failed += 1
                 print(f'core-control {name}: FAIL, {error}', flush=True)
-    print('core-control: ' + ('FAIL' if failed else 'ok'))
+    if not ran:
+        print('core-control: FAIL, every side was skipped, nothing was checked')
+        return 1
+    print('core-control: ' + ('FAIL' if failed else 'ok') + (f' (skipped {", ".join(skipped)})' if skipped else ''))
     return 1 if failed else 0
 
 

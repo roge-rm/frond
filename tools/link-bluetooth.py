@@ -151,11 +151,12 @@ def serve(path, listen, seconds, relay):
             try:
                 local.connect(path)
             except OSError as e:
+                # Count it before closing: the peer may stop us as soon as it sees the close.
+                with relay.lock:
+                    relay.stats['failed'] += 1
                 print(f'Peer {host}: could not reach {path}: {e.strerror or e}.', flush=True)
                 local.close()
                 peer.close()
-                with relay.lock:
-                    relay.stats['failed'] += 1
                 continue
             keepalive(peer)
             relay.pair(peer, local, f'Peer {host}')
@@ -192,10 +193,10 @@ def carry(host, remote, name, local, count, relay):
     try:
         peer = socket.create_connection((host, remote), timeout=CONNECT_SECONDS)
     except OSError as e:
-        print(f'Controller {count}: could not reach {name}: {e.strerror or e}.', flush=True)
-        local.close()
         with relay.lock:
             relay.stats['failed'] += 1
+        print(f'Controller {count}: could not reach {name}: {e.strerror or e}.', flush=True)
+        local.close()
         return
     peer.settimeout(None)
     keepalive(peer)

@@ -1,0 +1,19 @@
+--- a/src/uarm/native/DanaView.h
++++ b/src/uarm/native/DanaView.h
+@@ -24,6 +24,7 @@
+             bool ok=!value.empty() && seen.insert(key).second;
+             if(key=="keyboard") { ok=ok&&(value=="auto"||value=="compact"||value=="full"||value=="hidden"); next.keyboard=value; }
+             else if(key=="pointer") { ok=ok&&(value=="touch"||value=="pan"); next.pointer=value; }
++            else if(key=="page") { ok=ok&&(value=="abc"||value=="symbols"||value=="more"||value=="fn"); next.page=value; }
+             else if(key=="physical") { ok=ok&&(value=="on"||value=="off"); next.physical=value=="on"; }
+             else if(key=="zoom" && value=="fit") next.zoom=0;
+             else if(key=="zoom"||key=="pan-x"||key=="pan-y"||key=="density") {
+@@ -37,7 +38,7 @@
+             } else ok=false;
+             if(!ok) { error="Invalid Dana view setting: "+word; return false; }
+         }
+-        if(seen.empty()) { error="Use keyboard=, zoom=, pan-x=, pan-y=, pointer=, density= or physical=."; return false; }
++        if(seen.empty()) { error="Use keyboard=, zoom=, pan-x=, pan-y=, pointer=, density=, physical= or page=."; return false; }
+         *this=next; return true;
+     }
+     std::string Describe(const std::string& resolved) const {

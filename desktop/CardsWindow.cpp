@@ -1,4 +1,5 @@
 #include "CardsWindow.h"
+#include "CardFilesWindow.h"
 #include <QApplication>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -495,6 +496,7 @@ QMenu* CardsWindow::menuFor(const QString& id, QWidget* parent) {
         a->setEnabled(enabled && !exchange);
     };
     const bool stopped = !row.holderBusy && !inRunning;
+    add(stopped ? tr("Files…") : tr("Files… · In use"), "cardFiles", stopped, &CardsWindow::openFiles);
     add(tr("Rename…"), "renameCard", true, &CardsWindow::renameCard);
     add(tr("Duplicate"), "duplicateCard", stopped, &CardsWindow::duplicateCard);
     add(tr("Export image…"), "exportCard", stopped, &CardsWindow::exportImage);
@@ -550,7 +552,6 @@ void CardsWindow::importImage() {
     afterChange(this);
 }
 void CardsWindow::importFolder() {
-    if (!frondFolderCard::mtoolsAvailable()) return failed(tr("Install mtools to import a folder (Debian: sudo apt install mtools)."));
     const auto folder = QFileDialog::getExistingDirectory(this, tr("Import folder as card"));
     if (folder.isEmpty()) return;
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -599,6 +600,61 @@ void CardsWindow::exportImage(const QString& id) {
         return frondCards::exportCardImage(sessions, id, path, progress);
     }));
     afterChange(this);
+}
+void CardsWindow::openFiles(const QString& id) {
+    if (files) return;
+    QString path, holderDir;
+    std::unique_ptr<QLockFile> hold;
+    frondCards::Card card;
+    if (const auto error = frondCards::cardSource(sessions, id, &path, &hold, &card, &holderDir); !error.isEmpty()) return failed(error);
+    if (QFileInfo(path).fileName() != frondCards::fileOfKind(card.kind))
+        return failed(tr("Open %1 once to finish its last save.").arg(QFileInfo(holderDir).fileName()));
+    std::unique_ptr<frondCardFile::CardFile> opened;
+    try {
+        opened = frondCardFile::CardFile::open(path, !card.writeProtected);
+        // A machine loads the card as changed from the first write on, even after a crash.
+        if (!holderDir.isEmpty())
+            opened->beforeFirstWrite = [holderDir] {
+                auto slot = frondCards::readSlot(holderDir);
+                if (slot.swap) return;
+                slot.swap = true;
+                if (!frondCards::writeSlot(holderDir, slot)) throw frondCardFile::Error(QStringLiteral("Couldn't write the card."));
+            };
+        frondCardFile::FatImage check(*opened);
+    } catch (const frondCardFile::Error& e) {
+        if (e.message != frondCardFile::mismatchMessage()) return failed(e.message);
+        opened.reset();
+        if (!discardChange(path)) return;
+        hold.reset();
+        return openFiles(id);
+    }
+    auto* w = new CardFilesWindow(std::move(opened), card.name, this);
+    w->hold = std::move(hold);
+    w->deleteOnClose = true;
+    w->setWindowModality(Qt::WindowModal);
+    files = w;
+    connect(w, &QDialog::finished, this, [this] {
+        files = nullptr;
+        afterChange(this);
+    });
+    w->QDialog::open();
+}
+// A card refused for an unfinished change that doesn't match it: the choice to drop that change.
+bool CardsWindow::discardChange(const QString& path) {
+    QMessageBox box(QMessageBox::Warning, tr("Files"), frondCardFile::mismatchMessage(), QMessageBox::Cancel, this);
+    auto* discard = box.addButton(tr("Discard unfinished change"), QMessageBox::DestructiveRole);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != discard) return false;
+    if (QMessageBox::question(this, tr("Discard unfinished change"), tr("Discard the unfinished change? This can't be undone."),
+                              QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Discard)
+        return false;
+    const auto error = frondCardFile::discardMismatched(path);
+    if (!error.isEmpty()) {
+        failed(error);
+        return false;
+    }
+    return true;
 }
 void CardsWindow::linkCard(const QString& id) {
     LinkDialog dialog(sessions, id, held(), {}, this);

@@ -41,12 +41,77 @@ class DeviceDataTest(unittest.TestCase):
         self.assertEqual(profile['nor_bytes'], 8192000)
         self.assertEqual((profile['company_id'], profile['hal_id']), (0x54707776, 0x4d583161))
         self.assertEqual((profile['width'], profile['height']), (480, 320))
-        self.assertEqual(profile['default_display_mode'], 9)
+        self.assertEqual(profile['default_display_mode'], 10)
         for key in ('available', 'runner_eligible', 'runs_68k', 'sound', 'usb', 'infrared', 'bluetooth'):
             self.assertFalse(profile[key], key)
         self.assertNotIn(profile['name'], palm_boot.DEVICES)
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
         self.assertNotIn(profile['name'], kotlin)
+
+    def test_dana_independent_native_card_inventory(self):
+        profiles = json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']
+        dana = next(p for p in profiles if p['name'] == 'alphasmart-dana')
+        self.assertEqual([s['id'] for s in dana['storage_slots']], [0, 2])
+        self.assertEqual([s['label'] for s in dana['storage_slots']], [1, 2])
+        for slot in dana['storage_slots']:
+            self.assertEqual(slot['kind'], 'sd')
+            sd, mmc = slot['media_families']
+            self.assertEqual(sd['family'], 'sdsc')
+            self.assertEqual((sd['min_bytes'], sd['max_bytes']), (32 << 20, 2048 << 20))
+            self.assertEqual(mmc['family'], 'legacy-mmc-spi')
+            self.assertEqual(mmc['csd_format'], 'mmc-1.2-spec-3.3')
+            self.assertEqual(mmc['runtime_sizes_bytes'], [n << 20 for n in (32, 64, 128, 256)])
+            for family in (sd, mmc):
+                self.assertEqual(family['block_bytes'], 512)
+                self.assertEqual(family['size_rule'], 'legacy-csd-fixed-512')
+                self.assertEqual(family['guest_qualified_sizes_bytes'], [32 << 20])
+        wireless = next(p for p in profiles if p['name'] == 'alphasmart-dana-wireless')
+        self.assertEqual(wireless['storage_slots'], dana['storage_slots'])
+        for p in profiles:
+            if p is not dana and p is not wireless:
+                self.assertNotIn(2, [s['id'] for s in p['storage_slots']])
+
+    def test_dana_frontend_uses_independent_storage_metadata(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        dana = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana')
+        self.assertEqual(dana['status'], 'experimental-desktop')
+        self.assertEqual((dana['width'], dana['height']), (560, 160))
+        self.assertTrue(dana['sd_slot'])
+        self.assertTrue(dana['keyboard'])
+        self.assertTrue(dana['sound'])
+        self.assertTrue(dana['infrared'])
+        self.assertTrue(dana['available'])
+        self.assertTrue(dana['usb_printer'])
+        self.assertTrue(dana['usb_wifi'])
+        self.assertEqual([p['name'] for p in inventory['profiles'] if p.get('usb_wifi')], ['alphasmart-dana'])
+        self.assertEqual([p['name'] for p in inventory['profiles'] if p.get('built_in_wifi')], ['alphasmart-dana-wireless'])
+        self.assertFalse(dana['built_in_wifi'])
+        for key in ('runner_eligible', 'usb', 'network', 'serial', 'bluetooth', 'microphone'):
+            self.assertFalse(dana[key], key)
+        kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
+        self.assertIn('id = "alphasmart-dana"', kotlin)
+        self.assertIn('StorageSlot(2, 2, "sd"', kotlin)
+        self.assertIn('CardFamily("legacy-mmc-spi"', kotlin)
+        self.assertNotIn('alphasmart-dana', palm_boot.DEVICES)
+        self.assertIn('alphasmart-dana', palm_boot.DEVICES_68K)
+        self.assertTrue(dana['runs_68k'])
+
+    def test_dana_wireless_offered(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        dana = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana')
+        wireless = next(p for p in inventory['profiles'] if p['name'] == 'alphasmart-dana-wireless')
+        self.assertEqual(wireless['display_name'], 'AlphaSmart Dana Wireless')
+        self.assertEqual((wireless['ram_min_bytes'], wireless['ram_max_bytes']), (16 << 20, 16 << 20))
+        self.assertTrue(wireless['built_in_wifi'] and wireless['usb_printer'] and wireless['runs_68k'])
+        self.assertTrue(wireless['available'])
+        self.assertFalse(wireless['usb_wifi'] or wireless['runner_eligible'])
+        for key in ('nor_bytes', 'company_id', 'hal_id', 'width', 'height', 'setup', 'launcher', 'keyboard',
+                    'infrared', 'sound', 'sd_slot', 'default_display_mode'):
+            self.assertEqual(wireless[key], dana[key], key)
+        kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
+        self.assertIn('id = "alphasmart-dana-wireless"', kotlin)
+        self.assertIn('builtInWifi = true', kotlin)
+        self.assertIn('alphasmart-dana-wireless', palm_boot.DEVICES_68K)
 
     def test_sd_bounds(self):
         profiles = {p['name']: p for p in json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']}
@@ -145,8 +210,10 @@ class DeviceDataTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('frond_arm_install_inventory', ROOT / 'tests/frond-arm-install.py')
         refresh = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(refresh)
-        self.assertEqual(refresh.DEVICES, tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES))
+        self.assertEqual(refresh.DEVICES, tuple(name for name in palm_boot.FRONTEND_DEVICES if name in palm_boot.DEVICES) +
+                         tuple(refresh.VARIANTS))
         self.assertIn('palm-e2-franken', refresh.DEVICES)
+        self.assertIn('palm-e2-denvfs', refresh.DEVICES)
         self.assertNotIn('palm-iiix', refresh.DEVICES)
         for name in ('palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'):
             core = Mock()

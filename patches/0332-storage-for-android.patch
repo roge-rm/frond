@@ -1,0 +1,166 @@
+diff --git a/src/common/storage/CardFile.h b/src/common/storage/CardFile.h
+index 4f849df..43f0fce 100644
+--- a/src/common/storage/CardFile.h
++++ b/src/common/storage/CardFile.h
+@@ -76,6 +76,12 @@ inline bool settleCard(const std::filesystem::path& card) { return settleChanges
+ // A card file nobody has open in Files…, with any change a crash cut off finished.
+ inline bool ready(const std::filesystem::path& card) { return !inUse(card) && settleCard(card); }
+ 
++// As ready(), with why not: code "busy" and inFilesMessage when it's open in Files.
++inline Result readiness(const std::filesystem::path& card) {
++    if (inUse(card)) return failed("busy", inFilesMessage);
++    return settleChanges(card);
++}
++
+ // What a card load checks: the header and every CRC. The generation (0 for v1), or nothing.
+ inline std::optional<uint64_t> verifiedGeneration(const std::filesystem::path& card) {
+     frondSdFile::Info info;
+@@ -91,7 +97,7 @@ class CardFile : public Blocks {
+         : path(card), writable(canWrite), fd_(::open(card.c_str(), O_RDWR | O_CLOEXEC)) {
+         if (fd_.fd < 0) throw Error("Couldn't open the card file.");
+         if (!tryLock(fd_.fd)) throw Error(inUseMessage);
+-        if (!settleChangesLocked(card, fd_.fd).ok) throw Error("Couldn't finish the last change to the card.");
++        if (const auto settled = settleChangesLocked(card, fd_.fd); !settled.ok) throw Error(settled.message);
+         load();
+     }
+     static std::unique_ptr<CardFile> open(const std::filesystem::path& card, bool canWrite) {
+diff --git a/src/common/storage/FatImage.h b/src/common/storage/FatImage.h
+index c6f8bbe..ee44c80 100644
+--- a/src/common/storage/FatImage.h
++++ b/src/common/storage/FatImage.h
+@@ -313,13 +313,13 @@ class FatImage {
+             fat::checkName(name);
+             const auto dest = folder(toFolder);
+             if (slot.entry.directory && within(from, toFolder)) throw Error(slot.entry.name + " can't go into itself.");
++            const auto inner = slot.entry.directory ? sub(slot.entry) : Folder{};
+             const auto raw = rawOf(parent, slot);
+             eraseSlots(parent, slot);
+             const auto existing = slotsIn(dest);
+             refuseTaken(existing, name);
+             addEntry(dest, existing, name, raw[11], slot.entry.firstCluster, slot.entry.size, raw);
+             if (slot.entry.directory && dest.cluster != parent.cluster) {
+-                const Folder inner{slot.entry.firstCluster};
+                 auto bytes = folderBytes(inner);
+                 fat::put16(bytes.data() + 32 + 26, dest.cluster);
+                 writeSlots(inner, bytes, 1, 1);
+diff --git a/src/common/storage/Journal.h b/src/common/storage/Journal.h
+index a157e65..1e2ffe3 100644
+--- a/src/common/storage/Journal.h
++++ b/src/common/storage/Journal.h
+@@ -16,11 +16,13 @@
+ // to generation u64, record count u64, table count u64, 8 zero bytes;
+ // records: stored-bytes offset u64, length u32, bytes; then the complete new chunk table;
+ // trailer 16 bytes: "FRONDEND", CRC32 of everything before the trailer u32, zero u32.
+-// Version 1 has flags 0 and is a session journal. Version 2 has flags bit 0 for standalone.
++// Version 1 has flags 0 and is a session journal. Version 2 has flags bit 0 for standalone, 0
++// for a session journal; both kinds are written as version 2.
+ // A session journal is replayed only when the .frond asks for its generation; a standalone one
+-// (a change made outside a running machine) is always replayed. Session saves still write
+-// version 1, which every frontend reads.
+-// A journal is written as a temp and renamed, so one under its own name is complete.
++// (a change made outside a running machine) is always replayed.
++// A journal is written as a temp and renamed, so one under its own name is complete. A standalone
++// journal's temp is <folder>/.frondsd.tmp-edit-<card>-XXXXXX, written only by a CardFile holding
++// the card's lock, so one found while holding that lock is left from a crash.
+ namespace frondStorage {
+ 
+ constexpr size_t journalHeaderBytes = 64, journalTrailerBytes = 16, journalRecordBytes = 12;
+@@ -39,6 +41,21 @@ inline std::filesystem::path fullPath(const std::filesystem::path& card, uint64_
+     return folderOf(card) / (journalPrefix(card) + std::to_string(generation) + ".full");
+ }
+ 
++// The prefix of a standalone journal's temp.
++inline std::string editTempPrefix(const std::filesystem::path& card) {
++    return ".frondsd.tmp-edit-" + card.filename().string() + "-";
++}
++
++// Temps a cut-off standalone change left beside the card.
++inline std::vector<std::filesystem::path> editTemps(const std::filesystem::path& card) {
++    std::vector<std::filesystem::path> out;
++    const auto prefix = editTempPrefix(card);
++    std::error_code ec;
++    for (std::filesystem::directory_iterator it(folderOf(card), ec), end; !ec && it != end; it.increment(ec))
++        if (it->path().filename().string().rfind(prefix, 0) == 0) out.push_back(it->path());
++    return out;
++}
++
+ // The chunks a standalone change put data into before its journal.
+ inline std::filesystem::path pendingPath(const std::filesystem::path& card, uint64_t generation) {
+     return folderOf(card) / (journalPrefix(card) + std::to_string(generation) + ".pending");
+@@ -98,7 +115,8 @@ class JournalWriter {
+     bool open(const std::filesystem::path& card, uint64_t storedBytes, uint64_t from, uint64_t to,
+               JournalKind kind = JournalKind::session) {
+         abandon();
+-        if (!createTemp(folderOf(card), ".frondsd.tmp-", temp_)) return false;
++        const auto prefix = kind == JournalKind::standalone ? editTempPrefix(card) : std::string(".frondsd.tmp-");
++        if (!createTemp(folderOf(card), prefix.c_str(), temp_)) return false;
+         fd_ = ::open(temp_.c_str(), O_RDWR | O_CLOEXEC);
+         if (fd_ < 0) return false;
+         card_ = card;
+@@ -133,7 +151,7 @@ class JournalWriter {
+         uint8_t header[journalHeaderBytes]{};
+         std::memcpy(header, "FRONDJNL", 8);
+         const bool standalone = kind_ == JournalKind::standalone;
+-        frondSdFile::put32(header + 8, standalone ? 2 : 1);
++        frondSdFile::put32(header + 8, 2);
+         frondSdFile::put32(header + 12, standalone ? journalStandalone : 0);
+         frondSdFile::put64(header + 16, stored_);
+         frondSdFile::put64(header + 24, from_);
+diff --git a/src/common/storage/Settle.h b/src/common/storage/Settle.h
+index 349da6f..117ab7c 100644
+--- a/src/common/storage/Settle.h
++++ b/src/common/storage/Settle.h
+@@ -20,7 +20,7 @@
+ // settle() finishes what a cut-off write left beside the card, in this order:
+ // 1. the apps' legacy .files-commit and .files-intent (Legacy.h);
+ // 2. standalone journals, always replayed onto the card at their from or to generation;
+-// 3. pending lists with no journal left (Pending.h);
++// 3. pending lists with no journal left (Pending.h), and standalone journal temps;
+ // 4. with a session generation, the session save: a full copy or a session journal to that
+ //    generation, as a load of that .frond needs. Without one, any session file left refuses.
+ // Steps 1-3 lock the card as the apps do, so a card open in Files… isn't touched. Each step is
+@@ -35,6 +35,7 @@ inline Result failed(const char* code, std::string message) { return {false, cod
+ 
+ constexpr const char* unsettledMessage = "The card has an unfinished save. Open its machine once to finish it.";
+ constexpr const char* inFilesMessage = "The card is open in Files. Close it first.";
++constexpr const char* mismatchMessage = "The card has an unfinished change that doesn't match it.";
+ 
+ // The header and, for v2, the table of a card file, with the header CRC and file size checked.
+ inline bool readHeader(int fd, frondSdFile::Info& info, std::vector<uint32_t>* table = nullptr) {
+@@ -82,7 +83,7 @@ inline Changes changesOf(const std::filesystem::path& card) {
+ 
+ // Whether anything is beside the card for steps 1-3.
+ inline bool hasChanges(const std::filesystem::path& card) {
+-    if (legacy::present(card)) return true;
++    if (legacy::present(card) || !editTemps(card).empty()) return true;
+     const auto changes = changesOf(card);
+     return !changes.standalone.empty() || !changes.pending.empty();
+ }
+@@ -95,15 +96,15 @@ inline Result replayStandalone(const std::filesystem::path& card, int fd, const
+     frondSdFile::Info info;
+     if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info) ||
+         info.stored() != journal.storedBytes)
+-        return failed("unsettled", "The card's unfinished change doesn't fit it.");
++        return failed("mismatch", mismatchMessage);
+     const uint64_t v2Bytes = frondSdFile::headerBytes + journal.storedBytes + 4 * journal.table.size();
+     const int64_t size = sizeOf(fd);
+     if (info.version == frondSdFile::versionV1) {
+         if (journal.from != 0 || (size != int64_t(frondSdFile::headerBytes + info.stored()) && size != int64_t(v2Bytes)))
+-            return failed("unsettled", "The card's unfinished change doesn't fit it.");
++            return failed("mismatch", mismatchMessage);
+         if (ftruncate(fd, off_t(v2Bytes)) != 0 || fsync(fd) != 0) return failed("write", "Could not write the card file.");
+     } else if (size != int64_t(v2Bytes) || (info.generation != journal.from && info.generation != journal.to)) {
+-        return failed("unsettled", "The card's unfinished change doesn't fit it.");
++        return failed("mismatch", mismatchMessage);
+     }
+     if (!applyJournal(card, path, nullptr, JournalStep::header)) return failed("write", "Could not write the card file.");
+     removePath(pendingPath(card, journal.to));
+@@ -127,6 +128,8 @@ inline Result settleChangesLocked(const std::filesystem::path& card, int fd) {
+         removePath(path);
+         syncDir(folderOf(card));
+     }
++    // Under the card's lock no standalone journal is being written, so these are a crash's.
++    for (const auto& temp : editTemps(card)) removePath(temp);
+     return {true, "", {}};
+ }
+ 

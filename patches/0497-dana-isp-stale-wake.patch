@@ -1,0 +1,57 @@
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.cpp b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+index 7df3afb..608d624 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.cpp
++++ b/src/cloudpilot/emulator/hardware/EmHAL.cpp
+@@ -468,8 +468,8 @@ uint32 EmHAL::CyclesToNextInterrupt(uint64 systemCycles) {
+     return next;
+ }
+ 
+-void EmHAL::WakeAt(uint64 systemCycles) {
+-    if (systemCycles < wakeAt) wakeAt = systemCycles;
++void EmHAL::WakeAt(uint64 systemCycles, uint64 now) {
++    if (wakeAt <= now || systemCycles < wakeAt) wakeAt = systemCycles;
+ }
+ 
+ void EmHAL::ScaleCycles(uint32 factor) {
+diff --git a/src/cloudpilot/emulator/hardware/EmHAL.h b/src/cloudpilot/emulator/hardware/EmHAL.h
+index 65dad2d..361257c 100644
+--- a/src/cloudpilot/emulator/hardware/EmHAL.h
++++ b/src/cloudpilot/emulator/hardware/EmHAL.h
+@@ -94,8 +94,9 @@ class EmHAL {
+     static uint32 CyclesToNextInterrupt(uint64 systemCycles);
+     // A host transport whose bytes become readable at this system cycle: a stopped CPU runs its
+     // idle tasks (and so the UART) by then instead of sleeping on to the next timer interrupt.
+-    // One deadline at a time, the earliest; it clears once passed.
+-    static void WakeAt(uint64 systemCycles);
++    // One deadline at a time, the earliest still ahead of now (the CPU's cycle count); it clears
++    // once passed. A deadline the CPU ran through without sleeping gives way to the next one.
++    static void WakeAt(uint64 systemCycles, uint64 now);
+     // Multiplies every saved cycle stamp after the session's counter changed units.
+     static void ScaleCycles(uint32 factor);
+     static bool EnableRAM();
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+index edc32de..54dc96c 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -136,7 +136,7 @@ void EmRegsISPDana::Tick() {
+     if((regs[0x20]&1) && ((hostArmed && (regs[0x2c]&4)) || (regs[0x25]&1))) {
+         const uint64 phase=(remaining+1)*hz;
+         const uint64 needed=phase>fractional ? phase-fractional : 1;
+-        EmHAL::WakeAt(now+(needed+11999999)/12000000);
++        EmHAL::WakeAt(now+(needed+11999999)/12000000,now);
+     }
+ }
+ uint32 EmRegsISPDana::Read(emuptr address, int size) {
+diff --git a/src/cloudpilot/frond/IrPhoneTransport.h b/src/cloudpilot/frond/IrPhoneTransport.h
+index d0b3c66..9d68830 100644
+--- a/src/cloudpilot/frond/IrPhoneTransport.h
++++ b/src/cloudpilot/frond/IrPhoneTransport.h
+@@ -153,7 +153,7 @@ class IrPhoneTransport68k : public EmTransportSerial {
+         const uint64_t ready = engine->phone.ReadyAt(), now = Now();
+         if (ready == UINT64_MAX) return;
+         const double wait = ready > now ? double(ready - now) * gSession->GetClocksPerSecond() / 1e9 : 0;
+-        EmHAL::WakeAt(cycleMark + uint64_t(wait) + 1);
++        EmHAL::WakeAt(cycleMark + uint64_t(wait) + 1, cycleMark);
+     }
+ 
+     // Guest nanoseconds, carried on across a load that moves the cycle count back. The CPU's own

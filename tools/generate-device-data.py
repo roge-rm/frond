@@ -15,7 +15,7 @@ def outputs(profiles):
         'id': 'name', 'label': 'display_name', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',
         'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'memoryStick': 'memory_stick_supported', 'network': 'network', 'serialPort': 'serial', 'microphone': 'microphone', 'camera': 'camera',
-        'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth',
+        'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth', 'modem': 'modem', 'irPhone': 'ir_phone', 'usbPrinter': 'usb_printer', 'usbWifi': 'usb_wifi', 'builtInWifi': 'built_in_wifi',
         'detectKind': 'detect', 'companyId': 'company_id', 'halId': 'hal_id',
         'norLayout': 'nor_layout', 'headerOffset': 'header_offset', 'bigCardOffset': 'big_card_offset',
         'width': 'width', 'height': 'height', 'sideTabWidth': 'side_tab_width', 'silkscreenHeight': 'silkscreen_height',
@@ -42,6 +42,19 @@ def outputs(profiles):
         kotlin += '    Device(\n'
         for key, source in fields.items():
             kotlin += f'        {key} = {literal(key, profile[source])},\n'
+        slots = profile.get('storage_slots', [])
+        if slots:
+            kotlin += '        storageSlots = listOf(\n'
+            for slot in slots:
+                kotlin += f'            StorageSlot({slot["id"]}, {slot["label"]}, {json.dumps(slot["kind"])}, listOf(\n'
+                for family in slot.get('media_families', []):
+                    sizes = lambda key: 'listOf(' + ', '.join(str(n) + 'L' for n in family.get(key, [])) + ')'
+                    kotlin += (f'                CardFamily({json.dumps(family["family"])}, '
+                               f'{family["min_bytes"]}L, {min(family["max_bytes"], (1 << 63) - 1)}L, '
+                               f'{json.dumps(family["size_rule"])}, {sizes("runtime_sizes_bytes")}, '
+                               f'{sizes("guest_qualified_sizes_bytes")}),\n')
+                kotlin += '            )),\n'
+            kotlin += '        ),\n'
         variants = profile.get('firmware_variants', [])
         if variants:
             kotlin += '        firmwareVariants = listOf(\n'
@@ -68,12 +81,14 @@ def outputs(profiles):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
+    parser.add_argument('--source', type=Path, default=ROOT / 'build/source', help='prepared native source root')
+    parser.add_argument('--build-dir', type=Path, default=ROOT / 'build/device-data', help='exporter build folder')
     args = parser.parse_args()
-    work = ROOT / 'build/device-data'
+    work = args.build_dir.absolute()
     work.mkdir(parents=True, exist_ok=True)
     exporter = work / 'export'
     subprocess.run([os.environ.get('CXX', 'c++'), '-std=c++17', '-O0',
-                    '-I' + str(ROOT / 'build/source/src/common'), str(ROOT / 'tools/device-profiles.cpp'),
+                    '-I' + str(args.source.absolute() / 'src/common'), str(ROOT / 'tools/device-profiles.cpp'),
                     '-o', str(exporter)], check=True)
     profiles = json.loads(subprocess.check_output([str(exporter)], text=True))
     stale = []

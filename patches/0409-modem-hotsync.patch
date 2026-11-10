@@ -1,0 +1,462 @@
+diff --git a/src/cloudpilot/frond/ModemTransport.h b/src/cloudpilot/frond/ModemTransport.h
+index b439e0e..9755c1a 100644
+--- a/src/cloudpilot/frond/ModemTransport.h
++++ b/src/cloudpilot/frond/ModemTransport.h
+@@ -2,7 +2,8 @@
+ #define FROND_68K_MODEM_TRANSPORT_H
+ 
+ // The serial port's transport: a host link (HostTransport68k) or, in modem mode, a snap-on
+-// Hayes modem whose calls reach a PPP server and slirp. The modem is powered while the guest's
++// Hayes modem whose calls reach a PPP server and slirp, or for the HotSync number a second host
++// link (the modem HotSync link) that pilot-link answers. The modem is powered while the guest's
+ // serial line driver is on. Its clock is guest time in nanoseconds that never runs backwards,
+ // so a session load (which moves the cycle count) doesn't upset its timers. All on the
+ // emulator thread.
+@@ -12,12 +13,14 @@
+ 
+ #include "HostTransport.h"
+ #include "modem/HayesModem.h"
++#include "modem/LineSwitch.h"
+ #include "modem/PppServer.h"
+ #include "net/SlirpIp.h"
+ 
+ class ModemTransport68k : public EmTransportSerial {
+    public:
+-    explicit ModemTransport68k(HostLink68k& link) : host(link) {}
++    // sync is the modem HotSync link, used only while a HotSync call is up.
++    ModemTransport68k(HostLink68k& link, HostLink68k& sync) : host(link), syncLink(sync) {}
+ 
+     HostTransport68k& Host() { return host; }
+     const HostTransport68k& Host() const { return host; }
+@@ -128,7 +131,15 @@ class ModemTransport68k : public EmTransportSerial {
+             return host.Service(lineDriverOn);
+         }
+         if (lineDriverOn != powered) lineDriverOn ? Open() : Close();
+-        engine->modem.Service(Now());
++        const uint64_t now = Now();
++        PumpHotSync();
++        engine->modem.Service(now);
++        PumpHotSync();
++    }
++
++    // True while a call to the HotSync number is up.
++    bool HotSyncCall() const {
++        return engine && engine->line.HotSyncCall() && engine->hotsync.InCall();
+     }
+ 
+     // After a session load: an idle modem, with NO CARRIER if a call was up.
+@@ -141,7 +152,11 @@ class ModemTransport68k : public EmTransportSerial {
+     struct Engine {
+         frondNet::SlirpIp network;
+         frondModem::PppServer ppp{network};
+-        frondModem::HayesModem modem{ppp};
++        frondModem::PipeLine hotsync;
++        frondModem::LineSwitch line{ppp, hotsync};
++        frondModem::HayesModem modem{line};
++        // The HotSync link had a peer during this HotSync call.
++        bool syncPeerSeen{false};
+         unsigned dtrRises{0}, dtrDrops{0};
+     };
+ 
+@@ -153,7 +168,33 @@ class ModemTransport68k : public EmTransportSerial {
+         return uint64_t(clock);
+     }
+ 
++    // Moves bytes between a HotSync call and the HotSync link. Bytes on the link outside a call
++    // are dropped, and a TCP or Unix peer (or a PTY's reader) leaving during the call ends it.
++    void PumpHotSync() {
++        auto& pipe = engine->hotsync;
++        pipe.SetReachable(syncLink.GetKind() != HostLink68k::Kind::off);
++        if (!pipe.InCall() || !engine->line.HotSyncCall()) {
++            engine->syncPeerSeen = false;
++            syncLink.DropReceived();
++            return;
++        }
++        uint8_t buffer[512];
++        while (pipe.OutAvailable()) {
++            const size_t n = pipe.TakeOut(buffer, sizeof buffer);
++            syncLink.Send(buffer, n);
++        }
++        while (syncLink.Available() && pipe.InRoom()) {
++            const size_t n = syncLink.Take(buffer, std::min(sizeof buffer, pipe.InRoom()));
++            if (!n) break;
++            pipe.PutIn(buffer, n);
++        }
++        const bool connected = syncLink.Connected();
++        if (connected) engine->syncPeerSeen = true;
++        else if (engine->syncPeerSeen) pipe.PeerGone();
++    }
++
+     HostTransport68k host;
++    HostLink68k& syncLink;
+     std::unique_ptr<Engine> engine;
+     bool powered{false};
+     BaudCredit68k credit;
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index f071108..3258d4b 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -99,6 +99,8 @@ struct Options {
+     bool toneLog{false};
+     string serial{"off"};
+     string irda{"off"};
++    // The modem's HotSync link: where a call to the HotSync number goes.
++    string modemSync{"off"};
+     uint16_t gdbPort{0};
+     bool smooth{false};
+     optional<string> desktopSocket;
+@@ -115,7 +117,7 @@ void usage() {
+             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
+             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
+             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem]\n"
+-            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone]\n"
++            "                 [--irda off|pty|tcp:PORT|unix:PATH|phone] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
+             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
+             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
+@@ -553,7 +555,7 @@ class Runner {
+         fit = options.fit;
+         desktopMode = bool(options.desktopSocket);
+         // The session owns the transports; they live as long as the process.
+-        serialTransport = new ModemTransport68k(serialLink);
++        serialTransport = new ModemTransport68k(serialLink, modemSyncLink);
+         irTransport = new IrPhoneTransport68k(irLink);
+         gSession->SetTransportSerial(kUARTSerial, serialTransport);
+         gSession->SetTransportSerial(kUARTIR, irTransport);
+@@ -748,9 +750,35 @@ class Runner {
+             else if (link == &irLink && irTransport->PhoneMode()) cout << name << ": " << irTransport->Describe() << endl;
+             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
+         }
++        if (options.modemSync != "off") {
++            string error;
++            if (!SetModemSync(options.modemSync, error)) {
++                cerr << "modem-sync: " << error << endl;
++                if (!desktopMode) return false;
++            } else {
++                cout << "modem-sync: " << modemSyncLink.Describe() << endl;
++            }
++        }
+         return true;
+     }
+ 
++    // The modem's HotSync link, which a call to the HotSync number reaches. Only on a device with
++    // a modem.
++    bool SetModemSync(const string& mode, string& error) {
++        HostLink68k::Kind kind;
++        uint16_t port;
++        string path;
++        if (!HostLink68k::Parse(mode, kind, port, &path)) {
++            error = "use off, pty, tcp:PORT or unix:PATH";
++            return false;
++        }
++        if (kind != HostLink68k::Kind::off && !profile->capabilities.modem) {
++            error = string(profile->displayName) + " has no modem";
++            return false;
++        }
++        return modemSyncLink.Open(kind, port, error, path);
++    }
++
+     // The serial port's mode: a host link, or modem for the snap-on modem on a device that has one.
+     bool SetSerial(const string& mode, string& error) {
+         if (mode == "modem") {
+@@ -821,7 +849,13 @@ class Runner {
+     }
+ 
+     string SerialState() const {
+-        return serialTransport->ModemMode() ? serialTransport->Describe() : LinkState(serialLink, serialTransport->Host());
++        return serialTransport->ModemMode() ? ModemState() : LinkState(serialLink, serialTransport->Host());
++    }
++
++    // modem idle|dialling|online SPEED, then "; hotsync " and the HotSync link while it's on.
++    string ModemState() const {
++        const string modem = serialTransport->Describe();
++        return modemSyncLink.GetKind() == HostLink68k::Kind::off ? modem : modem + "; hotsync " + modemSyncLink.Describe();
+     }
+ 
+     // Host bytes in and out, and the transports following the guest's line drivers.
+@@ -831,6 +865,7 @@ class Runner {
+             return;
+         serialLink.Poll();
+         irLink.Poll();
++        modemSyncLink.Poll();
+         const bool on = gSession->IsPowerOn();
+         serialTransport->Service(on && EmHAL::GetLineDriverState(kUARTSerial));
+         irTransport->Service(on && EmHAL::GetLineDriverState(kUARTIR));
+@@ -1088,6 +1123,11 @@ class Runner {
+             cout << (serial ? "serial: " + SerialState() : "infrared: " + InfraredState()) << endl;
+         } else if (command == "serial-state") {
+             cout << "serial: " << SerialState() << endl;
++        } else if (command == "modem-sync") {
++            string mode, error;
++            if (!(words >> mode)) return void(cout << "usage: modem-sync off|pty|tcp:PORT|unix:PATH" << endl);
++            if (!SetModemSync(mode, error)) return void(cout << "modem-sync: error " << error << endl);
++            cout << "modem-sync: " << modemSyncLink.Describe() << endl;
+         } else if (command == "irda-state") {
+             cout << "infrared: " << InfraredState() << endl;
+         } else if (command == "hotsync") {
+@@ -1295,7 +1335,7 @@ class Runner {
+ 
+     // "off", "off <error>" after a failed change, or "pty|tcp|unix <endpoint> connected|waiting".
+     string SerialDescription() const {
+-        return serialTransport->ModemMode() ? serialTransport->Describe() : LinkDescription(serialLink, serialError);
++        return serialTransport->ModemMode() ? ModemState() : LinkDescription(serialLink, serialError);
+     }
+ 
+     string InfraredDescription() const {
+@@ -1487,6 +1527,13 @@ class Runner {
+             return {true, serial ? "serial" : "infrared", link.Describe()};
+         }
+         if (command == "serial-stats") return {true, "serial", serialTransport->Stats()};
++        if (command == "modem-sync") {
++            if (!profile->capabilities.modem) return {false, "unsupported", string(profile->displayName) + " has no modem."};
++            string error;
++            if (argument.empty()) return {true, "modem-sync", modemSyncLink.Describe()};
++            if (!SetModemSync(argument, error)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH. " + error};
++            return {true, "modem-sync", modemSyncLink.Describe()};
++        }
+         if (command == "irda-stats") {
+             if (irTransport->PhoneMode()) return {true, "infrared", irTransport->Stats()};
+             return {true, "infrared", "rx=" + to_string(irLink.Received()) + " tx=" + to_string(irLink.Sent()) +
+@@ -2015,7 +2062,7 @@ class Runner {
+     bool saveFailed{false};
+     bool desktopMode{false};
+     string lastSerial, lastInfrared, serialError, infraredError;
+-    HostLink68k serialLink, irLink;
++    HostLink68k serialLink, irLink, modemSyncLink;
+     ModemTransport68k* serialTransport{nullptr};
+     IrPhoneTransport68k* irTransport{nullptr};
+ };
+@@ -2076,6 +2123,13 @@ bool parseOptions(int argc, char** argv, Options& options) {
+                        !HostLink68k::Parse(v, kind, port, &path)))
+                 return false;
+             (arg == "--serial" ? options.serial : options.irda) = v;
++        } else if (arg == "--modem-sync") {
++            const char* v = value();
++            HostLink68k::Kind kind;
++            uint16_t port;
++            string path;
++            if (!v || !HostLink68k::Parse(v, kind, port, &path)) return false;
++            options.modemSync = v;
+         } else if (arg == "--gdb") {
+             if (!number(1, 65535, n) || n != int(n)) return false;
+             options.gdbPort = uint16_t(n);
+diff --git a/src/common/modem/HayesModem.cpp b/src/common/modem/HayesModem.cpp
+index 18cbb82..57fec38 100644
+--- a/src/common/modem/HayesModem.cpp
++++ b/src/common/modem/HayesModem.cpp
+@@ -424,6 +424,7 @@ void HayesModem::Dial(const std::string& text, uint64_t now) {
+ 
+     const auto planned = options.dialPlan.find(digits);
+     Result result = planned != options.dialPlan.end() ? planned->second : Result::Connect;
++    if (!line.Route(digits) && result == Result::Connect) result = Result::NoAnswer;
+     if (digits.empty() && !dialStay) result = Result::NoCarrier;
+     // X0 and X1 dial blind and can't tell busy from no answer; X2 and up hear the dial tone,
+     // X3 and up the busy tone.
+diff --git a/src/common/modem/HayesModem.h b/src/common/modem/HayesModem.h
+index cd9b680..afafdc6 100644
+--- a/src/common/modem/HayesModem.h
++++ b/src/common/modem/HayesModem.h
+@@ -31,6 +31,8 @@ class ModemLine {
+     // False once the far end has hung up.
+     virtual bool Carrier(uint64_t now) const = 0;
+     virtual void Service(uint64_t now) {}
++    // Called when a number is dialled, with its digits (0-9, *, #, A-D). False gives NO ANSWER.
++    virtual bool Route(const std::string& digits) { return true; }
+ };
+ 
+ class HayesModem {
+diff --git a/src/common/modem/LineSwitch.h b/src/common/modem/LineSwitch.h
+new file mode 100644
+index 0000000..4c1f0d0
+--- /dev/null
++++ b/src/common/modem/LineSwitch.h
+@@ -0,0 +1,123 @@
++#ifndef FROND_MODEM_LINE_SWITCH_H
++#define FROND_MODEM_LINE_SWITCH_H
++
++// Where a modem call goes. A number ending in the HotSync number reaches a PipeLine, raw bytes
++// the core passes to a host link for pilot-link (Modem Sync); any other number reaches the
++// data line (the PPP server). Single-threaded, on the modem's clock.
++
++#include <algorithm>
++#include <cstddef>
++#include <cstdint>
++#include <deque>
++#include <string>
++
++#include "HayesModem.h"
++
++namespace frondModem {
++
++// HOTSYNC on a phone keypad.
++inline constexpr const char* kHotSyncNumber = "4687962";
++
++// A far end whose bytes the owner moves to and from somewhere else.
++class PipeLine : public ModemLine {
++   public:
++    static constexpr size_t kQueueBytes = 65536;
++    // Once the far end has gone, bytes still on their way to the guest are dropped if the modem
++    // takes none of them for this long (in online command mode it takes none).
++    static constexpr uint64_t kDrainStallNs = 1000000000;
++
++    // Someone is there to answer; with nobody the number gives NO ANSWER.
++    void SetReachable(bool on) { reachable = on; }
++    bool Reachable() const { return reachable; }
++    bool InCall() const { return inCall; }
++    // The far end went away during the call: the modem reports NO CARRIER once the bytes it
++    // sent before going have reached the guest, or after kDrainStallNs with none taken.
++    void PeerGone() { carrier = false; }
++
++    // Bytes the guest sent, for the owner to pass on.
++    size_t TakeOut(uint8_t* data, size_t max) {
++        const size_t n = std::min(max, out.size());
++        std::copy_n(out.begin(), n, data);
++        out.erase(out.begin(), out.begin() + long(n));
++        return n;
++    }
++    size_t OutAvailable() const { return out.size(); }
++    // Bytes for the guest, from the owner. Returns how many fit.
++    size_t PutIn(const uint8_t* data, size_t size) {
++        const size_t n = std::min(size, kQueueBytes - std::min(kQueueBytes, in.size()));
++        in.insert(in.end(), data, data + n);
++        return n;
++    }
++    size_t InRoom() const { return kQueueBytes - std::min(kQueueBytes, in.size()); }
++
++    void Answer(uint64_t now) override {
++        drainMark = now;
++        inCall = true;
++        carrier = true;
++        in.clear();
++        out.clear();
++    }
++    void HangUp() override {
++        inCall = false;
++        in.clear();
++        out.clear();
++    }
++    void FromModem(const uint8_t* data, size_t size, uint64_t) override {
++        const size_t n = std::min(size, kQueueBytes - std::min(kQueueBytes, out.size()));
++        out.insert(out.end(), data, data + n);
++    }
++    size_t ToModem(uint8_t* data, size_t max, uint64_t now) override {
++        const size_t n = std::min(max, in.size());
++        std::copy_n(in.begin(), n, data);
++        in.erase(in.begin(), in.begin() + long(n));
++        if (n) drainMark = now;
++        return n;
++    }
++    // Called by the modem before Carrier while a call is up.
++    void Service(uint64_t now) override {
++        if (carrier || in.empty()) drainMark = now;
++        else if (now - drainMark >= kDrainStallNs) in.clear();
++    }
++    bool Carrier(uint64_t) const override { return carrier || !in.empty(); }
++
++   private:
++    bool reachable{false}, inCall{false}, carrier{true};
++    uint64_t drainMark{0};
++    std::deque<uint8_t> in, out;
++};
++
++// Picks the far end when a number is dialled and passes the call to it.
++class LineSwitch : public ModemLine {
++   public:
++    LineSwitch(ModemLine& data, PipeLine& hotsync) : data(data), hotsync(hotsync) {}
++
++    static bool IsHotSync(const std::string& digits) {
++        const std::string number = kHotSyncNumber;
++        return digits.size() >= number.size() && digits.compare(digits.size() - number.size(), number.size(), number) == 0;
++    }
++    bool HotSyncCall() const { return active == &hotsync; }
++
++    bool Route(const std::string& digits) override {
++        if (IsHotSync(digits)) {
++            active = &hotsync;
++            return hotsync.Reachable();
++        }
++        active = &data;
++        return data.Route(digits);
++    }
++    void Answer(uint64_t now) override { active->Answer(now); }
++    void HangUp() override { active->HangUp(); }
++    void FromModem(const uint8_t* bytes, size_t size, uint64_t now) override { active->FromModem(bytes, size, now); }
++    size_t ToModem(uint8_t* bytes, size_t max, uint64_t now) override { return active->ToModem(bytes, max, now); }
++    bool Carrier(uint64_t now) const override { return active->Carrier(now); }
++    void Service(uint64_t now) override { active->Service(now); }
++
++   private:
++    ModemLine& data;
++    PipeLine& hotsync;
++    ModemLine* active{&data};
++};
++
++}  // namespace frondModem
++
++#endif
+diff --git a/src/common/net/SlirpIp.cpp b/src/common/net/SlirpIp.cpp
+index e755924..1b32d73 100644
+--- a/src/common/net/SlirpIp.cpp
++++ b/src/common/net/SlirpIp.cpp
+@@ -49,6 +49,50 @@ std::vector<uint8_t> Arp(uint16_t op, const uint8_t* targetMac, uint32_t targetI
+     return frame;
+ }
+ 
++// Palm Network HotSync first sends a UDP wakeup (0xfade, type 1, then the PC's address, mask
++// and name) to port 14237 of its Primary PC and connects to TCP 14238 only once the PC sends
++// it back as type 2. Answering here lets pilot-link's net: listener, which has no UDP side,
++// take the sync. Returns the answer for a wakeup to 10.0.2.2, else an empty packet.
++constexpr uint16_t netSyncWakeupPort = 14237;
++
++uint16_t Checksum(const uint8_t* data, size_t size, uint32_t sum = 0) {
++    for (size_t i = 0; i + 1 < size; i += 2) sum += Get16(data + i);
++    if (size & 1) sum += uint32_t(data[size - 1]) << 8;
++    while (sum >> 16) sum = (sum & 0xffff) + (sum >> 16);
++    return uint16_t(~sum);
++}
++
++std::vector<uint8_t> NetSyncWakeupAnswer(const uint8_t* packet, size_t size) {
++    const size_t header = size_t(packet[0] & 0x0f) * 4;
++    if (packet[9] != 17 || header < 20 || size < header + 8 + 4 || Get32(packet + 16) != hostAddress ||
++        (Get16(packet + 6) & 0x3fff) != 0 || Get16(packet + header + 2) != netSyncWakeupPort)
++        return {};
++    const uint8_t* udp = packet + header;
++    const size_t length = std::min<size_t>(Get16(udp + 4), size - header);
++    if (length < 8 + 4 || Get16(udp + 8) != 0xfade || udp[10] != 1) return {};
++    const size_t payload = length - 8;
++    std::vector<uint8_t> out(20 + 8 + payload, 0);
++    out[0] = 0x45;
++    Put16(&out[2], uint16_t(out.size()));
++    out[8] = 64;
++    out[9] = 17;
++    Put32(&out[12], hostAddress);
++    std::copy(packet + 12, packet + 16, out.begin() + 16);
++    Put16(&out[10], Checksum(out.data(), 20));
++    uint8_t* reply = &out[20];
++    Put16(reply, netSyncWakeupPort);
++    std::copy(udp, udp + 2, reply + 2);
++    Put16(reply + 4, uint16_t(8 + payload));
++    std::copy(udp + 8, udp + length, reply + 8);
++    reply[10] = 2;
++    // The UDP checksum covers a pseudo-header: both addresses, the protocol and the length.
++    uint32_t pseudo = 17 + uint32_t(8 + payload);
++    for (size_t i = 12; i < 20; i += 2) pseudo += Get16(&out[i]);
++    uint16_t sum = Checksum(reply, 8 + payload, pseudo);
++    Put16(reply + 6, sum ? sum : 0xffff);
++    return out;
++}
++
+ }  // namespace
+ 
+ struct SlirpIp::Impl {
+@@ -163,6 +207,10 @@ bool SlirpIp::Valid() const { return impl->slirp; }
+ void SlirpIp::Input(const uint8_t* packet, size_t size, uint64_t now) {
+     if (!Valid() || size < 20 || size > 1500 || (packet[0] >> 4) != 4) return;
+     impl->now = now;
++    if (auto answer = NetSyncWakeupAnswer(packet, size); !answer.empty()) {
++        if (impl->incoming.size() < queueLimit) impl->incoming.push_back(std::move(answer));
++        return;
++    }
+     // An ARP request first puts the guest's MAC in slirp's table, so replies need no ARP round.
+     if (!impl->announced) {
+         impl->announced = true;

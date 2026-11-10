@@ -1,0 +1,2175 @@
+diff --git a/src/common/storage/CardFile.h b/src/common/storage/CardFile.h
+index 43f0fce..43c1e4f 100644
+--- a/src/common/storage/CardFile.h
++++ b/src/common/storage/CardFile.h
+@@ -99,6 +99,8 @@ class CardFile : public Blocks {
+         if (!tryLock(fd_.fd)) throw Error(inUseMessage);
+         if (const auto settled = settleChangesLocked(card, fd_.fd); !settled.ok) throw Error(settled.message);
+         load();
++        // Writing a classic stick has to keep its side region right, which Files doesn't do yet.
++        if (classic_ && writable) throw Error("Files can't change a classic Memory Stick yet.");
+     }
+     static std::unique_ptr<CardFile> open(const std::filesystem::path& card, bool canWrite) {
+         return std::make_unique<CardFile>(card, canWrite);
+@@ -216,7 +218,7 @@ class CardFile : public Blocks {
+             }
+         }
+         std::vector<uint8_t> header(frondSdFile::headerBytes);
+-        frondSdFile::makeHeaderV2(header.data(), uint64_t(payload_), target_, next, side_);
++        frondSdFile::makeHeaderV2(header.data(), uint64_t(payload_), target_, next, side_, classic_);
+         records.emplace_back(0, header);
+         const int64_t finalLength = tableAt + 4 * int64_t(count);
+         if (sizeOf(fd_.fd) < finalLength && ftruncate(fd_.fd, off_t(finalLength)) != 0)
+@@ -268,6 +270,7 @@ class CardFile : public Blocks {
+         version_ = info.version;
+         payload_ = int64_t(info.payloadBytes);
+         side_ = info.sideBytes;
++        classic_ = info.classic;
+         stored_ = info.stored();
+         gen_ = openGen_ = info.version == frondSdFile::versionV2 ? info.generation : 0;
+         target_ = gen_ + 1;
+@@ -318,6 +321,7 @@ class CardFile : public Blocks {
+     uint32_t version_{0};
+     int64_t payload_{0};
+     uint64_t side_{0}, stored_{0};
++    bool classic_{};
+     uint64_t gen_{0}, openGen_{0}, target_{0};
+     // Chunk CRCs as on the card; empty for a v1 card until its first change.
+     std::vector<uint32_t> table_;
+diff --git a/src/common/storage/Container.h b/src/common/storage/Container.h
+index c23bc70..35ee581 100644
+--- a/src/common/storage/Container.h
++++ b/src/common/storage/Container.h
+@@ -10,7 +10,7 @@
+ #define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
+ #include "zip/miniz.h"
+ 
+-// The card container, .frondsd and .frondmsp: 64-byte header then the stored bytes.
++// The card container, .frondsd, .frondmsp and v2 .frondms: 64-byte header then the stored bytes.
+ // Identity stays in the media descriptor, not this header.
+ //
+ // v1: 8-11 version, 12-15 sector size, 16-23 payload bytes, 24-27 CRC32 of the payload.
+@@ -20,6 +20,8 @@
+ // to the next 1 MiB boundary and the side region. The table after them has one CRC32 per chunk of
+ // the stored bytes, the last one short. The header CRC covers the header with its own field
+ // zeroed, then the table. A side region of 0 is every v1 and v2 file there was before it.
++// A classic Memory Stick (v2 .frondms) is the same v2 header with magic "FRONDMS\0" and a side
++// region (storage/MsLayout.h). Its v1 file is another format (MemoryStickImage.h).
+ namespace frondSdFile {
+ constexpr size_t headerBytes = 64;
+ constexpr uint32_t versionV1 = 1, versionV2 = 2;
+@@ -46,7 +48,7 @@ inline bool validPayloadSize(uint64_t size) {
+ }
+ 
+ // Where the side region starts in the stored bytes: the chunk boundary after the payload.
+-inline uint64_t sideOffset(uint64_t payloadBytes) {
++constexpr uint64_t sideOffset(uint64_t payloadBytes) {
+     return (payloadBytes + chunkBytes - 1) / chunkBytes * chunkBytes;
+ }
+ 
+@@ -83,6 +85,7 @@ struct Info {
+     uint64_t sideBytes{};
+     uint32_t crc{};  // v1: payload CRC, v2: header CRC
+     uint64_t generation{};
++    bool classic{};  // "FRONDMS\0": a classic Memory Stick
+     uint64_t stored() const { return storedBytes(payloadBytes, sideBytes); }
+     uint64_t chunks() const { return chunkCount(stored()); }
+     uint64_t fileBytes() const { return headerBytes + stored() + (version == versionV2 ? 4 * chunks() : 0); }
+@@ -91,9 +94,12 @@ struct Info {
+ // Any container header, with or without a side region.
+ inline bool parseContainer(const uint8_t* header, Info& info) {
+     if (!header) return false;
+-    if (std::memcmp(header, "FRONDSD\0", 8) || get32(header + 12) != sectorBytes) return false;
++    const bool classic = !std::memcmp(header, "FRONDMS\0", 8);
++    if ((!classic && std::memcmp(header, "FRONDSD\0", 8)) || get32(header + 12) != sectorBytes) return false;
+     Info parsed;
++    parsed.classic = classic;
+     parsed.version = get32(header + 8);
++    if (classic && parsed.version != versionV2) return false;
+     parsed.payloadBytes = get64(header + 16);
+     parsed.crc = get32(header + 24);
+     if (!validPayloadSize(parsed.payloadBytes)) return false;
+@@ -102,7 +108,7 @@ inline bool parseContainer(const uint8_t* header, Info& info) {
+         parsed.generation = get64(header + 28);
+         parsed.sideBytes = get64(header + 48);
+         if (parsed.sideBytes > maxSideBytes || get64(header + 36) != headerBytes + parsed.stored() ||
+-            get32(header + 44) != chunkBytes)
++            get32(header + 44) != chunkBytes || (classic && !parsed.sideBytes))
+             return false;
+         zeroFrom = 56;
+     } else if (parsed.version != versionV1) {
+@@ -117,7 +123,7 @@ inline bool parseContainer(const uint8_t* header, Info& info) {
+ // An SD or Pro card header: no side region, which neither has.
+ inline bool parseHeader(const uint8_t* header, Info& info) {
+     Info parsed;
+-    if (!parseContainer(header, parsed) || parsed.sideBytes) return false;
++    if (!parseContainer(header, parsed) || parsed.sideBytes || parsed.classic) return false;
+     info = parsed;
+     return true;
+ }
+@@ -147,9 +153,9 @@ inline uint32_t headerCrc(const uint8_t* header, const std::vector<uint32_t>& ta
+ }
+ 
+ inline void makeHeaderV2(uint8_t* header, uint64_t payloadBytes, uint64_t generation,
+-                         const std::vector<uint32_t>& table, uint64_t sideBytes = 0) {
++                         const std::vector<uint32_t>& table, uint64_t sideBytes = 0, bool classic = false) {
+     std::memset(header, 0, headerBytes);
+-    std::memcpy(header, "FRONDSD", 8);
++    std::memcpy(header, classic ? "FRONDMS" : "FRONDSD", 8);
+     put32(header + 8, versionV2);
+     put32(header + 12, sectorBytes);
+     put64(header + 16, payloadBytes);
+diff --git a/src/common/storage/Journal.h b/src/common/storage/Journal.h
+index 1e2ffe3..30d0ef8 100644
+--- a/src/common/storage/Journal.h
++++ b/src/common/storage/Journal.h
+@@ -293,6 +293,7 @@ inline bool applyJournal(const std::filesystem::path& card, const std::filesyste
+     // The payload and side region split from the card's header; a header that doesn't parse
+     // (or a card from before side regions) is all payload.
+     uint64_t payloadBytes = parsed.storedBytes, sideBytes = 0;
++    bool classic = false;
+     if (ok) {
+         uint8_t header[frondSdFile::headerBytes];
+         frondSdFile::Info info;
+@@ -300,6 +301,7 @@ inline bool applyJournal(const std::filesystem::path& card, const std::filesyste
+             info.stored() == parsed.storedBytes) {
+             payloadBytes = info.payloadBytes;
+             sideBytes = info.sideBytes;
++            classic = info.classic;
+         }
+     }
+     uint64_t at = journalHeaderBytes;
+@@ -326,7 +328,7 @@ inline bool applyJournal(const std::filesystem::path& card, const std::filesyste
+     }
+     if (ok && stop != JournalStep::pages) {
+         uint8_t header[frondSdFile::headerBytes];
+-        frondSdFile::makeHeaderV2(header, payloadBytes, parsed.to, parsed.table, sideBytes);
++        frondSdFile::makeHeaderV2(header, payloadBytes, parsed.to, parsed.table, sideBytes, classic);
+         ok = fsync(sfd) == 0 && writeAllAt(sfd, header, sizeof(header), 0) && fsync(sfd) == 0;
+     }
+     if (!ok) return false;
+diff --git a/src/common/storage/MsLayout.h b/src/common/storage/MsLayout.h
+new file mode 100644
+index 0000000..f7ff8b6
+--- /dev/null
++++ b/src/common/storage/MsLayout.h
+@@ -0,0 +1,121 @@
++#ifndef FROND_STORAGE_MS_LAYOUT_H
++#define FROND_STORAGE_MS_LAYOUT_H
++
++#include "storage/Container.h"
++
++#include <cstdint>
++
++// Where a classic Memory Stick keeps its bytes in a v2 .frondms (storage/Container.h).
++//
++// The payload is the logical region: user blocks x block bytes, logical block L at L x block
++// bytes, so logical sector = L x pages per block + page. Segment 0 has 494 user blocks (L 0-493),
++// each later 512-block segment 496.
++//
++// The side region, from the chunk boundary after the payload:
++// - boot blocks: the data bytes of physical blocks 0 and 1, page by page;
++// - extra bytes: 9 per physical page, every page of every block, in page order;
++// - location map: a u32 (little endian) per physical block: erasedSlot, bootSlot, a logical slot
++//   L, or spillBit | S for spill slot S;
++// - spill area: blocks - 2 - user blocks whole blocks.
++// A block with any byte that isn't 0xff has a slot; its data lives there, its extra bytes always
++// in the table. The block that holds L (holderBetter) is in logical slot L.
++namespace frondMsLayout {
++constexpr uint32_t dataBytes = 512, extraBytes = 9, segmentBlocks = 512;
++constexpr uint32_t erasedSlot = 0xffffffffu, bootSlot = 0xfffffffeu, spillBit = 0x80000000u;
++
++struct Layout {
++    uint32_t megabytes{}, blocks{}, pagesPerBlock{};
++
++    constexpr uint32_t Segments() const { return blocks / segmentBlocks; }
++    constexpr uint32_t UserBlocks() const { return Segments() * 496 - 2; }
++    constexpr uint32_t SpillBlocks() const { return blocks - 2 - UserBlocks(); }
++    constexpr uint32_t Slots() const { return UserBlocks() + SpillBlocks(); }
++    constexpr uint64_t Pages() const { return uint64_t(blocks) * pagesPerBlock; }
++    constexpr uint64_t BlockBytes() const { return uint64_t(pagesPerBlock) * dataBytes; }
++    constexpr uint64_t PayloadBytes() const { return UserBlocks() * BlockBytes(); }
++    constexpr uint64_t SideAt() const { return frondSdFile::sideOffset(PayloadBytes()); }
++    constexpr uint64_t BootAt() const { return SideAt(); }
++    constexpr uint64_t ExtrasAt() const { return BootAt() + 2 * BlockBytes(); }
++    constexpr uint64_t MapAt() const { return ExtrasAt() + extraBytes * Pages(); }
++    constexpr uint64_t SpillAt() const { return MapAt() + 4ull * blocks; }
++    constexpr uint64_t SideBytes() const { return SpillAt() + SpillBlocks() * BlockBytes() - SideAt(); }
++    constexpr uint64_t StoredBytes() const { return SideAt() + SideBytes(); }
++    // The data of slot i: logical slot L for i < user blocks, spill slot i - user blocks after.
++    constexpr uint64_t SlotAt(uint32_t slot) const {
++        return slot < UserBlocks() ? uint64_t(slot) * BlockBytes() : SpillAt() + (slot - UserBlocks()) * BlockBytes();
++    }
++    constexpr uint64_t ExtraAt(uint32_t block, uint32_t page) const {
++        return ExtrasAt() + (uint64_t(block) * pagesPerBlock + page) * extraBytes;
++    }
++    constexpr uint64_t BootPageAt(uint32_t block, uint32_t page) const {
++        return BootAt() + (uint64_t(block) * pagesPerBlock + page) * dataBytes;
++    }
++    // Logical blocks [first, end) of a segment.
++    constexpr uint32_t SegmentFirst(uint32_t segment) const { return segment ? 494 + (segment - 1) * 496 : 0; }
++    constexpr uint32_t SegmentEnd(uint32_t segment) const { return 494 + segment * 496; }
++    constexpr uint32_t SegmentOfLogical(uint32_t logical) const { return logical < 494 ? 0 : (logical - 494) / 496 + 1; }
++    // The physical block the Sony driver looks at first for L, and where an import puts it.
++    constexpr uint32_t Home(uint32_t logical) const {
++        return logical < 494 ? logical + 2 : SegmentOfLogical(logical) * segmentBlocks + (logical - 494) % 496;
++    }
++};
++
++constexpr Layout layouts[] = {{4, 512, 16},   {8, 1024, 16},  {16, 1024, 32},
++                              {32, 2048, 32}, {64, 4096, 32}, {128, 8192, 32}};
++
++inline const Layout* byShape(uint64_t blocks, uint64_t pagesPerBlock) {
++    for (const auto& l : layouts)
++        if (l.blocks == blocks && l.pagesPerBlock == pagesPerBlock) return &l;
++    return nullptr;
++}
++inline const Layout* byMegabytes(uint64_t megabytes) {
++    for (const auto& l : layouts)
++        if (l.megabytes == megabytes) return &l;
++    return nullptr;
++}
++// The layout of a classic container header's payload and side region sizes.
++inline const Layout* byContainer(uint64_t payloadBytes, uint64_t sideBytes) {
++    for (const auto& l : layouts)
++        if (l.PayloadBytes() == payloadBytes && l.SideBytes() == sideBytes) return &l;
++    return nullptr;
++}
++inline const Layout* byStoredBytes(uint64_t stored) {
++    for (const auto& l : layouts)
++        if (l.StoredBytes() == stored) return &l;
++    return nullptr;
++}
++inline const Layout* of(const frondSdFile::Info& info) {
++    return info.classic ? byContainer(info.payloadBytes, info.sideBytes) : nullptr;
++}
++
++// Page 0 extra bytes: overwrite flag, management flag, L big endian.
++struct Claim {
++    int32_t logical{-1};  // -1: none
++    bool updating{};      // UDST set: an older copy may still be the one in use
++};
++
++// What the Sony driver takes from a block's page 0 extra bytes at mount: BKST set, PGST 11,
++// ATFLG set, and an L inside the block's own segment. Blocks 0 and 1 hold the boot blocks.
++inline Claim claimOf(const Layout& l, uint32_t block, const uint8_t* extra) {
++    Claim c;
++    if (block < 2 || block >= l.blocks) return c;
++    const uint8_t overwrite = extra[0], management = extra[1];
++    const uint32_t logical = uint32_t(extra[2]) << 8 | extra[3];
++    const uint32_t segment = block / segmentBlocks;
++    if (!(overwrite & 0x80) || (overwrite & 0x60) != 0x60 || !(management & 0x08) || logical == 0xffff ||
++        logical < l.SegmentFirst(segment) || logical >= l.SegmentEnd(segment))
++        return c;
++    c.logical = int32_t(logical);
++    c.updating = overwrite & 0x10;
++    return c;
++}
++
++// Which of two blocks claiming the same L the driver keeps: UDST clear beats UDST set, and a tie
++// goes to the higher physical block.
++inline bool holderBetter(uint32_t a, const Claim& ca, uint32_t b, const Claim& cb) {
++    if (ca.updating != cb.updating) return !ca.updating;
++    return a > b;
++}
++}  // namespace frondMsLayout
++
++#endif
+diff --git a/src/common/storage/Pending.h b/src/common/storage/Pending.h
+index 398d4ae..86b3aa6 100644
+--- a/src/common/storage/Pending.h
++++ b/src/common/storage/Pending.h
+@@ -143,7 +143,7 @@ inline bool refreshChunks(int fd, uint64_t storedBytes, uint64_t generation, con
+     if (!writeAllAt(fd, t.data(), t.size(), frondSdFile::headerBytes + storedBytes) || fsync(fd) != 0) return false;
+     uint8_t h[frondSdFile::headerBytes];
+     frondSdFile::makeHeaderV2(h, info.payloadBytes, std::max(generation, v2 ? info.generation : uint64_t(0)), table,
+-                              info.sideBytes);
++                              info.sideBytes, info.classic);
+     return writeAllAt(fd, h, sizeof(h), 0) && fsync(fd) == 0;
+ }
+ 
+diff --git a/src/uarm/native/CardSwap.h b/src/uarm/native/CardSwap.h
+index 610f968..51d1b52 100644
+--- a/src/uarm/native/CardSwap.h
++++ b/src/uarm/native/CardSwap.h
+@@ -74,16 +74,16 @@ inline void noteTakenOut(const char* name, bool out) {
+ 
+ constexpr const char* takeOutNeedsFolder = "Save the machine before taking its card out.";
+ 
+-// Writes the card store's card (SD, or a Memory Stick Pro with `kind`) into the folder's card file
++// Writes the card store's card (SD, or a Memory Stick with `kind`) into the folder's card file
+ // and closes it. A card on this folder's file is journalled and the journal applied; any other is
+ // copied whole. If this fails the card stays in the store as it was.
+ inline SdResult takeOutFileCard(const std::filesystem::path& folder, uint32_t kind, bool writeProtected,
+-                                CardIdentity& identity) {
++                                CardIdentity& identity, const CardIdentity* cardIdentity = nullptr) {
+     if (folder.empty()) return frondSdCandidate::fail("folder", takeOutNeedsFolder);
+     if (!sdCardInitialized()) return frondSdCandidate::fail("empty", "This session has no card.");
+     frondMachine::Media media;
+     SdSave save;
+-    if (!beginSdSave(folder, media, false, save, kind, writeProtected)) {
++    if (!beginSdSave(folder, media, false, save, kind, writeProtected, cardIdentity)) {
+         abandonSdSave(save);
+         return frondSdCandidate::fail("write", "Could not write the card file.");
+     }
+@@ -147,18 +147,12 @@ inline SdResult takeOutMs(const std::filesystem::path& folder, MemoryStickContro
+         if (result.ok) msCtrlrDetach(ms);
+         return result;
+     }
++    if (!classicOnStore(ms)) return frondSdCandidate::fail("write", "Could not write the Memory Stick file.");
+     {
+-        std::shared_ptr<const CardSnapshot> pin;
+-        bool protect = false;
+-        if (!msCtrlrSaveCheckpoint(ms, pin, protect) || !pin || !frondMsGeometry::byPhysicalBytes(pin->Size()))
+-            return frondSdCandidate::fail("write", "Could not write the Memory Stick file.");
+-        if (!frondSession::writeMsFromReader(folder / frondMachine::msSibling, pin->Size(),
+-                                             [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
+-                                             msChangesToSave(ms)) ||
+-            !frondSession::syncDir(folder))
+-            return frondSdCandidate::fail("write", "Could not write the Memory Stick file.");
++        auto stick = slotCards().msIdentity;
++        auto result = takeOutFileCard(folder, frondMachine::kindMs, writeProtected, identity, &stick);
++        if (!result.ok) return result;
+     }
+-    identity = slotCards().msIdentity;
+     msCtrlrDetach(ms);
+     msOpened({}, 0);
+     noteTakenOut(frondMachine::msSibling, true);
+@@ -189,13 +183,13 @@ inline SdResult putInMs(const std::filesystem::path& folder, MemoryStickControll
+     swap.identityGiven = true;
+     swap.identity = identity;
+     frondMachine::Media media;
+-    std::vector<uint8_t> physical;
+-    if (!frondSession::swappedInCard(folder, frondMachine::msSibling, swap, media) ||
+-        !frondMs::decodeFile(folder / frondMachine::msSibling, physical))
++    if (!frondSession::swappedInCard(folder, frondMachine::msSibling, swap, media))
+         return frondSdCandidate::fail("card", "The Memory Stick file is missing or damaged.");
+     if (!deviceProfileMsSizeValid5(deviceType, media.logicalSize >> 20))
+         return frondSdCandidate::fail("size", "This machine doesn't take a Memory Stick of that size.");
+-    if (!msCtrlrAttachEjected(ms, std::move(physical), writeProtected) || !msCtrlrInsert(ms, true)) {
++    if (sdCardInitialized()) return frondSdCandidate::fail("busy", "Take the current card out first.");
++    if (!attachClassicFile(ms, folder / frondMachine::msSibling, identity, false, writeProtected) ||
++        !msCtrlrInsert(ms, true)) {
+         msCtrlrDetach(ms);
+         return frondSdCandidate::fail("card", "Could not open the Memory Stick file.");
+     }
+diff --git a/src/uarm/native/CardTool.h b/src/uarm/native/CardTool.h
+index 13a1635..1b39776 100644
+--- a/src/uarm/native/CardTool.h
++++ b/src/uarm/native/CardTool.h
+@@ -18,6 +18,7 @@
+ #include <cstring>
+ #include <fcntl.h>
+ #include <filesystem>
++#include <fstream>
+ #include <string>
+ #include <sys/stat.h>
+ #include <unistd.h>
+@@ -26,7 +27,7 @@
+ // Makes, imports and exports card files outside a running machine, for both frontends: `make`
+ // (kind, size, output), `import` (image, kind, output) and `export` (card file, image). The output
+ // of make and import is a settled card file of its kind (.frondsd v2 for SD and Memory Stick Pro,
+-// .frondms with change counter 0 for a classic stick), written to a temp beside it and renamed, so
++// v2 .frondms for a classic stick), written to a temp beside it and renamed, so
+ // a failed or cancelled run leaves nothing. Desktop runs it as `frond-core --card ...`, Android
+ // through JNI on a worker thread.
+ namespace frondCardTool {
+@@ -141,8 +142,26 @@ inline Result writeSd(const std::filesystem::path& dest, uint64_t size, Run& run
+     return {true, "created", {}};
+ }
+ 
+-// Writes a classic stick's physical image as a .frondms with change counter 0.
+-inline Result writeMs(const std::filesystem::path& dest, const std::vector<uint8_t>& image, Run& run) {
++// Writes a classic stick's physical image as a v2 .frondms at generation 1.
++inline Result writeMs(const std::filesystem::path& dest, const std::vector<uint8_t>& physical, Run& run) {
++    std::vector<uint8_t> stored;
++    if (!frondMs::storedOf(physical, stored)) return fail("image", "Use a valid Frond classic Memory Stick image.");
++    std::array<uint8_t, frondMachine::identityBytes> identity{};
++    identity[0] = 1;  // the frontend gives the card its identity; this skips the MD5 pass
++    const bool ok = frondSession::writeSdFromReader(
++        dest, stored.size(),
++        [&](uint64_t off, uint64_t n, void* out) {
++            std::memcpy(out, stored.data() + off, size_t(n));
++            return run.report(off + n, stored.size());
++        },
++        identity, 1, frondSession::msShape(stored.size()));
++    if (!ok) return run.cancelled ? fail("cancelled", "Cancelled.") : fail("write", "Could not write the card file.");
++    frondSession::syncDir(folderOf(dest));
++    return {true, "created", {}};
++}
++
++// The same as a v1 .frondms with change counter 0, which Frond 0.13 and older open.
++inline Result writeMsV1(const std::filesystem::path& dest, const std::vector<uint8_t>& image, Run& run) {
+     const bool ok = frondSession::writeMsFromReader(
+         dest, image.size(),
+         [&](uint64_t off, uint64_t n, void* out) {
+@@ -155,6 +174,11 @@ inline Result writeMs(const std::filesystem::path& dest, const std::vector<uint8
+     return {true, "created", {}};
+ }
+ 
++inline uint64_t msFileBytes(const frondMsGeometry::Geometry& g) {
++    const auto stored = frondMs::layoutOf(g)->StoredBytes();
++    return frondSdFile::headerBytes + stored + 4 * frondSdFile::chunkCount(stored);
++}
++
+ inline unsigned parseNumber(const std::string& text) {
+     if (text.empty() || text.size() > 5 || text.find_first_not_of("0123456789") != std::string::npos) return 0;
+     return unsigned(std::stoul(text));
+@@ -166,7 +190,7 @@ inline Result make(Kind kind, unsigned size, const std::filesystem::path& dest,
+     if (kind == Kind::ms) {
+         if (!msMegabytesTaken(size)) return fail("size", "Choose a classic Memory Stick of " + sizeList(kind) + ".");
+         const auto* geometry = frondMsGeometry::byMegabytes(size);
+-        if (auto space = checkSpace(dest, frondMs::fileBytes(*geometry)); !space.ok) return space;
++        if (auto space = checkSpace(dest, msFileBytes(*geometry)); !space.ok) return space;
+         return writeMs(dest, frondMs::create(*geometry), run);
+     }
+     const bool taken = kind == Kind::sd ? frondSd::validCardMib(size) && sdBytesTaken(uint64_t(size) << 20)
+@@ -200,18 +224,36 @@ inline Result importImage(const std::filesystem::path& source, Kind kind, const
+     if (std::filesystem::equivalent(source, dest, ec)) return fail("same", "The image and the card file are the same file.");
+     const uint64_t bytes = uint64_t(st.st_size);
+     if (kind == Kind::ms) {
+-        uint8_t header[frondMs::headerBytes];
++        uint8_t header[frondMs::headerBytes]{};
+         const int fd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+         const bool haveHeader = fd >= 0 && frondSession::readAllAt(fd, header, sizeof(header), 0);
+         if (fd >= 0) ::close(fd);
+-        const auto* geometry = haveHeader ? frondMs::headerGeometry(header) : nullptr;
+-        if (!geometry || bytes != frondMs::fileBytes(*geometry))
+-            return fail("size", "Use a Frond classic Memory Stick image of " + sizeList(kind) + ".");
++        const bool frondFile = haveHeader && !std::memcmp(header, "FRONDMS\0", 8);
++        const frondMsGeometry::Geometry* geometry = nullptr;
++        frondSdFile::Info info;
++        if (frondFile) {
++            // A v1 or v2 .frondms.
++            const bool v2 = frondMs::get32(header + 8) == 2;
++            geometry = v2 ? frondMs::v2Geometry(header, &info) : frondMs::headerGeometry(header);
++            if (!geometry || bytes != (v2 ? info.fileBytes() : frondMs::fileBytes(*geometry)))
++                return fail("size", "Use a Frond classic Memory Stick image of " + sizeList(kind) + ".");
++        } else {
++            if (haveHeader && frondMagic(header)) return fail("image", "That is a Frond card file, not a raw card image.");
++            // A raw logical image, as CloudpilotEmu and a PC see the stick.
++            geometry = frondMs::geometryForLogical(bytes);
++            if (!geometry) return fail("size", "Use a raw Memory Stick image of " + sizeList(kind) + ", aligned to 512 bytes.");
++        }
+         if (!msMegabytesTaken(geometry->megabytes))
+             return fail("size", "No device takes a " + std::to_string(geometry->megabytes) + " MB Memory Stick.");
+         std::vector<uint8_t> image;
+-        if (!frondMs::decodeFile(source, image)) return fail("image", "Use a valid Frond classic Memory Stick image.");
+-        if (auto space = checkSpace(dest, bytes); !space.ok) return space;
++        if (frondFile) {
++            if (!frondMs::readPhysical(source, image)) return fail("image", "Use a valid Frond classic Memory Stick image.");
++        } else {
++            std::vector<uint8_t> raw;
++            if (!frondMachine::readBytes(source, raw) || raw.size() != bytes) return fail("read", "Could not read the card image.");
++            image = frondMs::fromLogical(raw.data(), raw.size(), *geometry);
++        }
++        if (auto space = checkSpace(dest, msFileBytes(*geometry)); !space.ok) return space;
+         return writeMs(dest, image, run);
+     }
+     const bool taken = kind == Kind::sd ? sdBytesTaken(bytes) : msProMibTaken(frondMsPro::mibOfBytes(bytes));
+@@ -257,8 +299,9 @@ inline Result verifySdFile(int fd, const frondSdFile::Info& info, uint64_t fileS
+     return fromStorage(frondStorage::verify(fd, read, [&](uint64_t done, uint64_t total) { return run.report(done, 2 * total); }));
+ }
+ 
+-// A card file's image: raw sectors for an SD card or Memory Stick Pro, a .frondms for a classic
+-// stick (change counter 0). The card file has to be settled.
++// A card file's image: raw sectors for an SD card or Memory Stick Pro; for a classic stick its raw
++// logical image, or a v1 .frondms when the image's name ends in .frondms. The card file is settled
++// first.
+ inline Result exportCard(const std::filesystem::path& card, const std::filesystem::path& image,
+                          const Progress& progress = {}) {
+     Run run{progress};
+@@ -271,7 +314,8 @@ inline Result exportCard(const std::filesystem::path& card, const std::filesyste
+     struct Closer { int fd; ~Closer() { ::close(fd); } } closer{fd};
+     uint8_t header[frondSdFile::headerBytes]{};
+     if (!frondSession::readAllAt(fd, header, sizeof(header), 0)) return fail("image", "That is not a Frond card file.");
+-    if (!std::memcmp(header, "FRONDSD", 7)) {
++    const bool classic = !std::memcmp(header, "FRONDMS\0", 8);
++    if (!std::memcmp(header, "FRONDSD", 7) || (classic && frondMs::get32(header + 8) == 2)) {
+         if (auto settled = frondStorage::settle(card); !settled.ok) return fromStorage(settled);
+     } else {
+         const std::string journal = card.filename().string() + ".journal-";
+@@ -279,13 +323,31 @@ inline Result exportCard(const std::filesystem::path& card, const std::filesyste
+             if (it->path().filename().string().rfind(journal, 0) == 0)
+                 return fail("unsettled", frondStorage::unsettledMessage);
+     }
+-    if (!std::memcmp(header, "FRONDMS", 7)) {
++    if (classic) {
++        // A .frondms image is a v1 file, which Frond 0.13 and older open; anything else is the raw
++        // logical image.
+         std::vector<uint8_t> physical;
+-        if (!frondMs::decodeFile(card, physical)) return fail("image", "The card file is damaged.");
+-        if (auto space = checkSpace(image, frondMs::fileBytes(*frondMsGeometry::byPhysicalBytes(physical.size())));
+-            !space.ok)
+-            return space;
+-        return writeMs(image, physical, run);
++        if (!frondMs::readPhysical(card, physical)) return fail("image", "The card file is damaged.");
++        const auto& g = *frondMsGeometry::byPhysicalBytes(physical.size());
++        if (image.extension() == ".frondms") {
++            if (auto space = checkSpace(image, frondMs::fileBytes(g)); !space.ok) return space;
++            return writeMsV1(image, physical, run);
++        }
++        std::vector<uint8_t> stored, raw;
++        LogicalMsMedia media;
++        if (!frondMs::storedOf(physical, stored)) return fail("image", "The card file is damaged.");
++        std::vector<uint8_t>().swap(physical);
++        if (!frondMs::openStored(media, g, [&](uint64_t off, uint64_t n, void* dest) {
++                std::memcpy(dest, stored.data() + off, size_t(n));
++                return true;
++            }) ||
++            !frondMs::logicalOf(media, raw))
++            return fail("image", "The card file is damaged.");
++        if (auto space = checkSpace(image, raw.size()); !space.ok) return space;
++        if (!run.report(raw.size() / 2, raw.size())) return fail("cancelled", "Cancelled.");
++        if (!frondSession::writeAtomicFrond(image, raw.data(), raw.size())) return fail("write", "Could not write the image.");
++        run.report(raw.size(), raw.size());
++        return {true, "exported", {}};
+     }
+     frondSdFile::Info info;
+     if (!frondSession::readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseHeader(header, info))
+@@ -306,21 +368,38 @@ inline uint64_t sizeOf(const std::filesystem::path& file) {
+     return ::stat(file.c_str(), &st) == 0 ? uint64_t(st.st_size) : 0;
+ }
+ 
+-// Finishes what a cut-off change or the apps left beside an SD or Pro card file. "settled GENERATION".
++// Finishes what a cut-off change or the apps left beside a card file. "settled GENERATION".
+ inline Result settleCard(const std::filesystem::path& card) {
+     struct stat st{};
+     if (::stat(card.c_str(), &st) < 0 || !S_ISREG(st.st_mode)) return fail("read", "Could not read the card file.");
++    // A v1 .frondms has no journals of its own; its change counter stands for the generation.
++    if (frondMachine::msFileVersion(card) == 1) {
++        uint8_t header[frondMs::headerBytes];
++        std::ifstream in(card, std::ios::binary);
++        if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || !frondMs::headerGeometry(header))
++            return fail("image", "The card file is damaged.");
++        return {true, "settled " + std::to_string(frondMs::headerChanges(header)), {}};
++    }
+     if (auto settled = frondStorage::settle(card); !settled.ok) return fromStorage(settled);
+     frondSdFile::Info info;
+     if (!frondStorage::readHeader(card, info)) return fail("image", "The card file is damaged.");
+     return {true, "settled " + std::to_string(info.generation), {}};
+ }
+ 
+-// Checks every byte of a settled SD or Pro card file against its CRCs. "verified GENERATION".
++// Checks every byte of a settled card file against its CRCs. "verified GENERATION".
+ inline Result verifyCard(const std::filesystem::path& card, const Progress& progress = {}) {
+     Run run{progress};
+     if (frondStorage::hasChanges(card) || !frondStorage::journalFiles(card).empty())
+         return fail("unsettled", frondStorage::unsettledMessage);
++    if (frondMachine::msFileVersion(card) == 1) {
++        std::vector<uint8_t> physical;
++        uint8_t header[frondMs::headerBytes];
++        std::ifstream in(card, std::ios::binary);
++        if (!in.read(reinterpret_cast<char*>(header), sizeof(header)) || !frondMs::decodeFile(card, physical))
++            return fail("image", "The card file is damaged.");
++        run.report(1, 1);
++        return {true, "verified " + std::to_string(frondMs::headerChanges(header)), {}};
++    }
+     frondSdFile::Info info;
+     auto verified = frondStorage::verify(card, info, [&](uint64_t done, uint64_t total) { return run.report(done, total); });
+     if (!verified.ok) return fromStorage(verified);
+diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
+index 8f144ce..68e94d3 100644
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -469,13 +469,15 @@ class DesktopControl {
+                     const auto size=input?input.tellg():std::streampos(-1);
+                     uint8_t header[frondMs::headerBytes];
+                     const frondMsGeometry::Geometry* geometry=nullptr;
++                    frondSdFile::Info info;
+                     if(size>=std::streamoff(frondMs::headerBytes)){input.seekg(0);
+-                        if(input.read(reinterpret_cast<char*>(header),sizeof(header)))geometry=frondMs::headerGeometry(header);}
+-                    if(!geometry||size!=std::streamoff(frondMs::fileBytes(*geometry))||!deviceProfileMsSizeValid5(device,geometry->megabytes))
++                        if(input.read(reinterpret_cast<char*>(header),sizeof(header)))
++                            geometry=frondMs::get32(header+8)==2?frondMs::v2Geometry(header,&info):frondMs::headerGeometry(header);}
++                    const uint64_t expected=!geometry?0:frondMs::get32(header+8)==2?info.fileBytes():frondMs::fileBytes(*geometry);
++                    if(!geometry||uint64_t(size)!=expected||!deviceProfileMsSizeValid5(device,geometry->megabytes))
+                         return {false,"size","Use a Frond classic Memory Stick image from 4 to 128 MB."};
+-                    input.seekg(0);std::vector<uint8_t> bytes(frondMs::fileBytes(*geometry));
+-                    if(!input.read(reinterpret_cast<char*>(bytes.data()),bytes.size())||input.peek()!=std::char_traits<char>::eof())return {false,"read","Could not read the Memory Stick image."};
+-                    if(!frondMs::decode(bytes.data(),bytes.size(),image))return {false,"image","Use a valid Frond classic Memory Stick image."};
++                    input.close();
++                    if(!frondMs::readPhysical(path,image))return {false,"image","Use a valid Frond classic Memory Stick image."};
+                 }
+                 const bool wasPro=msCtrlrPro(ms);
+                 if(!msCtrlrAttach(ms,image))return {false,"image","Could not attach the Memory Stick image."};
+diff --git a/src/uarm/native/MachineSession.h b/src/uarm/native/MachineSession.h
+index b075697..d6ea79a 100644
+--- a/src/uarm/native/MachineSession.h
++++ b/src/uarm/native/MachineSession.h
+@@ -2,6 +2,7 @@
+ #define FROND_MACHINE_SESSION_H
+ 
+ #include "CardBacking.h"
++#include "MemoryStickImage.h"
+ #include "CardSave.h"
+ #include "SdCards.h"
+ #include "SessionIo.h"
+@@ -22,14 +23,13 @@
+ namespace frondNative {
+ 
+ // What the slots keep from load to save outside the card store: SD write protection (the card
+-// doesn't model it, the descriptor carries it), the classic stick's identity and change counter.
+-// `msBumped` is set once the counter has moved on for this open or insert. `takenOut` are card
++// doesn't model it, the descriptor carries it), and the classic stick's identity and the generation
++// (a v1 file's change counter) it was opened at. `takenOut` are card
+ // files a take-out left in the folder for the frontend to move; a save doesn't remove them.
+ struct SlotCards {
+     bool sdProtected{};
+     std::array<uint8_t, frondMachine::identityBytes> msIdentity{};
+     uint64_t msChanges{};
+-    bool msBumped{};
+     std::vector<std::string> takenOut;
+ };
+ inline SlotCards& slotCards() {
+@@ -37,24 +37,11 @@ inline SlotCards& slotCards() {
+     return cards;
+ }
+ 
+-// A classic stick opened or inserted with change counter `changes`.
++// A classic stick opened or inserted at generation `changes`.
+ inline void msOpened(const std::array<uint8_t, frondMachine::identityBytes>& identity, uint64_t changes) {
+     auto& cards = slotCards();
+     cards.msIdentity = identity;
+     cards.msChanges = changes;
+-    cards.msBumped = false;
+-}
+-
+-// The counter a save or take-out writes: one more than at open or insert once the stick's contents
+-// changed, and only once, so another machine that saved it at the old counter sees the change.
+-// SD cards and Pro sticks use their .frondsd generation, which every save moves on.
+-inline uint64_t msChangesToSave(MemoryStickController* ms) {
+-    auto& cards = slotCards();
+-    if (!cards.msBumped && msCtrlrChanged(ms)) {
+-        ++cards.msChanges;
+-        cards.msBumped = true;
+-    }
+-    return cards.msChanges;
+ }
+ 
+ // A lone v6 file outside a machine folder, which loading extracts into a folder of its own.
+@@ -130,34 +117,53 @@ inline void fillState(SoC& soc, frondSession::Contents& contents) {
+     contents.savestate = copy(soc.GetSavestate());
+ }
+ 
+-// Streams the stick from a pinned checkpoint, so the save holds no second image.
+-inline bool publishMs(const std::filesystem::path& folder, MemoryStickController* ms,
+-                      frondMachine::Media& media, std::filesystem::path& temp) {
+-    media.kind = frondMachine::kindMs;
+-    media.name = frondMachine::msSibling;
+-    media.inserted = msCtrlrInserted(ms);
+-    media.writeProtected = msCtrlrReadOnly(ms);
+-    media.identity = slotCards().msIdentity;
+-    media.contentGeneration = msChangesToSave(ms);
+-    std::shared_ptr<const CardSnapshot> pin;
+-    bool protect = false;
+-    if (!msCtrlrSaveCheckpoint(ms, pin, protect) || !pin) return false;
+-    // The stick's size gives its geometry, 4 to 128 MB.
+-    const auto* geometry = frondMsGeometry::byPhysicalBytes(pin->Size());
+-    if (!geometry) return false;
+-    media.logicalSize = geometry->LogicalBytes();
+-    media.physicalSize = geometry->PhysicalBytes();
+-    if (!frondSession::createTemp(folder, ".frondms.tmp-", temp)) return false;
+-    if (!frondSession::writeMsFromReader(
+-            temp, media.physicalSize,
+-            [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); }, media.contentGeneration)) {
+-        frondSession::removePath(temp);
+-        temp.clear();
++// A classic stick in its own RAM (a v6 session's, or one made or inserted from an image while
++// running) moves into the empty card store first, as card `identity`, so it saves like the others.
++inline bool classicOnStore(MemoryStickController* ms) {
++    if (msCtrlrClassicOnStore(ms)) return true;
++    char id[SD_CARD_ID_MAX_LEN + 1]{};
++    std::memcpy(id, slotCards().msIdentity.data(), SD_CARD_ID_MAX_LEN);
++    return msCtrlrMoveClassicToStore(ms, id);
++}
++
++// Attaches the folder's ms.frondms through the card store: a v2 file read and written in place,
++// a v1 file read into RAM, so its first save writes v2.
++inline bool attachClassicFile(MemoryStickController* ms, const std::filesystem::path& path,
++                              const StoreIdentity& identity, bool inserted, bool protect) {
++    if (!ms) return false;
++    char id[SD_CARD_ID_MAX_LEN + 1]{};
++    std::memcpy(id, identity.data(), SD_CARD_ID_MAX_LEN);
++    if (frondMachine::msFileVersion(path) == 2) {
++        frondSdFile::Info info;
++        if (frondMachine::readSdHeader(path, info) != frondMachine::SiblingStatus::ok || !info.classic ||
++            !sdCardInitializeFromFile(path.c_str(), info.stored(), frondSdFile::headerBytes, id))
++            return false;
++    } else {
++        std::vector<uint8_t> stored;
++        {
++            std::vector<uint8_t> physical;
++            if (!frondMs::decodeFile(path, physical) || !frondMs::storedOf(physical, stored)) return false;
++        }
++        sdCardInitializeWithBytes(std::move(stored), id);
++    }
++    if (!msCtrlrAttachClassicStore(ms, inserted, protect)) {
++        sdCardReset();
+         return false;
+     }
+     return true;
+ }
+ 
++// Step 1 of a classic stick's save: a journal against its v2 ms.frondms, or a full copy to one.
++inline bool beginMsSave(const std::filesystem::path& folder, MemoryStickController* ms, frondMachine::Media& media,
++                        SdSave& save) {
++    if (!classicOnStore(ms)) return false;
++    auto identity = slotCards().msIdentity;
++    if (!beginSdSave(folder, media, msCtrlrInserted(ms), save, frondMachine::kindMs, msCtrlrReadOnly(ms), &identity))
++        return false;
++    slotCards().msIdentity = media.identity;
++    return true;
++}
++
+ inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::filesystem::path& loadedFrom = {},
+                         const std::filesystem::path& loadedFolder = {}) {
+     if (!soc.Save()) {
+@@ -199,9 +205,8 @@ inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::
+     }
+     if (ms && msCtrlrPresent(ms) && !pro) {
+         frondMachine::Media media;
+-        std::filesystem::path temp;
+-        if (!publishMs(folder, ms, media, temp)) return fail("the Memory Stick could not be written");
+-        temps.push_back(std::move(temp));
++        if (!beginMsSave(folder, ms, media, sd)) return fail("the Memory Stick could not be written");
++        temps.emplace_back();  // published by completeSdSave
+         contents.media.push_back(std::move(media));
+     }
+     // Once the .frond is published the card file is finished, or left for the next load.
+diff --git a/src/uarm/native/main.cpp b/src/uarm/native/main.cpp
+index de6f252..9927d41 100644
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -645,11 +645,8 @@ namespace {
+             const auto msPath = std::filesystem::path(sessionFolder) / frondMachine::msSibling;
+             std::error_code ec;
+             if (std::filesystem::is_regular_file(msPath, ec)) {
+-                auto* ms = memoryStick;
+-                std::vector<uint8_t> physical;
+-                const bool attached = ms && frondMs::decodeFile(msPath, physical) &&
+-                                      (msSwapped ? msCtrlrAttachEjected(ms, std::move(physical), msProtect)
+-                                                 : msCtrlrAttach(ms, std::move(physical)));
++                const bool attached = frondNative::attachClassicFile(memoryStick, msPath, frondNative::slotCards().msIdentity,
++                                                                     !msSwapped, msSwapped && msProtect);
+                 if (!attached) {
+                     cerr << "session Memory Stick sidecar is missing or unreadable" << endl;
+                     return false;
+diff --git a/src/uarm/uarm/CardBacking.h b/src/uarm/uarm/CardBacking.h
+index 088e871..1f5a515 100644
+--- a/src/uarm/uarm/CardBacking.h
++++ b/src/uarm/uarm/CardBacking.h
+@@ -130,6 +130,8 @@ class RamCardBacking : public CardBacking {
+     }
+ 
+     const uint8_t* ContiguousData() const { return contiguous() ? working_->base->data() : nullptr; }
++    // A snapshot of the working state is still held.
++    bool Pinned() const { return working_.use_count() > (working_ == root_ ? 2 : 1); }
+ 
+     std::shared_ptr<const CardSnapshot> Snapshot() override {
+         return std::make_shared<Pin>(identity_, working_);
+diff --git a/src/uarm/uarm/CardSave.h b/src/uarm/uarm/CardSave.h
+index f859b1d..50ad6cf 100644
+--- a/src/uarm/uarm/CardSave.h
++++ b/src/uarm/uarm/CardSave.h
+@@ -16,11 +16,15 @@
+ #include <fstream>
+ 
+ // The SD card's part of a machine-folder save, apart from the SoC. On the TG50 the same card
+-// store holds a Memory Stick Pro, saved the same way as ms.frondmsp (kind 3); `kind` picks which.
++// store holds a Memory Stick Pro, saved the same way as ms.frondmsp (kind 3), or a classic stick
++// as a v2 ms.frondms (kind 2); `kind` picks which.
+ namespace frondNative {
+ 
++using StoreIdentity = std::array<uint8_t, frondMachine::identityBytes>;
++
++// `identity` replaces the card store's id, for a classic stick whose identity is raw bytes.
+ inline void fillSdMedia(frondMachine::Media& media, bool inserted, uint32_t kind = frondMachine::kindSd,
+-                        bool writeProtected = false) {
++                        bool writeProtected = false, const StoreIdentity* identity = nullptr) {
+     media.kind = kind;
+     media.name = frondMachine::fileCardSibling(kind);
+     media.inserted = inserted;
+@@ -28,8 +32,18 @@ inline void fillSdMedia(frondMachine::Media& media, bool inserted, uint32_t kind
+     const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
+     media.logicalSize = bytes;
+     media.physicalSize = bytes;
+-    const char* id = sdCardGetId();
++    if (kind == frondMachine::kindMs) {
++        const auto* l = frondMsLayout::byStoredBytes(bytes);
++        const auto* g = l ? frondMsGeometry::byShape(l->blocks, l->pagesPerBlock) : nullptr;
++        media.logicalSize = g ? g->LogicalBytes() : 0;
++        media.physicalSize = g ? g->PhysicalBytes() : 0;
++    }
+     media.identity.fill(0);
++    if (identity) {
++        media.identity = *identity;
++        return;
++    }
++    const char* id = sdCardGetId();
+     if (id && *id) std::memcpy(media.identity.data(), id, std::min(size_t(32), std::strlen(id)));
+ }
+ 
+@@ -39,8 +53,12 @@ inline uint64_t nextSdGeneration(const std::filesystem::path& folder, uint32_t k
+     frondSdFile::Info info;
+     std::ifstream in(folder / frondMachine::fileCardSibling(kind), std::ios::binary);
+     uint8_t header[frondSdFile::headerBytes];
+-    if (in && in.read(reinterpret_cast<char*>(header), sizeof(header)) && frondSdFile::parseHeader(header, info))
+-        newest = info.generation;
++    if (in && in.read(reinterpret_cast<char*>(header), sizeof(header))) {
++        if (frondSdFile::parseContainer(header, info)) newest = info.generation;
++        // A v1 .frondms: its change counter, which a converted stick's generations carry on from.
++        else if (kind == frondMachine::kindMs && !std::memcmp(header, "FRONDMS\0", 8) && frondSdFile::get32(header + 8) == 1)
++            newest = frondSdFile::get64(header + 32);
++    }
+     const std::string prefix = frondMachine::fileCardJournalPrefix(kind);
+     for (const auto& journal : frondSession::sdJournals(folder, kind)) {
+         const auto tail = journal.filename().string().substr(prefix.size());
+@@ -66,21 +84,23 @@ struct SdSave {
+ // fsyncs the folder. The card's own root does not move: a save that fails, or one to another
+ // folder, leaves the live session as it was.
+ inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
+-                      SdSave& save, bool writeProtected = false) {
+-    fillSdMedia(media, inserted, save.kind, writeProtected);
++                      SdSave& save, bool writeProtected = false, const StoreIdentity* identity = nullptr) {
++    fillSdMedia(media, inserted, save.kind, writeProtected, identity);
+     media.contentGeneration = nextSdGeneration(folder, save.kind);
+     auto pin = sdCardSnapshot();
+     if (!pin) return false;
++    const uint64_t stored = frondMachine::storeBytes(media);
++    const auto shape = save.kind == frondMachine::kindMs ? frondSession::msShape(stored) : frondSession::sdShape(stored);
++    if (!stored || pin->Size() != stored) return false;
+     const auto full = frondSession::sdFullPath(folder, media.contentGeneration, save.kind);
+     if (!frondSession::writeSdFromReader(
+-            full, media.physicalSize,
+-            [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); }, media.identity,
+-            media.contentGeneration))
++            full, stored, [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
++            media.identity, media.contentGeneration, shape))
+         return false;
+     save.full = full;
+     if (!frondSession::syncDir(folder)) return false;
+     save.generation = media.contentGeneration;
+-    save.payloadBytes = media.physicalSize;
++    save.payloadBytes = stored;
+     return true;
+ }
+ 
+@@ -91,7 +111,8 @@ inline bool journalSd(const std::filesystem::path& folder, frondMachine::Media&
+     frondSdFile::Info info;
+     std::vector<uint32_t> table;
+     if (frondMachine::readSdHeader(sidecar, info, &table) != frondMachine::SiblingStatus::ok ||
+-        info.version != frondSdFile::versionV2 || info.payloadBytes != media.physicalSize)
++        info.version != frondSdFile::versionV2 || info.classic != (save.kind == frondMachine::kindMs) ||
++        info.stored() != frondMachine::storeBytes(media))
+         return false;
+     // A journal left to the same generation is replaced by the rename, never removed first.
+     auto pin = sdCardSnapshot();
+@@ -100,7 +121,7 @@ inline bool journalSd(const std::filesystem::path& folder, frondMachine::Media&
+     const uint64_t to = info.generation + 1;
+     // A full copy left at this generation by a save that failed before publishing.
+     frondSession::removePath(frondSession::sdFullPath(folder, to, save.kind));
+-    if (!writer.open(folder, info.payloadBytes, info.generation, to, save.kind)) return false;
++    if (!writer.open(folder, info.stored(), info.generation, to, save.kind)) return false;
+     const int fd = ::open(sidecar.c_str(), O_RDONLY | O_CLOEXEC);
+     if (fd < 0) return false;
+     // CRC32 is affine, so for equal lengths crc(new) = crc(old) ^ crc(zeros) ^ crc(diff), with the
+@@ -108,7 +129,7 @@ inline bool journalSd(const std::filesystem::path& folder, frondMachine::Media&
+     std::vector<uint8_t> old;
+     const bool pages = sdCardForEachChange(*pin, [&](uint64_t off, uint64_t n, const uint8_t* data) {
+         const uint64_t c = off / frondSdFile::chunkBytes, start = c * frondSdFile::chunkBytes;
+-        const uint64_t len = std::min<uint64_t>(frondSdFile::chunkBytes, info.payloadBytes - start);
++        const uint64_t len = std::min<uint64_t>(frondSdFile::chunkBytes, info.stored() - start);
+         if (off + n > start + len) return false;
+         old.resize(size_t(n));
+         if (!frondSession::readAllAt(fd, old.data(), old.size(), frondSdFile::headerBytes + off)) return false;
+@@ -125,7 +146,7 @@ inline bool journalSd(const std::filesystem::path& folder, frondMachine::Media&
+     if (!writer.finish(table, save.journal)) return false;
+     media.contentGeneration = to;
+     save.generation = to;
+-    save.payloadBytes = info.payloadBytes;
++    save.payloadBytes = info.stored();
+     return true;
+ }
+ 
+@@ -155,19 +176,20 @@ inline bool unsettledSd(const std::filesystem::path& folder, uint32_t kind = fro
+ // journal, and the old journal or copy goes once that copy is in place. Saves never settle one:
+ // replaying it under a live card would change bytes the card's overlay was compared against.
+ inline bool beginSdSave(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
+-                        SdSave& save, uint32_t kind = frondMachine::kindSd, bool writeProtected = false) {
++                        SdSave& save, uint32_t kind = frondMachine::kindSd, bool writeProtected = false,
++                        const StoreIdentity* identity = nullptr) {
+     save = {};
+     save.kind = kind;
+     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
+     if (!unsettledSd(folder, kind) && sdCardBackedBy(sidecar.c_str()) && !sdCardPinned()) {
+-        fillSdMedia(media, inserted, kind, writeProtected);
++        fillSdMedia(media, inserted, kind, writeProtected, identity);
+         frondSdFile::Info info;
+         if (frondMachine::readSdHeader(sidecar, info) == frondMachine::SiblingStatus::ok &&
+             info.version == frondSdFile::versionV2) {
+             return journalSd(folder, media, save);
+         }
+     }
+-    return publishSd(folder, media, inserted, save, writeProtected);
++    return publishSd(folder, media, inserted, save, writeProtected, identity);
+ }
+ 
+ // A save that failed before its .frond was published. A full copy goes; a journal stays, and the
+@@ -221,6 +243,13 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind =
+         return;
+     }
+     FileCardBacking::DiscardGenerations(sidecar);
++    // A classic stick read from a v1 file, or made in this session, runs in RAM until its first
++    // save, then on the v2 file that save wrote, so later saves are journals.
++    if (kind == frondMachine::kindMs && !sdCardFileBacked()) {
++        if (!sdCardAdoptSavedFromRam(sidecar.c_str(), bytes, frondSdFile::headerBytes))
++            std::fprintf(stderr, "frond: the Memory Stick couldn't move onto the saved file; the next save copies it\n");
++        return;
++    }
+     if (frondSdCandidate::liveIn(folder) &&
+         sdCardBackedBy(frondSdCandidate::live().path.c_str()) &&
+         sdCardAdoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes))
+diff --git a/src/uarm/uarm/LogicalMsMedia.h b/src/uarm/uarm/LogicalMsMedia.h
+new file mode 100644
+index 0000000..b5af8a4
+--- /dev/null
++++ b/src/uarm/uarm/LogicalMsMedia.h
+@@ -0,0 +1,334 @@
++#ifndef FROND_LOGICAL_MS_MEDIA_H
++#define FROND_LOGICAL_MS_MEDIA_H
++
++#include "storage/MsLayout.h"
++
++#include <algorithm>
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <functional>
++#include <vector>
++
++// A classic Memory Stick's physical pages kept in the v2 .frondms layout (storage/MsLayout.h):
++// boot blocks, extra bytes and the location map in the side region, block data in logical slots
++// and the spill area. Reads give exactly the bytes a flat physical image would hold. Programs AND
++// into what is there and erases set a block to 0xff, wherever it lives.
++//
++// A block takes a slot when one of its bytes first stops being 0xff: logical slot L when its
++// page 0 claims L and that slot is free, otherwise a spill slot, otherwise a free logical slot of
++// an L nobody claims. When page 0 extra bytes change, or a block is erased, the holder of each L
++// involved is chosen again (frondMsLayout::holderBetter) and moved into slot L, swapping with
++// whatever was there. Slots never run out: there is one for every block but the boot blocks.
++//
++// The bytes go through `read` and `write` on the stored bytes (payload, padding, side region).
++// Not thread safe; the controller calls it from the emulation thread.
++class LogicalMsMedia {
++   public:
++    using Layout = frondMsLayout::Layout;
++    using Claim = frondMsLayout::Claim;
++    using ReadFn = std::function<bool(uint64_t offset, uint64_t length, void* dest)>;
++    using WriteFn = std::function<bool(uint64_t offset, uint64_t length, const void* src)>;
++    static constexpr uint32_t dataBytes = frondMsLayout::dataBytes, extraBytes = frondMsLayout::extraBytes;
++    static constexpr uint32_t recordBytes = dataBytes + extraBytes;
++
++    // Reads the map and page 0 extra bytes. False when the map doesn't fit the layout.
++    bool Open(const Layout& layout, ReadFn read, WriteFn write) {
++        layout_ = layout;
++        read_ = std::move(read);
++        write_ = std::move(write);
++        return Reload();
++    }
++    void Close() {
++        read_ = {};
++        write_ = {};
++        map_.clear();
++        owner_.clear();
++        page0_.clear();
++    }
++    bool IsOpen() const { return bool(read_); }
++    const Layout& Shape() const { return layout_; }
++
++    // After the stored bytes changed underneath, as a checkpoint restore does.
++    bool Reload() {
++        const auto& l = layout_;
++        std::vector<uint8_t> raw(size_t(4) * l.blocks);
++        std::vector<uint8_t> extras(size_t(l.Pages()) * extraBytes);
++        if (!read_(l.MapAt(), raw.size(), raw.data()) || !read_(l.ExtrasAt(), extras.size(), extras.data()))
++            return false;
++        std::vector<uint32_t> map(l.blocks);
++        std::vector<int32_t> owner(l.Slots(), -1);
++        std::vector<std::array<uint8_t, 4>> page0(l.blocks);
++        for (uint32_t b = 0; b < l.blocks; ++b) {
++            map[b] = frondSdFile::get32(raw.data() + 4 * b);
++            std::memcpy(page0[b].data(), extras.data() + size_t(b) * l.pagesPerBlock * extraBytes, 4);
++            if (b < 2) {
++                if (map[b] != frondMsLayout::bootSlot) return false;
++                continue;
++            }
++            if (map[b] == frondMsLayout::erasedSlot) continue;
++            const uint32_t slot = SlotIndex(map[b]);
++            if (slot >= l.Slots() || owner[slot] >= 0) return false;
++            owner[slot] = int32_t(b);
++        }
++        map_ = std::move(map);
++        owner_ = std::move(owner);
++        page0_ = std::move(page0);
++        return true;
++    }
++
++    bool Read(uint32_t block, uint32_t page, uint8_t* record) const {
++        if (!read_(layout_.ExtraAt(block, page), extraBytes, record + dataBytes)) return false;
++        if (block < 2) return read_(layout_.BootPageAt(block, page), dataBytes, record);
++        if (map_[block] == frondMsLayout::erasedSlot) {
++            std::memset(record, 0xff, dataBytes);
++            return true;
++        }
++        return read_(layout_.SlotAt(SlotIndex(map_[block])) + uint64_t(page) * dataBytes, dataBytes, record);
++    }
++
++    // Flash rules: the result is what is there AND `incoming`, for the data, the extra bytes or
++    // both. `changed` says whether any stored byte changed.
++    bool Program(uint32_t block, uint32_t page, const uint8_t* incoming, bool data, bool extra, bool& changed) {
++        changed = false;
++        if (!data && !extra) return true;
++        uint8_t current[recordBytes], result[recordBytes];
++        if (!Read(block, page, current)) return false;
++        std::memcpy(result, current, recordBytes);
++        if (data)
++            for (unsigned i = 0; i < dataBytes; ++i) result[i] &= incoming[i];
++        if (extra)
++            for (unsigned i = dataBytes; i < recordBytes; ++i) result[i] &= incoming[i];
++        const bool dataChanged = std::memcmp(result, current, dataBytes) != 0;
++        const bool extraChanged = std::memcmp(result + dataBytes, current + dataBytes, extraBytes) != 0;
++        if (!dataChanged && !extraChanged) return true;
++        changed = true;
++        if (extraChanged && !write_(layout_.ExtraAt(block, page), extraBytes, result + dataBytes)) return false;
++        if (block < 2) return !dataChanged || write_(layout_.BootPageAt(block, page), dataBytes, result);
++        const Claim before = ClaimOf(block);
++        if (page == 0) std::memcpy(page0_[block].data(), result + dataBytes, 4);
++        const bool taking = map_[block] == frondMsLayout::erasedSlot;
++        if (taking && !Take(block)) return false;
++        if (dataChanged &&
++            !write_(layout_.SlotAt(SlotIndex(map_[block])) + uint64_t(page) * dataBytes, dataBytes, result))
++            return false;
++        const Claim after = ClaimOf(block);
++        if (taking) return Rebalance(after.logical);
++        if (before.logical == after.logical && before.updating == after.updating) return true;
++        return Rebalance(before.logical) && Rebalance(after.logical);
++    }
++
++    bool Erase(uint32_t block, bool& changed) {
++        changed = false;
++        const auto& l = layout_;
++        std::vector<uint8_t> blank(size_t(l.pagesPerBlock) * extraBytes, 0xff);
++        if (block < 2) {
++            std::vector<uint8_t> current(blank.size()), data(l.BlockBytes());
++            if (!read_(l.ExtraAt(block, 0), current.size(), current.data()) ||
++                !read_(l.BootPageAt(block, 0), data.size(), data.data()))
++                return false;
++            if (current == blank && std::all_of(data.begin(), data.end(), [](uint8_t b) { return b == 0xff; }))
++                return true;
++            changed = true;
++            std::fill(data.begin(), data.end(), 0xff);
++            return write_(l.ExtraAt(block, 0), blank.size(), blank.data()) &&
++                   write_(l.BootPageAt(block, 0), data.size(), data.data());
++        }
++        if (map_[block] == frondMsLayout::erasedSlot) {
++            // A block with no slot has 0xff data; only a damaged file leaves it extra bytes.
++            std::vector<uint8_t> current(blank.size());
++            if (!read_(l.ExtraAt(block, 0), current.size(), current.data())) return false;
++            if (current == blank) return true;
++            changed = true;
++            page0_[block].fill(0xff);
++            return write_(l.ExtraAt(block, 0), blank.size(), blank.data());
++        }
++        changed = true;
++        const Claim before = ClaimOf(block);
++        owner_[SlotIndex(map_[block])] = -1;
++        if (!SetMap(block, frondMsLayout::erasedSlot) || !write_(l.ExtraAt(block, 0), blank.size(), blank.data()))
++            return false;
++        page0_[block].fill(0xff);
++        return Rebalance(before.logical);
++    }
++
++    // The block in logical slot L when it claims L, or -1. That block's data is L's.
++    int32_t Holder(uint32_t logical) const {
++        if (logical >= layout_.UserBlocks()) return -1;
++        const int32_t b = owner_[logical];
++        return b >= 0 && ClaimOf(uint32_t(b)).logical == int32_t(logical) ? b : -1;
++    }
++    uint32_t MapEntry(uint32_t block) const { return map_[block]; }
++
++    // Every claimed L in its slot, held by the block the driver would keep, and the map and
++    // owners agreeing. For tests.
++    bool Consistent() const {
++        const auto& l = layout_;
++        for (uint32_t b = 2; b < l.blocks; ++b) {
++            if (map_[b] == frondMsLayout::erasedSlot) continue;
++            if (owner_[SlotIndex(map_[b])] != int32_t(b)) return false;
++        }
++        for (uint32_t L = 0; L < l.UserBlocks(); ++L) {
++            const int32_t best = Best(L);
++            if (best >= 0 && owner_[L] != best) return false;
++        }
++        return true;
++    }
++
++    // Lays out a flat physical image (blocks x pages x 512+9) in `stored`, which must be
++    // StoredBytes() long. Used for v1 files and imports.
++    static bool Build(const Layout& l, const uint8_t* physical, std::vector<uint8_t>& stored) {
++        stored.assign(size_t(l.StoredBytes()), 0);
++        auto record = [&](uint32_t b, uint32_t p) { return physical + (size_t(b) * l.pagesPerBlock + p) * recordBytes; };
++        for (uint32_t b = 0; b < l.blocks; ++b)
++            for (uint32_t p = 0; p < l.pagesPerBlock; ++p)
++                std::memcpy(stored.data() + l.ExtraAt(b, p), record(b, p) + dataBytes, extraBytes);
++        for (uint32_t b = 0; b < 2; ++b)
++            for (uint32_t p = 0; p < l.pagesPerBlock; ++p)
++                std::memcpy(stored.data() + l.BootPageAt(b, p), record(b, p), dataBytes);
++        std::vector<uint32_t> map(l.blocks, frondMsLayout::erasedSlot);
++        map[0] = map[1] = frondMsLayout::bootSlot;
++        std::vector<int32_t> owner(l.Slots(), -1);
++        std::vector<uint8_t> written(l.blocks);
++        for (uint32_t b = 2; b < l.blocks; ++b) {
++            const uint8_t* first = record(b, 0);
++            const size_t n = size_t(l.pagesPerBlock) * recordBytes;
++            written[b] = !std::all_of(first, first + n, [](uint8_t v) { return v == 0xff; });
++        }
++        auto claimOf = [&](uint32_t b) { return frondMsLayout::claimOf(l, b, record(b, 0) + dataBytes); };
++        // Holders into their logical slots first, then everything else into spill and free slots.
++        std::vector<int32_t> best(l.UserBlocks(), -1);
++        for (uint32_t b = 2; b < l.blocks; ++b) {
++            if (!written[b]) continue;
++            const auto c = claimOf(b);
++            if (c.logical < 0) continue;
++            int32_t& h = best[size_t(c.logical)];
++            if (h < 0 || frondMsLayout::holderBetter(b, c, uint32_t(h), claimOf(uint32_t(h)))) h = int32_t(b);
++        }
++        for (uint32_t L = 0; L < l.UserBlocks(); ++L)
++            if (best[L] >= 0) {
++                owner[L] = best[L];
++                map[size_t(best[L])] = L;
++            }
++        uint32_t spill = l.UserBlocks(), unused = 0;
++        for (uint32_t b = 2; b < l.blocks; ++b) {
++            if (!written[b] || map[b] != frondMsLayout::erasedSlot) continue;
++            uint32_t slot;
++            if (spill < l.Slots()) {
++                slot = spill++;
++            } else {
++                while (unused < l.UserBlocks() && owner[unused] >= 0) ++unused;
++                if (unused == l.UserBlocks()) return false;
++                slot = unused;
++            }
++            owner[slot] = int32_t(b);
++            map[b] = SlotEntry(l, slot);
++        }
++        for (uint32_t b = 2; b < l.blocks; ++b) {
++            frondSdFile::put32(stored.data() + l.MapAt() + 4 * b, map[b]);
++            if (map[b] == frondMsLayout::erasedSlot) continue;
++            const uint64_t at = l.SlotAt(SlotIndex(l, map[b]));
++            for (uint32_t p = 0; p < l.pagesPerBlock; ++p)
++                std::memcpy(stored.data() + at + uint64_t(p) * dataBytes, record(b, p), dataBytes);
++        }
++        frondSdFile::put32(stored.data() + l.MapAt(), map[0]);
++        frondSdFile::put32(stored.data() + l.MapAt() + 4, map[1]);
++        return true;
++    }
++
++    static uint32_t SlotIndex(const Layout& l, uint32_t entry) {
++        return entry & frondMsLayout::spillBit ? l.UserBlocks() + (entry & ~frondMsLayout::spillBit) : entry;
++    }
++    static uint32_t SlotEntry(const Layout& l, uint32_t slot) {
++        return slot < l.UserBlocks() ? slot : frondMsLayout::spillBit | (slot - l.UserBlocks());
++    }
++
++   private:
++    uint32_t SlotIndex(uint32_t entry) const { return SlotIndex(layout_, entry); }
++
++    Claim ClaimOf(uint32_t block) const {
++        if (block < 2 || map_[block] == frondMsLayout::erasedSlot) return {};
++        return frondMsLayout::claimOf(layout_, block, page0_[block].data());
++    }
++
++    // The block the driver would keep for L, or -1 when nothing claims it.
++    int32_t Best(uint32_t logical) const {
++        const uint32_t segment = layout_.SegmentOfLogical(logical);
++        const uint32_t first = std::max<uint32_t>(2, segment * frondMsLayout::segmentBlocks);
++        const uint32_t end = std::min(layout_.blocks, (segment + 1) * frondMsLayout::segmentBlocks);
++        int32_t best = -1;
++        Claim bestClaim;
++        for (uint32_t b = first; b < end; ++b) {
++            const Claim c = ClaimOf(b);
++            if (c.logical != int32_t(logical)) continue;
++            if (best < 0 || frondMsLayout::holderBetter(b, c, uint32_t(best), bestClaim)) {
++                best = int32_t(b);
++                bestClaim = c;
++            }
++        }
++        return best;
++    }
++
++    bool SetMap(uint32_t block, uint32_t entry) {
++        uint8_t raw[4];
++        frondSdFile::put32(raw, entry);
++        if (!write_(layout_.MapAt() + 4ull * block, 4, raw)) return false;
++        map_[block] = entry;
++        return true;
++    }
++
++    bool Place(uint32_t block, uint32_t slot) {
++        owner_[slot] = int32_t(block);
++        return SetMap(block, SlotEntry(layout_, slot));
++    }
++
++    // A free spill slot, then a free logical slot (one no claimed L uses), or Slots().
++    uint32_t FreeSlot() const {
++        const auto& l = layout_;
++        for (uint32_t s = l.UserBlocks(); s < l.Slots(); ++s)
++            if (owner_[s] < 0) return s;
++        for (uint32_t s = 0; s < l.UserBlocks(); ++s)
++            if (owner_[s] < 0) return s;
++        return l.Slots();
++    }
++
++    // Gives an erased block a slot, all 0xff, before its first write.
++    bool Take(uint32_t block) {
++        const Claim c = frondMsLayout::claimOf(layout_, block, page0_[block].data());
++        uint32_t slot = c.logical >= 0 && owner_[size_t(c.logical)] < 0 ? uint32_t(c.logical) : FreeSlot();
++        if (slot >= layout_.Slots()) return false;
++        std::vector<uint8_t> blank(layout_.BlockBytes(), 0xff);
++        return write_(layout_.SlotAt(slot), blank.size(), blank.data()) && Place(block, slot);
++    }
++
++    // Puts L's holder into slot L. What was there takes the holder's old slot.
++    bool Rebalance(int32_t logical) {
++        if (logical < 0) return true;
++        const int32_t best = Best(uint32_t(logical));
++        const uint32_t target = uint32_t(logical);
++        if (best < 0 || owner_[target] == best) return true;
++        const uint32_t from = SlotIndex(map_[size_t(best)]);
++        const auto& l = layout_;
++        std::vector<uint8_t> moving(l.BlockBytes());
++        if (!read_(l.SlotAt(from), moving.size(), moving.data())) return false;
++        const int32_t other = owner_[target];
++        if (other >= 0) {
++            std::vector<uint8_t> displaced(l.BlockBytes());
++            if (!read_(l.SlotAt(target), displaced.size(), displaced.data()) ||
++                !write_(l.SlotAt(from), displaced.size(), displaced.data()) || !Place(uint32_t(other), from))
++                return false;
++        } else {
++            owner_[from] = -1;
++        }
++        return write_(l.SlotAt(target), moving.size(), moving.data()) && Place(uint32_t(best), target);
++    }
++
++    Layout layout_{};
++    ReadFn read_;
++    WriteFn write_;
++    std::vector<uint32_t> map_;
++    std::vector<int32_t> owner_;
++    std::vector<std::array<uint8_t, 4>> page0_;
++};
++
++#endif
+diff --git a/src/uarm/uarm/MachineFolder.h b/src/uarm/uarm/MachineFolder.h
+index 00e1e0a..6bced3f 100644
+--- a/src/uarm/uarm/MachineFolder.h
++++ b/src/uarm/uarm/MachineFolder.h
+@@ -3,6 +3,7 @@
+ 
+ #include "FrondSdImage.h"
+ #include "MemoryStickGeometry.h"
++#include "storage/MsLayout.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -32,11 +33,17 @@ constexpr size_t nameBytes = 32, identityBytes = 32;
+ constexpr size_t descriptorBytesV7 = 92, descriptorBytes = 100;
+ constexpr const char* sdJournalPrefix = "sd.frondsd.journal-";
+ constexpr const char* msProJournalPrefix = "ms.frondmsp.journal-";
++constexpr const char* msJournalPrefix = "ms.frondms.journal-";
+ // Cards kept as .frondsd sidecars with journals and generations: SD cards and Memory Stick Pros.
+ inline bool fileCardKind(uint32_t kind) { return kind == kindSd || kind == kindMsPro; }
+-inline const char* fileCardSibling(uint32_t kind) { return kind == kindMsPro ? msProSibling : sdSibling; }
++// Cards in the card store (sdcard.h), saved through the same journals: those, and a classic
++// Memory Stick in a v2 .frondms.
++inline bool storeCardKind(uint32_t kind) { return fileCardKind(kind) || kind == kindMs; }
++inline const char* fileCardSibling(uint32_t kind) {
++    return kind == kindMsPro ? msProSibling : kind == kindMs ? msSibling : sdSibling;
++}
+ inline const char* fileCardJournalPrefix(uint32_t kind) {
+-    return kind == kindMsPro ? msProJournalPrefix : sdJournalPrefix;
++    return kind == kindMsPro ? msProJournalPrefix : kind == kindMs ? msJournalPrefix : sdJournalPrefix;
+ }
+ // The 128 MB stick, the only size before v7 sessions and the one v6 sessions embed.
+ constexpr uint64_t msLogicalBytes = frondMsGeometry::largest.LogicalBytes();
+@@ -49,6 +56,7 @@ inline bool ignoredName(std::string_view name) {
+            name.find(".frondms.tmp-") != std::string_view::npos ||
+            name.find(".frondsd.journal-") != std::string_view::npos ||
+            name.find(".frondmsp.journal-") != std::string_view::npos ||
++           name.find(".frondms.journal-") != std::string_view::npos ||
+            name.find(".gen-") != std::string_view::npos;
+ }
+ 
+@@ -72,10 +80,26 @@ struct Media {
+     std::array<uint8_t, identityBytes> identity{};
+     uint64_t logicalSize{};
+     uint64_t physicalSize{};
+-    // SD and MS Pro: matches the .frondsd v2 header, 0 for v1. Classic MS: the .frondms change counter.
++    // The card file's v2 header generation, 0 for an SD or Pro v1 file. For a classic stick in a v1
++    // .frondms, its change counter.
+     uint64_t contentGeneration{};
+ };
+ 
++// The bytes a card keeps in the card store: the payload, or a classic stick's v2 stored bytes.
++inline uint64_t storeBytes(const Media& media) {
++    if (media.kind != kindMs) return media.physicalSize;
++    const auto* g = frondMsGeometry::byPhysicalBytes(media.physicalSize);
++    const auto* l = g ? frondMsLayout::byShape(g->blocks, g->pagesPerBlock) : nullptr;
++    return l ? l->StoredBytes() : 0;
++}
++// What the container header's payload is for the card: the logical region for a classic stick.
++inline uint64_t containerPayload(const Media& media) {
++    if (media.kind != kindMs) return media.physicalSize;
++    const auto* g = frondMsGeometry::byPhysicalBytes(media.physicalSize);
++    const auto* l = g ? frondMsLayout::byShape(g->blocks, g->pagesPerBlock) : nullptr;
++    return l ? l->PayloadBytes() : 0;
++}
++
+ inline bool validMedia(const Media& media) {
+     if (media.kind == kindSd)
+         return media.name == sdSibling && media.logicalSize == media.physicalSize &&
+@@ -195,7 +219,8 @@ inline bool readBytes(const std::filesystem::path& path, std::vector<uint8_t>& b
+     return !n || bool(in.read(reinterpret_cast<char*>(bytes.data()), n));
+ }
+ 
+-// The header must name the geometry of physicalSize. `changes` gets the change counter at 32.
++// A v1 .frondms header. It must name the geometry of physicalSize. `changes` gets the change
++// counter at 32.
+ inline bool msHeaderLooksRight(const std::filesystem::path& path, uint64_t physicalSize, uint64_t* changes = nullptr) {
+     std::ifstream in(path, std::ios::binary);
+     uint8_t header[frondSdFile::headerBytes];
+@@ -214,19 +239,30 @@ inline bool msHeaderLooksRight(const std::filesystem::path& path, uint64_t physi
+     return true;
+ }
+ 
+-// Reads the header of an SD sidecar, and the chunk table of a v2 one, checking the header CRC.
++// 1 or 2 for a .frondms that says it is that version, else 0.
++inline uint32_t msFileVersion(const std::filesystem::path& path) {
++    std::ifstream in(path, std::ios::binary);
++    uint8_t header[12];
++    if (!in || !in.read(reinterpret_cast<char*>(header), sizeof(header)) || std::memcmp(header, "FRONDMS\0", 8))
++        return 0;
++    const uint32_t version = frondSdFile::get32(header + 8);
++    return version == 1 || version == 2 ? version : 0;
++}
++
++// Reads the header of a card store sidecar (SD, Pro or a v2 classic stick), and the chunk table of a v2 one, checking the header CRC.
+ inline SiblingStatus readSdHeader(const std::filesystem::path& path, frondSdFile::Info& info,
+                                   std::vector<uint32_t>* table = nullptr) {
+     std::ifstream in(path, std::ios::binary);
+     uint8_t header[frondSdFile::headerBytes];
+     if (!in || !in.read(reinterpret_cast<char*>(header), sizeof(header))) return SiblingStatus::malformed;
+-    if (!frondSdFile::parseHeader(header, info)) return SiblingStatus::malformed;
++    if (!frondSdFile::parseContainer(header, info) || (info.sideBytes && !frondMsLayout::of(info)))
++        return SiblingStatus::malformed;
+     in.seekg(0, std::ios::end);
+     const auto n = in.tellg();
+     if (n < 0 || uint64_t(n) != info.fileBytes()) return SiblingStatus::malformed;
+     if (info.version == frondSdFile::versionV2) {
+-        std::vector<uint8_t> bytes(static_cast<size_t>(4 * frondSdFile::chunkCount(info.payloadBytes)));
+-        in.seekg(std::streamoff(frondSdFile::headerBytes + info.payloadBytes));
++        std::vector<uint8_t> bytes(static_cast<size_t>(4 * info.chunks()));
++        in.seekg(std::streamoff(frondSdFile::headerBytes + info.stored()));
+         if (!in.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size())))
+             return SiblingStatus::malformed;
+         std::vector<uint32_t> parsed;
+@@ -245,7 +281,7 @@ inline SiblingStatus checkSdPayload(const std::filesystem::path& path, const fro
+     uint32_t got = 0;
+     frondSdFile::ChunkCrcs chunks;
+     std::vector<uint8_t> chunk(65536);
+-    uint64_t left = info.payloadBytes;
++    uint64_t left = info.stored();
+     while (left) {
+         const auto want = std::min(left, uint64_t(chunk.size()));
+         if (!in.read(reinterpret_cast<char*>(chunk.data()), std::streamsize(want))) return SiblingStatus::malformed;
+@@ -264,7 +300,8 @@ inline SiblingStatus checkSdSibling(const std::filesystem::path& path, const Med
+     std::vector<uint32_t> table;
+     const auto header = readSdHeader(path, info, &table);
+     if (header != SiblingStatus::ok) return header;
+-    if (info.payloadBytes != card.physicalSize || card.logicalSize != card.physicalSize)
++    if (info.classic != (card.kind == kindMs) || info.payloadBytes != containerPayload(card) ||
++        info.stored() != storeBytes(card) || (card.kind != kindMs && card.logicalSize != card.physicalSize))
+         return SiblingStatus::mismatch;
+     if (info.generation != card.contentGeneration) return SiblingStatus::mismatch;
+     if (info.version == frondSdFile::versionV2 && !full) return SiblingStatus::ok;
+@@ -291,6 +328,11 @@ inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const st
+             const auto path = folder / msSibling;
+             std::error_code ec;
+             if (!std::filesystem::is_regular_file(path, ec)) return SiblingStatus::missing;
++            if (msFileVersion(path) == 2) {
++                const auto status = checkSdSibling(path, card, full);
++                if (status != SiblingStatus::ok) return status;
++                continue;
++            }
+             const auto size = std::filesystem::file_size(path, ec);
+             if (ec) return SiblingStatus::malformed;
+             if (size != frondSdFile::headerBytes + card.physicalSize) return SiblingStatus::mismatch;
+diff --git a/src/uarm/uarm/MemoryStickImage.h b/src/uarm/uarm/MemoryStickImage.h
+index 44488c6..6b53e47 100644
+--- a/src/uarm/uarm/MemoryStickImage.h
++++ b/src/uarm/uarm/MemoryStickImage.h
+@@ -1,6 +1,8 @@
+ #ifndef FROND_MEMORY_STICK_IMAGE_H
+ #define FROND_MEMORY_STICK_IMAGE_H
+ #include "MemoryStickMedia.h"
++#include "storage/Container.h"
++#include "storage/MsLayout.h"
+ #include <algorithm>
+ #include <cstring>
+ #include <filesystem>
+@@ -28,20 +30,23 @@ inline const Geometry* headerGeometry(const uint8_t* h) {
+     for(unsigned i=changesAt+8;i<64;++i)if(h[i])return nullptr;
+     return frondMsGeometry::byShape(get32(h+12),get32(h+16));
+ }
+-// Both boot blocks must carry the attributes the TG50 driver checks, for the image's own size.
+-inline bool validBoot(const std::vector<uint8_t>& image) {
+-    const auto* g=frondMsGeometry::byPhysicalBytes(image.size());
+-    if(!g)return false;
++// Both boot blocks must carry the attributes the TG50 driver checks, for the stick's own size.
++// `boot` is physical blocks 0 and 1, pages of 512+9 bytes.
++inline bool validBootBlocks(const uint8_t* boot,const Geometry& g) {
+     for(unsigned block=0;block<2;++block){
+-        const auto* b=image.data()+size_t(block)*g->pagesPerBlock*MemoryStickMedia::recordBytes;
++        const auto* b=boot+size_t(block)*g.pagesPerBlock*MemoryStickMedia::recordBytes;
+         if(b[0]||b[1]!=1||b[2]!=1||b[3]!=0||b[0xbc]!=2||b[0x178]!=1||
+            b[0x170]||b[0x171]||b[0x172]||b[0x173]||b[0x174]||b[0x175]||b[0x176]||!b[0x177]||
+-           b[0x1a0]!=1||b[0x1a1]!=2||getBe16(b+0x1a2)!=g->BlockKib()||getBe16(b+0x1a4)!=g->blocks||
+-           getBe16(b+0x1a6)!=g->Effective()||b[0x1a8]!=2||b[0x1a9]||b[0x1aa]!=16||b[0x1d6]!=1||
++           b[0x1a0]!=1||b[0x1a1]!=2||getBe16(b+0x1a2)!=g.BlockKib()||getBe16(b+0x1a4)!=g.blocks||
++           getBe16(b+0x1a6)!=g.Effective()||b[0x1a8]!=2||b[0x1a9]||b[0x1aa]!=16||b[0x1d6]!=1||
+            !(b[512]&0x80)||(b[513]&4))return false;
+     }
+     return true;
+ }
++inline bool validBoot(const std::vector<uint8_t>& image) {
++    const auto* g=frondMsGeometry::byPhysicalBytes(image.size());
++    return g&&validBootBlocks(image.data(),*g);
++}
+ // A blank stick of one of the classic sizes, with boot blocks at physical blocks 0 and 1.
+ inline std::vector<uint8_t> create(const Geometry& g=frondMsGeometry::largest) {
+     std::vector<uint8_t> image(size_t(g.PhysicalBytes()),0xff);
+@@ -88,5 +93,100 @@ inline bool decodeFile(const std::filesystem::path& path,std::vector<uint8_t>& p
+     if(get32(h+28)!=crc32(candidate.data(),candidate.size())||!validBoot(candidate))return false;
+     physical.swap(candidate);return true;
+ }
++
++// v2 .frondms: the storage container with magic "FRONDMS\0" over the LogicalMsMedia layout.
++inline const frondMsLayout::Layout* layoutOf(const Geometry& g){return frondMsLayout::byShape(g.blocks,g.pagesPerBlock);}
++inline const Geometry* geometryOf(const frondMsLayout::Layout& l){return frondMsGeometry::byShape(l.blocks,l.pagesPerBlock);}
++// The geometry of a v2 header, or nullptr.
++inline const Geometry* v2Geometry(const uint8_t* h,frondSdFile::Info* infoOut=nullptr) {
++    frondSdFile::Info info;
++    if(!frondSdFile::parseContainer(h,info)||!info.classic)return nullptr;
++    const auto* l=frondMsLayout::of(info);
++    if(!l)return nullptr;
++    if(infoOut)*infoOut=info;
++    return geometryOf(*l);
++}
++// The stored bytes (payload, padding, side region) of a flat physical image.
++inline bool storedOf(const std::vector<uint8_t>& physical,std::vector<uint8_t>& stored) {
++    const auto* g=frondMsGeometry::byPhysicalBytes(physical.size());
++    const auto* l=g?layoutOf(*g):nullptr;
++    return l&&LogicalMsMedia::Build(*l,physical.data(),stored);
++}
++// Reads a stick through LogicalMsMedia over `read` on its stored bytes.
++inline bool openStored(LogicalMsMedia& media,const Geometry& g,LogicalMsMedia::ReadFn read) {
++    const auto* l=layoutOf(g);
++    return l&&media.Open(*l,std::move(read),[](uint64_t,uint64_t,const void*){return false;});
++}
++inline bool physicalOf(const LogicalMsMedia& media,const Geometry& g,std::vector<uint8_t>& physical) {
++    std::vector<uint8_t> out(size_t(g.PhysicalBytes()));
++    for(uint32_t b=0;b<g.blocks;++b)for(uint32_t p=0;p<g.pagesPerBlock;++p)
++        if(!media.Read(b,p,out.data()+(size_t(b)*g.pagesPerBlock+p)*MemoryStickMedia::recordBytes))return false;
++    physical.swap(out);return true;
++}
++// The logical image other tools take: user blocks x block bytes, L's data from its holder, zeros
++// for an L nobody holds (as the Sony driver reads one).
++inline bool logicalOf(const LogicalMsMedia& media,std::vector<uint8_t>& image) {
++    const auto& l=media.Shape();
++    std::vector<uint8_t> out(size_t(l.PayloadBytes()),0);
++    uint8_t record[MemoryStickMedia::recordBytes];
++    for(uint32_t L=0;L<l.UserBlocks();++L){
++        const int32_t holder=media.Holder(L);
++        if(holder<0)continue;
++        for(uint32_t p=0;p<l.pagesPerBlock;++p){
++            if(!media.Read(uint32_t(holder),p,record))return false;
++            std::memcpy(out.data()+L*l.BlockBytes()+uint64_t(p)*512,record,512);
++        }
++    }
++    image.swap(out);return true;
++}
++// The smallest classic size whose logical image holds `bytes`, a multiple of 512.
++inline const Geometry* geometryForLogical(uint64_t bytes) {
++    if(!bytes||bytes%512)return nullptr;
++    for(const auto& l:frondMsLayout::layouts)if(bytes<=l.PayloadBytes())return geometryOf(l);
++    return nullptr;
++}
++// A physical image of a logical one: fresh boot blocks, and L in physical block order (each L at
++// its home block), every page's extra bytes f8 ff L ff ff ff ff ff as the Sony driver writes a
++// new block. A short image is padded with zeros.
++inline std::vector<uint8_t> fromLogical(const uint8_t* image,uint64_t bytes,const Geometry& g) {
++    auto physical=create(g);
++    const auto& l=*layoutOf(g);
++    for(uint32_t L=0;L<l.UserBlocks();++L){
++        const uint32_t block=l.Home(L);
++        for(uint32_t p=0;p<g.pagesPerBlock;++p){
++            auto* r=physical.data()+(size_t(block)*g.pagesPerBlock+p)*MemoryStickMedia::recordBytes;
++            const uint64_t at=L*l.BlockBytes()+uint64_t(p)*512;
++            std::memset(r,0,512);
++            if(at<bytes)std::memcpy(r,image+at,size_t(std::min<uint64_t>(512,bytes-at)));
++            r[512]=0xf8;r[513]=0xff;be16(r+514,uint16_t(L));std::fill_n(r+516,5,0xff);
++        }
++    }
++    return physical;
++}
++// A v1 or v2 .frondms as a flat physical image. v2 is read whole; its CRCs are checked.
++inline bool readPhysical(const std::filesystem::path& path,std::vector<uint8_t>& physical) {
++    std::ifstream in(path,std::ios::binary);
++    uint8_t h[headerBytes];
++    if(!in||!in.read(reinterpret_cast<char*>(h),headerBytes))return false;
++    if(get32(h+8)==1)return decodeFile(path,physical);
++    frondSdFile::Info info;
++    const auto* g=v2Geometry(h,&info);
++    if(!g)return false;
++    std::vector<uint8_t> file(size_t(info.fileBytes()));
++    in.seekg(0);
++    if(!in.read(reinterpret_cast<char*>(file.data()),std::streamsize(file.size()))||in.peek()!=std::char_traits<char>::eof())return false;
++    std::vector<uint32_t> table;
++    if(!frondSdFile::readTable(file.data(),file.data()+headerBytes+info.stored(),size_t(4*info.chunks()),info,table))return false;
++    frondSdFile::ChunkCrcs crcs;crcs.add(file.data()+headerBytes,size_t(info.stored()));
++    if(crcs.table()!=table)return false;
++    LogicalMsMedia media;
++    const auto* stored=file.data()+headerBytes;const auto size=info.stored();
++    if(!openStored(media,*g,[stored,size](uint64_t off,uint64_t n,void* dest){
++        if(off>size||n>size-off)return false;
++        std::memcpy(dest,stored+off,size_t(n));return true;}))return false;
++    std::vector<uint8_t> candidate;
++    if(!physicalOf(media,*g,candidate)||!validBoot(candidate))return false;
++    physical.swap(candidate);return true;
++}
+ }
+ #endif
+diff --git a/src/uarm/uarm/MemoryStickMedia.h b/src/uarm/uarm/MemoryStickMedia.h
+index 2220a12..8681301 100644
+--- a/src/uarm/uarm/MemoryStickMedia.h
++++ b/src/uarm/uarm/MemoryStickMedia.h
+@@ -2,18 +2,21 @@
+ #define FROND_MEMORY_STICK_MEDIA_H
+ 
+ #include "CardBacking.h"
++#include "LogicalMsMedia.h"
+ #include "MemoryStickGeometry.h"
+ 
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
++#include <functional>
+ #include <memory>
+ #include <vector>
+ 
+-// Physical classic flash, 4 to 128 MB. The card/controller layer supplies boot blocks and FTL metadata.
+-// This is a page-data/extra-byte stream, with no host ECC bytes or FAT-sector translation.
+-// The geometry comes from the image size at attach.
++// Physical classic flash, 4 to 128 MB: pages of 512 data bytes and 9 extra bytes, with no host
++// ECC or FAT-sector translation. The card/controller layer supplies boot blocks and FTL metadata.
++// The pages are kept in the v2 .frondms layout (LogicalMsMedia), on stored bytes that are either
++// the media's own RAM (Attach of a flat physical image) or a card store (AttachStore).
+ class MemoryStickMedia {
+    public:
+     using Geometry = frondMsGeometry::Geometry;
+@@ -23,14 +26,29 @@ class MemoryStickMedia {
+     using Page = std::array<uint8_t, recordBytes>;
+     enum class Result { ok, absent, address, writeProtected, invalidImage };
+ 
++    // Stored bytes somewhere else, such as the card store a session saves. `release` runs when
++    // the stick is detached.
++    struct Store {
++        LogicalMsMedia::ReadFn read;
++        LogicalMsMedia::WriteFn write;
++        std::function<std::shared_ptr<const CardSnapshot>()> snapshot;
++        std::function<bool(const std::shared_ptr<const CardSnapshot>&)> restore;
++        std::function<void()> release;
++    };
++
+     MemoryStickMedia() = default;
++    ~MemoryStickMedia() { Detach(); }
+     MemoryStickMedia(const MemoryStickMedia&) = delete;
+     MemoryStickMedia& operator=(const MemoryStickMedia&) = delete;
+     MemoryStickMedia(MemoryStickMedia&&) = delete;
+     MemoryStickMedia& operator=(MemoryStickMedia&&) = delete;
+ 
++    static const frondMsLayout::Layout* LayoutOf(const Geometry& g) {
++        return frondMsLayout::byShape(g.blocks, g.pagesPerBlock);
++    }
++
+    public:
+-    // Pin of the backing generation. Valid only on the same attachment.
++    // Pin of the stored bytes. Valid only on the same attachment.
+     struct Checkpoint {
+         std::shared_ptr<const CardSnapshot> pin;
+         bool writeProtected{};
+@@ -38,96 +56,119 @@ class MemoryStickMedia {
+ 
+     Result Attach(const std::vector<uint8_t>& image, bool protect) {
+         if (!frondMsGeometry::byPhysicalBytes(image.size())) return Result::invalidImage;
+-        return AttachOwned(std::vector<uint8_t>(image), protect);
++        return AttachOwned(image.data(), image.size(), protect);
++    }
++    Result Attach(std::vector<uint8_t>&& image, bool protect) {
++        const auto result = AttachOwned(image.data(), image.size(), protect);
++        if (result == Result::ok) std::vector<uint8_t>().swap(image);
++        return result;
++    }
++    // Stored bytes already in the v2 layout for `geometry`.
++    Result AttachStore(const Geometry& geometry, Store store, bool protect) {
++        const auto* layout = LayoutOf(geometry);
++        if (!layout || !store.read || !store.write || !store.snapshot || !store.restore) return Result::invalidImage;
++        LogicalMsMedia logical;
++        if (!logical.Open(*layout, store.read, store.write)) return Result::invalidImage;
++        Detach();
++        store_ = std::move(store);
++        logical_ = std::move(logical);
++        geometry_ = geometry;
++        writeProtected_ = protect;
++        return Result::ok;
+     }
+-    Result Attach(std::vector<uint8_t>&& image, bool protect) { return AttachOwned(std::move(image), protect); }
+ 
+     void Detach() {
+-        backing_.reset();
+-        origin_.reset();
++        auto release = std::move(store_.release);
++        logical_.Close();
++        store_ = {};
++        ram_.reset();
+         geometry_ = frondMsGeometry::largest;
+         writeProtected_ = false;
++        changed_ = false;
++        if (release) release();
+     }
+ 
+-    bool Present() const { return bool(backing_); }
+-    // The attached stick's geometry; the 128 MB one while none is attached.
++    bool Present() const { return logical_.IsOpen(); }
++    // On a card store rather than the media's own RAM.
++    bool OnStore() const { return Present() && !ram_; }
++    // The stick's geometry; the 128 MB one while none is attached.
+     const Geometry& Shape() const { return geometry_; }
+     uint32_t Blocks() const { return geometry_.blocks; }
+     uint32_t PagesPerBlock() const { return geometry_.pagesPerBlock; }
+     size_t ImageBytes() const { return size_t(geometry_.PhysicalBytes()); }
+-    bool Dirty() const { return ChangedPages() != 0; }
+-    size_t ChangedPages() const {
+-        if (!backing_ || !origin_) return 0;
+-        size_t n = 0;
+-        backing_->ForEachOverlay([&](uint64_t off, uint64_t len, const uint8_t* data) {
+-            if (len > recordBytes) len = recordBytes;
+-            Page original{};
+-            if (!origin_->Read(off, len, original.data())) return false;
+-            if (std::memcmp(data, original.data(), static_cast<size_t>(len)) != 0) ++n;
+-            return true;
+-        });
+-        return n;
+-    }
++    // Written since it was attached.
++    bool Dirty() const { return changed_; }
+     void SetWriteProtected(bool protect) { writeProtected_ = protect; }
+     bool WriteProtected() const { return writeProtected_; }
++    const LogicalMsMedia& Logical() const { return logical_; }
++
++    // The stored bytes of a stick in the media's own RAM, to move it into a card store.
++    bool CopyStored(std::vector<uint8_t>& out) const {
++        if (!ram_) return false;
++        std::vector<uint8_t> bytes(size_t(ram_->Size()));
++        if (!ram_->Read(0, bytes.size(), bytes.data())) return false;
++        out.swap(bytes);
++        return true;
++    }
+ 
+     Result Read(uint32_t block, uint32_t page, Page& result) const {
+-        uint32_t index;
+-        const auto status = Address(block, page, index);
++        const auto status = Address(block, page);
+         if (status != Result::ok) return status;
+-        if (!backing_->Read(uint64_t(index) * recordBytes, recordBytes, result.data())) return Result::absent;
++        Page candidate;
++        if (!logical_.Read(block, page, candidate.data())) return Result::absent;
++        result = candidate;
+         return Result::ok;
+     }
+ 
+     Result Program(uint32_t block, uint32_t page, const Page& incoming, bool data, bool extra) {
+-        Page result;
+-        const auto status = Read(block, page, result);
++        const auto status = Address(block, page);
+         if (status != Result::ok) return status;
+         if (writeProtected_) return Result::writeProtected;
+-        if (!data && !extra) return Result::ok;
+-        if (data)
+-            for (unsigned i = 0; i < dataBytes; ++i) result[i] &= incoming[i];
+-        if (extra)
+-            for (unsigned i = dataBytes; i < recordBytes; ++i) result[i] &= incoming[i];
+-        const uint32_t index = block * geometry_.pagesPerBlock + page;
+-        if (!backing_->Write(uint64_t(index) * recordBytes, recordBytes, result.data())) return Result::absent;
++        bool changed = false;
++        const bool ok = logical_.Program(block, page, incoming.data(), data, extra, changed);
++        changed_ |= changed;
++        if (!ok) {
++            logical_.Reload();
++            return Result::absent;
++        }
+         return Result::ok;
+     }
+ 
+     Result Erase(uint32_t block) {
+-        uint32_t index;
+-        const auto status = Address(block, 0, index);
++        const auto status = Address(block, 0);
+         if (status != Result::ok) return status;
+         if (writeProtected_) return Result::writeProtected;
+-        auto pin = backing_->Snapshot();
+-        if (!pin) return Result::absent;
+-        Page empty;
+-        empty.fill(0xff);
+-        for (unsigned page = 0; page < geometry_.pagesPerBlock; ++page) {
+-            if (!backing_->Write(uint64_t(index + page) * recordBytes, recordBytes, empty.data())) {
+-                backing_->Restore(*pin);
+-                return Result::absent;
+-            }
++        bool changed = false;
++        const bool ok = logical_.Erase(block, changed);
++        changed_ |= changed;
++        if (!ok) {
++            logical_.Reload();
++            return Result::absent;
+         }
+         return Result::ok;
+     }
+ 
++    // The flat physical image, block by block and page by page.
+     Result CopyImage(std::vector<uint8_t>& result) const {
+-        if (!backing_) return Result::absent;
++        if (!Present()) return Result::absent;
+         std::vector<uint8_t> candidate(ImageBytes());
+-        if (!backing_->Read(0, candidate.size(), candidate.data())) return Result::absent;
++        for (uint32_t b = 0; b < geometry_.blocks; ++b)
++            for (uint32_t p = 0; p < geometry_.pagesPerBlock; ++p)
++                if (!logical_.Read(b, p, candidate.data() + (size_t(b) * geometry_.pagesPerBlock + p) * recordBytes))
++                    return Result::absent;
+         result.swap(candidate);
+         return Result::ok;
+     }
+ 
+     Checkpoint SaveCheckpoint() {
+-        if (!backing_) return {};
+-        return {backing_->Snapshot(), writeProtected_};
++        if (!Present()) return {};
++        return {store_.snapshot(), writeProtected_};
+     }
+ 
+     Result RestoreCheckpoint(const Checkpoint& checkpoint) {
+-        if (!backing_) return Result::absent;
+-        if (!checkpoint.pin || !backing_->Restore(*checkpoint.pin)) return Result::invalidImage;
++        if (!Present()) return Result::absent;
++        if (!checkpoint.pin || !store_.restore(checkpoint.pin)) return Result::invalidImage;
++        if (!logical_.Reload()) return Result::invalidImage;
+         writeProtected_ = checkpoint.writeProtected;
+         return Result::ok;
+     }
+@@ -135,29 +176,36 @@ class MemoryStickMedia {
+    private:
+     friend struct MemoryStickMediaStateAccess;
+ 
+-    Result AttachOwned(std::vector<uint8_t>&& image, bool protect) {
+-        const auto* geometry = frondMsGeometry::byPhysicalBytes(image.size());
+-        if (!geometry) return Result::invalidImage;
+-        auto ram = std::make_shared<RamCardBacking>(std::move(image), recordBytes);
+-        origin_ = ram->Snapshot();
+-        if (!origin_) return Result::invalidImage;
+-        backing_ = std::move(ram);
+-        geometry_ = *geometry;
+-        writeProtected_ = protect;
+-        return Result::ok;
++    Result AttachOwned(const uint8_t* image, size_t size, bool protect) {
++        const auto* geometry = frondMsGeometry::byPhysicalBytes(size);
++        const auto* layout = geometry ? LayoutOf(*geometry) : nullptr;
++        if (!layout) return Result::invalidImage;
++        std::vector<uint8_t> stored;
++        if (!LogicalMsMedia::Build(*layout, image, stored)) return Result::invalidImage;
++        auto ram = std::make_shared<RamCardBacking>(std::move(stored), 4096);
++        auto* raw = ram.get();
++        Store store;
++        store.read = [raw](uint64_t off, uint64_t n, void* dest) { return raw->Read(off, n, dest); };
++        store.write = [raw](uint64_t off, uint64_t n, const void* src) { return raw->Write(off, n, src); };
++        store.snapshot = [raw] { return raw->Snapshot(); };
++        store.restore = [raw](const std::shared_ptr<const CardSnapshot>& pin) { return raw->Restore(*pin); };
++        const auto result = AttachStore(*geometry, std::move(store), protect);
++        if (result == Result::ok) ram_ = std::move(ram);
++        return result;
+     }
+ 
+-    Result Address(uint32_t block, uint32_t page, uint32_t& index) const {
+-        if (!backing_) return Result::absent;
++    Result Address(uint32_t block, uint32_t page) const {
++        if (!Present()) return Result::absent;
+         if (block >= geometry_.blocks || page >= geometry_.pagesPerBlock) return Result::address;
+-        index = block * geometry_.pagesPerBlock + page;
+         return Result::ok;
+     }
+ 
+-    std::shared_ptr<CardBacking> backing_;
+-    std::shared_ptr<const CardSnapshot> origin_;
++    LogicalMsMedia logical_;
++    Store store_;
++    std::shared_ptr<RamCardBacking> ram_;
+     Geometry geometry_{frondMsGeometry::largest};
+     bool writeProtected_{};
++    bool changed_{};
+ };
+ 
+ #endif
+diff --git a/src/uarm/uarm/SessionIo.h b/src/uarm/uarm/SessionIo.h
+index 7e27fc3..baa9430 100644
+--- a/src/uarm/uarm/SessionIo.h
++++ b/src/uarm/uarm/SessionIo.h
+@@ -202,16 +202,32 @@ using frondStorage::readAllAt;
+ using frondStorage::syncDir;
+ using frondStorage::writeAllAt;
+ 
+-// Table and header of a .frondsd v2 whose payload is already written after the header, then fsync.
+-inline bool finishSdV2(int fd, uint64_t size, uint64_t generation, const std::vector<uint32_t>& table) {
++// What a container file holds: its payload, and for a classic stick its side region as well.
++struct StoredShape {
++    uint64_t payloadBytes{}, sideBytes{};
++    bool classic{};
++    uint64_t stored() const { return frondSdFile::storedBytes(payloadBytes, sideBytes); }
++};
++inline StoredShape sdShape(uint64_t payloadBytes) { return {payloadBytes, 0, false}; }
++// The v2 .frondms shape of stored bytes this long, or an empty one.
++inline StoredShape msShape(uint64_t storedBytes) {
++    const auto* l = frondMsLayout::byStoredBytes(storedBytes);
++    return l ? StoredShape{l->PayloadBytes(), l->SideBytes(), true} : StoredShape{};
++}
++
++// Table and header of a v2 container whose stored bytes are already written after the header, then fsync.
++inline bool finishSdV2(int fd, const StoredShape& shape, uint64_t generation, const std::vector<uint32_t>& table) {
+     std::vector<uint8_t> tableBytes;
+     frondSdFile::tableBytes(table, tableBytes);
+     uint8_t header[frondSdFile::headerBytes];
+-    frondSdFile::makeHeaderV2(header, size, generation, table);
+-    return table.size() == frondSdFile::chunkCount(size) &&
+-           writeAllAt(fd, tableBytes.data(), tableBytes.size(), frondSdFile::headerBytes + size) &&
++    frondSdFile::makeHeaderV2(header, shape.payloadBytes, generation, table, shape.sideBytes, shape.classic);
++    return table.size() == frondSdFile::chunkCount(shape.stored()) &&
++           writeAllAt(fd, tableBytes.data(), tableBytes.size(), frondSdFile::headerBytes + shape.stored()) &&
+            writeAllAt(fd, header, sizeof(header), 0) && fsync(fd) == 0;
+ }
++inline bool finishSdV2(int fd, uint64_t size, uint64_t generation, const std::vector<uint32_t>& table) {
++    return finishSdV2(fd, sdShape(size), generation, table);
++}
+ 
+ inline bool writeSdFile(const std::filesystem::path& path, const uint8_t* payload, uint64_t size) {
+     std::vector<uint8_t> file;
+@@ -219,12 +235,14 @@ inline bool writeSdFile(const std::filesystem::path& path, const uint8_t* payloa
+     return writeAtomicFrond(path, file.data(), file.size());
+ }
+ 
+-// Stream sectors to a .frondsd v2 at `generation` without a whole-card vector.
++// Stream sectors to a .frondsd v2 at `generation` without a whole-card vector. With a classic
++// `shape`, `size` is its stored bytes and the file is a v2 .frondms.
+ template <typename ReadFn>
+ inline bool writeSdFromReader(const std::filesystem::path& path, uint64_t size, ReadFn read,
+                               std::array<uint8_t, frondMachine::identityBytes>& identity,
+-                              uint64_t generation = 1) {
+-    if (!frondSdFile::validPayloadSize(size)) return false;
++                              uint64_t generation = 1, StoredShape shape = {}) {
++    if (!shape.classic) shape = sdShape(size);
++    if (!frondSdFile::validPayloadSize(shape.payloadBytes) || shape.stored() != size) return false;
+     auto dir = path.parent_path();
+     if (dir.empty()) dir = ".";
+     std::string tmpl = (dir / ".frondsd.tmp-XXXXXX").string();
+@@ -266,7 +284,7 @@ inline bool writeSdFromReader(const std::filesystem::path& path, uint64_t size,
+         }
+     }
+     md5Finalize(&digest);
+-    if (!finishSdV2(fd, size, generation, crcs.table()) || close(fd) < 0 ||
++    if (!finishSdV2(fd, shape, generation, crcs.table()) || close(fd) < 0 ||
+         rename(name.data(), path.c_str()) < 0) {
+         unlink(name.data());
+         return false;
+@@ -615,7 +633,8 @@ inline bool applySdJournal(const std::filesystem::path& folder, const std::files
+ // Brings the folder's card file to the generation the .frond describes (storage/Settle.h): what
+ // Files… or a standalone change left is finished first, then the session save.
+ inline bool settleSdJournal(const std::filesystem::path& folder, const frondMachine::Media& card) {
+-    const auto result = frondStorage::settle(fileCardPath(folder, card.kind), card.contentGeneration, card.physicalSize);
++    const auto result =
++        frondStorage::settle(fileCardPath(folder, card.kind), card.contentGeneration, frondMachine::containerPayload(card));
+     if (!result.ok && result.code != "unsettled") std::cerr << result.message << std::endl;
+     return result.ok;
+ }
+@@ -704,7 +723,27 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
+     media.identity = swap.identity;
+     const auto path = folder / name;
+     std::error_code ec;
+-    if (media.name == frondMachine::msSibling) {
++    if (media.name == frondMachine::msSibling && frondMachine::msFileVersion(path) == 2) {
++        media.kind = frondMachine::kindMs;
++        if (const auto settled = frondStorage::settleChanges(path); !settled.ok) {
++            std::cerr << settled.message << std::endl;
++            return false;
++        }
++        if (!sdJournals(folder, media.kind).empty()) {
++            std::cerr << "the card put in has unfinished save files beside it" << std::endl;
++            return false;
++        }
++        frondSdFile::Info info;
++        const auto* layout = frondMachine::readSdHeader(path, info) == frondMachine::SiblingStatus::ok
++                                 ? frondMsLayout::of(info) : nullptr;
++        const auto* g = layout ? frondMsGeometry::byShape(layout->blocks, layout->pagesPerBlock) : nullptr;
++        if (!g) return false;
++        media.physicalSize = g->PhysicalBytes();
++        media.logicalSize = g->LogicalBytes();
++        media.contentGeneration = info.generation;
++        if (!frondMachine::validMedia(media) || frondMachine::checkSdSibling(path, media) != frondMachine::SiblingStatus::ok)
++            return false;
++    } else if (media.name == frondMachine::msSibling) {
+         media.kind = frondMachine::kindMs;
+         const auto bytes = std::filesystem::file_size(path, ec);
+         if (ec || bytes < frondSdFile::headerBytes) return false;
+@@ -769,7 +808,8 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
+             std::error_code ec;
+             const auto path = folder / present;
+             uint64_t changes = 0;
+-            const bool same = frondMachine::fileCardKind(saved->kind)
++            const bool v2 = saved->kind == frondMachine::kindMs && frondMachine::msFileVersion(path) == 2;
++            const bool same = frondMachine::fileCardKind(saved->kind) || v2
+                                   ? settleSdJournal(folder, *saved) &&
+                                         frondMachine::checkSdSibling(path, *saved) == frondMachine::SiblingStatus::ok
+                                   : std::filesystem::file_size(path, ec) == frondSdFile::headerBytes + saved->physicalSize &&
+@@ -804,7 +844,7 @@ inline bool loadV7Bytes(const uint8_t* data, size_t size, const std::filesystem:
+         return true;
+     }
+     for (const auto& media : parsed.media)
+-        if (frondMachine::fileCardKind(media.kind) && !settleSdJournal(folder, media)) return false;
++        if (frondMachine::storeCardKind(media.kind) && !settleSdJournal(folder, media)) return false;
+     if (frondMachine::checkSiblings(folder, parsed.media, full) != frondMachine::SiblingStatus::ok)
+         return false;
+     out = std::move(parsed);
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.cpp b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+index 3158600..b46491b 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.cpp
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.cpp
+@@ -31,6 +31,7 @@ struct LegacyMsRegisters {
+ #include "MemoryStickCard.h"
+ #include "MemoryStickImage.h"
+ #include "MemoryStickProCard.h"
++#include "sdcard.h"
+ #include "pxa_GPIO.h"
+ #include "pxa_DMA.h"
+ #include <cstdio>
+@@ -60,7 +61,7 @@ struct MemoryStickController : LegacyMsRegisters {
+ struct MemoryStickMediaStateAccess {
+     static MemoryStickMedia::Result Attach(MemoryStickMedia& media,
+                                            std::vector<uint8_t>&& image, bool protect) {
+-        return media.AttachOwned(std::move(image), protect);
++        return media.Attach(std::move(image), protect);
+     }
+ };
+ 
+@@ -342,6 +343,56 @@ bool msCtrlrAttach(MemoryStickController* m,std::vector<uint8_t>&& physical) {
+     m->pro.Detach();
+     msCtrlrDiscardSaveImage(m);msCardReset(m);m->state={};m->state.inserted=1;msCtrlrRefresh(m);return true;
+ }
++// The card store's classic stick, read and written in place. Once the store holds another card
++// (its epoch moved on), every access fails and detaching leaves the store alone.
++static MemoryStickMedia::Store msCardStore() {
++    const auto at=sdCardEpoch();
++    MemoryStickMedia::Store store;
++    store.read=[at](uint64_t off,uint64_t n,void* dest){return sdCardEpoch()==at&&sdCardReadBytes(off,n,dest);};
++    store.write=[at](uint64_t off,uint64_t n,const void* src){return sdCardEpoch()==at&&sdCardWriteBytes(off,n,src);};
++    store.snapshot=[at]{return sdCardEpoch()==at?sdCardSnapshot():nullptr;};
++    store.restore=[at](const std::shared_ptr<const CardSnapshot>& pin){return sdCardEpoch()==at&&sdCardRestore(pin);};
++    store.release=[at]{if(sdCardEpoch()==at)sdCardReset();};
++    return store;
++}
++static const frondMsGeometry::Geometry* msStoreGeometry() {
++    if(!sdCardInitialized())return nullptr;
++    const auto* layout=frondMsLayout::byStoredBytes(uint64_t(sdCardSectorCount())*SD_SECTOR_SIZE);
++    return layout?frondMsGeometry::byShape(layout->blocks,layout->pagesPerBlock):nullptr;
++}
++bool msCtrlrAttachClassicStore(MemoryStickController* m,bool inserted,bool protect) {
++    const auto* geometry=msStoreGeometry();
++    if(!m||m->state.inserted||!geometry)return false;
++    // The boot blocks are checked as for an image, before the stick replaces any other.
++    MemoryStickMedia probe;
++    MemoryStickMedia::Store peek=msCardStore();peek.release={};
++    if(probe.AttachStore(*geometry,std::move(peek),protect)!=MemoryStickMedia::Result::ok)return false;
++    std::vector<uint8_t> boot(size_t(2)*geometry->pagesPerBlock*MemoryStickMedia::recordBytes);
++    for(uint32_t b=0;b<2;++b)for(uint32_t p=0;p<geometry->pagesPerBlock;++p){
++        MemoryStickMedia::Page page;
++        if(probe.Read(b,p,page)!=MemoryStickMedia::Result::ok)return false;
++        std::memcpy(boot.data()+(size_t(b)*geometry->pagesPerBlock+p)*MemoryStickMedia::recordBytes,page.data(),page.size());
++    }
++    probe.Detach();
++    if(!frondMs::validBootBlocks(boot.data(),*geometry))return false;
++    m->pro.Detach();
++    if(m->card.media.AttachStore(*geometry,msCardStore(),protect)!=MemoryStickMedia::Result::ok)return false;
++    msCtrlrDiscardSaveImage(m);msCardReset(m);m->state={};m->state.inserted=inserted;msCtrlrRefresh(m);return true;
++}
++bool msCtrlrClassicOnStore(MemoryStickController* m){return m&&!m->pro.Present()&&m->card.media.OnStore();}
++bool msCtrlrMoveClassicToStore(MemoryStickController* m,const char* id) {
++    if(!m||m->pro.Present()||!m->card.media.Present())return false;
++    if(m->card.media.OnStore())return true;
++    if(sdCardInitialized())return false;
++    std::vector<uint8_t> stored;
++    if(!m->card.media.CopyStored(stored))return false;
++    const auto geometry=m->card.media.Shape();
++    const bool protect=m->card.media.WriteProtected();
++    sdCardInitializeWithBytes(std::move(stored),id?id:"");
++    // Same bytes, so the guest's transfer state carries on as it was.
++    if(m->card.media.AttachStore(geometry,msCardStore(),protect)!=MemoryStickMedia::Result::ok){sdCardReset();return false;}
++    return true;
++}
+ bool msCtrlrAttachEjected(MemoryStickController* m,std::vector<uint8_t>&& physical,bool protect) {
+     if(!m||m->state.inserted||!frondMs::validBoot(physical))return false;
+     if(m->card.media.Attach(std::move(physical),protect)!=MemoryStickMedia::Result::ok)return false;
+diff --git a/src/uarm/uarm/mmiodev_MemoryStickController.h b/src/uarm/uarm/mmiodev_MemoryStickController.h
+index 89b6cfb..02b6ccf 100644
+--- a/src/uarm/uarm/mmiodev_MemoryStickController.h
++++ b/src/uarm/uarm/mmiodev_MemoryStickController.h
+@@ -37,6 +37,14 @@ bool msCtrlrAttach(MemoryStickController*,const std::vector<uint8_t>&);
+ bool msCtrlrAttach(MemoryStickController*,std::vector<uint8_t>&&);
+ // Attaches a classic stick taken out of the slot, so its write protection can be set before it goes in.
+ bool msCtrlrAttachEjected(MemoryStickController*,std::vector<uint8_t>&& physical,bool protect);
++// Attaches the classic stick whose v2 .frondms stored bytes are in the card store (sdcard.h).
++// Detaching it resets the store.
++bool msCtrlrAttachClassicStore(MemoryStickController*,bool inserted,bool protect);
++// The classic stick is on the card store, not in its own RAM.
++bool msCtrlrClassicOnStore(MemoryStickController*);
++// Moves a classic stick from its own RAM into the empty card store as card `id`, with nothing the
++// guest can see changing. True when it is on the store already.
++bool msCtrlrMoveClassicToStore(MemoryStickController*,const char* id);
+ // For a load whose stick was changed while the machine was off: the next msCtrlrLoad keeps the stick
+ // attached now (or none) and leaves it ejected, with fresh transfer state. The detect line keeps
+ // its saved level until msCtrlrSwapEject, called once the load is done, which drops it.
+diff --git a/src/uarm/uarm/sdcard.cpp b/src/uarm/uarm/sdcard.cpp
+index 6981253..2316c5d 100644
+--- a/src/uarm/uarm/sdcard.cpp
++++ b/src/uarm/uarm/sdcard.cpp
+@@ -24,6 +24,15 @@ namespace {
+     size_t dirtyPagesSize = 0;
+ 
+     char cardId[SD_CARD_ID_MAX_LEN + 1];
++    uint64_t epoch = 0;
++
++    void allocateDirtyPages(size_t sectors) {
++        size_t dirtyPagesSize4 = sectors / (16 * 32);
++        if ((dirtyPagesSize4 * 16 * 32) < sectors) dirtyPagesSize4++;
++        dirtyPagesSize = dirtyPagesSize4 * 4;
++        dirtyPages = reinterpret_cast<uint32_t*>(malloc(dirtyPagesSize));
++        memset(dirtyPages, 0, dirtyPagesSize);
++    }
+ 
+     // The chunk table of a .frondsd v2 file, or none for v1 and other files.
+     bool sidecarChunks(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,
+@@ -35,11 +44,11 @@ namespace {
+         uint8_t header[frondSdFile::headerBytes];
+         const bool read = fread(header, 1, sizeof(header), f) == sizeof(header);
+         frondSdFile::Info info;
+-        if (!read || !frondSdFile::parseHeader(header, info) || info.version != frondSdFile::versionV2) {
++        if (!read || !frondSdFile::parseContainer(header, info) || info.version != frondSdFile::versionV2) {
+             fclose(f);
+             return true;
+         }
+-        if (info.payloadBytes != payloadBytes) {
++        if (info.stored() != payloadBytes) {
+             fclose(f);
+             return false;
+         }
+@@ -100,6 +109,7 @@ void sdCardRekey(const char* id) {
+ }
+ 
+ void sdCardReset() {
++    ++epoch;
+     if (dirtyPages) free(dirtyPages);
+     backing.reset();
+     backingStale = false;
+@@ -115,6 +125,46 @@ void sdCardReset() {
+ 
+ bool sdCardInitialized() { return backing != nullptr; }
+ 
++uint64_t sdCardEpoch() { return epoch; }
++
++bool sdCardReadBytes(uint64_t offset, uint64_t length, void* data) {
++    return backing && backing->Read(offset, length, data);
++}
++
++bool sdCardWriteBytes(uint64_t offset, uint64_t length, const void* data) {
++    if (!backing || !backing->Write(offset, length, data)) return false;
++    if (length)
++        for (uint64_t sector = offset / SD_SECTOR_SIZE; sector <= (offset + length - 1) / SD_SECTOR_SIZE; ++sector)
++            markDirty(uint32_t(sector));
++    return true;
++}
++
++void sdCardInitializeWithBytes(std::vector<uint8_t>&& bytes, const char* id) {
++    sdCardReset();
++    const size_t sectors = bytes.size() / SD_SECTOR_SIZE;
++    backing = std::make_unique<RamCardBacking>(std::move(bytes), 4096);
++    sectorsTotal = sectors;
++    sdCardDirty = false;
++    dataViewValid = false;
++    allocateDirtyPages(sectors);
++    sdCardRekey(id);
++}
++
++bool sdCardAdoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t payloadOffset) {
++    auto* ram = dynamic_cast<RamCardBacking*>(backing.get());
++    if (!ram || ram->Pinned() || payloadBytes != ram->Size()) return false;
++    FileCardOptions options;
++    options.identity = cardId;
++    if (!sidecarChunks(path, payloadBytes, payloadOffset, options.chunkCrcs)) return false;
++    FileCardBacking::DiscardGenerations(path);
++    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
++    if (!fresh) return false;
++    backing = std::move(fresh);
++    backingStale = false;
++    dataViewValid = false;
++    return true;
++}
++
+ bool sdCardWrite(uint32_t sector, const void* buf) {
+     if (!backing || sector >= sectorsTotal) return false;
+     if (!backing->Write(uint64_t(sector) * SD_SECTOR_SIZE, SD_SECTOR_SIZE, buf)) return false;
+diff --git a/src/uarm/uarm/sdcard.h b/src/uarm/uarm/sdcard.h
+index 39c0fcc..b5e7d38 100644
+--- a/src/uarm/uarm/sdcard.h
++++ b/src/uarm/uarm/sdcard.h
+@@ -50,6 +50,16 @@ bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadO
+ 
+ void sdCardReset();
+ 
++// A classic Memory Stick keeps its v2 .frondms stored bytes in the store: reads and writes at any
++// offset, a stored image moved in without a copy, and a count of every initialize and reset, so a
++// holder can tell the card it attached is still the one there.
++bool sdCardReadBytes(uint64_t offset, uint64_t length, void* data);
++bool sdCardWriteBytes(uint64_t offset, uint64_t length, const void* data);
++void sdCardInitializeWithBytes(std::vector<uint8_t>&& bytes, const char* id);
++uint64_t sdCardEpoch();
++// As sdCardAdoptSaved, for a card in RAM whose bytes a save has just written to `path`.
++bool sdCardAdoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
++
+ bool sdCardInitialized();
+ 
+ bool sdCardRead(uint32_t sector, void* data);

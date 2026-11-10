@@ -1,0 +1,366 @@
+--- a/src/cloudpilot/emulator/EmPalmOS.cpp
++++ b/src/cloudpilot/emulator/EmPalmOS.cpp
+@@ -484,6 +484,44 @@
+     return true;
+ }
+ 
++// After an application is deleted, the launcher in front is relaunched so it drops the icon. Like
++// FinishInstall, any event already waiting goes first.
++void EmPalmOS::RelaunchLauncher() {
++    UInt16 card = 0;
++    LocalID current = 0;
++    UInt32 currentCreator = 0;
++    if (SysCurAppDatabase(&card, &current) != 0 || current == 0 ||
++        DmDatabaseInfo(card, current, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &currentCreator) != 0 ||
++        currentCreator != sysFileCLauncher || dbForLaunch != 0 || HasPenEvent() || HasKeyboardEvent() ||
++        EvtEventAvail() || EvtSysEventAvail(true))
++        return;
++
++    dbForLaunch = current;
++    postNilEvent = true;
++}
++
++EmPalmOS::DeleteResult EmPalmOS::DeleteDatabaseByName(const string& name) {
++    if (!gSystemState.IsUIInitialized() || gSession->IsCpuStopped()) return DeleteResult::notReady;
++
++    const LocalID id = DmFindDatabase(0, name.c_str());
++    if (id == 0) return DeleteResult::missing;
++    if ((id & 0x01) == 0) return DeleteResult::rom;
++
++    UInt16 card = 0;
++    LocalID current = 0;
++    if (SysCurAppDatabase(&card, &current) == 0 && current == id) return DeleteResult::running;
++
++    UInt32 type = 0;
++    DmDatabaseInfo(0, id, 0, 0, 0, 0, 0, 0, 0, 0, 0, &type, 0);
++
++    const Err error = DmDeleteDatabase(0, id);
++    if (error == 0) {
++        if (type == sysFileTApplication) RelaunchLauncher();
++        return DeleteResult::deleted;
++    }
++    return error == dmErrDatabaseOpen ? DeleteResult::open : error == dmErrROMBased ? DeleteResult::rom : DeleteResult::failed;
++}
++
+ bool EmPalmOS::HasPendingAppForLaunch() { return dbForLaunch != 0; }
+ 
+ namespace {
+--- a/src/cloudpilot/emulator/EmPalmOS.h
++++ b/src/cloudpilot/emulator/EmPalmOS.h
+@@ -42,6 +42,12 @@
+     static bool LaunchAppByName(const string& name);
+     static bool HasPendingAppForLaunch();
+ 
++    // Deletes a RAM database by name with DmDeleteDatabase. Calls into Palm OS, so only from a safe
++    // point. A ROM database, the running application and an open database are refused. Deleting an
++    // application while the launcher is in front relaunches the launcher so it drops the icon.
++    enum class DeleteResult { deleted, notReady, missing, rom, running, open, failed };
++    static DeleteResult DeleteDatabaseByName(const string& name);
++
+     // What Palm OS gets after a HotSync install, for a database just installed by name: the app
+     // with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app
+     // install while the launcher is in front relaunches the launcher so it lists the app. Any
+@@ -62,6 +68,7 @@
+ 
+    private:
+     static bool HandleSystemCall(Bool fromTrap);
++    static void RelaunchLauncher();
+ 
+     static bool DispatchNextEvent();
+     static bool DispatchKeyboardEvent();
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1214,7 +1214,7 @@
+     // The desktop commands that call into Palm OS, so run at the guest's event loop.
+     static bool GuestCommand(const string& command) {
+         return command == "install" || command == "export" || command == "export-db" || command == "db-list" ||
+-               command == "launch-app";
++               command == "launch-app" || command == "delete-db";
+     }
+ 
+     // The same commands, codes and replies as the ARM runner's DesktopControl. What a IIIx doesn't
+@@ -1223,7 +1223,7 @@
+     Reply DesktopCommand(const string& command, const string& argument) {
+         static const char* const fileCommands[] = {"save", "install", "export", "export-db", "input-replay"};
+         static const char* const argumentCommands[] = {
+-            "launch-app",  "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
++            "launch-app",  "delete-db", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
+             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
+             "bluetooth-mode", "gdb-start"};
+         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
+@@ -1323,6 +1323,20 @@
+                         "starting."};
+             return {true, "launched", "Application launched."};
+         }
++        if (command == "delete-db") {
++            if (argument.empty() || argument.size() > 31)
++                return {false, "argument", "Enter a Palm database name (up to 31 bytes)."};
++            if (!ready) return notReady;
++            switch (EmPalmOS::DeleteDatabaseByName(argument)) {
++                case EmPalmOS::DeleteResult::deleted: return {true, "deleted", "Database deleted."};
++                case EmPalmOS::DeleteResult::notReady: return notReady;
++                case EmPalmOS::DeleteResult::missing: return {false, "missing", "There is no Palm database with that name."};
++                case EmPalmOS::DeleteResult::rom: return {false, "rom", "That database is in ROM and can't be deleted."};
++                case EmPalmOS::DeleteResult::running: return {false, "running", "That application is running. Switch to another one first."};
++                case EmPalmOS::DeleteResult::open: return {false, "open", "That database is open. Close its application first."};
++                default: return {false, "delete", "The database could not be deleted."};
++            }
++        }
+         if (command == "reset" || command == "hard-reset") {
+             gSession->Reset(command == "reset" ? EmSession::ResetType::soft : EmSession::ResetType::hard);
+             piezo.Restart(gSession->GetSystemCycles());
+--- a/src/uarm/uarm/app_launcher.cpp
++++ b/src/uarm/uarm/app_launcher.cpp
+@@ -6,6 +6,9 @@
+ #include <cstring>
+ 
+ #include "cputil.h"
++#include "db_list.h"
++#include "pace.h"
++#include "palmos_errors.h"
+ #include "syscall_dispatch.h"
+ 
+ #define MAX_NAME_LEN 31
+@@ -53,3 +56,58 @@
+ 
+     return result;
+ }
++
++DeleteDbResult deleteDatabaseByName(struct SyscallDispatch* sd, const char* name, bool* application) {
++    if (application) *application = false;
++    if (!syscallDispatchM68kSupport(sd) || !syscallDispatchPrepare(sd)) return DeleteDbResult::failed;
++    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, MAX_NAME_LEN + 1 + 8);
++    if (!scratch) return DeleteDbResult::failed;
++    DeleteDbResult result = DeleteDbResult::failed;
++    if (strlen(name) > MAX_NAME_LEN || !syscallDispatch_memcpy_fromHost(sd, scratch + 8, name, strlen(name) + 1)) {
++        syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch);
++        return result;
++    }
++    const uint32_t dbID = syscall68k_DmFindDatabase(sd, SC_EXECUTE_FULL, 0, scratch + 8);
++    if (!dbID) {
++        result = DeleteDbResult::missing;
++    } else {
++        bool rom = false;
++        DbMetadataList all;
++        if (dbListGet(sd, all))
++            for (const auto& db : all) {
++            if (db.localID != dbID) continue;
++            rom = rom || db.isRom;
++            if (application) *application = db.type == 0x6170706cu;
++        }
++        const bool running = syscall68k_SysCurAppDatabase(sd, SC_EXECUTE_FULL, scratch, scratch + 2) == 0 &&
++                             paceGet32(scratch + 2) == dbID;
++        if (rom) {
++            result = DeleteDbResult::rom;
++        } else if (running) {
++            result = DeleteDbResult::running;
++        } else {
++            const uint16_t err = syscall68k_DmDeleteDatabase(sd, SC_EXECUTE_FULL, 0, dbID);
++            result = err == 0 ? DeleteDbResult::deleted : err == dmErrDatabaseOpen ? DeleteDbResult::open : DeleteDbResult::failed;
++        }
++    }
++    syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch);
++    return result;
++}
++
++bool relaunchLauncher(struct SyscallDispatch* sd) {
++    if (!syscallDispatchM68kSupport(sd) || !syscallDispatchPrepare(sd)) return false;
++    // Card +0, database +2, creator +6.
++    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 16);
++    if (!scratch) return false;
++    bool ok = true;
++    if (syscall68k_SysCurAppDatabase(sd, SC_EXECUTE_FULL, scratch, scratch + 2) == 0) {
++        const uint32_t current = paceGet32(scratch + 2);
++        if (current && syscall68k_DmDatabaseInfo(sd, SC_EXECUTE_FULL, paceGet16(scratch), current, 0, 0, 0, 0, 0, 0, 0,
++                                                 0, 0, 0, scratch + 6) == 0 &&
++            paceGet32(scratch + 6) == 0x6c6e6368u && !syscall68k_EvtEventAvail(sd, SC_EXECUTE_FULL) &&
++            !syscall68k_EvtSysEventAvail(sd, SC_EXECUTE_FULL, true))
++            ok = syscall68k_SysUIAppSwitch(sd, SC_EXECUTE_FULL, 0, current, 0, 0) == 0;
++    }
++    syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch);
++    return ok;
++}
+--- a/src/uarm/uarm/app_launcher.h
++++ b/src/uarm/uarm/app_launcher.h
+@@ -5,4 +5,14 @@
+ 
+ bool launchAppByName(struct SyscallDispatch* sd, const char* name);
+ 
++// Deletes a RAM database by name with DmDeleteDatabase. A ROM database and the running application
++// are refused, and so is one Palm OS reports open.
++enum class DeleteDbResult { deleted, missing, rom, running, open, failed };
++// application, when given, tells whether the database was an application.
++DeleteDbResult deleteDatabaseByName(struct SyscallDispatch* sd, const char* name, bool* application = nullptr);
++
++// Relaunches the launcher when it is in front, unless an event is waiting, so it drops a deleted
++// application's icon. False when the switch could not be made.
++bool relaunchLauncher(struct SyscallDispatch* sd);
++
+ #endif  // _APP_LAUNCHER_H_
+--- a/src/uarm/native/NativeDatabase.h
++++ b/src/uarm/native/NativeDatabase.h
+@@ -12,6 +12,7 @@
+ 
+ #include "CPU.h"
+ #include "Defer.h"
++#include "app_launcher.h"
+ #include "db_installer.h"
+ #include "db_archive_name.h"
+ #include "db_list.h"
+@@ -45,6 +46,28 @@
+         return database && call(0x88f8, {database, 0, 0, 0}) == 0;
+     }
+ 
++    // DmDeleteDatabase on a RAM database by name. The running application is checked first.
++    // application, when given, tells whether the database was an application.
++    DeleteDbResult Delete(const std::string& name, bool* application = nullptr) {
++        if (application) *application = false;
++        const uint32_t database = Find(name);
++        if (!database) return DeleteDbResult::missing;
++        if (!(database & 0x80000000u)) return DeleteDbResult::rom;
++        uint32_t current = 0;
++        write(scratch + 96, &current, 4);
++        if (call(0x8800, {scratch + 96, 0, 0, 0}) == 0) read(scratch + 96, &current, 4);
++        if (current == database) return DeleteDbResult::running;
++        uint32_t type = 0;
++        write(scratch + 100, &type, 4);
++        if (session.Call(0x812c, {database, 0, 0, 0}, {0, 0, 0, 0, 0, 0, scratch + 100, 0}) == 0) read(scratch + 100, &type, 4);
++        const uint32_t error = call(0x8148, {database, 0, 0, 0});
++        if (error == 0) {
++            if (application) *application = type == applicationType;
++            return DeleteDbResult::deleted;
++        }
++        return error == dmErrDatabaseOpen ? DeleteDbResult::open : DeleteDbResult::failed;
++    }
++
+     int Install(const uint8_t* bytes, size_t length) {
+         if (!bytes || length < 78 || length > maxDatabaseBytes) return DB_INSTALL_RESULT_ERR_CORRUPT;
+         size_t offset = 0;
+@@ -123,6 +146,20 @@
+         if (call(0x88f8, {current, 0, 0, 0}) != 0) throw std::runtime_error("Could not relaunch the launcher");
+     }
+ 
++    // Relaunches the launcher when it is in front, unless an event is waiting, so it drops a deleted
++    // application's icon.
++    void RelaunchLauncher() {
++        uint8_t zero[16]{};
++        write(scratch + 96, zero, sizeof(zero));
++        uint32_t current = 0, currentCreator = 0;
++        if (call(0x8800, {scratch + 96, 0, 0, 0}) == 0) read(scratch + 96, &current, 4);
++        if (!current) return;
++        if (session.Call(0x812c, {current, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, scratch + 48}) != 0) return;
++        read(scratch + 48, &currentCreator, 4);
++        if (currentCreator != launcherCreator || call(0x881c, {}) & 0xff || call(0x82e0, {1, 0, 0, 0}) & 0xff) return;
++        if (call(0x88f8, {current, 0, 0, 0}) != 0) throw std::runtime_error("Could not relaunch the launcher");
++    }
++
+     // Name, attributes, type and creator of each RAM database, read from the database directory
+     // without opening any. Skips a68k like Export.
+     DbMetadataList List() {
+--- a/src/uarm/native/GuestDatabaseOps.h
++++ b/src/uarm/native/GuestDatabaseOps.h
+@@ -2,6 +2,8 @@
+ #define FROND_GUEST_DATABASE_OPS_H
+ 
+ #include <cstdio>
++#include <optional>
++#include <string>
+ 
+ #include "GuestExport.h"
+ #include "NativeDatabase.h"
+@@ -89,6 +91,55 @@
+     return LaunchResult::launched;
+ }
+ 
++// Deleting commits like an install. Returns nullopt when no supported boundary is available. Deleting
++// an application then relaunches the launcher in its own transaction: if that fails, the guest goes
++// back to just after the delete, which still succeeded.
++inline std::optional<DeleteDbResult> Delete(SoC& soc, const std::string& name) {
++    bool application = false;
++    DeleteDbResult result;
++    if (!NativeBoundary::Prepare(soc)) {
++        if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return std::nullopt;
++        {
++            ReadOnlyGuest transaction(soc);
++            result = deleteDatabaseByName(soc.GetSyscallDispatch(), name.c_str(), &application);
++            if (result == DeleteDbResult::deleted) transaction.Commit();
++        }
++        if (result == DeleteDbResult::deleted && application) {
++            try {
++                ReadOnlyGuest transaction(soc);
++                relaunchLauncher(soc.GetSyscallDispatch());
++                transaction.Commit();
++            } catch (const std::exception& error) {
++                std::fprintf(stderr, "delete: launcher relaunch failed, the database is deleted: %s\n", error.what());
++            }
++        }
++        return result;
++    }
++    {
++        ReadOnlyGuest transaction(soc);
++        NativeBoundary::Session session(soc);
++        NativeDatabase<NativeBoundary::Session> database(session);
++        result = database.Delete(name, &application);
++        database.Finish();
++        session.Close();
++        if (result == DeleteDbResult::deleted) transaction.Commit();
++    }
++    if (result == DeleteDbResult::deleted && application) {
++        try {
++            ReadOnlyGuest transaction(soc);
++            NativeBoundary::Session session(soc);
++            NativeDatabase<NativeBoundary::Session> database(session);
++            database.RelaunchLauncher();
++            database.Finish();
++            session.Close();
++            transaction.Commit();
++        } catch (const std::exception& error) {
++            std::fprintf(stderr, "delete: launcher relaunch failed, the database is deleted: %s\n", error.what());
++        }
++    }
++    return result;
++}
++
+ // The RAM databases' directory entries, without serialising any database. Read-only: the guest
+ // is rolled back afterwards like Export. Returns false only when no supported boundary is available.
+ inline bool List(SoC& soc, DbMetadataList& list) {
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -95,7 +95,7 @@
+             case DesktopChannel::Poll::idle: break;
+             case DesktopChannel::Poll::request: {
+                 const auto& command = request.command;
+-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
++                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                 if (work) { if (ctx.microphone) ctx.microphone->Disarm(); ctx.audioDriver.Pause(); }
+                 Reply result;
+                 try {
+@@ -222,7 +222,7 @@
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+                 return {false, "not-ready", "Palm OS has not reached a supported application boundary."};
+@@ -250,6 +250,19 @@
+                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
+             return {true, "launched", "Application launched."};
+         }
++        if (command == "delete-db") {
++            if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm database name (up to 31 bytes)."};
++            const auto deleted = GuestDatabaseOps::Delete(*ctx.soc, path);
++            if (!deleted) return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
++            switch (*deleted) {
++                case DeleteDbResult::deleted: return {true, "deleted", "Database deleted."};
++                case DeleteDbResult::missing: return {false, "missing", "There is no Palm database with that name."};
++                case DeleteDbResult::rom: return {false, "rom", "That database is in ROM and can't be deleted."};
++                case DeleteDbResult::running: return {false, "running", "That application is running. Switch to another one first."};
++                case DeleteDbResult::open: return {false, "open", "That database is open. Close its application first."};
++                default: return {false, "delete", "The database could not be deleted."};
++            }
++        }
+         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->name};
+         if (command == "power-state") {
+             const auto* machine = static_cast<SocPXA*>(ctx.soc);

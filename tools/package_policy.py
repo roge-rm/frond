@@ -17,12 +17,17 @@ DYNARMIC_LICENCES = {
     'zydis-LICENSE': 'externals/zydis/LICENSE',
 }
 # Other third-party licence texts installed from licences/ under the same name.
-LICENCE_FILES = ('argparse-LICENSE', 'zip-UNLICENSE', 'monocypher-LICENCE', 'nanopb-LICENSE', *DYNARMIC_LICENCES)
+# BlueZ's notices go with btvirt, This Frond's Bluetooth radio, and the Bluetooth phone built on its bthost.
+BLUEZ_LICENCES = ('bluez-COPYING', 'bluez-COPYING.LIB', 'bluez-ecc-BSD-2-Clause')
+LICENCE_FILES = ('argparse-LICENSE', 'zip-UNLICENSE', 'monocypher-LICENCE', 'nanopb-LICENSE', *DYNARMIC_LICENCES,
+                 *BLUEZ_LICENCES)
 # Docs installed under usr/share/doc/frond/ (using-frond.md is installed as README).
 DOCS = ('developer-reference.md', 'testing.md', 'performance.md', 'adding-a-device.md')
 FILES = {
     'usr/lib/frond/frond-core': 0o755,
     'usr/lib/frond/frond-68k-core': 0o755,
+    'usr/lib/frond/btvirt': 0o755,
+    'usr/lib/frond/bluetooth-phone': 0o755,
     'usr/bin/frond-desktop': 0o755,
     'usr/share/applications/org.frond.Frond.desktop': 0o644,
     'usr/share/icons/hicolor/scalable/apps/frond.svg': 0o644,

@@ -23,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import com.rm.frond.ui.AboutScreen
 import com.rm.frond.ui.CardsScreen
+import com.rm.frond.ui.ConnectionsScreen
 import com.rm.frond.ui.FirmwareScreen
 import com.rm.frond.ui.FrondTheme
 import com.rm.frond.ui.HomeScreen
@@ -67,6 +68,9 @@ class HomeModel(private val activity: HomeActivity) {
     val copyProgress: Float? get() = HomeWork.progress
     // The Cards screen, when open.
     var cards by mutableStateOf<CardsModel?>(null)
+        private set
+    // The Connections screen, when open; it watches the link engine while Home is in front.
+    var connections by mutableStateOf<ConnectionsModel?>(null)
         private set
     // A short message for the home screen's snackbar.
     var notice by mutableStateOf<String?>(null)
@@ -135,8 +139,15 @@ class HomeModel(private val activity: HomeActivity) {
             var finished = false
             try {
                 error = withContext(Dispatchers.IO) {
-                    work({ !isActive }) { done, total ->
-                        if (total > 0) HomeWork.scope.launch { if (HomeWork.copying) HomeWork.progress = done.toFloat() / total }
+                    try {
+                        work({ !isActive }) { done, total ->
+                            if (total > 0) HomeWork.scope.launch { if (HomeWork.copying) HomeWork.progress = done.toFloat() / total }
+                        }
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // A damaged card or a bug shows as a message, not a crash.
+                        e.message ?: "Something went wrong."
                     }
                 }
                 finished = true
@@ -178,7 +189,17 @@ class HomeModel(private val activity: HomeActivity) {
         if (cards == null) cards = CardsModel(activity, this).also { it.open() }
     }
 
+    fun openConnections() {
+        if (connections == null) connections = ConnectionsModel(activity).also { it.open() }
+    }
+
+    fun closeConnections() {
+        connections?.close()
+        connections = null
+    }
+
     fun closeCards() {
+        CardImageFiles.current?.takeIf { it.isOpen }?.close()
         cards = null
     }
 
@@ -312,6 +333,8 @@ class HomeActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (HomeWork.model === model) HomeWork.model = null
+        // A card open in Files stays open across a recreate and closes when the screen really goes.
+        if (isFinishing && !isChangingConfigurations) CardImageFiles.current?.close()
         super.onDestroy()
     }
 
@@ -319,6 +342,8 @@ class HomeActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         HomeWork.model = model
         model.restore(savedInstanceState)
+        // A card still open in Files from before a recreate: its view comes back.
+        if (CardImageFiles.current?.isOpen == true) model.openCards()
         // Cards: stale copies go and existing machines' cards move in. Machines running elsewhere wait.
         if (savedInstanceState == null) {
             val app = applicationContext
@@ -330,6 +355,7 @@ class HomeActivity : ComponentActivity() {
                 Surface(Modifier.fillMaxSize()) {
                     BackHandler(enabled = model.firmwareOpen) { model.closeFirmware() }
                     BackHandler(enabled = model.cards != null && !model.firmwareOpen && !model.settingsOpen) { model.closeCards() }
+                    BackHandler(enabled = model.connections != null && model.cards == null && !model.firmwareOpen && !model.settingsOpen) { model.closeConnections() }
                     BackHandler(enabled = model.machineDraft != null && !model.firmwareOpen) { model.cancelMachine() }
                     BackHandler(enabled = model.settingsOpen) {
                         when {
@@ -346,6 +372,7 @@ class HomeActivity : ComponentActivity() {
                         model.firmwareOpen -> FirmwareScreen(model)
                         model.machineDraft != null -> MachineSettingsScreen(model)
                         model.cards != null -> CardsScreen(model, model.cards!!)
+                        model.connections != null -> ConnectionsScreen(model, model.connections!!)
                         else -> HomeScreen(model)
                     }
                 }
@@ -387,13 +414,24 @@ class HomeActivity : ComponentActivity() {
                 delay(250)
                 model.refreshRunning()
             }
+            // FrondActivity leaves a note when the core stopped without being asked to. It writes it
+            // as its process ends, which can be after this resume.
+            val note = File(filesDir, FrondActivity.START_ERROR)
+            if (note.isFile) {
+                model.alert = "Emulator stopped" to note.readText()
+                note.delete()
+            }
         }
-        // FrondActivity leaves a note when the core stopped without being asked to.
-        val note = File(filesDir, FrondActivity.START_ERROR)
-        if (note.isFile) {
-            model.alert = "Emulator stopped" to note.readText()
-            note.delete()
-        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        model.connections?.open()
+    }
+
+    override fun onStop() {
+        model.connections?.close()
+        super.onStop()
     }
 
     override fun onPause() {

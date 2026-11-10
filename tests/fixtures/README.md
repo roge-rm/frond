@@ -34,3 +34,13 @@ separate. The fixtures contain no firmware or application binary.
 with snapshots before each tap and after a 2.5-second response window. Start with
 the menu closed and run for 26 seconds. Pair it with the optional menu observer
 and analyser described in [performance](../../doc/performance.md#input-and-menu-latency).
+
+# Card file leftovers
+
+`card-leftovers/android/` and `card-leftovers/desktop/` hold a 32 MiB SD card file cut off part
+way through a Files… change, written by each app's CardFile: `commit` stopped with its
+`.files-commit` written, `intent` stopped after the data. `*.sparse` is the card file as its
+non-zero 512-byte blocks ("FRONDSP1", the length, then offset and bytes, little endian), beside
+the `.files-intent` and `.files-commit` it left, and `*.expect` lists what it holds once settled.
+`CardFileTest` (Android) and `tests/card-file.cpp` (desktop) settle both sides'. Run either with
+`FROND_FIXTURE_OUT=<dir>` to write that side's again. They hold only generated test data.

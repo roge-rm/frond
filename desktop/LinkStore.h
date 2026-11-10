@@ -25,7 +25,10 @@ struct Peer {
     quint16 goodPort{0};
     bool paired{true};
     qint64 lastSeen{0};  // ms since the epoch, from beacons and links
+    // Whose radio Bluetooth uses with this peer, here or there, and when someone chose it (ms
+    // since the epoch, 0 if nobody has: then the side with the lower install id holds it).
     QString bluetoothRadio{"here"};
+    qint64 bluetoothRadioAt{0};
     bool keyChanged{false};  // its handshake failed against the pinned key: pair again
     QString id_() const { return hexId(id); }
 };

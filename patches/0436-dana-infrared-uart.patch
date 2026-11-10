@@ -1,0 +1,120 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -1,6 +1,7 @@
+ #include "EmRegsVZDana.h"
+ #include <cstdio>
+ #include "EmSession.h"
++#include "EmUARTDragonball.h"
+ #include "EmCPU68K.h"
+ #include <cstring>
+ #include "dana_keyboard5.h"
+@@ -115,10 +116,28 @@
+ template <typename T> void EmRegsVZDana::SaveState(T& s) {
+     EmRegsVZ::Save(s);
+     adc.Save(s);
++    if(auto* uart=s.GetChunk(ChunkType::uartDana)) {
++        auto pending=fUART[1]->CapturePending();
++        uart->Put32(1); uart->Put32(pending.rxCount); uart->Put32(pending.txCount);
++        uart->Put32(pending.receiving);
++        for(auto byte:pending.rx) uart->Put32(byte);
++        for(auto byte:pending.tx) uart->Put32(byte);
++    }
+     auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
+     c->Put32(9); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h);
+ }
+ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
++    EmUARTDragonball::PendingState pending;
++    if(auto* uart=l.GetChunk(ChunkType::uartDana)) {
++        if(uart->Get32()!=1) { l.NotifyError(); return; }
++        pending.rxCount=uart->Get32(); pending.txCount=uart->Get32();
++        unsigned receiving=uart->Get32(); pending.receiving=receiving!=0;
++        bool valid=receiving<=1;
++        for(auto& byte:pending.rx) { unsigned value=uart->Get32(); if(value>255) valid=false; byte=value; }
++        for(auto& byte:pending.tx) { unsigned value=uart->Get32(); if(value>255) valid=false; byte=value; }
++        if(!valid || !uart->IsAtEnd()) { l.NotifyError(); return; }
++    }
++    if(!fUART[1]->RestorePending(pending)) { l.NotifyError(); return; }
+     EmRegsVZ::Load(l);
+     adc.Load(l);
+     auto* c=l.GetChunk(ChunkType::regsVZDana);
+@@ -423,3 +442,13 @@
+     pwmActive=false;
+     DispatchPwmChange();
+ }
++
++// Dana DrvControl 102e028c enables UART2 SIR and drives PG4 low.
++Bool EmRegsVZDana::GetLineDriverState(EmUARTDeviceType type) {
++    return type==kUARTIR && (StdRead(0xfffff430,1)&0x10) &&
++        (StdRead(0xfffff433,1)&0x10) && !(StdRead(0xfffff431,1)&0x10) &&
++        !(StdRead(0xfffff43b,1)&0x30) && (StdRead(0xfffff918,2)&0x20);
++}
++EmUARTDeviceType EmRegsVZDana::GetUARTDevice(int uart) {
++    return uart==1 && GetLineDriverState(kUARTIR) ? kUARTIR : kUARTNone;
++}
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -95,6 +95,8 @@
+     }
+     void Reset(Bool hardware) override;
+     void TurnSoundOff() override;
++    Bool GetLineDriverState(EmUARTDeviceType) override;
++    EmUARTDeviceType GetUARTDevice(int) override;
+ 
+     void KDirWrite(emuptr, int, uint32);
+     void PortDataChanged(int, uint8, uint8) override;
+--- a/src/cloudpilot/emulator/hardware/EmUARTDragonball.cpp
++++ b/src/cloudpilot/emulator/hardware/EmUARTDragonball.cpp
+@@ -908,3 +908,23 @@
+ 
+     return false;
+ }
++
++EmUARTDragonball::PendingState EmUARTDragonball::CapturePending() {
++    PendingState pending;
++    pending.rxCount=fRxFIFO.GetUsed(); pending.txCount=fTxFIFO.GetUsed();
++    pending.receiving=receiveInProgress;
++    for(unsigned i=0;i<pending.rxCount;i++) { pending.rx[i]=fRxFIFO.Get(); fRxFIFO.Put(pending.rx[i]); }
++    for(unsigned i=0;i<pending.txCount;i++) { pending.tx[i]=fTxFIFO.Get(); fTxFIFO.Put(pending.tx[i]); }
++    return pending;
++}
++bool EmUARTDragonball::RestorePending(const PendingState& pending) {
++    if(sync || pending.rxCount>unsigned(fRxFIFO.GetMaxSize()) || pending.txCount>unsigned(fTxFIFO.GetMaxSize())) return false;
++    for(unsigned i=pending.rxCount;i<64;i++) if(pending.rx[i]) return false;
++    for(unsigned i=pending.txCount;i<64;i++) if(pending.tx[i]) return false;
++    fRxFIFO.Clear(); fTxFIFO.Clear();
++    for(unsigned i=0;i<pending.rxCount;i++) fRxFIFO.Put(pending.rx[i]);
++    for(unsigned i=0;i<pending.txCount;i++) fTxFIFO.Put(pending.tx[i]);
++    receiveInProgress=pending.receiving;
++    fState=State(fState.UART_TYPE);
++    return true;
++}
+--- a/src/cloudpilot/emulator/hardware/EmUARTDragonball.h
++++ b/src/cloudpilot/emulator/hardware/EmUARTDragonball.h
+@@ -120,6 +120,15 @@
+         /*  +  ->  */ unsigned int RXFIFO_LEVEL_MARKER : 4;  // 68SZ328 only
+     };
+ 
++    struct PendingState {
++        uint32 rxCount=0, txCount=0;
++        uint8 rx[64]{}, tx[64]{};
++        bool receiving=false;
++    };
++    // Capture on the emulation thread between CPU slices, non-sync mode only.
++    // Endpoint queues and peer state are outside the checkpoint.
++    PendingState CapturePending();
++    bool RestorePending(const PendingState&);
+     EmUARTDragonball(UART_Type, int uartNum);
+     ~EmUARTDragonball(void);
+ 
+--- a/src/cloudpilot/emulator/savestate/ChunkType.h
++++ b/src/cloudpilot/emulator/savestate/ChunkType.h
+@@ -30,7 +30,8 @@
+     externalStorage = 0x1c0,
+     spiSlaveSD = 0x1d0,
+     regsVZDana = 0x1e0,
+-    regsISPDana = 0x1f0
++    regsISPDana = 0x1f0,
++    uartDana = 0x200
+ };
+ 
+ #endif  // _CHUNK_TYPE_H_

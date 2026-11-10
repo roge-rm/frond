@@ -1,0 +1,12 @@
+--- a/src/cloudpilot/emulator/EmDevice.cpp
++++ b/src/cloudpilot/emulator/EmDevice.cpp
+@@ -1731,7 +1731,8 @@
+ bool EmDevice::NeedsSDCTLHack() const { return fDeviceID == kDevicePalmM515; }
+ 
+ bool EmDevice::HasCustomDigitizerTransform() const {
+-    return fDeviceID == kDeviceHandEra330 || fDeviceID == kDeviceHandEra330c ||
++    // Dana converts display input to its centred compatibility screen in the ROM.
++    return fDeviceID == kDeviceDana || fDeviceID == kDeviceHandEra330 || fDeviceID == kDeviceHandEra330c ||
+            fDeviceID == kDeviceYSX1100;
+ }
+ 

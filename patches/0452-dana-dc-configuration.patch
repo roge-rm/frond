@@ -1,0 +1,119 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -2,7 +2,7 @@
+ #include "EmRegs.h"
+ #include <array>
+ 
+-// Disconnected controller subset, ISP1161A rev.03 sections 10.1-10.6.
++// Disconnected controller registers, ISP1161A rev.03 sections 10 and 13.
+ // Unknown commands fail closed. No transfer buffers or USB endpoints are attached.
+ class EmRegsISPDana : public EmRegs {
+  public:
+@@ -26,6 +26,9 @@
+     uint32 Read(emuptr, int);
+     uint32 DeviceRead();
+     void DeviceWrite(uint16);
++    void ResetDevice();
++    std::array<uint16, 16> dcEndpoints{};
++    uint16 dcAddress=0;
+     uint16 dcCommand=0, dcMode=0, dcHardware=0, dcScratch=0;
+     bool dcUnlocked=true, dcSuspended=false;
+     uint32 dcInterrupt=0, dcInterruptEnable=0, dcLatch=0;
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -15,8 +15,7 @@
+     regs[0x12]=2; regs[0x20]=0x28;
+     regs[0x27] = 0x6122; // Modelled datasheet revision; firmware checks only 0x61xx.
+     command = 0; word = 0; latch = 0;
+-    dcCommand=dcMode=dcHardware=dcScratch=0; dcUnlocked=true; dcSuspended=false;
+-    dcInterrupt=dcInterruptEnable=dcLatch=0; dcWord=0;
++    ResetDevice();
+ }
+ void EmRegsISPDana::SetSubBankHandlers() {
+     EmRegs::SetSubBankHandlers();
+@@ -63,7 +62,9 @@
+ }
+ void EmRegsISPDana::Write(emuptr address, int size, uint32 value) {
+     if (size==2 && address==GetAddressStart()+6) {
+-        dcCommand=value & 0xff; dcWord=0; dcLatch=0; return;
++        dcCommand=value & 0xff; dcWord=0; dcLatch=0;
++        if (dcCommand==0xf6 && dcUnlocked) ResetDevice();
++        return;
+     }
+     if (size==2 && address==GetAddressStart()+4) { DeviceWrite(value); return; }
+     if (size != 2 || (address != GetAddressStart() && address != GetAddressStart()+2))
+@@ -137,7 +138,17 @@
+     }
+ }
+ 
++void EmRegsISPDana::ResetDevice() {
++    dcCommand=dcMode=dcHardware=dcScratch=dcAddress=0;
++    dcUnlocked=true; dcSuspended=false;
++    dcInterrupt=dcInterruptEnable=dcLatch=0; dcWord=0;
++    dcEndpoints.fill(0);
++    // Control FIFOs are fixed 64-byte single buffers, enabled after reset.
++    dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
++}
++
+ uint32 EmRegsISPDana::DeviceRead() {
++    if (dcCommand>=0x30 && dcCommand<=0x3f) return dcEndpoints[dcCommand-0x30];
+     switch (dcCommand) {
+         case 0xc0: {
+             uint32 result = (dcInterrupt >> (16*dcWord)) & 0xffff;
+@@ -149,6 +160,7 @@
+         case 0xc3: { uint32 value=(dcInterruptEnable >> (16*dcWord)) & 0xffff;
+             dcWord=(dcWord+1)%2; return value; }
+         case 0xb3: return dcScratch;
++        case 0xb7: return dcAddress;
+         case 0xb9: return dcMode;
+         case 0xbb: return dcHardware;
+         default: throw std::runtime_error("ISP DC unqualified read");
+@@ -157,6 +169,12 @@
+ void EmRegsISPDana::DeviceWrite(uint16 value) {
+     if (dcCommand==0xb0) { dcUnlocked=(value==0xaa37); return; }
+     if (!dcUnlocked) return;
++    if (dcCommand>=0x20 && dcCommand<=0x2f) {
++        unsigned endpoint=dcCommand-0x20;
++        // Retain ECR programming only. FIFO transactions remain unsupported.
++        dcEndpoints[endpoint]=endpoint<2 ? (endpoint ? 0xc3 : 0x83) : value & 0xff;
++        return;
++    }
+     switch (dcCommand) {
+         case 0xc2:
+             dcLatch |= uint32(value) << (16*dcWord);
+@@ -165,6 +183,7 @@
+             dcWord=0; dcLatch=0;
+             break;
+         case 0xb2: dcScratch=value; break;
++        case 0xb6: dcAddress=value & 0xff; break;
+         case 0xb8:
+             if ((dcMode & 0x20) && !(value & 0x20)) dcSuspended=true;
+             dcMode=value & 0xad; break;
+@@ -188,13 +207,25 @@
+ template <typename T> void EmRegsISPDana::SaveState(T& s) {
+ 
+     auto* c=s.GetChunk(ChunkType::regsISPDana); if(!c) return;
+-    c->Put32(2); SaveChunkHelper h(*c); StateFields(h);
++    c->Put32(3); SaveChunkHelper h(*c); StateFields(h);
++    h.Do16(dcAddress);
++    for (auto& value : dcEndpoints) h.Do16(value);
+ }
+ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
+ 
+     auto* c=l.GetChunk(ChunkType::regsISPDana);
+-    if(!c || c->Get32()!=2) { l.NotifyError(); return; }
++    if(!c) { l.NotifyError(); return; }
++    uint32 version=c->Get32();
++    if(version!=2 && version!=3) { l.NotifyError(); return; }
+     LoadChunkHelper h(*c); StateFields(h);
++    dcAddress=0; dcEndpoints.fill(0); dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
++    if(version==3) {
++        h.Do16(dcAddress);
++        for (auto& value : dcEndpoints) h.Do16(value);
++    }
++    if(dcAddress>0xff || dcEndpoints[0]!=0x83 || dcEndpoints[1]!=0xc3)
++        l.NotifyError();
++    for(auto value : dcEndpoints) if(value>0xff) l.NotifyError();
+     if((regs[0x15]&~0x10100u) || (regs[0x16]&~0x10100u) || resetCycles > (ClockHz()+99999)/100000 || command > 0xff || dcCommand > 0xff || word > 1 || dcWord > 1 ||
+        (command >= 0xa0 && word) || (word == 0 && latch) ||
+        (word == 1 && (command & 0x80) && (latch & 0xffff0000)) ||

@@ -10,10 +10,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.random.Random
 
-// Each card change is cut off after every step and must read as the old or the new card.
+// Raw images through the storage library: a failed change leaves the card alone and an add writes
+// little. The old SD exchange's raw image journal is still replayed for its leftovers.
 class FatJournalTest {
-    private class Crash : RuntimeException()
-
     private fun card(mib: Int, tag: String): File {
         val blank = FatImageTest().blank(mib)
         val file = File(blank.parentFile, "journal-$tag-$mib.img")
@@ -40,54 +39,25 @@ class FatJournalTest {
         out to fat.freeBytes
     }
 
-    private fun crashTest(tag: String, prepare: (FatImage) -> Unit, change: (FatImage) -> Unit) {
-        val expectNew = mapOf("data" to false, "journal" to true, "partly" to true, "applied" to true, "damaged" to false)
-        for ((step, isNew) in expectNew) {
-            val file = card(32, tag)
+    // A complete journal is replayed and goes; a damaged one just goes.
+    @Test fun oldExchangeJournalsAreReplayed() {
+        for (damaged in listOf(false, true)) {
+            val file = card(32, "old-$damaged")
             try {
-                FatImage.open(file, true).use(prepare)
-                val old = snapshot(file)
-                val reference = card(32, "$tag-ref")
-                FatImage.open(reference, true).use { prepare(it); change(it) }
-                val new = snapshot(reference)
-                reference.delete()
-                FatImage.open(file, true).use { fat ->
-                    fat.crashHook = { if (it == (if (step == "damaged") "journal" else step)) throw Crash() }
-                    try { change(fat); fail("$step didn't crash") } catch (_: Crash) { }
-                    assertFalse(fat.committed)
-                }
-                val journal = FatImage.journalOf(file)
-                if (step == "damaged") journal.writeBytes(journal.readBytes().copyOf(journal.length().toInt() - 7))
-                assertEquals("$tag $step journal", step != "data", journal.exists())
-                val after = snapshot(file)
-                assertFalse(journal.exists())
-                assertEquals("$tag $step", if (isNew) new else old, after)
-                // The card still takes changes after recovery.
-                FatImage.open(file, true).use { it.add("/", "after.txt", byteArrayOf(9).inputStream(), 1) }
-                assertTrue(snapshot(file).first.containsKey("/after.txt"))
+                val before = file.readBytes()
+                val sector = Random(5).nextBytes(512)
+                val journal = FatImage.encodeJournal(listOf(4096L to sector), file.length())
+                FatImage.journalOf(file).writeBytes(if (damaged) journal.copyOf(journal.size - 7) else journal)
+                FatImage.recover(file)
+                assertFalse(FatImage.journalOf(file).exists())
+                val after = file.readBytes()
+                if (damaged) assertArrayEquals(before, after)
+                else assertArrayEquals(sector, after.copyOfRange(4096, 4608))
             } finally {
                 file.delete()
                 FatImage.journalOf(file).delete()
             }
         }
-    }
-
-    private val data = Random(7).nextBytes(300_001)
-
-    @Test fun addSurvivesCrashes() = crashTest("add", { it.makeFolder("/", "PALM") }) {
-        it.add("/PALM", "A long file name.prc", data.inputStream(), data.size.toLong())
-    }
-
-    @Test fun makeFolderSurvivesCrashes() = crashTest("mkdir", { it.makeFolder("/", "PALM") }) {
-        it.makeFolder("/PALM", "Launcher")
-    }
-
-    // A full subfolder grows by a cluster in the same change.
-    @Test fun growingFolderSurvivesCrashes() = crashTest("grow", { fat ->
-        fat.makeFolder("/", "PALM")
-        for (i in 0 until 60) fat.add("/PALM", "Long file name number $i.pdb", byteArrayOf(i.toByte()).inputStream(), 1)
-    }) {
-        it.add("/PALM", "One more long file name.pdb", data.inputStream(), data.size.toLong())
     }
 
     @Test fun failedChangeLeavesTheCardAlone() {
@@ -103,7 +73,7 @@ class FatJournalTest {
         }
     }
 
-    // A 1 MB add on a 2 GiB card writes the data, a small journal and the sectors it names.
+    // A 1 MB add on a 2 GiB card writes the data and little else.
     @Test fun addOn2GiBCardWritesLittle() {
         val file = card(2048, "big")
         try {

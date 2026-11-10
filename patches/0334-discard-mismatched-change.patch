@@ -1,0 +1,111 @@
+diff --git a/src/common/storage/Settle.h b/src/common/storage/Settle.h
+index 117ab7c..66d2c27 100644
+--- a/src/common/storage/Settle.h
++++ b/src/common/storage/Settle.h
+@@ -88,24 +88,33 @@ inline bool hasChanges(const std::filesystem::path& card) {
+     return !changes.standalone.empty() || !changes.pending.empty();
+ }
+ 
+-// Replays one standalone journal onto the card open as `fd`. A v1 card at generation 0 first
+-// gets room for its table; the journal holds the whole new table.
+-inline Result replayStandalone(const std::filesystem::path& card, int fd, const std::filesystem::path& path,
+-                               const Journal& journal) {
++// Whether a standalone journal fits the card open as `fd`: the same stored size, and a generation
++// it goes from or to (a v1 card only from 0).
++inline bool journalFits(int fd, const Journal& journal) {
+     uint8_t header[frondSdFile::headerBytes];
+     frondSdFile::Info info;
+     if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info) ||
+         info.stored() != journal.storedBytes)
+-        return failed("mismatch", mismatchMessage);
++        return false;
+     const uint64_t v2Bytes = frondSdFile::headerBytes + journal.storedBytes + 4 * journal.table.size();
+     const int64_t size = sizeOf(fd);
+-    if (info.version == frondSdFile::versionV1) {
+-        if (journal.from != 0 || (size != int64_t(frondSdFile::headerBytes + info.stored()) && size != int64_t(v2Bytes)))
+-            return failed("mismatch", mismatchMessage);
+-        if (ftruncate(fd, off_t(v2Bytes)) != 0 || fsync(fd) != 0) return failed("write", "Could not write the card file.");
+-    } else if (size != int64_t(v2Bytes) || (info.generation != journal.from && info.generation != journal.to)) {
++    if (info.version == frondSdFile::versionV1)
++        return journal.from == 0 && (size == int64_t(frondSdFile::headerBytes + info.stored()) || size == int64_t(v2Bytes));
++    return size == int64_t(v2Bytes) && (info.generation == journal.from || info.generation == journal.to);
++}
++
++// Replays one standalone journal onto the card open as `fd`. A v1 card at generation 0 first
++// gets room for its table; the journal holds the whole new table.
++inline Result replayStandalone(const std::filesystem::path& card, int fd, const std::filesystem::path& path,
++                               const Journal& journal) {
++    if (!journalFits(fd, journal)) return failed("mismatch", mismatchMessage);
++    const uint64_t v2Bytes = frondSdFile::headerBytes + journal.storedBytes + 4 * journal.table.size();
++    uint8_t header[frondSdFile::headerBytes];
++    frondSdFile::Info info;
++    if (!readAllAt(fd, header, sizeof(header), 0) || !frondSdFile::parseContainer(header, info))
+         return failed("mismatch", mismatchMessage);
+-    }
++    if (info.version == frondSdFile::versionV1 && (ftruncate(fd, off_t(v2Bytes)) != 0 || fsync(fd) != 0))
++        return failed("write", "Could not write the card file.");
+     if (!applyJournal(card, path, nullptr, JournalStep::header)) return failed("write", "Could not write the card file.");
+     removePath(pendingPath(card, journal.to));
+     removePath(path);
+@@ -145,6 +154,27 @@ inline Result settleChanges(const std::filesystem::path& card) {
+     return settleChangesLocked(card, fd);
+ }
+ 
++// For a card refused with "mismatch": drops each standalone journal that doesn't fit it, with its
++// pending list, under the card's lock, then settles what is left.
++inline Result discardMismatched(const std::filesystem::path& card) {
++    std::error_code ec;
++    if (!std::filesystem::is_regular_file(card, ec)) return failed("read", "Could not read the card file.");
++    const int fd = ::open(card.c_str(), O_RDWR | O_CLOEXEC);
++    if (fd < 0) return failed("write", "Could not write the card file.");
++    Fd closer(fd);
++    if (!tryLock(fd)) return failed("busy", inFilesMessage);
++    if (!legacy::settle(card, fd)) return failed("write", "Could not write the card file.");
++    bool dropped = false;
++    for (const auto& [path, journal] : changesOf(card).standalone) {
++        if (journalFits(fd, journal)) continue;
++        removePath(pendingPath(card, journal.to));
++        removePath(path);
++        dropped = true;
++    }
++    if (dropped) syncDir(folderOf(card));
++    return settleChangesLocked(card, fd);
++}
++
+ // Step 4: brings the card to the generation a .frond describes. Same generation: stale journals
+ // go. One behind with a complete journal to this generation: the journal is replayed. A complete
+ // journal to this generation is also replayed over a card already there, which is harmless. A
+diff --git a/src/uarm/native/CardTool.h b/src/uarm/native/CardTool.h
+index 1b39776..b257fdb 100644
+--- a/src/uarm/native/CardTool.h
++++ b/src/uarm/native/CardTool.h
+@@ -407,8 +407,9 @@ inline Result verifyCard(const std::filesystem::path& card, const Progress& prog
+ }
+ 
+ // One operation from its words: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT, export CARD IMAGE,
+-// settle CARD or verify CARD. On success the message is "KIND BYTES" of the card file (for export,
+-// "image BYTES"; for settle and verify, "settled GENERATION" or "verified GENERATION").
++// settle CARD, discard CARD (drops an unfinished change that doesn't match, then settles) or
++// verify CARD. On success the message is "KIND BYTES" of the card file (for export, "image BYTES";
++// for settle, discard and verify, "settled GENERATION" or "verified GENERATION").
+ inline Result run(const std::vector<std::string>& args, const Progress& progress = {}) {
+     Kind kind;
+     Result result;
+@@ -422,13 +423,16 @@ inline Result run(const std::vector<std::string>& args, const Progress& progress
+         if (result.ok) result.message = std::string(kindName(kind)) + " " + std::to_string(sizeOf(args[3]));
+     } else if (args.size() == 2 && args[0] == "settle") {
+         result = settleCard(args[1]);
++    } else if (args.size() == 2 && args[0] == "discard") {
++        if (auto dropped = frondStorage::discardMismatched(args[1]); !dropped.ok) return fromStorage(dropped);
++        result = settleCard(args[1]);
+     } else if (args.size() == 2 && args[0] == "verify") {
+         result = verifyCard(args[1], progress);
+     } else if (args.size() == 3 && args[0] == "export") {
+         result = exportCard(args[1], args[2], progress);
+         if (result.ok) result.message = "image " + std::to_string(sizeOf(args[2]));
+     } else {
+-        return fail("usage", "Use: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT, export CARD IMAGE, settle CARD or verify CARD.");
++        return fail("usage", "Use: make KIND SIZE OUTPUT, import IMAGE KIND OUTPUT, export CARD IMAGE, settle CARD, discard CARD or verify CARD.");
+     }
+     return result;
+ }

@@ -15,6 +15,11 @@
 #include "DisplayChange.h"
 #include "WindowScale.h"
 #include <SDL_image.h>
+// Synthetic finger events come from a touch id SDL doesn't know, so count them as a touch screen.
+struct TouchInput : SdlEventHandler {
+    using SdlEventHandler::SdlEventHandler;
+    bool DirectTouch(SDL_TouchID) const override { return true; }
+};
 class Guest : public SoC {
  public:
     explicit Guest(DeviceType5 device=deviceTypeTX) : device(device) {
@@ -174,7 +179,7 @@ static void silkscreen(DeviceType5 device) {
                 renderer.Draw(true,0);
                 auto* shot=SDL_CreateRGBSurfaceWithFormat(0,width*scale,(height+controls.height)*scale,32,SDL_PIXELFORMAT_RGBA32);
                 assert(SDL_RenderReadPixels(SDL_GetRenderer(window),nullptr,SDL_PIXELFORMAT_RGBA32,shot->pixels,shot->pitch)==0);
-                SdlEventHandler input(&guest,scale,display,rotation);
+                TouchInput input(&guest,scale,display,rotation);
                 for(size_t i=0;i<silk.count;++i) {
                     const auto& b=silk.buttons[i].bounds;const int h=std::min(b.y+b.h,120)-b.y;
                     for(auto [px,py]:{std::pair<int,int>{b.x+b.w/2,b.y+h/2},{b.x+2,b.y+2},{b.x+b.w-3,b.y+2},
@@ -207,7 +212,7 @@ static void exercise(DeviceType5 device) {
     for(auto rotation:{Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270})
     for(float scale:{1.f,1.25f,1.5f,1.75f,2.f}) {
         Guest guest(device);DisplayConfiguration display=guest.display();
-        SdlEventHandler input(&guest,scale,display,rotation);
+        TouchInput input(&guest,scale,display,rotation);
         const int screenWidth=display.width,screenHeight=display.height+display.graffitiHeight;
         const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
         const int width=landscape?screenHeight:screenWidth,height=landscape?screenWidth:screenHeight;
@@ -709,7 +714,7 @@ static void tg50Art() {
     // pressed, shown in PressedButtons, released on leaving the key, on button up and on focus loss.
     {
         Guest guest;guest.setDisplay({320,320,0,160});DisplayConfiguration display=guest.display();
-        SdlEventHandler input(&guest,p,1,display,Rotation::portrait_0);
+        TouchInput input(&guest,p,1,display,Rotation::portrait_0);
         auto centre=[&](KeyId id) {
             for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==id) {
                 const auto k=deviceButtonRect(p,p.buttons[i],width,height,all);return std::pair<int,int>{k.x+k.w/2,k.y+k.h/2};
@@ -959,7 +964,7 @@ static void tg50ScreenBounds() {
     for(float scale : {1.f,1.25f,1.75f,2.f}) {
         for(auto rotation : {Rotation::portrait_0,Rotation::landscape_90,Rotation::portrait_180,Rotation::landscape_270}) {
             Guest guest(deviceTypeTG50);guest.setDisplay({320,320,0,224});auto display=guest.display();
-            SdlEventHandler input(&guest,scale,display,rotation);
+            TouchInput input(&guest,scale,display,rotation);
             const int left=int(38*scale),extent=int(320*scale);
             auto pointer=[&](Uint32 type,int x,int y) {
                 SDL_Event e{};e.type=type;e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;
@@ -1010,7 +1015,7 @@ static void tg50Visibility() {
                 assert(layout.x==expected.x && layout.y==expected.y);
                 assert(layout.scaleX==expected.scaleX && layout.scaleY==expected.scaleY);
             }
-            SdlEventHandler input(&guest,scale,display,rotation,view);
+            TouchInput input(&guest,scale,display,rotation,view);
             input.SetDirectCapture(false);input.SetLayout(layout,fit!=WindowFit::none);
             auto pixel=[&](float x,float y) {
                 return std::pair<int,int>{int(std::floor(layout.x+(x+0.5f)*layout.scaleX)),int(std::floor(layout.y+(y+0.5f)*layout.scaleY))};
@@ -1104,7 +1109,7 @@ static void tg50LiveDisplay() {
                         {WindowFit::none,true,JogPlacement::keyboard},{WindowFit::whole,false,JogPlacement::screen},
                         {WindowFit::none,false,JogPlacement::hidden}};
     auto* win=SDL_CreateWindow("TG50 live display",0,0,521,761,SDL_WINDOW_RESIZABLE);assert(win);
-    SdlEventHandler input(&guest,scale,display,Rotation::portrait_0,deviceControlView(true,JogPlacement::screen));
+    TouchInput input(&guest,scale,display,Rotation::portrait_0,deviceControlView(true,JogPlacement::screen));
     input.SetDirectCapture(false);
     KeyId held=keyInvalid;
     for(const auto& step : steps) {
@@ -1248,7 +1253,7 @@ static void lcdScaling() {
 static void tg50HostKeyboard() {
     Guest guest(deviceTypeTG50); guest.setDisplay({320,320,0,224});
     auto display = guest.display();
-    SdlEventHandler input(&guest,1,display,Rotation::portrait_0);
+    TouchInput input(&guest,1,display,Rotation::portrait_0);
     auto physical = [&](SDL_Scancode scan, bool down, bool repeat=false) {
         SDL_Event e{}; e.type = down ? SDL_KEYDOWN : SDL_KEYUP;
         e.key.keysym.scancode = scan; e.key.keysym.sym = SDL_GetKeyFromScancode(scan);
@@ -1341,7 +1346,7 @@ static void firmwarePowerInput() {
     Guest guest(deviceTypeE2);
     guest.powerSupported=false;
     auto display=guest.display();
-    SdlEventHandler input(&guest,1,display,Rotation::portrait_0);
+    TouchInput input(&guest,1,display,Rotation::portrait_0);
     SDL_Event event{};
     event.type=SDL_KEYDOWN; event.key.keysym.sym=SDLK_ESCAPE;
     input.HandleEvent(event); guest.expect({});

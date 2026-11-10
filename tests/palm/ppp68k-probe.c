@@ -1,15 +1,40 @@
 /* Dials the default Network service with the guest's own NetLib (PPP over the serial port on
    frond-68k), looks up example.com, fetches / over HTTP and shows each step on the screen:
    "open", "dns", "connect", "sent", the status line and the byte count, then "done" or the
-   failing step with its error. */
+   failing step with its error. The same lines go into the FrondPPPLog database, one record, so a
+   test can export and read them. */
 #include <PalmOS.h>
 #include <NetMgr.h>
 
 static Int16 row = 2;
+static Char log[400];
 
 static void show(const Char* text) {
     WinDrawChars(text, StrLen(text), 2, row);
     row += 11;
+    if (StrLen(log) + StrLen(text) + 2 < sizeof(log)) {
+        StrCat(log, text);
+        StrCat(log, "\n");
+    }
+}
+
+static void save(void) {
+    LocalID id = DmFindDatabase(0, "FrondPPPLog");
+    DmOpenRef db;
+    MemHandle record;
+    UInt16 at = 0;
+    if (id) DmDeleteDatabase(0, id);
+    if (DmCreateDatabase(0, "FrondPPPLog", 'FPpp', 'DATA', false)) return;
+    id = DmFindDatabase(0, "FrondPPPLog");
+    db = id ? DmOpenDatabase(0, id, dmModeReadWrite) : 0;
+    if (!db) return;
+    record = DmNewRecord(db, &at, StrLen(log) + 1);
+    if (record) {
+        DmWrite(MemHandleLock(record), 0, log, StrLen(log) + 1);
+        MemHandleUnlock(record);
+        DmReleaseRecord(db, at, true);
+    }
+    DmCloseDatabase(db);
 }
 
 static void step(const Char* label, Err error, UInt32 value) {
@@ -90,6 +115,7 @@ UInt32 PilotMain(UInt16 command, MemPtr parameters, UInt16 flags) {
     WinEraseWindow();
     show("Frond PPP probe");
     fetch();
+    save();
     do {
         EvtGetEvent(&event, evtWaitForever);
         SysHandleEvent(&event);

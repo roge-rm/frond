@@ -6,6 +6,25 @@ A 68k device (the Palm IIIx is the example) runs on a different runner, `frond-6
 
 Core changes go in a new patch after the last one in `patches/`, or in an unpushed patch regenerated in place. Check them with `make check-reconstruction`. Keep the upstream licence headers and credit.
 
+## Reuse what's there
+
+A new device should be mostly existing code with a new profile. Before writing anything, find the path an existing device already uses and extend it. Add a profile field or a per-device table for what differs; don't copy a file and change the copy.
+
+| Need | Reuse |
+| --- | --- |
+| SoC, board, timers, interrupts, LCD | the board model for that SoC (see Hardware notes per SoC) |
+| Cards, sticks and internal storage | the storage library in `src/common/storage/` (see Storage below) |
+| Sessions | the session folder with media descriptors and sidecars; no new save format |
+| Install, launch, export, guest commands | the PACE and API bridge and the shared guest-command code |
+| Sound | the shared ring-buffer audio queue |
+| Button bar and silkscreen | an existing style and painter in `DeviceControls.cpp` where the layout fits |
+| Frontend settings and lists | the generated device data and capability flags |
+| Tests | `tests/device-rom.py`, `tests/smoke.py` and the console, frame, setup and probe helpers in `tools/` |
+
+Work the same way earlier devices were done: a plan with milestones, a read of the firmware (REA) only as far as the code needs, compared with what was found for the closest existing device, then build, focused tests and the device checks saved for the release. Keep firmware reads and evidence under `build/` as before.
+
+When a change touches a shared path, run the focused tests for the devices that already use it too.
+
 ## Steps
 
 First check the existing profiles, board dispatch and ROM detection. A device may already have an inherited model with no frontend. Keep its fixed name and extend that model. If it shares a board with a supported device, start from that board's working paths and list the differences in firmware, display, controls and peripherals.
@@ -38,7 +57,7 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `detect`, `companyId`, `halId` | How firmware is recognised: `cardHeader` (the Palm card header's company and HAL IDs, company 0 matches any), `norSize`, or `none` |
 | `board` | Which board model runs it. `none` means no runner can start it |
 | `art` | Which button bar and silkscreen it gets |
-| `capabilities` | `network`, `keyboard`, `serial`, `usb`, `fastAudio`, `infrared`, `bluetooth`, `sound`, `microphone`, `backgroundPanel` (see Peripherals) |
+| `capabilities` | `network`, `keyboard`, `serial`, `usb`, `fastAudio`, `infrared`, `bluetooth`, `sound`, `microphone`, `backgroundPanel`, `modem`, `irPhone` (see Peripherals) |
 | `norSize`, `nandSize` | Exact NOR size and raw NAND size including spare bytes. Zero for no fixed size or no NAND |
 | `minRam`, `maxRam` | Powers of two, in bytes |
 | `defaultDisplay`, `displayModes` | Default `DisplayMode` and a mask with a bit per allowed mode. The numbers are saved in sessions |
@@ -84,6 +103,8 @@ A `DeviceProfile5` has these fields. The name is what sessions, settings, the co
 | `infrared`, `sound` | yes | yes | yes | yes | yes |
 | `fastAudio` | yes | yes | no | no | no |
 | `microphone`, `backgroundPanel` | no | no | no | yes | no |
+| `modem` | no | no | no | no | yes |
+| `irPhone` | yes | yes | yes | yes | yes |
 | Camera, Hold | no, no | no, no | camera present (no sensor, stays off), no | no, Hold switch works | no, no |
 | Home and Menu taps | Menu 54,466 | 27,351 and 27,405 | 23,352 and 23,412 | none (Home key F6) | none |
 | `setup`, `launcher` | `tx`, `wallpaper` | `e2`, `wallpaper-upper` | `zire`, `wallpaper` | `tg50`, `tg50-clie` | `iiix`, `iiix` |
@@ -155,13 +176,27 @@ The Palm IIIx (DragonBall EZ, 68k) runs in `frond-68k`, built from the vendored 
 - Another EZ or 68328/VZ Palm needs a profile, art and a setup recipe, and Cloudpilot already has the device model. A VZ board's bus timing is only unit-tested so far.
 - Checks: `make test-frond-68k`, `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `make test-core-control`, see [testing.md](testing.md#per-device-tests). The IIIx has no `SMOKE` entry yet.
 
+Dana uses the staged `vz328` backend in `frond-68k`, with `runs68k` true and
+`frontend.available` false. Normal ROM/session dispatch, native ROM pen input
+and the full keyboard input route work, including text synthesis, modifiers,
+replay and console/socket input. The ROM keeps its rollover and repeat rules.
+Halt/mask sleep, wake, backlight and the decoded two-button power modes are
+qualified. Sound uses the VZ
+PWM1 pin on PB7, with guest clock and pin-mux gating, and the existing mono
+piezo renderer. Alerts, clicks, Sound Manager tones and saved pending tones are
+qualified. IrDA uses UART2 SIR on PJ4/PJ5 with PG4 shutdown, qualified by
+guest payload and database beams, local state and disconnect checks. Fast audio,
+microphone, external serial and USB transfers remain unavailable. Both SD/MMC
+slots work in the native backend. Its virtual ADC inputs are raw simulator counts;
+physical voltages and electrical pen fidelity are unqualified.
+
 ## Fast engine requirements
 
 The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
 
 - The JIT keeps copies of code. Anything that changes guest code from the host (PACE patching, peephole patches, reset, session load) has to clear it through `jitClear`. Guest writes to translated RAM pages drop the code by themselves.
 - Instructions the JIT can't run, the PCs of hooks and watched sites go to the interpreter (`cpuJitPlain`). A new hook that changes instructions needs the same rule.
-- `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off.
+- `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off. `capabilities.modem` (the IIIx) lets `--serial modem` put the core's snap-on Hayes modem on the serial port. `capabilities.irPhone` lets `--irda phone` put the core's mobile phone on the IR port.
 - Run `make test-jit-differential` after any CPU change. It compares the JIT with the interpreter on random machine states and blocks. `make test-jit-overshoot` checks how far a run can pass its cycle budget.
 - Smoke the device in Fast (`FROND_CORE=build/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
 
@@ -171,10 +206,20 @@ List every control and port the real device has: keyboard, jog controls, storage
 
 - `capabilities` gates settings in the desktop (`capabilities()` in `desktop/FirmwareInput.h`), Android, the CLI and the core.
 - `sound` is a separate fact from the storage kind and from `fastAudio`.
-- The storage slot kind comes from `deviceProfileStorageSlot5` (SD, Memory Stick or none). Sizes are checked by `deviceProfileSdSizeValid5`, `deviceProfileMsSizeValid5` and `deviceProfileMsProSizeValid5`.
+- The storage slot kind comes from `deviceProfileStorageSlot5` (SD, Memory Stick or none). Sizes are checked by `deviceProfileSdSizeValid5`, `deviceProfileMsSizeValid5` and `deviceProfileMsProSizeValid5`. Storage itself is covered in the next section.
 - Add a presence field to the frontend part when a peripheral needs one (the camera and SD slot have one).
 
 When a peripheral needs its own guest procedure, add a scenario behind `tests/device-rom.py` and reuse the shared console, frame, setup and probe helpers in `tools/`.
+
+## Storage
+
+Every medium goes through the storage library in `src/common/storage/`: one container format, journals, settle and verify, CardFile and FatImage. Both apps use it for Files…. Don't add a new card format, writer or crash-recovery path for a device.
+
+- **SD and MMC:** set the slot and sizes in the profile. Nothing else is needed.
+- **Memory Stick Pro:** set `msProMaxMib`. The attribute area is generated from size and identity.
+- **Classic Memory Stick:** the container keeps every extra byte and boot block, so any driver sees a real stick. Writing from outside (`ClassicStick.h`) and the blank-stick format follow the TG50's driver, 3452Slot 2.10 (findings kept under `build/step-storage/rea/`). For a new Clié, read its Memory Stick slot driver and compare it with that: the blank-stick format for each size (partition start, FAT type and size, cluster size, `MEMSTICK.IND`), the extra bytes and order a new block gets, and which block wins when two claim one logical address. If they match, add nothing. If they differ, make the format or writer values a per-device table in `ClassicStick.h`.
+- **Internal NAND:** stored as `nand.frondnand` beside the session with a media descriptor. It can't be edited from outside; databases go in and out through the guest commands.
+- **RAM:** part of the session, reached through the guest commands.
 
 ## Button bar and silkscreen art
 
@@ -287,3 +332,13 @@ Keep firmware, sessions, installed Palm applications, raw PCM and captures out o
 
 - The board adds the Sony TG50 support chip (`mmiodev_TG50uc`) with the keyboard matrix, jog and Hold. Audio is the Sony mono path on the shared ring-buffer queue, and storage is a Memory Stick controller. RAM is 16 MiB, plus an extra MiB and a mirror that reproduce the RAM probe workaround.
 - Its firmware has no SndStream.
+
+Dana D3c native card inventory uses stable HAL slots SD0=0 and SD2=2 (labels
+1 and 2), each with representable SDSC capacities from 32 MiB up to 1 GiB
+minus 256 KiB and legacy MMC SPI at 32/64/128/256 MiB. Guest-qualified sizes are
+32 MiB FAT for each family and slot, paired and both mixed orders. Runtime
+bounds do not claim guest qualification at every capacity. The backend is
+complete for native CLI/runtime/session use; the device remains staged and
+frontend unavailable. D3d USB/Wi-Fi and D4 frontend work remain separate.
+`make test-dana-card-inventory` checks per-slot/family geometry and metadata
+without firmware. Frontend/card export acceptance waits for the next release.

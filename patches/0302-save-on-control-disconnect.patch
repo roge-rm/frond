@@ -1,0 +1,363 @@
+--- a/src/common/DesktopChannel.h
++++ b/src/common/DesktopChannel.h
+@@ -13,10 +13,31 @@
+ #include <fcntl.h>
+ #include <stdexcept>
+ #include <string>
++#include <sys/file.h>
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <unistd.h>
+ 
++// Locks <session>.core for the rest of the run: the launcher leaves the session alone while it is
++// held, as when this core saves it after the launcher died. The kernel frees it when the core exits.
++// False with a message when another core holds it or the file can't be made.
++inline bool LockSessionForCore(const std::string& session, std::string& error) {
++    const auto path = session + ".core";
++    const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
++    if (fd < 0) {
++        error = "cannot create " + path + ": " + std::strerror(errno);
++        return false;
++    }
++    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
++        const int code = errno;
++        close(fd);
++        error = code == EWOULDBLOCK ? "another core is running " + session
++                                    : "cannot lock " + path + ": " + std::strerror(code);
++        return false;
++    }
++    return true;  // fd stays open until exit
++}
++
+ class DesktopChannel {
+  public:
+     struct Request { std::string id, command, argument; };
+@@ -59,6 +80,7 @@
+         const auto n = recv(fd, data, sizeof(data), 0);
+         if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+             panelVisible = false;
++            lost = true;
+             return Poll::closed;
+         }
+         if (n > 0) input.append(data, n);
+@@ -90,9 +112,22 @@
+         if (output.empty()) return true;
+         const auto sent = send(fd, output.data(), output.size(), MSG_NOSIGNAL);
+         if (sent > 0) output.erase(0, sent);
+-        return sent >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
++        const bool ok = sent >= 0 || errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
++        if (!ok) lost = true;
++        return ok;
+     }
+     bool OutputEmpty() const { return output.empty(); }
++    // The launcher closed its end or went away, rather than breaking the protocol.
++    bool Lost() const { return lost; }
++    // A quit request that arrived but wasn't taken before the launcher went.
++    bool QuitPending() const {
++        size_t start = 0;
++        for (auto end = input.find('\n'); end != std::string::npos; start = end + 1, end = input.find('\n', start)) {
++            const auto first = input.find('\t', start);
++            if (first < end && first + 6 <= end && input.compare(first + 1, 5, "quit\t") == 0) return true;
++        }
++        return false;
++    }
+     bool PanelVisible() const { return panelVisible; }
+ 
+     // Looks for a cancel-files for this job among the waiting lines, during a long job. Gone when
+@@ -101,10 +136,14 @@
+         char bytes[4096];
+         while (true) {
+             const auto received = recv(fd, bytes, sizeof(bytes), MSG_DONTWAIT);
+-            if (received == 0) return Cancel::gone;
++            if (received == 0) {
++                lost = true;
++                return Cancel::gone;
++            }
+             if (received < 0) {
+                 if (errno == EINTR) continue;
+                 if (errno == EAGAIN || errno == EWOULDBLOCK) break;
++                lost = true;
+                 return Cancel::gone;
+             }
+             input.append(bytes, received);
+@@ -145,7 +184,7 @@
+ 
+  private:
+     int fd{-1};
+-    bool panelVisible{false};
++    bool panelVisible{false}, lost{false};
+     std::string input, output;
+ };
+ 
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -45,7 +45,9 @@
+ // thread dispatches requests.
+ class DesktopControl {
+  public:
+-    DesktopControl(const std::string& path, bool sound) : channel(path), sound(sound) {}
++    // saveOnLoss: the session the launcher saves on close, or empty to quit without saving when it goes.
++    DesktopControl(const std::string& path, bool sound, std::string saveOnLoss = {})
++        : channel(path), sound(sound), saveOnLoss(std::move(saveOnLoss)) {}
+     void event(const char* name, const std::string& message = {}) { channel.Event(name, message); }
+     void microphoneChanged(commands::Context& ctx) {
+         const auto state = ctx.microphone ? ctx.microphone->State() : "off";
+@@ -87,10 +89,12 @@
+ 
+     bool PanelVisible() const { return channel.PanelVisible(); }
+ 
++    // The save when the launcher went away failed; the core exits non-zero.
++    bool SaveFailed() const { return saveFailed; }
+     bool poll(commands::Context& ctx) {
+         DesktopChannel::Request request;
+         switch (channel.Receive(request)) {
+-            case DesktopChannel::Poll::closed: return true;
++            case DesktopChannel::Poll::closed: return lost(ctx);
+             case DesktopChannel::Poll::handled: return false;
+             case DesktopChannel::Poll::idle: break;
+             case DesktopChannel::Poll::request: {
+@@ -116,11 +120,24 @@
+                 break;
+             }
+         }
+-        if (!channel.Flush()) return true;
++        if (!channel.Flush()) return lost(ctx);
+         return quit && channel.OutputEmpty();
+     }
+ 
+  private:
++    // The socket closed. When the launcher went away without asking to quit, the session is saved
++    // where its close would have saved it, here on the emulation thread like a save request.
++    bool lost(commands::Context& ctx) {
++        if (saveOnLoss.empty() || quit || !channel.Lost() || channel.QuitPending()) return true;
++        if (ctx.microphone) ctx.microphone->Disarm();
++        ctx.audioDriver.Pause();
++        saveFailed = !frondNative::saveMachine(saveOnLoss, *ctx.soc, ctx.sessionPath, ctx.sessionFolder);
++        if (saveFailed)
++            std::cerr << "desktop: the launcher went away and the session could not be saved" << std::endl;
++        else
++            std::cout << "desktop: the launcher went away, session saved to " << saveOnLoss << std::endl;
++        return true;
++    }
+     bool flush() { return channel.Flush(); }
+     std::string lastMicrophone, lastSerial, lastUsb, lastInfrared, lastBluetooth;
+     static std::string UsbState(commands::Context& ctx) {
+@@ -688,6 +705,7 @@
+         return {true, "done", "Done."};
+     }
+     DesktopChannel channel;
+-    bool sound, quit{false};
++    bool sound, quit{false}, saveFailed{false};
++    std::string saveOnLoss;
+ };
+ #endif
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -4,6 +4,7 @@
+ #include <SDL.h>
+ #include <SDL_image.h>
+ #include <pthread.h>
++#include <csignal>
+ #include <unistd.h>
+ 
+ #include <cstring>
+@@ -90,6 +91,7 @@
+     optional<string> framebufferOutput;
+     optional<string> inputReplay;
+     optional<string> desktopSocket;
++    optional<string> saveOnDisconnect;
+     optional<string> workFolder;
+     optional<string> serial;
+     optional<string> infrared;
+@@ -392,6 +394,18 @@
+             cerr << "--desktop-socket cannot be combined with --run-for or --script" << endl;
+             return false;
+         }
++        if (options.saveOnDisconnect && (!options.desktopSocket || options.saveOnDisconnect->empty() ||
++                                         options.saveOnDisconnect->front() != '/')) {
++            cerr << "--save-on-disconnect takes an absolute path and needs --desktop-socket" << endl;
++            return false;
++        }
++        if (options.saveOnDisconnect) {
++            string error;
++            if (!LockSessionForCore(*options.saveOnDisconnect, error)) {
++                cerr << error << endl;
++                return false;
++            }
++        }
+         HostSerial::Config serialConfig;
+         if (options.serial && !HostSerial::Parse(*options.serial, serialConfig)) {
+             cerr << "--serial must be off, pty, tcp:PORT (PORT 0..65535) or unix:PATH" << endl;
+@@ -813,7 +827,8 @@
+ 
+         unique_ptr<DesktopControl> desktop;
+         if (options.desktopSocket) {
+-            desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio);
++            desktop = make_unique<DesktopControl>(*options.desktopSocket, !options.disableAudio,
++                                                  options.saveOnDisconnect.value_or(string()));
+             SDL_SetWindowTitle(window, windowTitle.c_str());
+         }
+ 
+@@ -1231,6 +1246,8 @@
+         sdCardReset();
+         frondSdCandidate::releaseUnused();
+ 
++        if (desktop && desktop->SaveFailed()) return false;
++
+         if (options.framebufferOutput) {
+             bool blank = false;
+             if (!sdlRenderer->SaveFramebuffer(options.framebufferOutput->c_str(), blank)) {
+@@ -1246,6 +1263,8 @@
+ }  // namespace
+ 
+ int main(int argc, char** argv) {
++    // A launcher that dies leaves stdout and stderr without a reader; the core still has to save.
++    signal(SIGPIPE, SIG_IGN);
+     // The card tool: make, import or export a card file without starting a machine.
+     if (argc >= 2 && std::string(argv[1]) == "--card")
+         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));
+@@ -1386,6 +1405,10 @@
+ 
+     program.add_argument("--desktop-socket").help("private desktop control socket");
+ 
++    program.add_argument("--save-on-disconnect")
++        .help("save the session here if the desktop's control socket goes without a quit")
++        .metavar("<session file>");
++
+     program.add_argument("--work-folder")
+         .help("run a session from elsewhere in this empty machine folder; its cards are copied there")
+         .metavar("<folder>");
+@@ -1459,6 +1482,7 @@
+                        .framebufferOutput = program.present("--framebuffer-output"),
+                        .inputReplay = program.present("--input-replay"),
+                        .desktopSocket = program.present("--desktop-socket"),
++                       .saveOnDisconnect = program.present("--save-on-disconnect"),
+                        .workFolder = program.present("--work-folder"),
+                        .serial = program.present("--serial"),
+                        .infrared = program.present("--irda"),
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -6,6 +6,7 @@
+ #include <SDL.h>
+ #include <SDL_image.h>
+ #include <fcntl.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+ #include <atomic>
+@@ -99,6 +100,8 @@
+     uint16_t gdbPort{0};
+     bool smooth{false};
+     optional<string> desktopSocket;
++    // Where the session is saved when the desktop's socket goes without a quit.
++    optional<string> saveOnDisconnect;
+     // A fitted window (Android, or --window-fit) places the device by WindowLayout in the background colour.
+     WindowFit fit{WindowFit::none};
+     uint32_t windowBackground{0};
+@@ -110,7 +113,7 @@
+             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
+             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
+             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH] [--irda off|pty|tcp:PORT|unix:PATH]\n"
+-            "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH]\n"
++            "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
+             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
+             "The desktop's ARM-only options are taken and ignored."
+@@ -129,9 +132,11 @@
+ 
+ // Writes through a flushed temporary file, so a failed write never leaves half a file.
+ bool writeFile(const string& path, const void* data, size_t size) {
+-    const string temporary = path + ".tmp";
+-    const int file = open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
++    // A temporary of its own beside the file, named so the desktop clears one a crash left.
++    string temporary = path + ".tmp-XXXXXX";
++    const int file = mkstemp(temporary.data());
+     if (file < 0) return false;
++    fchmod(file, 0644);
+     const auto* bytes = static_cast<const char*>(data);
+     bool ok = true;
+     while (ok && size) {
+@@ -637,7 +642,8 @@
+             const double ahead = emulatedMs - wallMs();
+             if (ahead > 1) SDL_Delay(uint32_t(min(ahead, 8.0)));
+         }
+-        return Finish();
++        const int status = Finish();
++        return saveFailed ? 1 : status;
+     }
+ 
+    private:
+@@ -1159,7 +1165,7 @@
+         DesktopChannel::Request request;
+         // One request at a time: the next waits while one waits for the guest's event loop.
+         switch (guestCall ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
+-            case DesktopChannel::Poll::closed: quit = true; return;
++            case DesktopChannel::Poll::closed: return DesktopLost();
+             case DesktopChannel::Poll::handled:
+             case DesktopChannel::Poll::idle: break;
+             case DesktopChannel::Poll::request: {
+@@ -1191,10 +1197,25 @@
+                 break;
+             }
+         }
+-        if (!desktop->Flush()) quit = true;
++        if (!desktop->Flush()) DesktopLost();
+         else if (desktopQuit && desktop->OutputEmpty()) quit = true;
+     }
+ 
++    // The socket closed. When the desktop went away without asking to quit, the session is saved
++    // where its close would have saved it, between emulation steps like a save request. A host
++    // call still waiting for the event loop is dropped.
++    void DesktopLost() {
++        quit = true;
++        if (!options.saveOnDisconnect || desktopQuit || !desktop->Lost() || desktop->QuitPending()) return;
++        vector<uint8_t> data;
++        saveFailed = !serializeSession(*profile, metadata, data) ||
++                     !writeFile(*options.saveOnDisconnect, data.data(), data.size());
++        if (saveFailed)
++            cerr << "desktop: the launcher went away and the session could not be saved" << endl;
++        else
++            cout << "desktop: the launcher went away, session saved to " << *options.saveOnDisconnect << endl;
++    }
++
+     // Pushes a link's state when it changes; clients that never use the link never see it.
+     void StateChanged(const char* name, string& last, const string& state) {
+         if (state == last || (state == "off" && last.empty())) return;
+@@ -1881,6 +1902,8 @@
+     unique_ptr<GdbStub> gdb;
+     unique_ptr<DesktopChannel> desktop;
+     bool desktopQuit{false};
++    // The save when the desktop went away failed; the core exits 1.
++    bool saveFailed{false};
+     bool desktopMode{false};
+     string lastSerial, lastInfrared, serialError, infraredError;
+     HostLink68k serialLink, irLink;
+@@ -1962,6 +1985,10 @@
+             const char* v = value();
+             if (!v) return false;
+             options.desktopSocket = v;
++        } else if (arg == "--save-on-disconnect") {
++            const char* v = value();
++            if (!v || v[0] != '/') return false;
++            options.saveOnDisconnect = v;
+         } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" || arg == "--jog-controls" ||
+                    arg == "--usb" || arg == "--bluetooth") {
+             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
+@@ -1999,6 +2026,17 @@
+         cerr << "--desktop-socket cannot be combined with --run-for or --check-rom" << endl;
+         return 2;
+     }
++    if (options.saveOnDisconnect && !options.desktopSocket) {
++        cerr << "--save-on-disconnect needs --desktop-socket" << endl;
++        return 2;
++    }
++    if (options.saveOnDisconnect) {
++        string error;
++        if (!LockSessionForCore(*options.saveOnDisconnect, error)) {
++            cerr << "frond-68k: " << error << endl;
++            return 1;
++        }
++    }
+     // Networking only goes the way the hardware did it, over the serial port.
+     Feature::SetNetworkRedirection(false);
+ 

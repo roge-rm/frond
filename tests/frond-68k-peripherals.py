@@ -2,7 +2,10 @@
 """frond-68k peripheral and workflow checks on private IIIx ROMs: piezo tones, backlight, sleep
 and wake, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
-session. --only ppp also dials out over serial PPP to slirp and fetches example.com.
+session. --only ppp also dials out over serial PPP to slirp and fetches example.com, --only
+modem does the same through the snap-on modem (--serial modem) and --only irphone through the
+infrared phone (--irda phone). --only modemsync HotSyncs over the modem both ways: Modem Sync to the
+HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
 are skipped. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
@@ -27,9 +30,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp']
-# Reaches example.com over the internet, so it only runs when asked for with --only ppp.
-OPT_IN = {'ppp'}
+CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
+          'modemsync']
+# Reach example.com over the internet, so they only run when asked for with --only.
+OPT_IN = {'ppp', 'modem', 'irphone', 'modemsync'}
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
@@ -446,6 +450,179 @@ def check_ppp(rom, session, root, probes):
     return f'{dns} DNS datagram, {connections} TCP connection, {received} data packets back; {state.split(", ", 1)[1]}'
 
 
+def check_modem(rom, session, root, probes):
+    """The snap-on modem (--serial modem): pick Palm Modem US/Canada in the Network panel, type a
+    phone number on the numeric keyboard, then the PPP probe dials with the guest's own NetLib
+    and Modem Manager, through the core's modem and PPP server to slirp, and fetches example.com.
+    Passes on the probe's FrondPPPLog showing HTTP 200 and the modem having been online. OS 3.5."""
+    if '3.5' not in rom.name:
+        raise Skip('the Network panel taps are for OS 3.5')
+    with Machine(session, root, 'modem', '--serial', 'modem') as m:
+        if m.send('serial-state', 'serial:') != 'serial: modem idle':
+            raise AssertionError('modem not idle at the start')
+        m.install(probes['ppp68k'])
+        m.core.launch('Preferences')
+        # Panel picker, Network, the Connection trigger, Palm Modem US/Canada, the Phone field,
+        # the silkscreen's numeric keyboard, 5551234, Done, then OK in Phone Setup.
+        digits = {'1': (62, 75), '2': (80, 75), '3': (98, 75), '4': (62, 91), '5': (80, 91)}
+        taps = [(135, 5), (125, 62), (100, 87), (110, 91), (120, 103), (128, 213)]
+        taps += [digits[d] for d in '5551234'] + [(16, 152), (12, 152)]
+        for x, y in taps:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.7)
+        m.frame('network.png')
+        m.core.launch('Frond PPP')
+        # The probe writes FrondPPPLog when it's done; it leaves the call up.
+        states, reply = [], ''
+        log = m.root / 'log.pdb'
+        end = time.monotonic() + 150
+        while time.monotonic() < end and 'written' not in reply:
+            state = m.send('serial-state', 'serial:').split(': ', 1)[1]
+            if not states or states[-1] != state:
+                states.append(state)
+            if 'online' in state:
+                reply = m.send(f'db-export-db FrondPPPLog "{log}"', 'export')
+            time.sleep(1)
+        m.frame('probe.png')
+    if 'written' not in reply:
+        raise AssertionError(f'no FrondPPPLog: {reply}; modem went {" > ".join(states)}')
+    data = log.read_bytes()
+    record = data[int.from_bytes(data[78:82], 'big'):]
+    lines = record.split(b'\0')[0].decode(errors='replace').splitlines()
+    status = next((line for line in lines if line.startswith('HTTP/')), '')
+    if ' 200' not in status or 'modem online 33600' not in states:
+        raise AssertionError(f'probe: {" | ".join(lines)}; modem went {" > ".join(states)}')
+    received = next((line.split()[-1] for line in lines if line.startswith('received')), '?')
+    return f'{status}, {received} bytes; modem went {" > ".join(states)}'
+
+
+def check_irphone(rom, session, root, probes):
+    """The infrared phone (--irda phone): a new "IrCOMM to Modem" connection in the Connection panel,
+    picked in the Network panel with a phone number, then the PPP probe dials with the guest's own
+    NetLib, Modem Manager and IrCOMM, through the core's IrLAP peer, modem and PPP server to slirp,
+    and fetches example.com. Passes on the probe's FrondPPPLog showing HTTP 200 and the phone having
+    been online. OS 3.5."""
+    if '3.5' not in rom.name:
+        raise Skip('the Connection and Network panel taps are for OS 3.5')
+    with Machine(session, root, 'irphone', '--irda', 'phone') as m:
+        if m.send('irda-state', 'infrared:') != 'infrared: phone idle':
+            raise AssertionError('phone not idle at the start')
+        m.install(probes['ppp68k'])
+        m.core.launch('Preferences')
+        # Panel picker, Connection, New, the Connection Method trigger, IrCOMM to Modem, OK (the new
+        # connection is called Custom); panel picker, Network, the Connection trigger, Custom, the
+        # Phone field, the silkscreen's numeric keyboard, 5551234, Done, then OK in Phone Setup.
+        digits = {'1': (62, 75), '2': (80, 75), '3': (98, 75), '4': (62, 91), '5': (80, 91)}
+        taps = [(135, 5), (125, 18), (16, 151), (110, 53), (100, 87), (20, 147),
+                (135, 5), (125, 62), (100, 89), (110, 141), (120, 103), (128, 213)]
+        taps += [digits[d] for d in '5551234'] + [(16, 152), (12, 152)]
+        for x, y in taps:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.7)
+        m.frame('network.png')
+        m.core.launch('Frond PPP')
+        # The probe writes FrondPPPLog when it's done; it leaves the call up.
+        states, reply = [], ''
+        log = m.root / 'log.pdb'
+        end = time.monotonic() + 150
+        while time.monotonic() < end and 'written' not in reply:
+            state = m.send('irda-state', 'infrared:').split(': ', 1)[1]
+            if not states or states[-1] != state:
+                states.append(state)
+            if 'online' in state:
+                reply = m.send(f'db-export-db FrondPPPLog "{log}"', 'export')
+            time.sleep(1)
+        m.frame('probe.png')
+    if 'written' not in reply:
+        raise AssertionError(f'no FrondPPPLog: {reply}; phone went {" > ".join(states)}')
+    data = log.read_bytes()
+    record = data[int.from_bytes(data[78:82], 'big'):]
+    lines = record.split(b'\0')[0].decode(errors='replace').splitlines()
+    status = next((line for line in lines if line.startswith('HTTP/')), '')
+    if ' 200' not in status or 'phone online 33600' not in states:
+        raise AssertionError(f'probe: {" | ".join(lines)}; phone went {" > ".join(states)}')
+    received = next((line.split()[-1] for line in lines if line.startswith('received')), '?')
+    return f'{status}, {received} bytes; phone went {" > ".join(states)}'
+
+
+def modem_states(m, process, limit):
+    """serial-state's modem part each second until process ends and the modem is idle again."""
+    states = []
+    end = time.monotonic() + limit
+    while time.monotonic() < end:
+        state = m.send('serial-state', 'serial:').split(': ', 1)[1].split(';')[0]
+        if not states or states[-1] != state:
+            states.append(state)
+        if process.poll() is not None and state == 'modem idle':
+            break
+        time.sleep(0.5)
+    return states
+
+
+def check_modemsync(rom, session, root, probes):
+    """HotSync over the snap-on modem. Modem Sync: the HotSync app dials 4687962, the call is
+    bridged to the --modem-sync PTY and pilot-install-netsync turns on Network HotSync with 10.0.2.2
+    as the Primary PC. Network HotSync: with Modem Sync Prefs on Network the HotSync app dials the
+    Network panel's service (Palm Modem US/Canada, 5551234), PPP comes up, the core answers the
+    NetSync wakeup and pilot-xfer -l on net:127.0.0.1 answers through slirp. OS 3.5."""
+    if '3.5' not in rom.name:
+        raise Skip('the HotSync and Network panel taps are for OS 3.5')
+    if not shutil.which('pilot-xfer') or not shutil.which('pilot-install-netsync'):
+        raise Skip('no pilot-xfer or pilot-install-netsync')
+    digits = {'1': (62, 75), '2': (80, 75), '3': (98, 75), '4': (62, 91), '5': (80, 91), '6': (98, 91),
+              '7': (62, 107), '8': (80, 107), '9': (98, 107)}
+
+    def taps(m, points):
+        for x, y in points:
+            m.core.tap(m.root, x, y)
+            time.sleep(0.7)
+
+    with Machine(session, root, 'modemsync', '--serial', 'modem', '--modem-sync', 'pty') as m:
+        # The startup lines print serial before modem-sync, so ask until the PTY shows.
+        state = m.core.until('serial-state', 'serial:', 'hotsync', 30).strip()
+        if not state.startswith('serial: modem idle; hotsync pty /dev/pts/'):
+            raise AssertionError(f'no HotSync PTY: {state}')
+        port = state.split('hotsync ')[1].split()[1]
+        # Network panel: Palm Modem US/Canada and 5551234, as in check_modem.
+        m.core.launch('Preferences')
+        taps(m, [(135, 5), (125, 62), (100, 87), (110, 91), (120, 103), (128, 213)] +
+             [digits[d] for d in '5551234'] + [(16, 152), (12, 152)])
+        # HotSync app: Modem, Enter phone #, the numeric keyboard, 4687962, Done, OK.
+        m.core.launch('HotSync')
+        time.sleep(1)
+        taps(m, [(98, 50), (80, 131), (128, 213)] + [digits[d] for d in '4687962'] + [(16, 152), (12, 152)])
+        netsync = subprocess.Popen(['pilot-install-netsync', '-p', port, '-e', '-n', 'frond', '-a', '10.0.2.2'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=m.root)
+        time.sleep(1)
+        taps(m, [(80, 80)])
+        direct = modem_states(m, netsync, 120)
+        if netsync.poll() is None:
+            netsync.kill()
+        out = netsync.communicate()[0]
+        m.frame('modem-sync.png')
+        if 'LANSync....: Enabled' not in out or '10.0.2.2' not in out or 'modem online 33600' not in direct:
+            raise AssertionError(f'Modem Sync: {out.strip()[-300:]!r}; modem went {" > ".join(direct)}')
+        # Let the HotSync app finish, then Menu, Modem Sync Prefs, Network, OK, Select Service (the
+        # Network panel opens on the service set above), Done and the HotSync button.
+        time.sleep(8)
+        taps(m, [(20, 5), (40, 17), (40, 108), (12, 152), (80, 115), (14, 152)])
+        m.frame('network-mode.png')
+        net = subprocess.Popen(['pilot-xfer', '-p', 'net:127.0.0.1', '-l'], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, cwd=m.root)
+        time.sleep(1)
+        taps(m, [(80, 80)])
+        network = modem_states(m, net, 180)
+        if net.poll() is None:
+            net.kill()
+        out = net.communicate()[0]
+        m.frame('network-sync.png')
+        listed = re.search(r'List complete\. (\d+) files found', out)
+        if not listed or 'modem online 33600' not in network:
+            raise AssertionError(f'Network HotSync: {out.strip()[-300:]!r}; modem went {" > ".join(network)}')
+    return (f'Modem Sync set LANSync, modem went {" > ".join(direct)}; Network HotSync listed '
+            f'{listed.group(1)} databases, modem went {" > ".join(network)}')
+
+
 def check_databases(rom, session, root, probes):
     """Install Hello.prc and FrondBench from the console, launch Hello, list the RAM databases,
     export Hello as a PRC and the RAM and all databases as zips, and FrondBench starting."""
@@ -502,9 +679,10 @@ def build_probes(root, sdk):
 
 
 NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
-         'ppp': ['ppp68k']}
+         'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
-       'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp}
+       'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
+       'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync}
 
 
 def main():

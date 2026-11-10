@@ -1,0 +1,321 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -4,6 +4,13 @@
+ #include "EmHAL.h"
+ #include <stdexcept>
+ #include <tuple>
++
++static bool KnownDeviceCommand(uint16 c) {
++    return (c>=1 && c<=0x0f) || c==0x10 || (c>=0x12 && c<=0x5f) ||
++        (c>=0x61 && c<=0x70) || (c>=0x72 && c<=0x8f) || (c>=0xa0 && c<=0xaf) ||
++        c==0xb0 || c==0xb2 || c==0xb3 || (c>=0xb6 && c<=0xbb) ||
++        c==0xc0 || c==0xc2 || c==0xc3 || (c>=0xd0 && c<=0xdf) || c==0xf4;
++}
+ 
+ void EmRegsISPDana::Reset(Bool hardware) {
+     EmRegs::Reset(hardware);
+@@ -146,6 +153,7 @@
+     // Control FIFOs are fixed 64-byte single buffers, enabled after reset.
+     dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
+     fifo={}; allocated=false; configNext=cursor=0; setupPending=false; effectiveAddress=0; deviceEnabled=false;
++    flushed=0; accessCancelled=false;
+     RefreshIrq();
+ }
+ 
+@@ -153,6 +161,7 @@
+     if(!dcUnlocked) throw std::runtime_error("ISP DC locked read");
+     unsigned e=dcCommand&15;
+     if(dcCommand>=0x10 && dcCommand<=0x1f) {
++        if(accessCancelled) return 0;
+         auto& ep=fifo[e]; auto& b=ep.packet[ep.cpu];
+         if(!b.full || cursor> (b.length+1)/2) throw std::runtime_error("ISP DC FIFO read boundary");
+         if(cursor++==0) return b.length;
+@@ -161,7 +170,7 @@
+     if((dcCommand>=0x50 && dcCommand<=0x5f) || (dcCommand>=0xd0 && dcCommand<=0xdf))
+         return EndpointStatus(e,dcCommand<0x60);
+     if(dcCommand>=0xa0 && dcCommand<=0xaf) {
+-        auto result=fifo[e].error; fifo[e].error &= ~0x80; return result;
++        auto result=fifo[e].error; fifo[e].error &= ~0x80; fifo[e].statusPending=false; return result;
+     }
+     if (dcCommand>=0x30 && dcCommand<=0x3f) return dcEndpoints[dcCommand-0x30];
+     switch (dcCommand) {
+@@ -191,19 +200,24 @@
+            (endpoint>=2 && ((value&0x10) || (value&15)>3)))
+             throw std::runtime_error("ISP DC unsupported ECR");
+         auto old=dcEndpoints[endpoint]; dcEndpoints[endpoint]=value;
+-        try { ValidateConfiguration(); } catch(...) { dcEndpoints[endpoint]=old; throw; }
++        unsigned next=endpoint==configNext ? configNext+1 : (endpoint==0 ? 1 : 0);
++        if(next==16) {
++            try { ValidateConfiguration(); } catch(...) { dcEndpoints[endpoint]=old; throw; }
++        }
++        for(unsigned e=0;e<16;++e) CancelAccess(e);
+         fifo={}; allocated=false; setupPending=false; cursor=0; dcInterrupt&=0xff;
+         RefreshIrq();
+-        configNext=endpoint==configNext ? configNext+1 : (endpoint==0 ? 1 : 0);
++        configNext=next;
+         if(configNext==16) { allocated=true; configNext=0; }
+         return;
+     }
+     if(dcCommand>=1 && dcCommand<=15) {
++        if(accessCancelled) return;
+         auto& ep=fifo[dcCommand]; auto& b=ep.packet[ep.cpu];
+         if(b.full) throw std::runtime_error("ISP DC full IN FIFO");
+         if(cursor==0) {
+             if(value>Capacity(dcCommand)) throw std::runtime_error("ISP DC packet length");
+-            b={}; b.length=value; cursor=1; return;
++            b={}; b.writing=true; b.length=value; cursor=1; return;
+         }
+         if(cursor>(b.length+1)/2) throw std::runtime_error("ISP DC FIFO write boundary");
+         b.data[cursor-1]=value; ++cursor; b.words=cursor-1; return;
+@@ -243,19 +257,19 @@
+ template <typename T> void EmRegsISPDana::SaveState(T& s) {
+ 
+     auto* c=s.GetChunk(ChunkType::regsISPDana); if(!c) return;
+-    c->Put32(4); SaveChunkHelper h(*c); StateFields(h);
++    c->Put32(5); SaveChunkHelper h(*c); StateFields(h);
+     h.Do16(dcAddress);
+     for (auto& value : dcEndpoints) h.Do16(value);
+-    PacketFields(h);
++    PacketFields(h); CancellationFields(h);
+ }
+ void EmRegsISPDana::Load(SavestateLoader<ChunkType>& l) {
+ 
+     auto* c=l.GetChunk(ChunkType::regsISPDana);
+     if(!c) { l.NotifyError(); return; }
+     uint32 version=c->Get32();
+-    if(version!=2 && version!=3 && version!=4) { l.NotifyError(); return; }
+-    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled);
+-    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled);
++    if(version!=2 && version!=3 && version!=4 && version!=5) { l.NotifyError(); return; }
++    auto fields=std::tie(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled);
++    auto before=std::make_tuple(lastCycle,fractional,resetCycles,regs,command,word,latch,dcEndpoints,dcAddress,dcCommand,dcMode,dcHardware,dcScratch,dcUnlocked,dcSuspended,dcInterrupt,dcInterruptEnable,dcLatch,dcWord,fifo,configNext,cursor,allocated,setupPending,effectiveAddress,vbus,deviceEnabled,flushed,accessCancelled);
+     bool invalid=false;
+     LoadChunkHelper h(*c); StateFields(h);
+     dcAddress=0; dcEndpoints.fill(0); dcEndpoints[0]=0x83; dcEndpoints[1]=0xc3;
+@@ -264,16 +278,39 @@
+         h.Do16(dcAddress);
+         for (auto& value : dcEndpoints) h.Do16(value);
+     }
+-    if(version==4) PacketFields(h);
++    flushed=0; accessCancelled=false;
++    if(version>=4) PacketFields(h);
++    if(version>=5) CancellationFields(h);
++    else {
++        // v2/v3 have no packet fields; v4 has no cancellation or write ownership.
++        for(auto& ep:fifo) ep.statusPending=ep.error!=0;
++        if(version==4 && dcCommand>=1 && dcCommand<=15 && cursor && fifo[dcCommand].cpu<=1)
++            fifo[dcCommand].packet[fifo[dcCommand].cpu].writing=true;
++    }
++    if(flushed>0xffff || (accessCancelled &&
++       (!((dcCommand>=1 && dcCommand<=0x10) || (dcCommand>=0x12 && dcCommand<=0x1f)) ||
++        !(flushed&(1u<<(dcCommand&15))) || cursor))) invalid=true;
++    if(setupPending && !fifo[0].setup) invalid=true;
++    if(dcCommand && !KnownDeviceCommand(dcCommand)) invalid=true;
++    bool packetCommand=(dcCommand>=1 && dcCommand<=0x10) || (dcCommand>=0x12 && dcCommand<=0x1f);
++    if(version>=4 && packetCommand) {
++        unsigned e=dcCommand&15;
++        if(accessCancelled!=bool(flushed&(1u<<e)) ||
++           ((dcCommand<0x10)!=bool(dcEndpoints[e]&64))) invalid=true;
++        if(!accessCancelled && (!allocated || !(dcEndpoints[e]&128) ||
++           ((dcCommand<0x10)!=bool(dcEndpoints[e]&64)) ||
++           (dcCommand>=0x10 && fifo[e].cpu<=1 && !fifo[e].packet[fifo[e].cpu].full))) invalid=true;
++    }
+     if(cursor && !((dcCommand>=1 && dcCommand<=15) || dcCommand==0x10 || (dcCommand>=0x12 && dcCommand<=0x1f))) invalid=true;
+     if(configNext>15 || cursor>33 || effectiveAddress>127 || (allocated && configNext)) invalid=true;
+-    try { ValidateConfiguration(); } catch(...) { invalid=true; }
++    try { if(allocated) ValidateConfiguration(); } catch(...) { invalid=true; }
++    for(auto value:dcEndpoints) if((value&0x10) || (value&15)>3) invalid=true;
+     for(unsigned i=0;i<16;++i) {
+         auto& ep=fifo[i];
+         if(ep.cpu>1 || ep.bus>1 || (!(dcEndpoints[i]&32) && (ep.cpu || ep.bus)) ||
+            (i>0 && (ep.setup || ep.overwrite)) ||
+            ep.error>255 || (ep.offered && (!(dcEndpoints[i]&64) || !ep.packet[ep.bus].full))) invalid=true;
+-        for(auto& b:ep.packet) if(b.length>Capacity(i) || b.words>32 ||
++        for(auto& b:ep.packet) if((b.writing && (b.full || !allocated || !(dcEndpoints[i]&128) || !(dcEndpoints[i]&64) || (flushed&(1u<<i)))) || b.length>Capacity(i) || b.words>32 ||
+             b.words>(b.length+1)/2 || (b.full && b.words!=(b.length+1)/2) ||
+             ((!allocated || !(dcEndpoints[i]&128)) && (b.full || b.length || b.words))) invalid=true;
+     }
+@@ -293,7 +330,14 @@
+        (ClockHz() && fractional >= ClockHz())) invalid=true;
+     if(cursor && dcCommand<=0x1f) {
+         unsigned e=dcCommand&15; auto& ep=fifo[e];
+-        if(ep.cpu<=1 && cursor>1+(ep.packet[ep.cpu].length+1)/2) invalid=true;
++        if(ep.cpu<=1) {
++            auto& b=ep.packet[ep.cpu];
++            if(!allocated || !(dcEndpoints[e]&128) ||
++               ((dcCommand<0x10) != bool(dcEndpoints[e]&64)) ||
++               (dcCommand>=0x10 ? !b.full : !b.writing) ||
++               cursor>1+(b.length+1)/2 ||
++               (dcCommand<0x10 && b.words!=cursor-1)) invalid=true;
++        }
+     }
+     if(c->HasError() || !c->IsAtEnd()) invalid=true;
+     if(invalid) { fields=before; l.NotifyError(); }
+@@ -316,33 +360,40 @@
+ }
+ void EmRegsISPDana::DeviceCommand(uint16 c) {
+     if(c==0xf6) { ResetDevice(); return; }
+-    bool known=(c>=1 && c<=0x0f) || c==0x10 || (c>=0x12 && c<=0x5f) ||
+-        (c>=0x61 && c<=0x70) || (c>=0x72 && c<=0x8f) || (c>=0xa0 && c<=0xaf) ||
+-        c==0xb0 || c==0xb2 || c==0xb3 || (c>=0xb6 && c<=0xbb) ||
+-        c==0xc0 || c==0xc2 || c==0xc3 || (c>=0xd0 && c<=0xdf) || c==0xf4;
++    bool known=KnownDeviceCommand(c);
+     if(!known) throw std::runtime_error("ISP DC unsupported command");
+     if(!dcUnlocked && c!=0xb0) throw std::runtime_error("ISP DC locked command");
+     unsigned e=c&15;
+     bool writePacket=c>=1 && c<=15, readPacket=c>=0x10 && c<=0x1f;
+     bool validate=c>=0x61 && c<=0x6f, clear=c>=0x70 && c<=0x7f;
++    bool ignored=false;
+     if(writePacket || readPacket || validate || clear) {
+         bool in=dcEndpoints[e]&64;
+-        if(!allocated || !(dcEndpoints[e]&128) || ((writePacket || validate)!=in))
+-            throw std::runtime_error("ISP DC unavailable FIFO command");
+-    }
+-    if(validate || clear) {
+-        if(e<2 && setupPending) return;
++        if(((writePacket || validate)!=in))
++            throw std::runtime_error("ISP DC wrong FIFO direction");
++        if(!allocated || !(dcEndpoints[e]&128)) {
++            if(!(flushed&(1u<<e))) throw std::runtime_error("ISP DC unavailable FIFO command");
++            ignored=true;
++        }
++        if(readPacket && (flushed&(1u<<e)) && !fifo[e].packet[fifo[e].cpu].full) ignored=true;
++        if((validate || clear) && ((flushed&(1u<<e)) || (e<2 && setupPending))) ignored=true;
++    }
++    if((validate || clear) && !ignored) {
+         auto& ep=fifo[e]; auto& b=ep.packet[ep.cpu];
+         if(validate) {
+-            if(b.full || b.words!=(b.length+1)/2 || cursor==0)
++            if(b.full || !b.writing || b.words!=(b.length+1)/2)
+                 throw std::runtime_error("ISP DC incomplete IN packet");
+-            b.full=true;
++            b.full=true; b.writing=false;
+         } else { b={}; ep.setup=false; }
+         if(dcEndpoints[e]&32) ep.cpu^=1;
+     } else if(c>=0x40 && c<=0x4f) fifo[e].stalled=true;
+-    else if(c>=0x80 && c<=0x8f) fifo[e]={};
++    else if(c>=0x80 && c<=0x8f) { CancelAccess(e); fifo[e]={}; }
+     else if(c==0xf4) setupPending=false;
+-    dcCommand=c; dcWord=0; dcLatch=0; cursor=0;
++    dcCommand=c; dcWord=0; dcLatch=0; cursor=0; accessCancelled=false;
++    if(writePacket || readPacket) {
++        accessCancelled=ignored;
++        if(!ignored) flushed &= ~(1u<<e);
++    }
+     RefreshIrq();
+ }
+ uint16 EmRegsISPDana::EndpointStatus(unsigned e,bool clear) {
+@@ -356,11 +407,13 @@
+     if(vbus==connected) return;
+     vbus=connected;
+     // External transactions are discarded at a cable boundary.
++    for(unsigned e=0;e<16;++e) CancelAccess(e);
+     fifo={}; setupPending=false; cursor=0; effectiveAddress=0;
+     dcInterrupt=0; RefreshIrq();
+ }
+ void EmRegsISPDana::BusReset() {
+     if(!DeviceAttached()) return;
++    for(unsigned e=0;e<16;++e) CancelAccess(e);
+     fifo={}; allocated=false; configNext=cursor=0; setupPending=false; effectiveAddress=0; deviceEnabled=false;
+     for(unsigned i=2;i<16;++i) dcEndpoints[i]&=~128;
+     deviceEnabled=true; dcUnlocked=true; dcInterrupt=1; RefreshIrq();
+@@ -368,10 +421,10 @@
+ EmRegsISPDana::PacketResult EmRegsISPDana::HostOut(unsigned e,const std::vector<uint8>& bytes,bool data1,bool setup) {
+     if(e>=16 || (dcEndpoints[e]&64) || bytes.size()>Capacity(e) || (setup && (e || bytes.size()!=8 || data1)))
+         throw std::runtime_error("ISP DC invalid host OUT");
+-    if(!DeviceAttached() || !deviceEnabled || !allocated || !(dcEndpoints[e]&128)) return PacketResult::nak;
++    if(!DeviceAttached() || !deviceEnabled || !allocated || !(dcEndpoints[e]&128)) return PacketResult::noAnswer;
+     auto& ep=fifo[e];
+     if(setup) {
+-        bool overwritten=setupPending; fifo[0]={}; fifo[1]={}; ep.overwrite=overwritten;
++        bool overwritten=setupPending; CancelAccess(0); CancelAccess(1); fifo[0]={}; fifo[1]={}; ep.overwrite=overwritten;
+         ep.setup=true; setupPending=true; ep.toggle=false; fifo[1].toggle=true;
+     } else if(ep.stalled) { Transaction(e,20); return PacketResult::stall; }
+     if(!setup && e==0 && setupPending) { Transaction(e,18); return PacketResult::nak; }
+@@ -387,7 +440,7 @@
+ EmRegsISPDana::PacketResult EmRegsISPDana::HostIn(unsigned e,std::vector<uint8>& bytes,bool& data1) {
+     if(e>=16 || !(dcEndpoints[e]&64)) throw std::runtime_error("ISP DC invalid host IN");
+     auto& ep=fifo[e];
+-    if(!DeviceAttached() || !deviceEnabled || !allocated || !(dcEndpoints[e]&128)) return PacketResult::nak;
++    if(!DeviceAttached() || !deviceEnabled || !allocated || !(dcEndpoints[e]&128)) return PacketResult::noAnswer;
+     if(ep.stalled) { Transaction(e,20); return PacketResult::stall; }
+     auto& b=ep.packet[ep.bus];
+     if(!b.full || (e==1 && setupPending)) { Transaction(e,18); return PacketResult::nak; }
+@@ -398,6 +451,7 @@
+ void EmRegsISPDana::HostAckIn(unsigned e) {
+     if(e>=16 || !fifo[e].offered) throw std::runtime_error("ISP DC unoffered host ACK");
+     auto& ep=fifo[e]; auto& b=ep.packet[ep.bus];
++    CancelAccess(e,ep.bus);
+     if(e==1 && b.length==0) effectiveAddress=dcAddress&127;
+     Transaction(e,1|(ep.toggle?64:0)); ep.toggle=!ep.toggle; ep.offered=false; b={};
+     if(dcEndpoints[e]&32) ep.bus^=1;
+@@ -417,7 +471,26 @@
+ }
+ 
+ void EmRegsISPDana::Transaction(unsigned e,uint16 status) {
+-    fifo[e].error=0x80|status;
++    auto& ep=fifo[e];
++    uint16 data01=(status&1) ? (status&64) : (ep.error&64);
++    ep.error=(ep.statusPending?0x80:0)|data01|(status&~64);
++    ep.statusPending=true;
+     if((status&1) || (dcMode&4)) dcInterrupt|=1u<<(8+e);
+     RefreshIrq();
+ }
++
++// The datasheet leaves FIFO overruns unpredictable. Host flushes cancel the CPU
++// access deterministically: zero reads and dropped writes until a new command.
++void EmRegsISPDana::CancelAccess(unsigned e,int buffer) {
++    if(buffer>=0 && fifo[e].cpu!=unsigned(buffer)) return;
++    flushed |= 1u<<e;
++    bool packet=(dcCommand>=1 && dcCommand<=0x10) || (dcCommand>=0x12 && dcCommand<=0x1f);
++    if(packet && (dcCommand&15)==e) { accessCancelled=true; cursor=0; }
++}
++template <typename T> void EmRegsISPDana::CancellationFields(T& h) {
++    h.Do32(flushed).DoBool(accessCancelled);
++    for(auto& ep:fifo) {
++        h.DoBool(ep.statusPending);
++        for(auto& b:ep.packet) h.DoBool(b.writing);
++    }
++}
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -7,7 +7,7 @@
+ // ISP1161A nonisochronous device FIFOs. Host controller transfers remain disconnected.
+ class EmRegsISPDana : public EmRegs {
+  public:
+-    enum class PacketResult { ack, nak, stall };
++    enum class PacketResult { ack, nak, stall, noAnswer };
+     void SetDeviceIrq(std::function<void(bool)> sink) { irqSink=std::move(sink); RefreshIrq(); }
+     void SetVbus(bool);
+     bool DeviceAttached() const { return vbus && (dcMode&1); }
+@@ -31,11 +31,15 @@
+     virtual uint64 CurrentCycle() const;
+     virtual uint64 ClockHz() const;
+  private:
+-    struct Packet { uint16 length=0, words=0; bool full=false; std::array<uint16,32> data{}; };
++    struct Packet { uint16 length=0, words=0; bool full=false, writing=false; std::array<uint16,32> data{}; };
+     struct Endpoint { std::array<Packet,2> packet{}; uint16 cpu=0, bus=0, error=0;
+-        bool stalled=false, toggle=false, setup=false, overwrite=false, offered=false; };
++        bool statusPending=false, stalled=false, toggle=false, setup=false, overwrite=false, offered=false; };
+     std::array<Endpoint,16> fifo{};
+     unsigned configNext=0, cursor=0;
++    uint32 flushed=0;
++    bool accessCancelled=false;
++    void CancelAccess(unsigned, int buffer=-1);
++    template <typename T> void CancellationFields(T&);
+     bool allocated=false, setupPending=false, vbus=false, deviceEnabled=false;
+     uint16 effectiveAddress=0;
+     std::function<void(bool)> irqSink;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -353,6 +353,10 @@
+     UpdateInterrupts();
+ }
+ void EmRegsVZDana::StIntControlWrite(emuptr a,int size,uint32 value) {
++    // Dana's DC route supports the level mode used by its ROM.
++    if(a<=0xfffff302 && a+size>0xfffff302 &&
++       ((value >> (8*(a+size-0xfffff303)))&4))
++        throw std::runtime_error("Dana DC edge IRQ2 unsupported");
+     StdWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0);
+ }
+ void EmRegsVZDana::StIntStatusWrite(emuptr a,int size,uint32 value) {

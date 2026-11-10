@@ -7,7 +7,7 @@ import java.io.File
 import java.io.IOException
 
 // Installs, launches and exports Palm databases in the running core, like the desktop's File menu
-// (install, launch-app, export and export-db on the control socket). Files pass through private
+// (install, launch-app, delete-db, export and export-db on the control socket). Files pass through private
 // copies in the app cache, as the core only takes paths. Every call blocks; run them off the main thread.
 class PalmDatabases(private val context: Context, private val link: ControlLink) {
     class Failed(message: String) : Exception(message)
@@ -26,11 +26,14 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     }
 
     // Installs a picked .prc or .pdb and returns the core's result, e.g. "Application installed.".
-    fun install(uri: Uri): String {
+    fun install(uri: Uri): String = install { context.contentResolver.openInputStream(uri) }
+
+    // The same from any stream, like a file in a picked folder.
+    fun install(open: () -> java.io.InputStream?): String {
         folder.mkdirs()
         val copy = File(folder, "install.pdb")
         try {
-            copyIn(uri, copy)
+            copyIn(open, copy)
             return run("install", copy.path).message
         } finally {
             copy.delete()
@@ -40,6 +43,25 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     fun launch(name: String) {
         val reply = link.request("launch-app", name, timeoutSeconds = 120)
         if (!reply.ok) throw Failed(if (reply.code == "launch") launchFailed(name) else message(reply))
+    }
+
+    // Deletes a RAM database by name. The core refuses a ROM database, the running application and an open one.
+    fun delete(name: String) {
+        run("delete-db", name)
+    }
+
+    // Deletes an application and the RAM databases with its creator, like the Palm launcher's Delete.
+    // The application goes first: if the core refuses it (ROM, running, open) nothing is touched.
+    // A data database that can't go is reported after the rest were tried.
+    fun deleteApplication(name: String) {
+        val all = list()
+        val app = all.firstOrNull { it.name == name && it.application } ?: throw Failed("There is no application named \"$name\".")
+        delete(app.name)
+        val failed = dataOf(all, app).mapNotNull { data ->
+            val reply = link.request("delete-db", data.name, timeoutSeconds = 120)
+            if (reply.ok) null else "${data.name}: ${message(reply)}"
+        }
+        if (failed.isNotEmpty()) throw Failed("${app.name} was deleted, but its data was not all: ${failed.joinToString("; ")}")
     }
 
     // Writes every RAM database, or the one named, as a ZIP to a picked document.
@@ -70,9 +92,12 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
         }
     }
 
-    private fun copyIn(uri: Uri, to: File) {
+    // One database as the core exports it: a ZIP holding its .prc or .pdb. The ZIP goes when use returns.
+    fun <T> exported(name: String, use: (File) -> T): T = withExport(name, use)
+
+    private fun copyIn(open: () -> java.io.InputStream?, to: File) {
         try {
-            val input = context.contentResolver.openInputStream(uri) ?: throw Failed("Couldn't read that file.")
+            val input = open() ?: throw Failed("Couldn't read that file.")
             input.use { i -> to.outputStream().use { i.copyTo(it, 1 shl 16) } }
         } catch (e: IOException) {
             to.delete()
@@ -102,6 +127,9 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
             }
             return found.toList().sortedBy { it.name.lowercase() }
         }
+
+        // The databases that go with an application: the others with its creator.
+        fun dataOf(all: List<Info>, app: Info) = all.filter { it.creator == app.creator && it.name != app.name }
 
         // The core couldn't find or open the application. Built-in ones go by their database name,
         // which often isn't the name in the launcher.

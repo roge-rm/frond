@@ -23,6 +23,28 @@ data class FirmwareVariant(
     val powerSupported: Boolean = true,
 )
 
+data class CardFamily(
+    val family: String, val minBytes: Long, val maxBytes: Long, val sizeRule: String,
+    val runtimeSizes: List<Long> = emptyList(), val guestQualifiedSizes: List<Long> = emptyList(),
+) {
+    val label: String get() = if (family == "legacy-mmc-spi") "MMC" else "SD"
+    val protocol: String get() = if (family == "legacy-mmc-spi") "mmc" else "sd"
+    fun accepts(bytes: Long): Boolean {
+        if (bytes <= 0 || bytes % 512 != 0L || bytes !in minBytes..maxBytes ||
+            (runtimeSizes.isNotEmpty() && bytes !in runtimeSizes)) return false
+        if (sizeRule != "legacy-csd-fixed-512") return true
+        val blocks = bytes / 512
+        val mult = (0..7).firstOrNull { (blocks shr (it + 2)) < 0x1000 } ?: return false
+        return blocks >= 4 && ((blocks shr (mult + 2)) shl (mult + 2)) == blocks
+    }
+    val sizes: List<Int> get() = Device.SD_SIZES.filter { accepts(it.toLong() shl 20) }
+}
+
+data class StorageSlot(val id: Int, val label: Int, val kind: String, val families: List<CardFamily> = emptyList()) {
+    val title: String get() = "Card $label"
+    val commandPrefix: String get() = when (id) { 0 -> "sd-"; 2 -> "sd2-"; else -> "ms-" }
+}
+
 // Generated inventory values come from deviceProfiles5. IDs are saved in sessions and settings.
 data class Device internal constructor(
     val id: String,
@@ -52,13 +74,25 @@ data class Device internal constructor(
     val holdPresent: Boolean = false, val holdSupported: Boolean = false,
     val memoryStick: Boolean = false,
     val microphone: Boolean = false,
+    // A snap-on modem for the serial port, run by the core.
+    val modem: Boolean = false,
+    // A mobile phone on the infrared port, run by the core.
+    val irPhone: Boolean = false,
+    // A USB printer on the host port that collects raw print jobs, run by the core.
+    val usbPrinter: Boolean = false,
+    // A USB 802.11b adapter on the same port, with the network through the core's router.
+    val usbWifi: Boolean = false,
+    // The Dana Wireless's built-in 802.11b module, with the network through the core's router.
+    val builtInWifi: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
+    val storageSlots: List<StorageSlot> = emptyList(),
 ) {
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
+    val infraredKeyboard: Boolean get() = keyboard && !isDana()
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0
@@ -69,7 +103,9 @@ data class Device internal constructor(
     val lowLatencyAudio: Boolean get() = sound && !runs68k
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.
-    val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }
+    val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else
+        storageSlots.firstOrNull()?.families?.firstOrNull { it.family == "sdsc" }?.sizes
+            ?: SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }
     val appNames: List<String> get() = appNamesText.split('|')
     val buttons: List<String> get() = buttonsText.split('|')
 

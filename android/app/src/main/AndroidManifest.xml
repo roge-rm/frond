@@ -4,7 +4,12 @@
     <!-- Virtual Wi-Fi and Internet via host, and the network's DNS servers for the Wi-Fi router. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- A notification when the Dana prints while Frond is in the background. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Connections: beacons on the Wi-Fi, and Android 17's local network access. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature
@@ -42,14 +47,6 @@
             android:preferMinimalPostProcessing="true"
             android:exported="false" />
 
-        <!-- The SD card and other peripherals of the running Palm; talks to the core in its process. -->
-        <activity
-            android:name=".PeripheralsActivity"
-            android:process=":emulator"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
-            android:label="@string/app_name"
-            android:exported="false" />
-
         <!-- The 68k core (libmain68k.so) for DragonBall devices, in its own process: it carries its own
              UAE copy, which can't share a process with the ARM core's. -->
         <activity
@@ -60,13 +57,6 @@
             android:launchMode="singleTask"
             android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation|density|fontScale|fontWeightAdjustment|colorMode|touchscreen|mcc|mnc|grammaticalGender|assetsPaths"
             android:preferMinimalPostProcessing="true"
-            android:exported="false" />
-
-        <activity
-            android:name=".Peripherals68kActivity"
-            android:process=":emulator68k"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
-            android:label="@string/app_name"
             android:exported="false" />
     </application>
 </manifest>

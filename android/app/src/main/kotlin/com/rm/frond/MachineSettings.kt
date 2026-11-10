@@ -19,21 +19,28 @@ enum class Engine(val label: String, val arg: String) {
     FAST("Fast", "fast"),
 }
 
-// A 68k device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock, Uncapped as fast as the host can with the guest's timers on real time.
+// A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
+// clock (an ARM device at its profile's MIPS), Uncapped as fast as the host can; on ARM that is a high --mips.
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
     UNCAPPED("Uncapped", "uncapped"),
 }
 
-// Which per-machine rows Edit settings and the running menu show. A 68k device has contrast and speed
-// and no engine or low-latency audio; the engine shows only in debug builds.
+// Android: whether the bar over the running machine hides by itself over the Palm or takes its own space.
+// arg is the saved name.
+enum class BarMode(val label: String, val arg: String) {
+    AUTO_HIDE("Auto-hide", "autohide"),
+    OWN_SPACE("Own space", "space"),
+}
+
+// Which per-machine rows Edit settings and the running menu show. Every device has speed. A 68k device
+// has contrast and no engine or low-latency audio.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
     companion object {
-        fun of(device: Device, debuggable: Boolean) = MachineRows(
+        fun of(device: Device) = MachineRows(
             contrast = device.runs68k,
-            speed = device.runs68k,
-            engine = debuggable && !device.runs68k,
+            speed = true,
+            engine = !device.runs68k,
             audioPreview = !device.runs68k,
         )
     }
@@ -56,16 +63,30 @@ data class MachineSettings(
     // False until a contrast is chosen, so a session's own saved contrast stays.
     val contrastSet: Boolean = false,
     val speed: CpuSpeed = CpuSpeed.ORIGINAL,
+    // Android: whether the bar over the running machine shows.
+    val barShown: Boolean = true,
+    val barMode: BarMode = BarMode.AUTO_HIDE,
+    // Infrared: off, phone (the core's own mobile phone), printer (an IrDA printer), or link:<id> for a connection (InfraredChoice). Applied at every start.
+    val infrared: String = InfraredChoice.OFF,
+    // Serial: the same values, or modem on a device with a snap-on modem. The LAN serial options are gone.
+    val serial: String = InfraredChoice.OFF,
+    // Bluetooth: off, radio (This Frond's radio) or link:<id> (BluetoothChoice). Applied at every start.
+    val bluetooth: String = BluetoothChoice.OFF,
+    val danaView: DanaView = DanaView(),
+    // Dana: what is on the USB host port, off, printer or wifi (applied at every start).
+    val usbPort: String = UsbPort.OFF,
+    // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
+    val wifiModule: Boolean = true,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
-    // m68k: frond-68k's arguments, with contrast and speed and no engine.
+    // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (smoothing) add("--smooth-lcd")
@@ -75,8 +96,9 @@ data class MachineSettings(
         if (m68k) {
             if (contrastSet) addAll(listOf("--contrast", contrast.toString()))
             if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
-        } else if (engine == Engine.FAST) {
-            addAll(listOf("--engine", engine.arg))
+        } else {
+            if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
+            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--mips", UNCAPPED_MIPS.toString()))
         }
     }
 
@@ -97,6 +119,8 @@ data class MachineSettings(
 
     companion object {
         const val DEFAULT_CONTRAST = 50
+        // The --mips an ARM device gets when Uncapped; the core runs at what the host manages.
+        const val UNCAPPED_MIPS = 1000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =
@@ -117,6 +141,15 @@ data class MachineSettings(
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
                 contrastSet = json.has("contrast") || fallback.contrastSet,
                 speed = CpuSpeed.entries.firstOrNull { it.arg == json.optString("speed") } ?: fallback.speed,
+                barShown = json.optBoolean("barShown", fallback.barShown),
+                barMode = BarMode.entries.firstOrNull { it.arg == json.optString("barMode") } ?: fallback.barMode,
+                infrared = InfraredChoice.normaliseInfrared(json.optString("infrared", fallback.infrared)),
+                serial = InfraredChoice.normaliseSerial(json.optString("serial", fallback.serial)),
+                bluetooth = BluetoothChoice.normalise(json.optString("bluetooth", fallback.bluetooth)),
+                danaView = DanaView.from(json.optJSONObject("danaView"), fallback.danaView),
+                usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
+                    else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
+                wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
             )
         }
     }

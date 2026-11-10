@@ -164,7 +164,7 @@ class FatImageTest {
             FatImage.open(file, false).use { }
             fail("4 GB card opened")
         } catch (e: FatImage.FatException) {
-            assertEquals("Use a 32 MB to 2 GB FAT16 card image.", e.message)
+            assertEquals("Use a card of up to 2 GB.", e.message)
         } finally {
             file.delete()
         }

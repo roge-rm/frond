@@ -1,0 +1,78 @@
+#include <cassert>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
+#include "EmRegsISPDana.h"
+#include "DanaUnqualified.h"
+#include "savestate/Savestate.h"
+#include "savestate/SavestateLoader.h"
+#include "savestate/SavestateProbe.h"
+class Isp: public EmRegsISPDana {
+ public:
+ Isp(){SetSubBankHandlers();Reset(true);}
+ uint64 CurrentCycle() const override{return 0;}
+ uint64 ClockHz() const override{return 1000000;}
+ void cmd(uint16 c){SetWord(0x1f000002,c);}
+ void put(uint16 v){SetWord(0x1f000000,v);}
+ uint16 get(){return GetWord(0x1f000000);}
+ void reg(uint16 c,uint16 v){cmd(c);put(v);}
+};
+static std::vector<uint8> save(Isp& i){Savestate<ChunkType> s;assert(s.Save(i));auto* p=static_cast<uint8*>(s.GetBuffer());return {p,p+s.GetSize()};}
+static bool load(Isp& i,std::vector<uint8> s){SavestateLoader<ChunkType> l;return l.Load(s.data(),s.size(),i);}
+int main(){
+ Isp i;i.reg(0xab,4096);i.reg(0xa2,11);i.cmd(0xc1);i.put(0x1234);
+ auto partial=save(i);
+ auto invalidWritten=partial;uint32 excessive=4097;
+ memcpy(invalidWritten.data()+invalidWritten.size()-4,&excessive,4);
+ assert(!load(i,invalidWritten));assert(save(i)==partial);
+ auto legacy=partial;legacy.resize(legacy.size()-4);
+ uint32 legacyVersion=9,legacyWords=(legacy.size()-12)/4;
+ memcpy(legacy.data()+8,&legacyWords,4);memcpy(legacy.data()+12,&legacyVersion,4);
+ assert(load(i,legacy));assert(save(i)==partial);
+i.put(0x5678);assert(load(i,partial));i.put(0x5678);
+ for(int n=0;n<4;++n)i.put(0xffff);
+ i.cmd(0x24);assert(i.get()&4);i.cmd(0x2c);assert(i.get()==4);
+ i.reg(0xa2,11);i.cmd(0x41);assert(i.get()==0x1234);assert(i.get()==0x5678);
+ auto reading=save(i);assert(i.get()==0xffff);assert(load(i,reading));assert(i.get()==0xffff);
+ i.get();i.get();assert(i.get()==255);
+ // A read past the transfer sees the floating bus and changes nothing.
+ auto outside=DanaUnqualifiedCount("ISP ATL access outside transfer");auto before=save(i);assert(i.get()==0xffff);
+ assert(DanaUnqualifiedCount("ISP ATL access outside transfer")==outside+1);assert(save(i)==before);
+ auto bad=before;uint32 invalid=4097; // appended host cursor follows all DC fields
+ // The cursor is immediately before 2048 Do16 words (each occupies one serialized word).
+ memcpy(bad.data()+bad.size()-4-16-2048*4-4,&invalid,4);
+ assert(!load(i,bad));assert(save(i)==before);
+ bad=before;bad.resize(bad.size()-4);assert(!load(i,bad));assert(save(i)==before);
+ // Interrupted malformed guest headers remain saveable until list validation.
+ i.reg(0xa2,8);i.cmd(0xc1);i.put(0xffff);auto prefix=save(i);
+ assert(load(i,prefix));i.put(0xffff);i.put(0xffff);i.put(0xffff);
+ auto malformed=save(i);assert(load(i,malformed));
+ i.reg(0xa2,4096);i.cmd(0xc1);for(int n=0;n<2048;++n)i.put(n);
+ // A zero count is logged; the ATL port then drops the words written to it.
+ auto counts=DanaUnqualifiedCount("ISP ATL count outside allocation");outside=DanaUnqualifiedCount("ISP ATL access outside transfer");
+ i.reg(0xa2,0);i.cmd(0xc1);i.put(0x1111);assert(DanaUnqualifiedCount("ISP ATL count outside allocation")==counts+1);
+ assert(DanaUnqualifiedCount("ISP ATL access outside transfer")==outside+1);auto dropped=save(i);assert(load(i,dropped));
+ i.reg(0xa9,0xf6);i.cmd(0x22);assert(i.get()==0);
+ uint8 data[24]={0,0xf8,64,0,1,4,1,0,42,0,0,0,0,0xf8,64,8,0,8,1,0};
+ EmRegsISPDana::HostPtd p;assert(EmRegsISPDana::ValidateHostList(data,20));
+ assert(!EmRegsISPDana::ValidateHostList(data,19));
+ assert(EmRegsISPDana::DecodeHostPtd(data,20,0,p)&&p.active&&p.total==1&&p.direction==1);
+ auto unchanged=p;assert(!EmRegsISPDana::DecodeHostPtd(data,7,0,p));assert(p.total==unchanged.total);
+ assert(!EmRegsISPDana::CompleteHostPtd(data,20,0,2,0,true));assert(data[1]==0xf8);
+ assert(EmRegsISPDana::CompleteHostPtd(data,20,0,1,0,true));assert(data[1]==4);
+ data[19]=1;assert(!EmRegsISPDana::ValidateHostList(data,20));
+ // Last ends the list even when the PIO transfer includes another word.
+ uint8 setup[18]={0,8,8,8,8,0,0,0,0x80,6,0,1,0,0,8,0,0,0};
+ assert(EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ setup[16]=0xff;setup[17]=0xff;
+ assert(EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ assert(!EmRegsISPDana::ValidateHostList(setup,15));
+ setup[3]=0;assert(!EmRegsISPDana::ValidateHostList(setup,sizeof setup));
+ uint8 in[24]={0,12,8,8,8,8,0,0,0,0};
+ assert(EmRegsISPDana::ValidateHostList(in,10,16));
+ assert(!EmRegsISPDana::ValidateHostList(in,10,12));
+ assert(!EmRegsISPDana::ValidateHostList(in,7,16));
+ in[5]=4;assert(!EmRegsISPDana::ValidateHostList(in,10,16));
+ in[5]=8;in[3]=0;assert(!EmRegsISPDana::ValidateHostList(in,10,24));
+ return 0;
+}

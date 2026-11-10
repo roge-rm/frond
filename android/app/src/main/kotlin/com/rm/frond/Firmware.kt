@@ -236,7 +236,9 @@ object Firmware {
         val info = try { inspectRom68k(rom, Device.entries + device) } catch (e: IOException) { return "Couldn't read the ROM image." }
         if (!info.hasHeader) return "This file isn't a ${device.label} ROM."
         if (info.device == null) return "This ROM isn't one the ${device.label} can run."
-        if (info.device != device) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."
+        // The Dana Wireless runs the Dana's ROM, whose header still says Dana.
+        val danaRom = device.id == "alphasmart-dana-wireless" && info.device?.id == "alphasmart-dana"
+        if (info.device != device && !danaRom) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."
         if (nand != null) return "The ${device.label} has no NAND. Leave the NAND image empty."
         return null
     }

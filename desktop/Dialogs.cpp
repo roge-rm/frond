@@ -1,3 +1,4 @@
+#include "DanaViewControls.h"
 #include <algorithm>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
@@ -7,6 +8,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -136,6 +138,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     jogControlsLabel->setBuddy(jogControls);
     showKeyboard->setChecked(prefs.showKeyboard);
     jogControls->setCurrentIndex(jogControls->findData(int(prefs.jogControls)));
+    danaView = new DanaViewControls(display);
+    danaView->setValues(prefs.danaView);
+    displayLayout->addWidget(danaView);
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
@@ -183,36 +188,65 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedLayout->addLayout(engineRow);
     layout->addWidget(speedBox);
     peripherals = new QGroupBox(tr("Connections"), this);
-    auto* peripheralsLayout = new QHBoxLayout(peripherals);
-    infraredLabel = new QLabel(tr("Infrared"), peripherals);
-    infrared = new QComboBox(peripherals);
-    infrared->setObjectName("machineInfrared");
-    infrared->addItem(tr("Off"), "off");
-    infrared->addItem(tr("Terminal (PTY)"), "pty");
-    infrared->addItem(tr("Wait for a peer"), "tcp");
-    frondLink::addConnectionChoices(infrared, prefs.infrared);
-    infraredPort = new QSpinBox(peripherals);
-    infraredPort->setObjectName("machineInfraredPort");
-    infraredPort->setRange(1, 65535);
-    infraredPort->setPrefix(tr("Port "));
-    infraredPort->setValue(prefs.infrared.startsWith("tcp:") ? prefs.infrared.mid(4).toInt() : 5030);
+    auto* peripheralsLayout = new QGridLayout(peripherals);
+    // One row per peripheral: the local choices, then the connections, and a port for Wait for a peer.
+    auto row = [&](int at, const QString& title, const QString& name, const QString& value, int port,
+                   QLabel*& label, QComboBox*& combo, QSpinBox*& spin) {
+        label = new QLabel(title, peripherals);
+        combo = new QComboBox(peripherals);
+        combo->setObjectName(name);
+        combo->addItem(tr("Off"), "off");
+        combo->addItem(tr("Terminal (PTY)"), "pty");
+        combo->addItem(tr("Wait for a peer"), "tcp");
+        frondLink::addConnectionChoices(combo, value);
+        spin = new QSpinBox(peripherals);
+        spin->setObjectName(name + "Port");
+        spin->setRange(1, 65535);
+        spin->setPrefix(tr("Port "));
+        spin->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : port);
+        combo->setCurrentIndex(std::max(0, combo->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
+        label->setBuddy(combo);
+        peripheralsLayout->addWidget(label, at, 0);
+        peripheralsLayout->addWidget(combo, at, 1);
+        peripheralsLayout->addWidget(spin, at, 2);
+        auto* box = combo; auto* field = spin;
+        connect(combo, &QComboBox::currentIndexChanged, this, [box, field] { field->setVisible(box->currentData() == "tcp"); });
+        spin->setVisible(combo->currentData() == "tcp");
+    };
+    row(0, tr("Infrared"), "machineInfrared", prefs.infrared, 5030, infraredLabel, infrared, infraredPort);
+    row(1, tr("Serial"), "machineSerial", prefs.serial, 5023, serialLabel, serial, serialPort);
+    infrared->insertItem(infrared->findData("tcp") + 1, tr("Printer"), "printer");
     infrared->setCurrentIndex(std::max(0, infrared->findData(prefs.infrared.startsWith("tcp:") ? QString("tcp") : prefs.infrared)));
-    infraredLabel->setBuddy(infrared);
-    peripheralsLayout->addWidget(infraredLabel);
-    peripheralsLayout->addWidget(infrared, 1);
-    peripheralsLayout->addWidget(infraredPort);
+    if (prefs.infrared == "phone") { frondLink::setPhoneChoice(infrared, true); infrared->setCurrentIndex(infrared->findData("phone")); }
+    if (prefs.serial == "modem") { frondLink::setModemChoice(serial, true); serial->setCurrentIndex(serial->findData("modem")); }
+    bluetoothLabel = new QLabel(tr("Bluetooth"), peripherals);
+    bluetooth = new QComboBox(peripherals);
+    bluetooth->setObjectName("machineBluetooth");
+    bluetooth->addItem(tr("Off"), "off");
+    bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Mobile phone"), "phone");
+    bluetooth->addItem(tr("Controller socket"), "socket");
+    frondLink::addConnectionChoices(bluetooth, prefs.bluetooth, false);
+    bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(prefs.bluetooth.startsWith("socket:") ? QString("socket") : prefs.bluetooth)));
+    bluetoothSocket = new QLineEdit(prefs.bluetooth.startsWith("socket:") ? prefs.bluetooth.mid(7) : QString(), peripherals);
+    bluetoothSocket->setObjectName("machineBluetoothSocket");
+    bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
+    bluetoothLabel->setBuddy(bluetooth);
+    peripheralsLayout->addWidget(bluetoothLabel, 2, 0);
+    peripheralsLayout->addWidget(bluetooth, 2, 1);
+    peripheralsLayout->addWidget(bluetoothSocket, 3, 1, 1, 2);
+    connect(bluetooth, &QComboBox::currentIndexChanged, this, [this] { bluetoothSocket->setVisible(bluetooth->currentData() == "socket"); });
+    bluetoothSocket->setVisible(bluetooth->currentData() == "socket");
+    peripheralsLayout->setColumnStretch(1, 1);
     layout->addWidget(peripherals);
     peripherals->setVisible(false);
-    connect(infrared, &QComboBox::currentIndexChanged, this, [this] { infraredPort->setVisible(infrared->currentData() == "tcp"); });
-    infraredPort->setVisible(infrared->currentData() == "tcp");
     contrast->setValue(prefs.contrast);
     contrastLabel->setText(tr("Contrast: %1").arg(prefs.contrast));
     connect(contrast, &QSlider::valueChanged, this, [this](int value) { contrastLabel->setText(tr("Contrast: %1").arg(value)); });
     // setDevice shows the rows for the chosen device.
-    const bool engineShown = qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
     for (QWidget* w : {static_cast<QWidget*>(contrastLabel), static_cast<QWidget*>(contrast),
                        static_cast<QWidget*>(speedLabel), static_cast<QWidget*>(speed)}) w->setVisible(false);
-    speedGroup->setVisible(engineShown);
+    speedGroup->setVisible(true);
     windowScale->setValue(prefs.scale);
     smoothLcd->setChecked(prefs.smooth);
     audio->setChecked(prefs.audio);
@@ -242,6 +276,7 @@ int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControl
 
 frondSessions::Preferences MachineSettings::values() const {
     auto prefs = originalPreferences;
+    prefs.danaView = danaView->values();
     prefs.scale = windowScale->value();
     prefs.smooth = smoothLcd->isChecked();
     prefs.audio = audio->isChecked();
@@ -252,9 +287,23 @@ frondSessions::Preferences MachineSettings::values() const {
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
     prefs.uncapped = speed->currentData().toBool();
+    const auto choice = [](QComboBox* combo, QSpinBox* port) {
+        const auto mode = combo->currentData().toString();
+        return mode == "tcp" ? "tcp:" + QString::number(port->value()) : mode;
+    };
     if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared) {
-        const auto mode = infrared->currentData().toString();
-        prefs.infrared = mode == "tcp" ? "tcp:" + QString::number(infraredPort->value()) : mode;
+        prefs.infrared = choice(infrared, infraredPort);
+        prefs.peripheralsSet = true;
+    }
+    if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).serial &&
+        !frondFirmware::serialAbsent(device)) {
+        prefs.serial = choice(serial, serialPort);
+        prefs.peripheralsSet = true;
+    }
+    if (peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).bluetooth) {
+        const auto mode = bluetooth->currentData().toString();
+        const auto path = bluetoothSocket->text().trimmed();
+        prefs.bluetooth = mode == "socket" ? (path.isEmpty() ? QStringLiteral("off") : "socket:" + path) : mode;
         prefs.peripheralsSet = true;
     }
     return prefs;
@@ -265,7 +314,32 @@ void MachineSettings::showPeripherals(bool shown) {
 }
 void MachineSettings::setDevice(Device device) {
     this->device = device;
-    peripherals->setVisible(peripheralsShown && device != Device::automatic && frondFirmware::capabilities(device).infrared);
+    const bool known = peripheralsShown && device != Device::automatic;
+    const bool hasInfrared = known && frondFirmware::capabilities(device).infrared;
+    const bool hasSerial = known && frondFirmware::capabilities(device).serial && !frondFirmware::serialAbsent(device);
+    const bool hasBluetooth = known && frondFirmware::capabilities(device).bluetooth;
+    peripherals->setVisible(hasInfrared || hasSerial || hasBluetooth);
+    for (QWidget* w : {static_cast<QWidget*>(bluetoothLabel), static_cast<QWidget*>(bluetooth)}) w->setVisible(hasBluetooth);
+    bluetoothSocket->setVisible(hasBluetooth && bluetooth->currentData() == "socket");
+    for (QWidget* w : {static_cast<QWidget*>(infraredLabel), static_cast<QWidget*>(infrared)}) w->setVisible(hasInfrared);
+    infraredPort->setVisible(hasInfrared && infrared->currentData() == "tcp");
+    {
+        const QSignalBlocker blocked(infrared);
+        const auto mode = infrared->currentData();
+        frondLink::setPhoneChoice(infrared, known && frondFirmware::capabilities(device).irPhone);
+        if (const int at = infrared->findData(mode); at >= 0) infrared->setCurrentIndex(at);
+    }
+    {
+        const QSignalBlocker blocked(serial);
+        const auto mode = serial->currentData();
+        frondLink::setModemChoice(serial, known && frondFirmware::capabilities(device).modem);
+        if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
+    }
+    for (QWidget* w : {static_cast<QWidget*>(serialLabel), static_cast<QWidget*>(serial)}) w->setVisible(hasSerial);
+    serialPort->setVisible(hasSerial && serial->currentData() == "tcp");
+    const bool dana = frondFirmware::isDana(device);
+    danaView->setVisible(dana);
+    windowScale->setVisible(!dana); scaleLabel->setVisible(!dana);
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(tg50);
@@ -274,13 +348,13 @@ void MachineSettings::setDevice(Device device) {
     fastAudio->setVisible(!m68k);
     contrastLabel->setVisible(m68k);
     contrast->setVisible(m68k);
-    // Original/Uncapped for 68k devices; the Engine choice has no JIT to pick there.
-    const bool engineShown = !m68k && qEnvironmentVariable("FROND_ENGINE_SETTING") == QLatin1String("1");
-    speedLabel->setVisible(m68k);
-    speed->setVisible(m68k);
+    // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
+    const bool engineShown = !m68k;
+    speedLabel->setVisible(true);
+    speed->setVisible(true);
     engineLabel->setVisible(engineShown);
     engine->setVisible(engineShown);
-    speedGroup->setVisible(m68k || engineShown);
+    speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);
     audio->setToolTip(soundSupported ? QString() : device == Device::automatic ? tr("Choose firmware first") :

@@ -1,6 +1,7 @@
 .PHONY: all clean prepare test test-cpu test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-pxa-timer benchmark-session test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
 BUILD_JOBS ?= 4
-CPU_TEST_LDLIBS ?= -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
+# libcommon-net.a: the core's .o files include HostInfrared's phone (SlirpIp).
+CPU_TEST_LDLIBS ?= build/source/src/common/libcommon-net.a -lcurl -lpthread -lresolv $(shell pkg-config --libs slirp)
 
 # The Fast engine (Dynarmic JIT) is built in on x86-64 and arm64 hosts; FROND_FAST=0 leaves it out.
 # Its source is exported into build/ by make dynarmic-source and built once in build/dynarmic.
@@ -23,8 +24,18 @@ all: out/frond desktop
 test: test-memory-stick-controller test-memory-stick-media
 test-memory-stick-media: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm tests/memory-stick-media.cpp -o build/test-memory-stick-media
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/memory-stick-media.cpp -o build/test-memory-stick-media
 	./build/test-memory-stick-media
+
+.PHONY: test-ms-logical-equivalence
+test: test-ms-logical-equivalence
+test-ms-logical-equivalence: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-ms-logical-equivalence.o
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -UNDEBUG \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/ms-logical-equivalence.cpp \
+		build/miniz-ms-logical-equivalence.o -o build/test-ms-logical-equivalence
+	./build/test-ms-logical-equivalence
 
 .PHONY: test-card-backing
 test: test-card-backing
@@ -52,6 +63,13 @@ test-card-swap: out/frond
 	./build/test-card-swap
 	python3 tests/card-swap-rom.py
 
+.PHONY: test-card-reinsert
+test: test-card-reinsert
+# A card put back right after an eject, with no guest time between, on the T|X, E2, Zire 72 and TG50
+# smoke sessions there are (tests/card-reinsert-rom.py).
+test-card-reinsert: out/frond
+	python3 tests/card-reinsert-rom.py
+
 .PHONY: test-card-tool
 test: test-card-tool
 # The card tool (make, import, export) as a library, then as `frond-core --card` (tests/card-tool.py).
@@ -72,11 +90,50 @@ test-session-v7: prepare
 	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
 		-o build/miniz-session-v7.o
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tests/session-v7.cpp build/source/src/common/session/session_file5.cpp \
 		build/source/src/common/md5.cpp build/source/src/uarm/uarm/sdcard.cpp build/miniz-session-v7.o \
 		-o build/test-session-v7
 	./build/test-session-v7
+
+.PHONY: test-storage-settle
+test: test-storage-settle
+# The storage library's settle and verify: both apps' leftovers (read back with mtools), journal
+# v2 session and standalone journals cut off at each step, pending lists and side regions.
+test-storage-settle: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-settle.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-settle.cpp build/source/src/common/session/session_file5.cpp \
+		build/source/src/common/md5.cpp build/source/src/uarm/uarm/sdcard.cpp build/miniz-storage-settle.o \
+		-o build/test-storage-settle
+	python3 tests/storage-settle.py build/test-storage-settle
+
+.PHONY: test-storage-fat
+test: test-storage-fat
+# The storage library's FatImage on FAT12: format layouts, FAT32 refused, cut-off changes on a FAT12
+# card file, and cards it formats or fills read back with mtools (tests/storage-fat.py).
+test-storage-fat: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-fat.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-fat.cpp build/miniz-storage-fat.o -o build/test-storage-fat
+	python3 tests/storage-fat.py build/test-storage-fat
+
+.PHONY: test-storage-ms
+test: test-storage-ms
+# Files on classic Memory Sticks: writes into held and unclaimed blocks read back through
+# LogicalMsMedia, unsettled sticks refused, the TG50's format for each size read back with mtools,
+# cut-off changes (tests/storage-ms.py).
+test-storage-ms: prepare
+	$(CC) -std=gnu99 -O1 -g -Ibuild/source/src/common -c build/source/src/common/zip/miniz.c \
+		-o build/miniz-storage-ms.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/storage-ms.cpp build/miniz-storage-ms.o -o build/test-storage-ms
+	python3 tests/storage-ms.py build/test-storage-ms
 
 prepare: build/source/.prepared
 
@@ -87,14 +144,14 @@ FORCE:
 build/source/.prepared: FORCE
 	python3 tools/prepare.py
 
-out/frond: build/source/.prepared build/source/src/common/libcommon.a $(CORE_JIT_DEPS)
+out/frond: build/source/.prepared build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(CORE_JIT_DEPS)
 	$(MAKE) -C build/source/src/uarm bin $(CORE_JIT_FLAGS)
 	mkdir -p out
 	cp build/source/src/uarm/cp-uarm out/frond.new
 	mv -f out/frond.new out/frond
 
 # The 68k runner for DragonBall devices, from Cloudpilot's core in src/cloudpilot.
-out/frond-68k: build/source/.prepared build/source/src/common/libcommon.a
+out/frond-68k: build/source/.prepared build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a
 	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 frond-68k
 	mkdir -p out
 	cp build/source/src/cloudpilot/frond-68k out/frond-68k.new
@@ -170,6 +227,36 @@ test-sdl-audio: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-sdl-audio-buffer
 	./build/test-sdl-audio-buffer
 
+.PHONY: test-dana-keyboard-art
+test: test-dana-keyboard-art
+DANA_ART_SOURCE ?= build/source
+DANA_ART_BUILD ?= build
+# The default source comes from prepare, so it isn't prepared twice side by side under -j.
+test-dana-keyboard-art: $(if $(filter build/source,$(DANA_ART_SOURCE)),prepare)
+	$(if $(filter-out build/source,$(DANA_ART_SOURCE)),python3 tools/prepare.py --destination $(DANA_ART_SOURCE))
+	mkdir -p $(DANA_ART_BUILD)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-I$(DANA_ART_SOURCE)/src/uarm/native -I$(DANA_ART_SOURCE)/src/uarm/uarm \
+		-I$(DANA_ART_SOURCE)/src/common \
+		tests/dana-keyboard-art.cpp $(DANA_ART_SOURCE)/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_ART_BUILD)/test-dana-keyboard-art
+	$(DANA_ART_BUILD)/test-dana-keyboard-art
+
+.PHONY: test-dana-view
+test: test-dana-view
+DANA_VIEW_SOURCE ?= build/source
+DANA_VIEW_BUILD ?= build
+# The default source comes from prepare, so it isn't prepared twice side by side under -j.
+test-dana-view: $(if $(filter build/source,$(DANA_VIEW_SOURCE)),prepare)
+	$(if $(filter-out build/source,$(DANA_VIEW_SOURCE)),python3 tools/prepare.py --destination $(DANA_VIEW_SOURCE))
+	mkdir -p $(DANA_VIEW_BUILD)
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
+		-I$(DANA_VIEW_SOURCE)/src/uarm/native -I$(DANA_VIEW_SOURCE)/src/uarm/uarm \
+		-I$(DANA_VIEW_SOURCE)/src/common \
+		tests/dana-view.cpp $(DANA_VIEW_SOURCE)/src/uarm/native/DeviceControls.cpp \
+		$(shell pkg-config --libs sdl2 SDL2_image) -o $(DANA_VIEW_BUILD)/test-dana-view
+	SDL_VIDEODRIVER=dummy $(DANA_VIEW_BUILD)/test-dana-view
+
 .PHONY: test-render-link
 test: test-render-link
 test-render-link: prepare
@@ -177,6 +264,12 @@ test-render-link: prepare
 		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm \
 		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o build/test-render-link
 	./build/test-render-link
+
+test: test-shortcut-keys
+test-shortcut-keys: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native tests/shortcut-keys.cpp -o build/test-shortcut-keys
+	./build/test-shortcut-keys
 
 test-fast-audio: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
@@ -296,6 +389,17 @@ test-jit-compile-thread: build/dynarmic-trial/src/.frond-source
 		tests/jit-compile-thread.cpp -pthread -o build/test-jit-compile-thread
 	./build/test-jit-compile-thread
 
+# iWMMXt on the PXA27x: each instruction against a per-lane model.
+.PHONY: test-pxa270-wmmx
+test: test-pxa270-wmmx
+test-pxa270-wmmx: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/wmmx-core.rsp
+	$(CXX) -std=c++17 -O1 -g \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/pxa270-wmmx.cpp @build/wmmx-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa270-wmmx
+	./build/test-pxa270-wmmx
+
 .PHONY: test-arm-conditions benchmark-menu
 test-arm-conditions: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/conditions-core.rsp
@@ -324,10 +428,16 @@ test-desktop: desktop
 	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
-deb: desktop out/frond-68k
+deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt bluetooth-opp-peer
 	python3 tools/package-deb.py
 
-# arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker only.
+# This Frond's Bluetooth radio. The pinned BlueZ source is fetched once with
+# python3 tools/build-bluetooth-provider.py --fetch.
+build/bluetooth-provider/emulator/btvirt:
+	python3 tools/build-bluetooth-provider.py --jobs $(BUILD_JOBS)
+
+# arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker and the BlueZ
+# checkout from tools/build-bluetooth-provider.py --fetch (btvirt is cross built from it).
 # The core is prepared fresh in build/arm64/source and mounted over build/source.
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64
@@ -394,18 +504,53 @@ test-host-network: prepare
 		tests/host-network.cpp build/source/src/uarm/uarm/HostNetwork.cpp -pthread -o build/test-host-network
 	./build/test-host-network
 
+.PHONY: test-modem
+test: test-modem
+test-modem: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/modem.cpp \
+		build/source/src/common/libcommon-net.a build/source/src/common/libcommon.a \
+		$(shell pkg-config --cflags --libs slirp) -o build/test-modem
+	./build/test-modem
+
+.PHONY: test-ir-peer
+test: test-ir-peer
+test-ir-peer: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/ir-peer.cpp \
+		build/source/src/common/libcommon.a -o build/test-ir-peer
+	./build/test-ir-peer
+
+.PHONY: test-ir-printer
+test: test-ir-printer
+# The IR printer's IrLPT and IrCOMM jobs from a scripted IrLAP primary (tests/ir-printer.cpp).
+test-ir-printer: prepare build/source/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/ir-printer.cpp \
+		build/source/src/common/libcommon.a -o build/test-ir-printer
+	./build/test-ir-printer
+
+build/source/src/common/libcommon-net.a: build/source/.prepared
+	$(MAKE) -C build/source/src/common net
+
 .PHONY: test-wifi
 test-wifi: prepare build/source/src/common/libcommon.a
-	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
-		tests/wifi-router.cpp build/source/src/uarm/uarm/WifiRouter.cpp \
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common/net \
+		tests/wifi-router.cpp build/source/src/common/net/WifiRouter.cpp \
 		$(shell pkg-config --cflags --libs slirp) -pthread -o build/test-wifi-router
 	./build/test-wifi-router
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/libertas-cf.cpp build/source/src/uarm/uarm/LibertasCF.cpp \
-		build/source/src/uarm/uarm/WifiRouter.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
+		build/source/src/common/net/WifiRouter.cpp build/source/src/uarm/uarm/NetworkSimulation.cpp \
 		build/source/src/uarm/uarm/HostNetwork.cpp build/source/src/common/libcommon.a \
 		$(shell pkg-config --cflags --libs slirp) -pthread -lz -o build/test-libertas-cf
 	./build/test-libertas-cf
+
+# The shared Ethernet router from libcommon-net.a, as both cores link it.
+.PHONY: test-net-wifi-router
+test: test-net-wifi-router
+test-net-wifi-router: prepare build/source/src/common/libcommon-net.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Ibuild/source/src/common tests/net-wifi-router.cpp \
+		build/source/src/common/libcommon-net.a $(shell pkg-config --cflags --libs slirp) -pthread \
+		-o build/test-net-wifi-router
+	./build/test-net-wifi-router
 
 .PHONY: test-scheduler
 test-scheduler: prepare
@@ -425,6 +570,13 @@ test-device-controls: out/frond
 	./build/test-device-controls
 
 # Fingers on the buttons and pen, ARM (T|X, E2) and 68k (IIIx): several held at once, no private sessions.
+.PHONY: test-68k-frame-bounds
+test: test-68k-frame-bounds
+test-68k-frame-bounds: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/cloudpilot/emulator tests/68k-frame-bounds.cpp -o build/test-68k-frame-bounds
+	./build/test-68k-frame-bounds
+
 .PHONY: test-multi-touch
 test: test-multi-touch
 test-multi-touch: out/frond out/frond-68k
@@ -594,10 +746,20 @@ test-session-folder-card: out/frond
 test-core-control: out/frond out/frond-68k
 	python3 tests/core-control.py
 
+# The printer commands (irprinter and the Dana's printer) through both runners' control sockets; needs
+# a private ARM smoke session and the Dana ROM, else that side is skipped.
+.PHONY: test-printer-control
+test-printer-control: out/frond out/frond-68k
+	python3 tests/printer-control.py
+
 .PHONY: test-frond-68k-gdb
 test-frond-68k-gdb: out/frond-68k
 	python3 tests/frond-68k-gdb.py
 	python3 tests/frond-68k-gdb.py --multiarch
+
+.PHONY: test-frond-68k-boot-save
+test-frond-68k-boot-save: out/frond-68k
+	python3 tests/frond-68k-boot-save.py
 
 build/test-frond-68k-sound: tests/frond-68k-sound.cpp build/source/.prepared
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/cloudpilot/frond tests/frond-68k-sound.cpp -o $@
@@ -1043,20 +1205,20 @@ test-tg50-call-budget: prepare
 	./build/test-tg50-call-budget
 
 .PHONY: test-memory-stick-controller
-test-memory-stick-controller: prepare
+test-memory-stick-controller: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/memory-stick-controller.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/common/libcommon.a -lz -o build/test-memory-stick-controller
 	./build/test-memory-stick-controller
 
 .PHONY: test-memory-stick-pro
 test: test-memory-stick-pro
-test-memory-stick-pro: prepare
+test-memory-stick-pro: build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tests/memory-stick-pro.cpp build/source/src/uarm/uarm/mmiodev_MemoryStickController.cpp \
-		build/source/src/common/libcommon.a -lz -o build/test-memory-stick-pro
+		build/source/src/uarm/uarm/sdcard.cpp build/source/src/common/libcommon.a -lz -o build/test-memory-stick-pro
 	./build/test-memory-stick-pro
 
 .PHONY: test-tg50-serial-configuration test-microwire64x16
@@ -1259,12 +1421,18 @@ test-csr-peer-services: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common tests/csr-peer-state.cpp @build/csr-peer-core.rsp build/source/src/common/libcommon.a -lSDL2 -lSDL2_image -lreadline $(CPU_TEST_LDLIBS) -o build/test-csr-peer-state
 	./build/test-csr-peer-state
 
-.PHONY: bluetooth-opp-peer test-bluetooth-opp-peer
-bluetooth-opp-peer:
-	python3 tools/build-bluetooth-opp-peer.py
+.PHONY: bluetooth-opp-peer test-bluetooth-opp-peer test-bluetooth-dun
+# The checkout tools/build-bluetooth-provider.py --fetch made and built.
+BLUETOOTH_PROVIDER ?= build/bluetooth-provider
+bluetooth-opp-peer: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER)
 
-test-bluetooth-opp-peer:
-	python3 tools/build-bluetooth-opp-peer.py --test
+test-bluetooth-opp-peer: prepare build/source/src/common/libcommon.a build/source/src/common/libcommon-net.a $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	python3 tools/build-bluetooth-opp-peer.py --source $(BLUETOOTH_PROVIDER) --test
+
+# The DUN phone through btvirt: a scripted client dials and brings LCP and IPCP up.
+test-bluetooth-dun: test-bluetooth-opp-peer
+	python3 tests/bluetooth-dun.py --btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
 
 .PHONY: test-csr-controller-lifecycle
 test: test-csr-controller-lifecycle
@@ -1979,3 +2147,150 @@ test-zodiac-bounded: build/zodiac-boot-probe
 		tests/zodiac-bounded.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-bounded
 	./build/test-zodiac-bounded
+
+# The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,
+# so their sub-makes running side by side only link and never rewrite an object another one is reading.
+.PHONY: test-68k-vz-registers
+test: test-68k-vz-registers
+test-68k-vz-registers: prepare out/frond-68k
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
+
+.PHONY: test-68k-dana
+test: test-68k-dana
+test-68k-dana: prepare out/frond-68k
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-dana.mk FROND_TEST_ROOT=$(CURDIR) dana-test
+
+.PHONY: test-dana-input
+test: test-dana-input
+test-dana-input: prepare
+	$(CXX) -std=c++17 -Wall -Wextra -Ibuild/source/src/common tests/dana-input.cpp -o build/test-dana-input
+	./build/test-dana-input
+
+.PHONY: test-68k-sd
+test-68k-sd: prepare
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
+		-f $(CURDIR)/tests/68k-sd.mk FROND_TEST_ROOT=$(CURDIR) sd-test
+
+.PHONY: test-68k-card-provider
+test-68k-card-provider: prepare
+	$(MAKE) -C build/source/src/common bin
+	$(CXX) -std=c++17 -O1 -Ibuild/source/src/common -Ibuild/source/src/uarm/uarm \
+		tests/68k-card-provider.cpp build/source/src/common/libcommon.a -o build/test-68k-card-provider
+	./build/test-68k-card-provider build/provider-runtime-check
+
+.PHONY: test-dana-card-inventory
+test-dana-card-inventory: prepare
+	$(CXX) -std=c++17 -O2 -Ibuild/source/src/common tests/dana-card-inventory.cpp -o build/test-dana-card-inventory
+	./build/test-dana-card-inventory
+
+.PHONY: test-68k-bus-state
+test: test-68k-bus-state
+test-68k-bus-state: prepare out/frond-68k
+	$(MAKE) -C build/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-bus-state.mk FROND_TEST_ROOT=$(CURDIR) bus-state-test
+
+.PHONY: test-raw-print-job
+RAW_PRINT_BUILD ?= build/raw-print-job
+RAW_PRINT_SOURCE ?= $(RAW_PRINT_BUILD)/source
+test-raw-print-job:
+	python3 tools/prepare.py --destination $(RAW_PRINT_SOURCE)
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_SOURCE)/src/common tests/raw-print-job.cpp -o $(RAW_PRINT_BUILD)/test-raw-print-job
+	$(RAW_PRINT_BUILD)/test-raw-print-job
+
+.PHONY: test-raw-print-file
+RAW_PRINT_FILE_BUILD ?= build/raw-print-file
+test-raw-print-file:
+	python3 tools/prepare.py --destination $(RAW_PRINT_FILE_BUILD)/source
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror -I$(RAW_PRINT_FILE_BUILD)/source/src/common tests/raw-print-file.cpp -Wl,--wrap=write,--wrap=unlinkat -o $(RAW_PRINT_FILE_BUILD)/test-raw-print-file
+	mkdir -p $(RAW_PRINT_FILE_BUILD)/output
+	$(RAW_PRINT_FILE_BUILD)/test-raw-print-file $(abspath $(RAW_PRINT_FILE_BUILD)/output)
+
+ISP_HOST_AREA ?= $(CURDIR)/build/isp-host-pio
+.PHONY: test-isp-host-pio
+test-isp-host-pio:
+	python3 tools/prepare.py --destination $(ISP_HOST_AREA)/source
+	$(MAKE) -C $(ISP_HOST_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_HOST_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-pio.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_HOST_TEST=$(ISP_HOST_AREA)/test-isp-host-pio isp-host-test
+
+ISP_ATL_AREA ?= $(CURDIR)/build/isp-host-atl
+.PHONY: test-isp-host-atl
+test-isp-host-atl:
+	python3 tools/prepare.py --destination $(ISP_ATL_AREA)/source
+	$(MAKE) -C $(ISP_ATL_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_ATL_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-atl.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_ATL_TEST=$(ISP_ATL_AREA)/test-isp-host-atl isp-atl-test
+
+ISP_IRQ_AREA ?= $(CURDIR)/build/isp-host-irq
+.PHONY: test-isp-host-irq
+test-isp-host-irq:
+	python3 tools/prepare.py --destination $(ISP_IRQ_AREA)/source
+	$(MAKE) -C $(ISP_IRQ_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_IRQ_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-irq.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_IRQ_TEST=$(ISP_IRQ_AREA)/test-isp-host-irq isp-irq-test
+
+ISP_ROOT_AREA ?= $(CURDIR)/build/isp-host-root
+.PHONY: test-isp-host-root
+test-isp-host-root:
+	python3 tools/prepare.py --destination $(ISP_ROOT_AREA)/source
+	$(MAKE) -C $(ISP_ROOT_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_ROOT_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-host-root.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_ROOT_TEST=$(ISP_ROOT_AREA)/test-isp-host-root isp-root-test
+
+.PHONY: test-usb-raw-printer
+USB_PRINTER_AREA ?= build/usb-raw-printer
+test-usb-raw-printer:
+	python3 tools/prepare.py --destination $(USB_PRINTER_AREA)/source
+	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_PRINTER_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-raw-printer.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_PRINTER_TEST=$(CURDIR)/$(USB_PRINTER_AREA)/test-usb-raw-printer usb-printer-test
+
+.PHONY: test-usb-prism2-adapter
+USB_PRISM2_AREA ?= build/usb-prism2-adapter
+test-usb-prism2-adapter:
+	python3 tools/prepare.py --destination $(USB_PRISM2_AREA)/source
+	g++ -std=c++17 -Wall -Wextra -I$(USB_PRISM2_AREA)/source/src/common -o $(USB_PRISM2_AREA)/test-usb-prism2-adapter tests/usb-prism2-adapter.cpp
+	$(USB_PRISM2_AREA)/test-usb-prism2-adapter
+
+.PHONY: test-usb-printer-runtime
+USB_RUNTIME_AREA ?= build/usb-printer-runtime
+test-usb-printer-runtime:
+	python3 tools/prepare.py --destination $(USB_RUNTIME_AREA)/source
+	$(MAKE) -C $(USB_RUNTIME_AREA)/source/src/common libcommon.a net
+	mkdir -p $(USB_RUNTIME_AREA)/output
+	$(MAKE) -C $(USB_RUNTIME_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-printer-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_RUNTIME_TEST=$(CURDIR)/$(USB_RUNTIME_AREA)/test-usb-printer-runtime USB_RUNTIME_OUTPUT=$(CURDIR)/$(USB_RUNTIME_AREA)/output usb-runtime-test
+
+.PHONY: test-usb-wifi-runtime
+USB_WIFI_AREA ?= build/usb-wifi-runtime
+test-usb-wifi-runtime:
+	python3 tools/prepare.py --destination $(USB_WIFI_AREA)/source
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-wifi-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) USB_WIFI_TEST=$(CURDIR)/$(USB_WIFI_AREA)/test-usb-wifi-runtime usb-wifi-test
+
+# The Dana Wireless's built-in Wi-Fi module on root port 1, built in the same area.
+.PHONY: test-dana-wifi-module
+test-dana-wifi-module:
+	python3 tools/prepare.py --destination $(USB_WIFI_AREA)/source
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(USB_WIFI_AREA)/source/src/cloudpilot -f Makefile -f $(CURDIR)/tests/usb-wifi-runtime.mk FROND_68K=1 FROND_TEST_ROOT=$(CURDIR) DANA_MODULE_TEST=$(CURDIR)/$(USB_WIFI_AREA)/test-dana-wifi-module dana-module-test
+
+ISP_FRAME_AREA ?= $(CURDIR)/build/isp-frame
+.PHONY: test-isp-frame
+test-isp-frame:
+	python3 tools/prepare.py --destination $(ISP_FRAME_AREA)/source
+	$(MAKE) -C $(ISP_FRAME_AREA)/source/src/common libcommon.a net
+	$(MAKE) -C $(ISP_FRAME_AREA)/source/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/isp-frame.mk FROND_TEST_ROOT=$(CURDIR) \
+		ISP_FRAME_TEST=$(ISP_FRAME_AREA)/test-isp-frame isp-frame-test
+
+.PHONY: test-print-text
+test: test-print-text
+test-print-text:
+	mkdir -p build/print-text
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/print-text.cpp -o build/print-text/test-print-text
+	build/print-text/test-print-text

@@ -38,6 +38,10 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
     // An image that fits more than one type, waiting for the type.
     var importing by mutableStateOf<Pair<File, List<String>>?>(null)
 
+    // The file view of a card opened with Files…; open while its path is set.
+    // One per process, so it outlives a recreated home screen.
+    val files: CardImageFiles get() = CardImageFiles.shared(app, sessions)
+
     // Reconciles first, as the plan asks whenever Cards opens.
     fun open() {
         activity.lifecycleScope.launch {

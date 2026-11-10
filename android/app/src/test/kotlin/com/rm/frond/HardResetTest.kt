@@ -10,7 +10,7 @@ import java.nio.file.Files
 class HardResetTest {
     private fun run(path: String?, saveFirst: Boolean, saveOk: Boolean = true, onSaved: () -> Unit = {}): Pair<String?, List<String>> {
         val sent = mutableListOf<String>()
-        val error = PeripheralsModel.runHardReset(path, saveFirst, onSaved) { command, argument ->
+        val error = RunningModel.runHardReset(path, saveFirst, onSaved) { command, argument ->
             sent += if (argument.isEmpty()) command else "$command $argument"
             if (command == "save" && !saveOk) ControlLink.Reply(false, "write", "Disk full")
             else ControlLink.Reply(true, "done", "Done.")

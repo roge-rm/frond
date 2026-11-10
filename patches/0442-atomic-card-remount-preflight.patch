@@ -1,0 +1,40 @@
+--- a/src/cloudpilot/emulator/ExternalStorage.cpp
++++ b/src/cloudpilot/emulator/ExternalStorage.cpp
+@@ -72,6 +72,23 @@
+ void ExternalStorage::Remount() {
+     remountFailed = false;
+ 
++    // Check the whole proposed set before releasing either live attachment.
++    for (uint8 slot = 0; slot <= static_cast<uint8>(EmHAL::MAX_SLOT); ++slot) {
++        const auto& key = mountedKeysFromSavestate[slot];
++        if (key.empty()) continue;
++        if (!HasImage(key) ||
++            !EmHAL::SupportsImageInSlot(static_cast<EmHAL::Slot>(slot), *images.at(key))) {
++            remountFailed = true;
++            return;
++        }
++        for (uint8 previous = 0; previous < slot; ++previous) {
++            if (mountedKeysFromSavestate[previous] == key) {
++                remountFailed = true;
++                return;
++            }
++        }
++    }
++
+     for (uint8 slot = 0; slot <= static_cast<uint8>(EmHAL::MAX_SLOT); slot++) {
+         const string& key(mountedKeysFromSavestate[slot]);
+ 
+@@ -80,13 +97,6 @@
+                 slots[slot].reset();
+                 EmHAL::Unmount(static_cast<EmHAL::Slot>(slot));
+             }
+-            continue;
+-        }
+-
+-        if (!HasImage(key)) {
+-            slots[slot].reset();
+-            EmHAL::Unmount(static_cast<EmHAL::Slot>(slot));
+-            remountFailed = true;
+             continue;
+         }
+ 

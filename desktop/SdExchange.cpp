@@ -1,5 +1,5 @@
 #include "SdExchange.h"
-#include "FatWrite.h"
+#include "CardStorage.h"
 #include <QStorageInfo>
 #include <QCryptographicHash>
 #include <QDir>
@@ -127,252 +127,21 @@ static QByteArray digest(const QString& path) {
 }
 
 namespace {
-using frondFolderCard::dirEntry;
-using frondFolderCard::le16;
-using frondFolderCard::le32;
-using frondFolderCard::putLe16;
-using frondFolderCard::shortDisplay;
-using frondFolderCard::shortName;
-
-// In-place FAT16 writer for one image file at the partition offset. Writes go straight to the
-// file it is given (a candidate copy); the caller drops the file when anything fails.
-class FatVolume {
- public:
-    struct Slot { QString name, shortText; bool dir{false}; uint32_t cluster{0}; int first{0}, count{0}; };
-    struct Folder { uint32_t cluster{0}; };  // 0 is the fixed root
-
-    FatVolume(const QString& path, qint64 offset) : file(path), base(offset) {}
-
-    bool open(QString& error) {
-        if (!file.open(QIODevice::ReadWrite)) { error = file.errorString(); return false; }
-        const auto boot = readAt(base, 512);
-        if (boot.size() != 512 || le16(boot, 11) != 512) return fail(error, "The card does not contain a supported FAT16 filesystem.");
-        perCluster = uint8_t(boot[13]);
-        const uint32_t reserved = le16(boot, 14);
-        fats = uint8_t(boot[16]);
-        rootEntries = le16(boot, 17);
-        fatSectors = le16(boot, 22);
-        const uint32_t total = le16(boot, 19) ? le16(boot, 19) : le32(boot, 32);
-        if (!perCluster || (perCluster & (perCluster - 1)) || !reserved || !fats || !fatSectors || !rootEntries)
-            return fail(error, "The card's FAT16 header is damaged.");
-        fatStart = base + qint64(reserved) * 512;
-        rootStart = fatStart + qint64(fats) * fatSectors * 512;
-        const uint32_t rootSectors = (rootEntries * 32 + 511) / 512;
-        dataStart = rootStart + qint64(rootSectors) * 512;
-        if (total < reserved + fats * fatSectors + rootSectors) return fail(error, "The card's FAT16 header is damaged.");
-        clusters = (total - reserved - fats * fatSectors - rootSectors) / perCluster;
-        clusterBytes = qint64(perCluster) * 512;
-        if (clusters < 4085 || clusters >= 65525 || (clusters + 2) * 2 > fatSectors * 512 || base + qint64(total) * 512 > file.size())
-            return fail(error, "The card's FAT16 header is damaged.");
-        fat = readAt(fatStart, int(fatSectors) * 512);
-        if (fat.size() != int(fatSectors) * 512) return fail(error, "Could not read the card's FAT.");
-        original = fat;
-        return true;
-    }
-    qint64 clusterSize() const { return clusterBytes; }
-
-    // The folder at an absolute path, found by long or short name in any case.
-    bool find(const QStringList& parts, Folder& out, QString& error) {
-        out = {};
-        for (const auto& part : parts) {
-            QList<Slot> existing;
-            if (!list(out, existing, error)) return false;
-            const auto hit = std::find_if(existing.begin(), existing.end(), [&](const Slot& s) { return same(s, part); });
-            if (hit == existing.end()) return fail(error, QString("There's no folder %1 on the card.").arg(part));
-            if (!hit->dir) return fail(error, QString("%1 is a file.").arg(part));
-            if (!hit->cluster) return fail(error, QString("The card's folder %1 is damaged.").arg(part));
-            out.cluster = hit->cluster;
-        }
-        return true;
-    }
-    bool list(const Folder& folder, QList<Slot>& result, QString& error) {
-        QByteArray bytes;
-        if (!folderBytes(folder, bytes, error)) return false;
-        result.clear();
-        QString parts[20];
-        int longFirst = -1, longCount = 0, longSum = -1;
-        for (int i = 0; i < bytes.size() / 32; ++i) {
-            const int at = i * 32;
-            const uint8_t first = uint8_t(bytes[at]), attr = uint8_t(bytes[at + 11]);
-            if (first == 0) break;
-            if (first == 0xe5) { longFirst = -1; continue; }
-            if ((attr & 0x3f) == 0x0f) {
-                const int order = first & 0x3f;
-                if (first & 0x40) {
-                    for (auto& p : parts) p.clear();
-                    longFirst = i; longCount = order; longSum = uint8_t(bytes[at + 13]);
-                }
-                if (longFirst >= 0 && order >= 1 && order <= 20 && uint8_t(bytes[at + 13]) == longSum) {
-                    static const int offsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
-                    QString text;
-                    for (int j = 0; j < 13; ++j) {
-                        const auto c = le16(bytes, at + offsets[j]);
-                        if (c == 0 || c == 0xffff) break;
-                        text += QChar(c);
-                    }
-                    parts[order - 1] = text;
-                } else longFirst = -1;
-                continue;
-            }
-            const auto raw = bytes.mid(at, 11);
-            const auto shortText = shortDisplay(raw);
-            QString longName;
-            bool complete = longFirst >= 0 && longCount <= 20 && longSum == frondFolderCard::shortChecksum(raw);
-            for (int k = 0; complete && k < longCount; ++k) { if (parts[k].isEmpty()) complete = false; else longName += parts[k]; }
-            const int start = complete ? longFirst : i;
-            longFirst = -1;
-            if (attr & 0x08) continue;
-            if (raw[0] == '.' ) continue;
-            QString shown = shortText;
-            if (!complete) {
-                // Case bits from other writers (NT-style) lower-case a short-only name.
-                const auto flags = uint8_t(bytes[at + 12]);
-                const auto base = QString::fromLatin1(raw.left(8)).trimmed(), ext = QString::fromLatin1(raw.mid(8, 3)).trimmed();
-                shown = (flags & 8 ? base.toLower() : base) + (ext.isEmpty() ? QString() : "." + (flags & 16 ? ext.toLower() : ext));
-            }
-            result.push_back({complete ? longName : shown, shortText, bool(attr & 0x10), le16(bytes, at + 26), start, i - start + 1});
-        }
-        return true;
-    }
-    static bool same(const Slot& s, const QString& name) {
-        return s.name.toUpper() == name.toUpper() || s.shortText.toUpper() == name.toUpper();
-    }
-
-    bool addFile(const Folder& folder, const QString& name, const QString& source, QString& error) {
-        QFile in(source);
-        if (!in.open(QIODevice::ReadOnly)) return fail(error, "Could not read the host file.");
-        const qint64 size = in.size();
-        if (size >= (qint64(1) << 32)) return fail(error, "The file is too large for a FAT16 card.");
-        QList<Slot> existing;
-        if (!list(folder, existing, error) || !refuse(existing, name, error)) return false;
-        QList<uint32_t> run;
-        if (!allocate(int((size + clusterBytes - 1) / clusterBytes), run, error)) return false;
-        qint64 left = size;
-        for (const auto c : run) {
-            auto chunk = in.read(std::min<qint64>(left, clusterBytes));
-            if (chunk.size() != std::min<qint64>(left, clusterBytes)) return fail(error, "Could not read the host file.");
-            left -= chunk.size();
-            chunk = chunk.leftJustified(int(clusterBytes), '\0');
-            if (!writeAt(clusterAt(c), chunk)) return fail(error, "Could not write the card image.");
-        }
-        return addEntry(folder, existing, name, 0x20, run.isEmpty() ? 0 : run.first(), uint32_t(size), error) && flushFat(error);
-    }
-    bool addFolder(const Folder& parent, const QString& name, QString& error) {
-        QList<Slot> existing;
-        if (!list(parent, existing, error) || !refuse(existing, name, error)) return false;
-        QList<uint32_t> run;
-        if (!allocate(1, run, error)) return false;
-        const auto when = QDateTime::currentDateTime();
-        QByteArray dot(11, ' '), dotdot(11, ' ');
-        dot[0] = '.'; dotdot[0] = '.'; dotdot[1] = '.';
-        QByteArray block = dirEntry(".", dot, 0x10, run[0], 0, when).right(32) + dirEntry("..", dotdot, 0x10, parent.cluster, 0, when).right(32);
-        block = block.leftJustified(int(clusterBytes), '\0');
-        if (!writeAt(clusterAt(run[0]), block)) return fail(error, "Could not write the card image.");
-        return addEntry(parent, existing, name, 0x10, run[0], 0, error) && flushFat(error);
-    }
-
- private:
-    static bool fail(QString& error, const QString& text) { error = text; return false; }
-    qint64 clusterAt(uint32_t c) const { return dataStart + qint64(c - 2) * clusterBytes; }
-    QByteArray readAt(qint64 at, int length) { return file.seek(at) ? file.read(length) : QByteArray(); }
-    bool writeAt(qint64 at, const QByteArray& bytes) { return file.seek(at) && file.write(bytes) == bytes.size(); }
-    uint32_t fatAt(uint32_t c) const { return le16(fat, int(c) * 2); }
-    void setFat(uint32_t c, uint32_t v) { putLe16(fat, int(c) * 2, v); }
-
-    // The clusters of a chain. The start must be a used data cluster and the chain must end properly.
-    bool chain(uint32_t start, QList<uint32_t>& out, QString& error) const {
-        out.clear();
-        if (start < 2 || start >= clusters + 2 || !fatAt(start)) return fail(error, "The card's FAT is damaged.");
-        uint32_t c = start;
-        while (c >= 2 && c < clusters + 2) {
-            if (out.size() > int(clusters)) return fail(error, "The card's FAT has a loop.");
-            out.push_back(c);
-            c = fatAt(c);
-        }
-        if (c < 0xfff8) return fail(error, "The card's FAT is damaged.");
-        return true;
-    }
-    bool folderBytes(const Folder& folder, QByteArray& out, QString& error) {
-        if (!folder.cluster) {
-            out = readAt(rootStart, rootEntries * 32);
-            return out.size() == int(rootEntries) * 32 || fail(error, "Could not read the card's top folder.");
-        }
-        QList<uint32_t> list;
-        if (!chain(folder.cluster, list, error)) return false;
-        out.clear();
-        for (const auto c : list) {
-            const auto part = readAt(clusterAt(c), int(clusterBytes));
-            if (part.size() != clusterBytes) return fail(error, "Could not read a card folder.");
-            out += part;
-        }
-        return true;
-    }
-    static bool refuse(const QList<Slot>& existing, const QString& name, QString& error) {
-        if (std::any_of(existing.begin(), existing.end(), [&](const Slot& s) { return same(s, name); }))
-            return fail(error, "That card name already exists. Choose another name; files are never overwritten.");
-        return true;
-    }
-    // Takes the first free clusters and chains them in the in-memory FAT.
-    bool allocate(int count, QList<uint32_t>& out, QString& error) {
-        out.clear();
-        for (uint32_t c = 2; int(out.size()) < count && c < clusters + 2; ++c)
-            if (!fatAt(c)) out.push_back(c);
-        if (int(out.size()) < count) return fail(error, "There isn't enough space on the card.");
-        for (int i = 0; i < out.size(); ++i) setFat(out[i], i + 1 < out.size() ? out[i + 1] : 0xffff);
-        return true;
-    }
-    bool addEntry(const Folder& folder, const QList<Slot>& existing, const QString& name, uint8_t attr, uint32_t cluster,
-                  uint32_t size, QString& error) {
-        QSet<QString> taken;
-        // Long names count too, so a new ~N alias never equals another file's name.
-        for (const auto& s : existing) { taken.insert(s.shortText.toUpper()); taken.insert(s.name.toUpper()); }
-        const auto shortBytes = shortName(name, taken);
-        if (shortBytes.isEmpty()) return fail(error, "No short name is free for that name.");
-        const auto entry = dirEntry(name, shortBytes, attr, cluster, size, QDateTime::currentDateTime());
-        const int count = entry.size() / 32;
-        QByteArray bytes;
-        QList<uint32_t> chainList;
-        int first = -1;
-        for (;;) {
-            if (!folderBytes(folder, bytes, error)) return false;
-            int run = 0;
-            for (int i = 0; i < bytes.size() / 32 && first < 0; ++i) {
-                const uint8_t b = uint8_t(bytes[i * 32]);
-                run = (b == 0 || b == 0xe5) ? run + 1 : 0;
-                if (run == count) first = i - count + 1;
-            }
-            if (first >= 0) break;
-            if (!folder.cluster) return fail(error, "The card's top folder is full. Use a subfolder.");
-            if (!chain(folder.cluster, chainList, error)) return false;
-            // A FAT folder holds at most 65536 entries (2 MB).
-            if ((chainList.size() + 1) * clusterBytes > 65536 * 32)
-                return fail(error, "That folder is full (a card folder holds at most 65536 names). Use another folder.");
-            QList<uint32_t> added;
-            if (!allocate(1, added, error)) return false;
-            setFat(chainList.last(), added[0]);
-            if (!writeAt(clusterAt(added[0]), QByteArray(int(clusterBytes), '\0'))) return fail(error, "Could not write the card image.");
-        }
-        if (folder.cluster && !chain(folder.cluster, chainList, error)) return false;
-        for (int k = 0; k < count; ++k) {
-            const qint64 at = qint64(first + k) * 32;
-            const qint64 position = folder.cluster ? clusterAt(chainList[int(at / clusterBytes)]) + at % clusterBytes : rootStart + at;
-            if (!writeAt(position, entry.mid(k * 32, 32))) return fail(error, "Could not write the card image.");
-        }
-        return true;
-    }
-    bool flushFat(QString& error) {
-        for (int copy = 0; copy < fats; ++copy)
-            if (!writeAt(fatStart + qint64(copy) * fatSectors * 512, fat)) return fail(error, "Could not write the card image.");
-        return file.flush() || fail(error, "Could not write the card image.");
-    }
-
-    QFile file;
-    qint64 base, fatStart{0}, rootStart{0}, dataStart{0}, clusterBytes{0};
-    uint32_t perCluster{0}, fats{0}, rootEntries{0}, fatSectors{0}, clusters{0};
-    QByteArray fat, original;
-};
-
 QStringList pathParts(const QString& path) { return path.mid(1).split('/'); }
+
+// Edits the candidate copy in place with the same FAT writer as Files… (FatImage.h). The caller
+// drops the candidate when anything fails.
+template <typename F> bool editImage(const QString& image, QString& error, F&& work) {
+    try {
+        frondCardFile::RawBlocks blocks(image, true);
+        frondCardFile::FatImage fat(blocks);
+        work(fat);
+        return true;
+    } catch (const frondCardFile::Error& e) {
+        error = e.message;
+        return false;
+    }
+}
 }  // namespace
 
 bool SdExchange::put(const QString& source, const QString& destination, QString& error) {
@@ -389,9 +158,12 @@ bool SdExchange::put(const QString& source, const QString& destination, QString&
     // reader of its own. Only a complete, verified candidate replaces the working revision.
     auto parts = pathParts(destination);
     const auto name = parts.takeLast();
-    FatVolume volume(next, offset);
-    FatVolume::Folder parent;
-    bool ok = volume.open(error) && volume.find(parts, parent, error) && volume.addFile(parent, name, source, error);
+    bool ok = editImage(next, error, [&](frondCardFile::FatImage& fat) {
+        QFile in(source);
+        if (!in.open(QIODevice::ReadOnly)) throw frondCardFile::Error(QStringLiteral("Could not read the host file."));
+        if (in.size() >= (qint64(1) << 32)) throw frondCardFile::Error(QStringLiteral("The file is too large for a FAT16 card."));
+        fat.add('/' + parts.join('/'), name, [&](char* b, qint64 n) { return in.read(b, n); }, in.size());
+    });
     ok = ok && run("mcopy", next, {"::" + destination, verified}, output, error);
     if (ok && (digest(source).isEmpty() || digest(source) != digest(verified))) {
         error = "The card copy did not match the host file. The working image has not changed."; ok = false;
@@ -420,9 +192,7 @@ bool SdExchange::mkdir(const QString& path, QString& error) {
     QString output;
     auto parts = pathParts(path);
     const auto name = parts.takeLast();
-    FatVolume volume(next, offset);
-    FatVolume::Folder parent;
-    if (!(volume.open(error) && volume.find(parts, parent, error) && volume.addFolder(parent, name, error)) ||
+    if (!editImage(next, error, [&](frondCardFile::FatImage& fat) { fat.makeFolder('/' + parts.join('/'), name); }) ||
         !run("mdir", next, {"::" + path}, output, error)) { QFile::remove(next); return false; }
     adopt(next); return true;
 }

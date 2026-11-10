@@ -78,6 +78,14 @@ set_target_properties(slirp PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${network}/include/slirp")
 target_link_libraries(frondcore PUBLIC slirp
     "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
+# common/net (slirp behind PPP and Wi-Fi) for frond-68k's snap-on modem, both cores' infrared
+# phone and the Wi-Fi router, as libcommon-net.a on the desktop. The phone's IrDA stack
+# (common/ir) is in frondcommon.
+add_library(frondnet STATIC "${COMMON}/net/SlirpIp.cpp" "${COMMON}/net/WifiRouter.cpp")
+target_compile_options(frondnet PRIVATE -O2 -g -Wno-unused-parameter)
+target_link_libraries(frondnet PUBLIC frondcommon slirp
+    "${network}/lib/libglib-2.0.a" "${network}/lib/libpcre2-8.a" "${network}/lib/libiconv.a" "${network}/lib/libintl.a" m)
+target_link_libraries(frondcore PUBLIC frondnet)
 target_compile_definitions(frondcore PUBLIC _FILE_OFFSET_BITS=64)
 # The core is too slow to use at -O0, so debug builds optimise it as well.
 target_compile_options(frondcore PRIVATE -O2 -g
@@ -165,7 +173,7 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CLOUDPILOT}/Makefile")
 add_library(frond68kcore STATIC ${cloudpilot_c} ${cloudpilot_cxx})
 target_include_directories(frond68kcore PUBLIC ${cloudpilot_include})
-target_link_libraries(frond68kcore PUBLIC frondcommon)
+target_link_libraries(frond68kcore PUBLIC frondcommon frondnet)
 # ENABLE_DEBUGGER: the GDB stub's breakpoints, as in the desktop's frond-68k.
 target_compile_definitions(frond68kcore PUBLIC EMULATION_LEVEL=EMULATION_UNIX ENABLE_DEBUGGER)
 target_compile_options(frond68kcore PRIVATE -O2 -g
@@ -186,12 +194,22 @@ target_compile_options(main68k PRIVATE -O2 -g
     -Wno-missing-field-initializers)
 target_link_libraries(main68k PRIVATE frond68kcore frondcommon SDL2 SDL2main SDL2_image log)
 
-# The card tool (native/CardTool.h) for the app's home process as libfrondcard.so: the core's card
-# file code and the JNI entry, without SDL, so it loads outside the :emulator process.
-add_library(frondcard SHARED CardToolJni.cpp)
+# The card tool (native/CardTool.h) and the storage library (common/storage) for the app's home
+# process as libfrondcard.so: the core's card file code and the JNI entries, without SDL, so it
+# loads outside the :emulator process. Unit tests load a host build of CardStorageJni.cpp alone.
+add_library(frondcard SHARED CardToolJni.cpp CardStorageJni.cpp)
 target_include_directories(frondcard PRIVATE "${UARM}/native")
 target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
 target_link_libraries(frondcard PRIVATE frondcore log)
+
+# The link library (link/: pairing, Noise KK, records, mux) for Connections as libfrondlink.so,
+# loaded by LinkNative.kt in the home and emulator processes. Same sources as the desktop's.
+set(LINK "${FROND_CORE}/../../link")
+add_library(frondlink SHARED LinkJni.cpp
+    "${LINK}/crypto.cpp" "${LINK}/noise.cpp" "${LINK}/wire.cpp" "${LINK}/pairing.cpp"
+    "${LINK}/messages.cpp" "${LINK}/mux.cpp" "${LINK}/link.cpp" "${LINK}/monocypher/monocypher.c")
+target_include_directories(frondlink PRIVATE "${LINK}")
+target_compile_options(frondlink PRIVATE -O2 -g)
 
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.

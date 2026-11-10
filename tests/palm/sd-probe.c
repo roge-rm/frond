@@ -22,8 +22,27 @@ static void logResult(const Char* label, Err error, UInt32 value) {
     }
     DmCloseDatabase(db);
 }
+// The first volume holding path, else the first volume. Some ROMs (the E2 de-NVFS) mount a volume of
+// their own before the card.
+static Err findVolume(UInt16* volume, const Char* path) {
+    UInt32 iterator = vfsIteratorStart;
+    UInt16 candidate;
+    FileRef file;
+    Err first = vfsErrNoFileSystem;
+    while (iterator != vfsIteratorStop) {
+        Err error = VFSVolumeEnumerate(&candidate, &iterator);
+        if (error) return first ? error : 0;
+        if (first) { *volume = candidate; first = 0; }
+        if (!VFSFileOpen(candidate, path, vfsModeRead, &file)) {
+            VFSFileClose(file);
+            *volume = candidate;
+            return 0;
+        }
+    }
+    return first;
+}
 static Err probe(void) {
-    UInt32 iterator = vfsIteratorStart, count = 0, bytes = 0;
+    UInt32 count = 0, bytes = 0;
     UInt32 used = 0, total = 0, started = TimGetTicks();
     UInt16 volume = 0;
     FileRef file = 0;
@@ -31,7 +50,7 @@ static Err probe(void) {
     const Char expected[] = "Hello from host\n", written[] = "Written by Palm TX\n";
     Err error;
     logResult("begin", 0, started);
-    error = VFSVolumeEnumerate(&volume, &iterator);
+    error = findVolume(&volume, "/HOST.TXT");
     logResult("enumerate", error, volume);
     if (error) { logResult("complete", error, started); return error; }
     error = VFSVolumeSize(volume, &used, &total);
@@ -128,11 +147,11 @@ static FileRef holdFile;
 static UInt32 holdTarget, holdDone, holdInterval, holdPass;
 static Boolean holdError;
 static void holdStart(void) {
-    UInt32 iterator = vfsIteratorStart, bytes = 0;
+    UInt32 bytes = 0;
     FileRef file;
     Char text[12];
     holdTarget = holdDone = 0; holdFile = 0; holdError = false;
-    if (VFSVolumeEnumerate(&holdVolume, &iterator)) return;
+    if (findVolume(&holdVolume, "/HOLD.TXT")) return;
     if (VFSFileOpen(holdVolume, "/HOLD.TXT", vfsModeRead, &file)) return;
     MemSet(text, sizeof(text), 0);
     VFSFileRead(file, sizeof(text) - 1, text, &bytes);

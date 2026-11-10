@@ -41,4 +41,10 @@ class PalmDatabasesTest {
         assertTrue(text.contains("\"Memos\""))
         assertTrue(text.contains("Memos-PMem"))
     }
+
+    @Test fun dataIsTheOthersWithTheCreator() {
+        val app = PalmDatabases.Info("Game", "appl", "GAME", true)
+        val all = listOf(app, PalmDatabases.Info("GameData", "DATA", "GAME", false), PalmDatabases.Info("Other", "DATA", "OTHR", false))
+        assertEquals(listOf("GameData"), PalmDatabases.dataOf(all, app).map { it.name })
+    }
 }

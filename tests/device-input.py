@@ -114,7 +114,8 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'zire72-desktop'], ['palm-zire-72'])
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
-                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-m515'])
+                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'alphasmart-dana', 'alphasmart-dana-wireless',
+                          'palm-m515'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
                          ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
@@ -122,13 +123,13 @@ class DeviceInputTest(unittest.TestCase):
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
-                          'ez68k-rom'})
+                          'ez68k-rom', 'vz68k-rom'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][7:]))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][9:]))
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--device', 'palm-tx']

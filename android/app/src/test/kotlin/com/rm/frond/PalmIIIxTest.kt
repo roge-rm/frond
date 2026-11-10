@@ -94,14 +94,13 @@ class PalmIIIxTest {
         assertFalse(d.network || d.keyboard || d.usb || d.bluetooth || d.microphone || d.camera || d.fastAudio)
         assertFalse(d.cardSupported || d.holdPresent)
         assertEquals(listOf("--device", "palm-iiix"), d.coreFlags)
-        for (arm in Device.entries.filter { it != d }) assertFalse(arm.id, arm.runs68k)
+        // The Danas run on the 68k core too; every other device is ARM.
+        for (arm in Device.entries.filter { it != d && !it.isDana() }) assertFalse(arm.id, arm.runs68k)
     }
 
     @Test fun settingsRowsFollowTheDevice() {
-        for (debug in listOf(false, true)) {
-            assertEquals(MachineRows(contrast = true, speed = true, engine = false, audioPreview = false), MachineRows.of(iiix, debug))
-            assertEquals(MachineRows(contrast = false, speed = false, engine = debug, audioPreview = true), MachineRows.of(Device.TX, debug))
-        }
+        assertEquals(MachineRows(contrast = true, speed = true, engine = false, audioPreview = false), MachineRows.of(iiix))
+        assertEquals(MachineRows(contrast = false, speed = true, engine = true, audioPreview = true), MachineRows.of(Device.TX))
     }
 
     @Test fun argumentsCarryContrastAndSpeed() {
@@ -112,7 +111,9 @@ class PalmIIIxTest {
         // Without a chosen contrast the session's own stays.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
         assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())
-        assertEquals(listOf("--window-fit", "fit", "--engine", "fast"), s.arguments())
+        assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--mips", "1000"), s.arguments())
+        // Original passes no --mips, so the core runs the device at its own.
+        assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments())
         assertEquals("fit=fit smooth=off contrast=30", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off", s.displayArgument())
         val back = MachineSettings.from(s.json())
@@ -128,12 +129,10 @@ class PalmIIIxTest {
 
     @Test fun the68kCoreRunsInItsOwnProcess() {
         assertEquals(Frond68kActivity::class.java, Emulators.activity(iiix))
-        assertEquals(Peripherals68kActivity::class.java, Emulators.panel(iiix))
         assertEquals("main68k", Emulators.library(iiix))
         assertEquals(":emulator68k", Emulators.process(iiix))
         for (arm in Device.entries.filter { !it.runs68k }) {
             assertEquals(FrondActivity::class.java, Emulators.activity(arm))
-            assertEquals(PeripheralsActivity::class.java, Emulators.panel(arm))
             assertEquals("main", Emulators.library(arm))
             assertEquals(":emulator", Emulators.process(arm))
         }
@@ -147,17 +146,7 @@ class PalmIIIxTest {
             e.getAttributeNS(android, "name") to e.getAttributeNS(android, "process")
         }
         assertEquals(":emulator68k", processes[".Frond68kActivity"])
-        assertEquals(":emulator68k", processes[".Peripherals68kActivity"])
         assertEquals(":emulator", processes[".FrondActivity"])
-        assertEquals(":emulator", processes[".PeripheralsActivity"])
         assertEquals(setOf(":emulator", ":emulator68k"), Emulators.processes.toSet())
-    }
-
-    @Test fun beamingReadsTheIiixState() {
-        assertNull(IrBeam.coreLeftReason("tcp 127.0.0.1:5030 waiting", 5030))
-        assertNull(IrBeam.coreLeftReason("tcp 127.0.0.1:5030 connected", 5030))
-        assertEquals("cannot listen", IrBeam.coreLeftReason("off cannot listen", 5030))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("off", 5030))
-        assertEquals("The emulator's infrared stopped.", IrBeam.coreLeftReason("tcp 127.0.0.1:5031 waiting", 5030))
     }
 }

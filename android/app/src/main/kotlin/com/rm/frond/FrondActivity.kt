@@ -3,6 +3,9 @@ package com.rm.frond
 import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.content.res.Configuration
+import android.hardware.input.InputManager
+import android.view.InputDevice
 import android.media.AudioManager
 import android.system.Os
 import android.view.Gravity
@@ -19,6 +22,10 @@ import android.os.Process
 import android.util.Log
 import android.window.OnBackInvokedDispatcher
 import androidx.core.view.ViewCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -49,18 +56,48 @@ open class FrondActivity : SDLActivity() {
     @Volatile private var destroyed = false
     // Why the core wasn't started, for the home screen.
     @Volatile private var startRefused: String? = null
-    private var menuButton: View? = null
     private var keyboardButton: View? = null
+    // The running bar over the Palm: its state, view and the owner its ComposeView needs.
+    private val bar = com.rm.frond.ui.RunningBarState()
+    private var barView: androidx.compose.ui.platform.ComposeView? = null
+    private var barOwner: BarOwner? = null
+    private var barResults: BarResults? = null
+    // The menu's and sheets' model, on the control link.
+    private var menuModel: RunningModel? = null
+    // The core's USB port state read after the start request, for a running bar made after it came back.
+    private var startUsbPort: PrintJob.Port? = null
+    private var imeVisible = false
     @Volatile private var pendingMicrophone = false
     @Volatile private var foreground = false
     @Volatile private var microphoneResume = 0L
-    fun microphoneOnReturn(on: Boolean) { pendingMicrophone = on }
+    // Over the Palm (the menu in the bar) the request starts at once; behind another screen it waits for the return.
+    fun microphoneOnReturn(on: Boolean) {
+        pendingMicrophone = on
+        if (on && foreground) runOnUiThread { startPendingMicrophone() }
+    }
+
+    private fun startPendingMicrophone() {
+        if (leaving || !pendingMicrophone) return
+        pendingMicrophone = false
+        val owner = this
+        val resume = microphoneResume
+        Thread {
+            val epoch = link.request("microphone-epoch", timeoutSeconds = 10)
+            if (epoch.ok && running === owner && foreground && !leaving && microphoneResume == resume)
+                link.request("microphone-mode", "on-return:${epoch.message}", timeoutSeconds = 10)
+            runOnUiThread { menuModel?.settleMicrophone() }
+        }.apply { isDaemon = true }.start()
+    }
     private var keyboard: PalmKeyboard? = null
+    @Volatile private var danaState: DanaViewState? = null
+    private var danaEnvironment = ""
+    private var lastDanaKeyboard = DanaKeyboard.AUTO
+    private var inputDevices: InputManager? = null
+    private var inputListener: InputManager.InputDeviceListener? = null
     // The Palm infrared keyboard, as the core last said.
     @Volatile private var keyboardAttached = false
     @Volatile private var stopped = false
-    // Set while our own Peripherals screen covers the emulator; it saves on its own stop instead.
-    @Volatile private var panelOpen = false
+    val inBackground get() = stopped
     // One save at a time: the background save and the save on back.
     private val saveLock = Any()
     // Sound as last sent to the core; Settings can change it while the Palm runs. UI thread only.
@@ -98,6 +135,9 @@ open class FrondActivity : SDLActivity() {
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
             if (name == "microphone") Log.i(TAG, "microphone: $state")
+            if (name == "dana-view" && launchDevice().isDana()) {
+                DanaViewState.parse(state)?.let { acceptDanaState(it) }
+            }
         }
         chooseAudioDriver()
         // SDL keeps its thread running while paused; the core idles itself in the background and
@@ -114,17 +154,58 @@ open class FrondActivity : SDLActivity() {
         startDebugger()
         addKeyboard()
         addController()
+        if (device.isDana()) {
+            keyboardButton?.visibility = View.VISIBLE
+            link.whenConnected { if (link.connectedOnce) updateDanaEnvironment() }
+        }
         SdCard.clean(this)
         // An edited card kept from a kill goes back into the Palm once the core answers, which with the debugger on
         // is after gdb first connects.
         link.whenConnected {
             Thread { SdCard.restorePending(applicationContext, link, sessionPath) }.apply { isDaemon = true }.start()
         }
+        // The Dana's USB port gets the machine's choice at every start, then the row shows what the core has.
+        // The Dana Wireless's radio goes first, as the machine had it.
+        val moduleRequest = UsbPort.moduleRequest(launchDevice(), machineSettings.wifiModule)
+        UsbPort.startRequest(launchDevice(), UsbPort.forStart(launchDevice(), machineSettings.usbPort))?.let { (command, argument) ->
+            link.whenConnected {
+                Thread {
+                    moduleRequest?.let { (c, a) -> link.request(c, a, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "wifi module: ${it.message}") } }
+                    link.request(command, argument, timeoutSeconds = 30).takeIf { !it.ok }?.let { Log.w(TAG, "usb port: ${it.message}") }
+                    val state = PrintJob.parsePort(link.request("usb-port-state", timeoutSeconds = 5).message)
+                    if (state.valid) runOnUiThread {
+                        startUsbPort = state
+                        menuModel?.printer?.adopt(state)
+                    }
+                }.apply { isDaemon = true }.start()
+            }
+        }
+        // Infrared, serial and Bluetooth over a connection are set from the machine's settings at every start.
+        val infraredPhone = machineSettings.infrared == InfraredChoice.PHONE && launchDevice().irPhone
+        val infraredPrinter = machineSettings.infrared == InfraredChoice.PRINTER && launchDevice().infrared
+        val infraredLink = InfraredChoice.linkId(machineSettings.infrared) != null || infraredPhone || infraredPrinter
+        val serialModem = machineSettings.serial == InfraredChoice.MODEM && launchDevice().modem
+        val serialLink = (InfraredChoice.linkId(machineSettings.serial) != null && launchDevice().serialPort) || serialModem
+        val bluetoothLink = machineSettings.bluetooth != BluetoothChoice.OFF && launchDevice().bluetooth
+        if (infraredLink || serialLink || bluetoothLink) {
+            if ((infraredLink && !infraredPhone && !infraredPrinter) || (serialLink && !serialModem) || InfraredChoice.linkId(machineSettings.bluetooth) != null) askLocalNetwork()
+            link.whenConnected {
+                Thread({
+                    val name = Sessions.forPath(applicationContext, sessionPath)?.name ?: launchDevice().label
+                    if (infraredLink) IrLink.apply(applicationContext, link, machineSettings.infrared, name, launchDevice().label)
+                        ?.let { Log.w(TAG, "infrared: $it") }
+                    if (serialLink) SerialLink.apply(applicationContext, link, machineSettings.serial, name, launchDevice().label)
+                        ?.let { Log.w(TAG, "serial: $it") }
+                    if (bluetoothLink) BluetoothLink.apply(applicationContext, link, machineSettings.bluetooth, name, launchDevice().label)
+                        ?.let { Log.w(TAG, "bluetooth: $it") }
+                }, "FrondLinks").apply { isDaemon = true }.start()
+            }
+        }
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
         if (Build.VERSION.SDK_INT >= 33) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { leave() }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
     }
 
@@ -157,6 +238,9 @@ open class FrondActivity : SDLActivity() {
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
             tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
+        if (launchDevice().isDana()) {
+            arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
+        }
         arguments += listOf("--window-background", BACKGROUND_HEX)
         arguments += machineSettings.audioArguments(launchDevice().lowLatencyAudio, audioPeriod()) { fastAudioQualified() }
         debugPort?.let { arguments += listOf("--gdb", it.toString()) }
@@ -183,7 +267,7 @@ open class FrondActivity : SDLActivity() {
         }
         if (runLock != null) return super.getMainFunction()
         Log.w(TAG, "couldn't take ${folder.name}/${Cards.RUN_LOCK}, not starting")
-        startRefused = "Couldn't start ${folder.name}: Frond is still using it. Try again in a moment."
+        startRefused = "Couldn't start ${Sessions.forPath(this, sessionPath)?.name ?: folder.name}: Frond is still using it. Try again in a moment."
         return "frond_not_started"
     }
 
@@ -206,7 +290,8 @@ open class FrondActivity : SDLActivity() {
     // After a save of the machine that succeeded: the slot is what the .frond says again.
     fun savedMachine() {
         if (runLock == null) return
-        machineFolder()?.let { Cards.clearSwap(it) }
+        // Not while the file view has the card out: the slot must load swapped until it's back.
+        machineFolder()?.takeIf { it.canonicalFile != SdCard.editing?.canonicalFile }?.let { Cards.clearSwap(it) }
     }
 
     // The core refuses to start with --fast-audio unless the NOR it runs is the qualified one for its
@@ -234,19 +319,34 @@ open class FrondActivity : SDLActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        // The room for the bar is known once the layout has its new size.
+        layout.addOnLayoutChangeListener { _, l, t, r, b, oldL, oldT, oldR, oldB -> if (b - t != oldB - oldT || r - l != oldR - oldL) updateSurfaceMargin() }
         ViewCompat.setOnApplyWindowInsetsListener(layout) { view, insets ->
             // The soft keyboard shrinks the surface too, and the core fits the device above it.
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
-            // With the soft keyboard up the device would cover the corner buttons, so it goes below them.
-            val buttons = if (insets.isVisible(WindowInsetsCompat.Type.ime())) menuButton?.height ?: 0 else 0
-            (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
-                if (it.topMargin != buttons) {
-                    it.topMargin = buttons
-                    SDLActivity.mSurface?.layoutParams = it
-                }
-            }
+            imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            updateSurfaceMargin()
             insets
+        }
+    }
+
+    // Moves the Palm's surface down for a bar that takes its own space, and for the corner keyboard button
+    // while the soft keyboard is up.
+    private fun updateSurfaceMargin() {
+        val density = resources.displayMetrics.density
+        val portrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        bar.portrait = portrait
+        val barPx = (RunningBar.heightDp(portrait) * density).toInt()
+        val parent = SDLActivity.getContentView()
+        val available = if (parent == null) 0 else parent.height - parent.paddingTop - parent.paddingBottom
+        val imeButtons = if (imeVisible && keyboardButton?.visibility == View.VISIBLE) (48 * density).toInt() else 0
+        val margin = RunningBar.surfaceTopMargin(bar.mode, bar.shown, barPx, available, (RunningBar.MIN_PALM_DP * density).toInt(), imeButtons)
+        (SDLActivity.mSurface?.layoutParams as? android.view.ViewGroup.MarginLayoutParams)?.let {
+            if (it.topMargin != margin) {
+                it.topMargin = margin
+                SDLActivity.mSurface?.layoutParams = it
+            }
         }
     }
 
@@ -272,11 +372,11 @@ open class FrondActivity : SDLActivity() {
     }
 
     @Deprecated("Back before Android 13")
-    override fun onBackPressed() = leave()
+    override fun onBackPressed() = back()
 
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.keyCode == android.view.KeyEvent.KEYCODE_BACK) {
-            if (event.action == android.view.KeyEvent.ACTION_UP) leave()
+            if (event.action == android.view.KeyEvent.ACTION_UP) back()
             return true
         }
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
@@ -318,7 +418,7 @@ open class FrondActivity : SDLActivity() {
                 if (destroyed || leaving) return@runOnUiThread
                 runningDevice = resolved
                 configureController(resolved)
-                addMenuButton()
+                addBar(resolved)
             }
         }, "FrondFirmware").apply { isDaemon = true }.start()
     }
@@ -332,14 +432,16 @@ open class FrondActivity : SDLActivity() {
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
-        getSystemService(android.hardware.input.InputManager::class.java)?.registerInputDeviceListener(
-            object : android.hardware.input.InputManager.InputDeviceListener {
-                override fun onInputDeviceAdded(deviceId: Int) {}
-                override fun onInputDeviceChanged(deviceId: Int) {}
-                override fun onInputDeviceRemoved(deviceId: Int) = controller.release(deviceId)
-            },
-            null,
-        )
+        inputDevices = getSystemService(InputManager::class.java)
+        inputListener = object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
+            override fun onInputDeviceChanged(deviceId: Int) = updateDanaEnvironment()
+            override fun onInputDeviceRemoved(deviceId: Int) {
+                controller.release(deviceId)
+                updateDanaEnvironment()
+            }
+        }
+        inputDevices?.registerInputDeviceListener(inputListener!!, null)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -357,11 +459,34 @@ open class FrondActivity : SDLActivity() {
                 .apply { isDaemon = true }.start()
         }
         controller.releaseAll()
+        // The menu and sheets live in this activity, so they pause with it: a waiting microphone request
+        // is dropped and the Bluetooth read stops until the Connections sheet is in front again.
+        menuModel?.cancelMicrophoneRequest()
+        menuModel?.stopBluetoothRefresh()
         super.onPause()
     }
 
     // Saves the session and asks the core to quit. SDL then finishes the activity when its main
     // returns. Also runs when SDL asks the core to close (the core sends a "close" event).
+    // Back closes the bar's menu first, then leaves the machine.
+    private fun back() {
+        if (bar.sheet != null) openSheet(null) else if (bar.menuOpen) bar.menuOpen = false else leave()
+    }
+
+    // Opens a sheet over the Palm, or closes it. The view covers the screen while one is open.
+    private fun openSheet(sheet: RunningSheets.Sheet?) {
+        if (leaving && sheet != null) return
+        bar.menuOpen = false
+        bar.sheet = sheet
+        layoutBar()
+        if (sheet != null) readMenuState()
+    }
+
+    // A Memory Stick's file view covers the Palm, so the core is told its panel is up.
+    private fun filesOpen(open: Boolean) {
+        if (runningDevice.memoryStick) link.setPanelVisible(open)
+    }
+
     private fun leave() {
         if (leaving) return
         leaving = true
@@ -370,10 +495,13 @@ open class FrondActivity : SDLActivity() {
             controller.releaseAll()
             hideKeyboard()
             keyboardButton?.visibility = View.GONE
+            barView?.visibility = View.GONE
             savingNote?.visibility = View.VISIBLE
         }
         Thread({
             letDebuggerGo()
+            // A card out for the file view goes back in first, so the final save has it.
+            menuModel?.putCardBackForStop()
             val path = sessionPath
             val reply = synchronized(saveLock) {
                 releaseInput()
@@ -404,8 +532,9 @@ open class FrondActivity : SDLActivity() {
 
     override fun onStart() {
         stopped = false
-        panelOpen = false
         super.onStart()
+        IrLink.setPaused(false)
+        SerialLink.setPaused(false)
     }
 
     // Hidden: SDL pauses the core and its audio. Saving here means a process kill while away keeps
@@ -413,7 +542,10 @@ open class FrondActivity : SDLActivity() {
     override fun onStop() {
         super.onStop()
         stopped = true
-        if (isFinishing || isChangingConfigurations || panelOpen) return
+        // The core pauses in the background; a connection's far side sees the Palm paused.
+        IrLink.setPaused(true)
+        SerialLink.setPaused(true)
+        if (isFinishing || isChangingConfigurations) return
         saveInBackground()
     }
 
@@ -432,39 +564,15 @@ open class FrondActivity : SDLActivity() {
         }, "FrondStopSave").start()
     }
 
-    // A small button in the corner that opens the menu screen (applications, SD card and the rest).
-    private fun addMenuButton() {
-        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
-        val button = android.widget.ImageButton(this).apply {
-            setImageResource(R.drawable.ic_menu)
-            contentDescription = "Menu"
-            setBackgroundColor(Color.TRANSPARENT)
-            alpha = 0.7f
-            val pad = (8 * resources.displayMetrics.density).toInt()
-            setPadding(pad, pad, pad, pad)
-            setOnClickListener { openPanel() }
-            id = View.generateViewId()
-        }
-        menuButton = button
-        layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
-            addRule(RelativeLayout.ALIGN_PARENT_TOP)
-            addRule(RelativeLayout.ALIGN_PARENT_END)
-        })
-        keyboardButton?.let { keyboardButton ->
-            val params = keyboardButton.layoutParams as? RelativeLayout.LayoutParams ?: return@let
-            params.removeRule(RelativeLayout.ALIGN_PARENT_END)
-            params.addRule(RelativeLayout.START_OF, button.id)
-            keyboardButton.layoutParams = params
-        }
-    }
-
-    // While the Palm infrared keyboard is attached, a keyboard button beside the menu button shows
-    // and hides the soft keyboard. Hardware keys reach the core through SDL either way.
+    // Dana toggles its native keyboard. Other devices show the IME only for an attached infrared keyboard,
+    // with a keyboard button in the corner. Hardware keys reach the core through SDL either way.
     private fun addKeyboard() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
-        val input = PalmKeyboard(this)
-        layout.addView(input, RelativeLayout.LayoutParams(1, 1))
-        keyboard = input
+        if (!launchDevice().isDana()) {
+            val input = PalmKeyboard(this)
+            layout.addView(input, RelativeLayout.LayoutParams(1, 1))
+            keyboard = input
+        }
         val button = android.widget.ImageButton(this).apply {
             setImageResource(R.drawable.ic_keyboard)
             contentDescription = "Keyboard"
@@ -477,7 +585,7 @@ open class FrondActivity : SDLActivity() {
         }
         layout.addView(button, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
             addRule(RelativeLayout.ALIGN_PARENT_TOP)
-            menuButton?.let { addRule(RelativeLayout.START_OF, it.id) } ?: addRule(RelativeLayout.ALIGN_PARENT_END)
+            addRule(RelativeLayout.ALIGN_PARENT_END)
         })
         keyboardButton = button
     }
@@ -486,6 +594,16 @@ open class FrondActivity : SDLActivity() {
         ViewCompat.getRootWindowInsets(window.decorView)?.isVisible(WindowInsetsCompat.Type.ime()) == true
 
     private fun toggleKeyboard() {
+        if (launchDevice().isDana()) {
+            val view = danaState?.view ?: machineSettings.danaView
+            val mode = danaState?.toggledKeyboard(lastDanaKeyboard)
+                ?: if (view.keyboard == DanaKeyboard.HIDDEN) lastDanaKeyboard else DanaKeyboard.HIDDEN
+            changeDanaView(view.copy(keyboard = mode)) { _, error ->
+                if (error != null && !destroyed && !leaving) AlertDialog.Builder(this)
+                    .setTitle("Couldn't change keyboard").setMessage(error).setPositiveButton("OK", null).show()
+            }
+            return
+        }
         val input = keyboard ?: return
         if (imeShowing()) hideKeyboard() else if (keyboardAttached) input.show()
     }
@@ -516,6 +634,9 @@ open class FrondActivity : SDLActivity() {
     // window once the Palm shows again.
     fun applyDisplay() {
         val saved = Sessions.forPath(this, sessionPath)?.settings ?: return
+        if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
+            changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
+        }
         val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
         if (wanted == display) return
         display = wanted
@@ -544,9 +665,79 @@ open class FrondActivity : SDLActivity() {
         }, "FrondSpeedSet").apply { isDaemon = true }.start()
     }
 
+    private fun currentDanaEnvironment(): String {
+        val manager = getSystemService(InputManager::class.java)
+        val keyboards = manager?.inputDeviceIds?.asSequence()?.mapNotNull { id ->
+            manager.getInputDevice(id)?.let {
+                DanaKeyboardDevice(it.isVirtual, it.keyboardType == InputDevice.KEYBOARD_TYPE_ALPHABETIC, Build.VERSION.SDK_INT < 27 || it.isEnabled)
+            }
+        }?.toList() ?: emptyList()
+        return danaEnvironment(resources.displayMetrics.density, hasDanaHardwareKeyboard(keyboards))
+    }
+
+    // Host changes send only host fields, preserving the core's current zoom and pan.
+    private fun updateDanaEnvironment() {
+        if (!launchDevice().isDana() || destroyed || leaving || !link.connectedOnce) return
+        val wanted = currentDanaEnvironment()
+        if (wanted == danaEnvironment) return
+        danaEnvironment = wanted
+        soundSender.execute {
+            if (destroyed || leaving) return@execute
+            val reply = link.request("dana-view", wanted, timeoutSeconds = 10)
+            if (!reply.ok) {
+                if (danaEnvironment == wanted) danaEnvironment = ""
+                Log.w(TAG, "dana-view: ${reply.message}")
+            } else readDanaState()
+        }
+    }
+
+    private fun readDanaState(): DanaViewState? {
+        val reply = link.request("dana-view-state", timeoutSeconds = 10)
+        return if (reply.ok) DanaViewState.parse(reply.message)?.also { acceptDanaState(it) } else null
+    }
+
+    // Native notifications update preferences directly, without echoing another setter.
+    private fun acceptDanaState(state: DanaViewState) {
+        danaState = state
+        runOnUiThread {
+            if (destroyed) return@runOnUiThread
+            if (state.view.keyboard != DanaKeyboard.HIDDEN) lastDanaKeyboard = state.view.keyboard
+            val previous = machineSettings.danaView
+            machineSettings = machineSettings.copy(danaView = state.view)
+            menuModel?.acceptDanaView(state.view)
+            keyboardButton?.contentDescription = if (state.resolved == DanaKeyboard.HIDDEN) "Show keyboard" else "Hide keyboard"
+            if (previous != state.view) {
+                try {
+                    Sessions.forPath(this, sessionPath)?.let { session ->
+                        Sessions.updateSettings(this, session.id) { it.copy(danaView = state.view) }
+                    }
+                } catch (e: Exception) { Log.w(TAG, "couldn't save Dana view: ${e.message}") }
+            }
+        }
+    }
+
+    // A refused command leaves the saved preference and menu at the last accepted native state.
+    fun changeDanaView(view: DanaView, done: (DanaView?, String?) -> Unit) {
+        if (!launchDevice().isDana() || destroyed || leaving) {
+            done(null, "The emulator isn't running.")
+            return
+        }
+        soundSender.execute {
+            val reply = link.request("dana-view", view.argument(), timeoutSeconds = 10)
+            val actual = readDanaState()
+            runOnUiThread {
+                if (!destroyed) done(actual?.view, if (!reply.ok) reply.message else if (actual == null) "Couldn't read the Dana view." else null)
+            }
+        }
+    }
+
     // Asks the core whether the infrared keyboard is attached and shows the keyboard button to match. Waits for
     // the control link first, which with the debugger on can be a long time.
     private fun readKeyboard() {
+        if (launchDevice().isDana()) {
+            keyboardButton?.visibility = if (leaving) View.GONE else View.VISIBLE
+            return
+        }
         if (!link.connectedOnce) {
             link.whenConnected { if (!leaving && link.connectedOnce) runOnUiThread { readKeyboard() } }
             return
@@ -557,7 +748,8 @@ open class FrondActivity : SDLActivity() {
             val attached = reply.message == "attached"
             keyboardAttached = attached
             runOnUiThread {
-                keyboardButton?.visibility = if (attached && !leaving) View.VISIBLE else View.GONE
+                bar.keyboardKey = attached
+                syncCorner()
                 if (!attached && keyboard?.hasFocus() == true) hideKeyboard()
             }
         }, "FrondKeyboard").apply { isDaemon = true }.start()
@@ -566,29 +758,277 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
-        if (!leaving && pendingMicrophone) {
-            pendingMicrophone = false
-            val owner = this
-            val resume = microphoneResume
-            Thread {
-                val epoch = link.request("microphone-epoch", timeoutSeconds = 10)
-                if (epoch.ok && running === owner && foreground && !leaving && microphoneResume == resume)
-                    link.request("microphone-mode", "on-return:${epoch.message}", timeoutSeconds = 10)
-            }.apply { isDaemon = true }.start()
-        }
+        startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
+        bar.sound = sound
         if (!leaving) applyDisplay()
+        menuModel?.readMicrophone()
+        if (bar.sheet == RunningSheets.Sheet.CONNECTIONS) menuModel?.startBluetoothRefresh()
+        if (!leaving) updateDanaEnvironment()
     }
 
-    private fun openPanel() {
-        if (leaving) return
-        hideKeyboard()
-        panelOpen = true
-        startActivity(
-            android.content.Intent(this, Emulators.panel(launchDevice()))
-                .putExtra(EXTRA_DEVICE, intent?.getStringExtra(EXTRA_DEVICE) ?: Device.TX.id),
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        requestedOrientation = settings.orientation.request
+        layoutBar()
+        updateSurfaceMargin()
+        ViewCompat.requestApplyInsets(SDLActivity.getContentView() ?: window.decorView)
+        updateDanaEnvironment()
+    }
+
+    // The ComposeView over the Palm: the whole width while the bar shows, just the handle when it's hidden,
+    // so touches outside both reach the Palm.
+    private fun addBar(device: Device) {
+        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
+        if (barView != null) return
+        val session = Sessions.forPath(this, sessionPath)
+        bar.shown = machineSettings.barShown
+        bar.mode = machineSettings.barMode
+        bar.name = session?.name ?: device.label
+        bar.subtitle = RunningBar.subtitle(device, machineSettings)
+        bar.soundKey = RunningBar.soundKey(device)
+        bar.sound = sound
+        bar.powerKey = RunningBar.powerKey(device)
+        val owner = BarOwner().also { it.create() }
+        barOwner = owner
+        val results = BarResults(this)
+        barResults = results
+        val model = RunningModel(
+            ModelHost(this, owner.lifecycleScope, { runOnUiThread(it) }, {}),
+            device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
+        menuModel = model
+        startUsbPort?.let { model.printer?.adopt(it) }
+        bar.device = device
+        bar.model = model
+        model.watchGdb()
+        model.watchBeam()
+        model.watchBluetooth()
+        model.watchLinks()
+        readMenuState()
+        val view = androidx.compose.ui.platform.ComposeView(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setContent {
+                androidx.compose.runtime.CompositionLocalProvider(androidx.activity.compose.LocalActivityResultRegistryOwner provides results) {
+                    com.rm.frond.ui.RunningBarView(bar, com.rm.frond.ui.RunningBarActions(
+                        back = { leave() }, toggleSound = { toggleSound() }, power = { pressPower() },
+                        keyboard = { toggleKeyboard() }, show = { setBarShown(true) }, hide = { setBarShown(false) }, autoHide = { setBarShown(false, remember = false) },
+                        openMenu = { openMenu() }, menuRow = { menuRow(it) },
+                        openSheet = { openSheet(it) }, closeSheet = { openSheet(null) }, filesOpen = { filesOpen(it) },
+                    ))
+                }
+            }
+        }
+        barView = view
+        // Compose makes its window recomposer from the content view's owners, so SDL's layout needs them too.
+        layout.setViewTreeLifecycleOwner(owner)
+        layout.setViewTreeViewModelStoreOwner(owner)
+        layout.setViewTreeSavedStateRegistryOwner(owner)
+        layout.addView(view, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_TOP)
+        })
+        layoutBar()
+    }
+
+    private fun readMenuState() {
+        val model = menuModel ?: return
+        model.readKeyboard()
+        model.readHold()
+        model.readNetwork()
+        model.readMicrophone()
+        model.readCard()
+    }
+
+    private fun openMenu() {
+        if (leaving) return
+        readMenuState()
+        bar.menuOpen = !bar.menuOpen
+    }
+
+    // The menu's rows. Reset, Hard reset and Network ask in the bar's own dialogs.
+    private fun menuRow(id: RunningMenu.Id) {
+        val model = menuModel ?: return
+        if (leaving) return
+        when (id) {
+            RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
+            RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
+            RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
+            RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
+            RunningMenu.Id.SCREENSHOT -> takeScreenshot()
+            RunningMenu.Id.HIDE_BAR -> setBarShown(false)
+            RunningMenu.Id.SAVE_COPY -> saveCopy(model)
+            RunningMenu.Id.LOG -> model.showLog()
+            RunningMenu.Id.RESET, RunningMenu.Id.HARD_RESET, RunningMenu.Id.NETWORK -> Unit
+        }
+    }
+
+    private fun toggleMicrophone(model: RunningModel) {
+        val on = model.microphone != "on" && model.microphone != "pending"
+        if (!on) model.changeMicrophone(false)
+        else if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) model.changeMicrophone(true)
+        else requestPermissions(arrayOf(android.Manifest.permission.RECORD_AUDIO), REQUEST_MICROPHONE)
+    }
+
+    // Android 17 asks before Frond reaches the local network; Connections need it.
+    fun askLocalNetwork() {
+        runOnUiThread {
+            if (Links.needsPermission(this)) requestPermissions(arrayOf(Links.LOCAL_NETWORK), REQUEST_LOCAL_NETWORK)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (barResults?.dispatchPermissions(requestCode, permissions, grantResults) == true) return
+        if (requestCode != REQUEST_MICROPHONE) return
+        if (grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED) menuModel?.changeMicrophone(true)
+        else menuModel?.microphoneDenied()
+    }
+
+    private fun saveCopy(model: RunningModel) {
+        @Suppress("DEPRECATION")
+        startActivityForResult(
+            android.content.Intent(android.content.Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(android.content.Intent.CATEGORY_OPENABLE)
+                .setType("application/zip")
+                .putExtra(android.content.Intent.EXTRA_TITLE, "${model.name}.zip"),
+            REQUEST_SAVE_COPY,
+        )
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (barResults?.dispatchResult(requestCode, resultCode, data) == true) return
+        if (requestCode == REQUEST_SAVE_COPY && resultCode == RESULT_OK) data?.data?.let { menuModel?.saveCopy(it) }
+    }
+
+    // The Palm's view as a PNG in Pictures/Frond.
+    private fun takeScreenshot() {
+        val surface = SDLActivity.mSurface ?: return
+        if (surface.width == 0 || surface.height == 0) return
+        val bitmap = android.graphics.Bitmap.createBitmap(surface.width, surface.height, android.graphics.Bitmap.Config.ARGB_8888)
+        android.view.PixelCopy.request(surface, bitmap, { result ->
+            if (result != android.view.PixelCopy.SUCCESS) {
+                android.widget.Toast.makeText(this, "Couldn't take the screenshot", android.widget.Toast.LENGTH_SHORT).show()
+                return@request
+            }
+            val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US).format(java.util.Date())
+            val name = RunningMenu.screenshotName(bar.name, stamp)
+            Thread({
+                val saved = try { savePicture(bitmap, name); true } catch (e: Exception) { Log.w(TAG, "screenshot: ${e.message}"); false }
+                runOnUiThread {
+                    android.widget.Toast.makeText(this, if (saved) "Screenshot saved" else "Couldn't save the screenshot", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }, "FrondScreenshot").apply { isDaemon = true }.start()
+        }, android.os.Handler(mainLooper))
+    }
+
+    private fun savePicture(bitmap: android.graphics.Bitmap, name: String) {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Frond")
+            }
+            val uri = contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: throw java.io.IOException("no place to save")
+            contentResolver.openOutputStream(uri)!!.use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        } else {
+            val folder = getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES) ?: throw java.io.IOException("no place to save")
+            File(folder, name).outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+        }
+    }
+
+    private fun layoutBar() {
+        val view = barView ?: return
+        val params = view.layoutParams as RelativeLayout.LayoutParams
+        val full = bar.shown || bar.sheet != null
+        val width = if (full) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        val height = if (bar.sheet != null) RelativeLayout.LayoutParams.MATCH_PARENT else RelativeLayout.LayoutParams.WRAP_CONTENT
+        val portrait = resources.configuration.orientation != android.content.res.Configuration.ORIENTATION_LANDSCAPE
+        val centre = if (!full && RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
+        val start = if (!full && !RunningBar.handleCentred(portrait)) RelativeLayout.TRUE else 0
+        if (params.width != width || params.height != height || params.getRule(RelativeLayout.CENTER_HORIZONTAL) != centre ||
+            params.getRule(RelativeLayout.ALIGN_PARENT_START) != start) {
+            params.width = width
+            params.height = height
+            params.addRule(RelativeLayout.CENTER_HORIZONTAL, centre)
+            params.addRule(RelativeLayout.ALIGN_PARENT_START, start)
+            view.layoutParams = params
+        }
+        syncCorner()
+        updateSurfaceMargin()
+    }
+
+    // The corner keyboard button shows only while the bar is hidden.
+    private fun syncCorner() {
+        val corner = RunningBar.cornerButtons(bar.shown) && !leaving
+        keyboardButton?.visibility = if (corner && bar.keyboardKey) View.VISIBLE else View.GONE
+    }
+
+    // The bar's mode changed in the Display sheet.
+    fun applyBarMode() {
+        val mode = Sessions.forPath(this, sessionPath)?.settings?.barMode ?: return
+        runOnUiThread {
+            if (bar.mode == mode) return@runOnUiThread
+            bar.mode = mode
+            machineSettings = machineSettings.copy(barMode = mode)
+            layoutBar()
+        }
+    }
+
+    // remember is false when Auto-hide hides the bar, so the machine still starts with it shown.
+    private fun setBarShown(shown: Boolean, remember: Boolean = true) {
+        if (bar.shown == shown) return
+        bar.shown = shown
+        layoutBar()
+        if (!remember) return
+        machineSettings = machineSettings.copy(barShown = shown)
+        val id = Sessions.forPath(this, sessionPath)?.id ?: return
+        Thread({
+            try {
+                Sessions.updateSettings(applicationContext, id) { it.copy(barShown = shown) }
+            } catch (e: Exception) {
+                Log.w(TAG, "bar setting: ${e.message}")
+            }
+        }, "FrondBarSetting").apply { isDaemon = true }.start()
+    }
+
+    private fun toggleSound() {
+        if (leaving) return
+        val on = !bar.sound
+        bar.sound = on
+        val id = Sessions.forPath(this, sessionPath)?.id
+        Thread({
+            try {
+                if (id != null) Sessions.updateSettings(applicationContext, id) { it.copy(sound = on) }
+            } catch (e: Exception) {
+                Log.w(TAG, "sound setting: ${e.message}")
+            }
+            runOnUiThread { if (!leaving) applySound() }
+        }, "FrondBarSound").apply { isDaemon = true }.start()
+    }
+
+    // Presses and releases the Palm's power key by key replay on the control link.
+    private fun pressPower() {
+        if (leaving) return
+        Thread({
+            // A file of its own per press, so two quick presses never share one.
+            val file = File.createTempFile("power", ".replay", cacheDir)
+            try {
+                file.writeText("0 key-down power\n80 key-up power\n")
+                // The core drops the microphone for input-replay; arm it again if it was on.
+                val wasOn = link.request("microphone-state", timeoutSeconds = 10).message == "on"
+                val reply = link.request("input-replay", file.path, timeoutSeconds = 30)
+                if (!reply.ok) Log.w(TAG, "power: ${reply.code} ${reply.message}")
+                if (wasOn) link.request("microphone-mode", "on", timeoutSeconds = 10)
+            } finally {
+                file.delete()
+            }
+        }, "FrondBarPower").apply { isDaemon = true }.start()
     }
 
     // With the debugger on in Settings: a loopback port for the core's --gdb, gdb's port on the network through
@@ -765,6 +1205,11 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        menuModel?.printer?.close()
+        menuModel?.irPrinter?.close()
+        barOwner?.destroy()
+        inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
+        inputListener = null
         if (!isFinishing && !leaving) {
             if (waitingForGdb) {
                 // Nothing has run since the session loaded, so there's nothing to save.
@@ -791,6 +1236,8 @@ open class FrondActivity : SDLActivity() {
             )
         }
         if (running === this) running = null
+        // Nothing has the card out for the file view once the machine has stopped.
+        if (isFinishing) SdCard.editing = null
         // The core has quit after a good final save: a linked card goes back to Cards.
         if (isFinishing && quitSent && finalSaveOk && runLock != null && !launchDevice().runs68k) {
             machineFolder()?.let { folder ->
@@ -802,18 +1249,18 @@ open class FrondActivity : SDLActivity() {
             }
         }
         HostDns.stop(applicationContext)
-        IrBeam.stop()
+        IrLink.stop()
         SerialLink.stop()
         UsbLink.stop()
         stopDebugLink()
         try { debugReservation?.close() } catch (_: Exception) {}
-        BtLink.stop(applicationContext)
+        BluetoothLink.stop()
         link.close()
         // Native statics in the core don't reset between runs, so the process ends with the activity.
         if (isFinishing) Process.killProcess(Process.myPid())
     }
 
-    // The control link, for the Peripherals screen in this process.
+    // The control link, for the menu's model in this process.
     val control: ControlLink get() = link
     val session: String? get() = sessionPath
 
@@ -824,6 +1271,9 @@ open class FrondActivity : SDLActivity() {
         @Volatile private var runLock: Cards.RunLock? = null
         const val TAG = "Frond"
         const val EXTRA_SESSION = "session"
+        private const val REQUEST_MICROPHONE = 41
+        private const val REQUEST_LOCAL_NETWORK = 43
+        private const val REQUEST_SAVE_COPY = 42
         const val EXTRA_DEVICE = "device"
         const val EXTRA_NOR = "nor"
         const val EXTRA_NAND = "nand"

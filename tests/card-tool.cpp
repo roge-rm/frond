@@ -4,6 +4,7 @@
 #include "CardSwap.h"
 #include "CardTool.h"
 #include "MemoryStickImage.h"
+#include "NandFile.h"
 #include "SessionIo.h"
 #include "pxa_DMA.h"
 #include "sdcard.h"
@@ -189,13 +190,14 @@ static void MakeFiles() {
         // A Pro stick fits no SD-only machine.
         OpensInStore(path, frondMachine::kindMsPro, deviceTypeTX, 0, false);
     }
-    // Classic sticks: the .frondms is exactly encode() of a new stick, counter 0.
+    // Classic sticks: a v2 .frondms of a new stick.
     for (const unsigned mb : {4u, 128u}) {
         const auto path = dir / ("ms" + std::to_string(mb));
         assert(Ok(frondCardTool::make(Kind::ms, mb, path)));
         const auto file = ReadAll(path);
-        const auto expect = frondMs::encode(frondMs::create(*frondMsGeometry::byMegabytes(mb)));
-        assert(file == expect && frondMs::headerChanges(file.data()) == 0);
+        std::vector<uint8_t> physical;
+        assert(frondMs::get32(file.data() + 8) == 2 && frondMs::readPhysical(path, physical) &&
+               physical == frondMs::create(*frondMsGeometry::byMegabytes(mb)));
         LoadsAsPutIn(path, "ms.frondms", "sony-clie-tg50");
     }
     // The tool replaces an existing output and leaves only the card.
@@ -230,18 +232,20 @@ static void ImportExport() {
     fs::remove(dir / "pro.img");
     fs::remove(dir / "pro-out.img");
 
-    // Classic stick: a written stick with a change counter imports with counter 0.
+    // Classic stick: a v1 stick with a change counter imports as a v2 one.
     auto image = frondMs::create(*frondMsGeometry::byMegabytes(16));
     auto file = frondMs::encode(image);
     frondMs::putChanges(file.data(), 9);
     WriteAll(dir / "in.frondms", file);
     assert(Ok(frondCardTool::importImage(dir / "in.frondms", Kind::ms, dir / "ms.frondms")));
     const auto imported = ReadAll(dir / "ms.frondms");
-    assert(frondMs::headerChanges(imported.data()) == 0);
-    assert(imported == frondMs::encode(image));
+    {
+        std::vector<uint8_t> back;
+        assert(frondMs::readPhysical(dir / "ms.frondms", back) && back == image);
+    }
     LoadsAsPutIn(dir / "ms.frondms", "ms.frondms", "sony-clie-tg50");
     assert(Ok(frondCardTool::exportCard(dir / "ms.frondms", dir / "out.frondms")));
-    assert(ReadAll(dir / "out.frondms") == imported);
+    assert(ReadAll(dir / "out.frondms") == imported && frondMs::get32(imported.data() + 8) == 2);
     // A made card exports and re-imports to the same bytes.
     assert(Ok(frondCardTool::make(Kind::sd, 32, dir / "made.frondsd")));
     assert(Ok(frondCardTool::exportCard(dir / "made.frondsd", dir / "made.img")));
@@ -323,7 +327,7 @@ static void Refusals() {
     WriteAll(dir / "crc.frondms", bad);
     assert(Refused(importImage(dir / "crc.frondms", Kind::ms, dir / "a"), "image"));
     assert(Refused(importImage(dir / "ok.frondms", Kind::sd, dir / "a"), "size"));
-    assert(Refused(importImage(dir / "card.frondsd", Kind::ms, dir / "a"), "size"));
+    assert(Refused(importImage(dir / "card.frondsd", Kind::ms, dir / "a"), "image"));
 
     // Export of damaged, unsettled or foreign files.
     assert(Ok(frondCardTool::exportCard(dir / "card.frondsd", dir / "x.img")));
@@ -430,8 +434,36 @@ static void Space() {
     std::printf("card tool space ok\n");
 }
 
+// A machine's nand.frondnand settles and verifies like a card file.
+static void Nand() {
+    const auto dir = Dir("nand");
+    constexpr uint64_t raw = 528 * 4096;
+    const auto file = dir / "nand.frondnand";
+    std::array<uint8_t, frondMachine::identityBytes> identity{};
+    assert(frondSession::writeSdFromReader(
+        file, frondNand::storedBytes(raw),
+        [&](uint64_t off, uint64_t n, void* out) { return std::memset(out, int(off >> 12), size_t(n)), true; }, identity, 1,
+        frondSession::nandShape(raw)));
+    auto r = frondCardTool::run({"settle", file.string()});
+    assert(r.ok && r.message == "settled 1");
+    r = frondCardTool::run({"verify", file.string()});
+    assert(r.ok && r.message == "verified 1");
+    // A save's journal beside it waits for its machine.
+    WriteAll(dir / "nand.frondnand.journal-2", {1});
+    assert(Refused(frondCardTool::run({"settle", file.string()}), "unsettled"));
+    assert(Refused(frondCardTool::run({"verify", file.string()}), "unsettled"));
+    fs::remove(dir / "nand.frondnand.journal-2");
+    auto bytes = ReadAll(file);
+    bytes[64 + 5000] ^= 1;
+    WriteAll(file, bytes);
+    assert(Refused(frondCardTool::run({"verify", file.string()}), "image"));
+    fs::remove_all(dir);
+    std::printf("card tool nand ok\n");
+}
+
 int main() {
     Space();
+    Nand();
     MakeFiles();
     ImportExport();
     Refusals();

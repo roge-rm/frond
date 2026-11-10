@@ -1,0 +1,227 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -1,4 +1,6 @@
+ #include "EmRegsVZDana.h"
++#include <cstdio>
++#include <stdexcept>
+ 
+ Bool EmRegsVZDana::GetLCDScreenOn() { return false; }
+ Bool EmRegsVZDana::GetLCDBacklightOn() { return false; }
+@@ -9,5 +11,136 @@
+ 
+ uint8 EmRegsVZDana::GetPortInternalValue(int port) {
+     // The small ROM's reset path requires D7 high to leave its power-down branch.
+-    return EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x80 : 0);
++    uint8 result=EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x9f : port == 'F' ? 2 : 0);
++    if(port=='D' && !resetAsserted && (keysDirty || packetIndex)) result &= ~0x10;
++    return result;
+ }
++
++uint8 EmRegsVZDana::GetPortInputValue(int port) {
++    return EmRegsVZ::GetPortInputValue(port) | (port=='K' && !resetAsserted ? 4 : port=='F' ? 2 : 0);
++}
++EmSPISlave* EmRegsVZDana::GetSPI2Slave() {
++    // E3 selects the ST controller; G2 selects the ADC.
++    if (!(StdRead(0xfffff421,1) & 8)) return this;
++    if (!(StdRead(0xfffff431,1) & 4)) return &adc;
++    throw std::runtime_error("SPI exchange with no qualified selection");
++}
++uint16 EmRegsVZDana::DoExchange(uint16 control, uint16 data) {
++    if (resetAsserted) return 0;
++    if ((control & 15)==7) {
++        const char* request="Get Ver!";
++        if (versionCommand || data=='G') {
++            if (versionCommand==8) {
++                if (data || versionReply>=4) throw std::runtime_error("ST version framing");
++                uint8 reply=uint8("07.4"[versionReply++]);
++                if (versionReply==4) versionCommand=versionReply=0;
++                return reply;
++            }
++            if (data!=uint8(request[versionCommand])) throw std::runtime_error("ST version request");
++            ++versionCommand; return 0;
++        }
++        if (data==0) { if(resetReply) { resetReply=false; return 0xaa; } return ReadKeyPacket(); }
++    }
++    throw std::runtime_error("ST unqualified SPI command");
++}
++
++void EmRegsVZDana::SetSubBankHandlers() {
++    EmRegsVZ::SetSubBankHandlers();
++    SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
++               (WriteFunction)&EmRegsVZDana::StIntControlWrite,0xfffff302,2);
++    SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
++               (WriteFunction)&EmRegsVZDana::StIntStatusWrite,0xfffff30c,2);
++    SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
++               (WriteFunction)&EmRegsVZDana::KDirWrite,0xfffff440,1);
++}
++void EmRegsVZDana::KDirWrite(emuptr a, int size, uint32 value) {
++    uint8 old=StdRead(a,size);
++    StdWrite(a,size,value);
++    if ((old&4) && !(value&4) && !(StdRead(0xfffff441,1)&4)) {
++        resetReply=true; versionCommand=versionReply=0; packetIndex=0; keysDirty=heldKeys!=0; UpdateStIrq();
++    }
++}
++void EmRegsVZDana::PortDataChanged(int p, uint8 old, uint8 value) {
++    EmRegsVZ::PortDataChanged(p,old,value);
++    if (p=='B' && ((old^value)&0x40)) {
++        resetAsserted=(value&0x40)!=0;
++        resetReply=!resetAsserted; versionCommand=versionReply=0; packetIndex=0; keysDirty=heldKeys!=0; UpdateStIrq();
++    }
++}
++
++#include "savestate/ChunkHelper.h"
++#include "savestate/Savestate.h"
++#include "savestate/SavestateLoader.h"
++#include "savestate/SavestateProbe.h"
++
++
++void EmRegsVZDana::Save(Savestate<ChunkType>& s) { SaveState(s); }
++void EmRegsVZDana::Save(SavestateProbe<ChunkType>& s) { SaveState(s); }
++template <typename T> void EmRegsVZDana::SaveState(T& s) {
++    EmRegsVZ::Save(s);
++    adc.Save(s);
++    auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
++    c->Put32(4); SaveChunkHelper h(*c); StateFields(h);
++}
++void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
++    EmRegsVZ::Load(l);
++    adc.Load(l);
++    auto* c=l.GetChunk(ChunkType::regsVZDana);
++    if(!c || c->Get32()!=4) { l.NotifyError(); return; }
++    LoadChunkHelper h(*c); StateFields(h);
++    if(heldKeys>3 || packetKeys>3 || packetIndex>2 || (packetIndex==2 && packetKeys!=3) || versionCommand > 8 || versionReply > 3 || (versionCommand != 8 && versionReply != 0)) l.NotifyError();
++}
++
++void EmRegsVZDana::Reset(Bool hardware) {
++    EmRegsVZ::Reset(hardware);
++    if(!hardware) return;
++    resetReply=true; resetAsserted=false; versionCommand=versionReply=0;
++    heldKeys=packetKeys=0; packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
++    adc=EmSPISlaveADS784x(kChannelSet2);
++}
++
++void EmRegsVZDana::DispatchButtonEvent(ButtonEvent e) {
++    uint8 mask;
++    switch(e.GetButton()) {
++        case ButtonEvent::Button::power: mask=1; break;
++        case ButtonEvent::Button::rockerUp: mask=2; break;
++        default: throw std::runtime_error("Dana key is not qualified");
++    }
++    uint8 next=e.GetType()==ButtonEvent::Type::press ? heldKeys|mask : heldKeys&~mask;
++    if(next!=heldKeys) { heldKeys=next; keysDirty=true; UpdateStIrq(); }
++}
++uint8 EmRegsVZDana::ReadKeyPacket() {
++    if(packetIndex) {
++        uint8 code=(packetKeys&1) && packetIndex==1 ? 0x0f : 0x70;
++        unsigned count=((packetKeys&1)!=0)+((packetKeys&2)!=0);
++        if(++packetIndex>count)packetIndex=0;
++        UpdateStIrq(); return code;
++    }
++    if(!keysDirty)return 0;
++    packetKeys=heldKeys; keysDirty=false;
++    unsigned count=((packetKeys&1)!=0)+((packetKeys&2)!=0);
++    if(count)packetIndex=1;
++    UpdateStIrq(); return 0x40|count;
++}
++
++void EmRegsVZDana::UpdateStIrq() {
++    bool high=resetAsserted || !(keysDirty || packetIndex);
++    uint16 control=StdRead(0xfffff302,2);
++    bool positive=(control&0x8000)!=0;
++    if(control&0x0800) {
++        if(high!=irqPinHigh && high==positive) irqLatched=true;
++    } else irqLatched=high==positive;
++    irqPinHigh=high;
++    uint16 pending=StdRead(0xfffff310,2);
++    StdWrite(0xfffff310,2,(pending&~1)|(irqLatched?1:0));
++    UpdateInterrupts();
++}
++void EmRegsVZDana::StIntControlWrite(emuptr a,int size,uint32 value) {
++    StdWrite(a,size,value); UpdateStIrq();
++}
++void EmRegsVZDana::StIntStatusWrite(emuptr a,int size,uint32 value) {
++    uint32 clear=size==4 ? value>>16 : value;
++    if(size==1 && a==0xfffff30c)clear=0;
++    if((StdRead(0xfffff302,2)&0x0800) && (clear&1))irqLatched=false;
++    intStatusHiWrite(a,size,value); UpdateStIrq();
++}
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -2,10 +2,40 @@
+ #define EM_REGS_VZ_DANA_H
+ 
+ #include "EmRegsVZ.h"
++#include "EmSPISlave.h"
++#include "EmSPISlaveADS784x.h"
+ 
+-// VZ bring-up only. External devices and GPIO wiring remain unqualified.
+-class EmRegsVZDana : public EmRegsVZ {
++// Dana ST controller subset: version exchange, reset and Power/Up snapshots.
++class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
++    class EmptySdBus : public EmSPISlave {
++      public: uint16 DoExchange(uint16, uint16) override { return 0xffff; }
++    } emptySdBus;
++    bool resetReply=true, resetAsserted=false;
++    unsigned versionCommand=0, versionReply=0;
++    uint8 heldKeys=0, packetKeys=0;
++    unsigned packetIndex=0;
++    bool keysDirty=false, irqPinHigh=true, irqLatched=false;
++    void UpdateStIrq();
++    void StIntControlWrite(emuptr,int,uint32);
++    void StIntStatusWrite(emuptr,int,uint32);
++    uint8 ReadKeyPacket();
++    EmSPISlaveADS784x adc{kChannelSet2};
+    public:
++    void DispatchButtonEvent(ButtonEvent) override;
++    void SetSubBankHandlers() override;
++    void Save(Savestate<ChunkType>&) override;
++    void Save(SavestateProbe<ChunkType>&) override;
++    void Load(SavestateLoader<ChunkType>&) override;
++    template <typename T> void SaveState(T&);
++    template <typename T> void StateFields(T& h) { h.DoBool(resetReply).DoBool(resetAsserted).Do32(versionCommand).Do32(versionReply).Do8(heldKeys).Do8(packetKeys).Do32(packetIndex).DoBool(keysDirty).DoBool(irqPinHigh).DoBool(irqLatched); }
++    void Reset(Bool hardware) override;
++
++    void KDirWrite(emuptr, int, uint32);
++    void PortDataChanged(int, uint8, uint8) override;
++    uint8 GetPortInputValue(int port) override;
++    EmSPISlave* GetSPI2Slave() override;
++    EmSPISlave* GetSPI1Slave() override { return &emptySdBus; }
++    uint16 DoExchange(uint16 control, uint16 data) override;
+     Bool GetLCDScreenOn() override;
+     Bool GetLCDBacklightOn() override;
+     uint8 GetPortInternalValue(int port) override;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.h
+@@ -128,7 +128,9 @@
+     void csDSelectWrite(emuptr address, int size, uint32 value);
+     void intMaskHiWrite(emuptr address, int size, uint32 value);
+     void intMaskLoWrite(emuptr address, int size, uint32 value);
++   protected:
+     void intStatusHiWrite(emuptr address, int size, uint32 value);
++   private:
+     void portXDataWrite(emuptr address, int size, uint32 value);
+     void pllRegisterWrite(emuptr address, int size, uint32 value);
+     void tmr1StatusWrite(emuptr address, int size, uint32 value);
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+@@ -998,7 +998,7 @@
+         if (event.GetButton() == ButtonEvent::Button::cradle)
+             EmRegsVZ::HotSyncEvent(event.GetType() == ButtonEvent::Type::press);
+         else
+-            EmRegsVZ::DispatchButtonEvent(event);
++            this->DispatchButtonEvent(event);
+     }
+ 
+     // See if there's anything new ("Put the data on the bus")
+--- a/src/cloudpilot/emulator/savestate/ChunkType.h
++++ b/src/cloudpilot/emulator/savestate/ChunkType.h
+@@ -28,7 +28,8 @@
+     regsSonyDsp = 0x1a0,
+     regsMB86189 = 0x1b0,
+     externalStorage = 0x1c0,
+-    spiSlaveSD = 0x1d0
++    spiSlaveSD = 0x1d0,
++    regsVZDana = 0x1e0
+ };
+ 
+ #endif  // _CHUNK_TYPE_H_

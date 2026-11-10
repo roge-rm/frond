@@ -1,0 +1,44 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+@@ -788,14 +788,14 @@
+     INSTALL_HANDLER(StdRead, StdWrite, portCPulldnEn);
+     INSTALL_HANDLER(StdRead, StdWrite, portCSelect);
+ 
+-    INSTALL_HANDLER(StdRead, StdWrite, portDDir);
++    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDDir);
+     INSTALL_HANDLER(portXDataRead, portXDataWrite, portDData);
+     INSTALL_HANDLER(StdRead, StdWrite, portDPullupEn);
+     INSTALL_HANDLER(StdRead, StdWrite, portDSelect);
+-    INSTALL_HANDLER(StdRead, StdWrite, portDPolarity);
++    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDPolarity);
+     INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDIntReqEn);
+-    INSTALL_HANDLER(StdRead, StdWrite, portDKbdIntEn);
+-    INSTALL_HANDLER(StdRead, StdWrite, portDIntEdge);
++    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDKbdIntEn);
++    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDIntEdge);
+ 
+     INSTALL_HANDLER(StdRead, StdWrite, portEDir);
+     INSTALL_HANDLER(portXDataRead, portXDataWrite, portEData);
+@@ -2499,10 +2499,9 @@
+     // We have a line-level interrupt if:
+     //
+     //	- line-level interrupts are requested
+-    //	- the GPIO bit matches the polarity bit
+-
+-    newBits |= ~portDIntEdge & portDData & portDPolarity;
+-    newBits |= ~portDIntEdge & ~portDData & ~portDPolarity;
++    //	- the input is high for POL=0, low for POL=1
++
++    newBits |= ~portDIntEdge & (portDData ^ portDPolarity);
+ 
+     // We have an edge interrupt if:
+     //
+@@ -2544,7 +2543,7 @@
+     //	The bit is configured for input (?)
+     //	The bit is configured to be OR'd into the interrupt.
+ 
+-    if (!gSession->GetDevice().EdgeHack()) {
++    if (!portDKbdIntEn || !gSession->GetDevice().EdgeHack()) {
+         uint8 KB = portDData & ~portDDir & portDKbdIntEn;
+ 
+         if (KB)

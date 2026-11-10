@@ -1,0 +1,21 @@
+diff --git a/src/uarm/uarm/devicePalmTungstenE2.cpp b/src/uarm/uarm/devicePalmTungstenE2.cpp
+index 6192ffc..103e333 100644
+--- a/src/uarm/uarm/devicePalmTungstenE2.cpp
++++ b/src/uarm/uarm/devicePalmTungstenE2.cpp
+@@ -357,10 +357,12 @@ void deviceTouch(struct Device *dev, int x, int y) {
+         if (x < 0 || y < 0) {
+             wm9712LsetPen(dev->wm9712L, -1, -1, 0);
+         } else {
+-            // Both ADC axes decrease toward the right/bottom. Use the full
+-            // panel with headroom at either end; Palm OS calibrates the panel.
+-            const int adcX = 3800 - (3480 * x + 159) / 319;
+-            const int adcY = 3800 - (3480 * y + 239) / 479;
++            // Both ADC axes decrease toward the right/bottom. The TX has no
++            // calibration at first boot, so the panel follows the ROM's default
++            // calibration: raw X 3749 to 313 across 0..319 and Y 3943 to 124
++            // down 0..479, measured with the pen probe (tests/palm/pen68k-probe).
++            const int adcX = 3749 - (3436 * x + 159) / 319;
++            const int adcY = 3943 - (3819 * y + 239) / 479;
+             // The TX driver treats high resistance readings (>=320) as pen up.
+             wm9712LsetPen(dev->wm9712L, adcX, adcY, 100);
+         }

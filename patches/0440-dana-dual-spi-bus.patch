@@ -1,0 +1,371 @@
+--- a/src/common/CardImage.cpp
++++ b/src/common/CardImage.cpp
+@@ -3,7 +3,8 @@
+ #include <algorithm>
+ #include <cstring>
+ 
+-CardImage::CardImage(uint8_t* data, size_t blocksTotal) : data(data), blocksTotal(blocksTotal) {
++CardImage::CardImage(uint8_t* data, size_t blocksTotal, bool readOnly)
++    : data(data), blocksTotal(blocksTotal), readOnly(readOnly) {
+     const size_t pageCount = (blocksTotal >> 4) + ((blocksTotal % 16 != 0) > 0 ? 1 : 0);
+     const size_t dirtyPageBufferSize = (pageCount >> 3) + ((pageCount % 8) > 0 ? 1 : 0);
+ 
+@@ -23,7 +24,7 @@
+ }
+ 
+ size_t CardImage::Write(const uint8_t* source, size_t index, size_t count) {
+-    if (index >= blocksTotal) return 0;
++    if (readOnly || index >= blocksTotal) return 0;
+ 
+     count = std::min(count, blocksTotal - index);
+ 
+@@ -40,7 +41,8 @@
+ size_t CardImage::BlocksTotal() const { return blocksTotal; }
+ 
+ bool CardImage::WriteByteRange(const uint8_t* source, size_t offset, size_t count) {
+-    if (offset + count > blocksTotal * BLOCK_SIZE) return false;
++    if (readOnly) return false;
++    if (offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return false;
+     if (count == 0) return true;
+ 
+     memcpy(data.get() + offset, source, count);
+@@ -51,7 +53,7 @@
+ }
+ 
+ bool CardImage::ReadByteRange(uint8_t* destination, size_t offset, size_t count) {
+-    if (offset + count > blocksTotal * BLOCK_SIZE) return false;
++    if (offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return false;
+ 
+     memcpy(destination, data.get() + offset, count);
+ 
+@@ -59,6 +61,7 @@
+ }
+ 
+ void CardImage::MarkRangeDirty(size_t offset, size_t count) {
++    if (readOnly || !count || offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return;
+     const size_t firstBlock = offset / BLOCK_SIZE;
+     const size_t lastBlock = (offset + count - 1) / BLOCK_SIZE;
+ 
+--- a/src/common/CardImage.h
++++ b/src/common/CardImage.h
+@@ -11,7 +11,8 @@
+     constexpr static size_t DIRTY_PAGE_SIZE = 8192;
+ 
+    public:
+-    CardImage(uint8_t* data, size_t blocksTotal);
++    CardImage(uint8_t* data, size_t blocksTotal, bool readOnly = false);
++    bool IsReadOnly() const { return readOnly; }
+ 
+     size_t Read(uint8_t* dest, size_t index, size_t count = 1);
+     size_t Write(const uint8_t* source, size_t index, size_t count = 1);
+@@ -29,6 +30,7 @@
+     std::unique_ptr<uint8_t[]> data;
+     std::unique_ptr<uint8_t[]> dirtyPages;
+     size_t blocksTotal;
++    const bool readOnly;
+ };
+ 
+ #endif  // _CARD_IMAGE_H_
+--- a/src/common/CardVolume.cpp
++++ b/src/common/CardVolume.cpp
+@@ -3,6 +3,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <iostream>
++#include <stdexcept>
+ 
+ using namespace std;
+ 
+@@ -42,6 +43,7 @@
+ }
+ 
+ void CardVolume::Format() {
++    if (image.IsReadOnly()) throw std::runtime_error("card is read-only");
+     memset(imageData, 0, imageSize);
+ 
+     CalculateGeometry();
+@@ -68,6 +70,7 @@
+ uint32_t CardVolume::AdvicedClusterSize() { return imageSize > 8 * 1024 * 1024 ? 32 : 16; }
+ 
+ void CardVolume::FixupPartitionType() {
++    if (image.IsReadOnly()) throw std::runtime_error("card is read-only");
+     if (Read8(partitionOffset + 0x3a) == '6') {
+         Write8(0x01c2, 0x06);
+     }
+--- a/src/cloudpilot/emulator/ExternalStorage.cpp
++++ b/src/cloudpilot/emulator/ExternalStorage.cpp
+@@ -19,11 +19,11 @@
+     return HasImage(key) ? images.at(key).get() : nullptr;
+ }
+ 
+-bool ExternalStorage::AddImage(const string& key, uint8* imageData, size_t size) {
++bool ExternalStorage::AddImage(const string& key, uint8* imageData, size_t size, bool readOnly) {
+     if (key.empty() || key.length() > MAX_KEY_LENGTH || size == 0 || size % (CardImage::BLOCK_SIZE) != 0 || HasImage(key))
+         return false;
+ 
+-    images.emplace(key, make_shared<CardImage>(imageData, size / CardImage::BLOCK_SIZE));
++    images.emplace(key, make_shared<CardImage>(imageData, size / CardImage::BLOCK_SIZE, readOnly));
+ 
+     return true;
+ }
+@@ -120,7 +120,7 @@
+ }
+ 
+ void ExternalStorage::RekeyImage(string oldKey, string newKey) {
+-    if (newKey == oldKey || !HasImage(oldKey) || newKey.length() > MAX_KEY_LENGTH) return;
++    if (newKey == oldKey || newKey.empty() || HasImage(newKey) || !HasImage(oldKey) || newKey.length() > MAX_KEY_LENGTH) return;
+ 
+     images.emplace(newKey, images.at(oldKey));
+     images.erase(oldKey);
+--- a/src/cloudpilot/emulator/ExternalStorage.h
++++ b/src/cloudpilot/emulator/ExternalStorage.h
+@@ -31,7 +31,7 @@
+ 
+     bool HasImage(const string& key) const;
+     CardImage* GetImage(const string& key);
+-    bool AddImage(const string& key, uint8* imageData, size_t size);
++    bool AddImage(const string& key, uint8* imageData, size_t size, bool readOnly = false);
+ 
+     bool Mount(const string& key, EmHAL::Slot slot);
+     bool Mount(const string& key);
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -51,6 +51,7 @@
+ #include "EmPalmOS.h"
+ #include "EmROMReader.h"
+ #include "EmSession.h"
++#include "ExternalStorage.h"
+ #include "EmSystemState.h"
+ #include "Feature.h"
+ #include "GdbStub.h"
+@@ -241,6 +242,13 @@
+ 
+ // The current machine as a session file.
+ bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& metadata, vector<uint8_t>& out) {
++    // This container path cannot retain external card contents yet.
++    if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard) ||
++       gExternalStorage.IsMounted(EmHAL::Slot::sdcard2) ||
++       gExternalStorage.IsMounted(EmHAL::Slot::memorystick)) {
++        cerr << "session save refused: external card persistence is not supported by this runner" << endl;
++        return false;
++    }
+     if (!gSession->Save()) return false;
+     auto& savestate = gSession->GetSavestate();
+     const auto rom = gSession->GetRomImage();
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.h
+@@ -73,7 +73,7 @@
+ 
+     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+     virtual void ScaleCycles(uint32 factor);
+-    inline void Cycle(uint64 systemCycles, Bool sleeping);
++    void Cycle(uint64 systemCycles, Bool sleeping);
+ 
+     virtual void SetUARTSync(bool sync);
+ 
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -4,12 +4,21 @@
+ #include "EmRegsVZ.h"
+ #include "EmSPISlave.h"
+ #include "EmSPISlaveADS784x.h"
++#include "EmSPISlaveSD.h"
+ 
+ // Dana ST controller: version exchange, reset and physical-key snapshots.
+ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+-    class EmptySdBus : public EmSPISlave {
+-      public: uint16 DoExchange(uint16, uint16) override { return 0xffff; }
+-    } emptySdBus;
++    EmSPISlaveSD sd0, sd1{EmHAL::Slot::sdcard2};
++    class CardBus : public EmSPISlave {
++        EmRegsVZDana& board;
++      public:
++        explicit CardBus(EmRegsVZDana& board) : board(board) {}
++        uint16 DoExchange(uint16 control, uint16 data) override;
++    } cardBus{*this};
++    bool CardPowered(unsigned slot);
++    bool CardSelected(unsigned slot);
++    void SyncCards();
++    void CardControlWrite(emuptr, int, uint32);
+     unsigned sleepCommand=0;
+     // Cold mask bytes are unknown on hardware; zero is the simulator default.
+     unsigned wakeMask[2]{};
+@@ -98,11 +107,15 @@
+     Bool GetLineDriverState(EmUARTDeviceType) override;
+     EmUARTDeviceType GetUARTDevice(int) override;
+ 
++    bool SupportsImageInSlot(EmHAL::Slot, uint32) override;
++    void Mount(EmHAL::Slot, CardImage&) override;
++    void Unmount(EmHAL::Slot) override;
++    void Remount(EmHAL::Slot, CardImage&) override;
+     void KDirWrite(emuptr, int, uint32);
+     void PortDataChanged(int, uint8, uint8) override;
+     uint8 GetPortInputValue(int port) override;
+     EmSPISlave* GetSPI2Slave() override;
+-    EmSPISlave* GetSPI1Slave() override { return &emptySdBus; }
++    EmSPISlave* GetSPI1Slave() override { return &cardBus; }
+     uint16 DoExchange(uint16 control, uint16 data) override;
+     bool CopyLCDFrame(Frame& frame, bool fullRefresh) override;
+     Bool GetLCDScreenOn() override;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZ.cpp
+@@ -951,7 +951,7 @@
+ // Emulator::Execute.  Interestingly, the loop runs 3% FASTER if this function
+ // is in its own separate function instead of being inline.
+ 
+-inline void EmRegsVZ::Cycle(uint64 systemCycles, Bool sleeping) {
++void EmRegsVZ::Cycle(uint64 systemCycles, Bool sleeping) {
+     if (unlikely(afterLoad)) {
+         DispatchPwmChange();
+         afterLoad = false;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -6,6 +6,7 @@
+ #include <cstring>
+ #include "dana_keyboard5.h"
+ #include <stdexcept>
++#include "ExternalStorage.h"
+ 
+ Bool EmRegsVZDana::GetLCDScreenOn() { return (StdRead(0xfffff441,1)&0x80)!=0; }
+ bool EmRegsVZDana::CopyLCDFrame(Frame& frame,bool fullRefresh) {
+@@ -20,12 +21,21 @@
+ uint8 EmRegsVZDana::GetPortInternalValue(int port) {
+     // The small ROM's reset path requires D7 high to leave its power-down branch.
+     uint8 result=EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x9f : port == 'F' ? 2 : 0);
++    if(port=='D') {
++        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) result &= ~2;
++        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard2)) result &= ~1;
++    }
+     if(port=='D' && !resetAsserted && StRequest()) result &= ~0x10;
+     return result;
+ }
+ 
+ uint8 EmRegsVZDana::GetPortInputValue(int port) {
+     if (port=='G') return (EmRegsVZ::GetPortInputValue(port)&~2) | (adc.packDetectHigh ? 2 : 0);
++    if(port=='F') {
++        auto* first=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard);
++        auto* second=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard2);
++        return 2 | (first && first->IsReadOnly() ? 0x80 : 0) | (second && second->IsReadOnly() ? 1 : 0);
++    }
+     return EmRegsVZ::GetPortInputValue(port) | (port=='K' && !resetAsserted ? 4 : port=='F' ? 2 : 0);
+ }
+ EmSPISlave* EmRegsVZDana::GetSPI2Slave() {
+@@ -73,6 +83,10 @@
+ 
+ void EmRegsVZDana::SetSubBankHandlers() {
+     EmRegsVZ::SetSubBankHandlers();
++    for(emuptr a : {0xfffff408u,0xfffff40bu,0xfffff428u,0xfffff42bu,
++                    0xfffff438u,0xfffff43bu,0xfffff440u,0xfffff443u})
++        SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
++                   (WriteFunction)&EmRegsVZDana::CardControlWrite,a,1);
+     SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
+                (WriteFunction)&EmRegsVZDana::SoundControlWrite,0xfffff500,2);
+     SetHandler((ReadFunction)&EmRegsVZDana::StdRead,
+@@ -91,6 +105,7 @@
+ void EmRegsVZDana::KDirWrite(emuptr a, int size, uint32 value) {
+     uint8 old=StdRead(a,size);
+     StdWrite(a,size,value);
++    SyncCards();
+     if ((old&4) && !(value&4) && !(StdRead(0xfffff441,1)&4)) {
+         ResetPowerProtocol();
+         resetReply=true; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
+@@ -98,6 +113,7 @@
+ }
+ void EmRegsVZDana::PortDataChanged(int p, uint8 old, uint8 value) {
+     EmRegsVZ::PortDataChanged(p,old,value);
++    if(p=='B' || p=='K' || p=='J' || p=='F') SyncCards();
+     if (p=='B' && ((old^value)&0x40)) {
+         ResetPowerProtocol();
+         resetAsserted=(value&0x40)!=0;
+@@ -116,6 +132,7 @@
+ template <typename T> void EmRegsVZDana::SaveState(T& s) {
+     EmRegsVZ::Save(s);
+     adc.Save(s);
++    sd0.Save(s); sd1.Save(s);
+     if(auto* uart=s.GetChunk(ChunkType::uartDana)) {
+         auto pending=fUART[1]->CapturePending();
+         uart->Put32(1); uart->Put32(pending.rxCount); uart->Put32(pending.txCount);
+@@ -140,6 +157,8 @@
+     if(!fUART[1]->RestorePending(pending)) { l.NotifyError(); return; }
+     EmRegsVZ::Load(l);
+     adc.Load(l);
++    if(!l.GetChunk(ChunkType::spiSlaveSD)) sd0.Reset();
++    sd0.Load(l); sd1.Load(l);
+     auto* c=l.GetChunk(ChunkType::regsVZDana);
+     if(!c) { l.NotifyError(); return; }
+     unsigned version=c->Get32();
+@@ -193,6 +212,7 @@
+ void EmRegsVZDana::Reset(Bool hardware) {
+     EmRegsVZ::Reset(hardware);
+     DispatchPwmChange();
++    sd0.Reset(); sd1.Reset();
+     if(!hardware) return;
+     ResetPowerProtocol();
+     hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8);
+@@ -434,6 +454,7 @@
+ }
+ void EmRegsVZDana::SoundMuxWrite(emuptr a,int size,uint32 value) {
+     StdWrite(a,size,value);
++    SyncCards();
+     DispatchPwmChange();
+ }
+ 
+@@ -452,3 +473,58 @@
+ EmUARTDeviceType EmRegsVZDana::GetUARTDevice(int uart) {
+     return uart==1 && GetLineDriverState(kUARTIR) ? kUARTIR : kUARTNone;
+ }
++
++
++bool EmRegsVZDana::CardPowered(unsigned slot) {
++    emuptr base=slot ? 0xfffff440 : 0xfffff408;
++    return (StdRead(base,1)&StdRead(base+1,1)&StdRead(base+3,1)&0x20)!=0;
++}
++bool EmRegsVZDana::CardSelected(unsigned slot) {
++    emuptr base=slot ? 0xfffff428 : 0xfffff438;
++    uint8 mask=slot ? 4 : 8;
++    return CardPowered(slot) && (StdRead(base,1)&StdRead(base+3,1)&mask) &&
++           !(StdRead(base+1,1)&mask);
++}
++void EmRegsVZDana::SyncCards() {
++    for(unsigned slot=0;slot<2;slot++) {
++        auto& sd=slot ? sd1 : sd0;
++        if(!CardPowered(slot)) sd.Reset();
++        else if(CardSelected(slot)) sd.Enable();
++        else sd.Disable();
++    }
++}
++void EmRegsVZDana::CardControlWrite(emuptr a,int size,uint32 value) {
++    StdWrite(a,size,value);
++    SyncCards();
++}
++uint16 EmRegsVZDana::CardBus::DoExchange(uint16 control,uint16 data) {
++    board.SyncCards();
++    // PJ0/1/2 must be assigned to SPI1. Both selected cards receive the clocks.
++    unsigned bits=(control&15)+1;
++    uint16 result=bits==16 ? 0xffff : (1u<<bits)-1;
++    if(board.StdRead(0xfffff43b,1)&7) return result;
++    if(bits!=8 && bits!=16) return result;
++    if(board.CardSelected(0)) result &= board.sd0.DoExchange(control,data);
++    if(board.CardSelected(1)) result &= board.sd1.DoExchange(control,data);
++    return result;
++}
++bool EmRegsVZDana::SupportsImageInSlot(EmHAL::Slot slot,uint32 blocks) {
++    return (slot==EmHAL::Slot::sdcard || slot==EmHAL::Slot::sdcard2) &&
++           EmSPISlaveSD::IsSizeRepresentable(blocks);
++}
++void EmRegsVZDana::Mount(EmHAL::Slot slot,CardImage&) {
++    if(slot!=EmHAL::Slot::sdcard && slot!=EmHAL::Slot::sdcard2) return;
++    (slot==EmHAL::Slot::sdcard ? sd0 : sd1).Reset();
++    UpdatePortDInterrupts();
++}
++void EmRegsVZDana::Unmount(EmHAL::Slot slot) {
++    if(slot!=EmHAL::Slot::sdcard && slot!=EmHAL::Slot::sdcard2) return;
++    (slot==EmHAL::Slot::sdcard ? sd0 : sd1).Reset();
++    uint8 mask=slot==EmHAL::Slot::sdcard ? 2 : 1;
++    fPortDEdge |= mask;
++    UpdatePortDInterrupts();
++}
++void EmRegsVZDana::Remount(EmHAL::Slot slot,CardImage&) {
++    // Restore preserves protocol cursors; explicit insertion uses Mount.
++    if(slot==EmHAL::Slot::sdcard || slot==EmHAL::Slot::sdcard2) UpdatePortDInterrupts();
++}

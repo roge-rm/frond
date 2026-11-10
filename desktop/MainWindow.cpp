@@ -1,14 +1,17 @@
 #include "MainWindow.h"
+#include "DanaViewControls.h"
 #include "LicencesDialog.h"
 #include "FirmwareInput.h"
-#include "SdExchangeDialog.h"
-#include "MemoryStickFilesDialog.h"
+#include "CardFilesWindow.h"
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
 #include "ConnectionsWindow.h"
 #include "LinkCommon.h"
 #include "CardsWindow.h"
+#include "RunningRules.h"
+#include "RunningPanels.h"
+#include <QCursor>
 #include <QCoreApplication>
 #include <QFileSystemWatcher>
 #include <QJsonObject>
@@ -22,15 +25,20 @@
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QApplication>
 #include <QShortcut>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QWindow>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QSlider>
@@ -48,7 +56,11 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
+#include <QSaveFile>
+#include <QtPrintSupport/QPrintDialog>
+#include <QtPrintSupport/QPrinter>
 #include <QVBoxLayout>
+#include "DanaCardsDialog.h"
 
 // frond-68k sits beside the ARM core: out/frond-68k in a build tree, frond-68k-core when installed.
 static QString siblingCore68k(const QString& core) {
@@ -106,87 +118,153 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             menu->exec(sessionList->viewport()->mapToGlobal(at));
         }
     });
-    // The running controls go on this page while a Palm runs.
-    auto* root = new QWidget(outer);
-    runningPage = root;
-    runningPage->setObjectName("running");
-    auto* layout = new QVBoxLayout(root);
-    layout->setContentsMargins(0, 0, 0, 0);
-    outerLayout->addWidget(runningPage);
+    // The running controls sit in four panels under the bar. The ones the bar or the Machine menu
+    // already offers are made here, hidden, so each has one handler.
+    // Running: a strip for the hidden bar over the Palm and its panel side by side.
+    runArea = new QWidget(outer);
+    runArea->setObjectName("runArea");
+    auto* runLayout = new QVBoxLayout(runArea);
+    runLayout->setContentsMargins(0, 0, 0, 0); runLayout->setSpacing(0);
+    barHandle = new BarHandle(runArea);
+    runLayout->addWidget(barHandle);
+    auto* body = bodyLayout = new QHBoxLayout;
+    body->setSpacing(0);
+    palmHolder = new PalmHolder(runArea);
+    palmHolder->hide();
+    panels = new PanelHost(runArea);
+    body->addWidget(palmHolder, 1);
+    body->addWidget(panels);
+    runLayout->addLayout(body, 1);
+    outerLayout->addWidget(runArea, 1);
+    runArea->hide();
+    barHandle->hide();
+    connect(barHandle, &BarHandle::clicked, this, [this] { setBarShown(true); });
+    runArea->installEventFilter(this);
+    overlayTimer = new QTimer(this);
+    overlayTimer->setSingleShot(true);
+    overlayTimer->setInterval(runningRules::fullScreenHideMs);
+    connect(overlayTimer, &QTimer::timeout, this, [this] {
+        if (!fullScreenOn) return;
+        if (runningRules::barStaysInFullScreen(runningBar->underMouse(), QApplication::activePopupWidget() != nullptr, panels->current() >= 0))
+            overlayTimer->start();
+        else showOverlayBar(false);
+    });
+    // The pointer over the Palm only reaches the core, so the top edge is watched here.
+    edgeTimer = new QTimer(this);
+    edgeTimer->setInterval(15);
+    connect(edgeTimer, &QTimer::timeout, this, [this] {
+        if (!fullScreenOn || overlayBarShown) { edgeTimer->stop(); return; }
+        if (runningRules::revealBar(QCursor::pos(), QRect(runArea->mapToGlobal(QPoint(0, 0)), runArea->size()))) {
+            showOverlayBar(true);
+            overlayTimer->start();
+        }
+    });
+    drivers = new QWidget(this);
+    drivers->hide();
+    auto* root = drivers;
+    auto* appsLayout = panels->addPage(tr("Applications"));
+    auto* cardLayout = panels->addPage(tr("Storage"));
+    auto* displayLayout = panels->addPage(tr("Display"));
+    auto* connectionsLayout = panels->addPage(tr("Connections"));
     settingsDialog = new SettingsDialog(this);
     settingsDialog->resume->setChecked(settings.value("resume", true).toBool());
     connect(settingsDialog->resume, &QCheckBox::toggled, this, [this](bool enabled) { settings.setValue("resume", enabled); });
-    // The running page follows the Android Menu screen: Applications, SD card, Device, Session.
-    auto section = [&](const QString& title, bool first = false) {
-        auto* heading = new QLabel(title, root);
-        auto font = heading->font(); font.setPointSizeF(font.pointSizeF() * 1.2); font.setBold(true);
-        heading->setFont(font);
-        if (!first) layout->addSpacing(8);
-        layout->addWidget(heading);
-        return heading;
-    };
     auto button = [&](const QString& text, const char* name, bool plain = false) {
         auto* b = new QPushButton(text, root);
         b->setObjectName(name);
         if (!plain) runningButtons << b;
         return b;
     };
-    section(tr("Applications"), true);
-    auto* apps = new QGridLayout;
-    auto* install = button(tr("Install application"), "installApp");
-    auto* launchApp = button(tr("Launch application"), "launchApp");
-    auto* exportAll = button(tr("Export RAM databases"), "exportRam");
-    auto* exportOne = button(tr("Export database"), "exportDatabase");
-    apps->addWidget(install, 0, 0); apps->addWidget(launchApp, 0, 1);
-    apps->addWidget(exportAll, 1, 0); apps->addWidget(exportOne, 1, 1);
-    layout->addLayout(apps);
-    connect(install, &QPushButton::clicked, this, [this] {
+    appsPanel = new AppsPanel(root);
+    appsLayout->addWidget(appsPanel, 1);
+    connect(appsPanel, &AppsPanel::installRequested, this, [this] {
         const auto paths = QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
         installFiles(paths);
     });
-    connect(launchApp, &QPushButton::clicked, this, [this] {
-        bool ok;
-        const auto name = QInputDialog::getText(this, tr("Launch application"), tr("Palm database name"), QLineEdit::Normal, {}, &ok);
-        if (ok && !name.isEmpty()) send("launch-app", name);
-    });
-    connect(exportAll, &QPushButton::clicked, this, [this] {
+    connect(appsPanel, &AppsPanel::otherRequested, this, &MainWindow::otherDatabase);
+    connect(appsPanel, &AppsPanel::launchRequested, this, [this](const QString& name) { send("launch-app", name); });
+    connect(appsPanel, &AppsPanel::exportAllRequested, this, [this] {
         const auto path = outputFile(tr("Export RAM databases"), tr("ZIP archives (*.zip)"), "Palm databases.zip");
         if (!path.isEmpty()) send("export", path);
     });
-    connect(exportOne, &QPushButton::clicked, this, [this] {
-        bool ok;
-        const auto name = QInputDialog::getText(this, tr("Export database"), tr("Palm database name"), QLineEdit::Normal, {}, &ok);
-        if (!ok || name.isEmpty()) return;
-        const auto path = outputFile(tr("Export database"), tr("ZIP archives (*.zip)"), name + ".zip");
-        if (!path.isEmpty()) send("export-db", path + "\n" + name);
-    });
+    connect(appsPanel, &AppsPanel::exportRequested, this, [this](const QString& name) { exportDatabase(name); });
+    connect(appsPanel, &AppsPanel::deleteRequested, this, &MainWindow::deleteApplication);
 
     // The buttons shown depend on the card's state; refresh() picks them.
-    storageHeading = section(tr("SD card"));
+    storageHeading = new QLabel(tr("SD card"), root);
     storageHeading->setObjectName("storageHeading");
+    cardLayout->addWidget(storageHeading);
+    danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
+    cardLayout->addWidget(danaCards);
+    connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,this); dialog.exec(); });
+    printerPanel = new PrinterPanel(root);
+    connectionsLayout->addWidget(printerPanel);
+    connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
+        const bool printer = port == "printer";
+        usbPrint.stage = printer ? PrinterStage::Attach : PrinterStage::None;
+        if (!(printer ? send("printer", "attach on") : send("usb-port", port))) {
+            usbPrint.stage = PrinterStage::None;
+            printerPanel->setPort(runningPreferences.usbPort);
+            notify(tr("Wait a moment and try again."));
+            return;
+        }
+        runningPreferences.usbPort = port;
+        printerPanel->setLinkReadout(port == "wifi" ? frondPrint::wifiReadout({true, false, false, "wifi", {}}) : QString());
+        savePeripherals();
+    });
+    connect(printerPanel, &PrinterPanel::moduleChosen, this, [this](bool on) {
+        if (!send("network-mode", on ? "wireless" : "disabled")) {
+            printerPanel->setModuleOn(runningPreferences.wifiModule);
+            notify(tr("Wait a moment and try again."));
+            return;
+        }
+        runningPreferences.wifiModule = on;
+        printerPanel->setModuleReadout(frondPrint::moduleReadout("off", on));
+        savePeripherals();
+    });
+    usbPrint = PrintSource{"printer", printerPanel};
+    // The infrared printer has only the received-job choices; its mode is the Infrared beaming picker.
+    irPrint = PrintSource{"irprinter", new PrinterPanel(root, true)};
+    connectionsLayout->addWidget(irPrint.panel);
+    for (auto* source : {&usbPrint, &irPrint}) {
+        auto* panel = source->panel;
+        connect(panel, &PrinterPanel::pdfRequested, this, [this, source] { printerSavePdf(*source); });
+        connect(panel, &PrinterPanel::printRequested, this, [this, source] { printerPrint(*source); });
+        connect(panel, &PrinterPanel::rawRequested, this, [this, source] { printerSaveRaw(*source); });
+        connect(panel, &PrinterPanel::discardRequested, this, [this, source] {
+            printerClearHeld(*source);
+            if (source == &usbPrint ? !printerPanel->plugged() : runningPreferences.infrared != "printer") return;
+            source->stage = PrinterStage::Discard;
+            if (!send(source->command, "clear")) source->stage = PrinterStage::None;
+        });
+    }
+    printerTimer = new QTimer(this);
+    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
+    printerTimer->start(1000);
+    auto* danaPending = new QLabel(tr("USB computer: not available yet"), root);
+    danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
     // shows where it is, and Insert once it is free.
-    auto* cardRow = new QHBoxLayout;
+    auto* cardRow = new QVBoxLayout;
     cardPick = button(tr("No card"), "cardPick", true);
     sdStatus = new QLabel(tr("Not known"), root);
     sdStatus->setObjectName("sdState");
     cardRow->addWidget(cardPick);
     cardRow->addWidget(sdStatus);
     sdReinsert = button(tr("Insert"), "sdInsert", true);
-    sdExchange = button(tr("Files"), "sdExchange", true);
+    sdExchange = button(tr("Files…"), "sdExchange", true);
     sdEject = button(tr("Eject"), "sdEject", true);
     sdExport = button(tr("Export image"), "sdExport", true);
     sdRetry = button(tr("Try again"), "sdRetry", true);
     for (auto* b : {sdReinsert, sdExchange, sdEject, sdExport, sdRetry}) cardRow->addWidget(b);
-    cardRow->addStretch();
-    layout->addLayout(cardRow);
+    cardLayout->addLayout(cardRow);
     auto* linkedRow = new QHBoxLayout;
     linkedState = new QLabel(root);
     linkedState->setObjectName("linkedState");
     linkedInsert = button(tr("Insert"), "linkedInsert", true);
     linkedRow->addWidget(linkedState); linkedRow->addWidget(linkedInsert); linkedRow->addStretch();
-    layout->addLayout(linkedRow);
+    cardLayout->addLayout(linkedRow);
     connect(cardPick, &QPushButton::clicked, this, &MainWindow::pickCard);
     connect(linkedInsert, &QPushButton::clicked, this, [this] {
         const auto slot = frondCards::readSlot(runningMachineDir());
@@ -209,26 +287,60 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 
     cardReadOnly = new QCheckBox(tr("Write protected"), root);
     cardReadOnly->setObjectName("cardReadOnly");
-    layout->addWidget(cardReadOnly);
+    cardLayout->addWidget(cardReadOnly);
+    auto* cardsButton = new QPushButton(tr("Cards…"), root);
+    cardsButton->setObjectName("openCards");
+    cardLayout->addWidget(cardsButton);
+    // Internal: the RAM databases of every running machine, in the same Files… as a card.
+    internalHeading = new QLabel(tr("Internal"), root);
+    internalHeading->setObjectName("internalHeading");
+    cardLayout->addSpacing(12);
+    cardLayout->addWidget(internalHeading);
+    internalButton = button(tr("Files…"), "internalFiles", true);
+    cardLayout->addWidget(internalButton);
+    cardLayout->addStretch();
+    connect(internalButton, &QPushButton::clicked, this, &MainWindow::openInternal);
+    connect(cardsButton, &QPushButton::clicked, this, [this] { showCards(); });
     connect(cardReadOnly, &QCheckBox::clicked, this, [this](bool on) { send("ms-read-only", on ? "on" : "off"); });
 
-    section(tr("Device"));
-    auto* grid = new QGridLayout;
-    layout->addLayout(grid);
-    grid->setHorizontalSpacing(12);
-    auto label = [&](const QString& text, int row) {
+    danaControls = new DanaViewControls(root);
+    displayLayout->addWidget(danaControls);
+    connect(danaControls, &DanaViewControls::changed, this, [this] { danaView.choose(danaControls->values()); });
+    connect(&danaView, &DanaViewController::changed, this, [this] { danaControls->setValues(danaView.values()); refresh(); });
+    connect(&danaView, &DanaViewController::error, this, [this](const QString& message) { failure(message); });
+    danaView.save = [this](const frondDana::Preferences& view) {
+        auto prefs = runningPreferences;
+        prefs.danaView = view;
+        const auto error = frondSessions::writePreferences(sessionPath, prefs);
+        if (error.isEmpty()) runningPreferences = prefs;
+        return error;
+    };
+
+    auto* displayGrid = new QGridLayout;
+    displayLayout->addLayout(displayGrid);
+    auto* grid = new QGridLayout;  // the Connections panel
+    connectionsLayout->addLayout(grid);
+    for (auto* g : {displayGrid, grid}) g->setHorizontalSpacing(12);
+    auto label = [&](const QString& text, int row, QGridLayout* into = nullptr) {
         auto* l = new QLabel(text, root);
-        grid->addWidget(l, row, 0);
+        if (into) into->addWidget(l, row, 0);
         return l;
+    };
+    // The control with its port field below it, so both fit the panel's width.
+    auto stack = [](QWidget* control, QWidget* port) {
+        auto* v = new QVBoxLayout;
+        v->setContentsMargins(0, 0, 0, 0); v->setSpacing(4);
+        v->addWidget(control); v->addWidget(port);
+        return v;
     };
     // One row per device: label, control, and the port beside it. Readout rows hide while empty.
     soundToggle = new QCheckBox(tr("On"), root);
     soundToggle->setObjectName("sound");
-    label(tr("Sound"), 1); grid->addWidget(soundToggle, 1, 1, 1, 2);
+    label(tr("Sound"), 1, displayGrid); displayGrid->addWidget(soundToggle, 1, 1, 1, 2);
     microphoneToggle = new QCheckBox(tr("On"), root);
     microphoneToggle->setObjectName("microphone");
-    microphoneLabel = label(tr("Microphone"), 14); grid->addWidget(microphoneToggle, 14, 1, 1, 2);
-    microphoneState = new QLabel(root); grid->addWidget(microphoneState, 15, 1, 1, 2);
+    microphoneLabel = label(tr("Microphone"), 2, displayGrid); displayGrid->addWidget(microphoneToggle, 2, 1, 1, 2);
+    microphoneState = new QLabel(root); displayGrid->addWidget(microphoneState, 3, 1, 1, 2);
     connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
         send("microphone-mode", on ? "on" : "off");
     });
@@ -244,12 +356,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
     });
-    networkLabel = label(tr("Network"), 2); grid->addWidget(network, 2, 1, 1, 2);
+    networkLabel = label(tr("Network"), 2);
     keyboard = new QCheckBox(tr("Attached"),root);
     keyboard->setObjectName("keyboardAttached");
     keyboard->setToolTip(tr("Uses the Palm Universal Wireless Keyboard protocol. Install and enable its Palm OS driver first. Type in the Palm window; modifiers and key releases are sent to the driver."));
     connect(keyboard,&QCheckBox::clicked,this,[this](bool attached) { send("keyboard-attach",attached?"on":"off"); });
-    keyboardLabel = label(tr("Infrared keyboard"), 3); grid->addWidget(keyboard, 3, 1, 1, 2);
+    keyboardLabel = label(tr("Infrared keyboard"), 3);
     serial = new QComboBox(root);
     serial->setObjectName("serialMode");
     serial->addItem(tr("Off"), "off");
@@ -260,7 +372,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     serialPort->setRange(1, 65535);
     serialPort->setPrefix(tr("Port "));
     loadSerialSettings();
-    serialLabel = label(tr("Serial port"), 4); grid->addWidget(serial, 4, 1); grid->addWidget(serialPort, 4, 2);
+    serialLabel = label(tr("Serial port"), 4, grid); grid->addLayout(stack(serial, serialPort), 4, 1, 1, 2);
     serialState = new QLabel(root);
     serialState->setObjectName("serialState");
     serialState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -289,7 +401,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbPort->setRange(1, 65535);
     usbPort->setPrefix(tr("Port "));
     loadUsbSettings();
-    usbLabel = label(tr("USB HotSync"), 6); grid->addWidget(usb, 6, 1); grid->addWidget(usbPort, 6, 2);
+    usbLabel = label(tr("USB HotSync"), 6, grid); grid->addLayout(stack(usb, usbPort), 6, 1, 1, 2);
     usbState = new QLabel(root);
     usbState->setObjectName("usbState");
     usbState->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -310,64 +422,115 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     irda->addItem(tr("Off"),"off");
     irda->addItem(tr("Terminal (PTY)"),"pty");
     irda->addItem(tr("Wait for a peer"),"tcp");
-    irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Connections."));
+    irda->addItem(tr("Printer"),"printer");
+    irda->setToolTip(tr("Pick a connection to beam to another Frond. Pair them in File > Pairing."));
     irdaPort=new QSpinBox(root);irdaPort->setObjectName("irdaPort");
     irdaPort->setRange(1,65535);irdaPort->setPrefix(tr("Port "));loadIrdaSettings();
-    label(tr("Infrared beaming"), 8); grid->addWidget(irda, 8, 1); grid->addWidget(irdaPort, 8, 2);
+    label(tr("Infrared beaming"), 8, grid); grid->addLayout(stack(irda, irdaPort), 8, 1, 1, 2);
     irdaState=new QLabel(root);irdaState->setObjectName("irdaState");
     irdaState->setTextInteractionFlags(Qt::TextSelectableByMouse);grid->addWidget(irdaState, 9, 1, 1, 2);
     auto irdaChanged=[this] {
-        if(client.running()){if(client.available())send("irda-mode",irdaArgument());return;}
+        if(client.running()){
+            if (!leavePrinterOk()) { const QSignalBlocker blocked(irda); irda->setCurrentIndex(std::max(0, irda->findData("printer"))); return; }
+            if(client.available())send("irda-mode",irdaArgument());return;
+        }
         refresh();
     };
     connect(irda,qOverload<int>(&QComboBox::activated),this,irdaChanged);
     connect(irdaPort,&QSpinBox::editingFinished,this,[this,irdaChanged]{if(irda->currentData()=="tcp")irdaChanged();});
 
-    bluetooth = new QCheckBox(tr("On"), root);
-    bluetooth->setObjectName("bluetoothEnabled");
+    bluetooth = new QComboBox(root);
+    bluetooth->setObjectName("bluetoothMode");
+    bluetooth->addItem(tr("Off"), "off");
+    bluetooth->addItem(tr("This Frond"), "radio");
+    bluetooth->addItem(tr("Mobile phone"), "phone");
+    bluetooth->addItem(tr("Controller socket"), "socket");
     bluetoothSocket = new QLineEdit(root);
     bluetoothSocket->setObjectName("bluetoothSocket");
     bluetoothSocket->setPlaceholderText(tr("Absolute controller socket path"));
     loadBluetoothSettings();
-    bluetoothLabel = label(tr("Bluetooth"), 10); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 1, 1, 2);
+    bluetoothLabel = label(tr("Bluetooth"), 10, grid); grid->addWidget(bluetooth, 10, 1, 1, 2); grid->addWidget(bluetoothSocket, 11, 0, 1, 3);
     bluetoothState = new QLabel(root); bluetoothState->setObjectName("bluetoothState");
     bluetoothState->setWordWrap(true); bluetoothState->setTextInteractionFlags(Qt::TextSelectableByMouse);
     grid->addWidget(bluetoothState, 12, 1, 1, 2);
     grid->setColumnStretch(1, 1);
     grid->setColumnMinimumWidth(2, 110);
-    for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda)})
+    for (auto* c : {static_cast<QWidget*>(network), static_cast<QWidget*>(serial), static_cast<QWidget*>(usb), static_cast<QWidget*>(irda),
+                    static_cast<QWidget*>(bluetooth)})
         c->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     holdLabel = new QLabel(tr("Hold"), root);
     holdToggle = new QCheckBox(tr("On"), root);
     holdToggle->setObjectName("hold");
-    grid->addWidget(holdLabel, 13, 0);
-    grid->addWidget(holdToggle, 13, 1, 1, 2);
     connect(holdToggle, &QCheckBox::clicked, this, [this](bool on) {
         if (frondFirmware::profile(runningDevice).frontend.holdSupported && holdKnown)
             send("hold", on ? "on" : "off");
     });
     // 68k devices: LCD contrast, sent live and kept in the machine settings and the session.
-    contrastLabel = label(tr("Contrast"), 0);
+    contrastLabel = label(tr("Contrast"), 0, displayGrid);
     contrast = new QSlider(Qt::Horizontal, root);
     contrast->setObjectName("runningContrast");
     contrast->setRange(0, 100);
     contrast->setPageStep(10);
     contrast->setTracking(false);
-    grid->addWidget(contrast, 0, 1, 1, 2);
+    displayGrid->addWidget(contrast, 0, 1, 1, 2);
     runningButtons << contrast;
     connect(contrast, &QSlider::valueChanged, this, [this](int value) {
         if (client.available() && frondFirmware::runs68k(runningDevice) && value != runningPreferences.contrast)
-            send("display", "contrast=" + QString::number(value));
+            { contrastPending = true; send("display", "contrast=" + QString::number(value)); }
     });
+    // Settings the core changes while it runs. Each is kept in the machine settings first.
+    sizeLabel = label(tr("Size"), 3, displayGrid);
+    sizeSlider = new QSlider(Qt::Horizontal, root);
+    sizeSlider->setObjectName("runningSize");
+    sizeSlider->setRange(4, 8);
+    sizeSlider->setPageStep(1);
+    sizeSlider->setTracking(false);
+    displayGrid->addWidget(sizeSlider, 3, 1, 1, 2);
+    smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
+    smoothToggle->setObjectName("runningSmooth");
+    displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
+    keyboardShow = new QCheckBox(tr("Show keyboard"), root);
+    keyboardShow->setObjectName("runningShowKeyboard");
+    displayGrid->addWidget(keyboardShow, 5, 0, 1, 3);
+    jogLabel = label(tr("Jog controls"), 6, displayGrid);
+    jogBox = new QComboBox(root);
+    jogBox->setObjectName("runningJogControls");
+    jogBox->addItem(tr("Hidden"), int(frondSessions::JogControls::hidden));
+    jogBox->addItem(tr("Left of screen"), int(frondSessions::JogControls::screen));
+    jogBox->addItem(tr("Left of keyboard"), int(frondSessions::JogControls::keyboard));
+    displayGrid->addWidget(jogBox, 6, 1, 1, 2);
+    speedLabel = label(tr("Speed"), 7, displayGrid);
+    speedBox = new QComboBox(root);
+    speedBox->setObjectName("runningSpeed");
+    speedBox->addItem(tr("Original"), false);
+    speedBox->addItem(tr("Uncapped"), true);
+    displayGrid->addWidget(speedBox, 7, 1, 1, 2);
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
+    connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
+    connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
+    connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
+    connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
     auto* reset = button(tr("Reset"), "reset");
+    resetButton = reset;
     auto* rotate = button(tr("Rotate"), "rotate");
     rotateButton = rotate;
     // The connector's HotSync button: the IIIx cradle, the T|X and the E2.
     hotSyncButton = button(tr("HotSync"), "hotsync");
-    auto* deviceButtons = new QHBoxLayout;
-    deviceButtons->addWidget(reset); deviceButtons->addWidget(rotate); deviceButtons->addWidget(hotSyncButton);
-    deviceButtons->addStretch();
-    layout->addLayout(deviceButtons);
+    displayLayout->addWidget(rotate, 0, Qt::AlignLeft);
+    displayLayout->addStretch();
+    connectionsLayout->addWidget(hotSyncButton, 0, Qt::AlignLeft);
+    auto* pair = new QPushButton(tr("Pair with another Frond…"), root);
+    pair->setObjectName("pairWith");
+    connectionsLayout->addWidget(pair, 0, Qt::AlignLeft);
+    connectionsLayout->addStretch();
+    // The side panels have a fixed width: lists shrink to it and readouts wrap instead of running off the right.
+    for (auto* box : panels->findChildren<QComboBox*>()) {
+        box->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        box->setMinimumContentsLength(6);
+    }
+    for (auto* readout : {microphoneState, serialState, usbState, irdaState, danaPending}) readout->setWordWrap(true);
+    connect(pair, &QPushButton::clicked, this, &MainWindow::showConnections);
     connect(hotSyncButton, &QPushButton::clicked, this, [this] { send("hotsync"); });
     connect(reset, &QPushButton::clicked, this, [this] {
         if (QMessageBox::question(this, tr("Reset"), tr("Reset the %1 now?").arg(deviceLabel())) == QMessageBox::Yes) send("reset");
@@ -386,15 +549,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         send(enabled ? "audio-on" : "audio-off");
     });
 
-    // Pinned under the scroll area, shown while a Palm runs.
-    sessionBar = new QWidget(this);
-    auto* sessionButtons = new QHBoxLayout(sessionBar);
     auto* saveButton = button(tr("Save"), "save");
     auto* copyButton = button(tr("Save a copy…"), "saveCopy");
     auto* logButton = button(tr("Emulator log"), "emulatorLog", true);
     auto* hardReset = button(tr("Hard reset"), "hardReset");
-    for (auto* b : {saveButton, copyButton, logButton, hardReset}) { b->setParent(sessionBar); sessionButtons->addWidget(b); }
-    connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
+    this->saveButton = saveButton; saveCopyButton = copyButton; this->logButton = logButton; hardResetButton = hardReset;
+        connect(saveButton, &QPushButton::clicked, this, [this] { save(); });
     connect(hardReset, &QPushButton::clicked, this, [this] {
         QMessageBox box(QMessageBox::Warning, tr("Hard reset"), tr("Erase everything on the %1?").arg(deviceLabel()),
                         QMessageBox::NoButton, this);
@@ -410,42 +570,54 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
     });
     connect(copyButton, &QPushButton::clicked, this, [this] { save(true); });
-    auto* saveShortcut = new QShortcut(QKeySequence::Save, this);
-    connect(saveShortcut, &QShortcut::activated, this, [this] {
-        if (runningPage->isVisible() && client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None) save();
-    });
     auto* logDialog = new QDialog(this);
     logDialog->setWindowTitle(tr("Emulator log")); logDialog->resize(700, 400);
     auto* logLayout = new QVBoxLayout(logDialog);
-    log = new QPlainTextEdit(logDialog); log->setReadOnly(true); log->setMaximumBlockCount(1000);
+    log = new QPlainTextEdit(logDialog); log->setObjectName("logText"); log->setReadOnly(true); log->setMaximumBlockCount(1000);
     logLayout->addWidget(log);
     connect(logButton, &QPushButton::clicked, logDialog, &QWidget::show);
+    // This Frond and connections: the hub listens for the core first, then the core is pointed at it.
     auto bluetoothChanged = [this] {
-        if (client.running()) { if (client.available()) send("bluetooth-mode", bluetoothArgument()); return; }
+        if (!client.running()) { refresh(); return; }
+        if (!bluetoothViaHub()) {
+            const auto argument = bluetoothArgument();
+            if (argument == bluetoothCore) { attachBluetooth(); return; }
+            if (client.available() && send("bluetooth-mode", argument)) bluetoothSent = argument;
+            return;
+        }
+        attachBluetooth();
+        if (bluetoothCore == bluetoothArgument()) {
+            bluetoothCoreChoice = runningPreferences.bluetooth = bluetoothChoice();
+            savePeripherals();
+        } else applyBluetoothLink();
         refresh();
     };
-    connect(bluetooth, &QCheckBox::clicked, this, bluetoothChanged);
-    connect(bluetoothSocket, &QLineEdit::editingFinished, this, bluetoothChanged);
+    connect(bluetooth, qOverload<int>(&QComboBox::activated), this, bluetoothChanged);
+    connect(bluetoothSocket, &QLineEdit::editingFinished, this, [this, bluetoothChanged] {
+        if (bluetooth->currentData() == "socket") bluetoothChanged();
+    });
 
-    stopButton = new QPushButton(tr("Save and Stop"), sessionBar);
+    stopButton = new QPushButton(tr("Save and Stop"), root);
     stopButton->setObjectName("stop");
-    forceButton = new QPushButton(tr("Force Stop…"), sessionBar);
+    forceButton = new QPushButton(tr("Force Stop…"), root);
     forceButton->setObjectName("forceStop");
     forceButton->hide();
-    sessionButtons->addStretch(); sessionButtons->addWidget(forceButton); sessionButtons->addWidget(stopButton);
-    layout->addStretch();
-    auto* scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setWidget(outer);
-    auto* central = new QWidget(this);
-    auto* centralLayout = new QVBoxLayout(central);
-    centralLayout->setContentsMargins(0, 0, 0, 0);
-    centralLayout->addWidget(scroll, 1);
-    centralLayout->addWidget(sessionBar);
-    sessionBar->hide();
-    setCentralWidget(central);
+    setCentralWidget(outer);
+    setAcceptDrops(true);
+    connect(panels, &PanelHost::aboutToChange, this, [this](int page) {
+        if (embedded && page >= 0 && !panelWasOpen && !isMaximized() && !isFullScreen()) baseWidth = width();
+    });
+    connect(panels, &PanelHost::changed, this, &MainWindow::panelChanged);
+    // The same keys the Palm window sends back as shortcut events; Quit is the File menu's.
+    for (const auto& key : runningRules::shortcutKeys()) {
+        if (key.what == runningRules::Shortcut::Quit) continue;
+        auto* shortcut = new QShortcut(QKeySequence(QString::fromLatin1(key.keys)), this);
+        connect(shortcut, &QShortcut::activated, this, [this, what = key.what] { runShortcut(what); });
+    }
+    connect(&client, &DesktopClient::shortcut, this, [this](const QString& name) {
+        // A dialog in front owns the keys.
+        if (const auto what = runningRules::shortcutFor(name); what && !QApplication::activeModalWidget()) runShortcut(*what);
+    });
     connect(stopButton, &QPushButton::clicked, this, [this] { stop(false); });
     connect(forceButton, &QPushButton::clicked, this, [this] {
         if (QMessageBox::warning(this, tr("Force Stop"), tr("Stop without saving? Changes since the last save will be lost."),
@@ -453,16 +625,25 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             allowClose = closeAfterStop; client.forceStop();
         }
     });
+    runningBar = new RunningBar(this);
+    addToolBar(Qt::TopToolBarArea, runningBar);
+    runningBar->installEventFilter(this);
+    connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
+    connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
+    connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
+        if (const auto index = network->findData(mode); index >= 0 && network->isEnabled()) { network->setCurrentIndex(index); emit network->activated(index); }
+    });
     auto* file = menuBar()->addMenu(tr("&File"));
     importAction = file->addAction(tr("&Import session…"), this, &MainWindow::importSessionDialog);
     importAction->setShortcut(QKeySequence::Open);
     file->addAction(tr("C&ards…"), this, [this] { showCards(); })->setObjectName("cardsAction");
-    file->addAction(tr("&Connections…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
+    file->addAction(tr("&Pairing…"), this, &MainWindow::showConnections)->setObjectName("connectionsAction");
     file->addAction(tr("&Firmware…"), this, [this] { showFirmware(); });
     file->addAction(tr("&Settings…"), this, [this] { settingsDialog->exec(); });
     file->addSeparator();
     file->addAction(tr("&Quit"), QKeySequence::Quit, this, &QWidget::close);
     auto* help = menuBar()->addMenu(tr("&Help"));
+    helpMenu = help;
     help->addAction(tr("Hardware &Keyboard Controls"), this, [this] {
         QMessageBox::information(this, tr("Hardware Keyboard Controls"),
             tr("With the Palm window focused and the infrared keyboard detached:\n\n"
@@ -472,6 +653,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
+               "Shortcuts, in the Palm window and in this one:\n"
+               "Ctrl+S: Save. Ctrl+Shift+S: Save a copy. Ctrl+W: Save and Stop. Ctrl+I: Install.\n"
+               "Ctrl+1 to Ctrl+4: Applications, Card, Display and Connections panels.\n"
+               "Ctrl+M: Sound on or off. Ctrl+B: Hide or show the bar. Ctrl+L: Emulator log. Ctrl+R: Reset.\n"
+               "F12: Screenshot. Ctrl+Q: Quit.\n"
+               "With the infrared keyboard attached, the Ctrl keys go to the Palm and only F12 is a shortcut.\n\n"
                "Palm OS button assignments may change what the application buttons do."));
     });
     help->addAction(tr("&About Frond"), this, [this] {
@@ -498,22 +685,25 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         failure(message, lines.mid(qMax(0, int(lines.size()) - 40)).join('\n'));
     });
     connect(&client, &DesktopClient::stalled, this, [this] {
-        forceButton->show(); statusBar()->showMessage(tr("The emulator is not responding. Waiting for it to finish…"));
+        forceButton->show(); runningBar->setForceStop(true); notify(tr("The emulator is not responding. Waiting for it to finish…"), 0);
     });
     connect(&client, &DesktopClient::started, this, [this] {
         microphoneArmed = false; microphoneState->clear();
         busy = false; hardResetAfterSave = false;
         frondSessions::touchWork(sessionPath);
-        statusBar()->showMessage(tr("Running. Your session will be saved when you close Frond.")); refresh();
+        notify(tr("Running. Your session will be saved when you close Frond.")); refresh();
         if (stopping) save();
         else send("device-state");
     });
     connect(&client, &DesktopClient::finished, this, [this] {
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
-        if (memoryStickFiles) memoryStickFiles->reject();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = false;
+        palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
+        appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
+        if (internalFiles) internalFiles->close();
+        internalJob = {}; internalListWanted = false;
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false; runningDevice = frondFirmware::Device::tx;
@@ -524,9 +714,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (const auto error = frondCards::releaseAtClose(sessionFolder(), frondSessions::machineDirOf(sessionPath)); !error.isEmpty())
                 log->appendPlainText(error);
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
-        sdKnown = protectionKnown = false; showSerial({}); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); refreshSessions();
+        sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
+        refresh();
         if (closeAfterStop) { allowClose = true; close(); }
-        else statusBar()->showMessage(tr("Stopped."));
+        else notify(tr("Stopped."));
     });
     connect(&client, &DesktopClient::closeRequested, this, [this] { stop(false); });
     connect(&client, &DesktopClient::microphoneState, this, [this](const QString& state) {
@@ -538,9 +729,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
+    // A Bluetooth switch waiting for the core to be free goes once the current request is done.
+    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] { applyBluetoothLink(); }); });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
+        else if (type == "serial") showSerialLink(m);
+        else if (type == "bt") showBluetoothLink(m);
         else if (type == "state") refreshIrdaChoices();
     });
     storeWatcher = new QFileSystemWatcher(this);
@@ -555,14 +750,109 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress && total > 0) cardProgress->setValue(int(done * 1000 / total));
     });
     connect(&client, &DesktopClient::result, this, [this](const QString& command, bool ok, const QString& code, const QString& message) {
+        if (client.property("danaCardRequest").toString()==command) return;
+        if (command == "dana-view" || command == "dana-view-state") {
+            forceButton->hide(); refresh();
+            if (stopping && exchangeStage == ExchangeStage::None) save();
+            return;
+        }
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        busy = false; forceButton->hide(); refresh();
+        busy = false; forceButton->hide(); runningBar->setForceStop(false); refresh();
+        QTimer::singleShot(0, this, [this] {
+            if (internalListWanted) listInternal();
+            if (appsStale) listApps();
+        });
+        if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "wifi-module-state") {
+            if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
+            return;
+        }
+        // At start the machine's USB port choice goes to the core, then the panel shows what the core has.
+        if (usbPortStart && (command == "usb-port" || command == "usb-port-state")) {
+            if (stopping) { usbPortStart = usbPortResync = false; save(); return; }
+            if (command == "usb-port") {
+                if (!ok) failure(message);
+                usbPortResync = true;
+                if (send("usb-port-state")) return;
+                usbPortResync = false;
+            } else usbPortReply(false, message);
+            usbPortStart = false;
+            notify(tr("Running. Sessions save automatically on close."));
+            return;
+        }
+        if (command == "usb-port-state" || (command == "usb-port" && ok)) {
+            usbPortReply(command == "usb-port", message);
+            if (stopping && command == "usb-port") save();
+            return;
+        }
+        if (command == "usb-port") {
+            // The core keeps what it had; ask it which that is.
+            if (stopping) { save(); return; }
+            failure(message);
+            usbPortResync = true;
+            send("usb-port-state");
+            return;
+        }
+        if (command == "irprinter") {
+            printerResult(irPrint, ok, message);
+            if (stopping) save();
+            return;
+        }
+        if (command == "printer") {
+            const bool chain = printerResult(usbPrint, ok, message);
+            if (stopping) { save(); return; }
+            if (chain) {
+                // A failed attach has already asked for the state.
+                usbPortStart = true;
+                if (usbPortResync) return;
+                usbPortResync = true;
+                if (send("usb-port-state")) return;
+                usbPortStart = usbPortResync = false;
+                notify(tr("Running. Sessions save automatically on close."));
+            }
+            else if (!busy) notify(QString());
+            return;
+        }
+        if (command == "window-id") {
+            embedReply(ok, message);
+            // The core started fitted for the embedding; on its own it goes back to following the
+            // Palm's size (Rotate, keyboard, jog). frond-68k can't change that live and has no rotation.
+            if (!embedded && !stopping && !frondFirmware::runs68k(runningDevice) && send("display", "fit=none")) {
+                fitOffPending = true;
+                return;
+            }
+            if (stopping) save();
+            else afterDevice();
+            return;
+        }
+        if (command == "display" && fitOffPending) {
+            fitOffPending = false;
+            if (!ok) log->appendPlainText(command + ": " + message);
+            if (stopping) save();
+            else afterDevice();
+            return;
+        }
+        if (deleteApp.active && !stopping && command == "delete-db") { deleteReply(ok, message); return; }
+        if (command == "input-replay") {
+            replayFiles.reset();
+            const bool rearm = ok && replayMicrophone;
+            replayMicrophone = false;
+            if (ok) {
+                if (replayKind == "screenshot") notify(tr("Screenshot saved: %1").arg(replayShot));
+                if (rearm) send("microphone-mode", "on");
+                return;
+            }
+        }
+        if (command == "install") appsStale = true;
+        if (internalJob.active && !stopping && (command == "install" || command == "export-db" || command == "delete-db")) {
+            internalReply(ok, message);
+            return;
+        }
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
-        if (memoryStickFiles && QStringList({"ms-files", "ms-get", "ms-put", "ms-mkdir", "ms-delete", "ms-rename"}).contains(command)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
         if (!ok) {
-            if (code == "cancelled" && !stopping) { statusBar()->showMessage(tr("Cancelled.")); return; }
+            if (code == "cancelled" && !stopping) { notify(tr("Cancelled.")); return; }
             if (command == "save") { copyLock.reset(); pendingCopy.clear(); frondSessions::removeStaging(copyStaging); copyStaging.clear(); }
             hardResetAfterSave = false;
             log->appendPlainText(command + ": " + message);
@@ -571,10 +861,24 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "ms-type") msExportPending = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
-            if (command == "serial-mode") showSerial("off " + message);  // the core is now off
+            // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
+            // picker and the hub's attach follow it.
+            if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
             if (command == "usb-mode") showUsb("off " + message);
-            if(command=="irda-mode")showIrda("off error: "+message);
-            if (command == "display") { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
+            if (command == "irda-mode") {
+                if (runningPreferences.infrared == "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
+                showIrda("off error: " + message); attachInfrared();
+            }
+            if (command == "bluetooth-mode") {
+                bluetoothSent.clear();
+                const QSignalBlocker blocked(bluetooth);
+                frondLink::addConnectionChoices(bluetooth, bluetoothCoreChoice, false);
+                bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(bluetoothCoreChoice.startsWith("socket:") ? QString("socket") : bluetoothCoreChoice)));
+                if (bluetoothCoreChoice.startsWith("socket:")) bluetoothSocket->setText(bluetoothCoreChoice.mid(7));
+                attachBluetooth();
+            }
+            if (command == "display" && contrastPending) { const QSignalBlocker blocked(contrast); contrast->setValue(runningPreferences.contrast); }
+            if (command == "display") { contrastPending = false; liveDisplay({}); }
             if (stopping) {
                 if (command == "save" && savingPath == sessionPath) askStop(message);
                 else save();
@@ -583,6 +887,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (code == "not-ready" && (command == "export" || command == "export-db" || command == "install" || command == "launch-app"))
                 failure(message + tr("\n\nWait for Palm OS to finish its current activity, then try again."));
             else failure(message);
+            if (command == "network-mode" && moduleStartPending) { moduleStartPending = false; send("network-state"); return; }
             if (command == "hold" && !stopping) send("hold-state");
             if (command == "ms-read-only" && !stopping) send("ms-protection");
             return;
@@ -598,8 +903,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "device-state") {
             showDevice(message);
             if (stopping) save();
-            else send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
-                storageSupported() ? cardCommand("state") : "network-state");
+            else if (embedWanted && !embedTried) { embedTried = true; send("window-id"); }
+            else afterDevice();
             return;
         }
         if (command == "hold-state") {
@@ -646,26 +951,33 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
         }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
-        if (command == "display") {
+        if (command == "display" && contrastPending) {
+            contrastPending = false;
             runningPreferences.contrast = contrast->value();
             runningPreferences.contrastSet = true;
             if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
         }
-        if (command == "serial-mode") { runningPreferences.serial = serialArgument(); savePeripherals(); }
+        if (command == "serial-mode") { runningPreferences.serial = serialChoice(); savePeripherals(); attachSerial(); }
         if (command == "serial-state" || command == "serial-mode") showSerial(message);
         if (command == "usb-mode") { runningPreferences.usb = usbArgument(); savePeripherals(); }
         if (command == "usb-state" || command == "usb-mode") showUsb(message);
-        if (command == "irda-mode") { runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared(); }
+        if (command == "irda-mode") {
+            if (runningPreferences.infrared == "printer" && irdaChoice() != "printer") { printerClearHeld(irPrint); irPrint.status = {}; }
+            runningPreferences.infrared = irdaChoice(); savePeripherals(); attachInfrared();
+        }
         if(command=="irda-state" || command=="irda-mode")showIrda(message);
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
-            showBluetooth(message);
             if(command=="bluetooth-mode") {
-                runningPreferences.bluetooth = bluetooth->isChecked() ? "socket:" + bluetoothSocket->text() : QStringLiteral("off");
+                bluetoothCore = bluetoothSent.isEmpty() ? bluetoothArgument() : bluetoothSent;
+                bluetoothSent.clear();
+                bluetoothCoreChoice = runningPreferences.bluetooth = bluetoothChoice();
                 savePeripherals();
+                attachBluetooth();
             }
+            showBluetooth(message);
         }
         refresh();
-        if (command == "network-state" && !stopping) { send("keyboard-state"); return; }
+        if (command == "network-state" && !stopping && !frondFirmware::isDana(runningDevice)) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
             frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
@@ -673,12 +985,35 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
+        // The Dana's USB port always gets the machine's choice, Off included, since a session brings the
+        // device it was saved with.
+        if ((command == "network-state" || (command == "network-mode" && moduleStartPending)) && !stopping) {
+            const auto caps = frondFirmware::capabilities(runningDevice);
+            // The Dana Wireless's radio first, as the machine had it.
+            if (caps.builtInWifi && !moduleStartSent) {
+                moduleStartSent = moduleStartPending = true;
+                if (send("network-mode", runningPreferences.wifiModule ? "wireless" : "disabled")) return;
+                moduleStartPending = false;
+            }
+            moduleStartPending = false;
+            const auto& port = runningPreferences.usbPort;
+            if (caps.usbPrinter && port == "printer") {
+                usbPrint.stage = PrinterStage::Chain;
+                if (send("printer", "attach on")) return;
+                usbPrint.stage = PrinterStage::None;
+            } else if (caps.usbPrinter || caps.usbWifi) {
+                usbPortStart = true;
+                if (send("usb-port", caps.usbWifi && port == "wifi" ? "wifi" : "off")) return;
+                usbPortStart = false;
+            }
+        }
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
-        statusBar()->showMessage(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
+        notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
             if (savedWorkingCopy) {
-                frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
+                // While Files has the card out, the slot keeps swap until it's back in.
+                if (exchangeStage == ExchangeStage::None) frondCards::clearSwap(frondSessions::machineDirOf(sessionPath));
                 if (stopping) finalSaved = true;
                 settings.setValue("lastSession", sessionPath); settings.sync();
                 QFile::remove(frondSessions::markerPath(sessionPath));
@@ -712,7 +1047,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
     frondCards::startUp(sessionFolder());
     refreshSessions();
-    statusBar()->showMessage(tr("Ready. Sessions are saved automatically when you close Frond."));
+    notify(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
         if (startupHandled) return;
         startupHandled = true;
@@ -722,9 +1057,37 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
 }
 void MainWindow::refresh() {
     const bool running = client.running();
+    danaControls->setVisible(running && frondFirmware::isDana(runningDevice));
+    danaControls->setEnabled(running && !stopping);
     home->setVisible(!running);
-    runningPage->setVisible(running);
-    sessionBar->setVisible(running);
+    runArea->setVisible(running);
+    palmHolder->setVisible(running && embedded);
+    barHandle->setVisible(running && !runningBar->barShown() && !fullScreenOn);
+    statusBar()->setVisible(!running);
+    if (running != machineMenuShown) {
+        machineMenuShown = running;
+        centralWidget()->layout()->setContentsMargins(running ? QMargins() : QMargins(9, 9, 9, 9));
+        if (running) {
+            menuBar()->insertMenu(helpMenu->menuAction(), runningBar->menu());
+            listGeometry = saveGeometry();
+            appsStale = true;
+        } else {
+            leaveFullScreen();
+            menuBar()->removeAction(runningBar->menu()->menuAction());
+            runningBar->setBarShown(true);
+            panels->open(-1);
+            // The panel's and the Palm's minimum sizes go with them once the layout settles.
+            panels->setMinimumWidth(0); panels->setMaximumWidth(QWIDGETSIZE_MAX);
+            if (layout()) layout()->activate();
+            centralWidget()->layout()->activate();
+            if (!listGeometry.isEmpty()) {
+                restoreGeometry(listGeometry);
+                QTimer::singleShot(0, this, [this, geometry = listGeometry] { if (!client.running()) restoreGeometry(geometry); });
+            }
+            listGeometry.clear();
+        }
+        if (running) fitWindow();
+    }
     for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState}) state->setVisible(!state->text().isEmpty());
     setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
     const auto* current = sessionList->currentItem();
@@ -732,12 +1095,21 @@ void MainWindow::refresh() {
     addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
+    const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
+    const bool dana = frondFirmware::isDana(currentDevice());
+    danaCards->setVisible(dana);
+    findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
+    printerPanel->setSupported(caps.usbPrinter, caps.usbWifi);
+    printerPanel->setModuleSupported(caps.builtInWifi);
+    printerPanel->setEnabled(running && !stopping);
+    irPrint.panel->setEnabled(running && !stopping);
+    danaCards->setEnabled(dana && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
-    note(network, caps.network, networkTip); note(keyboard, caps.keyboard, keyboardTip);
+    note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
     note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
-    note(irda, caps.infrared, caps.keyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
+    note(irda, caps.infrared, infraredKeyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
     microphoneToggle->setEnabled(enabled && caps.microphone);
@@ -750,15 +1122,31 @@ void MainWindow::refresh() {
     auto shown = [&](bool present, std::initializer_list<QWidget*> widgets) {
         for (auto* w : widgets) w->setVisible(present);
     };
+    {
+        const QSignalBlocker blocked(irda);
+        const auto mode = irda->currentData();
+        frondLink::setPhoneChoice(irda, caps.irPhone);
+        if (const int at = irda->findData(mode); at >= 0) irda->setCurrentIndex(at);
+    }
+    {
+        const QSignalBlocker blocked(serial);
+        const auto mode = serial->currentData();
+        frondLink::setModemChoice(serial, caps.modem);
+        if (const int at = serial->findData(mode); at >= 0) serial->setCurrentIndex(at);
+    }
     shown(!frondFirmware::serialAbsent(currentDevice()), {serialLabel, serial, serialPort});
     if (frondFirmware::serialAbsent(currentDevice())) serialState->setVisible(false);
     shown(!m68k || caps.network, {networkLabel, network});
-    shown(!m68k || caps.keyboard, {keyboardLabel, keyboard});
+    shown(!m68k || infraredKeyboard, {keyboardLabel, keyboard});
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(m68k, {contrastLabel, contrast});
+    shown(embedded, {sizeLabel, sizeSlider});
+    shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow, jogLabel, jogBox});
+    shown(m68k, {speedLabel, speedBox});
+    liveDisplay({});
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
     contrast->setEnabled(enabled);
@@ -771,22 +1159,27 @@ void MainWindow::refresh() {
     note(holdToggle, frontend.holdSupported, {});
     importAction->setEnabled(!running && !busy);
     network->setEnabled(enabled && caps.network);
-    keyboard->setEnabled(enabled && caps.keyboard && irda->currentData()=="off");
+    keyboard->setEnabled(enabled && infraredKeyboard && irda->currentData()=="off");
     const bool editable = !busy && !stopping && (!running || enabled);
     serial->setEnabled(editable && caps.serial);
-    serialPort->setEnabled(editable && caps.serial && serial->currentData() == "tcp");
+    serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
+    if (!frondFirmware::serialAbsent(currentDevice())) serialPort->setVisible(!serial->currentData().toString().startsWith("link:"));
     usb->setEnabled(editable && caps.usb);
-    usbPort->setEnabled(editable && caps.usb && usb->currentData() == "tcp");
+    usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
-    irdaPort->setEnabled(editable && caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp");
+    irdaPort->setEnabled(caps.infrared && !keyboard->isChecked() && irda->currentData()=="tcp"); irdaPort->setReadOnly(!editable);
     irdaPort->setVisible(!irda->currentData().toString().startsWith("link:"));
     bluetooth->setEnabled(editable && caps.bluetooth);
-    bluetoothSocket->setEnabled(editable && caps.bluetooth && bluetooth->isChecked());
-    bluetooth->setToolTip(caps.bluetooth ? tr("See doc/using-frond.md (Bluetooth) for controller setup.") : reason);
+    bluetoothSocket->setEnabled(caps.bluetooth && bluetooth->currentData() == "socket"); bluetoothSocket->setReadOnly(!editable);
+    if (!m68k || caps.bluetooth) bluetoothSocket->setVisible(bluetooth->currentData() == "socket");
+    bluetooth->setToolTip(caps.bluetooth ? QString() : reason);
     // Which card buttons show follows the card's state, as on Android.
     const bool memoryStick = this->memoryStick();
     const bool supported = storageSupported();
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
+    panels->setTitle(1, tr("Storage"));
+    internalButton->setEnabled(enabled && !internalFiles);
+    appsPanel->setEnabled(enabled);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -795,7 +1188,7 @@ void MainWindow::refresh() {
     // The picker button already says "No card" or the card's name, and Eject shows it's in.
     sdStatus->setVisible(!m68k && (!known || (cardPresent && !cardInserted)));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
-    sdExchange->setVisible(known && cardPresent && (!memoryStick || cardInserted));
+    sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
     sdExport->setVisible(known && cardPresent && !cardInserted);
     sdRetry->setVisible(!known || (memoryStick && cardPresent && !protectionKnown));
@@ -827,6 +1220,317 @@ void MainWindow::refresh() {
     }
     cardReadOnly->setVisible(memoryStick && supported && known && cardPresent);
     cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
+    runningRules::State state;
+    state.ready = enabled;
+    state.running = running;
+    if (holdKnown) state.hold = holdOn;
+    state.keyboardAttached = keyboard->isChecked();
+    state.beamOff = irda->currentData() == "off";
+    state.microphone = microphoneArmed ? "on" : microphoneState->text().isEmpty() ? "off" : "off " + microphoneState->text();
+    state.network = network->currentData().toString();
+    state.barShown = runningBar->barShown();
+    state.embedded = embedded;
+    state.fullScreen = fullScreenOn;
+    QList<QPair<QString, QString>> modes;
+    for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
+    const auto traits = runningRules::traitsFor(currentDevice());
+    runningBar->setMachine(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : QString(),
+                           runningRules::subtitle(traits, runningPreferences.fastEngine, frondFirmware::deviceName(currentDevice())));
+    runningBar->apply(traits, state, runningRules::cardIcon(supported, known, cardPresent, cardInserted),
+                      caps.sound && runningPreferences.audio, modes);
+    if (fullScreenOn) showOverlayBar(overlayBarShown);
+    else runningBar->setVisible(running && runningBar->barShown());
+}
+void MainWindow::notify(const QString& text, int ms) {
+    if (client.running()) runningBar->say(text, ms);
+    else statusBar()->showMessage(text);
+}
+void MainWindow::togglePanel(int page) { panels->open(panels->current() == page ? -1 : page); }
+void MainWindow::panelChanged(int page) {
+    runningBar->setOpenPanel(page);
+    if (fullScreenOn) {
+        placeOverlays();
+        if (page < 0 && overlayBarShown) overlayTimer->start();
+    }
+    if (page == 0) { appsStale = true; listApps(); }
+    setPanelOpen(page >= 0);
+}
+// Embedded, the panel opens at the right of the Palm and the window grows by its width. Without
+// the embedding the window is as wide as a panel needs and as tall as the bar and the open panel.
+void MainWindow::setPanelOpen(bool open) {
+    const bool changed = open != panelWasOpen;
+    panelWasOpen = open;
+    if (embedded) {
+        panels->setFixedWidth(runningRules::panelWidth);
+        // Showing the panel can already stretch the window to the layout's minimum, so opening
+        // starts from the width the window had without it.
+        if (changed && client.running() && !isMaximized() && !isFullScreen()) {
+            // The layout's minimum width drops with the panel; settle it before shrinking.
+            runArea->layout()->invalidate();
+            centralWidget()->layout()->invalidate();
+            if (layout()) { layout()->invalidate(); layout()->activate(); }
+            if (open) resize(runningRules::windowWidth(baseWidth, true), height());
+            else {
+                // The layout's minimum width settles after the panel is gone.
+                const int target = std::max(1, width() - runningRules::panelWidth);
+                QTimer::singleShot(0, this, [this, target] {
+                    if (client.running() && embedded && !panelWasOpen && !isMaximized() && !isFullScreen()) resize(target, height());
+                });
+            }
+        }
+        return;
+    }
+    fitWindow();
+}
+void MainWindow::fitWindow() {
+    if (!client.running() || isMaximized() || isFullScreen() || embedded) return;
+    panels->setMinimumHeight(panels->isVisibleTo(this) ? 420 : 0);
+    if (layout()) layout()->activate();
+    centralWidget()->layout()->activate();
+    resize(480, 1);
+    // The layout's minimum height settles after the panel is gone.
+    QTimer::singleShot(0, this, [this] { if (client.running() && !isMaximized() && !isFullScreen() && !embedded) resize(480, 1); });
+}
+// Full screen is only for the embedded Palm. The menu bar goes, the bar and an open panel float
+// over the Palm (native windows of the main window, so they stack above the embedded one) and the Palm fits the screen.
+void MainWindow::toggleFullScreen() {
+    if (fullScreenOn) leaveFullScreen();
+    else enterFullScreen();
+}
+void MainWindow::enterFullScreen() {
+    if (fullScreenOn || !client.running() || !embedded) return;
+    fullScreenOn = true;
+    fullScreenWasMaximized = isMaximized();
+    fullScreenReturnSize = QSize(panelWasOpen ? baseWidth : width(), height());
+    menuBar()->hide();
+    removeToolBar(runningBar);
+    for (QWidget* w : {static_cast<QWidget*>(runningBar), static_cast<QWidget*>(panels)}) {
+        w->setParent(this);
+        w->setAttribute(Qt::WA_NativeWindow);
+        w->setAutoFillBackground(true);
+    }
+    bodyLayout->removeWidget(panels);
+    barHandle->hide();
+    showFullScreen();
+    overlayBarShown = true;
+    panels->setVisible(panels->current() >= 0);
+    refresh();
+    placeOverlays();
+    overlayTimer->start();
+}
+void MainWindow::leaveFullScreen() {
+    if (!fullScreenOn) return;
+    // A panel left open would squeeze the Palm in the smaller window.
+    panels->open(-1);
+    fullScreenOn = false;
+    overlayTimer->stop();
+    edgeTimer->stop();
+    panels->setParent(runArea);
+    bodyLayout->addWidget(panels);
+    panels->setVisible(panels->current() >= 0);
+    addToolBar(Qt::TopToolBarArea, runningBar);
+    menuBar()->show();
+    if (fullScreenWasMaximized) showMaximized();
+    else {
+        // The window manager brings back the size from before full screen, which is wider by a
+        // panel when one was open then.
+        showNormal();
+        if (fullScreenReturnSize.width() > 0) resize(fullScreenReturnSize);
+    }
+    refresh();
+}
+void MainWindow::showOverlayBar(bool on) {
+    overlayBarShown = on;
+    runningBar->setVisible(on);
+    if (on) edgeTimer->stop();
+    else if (fullScreenOn) edgeTimer->start();
+    placeOverlays();
+}
+void MainWindow::placeOverlays() {
+    if (!fullScreenOn) return;
+    // Each is its own X window, so the raise goes to the window; the Palm's goes first.
+    const auto raise = [](QWidget* w) { if (w->windowHandle()) w->windowHandle()->raise(); else w->raise(); };
+    palmHolder->raisePalm();
+    const auto area = runArea->size();
+    const auto origin = runArea->mapTo(this, QPoint(0, 0));
+    runningBar->setGeometry(origin.x(), origin.y(), area.width(), runningBar->height());
+    if (panels->current() >= 0) {
+        panels->setGeometry(runningRules::overlayPanel(area, overlayBarShown ? runningBar->height() : 0).translated(origin));
+        raise(panels);
+    }
+    if (overlayBarShown) raise(runningBar);
+}
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (fullScreenOn) {
+        if (watched == runningBar && event->type() == QEvent::Enter) overlayTimer->stop();
+        else if (watched == runningBar && event->type() == QEvent::Leave) overlayTimer->start();
+        else if (watched == runArea && event->type() == QEvent::Resize) QTimer::singleShot(0, this, &MainWindow::placeOverlays);
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+// Shows or hides the bar, keeps the choice in the machine's settings and keeps the Palm's size.
+void MainWindow::setBarShown(bool shown) {
+    if (shown == runningBar->barShown()) return;
+    runningBar->setBarShown(shown);
+    barHandle->setVisible(client.running() && !shown);
+    runningPreferences.barShown = shown;
+    if (!sessionPath.isEmpty() && client.running())
+        if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+    if (embedded && !isMaximized() && !isFullScreen()) {
+        const int change = runningBar->height() - runningRules::handleHeight;
+        resize(width(), height() + (shown ? change : -change));
+    }
+    refresh();
+}
+// The window-id reply. An X11 id is wrapped and shown under the bar; anything else leaves the
+// core's own window and the bar-only window as they are.
+void MainWindow::embedReply(bool ok, const QString& message) {
+    const auto id = ok ? runningRules::parseWindowId(message) : 0;
+    embedded = id && palmHolder->embed(id);
+    if (!embedded) {
+        log->appendPlainText(!ok || !id ? tr("The Palm stays in its own window: %1").arg(message)
+                                        : tr("The Palm stays in its own window: window %1 couldn't be embedded.").arg(id));
+        // A hidden bar couldn't be brought back there; the saved choice stays for the next embedding.
+        runningBar->setBarShown(true);
+        refresh();
+        return;
+    }
+    panels->setMinimumHeight(0);
+    panels->setFixedWidth(runningRules::panelWidth);
+    palmHolder->show();
+    if (!isMaximized() && !isFullScreen()) {
+        if (layout()) layout()->activate();
+        centralWidget()->layout()->activate();
+        auto size = sizeHint().expandedTo(minimumSizeHint());
+        const auto* screen = windowHandle() ? windowHandle()->screen() : QGuiApplication::primaryScreen();
+        if (screen && !screen->availableGeometry().isEmpty()) size = size.boundedTo(screen->availableGeometry().size());
+        resize(size);
+    }
+    refresh();
+}
+// What follows the device name: the first state questions, in the order the window needs them.
+// A display setting changed in the panel: kept in the machine settings, then sent to the core. With
+// nothing named it only shows the settings in the controls.
+void MainWindow::liveDisplay(const QString& what) {
+    if (what.isEmpty() || !client.available()) {
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
+        sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
+        smoothToggle->setChecked(runningPreferences.smooth);
+        keyboardShow->setChecked(runningPreferences.showKeyboard);
+        jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
+        speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
+        return;
+    }
+    auto prefs = runningPreferences;
+    QString command = "display", argument;
+    const auto onOff = [](bool on) { return on ? QStringLiteral("on") : QStringLiteral("off"); };
+    if (what == "size") prefs.scale = sizeSlider->value();
+    else if (what == "smooth") { prefs.smooth = smoothToggle->isChecked(); argument = "smooth=" + onOff(prefs.smooth); }
+    else if (what == "keyboard") { prefs.showKeyboard = keyboardShow->isChecked(); argument = "keyboard=" + onOff(prefs.showKeyboard); }
+    else if (what == "jog") {
+        prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
+        argument = "jog=" + frondSessions::jogControlsName(prefs.jogControls);
+    } else if (what == "speed") {
+        prefs.uncapped = speedBox->currentData().toBool();
+        command = "speed"; argument = prefs.uncapped ? "uncapped" : "original";
+    }
+    if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { liveDisplay({}); return failure(error); }
+    const int oldScale = runningPreferences.scale;
+    runningPreferences = prefs;
+    if (what == "size") {
+        // The core follows the window, so the window is what changes size.
+        if (embedded && !isMaximized() && !isFullScreen() && oldScale != prefs.scale) {
+            const auto now = palmHolder->size(), next = runningRules::scaledPalm(now, oldScale, prefs.scale);
+            resize(width() + next.width() - now.width(), height() + next.height() - now.height());
+        }
+        sizeLabel->setText(tr("Size: %1×").arg(prefs.scale / 4.0));
+        return;
+    }
+    send(command, argument);
+}
+void MainWindow::afterDevice() {
+    send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
+         storageSupported() ? cardCommand("state") : "network-state");
+}
+void MainWindow::barChosen(runningRules::Id id) {
+    using runningRules::Id;
+    // Each row does what its control does, so the menu and the panels always agree.
+    switch (id) {
+        case Id::Hold: holdToggle->click(); break;
+        case Id::Keyboard: keyboard->click(); break;
+        case Id::Microphone: microphoneToggle->click(); break;
+        case Id::Display: panels->open(2); break;
+        case Id::Connections: panels->open(3); break;
+        case Id::Screenshot: screenshot(); break;
+        case Id::HideBar: setBarShown(!runningBar->barShown()); break;
+        case Id::Save: saveButton->click(); break;
+        case Id::SaveCopy: saveCopyButton->click(); break;
+        case Id::Log: logButton->click(); break;
+        case Id::Reset: resetButton->click(); break;
+        case Id::HardReset: hardResetButton->click(); break;
+        case Id::SaveStop: stopButton->click(); break;
+        case Id::FullScreen: toggleFullScreen(); break;
+        case Id::Network: break;
+    }
+}
+// Each key does what its bar button or menu row does; a control that is greyed out does nothing.
+void MainWindow::runShortcut(runningRules::Shortcut what) {
+    using runningRules::Shortcut;
+    if (what == Shortcut::Quit) { close(); return; }
+    if (!client.running()) return;
+    const bool idle = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
+    switch (what) {
+        case Shortcut::Save: if (idle) barChosen(runningRules::Id::Save); break;
+        case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
+        case Shortcut::SaveStop: stopButton->click(); break;
+        case Shortcut::Install: if (idle) emit appsPanel->installRequested(); break;
+        case Shortcut::Applications: togglePanel(0); break;
+        case Shortcut::Card: togglePanel(1); break;
+        case Shortcut::Display: togglePanel(2); break;
+        case Shortcut::Connections: togglePanel(3); break;
+        case Shortcut::Sound: soundToggle->click(); break;
+        case Shortcut::HideBar: if (embedded) barChosen(runningRules::Id::HideBar); break;
+        case Shortcut::Log: barChosen(runningRules::Id::Log); break;
+        case Shortcut::Reset: barChosen(runningRules::Id::Reset); break;
+        case Shortcut::Screenshot: screenshot(); break;
+        case Shortcut::FullScreen: toggleFullScreen(); break;
+        case Shortcut::Quit: break;
+    }
+}
+void MainWindow::barPressed(RunningBar::Button button) {
+    switch (button) {
+        case RunningBar::Button::Stop: stopButton->click(); break;
+        case RunningBar::Button::Applications: togglePanel(0); break;
+        case RunningBar::Button::Card: togglePanel(1); break;
+        case RunningBar::Button::Sound: soundToggle->click(); break;
+        case RunningBar::Button::Power: replay(runningRules::powerReplay(), "power"); break;
+        case RunningBar::Button::ForceStop: forceButton->click(); break;
+    }
+}
+// Writes the replay file and hands it to the core. The core drops the microphone for a replay,
+// so it is turned back on when the replay is loaded.
+bool MainWindow::replay(const QString& lines, const QString& kind) {
+    if (!client.available() || busy || stopping) return false;
+    replayFiles = std::make_unique<QTemporaryDir>();
+    QFile file(replayFiles->filePath("input.replay"));
+    if (!replayFiles->isValid() || !file.open(QIODevice::WriteOnly) || file.write(lines.toUtf8()) < 0) {
+        replayFiles.reset();
+        failure(tr("Couldn't write the input file."));
+        return false;
+    }
+    file.close();
+    replayMicrophone = microphoneArmed; replayKind = kind;
+    if (!send("input-replay", file.fileName())) { replayFiles.reset(); replayMicrophone = false; return false; }
+    return true;
+}
+void MainWindow::screenshot() {
+    const auto folder = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation) + "/Frond";
+    if (!QDir().mkpath(folder)) return failure(tr("Couldn't make the folder %1.").arg(folder));
+    const auto name = runningRules::screenshotName(QFileInfo(sessionPath).completeBaseName(),
+                                                   QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss"));
+    replayShot = name;
+    replay(runningRules::snapshotReplay(folder + "/" + name), "screenshot");
 }
 QString MainWindow::sessionFolder() const {
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sessions";
@@ -871,7 +1575,7 @@ void MainWindow::refreshSessions(const QString& select) {
     for (const auto& info : frondSessions::list(sessionFolder())) {
         if (!info.old && !QFileInfo::exists(frondSessions::preferencesPath(info.path))) {
             QLockFile lock(info.path + ".lock"); lock.setStaleLockTime(0);
-            if (lock.tryLock()) {
+            if (frondSessions::tryLockSession(lock, info.path)) {
                 frondSessions::Preferences prefs;
                 loadPreferences(info.path, frondFirmware::deviceFromId(info.device), &prefs);
             }
@@ -989,7 +1693,7 @@ void MainWindow::editSession(const QString& path) {
     const auto info = infoFor(path);
     if (info.old) return;
     QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    if (!frondSessions::tryLockSession(lock, path)) return failure(tr("This session is open in another Frond."));
     frondSessions::Preferences prefs;
     const auto device = frondFirmware::deviceFromId(info.device);
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
@@ -1082,9 +1786,22 @@ void MainWindow::exportSession(const QString& path) {
     const auto target = outputFile(tr("Export"), tr("Frond sessions (*.frond)"), info.name + ".frond");
     if (target.isEmpty()) return;
     if (!confirmReplace(frondSessions::exportDestDir(target))) return;
-    const auto error = frondSessions::exportFile(info, target);
+    // Copying and packing a T|X takes a couple of seconds, so it runs on a worker behind a progress
+    // dialog. The session's lock is held for it, so Cards greys its media as for a running machine;
+    // one locked already is running, and Cards greys it anyway.
+    QLockFile hold(info.path + ".lock");
+    hold.setStaleLockTime(0);
+    const bool held = frondSessions::tryLockSession(hold, info.path);
+    if (held && cardsWindow) cardsWindow->refresh();
+    const auto error = runCardJob(this, tr("Exporting %1…").arg(info.name), [&](const frondSessions::CopyProgress& progress) {
+        if (exportHook) exportHook();
+        return frondSessions::exportFile(info, target, progress);
+    });
+    if (held) hold.unlock();
+    if (cardsWindow) cardsWindow->refresh();
+    if (error == frondSessions::cancelledText()) return;
     if (!error.isEmpty()) failure(error);
-    else statusBar()->showMessage(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
+    else notify(tr("Session exported to %1.").arg(frondSessions::exportDestDir(target)));
 }
 void MainWindow::deleteSession(const QString& path) {
     const auto info = infoFor(path);
@@ -1114,7 +1831,11 @@ void MainWindow::deleteSession(const QString& path) {
 }
 QString MainWindow::importSession(const QString& path) {
     QString name;
-    const auto error = frondSessions::importFile(sessionFolder(), path, &name);
+    const auto folder = sessionFolder();
+    // A packed NAND is unpacked and checked on a worker behind a progress dialog.
+    const auto error = runCardJob(this, tr("Importing the session…"), [&](const frondSessions::CopyProgress& progress) {
+        return frondSessions::importFile(folder, path, &name, progress);
+    });
     if (error.isEmpty()) refreshSessions(frondSessions::filePath(sessionFolder(), name));
     return error;
 }
@@ -1123,8 +1844,9 @@ void MainWindow::importSessionDialog() {
     const auto path = QFileDialog::getOpenFileName(this, tr("Import session"), {}, tr("Frond sessions (*.frond *.session);;All files (*)"));
     if (path.isEmpty()) return;
     const auto error = importSession(path);
+    if (error == frondSessions::cancelledText()) return;
     if (!error.isEmpty()) failure(error);
-    else statusBar()->showMessage(tr("Session imported."));
+    else notify(tr("Session imported."));
 }
 void MainWindow::showFirmware(frondFirmware::Device device) {
     FirmwareDialog dialog(firmwareRoot(), device, this);
@@ -1153,7 +1875,7 @@ void MainWindow::addDevice() {
         return failure(tr("Could not create the session storage directory."));
     const auto path = frondSessions::filePath(sessionFolder(), name);
     QLockFile lock(path + ".lock"); lock.setStaleLockTime(0);
-    if (!lock.tryLock()) return failure(tr("This session is open in another Frond."));
+    if (!frondSessions::tryLockSession(lock, path)) return failure(tr("This session is open in another Frond."));
     if (const auto error = frondSessions::writePreferences(path, dialog.machineSettings->values()); !error.isEmpty()) {
         QFile::remove(frondSessions::markerPath(path));
         return failure(error);
@@ -1169,7 +1891,7 @@ void MainWindow::openSession(const QString& path, bool launchNow) {
     if (client.running()) return;
     if (!launchNow) {
         const auto error = importSession(QFileInfo(path).absoluteFilePath());
-        if (!error.isEmpty()) failure(error);
+        if (!error.isEmpty() && error != frondSessions::cancelledText()) failure(error);
         return;
     }
     if (!QDir().mkpath(sessionFolder())) return failure(tr("Could not create the session storage directory."));
@@ -1265,6 +1987,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         sessionLock.reset();
         return failure(tr("This working session is already open, or its lock file could not be created."));
     }
+    // A core left running by a Frond that stopped still holds the session while it saves.
+    if (frondSessions::coreRunning(sessionPath)) {
+        sessionLock.reset();
+        return failure(tr("The Palm that last ran this session is still saving it. Try again in a moment."));
+    }
     if (!QFileInfo::exists(frondSessions::preferencesPath(target)) && !arguments.isEmpty() &&
         frondSessions::readPreferences(arguments.first(), &runningPreferences)) {
         if (const auto error = frondSessions::writePreferences(target, runningPreferences); !error.isEmpty()) {
@@ -1275,13 +2002,27 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         sessionLock.reset(); return failure(error);
     }
     runningDevice = startDevice == frondFirmware::Device::automatic ? frondFirmware::Device::tx : startDevice;
+    const bool dana = frondFirmware::isDana(startDevice);
+    danaControls->setValues(runningPreferences.danaView);
+    danaView.configure(dana, runningPreferences.danaView, devicePixelRatioF());
+    if (dana) arguments << "--dana-view" << frondDana::argument(runningPreferences.danaView, devicePixelRatioF());
     loadSerialSettings(); loadUsbSettings(); loadIrdaSettings(); loadBluetoothSettings();
     if (caps.serial && serialArgument() != "off") arguments << "--serial" << serialArgument();
+    // A PTY for Modem Sync calls to the HotSync number, there whenever the modem is picked.
+    if (caps.modem) arguments << "--modem-sync" << "pty";
     if (caps.usb && usbArgument() != "off") arguments << "--usb" << usbArgument();
     if(caps.infrared && irdaArgument()!="off")arguments << "--irda" << irdaArgument();
-    if(caps.bluetooth && bluetooth->isChecked()) arguments << "--bluetooth" << bluetoothArgument();
+    // This Frond and connections start off: the hub listens first, then bluetooth-mode points the core at it.
+    bluetoothCore = caps.bluetooth && !bluetoothViaHub() ? bluetoothArgument() : QStringLiteral("off");
+    bluetoothCoreChoice = bluetoothCore == "off" ? QStringLiteral("off") : bluetoothChoice();
+    bluetoothSent.clear(); bluetoothListening = false; bluetoothAttach = {};
+    if (bluetoothCore != "off") arguments << "--bluetooth" << bluetoothCore;
+    bluetoothLinkText = caps.bluetooth && bluetoothChoice().startsWith("link:") && !frondLink::knownLink(bluetoothChoice())
+        ? tr("Bluetooth: Unknown connection") : QString();
     irdaLinkText = caps.infrared && irdaChoice().startsWith("link:") && !frondLink::knownLink(irdaChoice())
         ? tr("Infrared: Unknown connection") : QString();
+    serialLinkText = caps.serial && serialChoice().startsWith("link:") && !frondLink::knownLink(serialChoice())
+        ? tr("Serial: Unknown connection") : QString();
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
@@ -1292,11 +2033,20 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     }
     // frond-68k's scale is screen pixels per Palm pixel; its 160-pixel LCD takes twice the ARM value.
     arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
+    // The Palm's window follows Frond's window when it is embedded.
+    embedWanted = runningRules::embedPossible(QGuiApplication::platformName(), qEnvironmentVariableIsSet("FROND_TRY_EMBED"));
+    embedTried = embedded = false;
+    // fit, so the Palm takes the window's size at the quarter steps too; whole would floor 1.25x to 1x.
+    if (embedWanted) arguments << "--window-fit" << "fit";
+    runningBar->setBarShown(runningPreferences.barShown);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {
         if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
-    } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    } else {
+        if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+        if (runningPreferences.uncapped) arguments << "--mips" << "1000";
+    }
     {
         const QSignalBlocker blocked(contrast);
         contrast->setValue(runningPreferences.contrast);
@@ -1319,23 +2069,103 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
                                                                       [this](bool) { refresh(); });
         }
     }
+    // If Frond goes without stopping the Palm, the core saves the working session itself.
+    arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();
     stopping = closeAfterStop = allowClose = false;
     log->clear(); busy = true;
     const bool launched = client.start(coreFor(startDevice), arguments);
     if (!launched) { busy = false; sessionLock.reset(); }
-    else attachInfrared();
-    refresh(); statusBar()->showMessage(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
+    else { attachInfrared(); attachSerial(); attachBluetooth(); }
+    refresh(); notify(launched ? tr("Starting the Palm…") : tr("Could not start the Palm."));
 }
+QString MainWindow::bluetoothChoice() const {
+    const auto mode = bluetooth->currentData().toString();
+    return mode == "socket" ? "socket:" + bluetoothSocket->text() : mode;
+}
+bool MainWindow::bluetoothViaHub() const {
+    const auto choice = bluetoothChoice();
+    return choice == "radio" || choice == "phone" || (choice.startsWith("link:") && choice != "link:local" && frondLink::knownLink(choice));
+}
+// The core's endpoint: the socket path, or the hub's socket for this window.
 QString MainWindow::bluetoothArgument() const {
-    return bluetooth->isChecked() ? bluetoothSocket->text() : QStringLiteral("off");
+    const auto choice = bluetoothChoice();
+    if (choice.startsWith("socket:")) return choice.size() > 7 ? choice.mid(7) : QStringLiteral("off");
+    if (!bluetoothViaHub()) return QStringLiteral("off");
+    const auto path = frondLink::coreSocketPath("bt", QString::number(QCoreApplication::applicationPid()));
+    return path.isEmpty() ? QStringLiteral("off") : path;
 }
 void MainWindow::loadBluetoothSettings() {
     const auto& value = runningPreferences.bluetooth;
-    bluetooth->setChecked(value.startsWith("socket:"));
+    const QSignalBlocker blocked(bluetooth);
+    frondLink::addConnectionChoices(bluetooth, value, false);
+    bluetooth->setCurrentIndex(std::max(0, bluetooth->findData(value.startsWith("socket:") ? QString("socket") : value)));
     if (value.startsWith("socket:")) bluetoothSocket->setText(value.mid(7));
 }
 void MainWindow::showBluetooth(const QString& state) {
+    // Through the hub its status shows instead of the socket.
+    if (!state.isEmpty() && state != "off" && bluetoothViaHub() && bluetoothCore == bluetoothArgument()) {
+        bluetoothState->setText(bluetoothLinkText); refresh(); return;
+    }
     bluetoothState->setText(state.isEmpty() || state=="off" ? QString() : tr("Bluetooth: %1").arg(state));
+}
+void MainWindow::attachBluetooth() {
+    const bool wanted = client.running() && frondFirmware::capabilities(runningDevice).bluetooth && bluetoothViaHub() &&
+                        !bluetoothArgument().startsWith("off");
+    if (!wanted) {
+        link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false;
+        if (!bluetoothChoice().startsWith("link:")) bluetoothLinkText.clear();
+        return;
+    }
+    const auto choice = bluetoothChoice();
+    QJsonObject op{{"op", "bt-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+                         {"device", frondFirmware::deviceName(runningDevice)},
+                         {"link", choice == "radio" || choice == "phone" ? QStringLiteral("radio") : choice.mid(5)},
+                         {"socket", bluetoothArgument()}};
+    // The phone is a second device on this Frond's radio, which the hub runs beside it.
+    if (choice == "phone") op["phone"] = true;
+    if (op == bluetoothAttach) return;
+    bluetoothAttach = op;
+    bluetoothListening = false;
+    bluetoothLinkText = choice == "radio"   ? tr("Bluetooth: This Frond's radio")
+                        : choice == "phone" ? tr("Bluetooth: This Frond's radio, with the mobile phone")
+                                            : tr("Bluetooth: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    link.setSticky("bt", op);
+    if (bluetoothCore == bluetoothArgument()) bluetoothState->setText(bluetoothLinkText);
+    refresh();
+}
+// Points the core at the hub's socket once the hub listens there and the core is free.
+void MainWindow::applyBluetoothLink() {
+    if (!client.running() || stopping || !bluetoothViaHub() || !bluetoothListening || !bluetoothSent.isEmpty()) return;
+    const auto argument = bluetoothArgument();
+    if (argument == bluetoothCore || !client.available()) return;
+    if (send("bluetooth-mode", argument)) bluetoothSent = argument;
+}
+void MainWindow::showBluetoothLink(const QJsonObject& s) {
+    const auto peer = s.value("peer").toString(), state = s.value("state").toString();
+    QString text;
+    if (!s.value("listening").toBool()) text = tr("Bluetooth: couldn't make the controller socket");
+    else if (state == "radio" && bluetoothChoice() == "phone") {
+        // The phone's call: idle, dialling or online SPEED, once the phone has said.
+        const auto call = s.value("call").toString().split(' ');
+        text = call[0] == "online" && call.size() > 1 ? tr("Bluetooth: This Frond's radio, Mobile phone: online at %1").arg(call[1])
+               : call[0] == "dialling" ? tr("Bluetooth: This Frond's radio, Mobile phone: dialling")
+               : call[0] == "idle" ? tr("Bluetooth: This Frond's radio, Mobile phone: idle")
+                                    : tr("Bluetooth: This Frond's radio, with the mobile phone");
+    }
+    else if (state == "radio") text = tr("Bluetooth: This Frond's radio");
+    else if (state == "noradio") text = tr("Bluetooth: this Frond has no radio (btvirt is missing)");
+    else if (state == "nophone") text = tr("Bluetooth: this Frond has no mobile phone (bluetooth-phone is missing)");
+    else if (state == "here") text = tr("Bluetooth: this Frond's radio, with %1").arg(peer);
+    else if (state == "there") text = tr("Bluetooth: %1's radio").arg(peer);
+    else if (state == "notfound") text = tr("Bluetooth: %1 not found").arg(peer);
+    else if (state == "keychanged") text = tr("Bluetooth: %1 key changed, pair again").arg(peer);
+    else if (state == "forgotten") text = tr("Bluetooth: pair again with %1").arg(peer);
+    else if (state == "unknown") text = tr("Bluetooth: Unknown connection");
+    else text = tr("Bluetooth: connecting to %1").arg(peer);
+    bluetoothLinkText = text;
+    const bool listening = s.value("listening").toBool();
+    if (listening && !bluetoothListening) { bluetoothListening = true; applyBluetoothLink(); }
+    if (client.running() && bluetoothViaHub()) { bluetoothState->setText(text); refresh(); }
 }
 QString MainWindow::irdaChoice() const {
     return irda->currentData()=="tcp" ? "tcp:"+QString::number(irdaPort->value()) : irda->currentData().toString();
@@ -1348,18 +2178,31 @@ QString MainWindow::irdaArgument() const {
     const auto path = frondLink::coreSocketPath("ir", QString::number(QCoreApplication::applicationPid()));
     return path.isEmpty() ? QStringLiteral("off") : "unix:" + path;
 }
+// Leaving printer mode throws away output that is still held or arriving.
+bool MainWindow::leavePrinterOk() {
+    if (runningPreferences.infrared != "printer" || irdaChoice() == "printer") return true;
+    const auto& s = irPrint.status;
+    const bool unsaved = !irPrint.held.isEmpty() || (s.valid && (s.bytes > 0 || s.receiving > 0 || s.state == "receiving"));
+    if (!unsaved) return true;
+    return QMessageBox::question(this, tr("Discard the print?"),
+                                 tr("The infrared printer has output you haven't saved or printed. Changing the choice discards it."),
+                                 QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Discard;
+}
 void MainWindow::loadIrdaSettings() {
     const auto& value = runningPreferences.infrared;
     const QSignalBlocker blocked(irda);
+    frondLink::setPhoneChoice(irda, frondFirmware::capabilities(runningDevice).irPhone);
     frondLink::addConnectionChoices(irda, value);
     irda->setCurrentIndex(std::max(0, irda->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     irdaPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5030);
 }
 void MainWindow::refreshIrdaChoices() {
-    const auto current = irda->currentData().toString();
-    const QSignalBlocker blocked(irda);
-    frondLink::addConnectionChoices(irda, current);
-    irda->setCurrentIndex(std::max(0, irda->findData(current)));
+    for (auto* combo : {irda, serial, bluetooth}) {
+        const auto current = combo->currentData().toString();
+        const QSignalBlocker blocked(combo);
+        frondLink::addConnectionChoices(combo, current, combo != bluetooth);
+        combo->setCurrentIndex(std::max(0, combo->findData(current)));
+    }
 }
 void MainWindow::showIrda(const QString& state) {
     if(state.isEmpty()){irdaState->clear();return;}
@@ -1370,6 +2213,14 @@ void MainWindow::showIrda(const QString& state) {
     irda->setCurrentIndex(std::max(0,irda->findData(mode)));
     if(mode=="tcp"){
         const auto port=parts.value(1).section(':',-1).toInt();if(port>0)irdaPort->setValue(port);
+    }
+    if (mode == "printer") { irdaState->setText(tr("Printer: ready")); refresh(); return; }
+    if (mode == "phone") {
+        const auto phase = parts.value(1);
+        irdaState->setText(phase == "online" && parts.size() > 2 ? tr("Mobile phone: online at %1").arg(parts[2])
+                           : phase == "dialling" ? tr("Mobile phone: dialling")
+                           : phase == "linked" ? tr("Mobile phone: linked") : tr("Mobile phone: idle"));
+        refresh(); return;
     }
     irdaState->setText(state=="off"?QString():tr("Infrared: %1").arg(state));refresh();
 }
@@ -1409,15 +2260,56 @@ void MainWindow::showConnections() {
     connectionsWindow->activateWindow();
 }
 
-QString MainWindow::serialArgument() const {
+QString MainWindow::serialChoice() const {
     const auto mode = serial->currentData().toString();
     return mode == "tcp" ? "tcp:" + QString::number(serialPort->value()) : mode;
+}
+// A connection runs the core's serial port on a Unix socket the hub opens once the channel joins.
+QString MainWindow::serialArgument() const {
+    const auto choice = serialChoice();
+    if (!choice.startsWith("link:")) return choice;
+    if (!frondLink::knownLink(choice)) return QStringLiteral("off");
+    const auto path = frondLink::coreSocketPath("serial", QString::number(QCoreApplication::applicationPid()));
+    return path.isEmpty() ? QStringLiteral("off") : "unix:" + path;
+}
+void MainWindow::attachSerial() {
+    const auto choice = serialChoice();
+    const bool wanted = client.running() && frondFirmware::capabilities(runningDevice).serial &&
+                        frondLink::knownLink(choice) && serialArgument().startsWith("unix:");
+    if (!wanted) { link.setSticky("serial", {}); if (!choice.startsWith("link:")) serialLinkText.clear(); return; }
+    serialLinkText = tr("Serial: connecting to %1").arg(frondLink::connectionName(choice.mid(5)));
+    link.setSticky("serial", {{"op", "serial-attach"}, {"machine", QFileInfo(sessionPath).completeBaseName()},
+                              {"device", frondFirmware::deviceName(runningDevice)}, {"link", choice.mid(5)},
+                              {"socket", serialArgument().mid(5)}});
+    serialState->setText(serialLinkText);
+    refresh();
+}
+void MainWindow::showSerialLink(const QJsonObject& s) {
+    const auto peer = s.value("peer").toString(), state = s.value("state").toString(), far = s.value("far").toString();
+    const auto machine = s.value("machine").toString().isEmpty() ? s.value("device").toString() : s.value("machine").toString();
+    QString text;
+    if (state == "joined") text = far == "asleep" ? tr("Serial: %1, port closed").arg(peer) :
+                                  far == "paused" ? tr("Serial: %1, Palm paused").arg(peer) :
+                                  tr("Serial: %1, joined to %2").arg(peer, machine);
+    else if (state == "waiting") text = tr("Serial: waiting for a machine on %1").arg(peer);
+    else if (state == "busy") text = tr("Serial on %1 is in use by %2").arg(peer, s.value("busyBy").toString());
+    else if (state == "notfound") text = tr("Serial: %1 not found").arg(peer);
+    else if (state == "keychanged") text = tr("Serial: %1 key changed, pair again").arg(peer);
+    else if (state == "forgotten") text = tr("Serial: pair again with %1").arg(peer);
+    else if (state == "unknown") text = tr("Serial: Unknown connection");
+    else text = tr("Serial: connecting to %1").arg(peer);
+    serialLinkText = text;
+    if (client.running() && serial->currentData().toString().startsWith("link:")) { serialState->setText(text); refresh(); }
 }
 // Live readout of the core's serial-state reply: "off", "off <error>" or
 // "<pty|tcp> <endpoint> <connected|waiting>". Empty while no core is running.
 // While running, the mode and port follow what the core actually has open.
 void MainWindow::showSerial(const QString& state) {
     const auto parts = state.split(' ');
+    // On a connection the hub's status shows instead of the socket.
+    if (parts[0] == "unix" && serial->currentData().toString().startsWith("link:")) {
+        serialState->setText(serialLinkText); refresh(); return;
+    }
     if (!state.isEmpty()) {
         serial->setCurrentIndex(std::max(0, serial->findData(parts[0])));
         if (parts[0] == "tcp" && parts.size() > 1) {
@@ -1428,12 +2320,24 @@ void MainWindow::showSerial(const QString& state) {
     }
     if (state.isEmpty()) serialState->clear();
     else if (parts[0] == "off") serialState->setText(parts.size() > 1 ? tr("Serial: off, %1").arg(state.mid(4)) : QString());
+    else if (parts[0] == "modem" && parts.size() > 1) {
+        // "modem STATE [SPEED]; hotsync pty /dev/pts/N connected|waiting" with a HotSync link.
+        const auto modem = state.section("; ", 0, 0).split(' ');
+        const auto sync = state.section("; hotsync ", 1).split(' ');
+        auto text = modem.value(1) == "online" && modem.size() > 2 ? tr("Modem: online at %1").arg(modem[2])
+                    : modem.value(1) == "dialling" ? tr("Modem: dialling") : tr("Modem: idle");
+        if (sync.size() > 1) text = tr("%1, HotSync on %2").arg(text, sync[1]);
+        serialState->setText(text);
+    }
     else if (parts.size() == 3)
         serialState->setText(tr("Serial: %1, %2").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection")));
     else serialState->setText(tr("Serial: %1").arg(state));
 }
 void MainWindow::loadSerialSettings() {
     const auto& value = runningPreferences.serial;
+    const QSignalBlocker blocked(serial);
+    frondLink::setModemChoice(serial, frondFirmware::capabilities(runningDevice).modem);
+    frondLink::addConnectionChoices(serial, value);
     serial->setCurrentIndex(std::max(0, serial->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     serialPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5023);
 }
@@ -1464,6 +2368,159 @@ void MainWindow::loadUsbSettings() {
     const auto& value = runningPreferences.usb;
     usb->setCurrentIndex(std::max(0, usb->findData(value.startsWith("tcp:") ? QString("tcp") : value)));
     usbPort->setValue(value.startsWith("tcp:") ? value.mid(4).toInt() : 5024);
+    for (auto* source : {&usbPrint, &irPrint}) { source->held.clear(); source->status = {}; source->stage = PrinterStage::None; source->dir.reset(); }
+    irPrint.panel->hideReceived();
+    usbPortStart = usbPortResync = false;
+    printerPanel->setPort(runningPreferences.usbPort);
+    moduleStartSent = moduleStartPending = false;
+    printerPanel->setModuleOn(runningPreferences.wifiModule);
+    printerPanel->setModuleReadout({});
+    printerPanel->setReadout(false, 0);
+    printerPanel->hideReceived();
+}
+void MainWindow::printerPoll() {
+    if (!client.running() || stopping || busy || !client.available()) return;
+    const auto caps = frondFirmware::capabilities(runningDevice);
+    const auto port = printerPanel->port();
+    // One request at a time: every source that's wanted takes a turn of the poll, the Dana Wireless's
+    // module, the USB Wi-Fi adapter or printer and the IR printer.
+    enum class Poll { Module, UsbWifi, UsbPrinter, IrPrinter };
+    QList<Poll> wanted;
+    if (caps.builtInWifi && moduleStartSent) wanted << Poll::Module;
+    if (port == "wifi" && caps.usbWifi) wanted << Poll::UsbWifi;
+    if (port == "printer" && caps.usbPrinter) wanted << Poll::UsbPrinter;
+    if (runningPreferences.infrared == "printer" && caps.infrared) wanted << Poll::IrPrinter;
+    if (wanted.isEmpty()) return;
+    switch (wanted[pollTurn++ % unsigned(wanted.size())]) {
+        case Poll::Module: client.request("wifi-module-state"); break;
+        case Poll::UsbWifi: client.request("usb-port-state"); break;
+        case Poll::UsbPrinter: usbPrint.stage = PrinterStage::None; client.request("printer", "status"); break;
+        case Poll::IrPrinter: irPrint.stage = PrinterStage::None; client.request("irprinter", "status"); break;
+    }
+}
+// The reply to usb-port or usb-port-state. A switch has taken effect; a state reply updates the readout, and
+// after a failed switch also shows which port the core kept.
+void MainWindow::usbPortReply(bool switched, const QString& message) {
+    const auto state = frondPrint::parseUsbPort(message);
+    if (!state.valid) return;
+    if (usbPortResync) {
+        usbPortResync = false;
+        runningPreferences.usbPort = state.port;
+        printerPanel->setPort(state.port);
+        savePeripherals();
+    }
+    if (state.port == "wifi" && printerPanel->port() == "wifi") printerPanel->setLinkReadout(frondPrint::wifiReadout(state));
+    if (switched && !stopping) notify(tr("Running. Sessions save automatically on close."));
+}
+frond::PrintText MainWindow::printerText(const PrintSource& src) const {
+    return frond::renderPrintText(reinterpret_cast<const uint8_t*>(src.held.constData()), size_t(src.held.size()));
+}
+void MainWindow::printerShow(PrintSource& src) {
+    const qint64 total = src.held.size() + (src.status.valid ? src.status.bytes : 0);
+    if (&src == &irPrint) {
+        if (irdaChoice() == "printer")
+            irdaState->setText(total > 0 ? tr("Printer: %n byte(s) received", nullptr, int(total)) : tr("Printer: ready"));
+    } else if (src.panel->plugged()) src.panel->setReadout(src.status.attached, total);
+    // Say which printer a job came from only when the Dana has both.
+    const bool both = frondFirmware::capabilities(runningDevice).usbPrinter && irdaChoice() == "printer";
+    src.panel->setSource(!both ? QString() : &src == &irPrint ? tr("infrared printer") : tr("USB printer"));
+    if (src.held.isEmpty()) src.panel->hideReceived();
+    else src.panel->showReceived(src.held.size(), printerText(src).renderable);
+}
+// The held job also lives in src.dir/held.raw, which Save raw publishes from; it goes with the
+// held bytes, and with src.dir when the machine stops or the app exits.
+void MainWindow::printerClearHeld(PrintSource& src) {
+    src.held.clear();
+    if (src.dir) QFile::remove(src.dir->filePath("held.raw"));
+    printerShow(src);
+}
+// Takes the job out of the core into a private temp file, reads it and deletes the file.
+void MainWindow::printerCollect(PrintSource& src) {
+    if (!src.dir) src.dir = std::make_unique<QTemporaryDir>();
+    if (!src.dir->isValid()) { failure(tr("Couldn't make a folder for the print.")); return; }
+    src.stage = PrinterStage::Collect;
+    if (!send(src.command, "save " + src.dir->filePath("job.raw"))) src.stage = PrinterStage::None;
+}
+// Returns true when this was the reply that ends the start-up checks.
+bool MainWindow::printerResult(PrintSource& src, bool ok, const QString& message) {
+    const auto stage = std::exchange(src.stage, PrinterStage::None);
+    const auto status = frondPrint::parseStatus(message);
+    if (status.valid) src.status = status;
+    if (stage == PrinterStage::Collect) {
+        const auto path = src.dir ? src.dir->filePath("job.raw") : QString();
+        QByteArray bytes;
+        QFile file(path);
+        const bool read = ok && !path.isEmpty() && file.open(QIODevice::ReadOnly);
+        if (read) bytes = file.readAll();
+        file.close();
+        if (!path.isEmpty()) QFile::remove(path);
+        bool kept = read;
+        if (read) {
+            QFile held(src.dir->filePath("held.raw"));
+            kept = held.open(QIODevice::WriteOnly | QIODevice::Append) && held.write(bytes) == bytes.size();
+            if (kept) held.close();
+            else { held.close(); QFile::remove(held.fileName()); }
+        }
+        if (kept) src.held += bytes;
+        else if (read) failure(tr("The print couldn't be kept in the temporary folder."));
+        else {
+            const auto text = status.error.isEmpty() ? message : status.error;
+            failure(status.valid && (status.last == "rejected" || status.last == "uncertain")
+                        ? tr("The print couldn't be saved (%1): %2").arg(status.last, text)
+                        : tr("The print couldn't be saved: %1").arg(text));
+        }
+    } else if (stage == PrinterStage::Attach || stage == PrinterStage::Chain) {
+        if (!ok) {
+            failure(message);
+            usbPortResync = true;
+            send("usb-port-state");
+        }
+    } else if (!ok) {
+        if (stage == PrinterStage::Discard) failure(message);
+        return false;
+    }
+    printerShow(src);
+    if (stage == PrinterStage::None && !stopping && frondPrint::received(status)) printerCollect(src);
+    return stage == PrinterStage::Chain;
+}
+void MainWindow::printerSavePdf(PrintSource& src) {
+    const auto path = outputFile(tr("Save as PDF"), tr("PDF files (*.pdf)"), "Print.pdf");
+    if (path.isEmpty()) return;
+    QPrinter printer(QPrinter::HighResolution);
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setOutputFileName(path);
+    if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
+    printerClearHeld(src);
+    notify(tr("Saved %1.").arg(path));
+}
+void MainWindow::printerPrint(PrintSource& src) {
+    QPrinter printer(QPrinter::HighResolution);
+    QPrintDialog dialog(&printer, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't print.")); return; }
+    printerClearHeld(src);
+    notify(tr("Sent to the printer."));
+}
+void MainWindow::printerSaveRaw(PrintSource& src) {
+    // The dialog has already asked about replacing an existing file.
+    const auto path = QFileDialog::getSaveFileName(this, tr("Save raw file"), QDir::homePath() + "/Print.raw");
+    if (path.isEmpty()) return;
+    // QSaveFile writes a temporary file in the target folder and renames it over the target on
+    // commit, so a failed or interrupted save leaves no partial file.
+    QFile source(src.dir ? src.dir->filePath("held.raw") : QString());
+    QSaveFile file(path);
+    bool done = source.open(QIODevice::ReadOnly) && file.open(QIODevice::WriteOnly);
+    while (done && !source.atEnd()) {
+        const auto chunk = source.read(1 << 16);
+        done = !chunk.isEmpty() && file.write(chunk) == chunk.size();
+    }
+    if (!done || !file.commit()) {
+        file.cancelWriting();
+        failure(tr("Couldn't write %1.").arg(path));
+        return;
+    }
+    printerClearHeld(src);
+    notify(tr("Saved %1.").arg(path));
 }
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
@@ -1474,6 +2531,7 @@ QString MainWindow::outputFile(const QString& title, const QString& filter, cons
 }
 void MainWindow::save(bool saveAs) {
     if (!client.available()) return;
+    if (stopping && danaView.finishChanges()) return;
     if (!saveAs) {
         savingPath = sessionPath; send("save", sessionPath);
         return;
@@ -1484,6 +2542,15 @@ void MainWindow::save(bool saveAs) {
 }
 void MainWindow::saveCopyTo(const QString& path) {
     if (!client.available()) return;
+    if (frondFirmware::isDana(runningDevice)) {
+        for (const auto* slot : {"sd-state", "sd2-state"}) {
+            const auto result=DanaCardsDialog::requestWithClient(client,slot);
+            if (!result.ok) return failure(result.message);
+            const auto state=frondDanaCards::state(result.message);
+            if (!state.known) return failure(tr("Couldn't read both card slots."));
+            if (state.present) return failure(tr("Use Cards 1 and 2 to export a portable session folder with both cards."));
+        }
+    }
     const auto dest = frondSessions::exportDestDir(path);
     if (QFileInfo(dest).canonicalFilePath() == QFileInfo(frondSessions::machineDirOf(sessionPath)).canonicalFilePath() &&
         QFileInfo(dest).exists())
@@ -1492,7 +2559,7 @@ void MainWindow::saveCopyTo(const QString& path) {
     const auto name = QFileInfo(dest).fileName();
     const auto destFrond = dest + '/' + name + ".frond";
     copyLock = std::make_unique<QLockFile>(destFrond + ".lock"); copyLock->setStaleLockTime(0);
-    if (frondSessions::isMachineFolder(dest) && !copyLock->tryLock()) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
+    if (frondSessions::isMachineFolder(dest) && !frondSessions::tryLockSession(*copyLock, destFrond)) { copyLock.reset(); return failure(tr("This session is open in another Frond.")); }
     // The core saves the copy into a staging folder; the working session's files stay as they are.
     copyStaging = frondSessions::makeStaging(dest);
     if (copyStaging.isEmpty() || !QDir().mkdir(copyStaging + '/' + name)) {
@@ -1516,6 +2583,219 @@ bool MainWindow::confirmReplace(const QString& dest) {
     return QMessageBox::question(this, tr("Replace"), tr("Replace the session %1?").arg(QFileInfo(dest).fileName()),
                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) == QMessageBox::Yes;
 }
+// Asks the core for the RAM databases when the Applications panel is open and the core is free.
+void MainWindow::listApps() {
+    if (!appsStale || panels->current() != 0 || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
+    appsStale = false;
+    if (client.request("db-list")) { busy = true; refresh(); }
+}
+void MainWindow::databasesReply(bool ok, const QString& message) {
+    const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
+    if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
+    if (internalFiles) {
+        // A failed list keeps the last one and says why; it isn't asked for again until the next change.
+        internalFiles->setDatabases(ok ? all : knownDatabases);
+        if (!ok) internalFiles->note->setText(message);
+    }
+    // A list that can't be had (Palm OS still starting) is left as it was.
+    if (!ok) { log->appendPlainText("db-list: " + message); return; }
+    knownDatabases = all;
+    appsPanel->setDatabases(all);
+}
+void MainWindow::openInternal() {
+    if (!client.running()) return;
+    if (internalFiles) { internalFiles->raise(); internalFiles->activateWindow(); return; }
+    CardFilesWindow::Databases d;
+    d.list = [this] { internalListWanted = true; listInternal(); };
+    d.install = [this](const QStringList& files) {
+        QList<QPair<QString, QString>> commands;
+        for (const auto& f : files) commands << qMakePair(QStringLiteral("install"), f);
+        startInternal("install", commands);
+    };
+    d.exportTo = [this](const QStringList& names, const QString& folder) {
+        internalJob.temp = std::make_shared<QTemporaryDir>();
+        QList<QPair<QString, QString>> commands;
+        for (int i = 0; i < names.size(); ++i)
+            commands << qMakePair(QStringLiteral("export-db"), internalJob.temp->filePath(QString::number(i) + ".zip") + "\n" + names[i]);
+        startInternal("export", commands, folder);
+    };
+    d.remove = [this](const QStringList& names) {
+        QList<QPair<QString, QString>> commands;
+        for (const auto& n : names) commands << qMakePair(QStringLiteral("delete-db"), n);
+        startInternal("delete", commands);
+    };
+    internalFiles = new CardFilesWindow(std::move(d), tr("Internal"), this);
+    internalFiles->setObjectName("internalFilesWindow");
+    internalFiles->deleteOnClose = true;
+    connect(internalFiles, &QDialog::finished, this, [this] { refresh(); });
+    internalFiles->show();
+    refresh();
+    // The window asked for the list while it was being built, before internalFiles was set.
+    listInternal();
+}
+// Asks for db-list for the Internal window once the core is free.
+void MainWindow::listInternal() {
+    if (!internalListWanted || !internalFiles || !client.available() || busy || stopping || internalJob.active ||
+        exchangeStage != ExchangeStage::None || deleteApp.active || installTotal > 0)
+        return;
+    internalListWanted = false;
+    if (!send("db-list")) internalListWanted = true;
+}
+void MainWindow::startInternal(const QString& kind, const QList<QPair<QString, QString>>& commands, const QString& folder) {
+    if (!client.available() || busy || stopping || internalJob.active || exchangeStage != ExchangeStage::None || deleteApp.active ||
+        installTotal > 0) {
+        if (internalFiles) internalFiles->databasesDone(tr("Frond is busy. Try again in a moment."));
+        return;
+    }
+    const auto temp = internalJob.temp;
+    internalJob = {};
+    internalJob.active = true;
+    internalJob.kind = kind;
+    internalJob.folder = folder;
+    internalJob.queue = commands;
+    internalJob.temp = temp;
+    internalNext();
+}
+void MainWindow::internalNext() {
+    while (!internalJob.queue.isEmpty()) {
+        const auto [command, argument] = internalJob.queue.takeFirst();
+        internalJob.current = command == "install" ? QFileInfo(argument).fileName() : argument.section('\n', -1);
+        if (command == "export-db") internalJob.zips << argument.section('\n', 0, 0);
+        if (send(command, argument)) return;
+        if (command == "export-db") internalJob.zips.removeLast();
+        internalJob.failed << internalJob.current + ": " + tr("Couldn't send it to the emulator.");
+    }
+    internalDone();
+}
+void MainWindow::internalReply(bool ok, const QString& message) {
+    if (ok) internalJob.done++;
+    else {
+        internalJob.failed << internalJob.current + ": " + message;
+        if (internalJob.kind == "export") internalJob.zips.removeLast();
+    }
+    internalNext();
+}
+void MainWindow::internalDone() {
+    auto job = internalJob;
+    internalJob = {};
+    appsStale = true;
+    QString message;
+    if (job.kind == "export") {
+        int files = 0;
+        for (const auto& zip : job.zips) {
+            QString error;
+            const int n = frondCardFiles::unzipInto(zip, job.folder, &error);
+            if (n < 0) job.failed << error;
+            else files += n;
+        }
+        message = files == 1 ? tr("1 file copied") : tr("%1 files copied").arg(files);
+    } else if (job.kind == "install") {
+        message = tr("%1 added").arg(job.done);
+    } else {
+        message = job.done == 1 ? tr("1 deleted") : tr("%1 deleted").arg(job.done);
+    }
+    job.temp.reset();
+    if (!job.failed.isEmpty())
+        QMessageBox::warning(internalFiles ? static_cast<QWidget*>(internalFiles) : this,
+                             job.kind == "install" ? tr("Couldn't add the files") : job.kind == "export" ? tr("Couldn't copy to the folder")
+                                                                                                      : tr("Couldn't delete"),
+                             job.failed.join('\n'));
+    if (internalFiles) internalFiles->databasesDone(message);
+}
+// Deletes an application and the RAM databases with its creator. The application goes first: if
+// the core refuses it (ROM, running, open) nothing else is touched.
+void MainWindow::deleteApplication(const QString& name) {
+    if (!client.available() || busy || stopping || deleteApp.active) return;
+    if (QMessageBox::question(this, tr("Delete"), tr("Delete %1 and its data?").arg(name),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) return;
+    deleteApp = {};
+    deleteApp.active = deleteApp.lookup = true;
+    deleteApp.name = name;
+    if (!send("db-list")) deleteApp = {};
+}
+void MainWindow::deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all) {
+    if (!ok) { deleteApp = {}; failure(message); return; }
+    const runningRules::Database* app = nullptr;
+    for (const auto& d : all) if (d.name == deleteApp.name && d.application()) app = &d;
+    if (!app) { deleteApp = {}; appsStale = true; failure(tr("There is no application named \"%1\".").arg(deleteApp.name)); return; }
+    deleteApp.lookup = false;
+    deleteApp.queue << app->name;
+    for (const auto& d : runningRules::dataOf(all, *app)) deleteApp.queue << d.name;
+    deleteApp.first = true;
+    deleteNext();
+}
+void MainWindow::deleteNext() {
+    if (deleteApp.queue.isEmpty()) {
+        const auto name = deleteApp.name;
+        const auto failed = deleteApp.failed;
+        deleteApp = {};
+        appsStale = true;
+        if (failed.isEmpty()) notify(tr("Deleted %1.").arg(name));
+        else failure(tr("%1 was deleted, but its data was not all: %2").arg(name, failed.join("; ")));
+        return;
+    }
+    if (!send("delete-db", deleteApp.queue.takeFirst())) { deleteApp = {}; appsStale = true; }
+}
+void MainWindow::deleteReply(bool ok, const QString& message) {
+    if (!ok && deleteApp.first) {
+        deleteApp = {};
+        appsStale = true;
+        failure(message);
+        return;
+    }
+    if (!ok) deleteApp.failed << message;
+    deleteApp.first = false;
+    deleteNext();
+}
+void MainWindow::exportDatabase(const QString& name) {
+    const auto path = outputFile(tr("Export database"), tr("ZIP archives (*.zip)"), name + ".zip");
+    if (!path.isEmpty()) send("export-db", path + "\n" + name);
+}
+// Any RAM database by name: launch it or export it.
+void MainWindow::otherDatabase() {
+    QDialog dialog(this);
+    dialog.setObjectName("otherDialog");
+    dialog.setWindowTitle(tr("Other database"));
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(new QLabel(tr("Palm database name"), &dialog));
+    auto* name = new QComboBox(&dialog);
+    name->setObjectName("otherName");
+    name->setEditable(true);
+    for (const auto& d : knownDatabases) name->addItem(d.name);
+    name->setCurrentIndex(-1);
+    layout->addWidget(name);
+    auto* buttons = new QDialogButtonBox(&dialog);
+    auto* launchButton = buttons->addButton(tr("Launch"), QDialogButtonBox::AcceptRole);
+    auto* exportButton = buttons->addButton(tr("Export…"), QDialogButtonBox::ActionRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    launchButton->setObjectName("otherLaunch");
+    exportButton->setObjectName("otherExport");
+    QAbstractButton* chosen = nullptr;
+    connect(buttons, &QDialogButtonBox::clicked, &dialog, [&](QAbstractButton* b) { chosen = b; if (b != buttons->button(QDialogButtonBox::Cancel)) dialog.accept(); else dialog.reject(); });
+    if (dialog.exec() != QDialog::Accepted || name->currentText().trimmed().isEmpty()) return;
+    const auto value = name->currentText().trimmed();
+    if (chosen == launchButton) send("launch-app", value);
+    else exportDatabase(value);
+}
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (client.running() && !installPaths(event->mimeData()).isEmpty()) event->acceptProposedAction();
+}
+void MainWindow::dropEvent(QDropEvent* event) {
+    const auto paths = installPaths(event->mimeData());
+    if (!client.running() || paths.isEmpty()) return;
+    event->acceptProposedAction();
+    installFiles(paths);
+}
+QStringList MainWindow::installPaths(const QMimeData* data) const {
+    QStringList out;
+    for (const auto& url : data->urls()) {
+        const auto path = url.toLocalFile();
+        const auto suffix = QFileInfo(path).suffix().toLower();
+        if (suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
+    }
+    return out;
+}
 void MainWindow::installFiles(const QStringList& paths) {
     if (paths.isEmpty() || busy || installTotal > 0) return;
     if (paths.size() == 1) { send("install", QFileInfo(paths.first()).absoluteFilePath()); return; }
@@ -1531,7 +2811,7 @@ bool MainWindow::installNext() {
     installCurrent = installQueue.takeFirst();
     const int number = installTotal - installQueue.size();
     if (send("install", installCurrent)) {
-        statusBar()->showMessage(tr("Installing %1 of %2…").arg(number).arg(installTotal));
+        notify(tr("Installing %1 of %2…").arg(number).arg(installTotal));
         return true;
     }
     installFailed << QFileInfo(installCurrent).fileName() + ": " + tr("Couldn't send it to the emulator.");
@@ -1557,13 +2837,13 @@ bool MainWindow::installResult(bool ok, const QString& code, const QString& mess
     const int hint = installHint, total = installTotal;
     installTotal = 0; installFailed.clear(); installHint = 0;
     if (failed.isEmpty()) return false;
-    statusBar()->showMessage(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
+    notify(tr("Installed %1 of %2.").arg(total - failed.size()).arg(total));
     failure(failed.join('\n') + (hint ? tr("\n\nWait for Palm OS to finish its current activity, then try again.") : QString()));
     return true;
 }
 bool MainWindow::send(const QString& command, const QString& argument) {
     if (!client.request(command, argument)) return false;
-    busy = true; refresh(); statusBar()->showMessage(tr("Working…"));
+    busy = true; refresh(); notify(tr("Working…"));
     const bool msCard = command == "ms-create" || command == "ms-insert" || command == "ms-export";
     if (command == "sd-create" || command == "sd-insert" || command == "sd-export" || msCard) {
         // Large cards take a while; the core reports each percent and stops on cancel.
@@ -1587,9 +2867,8 @@ void MainWindow::stop(bool closeApp) {
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
     if (exchangeDialog) exchangeDialog->reject();
-    else if (memoryStickFiles) memoryStickFiles->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
-    else statusBar()->showMessage(tr("Waiting to save the session…"));
+    else notify(tr("Waiting to save the session…"));
 }
 void MainWindow::askStop(const QString& message) {
     const auto answer = QMessageBox::warning(this, tr("Session Was Not Saved"),
@@ -1597,7 +2876,10 @@ void MainWindow::askStop(const QString& message) {
         QMessageBox::Retry | QMessageBox::Cancel | QMessageBox::Discard, QMessageBox::Retry);
     if (answer == QMessageBox::Retry) save();
     else if (answer == QMessageBox::Discard) send("quit");
-    else { stopping = closeAfterStop = false; refresh(); }
+    else {
+        stopping = closeAfterStop = false;
+        refresh();
+    }
 }
 // The device the controls follow: the running one, else the TX (nothing greyed).
 frondFirmware::Device MainWindow::currentDevice() const {
@@ -1606,6 +2888,10 @@ frondFirmware::Device MainWindow::currentDevice() const {
 }
 QString MainWindow::deviceLabel() const {
     return frondFirmware::deviceName(runningDevice);
+}
+bool MainWindow::event(QEvent* event) {
+    if (event->type() == QEvent::ScreenChangeInternal) danaView.setDensity(devicePixelRatioF());
+    return QMainWindow::event(event);
 }
 void MainWindow::showDevice(const QString& id) {
     runningDevice = frondFirmware::deviceFromId(id);
@@ -1628,7 +2914,11 @@ void MainWindow::failure(const QString& message, const QString& details) {
     box->open();
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (allowClose || !client.running()) { settings.setValue("windowGeometry", saveGeometry()); event->accept(); return; }
+    if (allowClose || !client.running()) {
+        settings.setValue("windowGeometry", listGeometry.isEmpty() ? saveGeometry() : listGeometry);
+        event->accept();
+        return;
+    }
     event->ignore(); stop(true);
 }
 
@@ -1636,6 +2926,7 @@ bool MainWindow::memoryStick() const {
     return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
 }
 bool MainWindow::storageSupported() const {
+    if (frondFirmware::isDana(currentDevice())) return false;
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
 }
@@ -1643,75 +2934,121 @@ QString MainWindow::cardCommand(const char* operation) const {
     return (memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + QLatin1String(operation);
 }
 void MainWindow::beginExchange() {
-    if (memoryStick()) {
-        if (!client.available() || stopping || !cardInserted || memoryStickFiles) return;
-        if (QMessageBox::question(this, tr("Open Memory Stick files?"), tr("Close files on the Palm first; changes are saved immediately."),
-                                  QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-        if (!client.available() || stopping || !cardInserted) return;
-        MemoryStickFilesDialog dialog(client, [this](const QString& command, const QString& argument) { return send(command, argument); },
-                                      cardReadOnly->isChecked(), this);
-        memoryStickFiles = &dialog; dialog.exec(); memoryStickFiles = nullptr;
-        if (stopping && client.running() && client.available()) save();
-        return;
-    }
-    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
-    if (!SdExchange::available()) return failure(tr("Install mtools to exchange files (Debian: sudo apt install mtools)."));
-    if (QMessageBox::question(this, tr("Close Palm Files Before Exchange"),
-            tr("Save your work and close all files using the SD card on the Palm. "
-               "Frond will eject the card and save a recovery session before editing a private image. "
-               "Ejection cannot flush files left open by a Palm app. Continue?"),
+    if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
+    if (cardInserted && QMessageBox::question(this, tr("Open the card's files?"),
+            tr("Close any files open on the Palm first. The card is ejected while Files is open and goes back in when you close it."),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
     // The Palm window can request shutdown while the confirmation is open.
     if (!client.available() || stopping || !cardPresent || exchangeStage != ExchangeStage::None) return;
-    const auto data = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/sd-exchange";
-    const auto cache = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    if (!QDir().mkpath(data) || !QDir().mkpath(cache)) return failure(tr("Could not create SD exchange storage."));
-    exchangeRecovery = std::make_unique<QTemporaryDir>(data + "/recovery-XXXXXX");
-    exchangeFiles = std::make_unique<QTemporaryDir>(cache + "/sd-exchange-XXXXXX");
-    if (!exchangeRecovery->isValid() || !exchangeFiles->isValid()) {
-        endExchange(); return failure(tr("Could not create private SD exchange storage."));
-    }
-    exchangeBackup = exchangeRecovery->path() + "/before-exchange";
-    if (cardInserted) { exchangeStage = ExchangeStage::Eject; send("sd-eject"); }
-    else { exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup); }
+    exchangeWasInserted = cardInserted;
+    exchangeIdentity.clear();
+    if (cardInserted) { exchangeStage = ExchangeStage::Eject; send(cardCommand("eject")); }
+    else { exchangeStage = ExchangeStage::Save; savingPath = sessionPath; send("save", sessionPath); }
 }
 void MainWindow::endExchange() {
-    exchange.reset(); exchangeFiles.reset(); exchangeRecovery.reset();
-    exchangeStage = ExchangeStage::None; busy = false; refresh();
+    if (exchangeDialog) {
+        // Closing it here must not start a put-in.
+        auto* dialog = exchangeDialog.data();
+        exchangeDialog = nullptr;
+        dialog->closeCard();
+        dialog->disconnect(this);
+        dialog->close();
+    }
+    exchangeStage = ExchangeStage::None; exchangeIdentity.clear(); busy = false; refresh();
+    if (cardsWindow) cardsWindow->refresh();
 }
 void MainWindow::exchangeResult(bool ok, const QString& message) {
-    if (ok && exchangeStage == ExchangeStage::Backup) exchangeRecovery->setAutoRemove(false);
-    if (!ok || stopping) {
-        endExchange();
-        if (stopping) save();
-        else failure(message + (QFileInfo::exists(exchangeBackup) ? tr("\nRecovery session: %1").arg(exchangeBackup) : QString{}));
+    const auto stage = exchangeStage;
+    if (ok && stage == ExchangeStage::TakeOut) {
+        const auto parts = message.split(' ');
+        exchangeIdentity = parts.value(0).size() == 64 ? parts.value(0) : QString(64, '0');
+        exchangeProtected = parts.value(1) == "protected";
+    }
+    // Stopping with the card out: it goes back in before the final save.
+    if (ok && stopping && stage == ExchangeStage::TakeOut) {
+        exchangeStage = ExchangeStage::PutIn;
+        if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) { endExchange(); save(); }
         return;
     }
-    if (exchangeStage == ExchangeStage::Eject) {
-        exchangeStage = ExchangeStage::Backup; send("save", exchangeBackup);
-    } else if (exchangeStage == ExchangeStage::Backup) {
-        exchangeStage = ExchangeStage::Export; send("sd-export", exchangeFiles->path() + "/original.img");
-    } else if (exchangeStage == ExchangeStage::Export) {
-        exchange = std::make_unique<SdExchange>(exchangeFiles->path() + "/edit-XXXXXX");
-        QString error;
-        const auto maxCard = qint64(std::min<quint64>(frondFirmware::profile(runningDevice).sdMax, quint64(2048) << 20));
-        if (!exchange->open(exchangeFiles->path() + "/original.img", error, maxCard)) {
-            endExchange(); failure(error); return;
-        }
-        SdExchangeDialog dialog(*exchange, exchangeBackup, this);
-        exchangeDialog = &dialog;
-        const auto result = dialog.exec();
-        exchangeDialog = nullptr;
-        if (result == QDialog::Accepted && !stopping && client.running()) {
-            exchangeStage = ExchangeStage::Insert; send("sd-insert", exchange->image());
-        } else {
-            endExchange();
-            if (stopping && client.running()) save();
-        }
-    } else if (exchangeStage == ExchangeStage::Insert) {
+    if (!ok || stopping) {
+        const bool reinsert = !ok && !stopping && exchangeWasInserted && (stage == ExchangeStage::Save || stage == ExchangeStage::TakeOut);
         endExchange();
-        statusBar()->showMessage(tr("Card inserted. Recovery session: %1").arg(exchangeBackup));
+        if (!ok && stage == ExchangeStage::PutIn)
+            failure(tr("Couldn't put the card back in. It's kept in the machine and goes in at the next start. %1").arg(message));
+        else if (!ok) failure(message);
+        if (reinsert && client.available()) send(cardCommand("reinsert"));
+        if (stopping) save();
+        return;
     }
+    if (stage == ExchangeStage::Eject) {
+        exchangeStage = ExchangeStage::Save; savingPath = sessionPath; send("save", sessionPath);
+    } else if (stage == ExchangeStage::Save) {
+        // The working session is saved; as for any save, except that swap stays set from here
+        // until the card is back in, so a machine that dies meanwhile loads it from the folder.
+        savingPath.clear();
+        settings.setValue("lastSession", sessionPath); settings.sync();
+        QFile::remove(frondSessions::markerPath(sessionPath));
+        QFile::remove(frondSessions::workPath(sessionPath));
+        const auto dir = runningMachineDir();
+        auto slot = frondCards::readSlot(dir);
+        if (!slot.swap) {
+            slot.present = true;
+            slot.swap = true;
+            if (!frondCards::writeSlot(dir, slot)) { exchangeResult(false, tr("Couldn't open the card.")); return; }
+        }
+        exchangeStage = ExchangeStage::TakeOut; send(cardCommand("take-out"));
+    } else if (stage == ExchangeStage::TakeOut) {
+        exchangeStage = ExchangeStage::Open;
+        openExchangeCard();
+    } else if (stage == ExchangeStage::PutIn) {
+        if (!exchangeWasInserted) { exchangeStage = ExchangeStage::EjectAgain; send(cardCommand("eject")); return; }
+        endExchange();
+        notify(tr("Card put back in."));
+    } else if (stage == ExchangeStage::EjectAgain) {
+        endExchange();
+        notify(tr("Card put back in, ejected."));
+    }
+}
+// The card is out of the core in the machine folder's card file (sd.frondsd, ms.frondms or
+// ms.frondmsp): opens it in Files.
+void MainWindow::openExchangeCard() {
+    const auto dir = runningMachineDir();
+    const auto path = !memoryStick() ? dir + "/sd.frondsd" : QFileInfo::exists(dir + "/ms.frondms") ? dir + "/ms.frondms" : dir + "/ms.frondmsp";
+    std::unique_ptr<frondCardFile::CardFile> card;
+    QString error;
+    try {
+        card = frondCardFile::CardFile::open(path, !exchangeProtected);
+        frondCardFile::FatImage check(*card);
+    } catch (const frondCardFile::Error& e) {
+        error = e.message;
+        card.reset();
+    }
+    if (!error.isEmpty()) {
+        // The card goes back in as it was.
+        failure(error);
+        exchangeClosed();
+        return;
+    }
+    auto* dialog = new CardFilesWindow(std::move(card), runningCardName(), this);
+    dialog->deleteOnClose = true;
+    dialog->setWindowModality(Qt::WindowModal);
+    exchangeDialog = dialog;
+    connect(dialog, &QDialog::finished, this, &MainWindow::exchangeClosed);
+    refresh();
+    dialog->QDialog::open();
+}
+// Files closed: the card file is closed and goes back in the Palm.
+void MainWindow::exchangeClosed() {
+    if (exchangeDialog) exchangeDialog->closeCard();
+    exchangeDialog = nullptr;
+    if (exchangeStage != ExchangeStage::Open) return;
+    if (!client.available()) {
+        endExchange();
+        failure(tr("The emulator stopped. The card is kept in the machine and goes in at the next start."));
+        return;
+    }
+    exchangeStage = ExchangeStage::PutIn;
+    if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) exchangeResult(false, tr("Couldn't reach the Palm."));
 }
 
 // ---- Cards on the running machine ----
@@ -1735,7 +3072,7 @@ CardsWindow* MainWindow::showCards() {
         auto* w = new CardsWindow(sessionFolder(), this);
         w->setAttribute(Qt::WA_DeleteOnClose);
         w->runningMachine = [this] { return runningMachineDir(); };
-        w->exchangeOpen = [this] { return exchangeStage != ExchangeStage::None || memoryStickFiles != nullptr || cardMove.stage != CardMove::None; };
+        w->exchangeOpen = [this] { return exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None; };
         w->takeOutRunning = [this](const QString&) { if (client.available() && !busy && cardPresent) changeCard({}); };
         w->changed = [this] { refreshSessions(); refresh(); };
         cardsWindow = w;
@@ -1852,7 +3189,7 @@ bool MainWindow::continueCardMove(const QString& command, const QString& message
         if (!in.isEmpty()) putInCard(in);
         else {
             refresh();
-            statusBar()->showMessage(tr("Card taken out."));
+            notify(tr("Card taken out."));
         }
         return true;
     }

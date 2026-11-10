@@ -543,33 +543,42 @@ class CardsTest {
 
     private fun leftovers() = library.listFiles { f -> f.name.startsWith(".new-") }.orEmpty().size
 
-    @Test fun aFolderBecomesANewCardThroughTheTool() {
+    // The tool's `make` as it really writes a new card: a v2 card file of a fresh FAT16 layout.
+    private fun makingTool(args: Array<String>, listener: CardToolProgress?, cancel: java.util.concurrent.atomic.AtomicBoolean?): String {
+        if (args[0] != "make") return fakeTool(args, listener, cancel)
+        toolCalls += args.toList()
+        listener?.progress(1, 2)
+        if (cancel?.get() == true) return "error cancelled Cancelled."
+        CoreLayout.card(File(args[3]), args[2].toInt())
+        return "ok ${args[1]} ${args[2].toLong() shl 20}"
+    }
+
+    @Test fun aFolderBecomesANewCardThroughTheLibrary() {
         val root = FakeTree("Music", kids = listOf(
             FakeTree("A long name that needs a long entry.txt", "hello".toByteArray()),
             FakeTree("Songs", kids = listOf(FakeTree("Album", kids = listOf(FakeTree("track one.sunvox", ByteArray(200_000) { it.toByte() })))))))
-        // The tool is given a FAT image holding the tree; look inside it before the stand-in wraps it.
-        var listed = emptyList<String>()
-        var size = -1L
-        Cards.tool = { args, listener, cancel ->
-            if (args[0] == "import") {
-                FatImage.open(File(args[1]), false).use { listed = it.list("/").map { e -> e.name }.sorted() + it.list("/Songs/Album").map { e -> e.name } }
-                size = File(args[1]).length()
-            }
-            fakeTool(args, listener, cancel)
-        }
+        Cards.tool = ::makingTool
         val progress = mutableListOf<Long>()
         var made: String? = null
         assertNull(Cards.importFolderCard(sessions, root, "Music", "sd", 32, { false }, { d, t -> progress += d * 1000 / t }, { made = it }))
-        assertEquals(listOf("A long name that needs a long entry.txt", "Songs", "track one.sunvox"), listed)
-        assertEquals(32L shl 20, size)
-        assertTrue(progress.isNotEmpty() && progress.zipWithNext().all { (a, b) -> a <= b })
+        assertTrue(progress.isNotEmpty() && progress.zipWithNext().all { (a, b) -> a <= b } && progress.last() == 1000L)
         val card = named("Music")!!
         assertEquals(made, card.id)
         assertEquals("sd", card.kind)
-        assertEquals("import", toolCalls.last()[0])
-        assertEquals("sd", toolCalls.last()[2])
+        assertEquals(32L shl 20, card.bytes)
+        assertEquals(listOf("make", "sd", "32"), toolCalls.last().take(3))
         assertEquals(0, leftovers())
-        assertFalse(File(Cards.entryDir(library, card.id), ".work.img").exists())
+        // The card file in the drawer holds the tree, with no work image beside it.
+        val dir = Cards.entryDir(library, card.id)
+        assertEquals(listOf("card.json", "sd.frondsd"), dir.list()!!.sorted())
+        val file = File(dir, "sd.frondsd")
+        assertNotNull(CardFile.verify(file))
+        CardFile.open(file, false).use { c ->
+            FatImage.over(c).use {
+                assertEquals(listOf("A long name that needs a long entry.txt", "Songs"), it.list("/").map { e -> e.name }.sorted())
+                assertEquals(listOf("track one.sunvox"), it.list("/Songs/Album").map { e -> e.name })
+            }
+        }
         // The name is taken now; a classic stick isn't offered for a folder.
         assertEquals("There's already a card called Music.", Cards.importFolderCard(sessions, root, "Music", "sd", 32))
         assertEquals("Choose an SD card or Memory Stick Pro size.", Cards.importFolderCard(sessions, root, "Stick", "ms", 16))
@@ -582,6 +591,7 @@ class CardsTest {
         assertTrue(cards().isEmpty())
         assertEquals(0, leftovers())
         val small = FakeTree("Small", kids = listOf(FakeTree("a.txt", "x".toByteArray())))
+        Cards.tool = ::makingTool
         // Cancelled before anything, while the files go in, and while the tool makes the card file.
         assertEquals(COPY_CANCELLED, Cards.importFolderCard(sessions, small, "Small", "sd", 32, { true }))
         assertTrue(cards().isEmpty())
@@ -591,13 +601,13 @@ class CardsTest {
         assertTrue(cards().isEmpty())
         assertEquals(0, leftovers())
         var toolStarted = false
-        Cards.tool = { args, listener, cancel -> if (args[0] == "import") toolStarted = true; fakeTool(args, listener, cancel) }
+        Cards.tool = { args, listener, cancel -> if (args[0] == "make") toolStarted = true; makingTool(args, listener, cancel) }
         assertEquals(COPY_CANCELLED, Cards.importFolderCard(sessions, small, "Small", "sd", 32, { toolStarted }))
         assertTrue(toolStarted)
         assertTrue(cards().isEmpty())
         assertEquals(0, leftovers())
-        // No room for the raw image, the card file and the files.
-        Cards.freeSpace = { 40L shl 20 }
+        // No room for the card file.
+        Cards.freeSpace = { 20L shl 20 }
         assertTrue(Cards.importFolderCard(sessions, small, "Small", "sd", 32)!!.startsWith("Not enough free space"))
         assertEquals(0, leftovers())
         // A folder with a name FAT can't hold is refused with the name.

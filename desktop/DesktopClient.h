@@ -23,12 +23,14 @@ class DesktopClient : public QObject {
     void result(const QString& command, bool ok, const QString& code, const QString& message);
     void error(const QString& message);
     void closeRequested();
+    void shortcut(const QString& name);  // a key pressed over the Palm that the app owns
     void microphoneState(const QString& state);
     void serialState(const QString& state);  // pushed by the core on a change
     void usbState(const QString& state);
     void infraredState(const QString& state);
     void bluetoothState(const QString& state);
     void sdProgress(qint64 done, qint64 total);  // SD create, import and export
+    void danaViewState(const QString& state);
     void cardState(const QString& state);  // a card put in while the machine was off went in
     void stalled();
     void diagnostic(const QString& text);

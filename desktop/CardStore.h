@@ -3,6 +3,7 @@
 // Include SessionStore.h, which pulls this in once its own helpers are declared.
 #include "SessionStore.h"
 #include "FolderCard.h"
+#include "CardStorage.h"
 #ifndef FROND_CARD_STORE_H
 #define FROND_CARD_STORE_H
 
@@ -159,7 +160,7 @@ inline const Descriptor* describedCard(const QList<Descriptor>& cards, const QSt
     return nullptr;
 }
 
-// The SD or Pro v2 generation, or the classic stick's change counter, in a card file's header.
+// The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, in a card file's header.
 inline bool cardHeader(const QString& path, quint64* counter, qint64* logical) {
     using frondSessions::le32;
     using frondSessions::le64;
@@ -170,6 +171,11 @@ inline bool cardHeader(const QString& path, quint64* counter, qint64* logical) {
     if (h.left(8) == QByteArray("FRONDSD\0", 8)) {
         if (counter) *counter = le32(h, 8) == 2 ? le64(h, 28) : 0;
         if (logical) *logical = qint64(le64(h, 16));
+        return true;
+    }
+    if (frondSessions::classicV2(h)) {
+        if (counter) *counter = le64(h, 28);
+        if (logical) *logical = qint64(frondSessions::classicV2Physical(h) / 521 * 512);
         return true;
     }
     if (h.left(8) == QByteArray("FRONDMS\0", 8)) {
@@ -197,6 +203,12 @@ inline bool settled(const QString& dir, const QString& file, bool swap) {
     quint64 counter = 0;
     return cardHeader(dir + '/' + file, &counter, nullptr) && counter == d->generation;
 }
+
+// A card file nobody has open in Files…, with any change a crash cut off there finished.
+inline bool ready(const QString& path) { return frondCardFile::ready(path); }
+inline QString inFilesMessage() { return frondCardFile::inFilesMessage(); }
+// Empty when ready(), else why not: open in Files, or a leftover change that can't be finished.
+inline QString notReady(const QString& path) { return frondCardFile::notReady(path); }
 
 class LibraryLock {
  public:
@@ -297,6 +309,7 @@ inline QString toDrawer(const QString& library, const QString& dir, const QStrin
     const auto file = cardFileIn(dir);
     Card card;
     if (file.isEmpty() || !readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't move the card.");
+    if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
     auto slot = readSlot(dir);
     slot.present = true; slot.swap = true; slot.card = id;
     if (!writeSlot(dir, slot)) return QStringLiteral("Couldn't move the card.");
@@ -315,6 +328,7 @@ inline QString toMachine(const QString& library, const QString& id, const QStrin
     const auto file = fileOfKind(card.kind);
     if (!cardFileIn(dir).isEmpty()) return QStringLiteral("Take the machine's card out first.");
     if (!QFileInfo(entryDir(library, id) + '/' + file).isFile()) return QStringLiteral("That card is in another machine.");
+    if (const auto why = notReady(entryDir(library, id) + '/' + file); !why.isEmpty()) return why;
     auto slot = readSlot(dir);
     slot.present = true; slot.swap = true; slot.card = id; slot.name = card.name;
     if (!writeSlot(dir, slot)) return QStringLiteral("Couldn't move the card.");
@@ -417,7 +431,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         if (!isHeld) {
             m.lock = std::make_unique<QLockFile>(m.frond + ".lock");
             m.lock->setStaleLockTime(0);
-            if (!m.lock->tryLock()) {
+            if (!frondSessions::tryLockSession(*m.lock, m.frond)) {
                 const auto slot = readSlot(m.dir);
                 skippedClaims << slot.card << slot.link;
                 continue;
@@ -426,6 +440,12 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         m.locked = true;
         machines.push_back(std::move(m));
     }
+    // Files… changes a crash cut off, in the machines held and the drawer. Cards open in Files now
+    // are left alone.
+    for (const auto& m : machines)
+        if (const auto file = cardFileIn(m.dir); !file.isEmpty()) frondCardFile::settle(m.dir + '/' + file);
+    for (const auto& e : entries(library))
+        if (e.inDrawer) frondCardFile::settle(e.dir + '/' + fileOfKind(e.card.kind));
     auto known = entries(library);
     auto find = [&](const QString& id) -> Entry* {
         for (auto& e : known)
@@ -441,7 +461,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         };
         return hinted(a) && !hinted(b);
     });
-    QStringList claimed;
+    QStringList claimed, knownIn;  // knownIn: machines whose slot names the library card they hold
     for (auto& m : machines) {
         quint32 version = 0;
         descriptorsOf(m.frond, &version);
@@ -452,6 +472,7 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         if (!file.isEmpty()) {
             if (e && e->card.kind == kindOfFile(file) && !e->inDrawer && !claimed.contains(e->card.id)) {
                 claimed << e->card.id;  // rule 1
+                if (slot.card == e->card.id) knownIn << m.dir;
                 if (e->card.machine != m.name) {
                     e->card.machine = m.name;
                     writeCard(e->dir, e->card);
@@ -507,6 +528,18 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
         if (file.isEmpty() || slot.link.isEmpty() || slot.card != slot.link) continue;
         if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card);
     }
+    // Rule 7: a take-out the launcher didn't finish, as when Frond died and the core saved after it.
+    // The slot names the library card, the save has no card there and the slot hasn't changed
+    // since, so the card goes to the drawer.
+    for (auto& m : machines) {
+        const auto slot = readSlot(m.dir);
+        const auto file = cardFileIn(m.dir);
+        if (!knownIn.contains(m.dir) || file.isEmpty() || slot.card.isEmpty() || slot.swap) continue;
+        quint32 version = 0;
+        const auto cards = descriptorsOf(m.frond, &version);
+        if (version < 7 || describedCard(cards, file) || !settled(m.dir, file, false)) continue;
+        toDrawer(library, m.dir, slot.card);
+    }
     // Hints of drawer cards.
     for (auto& e : entries(library))
         if (e.inDrawer && !e.card.machine.isEmpty()) {
@@ -547,6 +580,8 @@ inline QStringList launchArguments(const QString& sessions, const QString& dir) 
 // name when another machine has the linked card.
 inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr) {
     const auto library = libraryFor(sessions);
+    // The machine lock is held, so its card can be settled even if the library is busy.
+    if (const auto file = cardFileIn(dir); !file.isEmpty()) frondCardFile::settle(dir + '/' + file);
     LibraryLock lock(library);
     if (lock.ok) {
         reconcileLocked(sessions, dir);
@@ -723,6 +758,7 @@ inline QString keepCardOf(const QString& sessions, const QString& dir, const fro
         const auto file = cardFileIn(dir);
         if (file.isEmpty()) return {};
         if (slot.card.isEmpty()) return QStringLiteral("Couldn't move the card into Cards.");
+        if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
         if (settled(dir, file, slot.swap)) return toDrawer(library, dir, slot.card);
     }
     // Copied outside the lock, then renamed in under it.
@@ -904,7 +940,7 @@ inline QList<MachineSlot> machineSlots(const QString& sessions, const QString& h
         if (heldCanon.isEmpty() || info.canonicalFilePath() != heldCanon) {
             QLockFile lock(frond + ".lock");
             lock.setStaleLockTime(0);
-            m.busy = !lock.tryLock();
+            m.busy = !frondSessions::tryLockSession(lock, frond);
         }
         result.append(m);
     }
@@ -937,7 +973,8 @@ inline QList<Row> rows(const QString& sessions, const QString& held = {}) {
             QLockFile lock(frondSessions::sessionFrondIn(row.holderDir) + ".lock");
             lock.setStaleLockTime(0);
             const bool heldHere = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(row.holderDir).canonicalFilePath();
-            row.holderBusy = !heldHere && QFileInfo(frondSessions::sessionFrondIn(row.holderDir)).isFile() && !lock.tryLock();
+            row.holderBusy = !heldHere && QFileInfo(frondSessions::sessionFrondIn(row.holderDir)).isFile() &&
+                             !frondSessions::tryLockSession(lock, frondSessions::sessionFrondIn(row.holderDir));
         }
         result.append(row);
     }
@@ -1046,9 +1083,9 @@ inline QStringList folderKinds() {
     return result;
 }
 
-// A host folder copied once onto a new card: a blank FAT16 image, the folder written in and read
-// back with mtools, then the card tool makes the card file from it, all inside cards/.new-<id> so a refusal, an
-// error or Cancel leaves nothing. Named `name`. Refused when the folder doesn't fit a card of `size`.
+// A host folder copied once onto a new card: the card tool makes a new card file, then the folder
+// goes onto it through the storage library in one commit, all inside cards/.new-<id> so a refusal,
+// an error or Cancel leaves nothing. Named `name`. Refused when the folder doesn't fit a card of `size`.
 inline QString importFolderCard(const QString& sessions, const QString& folder, const QString& name, const QString& kind, int size,
                                 const frondSessions::CopyProgress& progress = {}, QString* id = nullptr) {
     const auto library = libraryFor(sessions);
@@ -1057,8 +1094,7 @@ inline QString importFolderCard(const QString& sessions, const QString& folder, 
     if (freeCardName(library, wanted) != wanted) return QStringLiteral("There's already a card called %1.").arg(wanted);
     if (!folderKinds().contains(kind) || !sizesFor(kind).contains(size)) return QStringLiteral("Choose an SD card or Memory Stick Pro size.");
     if (!QFileInfo(folder).isDir()) return QStringLiteral("Couldn't read the folder.");
-    if (!frondFolderCard::mtoolsAvailable()) return QStringLiteral("Install mtools to import a folder (Debian: sudo apt install mtools).");
-    // Phases of the progress bar: copy 0 to 45%, check 45 to 50%, the card file 50 to 100%.
+    // Phases of the progress bar: the new card file 0 to 20%, the files 20 to 100%.
     constexpr qint64 whole = 1000;
     auto report = [&](qint64 done) { return !progress || progress(done, whole); };
     const auto plan = frondFolderCard::measure(folder, [&] { return !report(0); });
@@ -1068,23 +1104,24 @@ inline QString importFolderCard(const QString& sessions, const QString& folder, 
         return QStringLiteral("The folder doesn't fit on a %1 card.").arg(sizeLabel(size));
     const qint64 cardBytes = qint64(size) << 20;
     const auto free = freeSpace()(library);
-    if (free >= 0 && free < 2 * cardBytes + plan.bytes + spareBytes)
-        return QStringLiteral("Not enough free space for the card. It needs %1 MB.").arg((2 * cardBytes + plan.bytes + spareBytes) / 1000000 + 1);
+    if (free >= 0 && free < cardBytes + spareBytes)
+        return QStringLiteral("Not enough free space for the card. It needs %1 MB.").arg((cardBytes + spareBytes) / 1000000 + 1);
     NewCopy copy(library);
     if (!copy.ok) return QStringLiteral("Couldn't add the card.");
-    const auto raw = copy.dir + "/.work.img", back = copy.dir + "/.back";
-    if (!frondFolderCard::blankImage(raw, unsigned(size))) return QStringLiteral("Couldn't make the card.");
-    if (auto error = frondFolderCard::copyFolder(raw, folder, back, plan, [&](qint64 d, qint64 t) { return report(t ? d * 450 / t : 0); });
-        !error.isEmpty())
-        return error;
-    if (!report(450)) return QStringLiteral("Cancelled.");
-    if (!frondFolderCard::sameTree(folder, back)) return QStringLiteral("The card copy didn't match the folder.");
-    QDir(back).removeRecursively();
     const auto file = copy.dir + '/' + fileOfKind(kind);
-    const auto r = runCardTool(cardTool(), {QStringLiteral("import"), raw, toolKind(kind), file},
-                               [&](qint64 d, qint64 t) { return report(500 + (t ? d * 500 / t : 0)); });
+    const auto r = runCardTool(cardTool(), {QStringLiteral("make"), toolKind(kind), QString::number(size), file},
+                               [&](qint64 d, qint64 t) { return report(t ? d * 200 / t : 0); });
     if (!r.ok) return toolError(r);
-    QFile::remove(raw);
+    if (!report(200)) return QStringLiteral("Cancelled.");
+    try {
+        frondCardFile::CardFile card(file, true);
+        frondCardFile::FatImage fat(card);
+        if (const auto error = frondFolderCard::fill(fat, folder, plan, [&](qint64 d, qint64 t) { return report(200 + d * 800 / t); });
+            !error.isEmpty())
+            return error;
+    } catch (const frondCardFile::Error& e) {
+        return QStringLiteral("Couldn't copy the folder: %1").arg(e.message);
+    }
     qint64 logical = 0;
     if (!cardHeader(file, nullptr, &logical)) return QStringLiteral("Couldn't add the card.");
     if (const auto error = adoptNew(library, copy, {{}, wanted, kind, now(), {}, logical, newIdentity(), false}); !error.isEmpty())
@@ -1103,6 +1140,7 @@ inline QString cardSource(const QString& sessions, const QString& id, QString* p
     if (card) *card = c;
     const auto file = fileOfKind(c.kind);
     if (QFileInfo(entryDir(library, id) + '/' + file).isFile()) {
+        if (const auto why = notReady(entryDir(library, id) + '/' + file); !why.isEmpty()) return why;
         *path = entryDir(library, id) + '/' + file;
         return {};
     }
@@ -1111,9 +1149,15 @@ inline QString cardSource(const QString& sessions, const QString& id, QString* p
             if (r.holderBusy) return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             *hold = std::make_unique<QLockFile>(frondSessions::sessionFrondIn(r.holderDir) + ".lock");
             (*hold)->setStaleLockTime(0);
-            if (QFileInfo(frondSessions::sessionFrondIn(r.holderDir)).isFile() && !(*hold)->tryLock())
+            if (QFileInfo(frondSessions::sessionFrondIn(r.holderDir)).isFile() &&
+                !frondSessions::tryLockSession(**hold, frondSessions::sessionFrondIn(r.holderDir)))
                 return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             if (holderDir) *holderDir = r.holderDir;
+            if (const auto why = QFileInfo(r.holderDir + '/' + file).isFile() ? notReady(r.holderDir + '/' + file) : QString();
+                !why.isEmpty()) {
+                hold->reset();
+                return why;
+            }
             const auto slot = readSlot(r.holderDir);
             if (settled(r.holderDir, file, slot.swap)) {
                 *path = r.holderDir + '/' + file;
@@ -1203,13 +1247,14 @@ inline QString deleteCard(const QString& sessions, const QString& id, const QStr
     Card card;
     if (!readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't find that card.");
     if (!QFileInfo(entryDir(library, id) + '/' + fileOfKind(card.kind)).isFile()) return QStringLiteral("Take the card out of its machine first.");
+    if (const auto why = notReady(entryDir(library, id) + '/' + fileOfKind(card.kind)); !why.isEmpty()) return why;
     if (!QDir(entryDir(library, id)).removeRecursively()) return QStringLiteral("Couldn't delete the card.");
     for (const auto& m : machineSlots(sessions, held)) {
         if (m.busy || m.slot.link != id) continue;
         QLockFile mlock(frondSessions::sessionFrondIn(m.dir) + ".lock");
         mlock.setStaleLockTime(0);
         const bool own = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(m.dir).canonicalFilePath();
-        if (!own && !mlock.tryLock()) continue;
+        if (!own && !frondSessions::tryLockSession(mlock, frondSessions::sessionFrondIn(m.dir))) continue;
         auto slot = m.slot;
         slot.link.clear();
         writeSlot(m.dir, slot);
@@ -1229,7 +1274,7 @@ inline QString takeOutStopped(const QString& sessions, const QString& id, const 
     if (dir.isEmpty()) return QStringLiteral("Couldn't find that card.");
     QLockFile lock(frondSessions::sessionFrondIn(dir) + ".lock");
     lock.setStaleLockTime(0);
-    if (QFileInfo(frondSessions::sessionFrondIn(dir)).isFile() && !lock.tryLock())
+    if (QFileInfo(frondSessions::sessionFrondIn(dir)).isFile() && !frondSessions::tryLockSession(lock, frondSessions::sessionFrondIn(dir)))
         return QStringLiteral("%1 is running. Stop it first.").arg(QFileInfo(dir).fileName());
     if (const auto error = keepCardOf(sessions, dir, progress, QStringLiteral("Cancelled.")); !error.isEmpty()) return error;
     auto slot = readSlot(dir);
@@ -1260,7 +1305,7 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
         QLockFile mlock(frondSessions::sessionFrondIn(m.dir) + ".lock");
         mlock.setStaleLockTime(0);
         const bool own = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(m.dir).canonicalFilePath();
-        if (!own && !mlock.tryLock()) { error = QStringLiteral("%1 is running. Stop it first.").arg(m.name); continue; }
+        if (!own && !frondSessions::tryLockSession(mlock, frondSessions::sessionFrondIn(m.dir))) { error = QStringLiteral("%1 is running. Stop it first.").arg(m.name); continue; }
         auto slot = m.slot;
         slot.present = true;
         if (want) {

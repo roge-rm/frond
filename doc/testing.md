@@ -96,7 +96,7 @@ A new device adds a row here. "Smoke" means an entry in `SMOKE` in `tests/smoke.
 The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm/Generic-OS-3.5-EZ/`) or `--rom`. Without a ROM they skip.
 
 - `make test-frond-68k` (in `make test`): the 68000 timing table against the manual and the bus timing (`build/test-cpu68k-timing`), the piezo tone renderer (`build/test-frond-68k-sound`) and `tests/frond-68k.py` for ROM acceptance and refusal with synthetic headers (wrong size, little-endian ARM header, truncated). `--rom` adds the real ROMs by hash.
-- `make test-frond-68k-peripherals`: tones and their frequencies, backlight, sleep and wake with an alarm, serial HotSync with pilot-link over a PTY and TCP, database install, launch, list and export. `--only ppp` also dials out over serial PPP to slirp and fetches a page. Serial needs pilot-link. `FROND_68K_ROMS="--rom A --rom B"` picks ROMs.
+- `make test-frond-68k-peripherals`: tones and their frequencies, backlight, sleep and wake with an alarm, serial HotSync with pilot-link over a PTY and TCP, database install, launch, list and export. `--only ppp` also dials out over serial PPP to slirp and fetches a page, `--only modemsync` does a Modem Sync to the HotSync number and a Network HotSync over the modem (OS 3.5, pilot-link). Serial needs pilot-link. `FROND_68K_ROMS="--rom A --rom B"` picks ROMs.
 - `make test-frond-68k-gdb`: prc-tools' `m68k-palmos-gdb` 5.3 and `gdb-multiarch` on the debug Hello app in `build/hello-debug`, on the OS 3.5 ROM. Skips without them.
 - `make test-core-control`: the same control socket requests against `out/frond` (an ARM smoke session, `--arm-session` or `FROND_ARM_SESSION`) and `out/frond-68k`, checking replies, pushed events, save and reload, and that what a device lacks answers `unsupported`.
 - `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`: detection, cold boot to the launcher, saved session restore in a new process, soft and hard reset, damaged sessions refused into a running machine, saved contrast. Use `--sha256` to pin the ROM.
@@ -107,3 +107,140 @@ Tests that cover every device (profiles, controls, sessions, lifecycle, SD, netw
 
 `make test-zodiac-store-pc` checks the ARM920T stored PC value, word/block address
 modes, writeback, aborts and focused Exact/Fast probe admission.
+
+`make test-68k-frame-bounds` checks VZ frame row, destination and guest-address bounds without firmware.
+
+`make test-68k-vz-registers` checks VZ Port D polarity and register-driven LCD copy bounds, including a partial dirty row. It needs no firmware.
+
+Dana staged geometry checks: `heavy build make test-68k-vz-registers` covers the final panned pixel at 560x160, malformed LCD rows and depth, classic 160x160 decoding and VZ level IRQ pending/status polarity, enable, direction and masking. Dana remains unavailable.
+
+The same VZ target checks ADS784x partial commands, pending conversions and partial replies across save/load, with malformed saved bit counters rejected. These are generic converter tests, not Dana analogue qualification.
+
+`heavy build make test-68k-dana` uses no firmware. It checks the Dana ST version parser at every split, reply continuation, controller reset and ready polling, held Power/Up packets, D4 and board IRQ1 level/edge polarity and acknowledgement. It also checks the disconnected ISP register bank: nonzero HC/DC partial words, partial interrupt-status reads, interrupted writes, guest-cycle frame counting, HCR completion, buffer allocation limits and malformed state rejection. Parser-only ST snapshots isolate its state fields; they do not replace whole-session rollback tests.
+
+Dana's virtual analogue inputs use unsigned 12-bit ADC counts (0–4095). A4/channel 2 samples main battery, E4/channel 6 samples supply/alkaline detection, G1 is a separate pack-detect input and G2 selects the ADC. Defaults are main 3072 counts, supply 50 counts and pack-detect high, representing a virtual battery with no external supply. These are simulator choices, without a voltage or divider calibration. Tests select both channels, check zero/midscale/full-scale and reject out-of-range inputs, retaining the shared converter's serial conversion pipeline. The native ROM pen bridge is supported separately; ADC pen electrical accuracy is unqualified.
+
+Dana remains staged. The ISP bank has no transfer buffers, attached endpoints or board interrupt output wiring. USB traffic, external serial, HotSync and card support remain disabled; sound and IrDA have separate checks below. The ST board handler qualifies IRQ1 only, retaining the base acknowledgement for other interrupts; generic VZ INT0–3 edge capture remains unqualified. Normal runner boot, reset and session checks pass with the disconnected controller. Frontend availability waits for Dana controls and art.
+
+Dana's staged VZ backend runs in `frond-68k`; neither frontend offers it. Its
+virtual ADC defaults are main 3072, supply 50 raw counts and pack-detect high.
+Supply 50 avoids unsigned underflow in the ROM's `(supply >> 1) - 25` comparison;
+these are deterministic simulator inputs, with no measured voltage implied.
+`test-68k-dana` covers that classification boundary through actual ADC exchanges.
+
+With private firmware and the built `tests/palm/sync68k-probe.c` application:
+
+```
+python3 tests/dana-session.py --rom FILE --probe FrondSync68k.prc --evidence NEW_DIRECTORY
+```
+
+This uses normal backend dispatch for cold setup/launcher, soft reset, Power/Up
+hard reset, erased app/database checks, install/launch/export and fresh-process
+PDB equality. Eleven malformed production ADC/ST/ISP chunks must roll back with
+identical PNG/PDB bytes. Parser fixtures remain separate. Saved controller checks
+require no enabled pending HC event, disabled transfer-buffer sources and no DC
+interrupt enables. USB GPIO outputs, attached transfers and electrical ADC/pen
+accuracy remain unqualified. `tests/device-rom.py --device alphasmart-dana --rom
+FILE --launcher --resets` uses the same setup, launcher and reset recipes.
+
+Dana input: `heavy build make test-dana-input` checks typed source ownership and
+refusal without firmware. `heavy build make test-68k-dana` also checks ST pacing,
+partial replies and v5 migration with a later dirty snapshot. With private inputs,
+run `python3 tests/dana-input.py --session READY.frond --probe FrondKeyboardProbe.prc
+--evidence NEW-DIRECTORY --core out/frond-68k` under the build/timing lock. It checks
+actual guest text, modifiers, chords, repeat, refusal and pending-input lifecycle.
+
+The same Dana guest check is available through `tests/device-rom.py --device
+alphasmart-dana --keyboard-session READY.frond --keyboard-probe
+FrondKeyboardProbe.prc --evidence NEW-DIRECTORY` with the built `out/frond-68k`.
+
+`tests/dana-input.py --skip-basics` runs the chord, ownership and lifecycle portion
+while developing input state. The full check also covers every ordinary key group
+and enables Sticky Keys through the guest Keyboard application.
+
+Dana ordinary power development: `python3 tests/dana-power.py --session READY.frond
+--core out/frond-68k --evidence NEW-DIRECTORY` checks Power long holds, ordinary
+sleep/wake and production saved-power state. Use a private ready session with
+On key selected, under the build/timing lock. Two-button EB mode remains blocked;
+this test does not qualify it or the USB mode commands.
+
+Dana sound development uses a private ready session and the `dana-sound` Palm
+probe. Build it with `tools/build-palm-probe.py --probe dana-sound --sdk SDK`.
+On the test host, source `lab/frond-work/tools/pilrc/env.sh` first. Run
+`tests/dana-sound.py --core CORE --session SESSION --probe PRC --evidence NEW_DIR`
+under the build slot and speed lock. It measures captured PCM for Sound Manager
+calls, guest mute, quiet, reset, pending-tone reload/rollback and ordinary sleep.
+The separate `alarm68k` probe checks guest alarm wake. Alternate ST power modes
+are outside this sound check. Wider frontend and listening checks wait for release.
+
+Dana IrDA checks use private inputs and a new evidence directory. Build `irda`,
+`irda-db` and `dana-irda-fifo` with `tools/build-palm-probe.py` and the SDK.
+`tests/dana-irda.py` takes `--core`, `--peer-core`, `--session`, `--peer-session`,
+`--probe` and `--evidence`; the peer is a ready T|X session. It checks both
+4096-byte guest beams and a connection cut during another transfer. Use
+`--database --sender 0` and then a new directory with `--sender 1` for the
+Exchange Manager database writer/importer probe.
+
+`tests/dana-irda-state.py` takes `--core`, `--session`, `--probe` (the `irda`
+probe) and `--evidence`. It checks guest receive controls, shutdown gating,
+active local save/load, malformed UART rollback, no-peer cancellation and reset.
+`tests/dana-irda-fifo.py` takes the same arguments with the `dana-irda-fifo`
+probe. This separate raw UART diagnostic masks the receive IRQ so 32 incoming
+bytes stay in the hardware FIFO, then checks local rollback and fresh-process
+readback. It does not qualify IrLAP or OBEX by itself.
+
+Dana's UART2 FIFO chunk is version 1, separate from ST version 9. It stores
+receive/transmit bytes in order and the local receive-in-progress flag. An
+older Dana snapshot starts with empty UART2 FIFOs. Host endpoint queues, socket
+state and external peers are outside the checkpoint. A local load cannot undo
+bytes already sent to a peer or restore its transaction. A load can replay local
+sends; cancel or reset and
+start another guest transfer after reconnecting.
+
+`make test-68k-sd` checks the inherited SPI SD model without firmware. It covers
+command arguments, partial read/write cursors, malformed cursor and metadata
+chunks, end-of-image transfers, two independent instances and legacy one-slot
+metadata. It does not qualify Dana's board wiring, guest VFS, MMC, read-only
+media or session-container persistence.
+
+Dana runtime card development checks use `make test-68k-sd`,
+`make test-68k-dana`, `make test-card-backing` and
+`make test-68k-card-provider`. The provider test covers failed reads,
+failed write rollback and refusal of a foreign committed backing root.
+`tests/dana-cards.py` takes explicit `--core`, `--session`, `--probe`,
+`--make-card` and a new private `--evidence` directory. Build the fixture
+helper from `tests/dana-card-fixture.cpp` with the native headers, and the
+`dana-card` probe with `tools/build-palm-probe.py` and the installed SDK/PilRC.
+It uses mtools and the public runtime commands for two-card native guest SD
+read/write, readonly, host equality and independent removal/swap/reinsertion.
+These development checks do not qualify MMC or dual-card session persistence.
+
+Dana linked-session restore: `tests/dana-card-restore.py --core CORE --session
+PRIVATE_READY_SESSION --probe FrondDanaCards.prc --make-card FIXTURE_HELPER
+--evidence NEW_PRIVATE_DIRECTORY`. Use the probe from `tests/palm/dana-card-probe.c`.
+This checks normal save/load, fresh-process dual guest reads, file hashes,
+protected/ejected restore, owned-lock reuse, staged second-card lock/root failure,
+malformed protocol refusal and whole-machine rollback. Full in-flight SPI,
+sleep/reset and portable session acceptance remain separate gates.
+
+`tests/dana-card-portable.py` uses the Dana card probe and the native console to
+check portable dual-card folders. It moves a copy away from the source paths,
+loads it in a fresh process, reads both cards through guest VFS and increments
+`COPY.TXT` to prove new writes survive another process without changing the
+source backings. It also checks duplicate/import/peek, protected/ejected media,
+malformed manifests/payloads/roots/protocol state, rollback and staged-lock cleanup.
+Use new private evidence folders and a frozen candidate binary. Run on the test host
+under its shared speed lock; this is a development gate, not release acceptance.
+
+Dana D3c native card inventory uses stable HAL slots SD0=0 and SD2=2 (labels
+1 and 2), each with representable SDSC capacities from 32 MiB up to 1 GiB
+minus 256 KiB and legacy MMC SPI at 32/64/128/256 MiB. Guest-qualified sizes are
+32 MiB FAT for each family and slot, paired and both mixed orders. Runtime
+bounds do not claim guest qualification at every capacity. The backend is
+complete for native CLI/runtime/session use; the device remains staged and
+frontend unavailable. D3d USB/Wi-Fi and D4 frontend work remain separate.
+`make test-dana-card-inventory` checks per-slot/family geometry and metadata
+without firmware. Frontend/card export acceptance waits for the next release.
+The native guard check uses `tests/dana-card-geometry-fixture.cpp` to build and
+validate v2 files through the production header and payload readers before
+testing an unrepresentable capacity and a representable control on both slots.

@@ -1,0 +1,431 @@
+diff --git a/src/cloudpilot/emulator/ExternalStorage.cpp b/src/cloudpilot/emulator/ExternalStorage.cpp
+index 1030c35..a13f2d1 100644
+--- a/src/cloudpilot/emulator/ExternalStorage.cpp
++++ b/src/cloudpilot/emulator/ExternalStorage.cpp
+@@ -28,6 +28,12 @@ bool ExternalStorage::AddImage(const string& key, uint8* imageData, size_t size,
+     return true;
+ }
+ 
++bool ExternalStorage::AddImage(const string& key, std::shared_ptr<CardImage> image) {
++    if (key.empty() || key.size() > MAX_KEY_LENGTH || HasImage(key) || !image || !image->BlocksTotal()) return false;
++    images.emplace(key, std::move(image));
++    return true;
++}
++
+ bool ExternalStorage::Mount(const string& key, EmHAL::Slot slot) {
+     if (static_cast<int>(slot) < 0 || slot > EmHAL::MAX_SLOT || IsMounted(slot) || !HasImage(key) ||
+         GetSlot(key) != EmHAL::Slot::none || !EmHAL::SupportsImageInSlot(slot, *images.at(key)))
+diff --git a/src/cloudpilot/emulator/ExternalStorage.h b/src/cloudpilot/emulator/ExternalStorage.h
+index 3aaf04a..ed62777 100644
+--- a/src/cloudpilot/emulator/ExternalStorage.h
++++ b/src/cloudpilot/emulator/ExternalStorage.h
+@@ -30,9 +30,11 @@ class ExternalStorage {
+     void Load(SavestateLoader<ChunkType>&);
+ 
+     bool HasImage(const string& key) const;
++    bool HasImages() const { return !images.empty(); }
+     CardImage* GetImage(const string& key);
+     bool AddImage(const string& key, uint8* imageData, size_t size, bool readOnly = false);
+ 
++    bool AddImage(const string& key, std::shared_ptr<CardImage> image);
+     bool Mount(const string& key, EmHAL::Slot slot);
+     bool Mount(const string& key);
+     bool Unmount(EmHAL::Slot);
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+index 3317587..5a2d04e 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -20,21 +20,22 @@ void EmRegsVZDana::GetKeyInfo(int* rows, int* cols, uint16*, Bool*) {
+ 
+ uint8 EmRegsVZDana::GetPortInternalValue(int port) {
+     // The small ROM's reset path requires D7 high to leave its power-down branch.
+-    uint8 result=EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x9f : port == 'F' ? 2 : 0);
++    uint8 result=EmRegsVZ::GetPortInternalValue(port) | (port == 'D' ? 0x9f : port == 'F' || port == 'J' ? 2 : 0);
+     if(port=='D') {
+-        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) result &= ~2;
+-        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard2)) result &= ~1;
++        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) result &= ~4;
++        if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard2)) result &= ~8;
+     }
+     if(port=='D' && !resetAsserted && StRequest()) result &= ~0x10;
+     return result;
+ }
+ 
+ uint8 EmRegsVZDana::GetPortInputValue(int port) {
++    if(port=='J') return EmRegsVZ::GetPortInputValue(port) | 2; // MISO is ready between SPI transfers.
+     if (port=='G') return (EmRegsVZ::GetPortInputValue(port)&~2) | (adc.packDetectHigh ? 2 : 0);
+     if(port=='F') {
+         auto* first=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard);
+         auto* second=gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard2);
+-        return 2 | (first && first->IsReadOnly() ? 0x80 : 0) | (second && second->IsReadOnly() ? 1 : 0);
++        return 2 | (!first || !first->IsReadOnly() ? 0x80 : 0) | (!second || !second->IsReadOnly() ? 1 : 0);
+     }
+     return EmRegsVZ::GetPortInputValue(port) | (port=='K' && !resetAsserted ? 4 : port=='F' ? 2 : 0);
+ }
+@@ -515,12 +516,13 @@ bool EmRegsVZDana::SupportsImageInSlot(EmHAL::Slot slot,uint32 blocks) {
+ void EmRegsVZDana::Mount(EmHAL::Slot slot,CardImage&) {
+     if(slot!=EmHAL::Slot::sdcard && slot!=EmHAL::Slot::sdcard2) return;
+     (slot==EmHAL::Slot::sdcard ? sd0 : sd1).Reset();
++    fPortDEdge |= slot==EmHAL::Slot::sdcard ? 4 : 8;
+     UpdatePortDInterrupts();
+ }
+ void EmRegsVZDana::Unmount(EmHAL::Slot slot) {
+     if(slot!=EmHAL::Slot::sdcard && slot!=EmHAL::Slot::sdcard2) return;
+     (slot==EmHAL::Slot::sdcard ? sd0 : sd1).Reset();
+-    uint8 mask=slot==EmHAL::Slot::sdcard ? 2 : 1;
++    uint8 mask=slot==EmHAL::Slot::sdcard ? 4 : 8;
+     fPortDEdge |= mask;
+     UpdatePortDInterrupts();
+ }
+diff --git a/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp b/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp
+index 811c99b..14f4bcd 100644
+--- a/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp
++++ b/src/cloudpilot/emulator/hardware/EmSPISlaveSD.cpp
+@@ -555,10 +555,11 @@ void EmSPISlaveSD::DoReadCID() {
+     cid[6] = 'l';
+     cid[7] = 't';
+     cid[8] = 32;    // PRV
+-    cid[9] = 0x00;  // PSN
+-    cid[10] = 0x00;
+-    cid[11] = 0x4A;
+-    cid[12] = 0xEC;
++    const uint32 serial = Image()->Serial();
++    cid[9] = serial >> 24;  // PSN
++    cid[10] = serial >> 16;
++    cid[11] = serial >> 8;
++    cid[12] = serial;
+     cid[13] = 9;   // MDT.month = sept
+     cid[14] = 22;  // MDT.year = 2022
+     cid[15] = crc::sdCRC7(cid, 15) << 1;
+diff --git a/src/cloudpilot/frond/RuntimeCards.h b/src/cloudpilot/frond/RuntimeCards.h
+new file mode 100644
+index 0000000..99e0c01
+--- /dev/null
++++ b/src/cloudpilot/frond/RuntimeCards.h
+@@ -0,0 +1,112 @@
++#pragma once
++#include "ExternalStorage.h"
++#include "../../uarm/uarm/SessionIo.h"
++#include <sys/file.h>
++#include <iomanip>
++#include <sstream>
++
++// Runtime cards retain their own file lock and committed generations. Machine saves still refuse
++// mounted media. A successful block write is durable and is never rewound by a machine reset.
++class RuntimeCards {
++    struct Card {
++        int fd{-1};
++        std::string key, path;
++        uint32_t serial{};
++        bool protectedCard{}, failed{};
++        std::shared_ptr<FileCardBacking> backing;
++        ~Card() { if (fd >= 0) ::close(fd); }
++    };
++    std::unique_ptr<Card> cards[2];
++    static EmHAL::Slot slot(unsigned n) { return n ? EmHAL::Slot::sdcard2 : EmHAL::Slot::sdcard; }
++  public:
++    ~RuntimeCards() {
++        for (auto& card : cards) if (card) gExternalStorage.RemoveImage(card->key);
++    }
++    std::string Command(unsigned n, const std::string& op, const std::string& argument) {
++        if (n > 1) return "error: invalid slot";
++        auto& card = cards[n];
++        if (op == "state" && argument.empty())
++            return !card ? "none" : (gExternalStorage.IsMounted(slot(n)) ? "inserted " : "ejected ") +
++                card->key + (card->protectedCard ? " protected" : " writable") + (card->failed ? " io-error" : "");
++        if (op == "attach" || (op == "insert" && !argument.empty())) {
++            if (card) return "error: take out the current card first";
++            std::istringstream words(argument);
++            std::string path, key, policy, extra;
++            if (!(words >> std::quoted(path) >> key >> policy) || (words >> extra) || path.empty() || path[0] != '/' ||
++                key.size() != 32 || key.find_first_not_of("0123456789abcdef") != std::string::npos ||
++                (policy != "protected" && policy != "writable"))
++                return "error: use absolute-path 32-lowercase-hex-identity writable|protected";
++            auto next = std::make_unique<Card>();
++            next->key = key; next->path = path; next->protectedCard = policy == "protected";
++            // CID is 32 bits, so refuse a serial collision as well as duplicate identities.
++            next->serial = uint32_t(std::stoul(key.substr(0, 8), nullptr, 16));
++            for (auto& other : cards) if (other && (other->key == key || other->serial == next->serial))
++                return "error: duplicate identity or serial";
++            next->fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC | O_NOFOLLOW);
++            struct stat mine{}, named{};
++            if (next->fd < 0 || flock(next->fd, LOCK_EX | LOCK_NB) || fstat(next->fd, &mine) ||
++                stat(path.c_str(), &named) || !S_ISREG(mine.st_mode) || mine.st_dev != named.st_dev || mine.st_ino != named.st_ino)
++                return "error: cannot lock card file";
++            frondSdFile::Info info;
++            std::vector<uint32_t> table;
++            if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok ||
++                info.payloadBytes < (32u << 20) || info.payloadBytes > (2048ull << 20) ||
++                !EmHAL::SupportsImageInSlot(slot(n), uint32_t(info.payloadBytes / 512)) ||
++                frondMachine::checkSdPayload(path, info, table) != frondMachine::SiblingStatus::ok)
++                return "error: invalid SD file or geometry (32 to 2048 MiB, representable SDSC only)";
++            FileCardOptions options;
++            options.rejectInvalidRoot = true; options.identity = key; options.chunkCrcs = table;
++            next->backing = FileCardBacking::Open(path, info.payloadBytes, frondSdFile::headerBytes, options);
++            if (!next->backing) return "error: cannot open card backing";
++            auto* live = next.get();
++            auto image = std::make_shared<CardImage>(next->backing, next->protectedCard, [live] {
++                if (live->failed) return false;
++                if (!live->backing->Commit()) { live->failed = true; return false; }
++                return true;
++            }, next->serial);
++            if (!gExternalStorage.AddImage(key, image)) return "error: duplicate image key";
++            if (!gExternalStorage.Mount(key, slot(n))) {
++                gExternalStorage.RemoveImage(key);
++                return "error: cannot mount card";
++            }
++            card = std::move(next);
++            return "inserted";
++        }
++        if (!card) return "error: empty slot";
++        if (op == "export") {
++            std::istringstream words(argument); std::string dest, extra;
++            if (!(words >> std::quoted(dest)) || (words >> extra) || dest.empty() || dest[0]!='/')
++                return "error: use an absolute destination path";
++            int fd=::open(dest.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC,0600);
++            if (fd<0) return "error: destination must be a new file";
++            std::array<uint8_t, frondMachine::identityBytes> identity{};
++            const bool ok=frondSession::writeSdFromReader(dest,card->backing->Size(),
++                [&](uint64_t off,uint64_t count,void* p){return card->backing->Read(off,count,p);},identity);
++            ::close(fd);
++            if (!ok) { ::unlink(dest.c_str()); return "error: card export failed"; }
++            if (!frondSession::syncDir(std::filesystem::path(dest).parent_path())) return "error: export directory flush failed";
++            return "exported";
++        }
++        if (!argument.empty()) return "error: this command takes no argument";
++        if (op == "eject") return gExternalStorage.Unmount(slot(n)) ? "ejected" : "error: already ejected";
++        if (op == "insert") return gExternalStorage.Mount(card->key, slot(n)) ? "inserted" : "error: already inserted";
++        if (op == "take-out") {
++            if (gExternalStorage.IsMounted(slot(n))) return "error: eject first";
++            if (card->failed) return "error: card I/O failed; backing retained";
++            // Settle the live generations into an ordinary portable .frondsd before releasing it.
++            std::array<uint8_t, frondMachine::identityBytes> identity{};
++            if (!card->protectedCard && !frondSession::writeSdFromReader(card->path, card->backing->Size(),
++                [&](uint64_t off, uint64_t count, void* dest) { return card->backing->Read(off, count, dest); }, identity))
++                return "error: could not settle card file";
++            if (!card->protectedCard && !frondSession::syncDir(std::filesystem::path(card->path).parent_path()))
++                return "error: card directory flush failed; backing retained";
++            gExternalStorage.RemoveImage(card->key);
++            const auto path = card->path;
++            const bool protect = card->protectedCard;
++            card.reset();
++            if (!protect) FileCardBacking::DiscardGenerations(path);
++            return "taken-out";
++        }
++        return "error: unsupported card command";
++    }
++};
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 9b8f6ec..059b80f 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -55,6 +55,7 @@
+ #include "EmROMReader.h"
+ #include "EmSession.h"
+ #include "ExternalStorage.h"
++#include "RuntimeCards.h"
+ #include "EmSystemState.h"
+ #include "Feature.h"
+ #include "GdbStub.h"
+@@ -103,6 +104,7 @@ struct Options {
+     string irda{"off"};
+     // The modem's HotSync link: where a call to the HotSync number goes.
+     string modemSync{"off"};
++    string sdAttach[2];
+     uint16_t gdbPort{0};
+     bool smooth{false};
+     optional<string> desktopSocket;
+@@ -266,7 +268,7 @@ string parseMetadata(const void* data, size_t size, SessionMetadata& metadata) {
+ // The current machine as a session file.
+ bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& metadata, vector<uint8_t>& out) {
+     // This container path cannot retain external card contents yet.
+-    if(gExternalStorage.IsMounted(EmHAL::Slot::sdcard) ||
++    if(gExternalStorage.HasImages() || gExternalStorage.IsMounted(EmHAL::Slot::sdcard) ||
+        gExternalStorage.IsMounted(EmHAL::Slot::sdcard2) ||
+        gExternalStorage.IsMounted(EmHAL::Slot::memorystick)) {
+         cerr << "session save refused: external card persistence is not supported by this runner" << endl;
+@@ -623,6 +625,12 @@ class Runner {
+ 
+     // Headless: runs for options.runFor guest seconds as fast as the host can.
+     int RunHeadless() {
++        for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
++            if (profile->deviceType != deviceTypeDana) return 1;
++            const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
++            cout << "card: " << reply << endl;
++            if (reply.rfind("error:",0)==0) return 1;
++        }
+         if (options.inputReplay && !LoadReplay(*options.inputReplay)) return 1;
+         if (!OpenWav() || !OpenLinks()) return 1;
+         while (guestSeconds < options.runFor) {
+@@ -635,6 +643,12 @@ class Runner {
+     }
+ 
+     int RunWindow() {
++        for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
++            if (profile->deviceType != deviceTypeDana) return 1;
++            const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
++            cout << "card: " << reply << endl;
++            if (reply.rfind("error:",0)==0) return 1;
++        }
+         if (options.inputReplay && !LoadReplay(*options.inputReplay)) return 1;
+         if (!OpenWav() || !OpenLinks()) return 1;
+         if (options.gdbPort) StartGdb(options.gdbPort);
+@@ -1196,7 +1210,14 @@ class Runner {
+             return void(cout << "unsupported: " << refusal << endl);
+         auto argument = [&](string& value) { return bool(words >> quoted(value)) && !value.empty(); };
+         string path;
+-        if (command == "dana-down" || command == "dana-up" || command == "dana-text") {
++        if (command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) {
++            string args; getline(words,args);
++            const bool second=command.rfind("sd2-",0)==0;
++            const auto begin=args.find_first_not_of(" ");
++            args=begin==string::npos ? "" : args.substr(begin);
++            cout << "card: " << (profile->deviceType==deviceTypeDana ?
++                runtimeCards.Command(second,command.substr(second?4:3),args) : "error: unsupported device") << endl;
++        } else if (command == "dana-down" || command == "dana-up" || command == "dana-text") {
+             string value,extra;
+             if(!(words >> quoted(value)) || (words >> extra)) return void(cout << "input refused: argument" << endl);
+             const auto result=DanaInputCommand(command,value);
+@@ -1516,6 +1537,11 @@ class Runner {
+     // have answers "unsupported", or reports it absent for the state queries the desktop asks every
+     // device.
+     Reply DesktopCommand(const string& command, const string& argument) {
++        if ((command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) && profile->deviceType==deviceTypeDana) {
++            const bool second=command.rfind("sd2-",0)==0;
++            auto reply=runtimeCards.Command(second,command.substr(second?4:3),argument);
++            return {reply.rfind("error:",0)!=0,"card",reply};
++        }
+         if (auto refusal=peripheralRefusal68k(*profile,command,argument); !refusal.empty())
+             return {false,"unsupported",refusal};
+         static const char* const fileCommands[] = {"save", "install", "export", "export-db", "input-replay"};
+@@ -2200,6 +2226,7 @@ class Runner {
+     SessionMetadata metadata;
+     Lcd68k lcd;
+     Replay replay;
++    RuntimeCards runtimeCards;
+     Console console;
+     Speed speed{Speed::original};
+     double guestSeconds{0};
+@@ -2350,6 +2377,9 @@ bool parseOptions(int argc, char** argv, Options& options) {
+             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
+             if (!value()) return false;
+             cout << "frond-68k: ignoring " << arg << endl;
++        } else if (arg == "--sd-attach" || arg == "--sd2-attach") {
++            const char* v=value(); if (!v) return false;
++            options.sdAttach[arg=="--sd2-attach"] = v;
+         } else if (arg == "--card-swap" || arg == "--card-identity" || arg == "--card-protected") {
+             options.refused = arg;
+             return false;
+diff --git a/src/common/CardImage.cpp b/src/common/CardImage.cpp
+index eb7ce3f..45e7234 100644
+--- a/src/common/CardImage.cpp
++++ b/src/common/CardImage.cpp
+@@ -12,11 +12,21 @@ CardImage::CardImage(uint8_t* data, size_t blocksTotal, bool readOnly)
+     memset(dirtyPages.get(), 0, dirtyPageBufferSize);
+ }
+ 
++CardImage::CardImage(std::shared_ptr<CardBacking> backing, bool readOnly,
++                     std::function<bool()> flush, uint32_t serial)
++    : CardImage(nullptr, backing->Size() / BLOCK_SIZE, readOnly) {
++    this->backing = std::move(backing);
++    this->flush = std::move(flush);
++    this->serial = serial;
++}
++
+ size_t CardImage::Read(uint8_t* dest, size_t index, size_t count) {
+     if (index >= blocksTotal) return 0;
+ 
+     count = std::min(count, blocksTotal - index);
+ 
++    if (backing) return backing->Read(index * BLOCK_SIZE, count * BLOCK_SIZE, dest) ? count : 0;
++
+     for (size_t i = 0; i < count; i++)
+         memcpy(dest + i * BLOCK_SIZE, data.get() + (i + index) * BLOCK_SIZE, BLOCK_SIZE);
+ 
+@@ -28,6 +38,8 @@ size_t CardImage::Write(const uint8_t* source, size_t index, size_t count) {
+ 
+     count = std::min(count, blocksTotal - index);
+ 
++    if (backing) return WriteByteRange(source, index * BLOCK_SIZE, count * BLOCK_SIZE) ? count : 0;
++
+     for (size_t block = index; block < index + count; block++) {
+         memcpy(data.get() + block * BLOCK_SIZE, source + (block - index) * BLOCK_SIZE, BLOCK_SIZE);
+ 
+@@ -45,6 +57,16 @@ bool CardImage::WriteByteRange(const uint8_t* source, size_t offset, size_t coun
+     if (offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return false;
+     if (count == 0) return true;
+ 
++    if (backing) {
++        auto prior = backing->Snapshot();
++        if (!prior) return false;
++        if (!backing->Write(offset, count, source) || !flush || !flush()) {
++            backing->Restore(*prior);
++            return false;
++        }
++        MarkRangeDirty(offset, count);
++        return true;
++    }
+     memcpy(data.get() + offset, source, count);
+ 
+     MarkRangeDirty(offset, count);
+@@ -55,6 +77,7 @@ bool CardImage::WriteByteRange(const uint8_t* source, size_t offset, size_t coun
+ bool CardImage::ReadByteRange(uint8_t* destination, size_t offset, size_t count) {
+     if (offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return false;
+ 
++    if (backing) return backing->Read(offset, count, destination);
+     memcpy(destination, data.get() + offset, count);
+ 
+     return true;
+diff --git a/src/common/CardImage.h b/src/common/CardImage.h
+index c552f5d..f9cfb8b 100644
+--- a/src/common/CardImage.h
++++ b/src/common/CardImage.h
+@@ -3,6 +3,8 @@
+ 
+ #include <cstdint>
+ #include <memory>
++#include <functional>
++#include "../uarm/uarm/CardBacking.h"
+ 
+ class CardImage {
+    public:
+@@ -12,6 +14,9 @@ class CardImage {
+ 
+    public:
+     CardImage(uint8_t* data, size_t blocksTotal, bool readOnly = false);
++    CardImage(std::shared_ptr<CardBacking> backing, bool readOnly, std::function<bool()> flush,
++              uint32_t serial);
++    uint32_t Serial() const { return serial; }
+     bool IsReadOnly() const { return readOnly; }
+ 
+     size_t Read(uint8_t* dest, size_t index, size_t count = 1);
+@@ -31,6 +36,9 @@ class CardImage {
+     std::unique_ptr<uint8_t[]> dirtyPages;
+     size_t blocksTotal;
+     const bool readOnly;
++    std::shared_ptr<CardBacking> backing;
++    std::function<bool()> flush;
++    uint32_t serial{0x00004aec};
+ };
+ 
+ #endif  // _CARD_IMAGE_H_
+diff --git a/src/uarm/uarm/FileCardBacking.h b/src/uarm/uarm/FileCardBacking.h
+index b6bd5a2..05ece34 100644
+--- a/src/uarm/uarm/FileCardBacking.h
++++ b/src/uarm/uarm/FileCardBacking.h
+@@ -20,6 +20,7 @@
+ // same folder. The dirty index is a bounded memory cache plus a disk index.
+ 
+ struct FileCardOptions {
++    bool rejectInvalidRoot = false;
+     uint32_t pageSize = 4096;
+     size_t cacheBytes = 16u << 20;
+     size_t indexCacheEntries = 4096;
+@@ -443,6 +444,7 @@ class FileCardBacking : public CardBacking {
+             // A root only applies to the exact file and card it was written for. Anything else,
+             // including a v1 root or a broken chain, belongs to a replaced card and is discarded.
+             if (!loadRoot()) {
++                if (options.rejectInvalidRoot && std::filesystem::exists(genPath("root"), ec)) return false;
+                 root = base;
+                 working = base;
+                 DiscardGenerations(durablePath);

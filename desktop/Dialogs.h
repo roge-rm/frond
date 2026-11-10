@@ -10,6 +10,7 @@ class QLineEdit;
 class QSlider;
 class QSpinBox;
 class QGroupBox;
+class DanaViewControls;
 
 // Window scale in quarters that fits the screen, from the layout the core draws for the device.
 int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
@@ -23,19 +24,25 @@ class MachineSettings : public QWidget {
     QSlider* windowScale;
     QLabel* scaleLabel;
     QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
+    DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
-    // Only shown with FROND_ENGINE_SETTING=1 until the Fast engine is qualified; never for 68k devices.
+    // Never shown for 68k devices.
     QComboBox* engine;
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
-    // Infrared: the local choices and the connections. Shown once showPeripherals() is called.
+    // Infrared, Serial and Bluetooth: the local choices and the connections. Shown once showPeripherals() is called.
     QComboBox* infrared;
     QSpinBox* infraredPort;
+    QComboBox* serial;
+    QSpinBox* serialPort;
+    // Bluetooth: Off, This Frond, a controller socket, the connections.
+    QComboBox* bluetooth;
+    QLineEdit* bluetoothSocket;
     void showPeripherals(bool shown);
  private:
-    QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel;
+    QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel, *bluetoothLabel;
     QGroupBox* peripherals;
     bool peripheralsShown{false};
     frondFirmware::Device device{frondFirmware::Device::automatic};
