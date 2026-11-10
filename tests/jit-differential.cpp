@@ -106,12 +106,35 @@ struct WmmxSaver {
     void Save(T& s) { pxa270wmmxSave(w, s); }
 };
 
+// A device page at kDevice (mapped at virtual 0x2f000 in directed cases, 0x30000 unmapped) that
+// counts the accesses it takes, as a FIFO or doorbell register would see them. Reads return
+// the count so far. Offsets 0x800-0x80f refuse every access (a bus error, no side effect).
+constexpr uint32_t kDevice = 0x40000000;
+struct Device {
+    uint32_t reads = 0, writes = 0;
+};
+
+bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    Device& d = *static_cast<Device*>(userData);
+    const uint32_t off = pa - kDevice;
+    if (off >= 0x800 && off < 0x810) return false;
+    if (write) {
+        d.writes++;
+    } else {
+        d.reads++;
+        memcpy(buf, &d.reads, size < 4 ? size : 4);
+        if (size > 4) memset((uint8_t*)buf + 4, 0, size - 4);
+    }
+    return true;
+}
+
 struct Machine {
     bool fast = false;
     ArmCpu* cpu = nullptr;
     uint8_t* ram = nullptr;
     Pxa270wmmx* wmmx = nullptr;
     ArmMem* mem = nullptr;
+    Device* device = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -135,6 +158,8 @@ Machine makeMachine(bool fast) {
                     createSystemState());
     patchDispatchSetCpu(pd, m.cpu);
     m.wmmx = pxa270wmmxInit(m.cpu);
+    m.device = new Device;
+    if (!memRegionAdd(mem, kDevice, 0x1000, deviceAccess, m.device)) abort();
     return m;
 }
 
@@ -200,6 +225,7 @@ struct Snapshot {
     uint32_t usr[7], fiq[7], spsrFiq;
     uint32_t banked[4][3];  // IRQ, SVC, ABT, UND: r13, r14, SPSR
     uint32_t fsr, far, dacr, cpar;
+    uint32_t deviceReads, deviceWrites;
     std::vector<uint8_t> wmmx, ram;
     bool stopped;
 };
@@ -210,6 +236,8 @@ Snapshot snapshot(Machine& m, bool stopped) {
     memcpy(s.r, cpuGetRegisters(m.cpu), sizeof(s.r));
     s.cpsr = cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR);
     s.ram.assign(m.ram, m.ram + kRamSize);
+    s.deviceReads = m.device->reads;
+    s.deviceWrites = m.device->writes;
     Savestate<ChunkType> st;
     WmmxSaver saver{m.wmmx};
     if (!st.Save(saver)) abort();
@@ -281,6 +309,8 @@ std::vector<std::string> differences(const Snapshot& a, const Snapshot& b) {
     cmp("far", a.far, b.far);
     cmp("dacr", a.dacr, b.dacr);
     cmp("cpar", a.cpar, b.cpar);
+    cmp("device reads", a.deviceReads, b.deviceReads);
+    cmp("device writes", a.deviceWrites, b.deviceWrites);
     if (a.wmmx != b.wmmx) d.push_back("iwmmxt registers differ");
     int shown = 0;
     for (uint32_t i = 0; i < kRamSize; i += 4) {
@@ -373,6 +403,10 @@ struct Case {
     uint32_t cpsr = 0;
     bool codeCacheable = false;
     bool alignCheck = false;
+    // The device page at 0x2f000, directed cases only: the generated ones could reach it, and
+    // an LDM or STM that crosses from a device into an abort is re-run by the interpreter
+    // after the JIT's partial transfer, so the device sees the first words twice.
+    bool devicePage = false;
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
 };
@@ -462,6 +496,7 @@ Assembled assemble(const Case& c) {
     page(0x2b000, 3, false);
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
+    if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
 
@@ -1479,6 +1514,7 @@ constexpr uint64_t kLimit = 20000;
 
 void prepare(Machine& m, const Case& c, const Assembled& a) {
     memcpy(m.ram, a.image.data(), kRamSize);
+    *m.device = Device{};
     cpuInvalidateCodeCache(m.cpu);
     cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, SVC | 0xc0);
     cpuSetReg(m.cpu, 15, kSetup);
@@ -1619,7 +1655,7 @@ void report(Engines& e, const Case& c, const Outcome& o) {
 // final mode, the CPSR under a mask, or a word of RAM.
 // LOADED: register index holds the RAM word at value (which nothing in the case writes).
 struct Expect {
-    enum What { REG, CPSR, MEM, FSR, FAR, LOADED } what;
+    enum What { REG, CPSR, MEM, FSR, FAR, LOADED, DEVICE } what;  // DEVICE: index 0 reads, 1 writes
     uint32_t index;  // register number or address
     uint32_t value;
     uint32_t mask = ~0u;
@@ -1652,13 +1688,14 @@ std::vector<std::string> unexpected(const Directed& d, const Snapshot& s) {
     char line[120];
     for (const Expect& x : d.expect) {
         uint32_t v = 0;
-        static const char* const names[] = {"r", "cpsr", "mem", "fsr", "far", "r"};
+        static const char* const names[] = {"r", "cpsr", "mem", "fsr", "far", "r", "device"};
         const char* what = names[x.what];
         uint32_t want = x.value;
         if (x.what == Expect::REG || x.what == Expect::LOADED) v = s.r[x.index];
         else if (x.what == Expect::CPSR) v = s.cpsr;
         else if (x.what == Expect::FSR) v = s.fsr;
         else if (x.what == Expect::FAR) v = s.far;
+        else if (x.what == Expect::DEVICE) v = x.index ? s.deviceWrites : s.deviceReads;
         else memcpy(&v, &s.ram[x.index], 4);
         if (x.what == Expect::LOADED) memcpy(&want, &s.ram[x.value & (kRamSize - 1)], 4);
         if ((v & x.mask) == (want & x.mask)) continue;
@@ -1687,6 +1724,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.dacr = d.dacr;
     c.table[2] = d.dacr;
     c.alignCheck = false;
+    c.devicePage = true;
     c.sr = d.sr;
     c.table[4] = 0x70 | 1 | d.sr;
     for (auto [r, v] : d.regs) {
@@ -1889,6 +1927,21 @@ bool directed(Engines& e) {
          {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
          {{1, 0x29f80}, {2, 0x20800}, {3, 32}},
          {{Expect::REG, 1, 0x2a000}, {Expect::REG, 2, 0x20a00}, {Expect::REG, 3, 0}}},
+        // A WLDRD or WSTRD whose second word fails has done the first word's access once,
+        // as Exact does (the JIT doesn't run it again): a device page at 0x2f000 counts them,
+        // then a translation fault at 0x30000 or a refused register at device offset 0x800.
+        {"iwmmxt wstrd from a device into a hole",
+         {0xedc10100, 0xe1a02001}, false, SVC, {{1, 0x2fffc}},
+         {{Expect::REG, 2, 0x2fffc}, {Expect::DEVICE, 1, 1}, {Expect::DEVICE, 0, 0}}},
+        {"iwmmxt wldrd from a device into a hole",
+         {0xedd10100, 0xec532000}, false, SVC, {{1, 0x2fffc}},
+         {{Expect::DEVICE, 0, 1}, {Expect::DEVICE, 1, 0}}},
+        {"iwmmxt user wstrd [r1], #8 into a refused device register",
+         {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2f7fc}},
+         {{Expect::REG, 1, 0x2f7fc}, {Expect::REG, 2, 0x2f7fc}, {Expect::DEVICE, 1, 1}}},
+        {"iwmmxt wldrd and wstrd on a device",
+         {0xedd10100, 0xec532000, 0xedc10100, 0xedd10100}, false, SVC, {{1, 0x2f100}},
+         {{Expect::REG, 2, 1}, {Expect::REG, 3, 2}, {Expect::DEVICE, 0, 4}, {Expect::DEVICE, 1, 2}}},
         // CPAR bit 1 off: WLDRD (cp1) at 0x10008 is undefined, wldrb (cp0) still runs.
         {"iwmmxt cpar off for a load",
          {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
