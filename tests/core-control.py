@@ -449,7 +449,9 @@ def common(c, root, device, unsupported, saved):
 
 def reset_after_change(c, root, device):
     """A reset straight after an install or delete keeps the change. The T|X writes a database's
-    last pages to its NAND store up to 2 s later, so the core lets the guest run that far first."""
+    last pages to its NAND store up to 2 s later, so the core lets the guest run that far first.
+    Straight after the boot guest-ready can pass while the launcher is still busy and db-list then
+    answers not-ready for about a second, so db-list is retried as the protocol says."""
     if device not in ('palm-tx', 'palm-e2'):
         print(f'core-control frond: reset after change skipped, {device} has no NAND store (needs a T|X or E2 session)')
         return
@@ -457,11 +459,11 @@ def reset_after_change(c, root, device):
     c.ok('install', palm_database(root / f'{name}.pdb', name, b'DATA', b'FRst', False), code=('installed', 'needs-reset'))
     c.ok('reset', code='done')
     c.until_ok('guest-ready')
-    assert name.encode().hex() in c.ok('db-list', code='databases'), 'install lost by a reset straight after it'
+    assert name.encode().hex() in c.until_ok('db-list', timeout=30), 'install lost by a reset straight after it'
     c.ok('delete-db', name, code='deleted')
     c.ok('reset', code='done')
     c.until_ok('guest-ready')
-    assert name.encode().hex() not in c.ok('db-list', code='databases'), 'delete undone by a reset straight after it'
+    assert name.encode().hex() not in c.until_ok('db-list', timeout=30), 'delete undone by a reset straight after it'
 
 
 def check_arm(core, session, root):
