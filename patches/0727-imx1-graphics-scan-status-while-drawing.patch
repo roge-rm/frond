@@ -1,0 +1,25 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -249,7 +249,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 726;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 727;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -170,7 +170,10 @@
+         }
+         if (virtualProfile() && Imx1GraphicsDisplay::owns(address)) {
+             if (size != 4) return Imx1BootstrapAccess::width;
+-            if (!memoryReady(eim) || !engine.emptyRing()) return Imx1BootstrapAccess::sequence;
++            // The vertical-interval status read (54c) only follows the scan phase, so the ROM's wait
++            // at 200adb08 may run while a batch is still drawing. Everything else needs an empty ring.
++            const bool scanStatus = !write && (address & 0xffff) == 0x054c;
++            if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return Imx1BootstrapAccess::sequence;
+             return display.access(windows, pc, address, size, write, value);
+         }
+         if (virtualProfile() && Imx1GraphicsEngine::owns(address)) {

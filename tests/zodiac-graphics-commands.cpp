@@ -58,6 +58,17 @@ static void checkCommands(bool packedMono) {
     assert(submitted.access(eim,0x200b8cb0,0x16010140,4,false,value) == A::ok && value == 0x80000000);
     assert(memory.accessGpu(submitted,eim,0x100000,2,false,value) == A::ok && value == 0);
     assert(commands.duration() == 153648);
+    {
+        // The scan status read is let through while the batch draws; other display accesses still wait.
+        auto drawing = submitted;
+        uint32_t scan = 0xdeadbeef;
+        assert(drawing.access(eim,0x200adb08,0x1601054c,4,false,scan) == A::ok && (scan & ~0x400u) == 0);
+        assert(drawing.access(eim,0x200adb14,0x1601054c,4,false,scan) == A::ok && (scan & ~0x400u) == 0);
+        assert(drawing.access(eim,0x200adb08,0x1601054c,2,false,scan) == A::width);
+        assert(drawing.access(eim,0x200adb08,0x1601054c,4,true,scan) == A::sequence);
+        assert(drawing.access(eim,0x200aeb68,0x160104d8,4,true,scan) == A::sequence);
+        assert(!drawing.engineState().emptyRing());
+    }
     assert(submitted.advanceCpuCycles(uint32_t(commands.duration()-1)));
     assert(!submitted.engineState().completed() && submitted.engineState().consumer() == 0);
     assert(commands.complete(submitted,eim,memory) == A::sequence);
