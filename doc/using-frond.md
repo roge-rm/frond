@@ -17,7 +17,7 @@ On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with
 
 The 6 MiB E2 de-NVFS image is imported as Tungsten E2, with 32 MiB RAM by default and no NAND file needed. Its databases live in RAM, so save the session to keep them. The NOR must have the rePalm/Dmitry.GR card header at 0x20000, with the card running to the end of the image. Power and automatic sleep are disabled for this firmware; it stays awake while running.
 
-The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by default. NAND is optional. Its saved device name stays `palm-e2-franken`. The 320×480 screen includes Palm OS's input area and status bar, with no extra silkscreen below it. Home and Menu use the status bar whether the input area is open or closed. Frond keeps sleep disabled for this ROM, so the E3 has no Power control.
+The Tungsten E3 uses the modified 8 MiB ROM on the E2 board, with 32 MiB RAM by default. NAND is optional. Its saved device name stays `palm-e2-franken`. The 320×480 screen includes Palm OS's input area and status bar, with no extra silkscreen below it. Home and Menu use the status bar whether the input area is open or closed. Frond keeps sleep disabled for this ROM, so the E3 has no Power control. The ROM has no Bluetooth stack, and its network library needs one, so the E3 has no Bluetooth, mobile phone or dial-up; those rows are greyed out.
 
 A session has your firmware, installed apps and personal data in it. Keep it to yourself.
 
@@ -409,7 +409,7 @@ Modem and phone by device:
 |---|---|---|---|
 | Palm IIIx | yes, Palm OS 3.1, 3.5, 4.1 | yes, Palm OS 3.5 and 4.1 | no |
 | T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
-| Tungsten E3 | no | yes | yes, Linux |
+| Tungsten E3 | no | no | no |
 
 ### USB HotSync
 

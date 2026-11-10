@@ -123,8 +123,11 @@ class DeviceDataTest(unittest.TestCase):
         self.assertEqual(e3['fast_audio_md5'], 'a79f98bddd50c61e7eb89eee46eb81bd')
         self.assertNotEqual(e3['fast_audio_md5'], profiles['palm-e2']['fast_audio_md5'])
         self.assertNotIn('power', e3['buttons'].split('|'))
-        for key in ('sound', 'serial', 'usb', 'keyboard', 'infrared', 'bluetooth', 'hot_sync_button'):
+        for key in ('sound', 'serial', 'usb', 'keyboard', 'infrared', 'hot_sync_button'):
             self.assertTrue(e3[key], key)
+        # The ROM has no Bluetooth stack, and its Fake Net Library links to BtLib, so no network either.
+        for key in ('bluetooth', 'ir_phone', 'modem', 'network'):
+            self.assertFalse(e3[key], key)
         for name in ('palm-tx', 'palm-e2', 'palm-iiix'):
             self.assertTrue(profiles[name]['hot_sync_button'], name)
         for name in ('palm-zire-72', 'sony-clie-tg50', 'repalm'):

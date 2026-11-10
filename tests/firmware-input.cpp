@@ -161,8 +161,8 @@ class FirmwareInputTest : public QObject {
         QCOMPARE(profile.frontend.silkscreenHeight, uint16_t(0));
         QVERIFY(!QString::fromLatin1(profile.frontend.buttons).split('|').contains("power"));
         const auto caps = frondFirmware::capabilities(e3);
-        QVERIFY(caps.sound && caps.serial && caps.keyboard && caps.usb && caps.infrared && caps.bluetooth);
-        QVERIFY(!caps.network && caps.fastAudio && !caps.microphone);
+        QVERIFY(caps.sound && caps.serial && caps.keyboard && caps.usb && caps.infrared);
+        QVERIFY(!caps.network && !caps.bluetooth && !caps.irPhone && caps.fastAudio && !caps.microphone);
         QCOMPARE(QString::fromLatin1(profile.frontend.fastAudioNorMd5), QString("a79f98bddd50c61e7eb89eee46eb81bd"));
         QVERIFY(frondFirmware::hasHotSyncButton(e3));
         for (auto device : {Device::tx, Device::e2, frondFirmware::deviceFromId("palm-iiix")})

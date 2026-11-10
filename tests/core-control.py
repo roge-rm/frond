@@ -488,6 +488,10 @@ def check_arm(core, session, root):
         unsupported = [] if device == 'sony-clie-tg50' else [('ms-state', ''), ('ms-files', '/')]
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
+        # The E3 ROM has no Bluetooth stack, so the E3 has no Bluetooth or infrared phone.
+        no_phone = device == 'palm-e2-franken'
+        if no_phone:
+            unsupported += [('bluetooth-state', ''), ('bluetooth-mode', 'off')]
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
         # A lone file is extracted to <stem>/ on load, so the save goes to <stem>/<stem>.frond.
         # A lone v7 or later file runs in the folder it was copied to and saves back to itself.
@@ -501,16 +505,19 @@ def check_arm(core, session, root):
         c.fails('serial-mode', 'modem', code='argument' if device in SERIAL else 'unsupported')
         # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
         c.events.clear()
-        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
-        assert c.ok('irda-state', code='infrared') == 'phone idle'
-        assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
-        c.ok('speed-state')
-        assert ('infrared', 'phone idle') in c.events, c.events
-        c.fails('keyboard-attach', 'on', code='infrared')
+        if no_phone:
+            c.fails('irda-mode', 'phone', code='unsupported')
+        else:
+            assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+            assert c.ok('irda-state', code='infrared') == 'phone idle'
+            assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
+            c.ok('speed-state')
+            assert ('infrared', 'phone idle') in c.events, c.events
+            c.fails('keyboard-attach', 'on', code='infrared')
         assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
         assert c.ok('irda-mode', 'off', code='infrared') == 'off'
         assert c.ok('keyboard-attach', 'on', code='keyboard') == 'attached'
-        c.fails('irda-mode', 'phone', code='infrared')
+        c.fails('irda-mode', 'phone', code='unsupported' if no_phone else 'infrared')
         assert c.ok('keyboard-attach', 'off', code='keyboard') == 'detached'
         if lone:
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
