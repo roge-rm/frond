@@ -15,6 +15,26 @@ object CoreLog {
         return tail(parts.joinToString(""), MAX_CHARS)
     }
 
+    // The core's reason for refusing the session or the machine's ROM at start, from the end of its
+    // log, as the main text of the failure; null when the log has none. Mirrors the desktop's
+    // frondSessions::refusal and romRefusal.
+    fun refusal(log: String): String? {
+        for (line in log.lines().asReversed()) {
+            if (line.startsWith("failed to remount SD card: "))
+                return "Frond couldn't open this session: its card isn't the one it was saved with."
+            if (line.startsWith("session refused: ")) {
+                var reason = line.removePrefix("session refused: ").trim()
+                if (reason.startsWith("linked card committed history"))
+                    reason = "a card's saved changes are missing or don't match the session"
+                return "Frond couldn't open this session: $reason."
+            }
+            val at = line.indexOf(": this ROM ")
+            if (at > 0 && ' ' !in line.substring(0, at))
+                return "Frond couldn't start this machine: ${line.substring(at + 2).trim()}."
+        }
+        return null
+    }
+
     // The last max characters of text, starting at a whole line when it has to cut.
     fun tail(text: String, max: Int): String {
         if (text.length <= max) return text

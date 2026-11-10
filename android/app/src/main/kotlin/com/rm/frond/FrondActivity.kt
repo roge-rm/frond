@@ -1232,7 +1232,8 @@ open class FrondActivity : SDLActivity() {
         // A core that stopped by itself, before anyone asked it to quit, failed to start or crashed.
         if (isFinishing && !quitSent) {
             File(filesDir, START_ERROR).writeText(
-                startRefused ?: if (link.connectedOnce) "The emulator stopped unexpectedly." else "The emulator couldn't start this session.",
+                startRefused ?: if (link.connectedOnce) "The emulator stopped unexpectedly."
+                else CoreLog.refusal(CoreLog.read(this)) ?: "The emulator couldn't start this session.",
             )
         }
         if (running === this) running = null

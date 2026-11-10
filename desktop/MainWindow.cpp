@@ -687,7 +687,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         auto lines = log->toPlainText().split('\n');
         while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
         const auto details = lines.mid(qMax(0, int(lines.size()) - 40)).join('\n');
-        const auto refused = frondSessions::refusal(details);
+        auto refused = frondSessions::refusal(details);
+        if (refused.isEmpty()) refused = frondSessions::romRefusal(details);
         failure(refused.isEmpty() ? message : refused, details);
     });
     connect(&client, &DesktopClient::stalled, this, [this] {

@@ -197,6 +197,12 @@ class SessionStoreTest : public QObject {
         QCOMPARE(frondSessions::refusal("using RAM size: 1\n\nfailed to remount SD card: session and card image do not match\nexit 1"),
                  QString("Frond couldn't open this session: its card isn't the one it was saved with."));
     }
+    void romRefusalReason() {
+        // A ROM the core refuses at start is the failure's main text too.
+        QCOMPARE(frondSessions::romRefusal("args: x\nalphasmart-dana-wireless: this ROM has no serial number token\n"),
+                 QString("Frond couldn't start this machine: this ROM has no serial number token."));
+        QVERIFY(frondSessions::romRefusal("guest log: this ROM is fine\nSegmentation fault\n").isEmpty());
+    }
     void headers() {
         write(folder() + "/a.frond", header(6, "palm-tx"));
         const auto h = readHeader(folder() + "/a.frond");

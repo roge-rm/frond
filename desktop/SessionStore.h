@@ -774,6 +774,18 @@ inline QString refusal(const QString& log) {
     }
     return {};
 }
+// The core's reason for refusing the machine's ROM at start, like "alphasmart-dana-wireless: this
+// ROM has no serial number token", as the main text of the failure; empty when the log has none.
+inline QString romRefusal(const QString& log) {
+    static const QString marker = QStringLiteral(": this ROM ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        const auto at = lines[i].indexOf(marker);
+        if (at <= 0 || lines[i].left(at).contains(' ')) continue;
+        return QStringLiteral("Frond couldn't start this machine: %1.").arg(lines[i].mid(at + 2).trimmed());
+    }
+    return {};
+}
 
 // The library's progress over a CopyProgress, which may be empty.
 inline frondStorage::Progress storageProgress(const std::function<bool(qint64, qint64)>& progress) {
