@@ -1893,20 +1893,29 @@ bool directed(Engines& e) {
           0x1afffff8, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
          false, SVC, {},
          {{Expect::REG, 5, 0}, {Expect::REG, 4, 2}, {Expect::REG, 7, 0x10010}}},
-        // iWMMXt loads and stores in the JIT's slots. Exact raises undefined on a failed
-        // WLDR or WSTR (the handler returns to the next instruction) and writes no base back.
+        // iWMMXt loads and stores in the JIT's slots. A failed WLDR or WSTR takes the data
+        // abort as an ordinary load or store does (FSR and FAR set, the handler returns to the
+        // next instruction) and writes no base back.
         {"iwmmxt wldrd [r1, #8]! crossing into a hole",
          {0xedf10102, 0xe1a02001}, false, SVC, {{1, 0x29ff4}},
-         {{Expect::REG, 1, 0x29ff4}, {Expect::REG, 2, 0x29ff4}}},
+         {{Expect::REG, 1, 0x29ff4}, {Expect::REG, 2, 0x29ff4}, {Expect::FSR, 0, 0x07, 0xff},
+          {Expect::FAR, 0, 0x2a000}}},
         {"iwmmxt wstrd [r1], #8 crossing into the read-only page",
          {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2bffc}},
-         {{Expect::REG, 1, 0x2bffc}, {Expect::REG, 2, 0x2bffc}}},
+         {{Expect::REG, 1, 0x2bffc}, {Expect::REG, 2, 0x2bffc}, {Expect::FSR, 0, 0x0f, 0xff},
+          {Expect::FAR, 0, 0x2c000}}},
         {"iwmmxt wldrw [r1, #-4]! from a hole", {0xed310101}, false, SVC, {{1, 0x2a004}},
-         {{Expect::REG, 1, 0x2a004}}},
-        // Checked as privileged: user mode reads the privileged-only page.
+         {{Expect::REG, 1, 0x2a004}, {Expect::FSR, 0, 0x07, 0xff}, {Expect::FAR, 0, 0x2a000}}},
+        // Checked for the current mode: user mode can't read the privileged-only page, SVC can.
         {"iwmmxt user wldrd from the privileged-only page",
          {0xedd10100, 0xec532000}, false, USR, {{1, 0x28008}},
+         {{Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28008}, {Expect::CPSR, 0, USR, 0x1f}}},
+        {"iwmmxt svc wldrd from the privileged-only page",
+         {0xedd10100, 0xec532000}, false, SVC, {{1, 0x28008}},
          {{Expect::LOADED, 2, 0x28008}, {Expect::LOADED, 3, 0x2800c}}},
+        {"iwmmxt user wstrb to the user read-only page",
+         {0xed810004, 0xe1a02001}, false, USR, {{1, 0x29010}},
+         {{Expect::REG, 2, 0x29010}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x29014}}},
         // cp0 offsets are bytes, cp1 offsets words: wldrb [r1, #5]!, wstrh [r2], #-6,
         // wldrw [r3, #-4]!, wstrw [r4, #-8]! (offset 2 words).
         {"iwmmxt offsets and writeback",
@@ -1918,7 +1927,7 @@ bool directed(Engines& e) {
         {"iwmmxt unaligned", {0xedd10000, 0xedd21100, 0xed932100, 0xedc41100}, false, SVC,
          {{1, 0x20101}, {2, 0x20204}, {3, 0x20302}, {4, 0x20404}}, {}},
         // Media's copy loop, 8 times 16 bytes, then the same from 0x29f80 into the hole at
-        // 0x2a000: every load from there is undefined, r1 stays, the stores go on.
+        // 0x2a000: every load from there aborts, r1 stays, the stores go on.
         {"iwmmxt copy loop",
          {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
          {{1, 0x20100}, {2, 0x20800}, {3, 8}},
@@ -1932,13 +1941,14 @@ bool directed(Engines& e) {
         // then a translation fault at 0x30000 or a refused register at device offset 0x800.
         {"iwmmxt wstrd from a device into a hole",
          {0xedc10100, 0xe1a02001}, false, SVC, {{1, 0x2fffc}},
-         {{Expect::REG, 2, 0x2fffc}, {Expect::DEVICE, 1, 1}, {Expect::DEVICE, 0, 0}}},
+         {{Expect::REG, 2, 0x2fffc}, {Expect::DEVICE, 1, 1}, {Expect::DEVICE, 0, 0}, {Expect::FAR, 0, 0x30000}}},
         {"iwmmxt wldrd from a device into a hole",
          {0xedd10100, 0xec532000}, false, SVC, {{1, 0x2fffc}},
          {{Expect::DEVICE, 0, 1}, {Expect::DEVICE, 1, 0}}},
         {"iwmmxt user wstrd [r1], #8 into a refused device register",
          {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2f7fc}},
-         {{Expect::REG, 1, 0x2f7fc}, {Expect::REG, 2, 0x2f7fc}, {Expect::DEVICE, 1, 1}}},
+         {{Expect::REG, 1, 0x2f7fc}, {Expect::REG, 2, 0x2f7fc}, {Expect::DEVICE, 1, 1}, {Expect::FSR, 0, 0x0a, 0x0f},
+          {Expect::FAR, 0, 0x2f800}}},
         {"iwmmxt wldrd and wstrd on a device",
          {0xedd10100, 0xec532000, 0xedc10100, 0xedd10100}, false, SVC, {{1, 0x2f100}},
          {{Expect::REG, 2, 1}, {Expect::REG, 3, 2}, {Expect::DEVICE, 0, 4}, {Expect::DEVICE, 1, 2}}},
