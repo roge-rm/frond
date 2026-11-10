@@ -525,7 +525,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connectionsLayout->addWidget(pair, 0, Qt::AlignLeft);
     connectionsLayout->addStretch();
     // The side panels have a fixed width: lists shrink to it and readouts wrap instead of running off the right.
+    // The USB port list keeps its own sizing, so "Wi-Fi adapter" isn't cut off.
     for (auto* box : panels->findChildren<QComboBox*>()) {
+        if (box->objectName() == "usbPortChoice") continue;
         box->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         box->setMinimumContentsLength(6);
     }

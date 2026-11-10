@@ -16,6 +16,10 @@ PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     auto* label = new QLabel(tr("USB port"), this);
     portBox = new QComboBox(this);
     portBox->setObjectName("usbPortChoice");
+    // The choices change with the device, so the box sizes to them each time and the readout
+    // wraps instead of squeezing it.
+    portBox->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    portBox->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     portBox->addItem(tr("Off"), "off");
     readout = new QLabel(this);
     readout->setObjectName("printerReadout");

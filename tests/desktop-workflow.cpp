@@ -848,6 +848,9 @@ for line in s.makefile('rb'):
         {
             MainWindow window(core.fileName()); window.show();
             auto* mode = window.findChild<QComboBox*>("usbMode"); QVERIFY(mode);
+            // The USB port list sizes to its longest choice in the narrow panel.
+            auto* portChoice = window.findChild<QComboBox*>("usbPortChoice"); QVERIFY(portChoice);
+            QCOMPARE(portChoice->sizeAdjustPolicy(), QComboBox::AdjustToContents);
             auto* port = window.findChild<QSpinBox*>("usbPort"); QVERIFY(port);
             auto* state = window.findChild<QLabel*>("usbState"); QVERIFY(state);
             QCOMPARE(mode->currentData().toString(), QString("off"));

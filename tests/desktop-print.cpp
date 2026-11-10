@@ -91,6 +91,18 @@ class DesktopPrint : public QObject {
         QStringList choices;
         for (int i = 0; i < box->count(); i++) choices << box->itemText(i);
         QCOMPARE(choices, (QStringList{"Off", "Printer", "Wi-Fi adapter"}));
+        // The box widens for the longest choice when the choices come after the first show.
+        PrinterPanel fresh;
+        fresh.setFixedWidth(260);
+        fresh.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fresh));
+        fresh.setSupported(true, true);
+        fresh.setPort("wifi");
+        fresh.setLinkReadout("Connected, 10.0.2.15");
+        QApplication::processEvents();
+        auto* freshBox = fresh.findChild<QComboBox*>("usbPortChoice");
+        QVERIFY(freshBox->width() >= freshBox->fontMetrics().horizontalAdvance("Wi-Fi adapter"));
+        QVERIFY(freshBox->width() >= freshBox->sizeHint().width());
         panel.setSupported(true, false);
         QCOMPARE(box->count(), 2);
     }
