@@ -1,6 +1,7 @@
 #include "PrinterPanel.h"
 #include <algorithm>
 #include <QComboBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -18,6 +19,7 @@ PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     portBox->addItem(tr("Off"), "off");
     readout = new QLabel(this);
     readout->setObjectName("printerReadout");
+    readout->setWordWrap(true);
     row->addWidget(label);
     row->addWidget(portBox);
     row->addWidget(readout, 1);
@@ -32,6 +34,7 @@ PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     moduleBox->addItem(tr("Off"), false);
     moduleReadout = new QLabel(moduleRow);
     moduleReadout->setObjectName("wifiModuleReadout");
+    moduleReadout->setWordWrap(true);
     moduleLayout->addWidget(new QLabel(tr("Wi-Fi"), moduleRow));
     moduleLayout->addWidget(moduleBox);
     moduleLayout->addWidget(moduleReadout, 1);
@@ -43,6 +46,7 @@ PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     inner->setContentsMargins(0, 0, 0, 0);
     received = new QLabel(banner);
     received->setObjectName("printerReceived");
+    received->setWordWrap(true);
     note = new QLabel(tr("Only the Generic printer profile can be shown as pages"), banner);
     note->setObjectName("printerNote");
     note->setWordWrap(true);
@@ -54,9 +58,10 @@ PrinterPanel::PrinterPanel(QWidget* parent, bool bannerOnly) : QWidget(parent) {
     raw->setObjectName("printerRaw"); discard->setObjectName("printerDiscard");
     inner->addWidget(received);
     inner->addWidget(note);
-    auto* buttons = new QHBoxLayout;
-    for (auto* b : {pdf, print, raw, discard}) buttons->addWidget(b);
-    buttons->addStretch();
+    // Two rows of two, so the buttons fit the side panel's width.
+    auto* buttons = new QGridLayout;
+    buttons->addWidget(pdf, 0, 0); buttons->addWidget(print, 0, 1);
+    buttons->addWidget(raw, 1, 0); buttons->addWidget(discard, 1, 1);
     inner->addLayout(buttons);
     column->addWidget(banner);
     banner->hide();

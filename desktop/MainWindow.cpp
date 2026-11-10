@@ -524,6 +524,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     pair->setObjectName("pairWith");
     connectionsLayout->addWidget(pair, 0, Qt::AlignLeft);
     connectionsLayout->addStretch();
+    // The side panels have a fixed width: lists shrink to it and readouts wrap instead of running off the right.
+    for (auto* box : panels->findChildren<QComboBox*>()) {
+        box->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        box->setMinimumContentsLength(6);
+    }
+    for (auto* readout : {microphoneState, serialState, usbState, irdaState, danaPending}) readout->setWordWrap(true);
     connect(pair, &QPushButton::clicked, this, &MainWindow::showConnections);
     connect(hotSyncButton, &QPushButton::clicked, this, [this] { send("hotsync"); });
     connect(reset, &QPushButton::clicked, this, [this] {
