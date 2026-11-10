@@ -269,14 +269,15 @@ def calibration_target(rows, x, y):
         and rows[y + dy][4 * (x + dx) + 1] < 80) > 10
 
 
-def factory_setup(core, root, taps, launcher):
-    """Calibrate and finish the measured factory forms, waiting for each screen."""
+def factory_setup(core, root, taps, launcher, calibration=((291, 292), (27, 27), (160, 160))):
+    """Calibrate and finish the measured factory forms, waiting for each screen. calibration is
+    where to tap each of the three targets."""
     frame = root / 'boot-frame.png'
-    for x, y in [(291, 292), (27, 27), (160, 160)]:
+    for (x, y), tap in zip([(291, 292), (27, 27), (160, 160)], calibration):
         rows = core.wait_frame(frame, lambda rows: calibration_target(rows, x, y), 120)
         if x == 291:
             (root / 'calibrate.png').write_bytes(frame.read_bytes())
-        core.tap(root, x, y)
+        core.tap(root, *tap)
     title = rows[:24]
     for step, (x, y) in enumerate(taps):
         seen = []
@@ -296,8 +297,11 @@ def factory_setup(core, root, taps, launcher):
 
 
 def zire_setup(core, root):
-    # Language OK, Welcome Next, Location Next, Not now, Done.
-    factory_setup(core, root, [(40, 300), (280, 304), (280, 304), (45, 302), (35, 304)], launcher_wallpaper)
+    # Language OK, Welcome Next, Location Next, Not now, Done. The Zire calibrates in standard
+    # pixels, so the corner taps sit inside the standard pixel it takes for each target's centre
+    # (x 292-293 and y 292-293, x and y 28-29); then every later tap lands where it is made.
+    factory_setup(core, root, [(40, 300), (280, 304), (280, 304), (45, 302), (35, 304)], launcher_wallpaper,
+                  ((293, 292), (28, 28), (160, 160)))
 
 
 def zire_reminder(rows):
