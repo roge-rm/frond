@@ -147,6 +147,8 @@ FrondKeyboardProbe.prc --evidence NEW-DIRECTORY` with the built `out/frond-68k`.
 `tests/dana-input.py --skip-basics` runs the chord, ownership and lifecycle portion
 while developing input state. The full check also covers every ordinary key group
 and enables Sticky Keys through the guest Keyboard application.
+`--fresh-only --session pending.frond` starts a new process on the pending.frond
+an earlier run saved and checks only that its queued text arrives.
 
 Dana ordinary power development: `python3 tests/dana-power.py --session READY.frond
 --core out/frond-68k --evidence NEW-DIRECTORY` checks Power long holds, ordinary
