@@ -130,6 +130,26 @@ int main(int argc,char** argv) {
    assert(result.rfind("off aborted",0)==0);
    result.clear();assert(!owner.command("clear","",result));
  }
+ {
+   // The printer is only on the bus while the board powers the external port (PM5).
+   bind();assert(i.HasHostTarget(0));
+   i.SetPortSupply(0,false);assert(!i.HasHostTarget(0));assert((i.get(0x15)&0x10001)==0x10000);
+   std::string result;assert(!owner.command("begin","",result));
+   i.SetPortSupply(1,false);i.SetPortSupply(1,true);assert(!i.HasHostTarget(0));
+   owner.attach(i);assert(!i.HasHostTarget(0));
+   i.SetPortSupply(0,true);assert(i.HasHostTarget(0));assert((i.get(0x15)&1)==1);
+   owner.detach();
+   // With a connect delay the printer connects that long after attach or power, in poll().
+   uint64_t t=0;UsbPrinterRuntime late{50};late.clock=[&] {return t;};
+   late.attach(i);late.poll();assert(!i.HasHostTarget(0));
+   t=49;late.poll();assert(!i.HasHostTarget(0));
+   t=50;late.poll();assert(i.HasHostTarget(0));
+   i.SetPortSupply(0,false);assert(!i.HasHostTarget(0));
+   i.SetPortSupply(0,true);late.poll();assert(!i.HasHostTarget(0));
+   t=99;late.poll();assert(!i.HasHostTarget(0));
+   t=100;late.poll();assert(i.HasHostTarget(0));
+   i.SetPortSupply(0,false);i.SetPortSupply(0,true);late.detach();t=200;late.poll();assert(!i.HasHostTarget(0));
+ }
  { UsbPrinterRuntime shutdown;shutdown.attach(i);std::string result;assert(shutdown.command("begin","",result)); }
  assert(!i.HasHostTarget(0));
  std::cout<<"PASS production owner, HC packets, cancellation, atomic invalid load, load kept and file failures\n";
