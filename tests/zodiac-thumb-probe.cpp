@@ -320,9 +320,9 @@ void guards() {
                r.address == (target & ~1u) && !r.busAccesses && r.value == 8);
     }
     // A Thumb access uses the same strict peripheral failure path as an ARM access.
-    Program p; p.enter(0x00206084); p.half(0x6001); p.half(0xde00);
+    Program p; p.enter(0x002060d4); p.half(0x6001); p.half(0xde00);
     const auto r = compare(p);
-    assert(r.stop == Imx1ProbeStop::unsupportedWrite && r.address == 0x00206084 && r.size == 4);
+    assert(r.stop == Imx1ProbeStop::unsupportedWrite && r.address == 0x002060d4 && r.size == 4);
 }
 }
 int main() {

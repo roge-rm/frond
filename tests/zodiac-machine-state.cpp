@@ -244,6 +244,29 @@ void timerWfi(bool fast) {
     assert(inside && deadline);
     assert(r.back().run.status == Imx1MachineStatus::terminal && r.back().run.result.registers[6] == 0x55);
 }
+// UART2 sends two characters at the reset rate, 80 PERCLK1 cycles a bit, and the transmit complete
+// interrupt (source 23) ends the wait. Saves before the first load, inside each character and after.
+void uartWfi(bool fast) {
+    Guest g{"UART WFI", setup(), {}};
+    auto& words = g.words;
+    load(words, 0, 0x00207000); store(words, 0, 0x80, 5); store(words, 0, 0x84, 0x4027);
+    store(words, 0, 0x40, 0x41); store(words, 0, 0x40, 0x42); store(words, 0, 0x8c, 0x8048);
+    load(words, 0, 0x00223000); store(words, 0, 8, 23);
+    words.push_back(0xe321f013); words.push_back(0xee070f90);
+    words.push_back(0xe3a06055); words.push_back(0xe7f000f0);
+    words.resize(0x400 / 4, 0xe1a00000);
+    // The handler switches TCEN off again.
+    load(words, 9, 0x00207000); load(words, 10, 0x8040); words.push_back(0xe589a08c);
+    words.push_back(0xe2877001); words.push_back(0xe25ef004);
+    g.options.bootstrapPeripherals = true;
+    auto r = roundTrip(g, fast, {slice(500, 1), slice(500, 300), slice(500, 700), slice(3, 100000), slice(500, 100000)}, always);
+    assert(r.size() == 6 && r[1].run.result.stop == Imx1ProbeStop::idleBudget && r[3].run.result.stop == Imx1ProbeStop::idleBudget);
+    assert(r[1].run.retiredInstructions == r[3].run.retiredInstructions && !r[3].run.result.irqEntries);
+    assert(r[5].run.status == Imx1MachineStatus::terminal && r[5].run.result.registers[6] == 0x55 &&
+           r[5].run.result.irqEntries == 1 && r[5].run.result.registers[7] == 1);
+    // The two characters end 21 bit times after the wait began, less the instructions before it.
+    assert(r[5].run.result.idleHclk > 1500 && r[5].run.result.idleHclk <= 1680);
+}
 void penWait(bool fast) {
     Guest g{"pen wait", setup(), {}, true};
     auto& words = g.words;
@@ -794,6 +817,7 @@ int ZODIAC_STATE_MAIN() {
     for (bool fast : {false, true}) {
         timerWfi(fast);
         penWait(fast);
+        uartWfi(fast);
         for (bool ldm : {false, true}) thumbBl(fast, ldm, ldm);
         maskedIrq(fast);
         uninspectedSave(fast);
