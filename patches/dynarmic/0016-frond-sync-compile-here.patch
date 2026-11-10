@@ -1,0 +1,111 @@
+--- a/src/dynarmic/common/frond_compile_thread.h
++++ b/src/dynarmic/common/frond_compile_thread.h
+@@ -207,6 +207,23 @@
+         Enqueue(location, std::move(snapshot), false, 0);
+     }
+ 
++    // Sync mode with nothing compiling ahead: the request is compiled here, on the guest
++    // thread, as the worker would, and left on the done list. The worker has nothing queued,
++    // so this gives what Push and WaitIdle would, without waking it and waiting.
++    void CompileHere(IR::LocationDescriptor location, std::unique_ptr<A32::CodeSnapshot> snapshot) {
++        stats.queued++;
++        auto job = std::make_unique<Job>();
++        job->location = location;
++        job->snapshot = std::move(snapshot);
++        job->epoch = Epoch();
++        job->inval_seq = inval_seq;
++        pending.insert(location.Value());
++        compile(*job);
++        std::lock_guard lock{mutex};
++        done.push_back(std::move(job));
++        done_count.store(done.size(), std::memory_order_release);
++    }
++
+     // Compiling ahead, up to depth steps from a block asked for; 0 is off.
+     void SetAhead(unsigned depth) { ahead_depth = depth; }
+     bool AheadOn() const { return ahead_depth != 0; }
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -240,7 +240,7 @@
+     }
+ 
+     // Frond: on the guest thread. Queues the block at location and returns the dispatcher's
+-    // exit (the callbacks halt the run), or in sync mode waits for it and returns it.
++    // exit (the callbacks halt the run), or in sync mode compiles it (or waits for it) and returns it.
+     // Null leaves it to be compiled in place.
+     CodePtr CompileOffThread(IR::LocationDescriptor location) {
+         const A32::LocationDescriptor a32_location{location};
+@@ -279,12 +279,16 @@
+             if (!snapshot) {
+                 return nullptr;
+             }
+-            compile_thread->Push(location, std::move(snapshot));
+-            if (!compile_sync) {
+-                conf.callbacks->CompileQueued(pc, thumb);
+-                return block_of_code.GetReturnFromRunCodeAddress();
++            if (compile_sync && !compile_thread->AheadOn()) {
++                compile_thread->CompileHere(location, std::move(snapshot));
++            } else {
++                compile_thread->Push(location, std::move(snapshot));
++                if (!compile_sync) {
++                    conf.callbacks->CompileQueued(pc, thumb);
++                    return block_of_code.GetReturnFromRunCodeAddress();
++                }
++                compile_thread->WaitIdle();
+             }
+-            compile_thread->WaitIdle();
+             InstallCompiled(true);
+             if (const auto block = emitter.GetBasicBlock(location)) {
+                 return block->entrypoint;
+@@ -295,7 +299,7 @@
+         }
+     }
+ 
+-    // Frond: on the worker.
++    // Frond: on the worker, or on the guest thread in sync mode (CompileHere).
+     void CompileJob(CompileThread::Job& job) {
+         if (job.ahead && space_remaining.load(std::memory_order_acquire) < conf.code_cache_size / 4) {
+             job.status = CompileThread::Status::Skipped;
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -283,7 +283,8 @@
+ }
+ 
+ // On the guest thread. Queues the block and returns the dispatcher (the callbacks halt the
+-// run), or in sync mode waits for it and returns it. Null leaves it to be compiled in place.
++// run), or in sync mode compiles it (or waits for it) and returns it. Null leaves it to be
++// compiled in place.
+ CodePtr A32AddressSpace::CompileOffThread(IR::LocationDescriptor descriptor) {
+     const A32::LocationDescriptor a32_location{descriptor};
+     const u32 pc = a32_location.PC();
+@@ -322,12 +323,16 @@
+         if (!snapshot) {
+             return nullptr;
+         }
+-        compile_thread->Push(descriptor, std::move(snapshot));
+-        if (!compile_sync) {
+-            conf.callbacks->CompileQueued(pc, thumb);
+-            return reinterpret_cast<CodePtr>(prelude_info.return_to_dispatcher);
++        if (compile_sync && !compile_thread->AheadOn()) {
++            compile_thread->CompileHere(descriptor, std::move(snapshot));
++        } else {
++            compile_thread->Push(descriptor, std::move(snapshot));
++            if (!compile_sync) {
++                conf.callbacks->CompileQueued(pc, thumb);
++                return reinterpret_cast<CodePtr>(prelude_info.return_to_dispatcher);
++            }
++            compile_thread->WaitIdle();
+         }
+-        compile_thread->WaitIdle();
+         InstallCompiled(true);
+         if (CodePtr entry = Get(descriptor)) {
+             return entry;
+@@ -338,7 +343,7 @@
+     }
+ }
+ 
+-// On the worker.
++// On the worker, or on the guest thread in sync mode (CompileHere).
+ void A32AddressSpace::CompileJob(CompileThread::Job& job) {
+     IR::Block ir_block = GenerateIR(job.location, job.snapshot.get());
+     if (job.snapshot->overflow) {
