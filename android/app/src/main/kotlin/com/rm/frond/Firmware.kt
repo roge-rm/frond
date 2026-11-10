@@ -107,6 +107,7 @@ object Firmware {
     // Card flags: 0x0001 RAM only, 0x0020 runs on the 68EZ328. The IIIx's flash part holds 2 MiB from 0x10c00000.
     private const val ROM68K_EZ_BASE = 0x10c00000L
     private const val ROM68K_MAX_SIZE = 2L shl 20
+    private const val DANA_BASE = 0x10000000L
 
     fun inspectRom68k(rom: File, devices: List<Device> = Device.entries): Rom68kInfo = RandomAccessFile(rom, "r").use { file ->
         val size = file.length()
@@ -124,6 +125,26 @@ object Firmware {
         val company = if (version >= 5) be32(0x7e) else 0L
         val hal = if (version >= 5) be32(0x82) else 0L
         val header = Rom68kInfo(hasHeader = true)
+        val dana = devices.firstOrNull { it.id == "alphasmart-dana" }
+        if (dana != null && version == 5 && company == dana.companyId && hal == dana.halId) {
+            // A VZ small card with a second card at 32 KiB and padding after it; flag 0x0040 is the VZ.
+            if (flags and 0x0040 == 0 || flags and 0x0001 != 0 || size != dana.norSize ||
+                cardBytes < 0x100 || cardBytes > 0x8000 ||
+                reset < DANA_BASE || reset - DANA_BASE >= cardBytes) return@use header
+            val big = ByteArray(0x100)
+            file.seek(0x8000)
+            file.readFully(big)
+            fun bword(at: Int) = (0 until 4).fold(0L) { v, i -> (v shl 8) or (big[at + i].toLong() and 0xff) }
+            val length = bword(0x6c)
+            val bigReset = bword(4)
+            if (!big.copyOfRange(0x10, 0x19).contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII)) ||
+                bword(8) != 0xfeedbeefL || big[0x0c].toInt() != 0 || big[0x0d].toInt() != 5 ||
+                big[0x0f].toInt() and 0x40 == 0 || big[0x0f].toInt() and 1 != 0 ||
+                bword(0x7e) != company || bword(0x82) != hal ||
+                length < 0x100 || length > size - 0x8000 ||
+                bigReset < DANA_BASE + 0x8000 || bigReset - DANA_BASE - 0x8000 >= length) return@use header
+            return@use Rom68kInfo(dana, true)
+        }
         if (version !in 3..5 || flags and 0x0001 != 0 || flags and 0x0020 == 0) return@use header
         if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
         if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header

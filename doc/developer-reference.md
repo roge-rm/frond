@@ -150,7 +150,9 @@ A version 2 `ms.frondms` keeps every byte the Sony driver can see. The payload i
 | 64 MB | 4096 | 32 | FAT12 |
 | 128 MB | 8192 | 32 | FAT16 |
 
-A 128 MB stick takes 136.6 MB. A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
+A 128 MB stick takes 136.6 MB. A new stick (`frond --card make ms`, `ms-create`) has every logical block in its home block with zero data and no file system, so Palm OS asks to format it. On a stick of erased blocks the TG50 driver reads every page of each free block before it uses it, which takes about 50 s at 128 MB.
+
+A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
 
 Files writes a stick as the driver does:
 
@@ -262,6 +264,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | --- | --- | --- |
 | `device-state` | | `device`: profile name |
 | `window-id` | | `window`: `x11 ID`, the decimal X11 window id the app can embed. `unsupported` when the window isn't an X11 window (Wayland, the dummy video driver). `--window-fit fit` (or `whole` for whole steps, `fill`) makes the Palm follow the window's size; the desktop app uses `fit`. |
+| `window-layout` | | `layout`: `x y width height windowWidth windowHeight`, where the fitted device sits in the window and the window's size, both in the window's own units. `unsupported` without a window. Only `frond`. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
 | `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
@@ -834,6 +837,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks, and for the `palm-e2-denvfs` entry in `tests/smoke.py`. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
+| `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |

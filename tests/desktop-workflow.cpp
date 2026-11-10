@@ -1637,6 +1637,8 @@ for line in s.makefile('rb'):
                 QVERIFY(!action->isEnabled());
                 for (const auto* name : {"sdInsert", "sdEject", "cardPick"}) QVERIFY(!window.findChild<QPushButton*>(name)->isEnabled());
                 QVERIFY(frondCards::readSlot(a).swap);
+                // Named while the card is out of the Palm.
+                QVERIFY2(!w->windowTitle().startsWith("No card"), qPrintable(w->windowTitle()));
                 w->addPaths({host.fileName()});
                 QVERIFY(w->list->findItems("hello.txt", Qt::MatchExactly).size() == 1);
                 w->doneButton->click();
@@ -1667,8 +1669,6 @@ for line in s.makefile('rb'):
         // The card file changed in place only when Files had it, one generation on, and it loads.
         QVERIFY(frondCardFile::verify(cardPath).has_value());
         QCOMPARE(*frondCardFile::verify(cardPath), opened ? generation + 1 : generation);
-                // Named while the card is out of the Palm.
-                QVERIFY2(!w->windowTitle().startsWith("No card"), qPrintable(w->windowTitle()));
         {
             auto c = frondCardFile::CardFile::open(cardPath, false);
             frondCardFile::FatImage fat(*c);

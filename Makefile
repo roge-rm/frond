@@ -677,7 +677,7 @@ test-pace-debug: build/test-gdbstub-target
 benchmark-replay: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/replay-core.rsp
 	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tools/benchmark-replay.cpp @build/replay-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) -o build/benchmark-replay
 
@@ -1143,6 +1143,15 @@ device-session-probe: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/device-session.cpp @build/device-session-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-device-session
+
+.PHONY: test-savestate-layout
+test: test-savestate-layout
+test-savestate-layout: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/common/savestate \
+		tests/savestate-layout.cpp build/source/src/common/savestate/Chunk.cpp \
+		build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp \
+		-o build/test-savestate-layout
+	./build/test-savestate-layout
 
 .PHONY: test-pxa-i2s-audio
 test-pxa-i2s-audio: prepare
