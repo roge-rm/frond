@@ -806,7 +806,7 @@ zodiac-boot-probe: build/zodiac-boot-probe
 # Kept in every state the probe saves: the commit, a + for uncommitted changes and the patch count.
 ZODIAC_STATE_BUILD_NOTE = $(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo +) patches=$(words $(wildcard patches/*.patch))
 build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp tools/zodiac-state-file.h
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-core.rsp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_STATE_BUILD_NOTE='"$(ZODIAC_STATE_BUILD_NOTE)"' \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tools/zodiac-boot-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
@@ -829,6 +829,14 @@ test-zodiac-live-controls: build/zodiac-boot-probe
 		tests/zodiac-live-controls.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-live-controls
 	./build/test-zodiac-live-controls
+
+.PHONY: test-zodiac-normal-runtime
+# The normal runtime's view turn, pen, stick and EEPROM identity, with no firmware.
+test-zodiac-normal-runtime: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common \
+		tests/zodiac-normal-runtime.cpp -o build/test-zodiac-normal-runtime
+	./build/test-zodiac-normal-runtime
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
@@ -853,7 +861,7 @@ ifeq ($(FROND_FAST),1)
 test: test-zodiac-jit
 endif
 build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-jit-core.rsp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-jit-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/zodiac-jit.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
@@ -2123,7 +2131,7 @@ test-zodiac-mmcsd-empty: build/zodiac-boot-probe
 test-zodiac-asp-pen: build/zodiac-asp-pen-probe
 	python3 tests/zodiac-asp-pen.py
 build/zodiac-asp-pen-probe: build/zodiac-boot-probe tests/zodiac-asp-pen-probe.cpp
-	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-core.rsp
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/zodiac-asp-pen-probe.cpp build/source/src/uarm/uarm/imx1_boot_probe.cpp build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \

@@ -1,0 +1,829 @@
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -18,8 +18,9 @@
+ // How a device is told from its firmware: the card header's company and HAL IDs, the NOR size, or a
+ // big-endian 68k card header (deviceProfileInspect68kRom5).
+ enum class DeviceDetect5 { cardHeader, norSize, none, romHeader68k };
+-// Which board model runs it. ez328 and vz328 run in frond-68k, the others in frond.
+-enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328 };
++// Which board model runs it. ez328 and vz328 run in frond-68k, the others in frond. imx1Zodiac is the
++// guarded i.MX1 machine behind SocIMX1.
++enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328, imx1Zodiac };
+ // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
+ enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac };
+ // Settings and peripherals a device supports; the desktop and core gate on these.
+@@ -181,13 +182,14 @@
+      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
+      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
+      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
+-    // Inventory and control art only; the i.MX1 board and its peripherals are not implemented.
+-    {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::staged,
++    // The guarded i.MX1 machine behind SocIMX1: screen, pen, buttons and stick. No peripheral is finished
++    // (two SD slots, IrDA, Bluetooth, USB, sound, vibration), so every capability stays off.
++    {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
+-     DeviceBoard5::none, DeviceArt::zodiac, {},
++     DeviceBoard5::imx1Zodiac, DeviceArt::zodiac, {},
+      0x7d0000, 0, 128u << 20, 128u << 20, DisplayMode::mode_480x320, 1u << 10, false,
+      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+-     {false, "", 480, 320}},
++     {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power"}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -48,6 +48,20 @@
+ 	uarm/SoC.cpp 						\
+ 	uarm/soc_PXA.cpp					\
+ 	uarm/soc_pv.cpp						\
++	uarm/soc_IMX1.cpp					\
++	uarm/imx1_boot_probe.cpp			\
++	uarm/imx1_bootstrap.cpp				\
++	uarm/imx1_watchdog.cpp				\
++	uarm/imx1_rtc.cpp					\
++	uarm/imx1_aitc.cpp					\
++	uarm/imx1_cgm.cpp					\
++	uarm/imx1_gpio.cpp					\
++	uarm/imx1_sysctrl.cpp				\
++	uarm/imx1_eim.cpp					\
++	uarm/imx1_timer.cpp					\
++	uarm/imx1_i2c.cpp					\
++	uarm/imx1_asp.cpp					\
++	uarm/imx1_pwm.cpp					\
+ 	uarm/pv_ic.cpp						\
+ 	uarm/pv_timer.cpp					\
+ 	uarm/pv_uart.cpp					\
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -183,7 +183,12 @@
+     }
+ 
+     void CmdResetHard(vector<string> args, cli::CommandEnvironment& env, void* context) {
+-        reinterpret_cast<commands::Context*>(context)->soc->HardReset();
++        auto* soc = reinterpret_cast<commands::Context*>(context)->soc;
++        if (!soc->HardResetSupported()) {
++            cout << "not available on this device" << endl;
++            return;
++        }
++        soc->HardReset();
+     }
+ 
+     void CmdRotate(vector<string> args, cli::CommandEnvironment& env, void* context) {
+@@ -238,6 +243,10 @@
+         if (args.size() != 0) return env.PrintUsage();
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
++        if (!sd) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         if (!syscallDispatchM68kSupport(sd)) {
+             cout << "m68k syscalls not supported" << endl;
+@@ -281,6 +290,10 @@
+             return;
+         }
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
++        if (!sd) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         if (!syscallDispatchM68kSupport(sd)) {
+             cout << "m68k syscalls not supported" << endl;
+@@ -297,6 +310,10 @@
+ 
+     void CmdInstall(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         if (args.size() != 1) return env.PrintUsage();
++        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         size_t len;
+         unique_ptr<uint8_t[]> data;
+@@ -354,6 +371,10 @@
+         if (args.size() != 0) return env.PrintUsage();
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
++        if (!sd) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         DbMetadataList metadataList;
+         std::unique_ptr<GuestExport> guest;
+@@ -386,6 +407,10 @@
+ 
+     void CmdDbExport(vector<string> args, cli::CommandEnvironment& env, void* context, int type) {
+         if (args.size() != 1) return env.PrintUsage();
++        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+         try {
+@@ -417,6 +442,10 @@
+ 
+     void CmdLaunch(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         if (args.size() != 1) return env.PrintUsage();
++        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
++            cout << "not available on this device" << endl;
++            return;
++        }
+ 
+         auto ctx = reinterpret_cast<commands::Context*>(context);
+         try {
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -242,6 +242,14 @@
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+         if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
++        if (!ctx.soc->GuestServicesSupported()) {
++            for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
++                                      "guest-orientation", "power-state", "hotsync"})
++                if (command == needs) return {false, "unsupported", "This isn't available on this device yet."};
++        }
++        if (command == "hard-reset" && !ctx.soc->HardResetSupported())
++            return {false, "unsupported", "Hard reset isn't available on this device yet."};
+         if (frondNative::insertsCard(command)) frondNative::settleEject(*ctx.soc);
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
+--- a/src/uarm/native/InputReplay.cpp
++++ b/src/uarm/native/InputReplay.cpp
+@@ -73,6 +73,11 @@
+         } else if (command == "keyboard-attach" || command == "keyboard-detach") {
+             event.kind = Kind::keyboardAttach;
+             event.x = command == "keyboard-attach";
++        } else if (command == "stick") {
++            // The analogue stick in hundredths of its travel, right and down positive.
++            event.kind = Kind::stick;
++            if (!(tokens >> event.x >> event.y) || event.x < -100 || event.x > 100 || event.y < -100 || event.y > 100)
++                return fail();
+         } else if (command == "snapshot") {
+             event.kind = Kind::snapshot;
+             if (!(tokens >> std::quoted(event.path)) || event.path.empty()) return fail();
+@@ -99,6 +104,7 @@
+             case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
+             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
+             case Kind::keyboardAttach: soc.AttachKeyboard(event.x); break;
++            case Kind::stick: soc.AnalogStick(event.x / 100.0f, event.y / 100.0f); break;
+             case Kind::snapshot: {
+                 // A failed snapshot is reported but never ends the run.
+                 bool blank = false;
+--- a/src/uarm/native/InputReplay.h
++++ b/src/uarm/native/InputReplay.h
+@@ -26,7 +26,7 @@
+     const std::vector<std::string>& SnapshotResults() const { return snapshots; }
+ 
+    private:
+-    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, snapshot };
++    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, snapshot, stick };
+     struct Event {
+         uint64_t at;
+         Kind kind;
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -17,6 +17,8 @@
+ #include <string>
+ #include <thread>
+ #include <vector>
++#include <fstream>
++#include <iterator>
+ 
+ #include "Cli.h"
+ #include "Commands.h"
+@@ -56,6 +58,7 @@
+ #include "session/session_file5.h"
+ #include "soc_PXA.h"
+ #include "soc_pv.h"
++#include "soc_IMX1.h"
+ #include "CPU.h"
+ #include "MachineSession.h"
+ #include "MsProCards.h"
+@@ -534,6 +537,9 @@
+         }
+ 
+         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
++        // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
++        if (!options.ramSize && sessionDevice == deviceTypeInvalid && deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac)
++            ramSize = deviceProfile5(deviceType)->minRam;
+ 
+         if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
+             cerr << "unsupported RAM size: " << ramSize << " bytes" << endl;
+@@ -627,12 +633,37 @@
+             cerr << "TG50 session requires complete RAM and CPU/peripheral state" << endl;
+             return false;
+         }
+-        SoC* soc =
+-            (board == DeviceBoard5::paravirtual)
++        SoC* soc = nullptr;
++        if (board == DeviceBoard5::imx1Zodiac) {
++            // The Zodiac's machine has its own options and no GDB stub, fast audio or replay yet.
++            if (options.gdbPort || options.experimentalFastAudio || options.lowLatencyQueue) {
++                cerr << "--gdb and the low-latency audio options are not available on the Zodiac" << endl;
++                return false;
++            }
++            // Its machine runs the interpreter whatever --engine says.
++            cpuSetFastEngine(false);
++            string why;
++            soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why);
++            if (!soc) {
++                cerr << "Tapwave Zodiac 2: " << why << endl;
++                return false;
++            }
++            // A developer's way in while a cold boot takes this long: a machine state file to start from.
++            if (const char* path = getenv("FROND_ZODIAC_STATE"); path && *path && !savestate.size) {
++                ifstream file(path, ios::binary);
++                vector<char> bytes((istreambuf_iterator<char>(file)), istreambuf_iterator<char>());
++                if (!file || bytes.empty() || !soc->Load(bytes.size(), bytes.data())) {
++                    cerr << "FROND_ZODIAC_STATE: " << path << " could not be loaded" << endl;
++                    return false;
++                }
++            }
++        } else {
++            soc = (board == DeviceBoard5::paravirtual)
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+                 : static_cast<SoC*>(new SocPXA(deviceType, ramSize, nor.data, nor.size,
+                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
+                                                gdbPort, pxa270 ? 2 : deviceGetSocRev()));
++        }
+ 
+         if (auto* chip = soc->GetNand()) {
+             if (nandFromMalloc)
+@@ -791,6 +822,8 @@
+         commands::Register();
+         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
+         const uint64_t startedAt = timestampUsec();
++        auto* const zodiac = dynamic_cast<SocIMX1*>(soc);
++        const Imx1MachineCheapStatus zodiacStart = zodiac ? zodiac->Status() : Imx1MachineCheapStatus{};
+         uint64_t replayStartedAt = startedAt;
+         commands::Context commandContext{
+             .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation,
+@@ -996,8 +1029,14 @@
+                 performance.BeginWork();
+                 if (options.runFor && now - startedAt >= uint64_t(*options.runFor) * 1000000) {
+                     cout << "bounded run complete; PC=0x" << hex
+-                         << cpuGetRegExternal(soc->GetCpu(), 15) << dec
++                         << (soc->GetCpu() ? cpuGetRegExternal(soc->GetCpu(), 15) : 0) << dec
+                          << ", LCD=" << soc->LcdEnabled() << endl;
++                    if (zodiac) {
++                        const auto status = zodiac->Status();
++                        cout << "zodiac: " << status.retired - zodiacStart.retired << " instructions and "
++                             << (status.time.ticks - zodiacStart.time.ticks) * 1000 / 32768 << " ms of guest time in "
++                             << (now - startedAt) / 1000 << " ms" << (zodiac->Halted() ? ", stopped" : "") << endl;
++                    }
+                     break;
+                 }
+ 
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -82,6 +82,9 @@
+     void ResetInjectedTimeNsec() { injectedTimeNsec = 0; }
+ 
+     virtual bool PowerButtonSupported() const { return true; }
++    // False on a board with no PACE or guest calls: installs, exports, launches and the database list.
++    virtual bool GuestServicesSupported() const { return true; }
++    virtual bool HardResetSupported() const { return true; }
+     void KeyDown(enum KeyId key);
+     void KeyUp(enum KeyId key);
+     void PenDown(int x, int y);
+@@ -103,7 +106,7 @@
+     bool PcmOutputEnabled() const { return pcmEnabled; }
+     void SetPcmSuspended(bool pcmSuspended);
+ 
+-    Buffer GetRomData();
++    virtual Buffer GetRomData();
+ 
+     struct Buffer GetNandData();
+     struct Buffer GetNandDirtyPages();
+@@ -115,7 +118,7 @@
+ 
+     virtual bool Save() = 0;
+     virtual bool Load(size_t savestateSize, void *savestateData) = 0;
+-    struct Buffer GetSavestate();
++    virtual struct Buffer GetSavestate();
+ 
+     void SdInsert();
+     bool SdRemount();
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1669,6 +1669,7 @@
+     if (info.status != Imx1StateStatus::ok) return info;
+     // Nothing from here on can fail. No cpuIrq call, so the restored lines make no new edge.
+     cpuArm920ApplyState(p->cpu, *staged.cpu);
++    if (flags & imx1StateKeepMemory) staged.board->takeMemory(p->peripherals);
+     p->peripherals = std::move(*staged.board);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -256,6 +256,9 @@
+ };
+ // Load a state from another core revision anyway; the result says coreRevisionDiffers.
+ inline constexpr uint32_t imx1StateAllowCoreRevision = 1;
++// Load everything but the SDRAM and SRAM bytes, which stay as the machine has them. The power-on state
++// loaded this way is a warm reset: the CPU, caches, board and graphics chip start again and RAM is kept.
++inline constexpr uint32_t imx1StateKeepMemory = 2;
+ struct Imx1StateInfo {
+     Imx1StateStatus status = Imx1StateStatus::ok;
+     uint32_t formatVersion = 0, coreRevision = 0;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -190,6 +190,12 @@
+         auto& s = sdram[bank];
+         a.DoVector(s.ram, s.bytes).Require(s.ram.empty() || s.ram.size() == s.bytes, "sdram size");
+     }
++    // Takes the SRAM and SDRAM bytes of another board of the same geometry, leaving it with these.
++    void takeMemory(Imx1Bootstrap& other) {
++        sram.swap(other.sram);
++        for (unsigned bank = 0; bank < 2; ++bank)
++            if (sdram[bank].bytes == other.sdram[bank].bytes) sdram[bank].ram.swap(other.sdram[bank].ram);
++    }
+ 
+    private:
+     bool referenceRatioSupported(uint64_t denominator) const {
+--- /dev/null
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -0,0 +1,292 @@
++#include "soc_IMX1.h"
++
++#include <memory>
++
++#include "GunzipContext.h"
++
++#include <chrono>
++#include <climits>
++#include <cstdio>
++#include <iostream>
++
++#include "device_configuration.h"
++#include "imx1_bootstrap.h"
++
++namespace {
++    constexpr uint64_t ticksPerSecond = 32768;
++    // A key or the pen stays down at least this long in guest time, so a quick click is still seen.
++    constexpr uint64_t minimumHoldTicks = ticksPerSecond / 10;
++    // The cold boot was only ever run with these input levels, the ones the bring-up used: power and
++    // Function low until 90M instructions, the triggers, stick click, Bluetooth and two action keys
++    // low until Welcome was up at 396615148, then everything released.
++    constexpr uint64_t baselineReleaseRetired = 396615148;
++    // Host time one Run call may take, so input and frames are served while the guest is busy.
++    constexpr auto runHostLimit = std::chrono::milliseconds(12);
++
++    int controlFor(KeyId key) {
++        switch (key) {
++            case keyIdHard1: return int(Imx1ZodiacControl::actionDown);
++            case keyIdHard2: return int(Imx1ZodiacControl::actionRight);
++            case keyIdHard3: return int(Imx1ZodiacControl::actionLeft);
++            case keyIdHard4: return int(Imx1ZodiacControl::actionUp);
++            case keyIdHome: return int(Imx1ZodiacControl::home);
++            case keyIdFunction: return int(Imx1ZodiacControl::function);
++            case keyIdTriggerLeft: return int(Imx1ZodiacControl::triggerLeft);
++            case keyIdTriggerRight: return int(Imx1ZodiacControl::triggerRight);
++            case keyIdStickPress: return int(Imx1ZodiacControl::stickClick);
++            case keyIdPower: return int(Imx1ZodiacControl::power);
++            default: return -1;
++        }
++    }
++
++    // The machine options of the bring-up runs. Saved states only load into a machine made with these.
++    Imx1ProbeOptions machineOptions(Imx1I2cBus* eeprom) {
++        Imx1ProbeOptions o;
++        o.bootstrapPeripherals = true; o.assumeMpllSettled = true; o.assumeSpllSettled = true;
++        o.assumeI2cSingleMaster = true; o.i2cBus = eeprom; o.aspPx1HighFromReset = true;
++        o.gpioBInputKnown = true; o.gpioBInput = 0x08100000; o.gpioDInputKnown = true; o.gpioDInput = 0x600;
++        o.ramMiB = 128; o.cs4Port0InputKnown = true; o.cs4Port0Input = 0;
++        o.rtcInitialTimeKnown = true; o.rtcInitialTime = {1, 12, 34, 56};
++        o.aspUSampleKnown = true; o.aspUSample = 0x9b00;
++        o.graphicsProfile = Imx1GraphicsProfile::virtual5744Compatible8MiB;
++        o.gpioAInputMaskedKnown = true; o.gpioAInput = 0x80; o.gpioAInputMask = 0xffffdfff;
++        o.graphicsIrqA13 = true; o.graphicsRawAxesKnown = true; o.graphicsRawFirst = 512; o.graphicsRawSecond = 512;
++        o.arm920IcacheIndexCompatibility = true; o.lcdcContrastOnly = true; o.cs4IndexedInputs.set(1, 0x0e, 0);
++        o.mmcsdEmptySlot = true; o.virtualMpllRetune = true;
++        o.graphicsMode2Route = Imx1GraphicsMode2Route::defaultAux;
++        o.graphicsRawAuxKnown = true; o.graphicsRawAux = 900;
++        o.graphicsRawMode1Known = true; o.graphicsRawMode1 = 712;
++        o.graphicsVirtualA4SourceOver = true; o.graphicsVirtualPackedMono = true;
++        o.gpioEventAfterInstructions = 90000000;
++        o.gpioEventValues[0] = o.gpioEventMasks[0] = 0x400;
++        o.gpioEventValues[3] = o.gpioEventMasks[3] = 0x1000;
++        return o;
++    }
++}  // namespace
++
++SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error) {
++    Imx1I2cReadWindow::Image image{};
++    if (size > UINT32_MAX || !zodiacEepromIdentity(romData, size, image)) {
++        error = "this Zodiac ROM keeps its identity data in a layout Frond doesn't know";
++        return nullptr;
++    }
++    std::unique_ptr<SocIMX1> soc(new SocIMX1());
++    soc->rom.assign(romData, romData + size);
++    soc->eeprom = std::make_unique<Imx1I2cReadWindow>(image);
++    Imx1ProbeResult failure{};
++    soc->machine = imx1MachineCreate(soc->rom.data(), uint32_t(size), Imx1ProbeEntry::physicalFlash, false,
++                                     machineOptions(soc->eeprom.get()), nullptr, nullptr, &failure);
++    if (!soc->machine) {
++        error = std::string("the i.MX1 machine could not be made: ") + imx1ProbeStopName(failure.stop);
++        return nullptr;
++    }
++    // The state before the first instruction, which Reset loads again.
++    if (imx1MachineSaveState(soc->machine, soc->powerOn, "power-on") != Imx1StateStatus::ok) {
++        error = "the i.MX1 machine's power-on state could not be kept";
++        return nullptr;
++    }
++    soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
++    soc->ramSize = 128u << 20;
++    soc->StateChanged();
++    // The owner keeps it for the life of the process, like the machine inside.
++    return soc.release();
++}
++
++void SocIMX1::StateChanged() {
++    const auto status = imx1MachineGetStatus(machine);
++    halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
++    framePending = false;
++    redraw = true;
++    // Host keys are up now, whatever the loaded machine had held.
++    releasePending = true;
++    pressed.fill(false);
++    jammed = -1;
++    penIsDown = false;
++    stickSetX = stickSetY = INT_MIN;
++}
++
++void SocIMX1::Reset() {
++    SoC::Reset();
++    const auto info = imx1MachineLoadState(machine, powerOn.data(), powerOn.size(), imx1StateKeepMemory, "power-on");
++    if (info.status != Imx1StateStatus::ok)
++        std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
++    StateChanged();
++}
++
++bool SocIMX1::Save() {
++    return imx1MachineSaveState(machine, saved, "frond") == Imx1StateStatus::ok;
++}
++
++bool SocIMX1::Load(size_t savestateSize, void* savestateData) {
++    // A machine started from the ROM has no state to load.
++    if (!savestateSize || !savestateData) return true;
++    const auto* data = static_cast<const uint8_t*>(savestateData);
++    // The bring-up driver's state files are a gzip of the state.
++    std::unique_ptr<GunzipContext> gunzip;
++    if (savestateSize > 2 && data[0] == 0x1f && data[1] == 0x8b) {
++        gunzip = std::make_unique<GunzipContext>(data, savestateSize);
++        while (gunzip->GetState() == static_cast<int>(GunzipContext::State::more)) gunzip->Continue();
++        if (gunzip->GetState() != static_cast<int>(GunzipContext::State::done)) {
++            std::cerr << "zodiac: saved state refused: bad gzip" << std::endl;
++            return false;
++        }
++        data = static_cast<const uint8_t*>(gunzip->GetUncompressedData());
++        savestateSize = gunzip->GetUncompressedSize();
++    }
++    const auto info = imx1MachineLoadState(machine, data, savestateSize, 0, "frond");
++    if (info.status != Imx1StateStatus::ok) {
++        std::cerr << "zodiac: saved state refused: " << imx1StateStatusName(info.status);
++        if (info.section[0]) std::cerr << " in " << info.section;
++        if (info.detail) std::cerr << " (" << info.detail << ")";
++        if (info.status == Imx1StateStatus::coreRevisionMismatch)
++            std::cerr << ", made by core revision " << info.coreRevision << ", this is " << imx1MachineStateCoreRevision;
++        std::cerr << std::endl;
++        return false;
++    }
++    SoC::Reset();
++    StateChanged();
++    return true;
++}
++
++uint64_t SocIMX1::GetTime() {
++    const auto time = imx1MachineGetStatus(machine).time;
++    return uint64_t(__uint128_t(time.ticks) * 1000000000 / ticksPerSecond);
++}
++
++bool SocIMX1::LcdEnabled() {
++    uint32_t width = 0, height = 0;
++    return imx1MachinePeekFrame(machine, width, height) != nullptr;
++}
++
++uint32_t* SocIMX1::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) {
++    uint32_t width = 0, height = 0, first = 0, last = 0;
++    const uint32_t* panel = imx1MachineAcquireFrame(machine, width, height, first, last);
++    const bool acquired = panel != nullptr;
++    // After a load or a reset the frame the machine already has is shown again.
++    if (!panel && redraw) panel = imx1MachinePeekFrame(machine, width, height);
++    if (panel && width == zodiacPanelWidth && height == zodiacPanelHeight) {
++        zodiacRotateFrame(panel, view.data());
++        framePending = true;
++    }
++    if (acquired) imx1MachineAcknowledgeFrame(machine);
++    redraw = false;
++    if (!framePending) return nullptr;
++    firstDirtyLine = 0;
++    lastDirtyLine = zodiacViewHeight - 1;
++    return view.data();
++}
++
++void SocIMX1::AnalogStick(float x, float y) {
++    stickX = zodiacStickOffset(x);
++    stickY = zodiacStickOffset(y);
++}
++
++bool SocIMX1::SetControl(Imx1ZodiacControl control, bool down) {
++    if (imx1MachineSetZodiacControl(machine, control, down, false) != Imx1BootstrapAccess::ok) return false;
++    return imx1MachineSetZodiacControl(machine, control, down, true) == Imx1BootstrapAccess::ok;
++}
++
++void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
++    const int control = controlFor(key);
++    if (control < 0 || releasePending || halted || jammed >= 0) return;
++    if (!SetControl(Imx1ZodiacControl(control), true)) return;
++    jammed = control;
++    jamUntil = imx1MachineGetStatus(machine).time.ticks + uint64_t(durationMsec) * ticksPerSecond / 1000;
++}
++
++// Hands queued host input to the machine. An input the machine refuses just now stays queued.
++void SocIMX1::PumpInput(const Imx1MachineCheapStatus& status) {
++    const uint64_t now = status.time.ticks;
++    if (releasePending) {
++        // Controls do nothing until the cold boot's own input levels have been let go.
++        keyEventQueue->Clear();
++        if (status.retired >= baselineReleaseRetired) {
++            const uint32_t values[4] = {0x780, 0, 0, 0x7780}, masks[4] = {0x780, 0, 0, 0x7780};
++            if (imx1MachineReplaceGpioInputs(machine, values, masks, false) == Imx1BootstrapAccess::ok &&
++                imx1MachineReplaceGpioInputs(machine, values, masks, true) == Imx1BootstrapAccess::ok)
++                releasePending = false;
++        }
++    }
++    if (jammed >= 0 && now >= jamUntil && SetControl(Imx1ZodiacControl(jammed), false)) jammed = -1;
++    while (!releasePending && keyEventQueue->GetSize()) {
++        const KeyEvent event = keyEventQueue->Peek();
++        const int control = controlFor(event.key);
++        if (control >= 0 && control != jammed) {
++            if (event.keyDown && !pressed[control]) {
++                if (!SetControl(Imx1ZodiacControl(control), true)) break;
++                pressed[control] = true;
++                pressedAt[control] = now;
++            } else if (!event.keyDown && pressed[control]) {
++                if (now - pressedAt[control] < minimumHoldTicks || !SetControl(Imx1ZodiacControl(control), false)) break;
++                pressed[control] = false;
++            }
++        }
++        keyEventQueue->Pop();
++    }
++    while (penEventQueue->GetSize()) {
++        const PenEvent event = penEventQueue->Peek();
++        if (!event.penDown && !penIsDown) { penEventQueue->Pop(); continue; }
++        if (!event.penDown && now - penDownAt < minimumHoldTicks) break;
++        const int x = event.penDown ? event.x : penX, y = event.penDown ? event.y : penY;
++        const auto pen = zodiacPenInputs(event.penDown, x, y);
++        if (imx1MachineReplacePenInputs(machine, pen, false) != Imx1BootstrapAccess::ok ||
++            imx1MachineReplacePenInputs(machine, pen, true) != Imx1BootstrapAccess::ok) break;
++        if (event.penDown && !penIsDown) penDownAt = now;
++        penIsDown = event.penDown;
++        penX = x; penY = y;
++        penEventQueue->Pop();
++    }
++    if ((stickX != stickSetX || stickY != stickSetY) &&
++        imx1MachineSetZodiacStick(machine, stickX, stickY, false) == Imx1BootstrapAccess::ok &&
++        imx1MachineSetZodiacStick(machine, stickX, stickY, true) == Imx1BootstrapAccess::ok) {
++        stickSetX = stickX;
++        stickSetY = stickY;
++    }
++}
++
++void SocIMX1::ReportStop() {
++    const auto result = imx1MachineInspect(machine).result;
++    char line[256];
++    std::snprintf(line, sizeof line,
++                  "zodiac: the machine stopped: %s (%s) at pc %08x, address %08x, value %08x, after %llu instructions",
++                  imx1ProbeStopName(result.stop), imx1BootstrapAccessName(result.peripheralStatus), result.trace.pc,
++                  result.address, result.value, static_cast<unsigned long long>(imx1MachineGetStatus(machine).retired));
++    std::cerr << line << std::endl;
++}
++
++// Runs the guest up to maxCycles / cyclesPerSecond of its own time, or for a short stretch of host time
++// when it can't keep up, and returns the guest time that passed in the same cycle units.
++uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
++    if (halted || !cyclesPerSecond) {
++        keyEventQueue->Clear();
++        penEventQueue->Clear();
++        return maxCycles;
++    }
++    const auto before = imx1MachineGetStatus(machine);
++    PumpInput(before);
++    const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
++    Imx1MachineBounds bounds;
++    bounds.retired = 4000;
++    bounds.work = 20000;
++    bounds.deadline = {before.time.ticks + wanted, 0, 1};
++    const auto started = std::chrono::steady_clock::now();
++    bool waiting = false;
++    for (;;) {
++        const auto run = imx1MachineRunBounded(machine, bounds);
++        if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
++            run.reason == Imx1MachineYield::invalidBounds) {
++            halted = true;
++            ReportStop();
++            break;
++        }
++        if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
++        if (run.reason == Imx1MachineYield::deadline) break;
++        if (std::chrono::steady_clock::now() - started >= runHostLimit) break;
++    }
++    // Nothing can wake a waiting guest but input, so host time just passes.
++    if (waiting || halted) return maxCycles;
++    const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;
++    const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
++    creditRemainder = uint64_t(credit % ticksPerSecond);
++    return uint64_t(std::min<__uint128_t>(credit / ticksPerSecond, UINT64_MAX));
++}
+--- /dev/null
++++ b/src/uarm/uarm/soc_IMX1.h
+@@ -0,0 +1,91 @@
++#ifndef FROND_SOC_IMX1_H
++#define FROND_SOC_IMX1_H
++
++#include <array>
++#include <memory>
++#include <string>
++#include <vector>
++
++#include "SoC.h"
++#include "imx1_boot_probe.h"
++#include "imx1_i2c_read_window.h"
++#include "zodiac_panel.h"
++
++// The Tapwave Zodiac 2 in the normal runtime. It runs the guarded i.MX1 machine (imx1_boot_probe.h)
++// and nothing else: no PACE or guest calls, and input reaches the ROM as pen samples, pin levels and
++// stick values. One per process, as the machine is.
++class SocIMX1 : public SoC {
++   public:
++    // nullptr with the reason in error when the ROM can't run.
++    static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error);
++
++    void Reset() override;
++    uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
++    bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
++    bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
++    void AnalogStick(float x, float y) override;
++    bool Save() override;
++    bool Load(size_t savestateSize, void* savestateData) override;
++    Buffer GetRomData() override { return {.size = rom.size(), .data = rom.data()}; }
++    Buffer GetSavestate() override { return {.size = saved.size(), .data = saved.data()}; }
++    void DumpMMU() override {}
++    void JamKey(enum KeyId key, uint32_t durationMsec) override;
++    bool PrepareM68kSupport() override { return false; }
++    bool GuestServicesSupported() const override { return false; }
++    bool HardResetSupported() const override { return false; }
++    uint64_t GetTime() override;
++    uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
++    void ResetPendingFrame() override { framePending = false; }
++    DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
++    DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
++    void SuspendTimerInterrupts(bool) override {}
++    bool LcdEnabled() override;
++
++    // Instructions retired and idle clocks skipped so far, for speed readouts.
++    Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
++    bool Halted() const { return halted; }
++
++   protected:
++    void OnSetFramebufferDirty() override { redraw = true; }
++    bool OnSleep() override { return false; }
++    void OnWakeup() override {}
++    void OnSetAudioQueue(struct AudioQueue*) override {}
++    void OnSetPcmOutputEnabled() override {}
++    void OnSetPcmSuspended() override {}
++    void OnSdInsert() override {}
++    void OnSdRemount() override {}
++    void OnSdEject() override {}
++
++   private:
++    SocIMX1() = default;
++    void PumpInput(const Imx1MachineCheapStatus& status);
++    bool SetControl(Imx1ZodiacControl control, bool pressed);
++    void StateChanged();
++    void ReportStop();
++
++    std::vector<uint8_t> rom, saved, powerOn;
++    std::unique_ptr<Imx1I2cReadWindow> eeprom;
++    Imx1Machine* machine{nullptr};
++    bool halted{false};
++
++    // The view handed to the frontend, a copy, so the machine's frame is acknowledged at once.
++    std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacViewWidth) * zodiacViewHeight);
++    bool framePending{false}, redraw{true};
++
++    // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
++    uint64_t creditRemainder{0};
++
++    // Controls stay as the cold boot found them until the ROM reaches Welcome; see Run.
++    bool releasePending{true};
++    static constexpr unsigned controls = unsigned(Imx1ZodiacControl::count);
++    std::array<bool, controls> pressed{};
++    std::array<uint64_t, controls> pressedAt{};
++    int jammed{-1};
++    uint64_t jamUntil{0};
++    bool penIsDown{false};
++    uint64_t penDownAt{0};
++    int penX{0}, penY{0};
++    int stickX{0}, stickY{0}, stickSetX{0}, stickSetY{0};
++};
++
++#endif
+--- /dev/null
++++ b/src/uarm/uarm/zodiac_panel.h
+@@ -0,0 +1,88 @@
++#ifndef FROND_ZODIAC_PANEL_H
++#define FROND_ZODIAC_PANEL_H
++
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <cstddef>
++#include <cstdint>
++
++#include "imx1_asp.h"
++
++// The Tapwave Zodiac 2 as the normal runtime shows it: the 320x480 panel a quarter turn clockwise,
++// the pen as the fixed virtual touch panel's samples, the stick and the EEPROM identity.
++
++inline constexpr uint32_t zodiacPanelWidth = 320, zodiacPanelHeight = 480;
++inline constexpr uint32_t zodiacViewWidth = 480, zodiacViewHeight = 320;
++
++// Panel pixel (sx, sy) goes to view pixel (479 - sy, sx).
++inline void zodiacRotateFrame(const uint32_t* panel, uint32_t* view) {
++    for (uint32_t sy = 0; sy < zodiacPanelHeight; ++sy) {
++        const uint32_t* row = panel + size_t(sy) * zodiacPanelWidth;
++        uint32_t* column = view + (zodiacViewWidth - 1 - sy);
++        for (uint32_t sx = 0; sx < zodiacPanelWidth; ++sx) column[size_t(sx) * zodiacViewWidth] = row[sx];
++    }
++}
++
++// Raw 9 bit touch values for a view position. This is the virtual panel the ROM's own calibration
++// was done on: raw X falls with view y and raw Y rises with view x.
++inline void zodiacPenRaw(int x, int y, uint32_t& rawX, uint32_t& rawY) {
++    x = std::clamp(x, 0, int(zodiacViewWidth));
++    y = std::clamp(y, 0, int(zodiacViewHeight));
++    rawX = uint32_t(std::lround(36.0 + 330.0 * (1.0 - double(y) / zodiacViewHeight)));
++    rawY = uint32_t(std::lround(32.0 + 350.0 * double(x) / zodiacViewWidth));
++}
++
++// ASP samples for the pen at a view position, down or just lifted from there. Z, U and the
++// reference words are the fixed values of the virtual panel.
++inline Imx1AspPenInputs zodiacPenInputs(bool down, int x, int y) {
++    uint32_t rawX = 0, rawY = 0;
++    zodiacPenRaw(x, y, rawX, rawY);
++    Imx1AspPenInputs pen{};
++    pen.contactKnown = pen.normalKnown = pen.referenceKnown = true;
++    pen.contactDown = down;
++    pen.normal = {0x1100, uint16_t(0x1100 + (rawX << 7)), uint16_t(0x1100 + (rawY << 7)), 0x1234};
++    pen.reference = {0x0180, 0x3280, 0x7100};
++    return pen;
++}
++
++// A host axis (-1 to 1) as the stick's offset from rest, -511 to 511.
++inline int zodiacStickOffset(float axis) {
++    if (!(axis == axis)) return 0;
++    return int(std::lround(std::clamp(axis, -1.0f, 1.0f) * 511.0f));
++}
++
++// The 256 byte identity EEPROM the ROM expects, worked out from the ROM itself: the DAL's packed
++// globals (resource amdd, found through the big card's boot header) hold the 128 byte key at
++// 1c0, and the EEPROM carries it at 50..cf. Everything else reads ff. Only the layout this was
++// established on is taken (globals of 9a24 bytes that start with literal blocks); false otherwise.
++inline bool zodiacEepromIdentity(const uint8_t* rom, size_t size, std::array<uint8_t, 256>& image) {
++    constexpr size_t card = 0x20000, keyAt = 0x1c0, keyBytes = 128;
++    auto le32 = [&](size_t at) {
++        return uint32_t(rom[at]) | uint32_t(rom[at + 1]) << 8 | uint32_t(rom[at + 2]) << 16 | uint32_t(rom[at + 3]) << 24;
++    };
++    auto be32 = [&](size_t at) {
++        return uint32_t(rom[at]) << 24 | uint32_t(rom[at + 1]) << 16 | uint32_t(rom[at + 2]) << 8 | uint32_t(rom[at + 3]);
++    };
++    if (!rom || size < card + 0xb0) return false;
++    const uint64_t packed = card + uint64_t(le32(card + 0x78)), metadata = card + uint64_t(le32(card + 0xac));
++    if (packed + 8 > size || metadata + 8 > size) return false;
++    const uint32_t globals = be32(size_t(metadata) + 4);
++    if (globals != 0x9a24 || be32(size_t(packed) + 4) != uint32_t(0) - globals) return false;
++    std::array<uint8_t, keyAt + keyBytes> data{};
++    size_t have = 0, at = size_t(packed) + 8;
++    while (have < data.size()) {
++        if (at >= size || !(rom[at] & 0x80)) return false;
++        const size_t length = (rom[at] & 0x7f) + 1;
++        if (length > size - at - 1) return false;
++        const size_t take = std::min(length, data.size() - have);
++        std::copy(rom + at + 1, rom + at + 1 + take, data.begin() + have);
++        have += take;
++        at += 1 + length;
++    }
++    image.fill(0xff);
++    std::copy(data.begin() + keyAt, data.end(), image.begin() + 0x50);
++    return true;
++}
++
++#endif

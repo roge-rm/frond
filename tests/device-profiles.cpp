@@ -47,7 +47,7 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2 ||
+                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2 ||
                 deviceTypeIsDana5(p.deviceType)));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
@@ -105,7 +105,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 8 && names.size() == 11 && types.size() == 10);
+    assert(desktopCount == 9 && names.size() == 11 && types.size() == 10);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -636,10 +636,13 @@ static void palmIIIx() {
 
 static void zodiac2() {
     const auto* p = deviceProfileNamed5("tapwave-zodiac-2");
-    assert(p && p->deviceType == deviceTypeZodiac2 && p->support == DeviceSupport5::staged);
-    assert(p->board == DeviceBoard5::none && p->art == DeviceArt::zodiac);
-    assert(!p->frontend.available && !deviceProfileRunnerEligible5(p->deviceType));
-    assert(!deviceProfileRuns68k5(p->deviceType) && !deviceProfileSupportsDesktop5(p->deviceType));
+    assert(p && p->deviceType == deviceTypeZodiac2 && p->support == DeviceSupport5::experimentalDesktop);
+    assert(p->board == DeviceBoard5::imx1Zodiac && p->art == DeviceArt::zodiac);
+    assert(p->frontend.available && deviceProfileRunnerEligible5(p->deviceType));
+    assert(!deviceProfileRuns68k5(p->deviceType) && deviceProfileSupportsDesktop5(p->deviceType));
+    // Landscape, no silkscreen, and no card slot, Hold or camera until those are done.
+    assert(p->frontend.width == 480 && p->frontend.height == 320 && !p->frontend.silkscreenHeight);
+    assert(!p->frontend.sdSlot && !p->frontend.memoryStick && !p->frontend.holdPresent && !p->frontend.camera);
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared &&
            !c.bluetooth && !c.sound && !c.microphone && !c.backgroundPanel);

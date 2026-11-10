@@ -29,6 +29,7 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 - `make test-zodiac-uart-startup` checks disabled UART1/2 control, independent reset/readback, guarded effects and Exact/Fast startup.
 - `make test-zodiac-dma-channel` checks disabled channel allocation/configuration, independent state, reset, guarded transfers and Exact/Fast execution.
 - `make test-zodiac-dma-startup` checks idle DMA global state, reset pulse timing, guarded transfers and Exact/Fast startup.
+- `make test-zodiac-normal-runtime` checks the Zodiac's quarter turn of the panel, pen samples, stick offsets and the EEPROM identity read from a made-up ROM. No firmware.
 - `make test-zodiac-graphics-commands` checks bounded native ring packets, delayed solid RGB565 paint, pointer and busy state, rejected-batch atomicity, clipping and byte order.
 - `make test-zodiac-graphics-acquisition` checks independent virtual raw-axis and mode-1 inputs, guest-time acquisition, reset/cancellation, tagged FIFO, GPIO source selection and real timed helper readback/identity transfers on Exact and Fast.
 - `make check-device-data` checks the generated per-device data against the profiles.

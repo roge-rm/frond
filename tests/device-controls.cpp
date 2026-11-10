@@ -1381,7 +1381,7 @@ struct ZodiacInput : SdlEventHandler {
 };
 static void zodiacControls() {
     const auto* profile=deviceProfile5(deviceTypeZodiac2);
-    assert(profile && !profile->frontend.available && profile->board==DeviceBoard5::none);
+    assert(profile && profile->frontend.available && profile->board==DeviceBoard5::imx1Zodiac);
     assert(deviceArt("tapwave-zodiac-2")==DeviceArt::zodiac);
     const auto& p=deviceControls(deviceTypeZodiac2);
     assert(p.style==DeviceControlStyle::zodiac && p.panelWidth==150 && p.width==480);

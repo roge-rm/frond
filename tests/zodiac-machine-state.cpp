@@ -499,6 +499,46 @@ void sdram(bool fast) {
     assert(end.status == Imx1MachineStatus::terminal && end.result.trace.instruction == 0xe7f000f0);
     assert(end.result.registers[5] == 0x12345678 && end.result.registers[6] == 0x9abcdef0);
 }
+// The power-on state loaded with imx1StateKeepMemory is a warm reset: the machine starts over and
+// RAM keeps what the guest stored.
+void keepMemory() {
+    Guest g{"keep memory", setup(), {}};
+    auto& words = g.words;
+    // The SDRAM setup of the guest above, then r7 = [0x08000010] before the store there.
+    load(words, 0, 0x00221000);
+    load(words, 1, 0x91120200); words.push_back(0xe5801000);
+    load(words, 2, 0x08200000); words.push_back(0xe5923000);
+    load(words, 1, 0xa1120200); words.push_back(0xe5801000);
+    load(words, 2, 0x08000000);
+    for (unsigned i = 0; i < 8; ++i) words.push_back(0xe5923000);
+    load(words, 1, 0xb1120200); words.push_back(0xe5801000);
+    load(words, 2, 0x08111800); words.push_back(0xe5923000);
+    load(words, 1, 0x81129200); words.push_back(0xe5801000);
+    load(words, 4, 0x08000000);
+    words.push_back(0xe5947010);
+    load(words, 1, 0x12345678); words.push_back(0xe5841010);
+    words.push_back(0xe5945010);
+    words.push_back(0xe7f000f0);
+    g.options.bootstrapPeripherals = true; g.options.ramMiB = 32;
+    Live a(g, false);
+    const Bytes powerOn = a.save();
+    auto finish = [&] {
+        imx1MachineRunSlice(a.machine, 1000, false);
+        const auto run = imx1MachineInspect(a.machine);
+        assert(run.status == Imx1MachineStatus::terminal && run.result.trace.instruction == 0xe7f000f0);
+        assert(run.result.registers[5] == 0x12345678);
+        return run.result.registers[7];
+    };
+    const uint32_t first = finish();
+    assert(first != 0x12345678);
+    // A plain load brings RAM back too.
+    a.load(powerOn);
+    assert(a.save() == powerOn && finish() == first);
+    const auto info = imx1MachineLoadState(a.machine, powerOn.data(), powerOn.size(), imx1StateKeepMemory);
+    assert(info.status == Imx1StateStatus::ok && imx1MachineGetStatus(a.machine).retired == 0);
+    assert(a.save() != powerOn);
+    assert(finish() == 0x12345678);
+}
 // A guest for the virtual graphics profile. Every bus access runs from the PC the graphics
 // models expect for it, reached from a stub that loads the address, the value and the return.
 struct GraphicsGuest {
@@ -879,6 +919,8 @@ int ZODIAC_STATE_MAIN() {
                     "continue identically, and so do saves inside a WFI wait on graphics clocks, skipped and stepped\n",
                     fast ? "Fast" : "Exact");
     }
+    keepMemory();
+    std::puts("PASS: the power-on state loaded with its memory kept starts over with RAM as it was");
     refusals();
     std::puts("PASS: damaged, truncated and mismatched states are refused without changing the machine");
     return 0;

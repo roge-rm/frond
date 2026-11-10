@@ -25,7 +25,8 @@ from palm_boot import DEVICES_68K, FRONTEND_DEVICES, png_rows, setup_device
 from firmware_variants import firmware_variant
 
 # out/frond runs the ARM devices only.
-DEVICES = {name: device for name, device in FRONTEND_DEVICES.items() if name not in DEVICES_68K}
+# The Zodiac has no setup recipe, as nothing is injected into it.
+DEVICES = {name: device for name, device in FRONTEND_DEVICES.items() if name not in DEVICES_68K and device['setup']}
 
 
 class RunError(Exception):

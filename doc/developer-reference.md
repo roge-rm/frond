@@ -346,6 +346,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `pen-down X Y`, `pen-move X Y` | Touch at unscaled guest pixels. The range is the device surface, TX 0..319 by 0..479, E2 320 by 440 with its silkscreen. |
 | `pen-up` | Lift the pen. |
 | `key-down KEY`, `key-up KEY` | A key by name or by number (1 up to the highest key id). |
+| `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
