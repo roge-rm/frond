@@ -1511,6 +1511,36 @@ for line in s.makefile('rb'):
         QVERIFY(window.isVisible());
         QCOMPARE(digest(source.fileName()), QCryptographicHash::hash("unchanged import", QCryptographicHash::Sha256));
     }
+    // The name clash question stays answerable: the copy's progress doesn't come up over it.
+    void clashQuestionAboveProgress() {
+        QTemporaryDir files;
+        const auto cardPath = files.filePath("sd.frondsd");
+        QVERIFY(cardTool({"make", "sd", "32", cardPath}));
+        QFile host(files.filePath("hello.txt")); QVERIFY(host.open(QIODevice::WriteOnly)); host.write("hello"); host.close();
+        CardFilesWindow w(frondCardFile::CardFile::open(cardPath, true), "Card");
+        w.show();
+        w.addPaths({host.fileName()});
+        bool asked = false, progressOver = false;
+        QTimer poll; poll.setInterval(10);
+        QElapsedTimer since;
+        connect(&poll, &QTimer::timeout, &w, [&] {
+            for (auto* box : w.findChildren<QMessageBox*>()) {
+                if (!box->isVisible() || box->windowTitle() != "Name in use") continue;
+                if (!asked) { asked = true; since.start(); }
+                if (auto* job = w.findChild<QProgressDialog*>("cardJob"); job && job->isVisible()) progressOver = true;
+                if (since.elapsed() > 800) {
+                    for (auto* b : box->buttons()) if (b->text() == "Keep both") b->click();
+                }
+            }
+        });
+        poll.start();
+        w.addPaths({host.fileName()});
+        poll.stop();
+        QVERIFY(asked);
+        QVERIFY(!progressOver);
+        QCOMPARE(w.list->topLevelItemCount(), 2);
+        w.closeCard();
+    }
     // Files… on Internal: one flat list of databases by file name; install, export and delete go
     // to the callbacks with the database names, and each answer reads the list again.
     void internalFilesWindow() {
