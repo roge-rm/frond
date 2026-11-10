@@ -1637,6 +1637,8 @@ for line in s.makefile('rb'):
         // The card file changed in place only when Files had it, one generation on, and it loads.
         QVERIFY(frondCardFile::verify(cardPath).has_value());
         QCOMPARE(*frondCardFile::verify(cardPath), opened ? generation + 1 : generation);
+                // Named while the card is out of the Palm.
+                QVERIFY2(!w->windowTitle().startsWith("No card"), qPrintable(w->windowTitle()));
         {
             auto c = frondCardFile::CardFile::open(cardPath, false);
             frondCardFile::FatImage fat(*c);

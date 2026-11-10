@@ -3065,7 +3065,8 @@ QString MainWindow::runningMachineDir() const {
 }
 // The card in the slot by its Cards name; one that isn't in Cards yet by its type.
 QString MainWindow::runningCardName() const {
-    if (!cardPresent) return tr("No card");
+    // Files names the card while it's taken out for the exchange.
+    if (!cardPresent && exchangeStage == ExchangeStage::None) return tr("No card");
     const auto dir = runningMachineDir();
     const auto slot = frondCards::readSlot(dir);
     frondCards::Card card;
