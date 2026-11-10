@@ -160,7 +160,7 @@ Files writes a stick as the driver does:
 
 ### Internal NAND
 
-The T|X and E2 keep their NAND in `nand.frondnand`: the 512 main bytes of each 528-byte unit in page order as the payload, then the 16 spare bytes of each in the side region (a 2112-byte T|X page is 2048 main and 64 spare, the same split). A NAND is at most 256 MiB raw. Saves journal it like a card, and settle and verify take it. It can't be opened in Files: databases go in and out through Internal. `--nand` and `save-nand` keep the raw 528-byte unit format.
+The T|X, E2 and E3 keep their NAND in `nand.frondnand`: the 512 main bytes of each 528-byte unit in page order as the payload, then the 16 spare bytes of each in the side region (a 2112-byte T|X page is 2048 main and 64 spare, the same split). A NAND is at most 256 MiB raw. Saves journal it like a card, and settle and verify take it. It can't be opened in Files: databases go in and out through Internal. `--nand` and `save-nand` keep the raw 528-byte unit format.
 
 ### Session media
 
