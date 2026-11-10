@@ -1144,6 +1144,15 @@ device-session-probe: out/frond
 		tests/device-session.cpp @build/device-session-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-device-session
 
+.PHONY: test-savestate-layout
+test: test-savestate-layout
+test-savestate-layout: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/common/savestate \
+		tests/savestate-layout.cpp build/source/src/common/savestate/Chunk.cpp \
+		build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp \
+		-o build/test-savestate-layout
+	./build/test-savestate-layout
+
 .PHONY: test-pxa-i2s-audio
 test-pxa-i2s-audio: prepare
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
