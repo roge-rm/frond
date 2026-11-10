@@ -95,5 +95,28 @@ int main(int argc,char** argv) {
         fs::permissions(parent,fs::perms::owner_all);
         fs::remove_all(parent);
     }
-    std::cout<<"PASS search-only parent; partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
+    {
+        // A refused hard link, as on Android: the staging file is renamed into place instead.
+        const auto directory=root/"no-link";
+        assert(fs::create_directory(directory));
+        Output output((directory/"job.raw").string());
+        output.file.fault=RawPrintFile::Fault::link;
+        const uint8_t payload[]={1,2,3,4,5};
+        RawPrintJob job(8);assert(job.begin());assert(job.append(payload,sizeof(payload)));
+        cleanupCalls=0;failCleanup=true;
+        const auto state=job.finish(Output::publish,&output);
+        failCleanup=false;
+        assert(state==RawPrintJob::State::published && output.file.error.empty());
+        assert(fs::file_size(directory/"job.raw")==sizeof(payload));
+        unsigned entries=0;for(const auto& entry:fs::directory_iterator(directory)) {(void)entry;++entries;}
+        assert(entries==1 && cleanupCalls==0);
+        // The rename never replaces a file that is already there.
+        Output again((directory/"job.raw").string());
+        again.file.fault=RawPrintFile::Fault::link;
+        RawPrintJob second(8);assert(second.begin());assert(second.append(payload,2));
+        assert(second.finish(Output::publish,&again)==RawPrintJob::State::rejected);
+        assert(fs::file_size(directory/"job.raw")==sizeof(payload));
+        fs::remove_all(directory);
+    }
+    std::cout<<"PASS rename when links are refused; search-only parent; partial write, refused publication and close failure retain private staging with uncertain state and path; directory flush failure after cleanup is rejected with the path; no callback replay\n";
 }
