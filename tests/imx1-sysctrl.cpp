@@ -115,6 +115,16 @@ int main() {
     write(wakeControl, 0x20, Imx1BootstrapAccess::reservedBits);
     read(clockControl, 0);
     write(clockControl, 0x6221); read(clockControl, 0x6221);
+    // The ROM's radio probe polls INTSRCH for BTSYS (source 55, bit 23) at 200fc8dc. With the port D
+    // pins and the card slot known every source in the upper word has a level: the modules still in reset are low (SSI2,
+    // SPI1, SPI2, USBD, UART3 RX), and no radio answers. The lower word still has sources with none.
+    assert(soc.setGpioInput(3, 0));
+    unknown = 0xdeadbeef;
+    assert(soc.access(0x00223048, 4, false, unknown) == Imx1BootstrapAccess::externalInput && unknown == 0xdeadbeef);
+    soc.setMmcsdEmptySlot(true);
+    read(0x00223048, 0);
+    unknown = 0xdeadbeef;
+    assert(soc.access(0x0022304c, 4, false, unknown) == Imx1BootstrapAccess::externalInput && unknown == 0xdeadbeef);
     write(clockControl, 0x1000, Imx1BootstrapAccess::reservedBits);
     write(clockControl, 0x10000, Imx1BootstrapAccess::reservedBits);
     read(clockControl, 0x6221);
