@@ -69,6 +69,10 @@ def stage(arch, binaries, appdir, strip):
                 copy(binaries / 'frond-68k', 'usr/lib/frond/frond-68k-core', 0o755),
                 copy(binaries / 'btvirt', 'usr/lib/frond/btvirt', 0o755),
                 copy(binaries / 'bluetooth-phone', 'usr/lib/frond/bluetooth-phone', 0o755)]
+    # mtools dispatches on argv[0], so mdir and mcopy are links to it.
+    programs.append(copy(Path('/usr/bin/mtools'), 'usr/lib/frond/mtools', 0o755))
+    for tool in ('mdir', 'mcopy'):
+        os.symlink('mtools', appdir / 'usr/lib/frond' / tool)
     for program in programs:
         subprocess.run([strip, '--strip-unneeded', str(program)], check=True)
     copy(ROOT / 'packaging/org.frond.Frond.desktop', 'usr/share/applications/org.frond.Frond.desktop')
@@ -113,7 +117,7 @@ def stage(arch, binaries, appdir, strip):
         subprocess.run(['patchelf', '--set-rpath', rpath, str(path)], check=True)
 
     # The bundled libraries' Debian copyright files.
-    packages = set()
+    packages = {'mtools'}
     for name, source in bundled.items():
         # Merged /usr: a library may be listed under /lib or /usr/lib.
         for path in (source, Path(str(source).removeprefix('/usr'))):

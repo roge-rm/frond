@@ -912,7 +912,7 @@ All in `tools/`. Most take `--help`.
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
-| `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. |
+| `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. They carry mtools in `usr/lib/frond` for SD file exchange. |
 | `clean` | Remove build output. |
 | `dynarmic-source` | Export the pinned Dynarmic source again. |
 | `device-profiles` | Build the device profile dump. |
