@@ -10,8 +10,8 @@ Each Palm you run is a machine on the Devices list (Home on Android). Frond work
 - The first start runs Palm OS setup. If taps land in the wrong place, calibrate the screen in Prefs.
 - **Edit settings…** changes a machine's display and sound settings while it's stopped. Cancel keeps the old ones. Two machines of the same model can have different settings.
 - **Rename…**, **Duplicate**, **Export…** and **Delete** are in the row's menu (right-click or the … button on Linux). **Import session…** in the File menu (Import session in the Android menu) brings an exported machine back. A row shows the device, when it was saved and its size. "Saved by an older Frond" rows can only be deleted.
-- **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X, E2 and Palm IIIx then ask "Erase all data?", press up to erase. The Zire 72 erases at once and starts at calibration.
-- **Reset** (a soft reset) is next to Rotate.
+- **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X, E2, E3, TG50, Palm IIIx and Dana then ask whether to erase all data, press up to erase. The Zire 72 erases at once and starts at calibration.
+- **Reset…** (a soft reset) is in the Machine menu on Linux and the ⋮ menu on Android.
 
 On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file, the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`) and, on a device with NAND, its internal NAND (`nand.frondnand`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder with the NAND packed as `nand.frondnand.gz`, so keep the settings with it when you move it. A T|X exports at about 43 MB though its folder is about 160 MB, and an E2 at about 9 MB against 40 MB. Android exports the folder as a zip, and both apps import either. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
 
@@ -37,22 +37,22 @@ On Linux the window shows the running machine's controls instead of the list, an
 On Android the controls sit in a bar along the top of the running machine. Taps outside it go to the Palm, and the machine keeps running while a menu or sheet is open.
 
 - The bar has back (saves and leaves), the machine's name and engine, then Applications, Storage, Sound, Power and the ⋮ menu. Storage shows the card's state (in, out, ejected or none) on devices with a slot. Power only appears where the device has a power key. The keyboard button shows when the infrared keyboard is attached.
-- ⋮ lists Hold (TG50), Infrared keyboard, Microphone and Network with their state, then Display…, Connections… and Screenshot, then Hide bar, Save a copy… and Emulator log, then Reset and Hard reset…. Rows the device doesn't have are left out. Screenshot saves a PNG of the Palm to Pictures/Frond.
+- ⋮ lists Hold (TG50), Infrared keyboard, Microphone and Network with their state, then Display…, Connections… and Screenshot, then Hide bar, Save a copy… and Emulator log, then Reset and Hard reset…. On the IIIx and Dana rows the device doesn't have are left out, on the others they're greyed out. Screenshot saves a PNG of the Palm to Pictures/Frond.
 - Applications, Storage, Display and Connections open as a sheet over the bottom of the screen, or at the side in landscape, so the Palm stays in view. Tap outside it or press back to close it. Files… opens full screen.
-- Display has the display settings, Rotate and Audio. Connections has infrared, Bluetooth, serial, USB HotSync, the debugger and HotSync.
+- Display has the display settings, Rotate and Audio. Connections has infrared, Bluetooth, serial, USB HotSync, the Dana's USB port and Wi-Fi, the debugger and HotSync.
 - Hide bar leaves a small handle at the top edge. Tap it or swipe down on it to bring the bar back. Whether the bar shows is remembered for each machine. In landscape the bar is shorter.
 - Top bar (in Edit settings and the Display sheet) is Auto-hide or Own space. Auto-hide puts the bar over the Palm and hides it after a few seconds without a touch. Own space moves the Palm down to leave room for it, in portrait and landscape. With little room left, the bar goes over the Palm instead.
 
 ### Linux bar and panels
 
-On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Storage, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (Palm IIIx), which change while the Palm runs. A click on the Palm gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
+On Linux the bar sits at the top of Frond's window while a machine runs, above a Machine menu with the same rows as ⋮ on Android plus Full screen, Save and Save and Stop (Hard reset… is red). The Palm is inside Frond's window under the bar (on X11, and on Wayland through XWayland). Applications, Storage, Display and Connections open as a panel at the right of the Palm and the window grows to the right, so the Palm keeps its size. Hide bar leaves a thin strip with a tab at the top, and the choice is remembered for each machine. The Machine menu shows each row's keys. Display has Size, Smooth pixels, Show keyboard and Jog controls (TG50) and Speed (Palm IIIx and Dana), which change while the Palm runs. A click on the Palm gives it the keys and a click in a panel takes them back, wherever the pointer is when you type; switching to another window and back keeps the choice. If the Palm's window can't be embedded, it stays in its own window, with the bar and the panels in Frond's window. Ctrl+1 to Ctrl+4 open and close them, and so does the bar button or the panel's ✕.
 
 F11 or the Full screen row in the Machine menu fills the screen. The bar hides after 3 seconds and comes back when the pointer touches the top edge. Panels open over the Palm instead of widening the window.
 
 Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached the Ctrl keys go to the Palm, and only F11 and F12 still come back to Frond.
 
 - Applications lists the installed apps, each with Launch, Export and Delete. Double-click launches. Dropping PRC and PDB files on the window installs them.
-- Card has the card controls below. Display has Contrast (Palm IIIx), Sound, Microphone and Rotate. Connections has infrared beaming, Bluetooth, serial, USB HotSync, HotSync and Pair with another Frond…, which opens Pairing.
+- Storage has the card controls below. Display also has Contrast (Palm IIIx and Dana), Sound, Microphone and Rotate (not on the IIIx and Dana). Connections has infrared beaming, Bluetooth, serial, USB HotSync, the Dana's USB port and Wi-Fi, HotSync and Pair with another Frond…, which opens Connections.
 
 ### Apps
 
@@ -78,9 +78,9 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
-| Contrast | Palm IIIx only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
-| Speed | Original or Uncapped. On the Palm IIIx, Original runs at the real 16.58 MHz and Uncapped lets the host run it as fast as it can (timers stay real time); on Android it's in the Display sheet too and applies at once. On the other devices Original runs at the device's own MIPS (150 on the T|X and Zire 72, 96 on the E2 and TG50, scaled from the 312 MHz figure by clock) and Uncapped passes `--mips 1000`; both apply at the next start. |
-| Engine | Exact or Fast. See [performance.md](performance.md). The IIIx only has Exact, so it never shows there. |
+| Contrast | Palm IIIx and Dana only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
+| Speed | Original or Uncapped. On the Palm IIIx and Dana, Original runs at the real clock (16.58 MHz on the IIIx) and Uncapped lets the host run it as fast as it can (timers stay real time); it's in the Display panel or sheet too and applies at once. On the other devices Original runs at the device's own MIPS (150 on the T|X and Zire 72, 96 on the E2, E3 and TG50, scaled from the 312 MHz figure by clock) and Uncapped passes `--mips 1000`; both apply at the next start. |
+| Engine | Exact or Fast. See [performance.md](performance.md). The IIIx and Dana only have Exact, so it never shows there. |
 
 Android also has Settings in the home menu: Orientation (follow the phone, portrait or landscape), the gdb server and its port, and the controller keys.
 
@@ -242,13 +242,13 @@ Internal lists the databases in the Palm's RAM by file name, with their type and
 
 ## Connections
 
-Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet". The Zire 72 has no serial port, so that row isn't shown.
+Each device only gets the connections it really has. A control it doesn't have yet is greyed out, with "Not available on the <device> yet". The Zire 72 has no serial port, so that row isn't shown, and on the IIIx and Dana rows for hardware they don't have aren't shown.
 
 ### Connections between Fronds
 
 A connection is a link between two Frond installs on the same network, paired once. A machine's Infrared, Serial or Bluetooth setting can name a connection, and then the two Palms talk to each other through it, for example beaming a memo from a Tungsten E2 on a phone to a T|X on your computer. One link carries all the channels between two installs, and it only runs while a machine wants it.
 
-Open Connections from the File menu on Linux or the Home ⋮ menu on Android. At the top, This Frond is the name other installs see, with Rename. Each install picks a name the first time. Under Connections are the paired installs, each with a status:
+Open Pairing… from the File menu on Linux or Connections from the Home ⋮ menu on Android. At the top, This Frond is the name other installs see, with Rename. Each install picks a name the first time. Under Connections are the paired installs, each with a status:
 
 - Connected, with the round trip time and what it carries, for example "Connected · 4 ms · Infrared: Palm TX – Tungsten E2".
 - Seen at 192.168.1.20, which means it's on the network but nothing is using the link.
@@ -268,7 +268,7 @@ Android asks for the local network permission when Connections opens and when a 
 
 #### Using a connection
 
-In a machine's settings (Edit settings… on Linux, Machine settings on Android) and in the Connections panel while it runs, the Infrared, Serial and Bluetooth rows list Off, the local choices, then the connections by name:
+In a machine's settings (Edit settings… on Linux, Edit settings on Android) and in the Connections panel while it runs, the Infrared, Serial and Bluetooth rows list Off, the local choices, then the connections by name:
 
 - Infrared and Serial: on Linux Off, Terminal (PTY), Wait for a peer, then This computer and the paired installs. On Android Off, then the paired installs.
 - Bluetooth: Off, This Frond, then the paired installs. On Linux there is also Controller socket. This computer isn't listed, as machines on one computer share This Frond's radio.
@@ -321,7 +321,7 @@ The mode is saved. Live connections close when the machine resumes, so reload or
 
 The serial port (the T|X, E2 and E3 connector, the TG50 and the IIIx cradle) goes to a PTY or a TCP port. Open the path with `screen` or `minicom`, or connect to the port, for example `nc 127.0.0.1 5023`. Peers get CTS, DSR and DCD while connected, RTS flow control is honoured, and bytes sent with no peer are dropped. On Android the serial port goes to another Frond through a connection.
 
-Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync in the Connections panel (Linux) or in the Connections sheet (Android) on the E2 or T|X, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's serial HotSync isn't tested.
+Serial HotSync works on the E2 with pilot-link (`pilot-xfer -p /dev/pts/N -l`): put the serial port on a PTY, press HotSync in the Connections panel (Linux) or in the Connections sheet (Android) on the T|X, E2 or E3, which pulls the connector's HotSync line low for half a second like the cradle button. The Palm starts HotSync and pilot-link answers. The T|X's and E3's serial HotSync isn't tested.
 
 ### Palm IIIx serial and PPP
 
@@ -368,7 +368,7 @@ Programs that use NetLib, like a web clipping app or a telnet client, then work 
 
 ### Dial-up modem
 
-The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Machine settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
+The Palm IIIx has a snap-on modem on its serial port. Set Serial port to Modem in Edit settings (Linux, or in the Connections panel while it runs) or Edit settings (Android), then set up a connection in Palm OS the way you would for a real modem. Frond answers as a modem on a 33600 line and puts you on the internet through your computer's or phone's connection, with no root. Any number you dial connects. The line driver has to be on, so the modem only works while a program has the serial port open.
 
 1. Palm OS 3.1: the Modem panel's defaults (Standard, 57,600 bps) work. In Prefs, Network set the service's phone number to anything, for example `5551234`.
 2. Palm OS 3.5 and 4.1: open Prefs, Network, pick a service and set its Connection to the built-in Palm Modem US/Canada (the Modem settings it comes with work). Set the phone number to anything.
@@ -386,7 +386,7 @@ On Linux the modem can HotSync with pilot-link two ways. The state line shows th
 
 ### Mobile phone over infrared
 
-Devices with an infrared phone can use Mobile phone in the Infrared list (Linux, and Android in Machine settings and the Connections sheet) instead of Off or a connection. Frond then plays a phone with a modem, reached over IrCOMM, and the Palm gets the same internet as with the dial-up modem. Detach the infrared keyboard first, as they share the port. Mobile phone needs Palm OS 3.3 or later.
+Devices with an infrared phone can use Mobile phone in the Infrared list (Linux, and Android in Edit settings and the Connections sheet) instead of Off or a connection. Frond then plays a phone with a modem, reached over IrCOMM, and the Palm gets the same internet as with the dial-up modem. Detach the infrared keyboard first, as they share the port. Mobile phone needs Palm OS 3.3 or later.
 
 1. Palm OS 3.5: in Prefs, Connection, make a new connection with Via IrCOMM to Modem. Use it from Network as above.
 2. Palm OS 4.1: use the built-in IR to Phone connection.
@@ -410,6 +410,7 @@ Modem and phone by device:
 | Palm IIIx | yes, Palm OS 3.1, 3.5, 4.1 | yes, Palm OS 3.5 and 4.1 | no |
 | T\|X, TG50, E2, Zire 72 | no | yes | yes, Linux |
 | Tungsten E3 | no | no | no |
+| Dana, Dana Wireless | no | no | no |
 
 ### USB HotSync
 
@@ -425,7 +426,7 @@ Infrared beaming links two Frond machines through a connection, see Connections 
 
 ### Printing over infrared
 
-Every device with infrared can print to Frond as an IrDA printer. Pick Printer in the Infrared list (Linux: the Infrared beaming row, and Edit settings…; Android: Infrared beaming in Connections, and Machine settings). The choice is kept for the machine and applied at every start. Detach the infrared keyboard first, as they share the port.
+Every device with infrared can print to Frond as an IrDA printer. Pick Printer in the Infrared list (Linux: the Infrared beaming row, and Edit settings…; Android: Infrared beaming in Connections, and Edit settings). The choice is kept for the machine and applied at every start. Detach the infrared keyboard first, as they share the port.
 
 A print app that finds IrDA printers sees "Frond Printer". On the Dana, PrintBoy does: in its setup choose the IrDA port for your printer, then print as usual. Other IrDA print apps work the same way, and so do apps that print to the infrared serial port (IrCOMM).
 
@@ -465,28 +466,28 @@ and a USB Wi-Fi adapter. The Dana Wireless has the same, with built-in Wi-Fi
 instead of the adapter. Its USB computer transport is available through the
 native localhost debug path. The app's USB computer controls stay disabled.
 
-| | T\|X | E2 | Zire 72 | TG50 | IIIx |
-|---|---|---|---|---|---|
-| Sound | yes | yes | yes | yes, see below | yes, piezo |
-| Low-latency audio | yes | yes | yes | shorter queue | |
-| Microphone | | | yes | yes | |
-| Network | yes | | | | PPP over serial |
-| Serial port | yes | yes | not offered | yes | yes |
-| USB HotSync | yes | yes | yes | yes | |
-| Infrared beaming | yes | yes | yes | yes | yes |
-| Infrared keyboard | yes | yes | yes | yes | |
-| Mobile phone (infrared) | yes | yes | yes | yes | yes |
-| Dial-up modem | | | | | yes |
-| Bluetooth | yes | yes | yes | yes | |
-| Camera | | | no sensor | | |
-| Hold | | | | yes | |
-| Card | SD | SD | SD | Memory Stick, Pro | none |
+| | T\|X | E2 | E3 | Zire 72 | TG50 | IIIx |
+|---|---|---|---|---|---|---|
+| Sound | yes | yes | yes | yes | yes, see below | yes, piezo |
+| Low-latency audio | yes | yes | yes | yes | shorter queue | |
+| Microphone | | | | yes | yes | |
+| Network | yes | | | | | PPP over serial |
+| Serial port | yes | yes | yes | not offered | yes | yes |
+| USB HotSync | yes | yes | yes | yes | yes | |
+| Infrared beaming | yes | yes | yes | yes | yes | yes |
+| Infrared keyboard | yes | yes | yes | yes | yes | |
+| Mobile phone (infrared) | yes | yes | | yes | yes | yes |
+| Dial-up modem | | | | | | yes |
+| Bluetooth | yes | yes | | yes | yes | |
+| Camera | | | | no sensor | | |
+| Hold | | | | | yes | |
+| Card | SD | SD | SD | SD | Memory Stick, Pro | none |
 
 The Zire 72's Camera shows a white screen and goes back to the launcher. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
 
 On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 
-Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or Device (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
+Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 
 ## Troubleshooting
 

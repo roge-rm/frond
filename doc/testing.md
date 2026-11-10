@@ -18,7 +18,7 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 
 ## Firmware-free tests
 
-`make test` builds each test against the real core with synthetic ROM, RAM, NAND and card data, so it needs no firmware. It covers CPU alignment and conditions, instruction cache, MMU and memory regions, PACE and the GDB stub, session v7 and state round trips, audio queues and lifecycle, SD, Memory Stick, USB, serial and IrDA, Bluetooth, networking, keyboard, device profiles and controls, checkpoints and database export. `make -n test` lists the targets, and `make test-NAME` runs one.
+`make test` builds each test against the real core with synthetic ROM, RAM, NAND and card data, so it needs no firmware. It covers CPU alignment and conditions, instruction cache, MMU and memory regions, PACE and the GDB stub, session v9 and state round trips, audio queues and lifecycle, SD, Memory Stick, USB, serial and IrDA, Bluetooth, networking, keyboard, device profiles and controls, checkpoints and database export. `make -n test` lists the targets, and `make test-NAME` runs one.
 
 - `make test-desktop` builds the Qt desktop with tests and runs ctest: the control-socket client and the save, export and settings workflows.
 - `make test-build-tools` tests staging safety and package policy with synthetic data. It does not package Frond.
@@ -86,6 +86,7 @@ A new device adds a row here. "Smoke" means an entry in `SMOKE` in `tests/smoke.
 | `palm-zire-72` | yes | `test-device-profiles` | `zire72-rom.py` (`FROND_ZIRE_LAUNCHER=1`, `_STORAGE=1`, `_PERIPHERALS=1` add more), `app-compatibility.py`, `large-card-rom.py` |
 | `palm-iiix` | no | `test-frond-68k` (68000 timing table, piezo, ROM header checks), `test-core-control` | `device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `test-frond-68k-peripherals`, `test-frond-68k-gdb`, `timing68k.py`, `frond-68k-old-session.py` |
 | `sony-clie-tg50` | yes | `test-tg50-state`, `-pace`, `-audio-replay`, `-audio-queue`, `-pwm-audio`, `-microphone-*`, `-serial-board`, `-serial-configuration`, `-call-budget`, `test-memory-stick-*` | `device-rom.py`, `app-compatibility.py`, `ms-classic-rom.py`, `ms-pro-rom.py`, `test-tg50-usb-hotsync` |
+| `alphasmart-dana`, `alphasmart-dana-wireless` | no | `test-68k-dana`, `test-68k-vz-registers`, `test-68k-sd`, `test-dana-input`, `test-dana-view`, `test-dana-card-inventory`, `test-dana-wifi-module`, `test-usb-printer-runtime`, `test-usb-wifi-runtime` | `device-rom.py --device alphasmart-dana`, `dana-session.py`, `dana-input.py`, `dana-power.py`, `dana-sound.py`, `dana-irda.py`, `dana-cards.py` |
 
 The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm/Generic-OS-3.5-EZ/`) or `--rom`. Without a ROM they skip.
 
@@ -103,7 +104,7 @@ Tests that cover every device (profiles, controls, sessions, lifecycle, SD, netw
 
 `make test-68k-vz-registers` checks VZ Port D polarity and register-driven LCD copy bounds, including a partial dirty row. It needs no firmware.
 
-Dana staged geometry checks: `heavy build make test-68k-vz-registers` covers the final panned pixel at 560x160, malformed LCD rows and depth, classic 160x160 decoding and VZ level IRQ pending/status polarity, enable, direction and masking. Dana remains unavailable.
+Dana staged geometry checks: `heavy build make test-68k-vz-registers` covers the final panned pixel at 560x160, malformed LCD rows and depth, classic 160x160 decoding and VZ level IRQ pending/status polarity, enable, direction and masking.
 
 The same VZ target checks ADS784x partial commands, pending conversions and partial replies across save/load, with malformed saved bit counters rejected. These are generic converter tests, not Dana analogue qualification.
 
@@ -111,9 +112,9 @@ The same VZ target checks ADS784x partial commands, pending conversions and part
 
 Dana's virtual analogue inputs use unsigned 12-bit ADC counts (0–4095). A4/channel 2 samples main battery, E4/channel 6 samples supply/alkaline detection, G1 is a separate pack-detect input and G2 selects the ADC. Defaults are main 3072 counts, supply 50 counts and pack-detect high, representing a virtual battery with no external supply. These are simulator choices, without a voltage or divider calibration. Tests select both channels, check zero/midscale/full-scale and reject out-of-range inputs, retaining the shared converter's serial conversion pipeline. The native ROM pen bridge is supported separately; ADC pen electrical accuracy is unqualified.
 
-Dana remains staged. The ISP bank has no transfer buffers, attached endpoints or board interrupt output wiring. USB traffic, external serial, HotSync and card support remain disabled; sound and IrDA have separate checks below. The ST board handler qualifies IRQ1 only, retaining the base acknowledgement for other interrupts; generic VZ INT0–3 edge capture remains unqualified. Normal runner boot, reset and session checks pass with the disconnected controller. Frontend availability waits for Dana controls and art.
+The ISP bank has no transfer buffers, attached endpoints or board interrupt output wiring. Cards, sound and IrDA have separate checks below. The ST board handler qualifies IRQ1 only, retaining the base acknowledgement for other interrupts; generic VZ INT0–3 edge capture remains unqualified. Normal runner boot, reset and session checks pass with the disconnected controller.
 
-Dana's staged VZ backend runs in `frond-68k`; neither frontend offers it. Its
+Dana's VZ backend runs in `frond-68k`. Its
 virtual ADC defaults are main 3072, supply 50 raw counts and pack-detect high.
 Supply 50 avoids unsigned underflow in the ROM's `(supply >> 1) - 25` comparison;
 these are deterministic simulator inputs, with no measured voltage implied.
@@ -232,8 +233,7 @@ Dana D3c native card inventory uses stable HAL slots SD0=0 and SD2=2 (labels
 minus 256 KiB and legacy MMC SPI at 32/64/128/256 MiB. Guest-qualified sizes are
 32 MiB FAT for each family and slot, paired and both mixed orders. Runtime
 bounds do not claim guest qualification at every capacity. The backend is
-complete for native CLI/runtime/session use; the device remains staged and
-frontend unavailable. D3d USB/Wi-Fi and D4 frontend work remain separate.
+complete for native CLI/runtime/session use.
 `make test-dana-card-inventory` checks per-slot/family geometry and metadata
 without firmware. Frontend/card export acceptance waits for the next release.
 The native guard check uses `tests/dana-card-geometry-fixture.cpp` to build and

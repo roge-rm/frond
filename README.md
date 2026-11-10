@@ -2,7 +2,7 @@
 
 Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games.
 
-Currently it runs the Palm T|X, Tungsten E2 and Zire 72, the Palm IIIx, and the Sony CLIÉ TG50, with sound, memory cards, infrared, Bluetooth, HotSync, networking and saved sessions. Some peripherals are still in progress and more devices are on the way - check the peripheral table below to see what is currently supported.
+Currently it runs the Palm T|X, Tungsten E2, Tungsten E3 and Zire 72, the Palm IIIx, the AlphaSmart Dana and Dana Wireless, and the Sony CLIÉ TG50, with sound, memory cards, infrared, Bluetooth, HotSync, networking and saved sessions. Some peripherals are still in progress and more devices are on the way - check the peripheral table below to see what is currently supported.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
@@ -64,7 +64,7 @@ Install PRC and PDB files with Install…, in the Applications panel on Linux or
 
 Frond makes and imports SD card images up to 2 GB (1 GB on the E2), and copies files between your computer or phone and an ejected card with Files, under SD card. Close any files on the Palm before ejecting.
 
-The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it, up to 8 MiB each, and Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
+The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it, and Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
 
 ### Peripherals
 
@@ -73,12 +73,12 @@ The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 M
 | Virtual Wi-Fi, onto the internet through your computer or phone | yes | | | | |
 | Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#palm-iiix-serial-and-ppp) | yes | yes | | yes | yes |
 | HotSync button in the Connections panel, like the cradle's | yes | yes | | | yes |
-| Microphone | | | | yes | |
+| Microphone | | | yes | yes | |
 | USB HotSync over a PTY or TCP port | yes | yes | yes | yes | |
 | [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes | yes |
 | [Virtual Bluetooth](doc/using-frond.md#bluetooth), with a local provider you start yourself | yes | yes | yes | yes | |
 
-Anything else stays greyed out until it's done, like the E2's and Zire's networking and the Zire's camera and microphone. The Zire 72 has no serial port, as on the real one.
+Anything else stays greyed out until it's done, like the E2's and Zire's networking and the Zire's camera. The Zire 72 has no serial port, as on the real one.
 
 The Palm IIIx (Palm OS 3.1, 68k DragonBall EZ) runs in its own runner, `frond-68k`. It has sound, backlight, serial with the HotSync button, infrared and the screen contrast, and no SD, USB, Bluetooth or Wi-Fi, as on the real one. It only has the exact engine (no Fast), at its real 16.58 MHz or Uncapped. Networking is PPP over the serial port, see [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb, see [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
 
@@ -88,7 +88,7 @@ The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is of
 
 ### Low-latency audio
 
-Off by default. On the T|X and E2 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path when your computer or phone can't keep up. On the TG50, and a T|X or E2 with other firmware, it keeps a shorter audio queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
+Off by default. On the T|X, E2, E3 and Zire 72 it plays one 44.1 kHz stereo stream with less delay, for music apps like SunVox, and drops back to the normal path when your computer or phone can't keep up. On the TG50, and a T|X, E2, E3 or Zire 72 with other firmware, it keeps a shorter audio queue while sound plays, about 35 ms less delay. See [Low-latency audio](doc/using-frond.md#low-latency-audio).
 
 ### For developers
 
@@ -135,9 +135,11 @@ Or get the `.deb` for your machine, amd64 or arm64, from [Releases](https://gith
 |---|---|---|
 | Palm TX | 16 MiB | 132 MiB raw dump, with spare bytes |
 | Tungsten E2 | 8 MiB | 34,603,008 bytes raw dump, optional |
+| Tungsten E3 | 8 MiB | 34,603,008 bytes raw dump, optional |
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
 | Palm IIIx | one ROM file, 1.2 to 1.7 MB | none |
+| AlphaSmart Dana, Dana Wireless | one ROM file, 6 MiB | none |
 
 The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM.
 
