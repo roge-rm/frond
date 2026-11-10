@@ -1754,6 +1754,19 @@ build/test-zodiac-dcache: out/frond tests/zodiac-dcache.cpp
 test-zodiac-dcache: build/test-zodiac-dcache
 	./build/test-zodiac-dcache
 
+# Every i.MX1 test target.
+.PHONY: test-imx1
+test-imx1: test-imx1-aitc test-imx1-clocks-gpio test-imx1-live-clocks test-imx1-gpio-idle test-imx1-gpio-pad test-imx1-gpio-active test-imx1-mpll test-imx1-spll test-imx1-eim test-imx1-timer test-imx1-uart test-imx1-timer2 test-imx1-sysctrl test-imx1-mmcsd test-imx1-i2c-read-window test-imx1-i2c test-imx1-asp test-imx1-pwm test-imx1-rtc test-imx1-watchdog test-imx1-mpll-retune test-imx1-rtc-live-writes test-imx1-run-cache
+test: test-imx1
+
+# The UART cache flag survives board assignment.
+.PHONY: test-imx1-run-cache
+test-imx1-run-cache: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Ibuild/source/src/uarm/uarm \
+		tests/imx1-run-cache.cpp build/source/src/uarm/uarm/imx1_aitc.cpp build/source/src/uarm/uarm/imx1_cgm.cpp build/source/src/uarm/uarm/imx1_gpio.cpp build/source/src/uarm/uarm/imx1_sysctrl.cpp build/source/src/uarm/uarm/imx1_eim.cpp build/source/src/uarm/uarm/imx1_timer.cpp build/source/src/uarm/uarm/imx1_i2c.cpp build/source/src/uarm/uarm/imx1_asp.cpp build/source/src/uarm/uarm/imx1_pwm.cpp \
+		build/source/src/uarm/uarm/imx1_watchdog.cpp build/source/src/uarm/uarm/imx1_rtc.cpp build/source/src/uarm/uarm/imx1_bootstrap.cpp -o build/test-imx1-run-cache
+	./build/test-imx1-run-cache
+
 # Standalone i.MX1 interrupt-controller state and strict bootstrap integration.
 .PHONY: test-imx1-aitc
 test-imx1-aitc: prepare
