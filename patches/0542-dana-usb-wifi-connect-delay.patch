@@ -1,0 +1,17 @@
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1222,10 +1222,11 @@
+     }
+ 
+     // Host bytes in and out, and the transports following the guest's line drivers.
+-    // The printer connects 50 ms after the external port is powered or it's plugged in, like the
+-    // module below, so a wake's port scans settle before it enumerates.
++    // The printer and the Wi-Fi adapter connect 50 ms after the external port is powered or they're
++    // plugged in, like the module below, so a wake's port scans settle before they enumerate and a
++    // swap leaves the port empty long enough for the ROM to see the old device go.
+     UsbPrinterRuntime usbPrinter{50000000};
+-    UsbWifiRuntime usbWifi;
++    UsbWifiRuntime usbWifi{0,50000000};
+     // The external USB port's one device: off, printer or wifi. Kept across loads and resets.
+     string usbPort="off";
+     // A loaded session's adapter state, put back when the adapter is next plugged in.
