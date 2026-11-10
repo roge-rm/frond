@@ -579,6 +579,7 @@ class RunningModel(
                 var s = cur
                 if (next.size != old.size) s = s.copy(size = next.size)
                 if (next.smoothing != old.smoothing) s = s.copy(smoothing = next.smoothing)
+                if (next.showMips != old.showMips) s = s.copy(showMips = next.showMips)
                 if (next.contrast != old.contrast) s = s.copy(contrast = next.contrast, contrastSet = true)
                 if (next.speed != old.speed) s = s.copy(speed = next.speed)
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
@@ -591,6 +592,7 @@ class RunningModel(
             settings = machineSettings()
             FrondActivity.running?.applyDisplay()
             FrondActivity.running?.applySpeed()
+            FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."

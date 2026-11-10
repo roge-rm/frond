@@ -76,6 +76,8 @@ struct Preferences {
     // Dana Wireless: the built-in Wi-Fi module's radio.
     bool wifiModule{true};
     frondDana::Preferences danaView;
+    // ARM devices: a MIPS readout in the corner of the Palm.
+    bool showMips{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -92,6 +94,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
     result->barShown = object.value("barShown").toBool(true);
+    result->showMips = object.value("showMips").toBool(false);
     // Earlier machine settings only have the printer switch.
     const auto port = object.value("usbPort").toString();
     result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
@@ -115,6 +118,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (!prefs.barShown) object.insert("barShown", false);
+    if (prefs.showMips) object.insert("showMips", true);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);
     if (!prefs.wifiModule) object.insert("wifiModule", false);

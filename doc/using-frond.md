@@ -75,6 +75,7 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Size (Android) | Fit, Whole steps or Fill. |
 | Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
+| Show MIPS | Not on the Palm IIIx and Dana. Shows how many million Palm instructions a second the emulator is running, in a small box at the bottom right of the Palm, updated every second. Off by default. It is in the Display panel too and is saved with the machine. |
 | Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |

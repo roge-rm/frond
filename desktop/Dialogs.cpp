@@ -120,6 +120,8 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     windowScale->setToolTip(tr("1× to 2× in 0.25 steps."));
     smoothLcd = new QCheckBox(tr("Smooth pixels"), display);
     smoothLcd->setObjectName("smoothLcd");
+    showMips = new QCheckBox(tr("Show MIPS"), display);
+    showMips->setObjectName("showMips");
     contrastLabel = new QLabel(display);
     contrast = new QSlider(Qt::Horizontal, display);
     contrast->setObjectName("contrast");
@@ -144,6 +146,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     displayLayout->addWidget(scaleLabel);
     displayLayout->addWidget(windowScale);
     displayLayout->addWidget(smoothLcd);
+    displayLayout->addWidget(showMips);
     displayLayout->addWidget(contrastLabel);
     displayLayout->addWidget(contrast);
     displayLayout->addWidget(showKeyboard);
@@ -249,6 +252,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedGroup->setVisible(true);
     windowScale->setValue(prefs.scale);
     smoothLcd->setChecked(prefs.smooth);
+    showMips->setChecked(prefs.showMips);
     audio->setChecked(prefs.audio);
     fastAudio->setChecked(prefs.fastAudio);
     connect(windowScale, &QSlider::valueChanged, this, [this](int value) {
@@ -279,6 +283,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.danaView = danaView->values();
     prefs.scale = windowScale->value();
     prefs.smooth = smoothLcd->isChecked();
+    prefs.showMips = showMips->isChecked();
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
@@ -346,6 +351,7 @@ void MachineSettings::setDevice(Device device) {
     jogControls->setVisible(tg50);
     const bool m68k = frondFirmware::runs68k(device);
     fastAudio->setVisible(!m68k);
+    showMips->setVisible(!m68k);
     contrastLabel->setVisible(m68k);
     contrast->setVisible(m68k);
     // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
