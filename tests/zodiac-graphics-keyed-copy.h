@@ -167,14 +167,22 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
     assert(state.advanceCpuCycles(uint32_t(uploadTicks+commands.duration())));
     assert(commands.complete(state,eim,memory) == A::ok);
     check();
-    // The text producer's foreground in 490 doesn't change a keyed copy.
+    // The text producer's colours in 490 and 491 don't change a keyed copy.
     clear(); state = ready; commands = readyCommands;
     assert(append(state,commands,host,0x200ac300) == A::ok);
     auto afterText = copy;
-    afterText.insert(afterText.begin()+11,{0x490,0});
+    afterText.insert(afterText.begin()+11,{0x490,0,0x491,0xffff});
     assert(append(state,commands,afterText,0x200aa504) == A::ok);
     assert(state.advanceCpuCycles(1000) && commands.complete(state,eim,memory) == A::ok);
     check();
+    // Any other pair in 490 and 491 is refused.
+    for (const std::vector<uint32_t>& colours : {std::vector<uint32_t>{0x490,0}, {0x491,0xffff}, {0x490,0x1234,0x491,0xffff}}) {
+        clear(); state = ready; commands = readyCommands;
+        assert(append(state,commands,host,0x200ac300) == A::ok);
+        auto other = copy;
+        other.insert(other.begin()+11,colours.begin(),colours.end());
+        assert(append(state,commands,other,0x200aa504) == A::sideEffect);
+    }
     // Left/top clipping advances both the source and destination with separate row strides.
     clear(); state = ready; commands = readyCommands;
     assert(append(state,commands,host,0x200ac300) == A::ok);
