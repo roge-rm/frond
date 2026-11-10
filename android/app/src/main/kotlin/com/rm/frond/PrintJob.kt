@@ -29,21 +29,22 @@ object PrintJob {
     // A job counts as received when bytes have come in and then stopped for this long.
     const val PAUSE_MS = 3000L
 
-    // "[error text ]attached|off STATE bytes=N last=LAST idle=MS"; valid is false for anything else.
+    // "[error text ]attached|off STATE bytes=N [receiving=R ]last=LAST idle=MS"; valid is false for anything else.
+    // R, the bytes of a job still coming in, is only on the infrared printer's line.
     data class Status(
         val valid: Boolean = false, val attached: Boolean = false, val state: String = "", val last: String = "",
-        val error: String = "", val bytes: Long = 0, val idleMs: Long = -1,
+        val error: String = "", val bytes: Long = 0, val idleMs: Long = -1, val receiving: Long = 0,
     ) {
         val received get() = valid && attached && bytes > 0 && idleMs >= PAUSE_MS
     }
 
-    private val pattern = Regex("""(attached|off) (\S+) bytes=(\d+) last=(\S+) idle=(-?\d+)\s*$""")
+    private val pattern = Regex("""(attached|off) (\S+) bytes=(\d+)(?: receiving=(\d+))? last=(\S+) idle=(-?\d+)\s*$""")
 
     fun parseStatus(message: String): Status {
         val m = pattern.find(message) ?: return Status()
-        val (attached, state, bytes, last, idle) = m.destructured
+        val (attached, state, bytes, receiving, last, idle) = m.destructured
         return Status(true, attached == "attached", state, last, message.substring(0, m.range.first).trim(),
-            bytes.toLongOrNull() ?: 0, idle.toLongOrNull() ?: -1)
+            bytes.toLongOrNull() ?: 0, idle.toLongOrNull() ?: -1, receiving.toLongOrNull() ?: 0)
     }
 
     // The Dana has a printer or a Wi-Fi adapter to plug into its USB port.

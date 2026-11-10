@@ -179,7 +179,7 @@ The Dana has one external USB port, and USB port in Connections (desktop panel, 
 
 With Printer, a print from the Dana is collected and "Print received" shows when it stops. Choose Save as PDF (desktop), Print, Save raw file or Discard. Only the Generic printer profile can be shown as pages.
 
-The Dana can also print over infrared, see [Printing over infrared](#printing-over-infrared). With both on, "Print received" says which printer it came from.
+The Dana can also print over infrared, see [Printing over infrared](#printing-over-infrared). With both on, "Print received" says which printer it came from. On Android, when both printers have a print waiting, one notice says "2 prints ready" and Show opens Connections, where each has its own choices.
 
 With Wi-Fi adapter, the Dana sees a USB 802.11b adapter (a Microsoft MN-510) and the readout shows the link, for example "Connected, 10.0.2.15". To set it up, open Network in the Dana's Preferences:
 
@@ -429,7 +429,7 @@ Every device with infrared can print to Frond as an IrDA printer. Pick Printer i
 
 A print app that finds IrDA printers sees "Frond Printer". On the Dana, PrintBoy does: in its setup choose the IrDA port for your printer, then print as usual. Other IrDA print apps work the same way, and so do apps that print to the infrared serial port (IrCOMM).
 
-Each print is collected and "Print received" shows when it stops, with the same choices as the Dana's USB printer: Save as PDF (desktop), Print, Save raw file or Discard. On Android a notification shows if Frond is in the background. More printing adds to the same job until you choose one. Only the Generic printer profile can be shown as pages, so for a printer's own language (PCL, ESC/P) use Save raw file. Changing the Infrared choice while a print is waiting asks first, as it throws the print away. Nothing waiting is saved with the machine.
+Each print is collected and "Print received" shows when it stops, with the same choices as the Dana's USB printer: Save as PDF (desktop), Print, Save raw file or Discard. On Android a notification shows if Frond is in the background. More printing adds to the same job until you choose one. Only the Generic printer profile can be shown as pages, so for a printer's own language (PCL, ESC/P) use Save raw file. Changing the Infrared choice while a print is waiting or still coming in asks first, as it throws the print away. Nothing waiting is saved with the machine.
 
 On Linux you can still put each machine on Wait for a peer with a different port and join them yourself, for scripts:
 

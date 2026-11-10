@@ -113,8 +113,12 @@ fun RunningBarView(state: RunningBarState, actions: RunningBarActions) {
         Box(if (state.sheet != null) Modifier.fillMaxSize() else Modifier) {
             if (state.shown) Bar(state, actions) else Handle(actions, Modifier.align(Alignment.TopCenter))
             state.sheet?.let { SheetLayer(it, state, actions) }
-            state.model?.printer?.let { PrinterPrompt(it.jobs, if (state.shown) RunningBar.heightDp(state.portrait).dp else 24.dp) }
-            state.model?.irPrinter?.let { PrinterPrompt(it, if (state.shown) RunningBar.heightDp(state.portrait).dp else 24.dp) }
+            state.model?.let { model ->
+                val printers = listOfNotNull(model.printer?.jobs, model.irPrinter)
+                if (printers.isNotEmpty()) PrinterPrompt(printers, if (state.shown) RunningBar.heightDp(state.portrait).dp else 24.dp) {
+                    actions.openSheet(RunningSheets.Sheet.CONNECTIONS)
+                }
+            }
         }
         MenuDialogs(state, actions)
     }

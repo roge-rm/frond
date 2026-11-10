@@ -733,6 +733,12 @@ test-session-folder-card: out/frond
 test-core-control: out/frond out/frond-68k
 	python3 tests/core-control.py
 
+# The printer commands (irprinter and the Dana's printer) through both runners' control sockets; needs
+# a private ARM smoke session and the Dana ROM, else that side is skipped.
+.PHONY: test-printer-control
+test-printer-control: out/frond out/frond-68k
+	python3 tests/printer-control.py
+
 .PHONY: test-frond-68k-gdb
 test-frond-68k-gdb: out/frond-68k
 	python3 tests/frond-68k-gdb.py

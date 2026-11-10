@@ -1,16 +1,8 @@
 package com.rm.frond
 
-import android.Manifest
 import android.app.Activity
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.provider.DocumentsContract
 import android.print.PrintManager
 import androidx.compose.runtime.getValue
@@ -27,21 +19,25 @@ import java.io.IOException
 // arriving for PrintJob.PAUSE_MS the core saves the job to a private temp file, which is appended to the held
 // file, so more printing adds to the same job until it is printed, saved or discarded. Held bytes stay in
 // private storage and go on Discard, after a raw save and at the next machine start. command is the core's
-// printer command (printer or irprinter) and folder the private folder under files/. source names this printer
-// in the texts when another one could also have sent the job, and is null otherwise.
+// printer command (printer or irprinter), folder the private folder under files/ and printerName what the
+// notification calls it (USB printer or infrared printer). source names this printer in the texts when another one
+// could also have sent the job, and is null otherwise. notices holds the one notification for every printer.
 class PrintJobs(
     private val host: ModelHost,
     private val device: Device,
     private val link: ControlLink,
     private val command: String,
     folder: String,
-    private val notificationId: Int,
+    val printerName: String,
+    private val notices: PrintNotices,
     private val inBackground: () -> Boolean,
     private val source: () -> String?,
     private val problem: (String) -> Unit,
 ) {
-    class Held(val bytes: Long, val pages: PrintJob.Pages, val version: Int, val source: String?) {
+    class Held(val bytes: Long, val pages: PrintJob.Pages, val version: Int, val source: String?, val printer: String) {
         val title get() = "Print received" + (source?.let { " from the $it" } ?: "") + " ($bytes bytes)"
+        // The title when it's listed with another printer's job.
+        val namedTitle get() = "Print received from the $printer ($bytes bytes)"
     }
 
     var bytes by mutableStateOf(0L)
@@ -56,7 +52,10 @@ class PrintJobs(
     }
     private var lastError = ""
 
-    init { store.sweep() }
+    init {
+        store.sweep()
+        notices.add(this)
+    }
 
     // Polls once a second for as long as the machine runs, while active() says the core is printing here.
     fun startPolling(active: () -> Boolean) {
@@ -86,11 +85,11 @@ class PrintJobs(
     // Updates the held state in the order the store changed the file.
     private fun publish(size: Long, version: Int) {
         val h = if (size > 0) Held(size, if (size > MAX_RENDER) PrintJob.Pages(false, PrintJob.NOT_TEXT, emptyList())
-            else PrintJob.render(store.heldBytes()), version, source()) else null
+            else PrintJob.render(store.heldBytes()), version, source(), printerName) else null
         host.runOnUiThread {
             held = h
-            if (h == null) { choosing = false; cancelNotification() }
-            else if (inBackground()) notify(size)
+            if (h == null) choosing = false
+            notices.changed(h != null && inBackground())
         }
     }
 
@@ -117,7 +116,7 @@ class PrintJobs(
         val h = held ?: return
         if (!h.pages.renderable) return
         val manager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
-        val name = if (device.usbPrinter) "Dana print" else "Print"
+        val name = "${device.label} print"
         manager.print(name, PagesAdapter(activity, name, h.pages.pages) { wrote ->
             if (wrote) host.lifecycleScope.launch(Dispatchers.IO) { store.dropIfVersion(h.version, ::publish) }
         }, null)
@@ -149,33 +148,11 @@ class PrintJobs(
     }
 
     fun close() {
-        cancelNotification()
+        notices.remove(this)
         store.sweep()
     }
 
-    private fun notify(size: Long) {
-        val context = host.applicationContext
-        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Printing", NotificationManager.IMPORTANCE_DEFAULT))
-        val open = PendingIntent.getActivity(
-            context, 0,
-            Intent(context, Emulators.activity(device)).putExtra(FrondActivity.EXTRA_DEVICE, device.id)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-        manager.notify(notificationId, Notification.Builder(context, CHANNEL)
-            .setSmallIcon(R.drawable.ic_notification).setContentTitle("Print received")
-            .setContentText("$size bytes" + (source()?.let { " from the $it" } ?: " from the Dana")).setContentIntent(open).setAutoCancel(true).build())
-    }
-
-    private fun cancelNotification() =
-        host.applicationContext.getSystemService(NotificationManager::class.java).cancel(notificationId)
-
     companion object {
-        const val CHANNEL = "print"
-        const val NOTIFICATION = 41
-        const val IR_NOTIFICATION = 42
         // A bigger job is held for Save raw only.
         const val MAX_RENDER = 8L shl 20
     }

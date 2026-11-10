@@ -17,6 +17,7 @@ class PrinterModel(
     private val sessionId: String?,
     initialPort: String,
     initialModule: Boolean,
+    notices: PrintNotices,
     inBackground: () -> Boolean,
     private val otherActive: () -> Boolean,
     private val problem: (String) -> Unit,
@@ -33,7 +34,7 @@ class PrinterModel(
     var moduleText by mutableStateOf<String?>(null)
         private set
     // The received jobs; source names this printer when the infrared printer could also have sent one.
-    val jobs = PrintJobs(host, device, link, "printer", "print", PrintJobs.NOTIFICATION, inBackground, { if (otherActive()) "USB printer" else null }, problem)
+    val jobs = PrintJobs(host, device, link, "printer", "print", "USB printer", notices, inBackground, { if (otherActive()) "USB printer" else null }, problem)
 
     init {
         host.lifecycleScope.launch(Dispatchers.IO) {

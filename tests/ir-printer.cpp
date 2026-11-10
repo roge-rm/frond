@@ -345,6 +345,40 @@ static void TestOverflow() {
         p.Exchange({uint8_t(0x80 | IrPrinter::lptLsap), p.lptPeer, 0x02, 0x01});
     }
     CHECK(printer.HeldBytes() == 60 && printer.HeldJobs() == 1 && printer.GetStats().overflows == 2);
+    printer.Clear();
+
+    // IrCOMM cooked: the Tiny TP LSAP is disconnected too, so the job isn't dropped silently.
+    LmConnect(p, p.commLsap, IrComm::cookedLsap, {0x01, 0x00});
+    CHECK(printer.Comm().GetMode() == IrComm::Mode::Cooked && printer.Receiving());
+    p.pdus.clear();
+    const Bytes big = Job(150, 5);
+    for (size_t at = 0; at < big.size(); at += 50)
+        p.Exchange(Cat({IrComm::cookedLsap, p.commLsap, 0x01, 0x00}, Bytes(big.begin() + at, big.begin() + at + 50)));
+    told = false;
+    for (const Bytes& pdu : p.pdus)
+        told = told || (pdu.size() >= 3 && pdu[0] == (0x80 | p.commLsap) && pdu[1] == IrComm::cookedLsap && pdu[2] == 0x02);
+    CHECK(told);
+    CHECK(printer.Comm().GetMode() == IrComm::Mode::Closed);
+    CHECK(!printer.Receiving() && printer.HeldBytes() == 0 && printer.GetStats().overflows == 3);
+
+    // IrCOMM 3-wire raw the same.
+    LmConnect(p, 0x09, IrComm::rawLsap, {});
+    CHECK(printer.Comm().GetMode() == IrComm::Mode::Raw && printer.Receiving());
+    p.pdus.clear();
+    for (size_t at = 0; at < big.size(); at += 50)
+        p.Exchange(Cat({IrComm::rawLsap, 0x09}, Bytes(big.begin() + at, big.begin() + at + 50)));
+    told = false;
+    for (const Bytes& pdu : p.pdus)
+        told = told || (pdu.size() >= 3 && pdu[0] == (0x80 | 0x09) && pdu[1] == IrComm::rawLsap && pdu[2] == 0x02);
+    CHECK(told);
+    CHECK(printer.Comm().GetMode() == IrComm::Mode::Closed);
+    CHECK(!printer.Receiving() && printer.HeldBytes() == 0 && printer.GetStats().overflows == 4);
+
+    // The link is still there for the next job.
+    CHECK(LmConnect(p, p.lptPeer, IrPrinter::lptLsap, {}).empty());
+    SendLpt(p, Text("after"));
+    p.Exchange({uint8_t(0x80 | IrPrinter::lptLsap), p.lptPeer, 0x02, 0x01});
+    CHECK(printer.HeldBytes() == 5);
 }
 
 // ---- The irprinter command ----
@@ -352,22 +386,26 @@ static void TestOverflow() {
 static void TestControl() {
     IrPrinterControl control;
     std::string result;
-    CHECK(control.Command(nullptr, "status", "", result) && result == "off off bytes=0 last=none idle=-1");
+    CHECK(control.Command(nullptr, "status", "", result) && result == "off off bytes=0 receiving=0 last=none idle=-1");
     result.clear();
     CHECK(!control.Command(nullptr, "save", "/nowhere", result));
 
     IrPrinter printer;
     Primary p{printer};
     result.clear();
-    CHECK(control.Command(&printer, "status", "", result) && result == "attached ready bytes=0 last=none idle=-1");
+    CHECK(control.Command(&printer, "status", "", result) && result == "attached ready bytes=0 receiving=0 last=none idle=-1");
     Connect(p);
     CHECK(LmConnect(p, p.lptPeer, IrPrinter::lptLsap, {}).empty());
     control.Observe(&printer);
     result.clear();
     control.Command(&printer, "status", "", result);
-    CHECK(result.rfind("attached receiving bytes=0 last=none idle=", 0) == 0 && result.find("idle=-1") == std::string::npos);
+    CHECK(result.rfind("attached receiving bytes=0 receiving=0 last=none idle=", 0) == 0 && result.find("idle=-1") == std::string::npos);
     const Bytes job = Job(500, 77);
     SendLpt(p, job);
+    // A job still coming in isn't held yet, but the status line counts it.
+    result.clear();
+    control.Command(&printer, "status", "", result);
+    CHECK(result.rfind("attached receiving bytes=0 receiving=500 last=none idle=", 0) == 0);
     p.Exchange({uint8_t(0x80 | IrPrinter::lptLsap), p.lptPeer, 0x02, 0x01});
 
     char folder[] = "/tmp/frond-ir-printer-XXXXXX";
@@ -375,7 +413,7 @@ static void TestControl() {
     const std::string path = std::string(folder) + "/job.raw";
     result.clear();
     CHECK(control.Command(&printer, "save", path, result));
-    CHECK(result.rfind("attached ready bytes=0 last=published idle=", 0) == 0);
+    CHECK(result.rfind("attached ready bytes=0 receiving=0 last=published idle=", 0) == 0);
     std::ifstream in(path, std::ios::binary);
     CHECK(Bytes(std::istreambuf_iterator<char>(in), {}) == job);
     // The output never overwrites, and with nothing held there is nothing to save.

@@ -277,6 +277,13 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
     val device = model.device
     val debuggerShown = model.debugger.phase != NetRelay.Phase.OFF || model.debugger.error != null
+    // Prints waiting for a choice come first, one row each, so the prints notice's Show lands on them.
+    val ready = listOfNotNull(model.printer?.jobs, model.irPrinter).filter { it.held != null }
+    if (ready.isNotEmpty()) {
+        Header("Prints", Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp))
+        for (jobs in ready) HeldRow(jobs, ready.size > 1)
+        Header("Connections", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    }
     for (row in RunningSheets.connectionRows(device, model.usb.phase, debuggerShown)) {
         when (row) {
             ConnRow.BEAM -> {
@@ -291,7 +298,6 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
                     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = if (usable) Modifier.clickableRow { choosing = LinkKind.BEAM } else Modifier,
                 )
-                model.irPrinter?.let { HeldRow(it) }
             }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
             ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }

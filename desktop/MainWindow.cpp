@@ -2171,7 +2171,8 @@ QString MainWindow::irdaArgument() const {
 // Leaving printer mode throws away output that is still held or arriving.
 bool MainWindow::leavePrinterOk() {
     if (runningPreferences.infrared != "printer" || irdaChoice() == "printer") return true;
-    const bool unsaved = !irPrint.held.isEmpty() || (irPrint.status.valid && irPrint.status.bytes > 0);
+    const auto& s = irPrint.status;
+    const bool unsaved = !irPrint.held.isEmpty() || (s.valid && (s.bytes > 0 || s.receiving > 0 || s.state == "receiving"));
     if (!unsaved) return true;
     return QMessageBox::question(this, tr("Discard the print?"),
                                  tr("The infrared printer has output you haven't saved or printed. Changing the choice discards it."),
@@ -2369,18 +2370,23 @@ void MainWindow::loadUsbSettings() {
 }
 void MainWindow::printerPoll() {
     if (!client.running() || stopping || busy || !client.available()) return;
+    const auto caps = frondFirmware::capabilities(runningDevice);
     const auto port = printerPanel->port();
-    // One request at a time: the module's readout shares the poll with the printer's status.
-    if (frondFirmware::capabilities(runningDevice).builtInWifi && moduleStartSent && (port != "printer" || (modulePollTurn = !modulePollTurn))) {
-        client.request("wifi-module-state");
-        return;
+    // One request at a time: every source that's wanted takes a turn of the poll, the Dana Wireless's
+    // module, the USB Wi-Fi adapter or printer and the IR printer.
+    enum class Poll { Module, UsbWifi, UsbPrinter, IrPrinter };
+    QList<Poll> wanted;
+    if (caps.builtInWifi && moduleStartSent) wanted << Poll::Module;
+    if (port == "wifi" && caps.usbWifi) wanted << Poll::UsbWifi;
+    if (port == "printer" && caps.usbPrinter) wanted << Poll::UsbPrinter;
+    if (runningPreferences.infrared == "printer" && caps.infrared) wanted << Poll::IrPrinter;
+    if (wanted.isEmpty()) return;
+    switch (wanted[pollTurn++ % unsigned(wanted.size())]) {
+        case Poll::Module: client.request("wifi-module-state"); break;
+        case Poll::UsbWifi: client.request("usb-port-state"); break;
+        case Poll::UsbPrinter: usbPrint.stage = PrinterStage::None; client.request("printer", "status"); break;
+        case Poll::IrPrinter: irPrint.stage = PrinterStage::None; client.request("irprinter", "status"); break;
     }
-    if (port == "wifi" && frondFirmware::capabilities(runningDevice).usbWifi) { client.request("usb-port-state"); return; }
-    const bool usbWanted = port == "printer" && frondFirmware::capabilities(runningDevice).usbPrinter;
-    const bool irWanted = runningPreferences.infrared == "printer" && frondFirmware::capabilities(runningDevice).infrared;
-    // Both printers share the poll, a turn each.
-    if (usbWanted && (!irWanted || !(irPollTurn = !irPollTurn))) { usbPrint.stage = PrinterStage::None; client.request("printer", "status"); }
-    else if (irWanted) { irPrint.stage = PrinterStage::None; client.request("irprinter", "status"); }
 }
 // The reply to usb-port or usb-port-state. A switch has taken effect; a state reply updates the readout, and
 // after a failed switch also shows which port the core kept.

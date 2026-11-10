@@ -125,7 +125,7 @@ class MainWindow : public QMainWindow {
     // The start-up USB port choice and the state read after it are in flight.
     bool usbPortStart{false};
     // The Dana Wireless's radio choice goes to the core once at start (moduleStartSent), ahead of the USB port.
-    bool moduleStartSent{false}, moduleStartPending{false}, modulePollTurn{false};
+    bool moduleStartSent{false}, moduleStartPending{false};
     // One source of print jobs: the USB printer (command printer) or the infrared printer (irprinter).
     struct PrintSource {
         QString command;
@@ -145,7 +145,8 @@ class MainWindow : public QMainWindow {
     frond::PrintText printerText(const PrintSource& src) const;
     // Asks before the infrared printer's unsaved output is thrown away by another choice.
     bool leavePrinterOk();
-    bool irPollTurn{false};
+    // Which wanted source printerPoll asks next.
+    unsigned pollTurn{0};
     // Peripheral choices are per machine, in its settings file; machines from before take the
     // old global choices once.
     void migratePeripherals(frondSessions::Preferences* prefs);

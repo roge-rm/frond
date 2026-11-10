@@ -117,6 +117,11 @@ class DesktopPrint : public QObject {
         s = frondPrint::parseStatus("attached ready bytes=289 last=none idle=3100");
         QVERIFY(frondPrint::received(s));
         QVERIFY(!frondPrint::parseStatus("off off bytes=0 last=none idle=-1").attached);
+        // The IR printer's line also counts a job still coming in.
+        s = frondPrint::parseStatus("attached receiving bytes=289 receiving=40 last=none idle=50");
+        QVERIFY(s.valid && s.bytes == 289 && s.receiving == 40 && s.last == "none" && s.idleMs == 50);
+        s = frondPrint::parseStatus("off off bytes=0 receiving=0 last=none idle=-1");
+        QVERIFY(s.valid && !s.attached && s.receiving == 0);
     }
     void moduleRow() {
         PrinterPanel panel;

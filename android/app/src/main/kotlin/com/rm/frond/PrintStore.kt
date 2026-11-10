@@ -47,7 +47,8 @@ class PrintStore(
     suspend fun poll(onHeld: (Long, Int) -> Unit): Poll = lock.withLock {
         val status = PrintJob.parseStatus(request("status").message)
         if (!status.valid) return Poll.Idle
-        if (!status.received) return Poll.Bytes(status.bytes)
+        // Bytes counts a job still coming in too, so leaving the printer asks first.
+        if (!status.received) return Poll.Bytes(status.bytes + status.receiving)
         // A fresh name each time: a save that timed out may still be written by the core later.
         val job = File(dir, "job-${++counter}-${System.nanoTime()}.raw")
         val reply = request("save " + job.absolutePath)

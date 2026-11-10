@@ -315,6 +315,15 @@ diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
      }
  
      static string LinkDescription(const HostLink68k& link, const string& error) {
+@@ -2028,7 +2044,7 @@ class Runner {
+         static const char* const argumentCommands[] = {
+             "launch-app",  "delete-db", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
+             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
+-            "bluetooth-mode", "gdb-start", "usb-port"};
++            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter"};
+         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
+         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
+             const auto result=DanaInputCommand(command,argument);
 @@ -2144,6 +2160,7 @@ class Runner {
          if (command == "reset" || command == "hard-reset") {
              ReleaseInput();
@@ -356,11 +365,12 @@ diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
              return {true, "infrared", "rx=" + to_string(irLink.Received()) + " tx=" + to_string(irLink.Sent()) +
                                            " port=" + (irTransport->Host().IsOpen() ? "open" : "closed")};
          }
-@@ -2250,6 +2275,13 @@ class Runner {
+@@ -2250,6 +2275,14 @@ class Runner {
          if (command == "network-state") return {true, "network", NetworkState()};
          if (command == "hold-state") return {true, "hold", "unavailable"};
          if (command == "keyboard-state") return {true, "keyboard", "detached"};
 +        if (command == "irprinter") {
++            if (!profile->capabilities.infrared) return {false,"unsupported","This device has no infrared port."};
 +            auto split=argument.find(' ');
 +            string result;
 +            bool ok=irTransport->PrinterControl().Command(irTransport->Printer(),argument.substr(0,split),
@@ -387,7 +397,7 @@ diff --git a/src/common/ir/IrPrinter.cpp b/src/common/ir/IrPrinter.cpp
 new file mode 100644
 --- /dev/null
 +++ b/src/common/ir/IrPrinter.cpp
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,110 @@
 +#include "IrPrinter.h"
 +
 +namespace frondIr {
@@ -435,8 +445,10 @@ new file mode 100644
 +    if (!size || !Receiving()) return;
 +    if (!job.append(data, size)) {
 +        ++stats.overflows;
-+        // The guest is told the printer has gone, rather than sending on into nothing.
-+        if (lmp.Connected(lptLsap)) lmp.Disconnect(lptLsap, IrLmp::userRequest, 0);
++        // The guest is told the printer has gone, rather than sending on into nothing, on
++        // IrLPT and on either IrCOMM LSAP.
++        for (const uint8_t lsap : {lptLsap, IrComm::cookedLsap, IrComm::rawLsap})
++            if (lmp.Connected(lsap)) lmp.Disconnect(lsap, IrLmp::userRequest, 0);
 +    }
 +    ++activity;
 +}
@@ -615,14 +627,15 @@ diff --git a/src/common/ir/IrPrinterControl.h b/src/common/ir/IrPrinterControl.h
 new file mode 100644
 --- /dev/null
 +++ b/src/common/ir/IrPrinterControl.h
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,91 @@
 +#ifndef FROND_IR_IRPRINTERCONTROL_H
 +#define FROND_IR_IRPRINTERCONTROL_H
 +
 +// The host's irprinter command on a core's IR printer: status, save ABSOLUTE_PATH and clear, with
-+// the same status line as the USB printer's: "attached|off STATE bytes=N last=LAST idle=MS".
-+// STATE is receiving while a job comes in, else ready (off when no printer). N is the held output
-+// that save writes, LAST the last save's result since the printer came on and MS the host
++// the USB printer's status line with the bytes of a job still coming in added:
++// "attached|off STATE bytes=N receiving=R last=LAST idle=MS". STATE is receiving while a job comes
++// in, else ready (off when no printer). N is the held output that save writes, R the job coming in
++// (not held until it ends), LAST the last save's result since the printer came on and MS the host
 +// milliseconds since a byte arrived or a job ended, -1 with none. Emulation thread only.
 +
 +#include <chrono>
@@ -681,12 +694,13 @@ new file mode 100644
 +    }
 +
 +    std::string Status(const IrPrinter* printer) const {
-+        if (!printer) return "off off bytes=0 last=" + last + " idle=-1";
++        if (!printer) return "off off bytes=0 receiving=0 last=" + last + " idle=-1";
 +        const long long idle =
 +            any ? std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - stamp).count()
 +                : -1;
 +        return std::string("attached ") + (printer->Receiving() ? "receiving" : "ready") +
-+               " bytes=" + std::to_string(printer->HeldBytes()) + " last=" + last + " idle=" + std::to_string(idle);
++               " bytes=" + std::to_string(printer->HeldBytes()) +
++               " receiving=" + std::to_string(printer->ReceivingBytes()) + " last=" + last + " idle=" + std::to_string(idle);
 +    }
 +
 +   private:
@@ -708,6 +722,15 @@ new file mode 100644
 diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
 --- a/src/uarm/native/DesktopControl.h
 +++ b/src/uarm/native/DesktopControl.h
+@@ -241,7 +241,7 @@ class DesktopControl {
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
+-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
++        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+         if (frondNative::insertsCard(command)) frondNative::settleEject(*ctx.soc);
+         if (command == "guest-ready") {
+             if (!GuestDatabaseOps::Ready(*ctx.soc))
 @@ -310,7 +310,7 @@ class DesktopControl {
              if (!ctx.infrared || !caps.infrared)
                  return {false,"unsupported","This device has no infrared endpoint."};
@@ -717,10 +740,11 @@ diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
              const auto c=ctx.infrared->GetCounters();
              return {true,"infrared", "rx="+std::to_string(c.received)+" tx="+std::to_string(c.sent)+
                  " rx_drop="+std::to_string(ctx.infrared->DroppedReceive())+" tx_drop="+std::to_string(ctx.infrared->DroppedTransmit())+
-@@ -319,6 +319,13 @@ class DesktopControl {
+@@ -319,6 +319,14 @@ class DesktopControl {
                  " power="+std::to_string(machine->IrPowerEnabled())+" sleeping="+std::to_string(machine->PowerSleeping())};
          }
          if (command == "irda-state") return {true,"infrared",ctx.infrared ? ctx.infrared->Describe() : "off"};
++        if (command == "printer") return {false,"unsupported","This device has no USB printer."};
 +        if (command == "irprinter") {
 +            if (!ctx.infrared || !caps.infrared) return {false,"unsupported","This device has no infrared port."};
 +            const auto split=path.find(' ');
@@ -731,7 +755,7 @@ diff --git a/src/uarm/native/DesktopControl.h b/src/uarm/native/DesktopControl.h
          if (command == "irda-mode") {
              if (!caps.infrared)
                  return {false,"unsupported","This device has no infrared port."};
-@@ -327,8 +334,12 @@ class DesktopControl {
+@@ -327,8 +335,12 @@ class DesktopControl {
                  const bool ok=ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
                  return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
              }

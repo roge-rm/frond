@@ -531,14 +531,17 @@ class RunningModel(
     var settings by mutableStateOf(machineSettings())
         private set
 
+    // The one background notification for both printers.
+    private val printNotices = PrintNotices(activity.applicationContext, device)
+
     // The Dana's USB printer; null on any other device.
     val printer: PrinterModel? = if (PrintJob.rowShown(device) && link != null)
-        PrinterModel(activity, device, link, sessionId, UsbPort.forStart(device, settings.usbPort), settings.wifiModule, { FrondActivity.running?.inBackground == true }, { settings.infrared == InfraredChoice.PRINTER }) { alert = "USB printer" to it }
+        PrinterModel(activity, device, link, sessionId, UsbPort.forStart(device, settings.usbPort), settings.wifiModule, printNotices, { FrondActivity.running?.inBackground == true }, { settings.infrared == InfraredChoice.PRINTER }) { alert = "USB printer" to it }
     else null
 
     // The infrared printer's jobs, on every device with infrared; polled while the infrared choice is Printer.
     val irPrinter: PrintJobs? = if (device.infrared && link != null)
-        PrintJobs(activity, device, link, "irprinter", "print-ir", PrintJobs.IR_NOTIFICATION, { FrondActivity.running?.inBackground == true },
+        PrintJobs(activity, device, link, "irprinter", "print-ir", "infrared printer", printNotices, { FrondActivity.running?.inBackground == true },
             { if (printer?.plugged == true) "infrared printer" else null }) { alert = "Infrared printer" to it }
             .also { it.startPolling { settings.infrared == InfraredChoice.PRINTER } }
     else null
@@ -671,8 +674,8 @@ class RunningModel(
         activity.runOnUiThread { settings = settings.copy(infrared = choice) }
         if (InfraredChoice.linkId(choice) != null) FrondActivity.running?.askLocalNetwork()
         val error = IrLink.apply(activity.applicationContext, l, choice, name, device.label)
-        // The core throws its printer output away when the mode changes.
-        if (leftPrinter) irPrinter?.dropAll()
+        // The core throws its printer output away when the mode changes, but only if it did change.
+        if (leftPrinter && error == null) irPrinter?.dropAll()
         error
     }
 
