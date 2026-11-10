@@ -184,6 +184,20 @@ int main() {
         f.finish();
         for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x2d95,i));
     }
+    // An odd height: 6x3 is 18 samples, so the third word is a quarter used and its other samples are dropped.
+    {
+        Fixture f;
+        planes(f,6,3,20,24,0x92cb,0x2d95);
+        const auto p = packet(6,3);
+        assert((p[p.size()-6] >> 16) == 0xc004 && f.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 18; ++i) assert(f.read(destination+((i/6)*20+i%6)*2) == expected(0x92cb,0x2d95,i%16));
+        assert(f.read(destination+(3*20)*2) == 0x92cb && f.read(destination+(2*20+6)*2) == 0x92cb);
+        // An odd width stays refused.
+        Fixture g;
+        planes(g,6,3,20,24,0x92cb,0x2d95);
+        assert(g.append(packet(5,3)) != A::ok);
+    }
     // Different row strides, nonzero destination origin, lower-edge clipping and spatial colour planes.
     {
         Fixture f;
