@@ -48,6 +48,11 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 // controls for anything else are hidden rather than greyed.
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
 
+// The Zodiac runs with no guest calls yet: no install, application list, hard reset or Fast engine.
+inline bool guestServices(Device device) {
+    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
+}
+
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.

@@ -354,6 +354,9 @@ void MachineSettings::setDevice(Device device) {
     speed->setVisible(true);
     engineLabel->setVisible(engineShown);
     engine->setVisible(engineShown);
+    const bool engineChoice = frondFirmware::guestServices(device);
+    engine->setEnabled(engineChoice);
+    engine->setToolTip(engineChoice ? QString() : tr("Not available on the %1 yet").arg(frondFirmware::deviceName(device)));
     speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);

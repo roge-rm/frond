@@ -16,7 +16,7 @@ namespace runningRules {
 // isn't done yet.
 struct Traits {
     bool runs68k{false}, holdPresent{false}, holdSupported{false}, keyboard{false}, microphone{false},
-        network{false}, sound{false}, powerKey{false}, cardSlot{false};
+        network{false}, sound{false}, powerKey{false}, cardSlot{false}, guestServices{true};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -30,6 +30,7 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.microphone = caps.microphone;
     t.network = caps.network;
     t.sound = caps.sound;
+    t.guestServices = frondFirmware::guestServices(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     return t;
@@ -89,7 +90,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::Reset, QObject::tr("Reset…"), std::nullopt, {}, ready, false, 3});
-    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready, true, 3});
+    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.guestServices, true, 3});
     out.push_back({Id::SaveStop, QObject::tr("Save and Stop"), std::nullopt, {}, s.running && ready, false, 4});
     return out;
 }
@@ -230,7 +231,7 @@ inline Buttons buttons(const Traits& t, const State& s) {
 
 // The line under the machine's name: the engine on ARM devices, else the device.
 inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
-    return t.runs68k ? deviceName : fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
+    return t.runs68k ? deviceName : fastEngine && t.guestServices ? QObject::tr("Fast") : QObject::tr("Exact");
 }
 
 // "Frond NAME STAMP.png" with the characters a file name can't have replaced.

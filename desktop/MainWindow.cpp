@@ -1179,7 +1179,11 @@ void MainWindow::refresh() {
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
     panels->setTitle(1, tr("Storage"));
     internalButton->setEnabled(enabled && !internalFiles);
-    appsPanel->setEnabled(enabled);
+    const bool guest = frondFirmware::guestServices(currentDevice());
+    appsPanel->setEnabled(enabled && guest);
+    appsPanel->setToolTip(guest ? QString() : reason);
+    hardResetButton->setEnabled(guest);
+    hardResetButton->setToolTip(guest ? QString() : reason);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -1484,7 +1488,7 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::Save: if (idle) barChosen(runningRules::Id::Save); break;
         case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
         case Shortcut::SaveStop: stopButton->click(); break;
-        case Shortcut::Install: if (idle) emit appsPanel->installRequested(); break;
+        case Shortcut::Install: if (idle && frondFirmware::guestServices(currentDevice())) emit appsPanel->installRequested(); break;
         case Shortcut::Applications: togglePanel(0); break;
         case Shortcut::Card: togglePanel(1); break;
         case Shortcut::Display: togglePanel(2); break;
@@ -2044,7 +2048,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
     } else {
-        if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+        if (runningPreferences.fastEngine && frondFirmware::guestServices(startDevice)) arguments << "--engine" << "fast";
         if (runningPreferences.uncapped) arguments << "--mips" << "1000";
     }
     {
@@ -2585,7 +2589,7 @@ bool MainWindow::confirmReplace(const QString& dest) {
 }
 // Asks the core for the RAM databases when the Applications panel is open and the core is free.
 void MainWindow::listApps() {
-    if (!appsStale || panels->current() != 0 || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
+    if (!appsStale || panels->current() != 0 || !frondFirmware::guestServices(currentDevice()) || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
     appsStale = false;
     if (client.request("db-list")) { busy = true; refresh(); }
 }
