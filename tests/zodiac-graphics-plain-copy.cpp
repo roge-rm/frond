@@ -127,6 +127,9 @@ void geometry() {
     assert(f.append(p) == A::ok && f.commands.duration() == p.size()+1);
     f.finish();
     for (unsigned i = 0; i < 13*8; ++i) assert(f.read(destination+i*2) == 0xa55a);
+    // The text producer's foreground and background in 490 and 491 don't change the result.
+    planes(f); p = packet(); change(p,0x46f,0); change(p,0x490,0); change(p,0x491,0xffff);
+    assert(f.append(p) == A::ok); f.finish(); check(f);
 }
 void guards() {
     Fixture f; planes(f);
@@ -153,7 +156,7 @@ void guards() {
     };
     for (auto item : {std::pair<uint32_t,uint32_t>{0x41b,0x4598b4df},{0x41b,0x5598b4de},
         {0x4b2,0x01cc0a00},{0x4b2,0x00cc0b00},{0x4b1,0x40057d04},{0x488,0x80004},
-        {0x48f,0xffff},{0x490,0xffff},{0x491,1},{0x4b3,0xffff},{0x41d,1},{0x41e,1},
+        {0x48f,0xffff},{0x4b3,0xffff},{0x41d,1},{0x41e,1},
         {0x30f,0},{0x472,0x3e},{0x471,0x1ffe1fff},{0x4a0,1},{0x4a1,1},
         {0x42e,1},{0x42f,1},{0x430,1},{0x431,1},{0x432,1},{0x433,1},
         {0x401,0xe01001},{0x401,0xfffffffe},{0x401,0x15fffc},{0x402,0},{0x402,8193},{0x402,7},

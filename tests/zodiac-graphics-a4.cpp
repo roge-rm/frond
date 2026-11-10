@@ -174,6 +174,16 @@ int main() {
         for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(colour.first,colour.second,i));
         assert(f.read(destination+16) == colour.first);
     }
+    // The text producer's foreground and background in 490 and 491 don't change the result.
+    {
+        Fixture f;
+        planes(f,8,2,20,24,0x92cb,0x2d95);
+        auto p = packet(8,2);
+        replace(p,0x490,0); replace(p,0x491,0xffff);
+        assert(f.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x2d95,i));
+    }
     // Different row strides, nonzero destination origin, lower-edge clipping and spatial colour planes.
     {
         Fixture f;
@@ -233,7 +243,7 @@ int main() {
         const auto valid = packet(8,2);
         for (auto change : {std::pair<uint32_t,uint32_t>{0x41b,0xd798d4de},{0x4b2,0x01cc0b00},
             {0x4b1,0x40057c04},{0x4b1,0x40056d04},{0x4b1,0x40055d04},{0x4b1,0x40037d04},{0x488,0x01080004},{0x488,4},{0x484,0xe0f0f},
-            {0x490,0xfffe},{0x48f,0xfffe},{0x4b3,0xffff},{0x491,1},{0x472,0x3e},{0x471,0x1fff0007},
+            {0x48f,0xfffe},{0x4b3,0xffff},{0x472,0x3e},{0x471,0x1fff0007},
             {0x416,1},{0x416,0xffff0000},{0x420,7},{0x421,3},{0x419,0},{0x419,8193},
             {0x418,source+1},{0x418,0xfffffe},{0x46b,source+2},{0x46c,25},{0x401,destination+1},
             {0x401,0xfffffffe},{0x402,0},{0x402,8193},{0x402,7},{0x418,destination},
