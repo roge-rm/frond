@@ -170,6 +170,16 @@ class RunningRulesTest : public QObject {
         for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot}) QVERIFY(row(t, s, id).enabled);
         QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);
     }
+    // The panel's Hard reset button goes off with the other running controls, on every device.
+    void hardResetButtonFollowsTheControls() {
+        for (auto* id : devices()) {
+            const auto t = traitsFor(named(id));
+            QVERIFY2(!hardResetEnabled(false, t), id);
+            QCOMPARE(hardResetEnabled(true, t), t.guestServices);
+        }
+        QVERIFY(hardResetEnabled(true, traitsFor(named("palm-tx"))));
+        QVERIFY(!hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));
+    }
     void screenshotNamesAreFileSafe() {
         QCOMPARE(screenshotName("Palm TX", "20261107-133000"), QString("Frond Palm TX 20261107-133000.png"));
         QCOMPARE(screenshotName("a/b", "1"), QString("Frond a_b 1.png"));

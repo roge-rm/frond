@@ -229,6 +229,10 @@ inline Buttons buttons(const Traits& t, const State& s) {
     return b;
 }
 
+// The panel's Hard reset button: off whenever the other running controls are, and on a device
+// without guest calls.
+inline bool hardResetEnabled(bool controlsEnabled, const Traits& t) { return controlsEnabled && t.guestServices; }
+
 // The line under the machine's name: the engine on ARM devices, else the device.
 inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
     return t.runs68k ? deviceName : fastEngine && t.guestServices ? QObject::tr("Fast") : QObject::tr("Exact");

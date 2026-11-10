@@ -1182,7 +1182,7 @@ void MainWindow::refresh() {
     const bool guest = frondFirmware::guestServices(currentDevice());
     appsPanel->setEnabled(enabled && guest);
     appsPanel->setToolTip(guest ? QString() : reason);
-    hardResetButton->setEnabled(guest);
+    hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
     hardResetButton->setToolTip(guest ? QString() : reason);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
