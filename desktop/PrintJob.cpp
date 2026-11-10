@@ -39,6 +39,8 @@ UsbPort parseUsbPort(const QString& message) {
         if (word == "link=up") s.linkUp = true;
         else if (word.startsWith("ip=")) s.ip = word.mid(3);
     }
+    // The core says ip=none until the guest has sent from its address.
+    if (s.ip == "none") s.ip.clear();
     return s;
 }
 

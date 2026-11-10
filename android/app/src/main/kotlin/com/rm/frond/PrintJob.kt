@@ -11,7 +11,9 @@ object PrintJob {
         val port = words.firstOrNull() ?: return Port()
         if (port != UsbPort.OFF && port != UsbPort.PRINTER && port != UsbPort.WIFI) return Port()
         if (port != UsbPort.WIFI) return Port(true, port)
-        return Port(true, port, words.getOrNull(1) == "powered", "link=up" in words, words.firstOrNull { it.startsWith("ip=") }?.substring(3) ?: "")
+        // The core says ip=none until the guest has sent from its address.
+        val ip = words.firstOrNull { it.startsWith("ip=") }?.substring(3)?.takeIf { it != "none" } ?: ""
+        return Port(true, port, words.getOrNull(1) == "powered", "link=up" in words, ip)
     }
 
     // The Wi-Fi adapter's readout in the Connections sheet.

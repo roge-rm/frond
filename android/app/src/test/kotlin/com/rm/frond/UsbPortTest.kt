@@ -89,6 +89,7 @@ class UsbPortTest {
         val up = PrintJob.parsePort("wifi powered link=up ip=10.0.2.15 mac=02:00:00:00:00:01 tx=3 rx=4 dropped=0")
         assertTrue(up.valid && up.powered && up.linkUp)
         assertEquals("Connected, 10.0.2.15", PrintJob.wifiReadout(up))
+        assertEquals("Connected", PrintJob.wifiReadout(PrintJob.parsePort("wifi powered link=up ip=none mac=02:00:00:00:00:01 tx=2 rx=2 dropped=0")))
         assertEquals("Not connected", PrintJob.wifiReadout(PrintJob.parsePort("wifi powered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0")))
         assertEquals("Waiting for the Dana", PrintJob.wifiReadout(PrintJob.parsePort("wifi unpowered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0")))
         assertNull(PrintJob.wifiReadout(PrintJob.parsePort("printer attached collecting bytes=0 last=none idle=-1")))

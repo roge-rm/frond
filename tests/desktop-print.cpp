@@ -42,6 +42,8 @@ class DesktopPrint : public QObject {
         QVERIFY(s.valid && s.powered && s.linkUp);
         QCOMPARE(s.ip, QString("10.0.2.15"));
         QCOMPARE(frondPrint::wifiReadout(s), QString("Connected, 10.0.2.15"));
+        s = frondPrint::parseUsbPort("wifi powered link=up ip=none mac=02:00:00:00:00:01 tx=2 rx=2 dropped=0");
+        QCOMPARE(frondPrint::wifiReadout(s), QString("Connected"));
         s = frondPrint::parseUsbPort("wifi powered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0");
         QVERIFY(s.valid && !s.linkUp);
         QCOMPARE(frondPrint::wifiReadout(s), QString("Not connected"));
