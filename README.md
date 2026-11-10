@@ -19,19 +19,20 @@ Dan
 
 <table>
   <tr>
-    <td align="center"><img src="doc/images/android-tx.png" width="180" alt="The Palm T|X favourites launcher with its button bar" /><br>Palm T|X</td>
-    <td align="center"><img src="doc/images/android-e2.png" width="180" alt="Calculator on the Tungsten E2, with its silkscreen and buttons" /><br>Tungsten E2</td>
-    <td align="center"><img src="doc/images/android-zire72.png" width="180" alt="The Zire 72 agenda view over its photo wallpaper" /><br>Zire 72</td>
-    <td align="center"><img src="doc/images/android-tg50.png" width="180" alt="The CLIÉ TG50 launcher with its jog bar and keyboard" /><br>CLIÉ TG50</td>
+    <td align="center"><img src="doc/images/android-tx.png" height="390" alt="The Palm T|X favourites launcher with its button bar" /><br>Palm T|X</td>
+    <td align="center"><img src="doc/images/android-e2.png" height="390" alt="Calculator on the Tungsten E2, with its silkscreen and buttons" /><br>Tungsten E2</td>
+    <td align="center"><img src="doc/images/android-zire72.png" height="390" alt="The Zire 72 agenda view over its photo wallpaper" /><br>Zire 72</td>
+    <td align="center"><img src="doc/images/android-tg50.png" height="390" alt="The CLIÉ TG50 launcher with its jog bar and keyboard" /><br>CLIÉ TG50</td>
   </tr>
   <tr>
-    <td align="center"><img src="doc/images/android-iiix.png" width="180" alt="The Palm IIIx launcher with its silkscreen and buttons" /><br>Palm IIIx</td>
-    <td align="center" colspan="2"><img src="doc/images/android-dana.png" width="380" alt="An AlphaWord document on the AlphaSmart Dana, in landscape" /><br>AlphaSmart Dana, on Android</td>
-    <td align="center"><img src="doc/images/desktop-e3.png" width="180" alt="The Tungsten E3 launcher on Linux" /><br>Tungsten E3, on Linux</td>
+    <td align="center"><img src="doc/images/android-iiix.png" height="390" alt="The Palm IIIx launcher with its silkscreen and buttons" /><br>Palm IIIx</td>
+    <td align="center"><img src="doc/images/desktop-e3.png" height="390" alt="The Tungsten E3 launcher on Linux" /><br>Tungsten E3, on Linux</td>
+    <td align="center"><img src="doc/images/desktop-tx.png" height="390" alt="The Palm T|X on Linux at 2x, with the running bar" /><br>Palm T|X, on Linux</td>
+    <td align="center"><img src="doc/images/android-home.png" height="390" alt="The Frond home screen listing all seven devices" /><br>Devices</td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="doc/images/desktop-tx.png" width="300" alt="The Palm T|X on Linux at 2x, with the running bar" /><br>Palm T|X, on Linux</td>
-    <td align="center" colspan="2"><img src="doc/images/desktop-dana-wireless.png" width="380" alt="An AlphaWord document on the Dana Wireless, on Linux" /><br>Dana Wireless, on Linux</td>
+    <td align="center" colspan="2"><img src="doc/images/android-dana.png" height="180" alt="An AlphaWord document on the AlphaSmart Dana, in landscape" /><br>AlphaSmart Dana, on Android</td>
+    <td align="center" colspan="2"><img src="doc/images/desktop-dana-wireless.png" height="180" alt="An AlphaWord document on the Dana Wireless, on Linux" /><br>Dana Wireless, on Linux</td>
   </tr>
 </table>
 
