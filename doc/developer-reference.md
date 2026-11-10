@@ -261,7 +261,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | Command | Argument | Success reply |
 | --- | --- | --- |
 | `device-state` | | `device`: profile name |
-| `window-id` | | `window`: `x11 ID`, the decimal X11 window id the app can embed. `unsupported` when the window isn't an X11 window (Wayland, the dummy video driver). `--window-fit whole` makes the Palm follow the window's size. |
+| `window-id` | | `window`: `x11 ID`, the decimal X11 window id the app can embed. `unsupported` when the window isn't an X11 window (Wayland, the dummy video driver). `--window-fit fit` (or `whole` for whole steps, `fill`) makes the Palm follow the window's size; the desktop app uses `fit`. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
 | `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
