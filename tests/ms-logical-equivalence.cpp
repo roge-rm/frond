@@ -297,6 +297,8 @@ int main(int argc, char** argv) {
     const uint64_t sequences = argc > 1 ? std::strtoull(argv[1], nullptr, 10) : 90;
     const uint64_t steps = argc > 2 ? std::strtoull(argv[2], nullptr, 10) : 2000;
     const auto dir = std::filesystem::path("build") / "ms-logical-equivalence";
+    // A run stopped part way leaves its stick and generations, which a new Open refuses.
+    std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     uint64_t done = 0;
     for (uint64_t s = 0; s < sequences; ++s) {
