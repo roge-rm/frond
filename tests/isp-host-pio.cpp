@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <vector>
 #include "EmRegsISPDana.h"
+#include "DanaUnqualified.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
 #include "savestate/SavestateProbe.h"
@@ -34,7 +35,9 @@ i.put(0x5678);assert(load(i,partial));i.put(0x5678);
  i.reg(0xa2,11);i.cmd(0x41);assert(i.get()==0x1234);assert(i.get()==0x5678);
  auto reading=save(i);assert(i.get()==0xffff);assert(load(i,reading));assert(i.get()==0xffff);
  i.get();i.get();assert(i.get()==255);
- bool fail=false;auto before=save(i);try{i.get();}catch(const std::runtime_error&){fail=true;}assert(fail);assert(save(i)==before);
+ // A read past the transfer sees the floating bus and changes nothing.
+ auto outside=DanaUnqualifiedCount("ISP ATL access outside transfer");auto before=save(i);assert(i.get()==0xffff);
+ assert(DanaUnqualifiedCount("ISP ATL access outside transfer")==outside+1);assert(save(i)==before);
  auto bad=before;uint32 invalid=4097; // appended host cursor follows all DC fields
  // The cursor is immediately before 2048 Do16 words (each occupies one serialized word).
  memcpy(bad.data()+bad.size()-4-16-2048*4-4,&invalid,4);
@@ -45,7 +48,10 @@ i.put(0x5678);assert(load(i,partial));i.put(0x5678);
  assert(load(i,prefix));i.put(0xffff);i.put(0xffff);i.put(0xffff);
  auto malformed=save(i);assert(load(i,malformed));
  i.reg(0xa2,4096);i.cmd(0xc1);for(int n=0;n<2048;++n)i.put(n);
- i.reg(0xa2,0);fail=false;try{i.cmd(0xc1);}catch(...){fail=true;}assert(fail);
+ // A zero count is logged; the ATL port then drops the words written to it.
+ auto counts=DanaUnqualifiedCount("ISP ATL count outside allocation");outside=DanaUnqualifiedCount("ISP ATL access outside transfer");
+ i.reg(0xa2,0);i.cmd(0xc1);i.put(0x1111);assert(DanaUnqualifiedCount("ISP ATL count outside allocation")==counts+1);
+ assert(DanaUnqualifiedCount("ISP ATL access outside transfer")==outside+1);auto dropped=save(i);assert(load(i,dropped));
  i.reg(0xa9,0xf6);i.cmd(0x22);assert(i.get()==0);
  uint8 data[24]={0,0xf8,64,0,1,4,1,0,42,0,0,0,0,0xf8,64,8,0,8,1,0};
  EmRegsISPDana::HostPtd p;assert(EmRegsISPDana::ValidateHostList(data,20));

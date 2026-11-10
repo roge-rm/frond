@@ -1,0 +1,555 @@
+diff --git a/src/cloudpilot/emulator/EmDevice.cpp b/src/cloudpilot/emulator/EmDevice.cpp
+index 0cc3552..2ccc848 100644
+--- a/src/cloudpilot/emulator/EmDevice.cpp
++++ b/src/cloudpilot/emulator/EmDevice.cpp
+@@ -1120,6 +1120,7 @@ void EmDevice::CreateRegs(void) const {
+             isp->SetHostIrq([board](bool high) { board->SetHcIrqPin(high); });
+             isp->SetDeviceIrq([board](bool high) { board->SetDcIrqPin(high); });
+             board->usbSupplySink=[isp](unsigned port, bool on) { isp->SetPortSupply(port,on); };
++            board->cycleScaleSink=[isp](uint32 factor) { isp->ScaleCycles(factor); };
+             EmBankRegs::AddSubBank(board);
+             EmBankRegs::AddSubBank(isp);
+             break;
+diff --git a/src/cloudpilot/emulator/hardware/DanaUnqualified.h b/src/cloudpilot/emulator/hardware/DanaUnqualified.h
+new file mode 100644
+index 0000000..553e95c
+--- /dev/null
++++ b/src/cloudpilot/emulator/hardware/DanaUnqualified.h
+@@ -0,0 +1,46 @@
++#ifndef DANA_UNQUALIFIED_H
++#define DANA_UNQUALIFIED_H
++
++#include <cstdarg>
++#include <cstdio>
++#include <map>
++#include <string>
++
++#include "EmCommon.h"
++#include "Logging.h"
++
++// Guest access the Dana model hasn't qualified. The machine keeps running: reads see the floating
++// bus and writes are dropped. Each kind logs its first access, then again at every power-of-two
++// count. Emulation thread only; the counts aren't saved.
++inline std::map<std::string, uint64>& DanaUnqualifiedCounts() {
++    static std::map<std::string, uint64> counts;
++    return counts;
++}
++
++inline uint64 DanaUnqualifiedCount(const std::string& kind) {
++    auto& counts = DanaUnqualifiedCounts();
++    auto found = counts.find(kind);
++    return found == counts.end() ? 0 : found->second;
++}
++
++inline uint64 DanaUnqualifiedTotal() {
++    uint64 total = 0;
++    for (auto& entry : DanaUnqualifiedCounts()) total += entry.second;
++    return total;
++}
++
++inline void DanaUnqualified(const char* kind, const char* format, ...)
++    __attribute__((format(printf, 2, 3)));
++
++inline void DanaUnqualified(const char* kind, const char* format, ...) {
++    uint64 count = ++DanaUnqualifiedCounts()[kind];
++    if (count & (count - 1)) return;
++    char detail[160];
++    va_list args;
++    va_start(args, format);
++    vsnprintf(detail, sizeof(detail), format, args);
++    va_end(args);
++    logPrintf("Dana: ignored %s: %s (%llu so far)", kind, detail, (unsigned long long)count);
++}
++
++#endif
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+index 79ce1dc..86f2d17 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.cpp
+@@ -2,8 +2,13 @@
+ #include <cstdio>
+ #include "EmCPU68K.h"
+ #include "EmHAL.h"
++#include <algorithm>
+ #include <stdexcept>
+ #include <tuple>
++#include "DanaUnqualified.h"
++
++// Floating bus value for a refused read of this width.
++static uint32 Floating(int size) { return size==1 ? 0xff : size==2 ? 0xffff : 0xffffffff; }
+ 
+ void EmRegsISPDana::CycleThunk(void* context, uint64, bool) {
+     static_cast<EmRegsISPDana*>(context)->SettleLoadedPorts();
+@@ -143,8 +148,11 @@ uint32 EmRegsISPDana::Read(emuptr address, int size) {
+     SettleLoadedPorts();
+     Tick();
+     if (size==2 && address==GetAddressStart()+4) return DeviceRead();
+-    if (size != 2 || address != GetAddressStart() || (command & 0x80))
+-        throw std::runtime_error("ISP unsupported bus read");
++    if (size != 2 || address != GetAddressStart() || (command & 0x80)) {
++        DanaUnqualified("ISP unsupported bus read", "%d bytes at 0x%08x, command 0x%02x",
++                        size, unsigned(address), unsigned(command));
++        return Floating(size);
++    }
+     if(command==0x41) return HostWord(false);
+     unsigned index = command;
+     // Only disconnected-controller registers are implemented.
+@@ -152,7 +160,9 @@ uint32 EmRegsISPDana::Read(emuptr address, int size) {
+         case 0: case 1: case 2: case 3: case 4: case 5: case 0x0d: case 0x0e:
+         case 0x12: case 0x13: case 0x14: case 0x15: case 0x16: case 0x0f: case 0x27: case 0x11: case 0x20: case 0x24: case 0x25: case 0x28:
+         case 0x22: case 0x2a: case 0x2b: case 0x2c: break;
+-        default: throw std::runtime_error("ISP unqualified register read");
++        default:
++            DanaUnqualified("ISP unqualified register read", "register 0x%02x", index);
++            return 0xffff;
+     }
+     uint32 value = regs[index == 5 ? 4 : index];
+     if(index<0x20) {
+@@ -171,19 +181,27 @@ void EmRegsISPDana::Write(emuptr address, int size, uint32 value) {
+         return;
+     }
+     if (size==2 && address==GetAddressStart()+4) { DeviceWrite(value); return; }
+-    if (size != 2 || (address != GetAddressStart() && address != GetAddressStart()+2))
+-        throw std::runtime_error("ISP unsupported bus write");
++    if (size != 2 || (address != GetAddressStart() && address != GetAddressStart()+2)) {
++        DanaUnqualified("ISP unsupported bus write", "%d bytes at 0x%08x, value 0x%x",
++                        size, unsigned(address), unsigned(value));
++        return;
++    }
+     if (address == GetAddressStart()+2) {
+         if(value==0x41 || value==0xc1) {
++            // The command is taken so its data words reach the ATL port, which drops them.
+             if(!regs[0x22] || regs[0x22]>regs[0x2b])
+-                throw std::runtime_error("ISP ATL count outside allocation");
++                DanaUnqualified("ISP ATL count outside allocation", "count %u, ATL buffer %u",
++                                unsigned(regs[0x22]), unsigned(regs[0x2b]));
+             hostCursor=0;
+             if(value==0xc1) { hostRam.fill(0); hostArmed=false; hostWritten=0; }
+         }
+         command = value; word = 0; latch = 0;
+         return;
+     }
+-    if (!(command & 0x80)) throw std::runtime_error("ISP write to read command");
++    if (!(command & 0x80)) {
++        DanaUnqualified("ISP write to read command", "command 0x%02x, value 0x%04x", unsigned(command), unsigned(value));
++        return;
++    }
+     if(command==0xc1) { HostWord(true,value); return; }
+     latch |= (value & 0xffff) << (16 * word);
+     if (command < 0xa0 && word++ == 0) return;
+@@ -238,8 +256,10 @@ void EmRegsISPDana::Commit(uint32 value) {
+             unsigned index=(command&0x7f)-0x15;
+             auto& port=regs[0x15+index];
+             // SetPortSuspend on a disconnected port only sets CSC (handled below).
+-            if(((value&4) && (port&1)) || ((value&8) && (port&4)))
+-                throw std::runtime_error("ISP host suspend/resume unqualified");
++            if(((value&4) && (port&1)) || ((value&8) && (port&4))) {
++                DanaUnqualified("ISP host suspend/resume", "port %u status write 0x%08x", index, unsigned(value));
++                return;
++            }
+             port &= ~(value & 0x1f0000);
+             auto before=port;
+             bool controlled=(regs[0x12]&0x100) && (regs[0x13]&(1u<<(17+index)));
+@@ -262,10 +282,16 @@ void EmRegsISPDana::Commit(uint32 value) {
+             break;
+         }
+         case 0xa0:
+-            if(value&2) throw std::runtime_error("ISP HC edge interrupt unsupported");
++            if(value&2) {
++                DanaUnqualified("ISP HC edge interrupt mode", "HcHardwareConfiguration 0x%04x", unsigned(value));
++                return;
++            }
+             regs[0x20] = (value & 0x1fe7) | 8; break;
+         case 0xa2:
+-            if(value>4096) throw std::runtime_error("ISP invalid transfer count");
++            if(value>4096) {
++                DanaUnqualified("ISP invalid transfer count", "count %u", unsigned(value));
++                return;
++            }
+             regs[0x22]=value; hostCursor=0; break;
+         case 0xa4: regs[0x24] &= ~(value & 0x77); break;
+         case 0xa5: regs[0x25] = value & 0x77; break;
+@@ -282,10 +308,14 @@ void EmRegsISPDana::Commit(uint32 value) {
+             break;
+         case 0xaa: case 0xab:
+             if (value > 4096 || (value & 3) ||
+-                (command==0xaa ? 2*value+regs[0x2b] : 2*regs[0x2a]+value)>4096)
+-                throw std::runtime_error("ISP invalid buffer length");
++                (command==0xaa ? 2*value+regs[0x2b] : 2*regs[0x2a]+value)>4096) {
++                DanaUnqualified("ISP invalid buffer length", "command 0x%02x, length %u", unsigned(command), unsigned(value));
++                return;
++            }
+             regs[command & 0x7f] = value; hostArmed=false; hostCursor=0; hostWritten=0; regs[0x2c]=0; break;
+-        default: throw std::runtime_error("ISP unqualified register write");
++        default:
++            DanaUnqualified("ISP unqualified register write", "command 0x%02x, value 0x%08x", unsigned(command), unsigned(value));
++            return;
+     }
+     RefreshHostInterrupt();
+ }
+@@ -303,12 +333,18 @@ void EmRegsISPDana::ResetDevice() {
+ }
+ 
+ uint32 EmRegsISPDana::DeviceRead() {
+-    if(!dcUnlocked) throw std::runtime_error("ISP DC locked read");
++    if(!dcUnlocked) {
++        DanaUnqualified("ISP DC locked read", "command 0x%02x", unsigned(dcCommand));
++        return 0xffff;
++    }
+     unsigned e=dcCommand&15;
+     if(dcCommand>=0x10 && dcCommand<=0x1f) {
+         if(accessCancelled) return 0;
+         auto& ep=fifo[e]; auto& b=ep.packet[ep.cpu];
+-        if(!b.full || cursor> (b.length+1)/2) throw std::runtime_error("ISP DC FIFO read boundary");
++        if(!b.full || cursor> (b.length+1)/2) {
++            DanaUnqualified("ISP DC FIFO read boundary", "endpoint %u, word %u", e, cursor);
++            return 0xffff;
++        }
+         if(cursor++==0) return b.length;
+         return b.data[cursor-2];
+     }
+@@ -335,22 +371,34 @@ uint32 EmRegsISPDana::DeviceRead() {
+         case 0xb7: return dcAddress;
+         case 0xb9: return dcMode;
+         case 0xbb: return dcHardware;
+-        default: throw std::runtime_error("ISP DC unqualified read");
++        default:
++            DanaUnqualified("ISP DC unqualified read", "command 0x%02x", unsigned(dcCommand));
++            return 0xffff;
+     }
+ }
+ void EmRegsISPDana::DeviceWrite(uint16 value) {
+     if (dcCommand==0xb0) { dcUnlocked=(value==0xaa37); return; }
+-    if (!dcUnlocked) throw std::runtime_error("ISP DC locked write");
++    if (!dcUnlocked) {
++        DanaUnqualified("ISP DC locked write", "command 0x%02x, value 0x%04x", unsigned(dcCommand), unsigned(value));
++        return;
++    }
+     if (dcCommand>=0x20 && dcCommand<=0x2f) {
+         unsigned endpoint=dcCommand-0x20;
+         value &= 0xff;
+         if((endpoint<2 && value!=(endpoint ? 0xc3 : 0x83)) ||
+-           (endpoint>=2 && ((value&0x10) || (value&15)>3)))
+-            throw std::runtime_error("ISP DC unsupported ECR");
++           (endpoint>=2 && ((value&0x10) || (value&15)>3))) {
++            DanaUnqualified("ISP DC unsupported ECR", "endpoint %u, value 0x%02x", endpoint, unsigned(value));
++            return;
++        }
+         auto old=dcEndpoints[endpoint]; dcEndpoints[endpoint]=value;
+         unsigned next=endpoint==configNext ? configNext+1 : (endpoint==0 ? 1 : 0);
+         if(next==16) {
+-            try { ValidateConfiguration(); } catch(...) { dcEndpoints[endpoint]=old; throw; }
++            try { ValidateConfiguration(); }
++            catch(const std::runtime_error& error) {
++                dcEndpoints[endpoint]=old;
++                DanaUnqualified("ISP DC FIFO configuration", "%s", error.what());
++                return;
++            }
+         }
+         flushed=0;
+         for(auto& epoch:packetResetEpoch) ++epoch;
+@@ -363,12 +411,21 @@ void EmRegsISPDana::DeviceWrite(uint16 value) {
+     if(dcCommand>=1 && dcCommand<=15) {
+         if(accessCancelled) return;
+         auto& ep=fifo[dcCommand]; auto& b=ep.packet[ep.cpu];
+-        if(b.full) throw std::runtime_error("ISP DC full IN FIFO");
++        if(b.full) {
++            DanaUnqualified("ISP DC full IN FIFO", "endpoint %u", unsigned(dcCommand));
++            return;
++        }
+         if(cursor==0) {
+-            if(value>Capacity(dcCommand)) throw std::runtime_error("ISP DC packet length");
++            if(value>Capacity(dcCommand)) {
++                DanaUnqualified("ISP DC packet length", "endpoint %u, length %u", unsigned(dcCommand), unsigned(value));
++                return;
++            }
+             b={}; b.writing=true; b.length=value; cursor=1; return;
+         }
+-        if(cursor>(b.length+1)/2) throw std::runtime_error("ISP DC FIFO write boundary");
++        if(cursor>(b.length+1)/2) {
++            DanaUnqualified("ISP DC FIFO write boundary", "endpoint %u, word %u", unsigned(dcCommand), cursor);
++            return;
++        }
+         b.data[cursor-1]=value; ++cursor; b.words=cursor-1; return;
+     }
+     switch (dcCommand) {
+@@ -384,9 +441,14 @@ void EmRegsISPDana::DeviceWrite(uint16 value) {
+             if ((dcMode & 0x20) && !(value & 0x20)) dcSuspended=true;
+             dcMode=value & 0xad; break;
+         case 0xba:
+-            if(value&(2|0x4000)) throw std::runtime_error("ISP DC unsupported IRQ/pull-up mode");
++            if(value&(2|0x4000)) {
++                DanaUnqualified("ISP DC unsupported IRQ/pull-up mode", "hardware configuration 0x%04x", unsigned(value));
++                return;
++            }
+             dcHardware=value; break;
+-        default: throw std::runtime_error("ISP DC unqualified write");
++        default:
++            DanaUnqualified("ISP DC unqualified write", "command 0x%02x, value 0x%04x", unsigned(dcCommand), unsigned(value));
++            return;
+     }
+     RefreshIrq();
+ }
+@@ -572,30 +634,40 @@ void EmRegsISPDana::RefreshIrq() {
+ void EmRegsISPDana::DeviceCommand(uint16 c) {
+     if(c==0xf6) { ResetDevice(); return; }
+     bool known=KnownDeviceCommand(c);
+-    if(!known) throw std::runtime_error("ISP DC unsupported command");
+-    if(!dcUnlocked && c!=0xb0) throw std::runtime_error("ISP DC locked command");
++    // A refused command leaves the previous one selected.
++    if(!known) { DanaUnqualified("ISP DC unsupported command", "command 0x%02x", unsigned(c)); return; }
++    if(!dcUnlocked && c!=0xb0) { DanaUnqualified("ISP DC locked command", "command 0x%02x", unsigned(c)); return; }
+     unsigned e=c&15;
+     bool writePacket=c>=1 && c<=15, readPacket=c>=0x10 && c<=0x1f;
+     bool validate=c>=0x61 && c<=0x6f, clear=c>=0x70 && c<=0x7f;
+     bool ignored=false;
+     if(writePacket || readPacket || validate || clear) {
+         bool in=dcEndpoints[e]&64;
+-        if(((writePacket || validate)!=in))
+-            throw std::runtime_error("ISP DC wrong FIFO direction");
++        if(((writePacket || validate)!=in)) {
++            DanaUnqualified("ISP DC wrong FIFO direction", "command 0x%02x", unsigned(c));
++            return;
++        }
+         if(!allocated || !(dcEndpoints[e]&128)) {
+-            if(!(flushed&(1u<<e))) throw std::runtime_error("ISP DC unavailable FIFO command");
++            if(!(flushed&(1u<<e))) {
++                DanaUnqualified("ISP DC unavailable FIFO command", "command 0x%02x", unsigned(c));
++                return;
++            }
+             ignored=true;
+         }
+         if(readPacket && (flushed&(1u<<e)) && !fifo[e].packet[fifo[e].cpu].full) ignored=true;
+-        if(readPacket && !ignored && !fifo[e].packet[fifo[e].cpu].full)
+-            throw std::runtime_error("ISP DC empty OUT FIFO");
++        if(readPacket && !ignored && !fifo[e].packet[fifo[e].cpu].full) {
++            DanaUnqualified("ISP DC empty OUT FIFO", "command 0x%02x", unsigned(c));
++            return;
++        }
+         if((validate || clear) && ((flushed&(1u<<e)) || (e<2 && setupPending))) ignored=true;
+     }
+     if((validate || clear) && !ignored) {
+         auto& ep=fifo[e]; auto& b=ep.packet[ep.cpu];
+         if(validate) {
+-            if(b.full || !b.writing || b.words!=(b.length+1)/2)
+-                throw std::runtime_error("ISP DC incomplete IN packet");
++            if(b.full || !b.writing || b.words!=(b.length+1)/2) {
++                DanaUnqualified("ISP DC incomplete IN packet", "command 0x%02x", unsigned(c));
++                return;
++            }
+             b.full=true; b.writing=false;
+         } else { b={}; ep.setup=false; }
+         if(dcEndpoints[e]&32) ep.cpu^=1;
+@@ -729,8 +801,11 @@ template <typename T> void EmRegsISPDana::CancellationFields(T& h) {
+ // 10.4.3 (22/A2), 10.6.3 and 10.6.7 (41/C1). Low byte is even RAM.
+ uint16 EmRegsISPDana::HostWord(bool writing, uint16 value) {
+     unsigned count=regs[0x22];
+-    if(!count || count>regs[0x2b] || hostCursor>=count || hostCursor+2>regs[0x2b])
+-        throw std::runtime_error("ISP ATL access outside transfer");
++    if(!count || count>regs[0x2b] || hostCursor>=count || hostCursor+2>regs[0x2b]) {
++        DanaUnqualified("ISP ATL access outside transfer", "%s at byte %u, count %u, ATL buffer %u",
++                        writing ? "write" : "read", hostCursor, count, unsigned(regs[0x2b]));
++        return 0xffff;
++    }
+     auto& slot=hostRam[hostCursor/2];
+     uint16 result=slot;
+     if(writing) slot=(hostCursor+1==count) ? value&255 : value;
+@@ -832,8 +907,11 @@ void EmRegsISPDana::ExecuteHostFrame() {
+     std::array<uint8,4096> data{};
+     const unsigned written=hostWritten, size=regs[0x2b];
+     for(unsigned i=0;i<written;++i) data[i]=hostRam[i/2]>>((i&1)*8);
+-    if(!ValidateHostList(data.data(),written,size))
+-        throw std::runtime_error("ISP malformed ATL submission");
++    if(!ValidateHostList(data.data(),written,size)) {
++        DanaUnqualified("ISP malformed ATL submission", "%u bytes written of a %u-byte ATL buffer", written, size);
++        FailHostList(data,written,size);
++        return;
++    }
+     std::vector<unsigned> offsets;
+     for(unsigned o=0;;) {
+         HostPtd p; DecodeHostPtd(data.data(),size,o,p);
+@@ -890,6 +968,37 @@ void EmRegsISPDana::ExecuteHostFrame() {
+     regs[0x2c]|=32; regs[0x24]|=2;
+ }
+ 
++// A list the model can't run completes at once: each readable active PTD before the first malformed
++// one gets cc 5 (device not responding), the malformed one and any after it stay as the guest wrote
++// them, and the ATL done interrupt is raised.
++void EmRegsISPDana::FailHostList(std::array<uint8,4096>& data, unsigned written, unsigned size) {
++    hostArmed=false;
++    for(unsigned o=0; o<=written && written-o>=8;) {
++        HostPtd p;
++        // The same per-PTD checks as ValidateHostList: an OUT needs all its bytes written.
++        if(!DecodeHostPtd(data.data(),size,o,p) || (p.direction!=2 && o+8+p.total>written)) break;
++        if(p.active) {
++            CompleteHostPtd(data.data(),size,o,p.actual,5,p.toggle);
++            hostRam[o/2]=data[o]|(uint16(data[o+1])<<8);
++        }
++        if(p.last) break;
++        o=(o+8+p.total+3)&~3u;
++    }
++    regs[0x2c]|=32; regs[0x24]|=2;
++}
++
++// Cycle stamps follow the session's new cycle unit. The remaining reset times grow with it, but never
++// past a fresh reset's length, so a later load still accepts them.
++void EmRegsISPDana::ScaleCycles(uint32 factor) {
++    lastCycle*=factor;
++    uint64 hz=ClockHz();
++    resetCycles*=factor;
++    for(auto& cycles:portResetCycles) cycles*=factor;
++    if(!hz) return;
++    resetCycles=std::min<uint64>(resetCycles,(hz+99999)/100000);
++    for(auto& cycles:portResetCycles) cycles=std::min<uint64>(cycles,(hz+99)/100);
++}
++
+ // A port's reset, disable, power or disconnect leaves the ATL list armed, as on the ISP1161: the
+ // next frame completes that port's PTDs with cc 5 as their device no longer answers, and the
+ // other port's run on. A controller reset or load completes every active PTD with cc 5.
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+index 62ba7bb..4e52269 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsISPDana.h
+@@ -74,6 +74,8 @@ class EmRegsISPDana : public EmRegs {
+     void SetHostTarget(unsigned port, HostTarget target);
+     // Disconnects a port kept by a load now, for an owner whose device isn't the saved one.
+     void DropLoadedPort(unsigned port);
++    // Multiplies the cycle stamps when the session's cycle unit changes.
++    void ScaleCycles(uint32 factor);
+     void Initialize() override;
+     void Dispose() override;
+     void Reset(Bool hardware) override;
+@@ -133,6 +135,7 @@ class EmRegsISPDana : public EmRegs {
+     void HostCancelled(int port=-1);
+     bool hostArmed=false;
+     void ExecuteHostFrame();
++    void FailHostList(std::array<uint8,4096>&, unsigned written, unsigned size);
+     void CancelHostWork(int port=-1);
+     std::array<bool,2> hostAttached{}, hostLowSpeed{};
+     std::array<uint64,2> portResetCycles{};
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+index 2949b6e..f60ed60 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -7,6 +7,7 @@
+ #include "dana_keyboard5.h"
+ #include <stdexcept>
+ #include "ExternalStorage.h"
++#include "DanaUnqualified.h"
+ 
+ Bool EmRegsVZDana::GetLCDScreenOn() { return (StdRead(0xfffff441,1)&0x80)!=0; }
+ bool EmRegsVZDana::CopyLCDFrame(Frame& frame,bool fullRefresh) {
+@@ -40,18 +41,33 @@ uint8 EmRegsVZDana::GetPortInputValue(int port) {
+     }
+     return EmRegsVZ::GetPortInputValue(port) | (port=='K' && !resetAsserted ? 4 : port=='F' ? 2 : 0);
+ }
++namespace {
++    // SPI2 with neither chip select low: MISO floats high.
++    class FloatingSpi : public EmSPISlave {
++      public:
++        uint16 DoExchange(uint16 control, uint16) override {
++            DanaUnqualified("SPI2 exchange with no chip selected", "control=0x%04x", unsigned(control));
++            return 0xffff;
++        }
++    };
++}
+ EmSPISlave* EmRegsVZDana::GetSPI2Slave() {
+     // E3 selects the ST controller; G2 selects the ADC.
+     if (!(StdRead(0xfffff421,1) & 8)) return this;
+     if (!(StdRead(0xfffff431,1) & 4)) return &adc;
+-    throw std::runtime_error("SPI exchange with no qualified selection");
++    static FloatingSpi floating;
++    return &floating;
+ }
+ uint16 EmRegsVZDana::DoExchange(uint16 control, uint16 data) {
+     if (resetAsserted) return 0;
+     if ((control & 15)==7) {
+         // The reset helper dispatches EF after shifting its existing AA reply.
+         if(data==0xeb || data==0xed || data==0xee || data==0xef) {
+-            if(sleepCommand || versionCommand || versionReply) throw std::runtime_error("ST power command during partial request"); bool ack=resetReply; resetReply=false;
++            if(sleepCommand || versionCommand || versionReply) {
++                DanaUnqualified("ST power command during a partial request", "command=0x%02x", unsigned(data));
++                sleepCommand=versionCommand=versionReply=0; return 0xffff;
++            }
++            bool ack=resetReply; resetReply=false;
+             if(data==0xeb) { ebHold=1; ebReported=0; }
+             if(data==0xed) pa3Option=0;
+             EnterHalt(data==0xee);
+@@ -60,7 +76,10 @@ uint16 EmRegsVZDana::DoExchange(uint16 control, uint16 data) {
+         if(sleepCommand || (!versionCommand && data=='1')) {
+             constexpr char halt[]="123 Halt";
+             if(sleepCommand<8) {
+-                if(data!=uint8(halt[sleepCommand])) throw std::runtime_error("ST sleep framing");
++                if(data!=uint8(halt[sleepCommand])) {
++                    DanaUnqualified("ST sleep framing", "byte %u is 0x%02x", sleepCommand, unsigned(data));
++                    sleepCommand=0; return 0xffff;
++                }
+             } else wakeMask[sleepCommand-8]=data;
+             if(++sleepCommand==10) {
+                 sleepCommand=0; EnterHalt();
+@@ -70,17 +89,25 @@ uint16 EmRegsVZDana::DoExchange(uint16 control, uint16 data) {
+         const char* request="Get Ver!";
+         if (versionCommand || data=='G') {
+             if (versionCommand==8) {
+-                if (data || versionReply>=4) throw std::runtime_error("ST version framing");
++                if (data || versionReply>=4) {
++                    DanaUnqualified("ST version framing", "reply byte %u clocked with 0x%02x", versionReply, unsigned(data));
++                    versionCommand=versionReply=0; return 0xffff;
++                }
+                 uint8 reply=uint8("07.4"[versionReply++]);
+                 if (versionReply==4) versionCommand=versionReply=0;
+                 return reply;
+             }
+-            if (data!=uint8(request[versionCommand])) throw std::runtime_error("ST version request");
++            if (data!=uint8(request[versionCommand])) {
++                DanaUnqualified("ST version request", "byte %u is 0x%02x", versionCommand, unsigned(data));
++                versionCommand=0; return 0xffff;
++            }
+             ++versionCommand; return 0;
+         }
+         if (data==0) { if(resetReply) { resetReply=false; return 0xaa; } return stAsleep && !packetIndex && !pollIndex ? 0 : ReadKeyPacket(); }
+     }
+-    throw std::runtime_error("ST unqualified SPI command control="+std::to_string(control)+" data="+std::to_string(data));
++    // Unknown ST traffic shifts in a floating MISO.
++    DanaUnqualified("ST unqualified SPI command", "control=0x%04x data=0x%04x", unsigned(control), unsigned(data));
++    return 0xffff;
+ }
+ 
+ void EmRegsVZDana::SetSubBankHandlers() {
+@@ -365,8 +392,10 @@ void EmRegsVZDana::UpdateStIrq() {
+ void EmRegsVZDana::StIntControlWrite(emuptr a,int size,uint32 value) {
+     // Both ISP routes support the level mode used by the ROM.
+     if(a<=0xfffff302 && a+size>0xfffff302 &&
+-       ((value >> (8*(a+size-0xfffff303)))&6))
+-        throw std::runtime_error("Dana ISP edge interrupt unsupported");
++       ((value >> (8*(a+size-0xfffff303)))&6)) {
++        DanaUnqualified("ISP edge interrupt mode", "ICR write 0x%x at 0x%08x", unsigned(value), unsigned(a));
++        return;
++    }
+     StdWrite(a,size,value); UpdateStIrq(); UpdateIRQ2(dcIrqHigh?0x20:0); UpdateIRQ3(hcIrqHigh?0x40:0);
+ }
+ void EmRegsVZDana::StIntStatusWrite(emuptr a,int size,uint32 value) {
+@@ -396,7 +425,9 @@ void EmRegsVZDana::CycleSlowly(Bool sleeping) {
+ }
+ void EmRegsVZDana::ScaleCycles(uint32 factor) {
+     inputLastCycle*=factor;
+-    EmRegsVZ::ScaleCycles(factor); UpdateStIrq();
++    EmRegsVZ::ScaleCycles(factor);
++    if(cycleScaleSink) cycleScaleSink(factor);
++    UpdateStIrq();
+ }
+ 
+ void EmRegsVZDana::MigrateLegacyInput() {
+diff --git a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+index 921e352..a67468e 100644
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -74,6 +74,8 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
+     // USB root port supply: PM5 high powers the external port (0), PK0 high the internal module's
+     // port (1), as the ROM's helper drives them on boards with CSA size 0x0c or more (Frond's Dana).
+     std::function<void(unsigned port, bool on)> usbSupplySink;
++    // Called from ScaleCycles so the ISP's cycle stamps follow the session's.
++    std::function<void(uint32 factor)> cycleScaleSink;
+     void SyncUsbSupply();
+     void SetHcIrqPin(bool high) { auto old=hcIrqHigh; hcIrqHigh=high; UpdateIRQ3(old ? 0x40 : 0); }
+     void SetDcIrqPin(bool high) { auto old=dcIrqHigh; dcIrqHigh=high; UpdateIRQ2(old ? 0x20 : 0); }

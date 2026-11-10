@@ -3,6 +3,7 @@
 #include <vector>
 #include <stdexcept>
 #include "EmRegsISPDana.h"
+#include "DanaUnqualified.h"
 #include "EmRegsVZDana.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
@@ -30,7 +31,8 @@ int main(){
  b.SetWord(0xfffff302,0);i.reg(0xa0,0x1009);assert(pending());
  i.reg(0xa5,0);assert(high&&!pending());i.reg(0xa5,0x10);assert(pending());
  b.SetByte(0xfffff300,0x40);assert(b.GetInterruptBase()==0x40);assert(b.GetInterruptLevel()==3);
- bool edge=false;try{b.SetWord(0xfffff302,0x200);}catch(const std::runtime_error&){edge=true;}assert(edge&&b.GetWord(0xfffff302)==0);
+ // Edge mode is logged and the ICR write dropped.
+ auto edges=DanaUnqualifiedCount("ISP edge interrupt mode");b.SetWord(0xfffff302,0x200);assert(DanaUnqualifiedCount("ISP edge interrupt mode")==edges+1&&b.GetWord(0xfffff302)==0);
  auto before=save(i),bad=before;bad.resize(bad.size()-4);assert(!load(i,bad));assert(save(i)==before&&pending());
  bad=before;uint64 invalid=10001;memcpy(bad.data()+bad.size()-16,&invalid,8);assert(!load(i,bad));assert(save(i)==before&&pending());
  bad=before;unsigned matches=0;
@@ -46,7 +48,8 @@ int main(){
  i.Reset(true);assert(high&&!pending());
  i.reg(0xa0,1);i.SetHostConnection(0,true);i.reg(0x94,0x10000);i.reg(0x84,0x80000040);i.reg(0xa5,0x10);assert(pending());
  i.reg(0xa9,0xf6);assert(high&&!pending());
- bool refused=false;try{i.reg(0xa0,3);}catch(const std::runtime_error&){refused=true;}assert(refused);
+ auto hcEdges=DanaUnqualifiedCount("ISP HC edge interrupt mode");auto config=[&]{i.SetWord(0x1f000002,0x20);return i.GetWord(0x1f000000);};auto hcConfig=config();i.reg(0xa0,3);
+ assert(DanaUnqualifiedCount("ISP HC edge interrupt mode")==hcEdges+1&&config()==hcConfig);
  b.SetDcIrqPin(false);assert(b.GetWord(0xfffff310)&2);assert(!pending());b.SetHcIrqPin(false);assert((b.GetWord(0xfffff310)&6)==6);
  b.SetHcIrqPin(true);assert((b.GetWord(0xfffff310)&6)==2);
  i.SetHostIrq({});

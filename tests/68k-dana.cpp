@@ -5,9 +5,11 @@
 #include "CardVolume.h"
 #include <cstring>
 #include <cstdio>
+#include <string>
 #include <vector>
 #include <stdexcept>
 #include "EmRegsISPDana.h"
+#include "DanaUnqualified.h"
 #include "UsbDanaPort.h"
 #include "UsbHostBridge.h"
 #include "EmBankRegs.h"
@@ -31,6 +33,10 @@ class Isp : public EmRegsISPDana {
     void DCData(uint16 d) { SetWord(0x1f000004,d); }
     uint16 DCData() { return GetWord(0x1f000004); }
 };
+// A guest access the model hasn't qualified is logged and the machine carries on.
+template<class F> static void Ignores(F op) {
+    auto before=DanaUnqualifiedTotal(); op(); assert(DanaUnqualifiedTotal()>before);
+}
 template<class T> static std::vector<uint8> Save(T& m) {
     Savestate<ChunkType> s; assert(s.Save(m));
     auto* p=static_cast<uint8*>(s.GetBuffer());return {p,p+s.GetSize()};
@@ -185,7 +191,6 @@ static void UsbCancellationTest() {
         for(unsigned i=0;i<16;++i) reg(d,0x20+i,c[i]);
     };
     auto start=[&](Isp& d) { reg(d,0xb8,9); d.SetVbus(true); d.BusReset(); config(d); };
-    auto refuses=[](auto op) { bool caught=false; try { op(); } catch(const std::runtime_error&) { caught=true; } assert(caught); };
     auto usable=[&](Isp& d) {
         assert(d.HostOut(0,setup,false,true)==R::ack);
         d.DC(0x10);assert(d.DCData()==8);assert(d.DCData()==0x500);
@@ -276,18 +281,18 @@ static void UsbCancellationTest() {
         Isp x;start(x);x.SetVbus(false);x.SetVbus(true);
         std::vector<uint8> bytes;bool toggle=false;
         assert(x.HostIn(3,bytes,toggle)==R::nak);read(x,status);
-        auto before=Save(x);refuses([&]() { x.DC(0x63); });assert(Save(x)==before);
+        auto before=Save(x);Ignores([&]() { x.DC(0x63); });assert(Save(x)==before);
         x.DC(3);x.DCData(2);x.DCData(0x1234);x.DC(0x63);
         assert(x.HostIn(3,bytes,toggle)==R::ack && bytes==std::vector<uint8>({0x34,0x12}));
     }
     // Guest direction errors and unrelated endpoint validation still refuse.
-    refuses([&]() { d.DC(2); });
-    d.DC(3);d.DCData(2);d.DCData(1);refuses([&]() { d.DC(0x65); });
+    Ignores([&]() { d.DC(2); });
+    d.DC(3);d.DCData(2);d.DCData(1);Ignores([&]() { d.DC(0x65); });
     { std::vector<uint8> bytes;bool toggle=false;assert(d.HostIn(5,bytes,toggle)==R::nak); }
     d.DC(0x63);
     // SETUP-gated commands record their command and discard the previous latch.
     assert(d.HostOut(0,setup,false,true)==R::ack);d.DC(1);d.DCData(0);d.DC(0x61);
-    refuses([&]() { d.DCData(0); });d.DC(0xf4);d.DC(0x61);
+    Ignores([&]() { d.DCData(0); });d.DC(0xf4);d.DC(0x61);
     // Table 97: a first event is readable; only a second unread event sets bit7.
     d.DC(0x84);assert(d.HostOut(4,{1},false)==R::ack);assert(read(d,0xa4)==1);
     assert(d.HostOut(4,{2},true)==R::ack);assert(d.HostOut(4,{3},false)==R::nak);
@@ -306,11 +311,11 @@ static void UsbCancellationTest() {
     // Fresh config ends the reset guard, including wrong-owner refusal.
     {
         Isp x;start(x);auto before=Save(x);
-        refuses([&]() { x.DC(0x65); });assert(Save(x)==before);
+        Ignores([&]() { x.DC(0x65); });assert(Save(x)==before);
         assert(x.HostOut(2,{},false)==R::ack);x.DC(0x72);
         assert(x.HostOut(2,{1},true)==R::ack);x.DC(0x12);
         assert(x.DCData()==1);assert(x.DCData()==1);x.DC(0x72);
-        before=Save(x);refuses([&]() { x.DC(0x12); });assert(Save(x)==before);
+        before=Save(x);Ignores([&]() { x.DC(0x12); });assert(Save(x)==before);
     }
     // Each endpoint status path ends only the guard it actually observes.
     for(unsigned command:{0x50u,0xd0u,0xa0u,0xc0u}) {
@@ -397,10 +402,10 @@ static void UsbCancellationTest() {
     const uint16 moved[]={0x83,0xc3,0xa3,0xe3,0x23,0x63,0x81,0xc1,0x23,0x63,0x23,0x63,0x23,0x63,0x23,0x63};
     for(unsigned i=0;i<16;++i) reg(d,0x20+i,moved[i]);
     assert(d.HostOut(2,{1},false)==R::ack);
-    // Dana rejects unsupported IRQ2 edge routes before modifying ICR.
+    // Dana ignores unsupported IRQ2 edge routes without modifying ICR.
     St board;uint16 icr=board.GetWord(0xfffff302);
-    refuses([&]() { board.SetWord(0xfffff302,icr|0x400); });
-    refuses([&]() { board.SetByte(0xfffff302,4); });
+    Ignores([&]() { board.SetWord(0xfffff302,icr|0x400); });
+    Ignores([&]() { board.SetByte(0xfffff302,4); });
     assert(board.GetWord(0xfffff302)==icr);
     // No bus response is distinct from NAK on an enabled, empty endpoint.
     reg(d,0xb6,0);std::vector<uint8> bytes;bool toggle=false;
@@ -441,7 +446,7 @@ static void UsbPacketTest() {
     dc.DC(0x10);assert(dc.DCData()==8);assert(dc.DCData()==0x500);
     auto partial=Save(dc); Isp restored;assert(Load(restored,partial));
     assert(restored.DCData()==7);assert(restored.DCData()==0);assert(restored.DCData()==0);
-    refuses([&]() { restored.DCData(); });
+    Ignores([&]() { restored.DCData(); });
     // Malformed cursor rejects without changing any controller field.
     auto bad=partial; uint32 invalid=34; memcpy(bad.data()+12+4*86,&invalid,4);
     auto before=Save(restored);assert(!Load(restored,bad));assert(Save(restored)==before);
@@ -467,7 +472,7 @@ static void UsbPacketTest() {
     assert(dc.HostIn(3,bytes,toggle)==R::ack);assert((bytes==std::vector<uint8>{0x11,0x22,0x33}));
     dc.HostAckIn(3);read(0x53);
     for(unsigned n=0;n<2;++n) { dc.DC(5);dc.DCData(1);dc.DCData(0x30+n);dc.DC(0x65); }
-    refuses([&]() { dc.DC(5);dc.DCData(1); });
+    Ignores([&]() { dc.DC(5);dc.DCData(1); });
     for(unsigned n=0;n<2;++n) {
         assert(dc.HostIn(5,bytes,toggle)==R::ack);assert(bytes==std::vector<uint8>{uint8(0x30+n)});
         assert(toggle==bool(n));dc.HostAckIn(5);
@@ -488,16 +493,16 @@ static void UsbPacketTest() {
     assert(pending());board.SetByte(0xfffff41b,0x20);assert(!pending());
     board.SetByte(0xfffff41b,0);assert(pending());
     reg(0xb8,1);assert(!pending());reg(0xb8,9);assert(pending());read(0x54);assert(!pending());
-    refuses([&]() { reg(0x20,0); });refuses([&]() { reg(0x22,0x84); });
-    refuses([&]() { reg(0x22,0x93); });refuses([&]() { dc.DC(0xf0); });
-    refuses([&]() { dc.DC(3);dc.DCData(17); });
-    dc.DC(3);dc.DCData(3);dc.DCData(1);refuses([&]() { dc.DC(0x63); });
+    Ignores([&]() { reg(0x20,0); });Ignores([&]() { reg(0x22,0x84); });
+    Ignores([&]() { reg(0x22,0x93); });Ignores([&]() { dc.DC(0xf0); });
+    Ignores([&]() { dc.DC(3);dc.DCData(17); });
+    dc.DC(3);dc.DCData(3);dc.DCData(1);Ignores([&]() { dc.DC(0x63); });
     // A configuration consuming more than 512 noniso bytes is refused.
-    config();refuses([&]() { for(unsigned i=0;i<16;++i) reg(0x20+i,i<2 ? (i?0xc3:0x83) : 0xa3); });
+    config();Ignores([&]() { for(unsigned i=0;i<16;++i) reg(0x20+i,i<2 ? (i?0xc3:0x83) : 0xa3); });
     dc.SetVbus(false);assert(!pending());assert(!dc.DeviceAttached());
     dc.SetVbus(true);dc.BusReset();assert(dc.EffectiveAddress()==0);assert(read(0xb7)==0x87);
-    dc.DC(0xb0);dc.DCData(0);refuses([&]() { dc.DCData(); });
-    refuses([&]() { dc.DC(0xee); });dc.DC(0xf6);assert(!pending());
+    dc.DC(0xb0);dc.DCData(0);Ignores([&]() { dc.DCData(); });
+    Ignores([&]() { dc.DC(0xee); });dc.DC(0xf6);assert(!pending());
     reg(0xba,1);board.SetWord(0xfffff302,0x4000);assert(!pending());
     reg(0xb8,9);dc.DC(0xc2);dc.DCData(1);dc.DCData(0);
     dc.BusReset();assert(pending());read(0xc0);assert(!pending());
@@ -632,7 +637,54 @@ static void UsbBankLifetimeTest() {
     EmBankRegs::onBeforeDispose.RemoveHandler(h);
     puts("Dana bank owner disposes bridge references before bank Dispose and delete");
 }
+// Unqualified guest access logs, reads the floating bus and leaves the machine running.
+static void UnqualifiedAccessTest() {
+    {
+        St board; board.Byte(0);
+        // SPI2 with neither the ST (E3) nor the ADC (G2) selected.
+        board.Raw(0xfffff421,1,8); board.Raw(0xfffff431,1,4);
+        auto floating=DanaUnqualifiedCount("SPI2 exchange with no chip selected");
+        assert(board.GetSPI2Slave()->DoExchange(7,0)==0xffff);
+        assert(DanaUnqualifiedCount("SPI2 exchange with no chip selected")==floating+1);
+        board.Raw(0xfffff421,1,0);assert(board.GetSPI2Slave()==static_cast<EmSPISlave*>(&board));
+        // A 16-bit ST exchange isn't a command the ROM sends; the ST still answers polls after it.
+        auto before=Save(board);
+        Ignores([&]() { assert(board.DoExchange(15,0x1234)==0xffff); });
+        assert(Save(board)==before);
+        auto logged=DanaUnqualifiedTotal();board.Byte(0);assert(DanaUnqualifiedTotal()==logged);
+        // A wrong byte in the version request drops the request.
+        board.Byte('G');board.Byte('e');Ignores([&]() { board.Byte('x'); });
+        for(char c:std::string("Get Ver!")) assert(board.Byte(uint8(c))==0);
+        assert(board.Byte(0)=='0' && board.Byte(0)=='7' && board.Byte(0)=='.' && board.Byte(0)=='4');
+    }
+    {
+        Isp x;
+        auto reads=DanaUnqualifiedCount("ISP unqualified register read");
+        x.Command(0x30);assert(x.Data()==0xffff);
+        assert(DanaUnqualifiedCount("ISP unqualified register read")==reads+1);
+        assert(x.GetByte(0x1f000000)==0xff);
+        x.Command(0x27);assert(x.Data()==0x6122);
+        // Writes to unknown registers are dropped.
+        x.Command(0xbf);Ignores([&]() { x.Data(0x55); });
+        x.Command(0x28);assert(x.Data()==0);
+    }
+    {
+        // ScaleCycles keeps the frame clock and a port reset in step with the new cycle unit.
+        Isp x;x.now=100;
+        x.Command(0x81);x.Data(0x80);x.Data(0);
+        x.Command(0x94);x.Data(0);x.Data(1);x.SetHostConnection(0,true);
+        x.now=1500;x.Command(0x0f);assert(x.Data()==2);assert(x.Data()==0);
+        x.Command(0x95);x.Data(0x10);x.Data(0);
+        x.now*=2;x.ScaleCycles(2);
+        x.Command(0x0f);assert(x.Data()==2);assert(x.Data()==0);
+        // A 10 ms reset at 1 MHz, clamped to a fresh reset's length.
+        x.now+=9999;x.Command(0x15);assert(x.Data()&0x10);x.Data();
+        x.now+=1;x.Command(0x15);assert(!(x.Data()&0x10));assert(x.Data()&0x10);
+        auto saved=Save(x);Isp copy;assert(Load(copy,saved));
+    }
+}
 int main() {
+    UnqualifiedAccessTest();
     UsbBankLifetimeTest();
     UsbAdapterTest();
     UsbPacketTest();
@@ -714,17 +766,17 @@ int main() {
         for(unsigned cut=1;cut<10;cut++) {
             St m; m.Byte(0);
             for(unsigned i=0;i<cut;i++) m.Byte(halt[i]);
-            auto before=Save(m); bool refused=false;
-            try { m.Byte(mode); } catch(const std::runtime_error&) { refused=true; }
-            assert(refused && Save(m)==before);
+            // A power command inside a partial request drops the request; the next poll is normal.
+            Ignores([&]() { assert(m.Byte(mode)==0xffff); });
+            auto logged=DanaUnqualifiedTotal(); m.Byte(0); assert(DanaUnqualifiedTotal()==logged);
         }
         for(unsigned cut=1;cut<12;cut++) {
             St m; m.Byte(0);
             const char* request="Get Ver!";
             for(unsigned i=0;i<cut;i++) m.Byte(i<8 ? request[i] : 0);
-            auto before=Save(m); bool refused=false;
-            try { m.Byte(mode); } catch(const std::runtime_error&) { refused=true; }
-            assert(refused && Save(m)==before);
+            // A power command inside a partial request drops the request; the next poll is normal.
+            Ignores([&]() { assert(m.Byte(mode)==0xffff); });
+            auto logged=DanaUnqualifiedTotal(); m.Byte(0); assert(DanaUnqualifiedTotal()==logged);
         }
     }
     // Byte-backed EB: column F wakes, full scans use column order and suppress
@@ -921,12 +973,10 @@ int main() {
     {
     // Locked commands refuse immediately; hardware reset also works while locked.
     isp.DC(0xb0);isp.DCData(0);
-    bool refused=false; try { isp.DC(0x24); } catch(const std::runtime_error&) { refused=true; }
-    assert(refused); isp.DC(0xf6);isp.DC(0x34);assert(isp.DCData()==0);
+    Ignores([&]() { isp.DC(0x24); }); isp.DC(0xf6);isp.DC(0x34);assert(isp.DCData()==0);
     isp.Command(0xa8);isp.Data(0xbeef);isp.DC(0xf6);
     isp.Command(0x28);assert(isp.Data()==0xbeef);
-    refused=false;try { isp.DC(0x10); } catch(const std::runtime_error&) { refused=true; }
-    assert(refused);isp.Reset(true);
+    Ignores([&]() { isp.DC(0x10); });isp.Reset(true);
     }
 
     // Entering operational starts frame 1; each 1 ms frame (12000 bit times) adds one.
@@ -963,9 +1013,7 @@ int main() {
     isp.Command(0x15);assert(isp.Data()==0);assert(isp.Data()==0);
     isp.Command(0xaa);isp.Data(1024);isp.Command(0xab);isp.Data(2048);
     auto lengths=Save(isp);
-    bool refused=false;
-    try { isp.Command(0xaa);isp.Data(1028); } catch(const std::runtime_error&) { refused=true; }
-    assert(refused);auto afterRefusal=Save(isp);assert(Load(isp,afterRefusal));
+    Ignores([&]() { isp.Command(0xaa);isp.Data(1028); });auto afterRefusal=Save(isp);assert(Load(isp,afterRefusal));
     isp.Command(0x2a);assert(isp.Data()==1024);
     assert(Load(isp,lengths));
     isp.Command(0x82);isp.Data(1);isp.Data(0);

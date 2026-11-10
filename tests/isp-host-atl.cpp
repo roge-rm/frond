@@ -1,6 +1,7 @@
 #include <cassert>
 #include <vector>
 #include "EmRegsISPDana.h"
+#include "DanaUnqualified.h"
 #include "EmHAL.h"
 #include "UsbRawPrinter.h"
 #include "savestate/Savestate.h"
@@ -33,11 +34,19 @@ int main(){
   host.reg(0xa2,16);host.frame();auto descriptor=host.read(16);
   assert(descriptor[0]==8 && descriptor[1]==0 && descriptor[8]==18 && descriptor[9]==1 && descriptor[15]==8);
  }
- // A truncated OUT at the end invalidates the whole list before any callback.
+ // A truncated OUT at the end fails the whole list before any callback: the readable PTD before it
+ // completes with cc 5, the truncated one stays as written, and the list reports done.
  {
   Isp host;unsigned calls=0;host.ready([&](const auto& packet){++calls;return Isp::HostReply{R::ack,packet.toggle,{}};});
   auto list=ptd(4);list[3]=0;auto tail=ptd(8);tail.resize(10);list.insert(list.end(),tail.begin(),tail.end());
-  host.submit(list);bool failed=false;try{host.frame();}catch(...){failed=true;}assert(failed&&calls==0);
+  auto logged=DanaUnqualifiedCount("ISP malformed ATL submission");
+  host.submit(list);host.frame();assert(calls==0);
+  assert(DanaUnqualifiedCount("ISP malformed ATL submission")==logged+1);
+  assert((host.get(0x2c)&32) && (host.get(0x24)&2));
+  auto result=host.read(list.size());assert(result[0]==0 && result[1]==0x50 && result[13]==8);
+  // The list isn't run again, and the controller keeps working.
+  host.frame();assert(calls==0);
+  host.submit(ptd(4));host.frame();assert(calls==1 && host.read(12)[1]==4);
  }
  // Observed Dana IN8 header plus trailing word, with an unwritten destination.
  for(unsigned received : {2u,8u}) {
@@ -56,8 +65,8 @@ int main(){
   auto in=ptd(4,2);in[3]=0;auto out=ptd(1);in.insert(in.end(),out.begin(),out.end());
   host.submit(in);host.frame();assert(calls==2);
   // A stale successor cannot complete a newly written header-only list.
-  in.resize(8);host.submit(in);bool failed=false;
-  try{host.frame();}catch(...){failed=true;}assert(failed&&calls==2);
+  in.resize(8);host.submit(in);host.frame();assert(calls==2);
+  auto result=host.read(8);assert(result[0]==0 && (result[1]>>4)==5 && !(result[1]&8));
  }
 
  Isp i;unsigned calls=0,accepted=0;std::vector<bool>toggles;std::vector<unsigned>sizes;
@@ -71,7 +80,7 @@ int main(){
  calls=0;i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{42,43}};});b=ptd(10,2);i.submit(b);i.frame();out=i.read(b.size());assert(calls==1&&out[0]==2&&out[1]==0x94&&out[8]==42&&out[9]==43);
  for(bool oversized:{false,true}){calls=0;i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,!p.toggle,std::vector<uint8>(oversized?5:1)};});i.submit(b);i.frame();out=i.read(b.size());assert(out[0]==0&&out[1]==(oversized?0x80:0x30)&&calls==(oversized?1:3));}
  // Reject the last malformed header before the first OUT can escape.
- calls=0;i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{}};});b=ptd(4);b[3]=0;auto tail=ptd(0);tail[7]=1;b.insert(b.end(),tail.begin(),tail.end());i.submit(b);bool threw=false;try{i.frame();}catch(...){threw=true;}assert(threw&&calls==0);i.reg(0xa9,0xf6);
+ calls=0;i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{}};});b=ptd(4);b[3]=0;auto tail=ptd(0);tail[7]=1;b.insert(b.end(),tail.begin(),tail.end());i.submit(b);i.frame();assert(calls==0);out=i.read(b.size());assert(out[1]==0x50&&out[13]==8&&out[19]==1);i.reg(0xa9,0xf6);
  // Chained descriptors, inactive entries and per-frame interrupt transaction cap.
  i.ready([&](const auto&p){++calls;return Isp::HostReply{R::ack,p.toggle,{}};});b=ptd(4);b[3]=0;tail=ptd(10);tail[5]|=32;b.insert(b.end(),tail.begin(),tail.end());i.submit(b);i.frame();out=i.read(b.size());assert(out[0]==4&&out[12]==4&&(out[13]&8));
  // Work budget retains actual/toggle for explicit guest resubmission.
