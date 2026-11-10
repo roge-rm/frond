@@ -161,6 +161,37 @@ inline Imx1ProbeOptions wakeOptions() {
     o.gpioAInputKnown = true; o.gpioAInput = 0x80;
     return o;
 }
+// The sound setup the original ROM leaves running: SSI1 sending and DMA channel 10 refilling it
+// from a repeating buffer. Timer 2 wakes a loop of waits, and so does the end of the buffer when
+// its interrupt is enabled. The handler acknowledges both.
+inline std::vector<uint32_t> pcmGuest(uint32_t compare, uint32_t waits, uint32_t bytes, uint32_t pcdr, bool dmaInterrupt) {
+    auto words = setup();
+    if (pcdr) { load(words, 0, 0x0021b000); store(words, 0, 0x20, pcdr); }
+    load(words, 0, 0x00300000); store(words, 0, 0, 0x12340001); store(words, 0, 4, 0x12350003);
+    load(words, 0, 0x00209000); store(words, 0, 0, 1); store(words, 0, 8, 0x3ff);
+    load(words, 0, 0x00218000); store(words, 0, 8, 0x9900); store(words, 0, 0x14, 0x6100); store(words, 0, 0x20, 4);
+    store(words, 0, 0xc, 0xe8); store(words, 0, 0, 0x101); store(words, 0, 0, 0x102);
+    load(words, 0, 0x00209300); store(words, 0, 0, 0x00300000); store(words, 0, 4, 0x00218000); store(words, 0, 8, bytes);
+    store(words, 0, 0xc, 0x208c); store(words, 0, 0x10, 16); store(words, 0, 0x14, 8); store(words, 0, 0xc, 0x208d);
+    load(words, 0, 0x00218000); store(words, 0, 0xc, 0x2e8); store(words, 0, 8, 0x9b00);
+    load(words, 0, 0x00223000); store(words, 0, 8, 58);
+    if (dmaInterrupt) store(words, 0, 8, 61);
+    load(words, 0, 0x00203000); store(words, 0, 8, compare); store(words, 0, 0, 0x13);
+    words.push_back(0xe3a07000); words.push_back(0xe321f013);
+    words.push_back(0xee070f90);
+    words.push_back(0xe3570000 | waits); words.push_back(0xbafffffc);
+    // Read back what the wait moved: DMA status, the count left and the FIFO level.
+    load(words, 0, 0x00209000); words.push_back(0xe5904004);
+    load(words, 0, 0x00218000); words.push_back(0xe5905020);
+    load(words, 0, 0x00203000); words.push_back(0xe5908010);
+    words.push_back(0xe3a06055); words.push_back(0xe7f000f0);
+    assert(words.size() < 0x400 / 4);
+    words.resize(0x400 / 4, 0xe1a00000);
+    load(words, 9, 0x00203000); words.push_back(0xe599b014); words.push_back(0xe3a0a000); words.push_back(0xe589a014);
+    load(words, 9, 0x00209000); load(words, 11, 0x400); words.push_back(0xe589b004);
+    words.push_back(0xe2877001); words.push_back(0xe25ef004);
+    return words;
+}
 // The MCU PLL is off during each of two timed waits, so every wake also runs the nine CLK32 restart.
 inline std::vector<uint32_t> mcuOffGuest(uint32_t compare) {
     constexpr uint32_t cgm = 0x21b000;
@@ -374,9 +405,71 @@ inline void peripherals() {
     }
 }
 
+// Every peripheral field a state holds.
+inline std::vector<uint8_t> saved(Imx1Bootstrap b) {
+    std::vector<uint8_t> bytes;
+    StateWriter writer(bytes);
+    b.state(writer);
+    return bytes;
+}
+// The PCM transport the same way: SSI1 sending with DMA channel 10 refilling it, once and repeating,
+// beside timer 2. The whole saved state has to match after each advance.
+inline void pcm() {
+    for (bool repeat : {false, true}) for (uint32_t pcdr : {0u, 0x00100000u}) for (uint32_t bytes : {16u, 4096u}) {
+        Imx1Bootstrap stepped;
+        stepped.connectCpuInterrupts();
+        write(stepped, 0x0021b000, 0x57000003); write(stepped, 0x0021b020, pcdr);
+        write(stepped, 0x00223008, 58); write(stepped, 0x00223008, 61);
+        write(stepped, 0x00203008, 70001); write(stepped, 0x00203000, 0x13);
+        write(stepped, 0x00209000, 1); write(stepped, 0x00209008, 0x3ff);
+        write(stepped, 0x00218008, 0x9900); write(stepped, 0x00218014, 0x6100); write(stepped, 0x00218020, 4);
+        write(stepped, 0x0021800c, 0xe8);
+        for (unsigned i = 0; i < 8; ++i) write(stepped, 0x00218000, 0x100 + i);
+        for (unsigned i = 0; i < bytes / 4; ++i) write(stepped, 0x00300000 + i * 4, 0x12340001 + i * 0x10002);
+        write(stepped, 0x00209300, 0x00300000); write(stepped, 0x00209304, 0x00218000); write(stepped, 0x00209308, bytes);
+        write(stepped, 0x0020930c, repeat ? 0x208c : 0x2088);
+        write(stepped, 0x00209310, 16); write(stepped, 0x00209314, 8);
+        write(stepped, 0x0020930c, repeat ? 0x208d : 0x2089);
+        write(stepped, 0x0021800c, 0x2e8); write(stepped, 0x00218008, 0x9b00);
+        auto skipped = stepped;
+        uint64_t total = 0, advances = 0, longest = 0, ends = 0;
+        while (total < 5000000) {
+            const auto steps = std::min<uint64_t>(skipped.idleQuietHclk(), 1u << 30);
+            assert(steps && steps == std::min<uint64_t>(stepped.idleQuietHclk(), 1u << 30));
+            const auto before = shown(stepped);
+            for (uint64_t i = 0; i < steps; ++i) {
+                if (i) assert(shown(stepped) == before);
+                stepped.advanceHclkCycles(1);
+            }
+            if (steps > 1) skipped.advanceHclkCycles(uint32_t(steps - 1));
+            skipped.advanceHclkCycles(1);
+            assert(shown(stepped) == shown(skipped) && saved(stepped) == saved(skipped));
+            assert(stepped.pcmTransmittedWords() == skipped.pcmTransmittedWords() &&
+                   stepped.pcmLastTransmittedWord() == skipped.pcmLastTransmittedWord());
+            if (read(stepped, 0x00209004) & 0x400) ++ends;
+            for (auto* b : {&stepped, &skipped}) {
+                uint32_t value = 0;
+                assert(b->access(0x00203014, 4, false, value) == A::ok); write(*b, 0x00203014, 0);
+                write(*b, 0x00209004, 0x400);
+            }
+            total += steps; ++advances; longest = std::max(longest, steps);
+        }
+        if (stepped.pcmTransmittedWords() <= 1000 || ends < (repeat ? 2u : 1u) || advances * (repeat && bytes == 16 ? 8 : 1000) > total) {
+            std::fprintf(stderr, "PCM idle skip, repeat %d, PCDR %x, %u bytes: %llu clocks in %llu advances (longest %llu), %llu buffer ends, %llu words sent\n",
+                repeat, pcdr, bytes, (unsigned long long)total, (unsigned long long)advances, (unsigned long long)longest,
+                (unsigned long long)ends, (unsigned long long)stepped.pcmTransmittedWords());
+            assert(false);
+        }
+        std::printf("PASS: PCM idle skip matches %llu stepped clocks in %llu advances (longest %llu), %llu buffer ends, %llu words sent\n",
+            (unsigned long long)total, (unsigned long long)advances, (unsigned long long)longest, (unsigned long long)ends,
+            (unsigned long long)stepped.pcmTransmittedWords());
+    }
+}
+
 inline void run() {
     graphics();
     peripherals();
+    pcm();
     const auto options = wakeOptions();
     for (bool fast : {false, true}) {
         const auto timer = wakeGuest(100000, 0, 4);
@@ -398,9 +491,18 @@ inline void run() {
         assert(off.stop == Imx1ProbeStop::unsupportedInstruction && off.irqs == 2 && off.idle > 200000);
     }
     Imx1ProbeOptions plain; plain.bootstrapPeripherals = true;
+    for (bool fast : {false, true}) for (bool dmaInterrupt : {false, true}) for (uint32_t pcdr : {0u, 0x00100000u})
+    for (auto script : {Script::plain, Script::slices, Script::bounded}) {
+        if (fast && script != Script::plain) continue;
+        const auto sound = compare("pcm dma", pcmGuest(300000, 6, 4096, pcdr, dmaInterrupt), plain, fast, script,
+                                   !fast && script == Script::plain);
+        assert(sound.stop == Imx1ProbeStop::unsupportedInstruction && sound.irqs >= 6 && sound.idle > 500000);
+        // Passes are a few per timer wake and buffer end, never one per word.
+        assert(sound.advances * 500 < sound.idle);
+    }
     const auto watchdog = compare("watchdog bound", watchdogGuest(), plain, false, Script::plain, true);
     assert(watchdog.stop == Imx1ProbeStop::unsupportedPeripheral && watchdog.status == A::possibleWatchdogTimeout);
-    std::puts("PASS: idle skip and stepped idle agree on results, status, time, observers and diagnostics for timer, RTC, GPIO, MCU restart and watchdog waits, with idle, work and deadline bounds inside a wait");
+    std::puts("PASS: idle skip and stepped idle agree on results, status, time, observers and diagnostics for timer, RTC, GPIO, MCU restart, PCM DMA and watchdog waits, with idle, work and deadline bounds inside a wait");
 }
 }
 #endif
