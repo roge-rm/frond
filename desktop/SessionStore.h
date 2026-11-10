@@ -761,8 +761,11 @@ inline QString cancelledText() { return QStringLiteral("Cancelled."); }
 // the failure; empty when the log has none.
 inline QString refusal(const QString& log) {
     static const QString prefix = QStringLiteral("session refused: ");
+    static const QString remount = QStringLiteral("failed to remount SD card: ");
     const auto lines = log.split('\n');
     for (auto i = lines.size() - 1; i >= 0; --i) {
+        if (lines[i].startsWith(remount))
+            return QStringLiteral("Frond couldn't open this session: its card isn't the one it was saved with.");
         if (!lines[i].startsWith(prefix)) continue;
         auto reason = lines[i].mid(prefix.size()).trimmed();
         if (reason.startsWith(QStringLiteral("linked card committed history")))

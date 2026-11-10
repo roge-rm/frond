@@ -234,6 +234,49 @@ def tg50(case, found):
         txcase.refused(f, '--card-swap', '--card-identity', IDENTITY, why='Memory Stick Pro is not supported')
 
 
+def stick_reload_swap(case):
+    """A classic stick saved, loaded and saved again, then changed while off: the core's SD slot
+    flag from the second save has nothing to do with the stick, so the changed stick resumes as a
+    swap instead of failing to remount an SD card."""
+    a = case.machine('reload-a')
+    run = case.run(a)
+    try:
+        run.require('ms-create', '16')
+        run.require('save', a)
+    finally:
+        run.close()
+    run = case.run(a)
+    try:
+        smoke.need(card_state(run, 'ms') == 'inserted', 'reload: the saved stick is not in')
+        run.require('save', a)
+    finally:
+        run.close()
+    settled(a, 'ms.frondms')
+    # Another stick, as the desktop's card library makes one, put in while off.
+    (a / 'ms.frondms').unlink()
+    made = subprocess.run([str(smoke.CORE), '--card', 'make', 'ms', '16', str(a / 'ms.frondms')],
+                          capture_output=True, text=True, timeout=120)
+    smoke.need(made.returncode == 0, f'reload: card make failed: {made.stdout[-200:]}')
+    swap = ['--card-swap', '--card-identity', IDENTITY]
+    env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
+    loaded = subprocess.run([str(smoke.CORE), str(a), '--device', case.device, *swap, '--no-sound', '--run-for', '1'],
+                            capture_output=True, text=True, env=env, timeout=120)
+    (case.root / 'reload-swap-load.log').write_text(loaded.stdout + loaded.stderr)
+    smoke.need(loaded.returncode == 0, 'reload: the changed stick was refused: ' +
+               ' '.join(line for line in loaded.stderr.splitlines() if 'card' in line or 'stick' in line.lower()))
+    run = case.run(a, *swap)
+    try:
+        smoke.need(card_state(run, 'ms', 'inserted') == 'inserted', 'reload: the changed stick did not go in')
+        run.require('save', a)
+    finally:
+        run.close()
+    run = case.run(a)
+    try:
+        smoke.need(card_state(run, 'ms') == 'inserted', 'reload: the changed stick did not stay in after a save')
+    finally:
+        run.close()
+
+
 def black(rows):
     """The LCD is off (RGBA rows)."""
     return rows is None or not any(max(row[i] for i in range(0, len(row), 4)) > 40 or
@@ -552,7 +595,11 @@ def format_stick(run, work):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--device', action='append', choices=DEVICES)
+    parser.add_argument('--stick-reload-only', action='store_true',
+                        help='only the TG50 case of a classic stick changed after a load and save')
     args = parser.parse_args()
+    if args.stick_reload_only:
+        args.device = ['sony-clie-tg50']
     found = sessions(args.device or DEVICES)
     if not found:
         print('card swap on firmware: SKIP, no smoke sessions (make smoke-sessions or FROND_ARM_SESSIONS)')
@@ -568,10 +615,15 @@ def main():
         case = Case(device, found[device], root)
         case.notes = []
         try:
-            if device == 'palm-tx':
+            if args.stick_reload_only:
+                stick_reload_swap(case)
+            elif device == 'palm-tx':
                 tx(case, found)
-            if device == 'sony-clie-tg50':
+            if args.stick_reload_only:
+                pass
+            elif device == 'sony-clie-tg50':
                 tg50(case, found)
+                stick_reload_swap(case)
                 stick_counter(case, 'classic')
                 stick_counter(case, 'pro')
             else:

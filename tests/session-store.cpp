@@ -194,6 +194,8 @@ class SessionStoreTest : public QObject {
         QCOMPARE(frondSessions::refusal("session refused: device alphasmart-dana doesn't match\n"),
                  QString("Frond couldn't open this session: device alphasmart-dana doesn't match."));
         QVERIFY(frondSessions::refusal("Segmentation fault\n").isEmpty());
+        QCOMPARE(frondSessions::refusal("using RAM size: 1\n\nfailed to remount SD card: session and card image do not match\nexit 1"),
+                 QString("Frond couldn't open this session: its card isn't the one it was saved with."));
     }
     void headers() {
         write(folder() + "/a.frond", header(6, "palm-tx"));
