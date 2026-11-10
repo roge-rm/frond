@@ -65,7 +65,8 @@ inline Header inspect(const QString& path) {
     while (!file.atEnd()) { const auto bytes=file.read(65536); if (bytes.isEmpty()) return out; checksum=hash(bytes,checksum); }
     if (checksum!=u32(descriptor,4) || !file.seek(out.offset)) return out;
     const auto machine=file.read(40);
-    if (machine.size()!=40 || u32(machine,0)!=0x19800819u || u32(machine,4)<6 || u32(machine,4)>8 ||
+    // The newest version is left to frondSessions::openable, which knows it.
+    if (machine.size()!=40 || u32(machine,0)!=0x19800819u || u32(machine,4)<6 ||
         !isDana(machine.mid(8,32).split('\0').first())) return out;
     out.device=QString::fromLatin1(machine.mid(8,32).split('\0').first());
     out.version=u32(machine,4); out.valid=true;
