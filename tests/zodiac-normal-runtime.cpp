@@ -153,6 +153,50 @@ void stickRamp() {
     port.refuse = false; input.pump(port); assert(port.stickX == 100);
 }
 
+// Guest time the pen or key 3 stays down when the host holds it hostMsec, with input pumped every
+// 12 ms of host time and the guest passing guestTicks in each.
+uint64_t guestHold(bool pen, uint64_t hostMsec, uint64_t guestTicks) {
+    FakePort port;
+    ZodiacInput input;
+    uint64_t host = 5000, downAt = 0;
+    input.hostTime(host); input.pump(port);
+    assert(pen ? input.pen(port, true, 10, 20) : input.key(port, 3, true));
+    downAt = input.time();
+    for (;;) {
+        host += 12; input.advance(guestTicks); input.hostTime(host); input.pump(port);
+        if (host - 5000 < hostMsec) { assert(pen ? port.penDown : port.down[3]); continue; }
+        if (pen ? input.pen(port, false, 0, 0) : input.key(port, 3, false)) break;
+        assert(input.time() - downAt < 10 * ZodiacInput::ticksPerSecond);
+    }
+    assert(pen ? !port.penDown : !port.down[3]);
+    return input.time() - downAt;
+}
+
+// A tap lasts as long in guest time as the host held it, however slowly the guest runs. The ROM needs
+// the pen down for 108 ms of its own time when a tap lands in its battery poll.
+void guestTimeHolds() {
+    constexpr uint64_t second = ZodiacInput::ticksPerSecond, needed = second * 108 / 1000;
+    // Guest speeds from a two hundredth of real time to real time (393 ticks in 12 ms).
+    for (const uint64_t ticks : {2u, 7u, 40u, 131u, 393u}) {
+        const uint64_t slack = ticks + second * 12 / 1000;
+        // A 100 ms tap is held 125 ms of guest time, enough for the ROM.
+        uint64_t held = guestHold(true, 100, ticks);
+        assert(held >= ZodiacInput::minimumPenHoldTicks && held >= needed && held < ZodiacInput::minimumPenHoldTicks + slack);
+        // A 300 ms tap is held 300 ms of guest time.
+        held = guestHold(true, 300, ticks);
+        assert(held + slack >= second * 300 / 1000 && held < second * 300 / 1000 + slack);
+        // A long press is owed half a second, and ends with the host's when the guest keeps up.
+        held = guestHold(true, 2000, ticks);
+        assert(held >= ZodiacInput::longestOwedHoldTicks);
+        if (ticks < 98) assert(held < ZodiacInput::longestOwedHoldTicks + slack);
+        // Keys are held the same way, 100 ms at least.
+        held = guestHold(false, 30, ticks);
+        assert(held >= ZodiacInput::minimumHoldTicks && held < ZodiacInput::minimumHoldTicks + slack);
+        held = guestHold(false, 300, ticks);
+        assert(held + slack >= second * 300 / 1000 && held < second * 300 / 1000 + slack);
+    }
+}
+
 void holds() {
     constexpr uint64_t hold = ZodiacInput::minimumHoldTicks;
     FakePort port;
@@ -184,7 +228,8 @@ void holds() {
     assert(input.pen(port, false, 0, 0) && !port.penDown);
     assert(input.pen(port, true, 10, 20) && port.penDown && !input.pen(port, false, 0, 0));
     assert(input.pen(port, true, 30, 40) && port.penX == 30);
-    input.advance(hold); assert(input.pen(port, false, 0, 0) && !port.penDown && port.penX == 30 && port.penY == 40);
+    input.advance(ZodiacInput::minimumPenHoldTicks - 1); assert(!input.pen(port, false, 0, 0));
+    input.advance(1); assert(input.pen(port, false, 0, 0) && !port.penDown && port.penX == 30 && port.penY == 40);
     // The stick moves a step at a time towards where the host has it.
     input.stick(100, -200); input.pump(port); assert(port.stickX == 100 && port.stickY == -100 && !input.stickSettled());
     input.pump(port); assert(port.stickY == -100);
@@ -280,6 +325,7 @@ int main() {
     stickRamp();
     eeprom();
     holds();
+    guestTimeHolds();
     buttonsFromReset();
     std::puts("PASS: the Zodiac's view turn, pen samples, stick offsets, EEPROM identity, input holds and released buttons");
     machine();
