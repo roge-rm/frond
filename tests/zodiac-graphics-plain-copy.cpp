@@ -166,7 +166,7 @@ void guards() {
         {0x42e,1},{0x42f,1},{0x430,1},{0x431,1},{0x432,1},{0x433,1},
         {0x401,0xe01001},{0x401,0xfffffffe},{0x401,0x15fffc},{0x402,0},{0x402,8193},{0x402,7},
         {0x46b,0xe03001},{0x46b,0xfffffffe},{0x46b,destination+64},{0x46c,0},{0x46c,8193},{0x46c,4},
-        {0x470,0x0004000d},{0x470,0x00140006},{0x46f,0x80000000}}) {
+        {0x46f,0x80000000}}) {
         auto bad = packet(); change(bad,item.first,item.second); reject(bad);
     }
     for (auto item : {std::pair<unsigned,uint32_t>{20,0xc0031b00},{21,0xffff0000},
@@ -191,6 +191,29 @@ void guards() {
     assert(f.state.advanceCpuCycles(uint32_t(duration+f.commands.duration())));
     assert(f.commands.complete(f.state,f.eim,f.memory) == A::ok);
     assert(f.read(destination) == 0xffff); f.write(destination,0xa55a); check(f);
+}
+// Scissor word 470 is the first column and row not drawn, for copies and fills alike.
+void scissor() {
+    Fixture f; planes(f);
+    // The 3 by 2 copy to x 5, y 3 cut at column 7 and row 4: two pixels of its first row.
+    auto p = packet(); change(p,0x470,0x00040007);
+    assert(f.append(p) == A::ok && f.commands.duration() == p.size()+3);
+    f.finish();
+    for (unsigned i = 0; i < 13*8; ++i)
+        assert(f.read(destination+i*2) == (i == 44 ? 0u : i == 45 ? 0xf800u : 0xa55au));
+    // A scissor that ends where the copy starts draws nothing.
+    planes(f); p = packet(); change(p,0x470,0x00140005);
+    assert(f.append(p) == A::ok && f.commands.duration() == p.size()+1);
+    f.finish();
+    for (unsigned i = 0; i < 13*8; ++i) assert(f.read(destination+i*2) == 0xa55a);
+    // A fill of 6 by 4 at x 1, y 1 against a scissor of x 2..4, y 2..3.
+    planes(f);
+    assert(f.append({0x41b,0x55e0b4df,0x4b2,0x00f00a00,0x401,destination,0x402,13,0x46f,0x00020002,0x470,0x00040005,0x41f,0x07e0,
+        0xc0011a00,0x00010001,0x00060004},0x200b0200) == A::ok);
+    f.finish();
+    for (unsigned y = 0; y < 8; ++y)
+        for (unsigned x = 0; x < 13; ++x)
+            assert(f.read(destination+(y*13+x)*2) == (x >= 2 && x < 5 && y >= 2 && y < 4 ? 0x07e0u : 0xa55au));
 }
 // The fill routine's frame of up to four strips in one packet, and ROP3 5a (destination xor pattern).
 void fills() {
@@ -407,6 +430,6 @@ void privateCapture() {
 }
 }
 int main() {
-    geometry(); guards(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
+    geometry(); guards(); scissor(); fills(); stretch(); scanStatus(); executionAndReset(); privateCapture();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }

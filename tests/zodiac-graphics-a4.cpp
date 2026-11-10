@@ -269,7 +269,7 @@ int main() {
             {0x416,1},{0x416,0xffff0000},{0x420,7},{0x421,3},{0x419,0},{0x419,8193},
             {0x418,source+1},{0x418,0xfffffe},{0x46b,source+2},{0x46c,25},{0x401,destination+1},
             {0x401,0xfffffffe},{0x402,0},{0x402,8193},{0x402,7},{0x418,destination},
-            {0x4a1,1},{0x4a0,1},{0x42e,1},{0x41d,1},{0x30f,0},{0x470,0x00010004}}) {
+            {0x4a1,1},{0x4a0,1},{0x42e,1},{0x41d,1},{0x30f,0}}) {
             auto bad = valid; replace(bad,change.first,change.second); reject(bad);
         }
         // Exercise bounds and overlap after both copies of source state agree.

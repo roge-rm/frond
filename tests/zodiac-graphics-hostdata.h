@@ -197,9 +197,20 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
     auto bad = small; bad.push_back(0xf800f800); reject(bad);
     bad = small; bad.insert(bad.end(),small.begin()+8,small.end()); reject(bad);
     bad = small; bad.insert(bad.end(),{0x401,0xffffffff,0xc0011a00,0,0x00020001}); reject(bad);
-    // Interior upper edges, including odd visible-width padding, remain unqualified.
-    for (uint32_t clip : {0x00050003u,0x00040005u,0x00040003u}) {
-        auto clipped = small; clipped[4] = clip; reject(clipped);
+    // A picture 3 wide is sent 4 wide and 470 trims the last column, as the driver does for odd widths.
+    {
+        auto odd = small; odd[4] = 0x00050004;
+        run(odd,9);
+        for (unsigned y = 2; y < 5; ++y) {
+            for (unsigned x = 1; x < 4; ++x) assert(read(0xf51000+y*640+x*2) == 0xf800);
+            assert(read(0xf51000+y*640) == 0 && read(0xf51000+y*640+8) == 0);
+        }
+        clearSurface();
+        // The bottom edge the same way: rows 2 and 3 of 2..4.
+        odd[4] = 0x00040005;
+        run(odd,8);
+        assert(read(0xf51000+3*640+4*2) == 0xf800 && read(0xf51000+4*640+2) == 0 && read(0xf51000+4*640+8) == 0);
+        clearSurface();
     }
     reject(capturedState);
     reject({0xc0011a00,0,0x00020001});
@@ -429,11 +440,10 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
         bad.insert(bad.end(),{0x4b1,datatype});
         reject(packet(bad,32,5,32,2,two));
     }
-    // RGB565 rows keep their own guard on an interior upper scissor edge.
-    { auto bad = packet(header(0x00050020,0x00060025,0x5798b4df),32,5,32,2,std::vector<uint32_t>(32,0));
-      bad[16] = 0xc0211900; reject(bad);
-      bad[6] = 0x00070040; auto candidate = ready; auto work = readyCommands;
-      assert(submit(bad,candidate,work) == A::ok); }
+    // RGB565 rows take a scissor edge inside the rectangle like the packed rows do.
+    { auto rows = packet(header(0x00050020,0x00060025,0x5798b4df),32,5,32,2,std::vector<uint32_t>(32,0));
+      rows[16] = 0xc0211900; auto candidate = ready; auto work = readyCommands;
+      assert(submit(rows,candidate,work) == A::ok && work.duration() == rows.size()+1+5); }
     for (unsigned x = 0; x < 320; ++x) for (unsigned y = 0; y < 110; ++y) assert(read(x,y) == 0x1234);
     {
         // Replay of the 9 November 2026 empty-card run's terminal submission (steps 411540176 on):

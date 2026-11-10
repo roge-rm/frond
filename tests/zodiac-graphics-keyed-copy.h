@@ -141,7 +141,7 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
         assert(state.clockState().count() == clock && state.interruptState().pendingValue() == pending);
         assert(read(0xf51002) == 0 && read(destination+2) == 0xa55a);
     };
-    for (auto change : {std::pair<unsigned,uint32_t>{1,0x4598b4de},{2,0x00b400c5},{4,0xfffffffe},
+    for (auto change : {std::pair<unsigned,uint32_t>{1,0x4598b4de},{4,0xfffffffe},
          {5,0},{5,8193},{7,0xf50fff},{8,0},{8,3},{8,8193},{10,0xffff},{11,0xc0041c00},
          {12,0x01000004},{12,0x02000005},{13,0x10000},{14,1},{15,0xffff0000},{15,0x013f0000},
          {16,0xffffffff},{17,0},{17,0xffff0001}}) {

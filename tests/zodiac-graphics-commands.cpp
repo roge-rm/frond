@@ -147,7 +147,8 @@ static void checkCommands(bool packedMono) {
     auto clipped = batch;
     clipped[4] = 0x1234;
     clipped[13] = 0x00030002;
-    clipped[14] = 0x00030002;
+    // 470 holds the first column and row not drawn.
+    clipped[14] = 0x00040003;
     clipped[45] = 0x00010002;
     clipped[46] = 0x00020003;
     attempt(clipped,true);
