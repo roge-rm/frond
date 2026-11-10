@@ -484,8 +484,9 @@ def check_arm(core, session, root):
     c = Client(core, [copy], root, 'arm')
     try:
         device = c.ok('device-state')
-        # The TG50 has a Memory Stick slot; the others answer the ms- commands as absent.
-        unsupported = [] if device == 'sony-clie-tg50' else [('ms-state', ''), ('ms-files', '/')]
+        # The TG50 has a Memory Stick slot and no SD slot; the others answer the ms- commands as absent.
+        unsupported = ([('sd-create', '32'), ('sd-eject', ''), ('sd-take-out', ''), ('sd-export', str(work / 'sd.img'))]
+                       if device == 'sony-clie-tg50' else [('ms-state', ''), ('ms-files', '/')])
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
         # The E3 ROM has no Bluetooth stack, so the E3 has no Bluetooth or infrared phone.
@@ -591,7 +592,28 @@ def check_arm(core, session, root):
     gone = work / 'gone'
     shutil.copytree(saved.parent, gone, ignore=shutil.ignore_patterns('*.tmp-*'))
     disconnect(core, [gone / saved.name], gone / saved.name, root, 'arm')
+    if device == 'sony-clie-tg50':
+        stick_console(core, saved, work)
     return device
+
+
+def stick_console(core, saved, work):
+    """The console's SD commands refuse on a Memory Stick device, whose card store holds the stick."""
+    folder = work / 'sd-console'
+    shutil.copytree(saved.parent, folder, ignore=shutil.ignore_patterns('*.tmp-*'))
+    image = work / 'sd32.img'
+    with image.open('wb') as f:
+        f.truncate(32 << 20)
+    palm_boot.CORE = Path(core).resolve()
+    c = palm_boot.Core([folder / saved.name], work / 'sd-console.log')
+    try:
+        # The start's own lines first, so a reply below isn't one of them.
+        c.send('', 'using RAM size')
+        for command in (f'mount "{image}"', 'unmount', f'save-sd "{work / "out.img"}"'):
+            assert 'This device has no SD slot.' in c.send(command, ('slot', 'size', 'mounted', 'wrote', 'failed')), command
+        assert not (work / 'out.img').exists()
+    finally:
+        assert c.close() == 0
 
 
 def core_locked(target):
