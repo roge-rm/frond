@@ -1933,9 +1933,8 @@ for line in s.makefile('rb'):
         const auto saved = frondSessions::describe(session);
         QVERIFY(saved.saved && !saved.old); QCOMPARE(saved.device, QString("tapwave-zodiac-2"));
         if (launcher) {
-            // The pen held down until a battery poll comes stops the machine, for now. The stop is
-            // shown with its reason and the session stays as it was saved.
-            const auto before = digest(session);
+            // The pen held down across the ROM's battery polls (one every 5 s of guest time) doesn't stop
+            // the machine, and the session saves again afterwards.
             QSettings().setValue("resume", true);
             MainWindow window(core); window.show();
             QTimer poll; poll.setInterval(50);
@@ -1948,21 +1947,23 @@ for line in s.makefile('rb'):
             at(240, 300, x, y);
             if (QTest::currentTestFailed()) return;
             QCOMPARE(QProcess::execute("xdotool", {"mousemove", "--window", palm, x, y, "mousedown", "1"}), 0);
-            QTRY_VERIFY_WITH_TIMEOUT(!errors.isEmpty(), 400000);
-            QProcess::execute("xdotool", {"mouseup", "1"});
-            QVERIFY2(errors.first().startsWith("The Tapwave Zodiac 2 stopped: unsupported-peripheral"), qPrintable(errors.join('\n')));
-            QTRY_VERIFY_WITH_TIMEOUT(!reset->isEnabled(), 30000);
-            shot(window, "5-stopped.png");
-            errors.clear();
+            QTest::qWait(90000);
+            QCOMPARE(QProcess::execute("xdotool", {"mouseup", "1"}), 0);
+            QTest::qWait(5000);
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            QVERIFY(reset->isEnabled());
+            shot(window, "5-pen-held.png");
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
             poll.stop();
-            QCOMPARE(digest(session), before);
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            const auto held = frondSessions::describe(session);
+            QVERIFY(held.saved && !held.old); QCOMPARE(held.device, QString("tapwave-zodiac-2"));
             if (!shots.isEmpty()) {
-                QFile log(shots + "/stopped-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+                QFile log(shots + "/pen-held-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
             }
         }
         {
-            // The saved session runs again where it stopped, then a reset starts the boot over.
+            // The saved session runs again where it left off, then a reset starts the boot over.
             QSettings().setValue("resume", true);
             MainWindow window(core); window.show();
             QTimer poll; poll.setInterval(50);
