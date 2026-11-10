@@ -1,0 +1,163 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4310,27 +4310,31 @@
+ // JIT glue. The JIT runs only outside injected calls, the debugger and native PC breaks,
+ // with the MMU, and only while no slow path reason is set.
+ 
+-bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf) {
+-    if (va & (size - 1)) return false;
+-    uint_fast8_t fsr;
++bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr) {
++    if (va & (size - 1)) {
++        *fsr = 0;
++        return false;
++    }
+     switch (size) {
+-        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, false>(cpu, buf, va, cpu->privileged, &fsr);
+-        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, false>(cpu, buf, va, cpu->privileged, &fsr);
+-        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, false>(cpu, buf, va, cpu->privileged, &fsr);
+-        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, false>(cpu, buf, va, cpu->privileged, &fsr);
++        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, false>(cpu, buf, va, cpu->privileged, fsr);
++        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, false>(cpu, buf, va, cpu->privileged, fsr);
++        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, false>(cpu, buf, va, cpu->privileged, fsr);
++        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, false>(cpu, buf, va, cpu->privileged, fsr);
+     }
+     return false;
+ }
+ 
+-bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf) {
+-    if (va & (size - 1)) return false;
+-    uint_fast8_t fsr;
++bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr) {
++    if (va & (size - 1)) {
++        *fsr = 0;
++        return false;
++    }
+     void *b = const_cast<void *>(buf);
+     switch (size) {
+-        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, true>(cpu, b, va, cpu->privileged, &fsr);
+-        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, true>(cpu, b, va, cpu->privileged, &fsr);
+-        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, true>(cpu, b, va, cpu->privileged, &fsr);
+-        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, true>(cpu, b, va, cpu->privileged, &fsr);
++        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, true>(cpu, b, va, cpu->privileged, fsr);
++        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, true>(cpu, b, va, cpu->privileged, fsr);
++        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, true>(cpu, b, va, cpu->privileged, fsr);
++        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, true>(cpu, b, va, cpu->privileged, fsr);
+     }
+     return false;
+ }
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -33,7 +33,7 @@
+ 
+ // Counters for FROND_JIT_STATS=1.
+ struct Stats {
+-    uint64_t runs = 0, ran = 0, interpret = 0, halt = 0, fault = 0, invalAll = 0, invalRange = 0, clears = 0;
++    uint64_t runs = 0, ran = 0, interpret = 0, halt = 0, fault = 0, aborts = 0, invalAll = 0, invalRange = 0, clears = 0;
+     uint64_t cold = 0;  // runs ended at code not compiled yet
+     uint64_t queued = 0;  // of those, at code waiting for the compile thread
+     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+@@ -96,11 +96,11 @@
+                 (unsigned long long)(compiled.ahead_compiled - compiled.ahead_used),
+                 (unsigned long long)compiled.ahead_skipped);
+         fprintf(stderr,
+-                "jit: runs %llu ran %llu interpret %llu cold %llu queued %llu halt %llu fault %llu invalAll %llu "
++                "jit: runs %llu ran %llu interpret %llu cold %llu queued %llu halt %llu fault %llu aborts %llu invalAll %llu "
+                 "invalRange %llu clears %llu pageClears %llu pageFills %llu reads %llu writes %llu\n",
+                 (unsigned long long)runs, (unsigned long long)ran, (unsigned long long)interpret, (unsigned long long)cold,
+                 (unsigned long long)queued,
+-                (unsigned long long)halt, (unsigned long long)fault, (unsigned long long)invalAll,
++                (unsigned long long)halt, (unsigned long long)fault, (unsigned long long)aborts, (unsigned long long)invalAll,
+                 (unsigned long long)invalRange, (unsigned long long)clears, (unsigned long long)pageClears,
+                 (unsigned long long)pageFills, (unsigned long long)reads, (unsigned long long)writes);
+         fprintf(stderr,
+@@ -143,8 +143,11 @@
+ 
+ constexpr HaltReason kInterpret = HaltReason::UserDefined2;
+ constexpr HaltReason kSlowPath = HaltReason::UserDefined3;
+-// A data access that faults ends the run on that instruction (check_halt_on_memory_access),
+-// and the interpreter runs it again to take the abort.
++// A data access that faults ends the run on that instruction (check_halt_on_memory_access)
++// with the fault in Env::dataAbort, and the CPU takes the abort there without running the
++// instruction again (FROND_JIT_ABORT): the accesses before it in the same instruction (an
++// LDM or STM's first words) are done once, as in Exact. An unaligned access is refused
++// before it's tried, and the interpreter runs the instruction instead.
+ constexpr HaltReason kFault = HaltReason::MemoryAbort;
+ // The block at PC isn't compiled yet (ShouldCompile), for the interpreter.
+ constexpr HaltReason kCold = HaltReason::UserDefined4;
+@@ -460,6 +463,17 @@
+ 
+     void Fault() { jit->HaltExecution(kFault); }
+ 
++    // A failed access: a guest fault (fsr set) for the data abort, or a refused one for
++    // the interpreter. The run leaves at the check right after the access, so it's the
++    // instruction's last; the first fault is kept all the same.
++    [[gnu::cold, gnu::noinline]] void AccessFailed(uint32_t va, unsigned size, bool write, uint_fast8_t fsr) {
++        if (fsr && !dataAbort.set) {
++            stats.aborts++;
++            dataAbort = {true, {va, uint8_t(fsr), uint8_t(size), write}};
++        }
++        Fault();
++    }
++
+     // Interpret first: a block is compiled once its start has been reached `hot` times.
+     // Before that the run ends there and the interpreter runs the code up to its next taken
+     // branch, so code that runs once (an application starting) is never compiled. Counts are
+@@ -491,8 +505,9 @@
+     T Read(A32::VAddr va) {
+         T v{};
+         stats.reads++;
+-        if (!cpuJitRead(cpu, va, sizeof(T), &v)) {
+-            Fault();
++        uint_fast8_t fsr;
++        if (!cpuJitRead(cpu, va, sizeof(T), &v, &fsr)) {
++            AccessFailed(va, sizeof(T), false, fsr);
+             return 0;
+         }
+         // Only aligned reads land here for pages the table could hold; fill it.
+@@ -514,8 +529,9 @@
+     template <typename T>
+     void Write(A32::VAddr va, T v) {
+         stats.writes++;
+-        if (!cpuJitWrite(cpu, va, sizeof(T), &v)) {
+-            Fault();
++        uint_fast8_t fsr;
++        if (!cpuJitWrite(cpu, va, sizeof(T), &v, &fsr)) {
++            AccessFailed(va, sizeof(T), true, fsr);
+             return;
+         }
+         // A RAM page the guest may store to in this mode: map it writable. Unaligned stores
+@@ -1247,6 +1263,7 @@
+     e.budget = cycles;
+     e.ran = 0;
+     e.undoTick = false;
++    e.dataAbort.set = false;
+     const HaltReason hr = jit.Run();
+     jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege);
+     if (e.rewindPc != ~0u) {
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -14,7 +14,7 @@
+ enum FrondJitStop {
+     FROND_JIT_BUDGET,     // ran out of cycles, or the privilege changed
+     FROND_JIT_INTERPRET,  // regs[15] is an instruction the interpreter has to run, or one
+-                          // whose data access faulted
++                          // whose unaligned data access the JIT refused
+     FROND_JIT_HALT,       // a callback set the slow path
+     FROND_JIT_FAULT,      // a data access faulted; the guest state is not exact
+     FROND_JIT_COLD,       // regs[15] starts code not compiled yet, for the interpreter to run
+@@ -68,9 +68,11 @@
+ // The same for the one RAM page at hostPage, after a line of it was flagged.
+ void jitWriteProtectPage(FrondJit *jit, uint8_t *hostPage);
+ 
+-// Provided by CPU.cpp for the JIT's callbacks. Accesses use the current privilege.
+-bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf);
+-bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf);
++// Provided by CPU.cpp for the JIT's callbacks. Accesses use the current privilege. On a
++// guest fault they return false with *fsr set; an access not aligned to its size is
++// refused without trying it, with *fsr 0, for the interpreter.
++bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr);
++bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr);
+ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
+ // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
+ // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the

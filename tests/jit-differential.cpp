@@ -106,7 +106,7 @@ struct WmmxSaver {
     void Save(T& s) { pxa270wmmxSave(w, s); }
 };
 
-// A device page at kDevice (mapped at virtual 0x2f000 in directed cases, 0x30000 unmapped) that
+// A device page at kDevice (mapped at virtual 0x2f000, 0x30000 unmapped) that
 // counts the accesses it takes, as a FIFO or doorbell register would see them. Reads return
 // the count so far. Offsets 0x800-0x80f refuse every access (a bus error, no side effect).
 constexpr uint32_t kDevice = 0x40000000;
@@ -403,10 +403,9 @@ struct Case {
     uint32_t cpsr = 0;
     bool codeCacheable = false;
     bool alignCheck = false;
-    // The device page at 0x2f000, directed cases only: the generated ones could reach it, and
-    // an LDM or STM that crosses from a device into an abort is re-run by the interpreter
-    // after the JIT's partial transfer, so the device sees the first words twice.
-    bool devicePage = false;
+    // The device page at 0x2f000 (0x30000 stays unmapped), so a transfer that crosses from
+    // it into an abort shows whether the device saw its first words once, as in Exact.
+    bool devicePage = true;
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
 };
@@ -1952,6 +1951,21 @@ bool directed(Engines& e) {
         {"iwmmxt wldrd and wstrd on a device",
          {0xedd10100, 0xec532000, 0xedc10100, 0xedd10100}, false, SVC, {{1, 0x2f100}},
          {{Expect::REG, 2, 1}, {Expect::REG, 3, 2}, {Expect::DEVICE, 0, 4}, {Expect::DEVICE, 1, 2}}},
+        // LDM and STM that fault part-way after device words: each word before the fault is
+        // read or written once, as in Exact (the JIT takes the abort without a re-run).
+        {"ldmia r1, {r2-r5} from a device into a hole", {0xe891003c}, false, SVC, {{1, 0x2fff8}},
+         {{Expect::REG, 1, 0x2fff8}, {Expect::DEVICE, 0, 2}, {Expect::FSR, 0, 0x07, 0xff}, {Expect::FAR, 0, 0x30000}}},
+        {"stmia r1!, {r2-r5} from a device into a hole", {0xe8a1003c}, false, SVC, {{1, 0x2fff8}},
+         {{Expect::REG, 1, 0x2fff8}, {Expect::DEVICE, 1, 2}, {Expect::FAR, 0, 0x30000}}},
+        {"user ldmia r1, {r2-r5} into a refused device register", {0xe891003c}, false, USR, {{1, 0x2f7f8}},
+         {{Expect::DEVICE, 0, 2}, {Expect::FSR, 0, 0x0a, 0x0f}, {Expect::FAR, 0, 0x2f800}}},
+        {"stmdb r1!, {r2-r5} from a device down", {0xe921003c}, false, SVC, {{1, 0x30008}}, {{Expect::REG, 1, 0x30008}}},
+        {"thumb ldmia r0!, {r1-r3} from a device into a hole", {0xc80e}, true, USR, {{0, 0x2fff8}},
+         {{Expect::REG, 0, 0x2fff8}, {Expect::DEVICE, 0, 2}}},
+        {"thumb push {r0-r3} from a device into a hole", {0xb40f}, true, SVC, {{13, 0x30008}},
+         {{Expect::REG, 13, 0x30008}}},
+        {"ldr r0, [r1] from a refused device register", {0xe5910000}, false, SVC, {{1, 0x2f804}},
+         {{Expect::DEVICE, 0, 0}, {Expect::FSR, 0, 0x0a, 0x0f}, {Expect::FAR, 0, 0x2f804}}},
         // CPAR bit 1 off: WLDRD (cp1) at 0x10008 is undefined, wldrb (cp0) still runs.
         {"iwmmxt cpar off for a load",
          {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
