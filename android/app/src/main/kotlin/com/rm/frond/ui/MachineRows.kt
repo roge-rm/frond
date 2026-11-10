@@ -124,7 +124,7 @@ fun MachineAudioPreviewRow(
     }
 }
 
-// Exact or Fast. Only shown in debug builds until the Fast engine is qualified.
+// Exact or Fast, for ARM devices.
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     MachineChoiceRow("Engine", settings.engine, Engine.entries, { it.label }, listStyle) { onChange(settings.copy(engine = it)) }
