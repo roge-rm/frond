@@ -1034,14 +1034,30 @@ struct Gen {
     uint32_t wmmxCdp() { return wmmxValid(0x0e000000, 0x00fff1ef); }
     uint32_t wmmxMrc(uint32_t rd) { return wmmxValid(0x0e100010 | (rd << 12), 0x00ef01ef); }
 
+    // WLDR or WSTR the JIT runs: pre-indexed with or without writeback, or post-indexed,
+    // either direction, any size, base rn, cond AL unless given.
+    uint32_t wmmxMem(uint32_t rn, bool cp1, bool N, bool load, uint32_t imm8, uint32_t cnd = AL) {
+        const bool p = g.chance(60), w = !p || g.chance(40);
+        return cnd | 0x0c000000 | (p << 24) | (g.chance(60) << 23) | (N << 22) | (w << 21) | (load << 20) |
+               (rn << 16) | (g.below(16) << 12) | (cp1 ? 0x100 : 0) | imm8;
+    }
+    // A base for a transfer of the size cp1 and N give, often near a page edge, sometimes
+    // unaligned (dataAddr).
+    uint32_t wmmxBase(Item& it, bool cp1, bool N) { return armBase(it, cp1 ? (N ? 8 : 4) : (N ? 2 : 1)); }
+
     // Valid iWMMXt instructions for the JIT's slots, with the state around them: saturating
     // arithmetic on boundary values, the flag registers, MRC into the CPSR flags followed by
-    // a conditional instruction, CPAR changes, and TMIA (interpreted) mixed in.
+    // a conditional instruction, CPAR changes, TMIA (interpreted) mixed in, and loads and
+    // stores (every addressing mode and size, page edges, copy runs).
     void armWmmxValid(Item& it) {
         static const uint32_t edges[] = {0x7fffffff, 0x80000000, 0xffffffff, 0, 0x7f7f7f7f, 0x80808080,
                                          0x7fff8000, 0xff00ff00, 0x00010001, 0x01010101};
-        const uint32_t k = g.below(12), cp = g.below(2) << 8;
+        const uint32_t k = g.below(16), cp = g.below(2) << 8;
         const uint32_t ra = reg(), rb = reg();
+        if (k >= 12) {
+            armWmmxMem(it, k - 12);
+            return;
+        }
         if (k < 3) {
             it.kind = "iwmmxt valid cdp";
             for (uint32_t n = 1 + g.below(4); n--;) {
@@ -1120,6 +1136,52 @@ struct Gen {
                 it.ins.push_back({a, false});
                 it.ins.push_back({b, false});
             }
+        }
+    }
+
+    void armWmmxMem(Item& it, uint32_t k) {
+        static const uint32_t holes[] = {0x2a000, 0x2e000, 0x2c000, 0x28000, 0x29000};
+        if (k < 2) {
+            // One to three transfers with CDPs between, some conditional, some moved out by
+            // TMRRC so the loaded value meets ARM code.
+            it.kind = "iwmmxt wldr/wstr";
+            for (uint32_t n = 1 + g.below(3); n--;) {
+                const bool cp1 = g.chance(60), N = g.chance(50), load = g.chance(55);
+                const uint32_t rn = wmmxBase(it, cp1, N);
+                const uint32_t w = wmmxMem(rn, cp1, N, load, g.chance(70) ? g.below(8) : g.below(256),
+                                           g.chance(20) ? cond() : AL);
+                it.ins.push_back({w, false});
+                if (g.chance(30)) it.ins.push_back({wmmxCdp(), false});
+                if (load && g.chance(30)) {
+                    uint32_t rc = reg(), rd = reg();
+                    while (rd == rc) rd = reg();
+                    it.ins.push_back({AL | 0x0c500000 | (rd << 16) | (rc << 12) | ((w >> 12) & 15), false});
+                }
+            }
+        } else if (k < 3) {
+            // A WLDRD or WSTRD (or a word or halfword) that ends past a page edge: into a hole,
+            // into the read-only page (stores fault), or into pages user mode can't write or
+            // read (WLDR and WSTR check permissions as privileged). Writeback often.
+            it.kind = "iwmmxt transfer across a page edge";
+            const bool cp1 = g.chance(80), N = cp1 ? g.chance(80) : true;
+            const uint32_t size = cp1 ? (N ? 8 : 4) : 2;
+            const uint32_t rn = reg();
+            armConst(it, rn, g.pick(holes) - size + 1 + g.below(size + 3));
+            it.ins.push_back({wmmxMem(rn, cp1, N, g.chance(50), g.chance(60) ? 0 : g.below(4)), false});
+            if (g.chance(40)) it.ins.push_back({dpImm(AL, 4, false, rn, rn, armImm(4)), false});  // add rn, rn, #4
+        } else {
+            // A copy run as Media's: two WLDRDs then two WSTRDs, post-indexed by 8.
+            it.kind = "iwmmxt copy run";
+            uint32_t rs = reg(), rd = reg();
+            while (rd == rs) rd = reg();
+            armConst(it, rs, dataAddr(8));
+            armConst(it, rd, dataAddr(8));
+            const uint32_t wa = g.below(16), wb = g.below(16);
+            it.ins.push_back({AL | 0x0cf00102 | (rs << 16) | (wa << 12), false});  // wldrd wa, [rs], #8
+            it.ins.push_back({AL | 0x0cf00102 | (rs << 16) | (wb << 12), false});
+            if (g.chance(40)) it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({AL | 0x0ce00102 | (rd << 16) | (wa << 12), false});  // wstrd wa, [rd], #8
+            it.ins.push_back({AL | 0x0ce00102 | (rd << 16) | (wb << 12), false});
         }
     }
 
@@ -1787,6 +1849,45 @@ bool directed(Engines& e) {
           0x1afffff8, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
          false, SVC, {},
          {{Expect::REG, 5, 0}, {Expect::REG, 4, 2}, {Expect::REG, 7, 0x10010}}},
+        // iWMMXt loads and stores in the JIT's slots. Exact raises undefined on a failed
+        // WLDR or WSTR (the handler returns to the next instruction) and writes no base back.
+        {"iwmmxt wldrd [r1, #8]! crossing into a hole",
+         {0xedf10102, 0xe1a02001}, false, SVC, {{1, 0x29ff4}},
+         {{Expect::REG, 1, 0x29ff4}, {Expect::REG, 2, 0x29ff4}}},
+        {"iwmmxt wstrd [r1], #8 crossing into the read-only page",
+         {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2bffc}},
+         {{Expect::REG, 1, 0x2bffc}, {Expect::REG, 2, 0x2bffc}}},
+        {"iwmmxt wldrw [r1, #-4]! from a hole", {0xed310101}, false, SVC, {{1, 0x2a004}},
+         {{Expect::REG, 1, 0x2a004}}},
+        // Checked as privileged: user mode reads the privileged-only page.
+        {"iwmmxt user wldrd from the privileged-only page",
+         {0xedd10100, 0xec532000}, false, USR, {{1, 0x28008}},
+         {{Expect::LOADED, 2, 0x28008}, {Expect::LOADED, 3, 0x2800c}}},
+        // cp0 offsets are bytes, cp1 offsets words: wldrb [r1, #5]!, wstrh [r2], #-6,
+        // wldrw [r3, #-4]!, wstrw [r4, #-8]! (offset 2 words).
+        {"iwmmxt offsets and writeback",
+         {0xedb10005, 0xec620006, 0xed331101, 0xed242102}, false, SVC,
+         {{1, 0x20100}, {2, 0x20200}, {3, 0x20300}, {4, 0x20400}},
+         {{Expect::REG, 1, 0x20105}, {Expect::REG, 2, 0x201fa}, {Expect::REG, 3, 0x202fc},
+          {Expect::REG, 4, 0x203f8}}},
+        // Unaligned: halfword at an odd address, doubleword at 4 mod 8, word at 2 mod 4.
+        {"iwmmxt unaligned", {0xedd10000, 0xedd21100, 0xed932100, 0xedc41100}, false, SVC,
+         {{1, 0x20101}, {2, 0x20204}, {3, 0x20302}, {4, 0x20404}}, {}},
+        // Media's copy loop, 8 times 16 bytes, then the same from 0x29f80 into the hole at
+        // 0x2a000: every load from there is undefined, r1 stays, the stores go on.
+        {"iwmmxt copy loop",
+         {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
+         {{1, 0x20100}, {2, 0x20800}, {3, 8}},
+         {{Expect::REG, 1, 0x20180}, {Expect::REG, 2, 0x20880}, {Expect::REG, 3, 0}}},
+        {"iwmmxt copy loop into a hole",
+         {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
+         {{1, 0x29f80}, {2, 0x20800}, {3, 32}},
+         {{Expect::REG, 1, 0x2a000}, {Expect::REG, 2, 0x20a00}, {Expect::REG, 3, 0}}},
+        // CPAR bit 1 off: WLDRD (cp1) at 0x10008 is undefined, wldrb (cp0) still runs.
+        {"iwmmxt cpar off for a load",
+         {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
+         false, SVC, {{1, 0x20100}, {2, 0x20200}},
+         {{Expect::REG, 7, 0x1000c}}},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -1957,14 +2058,17 @@ struct CpuSaver {
 
 // moveOn: after the store the guest runs through another line (Z) before stopping, so
 // Exact's buffers no longer hold A's line; otherwise it stops in Y's line and Exact runs
-// the old word, the expected difference. 0: as expected, -1: not.
-int fetchBuffer(Engines& e, bool moveOn) {
-    const char* name = moveOn ? "fetch buffer, moved on" : "fetch buffer, still held";
+// the old word, the expected difference. wmmx: the rewrite is a WSTRW (the JIT's cp1 slot)
+// instead of an STR. 0: as expected, -1: not.
+int fetchBuffer(Engines& e, bool moveOn, bool wmmx = false) {
+    const char* name = wmmx ? (moveOn ? "fetch buffer, moved on, wstrw" : "fetch buffer, still held, wstrw")
+                            : (moveOn ? "fetch buffer, moved on" : "fetch buffer, still held");
     Case c = generate(99);
     c.items.clear();
     c.codeCacheable = false;  // the fetch buffers are used for uncacheable code
     c.dacr = 1;
     c.table[2] = 1;
+    if (wmmx) c.table[6 + 32 + 6] = 3;  // CPAR for the block (generate's table)
     const uint32_t A = kCode, Y = kCode + 0x100, Z = kCode + 0x180, S = kCode + 0x200;
     std::vector<std::pair<uint32_t, uint32_t>> words;
     if (moveOn)
@@ -1995,7 +2099,22 @@ int fetchBuffer(Engines& e, bool moveOn) {
             {Y + 16, 0xe3a05002},  // the new word
             {Y + 20, A + 8},
         };
-    const uint32_t spin = moveOn ? S : Y + 12;
+    if (wmmx) {
+        // tmcrr wR0, r1, r3 and wstrw wR0, [r2] in place of the STR: Y's words from Y + 8
+        // move down one, and the loads reach one further.
+        for (auto& [addr, v] : words) {
+            if (addr == Y + 0) v = 0xe59f100c;
+            if (addr == Y + 4) v = 0xe59f200c;
+            if (addr == Y + 8) v = 0xec431000;
+            else if (addr >= Y + 12 && addr < Y + 0x20) {
+                addr += 4;
+                if (v == 0xea00001b) v = 0xea00001a;  // b Z
+            }
+            if (addr == A + 12 && v == 0xea00003e) v = 0xea00003f;  // b Y + 16
+        }
+        words.push_back({Y + 12, 0xed820100});
+    }
+    const uint32_t spin = moveOn ? S : wmmx ? Y + 16 : Y + 12;
     // The code page has to be writable for the rewrite: patch the code into data page
     // 0x2b000 (read-write, uncacheable) instead, on the generator's image.
     Item end;
@@ -2066,11 +2185,11 @@ int fetchBuffer(Engines& e, bool moveOn) {
 
 }  // namespace
 
-// Every iWMMXt word pxa270wmmxJitValid accepts (all CDP, MCR, MRC, MCRR and MRRC encodings
-// on cp0 and cp1, condition AL) gets a callback from the JIT's slot as dynarmic would ask for
-// it: dynarmic asserts on a refusal.
+// Every iWMMXt word pxa270wmmxJitValid accepts (all CDP, MCR, MRC, MCRR, MRRC, LDC and STC
+// encodings on cp0 and cp1, condition AL) gets a callback from the JIT's slot as dynarmic
+// would ask for it: dynarmic asserts on a refusal.
 bool wmmxCompiles(Engines& e) {
-    uint64_t valid[2] = {}, refused = 0;
+    uint64_t valid[3] = {}, refused = 0;
     auto check = [&](uint32_t w, int k) {
         if (!pxa270wmmxJitValid(w)) return;
         ++valid[k];
@@ -2081,9 +2200,12 @@ bool wmmxCompiles(Engines& e) {
         if (!(x & 0xe00)) check(AL | 0x0e000000 | x, 0);  // CDP, MCR, MRC
     for (uint32_t x = 0; x < (1u << 21); ++x)
         if (!(x & 0xe00)) check(AL | 0x0c400000 | x, 1);  // MCRR, MRRC
-    printf("iwmmxt slots: %" PRIu64 " CDP/MCR/MRC and %" PRIu64 " MCRR/MRRC words valid, %" PRIu64 " refused\n",
-           valid[0], valid[1], refused);
-    return !refused && valid[0] && valid[1];
+    for (uint32_t x = 0; x < (1u << 25); ++x)
+        if (!(x & 0xe00) && (x & 0x01e00000) != 0x00400000) check(AL | 0x0c000000 | x, 2);  // LDC, STC
+    printf("iwmmxt slots: %" PRIu64 " CDP/MCR/MRC, %" PRIu64 " MCRR/MRRC and %" PRIu64
+           " LDC/STC words valid, %" PRIu64 " refused\n",
+           valid[0], valid[1], valid[2], refused);
+    return !refused && valid[0] && valid[1] && valid[2];
 }
 
 int main(int argc, char** argv) {
@@ -2155,6 +2277,8 @@ int main(int argc, char** argv) {
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
+        ok = fetchBuffer(e, true, true) == 0 && ok;
+        ok = fetchBuffer(e, false, true) == 0 && ok;
         ok = staleLink() == 0 && ok;
         ok = staleAhead() == 0 && ok;
     }

@@ -1,0 +1,236 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4478,8 +4478,9 @@
+     if ((i & 0x0ff000f0) == 0x01200070) return false;                           // BKPT
+     // MRC and MCR p15, 0, Rd, c3 (domain access control), Rd not PC: the JIT's p15 slot.
+     if ((i & 0x0fef0f10) == 0x0e030f10) return !thumb && ((i >> 12) & 15) != 15;
+-    // iWMMXt CDP, MCR, MRC, MCRR and MRRC: the JIT's cp0 and cp1 slots, on a CPU that has
+-    // iWMMXt with the coprocessor's CPAR bit set (checked in cpuJitPlain, outside the memo).
++    // iWMMXt CDP, MCR, MRC, MCRR, MRRC, LDC and STC: the JIT's cp0 and cp1 slots, on a CPU
++    // that has iWMMXt with the coprocessor's CPAR bit set (checked in cpuJitPlain, outside
++    // the memo).
+     if ((i & 0x0c000000) == 0x0c000000 && (i & 0x0f000000) != 0x0f000000 && ((i >> 8) & 14) == 0 && !thumb)
+         return pxa270wmmxJitValid(i);
+     if ((i & 0x0c000000) == 0x0c000000) return false;                           // coprocessor, SWI
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -37,6 +37,7 @@
+     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+     uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 calls, and those in user mode
+     uint64_t wmmx = 0;  // iWMMXt calls from generated code
++    uint64_t wmmxXfer = 0, wmmxFaults = 0;  // of those, WLDR and WSTR, and those that failed
+     uint64_t cparWrites = 0, cparChanges = 0;  // CPAR writes, and those that dropped the code
+     // Interpreter exits at cp0 and cp1 words (not SWI) by class: CDP, MCR/MRC, MCRR/MRRC,
+     // LDC/STC, and cond NV forms of any of them. Counted with FROND_JIT_STATS only.
+@@ -107,9 +108,10 @@
+                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
+                 (unsigned long long)cp15, (unsigned long long)cp15User);
+         fprintf(stderr,
+-                "jit: wmmx %llu cparWrites %llu cparChanges %llu interpret wmmx cdp %llu mcr/mrc %llu "
+-                "mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
+-                (unsigned long long)wmmx, (unsigned long long)cparWrites, (unsigned long long)cparChanges,
++                "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
++                "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
++                (unsigned long long)wmmx, (unsigned long long)wmmxXfer, (unsigned long long)wmmxFaults,
++                (unsigned long long)cparWrites, (unsigned long long)cparChanges,
+                 (unsigned long long)interpWmmx[0], (unsigned long long)interpWmmx[1],
+                 (unsigned long long)interpWmmx[2], (unsigned long long)interpWmmx[3],
+                 (unsigned long long)interpWmmx[4]);
+@@ -759,6 +761,31 @@
+         return value;
+     }
+ 
++    // WLDR and WSTR, by coprocessor, size (N), direction and wR; arg0 is the address
++    // dynarmic worked out (cp0 offsets unscaled). The access is the interpreter's, so a
++    // failed one ends the run on the instruction with the base not written back (the
++    // dynarmic patch checks right after the call), and the interpreter runs it again and
++    // raises the undefined instruction as Exact does.
++    struct WmmxXfer {
++        Env *env;
++        bool cp1, N, store;
++        uint8_t wR;
++    };
++    static std::uint64_t WmmxTransfer(void *arg, std::uint32_t ea, std::uint32_t) {
++        const WmmxXfer &x = *static_cast<WmmxXfer *>(arg);
++        Env &e = *x.env;
++        stats.wmmx++;
++        stats.wmmxXfer++;
++        if (!pxa270wmmxTransfer(cpuJitWmmx(e.cpu), e.cpu, x.cp1, x.N, x.store, x.wR, ea)) {
++            stats.wmmxFaults++;
++            e.Fault();
++            return 0;
++        }
++        e.CheckGen();
++        e.AfterIo();
++        return 0;
++    }
++
+     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+     std::uint64_t GetTicksRemaining() override { return budget; }
+ 
+@@ -833,11 +860,23 @@
+ // (cpuJitPlain), so each Compile* rebuilds the word, with Rt r0 and Rt2 r1 standing for
+ // the core registers dynarmic already checked, and asks it again: an encoding that got
+ // here and isn't valid would be a bug in the plain check, and dynarmic asserts on it.
+-// Loads and stores (LDC, STC) stay in the interpreter.
++// For LDC and STC the word is the pre-indexed form with base r0; every addressing mode the
++// plain check lets in is valid alike.
+ struct WmmxCoprocessor final : public A32::Coprocessor {
+     Env *env;
+     bool cp1;
+-    WmmxCoprocessor(Env *e, bool c) : env(e), cp1(c) {}
++    std::array<Env::WmmxXfer, 64> xfers;  // by N, store and wR; filled here, then read only
++    WmmxCoprocessor(Env *e, bool c) : env(e), cp1(c) {
++        for (unsigned i = 0; i < xfers.size(); i++)
++            xfers[i] = Env::WmmxXfer{e, c, bool(i & 32), bool(i & 16), uint8_t(i & 15)};
++    }
++
++    std::optional<Callback> Transfer(bool store, bool two, bool N, A32::CoprocReg CRd,
++                                     std::optional<std::uint8_t> option) {
++        const uint32_t w = Word((store ? 0x0d800000 : 0x0d900000) | (N ? 1u << 22 : 0) | (R(CRd) << 12));
++        if (two || option || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::nullopt;
++        return Callback{&Env::WmmxTransfer, &xfers[(N ? 32 : 0) | (store ? 16 : 0) | R(CRd)]};
++    }
+ 
+     static uint8_t R(A32::CoprocReg r) { return uint8_t(r); }
+     uint32_t Word(uint32_t bits) const { return 0xe0000000 | bits | (cp1 ? 0x100 : 0); }
+@@ -874,11 +913,13 @@
+         if (two || !cpuJitWmmx(env->cpu) || !pxa270wmmxJitValid(w)) return std::monostate{};
+         return Callback{&Env::WmmxMrrc, Op(w, opc, 0, 0, R(CRm), 0)};
+     }
+-    std::optional<Callback> CompileLoadWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
+-        return std::nullopt;
+-    }
+-    std::optional<Callback> CompileStoreWords(bool, bool, A32::CoprocReg, std::optional<std::uint8_t>) override {
+-        return std::nullopt;
++    std::optional<Callback> CompileLoadWords(bool two, bool N, A32::CoprocReg CRd,
++                                             std::optional<std::uint8_t> option) override {
++        return Transfer(false, two, N, CRd, option);
++    }
++    std::optional<Callback> CompileStoreWords(bool two, bool N, A32::CoprocReg CRd,
++                                              std::optional<std::uint8_t> option) override {
++        return Transfer(true, two, N, CRd, option);
+     }
+ };
+ 
+@@ -968,6 +1009,7 @@
+     j->wmmx[1] = std::make_shared<WmmxCoprocessor>(&j->env, true);
+     conf.coprocessors[0] = j->wmmx[0];
+     conf.coprocessors[1] = j->wmmx[1];
++    conf.coprocessor_unscaled_offsets = 1;  // iWMMXt WLDRB/H and WSTRB/H offsets are in bytes
+     j->jit = std::make_unique<A32::Jit>(conf);
+     j->env.jit = j->jit.get();
+     j->env.maxInstructions = j->maxUnchecked;
+@@ -1033,6 +1075,14 @@
+         return isCallback(c.CompileGetOneWord(false, (w >> 21) & 7, reg(16), reg(0), (w >> 5) & 7));
+     if ((w & 0x0ff00000) == 0x0c400000) return isCallback(c.CompileSendTwoWords(false, (w >> 4) & 15, reg(0)));
+     if ((w & 0x0ff00000) == 0x0c500000) return isCallback(c.CompileGetTwoWords(false, (w >> 4) & 15, reg(0)));
++    if ((w & 0x0e000000) == 0x0c000000) {  // LDC, STC; P = U = D = W = 0 is undefined
++        const bool p = w & (1 << 24), u = w & (1 << 23), d = w & (1 << 22), wb = w & (1 << 21);
++        if (!p && !u && !d && !wb) return false;
++        std::optional<std::uint8_t> option;
++        if (!p && !wb && u) option = uint8_t(w);
++        return (w & (1 << 20)) ? c.CompileLoadWords(false, d, reg(12), option).has_value()
++                               : c.CompileStoreWords(false, d, reg(12), option).has_value();
++    }
+     return false;
+ }
+ 
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -45,8 +45,8 @@
+ // A CPAR write; changed: bit 0 or 1 changed on a CPU with iWMMXt, which drops all translated
+ // code, since whether the JIT runs iWMMXt instructions depends on those bits.
+ void jitCparWritten(FrondJit *jit, bool changed);
+-// For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR
+-// or MRRC on coprocessor 0 or 1), as it would when dynarmic compiles it.
++// For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR,
++// MRRC, LDC or STC on coprocessor 0 or 1), as it would when dynarmic compiles it.
+ bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
+ // The first write to a watched RAM line since code was translated from it.
+ void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
+--- a/src/uarm/uarm/pxa270_WMMX.cpp
++++ b/src/uarm/uarm/pxa270_WMMX.cpp
+@@ -607,15 +607,12 @@
+     return mcrr(w, cp1, op, wR, cpuGetRegExternal(cpu, RdLo), cpuGetRegExternal(cpu, RdHi));
+ }
+ 
+-// WLDR and WSTR. Coprocessor 0 moves bytes (N clear) or halfwords (N set) with an unscaled
+-// offset, coprocessor 1 words or doublewords with the offset times 4. The control register
+-// forms (WLDRW and WSTRW wCx) are LDC2 and STC2 on coprocessor 1.
+-bool memAccess(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool N, bool store, uint8_t reg,
+-               uint_fast8_t addrReg, uint32_t addBefore, uint32_t addAfter, uint8_t *option) {
+-    if (option) return false;
++// The memory part of WLDR and WSTR at ea. Coprocessor 0 moves bytes (N clear) or halfwords
++// (N set), coprocessor 1 words or doublewords. The control register forms (WLDRW and WSTRW
++// wCx) are LDC2 and STC2 on coprocessor 1. False for an undefined form or a failed access
++// (checked as privileged); a WSTRD whose second word fails has written the first.
++bool transfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool two, bool N, bool store, unsigned reg, uint32_t ea) {
+     if (two && (!cp1 || N)) return false;
+-    const unsigned scale = cp1 ? 4 : 1;
+-    const uint32_t base = cpuGetRegExternal(cpu, addrReg), ea = base + addBefore * scale;
+     const unsigned size = cp1 ? (N && !two ? 8 : 4) : (N ? 2 : 1);
+ 
+     if (two) {
+@@ -655,7 +652,17 @@
+         }
+         setReg(w, reg, r);
+     }
++    return true;
++}
+ 
++// WLDR and WSTR: offsets on coprocessor 0 are in bytes, on coprocessor 1 times 4. The base
++// is written back only after the access succeeds.
++bool memAccess(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool N, bool store, uint8_t reg,
++               uint_fast8_t addrReg, uint32_t addBefore, uint32_t addAfter, uint8_t *option) {
++    if (option) return false;
++    const unsigned scale = cp1 ? 4 : 1;
++    const uint32_t base = cpuGetRegExternal(cpu, addrReg), ea = base + addBefore * scale;
++    if (!transfer(w, cpu, cp1, two, N, store, reg, ea)) return false;
+     if (addAfter) setCoreReg(cpu, addrReg, base + addAfter * scale);
+     return true;
+ }
+@@ -720,6 +727,10 @@
+     return mrrc(w, cp1, op, wR, *value);
+ }
+ 
++bool pxa270wmmxTransfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool N, bool store, unsigned wR, uint32_t ea) {
++    return transfer(w, cpu, cp1, false, N, store, wR, ea);
++}
++
+ // Whether a false return depends only on the encoding (never on register values), so
+ // running the instruction on scratch state answers for any state.
+ bool pxa270wmmxJitValid(uint32_t i) {
+@@ -747,6 +758,9 @@
+         }
+         return pxa270wmmxMcrr(&scratch, cp1, (i >> 4) & 15, i & 15, 0, 0);
+     }
++    // LDC, STC: pre-indexed with or without writeback, or post-indexed (P or W set; with
++    // both clear it is the option form or MCRR), base not r15. Every size is defined.
++    if ((i & 0x0e000000) == 0x0c000000) return (i & 0x01200000) != 0 && ((i >> 16) & 15) != 15;
+     return false;
+ }
+ 
+--- a/src/uarm/uarm/pxa270_WMMX.h
++++ b/src/uarm/uarm/pxa270_WMMX.h
+@@ -22,11 +22,17 @@
+                    uint32_t* value);
+ bool pxa270wmmxMcrr(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint32_t lo, uint32_t hi);
+ bool pxa270wmmxMrrc(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint64_t* value);
++// WLDR and WSTR to or from wR at ea, as the interpreter does them: bytes or halfwords (N)
++// on coprocessor 0, words or doublewords (N) on coprocessor 1. False, with wR unchanged,
++// when an access fails; a WSTRD whose second word fails has written the first.
++bool pxa270wmmxTransfer(struct Pxa270wmmx* w, struct ArmCpu* cpu, bool cp1, bool N, bool store, unsigned wR,
++                        uint32_t ea);
+ 
+ // Whether the ARM word is a coprocessor 0 or 1 instruction the Fast engine runs: CDP, MCR,
+-// MRC, MCRR or MRRC, defined for iWMMXt, not a cond NV (two) form, not TMIA, MCR with Rt
+-// not r15, MCRR and MRRC with two different registers other than r15. Depends only on the
+-// word; the CPU's CPAR is checked separately.
++// MRC, MCRR, MRRC, LDC or STC, defined for iWMMXt, not a cond NV (two) form, not TMIA, MCR
++// with Rt not r15, MCRR and MRRC with two different registers other than r15, LDC and STC
++// with a base other than r15 and not the option form. Depends only on the word; the CPU's
++// CPAR is checked separately.
+ bool pxa270wmmxJitValid(uint32_t word);
+ 
+ #include "savestate/ChunkTypeUarm.h"
