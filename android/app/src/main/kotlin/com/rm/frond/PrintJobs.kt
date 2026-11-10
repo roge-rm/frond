@@ -110,8 +110,8 @@ class PrintJobs(
         }
     }
 
-    // Draws the held pages through the system print dialog, which also saves as PDF. The job is dropped when
-    // the pages were written; a cancelled print keeps it.
+    // Draws the held pages through the system print dialog, which also saves as PDF, on Letter paper unless
+    // the dialog changes it. The job is dropped when the pages were written; a cancelled print keeps it.
     fun print(activity: Activity) {
         val h = held ?: return
         if (!h.pages.renderable) return
@@ -119,7 +119,7 @@ class PrintJobs(
         val name = "${device.label} print"
         manager.print(name, PagesAdapter(activity, name, h.pages.pages) { wrote ->
             if (wrote) host.lifecycleScope.launch(Dispatchers.IO) { store.dropIfVersion(h.version, ::publish) }
-        }, null)
+        }, PagesAdapter.letter())
     }
 
     // Copies the held job to the chosen file, then deletes it. A failed copy deletes the new file and keeps the job.

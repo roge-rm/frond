@@ -100,7 +100,8 @@ class PrintJobTest {
 
     @Test fun fontFitsBothLimits() {
         // 66 lines at 1.2 spacing are taller than 80 columns at 0.6 are wide, so a portrait page is limited by its height.
-        assertEquals(842f / 79.2f, PrintJob.fontSize(595f, 842f), 0.001f)
+        // Letter paper, 612 x 792 points.
+        assertEquals(792f / 79.2f, PrintJob.fontSize(612f, 792f), 0.001f)
         assertEquals(500f / 48f, PrintJob.fontSize(500f, 2000f), 0.001f)
     }
 }

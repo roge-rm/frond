@@ -2504,8 +2504,7 @@ void MainWindow::printerSavePdf(PrintSource& src) {
     const auto path = outputFile(tr("Save as PDF"), tr("PDF files (*.pdf)"), "Print.pdf");
     if (path.isEmpty()) return;
     QPrinter printer(QPrinter::HighResolution);
-    printer.setOutputFormat(QPrinter::PdfFormat);
-    printer.setOutputFileName(path);
+    frondPrint::pdfOutput(&printer, path);
     if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
     printerClearHeld(src);
     notify(tr("Saved %1.").arg(path));

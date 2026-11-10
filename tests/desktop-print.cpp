@@ -4,6 +4,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include "FirmwareInput.h"
 #include "PrintJob.h"
@@ -234,14 +235,22 @@ class DesktopPrint : public QObject {
         QTemporaryDir dir;
         const auto path = dir.filePath("job.pdf");
         QPrinter printer(QPrinter::HighResolution);
-        printer.setOutputFormat(QPrinter::PdfFormat);
-        printer.setOutputFileName(path);
+        frondPrint::pdfOutput(&printer, path);
         QCOMPARE(frondPrint::drawPages(&printer, text), 3);
         QFile file(path);
         QVERIFY(file.open(QIODevice::ReadOnly));
         const auto bytes = file.readAll();
         QVERIFY(bytes.startsWith("%PDF"));
         QCOMPARE(bytes.count("/Type /Page\n"), 3);
+        // Letter paper, 8.5 x 11 in: 612 x 792 points on every page.
+        static const QRegularExpression box(R"(/MediaBox \[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\])");
+        int boxes = 0;
+        for (auto it = box.globalMatch(QString::fromLatin1(bytes)); it.hasNext(); boxes++) {
+            const auto m = it.next();
+            QCOMPARE(qRound(m.captured(3).toDouble() - m.captured(1).toDouble()), 612);
+            QCOMPARE(qRound(m.captured(4).toDouble() - m.captured(2).toDouble()), 792);
+        }
+        QCOMPARE(boxes, 3);
     }
 };
 QTEST_MAIN(DesktopPrint)

@@ -3,6 +3,7 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetricsF>
+#include <QPageSize>
 #include <QPainter>
 #include <QObject>
 #include <QPrinter>
@@ -54,6 +55,13 @@ QString moduleReadout(const QString& state, bool radioOn) {
     if (!radioOn) return QObject::tr("Off");
     if (state.trimmed() == "off") return QObject::tr("Waiting for the Dana");
     return wifiReadout(parseUsbPort("wifi " + state));
+}
+
+void pdfOutput(QPrinter* printer, const QString& path) {
+    printer->setOutputFormat(QPrinter::PdfFormat);
+    printer->setOutputFileName(path);
+    printer->setPageSize(QPageSize(QPageSize::Letter));
+    printer->setPageOrientation(QPageLayout::Portrait);
 }
 
 int drawPages(QPrinter* printer, const frond::PrintText& text) {

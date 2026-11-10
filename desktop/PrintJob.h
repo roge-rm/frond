@@ -37,5 +37,7 @@ inline bool received(const Status& s) { return s.valid && s.attached && s.bytes 
 // One PrintText page per paper page, in a monospaced font sized so 80 columns by 66 lines fit
 // the page. Returns the number of pages drawn, 0 if the printer couldn't be painted on.
 int drawPages(QPrinter* printer, const frond::PrintText& text);
+// Sets the printer to write a PDF to path on Letter paper, the paper PrintBoy and the Dana's printers use.
+void pdfOutput(QPrinter* printer, const QString& path);
 
 }  // namespace frondPrint
