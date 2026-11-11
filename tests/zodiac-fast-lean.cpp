@@ -2,7 +2,9 @@
 // table change only shows after a CP15 TLB flush, a domain change and an SDRAM mode change take the lean path's
 // host pages away, a cacheable load of unbacked memory stops both engines at the same pc, and states saved under
 // either engine carry on under Fast as an uninterrupted Exact run does. Code rewritten in place drops what Fast
-// decoded from it.
+// decoded from it. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
+// mapping stops both engines at the same read, and a DMA controller write that starts the PCM DMA takes its buffer
+// page off the lean path.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -40,7 +42,7 @@ void thumbLoop(std::vector<uint32_t>& words) {
     for (size_t i = 0; i < std::size(h); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
 }
 
-enum class Tail { tlb, domain, sdram, code };
+enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther };
 
 // The graphics guest's setup with programmed clocks gives the step quiet spans, which the lean path runs.
 // The test code follows it, running from the linked alias at 0x20000000.
@@ -122,6 +124,68 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         sumLoop(words, 9);
         stopPc = pc() - 16;                               // the first ldr of that loop is out of sequence
         break;
+    case Tail::timer:
+        // Timer 1 counting from PERCLK1, then 200 reads of TCN and 100 of TCN and TSTAT in one LDM. TCN is
+        // answered on the lean path; TSTAT leaves it, and the step runs the LDM again.
+        load(words, 0, 0x00202000);
+        store(words, 0, 4, 7); store(words, 0, 0, 0x103);
+        words.push_back(0xe3a08000);                      // mov r8, #0
+        words.push_back(0xe3a070c8);                      // mov r7, #200
+        words.push_back(0xe5905010);                      // loop: ldr r5, [r0, #0x10]
+        words.push_back(0xe0888005);                      // add r8, r8, r5
+        words.push_back(0xe2577001);                      // subs r7, r7, #1
+        words.push_back(0x1afffffb);                      // bne loop
+        words.push_back(0xe2803010);                      // add r3, r0, #0x10
+        words.push_back(0xe3a09000);                      // mov r9, #0
+        words.push_back(0xe3a07064);                      // mov r7, #100
+        words.push_back(0xe8930006);                      // loop: ldmia r3, {r1, r2}
+        words.push_back(0xe0899001);                      // add r9, r9, r1
+        words.push_back(0xe2577001);                      // subs r7, r7, #1
+        words.push_back(0x1afffffb);                      // bne loop
+        stopPc = pc();
+        break;
+    case Tail::cachedTimer:
+        // Section 9 maps the peripherals cacheable, through the uncached view of the table. The step stops on a
+        // cacheable timer read; the lean path has to leave it to the step.
+        load(words, 3, 0x00404024);
+        load(words, 1, 0x00200c1a); words.push_back(0xe5831000);
+        load(words, 11, 0x00902010);
+        words.push_back(0xe3a03032);                      // mov r3, #50: a delay, so the read below is lean
+        words.push_back(0xe2533001);                      // subs r3, r3, #1
+        words.push_back(0x1afffffd);                      // bne
+        stopPc = pc();
+        words.push_back(0xe59bc000);                      // ldr r12, [r11]
+        break;
+    case Tail::dma:
+    case Tail::dmaOther: {
+        // 200 stores to an SRAM page put it on the lean path. The PCM DMA then starts, repeating over the
+        // first 16 bytes of that page, and 200 more stores follow, to the same page or (dmaOther) the next.
+        const uint32_t buffer = 0x00409000;               // SRAM 0x00309000, uncached
+        load(words, 2, buffer + 0x100);
+        const auto stores = [&] {
+            words.push_back(0xe3a070c8);                  // mov r7, #200
+            words.push_back(0xe5827000);                  // loop: str r7, [r2]
+            words.push_back(0xe2577001);                  // subs r7, r7, #1
+            words.push_back(0x1afffffc);                  // bne loop
+        };
+        stores();
+        load(words, 0, 0x00209000);
+        store(words, 0, 0, 1); store(words, 0, 8, 0x3ff);
+        load(words, 0, 0x00218000);
+        store(words, 0, 8, 0x9900); store(words, 0, 0x14, 0x6100); store(words, 0, 0x20, 4); store(words, 0, 0xc, 0xe8);
+        for (unsigned i = 0; i < 8; ++i) store(words, 0, 0, 0);
+        load(words, 0, buffer);
+        for (unsigned i = 0; i < 4; ++i) store(words, 0, i * 4, 0x12340001 + i * 0x10002);
+        load(words, 0, 0x00209300);
+        store(words, 0, 0, buffer - 0x00100000); load(words, 1, 0x00218000); words.push_back(0xe5801004);
+        store(words, 0, 8, 16); store(words, 0, 0xc, 0x208c); store(words, 0, 0x10, 16); store(words, 0, 0x14, 8);
+        store(words, 0, 0xc, 0x208d);
+        if (tail == Tail::dmaOther) load(words, 2, buffer + 0x1100);
+        else load(words, 2, buffer + 0x100);
+        stores();
+        stopPc = pc();
+        break;
+    }
     case Tail::code:
         load(words, 0, 0x00310000);
         words.push_back(0xe1a0e00f);                      // mov lr, pc
@@ -143,12 +207,14 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
 struct Outcome {
     Imx1MachineRun run;
     Imx1MachineCheapStatus cheap;
-    uint64_t lean, drops;
+    uint64_t lean, drops, timerReads;
 };
 
-Imx1Machine* make(const std::vector<uint32_t>& words, bool fast) {
+// A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
+Imx1Machine* make(const std::vector<uint32_t>& words, bool fast, bool observed = false) {
     auto o = graphicsOptions(false);
     o.ramMiB = 32;
+    if (observed) o.busObserver = [](void*, const Imx1ProbeAccess&) {};
     Imx1ProbeResult error{};
     Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
                                        Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
@@ -163,12 +229,14 @@ bool running(Imx1Machine* m) { return imx1MachineGetStatus(m).status == Imx1Mach
 Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
-                imx1MachineLeanCodeDrops(m)};
+                imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m)};
     imx1MachineStop(m);
     return out;
 }
 
-Outcome runGuest(const std::vector<uint32_t>& words, bool fast) { return finish(make(words, fast)); }
+Outcome runGuest(const std::vector<uint32_t>& words, bool fast, bool observed = false) {
+    return finish(make(words, fast, observed));
+}
 
 // Runs a fresh machine past the save point, so a load has to undo what it holds.
 void runAhead(Imx1Machine* m) {
@@ -197,10 +265,10 @@ void loadInto(Imx1Machine* m, const std::vector<uint8_t>& state) {
 
 void print(const char* name, const Outcome& o) {
     const auto& r = o.run.result;
-    std::printf("%s: stop=%s pc=%08x address=%08x retired=%llu ticks=%llu bus=%llu lean=%llu drops=%llu r4=%08x "
+    std::printf("%s: stop=%s pc=%08x address=%08x retired=%llu ticks=%llu bus=%llu lean=%llu drops=%llu timer=%llu r4=%08x "
                 "r6=%u r8=%08x r9=%08x r10=%08x r12=%08x\n", name, imx1ProbeStopName(r.stop), r.trace.pc, r.address,
                 (unsigned long long)o.cheap.retired, (unsigned long long)o.cheap.time.ticks,
-                (unsigned long long)r.busAccesses, (unsigned long long)o.lean, (unsigned long long)o.drops,
+                (unsigned long long)r.busAccesses, (unsigned long long)o.lean, (unsigned long long)o.drops, (unsigned long long)o.timerReads,
                 r.registers[4], r.registers[6], r.registers[8], r.registers[9], r.registers[10], r.registers[12]);
     std::fflush(stdout);
 }
@@ -285,6 +353,42 @@ int main() {
         assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2 && fast.drops > 0);
         assert(fast.run.result.stop == exact.run.result.stop && fast.cheap.retired == exact.cheap.retired);
     }
+    {
+        // Timer reads on the lean path give Exact's values. Bus accesses count what retires: the LDM that leaves
+        // the lean path at TSTAT is counted by the step alone, as with the lean path off.
+        const auto words = guest(Tail::timer, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true), observed = runGuest(words, true, true);
+        print("timer exact", exact); print("timer fast", fast); print("timer fast observed", observed);
+        assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.trace.pc == stopPc);
+        assert(exact.run.result.registers[8] && exact.run.result.registers[9]);
+        same(exact, fast);
+        same(exact, observed);
+        assert(fast.timerReads >= 250 && observed.lean == 0 && observed.timerReads == 0);
+        assert(fast.run.result.busAccesses == observed.run.result.busAccesses);
+    }
+    {
+        const auto words = guest(Tail::cachedTimer, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        print("cached timer exact", exact); print("cached timer fast", fast);
+        assert(exact.run.result.stop == Imx1ProbeStop::unsupportedDataCache && exact.run.result.trace.pc == stopPc);
+        assert(fast.lean > 0);
+        same(exact, fast);
+    }
+    {
+        // Stores to the PCM DMA buffer page come at their own time in the step once the DMA is running.
+        const auto words = guest(Tail::dma, stopPc, savePc), other = guest(Tail::dmaOther, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        const auto otherExact = runGuest(other, false), otherFast = runGuest(other, true);
+        print("dma exact", exact); print("dma fast", fast);
+        print("dma other page exact", otherExact); print("dma other page fast", otherFast);
+        const auto& pcm = exact.run.result.pcm;
+        std::printf("dma pcm: active=%d source=%08x remaining=%u words=%llu\n", pcm.dmaActive, pcm.source, pcm.remaining,
+                    (unsigned long long)pcm.transmittedWords); std::fflush(stdout);
+        assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.trace.pc == stopPc);
+        same(exact, fast);
+        same(otherExact, otherFast);
+        assert(otherFast.lean >= fast.lean + 150);
+    }
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
-              "rewritten code and unsupported access match Exact");
+              "rewritten code, unsupported access, timer reads, a cacheable timer and the PCM DMA buffer match Exact");
 }
