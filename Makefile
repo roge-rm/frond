@@ -2080,6 +2080,14 @@ test-zodiac-graphics-commands: build/zodiac-boot-probe
 		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-commands
 	./build/test-zodiac-graphics-commands
 
+.PHONY: test-zodiac-graphics-gpu
+# The host GPU path against the CPU model; skipped (77) on a host with no usable GPU.
+test-zodiac-graphics-gpu: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -pthread \
+		-Ibuild/source/src/uarm/uarm tests/zodiac-graphics-gpu.cpp \
+		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-gpu
+	./build/test-zodiac-graphics-gpu; status=$$?; [ $$status = 0 ] || [ $$status = 77 ]
+
 .PHONY: test-zodiac-graphics-a4
 test-zodiac-graphics-a4: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

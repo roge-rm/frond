@@ -1,0 +1,1144 @@
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index f259f03..8cd40f7 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -7,6 +7,7 @@
+ #include <string>
+ #include "imx1_graphics_frame.h"
+ #include "imx1_graphics_commands.h"
++#include "imx1_graphics_gpu_gles.h"
+ #include <array>
+ #include <vector>
+ 
+@@ -151,6 +152,38 @@ struct Probe {
+     std::unique_ptr<Imx1GraphicsMemory> graphicsMemory;
+     Imx1GraphicsFrame graphicsFrame;
+     Imx1GraphicsCommands graphicsCommands;
++    // The host GPU copy of graphics memory, Fast only and when FROND_ZODIAC_GPU asks for it. Not saved.
++    struct GraphicsGpu {
++        std::unique_ptr<Imx1GraphicsGpu> gpu;
++        bool failed = false;
++    } graphicsGpu;
++    // graphicsGpu, left out of the saved layout's size.
++    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu);
++    // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
++    void attachGraphicsGpu() {
++        const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
++        if (!fastEngine || !graphicsMemory || mode == Imx1GraphicsGpu::Mode::off) {
++            if (graphicsGpu.gpu) graphicsGpu.gpu->detach();
++            graphicsGpu.gpu.reset();
++            return;
++        }
++        if (!graphicsGpu.gpu) {
++            if (graphicsGpu.failed) return;
++            uint32_t banks[2] = {};
++            for (unsigned bank = 0; bank < 2; ++bank) graphicsMemory->rawBank(bank, banks[bank]);
++            std::string error;
++            auto backend = imx1MakeGraphicsGpuBackend(banks, error);
++            if (!backend) {
++                std::fprintf(stderr, "zodiac gpu: off, %s\n", error.c_str());
++                graphicsGpu.failed = true;
++                return;
++            }
++            const bool differential = mode == Imx1GraphicsGpu::Mode::differential;
++            std::fprintf(stderr, "zodiac gpu: %s%s\n", backend->renderer().c_str(), differential ? ", differential" : "");
++            graphicsGpu.gpu = std::make_unique<Imx1GraphicsGpu>(std::move(backend), differential);
++        }
++        graphicsGpu.gpu->attach(graphicsMemory.get());
++    }
+     // What the command decoder said about the batch it last refused. For the stop text, not saved.
+     Imx1GraphicsCommands::Refusal graphicsRefusal;
+     uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
+@@ -1681,6 +1714,7 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
+     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
+     // Fast keeps no cache contents: dirty data goes to memory first.
+     if (fast) cpuArm920LeanReset(p->cpu);
++    p->attachGraphicsGpu();
+     return true;
+ }
+ 
+@@ -1898,6 +1932,9 @@ void imx1MachineStop(Imx1Machine* machine) {
+     // The core lives on, but nothing runs it again: give back the JIT's memory.
+     cpuArm920DropJit(p->cpu);
+     p->fastJit = false;
++    // And the GPU, with its pages brought back first.
++    if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->detach();
++    p->graphicsGpu.gpu.reset();
+     if (activeMachine == machine) activeMachine = nullptr;
+ }
+ 
+@@ -2026,7 +2063,7 @@ struct ProbeState {
+ };
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+ static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields, stateIdentityVersion and the size in stateLayoutFingerprint");
+-static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
++static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1ProbeResult) == 352, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Arm920SavedState) == 43328, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1Bootstrap) - Imx1Bootstrap::unsavedBytes == 2344, "update its stateVersion and the size in stateLayoutFingerprint");
+@@ -2059,7 +2096,7 @@ static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update its stateVersion an
+ static_assert(sizeof(Imx1GraphicsSd) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1GraphicsClocks) == 104, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
+-static_assert(sizeof(Imx1GraphicsMemory) == 248, "update its stateVersion and the size in stateLayoutFingerprint");
++static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1GraphicsFrame) == 136, "update its stateVersion and the size in stateLayoutFingerprint");
+ #endif
+ 
+@@ -2528,6 +2565,7 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
+     p->cs5Configuration = std::move(*staged.graphics);
+     p->graphicsCommands = std::move(*staged.commands);
+     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
++    if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->attach(p->graphicsMemory.get());
+     p->graphicsFrame.replace(*staged.frame);
+     if (p->options.i2cBus) {
+         // Checked in decodeState, so this takes it.
+diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
+index 1d45ec3..f39a304 100644
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -346,8 +346,65 @@ class Imx1GraphicsCommands {
+     };
+     // One fill of a batch complete has checked: straight on the bank storage where fastFill can take it, else
+     // through accessGpu. Public for tests.
++    // With a host GPU attached (Fast only) the fill goes there where gpuFill can take it; in differential mode it
++    // runs on the GPU's CPU-only shadow copy too and the GPU's pages are checked against it.
+     static Imx1BootstrapAccess completeFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                             Imx1GraphicsMemory& memory, const Fill& fill) {
++        if (auto* gpu = memory.gpuResidency()) {
++            Imx1GraphicsMemory* shadow = gpu->mirror ? gpu->shadowMemory() : nullptr;
++            if (shadow) completeFillCpu(configuration, eim, *shadow, fill);
++            Imx1GpuFill drawn;
++            if (gpuFill(configuration, eim, memory, fill, drawn) && gpu->fill(drawn)) {
++                if (shadow) gpu->compare(drawn);
++                return Imx1BootstrapAccess::ok;
++            }
++            ++gpu->cpuFills;
++        }
++        return completeFillCpu(configuration, eim, memory, fill);
++    }
++    // Tests: gpuFills off keeps every fill on the CPU.
++    static inline bool gpuFills = true;
++    // A fill for the host GPU, with both ranges resolved to bank offsets. Only fills the GPU draws exactly as the
++    // CPU loop does: rows that don't overlap each other, and a source that shares no byte with the destination
++    // (the CPU loop reads and writes pixel by pixel, the GPU reads the source as it was before the fill).
++    static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
++                        const Fill& fill, Imx1GpuFill& out) {
++        if (!gpuFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
++            (fill.height > 1 && fill.pitch < fill.width * 2) ||
++            (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
++        const bool copy = fill.keyed || fill.plain, source = copy || fill.a4;
++        if (source && ((fill.sourceBase | fill.sourcePitch) & 1)) return false;
++        const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
++        if (!memory.contains(configuration, eim, fill.base, length, &out.bank, &out.base)) return false;
++        out.pitch = fill.pitch;
++        out.width = fill.width;
++        out.height = fill.height;
++        out.colour = fill.colour;
++        out.copy = copy;
++        out.keyed = fill.keyed;
++        out.doubled = copy && fill.doubled;
++        out.invert = fill.invert;
++        out.a4 = fill.a4;
++        out.painted = copy && fill.painted;
++        out.keyEqual = fill.keyEqual;
++        out.paint = fill.paint;
++        out.pixels = !copy && !fill.pixels.empty() ? fill.pixels.data() : nullptr;
++        if (source) {
++            const uint64_t sourceLength = !fill.doubled ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 :
++                uint64_t((fill.sourceY + fill.height - 1) >> 1) * fill.sourcePitch + (((fill.sourceX + fill.width - 1) >> 1) + 1) * 2;
++            if (!memory.contains(configuration, eim, fill.sourceBase, sourceLength, &out.sourceBank, &out.sourceBase)) return false;
++            if (out.sourceBank == out.bank && out.sourceBase < out.base + length && out.base < out.sourceBase + sourceLength)
++                return false;
++            out.sourcePitch = fill.sourcePitch;
++            out.sourceLength = uint32_t(sourceLength);
++            out.sourceX = fill.doubled ? fill.sourceX : 0;
++            out.sourceY = fill.doubled ? fill.sourceY : 0;
++        }
++        return true;
++    }
++    // The CPU model's fill. Public for tests.
++    static Imx1BootstrapAccess completeFillCpu(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
++                                               Imx1GraphicsMemory& memory, const Fill& fill) {
+         using A = Imx1BootstrapAccess;
+         if (fastFill(configuration, eim, memory, fill)) return A::ok;
+         for (uint32_t y = 0; y < fill.height; ++y)
+diff --git a/src/uarm/uarm/imx1_graphics_gpu.h b/src/uarm/uarm/imx1_graphics_gpu.h
+new file mode 100644
+index 0000000..aff1114
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_gpu.h
+@@ -0,0 +1,239 @@
++#ifndef FROND_IMX1_GRAPHICS_GPU_H
++#define FROND_IMX1_GRAPHICS_GPU_H
++
++#include <algorithm>
++#include <chrono>
++#include <cinttypes>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <string>
++#include <vector>
++#include "imx1_graphics_memory.h"
++
++// A host GPU that keeps a copy of both graphics memory banks and draws engine fills on it. Each bank is a texture
++// of 16-bit texels, 2048 wide, so one texture row is one 4 KB page.
++class Imx1GraphicsGpuBackend {
++   public:
++    static constexpr uint32_t rowTexels = 2048, pageBytes = 4096;
++    virtual ~Imx1GraphicsGpuBackend() = default;
++    virtual const std::string& renderer() const = 0;
++    // pages whole pages of bank from firstPage; data is copied before upload returns.
++    virtual void upload(unsigned bank, uint32_t firstPage, uint32_t pages, const uint8_t* data) = 0;
++    // Queues a fill (its inline pixels are copied first), and after it a read of the pages it touched into to, the
++    // bank's host copy (the same page offsets). Returns the fill's number; numbers count up from 1.
++    virtual uint64_t fill(const Imx1GpuFill& fill, uint32_t firstPage, uint32_t pages, uint8_t* to) = 0;
++    // The last fill whose pages have been read back. Any thread.
++    virtual uint64_t completed() const = 0;
++    virtual void waitFor(uint64_t fill) = 0;
++    // False once the backend has hit an error it can't draw past.
++    virtual bool healthy() const = 0;
++};
++
++// Keeps graphics memory the truth with a GPU copy beside it (Fast only). Pages start newer in the bytes; a fill
++// uploads the pages it touches that are, draws, and leaves its destination pages newer on the GPU until the CPU
++// reads them (an access, a display row, a state save, a hash). The GPU reads each fill's pages back on its own
++// thread straight after drawing, so the CPU only waits when it reads a page before that has finished. FROND_ZODIAC_GPU picks the mode: on (or 1), diff
++// (draws on both and checks every GPU fill's pages against a CPU-only shadow copy), anything else off.
++class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
++   public:
++    enum class Mode { off, on, differential };
++    static Mode modeFromEnvironment() {
++        const char* value = std::getenv("FROND_ZODIAC_GPU");
++        if (!value) return Mode::off;
++        if (!std::strcmp(value, "on") || !std::strcmp(value, "1")) return Mode::on;
++        if (!std::strcmp(value, "diff")) return Mode::differential;
++        return Mode::off;
++    }
++    struct Stats {
++        uint64_t fills = 0, solid = 0, inlinePixels = 0, copies = 0, keyed = 0, doubled = 0, inverts = 0, a4 = 0;
++        uint64_t uploads = 0, uploadPages = 0, downloads = 0, downloadPages = 0;
++        uint64_t downloadsFor[causes] = {}, waitsFor[causes] = {}, waits = 0;
++        // Host time the emulation thread spent waiting for read-backs, and in fill and upload calls.
++        uint64_t waitNs = 0, callNs = 0;
++        uint64_t compared = 0, mismatches = 0;
++    };
++    Imx1GraphicsGpu(std::unique_ptr<Imx1GraphicsGpuBackend> gpu, bool differential) : backend(std::move(gpu)) {
++        mirror = differential;
++    }
++    ~Imx1GraphicsGpu() override {
++        if (!std::getenv("FROND_ZODIAC_GPU_QUIET")) report(stderr);
++        // Its thread may still be reading pages back into readBack.
++        backend.reset();
++    }
++    Imx1GraphicsGpu(const Imx1GraphicsGpu&) = delete;
++    Imx1GraphicsGpu& operator=(const Imx1GraphicsGpu&) = delete;
++    const std::string& renderer() const { return backend->renderer(); }
++    const Stats& statistics() const { return stats; }
++    Imx1GraphicsGpuBackend& gpuBackend() { return *backend; }
++    void report(FILE* out) const {
++        std::fprintf(out, "zodiac gpu: %s, %" PRIu64 " fills (solid %" PRIu64 ", inline %" PRIu64 ", copy %" PRIu64
++                     ", keyed %" PRIu64 ", doubled %" PRIu64 ", invert %" PRIu64 ", a4 %" PRIu64 "), uploads %" PRIu64
++                     " (%" PRIu64 " pages), downloads %" PRIu64 " (%" PRIu64 " pages, %" PRIu64 " waits, %.1f ms waiting, %.1f ms in calls)",
++                     backend->renderer().c_str(), stats.fills, stats.solid, stats.inlinePixels, stats.copies,
++                     stats.keyed, stats.doubled, stats.inverts, stats.a4, stats.uploads, stats.uploadPages,
++                     stats.downloads, stats.downloadPages, stats.waits, stats.waitNs / 1e6, stats.callNs / 1e6);
++        std::fprintf(out, " (read %" PRIu64 ", write %" PRIu64 ", span %" PRIu64 ", copy %" PRIu64 ", whole %" PRIu64 ", writes %" PRIu64
++                     "), %" PRIu64 " fills on the CPU", stats.downloadsFor[access], stats.downloadsFor[accessWrite], stats.downloadsFor[span],
++                     stats.downloadsFor[copy], stats.downloadsFor[whole], stats.downloadsFor[writes], cpuFills);
++        std::fprintf(out, ", waits for read %" PRIu64 ", write %" PRIu64 ", span %" PRIu64, stats.waitsFor[access],
++                     stats.waitsFor[accessWrite], stats.waitsFor[span]);
++        if (mirror) std::fprintf(out, ", compared %" PRIu64 ", mismatches %" PRIu64, stats.compared, stats.mismatches);
++        std::fprintf(out, "\n");
++    }
++    // Takes memory as it is: every page newer in the bytes, and in differential mode a fresh shadow copy.
++    void attach(Imx1GraphicsMemory* graphics) {
++        detach();
++        memory = graphics;
++        gpuNewerPages = 0;
++        for (unsigned bank = 0; bank < 2; ++bank) {
++            uint32_t size = 0;
++            memory->rawBank(bank, size);
++            pages[bank].assign(size / pageBytes, cpuNewer);
++            pageFill[bank].assign(size / pageBytes, 0);
++            readBack[bank].resize(size);
++        }
++        if (mirror) {
++            if (!shadow) shadow = std::make_unique<Imx1GraphicsMemory>();
++            for (unsigned bank = 0; bank < 2; ++bank) {
++                uint32_t size = 0, shadowSize = 0;
++                const uint8_t* from = memory->rawBank(bank, size);
++                uint8_t* to = shadow->rawBank(bank, shadowSize);
++                std::memcpy(to, from, std::min(size, shadowSize));
++            }
++        }
++        memory->setResidency(this);
++    }
++    // Brings every GPU-newer page back and lets the memory go.
++    void detach() {
++        if (!memory) return;
++        cause = whole;
++        for (unsigned bank = 0; bank < 2; ++bank) cpuReads(bank, 0, uint32_t(pages[bank].size()) * pageBytes);
++        memory->setResidency(nullptr);
++        memory = nullptr;
++    }
++    void cpuReads(unsigned bank, uint32_t first, uint32_t end) override {
++        if (!gpuNewerPages || end <= first) return;
++        const uint32_t last = std::min<uint32_t>((end - 1) / pageBytes, uint32_t(pages[bank].size()) - 1);
++        uint32_t size = 0;
++        uint8_t* bytes = memory->rawBank(bank, size);
++        for (uint32_t page = first / pageBytes; page <= last;) {
++            if (pages[bank][page] != gpuNewer) { ++page; continue; }
++            uint32_t run = page;
++            while (run <= last && pages[bank][run] == gpuNewer) pages[bank][run++] = same;
++            // The pages' last fill read them back into readBack; wait for it if the GPU hasn't got there yet.
++            uint64_t last = 0;
++            for (uint32_t i = page; i < run; ++i) last = std::max(last, pageFill[bank][i]);
++            if (backend->completed() < last) {
++                const auto start = std::chrono::steady_clock::now();
++                backend->waitFor(last);
++                stats.waitNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    std::chrono::steady_clock::now() - start).count());
++                ++stats.waits;
++                ++stats.waitsFor[cause];
++            }
++            std::memcpy(bytes + size_t(page) * pageBytes, readBack[bank].data() + size_t(page) * pageBytes,
++                        size_t(run - page) * pageBytes);
++            ++stats.downloads;
++            ++stats.downloadsFor[cause];
++            stats.downloadPages += run - page;
++            gpuNewerPages -= run - page;
++            page = run;
++        }
++    }
++    void cpuWrites(unsigned bank, uint32_t first, uint32_t end) override {
++        if (end <= first) return;
++        cpuReads(bank, first, end);
++        const uint32_t last = std::min<uint32_t>((end - 1) / pageBytes, uint32_t(pages[bank].size()) - 1);
++        for (uint32_t page = first / pageBytes; page <= last; ++page) pages[bank][page] = cpuNewer;
++    }
++    void mirrorWrite(unsigned bank, uint32_t offset, uint32_t size, uint32_t value) override {
++        uint32_t bytes = 0;
++        uint8_t* to = shadow->rawBank(bank, bytes);
++        for (uint32_t i = 0; i < size && offset + i < bytes; ++i) to[offset + i] = uint8_t(value >> (i * 8));
++    }
++    bool fill(const Imx1GpuFill& fill) override {
++        if (!backend->healthy()) return false;
++        const auto start = std::chrono::steady_clock::now();
++        const uint32_t end = fill.end();
++        upload(fill.bank, fill.base, end);
++        if (fill.copy || fill.a4) upload(fill.sourceBank, fill.sourceBase, fill.sourceBase + fill.sourceLength);
++        const uint32_t firstPage = fill.base / pageBytes, last = (end - 1) / pageBytes;
++        const uint64_t number = backend->fill(fill, firstPage, last - firstPage + 1, readBack[fill.bank].data());
++        for (uint32_t page = firstPage; page <= last; ++page) {
++            if (pages[fill.bank][page] != gpuNewer) ++gpuNewerPages;
++            pages[fill.bank][page] = gpuNewer;
++            pageFill[fill.bank][page] = number;
++        }
++        // The CPU loop records each row's written span; a keyed copy's depends on its pixels, so the GPU records
++        // the whole rectangle, a wider dirty range with the same pixels.
++        memory->noteDirty(fill.bank, fill.base, end, uint64_t(fill.width) * fill.height);
++        stats.callNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - start).count());
++        ++stats.fills;
++        if (fill.a4) ++stats.a4;
++        else if (fill.invert) ++stats.inverts;
++        else if (fill.doubled) ++stats.doubled;
++        else if (fill.keyed) ++stats.keyed;
++        else if (fill.copy) ++stats.copies;
++        else if (fill.pixels) ++stats.inlinePixels;
++        else ++stats.solid;
++        return true;
++    }
++    Imx1GraphicsMemory* shadowMemory() override { return shadow.get(); }
++    // Downloads the fill's destination pages and checks them, whole, against the shadow copy. A mismatch is
++    // reported (the first few in full) and the pages take the shadow's bytes, so the run goes on from the CPU's.
++    void compare(const Imx1GpuFill& fill) override {
++        const uint32_t first = fill.base / pageBytes * pageBytes, end = ((fill.end() - 1) / pageBytes + 1) * pageBytes;
++        cause = whole;
++        cpuReads(fill.bank, first, end);
++        uint32_t size = 0, shadowSize = 0;
++        uint8_t* bytes = memory->rawBank(fill.bank, size);
++        const uint8_t* expected = shadow->rawBank(fill.bank, shadowSize);
++        ++stats.compared;
++        if (!std::memcmp(bytes + first, expected + first, end - first)) return;
++        uint32_t at = first;
++        while (bytes[at] == expected[at]) ++at;
++        at &= ~1u;
++        if (++stats.mismatches <= 8)
++            std::fprintf(stderr, "zodiac gpu: mismatch after fill %" PRIu64 " (bank %u offset %#x, gpu %04x cpu %04x; "
++                         "fill base %#x pitch %u %ux%u colour %#x%s%s%s%s%s%s%s%s source bank %u base %#x pitch %u)\n",
++                         stats.fills, fill.bank, at, unsigned(bytes[at] | bytes[at + 1] << 8),
++                         unsigned(expected[at] | expected[at + 1] << 8), fill.base, fill.pitch, fill.width, fill.height,
++                         fill.colour, fill.copy ? " copy" : "", fill.keyed ? " keyed" : "", fill.keyEqual ? " key-equal" : "",
++                         fill.doubled ? " doubled" : "", fill.painted ? " painted" : "", fill.invert ? " invert" : "",
++                         fill.a4 ? " a4" : "", fill.pixels ? " inline" : "", fill.sourceBank, fill.sourceBase,
++                         fill.sourcePitch);
++        std::memcpy(bytes + first, expected + first, end - first);
++        cpuWrites(fill.bank, first, end);
++    }
++   private:
++    void upload(unsigned bank, uint32_t first, uint32_t end) {
++        if (end <= first) return;
++        const uint32_t last = std::min<uint32_t>((end - 1) / pageBytes, uint32_t(pages[bank].size()) - 1);
++        uint32_t size = 0;
++        const uint8_t* bytes = memory->rawBank(bank, size);
++        for (uint32_t page = first / pageBytes; page <= last;) {
++            if (pages[bank][page] != cpuNewer) { ++page; continue; }
++            uint32_t run = page;
++            while (run <= last && pages[bank][run] == cpuNewer) pages[bank][run++] = same;
++            backend->upload(bank, page, run - page, bytes + size_t(page) * pageBytes);
++            ++stats.uploads;
++            stats.uploadPages += run - page;
++            page = run;
++        }
++    }
++    static constexpr uint32_t pageBytes = Imx1GraphicsGpuBackend::pageBytes;
++    std::unique_ptr<Imx1GraphicsGpuBackend> backend;
++    Imx1GraphicsMemory* memory = nullptr;
++    std::unique_ptr<Imx1GraphicsMemory> shadow;
++    // Each bank's pages as the GPU read them back after a fill (the backend's thread writes them), and for each
++    // page the last fill that wrote it. A page is copied from here only once that fill is completed, and a later
++    // fill to the page sets its number first, so the two threads never use the same page at once.
++    std::array<std::vector<uint8_t>, 2> readBack;
++    std::array<std::vector<uint64_t>, 2> pageFill;
++    Stats stats;
++};
++
++#endif
+diff --git a/src/uarm/uarm/imx1_graphics_gpu_gles.h b/src/uarm/uarm/imx1_graphics_gpu_gles.h
+new file mode 100644
+index 0000000..334c7aa
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_gpu_gles.h
+@@ -0,0 +1,576 @@
++#ifndef FROND_IMX1_GRAPHICS_GPU_GLES_H
++#define FROND_IMX1_GRAPHICS_GPU_GLES_H
++
++#include "imx1_graphics_gpu.h"
++
++// The GLES 3 backend over EGL, for the Linux desktop and Android alike. libEGL and libGLESv2 are opened at run
++// time, so nothing links against them and a host without them just has no GPU. It draws on a thread of its own
++// that owns the context, so it never meets a front end's own GL context on the emulation thread.
++#if __has_include(<EGL/egl.h>) && __has_include(<GLES3/gl3.h>) && !defined(__EMSCRIPTEN__)
++#define FROND_IMX1_GPU_GLES 1
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <GLES3/gl3.h>
++#include <dlfcn.h>
++#include <atomic>
++#include <chrono>
++#include <condition_variable>
++#include <deque>
++#include <functional>
++#include <mutex>
++#include <thread>
++
++#ifndef EGL_PLATFORM_DEVICE_EXT
++#define EGL_PLATFORM_DEVICE_EXT 0x313F
++#endif
++#ifndef EGL_DRM_DEVICE_FILE_EXT
++#define EGL_DRM_DEVICE_FILE_EXT 0x3233
++#endif
++#ifndef EGL_DRM_RENDER_NODE_FILE_EXT
++#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
++#endif
++#ifndef EGL_PLATFORM_SURFACELESS_MESA
++#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
++#endif
++
++class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
++   public:
++    // bankBytes: each bank's size, a whole number of pages. Null with why in error when there is no usable GPU.
++    // FROND_ZODIAC_GPU_DEVICE names an EGL device's DRM node to use (e.g. /dev/dri/renderD128), or surfaceless;
++    // otherwise the first hardware device with a DRM node, then Mesa's surfaceless platform, then the default
++    // display (Android's).
++    static std::unique_ptr<Imx1GraphicsGpuGles> create(const uint32_t (&bankBytes)[2], std::string& error) {
++        std::unique_ptr<Imx1GraphicsGpuGles> gpu(new Imx1GraphicsGpuGles());
++        for (unsigned bank = 0; bank < 2; ++bank) gpu->rows[bank] = bankBytes[bank] / pageBytes;
++        gpu->worker = std::thread([raw = gpu.get()] { raw->run(); });
++        {
++            std::unique_lock<std::mutex> lock(gpu->mutex);
++            gpu->changed.wait(lock, [&] { return gpu->started; });
++        }
++        if (!gpu->ready) {
++            error = gpu->failure;
++            return nullptr;
++        }
++        return gpu;
++    }
++    ~Imx1GraphicsGpuGles() override {
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            stopping = true;
++        }
++        changed.notify_all();
++        if (worker.joinable()) worker.join();
++        if (posted && !std::getenv("FROND_ZODIAC_GPU_QUIET"))
++            std::fprintf(stderr, "zodiac gpu: per fill %.1f us queued, %.1f us drawing, %.1f us reading back\n",
++                         queueNs / 1e3 / double(posted), drawNs / 1e3 / double(posted), readNs / 1e3 / double(posted));
++    }
++    const std::string& renderer() const override { return name; }
++    bool healthy() const override { return ready && !broken; }
++    void upload(unsigned bank, uint32_t firstPage, uint32_t pages, const uint8_t* data) override {
++        std::vector<uint8_t> copy(data, data + size_t(pages) * pageBytes);
++        post([this, bank, firstPage, pages, copy = std::move(copy)] {
++            gl.BindTexture(GL_TEXTURE_2D, banks[bank].texture);
++            gl.PixelStorei(GL_UNPACK_ALIGNMENT, 4);
++            gl.TexSubImage2D(GL_TEXTURE_2D, 0, 0, GLint(firstPage), rowTexels, GLsizei(pages), GL_RED_INTEGER,
++                             GL_UNSIGNED_SHORT, copy.data());
++        });
++    }
++    uint64_t fill(const Imx1GpuFill& fill, uint32_t firstPage, uint32_t pages, uint8_t* to) override {
++        std::vector<uint16_t> pixels;
++        if (fill.pixels) pixels.assign(fill.pixels, fill.pixels + size_t(fill.width) * fill.height);
++        const uint64_t number = ++posted;
++        const auto queued = std::chrono::steady_clock::now();
++        post([this, fill, pixels = std::move(pixels), firstPage, pages, to, number, queued] {
++            const auto started = std::chrono::steady_clock::now();
++            draw(fill, pixels);
++            const auto drawn = std::chrono::steady_clock::now();
++            read(fill.bank, firstPage, pages, to + size_t(firstPage) * pageBytes);
++            const auto read = std::chrono::steady_clock::now();
++            using ns = std::chrono::nanoseconds;
++            queueNs += uint64_t(std::chrono::duration_cast<ns>(started - queued).count());
++            drawNs += uint64_t(std::chrono::duration_cast<ns>(drawn - started).count());
++            readNs += uint64_t(std::chrono::duration_cast<ns>(read - drawn).count());
++            {
++                std::lock_guard<std::mutex> lock(mutex);
++                done.store(number, std::memory_order_release);
++            }
++            finished.notify_all();
++        });
++        return number;
++    }
++    uint64_t completed() const override { return done.load(std::memory_order_acquire); }
++    void waitFor(uint64_t number) override {
++        // Fills are short: spin a little before sleeping.
++        for (unsigned i = 0; i < 2000; ++i)
++            if (completed() >= number) return;
++        std::unique_lock<std::mutex> lock(mutex);
++        finished.wait(lock, [&] { return completed() >= number; });
++    }
++
++   private:
++    Imx1GraphicsGpuGles() = default;
++    struct Functions {
++        PFNGLGETSTRINGPROC GetString;
++        PFNGLGETERRORPROC GetError;
++        PFNGLGETINTEGERVPROC GetIntegerv;
++        PFNGLGENTEXTURESPROC GenTextures;
++        PFNGLBINDTEXTUREPROC BindTexture;
++        PFNGLTEXPARAMETERIPROC TexParameteri;
++        PFNGLTEXSTORAGE2DPROC TexStorage2D;
++        PFNGLTEXIMAGE2DPROC TexImage2D;
++        PFNGLTEXSUBIMAGE2DPROC TexSubImage2D;
++        PFNGLPIXELSTOREIPROC PixelStorei;
++        PFNGLACTIVETEXTUREPROC ActiveTexture;
++        PFNGLGENFRAMEBUFFERSPROC GenFramebuffers;
++        PFNGLBINDFRAMEBUFFERPROC BindFramebuffer;
++        PFNGLFRAMEBUFFERTEXTURE2DPROC FramebufferTexture2D;
++        PFNGLCHECKFRAMEBUFFERSTATUSPROC CheckFramebufferStatus;
++        PFNGLREADPIXELSPROC ReadPixels;
++        PFNGLBLITFRAMEBUFFERPROC BlitFramebuffer;
++        PFNGLVIEWPORTPROC Viewport;
++        PFNGLSCISSORPROC Scissor;
++        PFNGLENABLEPROC Enable;
++        PFNGLDISABLEPROC Disable;
++        PFNGLCREATESHADERPROC CreateShader;
++        PFNGLSHADERSOURCEPROC ShaderSource;
++        PFNGLCOMPILESHADERPROC CompileShader;
++        PFNGLGETSHADERIVPROC GetShaderiv;
++        PFNGLGETSHADERINFOLOGPROC GetShaderInfoLog;
++        PFNGLCREATEPROGRAMPROC CreateProgram;
++        PFNGLATTACHSHADERPROC AttachShader;
++        PFNGLLINKPROGRAMPROC LinkProgram;
++        PFNGLGETPROGRAMIVPROC GetProgramiv;
++        PFNGLGETPROGRAMINFOLOGPROC GetProgramInfoLog;
++        PFNGLUSEPROGRAMPROC UseProgram;
++        PFNGLGETUNIFORMLOCATIONPROC GetUniformLocation;
++        PFNGLUNIFORM1UIPROC Uniform1ui;
++        PFNGLUNIFORM1IPROC Uniform1i;
++        PFNGLGENVERTEXARRAYSPROC GenVertexArrays;
++        PFNGLBINDVERTEXARRAYPROC BindVertexArray;
++        PFNGLDRAWARRAYSPROC DrawArrays;
++    };
++    struct Egl {
++        PFNEGLGETPROCADDRESSPROC GetProcAddress;
++        PFNEGLQUERYSTRINGPROC QueryString;
++        PFNEGLGETDISPLAYPROC GetDisplay;
++        PFNEGLINITIALIZEPROC Initialize;
++        PFNEGLTERMINATEPROC Terminate;
++        PFNEGLBINDAPIPROC BindAPI;
++        PFNEGLCHOOSECONFIGPROC ChooseConfig;
++        PFNEGLCREATECONTEXTPROC CreateContext;
++        PFNEGLDESTROYCONTEXTPROC DestroyContext;
++        PFNEGLCREATEPBUFFERSURFACEPROC CreatePbufferSurface;
++        PFNEGLDESTROYSURFACEPROC DestroySurface;
++        PFNEGLMAKECURRENTPROC MakeCurrent;
++        PFNEGLGETERRORPROC GetError;
++    };
++    struct Bank { GLuint texture = 0, framebuffer = 0; };
++    enum Unit { sourceUnit, underUnit, pixelsUnit };
++
++    void post(std::function<void()> job) {
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            jobs.push_back(std::move(job));
++        }
++        changed.notify_all();
++    }
++    void run() {
++        const bool ok = start();
++        {
++            std::lock_guard<std::mutex> lock(mutex);
++            ready = ok;
++            started = true;
++        }
++        changed.notify_all();
++        if (ok) {
++            for (;;) {
++                std::deque<std::function<void()>> batch;
++                {
++                    std::unique_lock<std::mutex> lock(mutex);
++                    changed.wait(lock, [&] { return stopping || !jobs.empty(); });
++                    if (jobs.empty()) break;
++                    batch.swap(jobs);
++                }
++                for (auto& job : batch) job();
++            }
++        }
++        stop();
++    }
++    template <class F> bool load(void* library, F& to, const char* symbol) {
++        void* found = library ? dlsym(library, symbol) : nullptr;
++        if (!found && egl.GetProcAddress) found = reinterpret_cast<void*>(egl.GetProcAddress(symbol));
++        to = reinterpret_cast<F>(found);
++        if (!found) failure = std::string("no ") + symbol;
++        return found;
++    }
++    static void* open(std::initializer_list<const char*> names) {
++        for (const char* n : names)
++            if (void* library = dlopen(n, RTLD_NOW | RTLD_LOCAL)) return library;
++        return nullptr;
++    }
++    static bool hasWord(const char* list, const char* word) {
++        if (!list) return false;
++        const size_t length = std::strlen(word);
++        for (const char* at = std::strstr(list, word); at; at = std::strstr(at + 1, word))
++            if ((at == list || at[-1] == ' ') && (at[length] == ' ' || !at[length])) return true;
++        return false;
++    }
++    EGLDisplay pickDisplay() {
++        const char* client = egl.QueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
++        auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
++            egl.GetProcAddress("eglGetPlatformDisplayEXT"));
++        auto queryDevices = reinterpret_cast<PFNEGLQUERYDEVICESEXTPROC>(egl.GetProcAddress("eglQueryDevicesEXT"));
++        auto deviceString = reinterpret_cast<PFNEGLQUERYDEVICESTRINGEXTPROC>(egl.GetProcAddress("eglQueryDeviceStringEXT"));
++        const char* wanted = std::getenv("FROND_ZODIAC_GPU_DEVICE");
++        // "surfaceless" skips the devices, for Mesa's software rasteriser.
++        const bool devices = !wanted || std::strcmp(wanted, "surfaceless");
++        if (!devices) wanted = nullptr;
++        if (devices && getPlatformDisplay && queryDevices && deviceString && hasWord(client, "EGL_EXT_platform_device")) {
++            EGLDeviceEXT devices[16];
++            EGLint count = 0;
++            if (queryDevices(16, devices, &count)) {
++                for (EGLint i = 0; i < count; ++i) {
++                    const char* extensions = deviceString(devices[i], EGL_EXTENSIONS);
++                    if (hasWord(extensions, "EGL_MESA_device_software")) continue;
++                    const char* node = hasWord(extensions, "EGL_EXT_device_drm_render_node") ?
++                        deviceString(devices[i], EGL_DRM_RENDER_NODE_FILE_EXT) : nullptr;
++                    const char* card = hasWord(extensions, "EGL_EXT_device_drm") ?
++                        deviceString(devices[i], EGL_DRM_DEVICE_FILE_EXT) : nullptr;
++                    if (wanted && !((node && !std::strcmp(node, wanted)) || (card && !std::strcmp(card, wanted)))) continue;
++                    if (!wanted && !node && !card) continue;
++                    EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devices[i], nullptr);
++                    if (display != EGL_NO_DISPLAY && egl.Initialize(display, nullptr, nullptr)) {
++                        device = node ? node : card ? card : "";
++                        return display;
++                    }
++                }
++            }
++        }
++        if (wanted) {
++            failure = std::string("no EGL device ") + wanted;
++            return EGL_NO_DISPLAY;
++        }
++        if (getPlatformDisplay && hasWord(client, "EGL_MESA_platform_surfaceless")) {
++            EGLDisplay display = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
++            if (display != EGL_NO_DISPLAY && egl.Initialize(display, nullptr, nullptr)) {
++                device = "surfaceless";
++                return display;
++            }
++        }
++        EGLDisplay display = egl.GetDisplay(EGL_DEFAULT_DISPLAY);
++        if (display != EGL_NO_DISPLAY && egl.Initialize(display, nullptr, nullptr)) {
++            device = "default";
++            return display;
++        }
++        failure = "no EGL display";
++        return EGL_NO_DISPLAY;
++    }
++    bool start() {
++        eglLibrary = open({"libEGL.so.1", "libEGL.so"});
++        glLibrary = open({"libGLESv2.so.2", "libGLESv3.so", "libGLESv2.so"});
++        if (!eglLibrary || !glLibrary) {
++            failure = "no libEGL or libGLESv2";
++            return false;
++        }
++        egl.GetProcAddress = reinterpret_cast<PFNEGLGETPROCADDRESSPROC>(dlsym(eglLibrary, "eglGetProcAddress"));
++        if (!egl.GetProcAddress) { failure = "no eglGetProcAddress"; return false; }
++        if (!load(eglLibrary, egl.QueryString, "eglQueryString") || !load(eglLibrary, egl.GetDisplay, "eglGetDisplay") ||
++            !load(eglLibrary, egl.Initialize, "eglInitialize") || !load(eglLibrary, egl.Terminate, "eglTerminate") ||
++            !load(eglLibrary, egl.BindAPI, "eglBindAPI") || !load(eglLibrary, egl.ChooseConfig, "eglChooseConfig") ||
++            !load(eglLibrary, egl.CreateContext, "eglCreateContext") ||
++            !load(eglLibrary, egl.DestroyContext, "eglDestroyContext") ||
++            !load(eglLibrary, egl.CreatePbufferSurface, "eglCreatePbufferSurface") ||
++            !load(eglLibrary, egl.DestroySurface, "eglDestroySurface") ||
++            !load(eglLibrary, egl.MakeCurrent, "eglMakeCurrent") || !load(eglLibrary, egl.GetError, "eglGetError"))
++            return false;
++        display = pickDisplay();
++        if (display == EGL_NO_DISPLAY) return false;
++        if (!egl.BindAPI(EGL_OPENGL_ES_API)) { failure = "no GLES API"; return false; }
++        const bool surfaceless = hasWord(egl.QueryString(display, EGL_EXTENSIONS), "EGL_KHR_surfaceless_context");
++        const EGLint pbufferConfig[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE};
++        const EGLint anyConfig[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_SURFACE_TYPE, 0, EGL_NONE};
++        EGLConfig config = nullptr;
++        EGLint configs = 0;
++        bool pbuffer = egl.ChooseConfig(display, pbufferConfig, &config, 1, &configs) && configs;
++        if (!pbuffer && !(surfaceless && egl.ChooseConfig(display, anyConfig, &config, 1, &configs) && configs)) {
++            failure = "no GLES 3 config";
++            return false;
++        }
++        const EGLint contextAttributes[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
++        context = egl.CreateContext(display, config, EGL_NO_CONTEXT, contextAttributes);
++        if (context == EGL_NO_CONTEXT) { failure = "no GLES 3 context"; return false; }
++        if (!surfaceless) {
++            const EGLint size[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE};
++            surface = egl.CreatePbufferSurface(display, config, size);
++            if (surface == EGL_NO_SURFACE) { failure = "no pbuffer"; return false; }
++        }
++        if (!egl.MakeCurrent(display, surface, surface, context)) { failure = "eglMakeCurrent failed"; return false; }
++#define FROND_GL(f) load(glLibrary, gl.f, "gl" #f)
++        if (!(FROND_GL(GetString) && FROND_GL(GetError) && FROND_GL(GetIntegerv) && FROND_GL(GenTextures) &&
++              FROND_GL(BindTexture) && FROND_GL(TexParameteri) && FROND_GL(TexStorage2D) && FROND_GL(TexImage2D) &&
++              FROND_GL(TexSubImage2D) && FROND_GL(PixelStorei) && FROND_GL(ActiveTexture) &&
++              FROND_GL(GenFramebuffers) && FROND_GL(BindFramebuffer) && FROND_GL(FramebufferTexture2D) &&
++              FROND_GL(CheckFramebufferStatus) && FROND_GL(ReadPixels) && FROND_GL(BlitFramebuffer) &&
++              FROND_GL(Viewport) && FROND_GL(Scissor) && FROND_GL(Enable) && FROND_GL(Disable) &&
++              FROND_GL(CreateShader) && FROND_GL(ShaderSource) && FROND_GL(CompileShader) && FROND_GL(GetShaderiv) &&
++              FROND_GL(GetShaderInfoLog) && FROND_GL(CreateProgram) && FROND_GL(AttachShader) &&
++              FROND_GL(LinkProgram) && FROND_GL(GetProgramiv) && FROND_GL(GetProgramInfoLog) &&
++              FROND_GL(UseProgram) && FROND_GL(GetUniformLocation) && FROND_GL(Uniform1ui) && FROND_GL(Uniform1i) &&
++              FROND_GL(GenVertexArrays) && FROND_GL(BindVertexArray) && FROND_GL(DrawArrays)))
++            return false;
++#undef FROND_GL
++        const char* renderer = reinterpret_cast<const char*>(gl.GetString(GL_RENDERER));
++        const char* version = reinterpret_cast<const char*>(gl.GetString(GL_VERSION));
++        name = std::string(renderer ? renderer : "?") + " (" + (version ? version : "?") + ", " + device + ")";
++        for (unsigned bank = 0; bank < 2; ++bank) {
++            banks[bank] = makeTarget(rows[bank]);
++            if (!banks[bank].texture) return false;
++        }
++        const uint32_t scratchRows = std::max(rows[0], rows[1]);
++        sourceCopy = makeTarget(scratchRows);
++        underCopy = makeTarget(scratchRows);
++        if (!sourceCopy.texture || !underCopy.texture) return false;
++        gl.GenTextures(1, &pixelTexture);
++        gl.BindTexture(GL_TEXTURE_2D, pixelTexture);
++        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        if (!makeProgram()) return false;
++        gl.GenVertexArrays(1, &vertexArray);
++        gl.BindVertexArray(vertexArray);
++        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, banks[1].framebuffer);
++        GLint format = 0, type = 0;
++        gl.GetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
++        gl.GetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
++        readShort = format == GL_RED_INTEGER && type == GL_UNSIGNED_SHORT;
++        if (std::getenv("FROND_ZODIAC_GPU_READ_RGBA")) readShort = false;
++        return check("start");
++    }
++    void stop() {
++        if (display != EGL_NO_DISPLAY) {
++            egl.MakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++            if (surface != EGL_NO_SURFACE) egl.DestroySurface(display, surface);
++            if (context != EGL_NO_CONTEXT) egl.DestroyContext(display, context);
++            egl.Terminate(display);
++        }
++        // The libraries stay loaded: some drivers keep threads that outlive the display.
++    }
++    bool check(const char* what) {
++        const GLenum error = gl.GetError();
++        if (error == GL_NO_ERROR) return true;
++        if (!broken) std::fprintf(stderr, "zodiac gpu: GL error %#x in %s, drawing goes back to the CPU\n", error, what);
++        failure = std::string("GL error in ") + what;
++        broken = true;
++        return false;
++    }
++    Bank makeTarget(uint32_t height) {
++        Bank target;
++        gl.GenTextures(1, &target.texture);
++        gl.BindTexture(GL_TEXTURE_2D, target.texture);
++        gl.TexStorage2D(GL_TEXTURE_2D, 1, GL_R16UI, rowTexels, GLsizei(height));
++        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        gl.GenFramebuffers(1, &target.framebuffer);
++        gl.BindFramebuffer(GL_FRAMEBUFFER, target.framebuffer);
++        gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target.texture, 0);
++        if (gl.CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++            failure = "R16UI target incomplete";
++            return {};
++        }
++        return target;
++    }
++    GLuint compile(GLenum kind, const char* source) {
++        const GLuint shader = gl.CreateShader(kind);
++        gl.ShaderSource(shader, 1, &source, nullptr);
++        gl.CompileShader(shader);
++        GLint ok = 0;
++        gl.GetShaderiv(shader, GL_COMPILE_STATUS, &ok);
++        if (!ok) {
++            char log[1024] = {};
++            gl.GetShaderInfoLog(shader, sizeof log, nullptr, log);
++            failure = std::string("shader: ") + log;
++            return 0;
++        }
++        return shader;
++    }
++    bool makeProgram() {
++        // A triangle over the whole target; the scissor picks the rows.
++        static const char* vertex = R"(#version 300 es
++void main() {
++    vec2 at = vec2(float((gl_VertexID & 1) * 4 - 1), float((gl_VertexID & 2) * 2 - 1));
++    gl_Position = vec4(at, 0.0, 1.0);
++})";
++        // One texel per destination address: which pixel of the fill it is, if any, and that pixel's colour as the
++        // CPU loop works it out (inline pixels, source copy with key and paint, invert, A4).
++        static const char* fragment = R"(#version 300 es
++precision highp float;
++precision highp int;
++precision highp usampler2D;
++uniform usampler2D source;
++uniform usampler2D under;
++uniform usampler2D pixels;
++uniform uint base, pitch, width, height, colour, sourceBase, sourcePitch, sourceX, sourceY, paint, flags;
++layout(location = 0) out uint result;
++uint at(usampler2D from, uint address) {
++    return texelFetch(from, ivec2(int(address & 2047u), int(address >> 11)), 0).r;
++}
++uint blend(uint d, uint s, uint a, uint shift, uint mask) {
++    return ((((d >> shift) & mask) * (15u - a) + ((s >> shift) & mask) * a) / 15u) << shift;
++}
++void main() {
++    uint address = uint(gl_FragCoord.y) * 2048u + uint(gl_FragCoord.x);
++    if (address < base) discard;
++    uint offset = address - base;
++    uint y = height == 1u ? 0u : offset / pitch;
++    uint x = offset - y * pitch;
++    if (y >= height || x >= width) discard;
++    uint c = colour;
++    if ((flags & 1u) != 0u) c = texelFetch(pixels, ivec2(int(x), int(y)), 0).r;
++    if ((flags & 2u) != 0u) {
++        uint from = (flags & 8u) != 0u ? sourceBase + ((sourceY + y) >> 1) * sourcePitch + ((sourceX + x) >> 1) :
++                                         sourceBase + y * sourcePitch + x;
++        c = at(source, from);
++        if ((flags & 4u) != 0u && ((c == colour) != ((flags & 64u) != 0u))) discard;
++        if ((flags & 128u) != 0u) c = paint;
++    }
++    if ((flags & 16u) != 0u) c = (at(under, address) ^ c) & 65535u;
++    if ((flags & 32u) != 0u) {
++        uint d = at(under, address), s = at(source, sourceBase + y * sourcePitch + x);
++        c = c == 0u ? d : c == 15u ? s : blend(d, s, c, 0u, 31u) | blend(d, s, c, 5u, 63u) | blend(d, s, c, 11u, 31u);
++    }
++    result = c & 65535u;
++})";
++        const GLuint v = compile(GL_VERTEX_SHADER, vertex), f = v ? compile(GL_FRAGMENT_SHADER, fragment) : 0;
++        if (!f) return false;
++        program = gl.CreateProgram();
++        gl.AttachShader(program, v);
++        gl.AttachShader(program, f);
++        gl.LinkProgram(program);
++        GLint ok = 0;
++        gl.GetProgramiv(program, GL_LINK_STATUS, &ok);
++        if (!ok) {
++            char log[1024] = {};
++            gl.GetProgramInfoLog(program, sizeof log, nullptr, log);
++            failure = std::string("link: ") + log;
++            return false;
++        }
++        gl.UseProgram(program);
++        gl.Uniform1i(gl.GetUniformLocation(program, "source"), sourceUnit);
++        gl.Uniform1i(gl.GetUniformLocation(program, "under"), underUnit);
++        gl.Uniform1i(gl.GetUniformLocation(program, "pixels"), pixelsUnit);
++        const char* names[] = {"base", "pitch", "width", "height", "colour", "sourceBase", "sourcePitch", "sourceX",
++                               "sourceY", "paint", "flags"};
++        for (unsigned i = 0; i < 11; ++i) uniforms[i] = gl.GetUniformLocation(program, names[i]);
++        return true;
++    }
++    // Copies rows first to last of from's bank into the same rows of a scratch target.
++    void copyRows(const Bank& from, const Bank& to, uint32_t first, uint32_t last) {
++        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, from.framebuffer);
++        gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, to.framebuffer);
++        gl.BlitFramebuffer(0, GLint(first), rowTexels, GLint(last + 1), 0, GLint(first), rowTexels, GLint(last + 1),
++                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
++    }
++    void bindUnit(Unit unit, GLuint texture) {
++        gl.ActiveTexture(GL_TEXTURE0 + unit);
++        gl.BindTexture(GL_TEXTURE_2D, texture);
++    }
++    // Reads pages of a bank into data, as the CPU's bytes hold them.
++    void read(unsigned bank, uint32_t firstPage, uint32_t pages, uint8_t* data) {
++        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, banks[bank].framebuffer);
++        gl.PixelStorei(GL_PACK_ALIGNMENT, 4);
++        if (readShort) {
++            gl.ReadPixels(0, GLint(firstPage), rowTexels, GLsizei(pages), GL_RED_INTEGER, GL_UNSIGNED_SHORT, data);
++        } else {
++            // GLES always reads an unsigned integer buffer as RGBA unsigned ints.
++            readScratch.resize(size_t(pages) * rowTexels * 4);
++            gl.ReadPixels(0, GLint(firstPage), rowTexels, GLsizei(pages), GL_RGBA_INTEGER, GL_UNSIGNED_INT,
++                          readScratch.data());
++            for (size_t i = 0; i < size_t(pages) * rowTexels; ++i) {
++                data[i * 2] = uint8_t(readScratch[i * 4]);
++                data[i * 2 + 1] = uint8_t(readScratch[i * 4] >> 8);
++            }
++        }
++        if (checkEach) check("read");
++    }
++    void draw(const Imx1GpuFill& fill, const std::vector<uint16_t>& pixels) {
++        if (broken) return;
++        // In texels from here on.
++        const uint32_t base = fill.base / 2, last = (fill.end() - 2) / 2;
++        const uint32_t firstRow = base / rowTexels, lastRow = last / rowTexels;
++        const Bank& target = banks[fill.bank];
++        // A sampled texture is never the one drawn into: a source in the same bank and the destination's own
++        // pixels are read from copies of their rows.
++        GLuint source = sourceCopy.texture, under = underCopy.texture;
++        if (fill.copy || fill.a4) {
++            const uint32_t sourceFirst = fill.sourceBase / 2 / rowTexels;
++            const uint32_t sourceLast = (fill.sourceBase + fill.sourceLength - 2) / 2 / rowTexels;
++            if (fill.sourceBank == fill.bank) copyRows(target, sourceCopy, sourceFirst, sourceLast);
++            else source = banks[fill.sourceBank].texture;
++        }
++        if (fill.invert || fill.a4) copyRows(target, underCopy, firstRow, lastRow);
++        bindUnit(sourceUnit, source);
++        bindUnit(underUnit, under);
++        if (fill.pixels) {
++            bindUnit(pixelsUnit, pixelTexture);
++            gl.PixelStorei(GL_UNPACK_ALIGNMENT, 2);
++            gl.TexImage2D(GL_TEXTURE_2D, 0, GL_R16UI, GLsizei(fill.width), GLsizei(fill.height), 0, GL_RED_INTEGER,
++                          GL_UNSIGNED_SHORT, pixels.data());
++        } else bindUnit(pixelsUnit, pixelTexture);
++        gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, target.framebuffer);
++        gl.Viewport(0, 0, rowTexels, GLsizei(rows[fill.bank]));
++        gl.Enable(GL_SCISSOR_TEST);
++        if (firstRow == lastRow)
++            gl.Scissor(GLint(base % rowTexels), GLint(firstRow), GLsizei(last - base + 1), 1);
++        else gl.Scissor(0, GLint(firstRow), rowTexels, GLsizei(lastRow - firstRow + 1));
++        const uint32_t flags = (fill.pixels ? 1u : 0) | (fill.copy ? 2u : 0) | (fill.keyed ? 4u : 0) |
++            (fill.doubled ? 8u : 0) | (fill.invert ? 16u : 0) | (fill.a4 ? 32u : 0) | (fill.keyEqual ? 64u : 0) |
++            (fill.painted ? 128u : 0);
++        const uint32_t values[] = {base, fill.pitch / 2, fill.width, fill.height, fill.colour, fill.sourceBase / 2,
++                                   fill.sourcePitch / 2, fill.sourceX, fill.sourceY, fill.paint, flags};
++        for (unsigned i = 0; i < 11; ++i) gl.Uniform1ui(uniforms[i], values[i]);
++        gl.DrawArrays(GL_TRIANGLES, 0, 3);
++        gl.Disable(GL_SCISSOR_TEST);
++        if (checkEach) check("fill");
++    }
++
++    std::thread worker;
++    std::mutex mutex;
++    std::condition_variable changed, finished;
++    std::deque<std::function<void()>> jobs;
++    bool started = false, ready = false, stopping = false;
++    // broken is set on the worker and read anywhere; ready is set once before create returns.
++    std::atomic<bool> broken{false};
++    // Fills posted (emulation thread) and read back (worker).
++    uint64_t posted = 0;
++    // Worker thread: host time from posting to starting each fill, drawing it and reading it back. Read after
++    // the worker stops.
++    uint64_t queueNs = 0, drawNs = 0, readNs = 0;
++    std::atomic<uint64_t> done{0};
++    bool readShort = false;
++    const bool checkEach = std::getenv("FROND_ZODIAC_GPU_CHECK") != nullptr;
++    std::string failure, name, device;
++    void *eglLibrary = nullptr, *glLibrary = nullptr;
++    Egl egl{};
++    Functions gl{};
++    EGLDisplay display = EGL_NO_DISPLAY;
++    EGLContext context = EGL_NO_CONTEXT;
++    EGLSurface surface = EGL_NO_SURFACE;
++    uint32_t rows[2] = {};
++    Bank banks[2], sourceCopy, underCopy;
++    GLuint pixelTexture = 0, program = 0, vertexArray = 0;
++    GLint uniforms[11] = {};
++    std::vector<uint32_t> readScratch;
++};
++
++// The host's GPU backend, or null with why in error.
++inline std::unique_ptr<Imx1GraphicsGpuBackend> imx1MakeGraphicsGpuBackend(const uint32_t (&bankBytes)[2],
++                                                                          std::string& error) {
++    return Imx1GraphicsGpuGles::create(bankBytes, error);
++}
++#else
++inline std::unique_ptr<Imx1GraphicsGpuBackend> imx1MakeGraphicsGpuBackend(const uint32_t (&)[2], std::string& error) {
++    error = "built without EGL and GLES 3";
++    return nullptr;
++}
++#endif
++
++#endif
+diff --git a/src/uarm/uarm/imx1_graphics_memory.h b/src/uarm/uarm/imx1_graphics_memory.h
+index 996ff21..5c57bd0 100644
+--- a/src/uarm/uarm/imx1_graphics_memory.h
++++ b/src/uarm/uarm/imx1_graphics_memory.h
+@@ -6,6 +6,49 @@
+ #include <vector>
+ #include "imx1_cs5_configuration.h"
+ 
++class Imx1GraphicsMemory;
++
++// One engine fill for a host GPU, in bank offsets (bytes, even). sourceLength is how far from sourceBase the fill
++// may read. pixels: width by height inline pixels, or none.
++struct Imx1GpuFill {
++    unsigned bank = 0, sourceBank = 0;
++    uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0;
++    uint32_t sourceBase = 0, sourcePitch = 0, sourceLength = 0, sourceX = 0, sourceY = 0, paint = 0;
++    bool copy = false, keyed = false, doubled = false, invert = false, a4 = false, painted = false, keyEqual = false;
++    const uint16_t* pixels = nullptr;
++    uint32_t end() const { return base + (height - 1) * pitch + width * 2; }
++};
++
++// Where a host GPU holds a copy of graphics memory (Fast only): each 4 KB page of a bank is the same in both,
++// newer in the bytes (the GPU copy needs an upload) or newer on the GPU (the bytes need a download). The memory
++// asks it to bring pages back before the CPU reads them and marks them before the CPU writes them.
++class Imx1GraphicsResidency {
++   public:
++    static constexpr uint32_t pageShift = 12;
++    enum Page : uint8_t { same, cpuNewer, gpuNewer };
++    virtual ~Imx1GraphicsResidency() = default;
++    // Downloads the GPU-newer pages between bank offsets first and end.
++    virtual void cpuReads(unsigned bank, uint32_t first, uint32_t end) = 0;
++    // As cpuReads, then marks the pages newer in the bytes.
++    virtual void cpuWrites(unsigned bank, uint32_t first, uint32_t end) = 0;
++    // Differential mode: a CPU write of size bytes the shadow copy takes too.
++    virtual void mirrorWrite(unsigned bank, uint32_t offset, uint32_t size, uint32_t value) = 0;
++    // Draws a fill on the GPU copy and records its writes; false leaves it to the CPU.
++    virtual bool fill(const Imx1GpuFill& fill) = 0;
++    // Differential mode: the CPU-only copy every fill also runs on, and the check of a GPU fill's pages against it.
++    virtual Imx1GraphicsMemory* shadowMemory() = 0;
++    virtual void compare(const Imx1GpuFill& fill) = 0;
++    std::array<std::vector<uint8_t>, 2> pages;
++    uint32_t gpuNewerPages = 0;
++    bool mirror = false;
++    // Fills left to the CPU while the GPU was attached.
++    uint64_t cpuFills = 0;
++    // What the next cpuReads or cpuWrites is for, for the GPU's download counts: a CPU read or write, a span (a
++    // display row or a CPU fill), a copied range, a whole bank (hash, state) or a CPU fill's writes.
++    enum Cause : uint8_t { access, accessWrite, span, copy, whole, writes, causes };
++    Cause cause = access;
++};
++
+ // Storage belongs to the probe, separately from transactional control state.
+ class Imx1GraphicsMemory {
+    public:
+@@ -26,6 +69,10 @@ class Imx1GraphicsMemory {
+     }
+     // Borrowed backing for private diagnostics, without acknowledging dirty consumers.
+     const uint8_t* diagnosticData(unsigned bank, uint32_t& size) const {
++        if (residency && bank < 2) {
++            residency->cause = Imx1GraphicsResidency::whole;
++            residency->cpuReads(bank, 0, uint32_t(bytes[bank].size()));
++        }
+         size = bank < 2 ? bytes[bank].size() : 0;
+         return bank < 2 ? bytes[bank].data() : nullptr;
+     }
+@@ -47,6 +94,10 @@ class Imx1GraphicsMemory {
+     }
+     template <class A> void stateBytes(A& a, unsigned bank) {
+         const size_t size = bytes[bank].size();
++        if (residency) {
++            residency->cause = Imx1GraphicsResidency::whole;
++            residency->cpuReads(bank, 0, uint32_t(size));
++        }
+         a.DoVector(bytes[bank], size).Require(bytes[bank].size() == size, "graphics memory size");
+     }
+     void clearDirty(unsigned bank) { acknowledgeDirty(bank, Consumer::legacy, dirty(bank).generation); }
+@@ -68,10 +119,23 @@ class Imx1GraphicsMemory {
+     uint8_t* gpuSpan(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, uint32_t address, uint64_t length,
+                      unsigned& bank, uint32_t& offset) {
+         if (!contains(configuration, eim, address, length, &bank, &offset)) return nullptr;
++        if (residency) {
++            residency->cause = Imx1GraphicsResidency::span;
++            residency->cpuReads(bank, offset, uint32_t(offset + length));
++        }
+         return bytes[bank].data() + offset;
+     }
+     // count writes into bank, between offsets first and end, recorded as accessGpu records them one at a time.
+     void noteWrites(unsigned bank, uint32_t first, uint32_t end, uint64_t count) {
++        if (!count) return;
++        if (residency) {
++            residency->cause = Imx1GraphicsResidency::writes;
++            residency->cpuWrites(bank, first, end);
++        }
++        noteDirty(bank, first, end, count);
++    }
++    // Writes made on the GPU copy, recorded for the dirty consumers as noteWrites does. The caller marks the pages.
++    void noteDirty(unsigned bank, uint32_t first, uint32_t end, uint64_t count) {
+         if (!count) return;
+         generation += count;
+         for (auto& consumer : changes) {
+@@ -89,6 +153,10 @@ class Imx1GraphicsMemory {
+         unsigned bank = 0;
+         uint32_t offset = 0;
+         if (!destination || !contains(configuration, eim, address, length, &bank, &offset)) return false;
++        if (residency) {
++            residency->cause = Imx1GraphicsResidency::copy;
++            residency->cpuReads(bank, offset, offset + length);
++        }
+         std::memcpy(destination, bytes[bank].data() + offset, length);
+         return true;
+     }
+@@ -152,8 +220,27 @@ class Imx1GraphicsMemory {
+         transfer(bank, offset, size, write, value);
+         return true;
+     }
++    // The residency pointer, left out of the saved layout's size.
++    static constexpr size_t unsavedBytes = sizeof(Imx1GraphicsResidency*);
++    // The host GPU's copy, or none. Not saved; a load gives a new memory and the GPU marks every page again.
++    void setResidency(Imx1GraphicsResidency* gpu) { residency = gpu; }
++    Imx1GraphicsResidency* gpuResidency() const { return residency; }
++    // Bank storage with no residency check, for the GPU's uploads, downloads and shadow copy.
++    uint8_t* rawBank(unsigned bank, uint32_t& size) {
++        size = bank < 2 ? uint32_t(bytes[bank].size()) : 0;
++        return bank < 2 ? bytes[bank].data() : nullptr;
++    }
+    private:
+     void transfer(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value) {
++        if (residency) {
++            // An access never crosses a page, as it is aligned to its size.
++            const uint8_t page = residency->pages[bank][offset >> Imx1GraphicsResidency::pageShift];
++            residency->cause = write ? Imx1GraphicsResidency::accessWrite : Imx1GraphicsResidency::access;
++            if (write) {
++                if (page != Imx1GraphicsResidency::cpuNewer) residency->cpuWrites(bank, offset, offset + size);
++                if (residency->mirror) residency->mirrorWrite(bank, offset, size, value);
++            } else if (page == Imx1GraphicsResidency::gpuNewer) residency->cpuReads(bank, offset, offset + size);
++        }
+         if (write) {
+             for (uint32_t i = 0; i < size; ++i) bytes[bank][offset + i] = uint8_t(value >> (i * 8));
+             ++generation;
+@@ -188,10 +275,11 @@ class Imx1GraphicsMemory {
+         return cpuToGpu(address, gpuAddress) ? A::ok : A::unmapped;
+     }
+     std::array<std::vector<uint8_t>, 2> bytes;
++    Imx1GraphicsResidency* residency = nullptr;
+     std::array<std::array<Dirty, 2>, unsigned(Consumer::count)> changes{};
+     uint64_t generation = 0;
+ };
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Imx1GraphicsMemory) == 248, "update state() and stateVersion");
++static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update state() and stateVersion");
+ #endif
+ #endif
