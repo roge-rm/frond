@@ -1,8 +1,28 @@
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 8cd40f7..808eaba 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -182,6 +182,8 @@ struct Probe {
+             std::fprintf(stderr, "zodiac gpu: %s%s\n", backend->renderer().c_str(), differential ? ", differential" : "");
+             graphicsGpu.gpu = std::make_unique<Imx1GraphicsGpu>(std::move(backend), differential);
+         }
++        // Already attached to this memory: nothing to bring back or upload.
++        if (graphicsGpu.gpu->attachedMemory() == graphicsMemory.get()) return;
+         graphicsGpu.gpu->attach(graphicsMemory.get());
+     }
+     // What the command decoder said about the batch it last refused. For the stop text, not saved.
 diff --git a/src/uarm/uarm/imx1_graphics_gpu.h b/src/uarm/uarm/imx1_graphics_gpu.h
-index aff1114..09a54bd 100644
+index aff1114..067639a 100644
 --- a/src/uarm/uarm/imx1_graphics_gpu.h
 +++ b/src/uarm/uarm/imx1_graphics_gpu.h
-@@ -7,35 +7,61 @@
+@@ -1,41 +1,69 @@
+ #ifndef FROND_IMX1_GRAPHICS_GPU_H
+ #define FROND_IMX1_GRAPHICS_GPU_H
+ 
++#include <atomic>
+ #include <algorithm>
+ #include <chrono>
+ #include <cinttypes>
  #include <cstdio>
  #include <cstdlib>
  #include <cstring>
@@ -23,9 +43,10 @@ index aff1114..09a54bd 100644
 +    using Bytes = std::shared_ptr<const std::vector<uint8_t>>;
 +    using Pixels = std::shared_ptr<const std::vector<uint16_t>>;
 +    struct Stats {
-+        uint64_t batches = 0, readbacks = 0, readbackBytes = 0;
++        // Written by the backend's thread and read by others, so atomic (relaxed).
++        std::atomic<uint64_t> batches{0}, readbacks{0}, readbackBytes{0};
 +        // Worker host time from posting to running each command, drawing, and reading batches back.
-+        uint64_t queueNs = 0, drawNs = 0, readNs = 0;
++        std::atomic<uint64_t> queueNs{0}, drawNs{0}, readNs{0};
 +    };
      virtual ~Imx1GraphicsGpuBackend() = default;
      virtual const std::string& renderer() const = 0;
@@ -78,7 +99,7 @@ index aff1114..09a54bd 100644
  class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
     public:
      enum class Mode { off, on, differential };
-@@ -48,18 +74,22 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -48,18 +76,22 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
      }
      struct Stats {
          uint64_t fills = 0, solid = 0, inlinePixels = 0, copies = 0, keyed = 0, doubled = 0, inverts = 0, a4 = 0;
@@ -104,7 +125,11 @@ index aff1114..09a54bd 100644
          backend.reset();
      }
      Imx1GraphicsGpu(const Imx1GraphicsGpu&) = delete;
-@@ -70,15 +100,23 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -67,18 +99,27 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+     const std::string& renderer() const { return backend->renderer(); }
+     const Stats& statistics() const { return stats; }
+     Imx1GraphicsGpuBackend& gpuBackend() { return *backend; }
++    Imx1GraphicsMemory* attachedMemory() const { return memory; }
      void report(FILE* out) const {
          std::fprintf(out, "zodiac gpu: %s, %" PRIu64 " fills (solid %" PRIu64 ", inline %" PRIu64 ", copy %" PRIu64
                       ", keyed %" PRIu64 ", doubled %" PRIu64 ", invert %" PRIu64 ", a4 %" PRIu64 "), uploads %" PRIu64
@@ -127,14 +152,14 @@ index aff1114..09a54bd 100644
 +                     ", masked writes %" PRIu64 ", masked reads %" PRIu64, stats.waitsFor[access], stats.waitsFor[span],
 +                     stats.waitsFor[copy], stats.waitsFor[whole], stats.maskedWrites, stats.maskedReads);
 +        const auto& b = backend->backendStatistics();
-+        std::fprintf(out, ", %" PRIu64 " batches, %" PRIu64 " readbacks (%.1f MB)", b.batches, b.readbacks,
-+                     b.readbackBytes / 1e6);
++        std::fprintf(out, ", %" PRIu64 " batches, %" PRIu64 " readbacks (%.1f MB)", b.batches.load(std::memory_order_relaxed),
++                     b.readbacks.load(std::memory_order_relaxed), b.readbackBytes.load(std::memory_order_relaxed) / 1e6);
 +        if (stats.recoveries) std::fprintf(out, ", %" PRIu64 " recoveries (%" PRIu64 " commands replayed)",
 +                                           stats.recoveries, stats.replayed);
          if (mirror) std::fprintf(out, ", compared %" PRIu64 ", mismatches %" PRIu64, stats.compared, stats.mismatches);
          std::fprintf(out, "\n");
      }
-@@ -91,9 +129,16 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -91,9 +132,16 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
              uint32_t size = 0;
              memory->rawBank(bank, size);
              pages[bank].assign(size / pageBytes, cpuNewer);
@@ -153,7 +178,7 @@ index aff1114..09a54bd 100644
          if (mirror) {
              if (!shadow) shadow = std::make_unique<Imx1GraphicsMemory>();
              for (unsigned bank = 0; bank < 2; ++bank) {
-@@ -110,6 +155,8 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -110,6 +158,8 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
          if (!memory) return;
          cause = whole;
          for (unsigned bank = 0; bank < 2; ++bank) cpuReads(bank, 0, uint32_t(pages[bank].size()) * pageBytes);
@@ -162,7 +187,7 @@ index aff1114..09a54bd 100644
          memory->setResidency(nullptr);
          memory = nullptr;
      }
-@@ -118,23 +165,40 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -118,23 +168,40 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
          const uint32_t last = std::min<uint32_t>((end - 1) / pageBytes, uint32_t(pages[bank].size()) - 1);
          uint32_t size = 0;
          uint8_t* bytes = memory->rawBank(bank, size);
@@ -217,7 +242,7 @@ index aff1114..09a54bd 100644
              ++stats.downloads;
              ++stats.downloadsFor[cause];
              stats.downloadPages += run - page;
-@@ -144,9 +208,27 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -144,9 +211,27 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
      }
      void cpuWrites(unsigned bank, uint32_t first, uint32_t end) override {
          if (end <= first) return;
@@ -247,7 +272,7 @@ index aff1114..09a54bd 100644
      }
      void mirrorWrite(unsigned bank, uint32_t offset, uint32_t size, uint32_t value) override {
          uint32_t bytes = 0;
-@@ -154,17 +236,36 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -154,21 +239,48 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
          for (uint32_t i = 0; i < size && offset + i < bytes; ++i) to[offset + i] = uint8_t(value >> (i * 8));
      }
      bool fill(const Imx1GpuFill& fill) override {
@@ -268,6 +293,16 @@ index aff1114..09a54bd 100644
 +            return false;
 +        }
 +        const auto start = std::chrono::steady_clock::now();
++        // The pixels a keyed copy writes depend on its source, so the CPU reads it to count them as the CPU loop does.
++        uint64_t writes = uint64_t(fill.width) * fill.height;
++        uint32_t dirtyFirst = fill.base, dirtyEnd = end;
++        if (fill.keyed) {
++            cause = copy;
++            cpuReads(fill.sourceBank, fill.sourceBase, fill.sourceBase + fill.sourceLength);
++            if (lost || !backend->healthy()) return false;  // Recovered: the CPU does this fill.
++            keyedWrites(fill, writes, dirtyFirst, dirtyEnd);
++            if (!writes) { ++stats.fills; ++stats.keyed; return true; }
++        }
 +        prepare(fill.bank, fill.base, end);
 +        if (fill.copy || fill.a4) prepare(fill.sourceBank, fill.sourceBase, fill.sourceBase + fill.sourceLength);
          const uint32_t firstPage = fill.base / pageBytes, last = (end - 1) / pageBytes;
@@ -288,11 +323,40 @@ index aff1114..09a54bd 100644
 +            drawnFirst[fill.bank][page] = uint16_t(std::min<uint32_t>(drawnFirst[fill.bank][page], std::max(fill.base, start) - start));
 +            drawnEnd[fill.bank][page] = uint16_t(std::max<uint32_t>(drawnEnd[fill.bank][page], std::min(end, start + pageBytes) - start));
          }
-         // The CPU loop records each row's written span; a keyed copy's depends on its pixels, so the GPU records
-         // the whole rectangle, a wider dirty range with the same pixels.
-@@ -182,6 +283,27 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+-        // The CPU loop records each row's written span; a keyed copy's depends on its pixels, so the GPU records
+-        // the whole rectangle, a wider dirty range with the same pixels.
+-        memory->noteDirty(fill.bank, fill.base, end, uint64_t(fill.width) * fill.height);
++        memory->noteDirty(fill.bank, dirtyFirst, dirtyEnd, writes);
+         stats.callNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now() - start).count());
+         ++stats.fills;
+@@ -181,7 +293,51 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+         else ++stats.solid;
          return true;
      }
++    // The writes and dirty span the CPU loop makes for a keyed copy, from the source bytes.
++    void keyedWrites(const Imx1GpuFill& fill, uint64_t& writes, uint32_t& first, uint32_t& end) {
++        uint32_t size = 0;
++        const uint8_t* source = memory->rawBank(fill.sourceBank, size) + fill.sourceBase;
++        writes = 0;
++        first = UINT32_MAX;
++        end = 0;
++        for (uint32_t y = 0; y < fill.height; ++y) {
++            const uint8_t* row = source + (fill.doubled ? size_t((fill.sourceY + y) >> 1) : size_t(y)) * fill.sourcePitch;
++            uint32_t low = 0, high = 0;
++            for (uint32_t x = 0; x < fill.width; ++x) {
++                const uint8_t* at = row + (fill.doubled ? ((fill.sourceX + x) >> 1) * 2 : x * 2);
++                if ((uint32_t(at[0] | at[1] << 8) == fill.colour) != fill.keyEqual) continue;
++                if (!high) low = x * 2;
++                high = x * 2 + 2;
++                ++writes;
++            }
++            if (high) {
++                first = std::min(first, fill.base + y * fill.pitch + low);
++                end = std::max(end, fill.base + y * fill.pitch + high);
++            }
++        }
++    }
      Imx1GraphicsMemory* shadowMemory() override { return shadow.get(); }
 +    // Fills under this many pixels go to the CPU where the GPU hasn't drawn their bytes. FROND_ZODIAC_GPU_MIN_PIXELS
 +    // sets it; tests set it to 0.
@@ -318,7 +382,7 @@ index aff1114..09a54bd 100644
      // Downloads the fill's destination pages and checks them, whole, against the shadow copy. A mismatch is
      // reported (the first few in full) and the pages take the shadow's bytes, so the run goes on from the CPU's.
      void compare(const Imx1GpuFill& fill) override {
-@@ -208,31 +330,180 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
+@@ -208,31 +364,180 @@ class Imx1GraphicsGpu final : public Imx1GraphicsResidency {
          std::memcpy(bytes + first, expected + first, end - first);
          cpuWrites(fill.bank, first, end);
      }
@@ -443,8 +507,8 @@ index aff1114..09a54bd 100644
 +                stats.patchPages += run - page;
 +                page = run;
 +            } else ++page;
-+        }
-+    }
+         }
+     }
 +    // The backend broke: runs the commands since its last confirm again on the replica, brings every GPU-newer page
 +    // back from it under the CPU's masked writes, and keeps fills on the CPU from then on.
 +    void recover() {
@@ -483,9 +547,9 @@ index aff1114..09a54bd 100644
 +                if (mask) release(bank, page);
 +                pages[bank][page] = cpuNewer;
 +            }
-         }
++        }
 +        gpuNewerPages = 0;
-     }
++    }
      static constexpr uint32_t pageBytes = Imx1GraphicsGpuBackend::pageBytes;
      std::unique_ptr<Imx1GraphicsGpuBackend> backend;
      Imx1GraphicsMemory* memory = nullptr;
@@ -513,7 +577,7 @@ index aff1114..09a54bd 100644
  };
  
 diff --git a/src/uarm/uarm/imx1_graphics_gpu_gles.h b/src/uarm/uarm/imx1_graphics_gpu_gles.h
-index 334c7aa..0240234 100644
+index 334c7aa..2ad2525 100644
 --- a/src/uarm/uarm/imx1_graphics_gpu_gles.h
 +++ b/src/uarm/uarm/imx1_graphics_gpu_gles.h
 @@ -16,7 +16,6 @@
@@ -597,13 +661,13 @@ index 334c7aa..0240234 100644
 +            if (confirmed() >= number) return true;
 +            if (broken) break;
 +        }
-+        std::unique_lock<std::mutex> lock(mutex);
+         std::unique_lock<std::mutex> lock(mutex);
+-        finished.wait(lock, [&] { return completed() >= number; });
 +        finished.wait(lock, [&] { return confirmed() >= number || broken; });
 +        return confirmed() >= number;
 +    }
 +    void drain() override {
-         std::unique_lock<std::mutex> lock(mutex);
--        finished.wait(lock, [&] { return completed() >= number; });
++        std::unique_lock<std::mutex> lock(mutex);
 +        finished.wait(lock, [&] { return taken >= posted; });
 +    }
 +    const Stats& backendStatistics() const override { return stats; }
@@ -671,7 +735,7 @@ index 334c7aa..0240234 100644
      void run() {
          const bool ok = start();
          {
-@@ -184,18 +212,138 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
+@@ -184,18 +212,146 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
          changed.notify_all();
          if (ok) {
              for (;;) {
@@ -756,11 +820,19 @@ index 334c7aa..0240234 100644
 +                              readShort ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT, reinterpret_cast<void*>(run.at));
 +            }
 +            GLsync fence = gl.FenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
++            // A fence that doesn't signal in two seconds counts as a lost device.
 +            GLenum waited = GL_TIMEOUT_EXPIRED;
-+            while (fence && waited == GL_TIMEOUT_EXPIRED)
++            const auto waitStart = std::chrono::steady_clock::now();
++            while (fence && waited == GL_TIMEOUT_EXPIRED) {
 +                waited = gl.ClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 100000000);
++                if (waited == GL_TIMEOUT_EXPIRED && std::chrono::steady_clock::now() - waitStart > std::chrono::seconds(2)) break;
++            }
 +            if (fence) gl.DeleteSync(fence);
-+            if (waited == GL_WAIT_FAILED || !fence) { check("fence"); broken = true; }
++            if (waited == GL_TIMEOUT_EXPIRED || waited == GL_WAIT_FAILED || !fence) {
++                if (waited == GL_TIMEOUT_EXPIRED) std::fprintf(stderr, "zodiac gpu: fence timed out, drawing goes back to the CPU\n");
++                check("fence");
++                broken = true;
++            }
 +            if (broken || !check("batch")) {
 +                gl.BindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 +                uploaded.clear();
@@ -813,7 +885,7 @@ index 334c7aa..0240234 100644
      template <class F> bool load(void* library, F& to, const char* symbol) {
          void* found = library ? dlsym(library, symbol) : nullptr;
          if (!found && egl.GetProcAddress) found = reinterpret_cast<void*>(egl.GetProcAddress(symbol));
-@@ -315,8 +463,10 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
+@@ -315,8 +471,10 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
                FROND_GL(CreateShader) && FROND_GL(ShaderSource) && FROND_GL(CompileShader) && FROND_GL(GetShaderiv) &&
                FROND_GL(GetShaderInfoLog) && FROND_GL(CreateProgram) && FROND_GL(AttachShader) &&
                FROND_GL(LinkProgram) && FROND_GL(GetProgramiv) && FROND_GL(GetProgramInfoLog) &&
@@ -826,7 +898,7 @@ index 334c7aa..0240234 100644
              return false;
  #undef FROND_GL
          const char* renderer = reinterpret_cast<const char*>(gl.GetString(GL_RENDERER));
-@@ -334,7 +484,12 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
+@@ -334,7 +492,12 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
          gl.BindTexture(GL_TEXTURE_2D, pixelTexture);
          gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
          gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -840,7 +912,7 @@ index 334c7aa..0240234 100644
          gl.GenVertexArrays(1, &vertexArray);
          gl.BindVertexArray(vertexArray);
          gl.BindFramebuffer(GL_READ_FRAMEBUFFER, banks[1].framebuffer);
-@@ -392,13 +547,57 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
+@@ -392,13 +555,57 @@ class Imx1GraphicsGpuGles final : public Imx1GraphicsGpuBackend {
          }
          return shader;
      }
@@ -901,7 +973,7 @@ index 334c7aa..0240234 100644
          // One texel per destination address: which pixel of the fill it is, if any, and that pixel's colour as the
          // CPU loop works it out (inline pixels, source copy with key and paint, invert, A4).
          static const char* fragment = R"(#version 300 es
-@@ -408,7 +607,9 @@ precision highp usampler2D;
+@@ -408,7 +615,9 @@ precision highp usampler2D;
  uniform usampler2D source;
  uniform usampler2D under;
  uniform usampler2D pixels;
@@ -912,7 +984,7 @@ index 334c7aa..0240234 100644
  layout(location = 0) out uint result;
  uint at(usampler2D from, uint address) {
      return texelFetch(from, ivec2(int(address & 2047u), int(address >> 11)), 0).r;
-@@ -417,6 +618,9 @@ uint blend(uint d, uint s, uint a, uint shift, uint mask) {
+@@ -417,6 +626,9 @@ uint blend(uint d, uint s, uint a, uint shift, uint mask) {
      return ((((d >> shift) & mask) * (15u - a) + ((s >> shift) & mask) * a) / 15u) << shift;
  }
  void main() {
@@ -922,7 +994,7 @@ index 334c7aa..0240234 100644
      uint address = uint(gl_FragCoord.y) * 2048u + uint(gl_FragCoord.x);
      if (address < base) discard;
      uint offset = address - base;
-@@ -439,27 +643,13 @@ void main() {
+@@ -439,27 +651,13 @@ void main() {
      }
      result = c & 65535u;
  })";
@@ -953,7 +1025,7 @@ index 334c7aa..0240234 100644
          return true;
      }
      // Copies rows first to last of from's bank into the same rows of a scratch target.
-@@ -473,25 +663,36 @@ void main() {
+@@ -473,25 +671,36 @@ void main() {
          gl.ActiveTexture(GL_TEXTURE0 + unit);
          gl.BindTexture(GL_TEXTURE_2D, texture);
      }
@@ -1007,7 +1079,7 @@ index 334c7aa..0240234 100644
          if (broken) return;
          // In texels from here on.
          const uint32_t base = fill.base / 2, last = (fill.end() - 2) / 2;
-@@ -509,11 +710,11 @@ void main() {
+@@ -509,11 +718,11 @@ void main() {
          if (fill.invert || fill.a4) copyRows(target, underCopy, firstRow, lastRow);
          bindUnit(sourceUnit, source);
          bindUnit(underUnit, under);
@@ -1021,7 +1093,7 @@ index 334c7aa..0240234 100644
          } else bindUnit(pixelsUnit, pixelTexture);
          gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, target.framebuffer);
          gl.Viewport(0, 0, rowTexels, GLsizei(rows[fill.bank]));
-@@ -521,12 +722,12 @@ void main() {
+@@ -521,12 +730,12 @@ void main() {
          if (firstRow == lastRow)
              gl.Scissor(GLint(base % rowTexels), GLint(firstRow), GLsizei(last - base + 1), 1);
          else gl.Scissor(0, GLint(firstRow), rowTexels, GLsizei(lastRow - firstRow + 1));
@@ -1037,7 +1109,7 @@ index 334c7aa..0240234 100644
          gl.DrawArrays(GL_TRIANGLES, 0, 3);
          gl.Disable(GL_SCISSOR_TEST);
          if (checkEach) check("fill");
-@@ -535,16 +736,25 @@ void main() {
+@@ -535,16 +744,25 @@ void main() {
      std::thread worker;
      std::mutex mutex;
      std::condition_variable changed, finished;
@@ -1070,7 +1142,7 @@ index 334c7aa..0240234 100644
      bool readShort = false;
      const bool checkEach = std::getenv("FROND_ZODIAC_GPU_CHECK") != nullptr;
      std::string failure, name, device;
-@@ -557,8 +767,7 @@ void main() {
+@@ -557,8 +775,7 @@ void main() {
      uint32_t rows[2] = {};
      Bank banks[2], sourceCopy, underCopy;
      GLuint pixelTexture = 0, program = 0, vertexArray = 0;

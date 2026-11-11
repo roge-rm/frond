@@ -106,6 +106,17 @@ static void checkFills(uint64_t minPixels) {
             assert(C::completeFill(*state, eim, gpuMemory, f) == A::ok);
             assert(C::completeFillCpu(*state, eim, cpuMemory, f) == A::ok);
             if (gpu->statistics().fills == before) ++cpuFills;
+            // The saved dirty ranges and write counts match the CPU model's, keyed fills included.
+            for (unsigned bank = 0; bank < 2; ++bank) {
+                const auto a = gpuMemory.dirty(bank), b = cpuMemory.dirty(bank);
+                if (a.first != b.first || a.end != b.end || a.pending != b.pending || a.generation != b.generation) {
+                    std::fprintf(stderr, "FAIL: dirty state kind %u round %u bank %u: gpu %x-%x gen %llu, cpu %x-%x gen %llu\n",
+                                 kind, round, bank, a.first, a.end, (unsigned long long)a.generation, b.first, b.end,
+                                 (unsigned long long)b.generation);
+                    std::fflush(stdout);
+                    std::_Exit(1);
+                }
+            }
             // A few CPU writes and reads, anywhere in the regions.
             for (unsigned i = next(6); i; --i) {
                 const auto& at = regions[next(2)];
@@ -218,7 +229,8 @@ static void checkRecovery() {
             f.pitch = f.width * 2 + next(200) * 2;
             f.base = region.base + 64 + next((region.bytes - 128 - (f.height - 1) * f.pitch - f.width * 2) / 2) * 2;
             f.colour = next(0x10000);
-            const unsigned kind = next(4);
+            // A keyed fill reads its source on the CPU, which would wait on the held commands.
+            const unsigned drawn = next(4), kind = drawn == 2 && n >= before && n < before + held ? 1 : drawn;
             f.plain = kind == 1;
             f.keyed = kind == 2;
             f.invert = kind == 3;
