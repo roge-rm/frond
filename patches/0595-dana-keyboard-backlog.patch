@@ -1,4 +1,4 @@
-Host keys and power or rocker presses that don't fit the Dana's 32-report keyboard FIFO wait in order in a saved backlog of up to 8192 changes, fed into the FIFO as the guest reads reports and from CycleSlowly. Presses past that are refused, and a refused power or rocker press is logged instead of thrown. A key pressed again now waits 200 ms after its release instead of 100, as the ROM can take a press about 100 ms after the release twice.
+Host keys and power or rocker presses that don't fit the Dana's 32-report keyboard FIFO wait in order in a saved backlog of up to 8192 changes, fed into the FIFO as the guest reads reports and from CycleSlowly. While the ST is halted the waiting keys stay for after the wake; only a key that wakes it goes in, with its release. Presses past the limit are refused, and a refused power or rocker press is logged instead of thrown. The ST chunk is variable length from v11, so words left after its backlog are accepted. A key pressed again now waits 200 ms after its release instead of 100, as the ROM can take a press about 100 ms after the release twice.
 
 --- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
 +++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
@@ -12,6 +12,15 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
  #include "EmRegsVZ.h"
  #include "EmSPISlave.h"
  #include "EmSPISlaveADS784x.h"
+@@ -27,7 +29,7 @@
+     unsigned stAsleep=0;
+     // D8 and row IRQ groups are independent of the retained DA/DB masks.
+     unsigned ebHold=0, ebReported=0, rowGroups=0, pa3Option=1, fallingOnly=0;
+-    unsigned SelectedRowGroups() const;
++    unsigned SelectedRowGroups(uint8 extra=0) const;
+     void EnterHalt(bool shortPath=false);
+     bool StRequest();
+     void ResetPowerProtocol();
 @@ -43,11 +45,11 @@
      uint64 inputLastCycle=0,inputDelay=0,inputClockHz=0;
      bool InputReady();
@@ -29,7 +38,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      uint8 regapScan[8]{};
      uint64 regapLeft[8]{};
      bool repeatReply=false;
-@@ -57,6 +59,16 @@
+@@ -57,6 +59,18 @@
      void AgeRegap(uint64 elapsed);
      unsigned heldCount=0, queueHead=0, queueCount=0;
      void QueueKeys();
@@ -39,14 +48,16 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
 +    // Presses past kBacklogLimit are refused; releases always fit.
 +    std::deque<uint8> backlog;
 +    bool backlogDamaged=false;
-+    void FeedBacklog();
++    void FeedBacklog(bool direct=false);
++    bool Wakes(uint8 code) const;
++    bool PullWakingKey();
 +    bool AcceptTransitions(const std::vector<std::pair<uint8,bool>>& changes,bool paced=false);
 +    std::vector<uint8> BacklogHeld() const;
 +    void ApplyScanCode(uint8 code, bool down);
      unsigned packetIndex=0;
      bool dcIrqHigh=true, hcIrqHigh=true;
      bool keysDirty=false, irqPinHigh=true, irqLatched=false;
-@@ -107,8 +119,14 @@
+@@ -107,13 +121,22 @@
      bool DispatchDanaInput(const std::vector<DanaTransition5>&) override;
      void ReleaseDanaInput(bool cancel=true) override;
      void DispatchButtonEvent(ButtonEvent) override;
@@ -62,7 +73,15 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      void SetSubBankHandlers() override;
      void Save(Savestate<ChunkType>&) override;
      void Save(SavestateProbe<ChunkType>&) override;
-@@ -133,6 +151,12 @@
+     void Load(SavestateLoader<ChunkType>&) override;
+     template <typename T> void SaveState(T&);
++    // The ST chunk alone, which Save and Load use; public so tests can run it without the VZ core.
++    template <typename T> void SaveStChunk(T&);
++    void LoadStChunk(SavestateLoader<ChunkType>&);
+     template <typename T> void LegacyStateFields(T& h) { h.DoBool(resetReply).DoBool(resetAsserted).Do32(versionCommand).Do32(versionReply).Do8(heldKeys).Do8(packetKeys).Do32(packetIndex).DoBool(keysDirty).DoBool(irqPinHigh).DoBool(irqLatched).Do16(adc.mainBattery).Do16(adc.supply).DoBool(adc.packDetectHigh);
+     }
+     template <typename T> void StateFields(T& h) {
+@@ -133,6 +156,12 @@
          for(auto& left:regapLeft) h.Do64(left);
          h.DoBool(repeatReply);
      }
@@ -77,16 +96,33 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      Bool GetLineDriverState(EmUARTDeviceType) override;
 --- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
 +++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
-@@ -173,7 +173,7 @@
+@@ -172,9 +172,14 @@
+         for(auto byte:pending.rx) uart->Put32(byte);
          for(auto byte:pending.tx) uart->Put32(byte);
      }
++    SaveStChunk(s);
++}
++template <typename T> void EmRegsVZDana::SaveStChunk(T& s) {
      auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
 -    c->Put32(kStateVersion); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h);
 +    c->Put32(kStateVersion); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h); BacklogFields(h);
  }
++template void EmRegsVZDana::SaveStChunk(Savestate<ChunkType>&);
++template void EmRegsVZDana::SaveStChunk(SavestateProbe<ChunkType>&);
  void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
      EmUARTDragonball::PendingState pending;
-@@ -215,6 +215,9 @@
+     if(auto* uart=l.GetChunk(ChunkType::uartDana)) {
+@@ -192,6 +197,9 @@
+     adc.Load(l);
+     if(!l.GetChunk(ChunkType::spiSlaveSD)) sd0.Reset();
+     sd0.Load(l); sd1.Load(l);
++    LoadStChunk(l);
++}
++void EmRegsVZDana::LoadStChunk(SavestateLoader<ChunkType>& l) {
+     auto* c=l.GetChunk(ChunkType::regsVZDana);
+     if(!c) { l.NotifyError(); return; }
+     unsigned version=c->Get32();
+@@ -215,6 +223,9 @@
      else { rowGroups=stAsleep ? SelectedRowGroups() : 0; fallingOnly=stAsleep ? 1 : 0; }
      ClearRegap();
      if(version>=10) RegapFields(h);
@@ -96,7 +132,18 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      for(unsigned i=0;i<8;i++)
          if(regapLeft[i]>inputClockHz*kRegapMs/1000 || (!regapScan[i])!=(!regapLeft[i]) || (!hostPaced && regapScan[i])) l.NotifyError();
      if(repeatReply && (!packetIndex || !presentedScan[packetIndex-1])) l.NotifyError();
-@@ -247,6 +250,7 @@
+@@ -226,7 +237,9 @@
+        ((sleepCommand || stAsleep) && (versionCommand || versionReply || resetAsserted))) l.NotifyError();
+     if(inputClockHz>0xffffffffu || inputDelay>inputClockHz/50 || (!hostPaced && inputDelay)) l.NotifyError();
+     if(pollIndex>8 || (pollIndex && (!hostPaced || !presentedScan[pollIndex-1] || packetIndex))) l.NotifyError();
+-    if(!c->IsAtEnd()) l.NotifyError();
++    // From v11 the backlog makes the chunk variable length. A save into a layout probed with a
++    // longer backlog leaves unused words at the end, so only older fixed-size chunks must end here.
++    if(version<11 && !c->IsAtEnd()) l.NotifyError();
+     if(adc.mainBattery>4095 || adc.supply>4095 || heldKeys || packetKeys || heldCount>8 || queueHead>=32 || queueCount>32 || packetIndex>8 ||
+        (packetIndex && !repeatReply && !queueCount) || versionCommand>8 || versionReply>3 ||
+        (versionCommand!=8 && versionReply)) { l.NotifyError(); return; }
+@@ -247,6 +260,7 @@
      for(unsigned i=0;i<8;i++) if((i<heldCount)!=(heldScan[i]!=0)) l.NotifyError();
      if(packetIndex && !repeatReply && !packets[queueHead][packetIndex-1]) l.NotifyError();
      if(!valid(regapScan)) l.NotifyError();
@@ -104,7 +151,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
  
  }
  
-@@ -264,6 +268,7 @@
+@@ -264,6 +278,7 @@
      if(!hardware) return;
      ResetPowerProtocol();
      hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8); ClearRegap();
@@ -112,7 +159,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      resetReply=true; resetAsserted=false; versionCommand=versionReply=0;
      heldKeys=packetKeys=0; heldCount=queueHead=queueCount=0;
      std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets); packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
-@@ -274,22 +279,74 @@
+@@ -274,22 +289,104 @@
  
  bool EmRegsVZDana::DispatchDanaInput(const std::vector<DanaTransition5>& batch) {
      if(batch.size()>24) return false;
@@ -173,20 +220,50 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
 +    if(paced) hostPaced=true;
 +    bool idle=backlog.empty();
 +    backlog.insert(backlog.end(),add.begin(),add.end());
-+    if(idle) FeedBacklog();
++    if(idle) FeedBacklog(true);
 +    return true;
 +}
 +// A press keeps a FIFO slot for its own release, so a release always fits once it is applied.
-+// While the ST sleeps nothing is queued unless the key wakes it, so everything applies.
-+void EmRegsVZDana::FeedBacklog() {
++// While the ST sleeps, a direct dispatch applies as on hardware: a key that doesn't wake it is
++// lost. Keys that were already waiting stay for after the wake; only a press that wakes the ST
++// goes in, and a later waking key goes first with its release (PullWakingKey).
++void EmRegsVZDana::FeedBacklog(bool direct) {
 +    bool fed=false;
 +    while(!backlog.empty()) {
 +        uint8 code=backlog.front()&0x7f; bool down=(backlog.front()&0x80)!=0;
++        if(stAsleep && down && !direct && !Wakes(code)) {
++            if(!PullWakingKey()) break;
++            fed=true; continue;
++        }
 +        if(!stAsleep && (down ? queueCount+1+heldCount+1>32 || heldCount==8 : queueCount>=32)) break;
 +        backlog.pop_front();
 +        ApplyScanCode(code,down); fed=true;
 +    }
 +    if(fed) UpdateStIrq();
++}
++// True when pressing code now would give the falling row edge that wakes the sleeping ST.
++bool EmRegsVZDana::Wakes(uint8 code) const {
++    return heldCount<8 && (SelectedRowGroups(code) & ~rowGroups)!=0;
++}
++// Takes the first waiting press that wakes the ST and whose key isn't used earlier in the
++// backlog, with its release, and applies both. The rest keep their order.
++bool EmRegsVZDana::PullWakingKey() {
++    bool seen[128]{};
++    for(size_t i=0;i<backlog.size();i++) {
++        uint8 code=backlog[i]&0x7f;
++        if((backlog[i]&0x80) && !seen[code] && Wakes(code)) {
++            size_t release=i+1;
++            while(release<backlog.size() && (backlog[release]&0x7f)!=code) ++release;
++            bool released=release<backlog.size();
++            if(released) backlog.erase(backlog.begin()+release);
++            backlog.erase(backlog.begin()+i);
++            ApplyScanCode(code,true);
++            if(released) ApplyScanCode(code,false);
++            return true;
++        }
++        seen[code]=true;
++    }
++    return false;
 +}
  void EmRegsVZDana::ReleaseDanaInput(bool cancel) {
 +    if(!cancel && !backlog.empty()) {
@@ -198,7 +275,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      if(stAsleep) { heldCount=0; rowGroups=0; std::memset(heldScan,0,8); return; }
      ebHold=ebReported=0;
      if(!cancel) {
-@@ -312,8 +369,9 @@
+@@ -312,8 +409,9 @@
          case ButtonEvent::Button::rockerUp: code=0x70; break;
          default: throw std::runtime_error("Dana key is not qualified");
      }
@@ -209,7 +286,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
  }
  
  void EmRegsVZDana::QueueKeys() {
-@@ -327,13 +385,12 @@
+@@ -327,13 +425,12 @@
  }
  
  bool EmRegsVZDana::DispatchScanCode(uint8 code,bool down) {
@@ -227,7 +304,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      if(down) {
          heldScan[heldCount++]=code;
          std::sort(heldScan,heldScan+heldCount,[](uint8 a,uint8 b) {
-@@ -355,7 +412,7 @@
+@@ -355,7 +452,7 @@
      } else if(!ebReported || !heldCount) {
          QueueKeys(); if(!heldCount) ebHold=ebReported=0;
      }
@@ -236,7 +313,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
  }
  
  uint8 EmRegsVZDana::ReadKeyPacket() {
-@@ -392,6 +449,7 @@
+@@ -392,6 +489,7 @@
              if(hostPaced) NoteRelease(packet);
              std::memcpy(presentedScan,packet,8);
              std::memset(packet,0,8); queueHead=(queueHead+1)%32; --queueCount;
@@ -244,7 +321,7 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
          }
          // Space reports 10 ms apart. The ROM releases every key when no report comes for three
          // of its 10 ms ticks (20-30 ms), so a held key is reported again well inside that.
-@@ -490,6 +548,7 @@
+@@ -490,6 +588,7 @@
      ReportHeldKeys();
  }
  void EmRegsVZDana::ReportHeldKeys() {
@@ -252,3 +329,21 @@ Host keys and power or rocker presses that don't fit the Dana's 32-report keyboa
      if(!stAsleep && !ebReported && hostPaced && heldCount && !queueCount && !pollIndex && InputReady()) QueueKeys();
      UpdateStIrq();
  }
+@@ -523,10 +622,14 @@
+     sleepCommand=0; stAsleep=0; ebHold=ebReported=rowGroups=0; pa3Option=1; fallingOnly=0;
+ }
+ 
+-unsigned EmRegsVZDana::SelectedRowGroups() const {
++// extra counts one more key as held, for Wakes.
++unsigned EmRegsVZDana::SelectedRowGroups(uint8 extra) const {
+     unsigned groups=0;
+-    for(unsigned i=0;i<std::min(heldCount,8u);i++) {
+-        unsigned column=heldScan[i]&15, row=heldScan[i]>>4;
++    unsigned count=std::min(heldCount,8u);
++    for(unsigned i=0;i<=count;i++) {
++        uint8 code=i<count ? heldScan[i] : extra;
++        if(!code) continue;
++        unsigned column=code&15, row=code>>4;
+         if(column==15 || (stAsleep!=2 && !ebHold &&
+            (wakeMask[column/8] & (1u<<(column%8)))))
+             groups |= row<4 ? 1 : row==4 ? 2 : 4;

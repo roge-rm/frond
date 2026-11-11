@@ -753,6 +753,103 @@ static uint64 BurstHash(const BurstReports& reports) {
     for(const auto& [t,codes]:reports) { mix(t); mix(codes.size()); for(auto code:codes) mix(code); }
     return hash;
 }
+// The ST chunk through the same code as EmRegsVZDana::Save and Load, without the VZ core.
+struct RealSt : EmRegsVZDana {
+    RealSt() { SetSubBankHandlers(); }
+    template<class T> void Save(T& s) { SaveStChunk(s); }
+    void Load(SavestateLoader<ChunkType>& l) override { LoadStChunk(l); }
+    uint16 Byte(uint8 b) { return DoExchange(7,b); }
+};
+// Writes the ST chunk as a given version; backlog is written raw from v11 on.
+struct StWriter {
+    RealSt& board; unsigned version; std::vector<uint32> backlog; bool extra=false;
+    template<class T> void Save(T& s) {
+        auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
+        c->Put32(version); SaveChunkHelper h(*c);
+        board.StateFields(h); board.InputStateFields(h); board.PowerStateFields(h); board.PowerModeFields(h); board.RegapFields(h);
+        if(version>=11) { h.Do32(uint32(backlog.size())); for(auto entry:backlog) h.Do8(uint8(entry)); }
+        if(extra) c->Put32(0);
+    }
+};
+// Reads every queued report until the ST has nothing more.
+template<class T> static std::vector<std::vector<uint8>> Drain(T& board) {
+    std::vector<std::vector<uint8>> reports;
+    for(;;) {
+        unsigned header=board.Byte(0);
+        if(!header) return reports;
+        assert((header&0xf0)==0x40);
+        std::vector<uint8> codes;
+        for(unsigned i=0;i<(header&15);i++) codes.push_back(uint8(board.Byte(0)));
+        reports.push_back(codes);
+    }
+}
+static void BacklogStateTest() {
+    // One Savestate across two saves, as EmSession keeps it: the second, after the backlog has
+    // drained, is shorter than the probed layout and must still load.
+    RealSt big; assert(big.Byte(0)==0xaa);
+    for(unsigned i=0;i<200;i++) assert(big.DispatchScanCode(0x2b,(i%2)==0));
+    assert(big.BacklogSize()==168);
+    Savestate<ChunkType> one; assert(one.Save(big));
+    std::vector<uint8> withBacklog(static_cast<uint8*>(one.GetBuffer()),static_cast<uint8*>(one.GetBuffer())+one.GetSize());
+    RealSt mid; assert(Load(mid,withBacklog)); assert(mid.BacklogSize()==168);
+    assert(Drain(mid).size()==200);
+    assert(Drain(big).size()==200); assert(!big.BacklogSize());
+    assert(one.Save(big)); assert(one.GetSize()==withBacklog.size());
+    std::vector<uint8> drained(static_cast<uint8*>(one.GetBuffer()),static_cast<uint8*>(one.GetBuffer())+one.GetSize());
+    RealSt back; assert(Load(back,drained)); assert(!back.BacklogSize());
+    assert(Save(back)==Save(big));
+
+    // Version gating through LoadStChunk.
+    RealSt plain; assert(plain.Byte(0)==0xaa);
+    assert(plain.DispatchScanCode(0x2b,true));
+    for(unsigned version: {10u,11u}) {
+        StWriter writer{plain,version,{}}; RealSt loaded;
+        assert(Load(loaded,Save(writer))); assert(!loaded.BacklogSize());
+        assert(loaded.Byte(0)==0x41); assert(loaded.Byte(0)==0x2b);
+    }
+    {
+        // v11 with a waiting release of the held key, then a newer version refused as such.
+        StWriter writer{plain,11,{0x2b}}; RealSt loaded;
+        assert(Load(loaded,Save(writer))); assert(loaded.BacklogSize()==1);
+        writer.version=12; EmHAL::loadedNewerState=false;
+        assert(!Load(loaded,Save(writer))); assert(EmHAL::loadedNewerState);
+        EmHAL::loadedNewerState=false;
+        writer.version=4; assert(!Load(loaded,Save(writer))); assert(!EmHAL::loadedNewerState);
+    }
+    // A v10 chunk with a word left over is damaged; v11 may have them.
+    for(unsigned version: {10u,11u}) {
+        StWriter writer{plain,version,{},true}; RealSt loaded;
+        assert(Load(loaded,Save(writer))==(version==11));
+    }
+    // Damaged backlogs: a count past the limit, a release of a key not held, a press of a key
+    // already held, a bad scan code and a ninth held key.
+    std::vector<std::vector<uint32>> damaged{
+        {}, {0x2c}, {0x80|0x2b}, {0x80},
+        {0x80|0x09,0x80|0x7b,0x80|0x13,0x80|0x46,0x80|0x2c,0x80|0x2d,0x80|0x2a,0x80|0x0f}};
+    damaged[0].assign(EmRegsVZDana::kBacklogLimit+9,0x80|0x2c);
+    for(const auto& bad:damaged) {
+        StWriter writer{plain,11,bad}; RealSt loaded;
+        assert(!Load(loaded,Save(writer)));
+    }
+
+    // A halt while keys wait keeps them for after the wake; a power tap typed later goes first.
+    PacedSt asleep; assert(asleep.Byte(0)==0xaa);
+    for(unsigned i=0;i<80;i++) assert(asleep.DispatchScanCode(0x2b,(i%2)==0));
+    assert(asleep.BacklogSize()==48);
+    assert(asleep.Byte(0xef)==0);
+    asleep.ReportHeldKeys(); assert(asleep.BacklogSize()==48); assert(asleep.Byte(0)==0);
+    assert(asleep.DispatchScanCode(0x0f,true)); assert(asleep.DispatchScanCode(0x0f,false));
+    assert(asleep.BacklogSize()==50);
+    asleep.ReportHeldKeys(); assert(asleep.BacklogSize()<48);
+    auto woke=Drain(asleep);
+    assert(woke.size()==50 && !asleep.BacklogSize());
+    assert(woke[0]==std::vector<uint8>{0x0f} && woke[1].empty());
+    for(unsigned i=2;i<50;i++) assert(woke[i]==(i%2 ? std::vector<uint8>{} : std::vector<uint8>{0x2b}));
+    // Typed straight to a sleeping ST with nothing waiting, a key that doesn't wake it is lost.
+    PacedSt direct; assert(direct.Byte(0)==0xaa); assert(direct.Byte(0xef)==0);
+    assert(direct.DispatchScanCode(0x2b,true)); assert(direct.DispatchScanCode(0x2b,false));
+    assert(!direct.BacklogSize()); assert(direct.Byte(0)==0);
+}
 static void BacklogTest() {
     auto first=RunBurst(0), second=RunBurst(0);
     assert(BurstHash(first)==BurstHash(second) && first==second);
@@ -785,6 +882,7 @@ static void BacklogTest() {
 
 int main() {
     BacklogTest();
+    BacklogStateTest();
     UnqualifiedAccessTest();
     UsbBankLifetimeTest();
     UsbAdapterTest();
