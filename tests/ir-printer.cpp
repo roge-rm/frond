@@ -263,6 +263,63 @@ static void TestLptJob() {
     CHECK(printer.HeldBytes() == 7);
 }
 
+// A guest restored mid-print: it polls a link the new printer never had, or holds a link and an LSAP
+// it never sends on. The printer stays quiet and drops the idle link, so the guest's own
+// disconnect time ends its side and the next Print connects afresh.
+static void TestRestoredGuest() {
+    IrPrinter printer;
+    Primary p{printer};
+    Connect(p);
+    const uint8_t oldAddress = p.caddr;
+    CHECK(LmConnect(p, p.lptPeer, IrPrinter::lptLsap, {}).empty());
+    CHECK(printer.Receiving());
+    // Polls with no I frames for longer than the idle time end the link and the empty job.
+    for (int i = 0; i < 25 && printer.Lap().Connected(); ++i) {
+        p.Send(p.Command(uint8_t(p.vr << 5 | 0x11)));
+        p.Collect();
+        p.Idle(800 * ms);
+    }
+    CHECK(!printer.Lap().Connected() && !printer.Receiving() && printer.Lap().GetStats().timeouts == 1);
+    CHECK(printer.HeldBytes() == 0);
+    // A poll for the link that went gets no answer, not DM.
+    p.caddr = oldAddress;
+    p.Send(p.Command(0x11));
+    CHECK(p.Collect().empty());
+
+    // A fresh printer, as after a load, is quiet to the old link's polls too.
+    IrPrinter fresh;
+    Primary q{fresh};
+    q.caddr = oldAddress;
+    q.Send(q.Command(0x11));
+    CHECK(q.Collect().empty());
+
+    // The next Print connects and its job is held.
+    Connect(p);
+    CHECK(LmConnect(p, p.lptPeer, IrPrinter::lptLsap, {}).empty());
+    SendLpt(p, Text("after a restore"));
+    p.Exchange({uint8_t(0x80 | IrPrinter::lptLsap), p.lptPeer, 0x02, 0x01});
+    CHECK(printer.HeldBytes() == 15);
+}
+
+// A real print link that has carried data stays up through RR polls, however long the guest takes
+// over the next part of the page.
+static void TestBusyLinkStaysUp() {
+    IrPrinter printer;
+    Primary p{printer};
+    Connect(p);
+    CHECK(LmConnect(p, p.lptPeer, IrPrinter::lptLsap, {}).empty());
+    SendLpt(p, Text("first part"));
+    CHECK(printer.ReceivingBytes() == 10);
+    for (int i = 0; i < 40; ++i) {
+        p.Send(p.Command(uint8_t(p.vr << 5 | 0x11)));
+        p.Collect();
+        p.Idle(800 * ms);
+    }
+    CHECK(printer.Lap().Connected() && printer.Lap().GetStats().timeouts == 0);
+    SendLpt(p, Text(" and more"));
+    CHECK(printer.ReceivingBytes() == 19);
+}
+
 // Discovery alone, before any link: the guest is mid-print, so it keeps running until it goes quiet.
 static void TestDiscoveryNeedsGuest() {
     IrPrinter printer;
@@ -443,6 +500,8 @@ static void TestControl() {
 
 int main() {
     TestDiscoveryNeedsGuest();
+    TestRestoredGuest();
+    TestBusyLinkStaysUp();
     TestLptJob();
     TestEndings();
     TestIrComm();
