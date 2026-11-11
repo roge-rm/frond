@@ -780,6 +780,12 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
+| `FROND_ZODIAC_GPU` | Zodiac in Fast: `on` (or `1`) draws the graphics engine's fills on the host GPU, `diff` draws them on both and checks each GPU fill against the CPU's, reporting mismatches to stderr. Off by default. |
+| `FROND_ZODIAC_GPU_DEVICE` | The EGL device's DRM node to draw on, e.g. `/dev/dri/renderD128`, or `surfaceless` for Mesa's surfaceless platform. Default: the first hardware device. |
+| `FROND_ZODIAC_GPU_QUIET` | Leave out the GPU's fill and transfer counts when it stops. |
+| `FROND_ZODIAC_GPU_CHECK` | Check for a GL error after every fill and patch, as well as after each batch. |
+| `FROND_ZODIAC_GPU_MIN_PIXELS` | Fills under this many pixels stay on the CPU when the GPU hasn't drawn their bytes. Default 0, every fill the GPU can take. |
+| `FROND_ZODIAC_GPU_READ_RGBA` | Read GPU pages back as RGBA integers, the GLES path every driver has. |
 | `FROND_PACE_FAULT_DIAGNOSTICS` | Log guest permission faults seen from PACE. |
 | `FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC` | TG50 PACE entry diagnostics. |
 | `FROND_TG50_AUDIO_TRACE` | Trace the TG50 audio codec to stderr. |
@@ -977,6 +983,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-graphics-controller` | Native BIST/memory setup, external-memory RMW and mode commands, state-derived polling, guest-cycle completion and VRAM gating. Width, caller, value and sequence rejection plus reset retention. See [virtual controller](zodiac2-cs5.md#virtual-memory-controller). Outside `make test`. |
 | `test-zodiac-graphics-engine` | Native engine/scissor setup, bounded empty-ring configuration, address/tag fields and stored option RMW. Rejected transactions, EIM changes, reset and opening the following display transaction. See [engine and ring](zodiac2-cs5.md#virtual-engine-and-empty-ring). Outside `make test`. |
 | `test-zodiac-graphics-commands` | Bounded native context packets, guest-timed solid RGB565 paint, busy/consumer readback, rejection atomicity, clipping and byte order. See [ring transport](zodiac2-cs5.md#virtual-ring-transport-and-solid-paint). Outside `make test`. |
+| `test-zodiac-graphics-gpu` | The host GPU path against the CPU model: every fill kind the GPU takes, sources in either bank, fills left to the CPU, CPU reads and writes of every width on pages the GPU holds (masked writes and their patches), the differential mode and recovery from an injected GL error. `--bench FRAMES [SIZE [a4]]` times a fill-heavy frame loop with and without the GPU. Exits 77 (skipped) with no usable GPU. Outside `make test`. |
 | `test-zodiac-graphics-display` | Staged/active display words, guest latch and scan deadlines, clock requests, RGB565 conversion, stride/bounds, independent dirty generations and reset. Synthetic bus/frame Exact/Fast runs with `test-zodiac-virtual-graphics`. See [display](zodiac2-cs5.md#virtual-display-and-headless-frame). Outside `make test`. |
 | `test-zodiac-cs5-bus` | Fixed/DTACK/WAIT handshakes, guest HCLK stalls and timeout, narrow ports, GPIO mux, unknown-data guards, retained VRAM, asynchronous clock partitions and full synthetic Exact/Fast timer IRQ boundary. See [EIM](zodiac2-eim.md#virtual-cs5-handshake). Outside `make test`. |
 | `test-zodiac-graphics-clocks` | Register-driven virtual PLL and counter, DAC/gain/offset/range, lock and measurement deadlines, normal/fast dividers and multiple calibrated targets. See [graphics clocks](zodiac2-cs5.md#virtual-graphics-clocks-and-calibration). Outside `make test`. |
