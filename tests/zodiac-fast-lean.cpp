@@ -11,8 +11,8 @@
 // path give Exact's values at Exact's times, in ARM and in Thumb, and a run that changes engine between slices
 // ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
 // reads on the lean path give Exact's values. Fast blocks answer those reads and board writes in generated code,
-// take an IRQ such a write lets in within a block, pass the ROM's timer delay loop at once and run exception returns
-// and line-end Thumb BL pairs.
+// take an IRQ such a write lets in within a block, answer CGM, timer and DMA register reads and watchdog and DISR
+// writes there, pass the ROM's timer delay loop at once and run exception returns and line-end Thumb BL pairs.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -1027,6 +1027,39 @@ void jitBoardWrites() {
     assert(writes >= 300);
 }
 
+// CGM CSCR, both timers' control and status and DMA DISR and DIMR, read 150 times, with watchdog service and DISR
+// writes in the same loop: Fast blocks answer all of them in generated code, with Exact's results.
+void jitBoardRegisters() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 255);                             // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    std::vector<uint32_t> words;
+    load(words, 0, 0x0021b000); load(words, 1, 0x00202000); load(words, 2, 0x00203000); load(words, 3, 0x00209000);
+    load(words, 4, 0); load(words, 6, 0x00201000); load(words, 7, 150); load(words, 9, 0x5555); load(words, 10, 0);
+    const size_t top = words.size();
+    for (uint32_t w : {0xe5905000u, 0xe5915000u, 0xe5915014u, 0xe5925000u, 0xe5925014u, 0xe5935004u, 0xe5935008u}) {
+        words.push_back(w);                               // ldr r5, [...]
+        words.push_back(0xe0844005);                      // add r4, r4, r5
+    }
+    words.push_back(0xe5869004);                          // str r9, [r6, #4]: WSR
+    words.push_back(0xe583a004);                          // str r10, [r3, #4]: DISR
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const uint64_t reads = imx1MachineJitReads(nullptr), writes = imx1MachineJitBoardWrites(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("jit board registers exact", exact); print("jit board registers blocks", fast);
+    const uint64_t r = imx1MachineJitReads(nullptr) - reads, w = imx1MachineJitBoardWrites(nullptr) - writes;
+    std::printf("jit board registers: %llu reads and %llu writes in generated code\n", (unsigned long long)r,
+                (unsigned long long)w);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[7] == 0 && exact.run.result.registers[4] != 0);
+    sameResult(exact, fast);
+    assert(r >= 7 * 130 && w >= 2 * 130);
+}
+
 // The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time.
@@ -1061,15 +1094,17 @@ void delayLoop() {
     const auto& f = fast.run.result;
     std::printf("delay blocks r0=%08x r1=%u\n", f.registers[0], f.registers[1]);
     std::fflush(stdout);
+    // Each wait ends within a count or so of 120, at least one skip per wait, and in Exact's time to 2% and a tick.
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
-           f.registers[1] < 124);
-    assert(n >= 10 && fast.cheap.retired * 5 < exact.cheap.retired * 4);
+           f.registers[1] <= 121);
+    assert(n >= 20 && fast.cheap.retired * 5 < exact.cheap.retired * 4);
     const uint64_t et = exact.cheap.time.ticks, ft = fast.cheap.time.ticks;
-    assert(ft * 10 >= et * 9 && ft * 10 <= et * 11);
+    assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
 }
 
 // An exception return (MOVS PC, LR to a Thumb loop) and a Thumb BL whose prefix is the last halfword of a 32-byte
-// line, 200 times: both run in generated code. The mode change ends the run, so one run per return and no more.
+// line, 200 times: both run in generated code, the returns counted there. The mode change ends the run, so one run
+// per return and no more.
 void jitReturns() {
     GraphicsGuest g;
     g.setup(); g.display(); g.clocks();
@@ -1113,14 +1148,17 @@ void jitReturns() {
     h.push_back(0x4770);                                  // bx lr
     for (size_t i = 0; i < h.size(); i += 2) words.push_back(h[i] | uint32_t(i + 1 < h.size() ? h[i + 1] : 0x46c0) << 16);
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    const uint64_t returns = cpuJitExceptionReturns();
     const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
     const uint64_t n = imx1MachineJitRuns(nullptr);  // the last machine's
+    const uint64_t r = cpuJitExceptionReturns() - returns;
     print("jit returns exact", exact); print("jit returns blocks", fast);
-    std::printf("jit returns: %llu JIT runs\n", (unsigned long long)n);
+    std::printf("jit returns: %llu JIT runs, %llu exception returns in generated code\n", (unsigned long long)n,
+                (unsigned long long)r);
     std::fflush(stdout);
     assert(exact.run.result.registers[4] == 200 && exact.run.result.registers[6] == 1);
     sameResult(exact, fast);
-    assert(n <= 210);
+    assert(n <= 210 && r >= 180);
 }
 
 void jitLong() {
@@ -1129,6 +1167,7 @@ void jitLong() {
     setenv("FROND_JIT_HOT", "1", 1);
     jitReads();
     jitBoardWrites();
+    jitBoardRegisters();
     delayLoop();
     jitReturns();
     cpuSetJitSync(false);
