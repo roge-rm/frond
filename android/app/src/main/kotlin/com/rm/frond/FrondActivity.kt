@@ -139,7 +139,11 @@ open class FrondActivity : SDLActivity() {
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
-            if (name == "microphone") Log.i(TAG, "microphone: $state")
+            if (name == "microphone") {
+                Log.i(TAG, "microphone: $state")
+                // The core turns capture off and on by itself too, around a TG50 sleep.
+                runOnUiThread { menuModel?.acceptMicrophone(state) }
+            }
             if (name == "dana-view" && launchDevice().isDana()) {
                 DanaViewState.parse(state)?.let { acceptDanaState(it) }
             }
