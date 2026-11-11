@@ -322,9 +322,10 @@ struct Outcome {
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
-Imx1Machine* make(const std::vector<uint32_t>& words, bool fast, bool observed = false) {
+Imx1Machine* make(const std::vector<uint32_t>& words, bool fast, bool observed = false, bool icacheIndex = false) {
     auto o = graphicsOptions(false);
     o.ramMiB = 32;
+    o.arm920IcacheIndexCompatibility = icacheIndex;
     if (observed) o.busObserver = [](void*, const Imx1ProbeAccess&) {};
     Imx1ProbeResult error{};
     Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
@@ -1274,6 +1275,39 @@ void jitSwi() {
     assert(steps(fast) < steps(once) + 100);
 }
 
+// A loop of a control register read and I- and D-cache operations by index, count times: all run in the JIT's p15
+// slot, so a run of 200 takes few more steps than a run of 1 (each would add 200 through the step).
+Outcome cacheOpLoop(uint32_t count, bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 7, count);
+    load(words, 1, 0);
+    const size_t top = words.size();
+    words.push_back(0xee110f10);                          // mrc p15, 0, r0, c1, c0, 0
+    words.push_back(0xee071f55);                          // mcr p15, 0, r1, c7, c5, 2: I-cache entry by index
+    words.push_back(0xee071f15);                          // mcr p15, 0, r1, c7, c5, 0: whole I-cache
+    words.push_back(0xee071f5a);                          // mcr p15, 0, r1, c7, c10, 2: clean D-cache entry by index
+    words.push_back(0xe0844000);                          // add r4, r4, r0
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return finish(make(g.words, fast, false, true));  // c7, c5, 2 as the Zodiac takes it
+}
+
+void jitCacheOps() {
+    const auto exact = cacheOpLoop(200, false), fast = cacheOpLoop(200, true), once = cacheOpLoop(1, true);
+    const auto steps = [](const Outcome& o) { return o.cheap.retired - o.lean - o.jit; };
+    print("jit cache ops exact", exact); print("jit cache ops blocks", fast);
+    std::printf("jit cache ops: %llu steps for 200 rounds, %llu for 1\n", (unsigned long long)steps(fast),
+                (unsigned long long)steps(once));
+    std::fflush(stdout);
+    assert(exact.run.result.registers[7] == 0 && exact.run.result.registers[4] == 200 * exact.run.result.registers[0]);
+    sameResult(exact, fast);
+    assert(steps(fast) < steps(once) + 100);
+}
+
 void jitLong() {
     imx1SetFastBlocksDefault(true);
     cpuSetJitSync(true);
@@ -1286,6 +1320,7 @@ void jitLong() {
     jitDomain();
     jitReturns();
     jitSwi();
+    jitCacheOps();
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
 }
