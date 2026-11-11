@@ -2084,6 +2084,14 @@ bool directed(Engines& e) {
          {{Expect::REG, 13, 0x30008}}},
         {"ldr r0, [r1] from a refused device register", {0xe5910000}, false, SVC, {{1, 0x2f804}},
          {{Expect::DEVICE, 0, 0}, {Expect::FSR, 0, 0x0a, 0x0f}, {Expect::FAR, 0, 0x2f804}}},
+        // A register or flags set before a faulting access and set again after it in the same block: the
+        // first set stays (Dynarmic's get/set elimination with memory barriers), so the abort sees it and
+        // the code after the aborted load starts from it.
+        {"add, faulting ldr, add in one block", {0xe2855001, 0xe5946000, 0xe2855001}, false, USR,
+         {{4, 0x2a000}, {5, 0x100}}, {{Expect::REG, 5, 0x102}, {Expect::FAR, 0, 0x2a000}}},
+        {"flags set before a faulting ldr, read after it",
+         {0xe328f000, 0xeaffffff, 0xe1500000, 0xe5946000, 0xe2a77000, 0xe3510005}, false, USR,
+         {{0, 7}, {1, 9}, {4, 0x2a000}, {7, 0}}, {{Expect::REG, 7, 1}, {Expect::FAR, 0, 0x2a000}}},
         // CPAR bit 1 off: WLDRD (cp1) at 0x10008 is undefined, wldrb (cp0) still runs.
         {"iwmmxt cpar off for a load",
          {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
