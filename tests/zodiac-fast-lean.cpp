@@ -8,7 +8,8 @@
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
 // Graphics memory stores right after a change that makes the frame scan again show in the frame as in Exact, and a
 // timer read after a lean graphics memory store leaves the lean path. Scan status and acquisition reads on the lean
-// path give Exact's values at Exact's times, in ARM and in Thumb.
+// path give Exact's values at Exact's times, in ARM and in Thumb, and a run that changes engine between slices
+// ends as an Exact run does.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -628,6 +629,54 @@ void thumbScanReads() {
     std::fflush(stdout);
     assert(reads >= 10000 && writes >= 2000 && mixed >= 10);
 }
+// The engine changes between slices, every two slices, starting on either engine: in the scan read guests with
+// graphics memory stores and in the MMU guests with the caches on (dirty lines left by Exact must reach memory
+// before Fast reads it). Each run ends as an Exact run does, and the Fast slices still run on the lean path.
+void engineSwitch() {
+    uint64_t lean = 0, dirtyLean = 0;
+    unsigned switches = 0;
+    std::vector<std::vector<uint32_t>> guests;
+    for (bool thumb : {false, true})
+        for (uint32_t delay : {0u, 7u, 31u}) guests.push_back(thumb ? thumbScanGuest(delay, true) : scanGuest(delay, true));
+    uint32_t stopPc = 0, savePc = 0;
+    for (Tail tail : {Tail::tlb, Tail::domain, Tail::timer}) guests.push_back(guest(tail, stopPc, savePc));
+    for (const auto& words : guests) {
+        const auto exact = runGuest(words, false);
+        for (bool first : {true, false}) {
+            Imx1Machine* m = make(words, first);
+            for (unsigned n = 0; n < 100000 && running(m); ++n) {
+                if (n % 2 == 0 && n) {
+                    const bool fast = (n / 2 % 2 == 0) == first;
+                    assert(imx1MachineSetFastEngine(m, fast) && imx1MachineFastEngine(m) == fast);
+                    ++switches;
+                }
+                imx1MachineRunSlice(m, 311 + n % 3 * 97, 0);
+            }
+            const auto mixed = finish(m);
+            same(exact, mixed);
+            assert(exact.run.result.cs5WaitClocks == mixed.run.result.cs5WaitClocks &&
+                   exact.run.result.graphicsFrameHash == mixed.run.result.graphicsFrameHash);
+            lean += mixed.lean;
+        }
+    }
+    {
+        // Exact to Fast where the tlb guest's line is dirty in Exact's D-cache: Fast reads it from memory.
+        const auto words = guest(Tail::tlb, stopPc, savePc);
+        const auto exact = runGuest(words, false);
+        Imx1Machine* m = make(words, false);
+        for (unsigned n = 0; n < 1000000 && running(m) && imx1MachineGetStatus(m).pc != savePc; ++n)
+            imx1MachineRunSlice(m, 1, 0);
+        assert(running(m) && imx1MachineSetFastEngine(m, true));
+        const auto dirty = finish(m);
+        print("engine switch, exact to fast with a dirty line", dirty);
+        same(exact, dirty);
+        dirtyLean = dirty.lean;
+    }
+    std::printf("engine switch: %u switches between slices, %llu instructions on the lean path, %llu after the dirty "
+                "line\n", switches, (unsigned long long)lean, (unsigned long long)dirtyLean);
+    std::fflush(stdout);
+    assert(switches >= 100 && lean >= 5000 && dirtyLean > 0);
+}
 }  // namespace
 
 int main() {
@@ -638,6 +687,7 @@ int main() {
     storeThenTimer();
     scanReads();
     thumbScanReads();
+    engineSwitch();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
         // the engine runs.

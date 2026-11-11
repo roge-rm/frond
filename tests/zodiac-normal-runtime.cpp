@@ -363,7 +363,26 @@ void machine() {
         soc->GetPendingFrame(first, last);
         assert(!soc->RedrawPending());
     }
-    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset and the redraw flag");
+    // The engine: Exact from Create, Fast when asked and kept through a save, a load and Reset, and changed
+    // either way between runs.
+    assert(!soc->FastEngine() && soc->SetFastEngine(true) && soc->FastEngine());
+    run(*soc, 1);
+    assert(soc->Save());
+    const auto fastSaved = soc->GetSavestate();
+    std::vector<uint8_t> fastState(static_cast<const uint8_t*>(fastSaved.data),
+                                   static_cast<const uint8_t*>(fastSaved.data) + fastSaved.size);
+    assert(soc->Load(fastState.size(), fastState.data()) && soc->FastEngine());
+    soc->Reset();
+    assert(soc->FastEngine() && soc->Status().retired == 0);
+    run(*soc, 1);
+    const uint64_t onFast = soc->Status().retired;
+    assert(onFast > 0 && soc->SetFastEngine(false) && !soc->FastEngine());
+    run(*soc, 1);
+    const uint64_t onExact = soc->Status().retired;
+    assert(onExact > onFast && soc->SetFastEngine(true) && soc->FastEngine());
+    run(*soc, 1);
+    assert(soc->Status().retired > onExact && !soc->Halted());
+    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag and the engine");
 }
 }  // namespace
 
