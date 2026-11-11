@@ -1136,6 +1136,37 @@ void delayShort() {
     assert(fast.cheap.retired * 4 <= exact.cheap.retired * 5);
 }
 
+// The ROM's domain switch (200ccfcc): read DACR, set domain 0 to manager, write it, then write the old value back,
+// 200 times. Fast blocks run the MRC and MCR in generated code, with Exact's results.
+void jitDomain() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 7, 200);
+    const size_t top = words.size();
+    words.push_back(0xee130f10);                          // mrc p15, 0, r0, c3, c0, 0
+    words.push_back(0xe3802003);                          // orr r2, r0, #3
+    words.push_back(0xee032f10);                          // mcr p15, 0, r2, c3, c0, 0
+    words.push_back(0xe2844001);                          // add r4, r4, #1
+    words.push_back(0xee133f10);                          // mrc p15, 0, r3, c3, c0, 0
+    words.push_back(0xe0855003);                          // add r5, r5, r3
+    words.push_back(0xee030f10);                          // mcr p15, 0, r0, c3, c0, 0
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    words.push_back(0xee136f10);                          // mrc p15, 0, r6, c3, c0, 0
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const uint64_t calls = cpuJitDomainCalls();
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const uint64_t n = cpuJitDomainCalls() - calls;
+    print("jit domain exact", exact); print("jit domain blocks", fast);
+    std::printf("jit domain: %llu DACR reads and writes in generated code\n", (unsigned long long)n);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[7] == 0 && exact.run.result.registers[4] == 200);
+    sameResult(exact, fast);
+    assert(n >= 4 * 150);
+}
+
 // An exception return (MOVS PC, LR to a Thumb loop) and a Thumb BL whose prefix is the last halfword of a 32-byte
 // line, 200 times: both run in generated code, the returns counted there. The mode change ends the run, so one run
 // per return and no more.
@@ -1204,6 +1235,7 @@ void jitLong() {
     jitBoardRegisters();
     delayLoop();
     delayShort();
+    jitDomain();
     jitReturns();
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
