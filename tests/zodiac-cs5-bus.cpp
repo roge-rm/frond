@@ -105,7 +105,9 @@ int main() {
     for (int i=0;i<100;++i) assert(memory.validate(c,configured,0x16800000,4)==A::ok);
     assert(memory.dirty(1).generation==generation);
     assert(memory.validate(c,configured,0x16800001,4)==A::width);
-    assert(memory.validate(c,configured,0x16080000,4)==A::unmapped);
+    // 0x16080000 is the ring's CPU wrap view, refused until a ring and wrap are set; 0x160c0000 maps nothing.
+    assert(memory.validate(c,configured,0x16080000,4)==A::sequence);
+    assert(memory.validate(c,configured,0x160c0000,4)==A::unmapped);
     uint32_t datum=0;
     assert(c.access(configured,0x200acb98,0x160113e8,4,false,datum)==A::ok);
     for (auto op : {std::array<uint32_t,3>{0x200acba8,0x13e8,0x400},
