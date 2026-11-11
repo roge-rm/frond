@@ -2243,7 +2243,7 @@ test-zodiac-state-fingerprint: prepare
 		$(ZODIAC_NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=$$t-linux-android26 -std=c++17 \
 			-fsyntax-only -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 			build/source/src/uarm/uarm/imx1_boot_probe.cpp || exit 1; \
-		echo "zodiac state fingerprint $$t-android: same as desktop"; \
+		echo "zodiac state fingerprint $$t-android: compiles, fingerprint static_assert holds"; \
 	done
 
 .PHONY: test-zodiac-machine-state-reject test-zodiac-machine-state-cli

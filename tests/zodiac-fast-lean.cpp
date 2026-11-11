@@ -995,6 +995,35 @@ void jitReads() {
     assert(fast.jit > 2000 && reads >= 1500 && identity >= 100);
 }
 
+// 3000 graphics memory reads in a loop, the display off so the quiet span is long. A JIT run ends at the slice
+// (997 instructions), which counts instructions only, so the reads near its end are answered in generated code as
+// long as the span holds their wait clocks.
+void jitSliceEndReads() {
+    GraphicsGuest g;
+    g.setup(); g.clocks();
+    g.store(0x16800100, 0x1234);
+    std::vector<uint32_t> words;
+    load(words, 2, 0x16800100); load(words, 7, 3000); load(words, 8, 0);
+    const size_t top = words.size();
+    words.push_back(0xe5925000);                          // loop: ldr r5, [r2]
+    words.push_back(0xe0888005);                          // add r8, r8, r5
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false);
+    const uint64_t before = imx1MachineJitReads(nullptr);
+    const auto fast = runGuest(g.words, true);
+    const uint64_t reads = imx1MachineJitReads(nullptr) - before;
+    print("jit slice end reads exact", exact); print("jit slice end reads blocks", fast);
+    std::printf("jit slice end reads: %llu of 3000 answered in generated code, sum %08x\n", (unsigned long long)reads,
+                fast.run.result.registers[8]);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[7] == 0 && exact.run.result.registers[8] == 3000u * 0x1234);
+    sameResult(exact, fast);
+    assert(reads >= 2900);
+}
+
 // A run of GPIO IMR writes in generated code, then an AITC INTENNUM write that lets a forced IRQ in. Exact takes it
 // right after the store; Fast blocks take the write in generated code and the IRQ at the end of its block, here
 // within 64 instructions.
@@ -1053,9 +1082,9 @@ Lines storeTimerLines(bool fast) {
     return runLines(g.words, fast, false);
 }
 void jitStoreTimer() {
-    const uint64_t runs = imx1MachineJitRuns(nullptr);
     const auto exact = storeTimerLines(false), fast = storeTimerLines(true);
-    std::printf("jit store timer: %llu JIT runs\n", (unsigned long long)(imx1MachineJitRuns(nullptr) - runs));
+    // Counted from the start of the last machine, the Fast one.
+    std::printf("jit store timer: %llu JIT runs\n", (unsigned long long)imx1MachineJitRuns(nullptr));
     printLines("jit store timer exact", exact); printLines("jit store timer blocks", fast);
     assert(exact.entries.size() == 1 && fast.entries.size() == 1);
     const uint32_t e = 1000000 - exact.out.run.result.registers[7], f = 1000000 - fast.out.run.result.registers[7];
@@ -1141,16 +1170,21 @@ void jitRingPolls() {
 
 // The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
-// Exact's guest time.
-void delayLoop() {
+// Exact's guest time. With stores, each wait comes right after graphics memory stores, whose wait clocks are still
+// deferred when the skip looks at the timer.
+void delayLoop(bool stores = false) {
+    const char* name = stores ? "delay after stores" : "delay";
     GraphicsGuest g;
-    g.setup(); g.display(); g.clocks();
+    // With stores the display stays off, so the quiet span holds the stores and the wait after them.
+    g.setup(); if (!stores) g.display(); g.clocks();
     g.store(0x00202004, 255);                             // TPRER1
     g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
     std::vector<uint32_t> words;
-    load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0);
+    load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0); load(words, 2, 0x16800100);
     const size_t outer = words.size();
-    words.push_back(0xe5960010);                          // outer: ldr r0, [r6, #16]
+    // outer: 600 adds, so the stores land in a JIT run, not the slice's tail, then str r7, [r2] 4 times
+    if (stores) for (unsigned i = 0; i < 604; ++i) words.push_back(i < 600 ? 0xe2855001 : 0xe5827000);
+    words.push_back(0xe5960010);                          // ldr r0, [r6, #16]
     words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
     words.push_back(0xe0411000);                          // sub r1, r1, r0
     words.push_back(0xe3510078);                          // cmp r1, #120
@@ -1164,9 +1198,10 @@ void delayLoop() {
     g.end();
     const uint64_t skips = imx1MachineDelaySkips(nullptr);
     const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
-    print("delay exact", exact); print("delay blocks", fast);
+    print((std::string(name) + " exact").c_str(), exact); print((std::string(name) + " blocks").c_str(), fast);
     const uint64_t n = imx1MachineDelaySkips(nullptr) - skips;
-    std::printf("delay: %llu waits skipped, retired %llu against %llu, ticks %llu against %llu\n", (unsigned long long)n,
+    std::printf("%s: %llu graphics stores answered, %llu waits skipped, retired %llu against %llu, ticks %llu against "
+                "%llu\n", name, (unsigned long long)fast.cs5Writes, (unsigned long long)n,
                 (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired,
                 (unsigned long long)fast.cheap.time.ticks, (unsigned long long)exact.cheap.time.ticks);
     std::fflush(stdout);
@@ -1174,7 +1209,7 @@ void delayLoop() {
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] == 120);
     // The timer counts each wait starts from differ with the time Fast keeps, so only the loop's end is compared.
     const auto& f = fast.run.result;
-    std::printf("delay blocks r0=%08x r1=%u, most %u against %u, sum %u against %u\n", f.registers[0], f.registers[1],
+    std::printf("%s blocks r0=%08x r1=%u, most %u against %u, sum %u against %u\n", name, f.registers[0], f.registers[1],
                 f.registers[8], e.registers[8], f.registers[9], e.registers[9]);
     std::fflush(stdout);
     // Each wait ends at the count Exact's does, at least one skip per wait, and in Exact's time to 2% and a tick.
@@ -1182,6 +1217,9 @@ void delayLoop() {
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[8] == e.registers[8] &&
            f.registers[9] == e.registers[9]);
     assert(n >= 20 && fast.cheap.retired * 5 < exact.cheap.retired * 4);
+    // After stores the skip comes at the end of the slice (997) the wait starts in, not one slice later: about one
+    // slice a wait.
+    assert(!stores || fast.cheap.retired < 30 * 997);
     const uint64_t et = exact.cheap.time.ticks, ft = fast.cheap.time.ticks;
     assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
 }
@@ -1371,7 +1409,7 @@ Lines swiTimerLines(bool fast) {
 }
 void jitSwiTimer() {
     const auto exact = swiTimerLines(false), fast = swiTimerLines(true);
-    const uint64_t runs = imx1MachineJitRuns(nullptr);
+    const uint64_t runs = imx1MachineJitRuns(nullptr);  // the Fast machine's, counted from its start
     printLines("jit swi timer exact", exact); printLines("jit swi timer blocks", fast);
     const uint32_t e = 1000000 - exact.out.run.result.registers[7], f = 1000000 - fast.out.run.result.registers[7];
     std::printf("jit swi timer: IRQ after %u rounds against %u, ticks %llu against %llu, %llu in %llu JIT runs\n", f, e,
@@ -1473,12 +1511,14 @@ void jitLong() {
     cpuSetJitSync(true);
     setenv("FROND_JIT_HOT", "1", 1);
     jitReads();
+    jitSliceEndReads();
     jitBoardWrites();
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();
     jitSwiTimer();
     delayLoop();
+    delayLoop(true);
     delayShort();
     jitDomain();
     jitReturns();
