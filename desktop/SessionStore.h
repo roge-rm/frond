@@ -56,7 +56,7 @@ struct Preferences {
     bool showKeyboard{true};
     // New machines put the jog controls left of the keyboard.
     JogControls jogControls{JogControls::keyboard};
-    // Engine: Fast is the JIT, Exact the interpreter. Applies at next launch.
+    // Engine: Fast is the JIT (on the Zodiac its lean path), Exact the interpreter. Applies at next launch.
     bool fastEngine{false};
     // Uncapped speed instead of the device's Original speed; 68k devices also have an LCD contrast 0-100.
     int contrast{50};

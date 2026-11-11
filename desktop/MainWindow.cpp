@@ -2050,7 +2050,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
     } else {
-        if (runningPreferences.fastEngine && frondFirmware::guestServices(startDevice)) arguments << "--engine" << "fast";
+        if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
         if (runningPreferences.uncapped) arguments << "--mips" << "1000";
     }
     {

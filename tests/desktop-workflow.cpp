@@ -1883,9 +1883,9 @@ for line in s.makefile('rb'):
                 auto* firmware = window.findChild<FirmwareDialog*>();
                 if (!firmware || !firmware->isVisible()) return;
                 firmware->findChild<QLineEdit*>("nor")->setText(rom);
-                // The engine choice is greyed once the Zodiac is detected.
+                // A new Zodiac starts on Fast.
                 if (firmware->findChild<QPushButton*>("import")->isEnabled())
-                    QVERIFY(!firmware->findChild<QComboBox*>("engine")->isEnabled());
+                    QVERIFY(firmware->findChild<QComboBox*>("engine")->currentData().toBool());
                 firmware->findChild<QPushButton*>("import")->click();
             });
             poll.start();
@@ -2064,6 +2064,38 @@ for line in s.makefile('rb'):
         }
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
+    }
+    // A new Zodiac starts on Fast and other new machines on Exact, until the Engine is changed by hand; an
+    // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
+    void zodiacEngineDefault() {
+        const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
+        QVERIFY(frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::tx));
+        const frondSessions::Preferences fresh;
+        QTemporaryDir root;
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic, nullptr, &fresh);
+            auto* device = dialog.findChild<QComboBox*>("device");
+            auto* engine = dialog.machineSettings->engine;
+            const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
+            pick("tapwave-zodiac-2");
+            QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
+            pick("palm-tx");
+            QVERIFY(!engine->currentData().toBool());
+            pick("tapwave-zodiac-2");
+            QVERIFY(engine->currentData().toBool());
+            // Exact chosen by hand stays when the device changes.
+            engine->setCurrentIndex(engine->findData(false));
+            emit engine->activated(engine->currentIndex());
+            pick("palm-tx"); pick("tapwave-zodiac-2");
+            QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
+        }
+        {
+            MachineSettingsDialog dialog(zodiac, fresh);
+            QVERIFY(dialog.controls->engine->isEnabled() && !dialog.controls->values().fastEngine);
+            auto fast = fresh; fast.fastEngine = true;
+            MachineSettingsDialog fastDialog(zodiac, fast);
+            QVERIFY(fastDialog.controls->values().fastEngine);
+        }
     }
     // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
     // the speed too, no contrast, and the Engine.

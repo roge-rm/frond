@@ -48,9 +48,13 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 // controls for anything else are hidden rather than greyed.
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
 
-// The Zodiac runs with no guest calls yet: no install, application list, hard reset or Fast engine.
+// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
 inline bool guestServices(Device device) {
     return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
+}
+// New machines of these devices start on the Fast engine: the Zodiac, where only Fast reaches its real speed.
+inline bool fastByDefault(Device device) {
+    return device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac;
 }
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.

@@ -249,7 +249,7 @@ inline QString machineStopText(const QString& log) {
 
 // The line under the machine's name: the engine on ARM devices, else the device.
 inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
-    return t.runs68k ? deviceName : fastEngine && t.guestServices ? QObject::tr("Fast") : QObject::tr("Exact");
+    return t.runs68k ? deviceName : fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
 }
 
 // "Frond NAME STAMP.png" with the characters a file name can't have replaced.

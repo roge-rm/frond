@@ -159,7 +159,8 @@ class RunningRulesTest : public QObject {
         QCOMPARE(subtitle(traitsFor(named("palm-tx")), false, "Palm TX"), QString("Exact"));
         QCOMPARE(subtitle(traitsFor(named("palm-tx")), true, "Palm TX"), QString("Fast"));
         QCOMPARE(subtitle(traitsFor(named("palm-iiix")), true, "Palm IIIx"), QString("Palm IIIx"));
-        QCOMPARE(subtitle(traitsFor(named("tapwave-zodiac-2")), true, "Tapwave Zodiac 2"), QString("Exact"));
+        QCOMPARE(subtitle(traitsFor(named("tapwave-zodiac-2")), true, "Tapwave Zodiac 2"), QString("Fast"));
+        QCOMPARE(subtitle(traitsFor(named("tapwave-zodiac-2")), false, "Tapwave Zodiac 2"), QString("Exact"));
     }
     // The Zodiac's unfinished hardware is listed and greyed, and it has no hard reset yet.
     void zodiacRows() {
