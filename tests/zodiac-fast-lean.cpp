@@ -596,6 +596,8 @@ void storeThenTimer() {
     std::fflush(stdout);
     assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[8]);
     assert(fast.cs5Writes >= 100);
+    // The timer reads come after a store's deferred wait clocks and are answered with them counted.
+    assert(fast.timerReads >= 100);
     same(exact, fast);
     assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks);
 }
