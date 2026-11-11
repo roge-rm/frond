@@ -1,0 +1,14 @@
+--- a/src/uarm/uarm/scheduler.h
++++ b/src/uarm/uarm/scheduler.h
+@@ -192,6 +192,11 @@
+ template <typename T>
+ uint64_t Scheduler<T>::CyclesToNextUpdate(uint64_t cyclesPerSecond) {
+     if (nextUpdate <= accTime) return 1;
++    // The product nearly always fits in 64 bits, where dividing by the constant is a multiply;
++    // a 128-bit divide is a library call on arm64. Same result either way.
++    uint64_t product;
++    if (!__builtin_mul_overflow(nextUpdate - accTime, cyclesPerSecond, &product))
++        return product / 1_sec + 1;
+     const __uint128_t requested = __uint128_t(nextUpdate - accTime) * cyclesPerSecond / 1_sec + 1;
+     return requested > UINT64_MAX ? UINT64_MAX : uint64_t(requested);
+ }
