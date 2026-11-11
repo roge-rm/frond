@@ -37,9 +37,10 @@ static uint64_t readWmmx(unsigned reg) {
 }
 struct E2Versions {
     void Load(SavestateLoader<ChunkType>& loader) {
-        // The E2 power manager saves version 2 with PXA25x power sleep.
+        // The E2 power manager saves version 2 with PXA25x power sleep, and the batched OS
+        // timer, on every PXA device, saves version 1.
         const struct { ChunkType type; uint32_t version; } chunks[] = {
-            {ChunkType::pxaLcd, 0}, {ChunkType::pxaPwrClk, 2}, {ChunkType::pxaTimr, 0}};
+            {ChunkType::pxaLcd, 0}, {ChunkType::pxaPwrClk, 2}, {ChunkType::pxaTimr, 1}};
         for (auto chunk : chunks) {
             uint32_t version = 99;
             assert(loader.GetChunkOrFail(chunk.type, 2, "E2 compatibility", version));
