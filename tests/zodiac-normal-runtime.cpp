@@ -374,6 +374,13 @@ void machine() {
     assert(soc->Load(fastState.size(), fastState.data()) && soc->FastEngine());
     soc->Reset();
     assert(soc->FastEngine() && soc->Status().retired == 0);
+    // The setting is the machine's own: Reset keeps Exact when it was set, and Fast set again after it.
+    assert(soc->SetFastEngine(false) && !soc->FastEngine());
+    soc->Reset();
+    assert(!soc->FastEngine());
+    assert(soc->SetFastEngine(true) && soc->FastEngine());
+    soc->Reset();
+    assert(soc->FastEngine());
     run(*soc, 1);
     const uint64_t onFast = soc->Status().retired;
     assert(onFast > 0 && soc->SetFastEngine(false) && !soc->FastEngine());
