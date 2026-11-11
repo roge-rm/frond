@@ -810,6 +810,67 @@ void leanReads() {
     std::fflush(stdout);
     assert(memory >= 20000 && identity >= 2000 && board >= 4000);
 }
+// A loop of RTC reads (RTCISR, HOURMIN and SECONDS) with the sampling status SAM7 enabled, set every 64 CLK32 ticks
+// and cleared by the guest whenever it reads it set. On the lean path the reads give Exact's values, since the span
+// ends at each sampling period and second.
+std::vector<uint32_t> rtcGuest(uint32_t delay) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.spin(1 + delay);
+    std::vector<uint32_t> words;
+    load(words, 1, 0x00204000); load(words, 5, 0x8000);
+    words.push_back(0xe5815018);                          // str r5, [r1, #0x18] (RTCIENR)
+    words.push_back(0xe3a08000);                          // mov r8, #0
+    words.push_back(0xe3a09000);                          // mov r9, #0
+    words.push_back(0xe3a0a000);                          // mov r10, #0
+    words.push_back(0xe3a0b000);                          // mov r11, #0
+    load(words, 7, 120000);
+    const size_t top = words.size();
+    words.push_back(0xe5915014);                          // loop: ldr r5, [r1, #0x14] (RTCISR)
+    words.push_back(0xe0888005);                          // add r8, r8, r5
+    words.push_back(0xe3150902);                          // tst r5, #0x8000
+    words.push_back(0x15815014);                          // strne r5, [r1, #0x14]
+    words.push_back(0x128aa001);                          // addne r10, r10, #1
+    words.push_back(0x108bb007);                          // addne r11, r11, r7: the iteration it was seen in
+    for (uint32_t insn : {0xe5915000u, 0xe5915004u}) {    // ldr r5, [r1] (HOURMIN), ldr r5, [r1, #4] (SECONDS)
+        words.push_back(insn);
+        words.push_back(0xe0899005);                      // add r9, r9, r5
+    }
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return g.words;
+}
+Outcome rtcRun(const std::vector<uint32_t>& words, bool fast) {
+    auto o = graphicsOptions(false);
+    o.ramMiB = 32;
+    o.rtcInitialTimeKnown = true;
+    o.rtcInitialTime = {1, 12, 34, 56};
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
+    return finish(m);
+}
+void rtcReads() {
+    uint64_t board = 0, cleared = 0;
+    for (uint32_t delay : {0u, 5u, 17u}) {
+        const auto words = rtcGuest(delay);
+        const auto exact = rtcRun(words, false), fast = rtcRun(words, true);
+        if (delay == 0) { print("rtc reads exact", exact); print("rtc reads fast", fast); }
+        const auto& e = exact.run.result;
+        assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[9] && e.registers[11]);
+        same(exact, fast);
+        board += fast.boardReads;
+        cleared += e.registers[10];
+    }
+    std::printf("rtc reads: %llu board reads on the lean path, SAM7 seen set %llu times\n", (unsigned long long)board,
+                (unsigned long long)cleared);
+    std::fflush(stdout);
+    assert(board >= 600000 && cleared >= 12);
+}
 // The engine changes between slices, every two slices, starting on either engine: in the scan read guests with
 // graphics memory stores and in the MMU guests with the caches on (dirty lines left by Exact must reach memory
 // before Fast reads it). Each run ends as an Exact run does, and the Fast slices still run on the lean path.
@@ -1753,6 +1814,7 @@ int main() {
     scanReads();
     thumbScanReads();
     leanReads();
+    rtcReads();
     engineSwitch();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
