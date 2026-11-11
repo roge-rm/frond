@@ -15,6 +15,7 @@
 #include "DisplayChange.h"
 #include "WindowScale.h"
 #include "zodiac_input.h"
+#include "guest_orientation.h"
 #include "zodiac_panel.h"
 #include <SDL_image.h>
 // Synthetic finger events come from a touch id SDL doesn't know, so count them as a touch screen.
@@ -1761,6 +1762,17 @@ static void zodiacControls() {
     assert(std::string(guestOrientationName(1))=="portrait" && std::string(guestOrientationName(2))=="landscape");
     assert(std::string(guestOrientationName(3))=="reverse-portrait" && std::string(guestOrientationName(4))=="reverse-landscape");
     assert(!*guestOrientationName(0));
+    // The DAL logo's unturned scan (portrait) is skipped from any reset until the OS first goes landscape,
+    // and a guest reset, which shows as the display going off, starts that wait again.
+    {
+        GuestOrientationTracker tracker;
+        assert(tracker.Update(0)==0 && tracker.Update(1)==0 && tracker.Update(2)==2 && tracker.Update(1)==1);
+        assert(tracker.Update(0)==0 && tracker.Update(1)==0 && tracker.Update(2)==2);
+        tracker.Restart();
+        assert(tracker.Update(1)==0 && tracker.Update(2)==2);
+        tracker.Loaded();
+        assert(tracker.Update(1)==1);
+    }
     // Then the window's shape adds nothing: main.cpp passes quarterTurn false.
     assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,1080,2400)==Rotation::landscape_90);
     assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,2400,1080)==Rotation::landscape_90);
