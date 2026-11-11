@@ -836,6 +836,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             else if (!busy) notify(QString());
             return;
         }
+        if (command == "keyboard-grab") return;
         if (command == "window-id") {
             embedReply(ok, message);
             // The core started fitted for the embedding; on its own it goes back to following the
@@ -1336,6 +1337,8 @@ void MainWindow::enterFullScreen() {
     bodyLayout->removeWidget(panels);
     barHandle->hide();
     showFullScreen();
+    // Full screen takes the desktop's shortcuts, so Ctrl+F1 to F8 and Ctrl+Esc reach the Dana.
+    if (frondFirmware::isDana(runningDevice)) send("keyboard-grab", "on");
     overlayBarShown = true;
     panels->setVisible(panels->current() >= 0);
     refresh();
@@ -1347,6 +1350,7 @@ void MainWindow::leaveFullScreen() {
     // A panel left open would squeeze the Palm in the smaller window.
     panels->open(-1);
     fullScreenOn = false;
+    if (frondFirmware::isDana(runningDevice)) send("keyboard-grab", "off");
     overlayTimer->stop();
     edgeTimer->stop();
     panels->setParent(runArea);
@@ -1422,6 +1426,7 @@ void MainWindow::embedReply(bool ok, const QString& message) {
     panels->setMinimumHeight(0);
     panels->setFixedWidth(runningRules::panelWidth);
     palmHolder->show();
+    if (fullScreenOn && frondFirmware::isDana(runningDevice)) send("keyboard-grab", "on");
     if (!isMaximized() && !isFullScreen()) {
         if (layout()) layout()->activate();
         centralWidget()->layout()->activate();

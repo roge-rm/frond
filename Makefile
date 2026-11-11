@@ -265,11 +265,17 @@ test-render-link: prepare
 		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o build/test-render-link
 	./build/test-render-link
 
-test: test-shortcut-keys
+test: test-shortcut-keys test-dana-host-keys
 test-shortcut-keys: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
 		-Ibuild/source/src/uarm/native tests/shortcut-keys.cpp -o build/test-shortcut-keys
 	./build/test-shortcut-keys
+
+test-dana-host-keys: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror $(shell sdl2-config --cflags) \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/common \
+		tests/dana-host-keys.cpp -o build/test-dana-host-keys
+	./build/test-dana-host-keys
 
 test-fast-audio: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm \
