@@ -10,7 +10,9 @@
 // timer read after a lean graphics memory store leaves the lean path. Scan status and acquisition reads on the lean
 // path give Exact's values at Exact's times, in ARM and in Thumb, and a run that changes engine between slices
 // ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
-// reads on the lean path give Exact's values.
+// reads on the lean path give Exact's values. Fast blocks answer those reads and board writes in generated code,
+// take an IRQ such a write lets in within a block, pass the ROM's timer delay loop at once and run exception returns
+// and line-end Thumb BL pairs.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -973,6 +975,166 @@ void blocks() {
     std::fflush(stdout);
 }
 
+// Long JIT runs (milestone 10), with every block compiled at once in place. Graphics memory, identity, GPIO, AITC and
+// ASP reads are answered in generated code (the identity read by its access pc), with Exact's results.
+void jitReads() {
+    const uint64_t before = imx1MachineJitReads(nullptr), registers = imx1MachineJitRegisterReads(nullptr);
+    const auto words = readsGuest(0);
+    const auto exact = runGuest(words, false), fast = runGuest(words, true);
+    print("jit reads exact", exact); print("jit reads blocks", fast);
+    const uint64_t reads = imx1MachineJitReads(nullptr) - before;
+    const uint64_t identity = imx1MachineJitRegisterReads(nullptr) - registers;
+    std::printf("jit reads: %llu instructions in generated code, %llu reads answered there, %llu of them identity reads\n",
+                (unsigned long long)fast.jit, (unsigned long long)reads, (unsigned long long)identity);
+    std::fflush(stdout);
+    sameResult(exact, fast);
+    assert(fast.run.result.graphicsFrameHash == exact.run.result.graphicsFrameHash);
+    assert(fast.jit > 2000 && reads >= 1500 && identity >= 100);
+}
+
+// A run of GPIO IMR writes in generated code, then an AITC INTENNUM write that lets a forced IRQ in. Exact takes it
+// right after the store; Fast blocks take the write in generated code and the IRQ at the end of its block, here
+// within 64 instructions.
+void jitBoardWrites() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x0022300c, 31);                              // INTDISNUM 31
+    g.store(0x00223054, 1u << 31);                        // force it
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00223000); load(words, 1, 0x0021c000); load(words, 2, 31); load(words, 3, 400);
+    load(words, 4, 0);
+    words.push_back(0xe5814030);                          // loop: str r4, [r1, #0x30] (IMR_A)
+    words.push_back(0xe2533001);                          // subs r3, r3, #1
+    words.push_back(0x1afffffc);                          // bne loop
+    const uint32_t base = 0x20000000 + g.cursor;
+    words.push_back(0xe5802008);                          // str r2, [r0, #8]: INTENNUM 31
+    const uint32_t after = base + uint32_t(words.size()) * 4;
+    for (unsigned i = 0; i < 300; ++i) words.push_back(0xe2855001);  // add r5, r5, #1
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const uint64_t before = imx1MachineJitBoardWrites(nullptr);
+    const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
+    printLines("jit board writes exact", exact); printLines("jit board writes blocks", fast);
+    const uint64_t writes = imx1MachineJitBoardWrites(nullptr) - before;
+    std::printf("jit board writes: %llu in generated code, IRQ taken %u instructions late\n", (unsigned long long)writes,
+                fast.entries.empty() ? 0u : (fast.entries[0].interruptedPc - after) / 4);
+    std::fflush(stdout);
+    assert(exact.entries.size() == 1 && exact.entries[0].interruptedPc == after);
+    assert(exact.out.run.result.trace.pc == 0x18 && fast.out.run.result.trace.pc == 0x18);
+    assert(fast.entries.size() == 1 && fast.entries[0].interruptedPc >= after &&
+           fast.entries[0].interruptedPc - after <= 4 * 64);
+    assert(writes >= 300);
+}
+
+// The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
+// the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
+// Exact's guest time.
+void delayLoop() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 255);                             // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    std::vector<uint32_t> words;
+    load(words, 6, 0x00202000); load(words, 7, 20);
+    const size_t outer = words.size();
+    words.push_back(0xe5960010);                          // outer: ldr r0, [r6, #16]
+    words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
+    words.push_back(0xe0411000);                          // sub r1, r1, r0
+    words.push_back(0xe3510078);                          // cmp r1, #120
+    words.push_back(0x3afffffb);                          // bcc loop
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(outer) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const uint64_t skips = imx1MachineDelaySkips(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("delay exact", exact); print("delay blocks", fast);
+    const uint64_t n = imx1MachineDelaySkips(nullptr) - skips;
+    std::printf("delay: %llu waits skipped, retired %llu against %llu, ticks %llu against %llu\n", (unsigned long long)n,
+                (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired,
+                (unsigned long long)fast.cheap.time.ticks, (unsigned long long)exact.cheap.time.ticks);
+    std::fflush(stdout);
+    const auto& e = exact.run.result;
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] == 120);
+    // The timer counts each wait starts from differ with the time Fast keeps, so only the loop's end is compared.
+    const auto& f = fast.run.result;
+    std::printf("delay blocks r0=%08x r1=%u\n", f.registers[0], f.registers[1]);
+    std::fflush(stdout);
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
+           f.registers[1] < 124);
+    assert(n >= 10 && fast.cheap.retired * 5 < exact.cheap.retired * 4);
+    const uint64_t et = exact.cheap.time.ticks, ft = fast.cheap.time.ticks;
+    assert(ft * 10 >= et * 9 && ft * 10 <= et * 11);
+}
+
+// An exception return (MOVS PC, LR to a Thumb loop) and a Thumb BL whose prefix is the last halfword of a 32-byte
+// line, 200 times: both run in generated code. The mode change ends the run, so one run per return and no more.
+void jitReturns() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    while ((g.cursor & 31) != 0) { g.word(g.cursor, 0xe1a00000); g.cursor += 4; ++g.retired; }
+    const uint32_t base = 0x20000000 + g.cursor;
+    // ARM at base: r7 = 200; loop: lr = thumb | 1 ... set SPSR to SVC with T, movs pc, lr.
+    std::vector<uint32_t> words;
+    load(words, 7, 200);                                  // 3 words
+    const uint32_t loopAt = base + uint32_t(words.size()) * 4;
+    // add lr, pc, #(thumb - (here + 8)); msr spsr_fsxc, #0xf3 (SVC, I, F, T); movs pc, lr
+    const uint32_t thumbAt = base + 0x40;
+    words.push_back(0xe28fe000 | ((thumbAt - (loopAt + 8)) & 0xff));
+    words.push_back(0xe36ff0f3);
+    words.push_back(0xe1b0f00e);
+    while (base + words.size() * 4 < thumbAt) words.push_back(0xe1a00000);
+    // Thumb at thumbAt (line start): nops up to offset 30, BL prefix there, suffix at 32: bl func.
+    std::vector<uint16_t> h;
+    while (h.size() < 15) h.push_back(0x46c0);
+    const uint32_t blAt = thumbAt + 30;
+    const uint32_t funcAt = thumbAt + 0x60;
+    const int32_t offset = int32_t(funcAt - (blAt + 4));
+    h.push_back(uint16_t(0xf000 | ((offset >> 12) & 0x7ff)));
+    h.push_back(uint16_t(0xf800 | ((offset >> 1) & 0x7ff)));
+    // After the call: subs r7, #1; beq done; bx to ARM loop (adr r5, ...).
+    h.push_back(0x3f01);                                  // subs r7, #1
+    const uint32_t doneAt = thumbAt + 0x50;
+    const uint32_t beqAt = thumbAt + uint32_t(h.size()) * 2;
+    h.push_back(uint16_t(0xd000 | (((doneAt - (beqAt + 4)) >> 1) & 0xff)));  // beq done
+    const uint32_t ldrAt = thumbAt + uint32_t(h.size()) * 2;
+    h.push_back(0);                                       // ldr r5, [pc, #literal]
+    h.push_back(0x4728);                                  // bx r5
+    while ((thumbAt + h.size() * 2) & 3) h.push_back(0x46c0);
+    const uint32_t literalAt = thumbAt + uint32_t(h.size()) * 2;
+    h[(ldrAt - thumbAt) / 2] = uint16_t(0x4d00 | ((literalAt - ((ldrAt + 4) & ~3u)) / 4));
+    h.push_back(uint16_t(loopAt)); h.push_back(uint16_t(loopAt >> 16));
+    while (thumbAt + h.size() * 2 < doneAt) h.push_back(0x46c0);
+    h.push_back(0x2601);                                  // done: movs r6, #1
+    h.push_back(0xdeff);                                  // undefined: the run stops here
+    while (thumbAt + h.size() * 2 < funcAt) h.push_back(0x46c0);
+    h.push_back(0x3401);                                  // func: adds r4, #1
+    h.push_back(0x4770);                                  // bx lr
+    for (size_t i = 0; i < h.size(); i += 2) words.push_back(h[i] | uint32_t(i + 1 < h.size() ? h[i + 1] : 0x46c0) << 16);
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const uint64_t n = imx1MachineJitRuns(nullptr);  // the last machine's
+    print("jit returns exact", exact); print("jit returns blocks", fast);
+    std::printf("jit returns: %llu JIT runs\n", (unsigned long long)n);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[4] == 200 && exact.run.result.registers[6] == 1);
+    sameResult(exact, fast);
+    assert(n <= 210);
+}
+
+void jitLong() {
+    imx1SetFastBlocksDefault(true);
+    cpuSetJitSync(true);
+    setenv("FROND_JIT_HOT", "1", 1);
+    jitReads();
+    jitBoardWrites();
+    delayLoop();
+    jitReturns();
+    cpuSetJitSync(false);
+    unsetenv("FROND_JIT_HOT");
+}
+
 int main() {
     uint32_t stopPc = 0, savePc = 0;
     // Lean-only Fast first, which gives Exact's times as well.
@@ -1113,6 +1275,10 @@ int main() {
         assert(otherExact.pcmLast >= 0x0101 && otherExact.pcmLast <= 0x0104);
     }
     blocks();
+    jitLong();
+    std::puts("PASS: Fast blocks answer graphics, identity and board reads and board writes in generated code, take an "
+              "IRQ a write lets in within a block, pass timer delay loops at once and run exception returns and line-end "
+              "BL pairs, with Exact's results");
     std::puts("PASS: Fast blocks match Exact's results and lean Fast's memory across TLB, TTBR, domain, mode and SDRAM "
               "changes, rewritten code, new code pages, the shipped compile setup and the PCM DMA buffer page");
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
