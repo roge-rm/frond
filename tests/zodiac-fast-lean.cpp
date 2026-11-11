@@ -1226,6 +1226,215 @@ void delayLoop(bool stores = false) {
     assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
 }
 
+// The ROM's vertical wait (200adb08 to 200adb20) called 12 times, timer 1 read after each return. 200adb08 polls
+// the scan status until the display is in its rows, 200adb14 until it has left them. Fast blocks skip the polls
+// that would read the same value and charge their time, so Fast with the skip ends as Fast without it and as Exact
+// do: same registers, timer counts, retired count, guest time and wait clocks.
+void scanPolls() {
+    GraphicsGuest g;
+    // A bigger frame, 256 by 200, with the status rows 20 to 150, so each wait polls for a while.
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    g.store(0x00202004, 15);                              // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    const uint32_t loop[] = {0xe590154c, 0xe3110e40, 0x0afffffc, 0xe590154c, 0xe3110e40, 0x1afffffc,
+                             0xe3a00000, 0xe12fff1e};
+    for (unsigned i = 0; i < 8; ++i) g.word(0xadb08 + 4 * i, loop[i]);
+    std::vector<uint32_t> words;
+    load(words, 6, 0x00202000); load(words, 7, 12);
+    words.push_back(0xe3a09000);                          // mov r9, #0
+    const size_t top = words.size();
+    load(words, 0, 0x16010000);                           // outer: r0 = graphics registers
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t call = words.size();
+    words.push_back(0);                                   // b 200adb08
+    words.push_back(0xe5961010);                          // ldr r1, [r6, #16]
+    words.push_back(0xe0899001);                          // add r9, r9, r1: the counts each return saw
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(call) * 4, 0xadb08);
+    g.end();
+    const uint64_t skips = imx1MachineScanPollSkips(nullptr), rounds = imx1MachineScanPollRounds(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const uint64_t n = imx1MachineScanPollSkips(nullptr) - skips, r = imx1MachineScanPollRounds(nullptr) - rounds;
+    imx1SetScanPollSkip(false);
+    const auto plain = runGuest(g.words, true);
+    imx1SetScanPollSkip(true);
+    assert(imx1MachineScanPollSkips(nullptr) - skips == n);
+    print("scan polls exact", exact); print("scan polls fast", fast); print("scan polls no skip", plain);
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    const auto& p = plain.run.result;
+    std::printf("scan polls: %llu skips of %llu rounds, timer sum %u fast, %u no skip, %u exact, last %u %u %u\n",
+                (unsigned long long)n, (unsigned long long)r, f.registers[9], p.registers[9], e.registers[9],
+                f.registers[1], p.registers[1], e.registers[1]);
+    std::fflush(stdout);
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0);
+    same(plain, fast);
+    same(exact, fast);
+    assert(f.cs5WaitClocks == p.cs5WaitClocks && f.cs5WaitClocks == e.cs5WaitClocks);
+    assert(n >= 1000 && r >= 10000);
+}
+
+// The ROM's vertical wait, given at 0xadb08.
+void waitLoop(GraphicsGuest& g) {
+    const uint32_t loop[] = {0xe590154c, 0xe3110e40, 0x0afffffc, 0xe590154c, 0xe3110e40, 0x1afffffc,
+                             0xe3a00000, 0xe12fff1e};
+    for (unsigned i = 0; i < 8; ++i) g.word(0xadb08 + 4 * i, loop[i]);
+}
+
+// The vertical wait called 12 times with IRQs on and timer 2 raising one after comp counts. Nothing is mapped at
+// the vector, so the run stops there. Fast with the skip takes the IRQ where Fast without it and Exact do, also when
+// it comes inside a wait. Returns whether it did.
+bool scanPollIrq(uint32_t comp, uint64_t& skips) {
+    GraphicsGuest g;
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    waitLoop(g);
+    g.store(0x00223008, 58);                              // AITC: timer 2 on
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+    g.store(0x00203008, comp); g.store(0x00203000, 0x13);  // timer 2: PERCLK1, compare IRQ
+    std::vector<uint32_t> words;
+    load(words, 7, 12);
+    const size_t top = words.size();
+    load(words, 0, 0x16010000);                           // outer: r0 = graphics registers
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t call = words.size();
+    words.push_back(0);                                   // b 200adb08
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(call) * 4, 0xadb08);
+    g.end();
+    const uint64_t before = imx1MachineScanPollSkips(nullptr);
+    const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
+    skips = imx1MachineScanPollSkips(nullptr) - before;
+    imx1SetScanPollSkip(false);
+    const auto plain = runLines(g.words, true, false);
+    imx1SetScanPollSkip(true);
+    const bool ok = exact.entries.size() == 1 && exact.out.run.result.trace.pc == 0x18 && sameLines(exact, fast) &&
+                    sameLines(plain, fast);
+    const uint32_t at = exact.entries.empty() ? 0 : exact.entries[0].interruptedPc;
+    const bool inWait = at >= 0x200adb08 && at <= 0x200adb18;
+    if (!ok) {
+        std::printf("scan poll irq comp %u: %llu skips%s\n", comp, (unsigned long long)skips, inWait ? ", in the wait" : "");
+        printLines("  exact", exact); printLines("  fast", fast); printLines("  no skip", plain);
+    }
+    assert(ok);
+    return inWait;
+}
+// The vertical wait called once with IRQs off while timer 2 raises one, then entered again at 0xadb04, where msr
+// lets the IRQ in. The second wait starts with r1 = 0 and Z set, as the skip wants, outside the status rows, so the
+// skip could pass rounds there, but the IRQ is taken at 200adb08 as in Exact. spin moves the second entry.
+bool scanPollUnmask(uint32_t spin, uint64_t& skips) {
+    GraphicsGuest g;
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    waitLoop(g);
+    g.word(0xadb04, 0xe321f013);                          // msr cpsr_c, #0x13: IRQ and FIQ on
+    g.store(0x00223008, 58);                              // AITC: timer 2 on
+    g.store(0x00203008, 1000); g.store(0x00203000, 0x13);  // timer 2: PERCLK1, compare IRQ
+    std::vector<uint32_t> words;
+    load(words, 0, 0x16010000);
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t first = words.size();
+    words.push_back(0);                                   // b 200adb08
+    load(words, 2, spin);
+    words.push_back(0xe2522001);                          // subs r2, r2, #1
+    words.push_back(0x5afffffd);                          // bpl: spin + 1 rounds
+    words.push_back(0xe3a01000);                          // mov r1, #0
+    words.push_back(0xe3110e40);                          // tst r1, #0x400: Z set, N and C clear
+    load(words, 0, 0x16010000);
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t second = words.size();
+    words.push_back(0);                                   // b 200adb04
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(first) * 4, 0xadb08);
+    g.branch(base + uint32_t(second) * 4, 0xadb04);
+    g.end();
+    const uint64_t before = imx1MachineScanPollSkips(nullptr);
+    const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
+    skips = imx1MachineScanPollSkips(nullptr) - before;
+    imx1SetScanPollSkip(false);
+    const auto plain = runLines(g.words, true, false);
+    imx1SetScanPollSkip(true);
+    const bool ok = exact.entries.size() == 1 && exact.entries[0].interruptedPc == 0x200adb08 &&
+                    exact.out.run.result.trace.pc == 0x18 && sameLines(exact, fast) && sameLines(plain, fast);
+    if (!ok || spin == 0) {
+        std::printf("scan poll unmask spin %u: %llu skips\n", spin, (unsigned long long)skips);
+        printLines("  exact", exact); printLines("  fast", fast); printLines("  no skip", plain);
+    }
+    assert(ok);
+    return true;
+}
+// With the MMU on and the graphics registers privileged only, the vertical wait runs once in SVC mode, then is entered
+// again at 0xadb04, where msr switches to user mode: r1 = 0 and Z set as the skip wants, but the first load there
+// aborts. Fast stops at the abort at 200adb08 as Exact does, without passing rounds.
+void scanPollUser() {
+    GraphicsGuest g;
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    waitLoop(g);
+    g.word(0xadb04, 0xe321f0d0);                          // msr cpsr_c, #0xd0: user, IRQ and FIQ off
+    std::vector<uint32_t> words;
+    // Sections: 0x200 the ROM, 0x160 graphics, privileged only. MMU on, caches off.
+    load(words, 0, 0x00304580); store(words, 0, 0, 0x16000412);
+    load(words, 0, 0x00304800); store(words, 0, 0, 0x20000c12);
+    load(words, 0, 0x00304000);
+    words.push_back(0xee020f10);                          // TTB
+    load(words, 1, 0x0d); words.push_back(0xee031f10);     // domain 0 client, 1 manager
+    load(words, 1, 0x79); words.push_back(0xee011f10);     // MMU on
+    load(words, 0, 0x16010000);
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t first = words.size();
+    words.push_back(0);                                   // b 200adb08
+    words.push_back(0xe3a01000);                          // mov r1, #0
+    words.push_back(0xe3110e40);                          // tst r1, #0x400: Z set, N and C clear
+    load(words, 0, 0x16010000);
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t second = words.size();
+    words.push_back(0);                                   // b 200adb04
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(first) * 4, 0xadb08);
+    g.branch(base + uint32_t(second) * 4, 0xadb04);
+    const uint64_t before = imx1MachineScanPollSkips(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const uint64_t n = imx1MachineScanPollSkips(nullptr) - before;
+    imx1SetScanPollSkip(false);
+    const auto plain = runGuest(g.words, true);
+    imx1SetScanPollSkip(true);
+    print("scan poll user exact", exact); print("scan poll user fast", fast); print("scan poll user no skip", plain);
+    std::printf("scan poll user: %llu skips\n", (unsigned long long)n);
+    std::fflush(stdout);
+    const auto& e = exact.run.result;
+    assert(e.stop == Imx1ProbeStop::exception && e.trace.pc == 0x200adb08);
+    same(plain, fast);
+    same(exact, fast);
+}
+void scanPollIrqs() {
+    unsigned inWait = 0, withSkips = 0;
+    uint64_t total = 0;
+    for (uint32_t comp = 400000; comp < 400000 + 16 * 600001; comp += 600001) {
+        uint64_t skips;
+        if (scanPollIrq(comp, skips)) ++inWait;
+        if (skips) ++withSkips;
+        total += skips;
+    }
+    std::printf("scan poll irqs: %u of 16 in a wait, %u with skips, %llu skips\n", inWait, withSkips,
+                (unsigned long long)total);
+    assert(inWait == 16 && withSkips == 16);
+    total = 0;
+    for (uint32_t spin = 0; spin < 2000; spin += 250) {
+        uint64_t skips;
+        scanPollUnmask(spin, skips);
+        total += skips;
+    }
+    std::printf("scan poll unmask: %llu skips\n", (unsigned long long)total);
+    std::fflush(stdout);
+    scanPollUser();
+}
+
 // The same loop with timer 1 at PERCLK1 (prescaler 1), a count every few instructions, so a wait ends inside one JIT
 // run. Timer reads in generated code see the cycles run so far, so each wait ends as Exact's does, within a few
 // counts of 120, and the loop runs about as many instructions as Exact.
@@ -1522,6 +1731,8 @@ void jitLong() {
     delayLoop();
     delayLoop(true);
     delayShort();
+    scanPolls();
+    scanPollIrqs();
     jitDomain();
     jitReturns();
     jitSwi();

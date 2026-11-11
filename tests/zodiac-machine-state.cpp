@@ -620,8 +620,9 @@ struct GraphicsGuest {
                 {0xb8f04, 8, 0x04150000, true}, {0xb8f10, 0x230, 0x80000000, true}, {0xb8f20, 0x210, 0x0800000d, true}})
             graphics(e.pc, e.offset, e.value);
     }
-    // The 3x2 display of the machine frame test, two rows of pixels at the start of the external memory.
-    void display() {
+    // The 3x2 display of the machine frame test, two rows of pixels at the start of the external memory. total (420)
+    // and vertical (428, 430) set the frame size and the displayed rows, which are the scan status rows.
+    void display(uint32_t total = 0x60008, uint32_t vertical = 0x30001) {
         store(0x16800000, 0x07e0f800); store(0x16800004, 0x0000001f); store(0x16800008, 0x0000ffff); store(0x1680000c, 0x0000ffe0);
         const auto transaction = [&](bool begin) { graphics(0xaeb68, 0x4d8, begin ? 0x78 : 0x7b, !begin); };
         transaction(true);
@@ -629,11 +630,11 @@ struct GraphicsGuest {
         transaction(false);
         transaction(true);
         struct Word { uint32_t pc, offset, value; };
-        for (auto w : {Word{0xad65c, 0x42c, 0x40001}, {0xad668, 0x430, 0x30001}, {0xad2e0, 0x410, 3}, {0xad404, 0x540, 0x80604020},
+        for (auto w : {Word{0xad65c, 0x42c, 0x40001}, {0xad668, 0x430, vertical}, {0xad2e0, 0x410, 3}, {0xad404, 0x540, 0x80604020},
                 {0xad410, 0x544, 0xffdfbf9f}, {0xad418, 0x548, 0}, {0xad420, 0x578, 0x80604020}, {0xad428, 0x58c, 0xffdfbf9f},
                 {0xad430, 0x590, 0}, {0xad438, 0x594, 0x80604020}, {0xad440, 0x598, 0xffdfbf9f}, {0xad448, 0x59c, 0},
-                {0xad528, 0x538, 0x800000}, {0xad3b8, 0x524, 0x102aa}, {0xad2ec, 0x414, 0x1800406}, {0xad2f8, 0x420, 0x60008},
-                {0xad304, 0x424, 0x40001}, {0xad310, 0x428, 0x30001}})
+                {0xad528, 0x538, 0x800000}, {0xad3b8, 0x524, 0x102aa}, {0xad2ec, 0x414, 0x1800406}, {0xad2f8, 0x420, total},
+                {0xad304, 0x424, 0x40001}, {0xad310, 0x428, vertical}})
             graphics(w.pc, w.offset, w.value);
         transaction(false);
         transaction(true);
