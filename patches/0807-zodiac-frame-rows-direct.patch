@@ -1,0 +1,58 @@
+--- a/src/uarm/uarm/imx1_graphics_frame.h
++++ b/src/uarm/uarm/imx1_graphics_frame.h
+@@ -54,6 +54,10 @@
+         if (acquired && acquiredGeneration == generation) pending = false;
+         acquired = false;
+     }
++    // Tests: directRows off makes advance read every row through copyGpuRange; directRowCount counts the rows
++    // read straight from the bank storage.
++    static inline bool directRows = true;
++    static inline uint64_t directRowCount = 0;
+     // advance would read graphics memory now, so a write before it shows in the frame it scans.
+     bool scanDue(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim) const {
+         const auto& display = configuration.displayState();
+@@ -70,7 +74,17 @@
+         if (!full && display.frameNumber() == lastFrame) return true;
+         Imx1GraphicsDisplay::Surface candidate;
+         if (!display.surface(candidate)) return false;
+-        if (!memory.contains(configuration, eim, candidate.rangeBase, candidate.rangeBytes)) return false;
++        unsigned rangeBank = 0;
++        uint32_t rangeOffset = 0;
++        const uint8_t* range = memory.gpuSpan(configuration, eim, candidate.rangeBase, candidate.rangeBytes, rangeBank,
++                                              rangeOffset);
++        if (!range) return false;
++        // A row inside the checked range passes copyGpuRange's own check when the range lies in one bank's mapped
++        // addresses, so it is read straight from the bank storage.
++        const uint64_t rangeEnd = uint64_t(candidate.rangeBase) + candidate.rangeBytes;
++        const bool direct = directRows && candidate.xStride == 2 && candidate.width &&
++            ((candidate.rangeBase >= 0x100000 && rangeEnd <= 0x160000) ||
++             (candidate.rangeBase >= 0x800000 && rangeEnd <= 0x1000000));
+         enabled = true;
+         const auto dirty = memory.dirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout);
+         uint32_t first = candidate.height, last = 0;
+@@ -91,17 +105,22 @@
+             row.resize(candidate.width * 2);
+             for (uint32_t y = first; y <= last; ++y) {
+                 const uint32_t start = uint32_t(int64_t(candidate.base) + int64_t(y) * candidate.yStride);
+-                if (candidate.xStride == 2) {
++                const uint8_t* source = row.data();
++                if (direct && start >= candidate.rangeBase && uint64_t(start) + candidate.width * 2 <= rangeEnd) {
++                    source = range + (start - candidate.rangeBase);
++                    ++directRowCount;
++                } else if (candidate.xStride == 2) {
+                     if (!memory.copyGpuRange(configuration, eim, start, candidate.width * 2, row.data())) return false;
+                 } else {
+                     for (uint32_t x = 0; x < candidate.width; ++x)
+                         if (!memory.copyGpuRange(configuration, eim, start + x * candidate.xStride,
+                                                   2, row.data() + x * 2)) return false;
+                 }
++                uint32_t* out = pixels.data() + size_t(y) * candidate.width;
+                 for (uint32_t x = 0; x < candidate.width; ++x) {
+-                    const uint32_t rgb = uint32_t(row[x * 2]) | (uint32_t(row[x * 2 + 1]) << 8);
++                    const uint32_t rgb = uint32_t(source[x * 2]) | (uint32_t(source[x * 2 + 1]) << 8);
+                     const uint32_t red = (rgb >> 11) & 31, green = (rgb >> 5) & 63, blue = rgb & 31;
+-                    pixels[y * candidate.width + x] = 0xff000000u |
++                    out[x] = 0xff000000u |
+                         ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
+                 }
+             }

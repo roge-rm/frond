@@ -58,7 +58,7 @@ static void mode(Imx1Cs5Configuration& state, const Imx1Eim& eim, uint32_t base 
     assert(state.displayState().lcdEnabled());
 }
 
-int main() {
+static void checkDisplay() {
     Imx1Eim eim;
     uint32_t value = 0x3e00;
     assert(eim.access(0x00220028,4,true,value) == Imx1EimAccess::ok);
@@ -563,4 +563,16 @@ int main() {
     assert(frame.advance(state,memory,eim) && frame.getPendingFrame(first,last));
     assert(first == 0 && last == 1);
     std::puts("PASS: staged display/latch clocks, RGB565 frame, stride/bounds, independent generations and reset");
+}
+
+int main() {
+    // Frame rows read straight from the bank storage, then every row through copyGpuRange: the same checks pass.
+    checkDisplay();
+    const auto direct = Imx1GraphicsFrame::directRowCount;
+    assert(direct > 0);
+    Imx1GraphicsFrame::directRows = false;
+    checkDisplay();
+    assert(Imx1GraphicsFrame::directRowCount == direct);
+    std::printf("PASS: %llu frame rows read straight from the bank storage, and the same through copyGpuRange\n",
+                (unsigned long long)direct);
 }
