@@ -187,6 +187,7 @@ static Bytes Job(size_t size, uint8_t seed) {
 static void TestLptJob() {
     IrPrinter printer;
     Primary p{printer};
+    CHECK(!printer.NeedsGuest(p.now));
 
     const auto answers = Connect(p);
     CHECK(answers.size() == 1);
@@ -196,6 +197,8 @@ static void TestLptJob() {
     }
     CHECK(printer.Lap().Connected());
     CHECK(printer.Describe() == "printer linked");
+    // A linked printer keeps the guest running in the background, so the guest can end the job.
+    CHECK(printer.NeedsGuest(p.now));
 
     // IrMgr's query, then the IrCOMM classes are there as well.
     CHECK(LmConnect(p, p.iasLsap, 0x00, {}).empty());
@@ -254,7 +257,20 @@ static void TestLptJob() {
     p.Send(p.Command(0x53));
     p.Collect();
     CHECK(!printer.Lap().Connected() && !printer.Receiving());
+    // Just after the DISC the guest has only gone quiet; then nothing keeps it running.
+    CHECK(printer.NeedsGuest(p.now));
+    CHECK(!printer.NeedsGuest(p.now + IrPrinter::guestQuietNs));
     CHECK(printer.HeldBytes() == 7);
+}
+
+// Discovery alone, before any link: the guest is mid-print, so it keeps running until it goes quiet.
+static void TestDiscoveryNeedsGuest() {
+    IrPrinter printer;
+    Primary p{printer};
+    p.Send(Discovery(p.address, 0x01, 0), 10);
+    p.Collect(60 * ms, false);
+    CHECK(!printer.Lap().Connected() && printer.NeedsGuest(p.now));
+    CHECK(!printer.NeedsGuest(p.now + IrPrinter::guestQuietNs));
 }
 
 // ---- Link loss and a load ----
@@ -426,6 +442,7 @@ static void TestControl() {
 }
 
 int main() {
+    TestDiscoveryNeedsGuest();
     TestLptJob();
     TestEndings();
     TestIrComm();
