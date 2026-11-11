@@ -105,13 +105,21 @@ def run(args):
         c.send('\n'.join(['dana-down '+k for k in chord]+['dana-up '+k for k in chord]+['cycles']),'cycles:')
         time.sleep(1)
         assert [e[1] for e in records()[before:] if e[0]==4]==list(map(ord,'abcgh'))
-        launch();before=len(records());mark=len(c.lines)
-        c.send('\n'.join(['dana-text "abcdefghijkl"']*4+['cycles']),'cycles:')
-        replies=c.lines[mark:];accepted=sum('input accepted' in x for x in replies)
-        assert accepted>=1 and any('input refused' in x for x in replies)
-        time.sleep(2)
-        assert [e[1] for e in records()[before:] if e[0]==4]==list(map(ord,'abcdefghijkl'*accepted))
-        print('PASS guest rollover guard and burst refusal without partial text',flush=True)
+        # Text past the 32-report key FIFO waits in the ST backlog and arrives whole and in order.
+        def burst(value,chunk,wait):
+            launch();before=len(records());mark=len(c.lines)
+            parts=[value[i:i+chunk] for i in range(0,len(value),chunk)]
+            c.send('\n'.join(['dana-text '+json.dumps(part) for part in parts]+['cycles']),'cycles:')
+            replies=c.lines[mark:]
+            assert sum('input accepted' in x for x in replies)==len(parts) and not any('input refused' in x for x in replies),replies
+            # Exporting the log is a host call, so wait without one while the keys go in.
+            time.sleep(wait)
+            got=[e[1] for e in records()[before:] if e[0]==4]
+            assert got==list(map(ord,value)),(value,bytes(got))
+        burst('abcdefghijkl'*4,12,4)
+        # The probe logs its first 100 key events, so 96 keys.
+        burst('hello bookkeeper letter '*4,12,12)
+        print('PASS guest rollover guard and queued bursts of 48 and 96 keys',flush=True)
 
         launch()
         replay=root/'ownership.replay';replay.write_text('0 key-down dana.lshift\n1500 key-up dana.lshift\n')

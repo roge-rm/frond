@@ -1,4 +1,6 @@
 #include <cassert>
+#include <algorithm>
+#include <memory>
 #include <cmath>
 #include "EmHAL.h"
 #include "ExternalStorage.h"
@@ -56,11 +58,12 @@ struct St : EmRegsVZDana {
     void Raw(emuptr address,int size,uint32 value) { StdWrite(address,size,value); }
     template<class T> void Save(T& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana); if(!c)return;
-        SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h);
+        SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h); BacklogFields(h);
     }
     void Load(SavestateLoader<ChunkType>& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana);assert(c);
-        LoadChunkHelper h(*c);StateFields(h);InputStateFields(h);PowerStateFields(h);PowerModeFields(h);RegapFields(h);
+        LoadChunkHelper h(*c);StateFields(h);InputStateFields(h);PowerStateFields(h);PowerModeFields(h);RegapFields(h);BacklogFields(h);
+        assert(BacklogValid());
     }
     void LoadLegacy(SavestateLoader<ChunkType>& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana);assert(c);
@@ -684,7 +687,104 @@ static void UnqualifiedAccessTest() {
         auto saved=Save(x);Isp copy;assert(Load(copy,saved));
     }
 }
+// A burst far past the 32-report FIFO, as adb input text or a fast typist sends it, with power
+// presses mixed in. Every key reaches the guest in order, through a save and load mid-backlog,
+// and the reports land at the same guest times on every run.
+using BurstReports=std::vector<std::pair<uint64,std::vector<uint8>>>;
+static BurstReports RunBurst(uint64 saveAt) {
+    std::string text;
+    while(text.size()<192) text+="hello bookkeeper letter ";
+    text+="aabbccdd";
+    assert(text.size()==200);
+    auto board=std::make_unique<PacedSt>();
+    assert(board->Byte(0)==0xaa); board->SetWord(0xfffff302,0);
+    board->now=100;
+    for(size_t at=0;at<text.size();at+=10) {
+        assert(board->DispatchDanaInput(*DanaInput5::TextTransitions(text.substr(at,10))));
+        if(at%50==40) {
+            board->DispatchButtonEvent(ButtonEvent(ButtonEvent::Button::power,ButtonEvent::Type::press));
+            board->DispatchButtonEvent(ButtonEvent(ButtonEvent::Button::power,ButtonEvent::Type::release));
+        }
+    }
+    assert(board->BacklogSize()>300);
+    BurstReports seen;
+    bool saved=false;
+    for(uint64 t=100;t<30000;t++) {
+        if(t==saveAt) {
+            assert(board->BacklogSize()>0);
+            auto state=Save(*board);
+            auto fresh=std::make_unique<PacedSt>(); fresh->now=t;
+            assert(Load(*fresh,state)); assert(fresh->BacklogSize()==board->BacklogSize());
+            assert(Save(*fresh)==state);
+            board=std::move(fresh); saved=true;
+        }
+        board->now=t; board->ReportHeldKeys();
+        if(!(board->GetWord(0xfffff310)&1)) continue;
+        unsigned header=board->Byte(0); assert((header&0xf0)==0x40);
+        std::vector<uint8> codes;
+        for(unsigned i=0;i<(header&15);i++) codes.push_back(uint8(board->Byte(0)));
+        std::sort(codes.begin(),codes.end());
+        // A held set reported again is no change for the guest.
+        if(seen.empty() || seen.back().second!=codes) seen.push_back({t,codes});
+    }
+    assert(!board->BacklogSize());
+    assert(saved==(saveAt!=0));
+    // Expected: every transition in order, each a report of the held set after it.
+    std::vector<std::vector<uint8>> expected;
+    std::vector<uint8> held;
+    auto power=uint8(0x0f);
+    for(size_t at=0;at<text.size();at+=10) {
+        // Plain text without shift comes as a press and a release for each letter.
+        auto changes=*DanaInput5::TextTransitions(text.substr(at,10));
+        for(size_t i=0;i<changes.size();i++) {
+            auto code=changes[i].scan.Code();
+            if(i%2==0) held.push_back(code); else held.erase(std::find(held.begin(),held.end(),code));
+            auto report=held; std::sort(report.begin(),report.end()); expected.push_back(report);
+        }
+        if(at%50==40) { expected.push_back({power}); expected.push_back({}); }
+    }
+    assert(expected.size()==408 && seen.size()==expected.size());
+    for(size_t i=0;i<seen.size();i++) assert(seen[i].second==expected[i]);
+    return seen;
+}
+static uint64 BurstHash(const BurstReports& reports) {
+    uint64 hash=1469598103934665603ull;
+    auto mix=[&](uint64 value) { for(int i=0;i<8;i++) { hash^=(value>>(8*i))&255; hash*=1099511628211ull; } };
+    for(const auto& [t,codes]:reports) { mix(t); mix(codes.size()); for(auto code:codes) mix(code); }
+    return hash;
+}
+static void BacklogTest() {
+    auto first=RunBurst(0), second=RunBurst(0);
+    assert(BurstHash(first)==BurstHash(second) && first==second);
+    // A save and load half way through keeps the rest of the backlog and its timing.
+    auto resumed=RunBurst(first[first.size()/2].first+3);
+    assert(BurstHash(resumed)==BurstHash(first));
+    // Repeated letters still get their regap.
+    unsigned gaps=0;
+    for(size_t i=1;i<first.size();i++) if(first[i].first-first[i-1].first>=EmRegsVZDana::kRegapMs) ++gaps;
+    assert(gaps>=40);
+    printf("Dana keyboard backlog: 200 keys and 4 power presses in order, hash %016llx\n",
+           (unsigned long long)BurstHash(first));
+
+    // Past the limit a press is refused and the board left as it was; a power press is logged,
+    // never thrown. Everything accepted still reaches the guest.
+    St capped; assert(capped.Byte(0)==0xaa);
+    unsigned accepted=0;
+    while(capped.BacklogSize()<EmRegsVZDana::kBacklogLimit) assert(capped.DispatchScanCode(0x2b,(accepted++%2)==0));
+    assert(accepted%2==0);
+    auto atLimit=Save(capped);
+    assert(!capped.DispatchScanCode(0x2c,true)); assert(Save(capped)==atLimit);
+    capped.DispatchButtonEvent(ButtonEvent(ButtonEvent::Button::power,ButtonEvent::Type::press));
+    assert(Save(capped)==atLimit);
+    for(unsigned i=0;i<accepted;i++) {
+        assert(capped.Byte(0)==(i%2 ? 0x40 : 0x41));
+        if(!(i%2)) assert(capped.Byte(0)==0x2b);
+    }
+    assert(!capped.BacklogSize()); assert(capped.Byte(0)==0);
+}
+
 int main() {
+    BacklogTest();
     UnqualifiedAccessTest();
     UsbBankLifetimeTest();
     UsbAdapterTest();
@@ -881,18 +981,19 @@ int main() {
     paced.now=9; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
     paced.now=10; assert(paced.Byte(0)==0x40);
 
-    // The release went out at 10, so wait past the 100 ms regap before pressing a again.
-    paced.now=140;
+    // The release went out at 10, so wait past the regap before pressing a again.
+    const uint64 R=EmRegsVZDana::kRegapMs;
+    paced.now=R+40;
     assert(paced.DispatchDanaInput({{scan,true}}));
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
-    paced.now=145; assert(paced.Byte(0)==0x41);
+    paced.now=R+45; assert(paced.Byte(0)==0x41);
     assert(paced.DispatchDanaInput({{scan,false}}));
     auto idleReply=Save(paced);
-    paced.now=180;assert(paced.Byte(0)==scan.Code());assert(paced.Byte(0)==0x40);
-    paced.now=145;assert(Load(paced,idleReply));assert(paced.Byte(0)==scan.Code());
-    paced.now=160;assert(paced.Byte(0)==0x40);
-    // The release reached the guest at 160, so pressing a again waits for the 100 ms regap.
-    paced.now=260;assert(paced.DispatchDanaInput({{scan,true}}));
+    paced.now=R+80;assert(paced.Byte(0)==scan.Code());assert(paced.Byte(0)==0x40);
+    paced.now=R+45;assert(Load(paced,idleReply));assert(paced.Byte(0)==scan.Code());
+    paced.now=R+60;assert(paced.Byte(0)==0x40);
+    // The release reached the guest at R+60, so pressing a again waits for the regap.
+    paced.now=2*R+60;assert(paced.DispatchDanaInput({{scan,true}}));
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
     assert(paced.DispatchDanaInput({{scan,false}}));
     paced.ResetSt();assert(paced.Byte(0)==0xaa);assert(paced.Byte(0)==0x40);
@@ -913,7 +1014,7 @@ int main() {
     }
     {
         // A key pressed again soon after its release waits until the guest has seen it released
-        // for 100 ms, so the ROM takes it as a second press. Other keys don't wait.
+        // for the regap, so the ROM takes it as a second press. Other keys don't wait.
         PacedSt typed; assert(typed.Byte(0)==0xaa); typed.SetWord(0xfffff302,0);
         auto request=[&]() { return (typed.GetWord(0xfffff310)&1)!=0; };
         auto b=*DanaScan5::Named("b");
@@ -921,20 +1022,20 @@ int main() {
         assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==scan.Code());
         typed.now=110; typed.ReportHeldKeys(); assert(request()); assert(typed.Byte(0)==0x40);
         auto blocked=Save(typed);
-        typed.now=209; typed.ReportHeldKeys(); assert(!request());
-        typed.now=210; typed.ReportHeldKeys(); assert(request());
+        typed.now=110+R-1; typed.ReportHeldKeys(); assert(!request());
+        typed.now=110+R; typed.ReportHeldKeys(); assert(request());
         assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==scan.Code());
-        typed.now=220; typed.ReportHeldKeys(); assert(request()); assert(typed.Byte(0)==0x40);
+        typed.now=120+R; typed.ReportHeldKeys(); assert(request()); assert(typed.Byte(0)==0x40);
         // b was never released, so it follows at the usual 10 ms.
-        typed.now=230; typed.ReportHeldKeys(); assert(request());
+        typed.now=130+R; typed.ReportHeldKeys(); assert(request());
         assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==b.Code());
         // The regap survives a save and load.
         typed.now=110; assert(Load(typed,blocked));
-        typed.now=209; typed.ReportHeldKeys(); assert(!request());
-        typed.now=210; typed.ReportHeldKeys(); assert(request());
+        typed.now=110+R-1; typed.ReportHeldKeys(); assert(!request());
+        typed.now=110+R; typed.ReportHeldKeys(); assert(request());
 
         // Ten different keys released 10 ms apart before l is typed twice: each key keeps its own
-        // window, so the second l still waits 100 ms after the first l's release.
+        // window, so the second l still waits the regap after the first l's release.
         PacedSt many; assert(many.Byte(0)==0xaa); many.SetWord(0xfffff302,0);
         auto report=[&]() {
             std::vector<uint8> codes; unsigned n=many.Byte(0)&15;
@@ -954,7 +1055,7 @@ int main() {
             else assert(seen[i].second==std::vector<uint8>{DanaScan5::Named(std::string(1,letters[i/2]))->Code()});
         }
         assert(seen[20].first-seen[19].first==10);
-        assert(seen[22].first-seen[21].first==100);
+        assert(seen[22].first-seen[21].first==R);
 
         // With shift held, its set is reported again every 10 ms while a waits.
         PacedSt shifted; assert(shifted.Byte(0)==0xaa); shifted.SetWord(0xfffff302,0);
@@ -964,11 +1065,11 @@ int main() {
         assert(shifted.Byte(0)==0x41); shifted.Byte(0);
         shifted.now=110; assert(shifted.Byte(0)==0x42); shifted.Byte(0); shifted.Byte(0);
         shifted.now=120; assert(shifted.Byte(0)==0x41); assert(shifted.Byte(0)==shift.Code());
-        for(uint64 t=130;t<220;t+=10) {
+        for(uint64 t=130;t<120+R;t+=10) {
             shifted.now=t; shifted.ReportHeldKeys(); assert(shiftRequest());
             assert(shifted.Byte(0)==0x41); assert(shifted.Byte(0)==shift.Code());
         }
-        shifted.now=220; shifted.ReportHeldKeys(); assert(shiftRequest());
+        shifted.now=120+R; shifted.ReportHeldKeys(); assert(shiftRequest());
         assert(shifted.Byte(0)==0x42);
         // A cancel during a repeat keeps the reply being clocked and then releases.
         PacedSt cancelled; assert(cancelled.Byte(0)==0xaa);
@@ -996,7 +1097,7 @@ int main() {
     }
     {
         // Each press keeps a FIFO slot for its release, as power and rocker presses go straight to
-        // DispatchScanCode: the last press that fits still reaches the guest, its release too.
+        // DispatchScanCode. A press that doesn't fit waits in the backlog, with later changes behind it.
         St full; assert(full.Byte(0)==0xaa);
         auto b=*DanaScan5::Named("b"); const uint8 power=0x0f;
         std::vector<std::vector<uint8>> expected;
@@ -1010,10 +1111,11 @@ int main() {
         assert(change(b.Code(),true));
         for(unsigned i=0;expected.size()<29;i++) assert(change(scan.Code(),i%2==0));
         assert(held.size()==1 && expected.size()==29);
-        assert(change(power,true));
-        assert(!full.DispatchScanCode(DanaScan5::Named("c")->Code(),true));
-        assert(change(power,false)); assert(change(b.Code(),false));
-        assert(expected.size()==32);
+        assert(change(power,true)); assert(!full.BacklogSize());
+        const uint8 c=DanaScan5::Named("c")->Code();
+        assert(change(c,true)); assert(full.BacklogSize()==1);
+        assert(change(power,false)); assert(change(b.Code(),false)); assert(change(c,false));
+        assert(expected.size()==34 && full.BacklogSize()==4);
         for(const auto& want:expected) {
             std::vector<uint8> got; unsigned n=full.Byte(0)&15;
             for(unsigned i=0;i<n;i++) got.push_back(uint8(full.Byte(0)));
@@ -1027,9 +1129,10 @@ int main() {
     assert(reserved.DispatchDanaInput(fill));
     for(const char* name: {"a","b","c","d"}) assert(reserved.DispatchDanaInput({{*DanaScan5::Named(name),true}}));
     auto full=Save(reserved);
-    assert(!reserved.DispatchDanaInput({{*DanaScan5::Named("e"),true}}));assert(Save(reserved)==full);
+    assert(reserved.DispatchDanaInput({{*DanaScan5::Named("e"),true}}));assert(reserved.BacklogSize()==1);
+    assert(Save(reserved)!=full);
     for(const char* name: {"a","b","c","d"}) assert(reserved.DispatchDanaInput({{*DanaScan5::Named(name),false}}));
-    reserved.ReleaseDanaInput();assert(reserved.Byte(0)==0x40);
+    reserved.ReleaseDanaInput();assert(reserved.Byte(0)==0x40);assert(!reserved.BacklogSize());
     const auto& dana=*deviceProfileNamed5("alphasmart-dana");
     const auto& iiix=*deviceProfileNamed5("palm-iiix");
     for(const auto* command: {"hotsync","serial-mode"})
@@ -1213,12 +1316,13 @@ int main() {
         for(unsigned i=0;i<n;i++) assert(st.Byte(0)==expected[i]);
         if(!n) break;
     }
-    // Full FIFO refuses before changing held state; retry keeps the transition.
+    // A press past a full FIFO waits and follows once the guest has read two reports.
     for(unsigned i=0;i<32;i++) assert(st.DispatchScanCode(0x2b,(i%2)==0));
-    assert(!st.DispatchScanCode(0x2b,true));
+    assert(st.DispatchScanCode(0x2b,true)); assert(st.BacklogSize()==1);
     for(unsigned i=0;i<32;i++) {
         assert(st.Byte(0)==(i%2 ? 0x40 : 0x41));
         if(!(i%2)) assert(st.Byte(0)==0x2b);
+        assert(st.BacklogSize()==(i<1 ? 1u : 0u));
     }
     assert(st.DispatchScanCode(0x2b,true)); assert(st.Byte(0)==0x41); assert(st.Byte(0)==0x2b);
     assert(st.DispatchScanCode(0x2b,false)); assert(st.Byte(0)==0x40);
@@ -1229,8 +1333,13 @@ int main() {
     for(unsigned i=0;i<24;i++) batch.push_back({a,(i%2)==0});
     assert(st.DispatchDanaInput(batch));
     auto before=Save(st);
-    assert(!st.DispatchDanaInput(batch)); assert(Save(st)==before);
-    for(unsigned i=0;i<24;i++) { assert(st.Byte(0)==(i%2?0x40:0x41)); if(!(i%2)) assert(st.Byte(0)==a.Code()); }
+    std::vector<DanaTransition5> nine;
+    for(const char* name: {"b","c","d","e","f","g","h","i","j"}) nine.push_back({*DanaScan5::Named(name),true});
+    assert(!st.DispatchDanaInput(nine)); assert(Save(st)==before);
+    // A second burst doesn't fit the FIFO; the rest waits and follows in order.
+    assert(st.DispatchDanaInput(batch)); assert(st.BacklogSize()==16);
+    for(unsigned i=0;i<48;i++) { assert(st.Byte(0)==(i%2?0x40:0x41)); if(!(i%2)) assert(st.Byte(0)==a.Code()); }
+    assert(!st.BacklogSize());
     assert(st.DispatchDanaInput({{shift,true},{a,true}}));
     assert(st.Byte(0)==0x41); // Preserve the partially clocked reply across focus loss.
     st.ReleaseDanaInput();
