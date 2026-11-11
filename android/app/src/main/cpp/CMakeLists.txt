@@ -125,6 +125,10 @@ if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
     set(BUILD_SHARED_LIBS OFF)
     add_subdirectory("${FROND_DYNARMIC}" dynarmic EXCLUDE_FROM_ALL)
     set(BUILD_SHARED_LIBS ${shared_libs})
+    # Dynarmic's debug checks (the IR verification pass and register allocator asserts) took
+    # about a sixth of each compile, so debug builds leave them out like release builds and
+    # the desktop's Release build do. The JIT file sees the same headers, so it matches.
+    target_compile_definitions(dynarmic PRIVATE NDEBUG)
     # The JIT file is C++20 and sees only Dynarmic's headers: the core's include folders hide
     # system ones (uarm/syscall.h).
     add_library(frondjit OBJECT "${UARM}/uarm/jit_dynarmic.cpp")
@@ -132,6 +136,7 @@ if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
     target_include_directories(frondjit PRIVATE "${boost}/include"
         "${FROND_DYNARMIC}/externals/mcl/include" "${FROND_DYNARMIC}/externals/fmt/include")
     target_compile_options(frondjit PRIVATE -O2 -g)
+    target_compile_definitions(frondjit PRIVATE NDEBUG)
     target_link_libraries(frondjit PRIVATE dynarmic)
     target_sources(frondcore PRIVATE $<TARGET_OBJECTS:frondjit>)
     # PUBLIC: icache.h and icache_internal.h change with it.

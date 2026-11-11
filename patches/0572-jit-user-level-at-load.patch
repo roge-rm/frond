@@ -1,0 +1,22 @@
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1075,7 +1075,7 @@
+ 
+ struct FrondJit {
+     ArmCpu *cpu = nullptr;
+-    // [0] user, made when the CPU first runs in user mode; [1] privileged.
++    // [0] user, [1] privileged. Both are made by jitCreate.
+     std::unique_ptr<Level> level[2];
+     uint32_t maxUnchecked = 0, hot = 1;
+     A32::Jit::CompileThread mode{};
+@@ -1207,6 +1207,10 @@
+     j->mode = jitPrvCompileThread();
+     j->ahead = jitPrvAhead(j->mode);
+     jitPrvMakeLevel(j, true);
++    // The user level too, though some guests never run in user mode: making a JIT takes
++    // 5-10 ms (its prelude and memory fallbacks), which here falls in session loading
++    // rather than in the slice that first enters user mode.
++    jitPrvMakeLevel(j, false);
+     return j;
+ }
+ 
