@@ -2232,6 +2232,20 @@ test-zodiac-fast-lean: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-fast-lean
 	./build/test-zodiac-fast-lean
 
+.PHONY: test-zodiac-state-fingerprint
+# Compiles imx1_boot_probe.cpp for Android (libc++, arm64 and x86_64) with the NDK, whose static_assert checks the
+# state layout fingerprint is the desktop's, so states move between hosts. Skipped without an NDK.
+ZODIAC_NDK ?= $(lastword $(sort $(wildcard $(or $(ANDROID_HOME),$(HOME)/Android/Sdk)/ndk/*)))
+test: test-zodiac-state-fingerprint
+test-zodiac-state-fingerprint: prepare
+	@if [ -z "$(ZODIAC_NDK)" ]; then echo "test-zodiac-state-fingerprint: no NDK, skipped"; exit 0; fi; \
+	for t in aarch64 x86_64; do \
+		$(ZODIAC_NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=$$t-linux-android26 -std=c++17 \
+			-fsyntax-only -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+			build/source/src/uarm/uarm/imx1_boot_probe.cpp || exit 1; \
+		echo "zodiac state fingerprint $$t-android: same as desktop"; \
+	done
+
 .PHONY: test-zodiac-machine-state-reject test-zodiac-machine-state-cli
 test-zodiac-machine-state-reject: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
