@@ -610,7 +610,7 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 
 ### Control socket
 
-The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `keyboard-grab` (`on` or `off`), `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
 
 What a IIIx doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
 
@@ -994,10 +994,12 @@ the key is let go alone, so a chord never shows ctrl or shift to the guest. Alt 
 GUI pass straight through. A host key releases what it pressed even if Ctrl is let
 go first, and `ReleaseInput()` clears the state. Either Ctrl and Shift work.
 
-In full screen on the Dana, `PalmHolder::setKeyboardGrab()` takes the X keyboard on
-the Palm's embedded window (`xcb_grab_keyboard`, owner events on), so the desktop's
-own Ctrl+F1 to F4 and Ctrl+Esc reach it. It is let go on leaving full screen,
-when the focus is in another application and when the Palm is released.
+In full screen on the Dana the desktop app sends `keyboard-grab on` (and `off` on leaving,
+and again after every embed), and the core grabs the keyboard with
+`SDL_SetWindowKeyboardGrab` on its own window, so the desktop's own Ctrl+F1 to F4 and
+Ctrl+Esc reach it. The core keeps the wanted state, holds the grab only while the window
+has the focus, takes it again when the focus comes back and logs once if the grab is
+refused. The reply is `on` or `off`, with `grabbed` when the grab is held.
 
 The native Dana keyboard art shares these physical names. `danaKeyboardArt()`
 supplies key bounds and legends; `danaKeyAt()` returns an art index, not a scan or

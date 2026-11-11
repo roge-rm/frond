@@ -116,8 +116,6 @@ bool PalmHolder::embed(quint64 id) {
 }
 
 void PalmHolder::release() {
-    grabWanted = false;
-    grabKeyboard(false);
     mips->hide();
     pollTimer->stop();
     if (container) delete container.data();
@@ -213,33 +211,6 @@ void PalmHolder::focusFrond() {
     applyFocus();
 }
 
-void PalmHolder::setKeyboardGrab(bool on) {
-    grabWanted = on;
-    if (!on) grabKeyboard(false);
-    else applyFocus();
-}
-
-// Grabs or lets go of the X keyboard on the Palm's window. Keys still go to Frond's own windows
-// as usual (owner events); on Wayland the X server passes the grab on as a shortcut inhibit.
-void PalmHolder::grabKeyboard(bool on) {
-#ifdef FROND_XCB
-    auto* connection = xcbConnection();
-    if (!connection || on == grabbed) return;
-    if (!on) {
-        xcb_ungrab_keyboard(connection, XCB_CURRENT_TIME);
-        xcb_flush(connection);
-        grabbed = false;
-        return;
-    }
-    if (!palm) return;
-    XcbReply<xcb_grab_keyboard_reply_t> reply(xcb_grab_keyboard_reply(connection,
-        xcb_grab_keyboard(connection, 1, xcb_window_t(palm->winId()), XCB_CURRENT_TIME, XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC), nullptr), &free);
-    grabbed = reply && reply->status == XCB_GRAB_STATUS_SUCCESS;
-#else
-    Q_UNUSED(on);
-#endif
-}
-
 // Reads the X focus back and moves it to the Palm or the key window, so it never stays on a
 // window that holds the Palm, where keys would follow the pointer.
 void PalmHolder::applyFocus() {
@@ -263,7 +234,6 @@ void PalmHolder::applyFocus() {
                 break;
             }
     }
-    grabKeyboard(grabWanted && at != FocusAt::Elsewhere);
     switch (runningRules::keyTarget(at, wantPalm, QApplication::activePopupWidget() != nullptr)) {
         case runningRules::KeyTarget::Palm: setInputFocus(palmId); break;
         case runningRules::KeyTarget::Frond: setInputFocus(quint32(keySink->winId())); break;

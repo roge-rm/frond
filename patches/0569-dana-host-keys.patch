@@ -1,5 +1,5 @@
 diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
-index 844b7a5..95dc03c 100644
+index 844b7a5..c76b10c 100644
 --- a/src/cloudpilot/frond/main.cpp
 +++ b/src/cloudpilot/frond/main.cpp
 @@ -44,6 +44,7 @@
@@ -22,7 +22,19 @@ index 844b7a5..95dc03c 100644
              return;
          }
          if (down ? !keyHolds.Press(key) : !keyHolds.Release(key)) return;
-@@ -2680,7 +2684,24 @@ class Runner {
+@@ -2076,6 +2080,11 @@ class Runner {
+                 return {false, "durability-uncertain", "Output published, but its directory flush failed. Keep it and verify it before use."};
+             return {false, "portable", "Portable export refused. A new folder and managed cards are required."};
+         }
++        if(command=="keyboard-grab") {
++            if(argument!="on"&&argument!="off")return {false,"argument","Use on or off."};
++            SetKeyboardGrab(argument=="on");
++            return {true,"keyboard-grab",string(keyboardGrabWanted?"on":"off")+(keyboardGrabbed?" grabbed":"")};
++        }
+         if(command=="dana-view"||command=="dana-view-state") {
+             if(!deviceTypeIsDana5(profile->deviceType))return {false,"unsupported","This device has no Dana view."};
+             string error;
+@@ -2680,7 +2689,39 @@ class Runner {
          if (present) SDL_RenderPresent(renderer);
      }
  
@@ -30,6 +42,21 @@ index 844b7a5..95dc03c 100644
 +    void FlushDanaHost() {
 +        for(const auto& change:danaHostKeys.Flush())
 +            if(const auto scan=DanaScan5::Named(change.name))DanaKey(change.source,*scan,true);
++    }
++    // Full screen on the desktop asks the window to grab the keyboard, so the desktop's own shortcuts
++    // reach the Dana. The grab is only held while the window has the focus, and is tried again
++    // when it comes back, not in a loop.
++    void SetKeyboardGrab(bool wanted) {
++        keyboardGrabWanted=wanted;
++        ApplyKeyboardGrab();
++    }
++    void ApplyKeyboardGrab() {
++        if(!window)return;
++        const bool want=keyboardGrabWanted&&windowFocused;
++        if(want==keyboardGrabbed)return;
++        SDL_SetWindowKeyboardGrab(window,want?SDL_TRUE:SDL_FALSE);
++        keyboardGrabbed=want&&SDL_GetWindowKeyboardGrab(window)==SDL_TRUE;
++        if(want&&!keyboardGrabbed)cerr<<"Keyboard grab refused: "<<SDL_GetError()<<endl;
 +    }
 +    void ApplyDanaHost(const vector<DanaHostChange>& changes) {
 +        for(const auto& change:changes) {
@@ -47,7 +74,7 @@ index 844b7a5..95dc03c 100644
          const bool accepted=danaInput.Keys(DanaSource5::screen,batch,
              [](const auto& changes) {return EmHAL::DispatchDanaInput(changes);});
          if(accepted)controlsDirty=true;
-@@ -2859,7 +2880,7 @@ class Runner {
+@@ -2859,7 +2900,7 @@ class Runner {
          if (!keepReplay) replay=Replay();
          if(deviceTypeIsDana5(profile->deviceType)) {
              CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
@@ -56,7 +83,21 @@ index 844b7a5..95dc03c 100644
          }
          if (penDown) gSession->QueuePenEvent(PenEvent::up());
          penDown = false;
-@@ -2991,14 +3012,7 @@ class Runner {
+@@ -2889,11 +2930,12 @@ class Runner {
+                     // and a replay from --input-replay.
+                     if(deviceTypeIsDana5(profile->deviceType) && (event.window.event==SDL_WINDOWEVENT_HIDDEN||
+                         event.window.event==SDL_WINDOWEVENT_MINIMIZED))ReleaseInput(windowPolled,!windowPolled);
+-                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) windowFocused=true;
++                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {windowFocused=true;ApplyKeyboardGrab();}
+                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+                         // Initial focus events must keep balanced input from the loaded session and the replay.
+                         if(windowFocused) ReleaseInput(windowPolled,!windowPolled);
+                         windowFocused=false;
++                        ApplyKeyboardGrab();
+                     }
+                     break;
+                 case SDL_RENDER_TARGETS_RESET:
+@@ -2991,14 +3033,7 @@ class Runner {
                              case SDL_SCANCODE_APPLICATION: name="apps"; break;
                              default: break;
                          }
@@ -72,7 +113,16 @@ index 844b7a5..95dc03c 100644
                          break;
                      }
                      KeyId key = keyInvalid;
-@@ -3071,6 +3085,7 @@ class Runner {
+@@ -3045,7 +3080,7 @@ class Runner {
+     bool quit{false};
+     bool smooth{false};
+     SDL_Window* window{nullptr};
+-    bool windowFocused{false}, windowPolled{false};
++    bool windowFocused{false}, windowPolled{false}, keyboardGrabWanted{false}, keyboardGrabbed{false};
+     SDL_Renderer* renderer{nullptr};
+     SDL_Texture* lcdTexture{nullptr};
+     SDL_Texture* silkscreenTexture{nullptr};
+@@ -3071,6 +3106,7 @@ class Runner {
      struct DanaPointer {int key;bool pen,pan;double x,y;};
      map<pair<int64_t,int64_t>,DanaPointer> danaPointers;
      map<pair<int,uint8_t>,DanaScan5> danaReleases;
