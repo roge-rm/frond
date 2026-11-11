@@ -43,9 +43,11 @@ class DeviceDataTest(unittest.TestCase):
         self.assertEqual((profile['width'], profile['height']), (480, 320))
         self.assertEqual(profile['default_display_mode'], 10)
         self.assertTrue(profile['available'] and profile['runner_eligible'])
-        # Nothing it has is done yet but the screen, pen, buttons and stick.
-        for key in ('runs_68k', 'sound', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone', 'sd_slot'):
+        # Done so far: the screen, pen, buttons, stick and an SD card in slot 1, up to 2 GB.
+        for key in ('runs_68k', 'sound', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone'):
             self.assertFalse(profile[key], key)
+        self.assertTrue(profile['sd_slot'])
+        self.assertEqual((profile['sd_min_bytes'], profile['sd_max_bytes']), (32 << 20, 2048 << 20))
         # The Android app lists the Zodiac.
         self.assertNotIn('tapwave-zodiac-2', generator.DESKTOP_ONLY)
         for kotlin in (next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt'),

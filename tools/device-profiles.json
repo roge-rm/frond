@@ -870,8 +870,26 @@
       "cpu_hz": 0,
       "original_mips": 100,
       "sound": false,
-      "storage_slot": "none",
-      "storage_slots": [],
+      "storage_slot": "sd",
+      "storage_slots": [
+        {
+          "id": 0,
+          "label": 1,
+          "kind": "sd",
+          "media_families": [
+            {
+              "family": "sdsc",
+              "csd_format": "sd-v1",
+              "min_bytes": 33554432,
+              "max_bytes": 2147483648,
+              "block_bytes": 512,
+              "size_rule": "legacy-profile-aligned-512",
+              "runtime_sizes_bytes": [],
+              "guest_qualified_sizes_bytes": []
+            }
+          ]
+        }
+      ],
       "device_type": 9,
       "detect": 0,
       "company_id": 1416656758,
@@ -879,8 +897,8 @@
       "nor_layout": 2,
       "header_offset": 0,
       "big_card_offset": 131072,
-      "sd_min_bytes": 0,
-      "sd_max_bytes": 0,
+      "sd_min_bytes": 33554432,
+      "sd_max_bytes": 2147483648,
       "ms_sizes_mb": [],
       "ms_pro_max_mb": 0,
       "available": true,
@@ -902,7 +920,7 @@
       "menu_x": -1,
       "menu_y": -1,
       "rotating_status_bar": false,
-      "sd_slot": false,
+      "sd_slot": true,
       "camera": false,
       "fast_audio_md5": "",
       "network": false,
