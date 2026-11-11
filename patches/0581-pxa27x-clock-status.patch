@@ -1,0 +1,46 @@
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -94,8 +94,8 @@
+         switch (CRn) {
+             case 6:
+                 if (op2 != 0) break;
+-                if (read)
+-                    val = 0;
++                if (read)  // CLKCFG: PXA27x reads back T; HT and B aren't kept, F reads 0
++                    val = pc->isPXA270 && pc->turbo ? 1 : 0;
+                 else {
+                     pc->turbo = (val & 1) != 0;
+                     if (val & 2)
+@@ -187,6 +187,10 @@
+             if (!write) val = pc->OSCR;
+             // no writing to this register
+             break;
++
++        case 3:  // PXA27x CCSR: PLLs locked, running the L and 2N that CCCR asks for
++            if (!write && pc->isPXA270) val = 0x30000000u | (pc->CCCR & 0x79fu);
++            break;
+     }
+ 
+     if (!write) *(uint32_t *)buf = val;
+@@ -482,7 +486,9 @@
+ 
+ void pxaPwrClkReset(struct PxaPwrClk *pc) {
+     pc->sleeping = pc->wakePending = false;
+-    pc->CCCR = 0x00000122UL;  // set CCCR to almost default value (we use mult 32 not 27)
++    // PXA25x: almost the default (we use mult 32 not 27). PXA27x: L 16, 2N 3, the 208 MHz run
++    // and 312 MHz turbo these devices run at.
++    pc->CCCR = pc->isPXA270 ? 0x00000190UL : 0x00000122UL;
+     pc->CKEN = 0x000179EFUL;  // set CKEN to default value
+     pc->OSCR = 0x00000003UL;  // 32KHz oscillator on and stable
+     pc->PMCR = 0;
+--- a/src/uarm/uarm/soc_PXA.cpp
++++ b/src/uarm/uarm/soc_PXA.cpp
+@@ -103,7 +103,7 @@
+     cpu = cpuInit(ROM_BASE, mem, ARM_MEMORY_SYSTEM_MMU, true /* xscale */, false /* omap */,
+                   gdbPort, deviceType == deviceTypeTG50 ? CPUID_PXA250
+                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
+-                  0x0B16A16AUL, patchDispatch, pacePatch, systemState);
++                  socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
+ 
+ #ifndef __EMSCRIPTEN__
+     cpuSetDebugSoc(cpu,this);

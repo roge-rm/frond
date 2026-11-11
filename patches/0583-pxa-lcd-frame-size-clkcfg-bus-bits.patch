@@ -1,0 +1,224 @@
+--- a/src/uarm/uarm/pxa_LCD.cpp
++++ b/src/uarm/uarm/pxa_LCD.cpp
+@@ -115,6 +115,8 @@
+     }
+ }
+ 
++static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uint32_t oldLccr2);
++
+ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                 void *buf) {
+     struct PxaLcd *lcd = (struct PxaLcd *)userData;
+@@ -157,12 +159,15 @@
+                 break;
+ 
+             case 1:
+-                lcd->lccr1 = val;
+-                break;
+-
+-            case 2:
+-                lcd->lccr2 = val;
++            case 2: {
++                const uint32_t oldLccr1 = lcd->lccr1, oldLccr2 = lcd->lccr2;
++                if (pa == 1)
++                    lcd->lccr1 = val;
++                else
++                    lcd->lccr2 = val;
++                pxaLcdPrvFrameSizeChanged(lcd, oldLccr1, oldLccr2);
+                 break;
++            }
+ 
+             case 3:
+                 lcd->lccr3 = val;
+@@ -579,40 +584,97 @@
+     if (lcd->ovl2c1 & 0x80000000UL) pxaLcdPrvDrawOverlay(lcd, frame, 2, lcd->ovl2c1, lcd->ovl2c2);
+ }
+ 
++// A frame programmed in LCCR1 (PPL) and LCCR2 (LPP) larger than the panel, with a DMA length
++// to match. The panel shows the centre of it: Palm Linux on the T|X sets 324x484 with the
++// horizontal and vertical back porches 2 shorter than Palm OS's 320x480, so the panel's first
++// pixel is the frame's (2, 2). False for anything else, such as a frame the panel's size.
++static bool pxaLcdPrvLargerFrame(const struct PxaLcd *lcd, uint32_t lccr1, uint32_t lccr2,
++                                 uint8_t bpp, uint32_t len, uint32_t &ppl, uint32_t &lpp) {
++    ppl = (lccr1 & 0x3ff) + 1;
++    lpp = (lccr2 & 0x3ff) + 1;
++    if (bpp > 4 || ppl < lcd->width || lpp < lcd->height) return false;
++    if (ppl == lcd->width && lpp == lcd->height) return false;
++    return len == ((ppl * lpp) << bpp) >> 3;
++}
++
++// Draws the panel's part of a larger frame (see above) and finishes it.
++static void pxaLcdPrvScreenDataLarger(struct PxaLcd *lcd, uint32_t addr, uint32_t len, uint8_t bpp,
++                                      uint32_t ppl, uint32_t lpp) {
++    std::vector<uint8_t> frame(len);
++    pxaLcdPrvDma(lcd, frame.data(), addr, len);
++
++    const uint32_t x0 = (ppl - lcd->width) / 2, y0 = (lpp - lcd->height) / 2;
++    const uint32_t bits = 1u << bpp;
++    for (uint32_t y = 0; y < lcd->height; y++) {
++        uint32_t *dst = lcd->back_buffer + y * lcd->width;
++        for (uint32_t x = 0; x < lcd->width; x++) {
++            const uint32_t bit = ((y0 + y) * ppl + x0 + x) * bits;
++            const uint8_t *src = &frame[bit >> 3];
++            if (bpp == 4)
++                dst[x] = unpack_rgb16(src[0] | (src[1] << 8));
++            else
++                dst[x] = lcd->palette_mapped[(src[0] >> (bit & 7)) & ((1u << bits) - 1)];
++        }
++    }
++
++    lcd->i_pixel = 0;
++    lcd->frame_pending = true;
++    std::swap(lcd->front_buffer, lcd->back_buffer);
++}
++
++// Decides whether the DMA'd framebuffer is tracked by the SoC, and marks it dirty.
++static void pxaLcdPrvTrackFramebuffer(struct PxaLcd *lcd, bool larger) {
++    const uint32_t panelBytes = ((uint32_t)(lcd->width * lcd->height) << lcd->framebufferBpp) >> 3;
++    if (larger || lcd->framebufferSize == panelBytes) {
++        lcd->framebufferDirty = true;
++        lcd->framebufferTrackingActive =
++            lcd->soc->SetFramebuffer(lcd->framebufferBase, lcd->framebufferSize);
++    } else {
++        lcd->soc->SetFramebuffer(0, 0);
++        lcd->framebufferDirty = true;
++        lcd->framebufferTrackingActive = false;
++    }
++}
++
++// A change of LCCR1/LCCR2 that takes the frame in or out of the larger kind redoes the tracking
++// decision for the DMA seen so far, so a shrunk frame isn't left stale and a larger frame seen
++// before LCCR was programmed gets tracked.
++static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uint32_t oldLccr2) {
++    uint32_t ppl, lpp;
++    if (!lcd->framebufferSize) return;
++    const bool was = pxaLcdPrvLargerFrame(lcd, oldLccr1, oldLccr2, lcd->framebufferBpp,
++                                          lcd->framebufferSize, ppl, lpp);
++    const bool is = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, lcd->framebufferBpp,
++                                         lcd->framebufferSize, ppl, lpp);
++    if (was != is) pxaLcdPrvTrackFramebuffer(lcd, is);
++}
++
+ static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uint32_t len) {
+     uint8_t data[4];
+     uint32_t i, j;
+     const uint8_t bpp = (lcd->lccr3 >> 24) & 7;
+     const uint32_t *const frameBefore = lcd->front_buffer;
++    uint32_t ppl, lpp;
++    const bool larger = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, bpp, len, ppl, lpp);
+ 
+     if (addr != lcd->framebufferBase || len != lcd->framebufferSize || bpp != lcd->framebufferBpp) {
+         lcd->framebufferBase = addr;
+         lcd->framebufferSize = len;
+         lcd->framebufferBpp = bpp;
+ 
+-        if (len == ((uint32_t)(lcd->width * lcd->height) << bpp) >> 3) {
+-            // fprintf(stderr, "framebuffer now at 0x%08x , size %u bytes, %d bpp\n", addr, len,
+-            //         (int)(1 << bpp));
+-
+-            lcd->framebufferDirty = true;
+-            lcd->framebufferTrackingActive = lcd->soc->SetFramebuffer(addr, len);
+-        } else {
+-            // fprintf(stderr,
+-            //         "framebuffer size %u bytes does not match depth %d bpp, assuming segmented "
+-            //         "framebuffer\n",
+-            //         len, (int)(1 << bpp));
+-
+-            lcd->soc->SetFramebuffer(0, 0);
+-            lcd->framebufferDirty = true;
+-            lcd->framebufferTrackingActive = false;
+-        }
++        pxaLcdPrvTrackFramebuffer(lcd, larger);
+     }
+ 
+     // An overlay's planes aren't tracked, so a frame with one is always drawn.
+     const bool overlays = pxaLcdPrvOverlaysOn(lcd);
+     if (lcd->framebufferTrackingActive && !lcd->framebufferDirty && !overlays) return;
+ 
+-    if (bpp == 4 && pxaLcdPrvScreenData16FromRam(lcd, addr, len)) len = 0;
++    if (larger) {
++        pxaLcdPrvScreenDataLarger(lcd, addr, len, bpp, ppl, lpp);
++        len = 0;
++    } else if (bpp == 4 && pxaLcdPrvScreenData16FromRam(lcd, addr, len)) {
++        len = 0;
++    }
+ 
+     len /= 4;
+     while (len--) {
+--- a/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -20,7 +20,9 @@
+ #define PXA_POWER_MANAGER_BASE 0x40F00000UL
+ #define PXA_POWER_MANAGER_SIZE 0x00000180UL
+ 
+-#define SAVESTATE_VERSION 2
++#define SAVESTATE_VERSION 3
++// PXA25x saves stay at version 2; version 3 adds CLKCFG's HT and B on PXA27x.
++#define SAVESTATE_VERSION_PXA25X 2
+ 
+ struct PxaPwrClk {
+     PxaI2s *i2s;
+@@ -35,6 +37,7 @@
+     // power mgr 270 only
+     uint32_t PSTR, PVCR, PUCR, PKWR, PKSR, PCMD[32];
+     bool turbo, isPXA270;
++    uint32_t clkcfgBits;  // CLKCFG HT (bit 2) and B (bit 3) from the last write, PXA27x only
+     bool sleeping, wakePending;
+     bool restoring;
+     PxaGpio* gpio;
+@@ -61,6 +64,7 @@
+             chunkHelper.Do32(PSTR).Do32(PVCR).Do32(PUCR).Do32(PKWR).Do32(PKSR)
+                 .DoBuffer32(PCMD, 32);
+         if (version >= 2) chunkHelper.DoBool(sleeping).DoBool(wakePending);
++        if (version >= 3) chunkHelper.Do32(clkcfgBits);
+     }
+ };
+ 
+@@ -94,10 +98,11 @@
+         switch (CRn) {
+             case 6:
+                 if (op2 != 0) break;
+-                if (read)  // CLKCFG: PXA27x reads back T; HT and B aren't kept, F reads 0
+-                    val = pc->isPXA270 && pc->turbo ? 1 : 0;
++                if (read)  // CLKCFG: PXA27x reads back T, HT and B; F reads 0
++                    val = pc->isPXA270 ? (pc->turbo ? 1 : 0) | pc->clkcfgBits : 0;
+                 else {
+                     pc->turbo = (val & 1) != 0;
++                    if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
+                     if (val & 2)
+                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
+                                 (unsigned long)pc->CCCR, (unsigned long)val);
+@@ -476,6 +481,7 @@
+     }
+     pc->RCSR |= 4;  // SMR: sleep-exit reset, never set at sleep entry.
+     pc->turbo = false;
++    pc->clkcfgBits = 0;
+     pc->sleeping = pc->wakePending = false;
+     pxaPwrClkSyncUdc(pc);
+     if (pc->PCFR & 0x4000) {
+@@ -486,6 +492,7 @@
+ 
+ void pxaPwrClkReset(struct PxaPwrClk *pc) {
+     pc->sleeping = pc->wakePending = false;
++    pc->clkcfgBits = 0;
+     // PXA25x: almost the default (we use mult 32 not 27). PXA27x: L 16, 2N 3, the 208 MHz run
+     // and 312 MHz turbo these devices run at.
+     pc->CCCR = pc->isPXA270 ? 0x00000190UL : 0x00000122UL;
+@@ -516,7 +523,7 @@
+ template <typename T>
+ void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
+     // PXA25x moved to version 2 with power sleep; older versions still load.
+-    const uint32_t version = SAVESTATE_VERSION;
++    const uint32_t version = pc->isPXA270 ? SAVESTATE_VERSION : SAVESTATE_VERSION_PXA25X;
+     auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, version);
+     if (!chunk) ERR("unable to allocate chunk");
+ 
+@@ -533,6 +540,8 @@
+ 
+     LoadChunkHelper helper(*chunk);
+     pc->sleeping = pc->wakePending = false;  // v0/v1 never represented power sleep.
++    // Before v3 a PXA27x takes B as set, as Palm OS sets it (CLKCFG 0xb) while it boots.
++    pc->clkcfgBits = pc->isPXA270 ? 0x8 : 0;
+     if (version == 0) {
+         pc->PSTR = pc->PVCR = pc->PUCR = pc->PKWR = pc->PKSR = 0;
+         memset(pc->PCMD, 0, sizeof(pc->PCMD));

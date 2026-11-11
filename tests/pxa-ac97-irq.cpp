@@ -21,6 +21,13 @@ void pxaDmaExternalReq(PxaDma*, uint_fast8_t, bool) {}
 extern "C" void uarmAbort() { std::abort(); }
 
 static bool codecWrite(void*, uint32_t, uint16_t) { return true; }
+static unsigned pickyWrites;
+static bool pickyWrite(void*, uint32_t, uint16_t) { ++pickyWrites; return false; }
+static bool pickyRead(void*, uint32_t reg, uint16_t* value) {
+    if (reg != 0x7c) return false;
+    *value = 0x574d;
+    return true;
+}
 static bool codecRead(void*, uint32_t, uint16_t* value) { *value = 0x1234; return true; }
 static void write(uint32_t address, uint32_t value) {
     check(accessRegister(controller, address, 4, true, &value));
@@ -43,8 +50,9 @@ int main() {
     check(irq);  // unmasking an already completed command asserts the line
     write(gsr, cdone);
     check(!irq && !(read(gsr) & cdone));
+    write(gcr, 0);
     read(codec + 0x7c * 2);
-    check(!irq && (read(gsr) & sdone));
+    check(!irq && (read(gsr) & sdone) && (read(gsr) & cdone));  // a read sends a command too
     write(gcr, sdone);
     check(irq);
     write(gcr, 0);
@@ -108,5 +116,28 @@ int main() {
     }
     pxaAC97clientClientWantData(empty, Ac97PrimaryAudio, &data);
     check(data == 15);  // documented transmit underrun repeats the last sample
-    std::puts("PASS: AC97 IRQ masks, FIFO service, underrun/overflow, and halfword access");
+    // A present codec completes every cycle: registers it lacks read 0, writes are dropped.
+    // Spaces with no codec still complete nothing.
+    auto* picky = pxaAC97Init(nullptr, nullptr, nullptr);
+    pxaAC97clientAdd(picky, Ac97PrimaryAudio, pickyRead, pickyWrite, nullptr);
+    write(gsr, cdone | sdone);
+    write(codec + 0x20 * 2, 0x1234);
+    check((read(gsr) & cdone) && pickyWrites == 1);
+    write(gsr, cdone | sdone);
+    read(codec + 0x7c * 2);
+    check(read(gsr) & sdone);
+    write(gsr, cdone | sdone);
+    read(codec + 0x3c * 2);
+    check(read(gsr) & sdone);
+    check(read(codec + 0x3c * 2) == 0);  // the unknown register's value arrives on the next read
+    check(read(codec + 0x7c * 2) == 0);
+    check(read(codec + 0x7c * 2) == 0x574d);
+    constexpr uint32_t secondaryCodec = 0x40500300, modemCodec = 0x40500400;
+    write(gsr, cdone | sdone);
+    write(secondaryCodec, 0);
+    read(secondaryCodec);
+    write(modemCodec + 0x54 * 2, 0);
+    read(modemCodec + 0x54 * 2);
+    check(!(read(gsr) & (cdone | sdone)));
+    std::puts("PASS: AC97 IRQ masks, FIFO service, underrun/overflow, halfword access and link completion");
 }

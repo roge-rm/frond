@@ -175,8 +175,73 @@ static void pxa25xSleep() {
     assert(!soc.PowerSleeping());
 }
 
+// Run one coprocessor instruction at the start of RAM with r0 = in and return r1.
+static uint32_t coproc(SocPXA& soc, uint32_t instruction, uint32_t in = 0) {
+    auto cpu = soc.GetCpu();
+    write(soc, 0xa0000000, instruction);
+    write(soc, 0xa0000004, 0xeafffffe);
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, ARM_REG_NUM_CPSR, ARM_SR_MODE_SVC | ARM_SR_I | ARM_SR_F);
+    cpuSetReg(cpu, 15, 0xa0000000);
+    cpuSetReg(cpu, 0, in);
+    cpuSetReg(cpu, 1, 0xdeadbeef);
+    cpuCyclePure(cpu);
+    return cpuGetRegExternal(cpu, 1);
+}
+static uint32_t chunkVersion(const std::vector<uint8_t>& state, ChunkType type) {
+    const auto* words = reinterpret_cast<const uint32_t*>(state.data());
+    size_t offset = 1 + words[0] * 2;
+    for (unsigned i = 0; i < words[0]; ++i) {
+        if (words[1 + 2 * i] == uint32_t(type)) return words[offset];
+        offset += words[2 + 2 * i];
+    }
+    assert(false);
+    return 0;
+}
+// PXA27x CCSR, CLKCFG read back and cache type; PXA25x keeps its old values.
+static void clocks() {
+    static constexpr uint32_t CCCR = 0x41300000, CCSR = 0x4130000c;
+    static constexpr uint32_t READ_CLKCFG = 0xee161e10, WRITE_CLKCFG = 0xee060e10,
+                              READ_CACHE_TYPE = 0xee101f30;
+    const uint32_t branch = 0xeafffffe;
+    {
+        std::vector<uint8_t> rom(16u << 20), nand(132u << 20, 0xff);
+        memcpy(rom.data(), &branch, 4);
+        SocPXA soc(deviceTypeTX, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
+        assert(read(soc, CCCR) == 0x190 && read(soc, CCSR) == 0x30000190);
+        assert(coproc(soc, READ_CLKCFG) == 0);
+        coproc(soc, WRITE_CLKCFG, 0xb);  // T, F and B: frequency change to turbo
+        assert(coproc(soc, READ_CLKCFG) == 9);  // F reads 0
+        coproc(soc, WRITE_CLKCFG, 6);  // F and HT
+        assert(coproc(soc, READ_CLKCFG) == 4);
+        coproc(soc, WRITE_CLKCFG, 9);
+        // HT and B are saved; a version 2 chunk loads with B set and HT clear.
+        auto saved = snapshot(soc);
+        assert(chunkVersion(saved, ChunkType::pxaPwrClk) == 3);
+        coproc(soc, WRITE_CLKCFG, 0);
+        assert(soc.Load(saved.size(), saved.data()) && coproc(soc, READ_CLKCFG) == 9);
+        coproc(soc, WRITE_CLKCFG, 5);
+        auto old = legacy(snapshot(soc), ChunkType::pxaPwrClk, 2, 1);
+        assert(soc.Load(old.size(), old.data()) && coproc(soc, READ_CLKCFG) == 9);
+        soc.Reset();
+        assert(coproc(soc, READ_CLKCFG) == 0);  // reset clears CLKCFG
+        write(soc, CCCR, 0x02000210);
+        assert(read(soc, CCSR) == 0x30000210);
+        assert(coproc(soc, READ_CACHE_TYPE) == 0x0b1aa1aa);
+    }
+    std::vector<uint8_t> rom(8u << 20), nand(34603008, 0xff);
+    memcpy(rom.data(), &branch, 4);
+    SocPXA soc(deviceTypeE2, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 0);
+    assert(read(soc, CCCR) == 0x122 && read(soc, CCSR) == 0);
+    coproc(soc, WRITE_CLKCFG, 0xf);
+    assert(coproc(soc, READ_CLKCFG) == 0);
+    assert(chunkVersion(snapshot(soc), ChunkType::pxaPwrClk) == 2);  // PXA25x saves stay at version 2
+    assert(coproc(soc, READ_CACHE_TYPE) == 0x0b16a16a);
+}
+
 int main() {
     firmwarePower();
+    clocks();
     std::vector<uint8_t> rom(16 * 1024 * 1024), nand(132 * 1024 * 1024, 0xff);
     const uint32_t branch = 0xeafffffe;
     memcpy(rom.data(), &branch, 4);
@@ -316,7 +381,7 @@ int main() {
     assert(!fresh.PowerSleeping());
     soc.Reset();
     saved = snapshot(soc);
-    auto old = legacy(saved, ChunkType::pxaPwrClk, 1, 2);
+    auto old = legacy(saved, ChunkType::pxaPwrClk, 1, 3);
     old = legacy(old, ChunkType::pxaGpio, 0, 9);
     assert(soc.Load(old.size(), old.data()));
     assert(!soc.PowerSleeping());
@@ -329,7 +394,7 @@ int main() {
     size_t offset = 1 + 2 * words[0];
     for (unsigned i = 0; i < words[0]; ++i) {
         const unsigned size = words[2 + 2 * i];
-        if (words[1 + 2 * i] == uint32_t(ChunkType::pxaPwrClk)) words[offset + size - 1] = 1;
+        if (words[1 + 2 * i] == uint32_t(ChunkType::pxaPwrClk)) words[offset + size - 2] = 1;  // wakePending, before CLKCFG
         offset += size;
     }
     write(soc, PM + 8, 0xcafef00d);

@@ -695,6 +695,16 @@ test-mmu-fast-path: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-mmu-fast-path
 	./build/test-mmu-fast-path
 
+# The XScale D-cache's stale window after the MMU goes off, on both engines.
+.PHONY: test-xscale-stale-dcache
+test: test-xscale-stale-dcache
+test-xscale-stale-dcache: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/stale-dcache-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/xscale-stale-dcache.cpp @build/stale-dcache-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-xscale-stale-dcache
+	./build/test-xscale-stale-dcache 2>build/xscale-stale-dcache.err
+
 .PHONY: test-mem-region-bounds
 test-mem-region-bounds: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/mem-bounds-core.rsp
