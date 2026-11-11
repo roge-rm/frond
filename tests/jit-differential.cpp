@@ -1745,6 +1745,24 @@ Case directedCase(const Directed& d, uint64_t seed) {
     return c;
 }
 
+// Code for the BLX (immediate) cases that cross from the page at kCode to the next one.
+// ARM: nops up to a BLX in the page's last word, to Thumb movs r0, #7 at 0x11002.
+std::vector<uint32_t> armBlxAcrossPage() {
+    std::vector<uint32_t> c(0x3ff, 0xe1a00000);  // mov r0, r0 up to 0x10ff8
+    c.push_back(0xfbffffff);                     // blx 0x11002
+    c.push_back(0x200746c0);                     // (nop) movs r0, #7
+    c.push_back(0x0000e7fe);                     // b .
+    return c;
+}
+// Thumb: nops up to a BLX prefix in the page's last halfword, its suffix on the next page,
+// to ARM mov r0, #7 at 0x11008.
+std::vector<uint32_t> thumbBlxAcrossPage() {
+    std::vector<uint32_t> c(0x7ff, 0x46c0);  // mov r8, r8 up to 0x10ffc
+    for (uint32_t h : {0xf000u, 0xe803u, 0x46c0u, 0x46c0u, 0x46c0u, 0x0007u, 0xe3a0u, 0xfffeu, 0xeaffu})
+        c.push_back(h);
+    return c;
+}
+
 bool directed(Engines& e) {
     bool ok = true;
     // 0x29000 is user read-only and 0x2a000 unmapped, so a transfer from 0x29ff8 up faults
@@ -1774,6 +1792,54 @@ bool directed(Engines& e) {
         {"svc mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35, 0xe2811001}, false, SVC, {{0, 0x10000}},
          {{Expect::REG, 1, 6}}},
         {"svc mrc/mcr p15 c3", {0xe3a00007, 0xee030f10, 0xee131f10}, false, SVC, {}},
+        // The other p15 slot reads (c0 ID and cache type, c1 control, c2 TTB) and the c7 cache
+        // operations that do nothing, in a privileged mode, then in user mode, where each is
+        // undefined through the interpreter (the undefined vector returns to the next one).
+        {"svc mrc p15 c0, c1, c2 and mcr p15 c7 no-ops",
+         {0xe3a01005, 0xee101f10, 0xee104f30, 0xee112f10, 0xee123f10, 0xee070fb2, 0xee070f3a, 0xee070f5a,
+          0xee070f9a, 0xee070f16, 0xee070f36, 0xee070f56, 0xee070f1a, 0xee070f5e, 0xee070fd5, 0xe2855001},
+         false, SVC, {{5, 1}}, {{Expect::REG, 3, kL1, 0xffffc000}, {Expect::REG, 5, 2}}},
+        {"sys mrc p15 c2 in a loop", {0xee123f10, 0xe2555001, 0x1afffffc}, false, SYS, {{5, 3}},
+         {{Expect::REG, 3, kL1, 0xffffc000}, {Expect::REG, 5, 0}}},
+        {"user mrc p15, 0, r3, c2, c0, 0", {0xe3a01005, 0xee123f10, 0xe2811001}, false, USR, {{3, 0x1234}},
+         {{Expect::REG, 3, 0x1234}, {Expect::REG, 1, 6}, {Expect::CPSR, 0, USR, 0x1f}}},
+        {"user mrc p15, 0, r1, c0, c0, 0", {0xe3a02005, 0xee101f10}, false, USR, {{1, 0x1234}},
+         {{Expect::REG, 1, 0x1234}}},
+        {"user mrc p15, 0, r2, c1, c0, 0", {0xe3a01005, 0xee112f10}, false, USR, {{2, 0x1234}},
+         {{Expect::REG, 2, 0x1234}}},
+        {"user mcr p15, 0, r0, c7, c2, 5", {0xe3a01005, 0xee070fb2, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}}},
+        {"user mcr p15, 0, r0, c7, c10, 4", {0xee070f9a}, false, USR, {}},
+        // SWI in the JIT: the vector's movs pc, lr returns to the next instruction. From user
+        // mode (a privilege change), from SVC (none), conditional, from Thumb, and the
+        // semihosting SWI, which stays with the interpreter.
+        {"user swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"svc swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, SVC, {{14, 0x1234}},
+         {{Expect::REG, 1, 6}, {Expect::REG, 14, 0x10008}, {Expect::CPSR, 0, SVC, 0x3f}}},
+        {"user swi loop", {0xef000001, 0xe2555001, 0x1afffffc}, false, USR, {{5, 5}},
+         {{Expect::REG, 5, 0}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"user swine not taken, swieq taken", {0xe3a01005, 0xe3510005, 0x1f000042, 0x0f000043, 0xe2811001}, false,
+         USR, {}, {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR | 0x40000000, 0x4000003f}}},
+        {"irq swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, IRQ, {}, {{Expect::REG, 1, 6}}},
+        {"thumb user swi", {0x2105, 0xdf42, 0x3101}, true, USR, {},
+         {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"thumb svc swi", {0x2105, 0xdf42, 0x3101}, true, SVC, {{14, 0x1234}},
+         {{Expect::REG, 1, 6}, {Expect::REG, 14, 0x10004}, {Expect::CPSR, 0, SVC | 0x20, 0x3f}}},
+        {"thumb user swi loop", {0xdf07, 0x3d01, 0xd1fc}, true, USR, {{5, 4}},
+         {{Expect::REG, 5, 0}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"semihosting swi", {0xe3a00000, 0xe3a01005, 0xef123456, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}}},
+        {"thumb semihosting swi", {0x2000, 0x2105, 0xdfab, 0x3101}, true, USR, {}, {{Expect::REG, 1, 6}}},
+        // BLX (immediate) from ARM and from Thumb, within a page and across into the next.
+        {"blx to thumb", {0xe3a00001, 0xfaffffff, 0xe7fe2007}, false, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x10008}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"blx across a page to thumb", armBlxAcrossPage(), false, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x11000}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"thumb blx to arm", {0x2001, 0xf000, 0xe802, 0x46c0, 0x0007, 0xe3a0, 0xfffe, 0xeaff}, true, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x10007}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"thumb blx across a page to arm", thumbBlxAcrossPage(), true, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x11003}, {Expect::CPSR, 0, USR, 0x3f}}},
         // DACR changes in a loop: the JIT drops the page table entries of pages in changed
         // domains and keeps the rest. r10: both client, r11: domain 0 manager, r12: domain 1
         // no access, r9: as r12 with domain 5 client. The domain 1 page filled by the first
