@@ -1,0 +1,56 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1572,9 +1572,10 @@
+     cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
+     cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
+     // The register reads the graphics model answers by pc that Fast blocks take in generated code: the identity
+-    // read in the register read helper and the scan status reads.
+-    static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0};
+-    cpuArm920SetJitAccessPcs(p->cpu, accessPcs, 4);
++    // read in the register read helper, the scan status reads and the engine's ring pointer polls.
++    static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
++                                             0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030};
++    cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
+     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
+     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
+     // Fast keeps no cache contents: dirty data goes to memory first.
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -134,13 +134,16 @@
+         return true;
+     }
+     // A register read that changes nothing, as access answers it after ticks more of graphics time with no
+-    // change due: the scan status (54c) and the acquisition registers but the FIFO. False for anything else and
+-    // wherever access would refuse it.
++    // change due: the scan status (54c), the acquisition registers but the FIFO and the engine's ring pointer
++    // polls. False for anything else and wherever access would refuse it.
+     bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value) const {
+         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address)) return false;
+         if (address == 0x16010000 && pc == 0x200871dc) return quietIdentityRead(eim, value);
+         if (Imx1GraphicsAcquisition::owns(address))
+             return memoryReady(eim) && clocks.programmed() && acquisition.peek(address, value);
++        // No model before the engine in access owns these, and the board range at 20086952-20086a60 has none of them.
++        if (Imx1GraphicsEngine::owns(address))
++            return !(pc >= 0x20086952 && pc <= 0x20086a60) && memoryReady(eim) && engine.quietRead(pc, address, value);
+         if (address != 0x1601054c || Imx1GraphicsInterrupts::owns(address) || Imx1GraphicsClocks::owns(address))
+             return false;
+         const bool scanStatus = (pc == 0x200adb08 || pc == 0x200adb14) && !engine.completed();
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -76,6 +76,16 @@
+         for (auto& batch : pending) a.Do32(batch.end).Do64(batch.remaining);
+         a.Do32(nativeOption).DoBool(optionRead);
+     }
++    // The ring reads of the draw wait (200b8c64, 200b8c70, 200b8cb0) and the other read pointer polls, as access
++    // answers them, changing nothing. The pointers move only at a submit or a batch's completion.
++    bool quietRead(uint32_t pc, uint32_t address, uint32_t& value) const {
++        if (!ringEnabled) return false;
++        if (address == 0x1601021c && (pc == 0x200b8fcc || pc == 0x200b9030 || pc == 0x200b8c64)) value = readPointer;
++        else if (address == 0x16010220 && pc == 0x200b8c70) value = writePointer;
++        else if (address == 0x16010140 && pc == 0x200b8cb0) value = emptyRing() ? 0 : 0x80000000;
++        else return false;
++        return true;
++    }
+     Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,
+                                uint32_t size, bool write, uint32_t& value) {
+         using A = Imx1BootstrapAccess;

@@ -1100,6 +1100,43 @@ void jitBoardRegisters() {
     assert(r >= 7 * 130 && w >= 2 * 130);
 }
 
+// The draw wait's ring polls (read pointer at 200b8c64, write pointer at 200b8c70, busy at 200b8cb0) 200 times while
+// a fill runs: Fast blocks answer them in generated code with Exact's values.
+void jitRingPolls() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.fill();
+    g.word(0xb8c64, 0xe590521c); g.word(0xb8c68, 0xe12fff1e);  // ldr r5, [r0, #0x21c]; bx lr
+    g.word(0xb8c70, 0xe5906220); g.word(0xb8c74, 0xe12fff1e);  // ldr r6, [r0, #0x220]; bx lr
+    g.word(0xb8cb0, 0xe5904140); g.word(0xb8cb4, 0xe12fff1e);  // ldr r4, [r0, #0x140]; bx lr
+    std::vector<uint32_t> words;
+    load(words, 0, 0x16010000); load(words, 7, 200); load(words, 8, 0); load(words, 9, 0); load(words, 10, 0);
+    const size_t top = words.size();
+    std::vector<std::pair<size_t, uint32_t>> calls;
+    for (auto [stub, add] : {std::pair{0xb8c64u, 0xe0888005u}, {0xb8c70u, 0xe0899006u}, {0xb8cb0u, 0xe08aafa4u}}) {
+        words.push_back(0xe1a0e00f);                      // mov lr, pc
+        calls.push_back({words.size(), stub});
+        words.push_back(0);                               // b stub
+        words.push_back(add);                             // add r8, r8, r5 / add r9, r9, r6 / add r10, r10, r4, lsr #31
+    }
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    for (auto [at, stub] : calls) g.branch(base + uint32_t(at) * 4, stub);
+    g.end();
+    const uint64_t before = imx1MachineJitRegisterReads(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("jit ring polls exact", exact); print("jit ring polls blocks", fast);
+    const uint64_t r = imx1MachineJitRegisterReads(nullptr) - before;
+    std::printf("jit ring polls: %llu register reads in generated code, read pointer sum %08x, busy %u\n",
+                (unsigned long long)r, exact.run.result.registers[8], exact.run.result.registers[10]);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[7] == 0 && exact.run.result.registers[9] != 0);
+    sameResult(exact, fast);
+    assert(r >= 300);
+}
+
 // The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time.
@@ -1394,6 +1431,7 @@ void jitLong() {
     jitBoardWrites();
     jitStoreTimer();
     jitBoardRegisters();
+    jitRingPolls();
     delayLoop();
     delayShort();
     jitDomain();
