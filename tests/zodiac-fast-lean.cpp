@@ -229,6 +229,7 @@ struct Outcome {
     Imx1MachineCheapStatus cheap;
     uint64_t lean, drops, timerReads;
     uint16_t pcmLast;
+    uint64_t cs5Writes;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -250,7 +251,8 @@ bool running(Imx1Machine* m) { return imx1MachineGetStatus(m).status == Imx1Mach
 Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
-                imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m)};
+                imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m),
+                imx1MachineLeanCs5Writes(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -341,9 +343,9 @@ bool sameLines(const Lines& a, const Lines& b) {
            x.graphicsFrameHash == y.graphicsFrameHash && x.cs5WaitClocks == y.cs5WaitClocks;
 }
 void printLines(const char* name, const Lines& l) {
-    std::printf("%s: stop=%s pc=%08x address=%08x r8=%u retired=%llu ticks=%llu cs5wait=%llu lean=%llu entries=%zu", name,
-                imx1ProbeStopName(l.out.run.result.stop), l.out.run.result.trace.pc, l.out.run.result.address,
-                l.out.run.result.registers[8], (unsigned long long)l.out.cheap.retired,
+    std::printf("%s: stop=%s pc=%08x address=%08x cs5 writes=%llu retired=%llu ticks=%llu cs5wait=%llu lean=%llu entries=%zu",
+                name, imx1ProbeStopName(l.out.run.result.stop), l.out.run.result.trace.pc, l.out.run.result.address,
+                (unsigned long long)l.out.cs5Writes, (unsigned long long)l.out.cheap.retired,
                 (unsigned long long)l.out.cheap.time.ticks, (unsigned long long)l.out.run.result.cs5WaitClocks,
                 (unsigned long long)l.out.lean, l.entries.size());
     for (const auto& i : l.entries) std::printf(" [%llu %08x%s]", (unsigned long long)i.step, i.interruptedPc, i.fiq ? " fiq" : "");
@@ -373,6 +375,7 @@ void forcedIrq() {
 // Timer 2 raises an FIQ after comp counts while the guest fills the engine's ring and submits the fill at
 // 0xa9ed4 (graphics memory and register writes, each with CS5 wait clocks). Nothing is mapped at the vector,
 // so the run stops there. Returns 1 when the FIQ came right after the submission, 2 right after a ring store.
+uint64_t fastCs5Writes = 0;
 unsigned commandFiq(uint32_t comp) {
     GraphicsGuest g;
     g.setup(); g.display(); g.clocks();
@@ -385,6 +388,8 @@ unsigned commandFiq(uint32_t comp) {
     g.end();
     const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
     const auto stepped = runLines(g.words, false, true);
+    fastCs5Writes += fast.out.cs5Writes;
+    assert(!exact.out.cs5Writes && !stepped.out.cs5Writes);
     const bool ok = sameLines(exact, stepped) && sameLines(fast, stepped) && stepped.entries.size() == 1 &&
                     stepped.out.run.result.trace.pc == 0x1c;
     const bool atSubmit = stepped.entries.size() == 1 && stepped.entries[0].step == submitted &&
@@ -410,7 +415,8 @@ int main() {
             atSubmit += at == 1;
             atStore += at == 2;
         }
-        std::printf("command fiq: %u taken right after the submission, %u right after a ring store\n", atSubmit, atStore);
+        std::printf("command fiq: %u taken right after the submission, %u right after a ring store, %llu graphics memory "
+                    "writes on the lean path\n", atSubmit, atStore, (unsigned long long)fastCs5Writes);
         assert(atSubmit >= 32 && atStore >= 200);
     }
     {

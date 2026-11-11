@@ -1,0 +1,352 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -213,6 +213,10 @@
+     // Instructions this lean run has finished, and the probe's answer for reads of pages that aren't plain.
+     uint32_t leanDone;
+     Arm920LeanRead leanRead;
++    // The probe's answer for single stores to pages that aren't plain, the instruction the lean loop is running
++    // and the run's budget, which such a store can shrink.
++    Arm920LeanWrite leanWrite;
++    uint32_t leanInstr, leanBudget;
+ #ifdef FROND_DYNARMIC
+     struct FrondJit *jit;
+     // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
+@@ -849,6 +853,18 @@
+ // (host - va) for reads and writes alike, filled only for pages the lean page callback calls plain and the
+ // MMU TLB holds now, keyed by privilege; mem->hostTlb.gen moves on every TLB, domain, S, R, TTB and
+ // control change. Anything else sets leanExit, so the guarded step runs the instruction again.
++// The lean loop's current instruction has a single data access, a store: ARM STR, STRB, STRH, Thumb STR,
++// STRB, STRH in all their forms.
++static bool cpuPrvLeanSingleStore(const struct ArmCpu *cpu) {
++    const uint32_t i = cpu->leanInstr;
++    if (cpu->T) {
++        const uint32_t top = i & 0xf800;
++        return top == 0x6000 || top == 0x7000 || top == 0x8000 || top == 0x9000 ||
++               (i & 0xfe00) == 0x5000 || (i & 0xfe00) == 0x5200 || (i & 0xfe00) == 0x5400;
++    }
++    return (i & 0x0c100000) == 0x04000000 || (i & 0x0e1000f0) == 0x000000b0;
++}
++
+ template <int size, bool write>
+ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
+                                                          bool privileged) {
+@@ -863,17 +879,26 @@
+                         ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)
+                         : nullptr;
+     if (!page) {
++        // Only where the step's D-cache model would bypass: a cacheable or bufferable access stops there.
++        const bool cached = ((cp15MMUArm920Control(cpu->cp15.cp15mmu) & 4) && MMU_TRANSLATE_RESULT_CACHEABLE(r)) ||
++                            MMU_TRANSLATE_RESULT_BUFFERABLE(r);
+         if constexpr (!write) {
+-            // Only where the step's D-cache model would bypass: a cacheable or bufferable timer read stops there.
+             uint32_t value;
+-            const bool cached = ((cp15MMUArm920Control(cpu->cp15.cp15mmu) & 4) && MMU_TRANSLATE_RESULT_CACHEABLE(r)) ||
+-                                MMU_TRANSLATE_RESULT_BUFFERABLE(r);
+             if (size == 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
+                 cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, cpu->leanDone, &value)) {
+                 memcpy(buf, &value, size);
+                 ++cpu->leanBus;
+                 return true;
+             }
++        } else if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanWrite && cpuPrvLeanSingleStore(cpu)) {
++            uint32_t value = 0, cost = 0;
++            memcpy(&value, buf, size);
++            const uint32_t left = cpu->leanBudget - cpu->leanDone - 1;
++            if (cpu->leanWrite(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, value, cpu->leanDone, left, &cost)) {
++                cpu->leanBudget -= cost;
++                ++cpu->leanBus;
++                return true;
++            }
+         }
+         cpu->leanExit = true;
+         return false;
+@@ -4776,16 +4801,17 @@
+ }
+ 
+ template <int size>
+-static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu, uint32_t budget) {
++static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
+     uint32_t done = 0;
+     const uint32_t before = cpu->leanDone;
+-    while (done < budget) {
++    while (before + done < cpu->leanBudget) {
+         cpu->leanDone = before + done;
+         const uint32_t pc = cpu->regs[REG_NO_PC];
+         uint32_t instr, decoded;
+         cpu->curInstrPC = pc;
+         if (!cpuPrvLeanFetch<size>(cpu, pc, instr, decoded)) break;
+         cpu->regs[REG_NO_PC] = pc + size;
++        cpu->leanInstr = instr;
+         // Accesses of an instruction the step runs again are counted there, not here.
+         const uint64_t bus = cpu->leanBus;
+         cpuPrvDecompressExecFn(decoded)(cpu, instr);
+@@ -4815,11 +4841,12 @@
+     cpu->leanBlNext = ~0u;
+     cpu->leanBus = 0;
+     cpu->leanDone = 0;
++    cpu->leanBudget = budget;
+     uint32_t done = 0;
+     for (;;) {
+-        done += cpu->T ? cpuPrvLeanLoop<2>(cpu, budget - done) : cpuPrvLeanLoop<4>(cpu, budget - done);
++        done += cpu->T ? cpuPrvLeanLoop<2>(cpu) : cpuPrvLeanLoop<4>(cpu);
+         // Carry on only past an ARM/Thumb switch; a failed fetch leaves no slow path reason.
+-        if (done >= budget || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
++        if (done >= cpu->leanBudget || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
+         cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
+     }
+     cpu->leanRun = false;
+@@ -4859,6 +4886,8 @@
+ 
+ void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = read; }
+ 
++void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
++
+ // Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
+ void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
+     if (!cpu->leanCode) return;
+@@ -4883,6 +4912,7 @@
+ void cpuArm920LeanFlush(ArmCpu *) {}
+ void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
+ void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
++void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
+ uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
+ uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
+ #endif
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -273,6 +273,12 @@
+ // ran being the instructions the lean run finished before this one. False sends it to the step.
+ using Arm920LeanRead = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t ran, uint32_t* value);
+ void cpuArm920SetLeanRead(ArmCpu*, Arm920LeanRead read);
++// write(context, pa, size, value, ran, left, cost) may take a store of a page that isn't plain, for an
++// instruction whose only data access it is (STR, STRB, STRH). left is what the run's budget holds after this
++// instruction; cost is what the write takes from it on top. False sends the instruction to the step.
++using Arm920LeanWrite = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran,
++                                 uint32_t left, uint32_t* cost);
++void cpuArm920SetLeanWrite(ArmCpu*, Arm920LeanWrite write);
+ // Cleans dirty D-cache lines to memory, empties both caches and drops the lean TLB and decoded code. For
+ // entering Fast and after a load into it.
+ void cpuArm920LeanReset(ArmCpu*);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -25,6 +25,9 @@
+ // Only one machine exists at a time. These stay out of Probe, whose size is part of the state layout.
+ uint64_t deferredCycles = 0, quietCycles = 0;
+ uint32_t quietMode = 0;
++// Fast only: CS5 wait clocks (HCLK) of graphics memory writes the lean path took inside the quiet span, charged
++// after deferredCycles. The span covers both, so the order of the two charges changes nothing.
++uint64_t deferredHclk = 0;
+ // Set when an instruction that charged opened a new quiet span itself: the next step still looks at the interrupt
+ // lines, as it would after charging that instruction alone.
+ bool linesPending = false;
+@@ -32,6 +35,15 @@
+ bool fastEngine = false;
+ uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
+ uint64_t leanTimerReads = 0;  // timer count reads answered on the lean path, for tests
++uint64_t leanCs5Writes = 0;  // graphics memory writes taken on the lean path, for tests
++// One lean run's graphics memory writes: whether they can be taken and their wait clocks, worked out at the first
++// one, and the wait clocks and budget they took.
++struct LeanCs5 {
++    bool checked, usable;
++    uint32_t clocks, cost;
++    uint64_t waitClocks, waitCost;
++};
++LeanCs5 leanCs5{};
+ // Spans shorter than this are left to the step.
+ constexpr uint64_t leanMinimumSpan = 8;
+ 
+@@ -233,15 +245,31 @@
+     bool chargeDeferred() {
+         quietCycles = 0;
+         linesPending = false;
+-        if (!deferredCycles) return true;
++        if (!deferredCycles && !deferredHclk) return true;
+         const uint32_t cycles = uint32_t(deferredCycles);
+-        deferredCycles = 0;
++        const uint32_t hclk = uint32_t(deferredHclk);
++        deferredCycles = deferredHclk = 0;
+         auto status = advanceGraphicsCpu(cycles, peripherals.cpuReferencePeriod(quietMode));
+         if (status == Imx1BootstrapAccess::ok) {
+             if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
+             peripherals.advanceCpuCycles(cycles, quietMode, options.assumeMpllSettled);
+             status = peripherals.clockStatus();
+         }
++        // The wait clocks as cs5Wait charges them, in pieces of at most one transaction.
++        if (status == Imx1BootstrapAccess::ok && hclk) {
++            const auto bus = peripherals.busReferencePeriod();
++            const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
++            peripherals.advanceHclkCycles(hclk);
++            status = advanceGraphics([&](Imx1Cs5Configuration& c) {
++                for (uint32_t left = hclk; left;) {
++                    const uint32_t chunk = std::min(left, Imx1Cs5Bus::timeoutClocks);
++                    c.advanceBusCycles(chunk, bus, cpuPeriod);
++                    left -= chunk;
++                }
++            });
++            if (graphicsMemory) graphicsFrame.advance(cs5Configuration, *graphicsMemory, peripherals.eimState());
++            if (status == Imx1BootstrapAccess::ok) status = peripherals.clockStatus();
++        }
+         if (status == Imx1BootstrapAccess::ok) return true;
+         if (graphicsWireStatus == Imx1BootstrapAccess::ok) graphicsWireStatus = status;
+         return false;
+@@ -406,12 +434,83 @@
+     // instructions the run finished are cycles still to charge, and no charge is needed.
+     static bool leanRead(void* context, uint32_t pa, uint32_t size, uint32_t ran, uint32_t* value) {
+         auto& p = *static_cast<Probe*>(context);
+-        if (!Imx1Bootstrap::timerCountAddress(pa) || quietCycles <= ran || p.failed ||
++        if (!Imx1Bootstrap::timerCountAddress(pa) || quietCycles <= ran || p.failed || deferredHclk || leanCs5.waitClocks ||
+             p.graphicsWireStatus != Imx1BootstrapAccess::ok ||
+             !p.peripherals.timerCountAfter(pa, size, deferredCycles + ran, quietMode, *value)) return false;
+         ++leanTimerReads;
+         return true;
+     }
++    // Wait clocks of a CS5 write now, as cs5Wait works them out inside a quiet span, with nothing charged. False
++    // where cs5Wait would refuse, run past one transaction or advance a clock at a time.
++    bool quietWriteClocks(uint32_t& clocks) const {
++        const auto mode = peripherals.eimState().cs5Mode();
++        if (mode == Imx1Cs5Mode::unsupported || (mode != Imx1Cs5Mode::fixed && !peripherals.cs5PinsSelected(true)))
++            return false;
++        const auto busPeriod = peripherals.busReferencePeriod();
++        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
++        if (!cs5Configuration.busPeriodSupported(busPeriod, cpuPeriod) ||
++            (mode != Imx1Cs5Mode::fixed &&
++             (!cs5Configuration.memoryInterfaceReady() || !cs5Configuration.clockState().programmed())) ||
++            !peripherals.referenceChargeSupported(uint64_t(Imx1Cs5Bus::timeoutClocks) * busPeriod.numerator,
++                                                  busPeriod.denominator))
++            return false;
++        Imx1Cs5Bus transaction(mode);
++        Imx1GraphicsFraction service;
++        bool ready = mode == Imx1Cs5Mode::fixed;
++        auto state = transaction.sample(0, true, mode == Imx1Cs5Mode::dtack ? !ready : ready);
++        const auto rate = cs5Configuration.clockState().systemRate();
++        clocks = 0;
++        while (state == Imx1Cs5Bus::State::waiting) {
++            if (!ready && rate.numerator) {
++                const uint64_t numerator = busPeriod.numerator * rate.numerator;
++                const uint64_t denominator = uint64_t(busPeriod.denominator) * 32768 * rate.denominator;
++                if (!service.supports(denominator)) return false;
++                ready = service.add(numerator, denominator) != 0;
++            }
++            ++clocks;
++            state = transaction.sample(clocks, true, mode == Imx1Cs5Mode::dtack ? !ready : ready);
++        }
++        return state == Imx1Cs5Bus::State::complete && clocks;
++    }
++    // A graphics memory write on the lean path, answered as access answers it: the write now, its wait clocks
++    // deferred with the CPU cycles. The span has to hold the instructions and the wait clocks together, counted in
++    // CPU cycles rounded up and one more, which also covers the work the clocks add.
++    static bool leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t left,
++                          uint32_t* cost) {
++        auto& p = *static_cast<Probe*>(context);
++        if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
++            p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
++            return false;
++        if (!leanCs5.checked) {
++            leanCs5.checked = true;
++            uint32_t clocks = 0;
++            leanCs5.usable = p.boundaryStatus() == Imx1BootstrapAccess::ok && p.quietWriteClocks(clocks) &&
++                             p.acceptGraphics(p.cs5Configuration, false) == Imx1BootstrapAccess::ok;
++            if (leanCs5.usable) {
++                const auto bus = p.peripherals.busReferencePeriod();
++                const auto cpuPeriod = p.peripherals.cpuReferencePeriod(quietMode);
++                const __uint128_t time = __uint128_t(clocks) * bus.numerator * cpuPeriod.denominator;
++                const __uint128_t unit = __uint128_t(bus.denominator) * cpuPeriod.numerator;
++                const uint64_t cycles = uint64_t(time / unit + (time % unit != 0)) + 1;
++                leanCs5.clocks = clocks;
++                leanCs5.cost = uint32_t(std::max<uint64_t>(cycles, clocks));
++            }
++        }
++        if (!leanCs5.usable || left < leanCs5.cost) return false;
++        const bool user = (cpuGetRegExternal(p.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
++        if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok ||
++            p.graphicsMemory->validate(p.cs5Configuration, p.peripherals.eimState(), pa, size) != Imx1BootstrapAccess::ok)
++            return false;
++        uint32_t datum = value;
++        if (p.graphicsMemory->access(p.cs5Configuration, p.peripherals.eimState(), pa, size, true, datum) !=
++            Imx1BootstrapAccess::ok)
++            return false;
++        leanCs5.waitClocks += leanCs5.clocks;
++        leanCs5.waitCost += leanCs5.cost;
++        ++leanCs5Writes;
++        *cost = leanCs5.cost;
++        return true;
++    }
+     static bool cacheMemoryCheck(void* context, uint32_t address, uint32_t size, bool write) {
+         auto& p = *static_cast<Probe*>(context);
+         if (!write && p.resolve(address, size)) return true;
+@@ -426,10 +525,10 @@
+         // A timer count read inside the quiet cycles is worked out without charging them.
+         uint32_t timerCount = 0;
+         bool timerCountKnown = false;
+-        if ((deferredCycles || quietCycles) &&
++        if ((deferredCycles || deferredHclk || quietCycles) &&
+             !(Imx1Bootstrap::isRamAddress(address) && !(write && p.peripherals.pcmDmaReads(address, size))) &&
+             !(!write && p.resolve(address, size))) {
+-            timerCountKnown = !write && quietCycles && !p.failed && !memIsInstructionFetch(p.mem) &&
++            timerCountKnown = !write && quietCycles && !deferredHclk && !p.failed && !memIsInstructionFetch(p.mem) &&
+                 p.peripherals.timerCountAfter(address, size, deferredCycles, quietMode, timerCount);
+             if (!timerCountKnown) p.chargeDeferred();
+         }
+@@ -822,6 +921,8 @@
+     fastEngine = false;
+     leanRetired = 0;
+     leanTimerReads = 0;
++    leanCs5Writes = 0;
++    deferredHclk = 0;
+     // The core has process lifetime, as in the existing standalone CPU diagnostics.
+     auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
+     if (p->options.diagnosticSnapshot) p->recent.resize(4096);
+@@ -981,7 +1082,7 @@
+     if (p->options.bootstrapPeripherals) {
+         if (!quiet) {
+             p->updateInterrupts();
+-            if (!deferredCycles) {
++            if (!deferredCycles && !deferredHclk) {
+                 quietMode = cpuArm920ClockMode(p->cpu);
+                 quietCycles = p->quietCpuCycles(quietMode);
+             }
+@@ -1180,8 +1281,16 @@
+             if (!budget) continue;
+             uint32_t blNext;
+             uint64_t busAccesses;
++            leanCs5 = {};
+             const uint32_t ran = cpuArm920RunLean(p->cpu, uint32_t(budget), &blNext, &busAccesses);
+             p->result.busAccesses += busAccesses;
++            // Graphics memory writes add their wait clocks to the work and the deferred charge, and their cost
++            // to the span used, as cs5Wait would.
++            deferredHclk += leanCs5.waitClocks;
++            p->result.cs5WaitClocks += leanCs5.waitClocks;
++            p->work += leanCs5.waitClocks;
++            quietCycles -= leanCs5.waitCost;
++            leanCs5 = {};
+             if (!ran) continue;
+             deferredCycles += ran;
+             quietCycles -= ran;
+@@ -1210,6 +1319,7 @@
+     fastEngine = fast;
+     cpuArm920SetLean(p->cpu, fast ? Probe::leanPage : nullptr, fast ? bootstrapInstruction : nullptr, p);
+     cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
++    cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
+     // Fast keeps no cache contents: dirty data goes to memory first.
+     if (fast) cpuArm920LeanReset(p->cpu);
+     return true;
+@@ -1221,6 +1331,8 @@
+ 
+ uint64_t imx1MachineLeanTimerReads(const Imx1Machine*) { return leanTimerReads; }
+ 
++uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*) { return leanCs5Writes; }
++
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine* machine) { return cpuArm920LeanCodeDrops(machine->probe->cpu); }
+ 
+ uint16_t imx1MachinePcmLastTransmitted(const Imx1Machine* machine) {
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -212,6 +212,8 @@
+ uint64_t imx1MachineLeanRetired(const Imx1Machine*);
+ // Timer count reads the lean path answered, including any in an instruction the step then ran again.
+ uint64_t imx1MachineLeanTimerReads(const Imx1Machine*);
++// Graphics memory writes the Fast engine took on its lean path, wait clocks deferred.
++uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*);
+ // Times the Fast engine dropped its decoded code for a store to a page it came from.
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine*);
+ // The last PCM sample SSI1 shifted out, for tests.
