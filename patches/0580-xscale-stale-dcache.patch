@@ -1,0 +1,300 @@
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -46,6 +46,14 @@
+ void mmuSetPermHook(struct ArmMmu *mmu, void (*hook)(void *), void *ctx);
+ uint32_t mmuGetTTP(struct ArmMmu *mmu);
+ void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp);
++// XScale D-cache model (no-ops on other cores). mmuSetDcache sets the C bit: while it and
++// the MMU are on, the pages data accesses touch are noted with their PA. The MMU going off
++// with pages noted opens the stale window, where data accesses to those pages use the noted
++// PA. A whole D-cache invalidate (c7,c6,0 or c7,c7,0) drops the noted pages and closes the
++// window, and so do MMU on and reset.
++void mmuSetDcache(struct ArmMmu *mmu, bool on);
++void mmuDcacheInvalidate(struct ArmMmu *mmu);
++bool mmuStaleDcacheOpen(const struct ArmMmu *mmu);
+ 
+ void mmuSetS(struct ArmMmu *mmu, bool on);
+ void mmuSetR(struct ArmMmu *mmu, bool on);
+--- a/src/uarm/uarm/MMU_internal.h
++++ b/src/uarm/uarm/MMU_internal.h
+@@ -3,6 +3,8 @@
+ #define FROND_MMU_INTERNAL_H
+ #include "MMU.h"
+ #include "cputil.h"
++
++#include <vector>
+ #define TLB_SIZE (1 << 20)
+ 
+ struct TlbEntry {
+@@ -25,6 +27,17 @@
+ 
+     struct TlbEntry tlb[TLB_SIZE];
+     uint16_t revision;
++    // XScale D-cache model. Its lines are tagged by VA and still hit with the MMU off, so
++    // each 4K page touched with the cache on keeps its PA in dcPage[va >> 12] as
++    // (dcGen << 20) | PA page, until a whole D-cache invalidate moves dcGen on. dcPages lists
++    // the pages of the current dcGen in the order they were first noted. dcOn is the C bit
++    // (XScale only). staleOn: the MMU went off with pages noted, so data accesses to those
++    // pages use their noted PA until an invalidate, MMU on or reset.
++    uint32_t *dcPage;
++    std::vector<uint32_t> *dcPages;
++    uint16_t dcGen;
++    uint8_t dcOn;
++    uint8_t staleOn;
+     uint32_t flushes;  // counts mmuTlbFlush calls, for the JIT; not saved
+     // Called when the TLB, domains, S or R change, so anything that checked a permission
+     // before checks it again (the I-cache's fetch key). Not saved.
+@@ -70,12 +83,33 @@
+     return (section ? 0x0D : 0x0F) | (domain << 4);  // section or subpage permission fault
+ }
+ 
++// With the MMU off inside the stale window: the noted PA of addr's page, if it has one.
++static inline MMUTranslateResult mmuStaleTranslate(const ArmMmu* mmu, uint32_t addr) {
++    const uint32_t e = mmu->dcPage[addr >> 12];
++    if ((e >> 20) != mmu->dcGen) return addr;
++    return uint64_t((addr & 0xfff) | ((e & 0xfffff) << 12)) | (1ull << 62);
++}
++
++// Notes a cacheable page's mapping while the MMU and D-cache are on.
++static inline void mmuDcacheNote(ArmMmu* mmu, uint32_t va, uint32_t pa) {
++    uint32_t& e = mmu->dcPage[va >> 12];
++    const uint32_t noted = (uint32_t(mmu->dcGen) << 20) | (pa >> 12);
++    if (e == noted) return;
++    if ((e >> 20) != mmu->dcGen) mmu->dcPages->push_back(va >> 12);
++    e = noted;
++}
++
+ // Match mmuTranslate's cached translations and share its permission check.
+-// Misses keep the authoritative page walk. No new translation state.
+-template <bool write>
++// Misses keep the authoritative page walk. No new translation state. Data accesses (data
++// true) with the MMU off go through the stale D-cache while its window is open.
++template <bool write, bool data = false>
+ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t addr,
+                                                         bool privileged) {
+-    if (mmu->transTablPA == MMU_DISABLED_TTP) return addr;
++    if (mmu->transTablPA == MMU_DISABLED_TTP) {
++        if constexpr (data)
++            if (__builtin_expect(mmu->staleOn, 0)) return mmuStaleTranslate(mmu, addr);
++        return addr;
++    }
+     const auto& entry = mmu->tlb[addr >> 12];
+     if (entry.revision != mmu->revision)
+         return mmuTranslate(mmu, addr, privileged, write);
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -37,8 +37,23 @@
+     }
+ }
+ 
++// Drops every noted D-cache page.
++static void mmuPrvDcacheDrop(struct ArmMmu *mmu) {
++    mmu->staleOn = 0;
++    if (mmu->dcPages->empty()) return;
++    mmu->dcPages->clear();
++    if (++mmu->dcGen == 0x1000) {
++        mmu->dcGen = 1;
++        memset(mmu->dcPage, 0, TLB_SIZE * sizeof(uint32_t));
++    }
++}
++
+ void mmuReset(struct ArmMmu *mmu) {
+     mmu->transTablPA = MMU_DISABLED_TTP;
++    if (mmu->xscale) {
++        mmu->dcOn = 0;
++        mmuPrvDcacheDrop(mmu);
++    }
+     mmuTlbFlush(mmu);
+ }
+ 
+@@ -50,6 +65,12 @@
+     memset(mmu, 0, sizeof(*mmu));
+     mmu->mem = mem;
+     mmu->xscale = xscaleMode;
++    if (xscaleMode) {
++        mmu->dcPage = (uint32_t *)calloc(TLB_SIZE, sizeof(uint32_t));
++        if (!mmu->dcPage) ERR("cannot alloc D-cache pages");
++        mmu->dcPages = new std::vector<uint32_t>();
++        mmu->dcGen = 1;
++    }
+     mmuReset(mmu);
+ 
+     return mmu;
+@@ -304,9 +325,28 @@
+ 
+ void mmuSetTTP(struct ArmMmu *mmu, uint32_t ttp) {
+     mmuTlbFlush(mmu);
++    if (mmu->xscale)
++        mmu->staleOn = ttp == MMU_DISABLED_TTP &&
++                       (mmu->staleOn || (mmu->transTablPA != MMU_DISABLED_TTP && !mmu->dcPages->empty()));
+     mmu->transTablPA = ttp;
+ }
+ 
++void mmuSetDcache(struct ArmMmu *mmu, bool on) {
++    if (!mmu->xscale || mmu->dcOn == on) return;
++    mmu->dcOn = on;
++    // Pages already in the host TLB are noted again on their next fill.
++    if (on) hostTlbFlush(&mmu->mem->hostTlb);
++}
++
++void mmuDcacheInvalidate(struct ArmMmu *mmu) {
++    if (!mmu->xscale || (!mmu->staleOn && mmu->dcPages->empty())) return;
++    mmuPrvDcacheDrop(mmu);
++    // So pages the host TLB or the JIT hold are noted again in the new generation.
++    if (mmu->transTablPA != MMU_DISABLED_TTP) hostTlbFlush(&mmu->mem->hostTlb);
++}
++
++bool mmuStaleDcacheOpen(const struct ArmMmu *mmu) { return mmu->staleOn; }
++
+ void mmuSetS(struct ArmMmu *mmu, bool on) {
+     if (mmu->S == on) return;
+     mmu->S = on;
+@@ -474,6 +514,63 @@
+     mmuPrvDumpUpdate(0, 0, 0, 0, 0, false, false, false);  // finish things off
+ }
+ 
++// XScale D-cache state, saved only when there is some: the C bit, the stale window and
++// the noted pages as VA page, PA page pairs.
++template <typename T>
++static void mmuPrvDcacheSave(struct ArmMmu *mmu, T &savestate) {
++    if (!mmu->xscale || (!mmu->dcOn && !mmu->staleOn && mmu->dcPages->empty())) return;
++    auto chunk = savestate.GetChunk(ChunkType::xscaleDcache, 0);
++    if (!chunk) ERR("unable to allocate chunk");
++    SaveChunkHelper helper(*chunk);
++    std::vector<uint32_t> pairs;
++    pairs.reserve(mmu->dcPages->size() * 2);
++    for (uint32_t page : *mmu->dcPages) {
++        pairs.push_back(page);
++        pairs.push_back(mmu->dcPage[page] & 0xfffff);
++    }
++    helper.Do8(mmu->dcOn).Do8(mmu->staleOn).Do32(uint32_t(mmu->dcPages->size()));
++    if (!pairs.empty()) helper.DoBuffer32(pairs.data(), pairs.size());
++}
++
++template <typename T>
++static void mmuPrvDcacheLoad(struct ArmMmu *mmu, T &loader) {
++    if (!mmu->xscale) return;
++    mmu->dcPages->clear();
++    mmu->dcGen = 1;
++    memset(mmu->dcPage, 0, TLB_SIZE * sizeof(uint32_t));
++    mmu->staleOn = 0;
++    // Sessions from before the model ran with the cache on whenever the MMU was.
++    mmu->dcOn = mmu->transTablPA != MMU_DISABLED_TTP;
++    if (!loader.HasChunk(ChunkType::xscaleDcache)) return;
++    auto chunk = loader.GetChunkOrFail(ChunkType::xscaleDcache, 0, "xscale dcache");
++    if (!chunk) return;
++    LoadChunkHelper helper(*chunk);
++    uint8_t dcOn = 0, staleOn = 0;
++    uint32_t count = 0;
++    helper.Do8(dcOn).Do8(staleOn).Do32(count);
++    if (count > TLB_SIZE || dcOn > 1 || staleOn > 1) {
++        loader.NotifyError();
++        return;
++    }
++    std::vector<uint32_t> pairs(size_t(count) * 2);
++    if (count) helper.DoBuffer32(pairs.data(), pairs.size());
++    if (chunk->HasError()) {
++        loader.NotifyError();
++        return;
++    }
++    for (uint32_t i = 0; i < count; i++) {
++        const uint32_t page = pairs[2 * i], pa = pairs[2 * i + 1];
++        if (page >= TLB_SIZE || pa > 0xfffff || mmu->dcPage[page]) {
++            loader.NotifyError();
++            return;
++        }
++        mmu->dcPage[page] = (uint32_t(mmu->dcGen) << 20) | pa;
++        mmu->dcPages->push_back(page);
++    }
++    mmu->dcOn = dcOn;
++    mmu->staleOn = staleOn && mmu->transTablPA == MMU_DISABLED_TTP;
++}
++
+ template <typename T>
+ void mmuSave(struct ArmMmu *mmu, T &savestate) {
+     auto chunk = savestate.GetChunk(ChunkType::mmu, SAVESTATE_VERSION);
+@@ -481,6 +578,7 @@
+ 
+     SaveChunkHelper helper(*chunk);
+     mmu->DoSaveLoad(helper);
++    mmuPrvDcacheSave(mmu, savestate);
+ }
+ 
+ template <typename T>
+@@ -490,6 +588,7 @@
+ 
+     LoadChunkHelper helper(*chunk);
+     mmu->DoSaveLoad(helper);
++    mmuPrvDcacheLoad(mmu, loader);
+ 
+     mmuTlbFlush(mmu);
+ }
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -89,6 +89,9 @@
+                 else {
+                     uint32_t origVal = val;
+ 
++                    // The C bit only drives the XScale D-cache model; it doesn't read back.
++                    mmuSetDcache(cp15->mmu, (val & 0x00000004UL) != 0);
++
+                     // some bits ignore writes. pretend they were wirtten as proper
+                     val |= 0x0070;
+                     val &= ~0x0080;
+@@ -180,6 +183,7 @@
+             goto success;
+ 
+         case 7:  // cache ops
++            if ((CRm == 6 || CRm == 7) && op2 == 0) mmuDcacheInvalidate(cp15->mmu);
+             if ((CRm == 5 || CRm == 7) && op2 == 0) {
+                 icacheInvalGuest(cp15->ic);  // invalidate entire {icache(5) or both i and dcache(7)}
+                 if (CRm == 7) {
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -779,9 +779,13 @@
+ template <bool write>
+ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
+                                             bool privileged) {
+-    const struct ArmMmu *mmu = cpu->memorySystem.mmu;
+-    if (mmu->transTablPA != MMU_DISABLED_TTP && mmu->tlb[va >> 12].revision != mmu->revision)
+-        return;
++    struct ArmMmu *mmu = cpu->memorySystem.mmu;
++    if (mmu->transTablPA != MMU_DISABLED_TTP) {
++        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
++        if (mmu->dcOn && mmu->tlb[va >> 12].c) mmuDcacheNote(mmu, va, pa);
++    } else if ((va ^ pa) >> 12) {
++        return;  // a stale D-cache page: it keeps going through the translation
++    }
+     struct ArmMem *mem = cpu->mem;
+     struct HostTlb &hostTlb = mem->hostTlb;
+     const uint32_t vpage = va & ~0xfffu, ppage = pa & ~0xfffu;
+@@ -867,7 +871,7 @@
+     if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+         MMUTranslateResult translateResult =
+ #ifndef __EMSCRIPTEN__
+-            mmuTranslateCached<write>(cpu->memorySystem.mmu, vaddr, priviledged);
++            mmuTranslateCached<write, true>(cpu->memorySystem.mmu, vaddr, priviledged);
+ #else
+             mmuTranslate(cpu->memorySystem.mmu, vaddr, priviledged, write);
+ #endif
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -851,6 +851,8 @@
+             e.Cp15User(op.pc);
+             return e.jit->Regs()[op.rd];
+         }
++        // A D-cache invalidate flushes the host TLB so pages are noted again (mmuDcacheInvalidate).
++        e.CheckGen();
+         return value;
+     }
+ 
+--- a/src/uarm/uarm/savestate/ChunkTypeUarm.h
++++ b/src/uarm/uarm/savestate/ChunkTypeUarm.h
+@@ -63,6 +63,7 @@
+     networkSimulation = 0x100b0,
+     irKeyboard = 0x100c0,
+     libertasCF = 0x100d0,
++    xscaleDcache = 0x100e0,
+ };
+ 
+ inline ChunkType operator+(ChunkType chunkType, uint32_t index) {
