@@ -215,6 +215,14 @@ int main() {
     frame = soc.GetPendingFrame(first, last);
     assert(frame && frame[0] == 0xffff0000 && frame[320 * 480 - 1] == 0xff00ff00);
     for (uint32_t i = 1; i < 320 * 480 - 1; ++i) assert(frame[i] == 0xffffffff);
+    // LCCR1 and LCCR2 back to the panel size with the same DMA length: the stale larger frame
+    // is not kept, the data is drawn again through the panel path.
+    soc.ResetPendingFrame();
+    write32(0x44000004, 0x1b071543 & ~0x3ffu | 319);
+    write32(0x44000008, 0x030609e3 & ~0x3ffu | 479);
+    soc.Run(5000000, 100000000);
+    frame = soc.GetPendingFrame(first, last);
+    assert(frame);
     // E2 keeps the old timer and version-zero LCD wire format; power is version two.
     SocPXA e2(DeviceType5::deviceTypeE2, 16 * 1024 * 1024, rom.data(), 8 * 1024 * 1024,
               nand.data(), 33 * 1024 * 1024, -1, 0);

@@ -1,6 +1,36 @@
 --- a/src/uarm/uarm/pxa_LCD.cpp
 +++ b/src/uarm/uarm/pxa_LCD.cpp
-@@ -579,18 +579,58 @@
+@@ -115,6 +115,8 @@
+     }
+ }
+ 
++static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uint32_t oldLccr2);
++
+ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                 void *buf) {
+     struct PxaLcd *lcd = (struct PxaLcd *)userData;
+@@ -157,12 +159,15 @@
+                 break;
+ 
+             case 1:
+-                lcd->lccr1 = val;
+-                break;
+-
+-            case 2:
+-                lcd->lccr2 = val;
++            case 2: {
++                const uint32_t oldLccr1 = lcd->lccr1, oldLccr2 = lcd->lccr2;
++                if (pa == 1)
++                    lcd->lccr1 = val;
++                else
++                    lcd->lccr2 = val;
++                pxaLcdPrvFrameSizeChanged(lcd, oldLccr1, oldLccr2);
+                 break;
++            }
+ 
+             case 3:
+                 lcd->lccr3 = val;
+@@ -579,40 +584,97 @@
      if (lcd->ovl2c1 & 0x80000000UL) pxaLcdPrvDrawOverlay(lcd, frame, 2, lcd->ovl2c1, lcd->ovl2c2);
  }
  
@@ -8,10 +38,10 @@
 +// to match. The panel shows the centre of it: Palm Linux on the T|X sets 324x484 with the
 +// horizontal and vertical back porches 2 shorter than Palm OS's 320x480, so the panel's first
 +// pixel is the frame's (2, 2). False for anything else, such as a frame the panel's size.
-+static bool pxaLcdPrvLargerFrame(const struct PxaLcd *lcd, uint8_t bpp, uint32_t len, uint32_t &ppl,
-+                                 uint32_t &lpp) {
-+    ppl = (lcd->lccr1 & 0x3ff) + 1;
-+    lpp = (lcd->lccr2 & 0x3ff) + 1;
++static bool pxaLcdPrvLargerFrame(const struct PxaLcd *lcd, uint32_t lccr1, uint32_t lccr2,
++                                 uint8_t bpp, uint32_t len, uint32_t &ppl, uint32_t &lpp) {
++    ppl = (lccr1 & 0x3ff) + 1;
++    lpp = (lccr2 & 0x3ff) + 1;
 +    if (bpp > 4 || ppl < lcd->width || lpp < lcd->height) return false;
 +    if (ppl == lcd->width && lpp == lcd->height) return false;
 +    return len == ((ppl * lpp) << bpp) >> 3;
@@ -42,13 +72,40 @@
 +    std::swap(lcd->front_buffer, lcd->back_buffer);
 +}
 +
++// Decides whether the DMA'd framebuffer is tracked by the SoC, and marks it dirty.
++static void pxaLcdPrvTrackFramebuffer(struct PxaLcd *lcd, bool larger) {
++    const uint32_t panelBytes = ((uint32_t)(lcd->width * lcd->height) << lcd->framebufferBpp) >> 3;
++    if (larger || lcd->framebufferSize == panelBytes) {
++        lcd->framebufferDirty = true;
++        lcd->framebufferTrackingActive =
++            lcd->soc->SetFramebuffer(lcd->framebufferBase, lcd->framebufferSize);
++    } else {
++        lcd->soc->SetFramebuffer(0, 0);
++        lcd->framebufferDirty = true;
++        lcd->framebufferTrackingActive = false;
++    }
++}
++
++// A change of LCCR1/LCCR2 that takes the frame in or out of the larger kind redoes the tracking
++// decision for the DMA seen so far, so a shrunk frame isn't left stale and a larger frame seen
++// before LCCR was programmed gets tracked.
++static void pxaLcdPrvFrameSizeChanged(struct PxaLcd *lcd, uint32_t oldLccr1, uint32_t oldLccr2) {
++    uint32_t ppl, lpp;
++    if (!lcd->framebufferSize) return;
++    const bool was = pxaLcdPrvLargerFrame(lcd, oldLccr1, oldLccr2, lcd->framebufferBpp,
++                                          lcd->framebufferSize, ppl, lpp);
++    const bool is = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, lcd->framebufferBpp,
++                                         lcd->framebufferSize, ppl, lpp);
++    if (was != is) pxaLcdPrvTrackFramebuffer(lcd, is);
++}
++
  static void pxaLcdPrvScreenDataDma(struct PxaLcd *lcd, uint32_t addr /*PA*/, uint32_t len) {
      uint8_t data[4];
      uint32_t i, j;
      const uint8_t bpp = (lcd->lccr3 >> 24) & 7;
      const uint32_t *const frameBefore = lcd->front_buffer;
 +    uint32_t ppl, lpp;
-+    const bool larger = pxaLcdPrvLargerFrame(lcd, bpp, len, ppl, lpp);
++    const bool larger = pxaLcdPrvLargerFrame(lcd, lcd->lccr1, lcd->lccr2, bpp, len, ppl, lpp);
  
      if (addr != lcd->framebufferBase || len != lcd->framebufferSize || bpp != lcd->framebufferBpp) {
          lcd->framebufferBase = addr;
@@ -56,11 +113,25 @@
          lcd->framebufferBpp = bpp;
  
 -        if (len == ((uint32_t)(lcd->width * lcd->height) << bpp) >> 3) {
-+        if (larger || len == ((uint32_t)(lcd->width * lcd->height) << bpp) >> 3) {
-             // fprintf(stderr, "framebuffer now at 0x%08x , size %u bytes, %d bpp\n", addr, len,
-             //         (int)(1 << bpp));
+-            // fprintf(stderr, "framebuffer now at 0x%08x , size %u bytes, %d bpp\n", addr, len,
+-            //         (int)(1 << bpp));
+-
+-            lcd->framebufferDirty = true;
+-            lcd->framebufferTrackingActive = lcd->soc->SetFramebuffer(addr, len);
+-        } else {
+-            // fprintf(stderr,
+-            //         "framebuffer size %u bytes does not match depth %d bpp, assuming segmented "
+-            //         "framebuffer\n",
+-            //         len, (int)(1 << bpp));
+-
+-            lcd->soc->SetFramebuffer(0, 0);
+-            lcd->framebufferDirty = true;
+-            lcd->framebufferTrackingActive = false;
+-        }
++        pxaLcdPrvTrackFramebuffer(lcd, larger);
+     }
  
-@@ -612,7 +652,12 @@
+     // An overlay's planes aren't tracked, so a frame with one is always drawn.
      const bool overlays = pxaLcdPrvOverlaysOn(lcd);
      if (lcd->framebufferTrackingActive && !lcd->framebufferDirty && !overlays) return;
  

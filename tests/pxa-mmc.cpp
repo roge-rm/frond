@@ -199,7 +199,7 @@ int main(){
     // DMA mode: no FIFO request until the command starts the transfer. Linux pxamci starts its
     // channel and writes CMDAT with the clock off, then starts the clock.
     {
-        initCard(card);
+        initCard(card);writeReg(0,1);readReg(0x2c);  // the failed writes above left TX in I_REG
         for(unsigned i=0;i<512;i++)sector[i]=uint8_t(i*7);
         writeReg(0,1);writeReg(0x1c,512);writeReg(0x20,1);writeReg(0x30,17);writeReg(0x34,0);writeReg(0x38,0);
         writeReg(0x10,0x85);
@@ -218,6 +218,14 @@ int main(){
         assert((readReg(4)&0x1804)==0x1800&&sector[0]==0x0d&&sector[511]==0x0a);
         readReg(0x2c);assert(!dmaRequest[1]);
         for(unsigned i=0;i<512;i+=4)memcpy(sector+i,"\x11\x22\x33\x44",4);
+    }
+    // A write command that fails (no reply) starts no transfer, but TX is still requested so a
+    // started DMA drains as before.
+    {
+        initCard(card);
+        writeReg(0,1);writeReg(0x1c,512);writeReg(0x20,1);writeReg(0x30,63);writeReg(0x34,0);writeReg(0x38,0);
+        writeReg(0x10,0x8d);writeReg(0,2);
+        assert((readReg(4)&0x02)&&dmaRequest[1]);
     }
     // PXA25x keeps its previous one-byte-per-word access behaviour.
     card=vsdInit(readSector,writeSector,65536);initCard(card);
