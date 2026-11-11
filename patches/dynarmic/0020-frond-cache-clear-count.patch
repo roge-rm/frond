@@ -1,0 +1,80 @@
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -95,10 +95,12 @@
+ 
+     /// Frond: counts for the compile thread, since the Jit was made. Ahead: jobs queued,
+     /// compiled, later asked for and installed, and left undone (cache past its high-water
+-    /// mark, or cleared first).
++    /// mark, or cleared first). Cache clears: whole code cache clears, asked for or for lack of
++    /// space, counted with the compile thread off too.
+     struct CompileStats {
+         std::uint64_t queued = 0, installed = 0, stale = 0, cancelled = 0, overflow = 0, no_space = 0;
+         std::uint64_t ahead_queued = 0, ahead_compiled = 0, ahead_used = 0, ahead_skipped = 0;
++        std::uint64_t cache_clears = 0;
+     };
+     CompileStats GetCompileStats() const;
+ 
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -292,7 +292,9 @@
+ }
+ 
+ A32::Jit::CompileStats A32AddressSpace::GetCompileStats() const {
+-    return compile_thread ? compile_thread->GetStats() : A32::Jit::CompileStats{};
++    A32::Jit::CompileStats stats = compile_thread ? compile_thread->GetStats() : A32::Jit::CompileStats{};
++    stats.cache_clears = cache_clears;
++    return stats;
+ }
+ 
+ // On the guest thread. Queues the block and returns the dispatcher (the callbacks halt the
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -96,6 +96,7 @@
+ }
+ 
+ void AddressSpace::ClearCache() {
++    cache_clears++;
+     ClearFastDispatchTable();
+     block_entries.clear();
+     reverse_block_entries.clear();
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -100,6 +100,8 @@
+     FakeCall FastmemCallback(u64 host_pc);
+ 
+     const size_t code_cache_size;
++    // Frond: ClearCache calls, for A32::Jit::CompileStats. Guest thread only.
++    u64 cache_clears = 0;
+     oaknut::CodeBlock mem;
+     oaknut::CodeGenerator code;
+ 
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -381,7 +381,9 @@
+     }
+ 
+     Jit::CompileStats GetCompileStats() const {
+-        return compile_thread ? compile_thread->GetStats() : Jit::CompileStats{};
++        Jit::CompileStats stats = compile_thread ? compile_thread->GetStats() : Jit::CompileStats{};
++        stats.cache_clears = cache_clears;
++        return stats;
+     }
+ 
+ private:
+@@ -460,6 +462,7 @@
+             // Frond: waits for a block the compile thread is emitting.
+             std::lock_guard code_lock{code_mutex};
+             if (invalidate_entire_cache) {
++                cache_clears++;
+                 block_of_code.ClearCache();
+                 emitter.ClearCache();
+                 if (compile_thread) {
+@@ -495,6 +498,8 @@
+     // under code_mutex. space_remaining follows SpaceRemaining for the guest thread.
+     std::mutex code_mutex;
+     std::atomic<size_t> space_remaining{block_of_code.SpaceRemaining()};
++    // Frond: whole cache clears, for GetCompileStats. Guest thread only.
++    u64 cache_clears = 0;
+     bool compile_sync = false;
+     std::unique_ptr<CompileThread> compile_thread;  // last, so its worker stops first
+ };

@@ -2233,6 +2233,124 @@ int staleDispatch() {
     return 0;
 }
 
+// The code cache filling mid-run, so dynarmic clears it itself (AddressSpace::Emit with the
+// compile thread off, the compile thread's own checks otherwise) while A's BX to B is in the
+// fast dispatch table. The clear has to empty the table: the code emitted after it lands where
+// A and B were, so a stale entry would run filler code. The cache is made small, and a filler
+// of 2048 two-word blocks is rewritten and run until a clear, then for a quarter as many passes
+// again without one, so the code after the last clear covers A and B (the compile thread
+// emits only part of the filler each pass). inPlace: FROND_JIT_THREAD=0, else as --thread
+// says. Fast only. 0: as expected, -1: not.
+int cacheFullDispatch(bool inPlace) {
+    const char* name = inPlace ? "code cache filled mid-run, compiling in place" : "code cache filled mid-run";
+    // Dynarmic clears with under 1 MB left; x64 also takes a 2 MB constant pool and a bigger
+    // prelude. A filler pass emits well under what is left.
+#if defined(__aarch64__)
+    constexpr size_t kCache = (5u << 19);
+#else
+    constexpr size_t kCache = (8u << 20);
+#endif
+    if (inPlace) setenv("FROND_JIT_THREAD", "0", 1);
+    cpuSetJitCodeCacheSize(kCache);
+    Machine* made;
+    if (inPlace) {
+        static Machine one = makeMachine(true);
+        made = &one;
+    } else {
+        static Machine one = makeMachine(true);
+        made = &one;
+    }
+    Machine& m = *made;
+    cpuSetJitCodeCacheSize(0);
+    unsetenv("FROND_JIT_THREAD");
+    Case c = generate(96);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000, F = kCode + 0x3000;
+    constexpr uint32_t kFill = 2048;
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    auto branch = [](uint32_t from, uint32_t to) { return 0xea000000 | (((to - from - 8) >> 2) & 0xffffff); };
+    put(A, 0xe3a05000);      // mov r5, #0
+    put(A + 4, 0xe12fff17);  // bx r7
+    put(B, 0xe3a05001);      // mov r5, #1
+    put(B + 4, branch(B + 4, S));
+    put(S, kSpinArm);
+    for (uint32_t i = 0; i < kFill; ++i) {
+        const uint32_t at = F + 8 * i;
+        put(at, 0xe3a05c01);  // mov r5, #0x100
+        put(at + 4, branch(at + 4, i + 1 < kFill ? at + 8 : S));
+    }
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runTo = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuSetReg(m.cpu, 7, B);
+        for (int i = 0; i < 2000 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    auto settle = [&]() {
+        uint32_t bad = 0;
+        for (int i = 0; i < 30; ++i) {
+            if (runTo(A) != 1) bad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return bad;
+    };
+    // Each pass gives the filler new immediates, so its blocks are dropped and emitted again.
+    uint32_t pass = 0, fillBad = 0;
+    auto fill = [&]() {
+        ++pass;
+        for (uint32_t i = 0; i < kFill; ++i) {
+            const uint32_t word = 0xe3a05c00 | (pass & 0xff);  // mov r5, #pass << 8
+            memAccess(m.mem, F + 8 * i, 4, true, (void*)&word);
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (runTo(F) != ((pass & 0xff) << 8)) fillBad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        uint64_t clears = 0;
+        cpuJitCacheClears(m.cpu, &clears);
+        return clears;
+    };
+    const uint32_t bad1 = settle();
+    uint64_t clears0 = 0, clears = 0;
+    if (!cpuJitCacheClears(m.cpu, &clears0)) {
+        printf("FAIL %s: no clear count\n", name);
+        return -1;
+    }
+    clears = clears0;
+    while (pass < 1000 && clears == clears0) clears = fill();
+    const uint32_t fillPasses = pass, want = std::max<uint32_t>(1, fillPasses / 4);
+    uint32_t quiet = 0;
+    for (uint32_t i = 0; i < 4 * fillPasses + 20 && quiet < want && clears != clears0; ++i) {
+        const uint64_t before = clears;
+        clears = fill();
+        quiet = clears == before ? quiet + 1 : 0;
+    }
+    const uint32_t bad2 = settle();
+    printf("%s: %llu clears in %u filler passes, runs of 30 not as expected: %u before, %u after; filler runs wrong %u\n",
+           name, (unsigned long long)(clears - clears0), pass, bad1, bad2, fillBad);
+    if (clears == clears0 || quiet < want) {
+        printf("FAIL %s: the cache never filled, or never stopped clearing\n", name);
+        return -1;
+    }
+    if (bad1 || bad2 || fillBad) {
+        printf("FAIL %s: expected r5 1 from A to B every run\n", name);
+        return -1;
+    }
+    return 0;
+}
+
 // A block compiled ahead (B, a branch target of A that hasn't run) whose code is rewritten
 // from outside before the guest first goes there: the new B has to run. Fast, thread on,
 // compiling ahead on (it's off by default).
@@ -2618,6 +2736,8 @@ int main(int argc, char** argv) {
         ok = fetchBuffer(e, false, true) == 0 && ok;
         ok = staleLink() == 0 && ok;
         ok = staleDispatch() == 0 && ok;
+        ok = cacheFullDispatch(false) == 0 && ok;
+        ok = cacheFullDispatch(true) == 0 && ok;
         ok = staleAhead() == 0 && ok;
     }
     const auto t0 = std::chrono::steady_clock::now();
