@@ -1,0 +1,100 @@
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1187,6 +1187,10 @@
+ static constexpr size_t kUserCodeCache = kCodeCache;
+ #endif
+ 
++static size_t jitPrvCodeCache = 0;
++
++void jitSetCodeCacheSize(size_t bytes) { jitPrvCodeCache = bytes; }
++
+ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+     auto l = std::make_unique<Level>();
+     l->pages = static_cast<PageTable *>(calloc(1, sizeof(PageTable)));
+@@ -1210,7 +1214,7 @@
+     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+     conf.only_detect_misalignment_via_page_table_on_page_boundary = false;
+     conf.always_little_endian = true;
+-    conf.code_cache_size = privileged ? kCodeCache : kUserCodeCache;
++    conf.code_cache_size = jitPrvCodeCache ? jitPrvCodeCache : privileged ? kCodeCache : kUserCodeCache;
+     conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&e);
+     conf.psr_coprocessor = kPsrCoprocessor;
+     conf.coprocessors[15] = std::make_shared<Cp15Coprocessor>(&e);
+@@ -1276,6 +1280,14 @@
+     }
+ }
+ 
++uint64_t jitCacheClears(const FrondJit *j) {
++    uint64_t clears = 0;
++    for (const auto &l : j->level) {
++        if (l) clears += l->jit->GetCompileStats().cache_clears;
++    }
++    return clears;
++}
++
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+     jitPrvEach(j, [&](Env &e) {
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -5,6 +5,7 @@
+ #ifndef _JIT_DYNARMIC_H_
+ #define _JIT_DYNARMIC_H_
+ 
++#include <cstddef>
+ #include <cstdint>
+ 
+ struct ArmCpu;
+@@ -47,6 +48,10 @@
+ uint32_t jitMaxUnchecked(const FrondJit *jit);
+ // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
+ void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
++// Code cache size in bytes for JITs made after this (tests); 0 for the default.
++void jitSetCodeCacheSize(size_t bytes);
++// Whole code cache clears so far, asked for or for lack of space, both privilege levels.
++uint64_t jitCacheClears(const FrondJit *jit);
+ // Translated code is dropped when the RAM it came from is written (jitCodeWritten) or its
+ // mapping changes, so the guest's I-cache invalidations only matter for code from pages
+ // writes can't be seen on.
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -3,6 +3,7 @@
+ #ifndef _CPU_H_
+ #define _CPU_H_
+ 
++#include <cstddef>
+ #include <cstdint>
+ #include <functional>
+ 
+@@ -128,6 +129,10 @@
+ // Fast engine's compile thread counts for this CPU (tests): blocks dropped as stale, and
+ // blocks compiled ahead and those of them used. False without the Fast engine.
+ bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
++// Fast engine's code cache size in bytes for CPUs made from now on (tests); 0 for the default.
++void cpuSetJitCodeCacheSize(size_t bytes);
++// Fast engine's whole code cache clears for this CPU (tests). False without the Fast engine.
++bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears);
+ // Most cycles one cpuCycle call can return past the cycles it was asked for: 19 for the
+ // interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
+ // generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -980,10 +980,18 @@
+     jitCompileCounts(cpu->jit, stale, aheadCompiled, aheadUsed);
+     return true;
+ }
++void cpuSetJitCodeCacheSize(size_t bytes) { jitSetCodeCacheSize(bytes); }
++bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears) {
++    if (!cpu || !cpu->jit) return false;
++    *clears = jitCacheClears(cpu->jit);
++    return true;
++}
+ #else
+ bool cpuSetFastEngine(bool fast) { return !fast; }
+ void cpuSetJitSync(bool) {}
+ bool cpuJitCompileCounts(const struct ArmCpu *, uint64_t *, uint64_t *, uint64_t *) { return false; }
++void cpuSetJitCodeCacheSize(size_t) {}
++bool cpuJitCacheClears(const struct ArmCpu *, uint64_t *) { return false; }
+ #endif
+ 
+ uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {

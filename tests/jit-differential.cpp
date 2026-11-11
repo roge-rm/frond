@@ -409,6 +409,8 @@ struct Case {
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
     std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
+    // Maps the page tables at 0x8000 (privileged only), so a case can remap pages.
+    bool tablesPage = false;
 };
 
 struct Assembled {
@@ -501,6 +503,7 @@ Assembled assemble(const Case& c) {
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
     if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
+    if (c.tablesPage) page(kL2a, 1, false);
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
 
@@ -1676,6 +1679,7 @@ struct Directed {
     uint32_t sr = 0x200;  // control S and R
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
     std::vector<uint32_t> swiHandler;
+    bool tablesPage = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1728,6 +1732,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.cpsr = (c.cpsr & 0xf0000000) | 0xc0 | (d.thumb ? 0x20 : 0) | d.mode;
     c.dacr = d.dacr;
     c.swiHandler = d.swiHandler;
+    c.tablesPage = d.tablesPage;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -1737,6 +1742,24 @@ Case directedCase(const Directed& d, uint64_t seed) {
         if (r < 8) c.r0to7[r] = v;
         else if (r < 15) c.table[bankIndex(c, d.mode, r)] = v;
     }
+    return c;
+}
+
+// Code for the BLX (immediate) cases that cross from the page at kCode to the next one.
+// ARM: nops up to a BLX in the page's last word, to Thumb movs r0, #7 at 0x11002.
+std::vector<uint32_t> armBlxAcrossPage() {
+    std::vector<uint32_t> c(0x3ff, 0xe1a00000);  // mov r0, r0 up to 0x10ff8
+    c.push_back(0xfbffffff);                     // blx 0x11002
+    c.push_back(0x200746c0);                     // (nop) movs r0, #7
+    c.push_back(0x0000e7fe);                     // b .
+    return c;
+}
+// Thumb: nops up to a BLX prefix in the page's last halfword, its suffix on the next page,
+// to ARM mov r0, #7 at 0x11008.
+std::vector<uint32_t> thumbBlxAcrossPage() {
+    std::vector<uint32_t> c(0x7ff, 0x46c0);  // mov r8, r8 up to 0x10ffc
+    for (uint32_t h : {0xf000u, 0xe803u, 0x46c0u, 0x46c0u, 0x46c0u, 0x0007u, 0xe3a0u, 0xfffeu, 0xeaffu})
+        c.push_back(h);
     return c;
 }
 
@@ -1769,6 +1792,54 @@ bool directed(Engines& e) {
         {"svc mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35, 0xe2811001}, false, SVC, {{0, 0x10000}},
          {{Expect::REG, 1, 6}}},
         {"svc mrc/mcr p15 c3", {0xe3a00007, 0xee030f10, 0xee131f10}, false, SVC, {}},
+        // The other p15 slot reads (c0 ID and cache type, c1 control, c2 TTB) and the c7 cache
+        // operations that do nothing, in a privileged mode, then in user mode, where each is
+        // undefined through the interpreter (the undefined vector returns to the next one).
+        {"svc mrc p15 c0, c1, c2 and mcr p15 c7 no-ops",
+         {0xe3a01005, 0xee101f10, 0xee104f30, 0xee112f10, 0xee123f10, 0xee070fb2, 0xee070f3a, 0xee070f5a,
+          0xee070f9a, 0xee070f16, 0xee070f36, 0xee070f56, 0xee070f1a, 0xee070f5e, 0xee070fd5, 0xe2855001},
+         false, SVC, {{5, 1}}, {{Expect::REG, 3, kL1, 0xffffc000}, {Expect::REG, 5, 2}}},
+        {"sys mrc p15 c2 in a loop", {0xee123f10, 0xe2555001, 0x1afffffc}, false, SYS, {{5, 3}},
+         {{Expect::REG, 3, kL1, 0xffffc000}, {Expect::REG, 5, 0}}},
+        {"user mrc p15, 0, r3, c2, c0, 0", {0xe3a01005, 0xee123f10, 0xe2811001}, false, USR, {{3, 0x1234}},
+         {{Expect::REG, 3, 0x1234}, {Expect::REG, 1, 6}, {Expect::CPSR, 0, USR, 0x1f}}},
+        {"user mrc p15, 0, r1, c0, c0, 0", {0xe3a02005, 0xee101f10}, false, USR, {{1, 0x1234}},
+         {{Expect::REG, 1, 0x1234}}},
+        {"user mrc p15, 0, r2, c1, c0, 0", {0xe3a01005, 0xee112f10}, false, USR, {{2, 0x1234}},
+         {{Expect::REG, 2, 0x1234}}},
+        {"user mcr p15, 0, r0, c7, c2, 5", {0xe3a01005, 0xee070fb2, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}}},
+        {"user mcr p15, 0, r0, c7, c10, 4", {0xee070f9a}, false, USR, {}},
+        // SWI in the JIT: the vector's movs pc, lr returns to the next instruction. From user
+        // mode (a privilege change), from SVC (none), conditional, from Thumb, and the
+        // semihosting SWI, which stays with the interpreter.
+        {"user swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"svc swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, SVC, {{14, 0x1234}},
+         {{Expect::REG, 1, 6}, {Expect::REG, 14, 0x10008}, {Expect::CPSR, 0, SVC, 0x3f}}},
+        {"user swi loop", {0xef000001, 0xe2555001, 0x1afffffc}, false, USR, {{5, 5}},
+         {{Expect::REG, 5, 0}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"user swine not taken, swieq taken", {0xe3a01005, 0xe3510005, 0x1f000042, 0x0f000043, 0xe2811001}, false,
+         USR, {}, {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR | 0x40000000, 0x4000003f}}},
+        {"irq swi", {0xe3a01005, 0xef000042, 0xe2811001}, false, IRQ, {}, {{Expect::REG, 1, 6}}},
+        {"thumb user swi", {0x2105, 0xdf42, 0x3101}, true, USR, {},
+         {{Expect::REG, 1, 6}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"thumb svc swi", {0x2105, 0xdf42, 0x3101}, true, SVC, {{14, 0x1234}},
+         {{Expect::REG, 1, 6}, {Expect::REG, 14, 0x10004}, {Expect::CPSR, 0, SVC | 0x20, 0x3f}}},
+        {"thumb user swi loop", {0xdf07, 0x3d01, 0xd1fc}, true, USR, {{5, 4}},
+         {{Expect::REG, 5, 0}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"semihosting swi", {0xe3a00000, 0xe3a01005, 0xef123456, 0xe2811001}, false, USR, {},
+         {{Expect::REG, 1, 6}}},
+        {"thumb semihosting swi", {0x2000, 0x2105, 0xdfab, 0x3101}, true, USR, {}, {{Expect::REG, 1, 6}}},
+        // BLX (immediate) from ARM and from Thumb, within a page and across into the next.
+        {"blx to thumb", {0xe3a00001, 0xfaffffff, 0xe7fe2007}, false, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x10008}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"blx across a page to thumb", armBlxAcrossPage(), false, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x11000}, {Expect::CPSR, 0, USR | 0x20, 0x3f}}},
+        {"thumb blx to arm", {0x2001, 0xf000, 0xe802, 0x46c0, 0x0007, 0xe3a0, 0xfffe, 0xeaff}, true, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x10007}, {Expect::CPSR, 0, USR, 0x3f}}},
+        {"thumb blx across a page to arm", thumbBlxAcrossPage(), true, USR, {},
+         {{Expect::REG, 0, 7}, {Expect::REG, 14, 0x11003}, {Expect::CPSR, 0, USR, 0x3f}}},
         // DACR changes in a loop: the JIT drops the page table entries of pages in changed
         // domains and keeps the rest. r10: both client, r11: domain 0 manager, r12: domain 1
         // no access, r9: as r12 with domain 5 client. The domain 1 page filled by the first
@@ -1794,6 +1865,20 @@ bool directed(Engines& e) {
          {{4, 0x28010}, {5, 0x5555}, {8, 0x77}, {9, 0}},
          {{Expect::REG, 8, 0x77}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28010}, {Expect::CPSR, 0, USR, 0x1f}},
          0x200, 1, {0xe3a06001, 0xee036f10, 0xe1b0f00e}},
+        // Domain changes and remaps interleaved, on the domain 1 alias of 0x21000 (r4). Each
+        // pass: a store with domain 1 manager (r10), one as a client (r11), the page remapped
+        // read-only (AP 0, r6) and the TLB flushed (r12), a read, a store as manager again,
+        // then one as a client, which takes a permission fault (FSR 0x1f) as the manager's
+        // writable entry must have gone read-only, then the page remapped writable (r8).
+        {"svc dacr changes and remaps interleaved",
+         {0xee03af10, 0xe5847000, 0xee03bf10, 0xe5847004, 0xe5856000, 0xee08cf17, 0xe5949000, 0xee03af10,
+          0xe5847008, 0xee03bf10, 0xe584700c, 0xe5858000, 0xee08cf17, 0xe2877001, 0xe2533001, 0x1affffef},
+         false, SVC,
+         {{3, 8}, {4, 0x101040}, {5, kL2b + 4}, {6, 0x2100e}, {7, 0x77}, {8, 0x21ffe}, {10, 0xd}, {11, 5},
+          {12, 0}},
+         {{Expect::REG, 3, 0}, {Expect::REG, 9, 0x7e}, {Expect::MEM, 0x21040, 0x7e}, {Expect::MEM, 0x21044, 0x7e},
+          {Expect::MEM, 0x21048, 0x7e}, {Expect::FSR, 0, 0x1f, 0xff}, {Expect::FAR, 0, 0x10104c}},
+         0x200, 5, {}, true},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
          {{Expect::REG, 2, 0}, {Expect::CPSR, 0, 0x60000000, 0xf8000000}}},
@@ -2087,12 +2172,194 @@ int staleLink() {
     return 0;
 }
 
+// An indirect jump (BX) from A to B, which the JIT takes through its fast dispatch table,
+// with B rewritten from outside twice: each time the table has to drop B, so A's next BX runs
+// the new code. With --thread the second rewrite hits a B installed from the compile thread.
+// Fast only. 0: as expected, -1: not.
+int staleDispatch() {
+    const char* name = "indirect jump to a block rewritten while dispatch holds it";
+    cpuSetJitSync(false);
+    static Machine m = makeMachine(true);
+    cpuSetJitSync(!gThread);
+    Case c = generate(97);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000;  // separate pages
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    put(A, 0xe3a05000);      // mov r5, #0
+    put(A + 4, 0xe12fff17);  // bx r7
+    put(B, 0xe3a05001);      // mov r5, #1 (rewritten to #2, then #3)
+    put(B + 4, 0xea0003fd);  // b S
+    put(S, kSpinArm);
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuSetReg(m.cpu, 7, B);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    // Runs from A a while, so A and B are compiled (and installed) and the BX is in the table.
+    auto settle = [&](uint32_t want) {
+        uint32_t bad = 0;
+        for (int i = 0; i < 30; ++i) {
+            if (runFrom(A) != want) bad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return bad;
+    };
+    const uint32_t bad1 = settle(1);
+    const uint32_t word2 = 0xe3a05002, word3 = 0xe3a05003;
+    memAccess(m.mem, B, 4, true, (void*)&word2);
+    const uint32_t bad2 = settle(2);
+    memAccess(m.mem, B, 4, true, (void*)&word3);
+    const uint32_t bad3 = settle(3);
+    printf("%s: runs of 30 not as expected: %u before, %u after the first rewrite, %u after the second\n", name,
+           bad1, bad2, bad3);
+    if (bad1 || bad2 || bad3) {
+        printf("FAIL %s: expected 1, then 2, then 3\n", name);
+        return -1;
+    }
+    return 0;
+}
+
+// The code cache filling mid-run, so dynarmic clears it itself (AddressSpace::Emit with the
+// compile thread off, the compile thread's own checks otherwise) while A's BX to B is in the
+// fast dispatch table. The clear has to empty the table: the code emitted after it lands where
+// A and B were, so a stale entry would run filler code. The cache is made small, and a filler
+// of 2048 two-word blocks is rewritten and run until a clear, then for a quarter as many passes
+// again without one, so the code after the last clear covers A and B (the compile thread
+// emits only part of the filler each pass). inPlace: FROND_JIT_THREAD=0, else as --thread
+// says. Fast only. 0: as expected, -1: not.
+int cacheFullDispatch(bool inPlace) {
+    const char* name = inPlace ? "code cache filled mid-run, compiling in place" : "code cache filled mid-run";
+    // Dynarmic clears with under 1 MB left; x64 also takes a 2 MB constant pool and a bigger
+    // prelude. A filler pass emits well under what is left.
+#if defined(__aarch64__)
+    constexpr size_t kCache = (5u << 19);
+#else
+    constexpr size_t kCache = (8u << 20);
+#endif
+    if (inPlace) setenv("FROND_JIT_THREAD", "0", 1);
+    cpuSetJitCodeCacheSize(kCache);
+    Machine* made;
+    if (inPlace) {
+        static Machine one = makeMachine(true);
+        made = &one;
+    } else {
+        static Machine one = makeMachine(true);
+        made = &one;
+    }
+    Machine& m = *made;
+    cpuSetJitCodeCacheSize(0);
+    unsetenv("FROND_JIT_THREAD");
+    Case c = generate(96);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000, F = kCode + 0x3000;
+    constexpr uint32_t kFill = 2048;
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    auto branch = [](uint32_t from, uint32_t to) { return 0xea000000 | (((to - from - 8) >> 2) & 0xffffff); };
+    put(A, 0xe3a05000);      // mov r5, #0
+    put(A + 4, 0xe12fff17);  // bx r7
+    put(B, 0xe3a05001);      // mov r5, #1
+    put(B + 4, branch(B + 4, S));
+    put(S, kSpinArm);
+    for (uint32_t i = 0; i < kFill; ++i) {
+        const uint32_t at = F + 8 * i;
+        put(at, 0xe3a05c01);  // mov r5, #0x100
+        put(at + 4, branch(at + 4, i + 1 < kFill ? at + 8 : S));
+    }
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runTo = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuSetReg(m.cpu, 7, B);
+        for (int i = 0; i < 2000 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    auto settle = [&]() {
+        uint32_t bad = 0;
+        for (int i = 0; i < 30; ++i) {
+            if (runTo(A) != 1) bad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return bad;
+    };
+    // Each pass gives the filler new immediates, so its blocks are dropped and emitted again.
+    uint32_t pass = 0, fillBad = 0;
+    auto fill = [&]() {
+        ++pass;
+        for (uint32_t i = 0; i < kFill; ++i) {
+            const uint32_t word = 0xe3a05c00 | (pass & 0xff);  // mov r5, #pass << 8
+            memAccess(m.mem, F + 8 * i, 4, true, (void*)&word);
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (runTo(F) != ((pass & 0xff) << 8)) fillBad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        uint64_t clears = 0;
+        cpuJitCacheClears(m.cpu, &clears);
+        return clears;
+    };
+    const uint32_t bad1 = settle();
+    uint64_t clears0 = 0, clears = 0;
+    if (!cpuJitCacheClears(m.cpu, &clears0)) {
+        printf("FAIL %s: no clear count\n", name);
+        return -1;
+    }
+    clears = clears0;
+    while (pass < 1000 && clears == clears0) clears = fill();
+    const uint32_t fillPasses = pass, want = std::max<uint32_t>(1, fillPasses / 4);
+    uint32_t quiet = 0;
+    for (uint32_t i = 0; i < 4 * fillPasses + 20 && quiet < want && clears != clears0; ++i) {
+        const uint64_t before = clears;
+        clears = fill();
+        quiet = clears == before ? quiet + 1 : 0;
+    }
+    const uint32_t bad2 = settle();
+    printf("%s: %llu clears in %u filler passes, runs of 30 not as expected: %u before, %u after; filler runs wrong %u\n",
+           name, (unsigned long long)(clears - clears0), pass, bad1, bad2, fillBad);
+    if (clears == clears0 || quiet < want) {
+        printf("FAIL %s: the cache never filled, or never stopped clearing\n", name);
+        return -1;
+    }
+    if (bad1 || bad2 || fillBad) {
+        printf("FAIL %s: expected r5 1 from A to B every run\n", name);
+        return -1;
+    }
+    return 0;
+}
+
 // A block compiled ahead (B, a branch target of A that hasn't run) whose code is rewritten
-// from outside before the guest first goes there: the new B has to run. Fast, thread on.
+// from outside before the guest first goes there: the new B has to run. Fast, thread on,
+// compiling ahead on (it's off by default).
 int staleAhead() {
     const char* name = "block compiled ahead, rewritten before use";
     cpuSetJitSync(false);
+    setenv("FROND_JIT_AHEAD", "1", 1);
     static Machine m = makeMachine(true);
+    unsetenv("FROND_JIT_AHEAD");
     cpuSetJitSync(!gThread);
     Case c = generate(98);
     c.items.clear();
@@ -2468,6 +2735,9 @@ int main(int argc, char** argv) {
         ok = fetchBuffer(e, true, true) == 0 && ok;
         ok = fetchBuffer(e, false, true) == 0 && ok;
         ok = staleLink() == 0 && ok;
+        ok = staleDispatch() == 0 && ok;
+        ok = cacheFullDispatch(false) == 0 && ok;
+        ok = cacheFullDispatch(true) == 0 && ok;
         ok = staleAhead() == 0 && ok;
     }
     const auto t0 = std::chrono::steady_clock::now();

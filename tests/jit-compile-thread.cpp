@@ -1,11 +1,12 @@
 // The JIT compile thread's bookkeeping, with asserts on. A block whose first instruction is
 // left to the interpreter ends where it starts (last_pc is first_pc - 1); taking it off the
 // done list while an invalidation is logged must not look the empty range up. A block kept
-// ready twice is kept once.
+// ready twice is kept once. A sync compile here runs on the calling thread and is left done.
 #undef NDEBUG
 
 #include <cstdio>
 #include <memory>
+#include <thread>
 
 #include "dynarmic/common/frond_compile_thread.h"
 
@@ -38,7 +39,9 @@ void Expect(bool ok, const char* what) {
 int main() {
     // Each job's range by its pc: an empty one, one inside the invalidated range, one outside.
     const std::uint32_t empty_pc = 0x1000, hit_pc = 0x2000, miss_pc = 0x3000;
+    std::thread::id compiled_on;
     Thread thread{[&](Thread::Job& job) {
+        compiled_on = std::this_thread::get_id();
         const std::uint32_t pc = static_cast<std::uint32_t>(job.location.Value());
         job.first_pc = pc;
         job.last_pc = pc == empty_pc ? pc - 1 : pc + 0x0f;
@@ -96,6 +99,18 @@ int main() {
     }());
     thread.Invalidated(twice);
     Expect(thread.TakeReady(IR::LocationDescriptor{miss_pc}) != nullptr, "block outside the invalidation still ready");
+
+    // Compiled here: on this thread, done at once and off the pending list, counted as queued.
+    const std::uint32_t here_pc = 0x5000;
+    const auto queued = thread.GetStats().queued;
+    thread.CompileHere(IR::LocationDescriptor{here_pc}, std::make_unique<Snapshot>());
+    Expect(compiled_on == std::this_thread::get_id(), "compiled on the calling thread");
+    Expect(thread.IsPending(IR::LocationDescriptor{here_pc}), "pending until taken");
+    Expect(thread.HasDone(), "left on the done list");
+    auto here = thread.TakeDone();
+    Expect(here.size() == 1 && here[0]->status == Thread::Status::Done && thread.StillValid(*here[0]), "done and valid");
+    Expect(!thread.IsPending(IR::LocationDescriptor{here_pc}), "taken off the pending list");
+    Expect(thread.GetStats().queued == queued + 1, "counted as queued");
 
     if (failures) {
         return 1;

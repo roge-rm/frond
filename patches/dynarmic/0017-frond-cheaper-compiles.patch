@@ -1,0 +1,289 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -586,7 +586,9 @@
+ 
+     prelude_info.end_of_prelude = code.offset();
+ 
+-    mem.invalidate_all();
++    // Frond: only the prelude is written yet, and each block is invalidated when it's
++    // emitted. Invalidating the whole code cache here took about 7 ms per JIT on a phone.
++    mem.invalidate(mem.ptr(), static_cast<std::size_t>(prelude_info.end_of_prelude));
+     ProtectCodeMemory();
+ }
+ 
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -15,6 +15,7 @@
+ #include "dynarmic/backend/arm64/a32_core.h"
+ #include "dynarmic/backend/arm64/a32_jitstate.h"
+ #include "dynarmic/common/atomic.h"
++#include "dynarmic/frontend/A32/translate/a32_translate.h"
+ #include "dynarmic/interface/A32/a32.h"
+ 
+ namespace Dynarmic::A32 {
+@@ -178,7 +179,10 @@
+ };
+ 
+ Jit::Jit(UserConfig conf)
+-        : impl(std::make_unique<Impl>(this, conf)) {}
++        : impl(std::make_unique<Impl>(this, conf)) {
++    // Frond: the decoder tables are built here, so the first compile doesn't stall.
++    PrepareDecoders();
++}
+ 
+ Jit::~Jit() = default;
+ 
+--- a/src/dynarmic/backend/arm64/emit_arm64.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64.cpp
+@@ -199,7 +199,9 @@
+     EmittedBlockInfo ebi;
+ 
+     FpsrManager fpsr_manager{code, conf.state_fpsr_offset};
+-    RegAlloc reg_alloc{code, fpsr_manager, GPR_ORDER, FPR_ORDER};
++    static const std::vector<int> gpr_order{GPR_ORDER};
++    static const std::vector<int> fpr_order{FPR_ORDER};
++    RegAlloc reg_alloc{code, fpsr_manager, gpr_order, fpr_order};
+     EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
+ 
+     ebi.entry_point = code.xptr<CodePtr>();
+--- a/src/dynarmic/backend/arm64/reg_alloc.cpp
++++ b/src/dynarmic/backend/arm64/reg_alloc.cpp
+@@ -445,13 +445,18 @@
+         return *empty;
+     }
+ 
+-    std::vector<int> candidates;
+-    std::copy_if(order.begin(), order.end(), std::back_inserter(candidates), [&](int i) { return regs[i].MaybeAllocatable(); });
++    std::array<int, 32> candidates;
++    size_t candidate_count = 0;
++    for (int i : order) {
++        if (regs[i].MaybeAllocatable()) {
++            candidates[candidate_count++] = i;
++        }
++    }
+ 
+     // TODO: The candidate was chosen randomly before, and a LRU was
+     // suggested as an improvement. However, using an incrementing index
+     // seems to be close enough. Determine if an LRU is still needed.
+-    return candidates[alloc_candidate_index++ % candidates.size()];
++    return candidates[alloc_candidate_index++ % candidate_count];
+ }
+ 
+ void RegAlloc::SpillGpr(int index) {
+--- a/src/dynarmic/backend/arm64/reg_alloc.h
++++ b/src/dynarmic/backend/arm64/reg_alloc.h
+@@ -11,6 +11,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include <boost/container/small_vector.hpp>
+ #include <mcl/assert.hpp>
+ #include <mcl/stdint.hpp>
+ #include <mcl/type_traits/is_instance_of_template.hpp>
+@@ -137,7 +138,8 @@
+ };
+ 
+ struct HostLocInfo final {
+-    std::vector<const IR::Inst*> values;
++    // Frond: a location rarely holds more than two values, so these stay off the heap.
++    boost::container::small_vector<const IR::Inst*, 2> values;
+     size_t locked = 0;
+     bool realized = false;
+     size_t uses_this_inst = 0;
+@@ -157,7 +159,8 @@
+ public:
+     using ArgumentInfo = std::array<Argument, IR::max_arg_count>;
+ 
+-    explicit RegAlloc(oaknut::CodeGenerator& code, FpsrManager& fpsr_manager, std::vector<int> gpr_order, std::vector<int> fpr_order)
++    // Frond: the orders are referenced, not copied, and must outlive the RegAlloc.
++    explicit RegAlloc(oaknut::CodeGenerator& code, FpsrManager& fpsr_manager, const std::vector<int>& gpr_order, const std::vector<int>& fpr_order)
+             : code{code}, fpsr_manager{fpsr_manager}, gpr_order{gpr_order}, fpr_order{fpr_order} {}
+ 
+     ArgumentInfo GetArgumentInfo(IR::Inst* inst);
+@@ -338,8 +341,8 @@
+ 
+     oaknut::CodeGenerator& code;
+     FpsrManager& fpsr_manager;
+-    std::vector<int> gpr_order;
+-    std::vector<int> fpr_order;
++    const std::vector<int>& gpr_order;
++    const std::vector<int>& fpr_order;
+ 
+     std::array<HostLocInfo, 32> gprs;
+     std::array<HostLocInfo, 32> fprs;
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -500,7 +500,10 @@
+ };
+ 
+ Jit::Jit(UserConfig conf)
+-        : impl(std::make_unique<Impl>(this, std::move(conf))) {}
++        : impl(std::make_unique<Impl>(this, std::move(conf))) {
++    // Frond: the decoder tables are built here, so the first compile doesn't stall.
++    PrepareDecoders();
++}
+ 
+ Jit::~Jit() = default;
+ 
+--- a/src/dynarmic/backend/x64/reg_alloc.h
++++ b/src/dynarmic/backend/x64/reg_alloc.h
+@@ -11,6 +11,7 @@
+ #include <utility>
+ #include <vector>
+ 
++#include <boost/container/small_vector.hpp>
+ #include <mcl/stdint.hpp>
+ #include <xbyak/xbyak.h>
+ 
+@@ -61,8 +62,8 @@
+     size_t accumulated_uses = 0;
+     size_t total_uses = 0;
+ 
+-    // Value state
+-    std::vector<IR::Inst*> values;
++    // Value state. Frond: a location rarely holds more than two values, so these stay off the heap.
++    boost::container::small_vector<IR::Inst*, 2> values;
+     size_t max_bit_width = 0;
+ };
+ 
+--- a/src/dynarmic/common/memory_pool.cpp
++++ b/src/dynarmic/common/memory_pool.cpp
+@@ -6,19 +6,63 @@
+ #include "dynarmic/common/memory_pool.h"
+ 
+ #include <cstdlib>
++#include <vector>
+ 
+ namespace Dynarmic::Common {
+ 
++namespace {
++// Frond: each IR block has its own pool, and a 4096-instruction slab is over 256 KiB, which
++// malloc maps and unmaps (and the kernel zero-fills) for every compile. Freed slabs are kept
++// per thread and handed to the next pool of the same slab size instead.
++constexpr size_t kKeptSlabs = 4;
++
++struct KeptSlabs {
++    size_t bytes = 0;
++    std::vector<char*> slabs;
++    ~KeptSlabs() {
++        for (char* slab : slabs) {
++            std::free(slab);
++        }
++    }
++};
++
++thread_local KeptSlabs kept;
++
++char* TakeSlab(size_t bytes) {
++    if (kept.bytes == bytes && !kept.slabs.empty()) {
++        char* slab = kept.slabs.back();
++        kept.slabs.pop_back();
++        return slab;
++    }
++    return static_cast<char*>(std::malloc(bytes));
++}
++
++void GiveSlab(char* slab, size_t bytes) {
++    if (kept.bytes != bytes) {
++        for (char* s : kept.slabs) {
++            std::free(s);
++        }
++        kept.slabs.clear();
++        kept.bytes = bytes;
++    }
++    if (kept.slabs.size() < kKeptSlabs) {
++        kept.slabs.push_back(slab);
++    } else {
++        std::free(slab);
++    }
++}
++}  // namespace
++
+ Pool::Pool(size_t object_size, size_t initial_pool_size)
+         : object_size(object_size), slab_size(initial_pool_size) {
+     AllocateNewSlab();
+ }
+ 
+ Pool::~Pool() {
+-    std::free(current_slab);
++    GiveSlab(current_slab, object_size * slab_size);
+ 
+     for (char* slab : slabs) {
+-        std::free(slab);
++        GiveSlab(slab, object_size * slab_size);
+     }
+ }
+ 
+@@ -36,7 +80,7 @@
+ }
+ 
+ void Pool::AllocateNewSlab() {
+-    current_slab = static_cast<char*>(std::malloc(object_size * slab_size));
++    current_slab = TakeSlab(object_size * slab_size);
+     current_ptr = current_slab;
+     remaining = slab_size;
+ }
+--- a/src/dynarmic/frontend/A32/decoder/arm.h
++++ b/src/dynarmic/frontend/A32/decoder/arm.h
+@@ -49,7 +49,7 @@
+ 
+     ArmDecodeTable<V> table{};
+     for (size_t i = 0; i < table.size(); ++i) {
+-        for (auto matcher : list) {
++        for (const auto& matcher : list) {
+             const auto expect = detail::ToFastLookupIndexArm(matcher.GetExpected());
+             const auto mask = detail::ToFastLookupIndexArm(matcher.GetMask());
+             if ((i & mask) == expect) {
+--- a/src/dynarmic/frontend/A32/translate/a32_translate.cpp
++++ b/src/dynarmic/frontend/A32/translate/a32_translate.cpp
+@@ -6,6 +6,12 @@
+ #include "dynarmic/frontend/A32/translate/a32_translate.h"
+ 
+ #include "dynarmic/frontend/A32/a32_location_descriptor.h"
++#include "dynarmic/frontend/A32/decoder/arm.h"
++#include "dynarmic/frontend/A32/decoder/asimd.h"
++#include "dynarmic/frontend/A32/decoder/thumb16.h"
++#include "dynarmic/frontend/A32/decoder/thumb32.h"
++#include "dynarmic/frontend/A32/decoder/vfp.h"
++#include "dynarmic/frontend/A32/translate/impl/a32_translate_impl.h"
+ #include "dynarmic/ir/basic_block.h"
+ 
+ namespace Dynarmic::A32 {
+@@ -24,4 +30,13 @@
+     return (descriptor.TFlag() ? TranslateSingleThumbInstruction : TranslateSingleArmInstruction)(block, descriptor, instruction);
+ }
+ 
++void PrepareDecoders() {
++    // Each decoder builds its table on its first call.
++    (void)DecodeArm<TranslatorVisitor>(0);
++    (void)DecodeASIMD<TranslatorVisitor>(0);
++    (void)DecodeThumb16<TranslatorVisitor>(0);
++    (void)DecodeThumb32<TranslatorVisitor>(0);
++    (void)DecodeVFP<TranslatorVisitor>(0);
++}
++
+ }  // namespace Dynarmic::A32
+--- a/src/dynarmic/frontend/A32/translate/a32_translate.h
++++ b/src/dynarmic/frontend/A32/translate/a32_translate.h
+@@ -62,4 +62,8 @@
+  */
+ bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor, u32 instruction);
+ 
++/// Frond: builds the decoder tables, which are otherwise built by the first translation
++/// (the ARM one takes about 17 ms on x64). Safe to call more than once and from any thread.
++void PrepareDecoders();
++
+ }  // namespace Dynarmic::A32
+--- a/src/dynarmic/ir/opt/identity_removal_pass.cpp
++++ b/src/dynarmic/ir/opt/identity_removal_pass.cpp
+@@ -12,7 +12,9 @@
+ namespace Dynarmic::Optimization {
+ 
+ void IdentityRemovalPass(IR::Block& block) {
+-    std::vector<IR::Inst*> to_invalidate;
++    // Frond: kept per thread, so a compile doesn't allocate it.
++    thread_local std::vector<IR::Inst*> to_invalidate;
++    to_invalidate.clear();
+ 
+     auto iter = block.begin();
+     while (iter != block.end()) {

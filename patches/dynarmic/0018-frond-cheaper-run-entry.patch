@@ -1,0 +1,64 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -477,7 +477,14 @@
+         code.AND(Wscratch0, Wscratch0, 0xffff0000);
+         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
+         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
+-        code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        {
++            // Frond: writing FPCR stalls the pipeline; skip it when it already holds the value.
++            oaknut::Label fpcr_set;
++            code.CMP(Xscratch1, Xscratch0);
++            code.B(EQ, fpcr_set);
++            code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++            code.l(fpcr_set);
++        }
+ 
+         code.LDAR(Wscratch0, Xhalt);
+         code.CBNZ(Wscratch0, return_from_run_code);
+@@ -515,7 +522,14 @@
+         code.AND(Wscratch0, Wscratch0, 0xffff0000);
+         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
+         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
+-        code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        {
++            // Frond: writing FPCR stalls the pipeline; skip it when it already holds the value.
++            oaknut::Label fpcr_set;
++            code.CMP(Xscratch1, Xscratch0);
++            code.B(EQ, fpcr_set);
++            code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++            code.l(fpcr_set);
++        }
+ 
+         oaknut::Label step_hr_loop;
+         code.l(step_hr_loop);
+@@ -568,7 +582,14 @@
+         }
+ 
+         code.LDR(Wscratch0, SP, offsetof(StackLayout, save_host_fpcr));
+-        code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++        {
++            oaknut::Label fpcr_restored;
++            code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
++            code.CMP(Xscratch1, Xscratch0);
++            code.B(EQ, fpcr_restored);
++            code.MSR(oaknut::SystemReg::FPCR, Xscratch0);
++            code.l(fpcr_restored);
++        }
+ 
+         oaknut::Label exit_hr_loop;
+         code.l(exit_hr_loop);
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -84,6 +84,11 @@
+     }
+ 
+     void ClearHalt(HaltReason hr) {
++        // Frond: the run's exit already cleared every reason, so this nearly always finds
++        // nothing to clear; skip the atomic and the barrier then.
++        if ((Atomic::Load(&halt_reason) & static_cast<u32>(hr)) == 0) {
++            return;
++        }
+         Atomic::And(&halt_reason, ~static_cast<u32>(hr));
+         Atomic::Barrier();
+     }
