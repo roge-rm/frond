@@ -6,6 +6,8 @@
 // mapping stops both engines at the same read, and a DMA controller write that starts the PCM DMA takes its buffer
 // page off the lean path while the DMA sends what both paths wrote. An IRQ raised by an MMIO write and an FIQ that
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
+// Graphics memory stores right after a change that makes the frame scan again show in the frame as in Exact, and a
+// timer read after a lean graphics memory store leaves the lean path.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -401,11 +403,113 @@ unsigned commandFiq(uint32_t comp) {
     assert(ok);
     return atSubmit ? 1 : stepped.entries[0].interruptedPc == 0x200ff004 && stepped.entries[0].step > submitted - 300 ? 2 : 0;
 }
+// A guest that changes what the scanout reads, then stores a pixel to each display row, which the lean path takes,
+// and stops before the next frame. eim: the CS5 chip select goes off and back on, so the next frame advance scans
+// the whole frame; transaction: a display transaction latches the surface again. delay moves the change against
+// the display's frames.
+enum class Trigger { eim, transaction };
+std::vector<uint32_t> drawGuest(Trigger trigger, uint32_t delay) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.spin(1000 + delay);
+    if (trigger == Trigger::eim) {
+        g.store(0x0022002c, 0x11111e00);
+        g.store(0x0022002c, 0x11111e01);
+    } else {
+        g.graphics(0xaeb68, 0x4d8, 0x78);
+        g.graphics(0xad720, 0x418, 0x800000);
+        g.graphics(0xaeb68, 0x4d8, 0x7b);
+    }
+    std::vector<uint32_t> words;
+    load(words, 2, 0x16800000); load(words, 3, 0x001f07e0);
+    words.push_back(0xe5823000);                          // str r3, [r2]
+    words.push_back(0xe5823008);                          // str r3, [r2, #8]
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return g.words;
+}
+// What the frontend sees where the run stops: the frame hash, the pixels and the rows of the pending frame.
+struct Shown {
+    uint32_t hash = 0, first = 0, last = 0;
+    bool present = false;
+    std::vector<uint32_t> pixels;
+    bool operator==(const Shown& o) const {
+        return hash == o.hash && first == o.first && last == o.last && present == o.present && pixels == o.pixels;
+    }
+};
+Shown drawn(const std::vector<uint32_t>& words, bool fast, Outcome& out) {
+    Imx1Machine* m = make(words, fast);
+    for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
+    Shown s;
+    s.hash = imx1MachineInspect(m).result.graphicsFrameHash;
+    uint32_t width = 0, height = 0;
+    if (const auto* pixels = imx1MachinePeekFrame(m, width, height)) s.pixels.assign(pixels, pixels + width * height);
+    s.present = imx1MachineAcquireFrame(m, width, height, s.first, s.last) != nullptr;
+    if (s.present) imx1MachineAcknowledgeFrame(m);
+    out = finish(m);
+    return s;
+}
+// Fast shows the frame Exact shows at each stop: with the stores before the frame advance Exact runs first, the
+// frame would hold them early.
+void leanDraw(Trigger trigger, const char* name) {
+    uint64_t lean = 0;
+    unsigned differ = 0, old = 0;
+    for (uint32_t delay = 0; delay < 240; ++delay) {
+        const auto words = drawGuest(trigger, delay);
+        Outcome exact, fast;
+        const auto e = drawn(words, false, exact), f = drawn(words, true, fast);
+        assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && !e.pixels.empty());
+        same(exact, fast);
+        assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks);
+        lean += fast.cs5Writes;
+        old += (e.pixels[0] & 0xffffff) == 0x0000ff;
+        if (e == f) continue;
+        if (!differ++)
+            std::printf("%s, delay %u: exact hash %08x rows %u-%u%s, fast hash %08x rows %u-%u%s\n", name, delay, e.hash,
+                        e.first, e.last, e.present ? " pending" : "", f.hash, f.first, f.last, f.present ? " pending" : "");
+    }
+    std::printf("%s: %llu graphics memory writes on the lean path, %u of 240 stops still show the old pixel, %u differ\n",
+                name, (unsigned long long)lean, old, differ);
+    std::fflush(stdout);
+    assert(lean >= 10 && !differ);
+}
+
+// Graphics memory stores and timer count reads in one loop: a timer read after a store whose wait clocks are
+// still deferred leaves the lean path, and the step charges them first.
+void storeThenTimer() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 0, 0x00202000);
+    store(words, 0, 4, 0); store(words, 0, 0, 0x103);   // timer 1 from PERCLK1, no prescaler
+    load(words, 2, 0x16800100);
+    words.push_back(0xe3a08000);                          // mov r8, #0
+    words.push_back(0xe3a070c8);                          // mov r7, #200
+    words.push_back(0xe5827000);                          // loop: str r7, [r2]
+    words.push_back(0xe5905010);                          // ldr r5, [r0, #0x10]
+    words.push_back(0xe0888005);                          // add r8, r8, r5
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1afffffa);                          // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("store then timer exact", exact); print("store then timer fast", fast);
+    std::printf("store then timer: fast cs5 writes on the lean path %llu, timer reads on the lean path %llu\n",
+                (unsigned long long)fast.cs5Writes, (unsigned long long)fast.timerReads);
+    std::fflush(stdout);
+    assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[8]);
+    assert(fast.cs5Writes >= 100);
+    same(exact, fast);
+    assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks);
+}
 }  // namespace
 
 int main() {
     uint32_t stopPc = 0, savePc = 0;
     forcedIrq();
+    leanDraw(Trigger::eim, "draw after eim");
+    leanDraw(Trigger::transaction, "draw after transaction");
+    storeThenTimer();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
         // the engine runs.
@@ -417,7 +521,7 @@ int main() {
         }
         std::printf("command fiq: %u taken right after the submission, %u right after a ring store, %llu graphics memory "
                     "writes on the lean path\n", atSubmit, atStore, (unsigned long long)fastCs5Writes);
-        assert(atSubmit >= 32 && atStore >= 200);
+        assert(atSubmit >= 32 && atStore >= 200 && fastCs5Writes > 0);
     }
     {
         const auto words = guest(Tail::tlb, stopPc, savePc);

@@ -1,0 +1,29 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -484,8 +484,10 @@
+         if (!leanCs5.checked) {
+             leanCs5.checked = true;
+             uint32_t clocks = 0;
++            // With a frame scan due, the step's charge scans the frame before the write, as in Exact.
+             leanCs5.usable = p.boundaryStatus() == Imx1BootstrapAccess::ok && p.quietWriteClocks(clocks) &&
+-                             p.acceptGraphics(p.cs5Configuration, false) == Imx1BootstrapAccess::ok;
++                             p.acceptGraphics(p.cs5Configuration, false) == Imx1BootstrapAccess::ok &&
++                             !p.graphicsFrame.scanDue(p.cs5Configuration, p.peripherals.eimState());
+             if (leanCs5.usable) {
+                 const auto bus = p.peripherals.busReferencePeriod();
+                 const auto cpuPeriod = p.peripherals.cpuReferencePeriod(quietMode);
+--- a/src/uarm/uarm/imx1_graphics_frame.h
++++ b/src/uarm/uarm/imx1_graphics_frame.h
+@@ -54,6 +54,12 @@
+         if (acquired && acquiredGeneration == generation) pending = false;
+         acquired = false;
+     }
++    // advance would read graphics memory now, so a write before it shows in the frame it scans.
++    bool scanDue(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim) const {
++        const auto& display = configuration.displayState();
++        if (!display.lcdEnabled() || !configuration.memoryReady(eim)) return false;
++        return !valid || !enabled || display.revision() != lastRevision || display.frameNumber() != lastFrame;
++    }
+     bool advance(const Imx1Cs5Configuration& configuration, Imx1GraphicsMemory& memory, const Imx1Eim& eim) {
+         const auto& display = configuration.displayState();
+         if (!display.lcdEnabled() || !configuration.memoryReady(eim)) {
