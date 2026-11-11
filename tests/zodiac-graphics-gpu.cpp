@@ -1,6 +1,8 @@
 // The host GPU path of the Zodiac graphics engine against the CPU model: every fill kind the GPU takes, sources in
-// the same bank and the other one, CPU accesses between fills onto pages the GPU holds newer, and the
-// differential mode. Exits 77 where the host has no usable GPU.
+// the same bank and the other one, CPU accesses of every width between fills onto pages the GPU holds newer
+// (masked writes and their patches), the differential mode and the recovery from an injected GL error. Exits 77
+// where the host has no usable GPU. With --bench FRAMES [SIZE [a4]] it times a fill-heavy frame loop with the GPU and without.
+#include <chrono>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -28,7 +30,9 @@ static std::unique_ptr<Imx1GraphicsGpu> makeGpu(bool differential) {
         std::printf("SKIP: no GPU (%s)\n", error.c_str());
         std::exit(77);
     }
-    return std::make_unique<Imx1GraphicsGpu>(std::move(backend), differential);
+    auto gpu = std::make_unique<Imx1GraphicsGpu>(std::move(backend), differential);
+    gpu->minPixels = 0;
+    return gpu;
 }
 
 // Both memories, every byte of each region, read the CPU's way (so GPU-newer pages come back).
@@ -43,7 +47,8 @@ static void compareRegions(Imx1GraphicsMemory& gpu, Imx1GraphicsMemory& cpu, con
             if (a != b) {
                 std::fprintf(stderr, "FAIL: %s kind %u round %u differs at %x: gpu %04x, cpu %04x\n", what, kind, round,
                              region.base + i, a, b);
-                std::exit(1);
+                std::fflush(stdout);
+                std::_Exit(1);  // The GPU thread is still running; skip the exit handlers.
             }
         }
 }
@@ -51,9 +56,13 @@ static void compareRegions(Imx1GraphicsMemory& gpu, Imx1GraphicsMemory& cpu, con
 // Random fills of every kind on two memories, one with the GPU attached. Destinations in bank 0 or bank 1;
 // sources in either, a third of them around the destination (those stay on the CPU). Between fills, CPU writes and
 // reads land on random pages, some of them ones the GPU holds newer. Every fourth fill the regions are compared.
-static void checkFills() {
-    static Imx1GraphicsMemory gpuMemory, cpuMemory;
+// With minPixels, small fills on bytes the GPU hasn't drawn go to the CPU, and the rest still match.
+static void checkFills(uint64_t minPixels) {
+    static Imx1GraphicsMemory memories[2][2];
+    Imx1GraphicsMemory& gpuMemory = memories[minPixels != 0][0];
+    Imx1GraphicsMemory& cpuMemory = memories[minPixels != 0][1];
     auto gpu = makeGpu(false);
+    gpu->minPixels = minPixels;
     std::printf("renderer: %s\n", gpu->renderer().c_str());
     const std::vector<Region> regions = {{0x100000, 0x6000}, {0x900000, 0x6000}};
     for (const auto& region : regions)
@@ -98,20 +107,24 @@ static void checkFills() {
             assert(C::completeFillCpu(*state, eim, cpuMemory, f) == A::ok);
             if (gpu->statistics().fills == before) ++cpuFills;
             // A few CPU writes and reads, anywhere in the regions.
-            for (unsigned i = next(4); i; --i) {
+            for (unsigned i = next(6); i; --i) {
                 const auto& at = regions[next(2)];
-                const uint32_t address = at.base + next(at.bytes / 2) * 2;
-                uint32_t word = next(0x10000), a = 0, b = 0;
-                if (next(2)) {
-                    assert(gpuMemory.accessGpu(*state, eim, address, 2, true, word) == A::ok);
-                    assert(cpuMemory.accessGpu(*state, eim, address, 2, true, word) == A::ok);
+                const uint32_t size = 1u << next(3);
+                // Half of them next to the last fill, where the GPU most likely holds the page newer.
+                const uint32_t address = next(2) ? at.base + next(at.bytes / size) * size :
+                    std::min(f.base + next(64) * 4, region.base + region.bytes - 4) & ~(size - 1);
+                uint32_t word = next(0x10000) | next(0x10000) << 16, a = 0, b = 0;
+                if (next(3)) {
+                    assert(gpuMemory.accessGpu(*state, eim, address, size, true, word) == A::ok);
+                    assert(cpuMemory.accessGpu(*state, eim, address, size, true, word) == A::ok);
                 } else {
-                    assert(gpuMemory.accessGpu(*state, eim, address, 2, false, a) == A::ok);
-                    assert(cpuMemory.accessGpu(*state, eim, address, 2, false, b) == A::ok);
+                    assert(gpuMemory.accessGpu(*state, eim, address, size, false, a) == A::ok);
+                    assert(cpuMemory.accessGpu(*state, eim, address, size, false, b) == A::ok);
                     if (a != b) {
                         std::fprintf(stderr, "FAIL: read kind %u round %u at %x: gpu %04x, cpu %04x\n", kind, round,
                                      address, a, b);
-                        std::exit(1);
+                        std::fflush(stdout);
+                        std::_Exit(1);
                     }
                 }
             }
@@ -130,10 +143,13 @@ static void checkFills() {
     const auto& s = gpu->statistics();
     gpu->report(stdout);
     assert(s.solid && s.inlinePixels && s.copies && s.keyed && s.doubled && s.inverts && s.a4 && s.downloads && s.uploads);
-    assert(cpuFills > 0 && cpuFills < fills / 2);
+    assert(s.maskedWrites && s.patches && s.patchPages && !s.recoveries);
+    assert(minPixels ? gpu->smallFills > 50 : !gpu->smallFills);
+    assert(cpuFills > 0 && cpuFills - gpu->smallFills < fills / 2);
     gpu->detach();
-    std::printf("PASS: %u fills of %u kinds, %llu on the GPU and %u on the CPU, match the CPU model\n", fills, kinds,
-                (unsigned long long)s.fills, cpuFills);
+    std::printf("PASS: %u fills of %u kinds, %llu on the GPU and %u on the CPU (%llu small, under %llu pixels), match the "
+                "CPU model\n", fills, kinds, (unsigned long long)s.fills, cpuFills, (unsigned long long)gpu->smallFills,
+                (unsigned long long)minPixels);
 }
 
 // Differential mode: fills checked one at a time against the shadow copy, no mismatches, and CPU writes reach the
@@ -172,7 +188,129 @@ static void checkDifferential() {
     std::printf("PASS: differential mode compared %llu fills, no mismatches\n", (unsigned long long)s.compared);
 }
 
-int main() {
+// A GL error injected into a held batch of fills, patches and uploads: the commands since the last confirm run
+// again on the CPU, every page comes back and later fills stay on the CPU, all matching the CPU model. Each round
+// confirms a few batches first, so the replica holds read-back pages and uploads when the error comes.
+static void checkRecovery() {
+    for (unsigned round = 0; round < 6; ++round) {
+        static Imx1GraphicsMemory gpuMemory, cpuMemory;
+        auto gpu = makeGpu(false);
+        const std::vector<Region> regions = {{0x100000, 0x6000}, {0x900000, 0x6000}};
+        for (const auto& region : regions)
+            for (uint32_t i = 0; i < region.bytes; i += 2) {
+                uint32_t word = next(0x10000);
+                assert(gpuMemory.accessGpu(*state, eim, region.base + i, 2, true, word) == A::ok);
+                assert(cpuMemory.accessGpu(*state, eim, region.base + i, 2, true, word) == A::ok);
+            }
+        gpu->attach(&gpuMemory);
+        auto& backend = gpu->gpuBackend();
+        const unsigned before = 2 + round, held = 6 + round * 3;
+        for (unsigned n = 0; n < before + held + 8; ++n) {
+            if (n == before) {
+                // Let the confirmed part land, then hold the rest back as one batch with an error in it.
+                backend.drain();
+                backend.hold(true);
+            }
+            const auto& region = regions[next(2)];
+            C::Fill f{};
+            f.width = 1 + next(60);
+            f.height = 1 + next(16);
+            f.pitch = f.width * 2 + next(200) * 2;
+            f.base = region.base + 64 + next((region.bytes - 128 - (f.height - 1) * f.pitch - f.width * 2) / 2) * 2;
+            f.colour = next(0x10000);
+            const unsigned kind = next(4);
+            f.plain = kind == 1;
+            f.keyed = kind == 2;
+            f.invert = kind == 3;
+            if (f.plain || f.keyed) {
+                const auto& from = regions[f.base >= 0x900000 ? 0 : 1];
+                f.sourcePitch = f.width * 2;
+                f.sourceBase = from.base + next((from.bytes - f.height * f.sourcePitch - 8) / 2) * 2;
+                if (f.keyed) f.colour = 0;
+            }
+            assert(C::completeFill(*state, eim, gpuMemory, f) == A::ok);
+            assert(C::completeFillCpu(*state, eim, cpuMemory, f) == A::ok);
+            for (unsigned i = next(4); i; --i) {
+                const uint32_t size = 1u << next(3);
+                const uint32_t address = (f.base + next(f.height * f.pitch / 4) * 4) & ~(size - 1);
+                uint32_t word = next(0x10000) | next(0x10000) << 16;
+                assert(gpuMemory.accessGpu(*state, eim, address, size, true, word) == A::ok);
+                assert(cpuMemory.accessGpu(*state, eim, address, size, true, word) == A::ok);
+            }
+            if (n == before + held / 2) backend.injectError(backend.confirmed() + 1 + next(held / 2));
+            if (n == before + held - 1) {
+                backend.hold(false);
+                backend.drain();
+            }
+        }
+        compareRegions(gpuMemory, cpuMemory, regions, "recovery", 0, round);
+        const auto& s = gpu->statistics();
+        assert(s.recoveries == 1 && s.replayed >= held / 2 && !backend.healthy());
+        assert(gpu->cpuFills >= 8);
+        gpu->report(stdout);
+        gpu->detach();
+    }
+    std::printf("PASS: injected GL errors recovered, replayed commands match the CPU model\n");
+}
+
+// A fill-heavy frame loop on a double-buffered 480x320 surface, as a game might draw it: clear, then 64 sprites of
+// size by size pixels (keyed copies, or A4 blends with a4 set) from a sheet in the other bank, a few CPU writes
+// onto the frame, and the display reading the other buffer, the frame before. Timed with the GPU attached and
+// without; prints frames and fills per second and the GPU's counts.
+static void bench(unsigned frames, uint32_t size, bool a4) {
+    static Imx1GraphicsMemory memories[2];
+    const uint32_t buffers[2] = {0x900000, 0x980000}, sheet = 0x100000, pitch = 480 * 2, sheetPitch = 1024;
+    std::vector<uint8_t> shown(pitch * 320);
+    for (int withGpu = 0; withGpu < 2; ++withGpu) {
+        Imx1GraphicsMemory& memory = memories[withGpu];
+        r = 0x9e3779b97f4a7c15ull;
+        for (uint32_t i = 0; i < sheetPitch * 128; i += 2) {
+            uint32_t word = next(4) ? palette[next(4)] : 0;
+            assert(memory.accessGpu(*state, eim, sheet + i, 2, true, word) == A::ok);
+        }
+        std::unique_ptr<Imx1GraphicsGpu> gpu;
+        if (withGpu) {
+            gpu = makeGpu(false);
+            if (const char* value = std::getenv("FROND_ZODIAC_GPU_MIN_PIXELS")) gpu->minPixels = std::strtoull(value, nullptr, 10);
+            gpu->attach(&memory);
+        }
+        const auto start = std::chrono::steady_clock::now();
+        for (unsigned n = 0; n < frames; ++n) {
+            const uint32_t frame = buffers[n & 1];
+            C::Fill clear{};
+            clear.base = frame; clear.width = 480; clear.height = 320; clear.pitch = pitch; clear.colour = n & 0xffff;
+            assert(C::completeFill(*state, eim, memory, clear) == A::ok);
+            for (unsigned s = 0; s < 64; ++s) {
+                C::Fill sprite{};
+                sprite.width = size; sprite.height = size; sprite.pitch = pitch;
+                sprite.base = frame + ((s * 37 + n * 3) % (320 - size)) * pitch + ((s * 53 + n * 5) % (480 - size)) * 2;
+                sprite.sourceBase = sheet + (s % 4) * size * 2;
+                sprite.sourcePitch = sheetPitch;
+                if (a4) { sprite.a4 = true; sprite.colour = 1 + s % 14; }
+                else { sprite.keyed = true; sprite.colour = 0; }
+                assert(C::completeFill(*state, eim, memory, sprite) == A::ok);
+            }
+            for (unsigned w = 0; w < 16; ++w) {
+                uint32_t word = w * 0x1111;
+                assert(memory.accessGpu(*state, eim, frame + 8 * pitch + w * 4, 4, true, word) == A::ok);
+            }
+            if (n && !memory.copyGpuRange(*state, eim, buffers[~n & 1], pitch * 320, shown.data())) std::abort();
+        }
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        std::printf("bench %s %ux%u %s: %u frames in %.3f s, %.1f frames/s, %.0f fills/s\n", withGpu ? "gpu" : "cpu",
+                    size, size, a4 ? "a4" : "keyed", frames, seconds, frames / seconds, frames * 65 / seconds);
+        if (gpu) {
+            gpu->report(stdout);
+            gpu->detach();
+        }
+    }
+    uint32_t a = 0, b = 0;
+    const uint8_t* x = memories[0].diagnosticData(1, a);
+    const uint8_t* y = memories[1].diagnosticData(1, b);
+    std::printf("bench end states %s\n", a == b && !std::memcmp(x, y, a) ? "equal" : "DIFFER");
+}
+
+int main(int argc, char** argv) {
     uint32_t value = 0x3e00;
     assert(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
     value = 0x11111e01;
@@ -183,6 +321,12 @@ int main() {
     configureGraphicsController(configuration, eim);
     static Imx1GraphicsMemory probe;
     assert(probe.contains(configuration, eim, 0x100000, 0x6000) && probe.contains(configuration, eim, 0x900000, 0x6000));
-    checkFills();
+    if (argc >= 3 && !std::strcmp(argv[1], "--bench")) {
+        bench(unsigned(std::atoi(argv[2])), argc > 3 ? uint32_t(std::atoi(argv[3])) : 32, argc > 4 && !std::strcmp(argv[4], "a4"));
+        return 0;
+    }
+    checkFills(0);
+    checkFills(400);
     checkDifferential();
+    checkRecovery();
 }
