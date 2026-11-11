@@ -1,0 +1,806 @@
+diff --git a/src/common/device_profile5.h b/src/common/device_profile5.h
+index edbb4a6..1738881 100644
+--- a/src/common/device_profile5.h
++++ b/src/common/device_profile5.h
+@@ -183,14 +183,15 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
+      6u << 20, 0, 16u << 20, 16u << 20, DisplayMode::mode_560x160, 1u << 9, false,
+      DeviceNorLayout5::any, 0, 0x8000, false, 32u << 20, 2048ull << 20,
+      {true, "dana", 560, 160, 0, 0, "", "", -1, -1, -1, -1, false, true, false, "", "dana"}},
+-    // The guarded i.MX1 machine behind SocIMX1: screen, pen, buttons and stick. No peripheral is finished
+-    // (two SD slots, IrDA, Bluetooth, USB, sound, vibration), so every capability stays off.
++    // The guarded i.MX1 machine behind SocIMX1: screen, pen, buttons, stick and an SD card in slot 1, up
++    // to 2 GB as the OS has no SDHC. The other peripherals (slot 2, IrDA, Bluetooth, USB, sound,
++    // vibration) aren't finished, so every capability stays off.
+     {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
+      DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
+      DeviceBoard5::imx1Zodiac, DeviceArt::zodiac, {},
+      0x7d0000, 0, 128u << 20, 128u << 20, DisplayMode::mode_480x320, 1u << 10, false,
+-     DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
+-     {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power"}},
++     DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
++     {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
+     // Reserved names: art only, no board yet.
+     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
+      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 79a61a7..15c8865 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -343,6 +343,13 @@ struct Probe {
+         if (irq != irqRaised) { cpuIrq(cpu, false, irq); irqRaised = irq; }
+         if (fiq != fiqRaised) { cpuIrq(cpu, true, fiq); fiqRaised = fiq; }
+     }
++    // A card DMA wrote this RAM page: as a CPU store there, decoded and translated code from it goes.
++    static void dmaStored(void* context, uint32_t pa) {
++        auto& p = *static_cast<Probe*>(context);
++        if (!p.cpu) return;
++        if (!p.fastJit) cpuDropTranslatedCode(p.cpu);
++        if (p.fastEngine) cpuArm920LeanStored(p.cpu, pa);
++    }
+     static void i2cEvent(void* context, const Imx1I2cTransfer& transfer, Imx1I2cResponse response) {
+         auto& p = *static_cast<Probe*>(context);
+         const auto& state = p.peripherals.i2cState();
+@@ -1280,6 +1287,7 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+     configureBoard(p->peripherals, p->options);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
++    p->peripherals.setDmaStoreHook(Probe::dmaStored, p);
+     if (rom && size) p->rom.assign(rom, rom + size);
+     p->alias = entry == Imx1ProbeEntry::resetAlias ? 0 :
+                entry == Imx1ProbeEntry::linkedAlias ? 0x20000000 : 0x10000000;
+@@ -1858,6 +1866,22 @@ Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine* machine, const uin
+     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+     return p->peripherals.transitionGpioInputs(values, masks, commit);
+ }
++Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine* machine, VSD* card, bool commit) {
++    if (!machine) return Imx1BootstrapAccess::sequence;
++    auto* p = machine->probe;
++    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.mmcsdEmptySlot)
++        return Imx1BootstrapAccess::sequence;
++    uint32_t values[4]{}, masks[4]{};
++    masks[1] = imx1MmcsdCardDetectPin;
++    values[1] = card ? 0 : imx1MmcsdCardDetectPin;
++    const auto status = p->peripherals.transitionGpioInputs(values, masks, false);
++    if (status != Imx1BootstrapAccess::ok || !commit) return status;
++    p->peripherals.attachMmcsdCard(card);
++    return p->peripherals.transitionGpioInputs(values, masks, true);
++}
++VSD* imx1MachineMmcsdCard(const Imx1Machine* machine) {
++    return machine ? machine->probe->peripherals.mmcsdCard() : nullptr;
++}
+ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine* machine, uint32_t first, uint32_t second, bool commit) {
+     if (!machine) return Imx1BootstrapAccess::sequence;
+     auto* p = machine->probe;
+@@ -2097,7 +2121,7 @@ static_assert(sizeof(Imx1Sysctrl) == 12, "update its stateVersion and the size i
+ static_assert(sizeof(Imx1Reset) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1Bta) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1Uart) == 264, "update its stateVersion and the size in stateLayoutFingerprint");
+-static_assert(sizeof(Imx1Mmcsd) == 96, "update its stateVersion and the size in stateLayoutFingerprint");
++static_assert(sizeof(Imx1Mmcsd) - Imx1Mmcsd::unsavedBytes == 96, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1I2c) == 64, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1Asp) == 100, "update its stateVersion and the size in stateLayoutFingerprint");
+ static_assert(sizeof(Imx1Pwm) == 64, "update its stateVersion and the size in stateLayoutFingerprint");
+@@ -2401,6 +2425,11 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
+     if (!open("BOOT", Imx1Bootstrap::stateVersion, true, a)) return info;
+     staged.board->state(a);
+     if (!finish(a)) return info;
++    // The card section, only in states saved with a card in. It waits in the board for the next attach.
++    if (open("SDCD", Imx1Bootstrap::cardStateVersion, false, a)) {
++        staged.board->stateCard(a);
++        if (!finish(a)) return info;
++    } else if (info.status != S::ok) return info;
+     if (!open("SRAM", stateMemoryVersion, true, a)) return info;
+     staged.board->stateSram(a);
+     if (!finish(a)) return info;
+@@ -2522,6 +2551,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
+     { auto a = file.begin(stateFourcc("DCAC"), Arm920SavedState::stateVersion); cpu->stateDcache(a); file.end(); }
+     { auto a = file.begin(stateFourcc("TLB "), Arm920SavedState::stateVersion); cpu->stateTlb(a); file.end(); }
+     { auto a = file.begin(stateFourcc("BOOT"), Imx1Bootstrap::stateVersion); p->peripherals.state(a); file.end(); }
++    if (p->peripherals.mmcsdCard()) {
++        auto a = file.begin(stateFourcc("SDCD"), Imx1Bootstrap::cardStateVersion);
++        p->peripherals.stateCard(a);
++        file.end();
++    }
+     { auto a = file.begin(stateFourcc("SRAM"), stateMemoryVersion); p->peripherals.stateSram(a); file.end(); }
+     for (unsigned bank = 0; bank < 2; ++bank) {
+         auto a = file.begin(stateFourcc(bank ? "SDR1" : "SDR0"), stateMemoryVersion);
+@@ -2572,15 +2606,20 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
+     if (!machine) { Imx1StateInfo info; info.status = Imx1StateStatus::notAtBoundary; return info; }
+     auto* p = machine->probe;
+     StagedState staged;
+-    const auto info = decodeState(*p, data, size, flags, buildNote, staged);
++    auto info = decodeState(*p, data, size, flags, buildNote, staged);
+     if (info.status != Imx1StateStatus::ok) return info;
+     // Nothing from here on can fail. No cpuIrq call, so the restored lines make no new edge.
+     cpuArm920ApplyState(p->cpu, *staged.cpu);
+     if (flags & imx1StateExternalReset) staged.board->takeExternalReset(p->peripherals);
+     else if (flags & imx1StateKeepMemory) staged.board->takeMemory(p->peripherals);
++    // The card stays in the slot. It carries on from the state's card section if there is one, else it
++    // starts again with no transfer.
++    VSD* const card = p->peripherals.mmcsdCard();
+     p->peripherals = std::move(*staged.board);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
++    p->peripherals.setDmaStoreHook(Probe::dmaStored, p);
++    info.cardResumed = card && p->peripherals.attachMmcsdCard(card);
+     p->cs4Capture = *staged.cs4;
+     p->cs5Reset = *staged.cs5Reset;
+     p->cs5Configuration = std::move(*staged.graphics);
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index 05a3f1f..f7e4fce 100644
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -270,6 +270,14 @@ Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
+ // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
+ Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],
+                                                const uint32_t (&masks)[4], bool commit = true);
++// The card in the internal MMCSD slot (slot 1), or null to take it out, with its card detect pin, GPIO B20,
++// low while a card is in (ROM 204c5a5c). The guest sees the pin change and mounts or drops the card itself.
++// Needs the virtual slot (mmcsdEmptySlot). A state saved with a card in keeps the card's own state and the
++// transfer under way in its SDCD section; the card image itself stays outside. Setting the card already in
++// changes nothing.
++inline constexpr uint32_t imx1MmcsdCardDetectPin = 1u << 20;
++Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine*, VSD* card, bool commit = true);
++VSD* imx1MachineMmcsdCard(const Imx1Machine*);
+ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
+                                                  bool commit = true);
+ // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
+@@ -336,6 +344,10 @@ struct Imx1StateInfo {
+     // Saved by the other engine: the JIT counters start from zero.
+     bool engineChanged = false;
+     bool coreRevisionDiffers = false, buildNoteDiffers = false;
++    // Load only: the card in the slot took on the state's card section. Without one, or for a card of
++    // another size, the slot starts again with no transfer and the caller resets the card. With no card
++    // in, the section waits for the next imx1MachineSetMmcsdCard.
++    bool cardResumed = false;
+ };
+ // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
+ // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+index f336fa9..ca10643 100644
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -160,6 +160,7 @@ void Imx1Bootstrap::advanceSystemOutput(uint64_t systemClocks, bool wholeWritePe
+     if (lcdcContrastOnly && (rmcr & 2) && (pwmr & 0x100))
+         contrastPhase = (contrastPhase + contrastClocks / cgm.perclk2Divider()) & 255;
+     mmcsd.advancePerclk2(contrastClocks / cgm.perclk2Divider());
++    if (mmcsd.dataWaiting()) cardDmaService();
+     asp.advance(contrastClocks / cgm.perclk2Divider());
+     perclk2Phase = contrastClocks % cgm.perclk2Divider();
+     const uint64_t clocks = systemClocks + perclk1Phase;
+@@ -259,6 +260,49 @@ bool Imx1Bootstrap::pcmDmaSourceValid(uint32_t address, uint32_t bytes) const {
+     return bytes && !(bytes & 3) && !(address & 3) && cacheMemoryRange(address, bytes, false);
+ }
+ 
++// MC9328MX1RM 20.5.1 and 11: a card read takes BUFFER_ACCESS (FIFO mode, 16-bit) to linear RAM, a write
++// linear RAM to BUFFER_ACCESS, with the request enabled and no repeat. Only RAM a plain access reaches.
++bool Imx1Bootstrap::cardDmaConfigurationValid(unsigned number, const uint32_t* channel) const {
++    if (number == 10 || !mmcsd.card() || channel[4] != 13 || !channel[2]) return false;
++    const uint32_t control = channel[3];
++    if ((control & 0xe) != 8) return false;
++    const uint32_t sourceMode = (control >> 10) & 3, destinationMode = (control >> 12) & 3;
++    const uint32_t sourceSize = (control >> 4) & 3, destinationSize = (control >> 6) & 3;
++    if (sourceMode == 2 && destinationMode == 0 && sourceSize == 2 && channel[0] == 0x00214038)
++        return cacheMemoryRange(channel[1], channel[2], true);
++    if (sourceMode == 0 && destinationMode == 2 && destinationSize == 2 && channel[1] == 0x00214038)
++        return cacheMemoryRange(channel[0], channel[2], false);
++    return false;
++}
++
++// Moves the card's waiting data through each enabled card channel in the matching direction, as much
++// as its count has left, at once. A channel that reaches its count sets its DISR bit and stops.
++void Imx1Bootstrap::cardDmaService() {
++    SourceChange change(*this);
++    for (unsigned number = 0; number < 10 && mmcsd.dataWaiting(); ++number) {
++        if (!(cardDma.active & (1u << number))) continue;
++        auto& channel = dmaChannels[number];
++        const bool toCard = channel[1] == 0x00214038;
++        if (toCard != mmcsd.dataWrite()) continue;
++        const uint32_t base = toCard ? channel[0] : channel[1];
++        while (cardDma.moved[number] < channel[2] && mmcsd.dataWaiting()) {
++            const uint32_t address = base + cardDma.moved[number];
++            const uint32_t inPage = 0x1000 - (address & 0xfff);
++            const uint32_t size = std::min(inPage, channel[2] - cardDma.moved[number]);
++            uint8_t* page = plainPage(address & ~0xfffu, !toCard);
++            if (!page) break;
++            const uint32_t moved = mmcsd.moveData(page + (address & 0xfff), size);
++            if (moved && !toCard && dmaStoreHook) dmaStoreHook(dmaStoreContext, address & ~0xfffu);
++            cardDma.moved[number] += moved;
++            if (moved < size) break;
++        }
++        if (cardDma.moved[number] == channel[2]) {
++            dmaStatus |= 1u << number;
++            cardDma.active &= ~(1u << number);
++        }
++    }
++}
++
+ bool Imx1Bootstrap::pcmDmaConfigurationValid(const uint32_t* channel) const {
+     return (channel[3] & ~5u) == 0x2088 && channel[1] == 0x00218000 &&
+            channel[4] == 16 && channel[5] == 8 && channel[6] == 0 &&
+@@ -699,7 +743,8 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+             if (value & ~mask) return Imx1BootstrapAccess::reservedBits;
+             if (offset == 8) dmaMask = value;
+             else if (offset == 0x1c) dmaBurstTimeout = value;
+-            else if (offset == 4 && (dmaChannels[10][3] & 1)) dmaStatus &= ~value;
++            // Channel 10's bit only clears while it is enabled; the card channels' always do.
++            else if (offset == 4) dmaStatus &= ~(value & ((dmaChannels[10][3] & 1) ? 0x7ffu : 0x3ffu));
+         } else value = offset == 8 ? dmaMask : offset == 0x1c ? dmaBurstTimeout : offset == 4 ? dmaStatus : 0;
+         return Imx1BootstrapAccess::ok;
+     }
+@@ -717,8 +762,12 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+                 if (value & 1) {
+                     auto next = std::vector<uint32_t>(channel, channel + 7);
+                     next[3] = value;
+-                    if (offset / 0x40 != 10 || !pcmDmaConfigurationValid(next.data()) || dmaResetClocks || !(dmaControl & 1))
+-                        return Imx1BootstrapAccess::sideEffect;
++                    const unsigned number = offset / 0x40;
++                    if (dmaResetClocks || !(dmaControl & 1)) return Imx1BootstrapAccess::sideEffect;
++                    if (number == 10 ? !pcmDmaConfigurationValid(next.data()) : !cardDmaConfigurationValid(number, next.data()))
++                        return number != 10 && !mmcsd.card() ? Imx1BootstrapAccess::sideEffect :
++                               number != 10 && next[4] == 13 ? Imx1BootstrapAccess::memoryUnavailable :
++                               Imx1BootstrapAccess::sideEffect;
+                 }
+                 const auto source = (value >> 10) & 3, destination = (value >> 12) & 3;
+                 if (((value >> 4) & 3) == 3 || ((value >> 6) & 3) == 3 ||
+@@ -738,8 +787,18 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+                     dmaPcmSource = channel[0];
+                 }
+             }
++            const unsigned number = offset / 0x40;
++            if (number != 10 && (cardDma.active & (1u << number)) && word != 3) return Imx1BootstrapAccess::sideEffect;
+             // The selected probe is little endian; both DMA address registers are word aligned.
+             channel[word] = word < 2 ? value & ~3u : value;
++            if (number != 10 && word == 3) {
++                if (!(value & 1)) cardDma.active &= ~(1u << number);
++                else if (!(cardDma.active & (1u << number))) {
++                    cardDma.active |= 1u << number;
++                    cardDma.moved[number] = 0;
++                    cardDmaService();
++                }
++            }
+         } else value = channel[word];
+         return Imx1BootstrapAccess::ok;
+     }
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+index 3a8ee22..600a3bd 100644
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -41,6 +41,29 @@ class Imx1Bootstrap {
+     bool aspPenWakePossible(const Imx1AspPenInputs& inputs) const;
+     const Imx1AspPenInputs& aspPenInputs() const { return asp.currentPenInputs(); }
+     void setMmcsdEmptySlot(bool enabled) { SourceChange change(*this); mmcsd.setEmptySlot(enabled); }
++    // The card in the MMCSD slot, or null. Card detect is a GPIO input the caller drives. The card already
++    // in, or a card a loaded state's card section resumes (stateCard), keeps its transfer and DMA. Returns
++    // true when it does.
++    bool attachMmcsdCard(VSD* card) {
++        SourceChange change(*this);
++        if (mmcsd.attachCard(card)) return true;
++        cardDma = {};
++        return false;
++    }
++    VSD* mmcsdCard() const { return mmcsd.card(); }
++    // The card section: saved only while a card is in, so a state with the slot empty keeps the BOOT layout.
++    static constexpr uint32_t cardStateVersion = Imx1Mmcsd::cardStateVersion;
++    template <class A> void stateCard(A& a) {
++        SourceChange change(*this);
++        mmcsd.stateCard(a);
++        a.Do32(cardDma.active).DoBuffer32(cardDma.moved, 11);
++        a.Require(!(cardDma.active & ~0x3ffu), "card dma channel");
++        for (unsigned n = 0; n < 10 && a.ok(); ++n)
++            a.Require(!(cardDma.active & (1u << n)) || ((dmaChannels[n][3] & 1) && cardDma.moved[n] <= dmaChannels[n][2]),
++                      "card dma count");
++    }
++    // Called with the physical address of each 4 KiB page a DMA transfer writes, so decoded code from it goes.
++    void setDmaStoreHook(void (*hook)(void*, uint32_t), void* context) { dmaStoreHook = hook; dmaStoreContext = context; }
+     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
+     uint32_t lcdcContrastPhase() const { return contrastPhase; }
+     bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); return rtc.initialise(time); }
+@@ -394,6 +417,9 @@ class Imx1Bootstrap {
+     uint32_t contrastPhase = 0, perclk2Phase = 0;
+     Imx1Uart uart1{false}, uart2{true};
+     void advancePcm(uint64_t systemClocks);
++    // The MMCSD card's data DMA: a channel other than 10 on request 13 (SDHC) between BUFFER_ACCESS and RAM.
++    bool cardDmaConfigurationValid(unsigned number, const uint32_t* channel) const;
++    void cardDmaService();
+     bool pcmDmaSourceValid(uint32_t address, uint32_t bytes) const;
+     bool pcmDmaConfigurationValid(const uint32_t* channel) const;
+     void pcmDmaBeat();
+@@ -455,6 +481,14 @@ class Imx1Bootstrap {
+         }
+     };
+     mutable RunCache runCache;
++    // In the card section (stateCard): the card DMA channels taking requests and the bytes each has moved.
++    // Not saved: the store hook.
++    struct CardDma {
++        uint32_t active = 0;
++        uint32_t moved[11] = {};
++    } cardDma;
++    void (*dmaStoreHook)(void*, uint32_t) = nullptr;
++    void* dmaStoreContext = nullptr;
+     // Every method that can change a source other than the GPIO ports holds one of these while it runs.
+     struct SourceChange {
+         const Imx1Bootstrap& board;
+@@ -471,7 +505,7 @@ class Imx1Bootstrap {
+     };
+ 
+    public:
+-    static constexpr size_t unsavedBytes = sizeof(RunCache);
++    static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + 2 * sizeof(void*) + Imx1Mmcsd::unsavedBytes;
+ };
+ 
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+diff --git a/src/uarm/uarm/imx1_mmcsd.h b/src/uarm/uarm/imx1_mmcsd.h
+index 4c9757f..0657981 100644
+--- a/src/uarm/uarm/imx1_mmcsd.h
++++ b/src/uarm/uarm/imx1_mmcsd.h
+@@ -1,18 +1,82 @@
+ #ifndef FROND_IMX1_MMCSD_H
+ #define FROND_IMX1_MMCSD_H
+ 
++#include <algorithm>
+ #include <cstdint>
++#include <cstring>
++#include <vector>
++
++#include "vSD.h"
+ 
+ enum class Imx1MmcsdAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput, sequence };
+ 
+-// MC9328MX1RM 7.2 and 20.6: startup and explicit empty-slot command discovery.
++// MC9328MX1RM 7.2 and 20.6: startup, the virtual slot's command timing and, with a card attached,
++// the card's commands, responses and block data. The data goes through a DMA channel the board runs
++// (Imx1Bootstrap), 16-bit halfwords of the FIFO taken as the card's bytes in order.
+ class Imx1Mmcsd {
+    public:
+     void setEmptySlot(bool enabled) { emptySlot = enabled; }
++    // The card in the virtual slot, or null for none. Only with the virtual slot. Attaching the card already
++    // in keeps the command and transfer under way. After a state load with the card's section (stateCard)
++    // the next attach takes that state on into the card if it is the same size, and drops it otherwise.
++    // Returns true when the slot carries on, false when it starts again with no command or data.
++    bool attachCard(VSD* card) {
++        card = emptySlot ? card : nullptr;
++        const bool resuming = resume.valid;
++        resume.valid = false;
++        if (!resuming && card == slot.card) return true;
++        slot.card = card;
++        // Through pointers, so only the code that attaches a card links vSD.
++        slot.command = vsdCommand;
++        slot.fromCard = vsdDataXferBlockFromCard;
++        slot.toCard = vsdDataXferBlockToCard;
++        slot.saveCard = vsdMachineSave;
++        const bool resumed = resuming && card && vsdMachineLoad(card, resume.card.data(), resume.card.size());
++        resume.card.clear();
++        if (resumed) return true;
++        slot.responseCount = slot.responseRead = 0;
++        endData();
++        return false;
++    }
++    VSD* card() const { return slot.card; }
+     bool interruptKnown() const { return emptySlot; }
+     bool interruptOutput() const { return emptySlot && interrupt; }
+     bool clockRunning() const { return running; }
+-    bool canInterrupt() const { return emptySlot && (control & 4) && remaining && !(registers[9] & 4); }
++    bool canInterrupt() const {
++        if (!emptySlot || !(control & 4)) return false;
++        if (slot.dataPhase) return !(registers[9] & dataMask());
++        return remaining && (!(registers[9] & 4) || (slot.data && !(registers[9] & dataMask())));
++    }
++    // The data phase's clocks have passed and the bytes wait for the DMA.
++    bool dataWaiting() const { return slot.dataWaiting; }
++    bool dataWrite() const { return slot.dataWrite; }
++    uint32_t dataLeft() const { return slot.dataBytes - slot.dataDone; }
++    // Moves up to bytes of the waiting data between the card and memory. A failed card access ends the
++    // transfer with a CRC error. Returns the bytes moved.
++    uint32_t moveData(uint8_t* bytes, uint32_t size) {
++        if (!slot.dataWaiting) return 0;
++        const uint32_t length = registers[6];
++        uint32_t moved = 0;
++        while (moved < size && slot.dataDone < slot.dataBytes) {
++            const uint32_t offset = slot.dataDone % length;
++            if (!slot.dataWrite && !offset &&
++                (!slot.card || slot.fromCard(slot.card, slot.block, length) != SdDataOk)) return failData(moved);
++            const uint32_t n = std::min(size - moved, length - offset);
++            if (slot.dataWrite) std::memcpy(slot.block + offset, bytes + moved, n);
++            else std::memcpy(bytes + moved, slot.block + offset, n);
++            moved += n;
++            slot.dataDone += n;
++            if (slot.dataWrite && offset + n == length &&
++                (!slot.card || slot.toCard(slot.card, slot.block, length) != SdDataOk)) return failData(moved);
++        }
++        if (slot.dataDone == slot.dataBytes) {
++            // DATA_TRANS_DONE, and WRITE_OP_DONE after a write: the virtual card programs at once.
++            status |= slot.dataWrite ? 0x1800 : 0x800;
++            if (!(registers[9] & dataMask())) interrupt = true;
++            endData();
++        }
++        return moved;
++    }
+     // PERCLK2 cycles until the clock stop or command in progress ends, 0 when neither runs.
+     uint64_t idleQuietPerclk2() const {
+         if (!running || !(control & 4)) return 0;
+@@ -33,12 +97,23 @@ class Imx1Mmcsd {
+             if (ticks < stopRemaining) stopRemaining -= unsigned(ticks);
+             else { stopRemaining = 0; running = false; phase = 0; }
+         } else if (remaining) {
+-            if (ticks < remaining) remaining -= unsigned(ticks);
+-            else {
+-                remaining = 0;
+-                // Completion is the transmitter event; an absent card supplies no response bytes.
+-                status = 0x2000 | (responseExpected ? 2 : 0);
+-                interrupt = !(registers[9] & 4);
++            if (ticks < remaining) { remaining -= unsigned(ticks); return; }
++            const uint64_t left = ticks - remaining;
++            remaining = 0;
++            if (slot.dataPhase) {
++                // The block clocks have passed; the bytes wait for the DMA.
++                slot.dataPhase = false;
++                slot.dataWaiting = true;
++                return;
++            }
++            // Completion is the transmitter event; an absent card supplies no response bytes.
++            status = 0x2000 | (responseExpected ? 2 : 0);
++            interrupt = !(registers[9] & 4);
++            if (slot.data && !responseExpected) {
++                slot.dataPhase = true;
++                remaining = slot.dataClocks;
++                if (left >= remaining) { remaining = 0; slot.dataPhase = false; slot.dataWaiting = true; }
++                else remaining -= unsigned(left);
+             }
+         }
+     }
+@@ -92,6 +167,7 @@ class Imx1Mmcsd {
+                 if (!emptySlot) return A::externalInput;
+                 if (value != 6) return A::sideEffect;
+                 if (!enable || !ready || running || staged != 15) return A::sequence;
++                if (slot.card) return launchCardCommand();
+                 const uint32_t command = registers[10], format = registers[3];
+                 const bool resetCommand = command == 0 && format == 0x80;
+                 const bool responseCommand = (command == 55 && format == 1) ||
+@@ -110,6 +186,8 @@ class Imx1Mmcsd {
+                 if (!enable || !stop || remaining || (value & 0x20)) return A::sideEffect;
+                 if (!stopRemaining) stopRemaining = 8;
+                 control = 4; status = 0; interrupt = false;
++                // A transfer still waiting on its DMA is given up.
++                endData();
+                 return A::ok;
+             }
+             control = value & 0x24;
+@@ -120,6 +198,12 @@ class Imx1Mmcsd {
+             if (!emptySlot) return A::externalInput;
+             value = status | (running && (control & 4) ? 0x100 : 0); return A::ok;
+         }
++        if (index == 13 && slot.card) {
++            // RES_FIFO: the response, a halfword a read, first bits first.
++            if (write || slot.responseRead >= slot.responseCount) return A::sideEffect;
++            value = slot.response[slot.responseRead++];
++            return A::ok;
++        }
+         if (index == 8 || index >= 13) return A::externalInput;
+         static constexpr uint32_t masks[]{0,0,0x3f,0x1fff,0xff,0xffff,0x3ff,0xffff,0,0x7f,0x3f,0xffff,0xffff};
+         if (!write) { value = registers[index]; return A::ok; }
+@@ -142,11 +226,85 @@ class Imx1Mmcsd {
+         a.FixedBool(emptySlot).DoBool(resetAsserted).DoBool(ready);
+         a.Require(registers[2] < 64, "mmcsd clock rate");
+     }
++    // The card section of a machine state, kept only while a card is in: the response, the transfer under
++    // way and the card's own state. A loaded one waits for the next attachCard.
++    static constexpr uint32_t cardStateVersion = 1;
++    template <class A> void stateCard(A& a) {
++        std::vector<uint8_t> card;
++        if (!A::loading && slot.card) slot.saveCard(slot.card, card);
++        a.DoBuffer16(slot.response, 8).Do8(slot.responseCount).Do8(slot.responseRead);
++        a.DoBool(slot.data).DoBool(slot.dataWrite).DoBool(slot.dataPhase).DoBool(slot.dataWaiting);
++        a.Do32(slot.dataBytes).Do32(slot.dataDone).Do32(slot.dataClocks).DoBuffer(slot.block, sizeof(slot.block));
++        a.DoVector(card, 256);
++        a.Require(emptySlot, "card without the virtual slot");
++        a.Require(slot.responseRead <= slot.responseCount && slot.responseCount <= 8, "card response");
++        a.Require(slot.dataDone <= slot.dataBytes && (!slot.dataPhase || !slot.dataWaiting) &&
++                  (slot.data || (!slot.dataPhase && !slot.dataWaiting && !slot.dataBytes)), "card transfer");
++        if (A::loading && a.ok()) { resume.card = std::move(card); resume.valid = true; }
++    }
+    private:
++    // INT_MASK bits of the data phase's end: DATA_TRAN, and WRITE_OP_DONE for a write.
++    uint32_t dataMask() const { return slot.dataWrite ? 3 : 1; }
++    void endData() {
++        slot.data = slot.dataWrite = slot.dataPhase = slot.dataWaiting = false;
++        slot.dataBytes = slot.dataDone = slot.dataClocks = 0;
++    }
++    uint32_t failData(uint32_t moved) {
++        status |= 0x800 | (slot.dataWrite ? 4 : 8);
++        if (!(registers[9] & dataMask())) interrupt = true;
++        endData();
++        return moved;
++    }
++    // A command to the attached card. The card answers at once; the response is the guest's when the
++    // command and response bits have passed on the card clock. A command the card doesn't answer
++    // times out after RES_TO clocks, as in the empty slot.
++    Imx1MmcsdAccess launchCardCommand() {
++        using A = Imx1MmcsdAccess;
++        const uint32_t command = registers[10], format = registers[3], response = format & 7;
++        const bool data = format & 8;
++        // Stream mode, ReadWait and the R4 to R6 formats stay outside the subset.
++        if (response > 3 && response != 6) return A::sideEffect;
++        if (format & 0x20) return A::sideEffect;
++        if (response && !registers[4]) return A::sideEffect;
++        if (data && (!registers[6] || registers[6] > 512 || !registers[7])) return A::sideEffect;
++        uint8_t reply[17]{};
++        const auto kind = slot.command(slot.card, uint8_t(command), (registers[11] << 16) | registers[12], reply);
++        const bool longReply = kind == SdReply136bits;
++        const bool answered = kind != SdReplyNone && response && longReply == (response == 2);
++        unsigned bits = 48 + ((format & 0x80) ? 80 : 0);
++        slot.responseCount = slot.responseRead = 0;
++        if (response && !answered) bits += registers[4];
++        else if (response) {
++            const unsigned length = longReply ? 16 : 6;
++            // An R2 starts with the start, transmission and reserved bits, 0x3f; vSD puts the command there.
++            if (longReply) reply[0] = 0x3f;
++            // Long responses drop the CRC byte (20.6.12); the short ones keep it in the last halfword.
++            for (unsigned i = 0; i < length; i += 2)
++                slot.response[slot.responseCount++] = uint16_t(reply[i] << 8 | (i + 1 < length ? reply[i + 1] : 0));
++            if (!longReply) slot.response[2] &= 0xff00;
++            bits += 2 + (longReply ? 136 : 48);
++        }
++        endData();
++        if (data && answered) {
++            const unsigned width = (format & 0x300) == 0x200 ? 4 : 1;
++            const unsigned perBlock = registers[6] * 8 / width + 16 + 2 + ((format & 0x10) ? 16 : 0);
++            slot.data = true;
++            slot.dataWrite = format & 0x10;
++            slot.dataBytes = registers[6] * registers[7];
++            slot.dataClocks = 2 + perBlock * registers[7];
++        }
++        responseExpected = response && !answered;
++        remaining = bits;
++        staged = 0; status = 0; interrupt = false; phase = 0;
++        running = true; control = 4;
++        return A::ok;
++    }
+     void resetRegisters() {
+         control = 0; recovery = 0; ready = false;
+         status = remaining = stopRemaining = staged = phase = 0;
+         running = interrupt = responseExpected = false;
++        slot.responseCount = slot.responseRead = 0;
++        endData();
+         for (auto& value : registers) value = 0;
+         registers[2] = 0x36; registers[4] = 0x40; registers[5] = 0xffff;
+     }
+@@ -156,9 +314,35 @@ class Imx1Mmcsd {
+     uint32_t status = 0, remaining = 0, stopRemaining = 0, staged = 0, phase = 0;
+     bool running = false, interrupt = false, responseExpected = false;
+     bool emptySlot = false, resetAsserted = false, ready = false;
++    // Not saved: the attached card and the command and transfer under way with it.
++    struct Slot {
++        VSD* card = nullptr;
++        SdReplyType (*command)(VSD*, uint8_t, uint32_t, void*) = nullptr;
++        SdDataReplyType (*fromCard)(VSD*, void*, uint32_t) = nullptr;
++        SdDataReplyType (*toCard)(VSD*, const void*, uint32_t) = nullptr;
++        void (*saveCard)(VSD*, std::vector<uint8_t>&) = nullptr;
++        uint16_t response[8]{};
++        uint8_t responseCount = 0, responseRead = 0;
++        // data: the command has a data phase after its response; dataPhase: its clocks are counting;
++        // dataWaiting: they have passed and the bytes wait for the DMA.
++        bool data = false, dataWrite = false, dataPhase = false, dataWaiting = false;
++        uint32_t dataBytes = 0, dataDone = 0, dataClocks = 0;
++        uint8_t block[512]{};
++    } slot;
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++    static_assert(sizeof(Slot) == 592, "update stateCard and cardStateVersion");
++#endif
++    // A loaded card section's card state, for the next attachCard.
++    struct Resume {
++        bool valid = false;
++        std::vector<uint8_t> card;
++    } resume;
++
++   public:
++    static constexpr size_t unsavedBytes = sizeof(Slot) + sizeof(Resume);
+ };
+ #if defined(__GLIBCXX__) && defined(__x86_64__)
+-static_assert(sizeof(Imx1Mmcsd) == 96, "update state() and stateVersion");
++static_assert(sizeof(Imx1Mmcsd) - Imx1Mmcsd::unsavedBytes == 96, "update state() and stateVersion");
+ #endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/soc_IMX1.cpp b/src/uarm/uarm/soc_IMX1.cpp
+index 3c0dd5b..7a1c949 100644
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include "device_configuration.h"
+ #include "imx1_bootstrap.h"
++#include "sdcard.h"
++#include "vSD.h"
+ 
+ namespace {
+     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
+@@ -110,6 +112,42 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
+     return soc.release();
+ }
+ 
++// The largest card the ROM can take: it has no CMD8, so only standard capacity, which vSD gives up to here.
++static constexpr size_t zodiacCardSectors = size_t(2048) << 11;
++
++void SocIMX1::OnSdInsert() {
++    const size_t sectors = sdCardSectorCount();
++    if (sectors > zodiacCardSectors) {
++        std::cerr << "zodiac: the card is over 2 GB, which the Zodiac can't use; left out" << std::endl;
++        return;
++    }
++    if (!vsd) vsd = vsdInit(sdCardRead, sdCardWrite, 0);
++    vsdReset(vsd, uint32_t(sectors));
++    cardIn = true;
++    cardSync = true;
++    SyncCard();
++}
++
++void SocIMX1::OnSdRemount() {
++    cardSync = true;
++    SyncCard();
++}
++
++void SocIMX1::OnSdEject() {
++    cardIn = false;
++    cardSync = true;
++    SyncCard();
++    if (vsd) vsdReset(vsd, 0);
++}
++
++void SocIMX1::SyncCard() {
++    if (!cardSync || halted) return;
++    VSD* const card = cardIn ? vsd : nullptr;
++    if (imx1MachineSetMmcsdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
++        imx1MachineSetMmcsdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
++    cardSync = false;
++}
++
+ void SocIMX1::StateChanged() {
+     const auto status = imx1MachineGetStatus(machine);
+     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
+@@ -131,6 +169,8 @@ void SocIMX1::Reset() {
+         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
+     orientationTracker.Restart(imx1MachineStartups(machine));
+     StateChanged();
++    // The power-on state has the slot empty; a card still in reads as in from the start.
++    if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
+ }
+ 
+ // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
+@@ -162,6 +202,13 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
+     // A saved machine is taken as past its boot.
+     orientationTracker.Loaded(imx1MachineStartups(machine));
+     StateChanged();
++    // A card in carries on from the state's card section, or starts idle without one. With no card in, a
++    // card section waits for OnSdInsert, which a session start calls next; the next Run takes the card out.
++    cardSync = true;
++    if (cardIn) {
++        if (!info.cardResumed) vsdReset(vsd, uint32_t(sdCardSectorCount()));
++        SyncCard();
++    }
+     return true;
+ }
+ 
+@@ -274,6 +321,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+         return maxCycles;
+     }
+     const auto before = imx1MachineGetStatus(machine);
++    SyncCard();
+     PumpInput();
+     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+     Imx1MachineBounds bounds;
+diff --git a/src/uarm/uarm/soc_IMX1.h b/src/uarm/uarm/soc_IMX1.h
+index ae337c7..e66624e 100644
+--- a/src/uarm/uarm/soc_IMX1.h
++++ b/src/uarm/uarm/soc_IMX1.h
+@@ -75,15 +75,18 @@ class SocIMX1 : public SoC {
+     void OnSetAudioQueue(struct AudioQueue*) override {}
+     void OnSetPcmOutputEnabled() override {}
+     void OnSetPcmSuspended() override {}
+-    void OnSdInsert() override {}
+-    void OnSdRemount() override {}
+-    void OnSdEject() override {}
++    void OnSdInsert() override;
++    void OnSdRemount() override;
++    void OnSdEject() override;
+ 
+    private:
+     SocIMX1() = default;
+     void PumpInput();
+     void StateChanged();
+     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
++    // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
++    // machine refuses just now is tried again on the next Run.
++    void SyncCard();
+ 
+     std::vector<uint8_t> rom, saved, powerOn;
+     std::unique_ptr<Imx1I2cReadWindow> eeprom;
+@@ -100,6 +103,10 @@ class SocIMX1 : public SoC {
+     uint64_t creditRemainder{0};
+ 
+     ZodiacInput input;
++
++    // The SD card in slot 1 over the shared card store. The ROM speaks SD 1.x only, so cards stay at 2 GB.
++    struct VSD* vsd{nullptr};
++    bool cardIn{false}, cardSync{false};
+ };
+ 
+ #endif
+diff --git a/src/uarm/uarm/vSD.cpp b/src/uarm/uarm/vSD.cpp
+index 3105c0f..8504dc6 100644
+--- a/src/uarm/uarm/vSD.cpp
++++ b/src/uarm/uarm/vSD.cpp
+@@ -7,6 +7,7 @@
+ #include <cstring>
+ 
+ #include "cputil.h"
++#include "machine_state_archive.h"
+ #include "memory_buffer.h"
+ #include "sd_log_limit.h"
+ #include "savestate/savestateAll.h"
+@@ -784,6 +785,39 @@ void vsdReset(struct VSD *vsd, uint32_t nSec) {
+ 
+ void vsdPowerOff(struct VSD *vsd) { vsdCardReset(vsd); }
+ 
++template <class A>
++static void vsdMachineFields(VSD &v, A &a) {
++    uint8_t state8 = static_cast<uint8_t>(v.state);
++    a.Do32(v.nSec).Do8(state8).Do8(v.busyCount).Do8(v.initWaitLeft).Do16(v.rca).Do16(v.curBufLen);
++    a.DoBool(v.hcCard).DoBool(v.acmdShift).DoBool(v.reportAcmdNext).DoBool(v.bufIsData).DoBool(v.bufContinuous);
++    a.DoBool(v.haveExpectedNumBlocks).DoBool(v.wideBus).DoBool(v.illegalPending);
++    a.DoBool(v.eraseHaveStart).DoBool(v.eraseHaveEnd);
++    a.Do32(v.prevAcmd41Param).Do32(v.curSec).Do32(v.numBlocksExpected).Do32(v.eraseStart).Do32(v.eraseEnd);
++    a.DoBuffer(v.curBuf, sizeof(v.curBuf));
++    v.state = static_cast<State>(state8);
++}
++
++void vsdMachineSave(struct VSD *vsd, std::vector<uint8_t> &out) {
++    out.clear();
++    StateWriter writer(out);
++    vsdMachineFields(*vsd, writer);
++}
++
++bool vsdMachineLoad(struct VSD *vsd, const uint8_t *data, size_t size) {
++    VSD v = *vsd;
++    StateReader reader(data, size);
++    vsdMachineFields(v, reader);
++    // The same checks as vsdLoad: restored lengths feed the backing callbacks or a copy from curBuf.
++    if (!reader.complete() || v.nSec != vsd->nSec || v.hcCard != vsd->hcCard || v.state > StateDis ||
++        (v.bufIsData ? v.curBufLen != 512 : v.curBufLen > sizeof(v.curBuf)) ||
++        ((v.state == StateData || v.state == StateRcv) && !v.curBufLen) ||
++        (v.state == StateRcv && !v.bufIsData))
++        return false;
++    v.illegalReport = false;
++    *vsd = v;
++    return true;
++}
++
+ uint8_t vsdCRC7(uint8_t *data, uint32_t sz) {
+     uint8_t crc = 0;
+     static const uint8_t crc7tab[] = {
+diff --git a/src/uarm/uarm/vSD.h b/src/uarm/uarm/vSD.h
+index 4e58fa3..4adac3d 100644
+--- a/src/uarm/uarm/vSD.h
++++ b/src/uarm/uarm/vSD.h
+@@ -3,7 +3,9 @@
+ #ifndef _VIRTUAL_SD_H_
+ #define _VIRTUAL_SD_H_
+ 
++#include <cstddef>
+ #include <cstdint>
++#include <vector>
+ 
+ struct VSD;
+ typedef struct VSD VSD;
+@@ -36,6 +38,11 @@ bool vsdIsCardBusy(struct VSD *vsd);
+ enum SdDataReplyType vsdDataXferBlockToCard(struct VSD *vsd, const void *data, uint32_t blockSz);
+ enum SdDataReplyType vsdDataXferBlockFromCard(struct VSD *vsd, void *data, uint32_t blockSz);
+ 
++// The card's state for a machine state (machine_state_archive.h), in a layout of its own. Load leaves the
++// card as it was and returns false for another card size or a state the card can't be in.
++void vsdMachineSave(struct VSD *vsd, std::vector<uint8_t> &out);
++bool vsdMachineLoad(struct VSD *vsd, const uint8_t *data, size_t size);
++
+ // util
+ uint8_t vsdCRC7(uint8_t *data, uint32_t sz);
+ 
