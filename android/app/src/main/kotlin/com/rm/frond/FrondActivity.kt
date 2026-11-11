@@ -115,6 +115,8 @@ open class FrondActivity : SDLActivity() {
     @Volatile private var display = ""
     // Game controller buttons and sticks to the Palm's buttons. UI thread only.
     private var controller = ControllerInput(ControllerMap(emptyMap())) { _, _ -> }
+    // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
+    private var zodiacPad: ZodiacPad? = null
     lateinit var runningDevice: Device
         private set
 
@@ -135,7 +137,7 @@ open class FrondActivity : SDLActivity() {
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
         display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
-        requestedOrientation = settings.orientation.request
+        requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
             if (name == "close") leave()
@@ -149,6 +151,7 @@ open class FrondActivity : SDLActivity() {
         // still answers the control socket, so it can save. SDL pauses the audio device.
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE", "0", true)
         Os.setenv("SDL_ANDROID_BLOCK_ON_PAUSE_PAUSEAUDIO", "1", true)
+        setCoreTestEnvironment()
         HostDns.start(applicationContext)
         // A btvirt and sockets left by an emulator that was killed.
         BtLink.cleanLater(applicationContext)
@@ -375,8 +378,13 @@ open class FrondActivity : SDLActivity() {
 
     // SDL asks for an orientation from the window's shape; the setting decides instead.
     override fun setOrientationBis(w: Int, h: Int, resizable: Boolean, hint: String?) {
-        requestedOrientation = settings.orientation.request
+        requestedOrientation = orientationRequest()
     }
+
+    // The Zodiac is a landscape device, so it stays landscape whatever the setting.
+    private fun orientationRequest() =
+        if (launchDevice().zodiac) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else settings.orientation.request
 
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()
@@ -389,9 +397,13 @@ open class FrondActivity : SDLActivity() {
         // Controller keys go to the Palm here and never reach SDL, so they don't also arrive as
         // keyboard keys. Unused ones are swallowed too, or Android turns B into Back.
         if (ControllerMap.fromController(event)) {
+            val pad = zodiacPad
             when (event.action) {
-                android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && !leaving) controller.key(event.deviceId, event.keyCode, true)
-                android.view.KeyEvent.ACTION_UP -> controller.key(event.deviceId, event.keyCode, false)
+                android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && !leaving) {
+                    if (pad != null) pad.key(event.deviceId, event.keyCode, true) else controller.key(event.deviceId, event.keyCode, true)
+                }
+                android.view.KeyEvent.ACTION_UP ->
+                    if (pad != null) pad.key(event.deviceId, event.keyCode, false) else controller.key(event.deviceId, event.keyCode, false)
             }
             return true
         }
@@ -400,7 +412,18 @@ open class FrondActivity : SDLActivity() {
 
     override fun dispatchGenericMotionEvent(event: android.view.MotionEvent): Boolean {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
-            if (!leaving) {
+            val pad = zodiacPad
+            if (!leaving && pad != null) {
+                pad.axes(
+                    event.deviceId,
+                    event.getAxisValue(android.view.MotionEvent.AXIS_X),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_Y),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_HAT_X),
+                    event.getAxisValue(android.view.MotionEvent.AXIS_HAT_Y),
+                    maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_LTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_BRAKE)),
+                    maxOf(event.getAxisValue(android.view.MotionEvent.AXIS_RTRIGGER), event.getAxisValue(android.view.MotionEvent.AXIS_GAS)),
+                )
+            } else if (!leaving) {
                 controller.axes(
                     event.deviceId,
                     event.getAxisValue(android.view.MotionEvent.AXIS_X),
@@ -439,12 +462,14 @@ open class FrondActivity : SDLActivity() {
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
+        if (launchDevice().zodiac) zodiacPad = ZodiacPad(ZodiacPad::push)
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
             override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
             override fun onInputDeviceChanged(deviceId: Int) = updateDanaEnvironment()
             override fun onInputDeviceRemoved(deviceId: Int) {
                 controller.release(deviceId)
+                zodiacPad?.release(deviceId)
                 updateDanaEnvironment()
             }
         }
@@ -453,7 +478,10 @@ open class FrondActivity : SDLActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         // Android stops sending a held controller's events to a window without focus.
-        if (!hasFocus) controller.releaseAll()
+        if (!hasFocus) {
+            controller.releaseAll()
+            zodiacPad?.releaseAll()
+        }
         super.onWindowFocusChanged(hasFocus)
     }
 
@@ -466,6 +494,7 @@ open class FrondActivity : SDLActivity() {
                 .apply { isDaemon = true }.start()
         }
         controller.releaseAll()
+        zodiacPad?.releaseAll()
         // The menu and sheets live in this activity, so they pause with it: a waiting microphone request
         // is dropped and the Bluetooth read stops until the Connections sheet is in front again.
         menuModel?.cancelMicrophoneRequest()
@@ -500,6 +529,7 @@ open class FrondActivity : SDLActivity() {
         link.cancelFiles()
         runOnUiThread {
             controller.releaseAll()
+            zodiacPad?.releaseAll()
             hideKeyboard()
             shownBeforeLeave = (barView?.visibility ?: View.VISIBLE) to (keyboardButton?.visibility ?: View.GONE)
             keyboardButton?.visibility = View.GONE
@@ -778,7 +808,7 @@ open class FrondActivity : SDLActivity() {
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
         super.onConfigurationChanged(newConfig)
-        requestedOrientation = settings.orientation.request
+        requestedOrientation = orientationRequest()
         layoutBar()
         updateSurfaceMargin()
         ViewCompat.requestApplyInsets(SDLActivity.getContentView() ?: window.decorView)
@@ -1226,6 +1256,19 @@ open class FrondActivity : SDLActivity() {
                 if (reply.ok) Log.i(TAG, "speed: ${reply.message}")
             }
         }, "FrondSpeed").apply { isDaemon = true }.start()
+    }
+
+    // Debug builds set FROND_ variables for the core from files/core-env, one NAME=value a line, for speed
+    // tests (FROND_JIT_SYNC, FROND_JIT_STATS and the like).
+    private fun setCoreTestEnvironment() {
+        if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0) return
+        val lines = try { File(filesDir, "core-env").readLines() } catch (e: Exception) { return }
+        for (line in lines) {
+            val name = line.substringBefore('=', "").trim()
+            if (!name.startsWith("FROND_")) continue
+            Os.setenv(name, line.substringAfter('=').trim(), true)
+            Log.i(TAG, "core-env: $name")
+        }
     }
 
     // Debug builds read "driver period" from files/audio-test, for comparing audio setups.

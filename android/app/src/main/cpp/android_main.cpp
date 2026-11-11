@@ -126,3 +126,26 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_push(JNIEnv*, jc
     event.key.keysym.sym = keycode;
     SDL_PushEvent(&event);
 }
+
+// The Zodiac's game controllers from FrondActivity (ZodiacPad.kt), on the Android UI thread. They go
+// into SDL's queue as game controller events for SdlEventHandler, which maps them as the desktop does.
+// which is the Android input device id.
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushButton(JNIEnv*, jclass, jint which, jint button, jboolean down) {
+    SDL_Event event{};
+    event.type = down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+    event.cbutton.timestamp = SDL_GetTicks();
+    event.cbutton.which = which;
+    event.cbutton.button = Uint8(button);
+    event.cbutton.state = down ? SDL_PRESSED : SDL_RELEASED;
+    SDL_PushEvent(&event);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, jclass, jint which, jint axis, jint value) {
+    SDL_Event event{};
+    event.type = SDL_CONTROLLERAXISMOTION;
+    event.caxis.timestamp = SDL_GetTicks();
+    event.caxis.which = which;
+    event.caxis.axis = Uint8(axis);
+    event.caxis.value = Sint16(value);
+    SDL_PushEvent(&event);
+}

@@ -236,7 +236,7 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun addMachine() {
-        if (!copying && !emulatorRunning()) machineDraft = MachineDraft(Device.shown.first())
+        if (!copying && !emulatorRunning()) Device.shown.first().let { machineDraft = MachineDraft(it, MachineSettings.defaults(it)) }
     }
 
     fun cancelMachine() {
@@ -244,7 +244,9 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     fun chooseMachine(device: Device) {
-        machineDraft?.takeIf { it.sessionId == null }?.let { machineDraft = it.copy(device = device) }
+        machineDraft?.takeIf { it.sessionId == null }?.let {
+            machineDraft = it.copy(device = device, settings = it.settings.forDevice(it.device, device))
+        }
     }
 
     fun changeMachineSettings(settings: MachineSettings) {
@@ -292,7 +294,7 @@ class HomeModel(private val activity: HomeActivity) {
     fun firmwareImported(device: Device) {
         val adding = startAfterImport != null
         closeFirmware()
-        if (adding) machineDraft = machineDraft?.copy(device = device)
+        if (adding) machineDraft = machineDraft?.let { it.copy(device = device, settings = it.settings.forDevice(it.device, device)) }
     }
 
     fun restore(state: Bundle?) {

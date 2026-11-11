@@ -8,7 +8,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 # Devices the desktop runs that the Android app has no controls for yet. They stay out of its list.
-DESKTOP_ONLY = {'tapwave-zodiac-2'}
+DESKTOP_ONLY = set()
 
 
 def outputs(profiles):
