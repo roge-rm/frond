@@ -2088,11 +2088,14 @@ int staleLink() {
 }
 
 // A block compiled ahead (B, a branch target of A that hasn't run) whose code is rewritten
-// from outside before the guest first goes there: the new B has to run. Fast, thread on.
+// from outside before the guest first goes there: the new B has to run. Fast, thread on,
+// compiling ahead on (it's off by default).
 int staleAhead() {
     const char* name = "block compiled ahead, rewritten before use";
     cpuSetJitSync(false);
+    setenv("FROND_JIT_AHEAD", "1", 1);
     static Machine m = makeMachine(true);
+    unsetenv("FROND_JIT_AHEAD");
     cpuSetJitSync(!gThread);
     Case c = generate(98);
     c.items.clear();

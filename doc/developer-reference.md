@@ -775,7 +775,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT` | `1` or `0` picks the Fast or Exact engine at run time, over `--engine`. |
 | `FROND_JIT_SYNC` | `1` waits for each compile where it was asked for, so runs repeat exactly. `0` uses the compile thread. Tests and replays default to sync. |
 | `FROND_JIT_THREAD` | `0` compiles in place instead of on the compile thread. |
-| `FROND_JIT_AHEAD` | How many links on from a requested block to compile ahead. `0` is off. Default 1 with the thread. |
+| `FROND_JIT_AHEAD` | How many links on from a requested block to compile ahead. `0` is off, the default. |
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |

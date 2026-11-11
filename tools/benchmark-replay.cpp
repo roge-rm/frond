@@ -312,6 +312,9 @@ int main(int argc, char** argv) {
         unsigned peak=0, snapshots=0;
         bool haveFrame=false;
         size_t next=0;
+        // Host and guest ns of each 1 ms work request, for the pause figures.
+        struct Slice { uint64_t host, guest; };
+        std::vector<Slice> slices; slices.reserve(size_t(duration)+16);
         // BENCH_DUMP_RAM=1 writes guest RAM at the start and end, for tools that read guest data.
         const bool dumpRam=std::getenv("BENCH_DUMP_RAM")!=nullptr;
         auto dump=[&](const char* name) {
@@ -361,8 +364,10 @@ int main(int argc, char** argv) {
                 }
             }
             if (elapsed>=duration*1000000) break;
+            const auto sliceStart=wallNs(); const auto sliceGuest=soc->GetTime();
             const auto count=soc->Run(mips*1000,mips*1000000); // fixed 1 ms work requests
             if (!count) throw std::runtime_error("guest made no progress");
+            slices.push_back({uint64_t(wallNs()-sliceStart),uint64_t(soc->GetTime()-sliceGuest)});
             cycles+=count;
             uint32_t pcm[8192];
             const auto n=audioQueuePopChunk(queue,pcm,8192);
@@ -399,6 +404,36 @@ int main(int argc, char** argv) {
                     hostMips,(unsigned long long)frameCount,(unsigned long long)frameSequence,
                     (unsigned long long)pcmFrames,(unsigned long long)pcmHash);
         std::fflush(stdout);
+        // Pauses on the guest thread: the longest work requests, the most host time in any 20
+        // in a row, and underruns of a real-time player that runs the guest up to BUF ms ahead
+        // of the sound it plays (refilling BUF after each underrun).
+        if (!slices.empty()) {
+            std::vector<uint64_t> hosts; hosts.reserve(slices.size());
+            for (const auto& sl : slices) hosts.push_back(sl.host);
+            std::vector<uint64_t> sorted=hosts; std::sort(sorted.begin(),sorted.end());
+            auto pct=[&](double p) { return sorted[std::min(sorted.size()-1,size_t(p*sorted.size()))]/1e6; };
+            uint64_t window=0, worst=0;
+            size_t worstAt=0, maxAt=0, over5=0;
+            for (size_t i=0;i<hosts.size();++i) {
+                window+=hosts[i]; if (i>=20) window-=hosts[i-20];
+                if (window>worst) { worst=window; worstAt=i; }
+                if (hosts[i]>hosts[maxAt]) maxAt=i;
+                over5+=hosts[i]>5000000;
+            }
+            auto underruns=[&](double bufMs) {
+                const double buf=bufMs*1e6; double real=-buf, guest=0; unsigned n=0;
+                for (const auto& sl : slices) {
+                    if (guest-real>buf) real=guest-buf;
+                    real+=double(sl.host); guest+=double(sl.guest);
+                    if (real>guest) { ++n; real=guest-buf; }
+                }
+                return n;
+            };
+            std::printf("pauses: %zu slices, max %.3f ms, p99 %.3f, p99.9 %.3f, worst 20 %.2f ms, underruns at 10 ms %u, 40 ms %u, "
+                        "over 5 ms %zu, max at slice %zu, worst 20 ending at %zu\n",
+                        hosts.size(),sorted.back()/1e6,pct(0.99),pct(0.999),worst/1e6,underruns(10),underruns(40),over5,maxAt,worstAt);
+            std::fflush(stdout);
+        }
         clockSoc=nullptr;
     } catch (const std::exception& e) { std::fprintf(stderr,"%s\n",e.what()); return 1; }
 }
