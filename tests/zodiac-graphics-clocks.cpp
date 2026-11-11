@@ -1,6 +1,8 @@
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
+#include <numeric>
 #include "imx1_graphics_clocks.h"
 using A = Imx1BootstrapAccess;
 static void put(Imx1GraphicsClocks& c, uint32_t pc, uint32_t off, uint32_t v) {
@@ -20,7 +22,36 @@ static void begin(Imx1GraphicsClocks& c, uint32_t selector = 1) {
 static void advance(Imx1GraphicsClocks& c, uint64_t n) {
     while (n) { auto step = n; if (c.nextEvent()) step = std::min(step,c.nextEvent()); c.advance(step); n -= step; }
 }
+// imx1Gcd against std::gcd: zero, equal, one dividing the other both ways, and unrelated values.
+static void gcdMatches() {
+    const uint64_t values[] = {0, 1, 2, 3, 4, 6, 15, 16, 32768, 65536, 200000000, 16000000, 800000000, 3200000000ull,
+                               12800000000ull, 1ull << 40, (1ull << 63) - 25, ~0ull, 0x8000000000000000ull};
+    unsigned checked = 0;
+    for (uint64_t a : values)
+        for (uint64_t b : values)
+            for (uint64_t k : {uint64_t(1), uint64_t(3), uint64_t(5)}) {
+                const uint64_t x = a, y = b / k * k;
+                if (imx1Gcd(x, y) != std::gcd(x, y) || imx1Gcd(y, x) != std::gcd(y, x)) {
+                    std::fprintf(stderr, "FAIL: gcd(%llu, %llu): %llu, std::gcd %llu\n", (unsigned long long)x, (unsigned long long)y,
+                                (unsigned long long)imx1Gcd(x, y), (unsigned long long)std::gcd(x, y));
+                    std::abort();
+                }
+                checked += 2;
+            }
+    uint64_t r = 88172645463325252ull;
+    for (unsigned i = 0; i < 100000; ++i) {
+        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+        const uint64_t x = (r >> (i % 40)) | 1, y = i & 1 ? x * (i % 7 + 1) : r >> (i % 23);
+        if (imx1Gcd(x, y) != std::gcd(x, y) || imx1Gcd(y, x) != std::gcd(y, x)) {
+            std::fprintf(stderr, "FAIL: gcd(%llu, %llu) differs\n", (unsigned long long)x, (unsigned long long)y);
+            std::abort();
+        }
+        checked += 2;
+    }
+    std::printf("imx1Gcd matches std::gcd for %u pairs\n", checked);
+}
 int main() {
+    gcdMatches();
     Imx1GraphicsClocks c;
     put(c,0x200c45e4,0x80,0x3f);
     for (auto op : {std::array<uint32_t,3>{0x200c4e24,0xa4,0x1100020},
