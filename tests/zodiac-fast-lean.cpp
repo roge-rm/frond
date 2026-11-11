@@ -1317,9 +1317,7 @@ void jitReturns() {
 // A Thumb loop of SWI, count times, with the MMU mapping the ROM at 0; the handler at the SWI vector adds 1 to r4 and returns with MOVS PC, LR. The SWI,
 // the return and the Thumb code after it all run in generated code, so a run of 200 takes few more steps than a
 // run of 1 (each of the two would add 200 if it went through the step).
-Outcome swiLoop(uint32_t count, bool fast) {
-    GraphicsGuest g;
-    g.setup(); g.display(); g.clocks();
+void swiGuest(GraphicsGuest& g, uint32_t count) {
     while ((g.cursor & 31) != 0) { g.word(g.cursor, 0xe1a00000); g.cursor += 4; }
     const uint32_t base = g.cursor;
     std::vector<uint32_t> words;
@@ -1346,11 +1344,55 @@ Outcome swiLoop(uint32_t count, bool fast) {
     words.push_back(0xe1b0f00e);                          // movs pc, lr
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
     g.branch(8, handlerAt);
+}
+Outcome swiLoop(uint32_t count, bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    swiGuest(g, count);
     return runGuest(g.words, fast);
 }
 
+// The SWI loop with IRQs on while timer 1's compare IRQ comes due, display off so the quiet spans are long. A SWI that
+// goes on in the same JIT run leaves the run's budget as it was, so the IRQ comes within a few rounds of Exact's,
+// not after the loop.
+Lines swiTimerLines(bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.clocks();
+    g.store(0x00223008, 59);                              // INTENNUM 59: timer 1
+    g.store(0x00202004, 255);                             // TPRER1
+    g.store(0x00202008, 3000);                            // TCMP1
+    g.store(0x00202000, 0x13);                            // TCTL1: on, PERCLK1, IRQ
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+    swiGuest(g, 1000000);
+    g.word(0x18, 0xe7f000f0);                             // IRQ vector: undefined, the run stops there
+    return runLines(g.words, fast, false);
+}
+void jitSwiTimer() {
+    const auto exact = swiTimerLines(false), fast = swiTimerLines(true);
+    const uint64_t runs = imx1MachineJitRuns(nullptr);
+    printLines("jit swi timer exact", exact); printLines("jit swi timer blocks", fast);
+    const uint32_t e = 1000000 - exact.out.run.result.registers[7], f = 1000000 - fast.out.run.result.registers[7];
+    std::printf("jit swi timer: IRQ after %u rounds against %u, ticks %llu against %llu, %llu in %llu JIT runs\n", f, e,
+                (unsigned long long)fast.out.cheap.time.ticks, (unsigned long long)exact.out.cheap.time.ticks,
+                (unsigned long long)fast.out.jit, (unsigned long long)runs);
+    std::fflush(stdout);
+    assert(exact.entries.size() == 1 && fast.entries.size() == 1);
+    assert(exact.out.run.result.trace.pc == 0x18 && fast.out.run.result.trace.pc == 0x18);
+    assert(e > 1000 && e < 900000);
+    // A round is 5 instructions, a run at most a slice of 997.
+    assert(f + 2 >= e && f <= e + 200);
+}
+
 void jitSwi() {
-    const auto exact = swiLoop(200, false), fast = swiLoop(200, true), once = swiLoop(1, true);
+    const auto exact = swiLoop(200, false);
+    // JIT runs (counted from each machine's start): a privileged SWI and the return to Thumb go on in the same run, so
+    // 200 rounds take few more runs than 1 (each would add two if the SWI and the switch back ended the run).
+    const auto fast = swiLoop(200, true);
+    const uint64_t runs200 = imx1MachineJitRuns(nullptr);
+    const auto once = swiLoop(1, true);
+    const uint64_t runs1Round = imx1MachineJitRuns(nullptr);
+    std::printf("jit swi: %llu JIT runs for 200 rounds, %llu for 1\n", (unsigned long long)runs200,
+                (unsigned long long)runs1Round);
     const auto steps = [](const Outcome& o) { return o.cheap.retired - o.lean - o.jit; };
     print("jit swi exact", exact); print("jit swi blocks", fast);
     std::printf("jit swi: %llu steps for 200 rounds, %llu for 1\n", (unsigned long long)steps(fast),
@@ -1360,6 +1402,7 @@ void jitSwi() {
     assert(once.run.result.registers[4] == 1);
     sameResult(exact, fast);
     assert(steps(fast) < steps(once) + 100);
+    assert(runs200 < runs1Round + 100);
 }
 
 // A loop of a control register read and I- and D-cache operations by index, count times: all run in the JIT's p15
@@ -1432,6 +1475,7 @@ void jitLong() {
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();
+    jitSwiTimer();
     delayLoop();
     delayShort();
     jitDomain();
