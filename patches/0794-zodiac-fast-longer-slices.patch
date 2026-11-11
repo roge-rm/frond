@@ -1,0 +1,15 @@
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -269,8 +269,10 @@
+     PumpInput();
+     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+     Imx1MachineBounds bounds;
+-    bounds.retired = 4000;
+-    bounds.work = 20000;
++    // Fast runs longer slices: each slice end charges the whole board, and the deadline still ends the call on time.
++    const bool fast = imx1MachineFastEngine(machine);
++    bounds.retired = fast ? 8000 : 4000;
++    bounds.work = fast ? 40000 : 20000;
+     bounds.deadline = {before.time.ticks + wanted, 0, 1};
+     const auto started = std::chrono::steady_clock::now();
+     bool waiting = false;
