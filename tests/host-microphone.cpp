@@ -95,6 +95,10 @@ int main() {
         mic.Service({});assert(mic.State()=="off");
         awake=true;mic.Service({});assert(mic.State()=="on");
         mic.Disarm();mic.Service({});assert(mic.State()=="off");
+        // A host-side drop (a host call such as a Power key replay) keeps the choice too.
+        assert(mic.Arm());mic.Suspend();assert(mic.State()=="off");
+        awake=false;mic.Service({});assert(mic.State()=="off");awake=true;mic.Service({});assert(mic.State()=="on");
+        mic.Disarm();
         assert(mic.Arm());mic.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND);
         mic.AppEventOnDeviceThread(SDL_APP_DIDENTERFOREGROUND);mic.Service({});assert(mic.State()=="off");
     }
