@@ -1226,6 +1226,54 @@ void jitReturns() {
     assert(n <= 210 && r >= 180);
 }
 
+// A Thumb loop of SWI, count times, with the MMU mapping the ROM at 0; the handler at the SWI vector adds 1 to r4 and returns with MOVS PC, LR. The SWI,
+// the return and the Thumb code after it all run in generated code, so a run of 200 takes few more steps than a
+// run of 1 (each of the two would add 200 if it went through the step).
+Outcome swiLoop(uint32_t count, bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    while ((g.cursor & 31) != 0) { g.word(g.cursor, 0xe1a00000); g.cursor += 4; }
+    const uint32_t base = g.cursor;
+    std::vector<uint32_t> words;
+    // Sections: 0 the ROM, for the vectors, 0x200 the ROM. MMU on, caches off.
+    load(words, 0, 0x00304000);
+    store(words, 0, 0, 0x20000c1a);
+    load(words, 0, 0x00304800); store(words, 0, 0, 0x20000c1a);
+    load(words, 0, 0x00304000);
+    words.push_back(0xee020f10);                          // TTB
+    load(words, 1, 0x0d); words.push_back(0xee031f10);     // domain 0 client, 1 manager
+    load(words, 1, 0x79); words.push_back(0xee011f10);     // MMU on
+    load(words, 7, count);
+    const uint32_t thumbAt = base + 0x100, handlerAt = base + 0x140;
+    const uint32_t step = thumbAt + 1 - (base + uint32_t(words.size()) * 4 + 8);
+    assert(step < 256);
+    words.push_back(0xe28f5000 | step);                   // add r5, pc, #step
+    words.push_back(0xe12fff15);                          // bx r5
+    while (base + words.size() * 4 < thumbAt) words.push_back(0xe1a00000);
+    words.push_back(0x3f01df00);                          // loop: swi 0; subs r7, #1
+    words.push_back(0x2601d1fc);                          // bne loop; movs r6, #1
+    words.push_back(0x46c0deff);                          // undefined: the run stops here
+    while (base + words.size() * 4 < handlerAt) words.push_back(0xe1a00000);
+    words.push_back(0xe2844001);                          // handler: add r4, r4, #1
+    words.push_back(0xe1b0f00e);                          // movs pc, lr
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(8, handlerAt);
+    return runGuest(g.words, fast);
+}
+
+void jitSwi() {
+    const auto exact = swiLoop(200, false), fast = swiLoop(200, true), once = swiLoop(1, true);
+    const auto steps = [](const Outcome& o) { return o.cheap.retired - o.lean - o.jit; };
+    print("jit swi exact", exact); print("jit swi blocks", fast);
+    std::printf("jit swi: %llu steps for 200 rounds, %llu for 1\n", (unsigned long long)steps(fast),
+                (unsigned long long)steps(once));
+    std::fflush(stdout);
+    assert(exact.run.result.registers[4] == 200 && exact.run.result.registers[6] == 1);
+    assert(once.run.result.registers[4] == 1);
+    sameResult(exact, fast);
+    assert(steps(fast) < steps(once) + 100);
+}
+
 void jitLong() {
     imx1SetFastBlocksDefault(true);
     cpuSetJitSync(true);
@@ -1237,6 +1285,7 @@ void jitLong() {
     delayShort();
     jitDomain();
     jitReturns();
+    jitSwi();
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
 }
