@@ -1762,16 +1762,16 @@ static void zodiacControls() {
     assert(std::string(guestOrientationName(1))=="portrait" && std::string(guestOrientationName(2))=="landscape");
     assert(std::string(guestOrientationName(3))=="reverse-portrait" && std::string(guestOrientationName(4))=="reverse-landscape");
     assert(!*guestOrientationName(0));
-    // The DAL logo's unturned scan (portrait) is skipped from any reset until the OS first goes landscape,
-    // and a guest reset, which shows as the display going off, starts that wait again.
+    // The DAL logo's unturned scan (portrait) is skipped from any startup until the OS first goes landscape.
+    // Sleep and wake turn the display off (scan 0) without a startup, so a portrait program stays portrait.
     {
         GuestOrientationTracker tracker;
-        assert(tracker.Update(0)==0 && tracker.Update(1)==0 && tracker.Update(2)==2 && tracker.Update(1)==1);
-        assert(tracker.Update(0)==0 && tracker.Update(1)==0 && tracker.Update(2)==2);
-        tracker.Restart();
-        assert(tracker.Update(1)==0 && tracker.Update(2)==2);
-        tracker.Loaded();
-        assert(tracker.Update(1)==1);
+        tracker.Restart(0);
+        assert(tracker.Update(0,1)==0 && tracker.Update(1,1)==0 && tracker.Update(2,1)==2 && tracker.Update(1,1)==1);
+        assert(tracker.Update(0,1)==0 && tracker.Update(1,1)==1);
+        assert(tracker.Update(1,2)==0 && tracker.Update(1,2)==0 && tracker.Update(2,2)==2 && tracker.Update(1,2)==1);
+        tracker.Loaded(5);
+        assert(tracker.Update(1,5)==1);
     }
     // Then the window's shape adds nothing: main.cpp passes quarterTurn false.
     assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,1080,2400)==Rotation::landscape_90);
