@@ -180,6 +180,31 @@ int main() {
     uint64_t whole=f.add(1001,7)+f.add(2001,11);
     uint64_t parts=0; for(int i=0;i<1001;++i) parts+=g.add(1,7); for(int i=0;i<2001;++i) parts+=g.add(1,11);
     assert(whole==parts && f.phase==g.phase && f.denominator==g.denominator);
+    {
+        // A denominator that divides the fraction's skips the gcd; both forms give the same over mixed charges.
+        struct Reference {
+            uint64_t phase=0, denominator=1;
+            bool supports(uint64_t d) const {
+                return d && d/std::gcd(d,denominator) <= (std::numeric_limits<uint64_t>::max()/2)/denominator;
+            }
+            uint64_t add(uint64_t n, uint64_t d) {
+                const auto common=denominator*(d/std::gcd(d,denominator));
+                const auto fraction=phase*(common/denominator)+(n%d)*(common/d);
+                phase=fraction%common; denominator=common;
+                return n/d+fraction/common;
+            }
+        } r;
+        Imx1GraphicsFraction h;
+        const uint64_t ds[]{64,128,25000000,1600,6400,3*64,7,1};
+        uint64_t seed=0x9e3779b97f4a7c15u;
+        for (int i=0;i<20000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            const uint64_t d=ds[(seed>>33)%std::size(ds)], n=(seed>>20)&0xffffffffu;
+            assert(h.supports(d)==r.supports(d));
+            if (!r.supports(d)) continue;
+            assert(h.add(n,d)==r.add(n,d) && h.phase==r.phase && h.denominator==r.denominator);
+        }
+    }
     uint32_t pclk=0;
     assert(c.access(0x200c54a8,0x16010090,4,false,pclk)==A::ok && pclk==0x20);
     put(c,0x200c54c0,0x90,0x21);

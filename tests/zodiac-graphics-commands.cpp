@@ -232,4 +232,13 @@ static void checkCommands(bool packedMono) {
 int main() {
     checkCommands(false);
     checkCommands(true);
+    // The fills ran straight on the bank storage; with every fill through accessGpu the same checks pass.
+    const auto direct = Imx1GraphicsCommands::directFillCount;
+    assert(direct > 0);
+    Imx1GraphicsCommands::directFills = false;
+    checkCommands(false);
+    checkCommands(true);
+    assert(Imx1GraphicsCommands::directFillCount == direct);
+    std::printf("PASS: %llu fills completed straight on the bank storage, and the same through accessGpu\n",
+                (unsigned long long)direct);
 }
