@@ -1,0 +1,208 @@
+Hold back a quick press of a key the Dana guest just saw released until it has been released for 100 ms of guest time, so a letter typed twice reaches the ROM as two presses.
+
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -139,7 +139,7 @@
+     SyncCards();
+     if ((old&4) && !(value&4) && !(StdRead(0xfffff441,1)&4)) {
+         ResetPowerProtocol();
+-        resetReply=true; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
++        resetReply=true; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); ClearRegap(); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
+     }
+ }
+ void EmRegsVZDana::PortDataChanged(int p, uint8 old, uint8 value) {
+@@ -149,7 +149,7 @@
+     if (p=='B' && ((old^value)&0x40)) {
+         ResetPowerProtocol();
+         resetAsserted=(value&0x40)!=0;
+-        resetReply=!resetAsserted; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
++        resetReply=!resetAsserted; versionCommand=versionReply=0; packetIndex=pollIndex=0; std::memset(presentedScan,0,8); ClearRegap(); queueHead=queueCount=0; keysDirty=false; if(heldCount) QueueKeys(); UpdateStIrq();
+     }
+ }
+ 
+@@ -173,7 +173,7 @@
+         for(auto byte:pending.tx) uart->Put32(byte);
+     }
+     auto* c=s.GetChunk(ChunkType::regsVZDana); if(!c) return;
+-    c->Put32(9); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h);
++    c->Put32(10); SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h);
+ }
+ void EmRegsVZDana::Load(SavestateLoader<ChunkType>& l) {
+     EmUARTDragonball::PendingState pending;
+@@ -195,7 +195,7 @@
+     auto* c=l.GetChunk(ChunkType::regsVZDana);
+     if(!c) { l.NotifyError(); return; }
+     unsigned version=c->Get32();
+-    if(version!=5 && version!=6 && version!=7 && version!=8 && version!=9) { l.NotifyError(); return; }
++    if(version<5 || version>10) { l.NotifyError(); return; }
+     LoadChunkHelper h(*c);
+     if(version>=6) StateFields(h);
+     else {
+@@ -212,6 +212,10 @@
+     if(version>=8) PowerStateFields(h);
+     if(version>=9) PowerModeFields(h);
+     else { rowGroups=stAsleep ? SelectedRowGroups() : 0; fallingOnly=stAsleep ? 1 : 0; }
++    ClearRegap();
++    if(version>=10) RegapFields(h);
++    if(regapDelay>inputClockHz*kRegapMs/1000 || (!hostPaced && (regapDelay || regapScan[0])) ||
++       (repeatReply && (!packetIndex || !presentedScan[packetIndex-1]))) l.NotifyError();
+     if(sleepCommand>9 || wakeMask[0]>255 || wakeMask[1]>255 || stAsleep>2 || (version<9 && stAsleep>1) ||
+        ebHold>1 || ebReported>1 || (ebReported && !ebHold) || rowGroups>7 || pa3Option>1 || fallingOnly>1 ||
+        (!pa3Option && !stAsleep) || (stAsleep==1 && !fallingOnly) || (stAsleep==2 && !fallingOnly && rowGroups) ||
+@@ -239,7 +243,8 @@
+     if(!valid(heldScan)) l.NotifyError();
+     for(auto& packet:packets) if(!valid(packet)) l.NotifyError();
+     for(unsigned i=0;i<8;i++) if((i<heldCount)!=(heldScan[i]!=0)) l.NotifyError();
+-    if(packetIndex && !packets[queueHead][packetIndex-1]) l.NotifyError();
++    if(packetIndex && !repeatReply && !packets[queueHead][packetIndex-1]) l.NotifyError();
++    if(!valid(regapScan)) l.NotifyError();
+ 
+ }
+ 
+@@ -256,7 +261,7 @@
+     sd0.Reset(); sd1.Reset();
+     if(!hardware) return;
+     ResetPowerProtocol();
+-    hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8);
++    hostPaced=false; inputLastCycle=inputDelay=inputClockHz=0; pollIndex=0; std::memset(presentedScan,0,8); ClearRegap();
+     resetReply=true; resetAsserted=false; versionCommand=versionReply=0;
+     heldKeys=packetKeys=0; heldCount=queueHead=queueCount=0;
+     std::memset(heldScan,0,sizeof heldScan); std::memset(packets,0,sizeof packets); packetIndex=0; keysDirty=false; irqPinHigh=true; irqLatched=false; UpdateStIrq();
+@@ -292,7 +297,7 @@
+         UpdateStIrq(); return;
+     }
+     // Preserve a reply already being clocked; replace all later input with release.
+-    if(packetIndex) { queueCount=1; }
++    if(packetIndex && !repeatReply) { queueCount=1; }
+     else { queueHead=queueCount=0; }
+     heldCount=0; std::memset(heldScan,0,8);
+     QueueKeys(); UpdateStIrq();
+@@ -347,7 +352,12 @@
+ 
+ uint8 EmRegsVZDana::ReadKeyPacket() {
+     if(ebReported && !queueCount && !pollIndex) return 0;
+-    if(pollIndex || !queueCount || (!packetIndex && !InputReady())) {
++    bool ready=!pollIndex && queueCount && (packetIndex || InputReady());
++    if(ready && !packetIndex && RegapBlocked()) {
++        // Hold back a quick press of a just released key; report the held set again meanwhile.
++        if(presentedScan[0]) repeatReply=true; else ready=false;
++    }
++    if(!ready) {
+         if(!hostPaced) return 0;
+         // The ROM polls between IRQs. No new packet still means the last held set.
+         if(pollIndex) {
+@@ -359,7 +369,7 @@
+         if(count) pollIndex=1;
+         return 0x40|count;
+     }
+-    auto* packet=packets[queueHead];
++    auto* packet=repeatReply ? presentedScan : packets[queueHead];
+     uint8 reply;
+     if(packetIndex) reply=packet[packetIndex++-1];
+     else {
+@@ -368,8 +378,13 @@
+         packetIndex=1;
+     }
+     if(packetIndex>8 || !packet[packetIndex-1]) {
+-        std::memcpy(presentedScan,packet,8);
+-        std::memset(packet,0,8); queueHead=(queueHead+1)%32; --queueCount;
++        if(hostPaced) InputReady();
++        if(repeatReply) repeatReply=false;
++        else {
++            if(hostPaced) NoteRelease(packet);
++            std::memcpy(presentedScan,packet,8);
++            std::memset(packet,0,8); queueHead=(queueHead+1)%32; --queueCount;
++        }
+         // Space reports 10 ms apart. The ROM releases every key when no report comes for three
+         // of its 10 ms ticks (20-30 ms), so a held key is reported again well inside that.
+         if(hostPaced) { inputLastCycle=InputCycle(); inputClockHz=InputHz(); inputDelay=inputClockHz/100; }
+@@ -411,15 +426,41 @@
+ uint64 EmRegsVZDana::InputHz() const { return gSession ? uint64(gSession->GetClocksPerSecond()) : 0; }
+ bool EmRegsVZDana::InputReady() {
+     uint64 now=InputCycle(),hz=InputHz();
+-    if(inputClockHz && hz!=inputClockHz) inputDelay=inputDelay*hz/inputClockHz;
++    if(inputClockHz && hz!=inputClockHz) { inputDelay=inputDelay*hz/inputClockHz; regapDelay=regapDelay*hz/inputClockHz; }
+     inputClockHz=hz;
+     if(now>=inputLastCycle) {
+         uint64 elapsed=now-inputLastCycle;
+         inputDelay=elapsed>=inputDelay?0:inputDelay-elapsed;
++        regapDelay=elapsed>=regapDelay?0:regapDelay-elapsed;
+     }
++    if(!regapDelay) std::memset(regapScan,0,8);
+     inputLastCycle=now;
+     return !inputDelay;
+ }
++// True when the queue head presses a key the guest saw released less than kRegapMs ago.
++bool EmRegsVZDana::RegapBlocked() const {
++    if(!regapDelay || !queueCount) return false;
++    for(auto code:packets[queueHead]) {
++        if(!code) break;
++        if(std::find(regapScan,regapScan+8,code)!=regapScan+8 &&
++           std::find(presentedScan,presentedScan+8,code)==presentedScan+8) return true;
++    }
++    return false;
++}
++// Called before next replaces presentedScan: keys it releases start a new regap window,
++// keys it presses again leave regapScan.
++void EmRegsVZDana::NoteRelease(const uint8* next) {
++    auto in=[](const uint8* codes,uint8 code) { return code && std::find(codes,codes+8,code)!=codes+8; };
++    uint8 kept[8]{}; unsigned n=0;
++    for(auto code:regapScan) if(code && !in(next,code)) kept[n++]=code;
++    bool released=false;
++    for(auto code:presentedScan) if(code && !in(next,code)) {
++        released=true;
++        if(!in(kept,code) && n<8) kept[n++]=code;
++    }
++    std::memcpy(regapScan,kept,8);
++    if(released) regapDelay=inputClockHz*kRegapMs/1000;
++}
+ void EmRegsVZDana::CycleSlowly(Bool sleeping) {
+     EmRegsVZ::CycleSlowly(sleeping);
+     ReportHeldKeys();
+@@ -452,7 +493,7 @@
+ 
+ // Common HALT always selects column F; DA/DB select the other columns.
+ bool EmRegsVZDana::StRequest() {
+-    return packetIndex || (!stAsleep && keysDirty && InputReady());
++    return packetIndex || (!stAsleep && keysDirty && InputReady() && (presentedScan[0] || !RegapBlocked()));
+ }
+ void EmRegsVZDana::ResetPowerProtocol() {
+     sleepCommand=0; stAsleep=0; ebHold=ebReported=rowGroups=0; pa3Option=1; fallingOnly=0;
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -1,6 +1,7 @@
+ #ifndef EM_REGS_VZ_DANA_H
+ #define EM_REGS_VZ_DANA_H
+ 
++#include <cstring>
+ #include <functional>
+ #include "EmRegsVZ.h"
+ #include "EmSPISlave.h"
+@@ -41,6 +42,16 @@
+     bool hostPaced=false;
+     uint64 inputLastCycle=0,inputDelay=0,inputClockHz=0;
+     bool InputReady();
++    // The ROM drops a press of a key it saw released less than about 60-70 ms of guest time
++    // before, so a snapshot that presses a key in regapScan again waits until regapDelay
++    // cycles pass. Meanwhile the held set is reported again from presentedScan (repeatReply).
++    static constexpr uint64 kRegapMs=100;
++    uint8 regapScan[8]{};
++    uint64 regapDelay=0;
++    bool repeatReply=false;
++    bool RegapBlocked() const;
++    void NoteRelease(const uint8* next);
++    void ClearRegap() { std::memset(regapScan,0,8); regapDelay=0; repeatReply=false; }
+     unsigned heldCount=0, queueHead=0, queueCount=0;
+     void QueueKeys();
+     unsigned packetIndex=0;
+@@ -114,6 +125,10 @@
+     template<class T> void PowerModeFields(T& h) {
+         h.Do32(ebHold).Do32(ebReported).Do32(rowGroups).Do32(pa3Option).Do32(fallingOnly);
+     }
++    template<class T> void RegapFields(T& h) {
++        for(auto& code:regapScan) h.Do8(code);
++        h.Do64(regapDelay).DoBool(repeatReply);
++    }
+     void Reset(Bool hardware) override;
+     void TurnSoundOff() override;
+     Bool GetLineDriverState(EmUARTDeviceType) override;

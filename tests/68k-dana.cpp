@@ -56,11 +56,11 @@ struct St : EmRegsVZDana {
     void Raw(emuptr address,int size,uint32 value) { StdWrite(address,size,value); }
     template<class T> void Save(T& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana); if(!c)return;
-        SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h);
+        SaveChunkHelper h(*c); StateFields(h); InputStateFields(h); PowerStateFields(h); PowerModeFields(h); RegapFields(h);
     }
     void Load(SavestateLoader<ChunkType>& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana);assert(c);
-        LoadChunkHelper h(*c);StateFields(h);InputStateFields(h);PowerStateFields(h);PowerModeFields(h);
+        LoadChunkHelper h(*c);StateFields(h);InputStateFields(h);PowerStateFields(h);PowerModeFields(h);RegapFields(h);
     }
     void LoadLegacy(SavestateLoader<ChunkType>& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana);assert(c);
@@ -881,16 +881,18 @@ int main() {
     paced.now=9; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
     paced.now=10; assert(paced.Byte(0)==0x40);
 
-    paced.now=40;
+    // The release went out at 10, so wait past the 100 ms regap before pressing a again.
+    paced.now=140;
     assert(paced.DispatchDanaInput({{scan,true}}));
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
-    paced.now=45; assert(paced.Byte(0)==0x41);
+    paced.now=145; assert(paced.Byte(0)==0x41);
     assert(paced.DispatchDanaInput({{scan,false}}));
     auto idleReply=Save(paced);
-    paced.now=80;assert(paced.Byte(0)==scan.Code());assert(paced.Byte(0)==0x40);
-    paced.now=45;assert(Load(paced,idleReply));assert(paced.Byte(0)==scan.Code());
-    paced.now=60;assert(paced.Byte(0)==0x40);
-    paced.now=80;assert(paced.DispatchDanaInput({{scan,true}}));
+    paced.now=180;assert(paced.Byte(0)==scan.Code());assert(paced.Byte(0)==0x40);
+    paced.now=145;assert(Load(paced,idleReply));assert(paced.Byte(0)==scan.Code());
+    paced.now=160;assert(paced.Byte(0)==0x40);
+    // The release reached the guest at 160, so pressing a again waits for the 100 ms regap.
+    paced.now=260;assert(paced.DispatchDanaInput({{scan,true}}));
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
     assert(paced.DispatchDanaInput({{scan,false}}));
     paced.ResetSt();assert(paced.Byte(0)==0xaa);assert(paced.Byte(0)==0x40);
@@ -908,6 +910,53 @@ int main() {
         held.now=119; held.ReportHeldKeys(); assert(!request());
         held.now=120; held.ReportHeldKeys(); assert(request()); assert(held.Byte(0)==0x40);
         held.now=200; held.ReportHeldKeys(); assert(!request());
+    }
+    {
+        // A key pressed again soon after its release waits until the guest has seen it released
+        // for 100 ms, so the ROM takes it as a second press. Other keys don't wait.
+        PacedSt typed; assert(typed.Byte(0)==0xaa); typed.SetWord(0xfffff302,0);
+        auto request=[&]() { return (typed.GetWord(0xfffff310)&1)!=0; };
+        auto b=*DanaScan5::Named("b");
+        typed.now=100; assert(typed.DispatchDanaInput({{scan,true},{scan,false},{scan,true},{scan,false},{b,true},{b,false}}));
+        assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==scan.Code());
+        typed.now=110; typed.ReportHeldKeys(); assert(request()); assert(typed.Byte(0)==0x40);
+        auto blocked=Save(typed);
+        typed.now=209; typed.ReportHeldKeys(); assert(!request());
+        typed.now=210; typed.ReportHeldKeys(); assert(request());
+        assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==scan.Code());
+        typed.now=220; typed.ReportHeldKeys(); assert(request()); assert(typed.Byte(0)==0x40);
+        // b was never released, so it follows at the usual 10 ms.
+        typed.now=230; typed.ReportHeldKeys(); assert(request());
+        assert(typed.Byte(0)==0x41); assert(typed.Byte(0)==b.Code());
+        // The regap survives a save and load.
+        typed.now=110; assert(Load(typed,blocked));
+        typed.now=209; typed.ReportHeldKeys(); assert(!request());
+        typed.now=210; typed.ReportHeldKeys(); assert(request());
+
+        // With shift held, its set is reported again every 10 ms while a waits.
+        PacedSt shifted; assert(shifted.Byte(0)==0xaa); shifted.SetWord(0xfffff302,0);
+        auto shift=*DanaScan5::Named("lshift");
+        auto shiftRequest=[&]() { return (shifted.GetWord(0xfffff310)&1)!=0; };
+        shifted.now=100; assert(shifted.DispatchDanaInput({{shift,true},{scan,true},{scan,false},{scan,true}}));
+        assert(shifted.Byte(0)==0x41); shifted.Byte(0);
+        shifted.now=110; assert(shifted.Byte(0)==0x42); shifted.Byte(0); shifted.Byte(0);
+        shifted.now=120; assert(shifted.Byte(0)==0x41); assert(shifted.Byte(0)==shift.Code());
+        for(uint64 t=130;t<220;t+=10) {
+            shifted.now=t; shifted.ReportHeldKeys(); assert(shiftRequest());
+            assert(shifted.Byte(0)==0x41); assert(shifted.Byte(0)==shift.Code());
+        }
+        shifted.now=220; shifted.ReportHeldKeys(); assert(shiftRequest());
+        assert(shifted.Byte(0)==0x42);
+        // A cancel during a repeat keeps the reply being clocked and then releases.
+        PacedSt cancelled; assert(cancelled.Byte(0)==0xaa);
+        cancelled.now=100; assert(cancelled.DispatchDanaInput({{shift,true},{scan,true},{scan,false},{scan,true}}));
+        cancelled.Byte(0); cancelled.Byte(0);
+        cancelled.now=110; cancelled.Byte(0); cancelled.Byte(0); cancelled.Byte(0);
+        cancelled.now=120; cancelled.Byte(0); cancelled.Byte(0);
+        cancelled.now=130; assert(cancelled.Byte(0)==0x41);
+        cancelled.ReleaseDanaInput(); assert(cancelled.Byte(0)==shift.Code());
+        cancelled.now=140; assert(cancelled.Byte(0)==0x40);
+        cancelled.now=300; assert(cancelled.Byte(0)==0x40);
     }
     St reserved; assert(reserved.Byte(0)==0xaa);
     std::vector<DanaTransition5> fill;

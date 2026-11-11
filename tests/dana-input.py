@@ -92,6 +92,12 @@ def run(args):
             assert len([e for e in repeated if e[0]==4 and e[1]==ord('a')])>=2
             before=records();time.sleep(.5);assert records()==before
             print('PASS guest repeat and release',flush=True)
+        # A letter typed twice in a row reaches the guest as two presses.
+        for value in ['hello','line0011','aaaaaaaaaaaa']:
+            launch();before=len(records());text(value);time.sleep(2.5)
+            got=[e[1] for e in records()[before:] if e[0]==4]
+            assert got==list(map(ord,value)),(value,bytes(got))
+        print('PASS repeated letters',flush=True)
         launch();before=len(records())
         chord='abcdefgh'
         c.send('\n'.join(['dana-down '+k for k in chord]+['dana-up '+k for k in chord]+['cycles']),'cycles:')
