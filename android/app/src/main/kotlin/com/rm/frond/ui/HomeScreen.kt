@@ -91,8 +91,11 @@ fun HomeScreen(model: HomeModel) {
     val notice = model.notice
     LaunchedEffect(notice) {
         if (notice == null) return@LaunchedEffect
-        snackbar.showSnackbar(notice)
-        if (model.notice == notice) model.notice = null
+        try {
+            snackbar.showSnackbar(notice)
+        } finally {
+            if (model.notice == notice) model.notice = null
+        }
     }
 
     Scaffold(

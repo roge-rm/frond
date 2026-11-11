@@ -69,10 +69,13 @@ fun CardsScreen(home: HomeModel, model: CardsModel) {
         exporting = null
         if (uri != null && row != null) model.export(row, uri)
     }
-    home.notice?.let { text ->
-        LaunchedEffect(text) {
-            home.notice = null
-            snackbar.showSnackbar(text)
+    val notice = home.notice
+    LaunchedEffect(notice) {
+        if (notice == null) return@LaunchedEffect
+        try {
+            snackbar.showSnackbar(notice)
+        } finally {
+            if (home.notice == notice) home.notice = null
         }
     }
 

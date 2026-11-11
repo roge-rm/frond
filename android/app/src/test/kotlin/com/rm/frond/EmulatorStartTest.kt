@@ -32,3 +32,35 @@ class EmulatorStartTest {
         assertEquals(Action.GIVE_UP, decide(processListed = true, activityShown = false, waitedMs = GRACE_MS + END_WAIT_MS, ended = true))
     }
 }
+
+class LatestStartTest {
+    private fun scope() = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+
+    @Test fun latestTapReplacesTheWaitingOne() {
+        val starts = LatestStart(scope())
+        val ran = mutableListOf<String>()
+        val first = kotlinx.coroutines.CompletableDeferred<Unit>()
+        starts.start("a") { try { first.await(); ran += "a" } catch (e: kotlinx.coroutines.CancellationException) { ran += "a cancelled"; throw e } }
+        starts.start("b") { ran += "b" }
+        assertEquals(listOf("a cancelled", "b"), ran)
+    }
+
+    @Test fun repeatTapOnTheSameSessionKeepsTheWait() {
+        val starts = LatestStart(scope())
+        var runs = 0
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        starts.start("a") { runs++; gate.await() }
+        starts.start("a") { runs++ }
+        assertEquals(1, runs)
+    }
+
+    @Test fun cancelDropsThePendingStart() {
+        val starts = LatestStart(scope())
+        var done = false
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        starts.start("a") { gate.await(); done = true }
+        starts.cancel()
+        gate.complete(Unit)
+        assertEquals(false, done)
+    }
+}

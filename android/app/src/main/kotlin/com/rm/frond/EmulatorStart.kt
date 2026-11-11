@@ -1,5 +1,9 @@
 package com.rm.frond
 
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+
 // What Home does when asked to start a session while an emulator process may still be up.
 // A process can outlive its activity: SDL's onDestroy waits for the core to quit, and the core
 // saves before it does, so a finished activity's process can stay listed for a few seconds, or
@@ -24,5 +28,25 @@ object EmulatorStart {
         !ended -> Action.END_STALE
         waitedMs < GRACE_MS + END_WAIT_MS -> Action.WAIT
         else -> Action.GIVE_UP
+    }
+}
+
+// One pending start at a time. A tap on another session replaces the one waiting; a repeat tap
+// on the same session leaves it alone.
+class LatestStart(private val scope: CoroutineScope) {
+    private var job: Job? = null
+    private var id: String? = null
+
+    fun start(sessionId: String, block: suspend CoroutineScope.() -> Unit) {
+        if (job?.isActive == true && id == sessionId) return
+        job?.cancel()
+        id = sessionId
+        job = scope.launch(block = block)
+    }
+
+    fun cancel() {
+        job?.cancel()
+        job = null
+        id = null
     }
 }

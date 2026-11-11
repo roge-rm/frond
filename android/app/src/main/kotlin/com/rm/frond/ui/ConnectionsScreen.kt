@@ -62,10 +62,13 @@ fun ConnectionsScreen(home: HomeModel, model: ConnectionsModel) {
         if (Build.VERSION.SDK_INT >= 37 && Links.needsPermission(context)) askNetwork.launch(Links.LOCAL_NETWORK)
     }
     val snackbar = remember { SnackbarHostState() }
-    model.notice?.let { text ->
-        LaunchedEffect(text) {
-            model.notice = null
-            snackbar.showSnackbar(text)
+    val notice = model.notice
+    LaunchedEffect(notice) {
+        if (notice == null) return@LaunchedEffect
+        try {
+            snackbar.showSnackbar(notice)
+        } finally {
+            if (model.notice == notice) model.notice = null
         }
     }
     var menu by remember { mutableStateOf(false) }

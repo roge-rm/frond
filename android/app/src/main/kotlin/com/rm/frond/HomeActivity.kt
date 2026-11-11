@@ -44,6 +44,7 @@ internal object HomeWork {
     var progress by mutableStateOf<Float?>(null)
     var job: Job? = null
     var model: HomeModel? = null
+    val starts = LatestStart(scope)
 }
 
 // What the home screen shows. Lives in the activity and reloads from storage on resume.
@@ -203,32 +204,36 @@ class HomeModel(private val activity: HomeActivity) {
         cards = null
     }
 
-    private var startJob: Job? = null
-
     // Starts a session. With an emulator process still listed it brings a shown emulator forward,
-    // or waits for a closing one and ends it if it stays, then starts.
+    // or waits for a closing one and ends it if it stays, then starts. The wait lives in HomeWork,
+    // so a recreated Home keeps it; the latest tap wins, and leaving Home drops it.
     fun start(requested: Session) {
-        if (copying || startJob?.isActive == true) return
-        startJob = activity.lifecycleScope.launch {
+        if (copying) return
+        HomeWork.starts.start(requested.id) {
             val asked = System.currentTimeMillis()
             var ended = false
-            var told = false
+            var toldModel: HomeModel? = null
             while (isActive) {
+                val m = HomeWork.model
+                if (m == null) {
+                    delay(EmulatorStart.POLL_MS)
+                    continue
+                }
                 val waited = System.currentTimeMillis() - asked
-                when (EmulatorStart.decide(emulatorRunning(), bringEmulatorForward(dryRun = true), waited, ended)) {
-                    EmulatorStart.Action.START -> { launch(requested); return@launch }
-                    EmulatorStart.Action.BRING_FORWARD -> { bringEmulatorForward(dryRun = false); return@launch }
-                    EmulatorStart.Action.WAIT -> if (!told) {
-                        told = true
-                        notice = "Waiting for the last session to close"
+                when (EmulatorStart.decide(m.emulatorRunning(), m.bringEmulatorForward(dryRun = true), waited, ended)) {
+                    EmulatorStart.Action.START -> { m.launch(requested); return@start }
+                    EmulatorStart.Action.BRING_FORWARD -> { m.bringEmulatorForward(dryRun = false); return@start }
+                    EmulatorStart.Action.WAIT -> if (toldModel !== m) {
+                        toldModel = m
+                        m.notice = "Waiting for the last session to close"
                     }
                     EmulatorStart.Action.END_STALE -> {
                         ended = true
-                        endEmulatorProcesses()
+                        m.endEmulatorProcesses()
                     }
                     EmulatorStart.Action.GIVE_UP -> {
-                        alert = "Couldn't start" to "The last session's emulator is still running. Force stop Frond in Android's app settings and try again."
-                        return@launch
+                        m.alert = "Couldn't start" to "The last session's emulator is still running. Force stop Frond in Android's app settings and try again."
+                        return@start
                     }
                 }
                 delay(EmulatorStart.POLL_MS)
@@ -236,9 +241,15 @@ class HomeModel(private val activity: HomeActivity) {
         }
     }
 
+    // Home has gone to the background for good: nothing is started from there.
+    fun cancelStart() {
+        HomeWork.starts.cancel()
+        if (notice == "Waiting for the last session to close") notice = null
+    }
+
     // Brings a task with an emulator activity on top to the front. With dryRun it only says
     // whether there is one.
-    private fun bringEmulatorForward(dryRun: Boolean): Boolean {
+    internal fun bringEmulatorForward(dryRun: Boolean): Boolean {
         val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return false
         val names = setOf(FrondActivity::class.java.name, Frond68kActivity::class.java.name)
         val task = manager.appTasks.orEmpty().firstOrNull { task ->
@@ -250,7 +261,7 @@ class HomeModel(private val activity: HomeActivity) {
     }
 
     // Ends emulator processes left with no activity. They run under this app's uid, so this is allowed.
-    private fun endEmulatorProcesses() {
+    internal fun endEmulatorProcesses() {
         val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return
         val names = Emulators.processes.map { activity.packageName + it }
         manager.runningAppProcesses.orEmpty().filter { it.processName in names }.forEach {
@@ -259,7 +270,7 @@ class HomeModel(private val activity: HomeActivity) {
         }
     }
 
-    private fun launch(requested: Session) {
+    internal fun launch(requested: Session) {
         val session = Sessions.read(activity, requested.id) ?: return
         val device = session.device
         if (session.old || device == null) {
@@ -280,7 +291,7 @@ class HomeModel(private val activity: HomeActivity) {
         )
     }
 
-    private fun emulatorRunning(): Boolean {
+    internal fun emulatorRunning(): Boolean {
         val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return true
         val names = Emulators.processes.map { activity.packageName + it }
         return manager.runningAppProcesses.orEmpty().any { it.processName in names }
@@ -485,6 +496,7 @@ class HomeActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        if (!isChangingConfigurations) model.cancelStart()
         model.connections?.close()
         super.onStop()
     }
