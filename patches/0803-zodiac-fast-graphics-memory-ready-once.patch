@@ -1,0 +1,94 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -45,6 +45,8 @@
+     bool checked, usable;
+     // CS5 register reads: the GPIO and graphics checks, worked out at the first one. A board write clears them.
+     bool registerChecked, registerUsable;
++    // Graphics memory: memoryReady, worked out at the first access, as only MMIO writes change it.
++    bool memoryChecked, memoryUsable;
+     uint32_t clocks, cost;
+     uint64_t waitClocks, waitCost;
+ };
+@@ -539,6 +541,13 @@
+         }
+         return leanCs5.usable;
+     }
++    bool leanMemoryReady() {
++        if (!leanCs5.memoryChecked) {
++            leanCs5.memoryChecked = true;
++            leanCs5.memoryUsable = cs5Configuration.memoryReady(peripherals.eimState());
++        }
++        return leanCs5.memoryUsable;
++    }
+     // The GPIO side of a CS5 register read: the acquisition source the port B pins select and the settled A13
+     // drive. Neither the pins nor the graphics state change in a run except through a board write, which clears
+     // leanCs5, so the first read of a run works them out for the rest.
+@@ -597,12 +606,9 @@
+             return false;
+         if (!p.leanCs5Ready() || left < leanCs5.cost) return false;
+         const bool user = (cpuGetRegExternal(p.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
+-        if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok ||
+-            p.graphicsMemory->validate(p.cs5Configuration, p.peripherals.eimState(), pa, size) != Imx1BootstrapAccess::ok)
+-            return false;
+         uint32_t datum = value;
+-        if (p.graphicsMemory->access(p.cs5Configuration, p.peripherals.eimState(), pa, size, true, datum) !=
+-            Imx1BootstrapAccess::ok)
++        if (p.peripherals.eimState().cs5Transfer(pa, size, true, user) != Imx1EimAccess::ok || !p.leanMemoryReady() ||
++            !p.graphicsMemory->accessReady(p.cs5Configuration, pa, size, true, datum))
+             return false;
+         leanCs5.waitClocks += leanCs5.clocks;
+         leanCs5.waitCost += leanCs5.cost;
+@@ -704,9 +710,8 @@
+             return false;
+         if (!leanCs5Ready() || left < leanCs5.cost) return false;
+         const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
+-        if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok ||
+-            graphicsMemory->validate(cs5Configuration, peripherals.eimState(), pa, size) != Imx1BootstrapAccess::ok ||
+-            graphicsMemory->access(cs5Configuration, peripherals.eimState(), pa, size, false, value) != Imx1BootstrapAccess::ok)
++        if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok || !leanMemoryReady() ||
++            !graphicsMemory->accessReady(cs5Configuration, pa, size, false, value))
+             return false;
+         leanCs5.waitClocks += leanCs5.clocks;
+         leanCs5.waitCost += leanCs5.cost;
+--- a/src/uarm/uarm/imx1_graphics_memory.h
++++ b/src/uarm/uarm/imx1_graphics_memory.h
+@@ -131,6 +131,29 @@
+             return Imx1BootstrapAccess::sequence;
+         const uint32_t offset = gpuAddress - range.first;
+         if (uint64_t(offset) + size > bytes[bank].size()) return Imx1BootstrapAccess::sequence;
++        transfer(bank, offset, size, write, value);
++        return Imx1BootstrapAccess::ok;
++    }
++    // validate and then access in one, for a caller that has seen configuration.memoryReady(eim) hold with the
++    // configuration and EIM as they are now. True where both would give ok.
++    bool accessReady(const Imx1Cs5Configuration& configuration, uint32_t cpuAddress, uint32_t size, bool write,
++                     uint32_t& value) {
++        uint32_t gpuAddress = 0, cpu = 0;
++        if (resolve(configuration, cpuAddress, size, gpuAddress) != Imx1BootstrapAccess::ok ||
++            (size != 1 && size != 2 && size != 4) || (gpuAddress & (size - 1)) || !gpuToCpu(gpuAddress, cpu))
++            return false;
++        const unsigned bank = gpuAddress < 0x800000 ? 0 : 1;
++        const auto& windows = configuration.memoryWindows();
++        const auto range = bank == 0 ? windows.internal() : windows.external();
++        if (!range.known || gpuAddress < range.first || uint64_t(gpuAddress) + size > uint64_t(range.last) + 1)
++            return false;
++        const uint32_t offset = gpuAddress - range.first;
++        if (uint64_t(offset) + size > bytes[bank].size()) return false;
++        transfer(bank, offset, size, write, value);
++        return true;
++    }
++   private:
++    void transfer(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value) {
+         if (write) {
+             for (uint32_t i = 0; i < size; ++i) bytes[bank][offset + i] = uint8_t(value >> (i * 8));
+             ++generation;
+@@ -147,9 +170,7 @@
+             value = 0;
+             for (uint32_t i = 0; i < size; ++i) value |= uint32_t(bytes[bank][offset + i]) << (i * 8);
+         }
+-        return Imx1BootstrapAccess::ok;
+     }
+-   private:
+     static Imx1BootstrapAccess resolve(const Imx1Cs5Configuration& configuration,
+                                        uint32_t address, uint32_t size, uint32_t& gpuAddress) {
+         using A = Imx1BootstrapAccess;
