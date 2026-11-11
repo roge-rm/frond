@@ -175,8 +175,49 @@ static void pxa25xSleep() {
     assert(!soc.PowerSleeping());
 }
 
+// Run one coprocessor instruction at the start of RAM with r0 = in and return r1.
+static uint32_t coproc(SocPXA& soc, uint32_t instruction, uint32_t in = 0) {
+    auto cpu = soc.GetCpu();
+    write(soc, 0xa0000000, instruction);
+    write(soc, 0xa0000004, 0xeafffffe);
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, ARM_REG_NUM_CPSR, ARM_SR_MODE_SVC | ARM_SR_I | ARM_SR_F);
+    cpuSetReg(cpu, 15, 0xa0000000);
+    cpuSetReg(cpu, 0, in);
+    cpuSetReg(cpu, 1, 0xdeadbeef);
+    cpuCyclePure(cpu);
+    return cpuGetRegExternal(cpu, 1);
+}
+// PXA27x CCSR, CLKCFG read back and cache type; PXA25x keeps its old values.
+static void clocks() {
+    static constexpr uint32_t CCCR = 0x41300000, CCSR = 0x4130000c;
+    static constexpr uint32_t READ_CLKCFG = 0xee161e10, WRITE_CLKCFG = 0xee060e10,
+                              READ_CACHE_TYPE = 0xee101f30;
+    const uint32_t branch = 0xeafffffe;
+    {
+        std::vector<uint8_t> rom(16u << 20), nand(132u << 20, 0xff);
+        memcpy(rom.data(), &branch, 4);
+        SocPXA soc(deviceTypeTX, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
+        assert(read(soc, CCCR) == 0x190 && read(soc, CCSR) == 0x30000190);
+        assert(coproc(soc, READ_CLKCFG) == 0);
+        coproc(soc, WRITE_CLKCFG, 0xb);  // T, F and B: frequency change to turbo
+        assert(coproc(soc, READ_CLKCFG) == 1);
+        write(soc, CCCR, 0x02000210);
+        assert(read(soc, CCSR) == 0x30000210);
+        assert(coproc(soc, READ_CACHE_TYPE) == 0x0b1aa1aa);
+    }
+    std::vector<uint8_t> rom(8u << 20), nand(34603008, 0xff);
+    memcpy(rom.data(), &branch, 4);
+    SocPXA soc(deviceTypeE2, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 0);
+    assert(read(soc, CCCR) == 0x122 && read(soc, CCSR) == 0);
+    coproc(soc, WRITE_CLKCFG, 3);
+    assert(coproc(soc, READ_CLKCFG) == 0);
+    assert(coproc(soc, READ_CACHE_TYPE) == 0x0b16a16a);
+}
+
 int main() {
     firmwarePower();
+    clocks();
     std::vector<uint8_t> rom(16 * 1024 * 1024), nand(132 * 1024 * 1024, 0xff);
     const uint32_t branch = 0xeafffffe;
     memcpy(rom.data(), &branch, 4);
