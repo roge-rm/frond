@@ -9,7 +9,8 @@
 // Graphics memory stores right after a change that makes the frame scan again show in the frame as in Exact, and a
 // timer read after a lean graphics memory store leaves the lean path. Scan status and acquisition reads on the lean
 // path give Exact's values at Exact's times, in ARM and in Thumb, and a run that changes engine between slices
-// ends as an Exact run does.
+// ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
+// reads on the lean path give Exact's values.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -49,7 +50,7 @@ void thumbLoop(std::vector<uint32_t>& words) {
     for (size_t i = 0; i < std::size(h); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
 }
 
-enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode };
+enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode, freshCode };
 
 // The graphics guest's setup with programmed clocks gives the step quiet spans, which the lean path runs.
 // The test code follows it, running from the linked alias at 0x20000000.
@@ -280,6 +281,27 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         words.push_back(0xe12fff10);                      // bx r0
         stopPc = pc();
         break;
+    case Tail::freshCode:
+        // 12 rounds, each on a new uncached SRAM page: store mov r9, #1; bx lr, call it, store mov r9, #2 over
+        // it and call it again. r10 = 12, r11 = 24 in both engines.
+        load(words, 0, 0x00411000);
+        load(words, 1, 0xe3a09001); load(words, 4, 0xe3a09002); load(words, 5, 0xe12fff1e);
+        words.push_back(0xe3a0a000);                      // mov r10, #0
+        words.push_back(0xe3a0b000);                      // mov r11, #0
+        load(words, 3, 12);
+        for (uint32_t w : {0xe5801000u,                   // loop: str r1, [r0]
+                           0xe5805004u,                   // str r5, [r0, #4]
+                           0xe1a0e00fu, 0xe12fff10u,      // mov lr, pc; bx r0: r9 = 1
+                           0xe08aa009u,                   // add r10, r10, r9
+                           0xe5804000u,                   // str r4, [r0]
+                           0xe1a0e00fu, 0xe12fff10u,      // mov lr, pc; bx r0: r9 = 2
+                           0xe08bb009u,                   // add r11, r11, r9
+                           0xe2800a01u,                   // add r0, r0, #0x1000
+                           0xe2533001u,                   // subs r3, r3, #1
+                           0x1afffff3u})                  // bne loop
+            words.push_back(w);
+        stopPc = pc();
+        break;
     }
     words.push_back(0xe7f000f0);
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
@@ -294,6 +316,7 @@ struct Outcome {
     uint64_t cs5Writes, cs5Reads;
     uint64_t jit;
     uint64_t memoryReads, boardReads;
+    uint64_t memory;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -317,7 +340,7 @@ Outcome finish(Imx1Machine* m) {
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
                 imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m),
                 imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m), imx1MachineJitRetired(m),
-                imx1MachineLeanCs5MemoryReads(m), imx1MachineLeanBoardReads(m)};
+                imx1MachineLeanCs5MemoryReads(m), imx1MachineLeanBoardReads(m), imx1MachineMemoryHash(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -832,9 +855,23 @@ void engineSwitch() {
 }
 }  // namespace
 
+// Fast with blocks leaves memory as lean Fast does (neither keeps cache contents, which Exact's memory would lack)
+// and shows Exact's frame.
+void sameMemory(const Outcome& exact, const Outcome& lean, const Outcome& fast) {
+    assert(fast.memory == lean.memory);
+    assert(fast.run.result.graphicsFrameHash == exact.run.result.graphicsFrameHash);
+}
+Outcome runLean(const std::vector<uint32_t>& words) {
+    imx1SetFastBlocksDefault(false);
+    const auto lean = runGuest(words, true);
+    imx1SetFastBlocksDefault(true);
+    return lean;
+}
+
 // The MMU guests again with Dynarmic blocks in Fast: direct host pages across a TLB flush, a domain change, an
-// SDRAM mode change, a TTBR change and a switch to user mode, code rewritten in place, and stores to the PCM DMA
-// buffer page, which never get a direct page.
+// SDRAM mode change, a TTBR change and a switch to user mode, code rewritten in place, new code pages stored to,
+// run and rewritten within one run of the JIT, and stores to the PCM DMA buffer page, which never get a direct
+// page. Then some of them with the compile thread, compiling ahead and the hot count as shipped.
 void blocks() {
     imx1SetFastBlocksDefault(true);
     // Every block compiled at once, in place, so runs repeat and the loops run in the JIT.
@@ -843,11 +880,13 @@ void blocks() {
     uint32_t stopPc = 0, savePc = 0;
     const auto both = [&](Tail tail, const char* name) {
         const auto words = guest(tail, stopPc, savePc);
-        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true), lean = runLean(words);
         std::string n = name;
         print((n + " exact").c_str(), exact); print((n + " blocks").c_str(), fast);
-        std::printf("%s blocks: %llu instructions in the JIT\n", name, (unsigned long long)fast.jit);
+        std::printf("%s blocks: %llu instructions in the JIT, memory %016llx, lean %016llx\n", name,
+                    (unsigned long long)fast.jit, (unsigned long long)fast.memory, (unsigned long long)lean.memory);
         assert(fast.jit > 400);
+        sameMemory(exact, lean, fast);
         return std::pair{exact, fast};
     };
     {
@@ -891,6 +930,15 @@ void blocks() {
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
     }
     {
+        // Compiled in place mid-run, so the new page's code is translated with no lean step in between: its
+        // marking has to take away the JIT's writable page and the host TLB's write entry for the rewrite.
+        setenv("FROND_JIT_THREAD", "0", 1);
+        const auto [exact, fast] = both(Tail::freshCode, "fresh code");
+        unsetenv("FROND_JIT_THREAD");
+        assert(exact.run.result.registers[10] == 12 && exact.run.result.registers[11] == 24);
+        sameResult(exact, fast);
+    }
+    {
         const auto [exact, fast] = both(Tail::timer, "timer");
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == stopPc);
     }
@@ -907,6 +955,21 @@ void blocks() {
         assert(fast.run.result.busAccesses >= 8192 && otherFast.run.result.busAccesses < 4096);
         assert(fast.run.result.pcm.transmittedWords >= 16);
     }
+    // As shipped: the compile thread, compiling ahead, hot 4. Compiles land at other times on each run.
+    cpuSetJitSync(false);
+    unsetenv("FROND_JIT_HOT");
+    uint64_t shipped = 0;
+    for (Tail tail : {Tail::tlb, Tail::domain, Tail::user, Tail::code, Tail::hotCode, Tail::freshCode, Tail::dmaOther}) {
+        const auto words = guest(tail, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true), lean = runLean(words);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
+        if (tail != Tail::code && tail != Tail::hotCode) sameResult(exact, fast);
+        else assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2);
+        sameMemory(exact, lean, fast);
+        shipped += fast.jit;
+    }
+    std::printf("shipped setup: %llu instructions in the JIT\n", (unsigned long long)shipped);
+    assert(shipped > 1000);
     std::fflush(stdout);
 }
 
@@ -1050,8 +1113,8 @@ int main() {
         assert(otherExact.pcmLast >= 0x0101 && otherExact.pcmLast <= 0x0104);
     }
     blocks();
-    std::puts("PASS: Fast blocks match Exact's results across TLB, TTBR, domain, mode and SDRAM changes, rewritten code "
-              "and the PCM DMA buffer page");
+    std::puts("PASS: Fast blocks match Exact's results and lean Fast's memory across TLB, TTBR, domain, mode and SDRAM "
+              "changes, rewritten code, new code pages, the shipped compile setup and the PCM DMA buffer page");
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
               "rewritten code, unsupported access, timer reads, a cacheable timer and the PCM DMA buffer match Exact");
 }

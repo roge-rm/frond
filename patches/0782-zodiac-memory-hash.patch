@@ -1,0 +1,50 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1479,6 +1479,17 @@
+ uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*) { return leanCs5MemoryReads; }
+ uint64_t imx1MachineLeanBoardReads(const Imx1Machine*) { return leanBoardReads; }
+ 
++uint64_t imx1MachineMemoryHash(const Imx1Machine* machine) {
++    const auto* p = machine->probe;
++    uint64_t h = p->peripherals.memoryHash(0xcbf29ce484222325ull);
++    for (unsigned bank = 0; p->graphicsMemory && bank < 2; ++bank) {
++        uint32_t size = 0;
++        const uint8_t* data = p->graphicsMemory->diagnosticData(bank, size);
++        for (uint32_t i = 0; i < size; ++i) h = (h ^ data[i]) * 0x100000001b3ull;
++    }
++    return h;
++}
++
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine* machine) { return cpuArm920LeanCodeDrops(machine->probe->cpu); }
+ 
+ uint16_t imx1MachinePcmLastTransmitted(const Imx1Machine* machine) {
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -228,6 +228,8 @@
+ uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*);
+ // ASP status, GPIO and AITC reads the Fast engine answered on its lean path.
+ uint64_t imx1MachineLeanBoardReads(const Imx1Machine*);
++// A hash of SRAM, SDRAM and graphics memory as they are in memory (cache contents left out), for tests.
++uint64_t imx1MachineMemoryHash(const Imx1Machine*);
+ // Times the Fast engine dropped its decoded code for a store to a page it came from.
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine*);
+ // The last PCM sample SSI1 shifted out, for tests.
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -271,6 +271,16 @@
+         a.Do32(systemStop).Do32(systemStopHclk).Do64(systemStopTick);
+         a.Require(systemStop <= stopWaking, "stop mode");
+     }
++    // A hash of SRAM and both SDRAM banks, carried on from h, for tests.
++    uint64_t memoryHash(uint64_t h) const {
++        const auto add = [&](const std::vector<uint8_t>& bytes) {
++            for (uint8_t b : bytes) h = (h ^ b) * 0x100000001b3ull;
++            h = (h ^ bytes.size()) * 0x100000001b3ull;
++        };
++        add(sram);
++        for (const auto& s : sdram) add(s.ram);
++        return h;
++    }
+     template <class A> void stateSram(A& a) {
+         const size_t bytes = sram.size();
+         a.DoVector(sram, bytes).Require(sram.size() == bytes, "sram size");
