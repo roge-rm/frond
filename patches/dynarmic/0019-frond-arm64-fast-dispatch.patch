@@ -169,7 +169,7 @@
  #include <optional>
  
  #include <mcl/stdint.hpp>
-@@ -45,6 +47,28 @@
+@@ -45,6 +47,29 @@
  
      void DumpDisassembly() const;
  
@@ -183,7 +183,8 @@
 +    };
 +    static_assert(sizeof(FastDispatchEntry) == 16);
 +    static constexpr unsigned fast_dispatch_bits = 12;
-+    // Matches EmitFastDispatchIndex: PC bits 1-12 mixed with bits 13-24 and the T flag.
++    // Matches EmitFastDispatchIndex: PC bits 1-12 xor bits 13-24 and the T flag. Index bit 0 is
++    // PC bit 1 xor bit 13, so ARM blocks use every slot over 16 KB of code, Thumb over 8 KB.
 +    static u32 FastDispatchIndex(u64 location_descriptor) {
 +        u32 x = static_cast<u32>(location_descriptor ^ (location_descriptor >> 31));
 +        x ^= x >> 12;
@@ -198,7 +199,7 @@
  protected:
      virtual EmitConfig GetEmitConfig() = 0;
      virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;
-@@ -88,6 +112,12 @@
+@@ -88,6 +113,12 @@
      ExceptionHandler exception_handler;
      FastmemManager fastmem_manager;
  
