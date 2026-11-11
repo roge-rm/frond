@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
@@ -229,7 +230,92 @@ static void checkCommands(bool packedMono) {
     std::puts("PASS: native ring packet decoding, delayed RGB565 solid paint, consumer/busy/readback guards and rejection");
 }
 
+// completeFill straight on the bank storage against the accessGpu loop, for every kind of fill: inline pixels,
+// plain and keyed copies (doubled or not, painted or not), invert and A4, with sources and rows that overlap the
+// destination. Bytes, dirty ranges and generations must match.
+static void checkFillKinds() {
+    using A = Imx1BootstrapAccess;
+    using C = Imx1GraphicsCommands;
+    Imx1Eim eim;
+    uint32_t value = 0x3e00;
+    assert(eim.access(0x00220028,4,true,value) == Imx1EimAccess::ok);
+    value = 0x11111e01;
+    assert(eim.access(0x0022002c,4,true,value) == Imx1EimAccess::ok);
+    Imx1Cs5Configuration state(Imx1GraphicsProfile::virtual5744Compatible8MiB,false,false);
+    configureGraphicsInterface(state,eim);
+    configureGraphicsController(state,eim);
+    static Imx1GraphicsMemory fast, slow;
+    uint64_t r = 0x9e3779b97f4a7c15ull;
+    auto next = [&r](uint32_t n) { r ^= r << 13; r ^= r >> 7; r ^= r << 17; return uint32_t(r % n); };
+    const uint32_t region = 0x100000, regionBytes = 0x4000;
+    const uint16_t palette[4] = {0x0000, 0xffff, 0xf800, 0x07e0};
+    unsigned fills = 0, kinds = 0;
+    for (unsigned kind = 0; kind < 128; ++kind) {
+        const bool pixels = kind & 1, copy = kind & 2, keyed = copy && (kind & 4), doubled = copy && (kind & 8);
+        const bool invert = kind & 16, a4 = kind & 32, painted = keyed && (kind & 64);
+        if ((!copy && (kind & (4 | 8 | 64))) || (a4 && doubled) || (pixels && copy)) continue;
+        ++kinds;
+        for (unsigned round = 0; round < 40; ++round) {
+            for (uint32_t i = 0; i < regionBytes; i += 2) {
+                uint32_t word = next(3) ? palette[next(4)] : next(0x10000);
+                assert(fast.accessGpu(state,eim,region + i,2,true,word) == A::ok);
+                assert(slow.accessGpu(state,eim,region + i,2,true,word) == A::ok);
+            }
+            for (unsigned c = 0; c < unsigned(Imx1GraphicsMemory::Consumer::count); ++c) {
+                fast.acknowledgeDirty(0,Imx1GraphicsMemory::Consumer(c),fast.dirty(0,Imx1GraphicsMemory::Consumer(c)).generation);
+                slow.acknowledgeDirty(0,Imx1GraphicsMemory::Consumer(c),slow.dirty(0,Imx1GraphicsMemory::Consumer(c)).generation);
+            }
+            C::Fill f{};
+            f.width = 1 + next(40); f.height = 1 + next(20);
+            f.pitch = next(4) ? f.width * 2 + next(40) * 2 : 2 + next(f.width) * 2;
+            f.base = region + 64 + next(0x1000) * 2;
+            f.keyed = keyed; f.plain = copy && !keyed; f.a4 = a4; f.invert = invert; f.doubled = doubled;
+            f.painted = painted; f.paint = next(0x10000); f.keyEqual = next(2);
+            f.colour = a4 ? next(17) : keyed ? palette[next(4)] : next(0x10000);
+            if (copy || a4) {
+                f.sourcePitch = f.width * 2 + next(30) * 2;
+                f.sourceX = doubled ? next(5) : 0; f.sourceY = doubled ? next(5) : 0;
+                // Every third fill reads from just around the destination.
+                f.sourceBase = round % 3 ? region + next(0x1000) * 2 : f.base - 64 + next(64) * 2;
+            }
+            if (pixels || (a4 && next(2)))
+                for (uint32_t i = 0; i < f.width * f.height; ++i)
+                    f.pixels.push_back(uint16_t(a4 ? (next(3) ? next(2) * 15 : next(16)) : next(0x10000)));
+            const auto before = C::directFillCount;
+            C::directFills = true;
+            assert(C::completeFill(state,eim,fast,f) == A::ok);
+            assert(C::directFillCount == before + 1);
+            C::directFills = false;
+            assert(C::completeFill(state,eim,slow,f) == A::ok);
+            C::directFills = true;
+            for (uint32_t i = 0; i < regionBytes; i += 2) {
+                uint32_t a = 0, b = 0;
+                assert(fast.accessGpu(state,eim,region + i,2,false,a) == A::ok);
+                assert(slow.accessGpu(state,eim,region + i,2,false,b) == A::ok);
+                if (a != b) {
+                    std::fprintf(stderr, "FAIL: fill kind %u round %u differs at %x: %04x, accessGpu %04x\n", kind, round, region + i, a, b);
+                    std::abort();
+                }
+            }
+            for (unsigned c = 0; c < unsigned(Imx1GraphicsMemory::Consumer::count); ++c) {
+                const auto a = fast.dirty(0,Imx1GraphicsMemory::Consumer(c)), b = slow.dirty(0,Imx1GraphicsMemory::Consumer(c));
+                if (a.first != b.first || a.end != b.end || a.pending != b.pending || a.generation != b.generation) {
+                    std::fprintf(stderr, "FAIL: fill kind %u round %u dirty %x-%x %d %llu, accessGpu %x-%x %d %llu\n", kind, round,
+                                a.first, a.end, a.pending, (unsigned long long)a.generation, b.first, b.end, b.pending,
+                                (unsigned long long)b.generation);
+                    std::abort();
+                }
+                fast.acknowledgeDirty(0,Imx1GraphicsMemory::Consumer(c),a.generation);
+                slow.acknowledgeDirty(0,Imx1GraphicsMemory::Consumer(c),b.generation);
+            }
+            ++fills;
+        }
+    }
+    std::printf("PASS: %u fills of %u kinds straight on the bank storage match the accessGpu loop\n", fills, kinds);
+}
+
 int main() {
+    checkFillKinds();
     checkCommands(false);
     checkCommands(true);
     // The fills ran straight on the bank storage; with every fill through accessGpu the same checks pass.
