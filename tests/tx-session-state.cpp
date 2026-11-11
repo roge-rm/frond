@@ -190,6 +190,30 @@ int main() {
     fresh.Run(5000000, 100000000);
     frame = fresh.GetPendingFrame(first, last);
     assert(frame && frame[0] == 0xff0000ff && frame[320 * 480 - 1] == frame[0]);
+    // A 324x484 frame from LCCR1 and LCCR2 (Palm Linux) shows its centre 320x480: red border,
+    // blue first and green last panel pixel, white between.
+    soc.ResetPendingFrame();
+    for (uint32_t y = 0; y < 484; ++y) {
+        for (uint32_t x = 0; x < 324; x += 2) {
+            uint32_t pair = 0;
+            for (uint32_t i = 0; i < 2; ++i) {
+                const uint32_t px = x + i;
+                uint16_t c = 0xffff;
+                if (px < 2 || px >= 322 || y < 2 || y >= 482) c = 0xf800;
+                else if (px == 2 && y == 2) c = 0x001f;
+                else if (px == 321 && y == 481) c = 0x07e0;
+                pair |= uint32_t(c) << (16 * i);
+            }
+            write32(framebuffer + (y * 324 + x) * 2, pair);
+        }
+    }
+    write32(descriptor + 12, 324 * 484 * 2);
+    write32(0x44000004, 0x1b071543);
+    write32(0x44000008, 0x030609e3);
+    soc.Run(5000000, 100000000);
+    frame = soc.GetPendingFrame(first, last);
+    assert(frame && frame[0] == 0xffff0000 && frame[320 * 480 - 1] == 0xff00ff00);
+    for (uint32_t i = 1; i < 320 * 480 - 1; ++i) assert(frame[i] == 0xffffffff);
     // E2 keeps the old timer and version-zero LCD wire format; power is version two.
     SocPXA e2(DeviceType5::deviceTypeE2, 16 * 1024 * 1024, rom.data(), 8 * 1024 * 1024,
               nand.data(), 33 * 1024 * 1024, -1, 0);
