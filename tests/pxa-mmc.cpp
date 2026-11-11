@@ -12,7 +12,8 @@ static uint8_t sector[512];
 bool memRegionAdd(ArmMem*,uint32_t,uint32_t,ArmMemAccessF f,void* context){accessRegister=f;controller=context;return true;}
 static bool icLevel;
 void pxaIcInt(PxaIc*,uint_fast8_t,bool level){icLevel=level;}
-void pxaDmaExternalReq(PxaDma*,uint_fast8_t,bool){}
+static bool dmaRequest[2];  // RX (line 21) and TX (22)
+void pxaDmaExternalReq(PxaDma*,uint_fast8_t line,bool level){dmaRequest[line-21]=level;}
 extern "C" void uarmAbort(){abort();}
 static bool readSector(uint32_t n,void* out){if(n)return false;memcpy(out,sector,512);return true;}
 static bool writeSector(uint32_t n,const void* in){if(n)return false;memcpy(sector,in,512);return true;}
@@ -195,10 +196,33 @@ int main(){
         if (mib == 1886) assert(blLen == 10 && cSize == 3771 && mult == 7);
         if (mib == 2048) assert(blLen == 10 && cSize == 4095 && mult == 7);
     }
+    // DMA mode: no FIFO request until the command starts the transfer. Linux pxamci starts its
+    // channel and writes CMDAT with the clock off, then starts the clock.
+    {
+        initCard(card);
+        for(unsigned i=0;i<512;i++)sector[i]=uint8_t(i*7);
+        writeReg(0,1);writeReg(0x1c,512);writeReg(0x20,1);writeReg(0x30,17);writeReg(0x34,0);writeReg(0x38,0);
+        writeReg(0x10,0x85);
+        assert(!dmaRequest[0]&&!dmaRequest[1]&&!(readReg(0x2c)&0x60));
+        writeReg(0,2);
+        assert(dmaRequest[0]&&!dmaRequest[1]);
+        for(unsigned i=0;i<512;i+=4){uint32_t w;memcpy(&w,sector+i,4);assert(readReg(0x40)==w);}
+        assert(readReg(4)&0x800);
+        readReg(0x2c);assert(!dmaRequest[0]);
+        writeReg(0,1);writeReg(0x1c,512);writeReg(0x20,1);writeReg(0x30,24);writeReg(0x34,0);writeReg(0x38,0);
+        writeReg(0x10,0x8d);
+        assert(!dmaRequest[0]&&!dmaRequest[1]&&!(readReg(0x2c)&0x60));
+        writeReg(0,2);
+        assert(dmaRequest[1]&&!dmaRequest[0]);
+        for(unsigned i=0;i<128;i++)writeReg(0x44,0x0a0b0c0d);
+        assert((readReg(4)&0x1804)==0x1800&&sector[0]==0x0d&&sector[511]==0x0a);
+        readReg(0x2c);assert(!dmaRequest[1]);
+        for(unsigned i=0;i<512;i+=4)memcpy(sector+i,"\x11\x22\x33\x44",4);
+    }
     // PXA25x keeps its previous one-byte-per-word access behaviour.
     card=vsdInit(readSector,writeSector,65536);initCard(card);
     mmc=pxaMmcInit(nullptr,nullptr,nullptr);pxaMmcInsert(mmc,card);
     writeReg(0x28,0x3ff);assert(readReg(0x28)==0x7f);  // PXA25x I_MASK has 7 bits
     command(17,0,512,false);assert(readReg(0x40)==0x11);assert(readReg(0x40)==0x22);
-    puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status, error and removal signalling, PXA25x compatibility");
+    puts("PASS: PXA27x packed FIFO widths, block write, PRTBUF, SD status, DMA requests after the command, error and removal signalling, PXA25x compatibility");
 }

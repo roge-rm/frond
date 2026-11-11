@@ -1,0 +1,20 @@
+--- a/src/uarm/uarm/pxa_MMC.cpp
++++ b/src/uarm/uarm/pxa_MMC.cpp
+@@ -94,12 +94,15 @@
+         if (mmc->stat & 0x0022) mmc->iReg |= I_RES_ERR;
+     }
+ 
+-    if ((mmc->cmdat & 4) && (mmc->cmdat & 8) && mmc->numBlks) {
++    // FIFO requests only once the command has started the transfer: TX while blocks are left
++    // to send, RX while a block is in the FIFO. A DMA channel started before the command
++    // (Linux pxamci) must not move a burst while the clock is still off.
++    if ((mmc->cmdat & 4) && (mmc->cmdat & 8) && mmc->numBlks && mmc->dataXferOngoing) {
+         mmc->stat |= 0x40;
+         mmc->iReg |= 0x40;
+     }
+ 
+-    if ((mmc->cmdat & 4) && !(mmc->cmdat & 8) && (mmc->numBlks || mmc->fifoBytes)) {
++    if ((mmc->cmdat & 4) && !(mmc->cmdat & 8) && mmc->fifoBytes) {
+         mmc->stat |= 0x80;
+         mmc->iReg |= 0x20;
+     }
