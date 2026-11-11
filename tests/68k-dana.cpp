@@ -995,19 +995,31 @@ int main() {
         halted.now=300; assert(halted.Byte(0)==0);
     }
     {
-        // With all 32 reports queued, a release folds into the newest one instead of being refused.
+        // Each press keeps a FIFO slot for its release, as power and rocker presses go straight to
+        // DispatchScanCode: the last press that fits still reaches the guest, its release too.
         St full; assert(full.Byte(0)==0xaa);
-        auto b=*DanaScan5::Named("b");
-        assert(full.DispatchScanCode(b.Code(),true));
-        for(unsigned i=0;i<31;i++) assert(full.DispatchScanCode(scan.Code(),i%2==0));
+        auto b=*DanaScan5::Named("b"); const uint8 power=0x0f;
+        std::vector<std::vector<uint8>> expected;
+        std::vector<uint8> held;
+        auto change=[&](uint8 code,bool down) {
+            if(!full.DispatchScanCode(code,down)) return false;
+            if(down) held.push_back(code); else held.erase(std::find(held.begin(),held.end(),code));
+            auto report=held; std::sort(report.begin(),report.end()); expected.push_back(report);
+            return true;
+        };
+        assert(change(b.Code(),true));
+        for(unsigned i=0;expected.size()<29;i++) assert(change(scan.Code(),i%2==0));
+        assert(held.size()==1 && expected.size()==29);
+        assert(change(power,true));
         assert(!full.DispatchScanCode(DanaScan5::Named("c")->Code(),true));
-        assert(full.DispatchScanCode(b.Code(),false)); assert(full.DispatchScanCode(scan.Code(),false));
-        std::vector<uint8> last;
-        for(unsigned r=0;r<32;r++) {
-            last.clear(); unsigned n=full.Byte(0)&15;
-            for(unsigned i=0;i<n;i++) last.push_back(uint8(full.Byte(0)));
+        assert(change(power,false)); assert(change(b.Code(),false));
+        assert(expected.size()==32);
+        for(const auto& want:expected) {
+            std::vector<uint8> got; unsigned n=full.Byte(0)&15;
+            for(unsigned i=0;i<n;i++) got.push_back(uint8(full.Byte(0)));
+            std::sort(got.begin(),got.end()); assert(got==want);
         }
-        assert(last.empty());
+        assert(full.Byte(0)==0);
     }
     St reserved; assert(reserved.Byte(0)==0xaa);
     std::vector<DanaTransition5> fill;
