@@ -1,0 +1,69 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -25,6 +25,9 @@
+ // Only one machine exists at a time. These stay out of Probe, whose size is part of the state layout.
+ uint64_t deferredCycles = 0, quietCycles = 0;
+ uint32_t quietMode = 0;
++// Set when an instruction that charged opened a new quiet span itself: the next step still looks at the interrupt
++// lines, as it would after charging that instruction alone.
++bool linesPending = false;
+ // The Fast engine: inside a quiet span the lean interpreter runs instead of the guarded step.
+ bool fastEngine = false;
+ uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
+@@ -229,6 +232,7 @@
+     // time calls this first. A refusal is kept in graphicsWireStatus for the next clock boundary.
+     bool chargeDeferred() {
+         quietCycles = 0;
++        linesPending = false;
+         if (!deferredCycles) return true;
+         const uint32_t cycles = uint32_t(deferredCycles);
+         deferredCycles = 0;
+@@ -961,7 +965,8 @@
+         if (wake) cpuArm920EndWait(p->cpu);
+     }
+     // While cycles can wait nothing has changed since these were last looked at.
+-    const bool quiet = quietCycles != 0;
++    const bool quiet = quietCycles != 0 && !linesPending;
++    linesPending = false;
+     // Conservative bus stall: jump to the reference event without retiring instructions.
+     if (p->options.bootstrapPeripherals && !quiet) {
+         p->finishGraphicsBusStall();
+@@ -1110,6 +1115,19 @@
+         if (!p->chargeDeferred()) { p->clockBoundary(); return false; }
+         // The write that turned the CPU's own clock off ends there. The time after it passes in the wait loop.
+         if (p->peripherals.cpuClockHeld(cpuArm920ClockMode(p->cpu))) return true;
++        // An access charged the span so far. When a new span starts here, in the same clock mode and with no bus
++        // stall to finish, this instruction's cycles wait in it, which gives the state their own charge would.
++        if (cpuArm920ClockMode(p->cpu) == quietMode && p->graphicsWireStatus == Imx1BootstrapAccess::ok &&
++            !p->peripherals.systemPllBusStallPending()) {
++            const uint64_t span = p->quietCpuCycles(quietMode);
++            if (span > cycles) {
++                if (p->clockBoundary()) return false;
++                deferredCycles = cycles;
++                quietCycles = span - cycles;
++                linesPending = true;
++                return true;
++            }
++        }
+         const auto graphicsStatus = p->advanceGraphicsCpu(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)));
+         if (graphicsStatus != Imx1BootstrapAccess::ok) {
+             p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+@@ -1146,7 +1164,7 @@
+         for (uint32_t slice = 0; slice < retiredBudget;) {
+             if (!runStep(p, idleHclkLimit)) break;
+             ++slice;
+-            if (quietCycles < leanMinimumSpan || p->blPrefix || slice + 1 >= retiredBudget ||
++            if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
+                 cpuArm920ClockMode(p->cpu) != quietMode) continue;
+             uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
+             if (p->bounds) {
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -218,6 +218,7 @@
+     // Finish a held-high System PLL interval before the next architectural bus access.
+     // Returns elapsed independent reference units, without retiring CPU instructions.
+     uint64_t finishSystemPllBusStall();
++    bool systemPllBusStallPending() const { return cgm.systemRestartRemaining() != 0; }
+     // Charge with the post-instruction mode, preserving System PLL and PERCLK1 fractions.
+     void advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assumeSettled);
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode = 0);
