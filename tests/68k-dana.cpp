@@ -838,9 +838,13 @@ static void BacklogStateTest() {
     assert(asleep.BacklogSize()==48);
     assert(asleep.Byte(0xef)==0);
     asleep.ReportHeldKeys(); assert(asleep.BacklogSize()==48); assert(asleep.Byte(0)==0);
+    // Nothing waiting wakes it, so later feeds don't scan the backlog again until it changes.
+    unsigned scans=asleep.wakeScans; assert(scans>=1);
+    for(unsigned i=0;i<100;i++) asleep.ReportHeldKeys();
+    assert(asleep.wakeScans==scans && asleep.BacklogSize()==48);
     assert(asleep.DispatchScanCode(0x0f,true)); assert(asleep.DispatchScanCode(0x0f,false));
     assert(asleep.BacklogSize()==50);
-    asleep.ReportHeldKeys(); assert(asleep.BacklogSize()<48);
+    asleep.ReportHeldKeys(); assert(asleep.BacklogSize()<48); assert(asleep.wakeScans==scans+1);
     auto woke=Drain(asleep);
     assert(woke.size()==50 && !asleep.BacklogSize());
     assert(woke[0]==std::vector<uint8>{0x0f} && woke[1].empty());
