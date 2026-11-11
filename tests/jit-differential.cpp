@@ -409,6 +409,8 @@ struct Case {
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
     std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
+    // Maps the page tables at 0x8000 (privileged only), so a case can remap pages.
+    bool tablesPage = false;
 };
 
 struct Assembled {
@@ -501,6 +503,7 @@ Assembled assemble(const Case& c) {
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
     if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
+    if (c.tablesPage) page(kL2a, 1, false);
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
 
@@ -1676,6 +1679,7 @@ struct Directed {
     uint32_t sr = 0x200;  // control S and R
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
     std::vector<uint32_t> swiHandler;
+    bool tablesPage = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1728,6 +1732,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.cpsr = (c.cpsr & 0xf0000000) | 0xc0 | (d.thumb ? 0x20 : 0) | d.mode;
     c.dacr = d.dacr;
     c.swiHandler = d.swiHandler;
+    c.tablesPage = d.tablesPage;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -1794,6 +1799,20 @@ bool directed(Engines& e) {
          {{4, 0x28010}, {5, 0x5555}, {8, 0x77}, {9, 0}},
          {{Expect::REG, 8, 0x77}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28010}, {Expect::CPSR, 0, USR, 0x1f}},
          0x200, 1, {0xe3a06001, 0xee036f10, 0xe1b0f00e}},
+        // Domain changes and remaps interleaved, on the domain 1 alias of 0x21000 (r4). Each
+        // pass: a store with domain 1 manager (r10), one as a client (r11), the page remapped
+        // read-only (AP 0, r6) and the TLB flushed (r12), a read, a store as manager again,
+        // then one as a client, which takes a permission fault (FSR 0x1f) as the manager's
+        // writable entry must have gone read-only, then the page remapped writable (r8).
+        {"svc dacr changes and remaps interleaved",
+         {0xee03af10, 0xe5847000, 0xee03bf10, 0xe5847004, 0xe5856000, 0xee08cf17, 0xe5949000, 0xee03af10,
+          0xe5847008, 0xee03bf10, 0xe584700c, 0xe5858000, 0xee08cf17, 0xe2877001, 0xe2533001, 0x1affffef},
+         false, SVC,
+         {{3, 8}, {4, 0x101040}, {5, kL2b + 4}, {6, 0x2100e}, {7, 0x77}, {8, 0x21ffe}, {10, 0xd}, {11, 5},
+          {12, 0}},
+         {{Expect::REG, 3, 0}, {Expect::REG, 9, 0x7e}, {Expect::MEM, 0x21040, 0x7e}, {Expect::MEM, 0x21044, 0x7e},
+          {Expect::MEM, 0x21048, 0x7e}, {Expect::FSR, 0, 0x1f, 0xff}, {Expect::FAR, 0, 0x10104c}},
+         0x200, 5, {}, true},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
          {{Expect::REG, 2, 0}, {Expect::CPSR, 0, 0x60000000, 0xf8000000}}},
