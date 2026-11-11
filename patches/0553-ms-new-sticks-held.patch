@@ -1,0 +1,35 @@
+--- a/src/uarm/uarm/MemoryStickImage.h
++++ b/src/uarm/uarm/MemoryStickImage.h
+@@ -163,6 +163,10 @@
+     }
+     return physical;
+ }
++// A new stick as Frond makes one: boot blocks, and every L at its home block with zero data, like a
++// stick wiped on a PC. The TG50 driver then finds every L in its first mount scan; on an erased stick
++// it reads every page of each free block before it claims one for an L, about 50 s at 128 MB.
++inline std::vector<uint8_t> blank(const Geometry& g){return fromLogical(nullptr,0,g);}
+ // A v1 or v2 .frondms as a flat physical image. v2 is read whole; its CRCs are checked.
+ inline bool readPhysical(const std::filesystem::path& path,std::vector<uint8_t>& physical) {
+     std::ifstream in(path,std::ios::binary);
+--- a/src/uarm/native/CardTool.h
++++ b/src/uarm/native/CardTool.h
+@@ -177,7 +177,7 @@
+         if (!msMegabytesTaken(size)) return fail("size", "Choose a classic Memory Stick of " + sizeList(kind) + ".");
+         const auto* geometry = frondMsGeometry::byMegabytes(size);
+         if (auto space = checkSpace(dest, msFileBytes(*geometry)); !space.ok) return space;
+-        return writeMs(dest, frondMs::create(*geometry), run);
++        return writeMs(dest, frondMs::blank(*geometry), run);
+     }
+     const bool taken = kind == Kind::sd ? frondSd::validCardMib(size) && sdBytesTaken(uint64_t(size) << 20)
+                                         : msProMibTaken(size);
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -481,7 +481,7 @@
+                     const auto* geometry=frondMsGeometry::byMegabytes(megabytes);
+                     if(!geometry||!deviceProfileMsSizeValid5(device,megabytes))
+                         return {false,"size","Choose a classic Memory Stick from 4 to 128 MB."};
+-                    image=frondMs::create(*geometry);
++                    image=frondMs::blank(*geometry);
+                 }else {
+                     // The header names the geometry, so the size check comes before reading the image.
+                     std::ifstream input(path,std::ios::binary|std::ios::ate);

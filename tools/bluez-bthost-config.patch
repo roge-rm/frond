@@ -51,7 +51,7 @@
  	return true;
  }
  
-@@ -2228,12 +2251,15 @@
+@@ -2228,16 +2251,37 @@
  	if (len < sizeof(*rsp))
  		return false;
  
@@ -70,7 +70,45 @@
  
  	return true;
  }
-@@ -4212,7 +4238,8 @@
+ 
++static void btconn_drop_cid_hooks(struct btconn *conn, struct l2conn *l2conn)
++{
++	struct cid_hook **hook = &conn->cid_hooks;
++
++	/* A hook belongs to one channel: the next channel can reuse its CID. */
++	while (*hook) {
++		struct cid_hook *old = *hook;
++
++		if (old->cid != l2conn->scid && old->cid != l2conn->dcid) {
++			hook = &old->next;
++			continue;
++		}
++
++		*hook = old->next;
++		free(old);
++	}
++}
++
+ static bool l2cap_disconn_req(struct bthost *bthost, struct btconn *conn,
+ 				uint8_t ident, const void *data, uint16_t len)
+ {
+@@ -2261,6 +2305,7 @@
+ 		return true;
+ 
+ 	btconn_detach_l2cap_conn(conn, l2conn);
++	btconn_drop_cid_hooks(conn, l2conn);
+ 
+ 	cb_data = bthost_find_l2cap_cb_by_psm(bthost, l2conn->psm);
+ 
+@@ -2287,6 +2332,7 @@
+ 		return true;
+ 
+ 	btconn_detach_l2cap_conn(conn, l2conn);
++	btconn_drop_cid_hooks(conn, l2conn);
+ 
+ 	cb_data = bthost_find_l2cap_cb_by_psm(bthost, l2conn->psm);
+ 
+@@ -4212,7 +4258,8 @@
  	bthost->rfcomm_conn_data = data;
  
  	req.psm = cpu_to_le16(0x0003);

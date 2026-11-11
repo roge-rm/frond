@@ -76,6 +76,8 @@ struct Preferences {
     // Dana Wireless: the built-in Wi-Fi module's radio.
     bool wifiModule{true};
     frondDana::Preferences danaView;
+    // ARM devices: a MIPS readout in the corner of the Palm.
+    bool showMips{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -92,6 +94,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
     result->barShown = object.value("barShown").toBool(true);
+    result->showMips = object.value("showMips").toBool(false);
     // Earlier machine settings only have the printer switch.
     const auto port = object.value("usbPort").toString();
     result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
@@ -115,6 +118,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (!prefs.barShown) object.insert("barShown", false);
+    if (prefs.showMips) object.insert("showMips", true);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);
     if (!prefs.wifiModule) object.insert("wifiModule", false);
@@ -757,6 +761,35 @@ inline bool applySdJournalCopy(const QString& journalPath, const QString& sdPath
 
 // What a stopped job returns, so the caller shows no failure.
 inline QString cancelledText() { return QStringLiteral("Cancelled."); }
+// The core's reason for refusing a session at load, from the end of its log, as the main text of
+// the failure; empty when the log has none.
+inline QString refusal(const QString& log) {
+    static const QString prefix = QStringLiteral("session refused: ");
+    static const QString remount = QStringLiteral("failed to remount SD card: ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        if (lines[i].startsWith(remount))
+            return QStringLiteral("Frond couldn't open this session: its card isn't the one it was saved with.");
+        if (!lines[i].startsWith(prefix)) continue;
+        auto reason = lines[i].mid(prefix.size()).trimmed();
+        if (reason.startsWith(QStringLiteral("linked card committed history")))
+            reason = QStringLiteral("a card's saved changes are missing or don't match the session");
+        return QStringLiteral("Frond couldn't open this session: %1.").arg(reason);
+    }
+    return {};
+}
+// The core's reason for refusing the machine's ROM at start, like "alphasmart-dana-wireless: this
+// ROM has no serial number token", as the main text of the failure; empty when the log has none.
+inline QString romRefusal(const QString& log) {
+    static const QString marker = QStringLiteral(": this ROM ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        const auto at = lines[i].indexOf(marker);
+        if (at <= 0 || lines[i].left(at).contains(' ')) continue;
+        return QStringLiteral("Frond couldn't start this machine: %1.").arg(lines[i].mid(at + 2).trimmed());
+    }
+    return {};
+}
 
 // The library's progress over a CopyProgress, which may be empty.
 inline frondStorage::Progress storageProgress(const std::function<bool(qint64, qint64)>& progress) {
@@ -1077,9 +1110,12 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (progress && !progress(n, all)) cancelled = true;
         return !cancelled;
     };
-    for (const auto& [source, target] : jobs)
+    // The copy keeps each file's mode, so a private (0600) session stays private.
+    for (const auto& [source, target] : jobs) {
         if (!copyChunked(source, target, &done, total, watch))
             return fail(cancelled ? QStringLiteral("Duplicate cancelled.") : failed);
+        QFile::setPermissions(target, QFile::permissions(source));
+    }
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, dest + '/' + nandSettle.sibling)) return fail(failed);
     // The copy's slot: its own new card, the link, or nothing. A card the .frond still describes

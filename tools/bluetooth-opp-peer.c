@@ -92,7 +92,7 @@ static struct bytes record(const struct selection*s){
  if(!spp_mode&&!dun_mode&&selected(s,0x303)){attr(&b,0x303);a=seq(&b);u8(&b,8);u8(&b,0xff);endseq(&b,a);}
  endseq(&b,all);return b;
 }
-struct sdplink{uint16_t handle,cid;};static struct sdplink links[32];static unsigned link_count;
+struct sdplink{bool used;uint16_t handle,cid;};static struct sdplink links[32];
 static void sdp_reply(struct sdplink*l,uint8_t opcode,uint16_t transaction,const struct bytes*parameters){struct bytes b={0};u8(&b,opcode);u16(&b,transaction);u16(&b,parameters->n);add(&b,parameters->b,parameters->n);bthost_send_cid(host,l->handle,l->cid,b.b,b.n);}
 static void sdp_error(struct sdplink*l,uint16_t t,uint16_t code){struct bytes b={0};u16(&b,code);sdp_reply(l,1,t,&b);}
 static void sdp_data(const void*data,uint16_t length,void*context){
@@ -113,7 +113,10 @@ static void sdp_data(const void*data,uint16_t length,void*context){
  }
  printf("SDP opcode=%u match=%u channel=%u\n",op,match,CHANNEL);fflush(stdout);
 }
-static void sdp_connected(uint16_t h,uint16_t c,void*p){assert(link_count<32);struct sdplink*l=&links[link_count++];l->handle=h;l->cid=c;bthost_add_cid_hook(host,h,c,sdp_data,l);}
+/* A slot is in use from the SDP channel's open until its L2CAP close or its link going; bthost drops the CID hook then too. */
+static void sdp_connected(uint16_t h,uint16_t c,void*p){struct sdplink*l=NULL;for(unsigned i=0;i<32&&!l;++i)if(!links[i].used)l=&links[i];if(!l){printf("SDP_BUSY handle=%04x\n",h);fflush(stdout);return;}l->used=true;l->handle=h;l->cid=c;bthost_add_cid_hook(host,h,c,sdp_data,l);}
+static void sdp_closed(uint16_t h,uint16_t c,void*p){for(unsigned i=0;i<32;++i)if(links[i].used&&links[i].handle==h&&links[i].cid==c)links[i].used=false;}
+static void sdp_link_gone(uint16_t h){for(unsigned i=0;i<32;++i)if(links[i].used&&links[i].handle==h)links[i].used=false;}
 static uint8_t uih_fcs(const uint8_t*p){
  uint8_t crc=0xff;for(unsigned i=0;i<2;++i){crc^=p[i];for(unsigned j=0;j<8;++j)crc=(crc>>1)^((crc&1)?0xe0:0);}return 0xff-crc;
 }
@@ -330,7 +333,7 @@ static void ready(void){
 static void read_h4(int fd,uint32_t events,void*p){
  static uint8_t data[65540];static size_t count;if(events&(EPOLLERR|EPOLLHUP)){mainloop_quit();return;}
  ssize_t n=recv(fd,data+count,sizeof(data)-count,MSG_DONTWAIT);if(n<0&&(errno==EAGAIN||errno==EINTR))return;if(n<=0){mainloop_quit();return;}count+=n;
- for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(dun&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])dun_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode)dun_watch_disc(data,want);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
+ for(;;){if(!count)break;size_t want;if(data[0]==4){if(count<3)break;want=3+data[2];}else if(data[0]==2){if(count<5)break;want=5+data[3]+((size_t)data[4]<<8);}else if(data[0]==3){if(count<4)break;want=4+data[3];}else{fprintf(stderr,"Unexpected H4 type %u\n",data[0]);exit(2);}assert(want<=sizeof(data));if(count<want)break;bool disconnected_link=push_mode && client_state==5 && want==7 && data[0]==4 && data[1]==5 && data[2]==4 && !data[3] && (data[4]|data[5]<<8)==rfhandle;if(spp_mode&&!push_mode&&completed&&want==7&&data[0]==4&&data[1]==5&&data[2]==4&&!data[3]&&(data[4]|data[5]<<8)==rfhandle){disconnected=true;puts("SPP_HCI_DISCONNECT_COMPLETE");mainloop_quit();}if(!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])sdp_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode&&want==7&&data[0]==4&&data[1]==5&&!data[3])dun_link_gone(data[4]|data[5]<<8);if(dun&&!push_mode)dun_watch_disc(data,want);map_cids(data,want);bthost_receive_h4(host,data,want);if(disconnected_link){if(spp_mode)disconnected=true;push_link_closed=true;puts("HCI_DISCONNECT_COMPLETE");fflush(stdout);mainloop_quit();}memmove(data,data+want,count-want);count-=want;}
 }
 static void stopped(int sig,void*p){mainloop_quit();}
 static void debug(const char*line,void*p){printf("H4 %s\n",line);fflush(stdout);}
@@ -355,7 +358,10 @@ static void dun_tests(void){
  /* A DISC on the call's channel ends it. */
  rfcid=0x40;uint8_t acl[13]={2,0,0x20,8,0,4,0,0x40,0,(CHANNEL*2<<2)|3,0x53,1,0};dun_watch_disc(acl,sizeof(acl));assert(!dun_open&&!strcmp(dun_state,"off"));
  dun_open=true;frond_dun_open(dun,monotonic_ns());dun_flush();dun_link_gone(rfhandle);assert(!dun_open&&!strcmp(dun_state,"off"));frond_dun_destroy(dun);dun=NULL;
- puts("PASS DUN UUID1103 record on channel 9, modem commands, one call at a time, DISC and link loss end the call");
+ /* Each dial opens an SDP session: closed ones and ones on a lost link give their slot back. */
+ host=bthost_create();assert(host);for(unsigned i=0;i<100;++i){sdp_connected(1,0x40,NULL);sdp_closed(1,0x40,NULL);}
+ for(unsigned round=0;round<10;++round){for(unsigned i=0;i<8;++i)sdp_connected(2,0x40+i,NULL);sdp_link_gone(2);}for(unsigned i=0;i<32;++i)assert(!links[i].used);bthost_destroy(host);host=NULL;
+ puts("PASS DUN UUID1103 record on channel 9, modem commands, one call at a time, DISC and link loss end the call, SDP sessions freed");
 }
 int main(int argc,char**argv){
  if(argc==2&&!strcmp(argv[1],"--selftest-spp")){spp_tests();return 0;}
@@ -368,5 +374,5 @@ int main(int argc,char**argv){
  sk=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);assert(sk>=0);struct sockaddr_un a={.sun_family=AF_UNIX};assert(strlen(argv[1])<sizeof(a.sun_path));strcpy(a.sun_path,argv[1]);
  /* The phone may start beside a btvirt that hasn't made its socket yet. */
  for(int tries=dun_mode&&!push_mode?50:1;connect(sk,(void*)&a,sizeof(a));){assert(--tries>0);usleep(100000);}
- mainloop_init();host=bthost_create();assert(host);bthost_set_send_handler(host,send_h4,NULL);bthost_set_debug(host,debug,NULL,NULL);bthost_set_cmd_complete_cb(host,command,NULL);bthost_notify_ready(host,ready);bthost_set_pin_code(host,(const uint8_t*)pin_code,strlen(pin_code));if(push_mode)bthost_set_connect_cb(host,client_connected,NULL);else{bthost_add_l2cap_server(host,1,sdp_connected,NULL,NULL);bthost_add_l2cap_server(host,3,NULL,rfcomm_closed,NULL);bthost_add_rfcomm_server(host,CHANNEL,rfcomm_connected,NULL);}assert(!mainloop_add_fd(sk,EPOLLIN,read_h4,NULL,NULL));bthost_start(host);if(push_mode)timeout_add(60000,deadline,NULL,NULL);if(gate_path)timeout_add(20,check_gate,NULL,NULL);if(dun&&!push_mode)timeout_add(5,dun_tick,NULL,NULL);mainloop_run_with_signal(stopped,NULL);printf("RESULT put_complete=%u disconnect_seen=%u bytes=%zu\n",completed,disconnected,payload_size);bthost_destroy(host);close(sk);if(dun_mode&&!push_mode){frond_dun_destroy(dun);return 0;}return completed && disconnected && (!push_mode || push_link_closed) && !client_failed?0:2;
+ mainloop_init();host=bthost_create();assert(host);bthost_set_send_handler(host,send_h4,NULL);bthost_set_debug(host,debug,NULL,NULL);bthost_set_cmd_complete_cb(host,command,NULL);bthost_notify_ready(host,ready);bthost_set_pin_code(host,(const uint8_t*)pin_code,strlen(pin_code));if(push_mode)bthost_set_connect_cb(host,client_connected,NULL);else{bthost_add_l2cap_server(host,1,sdp_connected,sdp_closed,NULL);bthost_add_l2cap_server(host,3,NULL,rfcomm_closed,NULL);bthost_add_rfcomm_server(host,CHANNEL,rfcomm_connected,NULL);}assert(!mainloop_add_fd(sk,EPOLLIN,read_h4,NULL,NULL));bthost_start(host);if(push_mode)timeout_add(60000,deadline,NULL,NULL);if(gate_path)timeout_add(20,check_gate,NULL,NULL);if(dun&&!push_mode)timeout_add(5,dun_tick,NULL,NULL);mainloop_run_with_signal(stopped,NULL);printf("RESULT put_complete=%u disconnect_seen=%u bytes=%zu\n",completed,disconnected,payload_size);bthost_destroy(host);close(sk);if(dun_mode&&!push_mode){frond_dun_destroy(dun);return 0;}return completed && disconnected && (!push_mode || push_link_closed) && !client_failed?0:2;
 }

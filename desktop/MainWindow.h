@@ -180,6 +180,8 @@ class MainWindow : public QMainWindow {
     void placeOverlays();
     void setPanelOpen(bool open);
     void liveDisplay(const QString& what);
+    void updateMips();
+    void pollMips();
     void listApps();
     void databasesReply(bool ok, const QString& message);
     void deleteApplication(const QString& name);
@@ -227,7 +229,7 @@ class MainWindow : public QMainWindow {
     bool panelWasOpen{false};
     int baseWidth{0};  // the window's width with no panel open, while the Palm is embedded
     bool contrastPending{false};
-    QCheckBox *smoothToggle{nullptr}, *keyboardShow{nullptr};
+    QCheckBox *smoothToggle{nullptr}, *mipsToggle{nullptr}, *keyboardShow{nullptr};
     QSlider* sizeSlider{nullptr};
     QComboBox *jogBox{nullptr}, *speedBox{nullptr};
     QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *speedLabel{nullptr};
@@ -268,6 +270,7 @@ class MainWindow : public QMainWindow {
     QString bluetoothCore{"off"};  // what the core's Bluetooth is set to now
     QString bluetoothCoreChoice{"off"};  // the choice that gave it
     QString bluetoothSent;  // the bluetooth-mode argument waiting for its reply
+    bool irdaQueued = false;  // an infrared choice waiting for the core to finish a request
     QSettings settings;
     QString core, core68k, sessionPath, savingPath, pendingCopy, copyStaging;
     bool hardResetAfterSave{false};
@@ -281,6 +284,7 @@ class MainWindow : public QMainWindow {
     QLabel* usbState;
     PrinterPanel* printerPanel;
     QTimer* printerTimer;
+    QTimer* mipsTimer;
     PrintSource usbPrint, irPrint;
     QLineEdit* bluetoothSocket;
     QComboBox* bluetooth;

@@ -1,5 +1,6 @@
 #include "SdExchange.h"
 #include "CardStorage.h"
+#include <QCoreApplication>
 #include <QStorageInfo>
 #include <QCryptographicHash>
 #include <QDir>
@@ -14,9 +15,16 @@
 SdExchange::SdExchange(const QString& scratchTemplate)
     : directory(scratchTemplate.isEmpty() ? QDir::tempPath() + "/frond-exchange-XXXXXX" : scratchTemplate) {}
 
+// The copy in ../lib/frond beside the program (the AppImage's), else the one on PATH.
+static QString findTool(const QString& name) {
+    const QString bundled = QCoreApplication::applicationDirPath() + "/../lib/frond/" + name;
+    if (QFileInfo(bundled).isExecutable()) return QDir::cleanPath(bundled);
+    return QStandardPaths::findExecutable(name);
+}
+
 bool SdExchange::available() {
     for (const auto* name : {"mdir", "mcopy"})
-        if (QStandardPaths::findExecutable(name).isEmpty()) return false;
+        if (findTool(name).isEmpty()) return false;
     return true;
 }
 
@@ -41,7 +49,7 @@ bool SdExchange::run(const QString& tool, const QString& image, const QStringLis
     env.insert("LC_ALL", "C.UTF-8");
     process.setProcessEnvironment(env);
     process.setProcessChannelMode(QProcess::MergedChannels);
-    process.start(QStandardPaths::findExecutable(tool),
+    process.start(findTool(tool),
                   QStringList{"-i", image + "@@" + QString::number(offset)} + args);
     process.closeWriteChannel();
     if (!process.waitForStarted(3000)) {

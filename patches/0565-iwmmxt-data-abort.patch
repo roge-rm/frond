@@ -1,0 +1,346 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -1054,6 +1054,42 @@
+     }
+ }
+ 
++// A coprocessor's data access for the guest, checked for the current mode. False with *fsr
++// set on a fault, which cpuDataAbortExternal then logs and takes.
++bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size, bool write,
++                   uint_fast8_t *fsr) {
++    const bool p = cpu->privileged;
++    switch (size) {
++        case 1:
++            return write ? cpuPrvMemOpExGeneric<1, true>(cpu, buf, vaddr, p, fsr)
++                         : cpuPrvMemOpExGeneric<1, false>(cpu, buf, vaddr, p, fsr);
++        case 2:
++            return write ? cpuPrvMemOpExGeneric<2, true>(cpu, buf, vaddr, p, fsr)
++                         : cpuPrvMemOpExGeneric<2, false>(cpu, buf, vaddr, p, fsr);
++        case 4:
++            return write ? cpuPrvMemOpExGeneric<4, true>(cpu, buf, vaddr, p, fsr)
++                         : cpuPrvMemOpExGeneric<4, false>(cpu, buf, vaddr, p, fsr);
++        default:
++            ERR("invalid size %i\n", size);
++    }
++    return false;
++}
++
++// A failed data access of the instruction at curInstrPC: logged as cpuPrvMemOp logs the
++// interpreter's own, then the data abort.
++static void cpuPrvDataAbort(struct ArmCpu *cpu, uint32_t vaddr, unsigned size, bool write, uint_fast8_t fsr) {
++#ifndef __EMSCRIPTEN__
++    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
++            (unsigned long)vaddr, cpu->curInstrPC, unsigned(fsr));
++    gdbStubDebugBreakRequested(cpu->debugStub);
++#endif
++    cpuPrvHandleMemErr(cpu, vaddr, write, false, fsr);
++}
++
++void cpuDataAbortExternal(struct ArmCpu *cpu, uint32_t vaddr, uint_fast8_t size, bool write, uint_fast8_t fsr) {
++    cpuPrvDataAbort(cpu, vaddr, size, write, fsr);
++}
++
+ static FORCE_INLINE uint64_t cpuPrv64FromHalves(uint64_t hi, uint32_t lo) {
+     // better than shifting in almost all compilers
+     union {
+@@ -4607,11 +4643,11 @@
+     return cpuPrvFastEngine;
+ }
+ 
+-// One instruction through the interpreter, as cpuCycleLine's slow path does it. With
+-// undefined, the instruction is fetched as usual and then raises the undefined instruction
+-// instead of running (FROND_JIT_UNDEFINED: the JIT already ran it up to its failed access).
++// One instruction through the interpreter, as cpuCycleLine's slow path does it. With abort,
++// the instruction is fetched as usual and then takes that data abort instead of running
++// (FROND_JIT_ABORT: the JIT already ran it up to its failed access).
+ template <int memorySystemKind>
+-static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, bool undefined = false) {
++static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, const FrondJitAbort *abort = nullptr) {
+     const uint32_t pc = cpu->regs[REG_NO_PC];
+     cpu->curInstrPC = pc;
+     acc += 1;
+@@ -4621,14 +4657,14 @@
+     const bool ok = cpu->T ? icacheFetch<memorySystemKind, 2, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded)
+                            : icacheFetch<memorySystemKind, 4, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded);
+     // The JIT fetched this instruction before its access, so a fetch that fails now (the
+-    // access changed the mapping) doesn't stop the undefined instruction.
+-    if (!ok && !undefined) {
++    // access changed the mapping) doesn't stop the abort.
++    if (!ok && !abort) {
+         cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+         return;
+     }
+     cpu->regs[REG_NO_PC] = pc + size;
+-    if (undefined)
+-        execFn_invalid<memorySystemKind, false>(cpu, instr);
++    if (abort)
++        cpuPrvDataAbort(cpu, abort->addr, abort->size, abort->write, abort->fsr);
+     else
+         cpuPrvDecompressExecFn(decoded)(cpu, instr);
+ }
+@@ -4650,14 +4686,14 @@
+             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
+                     cpu->regs[REG_NO_PC]);
+         }
+-        // Before the slow path check: in Exact the undefined instruction is taken inside
+-        // the same instruction as the access, before any interrupt that access raised.
+-        const bool undefined = stop == FROND_JIT_UNDEFINED;
+-        if (cpu->slowPath && !undefined) break;
+-        if (stop == FROND_JIT_INTERPRET || undefined) {
++        // Before the slow path check: in Exact the data abort is taken inside the same
++        // instruction as the access, before any interrupt an earlier access raised.
++        const FrondJitAbort *abort = stop == FROND_JIT_ABORT ? &jitLastAbort(cpu->jit) : nullptr;
++        if (cpu->slowPath && !abort) break;
++        if (stop == FROND_JIT_INTERPRET || abort) {
+             // Stay in the interpreter while the next instruction would come straight back.
+             for (bool first = true;; first = false) {
+-                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc, first && undefined);
++                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc, first ? abort : nullptr);
+                 if (cpu->slowPath || acc >= cycles) break;
+                 const uint32_t pc = cpu->regs[REG_NO_PC];
+                 uint32_t word;
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -147,6 +147,12 @@
+ void cpuSetReg(struct ArmCpu *cpu, uint_fast8_t reg, uint32_t val);
+ bool cpuMemOpExternal(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size,
+                       bool write);  // for external use
++// A coprocessor load or store's access (1, 2 or 4 bytes), checked for the current mode.
++// False with *fsr set on a fault; cpuDataAbortExternal then logs it and takes the data abort
++// for the instruction at curInstrPC as an ordinary load or store does.
++bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size, bool write,
++                   uint_fast8_t *fsr);
++void cpuDataAbortExternal(struct ArmCpu *cpu, uint32_t vaddr, uint_fast8_t size, bool write, uint_fast8_t fsr);
+ 
+ void cpuCoprocessorRegister(struct ArmCpu *cpu, uint8_t cpNum, struct ArmCoprocessor *coproc);
+ 
+--- a/src/uarm/uarm/pxa270_WMMX.cpp
++++ b/src/uarm/uarm/pxa270_WMMX.cpp
+@@ -439,6 +439,9 @@
+     }
+ }
+ 
++// The control registers WLDRW and TMCR can write: wCID is read only.
++bool controlWritable(unsigned reg) { return (reg >= 1 && reg <= 3) || (reg >= 8 && reg <= 11); }
++
+ // wCID is read only.
+ bool writeControl(Pxa270wmmx *w, unsigned reg, uint32_t val) {
+     switch (reg) {
+@@ -609,45 +612,54 @@
+ 
+ // The memory part of WLDR and WSTR at ea. Coprocessor 0 moves bytes (N clear) or halfwords
+ // (N set), coprocessor 1 words or doublewords. The control register forms (WLDRW and WSTRW
+-// wCx) are LDC2 and STC2 on coprocessor 1. False for an undefined form or a failed access
+-// (checked as privileged); a WSTRD whose second word fails has written the first.
+-bool transfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool two, bool N, bool store, unsigned reg, uint32_t ea) {
++// wCx) are LDC2 and STC2 on coprocessor 1. Accesses are checked for the current mode. False
++// for an undefined form, or for a failed access with *fault set (fault->fsr nonzero), wR
++// unchanged; a WSTRD whose second word fails has written the first.
++bool transfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool two, bool N, bool store, unsigned reg, uint32_t ea,
++              Pxa270wmmxFault *fault) {
+     if (two && (!cp1 || N)) return false;
+     const unsigned size = cp1 ? (N && !two ? 8 : 4) : (N ? 2 : 1);
++    *fault = Pxa270wmmxFault{};
++    const auto access = [&](void *buf, uint32_t va, unsigned bytes) {
++        uint_fast8_t fsr = 0;
++        if (cpuMemOpGuest(cpu, buf, va, bytes, store, &fsr)) return true;
++        *fault = Pxa270wmmxFault{va, uint8_t(fsr ? fsr : 10), uint8_t(bytes), store};
++        return false;
++    };
+ 
+     if (two) {
+         uint32_t val = 0;
+         if (store) {
+-            if (!readControl(w, reg, val) || !cpuMemOpExternal(cpu, &val, ea, 4, true)) return false;
++            if (!readControl(w, reg, val) || !access(&val, ea, 4)) return false;
+         } else {
+-            if (!cpuMemOpExternal(cpu, &val, ea, 4, false) || !writeControl(w, reg, val)) return false;
++            // Undefined before any access, so a refused register never touches memory.
++            if (!controlWritable(reg) || !access(&val, ea, 4)) return false;
++            writeControl(w, reg, val);
+         }
+     } else if (store) {
+         union REG64 v = w->wR[reg];
+         if (size == 8) {
+-            if (!cpuMemOpExternal(cpu, &v.v32[ACCESS_REG_32(0)], ea, 4, true) ||
+-                !cpuMemOpExternal(cpu, &v.v32[ACCESS_REG_32(1)], ea + 4, 4, true))
++            if (!access(&v.v32[ACCESS_REG_32(0)], ea, 4) || !access(&v.v32[ACCESS_REG_32(1)], ea + 4, 4))
+                 return false;
+         } else {
+             uint32_t x32 = (uint32_t)v.v64;
+             uint16_t x16 = (uint16_t)v.v64;
+             uint8_t x8 = (uint8_t)v.v64;
+             void *buf = size == 4 ? (void *)&x32 : size == 2 ? (void *)&x16 : (void *)&x8;
+-            if (!cpuMemOpExternal(cpu, buf, ea, size, true)) return false;
++            if (!access(buf, ea, size)) return false;
+         }
+     } else {
+         uint64_t r;
+         if (size == 8) {
+             uint32_t lo, hi;
+-            if (!cpuMemOpExternal(cpu, &lo, ea, 4, false) || !cpuMemOpExternal(cpu, &hi, ea + 4, 4, false))
+-                return false;
++            if (!access(&lo, ea, 4) || !access(&hi, ea + 4, 4)) return false;
+             r = ((uint64_t)hi << 32) | lo;
+         } else {
+             uint32_t x32 = 0;
+             uint16_t x16 = 0;
+             uint8_t x8 = 0;
+             void *buf = size == 4 ? (void *)&x32 : size == 2 ? (void *)&x16 : (void *)&x8;
+-            if (!cpuMemOpExternal(cpu, buf, ea, size, false)) return false;
++            if (!access(buf, ea, size)) return false;
+             r = size == 4 ? x32 : size == 2 ? x16 : x8;
+         }
+         setReg(w, reg, r);
+@@ -655,14 +667,20 @@
+     return true;
+ }
+ 
+-// WLDR and WSTR: offsets on coprocessor 0 are in bytes, on coprocessor 1 times 4. The base
+-// is written back only after the access succeeds.
++// WLDR and WSTR: offsets on coprocessor 0 are in bytes, on coprocessor 1 times 4. A failed
++// access takes the data abort as an ordinary load or store does (so the instruction is
++// handled, not undefined); the base is written back only after the access succeeds.
+ bool memAccess(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool N, bool store, uint8_t reg,
+                uint_fast8_t addrReg, uint32_t addBefore, uint32_t addAfter, uint8_t *option) {
+     if (option) return false;
+     const unsigned scale = cp1 ? 4 : 1;
+     const uint32_t base = cpuGetRegExternal(cpu, addrReg), ea = base + addBefore * scale;
+-    if (!transfer(w, cpu, cp1, two, N, store, reg, ea)) return false;
++    Pxa270wmmxFault fault;
++    if (!transfer(w, cpu, cp1, two, N, store, reg, ea, &fault)) {
++        if (!fault.fsr) return false;
++        cpuDataAbortExternal(cpu, fault.addr, fault.size, fault.write, fault.fsr);
++        return true;
++    }
+     if (addAfter) setCoreReg(cpu, addrReg, base + addAfter * scale);
+     return true;
+ }
+@@ -727,8 +745,9 @@
+     return mrrc(w, cp1, op, wR, *value);
+ }
+ 
+-bool pxa270wmmxTransfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool N, bool store, unsigned wR, uint32_t ea) {
+-    return transfer(w, cpu, cp1, false, N, store, wR, ea);
++bool pxa270wmmxTransfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool N, bool store, unsigned wR, uint32_t ea,
++                        Pxa270wmmxFault *fault) {
++    return transfer(w, cpu, cp1, false, N, store, wR, ea, fault);
+ }
+ 
+ // Whether a false return depends only on the encoding (never on register values), so
+--- a/src/uarm/uarm/pxa270_WMMX.h
++++ b/src/uarm/uarm/pxa270_WMMX.h
+@@ -22,11 +22,19 @@
+                    uint32_t* value);
+ bool pxa270wmmxMcrr(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint32_t lo, uint32_t hi);
+ bool pxa270wmmxMrrc(struct Pxa270wmmx* w, bool cp1, unsigned op, unsigned wR, uint64_t* value);
++// A failed WLDR or WSTR access, for the data abort: its address, fault status (0: no
++// fault), size in bytes and direction.
++struct Pxa270wmmxFault {
++    uint32_t addr;
++    uint8_t fsr, size;
++    bool write;
++};
+ // WLDR and WSTR to or from wR at ea, as the interpreter does them: bytes or halfwords (N)
+-// on coprocessor 0, words or doublewords (N) on coprocessor 1. False, with wR unchanged,
+-// when an access fails; a WSTRD whose second word fails has written the first.
++// on coprocessor 0, words or doublewords (N) on coprocessor 1, checked for the CPU's current
++// mode. False, with wR unchanged and *fault set, when an access fails; a WSTRD whose second
++// word fails has written the first.
+ bool pxa270wmmxTransfer(struct Pxa270wmmx* w, struct ArmCpu* cpu, bool cp1, bool N, bool store, unsigned wR,
+-                        uint32_t ea);
++                        uint32_t ea, struct Pxa270wmmxFault* fault);
+ 
+ // Whether the ARM word is a coprocessor 0 or 1 instruction the Fast engine runs: CDP, MCR,
+ // MRC, MCRR, MRRC, LDC or STC, defined for iWMMXt, not a cond NV (two) form, not TMIA, MCR
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -810,11 +810,14 @@
+     // WLDR and WSTR, by coprocessor, size (N), direction and wR; arg0 is the address
+     // dynarmic worked out (cp0 offsets unscaled). The access is the interpreter's, so a
+     // failed one ends the run on the instruction with the base not written back (the
+-    // dynarmic patch checks right after the call), sets wmmxUndefined, and jitRun reports
+-    // FROND_JIT_UNDEFINED: the interpreter raises the undefined instruction there as Exact
+-    // does, without running it again, since a WLDRD or WSTRD whose second word failed has
++    // dynarmic patch checks right after the call) and the fault kept in dataAbort: jitRun
++    // reports FROND_JIT_ABORT and the CPU takes the data abort there as Exact does, without
++    // running the instruction again, since a WLDRD or WSTRD whose second word failed has
+     // already done the first word's access and a device would see it twice.
+-    bool wmmxUndefined = false;
++    struct Abort {
++        bool set = false;
++        FrondJitAbort fault{};
++    } dataAbort;
+     struct WmmxXfer {
+         Env *env;
+         bool cp1, N, store;
+@@ -825,9 +828,10 @@
+         Env &e = *x.env;
+         stats.wmmx++;
+         stats.wmmxXfer++;
+-        if (!pxa270wmmxTransfer(cpuJitWmmx(e.cpu), e.cpu, x.cp1, x.N, x.store, x.wR, ea)) {
++        Pxa270wmmxFault f;
++        if (!pxa270wmmxTransfer(cpuJitWmmx(e.cpu), e.cpu, x.cp1, x.N, x.store, x.wR, ea, &f)) {
+             stats.wmmxFaults++;
+-            e.wmmxUndefined = true;
++            e.dataAbort = Abort{true, {f.addr, f.fsr, f.size, f.write}};
+             e.Fault();
+             return 0;
+         }
+@@ -998,8 +1002,11 @@
+     uint32_t maxUnchecked = 0, hot = 1;
+     A32::Jit::CompileThread mode{};
+     unsigned ahead = 0;
++    FrondJitAbort abort{};  // the last run's, for FROND_JIT_ABORT
+ };
+ 
++const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
++
+ template <typename F>
+ void jitPrvEach(FrondJit *j, F f) {
+     for (auto &l : j->level)
+@@ -1255,9 +1262,10 @@
+     if (Has(hr, kFault)) stats.fault++;
+     if (Has(hr, kInterpret)) stats.interpret++;
+     if (Has(hr, kSlowPath)) stats.halt++;
+-    if (e.wmmxUndefined) {
+-        e.wmmxUndefined = false;
+-        stop = FROND_JIT_UNDEFINED;
++    if (e.dataAbort.set) {
++        j->abort = e.dataAbort.fault;
++        e.dataAbort.set = false;
++        stop = FROND_JIT_ABORT;
+     } else if (Has(hr, kFault) || Has(hr, kInterpret))
+         stop = FROND_JIT_INTERPRET;
+     else if (Has(hr, kSlowPath))
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -19,9 +19,17 @@
+     FROND_JIT_FAULT,      // a data access faulted; the guest state is not exact
+     FROND_JIT_COLD,       // regs[15] starts code not compiled yet, for the interpreter to run
+                           // up to its next taken branch
+-    FROND_JIT_UNDEFINED,  // regs[15] is an iWMMXt load or store whose access failed after it
+-                          // ran in the JIT; the interpreter raises the undefined instruction
+-                          // there without running it again
++    FROND_JIT_ABORT,      // regs[15] is a load or store whose access failed after it ran in
++                          // the JIT up to there; the CPU takes the data abort jitLastAbort
++                          // gives without running it again
++};
++
++// The failed access behind FROND_JIT_ABORT: its address, fault status, size in bytes and
++// direction.
++struct FrondJitAbort {
++    uint32_t addr;
++    uint8_t fsr, size;
++    bool write;
+ };
+ 
+ FrondJit *jitCreate(ArmCpu *cpu);
+@@ -30,6 +38,7 @@
+ // does the same). Without it, blocks compile in the background and runs don't repeat.
+ void jitSetSync(bool sync);
+ void jitDestroy(FrondJit *jit);
++const FrondJitAbort &jitLastAbort(const FrondJit *jit);
+ // Runs up to about cycles instructions. Returns how many ran, at most
+ // cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.
+ uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);

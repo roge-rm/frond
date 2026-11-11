@@ -214,7 +214,9 @@ int main() {
         const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);
         assert(display.width == 320 && display.height == 480 && display.graffitiHeight == 0);
         const auto& caps = p->capabilities;
-        assert(caps.keyboard && caps.serial && caps.usb && caps.infrared && caps.bluetooth && caps.sound);
+        assert(caps.keyboard && caps.serial && caps.usb && caps.infrared && caps.sound);
+        // No Bluetooth stack in the ROM, and NetLib can't open without it.
+        assert(!caps.bluetooth && !caps.irPhone && !caps.modem);
         assert(caps.fastAudio && !caps.network && !caps.microphone && !caps.backgroundPanel);
         assert(!std::strcmp(p->frontend.fastAudioNorMd5, "a79f98bddd50c61e7eb89eee46eb81bd"));
         for (const auto& other : deviceProfiles5)
@@ -357,7 +359,7 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.irPhone == (p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
-                                          p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeZire72));
+                                          p.deviceType == deviceTypeZire72));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == deviceTypeIsDana5(p.deviceType));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbWifi == (p.deviceType == deviceTypeDana));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.builtInWifi == (p.deviceType == deviceTypeDanaWireless));

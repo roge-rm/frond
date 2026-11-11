@@ -1,0 +1,46 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -916,6 +916,18 @@
+             link.Call([&] { id = x11WindowId(window); });
+             return id;
+         };
++        commandContext.windowLayout = [&]() {
++            string text;
++            link.Call([&] {
++                int windowWidth = 0, windowHeight = 0;
++                SDL_GetWindowSize(window, &windowWidth, &windowHeight);
++                const auto& layout = sdlRenderer->Layout();
++                if (windowWidth > 0 && windowHeight > 0)
++                    text = to_string(layout.x) + " " + to_string(layout.y) + " " + to_string(layout.width) + " " +
++                           to_string(layout.height) + " " + to_string(windowWidth) + " " + to_string(windowHeight);
++            });
++            return text;
++        };
+         // Display changes from the guest thread wait here for the SDL thread.
+         mutex displayMutex;
+         optional<DisplayChange> displayRequest;
+--- a/src/uarm/native/Commands.h
++++ b/src/uarm/native/Commands.h
+@@ -45,6 +45,8 @@
+         std::function<void(const DisplayChange&)> changeDisplay{};
+         // The window's X11 id as "x11 ID" for the desktop app to embed, empty without one.
+         std::function<std::string()> windowId{};
++        // The fitted device's rectangle in the window as "x y width height windowWidth windowHeight", empty without one.
++        std::function<std::string()> windowLayout{};
+     };
+ 
+     void Register();
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -704,6 +704,11 @@
+             if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
+             return {true, "window", id};
+         }
++        if (command == "window-layout") {
++            const auto layout = ctx.windowLayout ? ctx.windowLayout() : std::string();
++            if (layout.empty()) return {false, "unsupported", "There is no window."};
++            return {true, "layout", layout};
++        }
+         if (command == "display") {
+             // Queued for the SDL thread, which applies it once the app is in the foreground.
+             if (!ctx.changeDisplay) return {false, "unsupported", "There is no window to change."};

@@ -4,7 +4,8 @@
 // SPSRs, flags, CP15 fault and domain registers, iWMMXt registers, data memory, page
 // attributes) and a random block of ARMv5TE and Thumb segments, weighted towards LDM/STM,
 // conditional execution, shifts by register, PC writes, Thumb switching, transfers that
-// fault part-way and iWMMXt instructions (which the JIT hands to the interpreter). Both
+// fault part-way and iWMMXt instructions (data processing and register transfers run in the
+// JIT's cp0 and cp1 slots, loads, stores and the rest in the interpreter). Both
 // engines run the case from the same state until they stop on a B . (the block's end, or
 // the reset, prefetch abort, IRQ and FIQ vectors; undefined and SWI return to the next
 // instruction and a data abort skips the one that aborted). Then their registers, CPSR,
@@ -42,6 +43,7 @@
 #include "pace_patch.h"
 #include "memory_buffer.h"
 #include "patch_dispatch.h"
+#include "jit_dynarmic.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -104,12 +106,35 @@ struct WmmxSaver {
     void Save(T& s) { pxa270wmmxSave(w, s); }
 };
 
+// A device page at kDevice (mapped at virtual 0x2f000, 0x30000 unmapped) that
+// counts the accesses it takes, as a FIFO or doorbell register would see them. Reads return
+// the count so far. Offsets 0x800-0x80f refuse every access (a bus error, no side effect).
+constexpr uint32_t kDevice = 0x40000000;
+struct Device {
+    uint32_t reads = 0, writes = 0;
+};
+
+bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    Device& d = *static_cast<Device*>(userData);
+    const uint32_t off = pa - kDevice;
+    if (off >= 0x800 && off < 0x810) return false;
+    if (write) {
+        d.writes++;
+    } else {
+        d.reads++;
+        memcpy(buf, &d.reads, size < 4 ? size : 4);
+        if (size > 4) memset((uint8_t*)buf + 4, 0, size - 4);
+    }
+    return true;
+}
+
 struct Machine {
     bool fast = false;
     ArmCpu* cpu = nullptr;
     uint8_t* ram = nullptr;
     Pxa270wmmx* wmmx = nullptr;
     ArmMem* mem = nullptr;
+    Device* device = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -133,6 +158,8 @@ Machine makeMachine(bool fast) {
                     createSystemState());
     patchDispatchSetCpu(pd, m.cpu);
     m.wmmx = pxa270wmmxInit(m.cpu);
+    m.device = new Device;
+    if (!memRegionAdd(mem, kDevice, 0x1000, deviceAccess, m.device)) abort();
     return m;
 }
 
@@ -198,6 +225,7 @@ struct Snapshot {
     uint32_t usr[7], fiq[7], spsrFiq;
     uint32_t banked[4][3];  // IRQ, SVC, ABT, UND: r13, r14, SPSR
     uint32_t fsr, far, dacr, cpar;
+    uint32_t deviceReads, deviceWrites;
     std::vector<uint8_t> wmmx, ram;
     bool stopped;
 };
@@ -208,6 +236,8 @@ Snapshot snapshot(Machine& m, bool stopped) {
     memcpy(s.r, cpuGetRegisters(m.cpu), sizeof(s.r));
     s.cpsr = cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR);
     s.ram.assign(m.ram, m.ram + kRamSize);
+    s.deviceReads = m.device->reads;
+    s.deviceWrites = m.device->writes;
     Savestate<ChunkType> st;
     WmmxSaver saver{m.wmmx};
     if (!st.Save(saver)) abort();
@@ -279,6 +309,8 @@ std::vector<std::string> differences(const Snapshot& a, const Snapshot& b) {
     cmp("far", a.far, b.far);
     cmp("dacr", a.dacr, b.dacr);
     cmp("cpar", a.cpar, b.cpar);
+    cmp("device reads", a.deviceReads, b.deviceReads);
+    cmp("device writes", a.deviceWrites, b.deviceWrites);
     if (a.wmmx != b.wmmx) d.push_back("iwmmxt registers differ");
     int shown = 0;
     for (uint32_t i = 0; i < kRamSize; i += 4) {
@@ -371,8 +403,12 @@ struct Case {
     uint32_t cpsr = 0;
     bool codeCacheable = false;
     bool alignCheck = false;
+    // The device page at 0x2f000 (0x30000 stays unmapped), so a transfer that crosses from
+    // it into an abort shows whether the device saw its first words once, as in Exact.
+    bool devicePage = true;
     uint32_t dacr = 0;
     uint32_t sr = 0x200;  // the control register's S (0x100) and R (0x200) bits
+    std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
 };
 
 struct Assembled {
@@ -403,6 +439,10 @@ Assembled assemble(const Case& c) {
     put32(0x04, 0xe1b0f00e);   // movs pc, lr
     put32(0x08, 0xe1b0f00e);   // movs pc, lr
     put32(0x10, 0xea00003a);   // b 0x100
+    if (!c.swiHandler.empty()) {
+        put32(0x08, 0xea000044);  // b 0x120
+        for (size_t i = 0; i < c.swiHandler.size(); ++i) put32(0x120 + 4 * i, c.swiHandler[i]);
+    }
     put32(0x100, 0xe14fd000);  // mrs sp, spsr
     put32(0x104, 0xe31d0020);  // tst sp, #0x20
     put32(0x108, 0x025ef004);  // subeqs pc, lr, #4
@@ -460,6 +500,7 @@ Assembled assemble(const Case& c) {
     page(0x2b000, 3, false);
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
+    if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
 
@@ -1021,6 +1062,168 @@ struct Gen {
     }
 
     // In user mode for sure: a jump into the privileged-only page, a prefetch abort when taken.
+    // An iWMMXt CDP, MCR, MRC, MCRR or MRRC the JIT runs (pxa270wmmxJitValid), condition AL.
+    uint32_t wmmxValid(uint32_t pattern, uint32_t random) {
+        for (int tries = 0; tries < 200; ++tries) {
+            const uint32_t w = AL | pattern | (g.u32() & random);
+            if (pxa270wmmxJitValid(w)) return w;
+        }
+        return AL | 0x0e000000;  // wor wR0, wR0, wR0
+    }
+    uint32_t wmmxCdp() { return wmmxValid(0x0e000000, 0x00fff1ef); }
+    uint32_t wmmxMrc(uint32_t rd) { return wmmxValid(0x0e100010 | (rd << 12), 0x00ef01ef); }
+
+    // WLDR or WSTR the JIT runs: pre-indexed with or without writeback, or post-indexed,
+    // either direction, any size, base rn, cond AL unless given.
+    uint32_t wmmxMem(uint32_t rn, bool cp1, bool N, bool load, uint32_t imm8, uint32_t cnd = AL) {
+        const bool p = g.chance(60), w = !p || g.chance(40);
+        return cnd | 0x0c000000 | (p << 24) | (g.chance(60) << 23) | (N << 22) | (w << 21) | (load << 20) |
+               (rn << 16) | (g.below(16) << 12) | (cp1 ? 0x100 : 0) | imm8;
+    }
+    // A base for a transfer of the size cp1 and N give, often near a page edge, sometimes
+    // unaligned (dataAddr).
+    uint32_t wmmxBase(Item& it, bool cp1, bool N) { return armBase(it, cp1 ? (N ? 8 : 4) : (N ? 2 : 1)); }
+
+    // Valid iWMMXt instructions for the JIT's slots, with the state around them: saturating
+    // arithmetic on boundary values, the flag registers, MRC into the CPSR flags followed by
+    // a conditional instruction, CPAR changes, TMIA (interpreted) mixed in, and loads and
+    // stores (every addressing mode and size, page edges, copy runs).
+    void armWmmxValid(Item& it) {
+        static const uint32_t edges[] = {0x7fffffff, 0x80000000, 0xffffffff, 0, 0x7f7f7f7f, 0x80808080,
+                                         0x7fff8000, 0xff00ff00, 0x00010001, 0x01010101};
+        const uint32_t k = g.below(16), cp = g.below(2) << 8;
+        const uint32_t ra = reg(), rb = reg();
+        if (k >= 12) {
+            armWmmxMem(it, k - 12);
+            return;
+        }
+        if (k < 3) {
+            it.kind = "iwmmxt valid cdp";
+            for (uint32_t n = 1 + g.below(4); n--;) {
+                const uint32_t w = wmmxCdp();
+                it.ins.push_back({g.chance(20) ? (w & 0x0fffffff) | cond() : w, false});
+            }
+        } else if (k < 5) {
+            // TMCRR boundary values into one or two registers, then a saturating add,
+            // subtract or pack on them, then wCSSF or wCASF out.
+            it.kind = "iwmmxt saturation";
+            const uint32_t wn = g.below(16), wm = g.below(16);
+            for (uint32_t wr : {wn, wm}) {
+                armConst(it, ra, g.chance(70) ? g.pick(edges) : g.u32());
+                armConst(it, rb, g.chance(70) ? g.pick(edges) : g.u32());
+                it.ins.push_back({AL | 0x0c400000 | (rb << 16) | (ra << 12) | wr, false});  // tmcrr
+            }
+            if (g.chance(30)) it.ins.push_back({AL | 0x0e020110, false});  // tmcr wCSSF, r0
+            static const uint32_t sat[] = {1, 3};
+            uint32_t op;
+            if (g.chance(70))  // WADD, WSUB (cp1 op2 4, 5): size 0-2, unsigned or signed saturation
+                op = 0x0e000100 | (((g.below(3) << 2) | g.pick(sat)) << 20) | ((4 + g.below(2)) << 5);
+            else  // WPACK (cp0 op2 4): from halfword, word or doubleword
+                op = 0x0e000000 | ((((1 + g.below(3)) << 2) | g.pick(sat)) << 20) | (4 << 5);
+            it.ins.push_back({AL | op | (wn << 16) | (g.below(16) << 12) | wm, false});
+            it.ins.push_back({AL | 0x0e100110 | ((g.chance(50) ? 2 : 3) << 16) | (ra << 12), false});  // tmrc
+        } else if (k < 7) {
+            // An MRC into the CPSR flags (TANDC, TORC, TEXTRC, TMRC and the rest with r15),
+            // then a conditional MOV that shows them.
+            it.kind = "iwmmxt mrc r15";
+            uint32_t w;
+            if (g.chance(60)) {  // TANDC, TORC (op2 1, 2) or TEXTRC (op2 3) on wCASF
+                const uint32_t op2 = 1 + g.below(3);
+                w = AL | 0x0e13f110 | ((g.below(3) << 1) << 21) | (op2 << 5) | (op2 == 3 ? g.below(8) : 0);
+            } else {
+                w = wmmxMrc(15);
+            }
+            if (g.chance(50)) it.ins.push_back({wmmxCdp(), false});  // sets wCASF, most of them
+            it.ins.push_back({w, false});
+            it.ins.push_back({dpImm(cond(), 13, false, 0, ra, armImm(g.below(256))), false});
+        } else if (k < 8) {
+            // TMCR of any control register (wCID and the holes are undefined), then TMRC.
+            it.kind = "iwmmxt tmcr/tmrc";
+            static const uint32_t regs[] = {1, 2, 3, 8, 9, 10, 11};
+            const uint32_t c = g.chance(80) ? g.pick(regs) : g.below(16);
+            if (g.chance(50)) armConst(it, ra, g.chance(50) ? g.pick(edges) : g.u32());
+            it.ins.push_back({cond() | 0x0e000110 | (c << 16) | (ra << 12), false});
+            it.ins.push_back({cond() | 0x0e100110 | (c << 16) | (rb << 12), false});
+        } else if (k < 9) {
+            it.kind = "iwmmxt tmcrr/tmrrc";
+            uint32_t rc = reg(), rd = reg();
+            while (rd == rc) rd = reg();
+            it.ins.push_back({cond() | 0x0c400000 | (rb << 16) | (ra << 12) | g.below(16), false});
+            if (g.chance(50)) it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({cond() | 0x0c500000 | (rd << 16) | (rc << 12) | g.below(16), false});
+        } else if (k < 10) {
+            // TMIA, TMIAPH, TMIAxy: interpreted, between JIT ones.
+            it.kind = "iwmmxt tmia";
+            static const uint32_t kinds[] = {0, 8, 12, 13, 14, 15};
+            it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({cond() | 0x0e200010 | (g.pick(kinds) << 16) | (ra << 12) | cp | (g.below(8) << 5) |
+                                  g.below(15),
+                              false});
+            it.ins.push_back({wmmxCdp(), false});
+        } else {
+            // A CPAR write (privileged; undefined in user mode), then iWMMXt that may now be
+            // undefined, then often CPAR back to 3 and the same again.
+            it.kind = "iwmmxt cpar";
+            const uint32_t a = wmmxCdp(), b = wmmxMrc(rb == 15 ? 0 : rb);
+            it.ins.push_back({movImm(ra, g.below(4)), false});
+            it.ins.push_back({AL | 0x0e0f0f11 | (ra << 12), false});  // mcr p15, 0, ra, c15, c1, 0
+            it.ins.push_back({a, false});
+            it.ins.push_back({b, false});
+            if (g.chance(60)) {
+                it.ins.push_back({movImm(ra, 3), false});
+                it.ins.push_back({AL | 0x0e0f0f11 | (ra << 12), false});
+                it.ins.push_back({a, false});
+                it.ins.push_back({b, false});
+            }
+        }
+    }
+
+    void armWmmxMem(Item& it, uint32_t k) {
+        static const uint32_t holes[] = {0x2a000, 0x2e000, 0x2c000, 0x28000, 0x29000};
+        if (k < 2) {
+            // One to three transfers with CDPs between, some conditional, some moved out by
+            // TMRRC so the loaded value meets ARM code.
+            it.kind = "iwmmxt wldr/wstr";
+            for (uint32_t n = 1 + g.below(3); n--;) {
+                const bool cp1 = g.chance(60), N = g.chance(50), load = g.chance(55);
+                const uint32_t rn = wmmxBase(it, cp1, N);
+                const uint32_t w = wmmxMem(rn, cp1, N, load, g.chance(70) ? g.below(8) : g.below(256),
+                                           g.chance(20) ? cond() : AL);
+                it.ins.push_back({w, false});
+                if (g.chance(30)) it.ins.push_back({wmmxCdp(), false});
+                if (load && g.chance(30)) {
+                    uint32_t rc = reg(), rd = reg();
+                    while (rd == rc) rd = reg();
+                    it.ins.push_back({AL | 0x0c500000 | (rd << 16) | (rc << 12) | ((w >> 12) & 15), false});
+                }
+            }
+        } else if (k < 3) {
+            // A WLDRD or WSTRD (or a word or halfword) that ends past a page edge: into a hole,
+            // into the read-only page (stores fault), or into pages user mode can't write or
+            // read (WLDR and WSTR check permissions as privileged). Writeback often.
+            it.kind = "iwmmxt transfer across a page edge";
+            const bool cp1 = g.chance(80), N = cp1 ? g.chance(80) : true;
+            const uint32_t size = cp1 ? (N ? 8 : 4) : 2;
+            const uint32_t rn = reg();
+            armConst(it, rn, g.pick(holes) - size + 1 + g.below(size + 3));
+            it.ins.push_back({wmmxMem(rn, cp1, N, g.chance(50), g.chance(60) ? 0 : g.below(4)), false});
+            if (g.chance(40)) it.ins.push_back({dpImm(AL, 4, false, rn, rn, armImm(4)), false});  // add rn, rn, #4
+        } else {
+            // A copy run as Media's: two WLDRDs then two WSTRDs, post-indexed by 8.
+            it.kind = "iwmmxt copy run";
+            uint32_t rs = reg(), rd = reg();
+            while (rd == rs) rd = reg();
+            armConst(it, rs, dataAddr(8));
+            armConst(it, rd, dataAddr(8));
+            const uint32_t wa = g.below(16), wb = g.below(16);
+            it.ins.push_back({AL | 0x0cf00102 | (rs << 16) | (wa << 12), false});  // wldrd wa, [rs], #8
+            it.ins.push_back({AL | 0x0cf00102 | (rs << 16) | (wb << 12), false});
+            if (g.chance(40)) it.ins.push_back({wmmxCdp(), false});
+            it.ins.push_back({AL | 0x0ce00102 | (rd << 16) | (wa << 12), false});  // wstrd wa, [rd], #8
+            it.ins.push_back({AL | 0x0ce00102 | (rd << 16) | (wb << 12), false});
+        }
+    }
+
     void armUserFetch(Item& it) {
         it.kind = "user fetch, privileged page";
         const uint32_t rt = reg();
@@ -1041,7 +1244,8 @@ struct Gen {
         else if (k < 60) armBlock(it);
         else if (k < 66) armStatus(it);
         else if (k < 70) armCp15(it);
-        else if (k < 77) armWmmx(it);
+        else if (k < 72) armWmmx(it);
+        else if (k < 77) armWmmxValid(it);
         else if (k < 79) armMisc(it);
         else if (k < 80 && modes == bit(USR)) armUserFetch(it);
         else if (!armPcWrite(it)) {
@@ -1314,6 +1518,7 @@ constexpr uint64_t kLimit = 20000;
 
 void prepare(Machine& m, const Case& c, const Assembled& a) {
     memcpy(m.ram, a.image.data(), kRamSize);
+    *m.device = Device{};
     cpuInvalidateCodeCache(m.cpu);
     cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, SVC | 0xc0);
     cpuSetReg(m.cpu, 15, kSetup);
@@ -1335,8 +1540,7 @@ struct Engines {
     uint32_t worstOver = 0;  // most any Fast call ran past its budget
 };
 
-Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
-    const Assembled a = assemble(c);
+Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* exactState = nullptr) {
     Outcome o;
     prepare(e.exact, c, a);
     prepare(e.fast, c, a);
@@ -1362,6 +1566,10 @@ Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
     }
     o.ok = o.diffs.empty();
     return o;
+}
+
+Outcome runCase(Engines& e, const Case& c, Snapshot* exactState = nullptr) {
+    return runAssembled(e, c, assemble(c), exactState);
 }
 
 void printCase(const Case& c) {
@@ -1451,7 +1659,7 @@ void report(Engines& e, const Case& c, const Outcome& o) {
 // final mode, the CPSR under a mask, or a word of RAM.
 // LOADED: register index holds the RAM word at value (which nothing in the case writes).
 struct Expect {
-    enum What { REG, CPSR, MEM, FSR, FAR, LOADED } what;
+    enum What { REG, CPSR, MEM, FSR, FAR, LOADED, DEVICE } what;  // DEVICE: index 0 reads, 1 writes
     uint32_t index;  // register number or address
     uint32_t value;
     uint32_t mask = ~0u;
@@ -1467,6 +1675,7 @@ struct Directed {
     std::vector<Expect> expect;
     uint32_t sr = 0x200;  // control S and R
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
+    std::vector<uint32_t> swiHandler;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1484,13 +1693,14 @@ std::vector<std::string> unexpected(const Directed& d, const Snapshot& s) {
     char line[120];
     for (const Expect& x : d.expect) {
         uint32_t v = 0;
-        static const char* const names[] = {"r", "cpsr", "mem", "fsr", "far", "r"};
+        static const char* const names[] = {"r", "cpsr", "mem", "fsr", "far", "r", "device"};
         const char* what = names[x.what];
         uint32_t want = x.value;
         if (x.what == Expect::REG || x.what == Expect::LOADED) v = s.r[x.index];
         else if (x.what == Expect::CPSR) v = s.cpsr;
         else if (x.what == Expect::FSR) v = s.fsr;
         else if (x.what == Expect::FAR) v = s.far;
+        else if (x.what == Expect::DEVICE) v = x.index ? s.deviceWrites : s.deviceReads;
         else memcpy(&v, &s.ram[x.index], 4);
         if (x.what == Expect::LOADED) memcpy(&want, &s.ram[x.value & (kRamSize - 1)], 4);
         if ((v & x.mask) == (want & x.mask)) continue;
@@ -1517,8 +1727,10 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.items.push_back(end);
     c.cpsr = (c.cpsr & 0xf0000000) | 0xc0 | (d.thumb ? 0x20 : 0) | d.mode;
     c.dacr = d.dacr;
+    c.swiHandler = d.swiHandler;
     c.table[2] = d.dacr;
     c.alignCheck = false;
+    c.devicePage = true;
     c.sr = d.sr;
     c.table[4] = 0x70 | 1 | d.sr;
     for (auto [r, v] : d.regs) {
@@ -1553,7 +1765,35 @@ bool directed(Engines& e) {
         // MRC/MCR p15 c3 in user mode: undefined through the interpreter (the 2e note).
         {"user mrc p15, 0, r0, c3, c0, 0", {0xe3a01005, 0xee130f10}, false, USR, {{0, 0x1234}}},
         {"user mcr p15, 0, r0, c3, c0, 0", {0xe3a01005, 0xee030f10}, false, USR, {{0, 0x0}}},
+        {"user mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35}, false, USR, {{0, 0x10000}}},
+        {"svc mcr p15, 0, r0, c7, c5, 1", {0xe3a01005, 0xee070f35, 0xe2811001}, false, SVC, {{0, 0x10000}},
+         {{Expect::REG, 1, 6}}},
         {"svc mrc/mcr p15 c3", {0xe3a00007, 0xee030f10, 0xee131f10}, false, SVC, {}},
+        // DACR changes in a loop: the JIT drops the page table entries of pages in changed
+        // domains and keeps the rest. r10: both client, r11: domain 0 manager, r12: domain 1
+        // no access, r9: as r12 with domain 5 client. The domain 1 page filled by the first
+        // load faults after r12 (r8 stays 0), the AP 0 page takes a store under manager only,
+        // and the domain 0 page filled writable keeps taking stores.
+        {"svc dacr loop",
+         {0xee03af10, 0xe5945000, 0xe5817000, 0xe5926000, 0xee03bf10, 0xe5827004, 0xe5817004, 0xee03cf10,
+          0xe5817008, 0xe5948000, 0xee039f10, 0xe5948004, 0xe581700c, 0xe5827008, 0xe2877001, 0xe2533001,
+          0x1affffee},
+         false, SVC,
+         {{1, 0x21000}, {2, 0x2c000}, {3, 8}, {4, 0x101044}, {7, 0x77}, {8, 0}, {9, 0x401}, {10, 5}, {11, 7},
+          {12, 1}},
+         {{Expect::REG, 3, 0}, {Expect::REG, 8, 0}, {Expect::MEM, 0x2c004, 0x7e}, {Expect::MEM, 0x2100c, 0x7e},
+          {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x2c008}},
+         0x200, 5},
+        // The user Env keeps its own page table: a user read fills the privileged-only page
+        // while domain 0 is manager, a SWI handler sets domain 0 back to client, and the
+        // user read of the page then takes a permission fault (FSR 0xf, r8 stays 0x77). The
+        // first load touches the vector page, as a first translation of a page empties the
+        // page tables (a full flush) and the exception entry would otherwise do that.
+        {"usr dacr manager then client, read of AP 1",
+         {0xe5997000, 0xe3a06003, 0xee036f10, 0xe321f0d0, 0xe5945000, 0xef000000, 0xe5948000}, false, SVC,
+         {{4, 0x28010}, {5, 0x5555}, {8, 0x77}, {9, 0}},
+         {{Expect::REG, 8, 0x77}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28010}, {Expect::CPSR, 0, USR, 0x1f}},
+         0x200, 1, {0xe3a06001, 0xee036f10, 0xe1b0f00e}},
         // ADC with S: V is signed overflow of the sum with the carry in.
         {"adcs r2, r0, r1: -1 + 1 + 0", {0xe328f000, 0xe0b02001}, false, USR, {{0, 0xffffffff}, {1, 1}},
          {{Expect::REG, 2, 0}, {Expect::CPSR, 0, 0x60000000, 0xf8000000}}},
@@ -1667,6 +1907,103 @@ bool directed(Engines& e) {
          {0xe16ff002, 0xe58d3000, 0xe8dd8000, 0x4f70f800, 0xe7fee7fe}, false, IRQ,
          {{0, 0x20100}, {2, 0xf2}, {3, 0x1000c}, {13, 0x20200}, {14, 0x1000e}},
          {{Expect::REG, 0, 0x20100}, {Expect::REG, 14, 0x1000f}, {Expect::CPSR, 0, 0x32, 0x3f}}},
+        // iWMMXt in the JIT's slots. WADDHSS on 0x7fff and 0xffff lanes plus 1: lanes 1 and 3
+        // saturate (wCSSF bits 2 and 6), lanes 0 and 2 wrap to 0.
+        {"iwmmxt waddhss saturating, wcssf",
+         {0xe3a00000, 0xee020110, 0xe3e00102, 0xe1a01000, 0xec410002, 0xe3a02801, 0xe3822001, 0xe1a03002,
+          0xec432003, 0xee721183, 0xee126110, 0xec598001},
+         false, USR, {},
+         {{Expect::REG, 6, 0x44}, {Expect::REG, 8, 0x7fff0000}, {Expect::REG, 9, 0x7fff0000}}},
+        // TANDCW r15 with every wCASF nibble set: NZCV all set, then MI and EQ both pass.
+        {"iwmmxt tandcw r15, conditional after",
+         {0xe3e00000, 0xee030110, 0xe3a01000, 0xe3a02000, 0xee93f130, 0x43a01001, 0x03a02001}, false, USR, {},
+         {{Expect::REG, 1, 1}, {Expect::REG, 2, 1}, {Expect::CPSR, 0, 0xf0000000, 0xf0000000}}},
+        // The same block three times, CPAR 3, 2, 3: the second time WOR (cp0) at 0x1000c is
+        // undefined (r14_und 0x10010, read into r7 at the end) and TMRC (cp1) still runs.
+        {"iwmmxt cpar off and on in a loop",
+         {0xe3a04003, 0xe3a05003, 0xee0f4f11, 0xee021003, 0xee136110, 0xe2244001, 0xee0f4f11, 0xe2555001,
+          0x1afffff8, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
+         false, SVC, {},
+         {{Expect::REG, 5, 0}, {Expect::REG, 4, 2}, {Expect::REG, 7, 0x10010}}},
+        // iWMMXt loads and stores in the JIT's slots. A failed WLDR or WSTR takes the data
+        // abort as an ordinary load or store does (FSR and FAR set, the handler returns to the
+        // next instruction) and writes no base back.
+        {"iwmmxt wldrd [r1, #8]! crossing into a hole",
+         {0xedf10102, 0xe1a02001}, false, SVC, {{1, 0x29ff4}},
+         {{Expect::REG, 1, 0x29ff4}, {Expect::REG, 2, 0x29ff4}, {Expect::FSR, 0, 0x07, 0xff},
+          {Expect::FAR, 0, 0x2a000}}},
+        {"iwmmxt wstrd [r1], #8 crossing into the read-only page",
+         {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2bffc}},
+         {{Expect::REG, 1, 0x2bffc}, {Expect::REG, 2, 0x2bffc}, {Expect::FSR, 0, 0x0f, 0xff},
+          {Expect::FAR, 0, 0x2c000}}},
+        {"iwmmxt wldrw [r1, #-4]! from a hole", {0xed310101}, false, SVC, {{1, 0x2a004}},
+         {{Expect::REG, 1, 0x2a004}, {Expect::FSR, 0, 0x07, 0xff}, {Expect::FAR, 0, 0x2a000}}},
+        // Checked for the current mode: user mode can't read the privileged-only page, SVC can.
+        {"iwmmxt user wldrd from the privileged-only page",
+         {0xedd10100, 0xec532000}, false, USR, {{1, 0x28008}},
+         {{Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x28008}, {Expect::CPSR, 0, USR, 0x1f}}},
+        {"iwmmxt svc wldrd from the privileged-only page",
+         {0xedd10100, 0xec532000}, false, SVC, {{1, 0x28008}},
+         {{Expect::LOADED, 2, 0x28008}, {Expect::LOADED, 3, 0x2800c}}},
+        {"iwmmxt user wstrb to the user read-only page",
+         {0xed810004, 0xe1a02001}, false, USR, {{1, 0x29010}},
+         {{Expect::REG, 2, 0x29010}, {Expect::FSR, 0, 0x0f, 0xff}, {Expect::FAR, 0, 0x29014}}},
+        // cp0 offsets are bytes, cp1 offsets words: wldrb [r1, #5]!, wstrh [r2], #-6,
+        // wldrw [r3, #-4]!, wstrw [r4, #-8]! (offset 2 words).
+        {"iwmmxt offsets and writeback",
+         {0xedb10005, 0xec620006, 0xed331101, 0xed242102}, false, SVC,
+         {{1, 0x20100}, {2, 0x20200}, {3, 0x20300}, {4, 0x20400}},
+         {{Expect::REG, 1, 0x20105}, {Expect::REG, 2, 0x201fa}, {Expect::REG, 3, 0x202fc},
+          {Expect::REG, 4, 0x203f8}}},
+        // Unaligned: halfword at an odd address, doubleword at 4 mod 8, word at 2 mod 4.
+        {"iwmmxt unaligned", {0xedd10000, 0xedd21100, 0xed932100, 0xedc41100}, false, SVC,
+         {{1, 0x20101}, {2, 0x20204}, {3, 0x20302}, {4, 0x20404}}, {}},
+        // Media's copy loop, 8 times 16 bytes, then the same from 0x29f80 into the hole at
+        // 0x2a000: every load from there aborts, r1 stays, the stores go on.
+        {"iwmmxt copy loop",
+         {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
+         {{1, 0x20100}, {2, 0x20800}, {3, 8}},
+         {{Expect::REG, 1, 0x20180}, {Expect::REG, 2, 0x20880}, {Expect::REG, 3, 0}}},
+        {"iwmmxt copy loop into a hole",
+         {0xecf10102, 0xecf11102, 0xece20102, 0xece21102, 0xe2533001, 0x1afffff9}, false, SVC,
+         {{1, 0x29f80}, {2, 0x20800}, {3, 32}},
+         {{Expect::REG, 1, 0x2a000}, {Expect::REG, 2, 0x20a00}, {Expect::REG, 3, 0}}},
+        // A WLDRD or WSTRD whose second word fails has done the first word's access once,
+        // as Exact does (the JIT doesn't run it again): a device page at 0x2f000 counts them,
+        // then a translation fault at 0x30000 or a refused register at device offset 0x800.
+        {"iwmmxt wstrd from a device into a hole",
+         {0xedc10100, 0xe1a02001}, false, SVC, {{1, 0x2fffc}},
+         {{Expect::REG, 2, 0x2fffc}, {Expect::DEVICE, 1, 1}, {Expect::DEVICE, 0, 0}, {Expect::FAR, 0, 0x30000}}},
+        {"iwmmxt wldrd from a device into a hole",
+         {0xedd10100, 0xec532000}, false, SVC, {{1, 0x2fffc}},
+         {{Expect::DEVICE, 0, 1}, {Expect::DEVICE, 1, 0}}},
+        {"iwmmxt user wstrd [r1], #8 into a refused device register",
+         {0xece10102, 0xe1a02001}, false, USR, {{1, 0x2f7fc}},
+         {{Expect::REG, 1, 0x2f7fc}, {Expect::REG, 2, 0x2f7fc}, {Expect::DEVICE, 1, 1}, {Expect::FSR, 0, 0x0a, 0x0f},
+          {Expect::FAR, 0, 0x2f800}}},
+        {"iwmmxt wldrd and wstrd on a device",
+         {0xedd10100, 0xec532000, 0xedc10100, 0xedd10100}, false, SVC, {{1, 0x2f100}},
+         {{Expect::REG, 2, 1}, {Expect::REG, 3, 2}, {Expect::DEVICE, 0, 4}, {Expect::DEVICE, 1, 2}}},
+        // LDM and STM that fault part-way after device words: each word before the fault is
+        // read or written once, as in Exact (the JIT takes the abort without a re-run).
+        {"ldmia r1, {r2-r5} from a device into a hole", {0xe891003c}, false, SVC, {{1, 0x2fff8}},
+         {{Expect::REG, 1, 0x2fff8}, {Expect::DEVICE, 0, 2}, {Expect::FSR, 0, 0x07, 0xff}, {Expect::FAR, 0, 0x30000}}},
+        {"stmia r1!, {r2-r5} from a device into a hole", {0xe8a1003c}, false, SVC, {{1, 0x2fff8}},
+         {{Expect::REG, 1, 0x2fff8}, {Expect::DEVICE, 1, 2}, {Expect::FAR, 0, 0x30000}}},
+        {"user ldmia r1, {r2-r5} into a refused device register", {0xe891003c}, false, USR, {{1, 0x2f7f8}},
+         {{Expect::DEVICE, 0, 2}, {Expect::FSR, 0, 0x0a, 0x0f}, {Expect::FAR, 0, 0x2f800}}},
+        {"stmdb r1!, {r2-r5} from a device down", {0xe921003c}, false, SVC, {{1, 0x30008}}, {{Expect::REG, 1, 0x30008}}},
+        {"thumb ldmia r0!, {r1-r3} from a device into a hole", {0xc80e}, true, USR, {{0, 0x2fff8}},
+         {{Expect::REG, 0, 0x2fff8}, {Expect::DEVICE, 0, 2}}},
+        {"thumb push {r0-r3} from a device into a hole", {0xb40f}, true, SVC, {{13, 0x30008}},
+         {{Expect::REG, 13, 0x30008}}},
+        {"ldr r0, [r1] from a refused device register", {0xe5910000}, false, SVC, {{1, 0x2f804}},
+         {{Expect::DEVICE, 0, 0}, {Expect::FSR, 0, 0x0a, 0x0f}, {Expect::FAR, 0, 0x2f804}}},
+        // CPAR bit 1 off: WLDRD (cp1) at 0x10008 is undefined, wldrb (cp0) still runs.
+        {"iwmmxt cpar off for a load",
+         {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
+         false, SVC, {{1, 0x20100}, {2, 0x20200}},
+         {{Expect::REG, 7, 0x1000c}}},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -1828,6 +2165,78 @@ int staleAhead() {
     return 0;
 }
 
+// Privilege switches with code kept per privilege level, as on the TG50, which runs
+// applications in user mode. S is set, so the vectors and kCode are privileged only. User
+// code at U loops 8 times: a load from the privileged-only page (data abort, skipped), a
+// SWI into a handler at 0x200 that reads that page, stores to Y and, on its 4th entry,
+// rewrites the first word of X (a user function on a page user code ran) and invalidates
+// its I-cache line, then a call to X, then the same MCR in user mode (undefined). The run
+// gets to user mode by MOVS PC from SVC, or by MSR CPSR_c from code on a user page. X adds
+// 1 to r0 until it's rewritten to add 16: r0 is 3 + 5 * 16 at the end. The privileged store
+// to X goes through the page table that had Y's page writable before user code ran X, so
+// it only reaches the user level's code if X's code flag write-protected both levels.
+bool privilegeSwitch(Engines& e) {
+    constexpr uint32_t U = 0x24000, X = 0x25000, Y = X + 0x100, M = 0x26000;
+    bool ok = true;
+    for (int variant = 0; variant < 2; ++variant) {
+        const char* name = variant ? "privilege switch, msr cpsr_c" : "privilege switch, movs pc";
+        const Directed d{name,
+                         {0xe3a09000, 0xe361f010, 0xe1a0e005, 0xe1b0f00e},  // mov r9, #0; msr spsr_c, #usr;
+                         false,                                             // mov lr, r5; movs pc, lr
+                         SVC,
+                         {{0, 0}, {1, 0x28000}, {2, 0xe2800010}, {4, X}, {5, U}, {7, 0x5a5a5a5a}},
+                         {{Expect::REG, 0, 83}, {Expect::REG, 3, 0}, {Expect::REG, 9, 8},
+                          {Expect::LOADED, 6, 0x28000}, {Expect::CPSR, 0, USR, 0x3f},
+                          {Expect::MEM, Y, 0x5a5a5a5a}, {Expect::MEM, X, 0xe2800010}},
+                         0x100};
+        for (uint64_t seed = 1; seed <= 8; ++seed) {
+            const Case c = directedCase(d, seed);
+            Assembled a = assemble(c);
+            auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+            put(0x08, 0xea00007c);  // b 0x200
+            const uint32_t handler[] = {
+                0xe5916000,  // ldr r6, [r1]
+                0xe5847100,  // str r7, [r4, #0x100]
+                0xe2899001,  // add r9, r9, #1
+                0xe3590004,  // cmp r9, #4
+                0x05842000,  // streq r2, [r4]
+                0xee074f35,  // mcr p15, 0, r4, c7, c5, 1
+                0xe1b0f00e,  // movs pc, lr
+            };
+            const uint32_t user[] = {
+                0xe3a03008,  // mov r3, #8
+                0xe5918000,  // ldr r8, [r1] (aborts)
+                0xef000000,  // swi 0
+                0xeb0003fb,  // bl X
+                0xee074f35,  // mcr p15, 0, r4, c7, c5, 1 (undefined)
+                0xe2533001,  // subs r3, r3, #1
+                0x1afffff9,  // bne U + 4
+                kSpinArm,
+            };
+            for (uint32_t i = 0; i < 7; ++i) put(0x200 + 4 * i, handler[i]);
+            for (uint32_t i = 0; i < 8; ++i) put(U + 4 * i, user[i]);
+            put(X, 0xe2800001);      // add r0, r0, #1
+            put(X + 4, 0xe12fff1e);  // bx lr
+            put(M, 0xe3a09000);      // mov r9, #0
+            put(M + 4, 0xe321f010);  // msr cpsr_c, #usr
+            put(M + 8, 0xe1a0f005);  // mov pc, r5
+            if (variant) a.start = M;
+            Snapshot xs;
+            Outcome o = runAssembled(e, c, a, &xs);
+            if (o.ok && !o.unstopped) {
+                o.diffs = unexpected(d, xs);
+                if (o.diffs.empty() && xs.stopped) continue;
+                if (!xs.stopped) o.diffs.push_back("exact did not stop");
+            }
+            printf("FAIL %s (seed %" PRIu64 ")%s\n", name, seed, o.unstopped ? " did not stop" : "");
+            for (const auto& s : o.diffs) printf("  %s\n", s.c_str());
+            ok = false;
+            break;
+        }
+    }
+    return ok;
+}
+
 struct CpuSaver {
     ArmCpu* cpu;
     template <class T>
@@ -1837,14 +2246,17 @@ struct CpuSaver {
 
 // moveOn: after the store the guest runs through another line (Z) before stopping, so
 // Exact's buffers no longer hold A's line; otherwise it stops in Y's line and Exact runs
-// the old word, the expected difference. 0: as expected, -1: not.
-int fetchBuffer(Engines& e, bool moveOn) {
-    const char* name = moveOn ? "fetch buffer, moved on" : "fetch buffer, still held";
+// the old word, the expected difference. wmmx: the rewrite is a WSTRW (the JIT's cp1 slot)
+// instead of an STR. 0: as expected, -1: not.
+int fetchBuffer(Engines& e, bool moveOn, bool wmmx = false) {
+    const char* name = wmmx ? (moveOn ? "fetch buffer, moved on, wstrw" : "fetch buffer, still held, wstrw")
+                            : (moveOn ? "fetch buffer, moved on" : "fetch buffer, still held");
     Case c = generate(99);
     c.items.clear();
     c.codeCacheable = false;  // the fetch buffers are used for uncacheable code
     c.dacr = 1;
     c.table[2] = 1;
+    if (wmmx) c.table[6 + 32 + 6] = 3;  // CPAR for the block (generate's table)
     const uint32_t A = kCode, Y = kCode + 0x100, Z = kCode + 0x180, S = kCode + 0x200;
     std::vector<std::pair<uint32_t, uint32_t>> words;
     if (moveOn)
@@ -1875,7 +2287,22 @@ int fetchBuffer(Engines& e, bool moveOn) {
             {Y + 16, 0xe3a05002},  // the new word
             {Y + 20, A + 8},
         };
-    const uint32_t spin = moveOn ? S : Y + 12;
+    if (wmmx) {
+        // tmcrr wR0, r1, r3 and wstrw wR0, [r2] in place of the STR: Y's words from Y + 8
+        // move down one, and the loads reach one further.
+        for (auto& [addr, v] : words) {
+            if (addr == Y + 0) v = 0xe59f100c;
+            if (addr == Y + 4) v = 0xe59f200c;
+            if (addr == Y + 8) v = 0xec431000;
+            else if (addr >= Y + 12 && addr < Y + 0x20) {
+                addr += 4;
+                if (v == 0xea00001b) v = 0xea00001a;  // b Z
+            }
+            if (addr == A + 12 && v == 0xea00003e) v = 0xea00003f;  // b Y + 16
+        }
+        words.push_back({Y + 12, 0xed820100});
+    }
+    const uint32_t spin = moveOn ? S : wmmx ? Y + 16 : Y + 12;
     // The code page has to be writable for the rewrite: patch the code into data page
     // 0x2b000 (read-write, uncacheable) instead, on the generator's image.
     Item end;
@@ -1946,6 +2373,29 @@ int fetchBuffer(Engines& e, bool moveOn) {
 
 }  // namespace
 
+// Every iWMMXt word pxa270wmmxJitValid accepts (all CDP, MCR, MRC, MCRR, MRRC, LDC and STC
+// encodings on cp0 and cp1, condition AL) gets a callback from the JIT's slot as dynarmic
+// would ask for it: dynarmic asserts on a refusal.
+bool wmmxCompiles(Engines& e) {
+    uint64_t valid[3] = {}, refused = 0;
+    auto check = [&](uint32_t w, int k) {
+        if (!pxa270wmmxJitValid(w)) return;
+        ++valid[k];
+        if (cpuJitWmmxCompiles(e.fast.cpu, w)) return;
+        if (++refused <= 10) printf("FAIL iwmmxt %08x is valid for the JIT but its slot refuses it\n", w);
+    };
+    for (uint32_t x = 0; x < (1u << 24); ++x)
+        if (!(x & 0xe00)) check(AL | 0x0e000000 | x, 0);  // CDP, MCR, MRC
+    for (uint32_t x = 0; x < (1u << 21); ++x)
+        if (!(x & 0xe00)) check(AL | 0x0c400000 | x, 1);  // MCRR, MRRC
+    for (uint32_t x = 0; x < (1u << 25); ++x)
+        if (!(x & 0xe00) && (x & 0x01e00000) != 0x00400000) check(AL | 0x0c000000 | x, 2);  // LDC, STC
+    printf("iwmmxt slots: %" PRIu64 " CDP/MCR/MRC, %" PRIu64 " MCRR/MRRC and %" PRIu64
+           " LDC/STC words valid, %" PRIu64 " refused\n",
+           valid[0], valid[1], valid[2], refused);
+    return !refused && valid[0] && valid[1] && valid[2];
+}
+
 int main(int argc, char** argv) {
     uint64_t first = 1, last = 30001, one = 0;
     bool single = false, show = false, runDirected = true, open = false;
@@ -2012,8 +2462,12 @@ int main(int argc, char** argv) {
     bool ok = true;
     if (runDirected && !single) {
         ok = directed(e) && ok;
+        ok = privilegeSwitch(e) && ok;
+        ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
+        ok = fetchBuffer(e, true, true) == 0 && ok;
+        ok = fetchBuffer(e, false, true) == 0 && ok;
         ok = staleLink() == 0 && ok;
         ok = staleAhead() == 0 && ok;
     }

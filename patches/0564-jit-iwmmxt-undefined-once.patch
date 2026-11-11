@@ -1,0 +1,133 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4607,9 +4607,11 @@
+     return cpuPrvFastEngine;
+ }
+ 
+-// One instruction through the interpreter, as cpuCycleLine's slow path does it.
++// One instruction through the interpreter, as cpuCycleLine's slow path does it. With
++// undefined, the instruction is fetched as usual and then raises the undefined instruction
++// instead of running (FROND_JIT_UNDEFINED: the JIT already ran it up to its failed access).
+ template <int memorySystemKind>
+-static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc) {
++static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, bool undefined = false) {
+     const uint32_t pc = cpu->regs[REG_NO_PC];
+     cpu->curInstrPC = pc;
+     acc += 1;
+@@ -4618,12 +4620,17 @@
+     const uint32_t size = cpu->T ? 2 : 4;
+     const bool ok = cpu->T ? icacheFetch<memorySystemKind, 2, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded)
+                            : icacheFetch<memorySystemKind, 4, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded);
+-    if (!ok) {
++    // The JIT fetched this instruction before its access, so a fetch that fails now (the
++    // access changed the mapping) doesn't stop the undefined instruction.
++    if (!ok && !undefined) {
+         cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+         return;
+     }
+     cpu->regs[REG_NO_PC] = pc + size;
+-    cpuPrvDecompressExecFn(decoded)(cpu, instr);
++    if (undefined)
++        execFn_invalid<memorySystemKind, false>(cpu, instr);
++    else
++        cpuPrvDecompressExecFn(decoded)(cpu, instr);
+ }
+ 
+ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
+@@ -4643,11 +4650,14 @@
+             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
+                     cpu->regs[REG_NO_PC]);
+         }
+-        if (cpu->slowPath) break;
+-        if (stop == FROND_JIT_INTERPRET) {
++        // Before the slow path check: in Exact the undefined instruction is taken inside
++        // the same instruction as the access, before any interrupt that access raised.
++        const bool undefined = stop == FROND_JIT_UNDEFINED;
++        if (cpu->slowPath && !undefined) break;
++        if (stop == FROND_JIT_INTERPRET || undefined) {
+             // Stay in the interpreter while the next instruction would come straight back.
+-            for (;;) {
+-                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc);
++            for (bool first = true;; first = false) {
++                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc, first && undefined);
+                 if (cpu->slowPath || acc >= cycles) break;
+                 const uint32_t pc = cpu->regs[REG_NO_PC];
+                 uint32_t word;
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -65,7 +65,8 @@
+     // jitWriteProtect or a code flag.
+     uint64_t writeMaps = 0, writeProtects = 0;
+     // Compile thread counts: JITs still alive at exit, and those of JITs gone before.
+-    std::vector<const A32::Jit *> jits;
++    std::vector<const A32::Jit *> jits;  // under jitsMutex: user level JITs are made on emulation threads
++    std::mutex jitsMutex;
+     A32::Jit::CompileStats compiled;
+     void AddCompiled(const A32::Jit &jit) {
+         const A32::Jit::CompileStats c = jit.GetCompileStats();
+@@ -809,8 +810,11 @@
+     // WLDR and WSTR, by coprocessor, size (N), direction and wR; arg0 is the address
+     // dynarmic worked out (cp0 offsets unscaled). The access is the interpreter's, so a
+     // failed one ends the run on the instruction with the base not written back (the
+-    // dynarmic patch checks right after the call), and the interpreter runs it again and
+-    // raises the undefined instruction as Exact does.
++    // dynarmic patch checks right after the call), sets wmmxUndefined, and jitRun reports
++    // FROND_JIT_UNDEFINED: the interpreter raises the undefined instruction there as Exact
++    // does, without running it again, since a WLDRD or WSTRD whose second word failed has
++    // already done the first word's access and a device would see it twice.
++    bool wmmxUndefined = false;
+     struct WmmxXfer {
+         Env *env;
+         bool cp1, N, store;
+@@ -823,6 +827,7 @@
+         stats.wmmxXfer++;
+         if (!pxa270wmmxTransfer(cpuJitWmmx(e.cpu), e.cpu, x.cp1, x.N, x.store, x.wR, ea)) {
+             stats.wmmxFaults++;
++            e.wmmxUndefined = true;
+             e.Fault();
+             return 0;
+         }
+@@ -1099,7 +1104,10 @@
+         e.other = &o->env;
+         o->env.other = &e;
+     }
+-    if (stats.on) stats.jits.push_back(l->jit.get());
++    if (stats.on) {
++        std::lock_guard<std::mutex> lock(stats.jitsMutex);
++        stats.jits.push_back(l->jit.get());
++    }
+     j->level[privileged] = std::move(l);
+     return j->level[privileged].get();
+ }
+@@ -1117,6 +1125,7 @@
+ 
+ void jitDestroy(FrondJit *j) {
+     if (stats.on) {
++        std::lock_guard<std::mutex> lock(stats.jitsMutex);
+         for (auto &l : j->level) {
+             if (!l) continue;
+             stats.AddCompiled(*l->jit);
+@@ -1246,7 +1255,10 @@
+     if (Has(hr, kFault)) stats.fault++;
+     if (Has(hr, kInterpret)) stats.interpret++;
+     if (Has(hr, kSlowPath)) stats.halt++;
+-    if (Has(hr, kFault) || Has(hr, kInterpret))
++    if (e.wmmxUndefined) {
++        e.wmmxUndefined = false;
++        stop = FROND_JIT_UNDEFINED;
++    } else if (Has(hr, kFault) || Has(hr, kInterpret))
+         stop = FROND_JIT_INTERPRET;
+     else if (Has(hr, kSlowPath))
+         stop = FROND_JIT_HALT;
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -19,6 +19,9 @@
+     FROND_JIT_FAULT,      // a data access faulted; the guest state is not exact
+     FROND_JIT_COLD,       // regs[15] starts code not compiled yet, for the interpreter to run
+                           // up to its next taken branch
++    FROND_JIT_UNDEFINED,  // regs[15] is an iWMMXt load or store whose access failed after it
++                          // ran in the JIT; the interpreter raises the undefined instruction
++                          // there without running it again
+ };
+ 
+ FrondJit *jitCreate(ArmCpu *cpu);

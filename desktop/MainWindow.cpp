@@ -238,6 +238,12 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (!send(source->command, "clear")) source->stage = PrinterStage::None;
         });
     }
+    connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
+        if (command == "speed-state" && runningPreferences.showMips) palmHolder->setMips(ok ? message : QString());
+    });
+    mipsTimer = new QTimer(this);
+    mipsTimer->setInterval(1000);
+    connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
     printerTimer = new QTimer(this);
     connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
     printerTimer->start(1000);
@@ -432,7 +438,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     auto irdaChanged=[this] {
         if(client.running()){
             if (!leavePrinterOk()) { const QSignalBlocker blocked(irda); irda->setCurrentIndex(std::max(0, irda->findData("printer"))); return; }
-            if(client.available())send("irda-mode",irdaArgument());return;
+            // The confirm dialog lets a poll go out, so the switch may have to wait for its reply.
+            if(client.available())send("irda-mode",irdaArgument()); else irdaQueued=true;
+            return;
         }
         refresh();
     };
@@ -489,6 +497,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
     smoothToggle->setObjectName("runningSmooth");
     displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
+    mipsToggle = new QCheckBox(tr("Show MIPS"), root);
+    mipsToggle->setObjectName("runningShowMips");
+    displayGrid->addWidget(mipsToggle, 8, 0, 1, 3);
     keyboardShow = new QCheckBox(tr("Show keyboard"), root);
     keyboardShow->setObjectName("runningShowKeyboard");
     displayGrid->addWidget(keyboardShow, 5, 0, 1, 3);
@@ -505,9 +516,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     speedBox->addItem(tr("Original"), false);
     speedBox->addItem(tr("Uncapped"), true);
     displayGrid->addWidget(speedBox, 7, 1, 1, 2);
-    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
     connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
     connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
+    connect(mipsToggle, &QCheckBox::clicked, this, [this] { liveDisplay("mips"); });
     connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
     connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
     connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
@@ -525,7 +537,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connectionsLayout->addWidget(pair, 0, Qt::AlignLeft);
     connectionsLayout->addStretch();
     // The side panels have a fixed width: lists shrink to it and readouts wrap instead of running off the right.
+    // The USB port list keeps its own sizing, so "Wi-Fi adapter" isn't cut off.
     for (auto* box : panels->findChildren<QComboBox*>()) {
+        if (box->objectName() == "usbPortChoice") continue;
         box->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
         box->setMinimumContentsLength(6);
     }
@@ -683,8 +697,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         auto lines = log->toPlainText().split('\n');
         while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
         const auto details = lines.mid(qMax(0, int(lines.size()) - 40)).join('\n');
-        const auto stopped = runningRules::machineStopText(details);
-        failure(stopped.isEmpty() ? message : stopped, details);
+        auto refused = runningRules::machineStopText(details);
+        if (refused.isEmpty()) refused = frondSessions::refusal(details);
+        if (refused.isEmpty()) refused = frondSessions::romRefusal(details);
+        failure(refused.isEmpty() ? message : refused, details);
     });
     connect(&client, &DesktopClient::stalled, this, [this] {
         forceButton->show(); runningBar->setForceStop(true); notify(tr("The emulator is not responding. Waiting for it to finish…"), 0);
@@ -701,7 +717,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        holdKnown = holdOn = false;
+        holdKnown = holdOn = irdaQueued = false;
+        mipsTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         if (internalFiles) internalFiles->close();
@@ -718,6 +735,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
         sdKnown = protectionKnown = false; showSerial({}); link.setSticky("serial", {}); serialLinkText.clear(); loadSerialSettings(); showUsb({}); loadUsbSettings(); showIrda({}); link.setSticky("ir", {}); irdaLinkText.clear(); loadIrdaSettings(); showBluetooth({}); link.setSticky("bt", {}); bluetoothAttach = {}; bluetoothListening = false; bluetoothLinkText.clear(); bluetoothCore = bluetoothCoreChoice = "off"; bluetoothSent.clear(); loadBluetoothSettings(); sessionLock.reset(); forceButton->hide(); runningBar->setForceStop(false); refreshSessions();
         refresh();
+        // The machine's card is free for Files and the rest once its lock is gone.
+        if (cardsWindow) cardsWindow->refresh();
         if (closeAfterStop) { allowClose = true; close(); }
         else notify(tr("Stopped."));
     });
@@ -732,7 +751,10 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
     // A Bluetooth switch waiting for the core to be free goes once the current request is done.
-    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] { applyBluetoothLink(); }); });
+    connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] {
+        applyBluetoothLink();
+        if (irdaQueued && client.running() && !stopping && client.available()) { irdaQueued = false; send("irda-mode", irdaArgument()); }
+    }); });
     connect(&link, &LinkClient::message, this, [this](const QJsonObject& m) {
         const auto type = m.value("type").toString();
         if (type == "ir") showIrdaLink(m);
@@ -1145,6 +1167,7 @@ void MainWindow::refresh() {
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(m68k, {contrastLabel, contrast});
+    shown(!m68k, {mipsToggle});
     shown(embedded, {sizeLabel, sizeSlider});
     shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow, jogLabel, jogBox});
     shown(m68k, {speedLabel, speedBox});
@@ -1419,10 +1442,12 @@ void MainWindow::embedReply(bool ok, const QString& message) {
 // nothing named it only shows the settings in the controls.
 void MainWindow::liveDisplay(const QString& what) {
     if (what.isEmpty() || !client.available()) {
-        const QSignalBlocker a(sizeSlider), b(smoothToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox);
         if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
         sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
         smoothToggle->setChecked(runningPreferences.smooth);
+        mipsToggle->setChecked(runningPreferences.showMips);
+        updateMips();
         keyboardShow->setChecked(runningPreferences.showKeyboard);
         jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
         speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
@@ -1433,6 +1458,13 @@ void MainWindow::liveDisplay(const QString& what) {
     const auto onOff = [](bool on) { return on ? QStringLiteral("on") : QStringLiteral("off"); };
     if (what == "size") prefs.scale = sizeSlider->value();
     else if (what == "smooth") { prefs.smooth = smoothToggle->isChecked(); argument = "smooth=" + onOff(prefs.smooth); }
+    else if (what == "mips") {
+        prefs.showMips = mipsToggle->isChecked();
+        if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { liveDisplay({}); return failure(error); }
+        runningPreferences = prefs;
+        updateMips();
+        return;
+    }
     else if (what == "keyboard") { prefs.showKeyboard = keyboardShow->isChecked(); argument = "keyboard=" + onOff(prefs.showKeyboard); }
     else if (what == "jog") {
         prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
@@ -1454,6 +1486,18 @@ void MainWindow::liveDisplay(const QString& what) {
         return;
     }
     send(command, argument);
+}
+// The MIPS readout: polled once a second while it is on, for an ARM device that is up and idle.
+// The reply starts "148.00 MIPS, limit ...".
+void MainWindow::updateMips() {
+    const bool wanted = runningPreferences.showMips && client.running() && !frondFirmware::runs68k(runningDevice);
+    if (!wanted) { mipsTimer->stop(); palmHolder->setMips({}); return; }
+    if (!mipsTimer->isActive()) { mipsTimer->start(); pollMips(); }
+}
+void MainWindow::pollMips() {
+    // It doesn't use the request slot, so it never holds up or drops anything the user does.
+    if (!client.running() || stopping || QApplication::activeModalWidget()) return;
+    client.requestBackground("speed-state");
 }
 void MainWindow::afterDevice() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
@@ -1843,6 +1887,11 @@ QString MainWindow::importSession(const QString& path) {
         return frondSessions::importFile(folder, path, &name, progress);
     });
     if (error.isEmpty()) refreshSessions(frondSessions::filePath(sessionFolder(), name));
+    // An open Cards window lists the imported machine's card.
+    if (cardsWindow) {
+        frondCards::reconcile(sessionFolder());
+        cardsWindow->refresh();
+    }
     return error;
 }
 void MainWindow::importSessionDialog() {
@@ -2385,7 +2434,7 @@ void MainWindow::loadUsbSettings() {
     printerPanel->hideReceived();
 }
 void MainWindow::printerPoll() {
-    if (!client.running() || stopping || busy || !client.available()) return;
+    if (!client.running() || stopping || busy || irdaQueued || !client.available()) return;
     const auto caps = frondFirmware::capabilities(runningDevice);
     const auto port = printerPanel->port();
     // One request at a time: every source that's wanted takes a turn of the poll, the Dana Wireless's
@@ -2493,8 +2542,7 @@ void MainWindow::printerSavePdf(PrintSource& src) {
     const auto path = outputFile(tr("Save as PDF"), tr("PDF files (*.pdf)"), "Print.pdf");
     if (path.isEmpty()) return;
     QPrinter printer(QPrinter::HighResolution);
-    printer.setOutputFormat(QPrinter::PdfFormat);
-    printer.setOutputFileName(path);
+    frondPrint::pdfOutput(&printer, path);
     if (frondPrint::drawPages(&printer, printerText(src)) == 0) { failure(tr("Couldn't write %1.").arg(path)); return; }
     printerClearHeld(src);
     notify(tr("Saved %1.").arg(path));
@@ -3064,7 +3112,8 @@ QString MainWindow::runningMachineDir() const {
 }
 // The card in the slot by its Cards name; one that isn't in Cards yet by its type.
 QString MainWindow::runningCardName() const {
-    if (!cardPresent) return tr("No card");
+    // Files names the card while it's taken out for the exchange.
+    if (!cardPresent && exchangeStage == ExchangeStage::None) return tr("No card");
     const auto dir = runningMachineDir();
     const auto slot = frondCards::readSlot(dir);
     frondCards::Card card;

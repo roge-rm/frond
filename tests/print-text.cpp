@@ -58,6 +58,8 @@ int main() {
     CHECK(r("\x80").pages[0][0] == "\xe2\x82\xac");
     CHECK(r("\x92").pages[0][0] == "\xe2\x80\x99");
     CHECK(r("\x81").pages[0][0] == "\xef\xbf\xbd");
+    // 0x8d-0x90 are the suits the Dana draws: diamond, club, heart, spade.
+    CHECK(r("\x8d\x8e\x8f\x90").pages[0][0] == "\xe2\x99\xa6\xe2\x99\xa3\xe2\x99\xa5\xe2\x99\xa0");
     CHECK(r("a\xa0" "b").pages[0][0] == "a b");
     CHECK(r("\xff").pages[0][0] == "\xc3\xbf");
     CHECK(r(std::string(80, '\xe9')).pages[0].size() == 1);  // columns count characters, not UTF-8 bytes

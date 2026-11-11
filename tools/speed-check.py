@@ -6,6 +6,8 @@ report to stdout and JSON to build/speed-check/<timestamp>/. A workload whose
 session isn't given is skipped.
 
   BIKE_SESSION, FRONDBENCH_SESSION  session files for the two workloads (no defaults)
+  BIKE_REPLAY, FRONDBENCH_REPLAY    another replay for a workload, like frondbench-run.replay for a
+                                    core before patch 0414 (T|X touch on the ROM's default calibration)
   SPEED_MIPS                        MIPS cap, default 100
   SPEED_BENCH                       another benchmark-replay binary
   SPEED_HOST                        an ssh destination (user@host) to run on instead of here, in ~/frond-speed/
@@ -41,9 +43,10 @@ if REAL and 'Total' not in REAL:
     REAL['Total'] = sum(REAL.values())
 
 WORKLOADS = [
-    # name, session variable, replay, guest ms
+    # name, session variable, replay, guest ms. The FrondBench session was calibrated by hand before
+    # 0414 moved T|X touches, so its Run tap is at 34,293 now (38,302 before).
     ('bike', 'BIKE_SESSION', 'bike-level1.replay', 10000),
-    ('frondbench', 'FRONDBENCH_SESSION', 'frondbench-run.replay', 40000),
+    ('frondbench', 'FRONDBENCH_SESSION', 'frondbench-run-tx0414.replay', 40000),
 ]
 
 
@@ -68,7 +71,7 @@ def remote_lock():
 def remote_sync(workloads, rdir):
     """Copy the binary, replays and sessions into this run's own folder on the remote host."""
     run(SSH + [f'mkdir -p ~/{rdir}'])
-    files = [BENCH] + [FIXTURES / w['replay'] for w in workloads]
+    files = [BENCH] + [w['replay'] for w in workloads]
     run(['rsync', '-t', '-e', RSH] + [str(f) for f in files] + [f'{HOST}:{rdir}/'])
     for w in workloads:
         run(SSH + [f"mkdir -p ~/{rdir}/{w['name']}"])
@@ -81,14 +84,14 @@ def bench(w, mips, out, host, rdir):
     if host:
         name = w['name']
         remote = (f"cd ~/{rdir} && BENCH_DUMP_RAM=1 ./{BENCH.name} {name}/session.frond "
-                  f"{w['replay']} {w['ms']} {mips} on {name}/out > {name}.log 2>&1 || tail -n 3 {name}.log >&2; "
+                  f"{w['replay'].name} {w['ms']} {mips} on {name}/out > {name}.log 2>&1 || tail -n 3 {name}.log >&2; "
                   f"test -f {name}/out/summary.json")
         res = subprocess.run(SSH + [remote], capture_output=True, text=True)
         if res.returncode:
             raise RuntimeError(res.stderr.strip() or 'run failed on the remote host')
         run(['rsync', '-a', '-e', RSH, f'{HOST}:{rdir}/{name}/out/', str(out) + '/'])
     else:
-        res = subprocess.run([str(BENCH), w['session'], str(FIXTURES / w['replay']), str(w['ms']),
+        res = subprocess.run([str(BENCH), w['session'], str(w['replay']), str(w['ms']),
                               str(mips), 'on', str(out)], env=env, capture_output=True, text=True)
         if res.returncode:
             raise RuntimeError(res.stderr.strip())
@@ -122,6 +125,7 @@ def main():
             print(f'{name}: skipped, {"no session file at " + session if session else "no session"} (set {var})')
             skipped.append(name)
         else:
+            replay = Path(os.environ.get(name.upper() + '_REPLAY') or FIXTURES / replay).absolute()
             ws.append(dict(name=name, session=session, replay=replay, ms=ms))
     rdir = f'{REMOTE}/run-{stamp}'
     lock = None

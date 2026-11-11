@@ -114,6 +114,40 @@ for line in s.makefile('rb'):
         QVERIFY(client.request("quit"));QTRY_COMPARE(finished.count(),1);
     }
 
+    void backgroundQuery() {
+        // A speed-state query that is still out leaves the request slot free: a save and the quit go through
+        // and each reply reaches its own handler.
+        QTemporaryDir dir; QFile fake(dir.filePath("core.py")); QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write(R"PY(import socket,sys,time
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+held=None
+for line in s.makefile('rb'):
+    i,command,arg=line.rstrip(b'\n').split(b'\t')
+    if command==b'speed-state':
+        held=i;continue
+    s.sendall(i+b'\tok\tdone\t'+command.hex().encode()+b'\n')
+    if held is not None:
+        s.sendall(held+b'\tok\tspeed\t'+b'148.00 MIPS, limit 200.00 MIPS'.hex().encode()+b'\n');held=None
+    if command==b'quit': break
+)PY"); fake.close();
+        DesktopClient client; QSignalSpy ready(&client, &DesktopClient::started), result(&client, &DesktopClient::result);
+        QSignalSpy background(&client, &DesktopClient::backgroundResult), error(&client, &DesktopClient::error);
+        QSignalSpy finished(&client, &DesktopClient::finished);
+        QVERIFY(client.start("/usr/bin/python3", {fake.fileName()})); QTRY_COMPARE(ready.count(), 1);
+        QVERIFY(client.requestBackground("speed-state"));
+        QVERIFY(client.backgroundOut());
+        QVERIFY(!client.requestBackground("speed-state"));
+        QVERIFY(client.available());
+        QVERIFY(client.request("save", "/session.frond"));
+        QTRY_COMPARE(result.count(), 1);
+        QCOMPARE(result.at(0).at(0).toString(), "save");
+        QTRY_COMPARE(background.count(), 1);
+        QCOMPARE(background.at(0).at(2).toString(), "148.00 MIPS, limit 200.00 MIPS");
+        QVERIFY(!client.backgroundOut());
+        QVERIFY(client.request("quit")); QTRY_COMPARE(finished.count(), 1);
+        QCOMPARE(error.count(), 0);
+    }
     void failedStart() {
         DesktopClient client;
         QSignalSpy error(&client, &DesktopClient::error), finished(&client, &DesktopClient::finished);

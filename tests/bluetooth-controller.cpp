@@ -89,6 +89,15 @@ int main(){
             assert(migrate.Load(wake.data(),wake.size(),m));m.Write({1,0x29,0xfc,1,2});assert(m.Read().empty());
         }
     }
+    // A reconnect programs the TX's adopted address before the guest's command
+    // and drops its completion. The E2 refused it locally, so it has none.
+    const auto reopened=[&]{
+        size_t got=0;const size_t want=txBoard?14:4;
+        while(got<want){const auto n=recv(s.peer,bytes+got,sizeof(bytes)-got,0);assert(n>0);got+=size_t(n);}
+        assert(got==want);
+        if(txBoard){assert(!memcmp(bytes,address.data(),address.size()));s.Send({4,14,4,1,1,0xfc,0});}
+        assert(!memcmp(bytes+want-4,"\1\3\14\0",4));
+    };
     // Local vendor completions cannot preempt a partly clocked controller
     // event/ACL/SCO packet; doing so would corrupt the guest's H4 framing.
     for(const std::vector<uint8_t> frame:{std::vector<uint8_t>{4,14,10,1,9,16,0,14,232,12,224,7,0},
@@ -118,7 +127,7 @@ int main(){
     bcm2035BeginCheckpoint(m.b);bcm2035Suspend(m.b);assert(bcm2035BackendState(m.b)=="connected");
     bcm2035EndCheckpoint(m.b,true);assert(recv(s.peer,bytes,sizeof(bytes),0)==0);assert(m.Read().empty());
     m.Write({1,3,12,0});assert(bcm2035BackendState(m.b)!="connected"); // No guessed live-link continuation.
-    m.Power(false);m.Power(true);m.Write({1,3,12,0});s.Accept();m.Run();assert(recv(s.peer,bytes,sizeof(bytes),0)==4);
+    m.Power(false);m.Power(true);m.Write({1,3,12,0});s.Accept();m.Run();reopened();
     s.Send(reply);m.Run();assert(m.Read()==reply);
     // A committed off/on pulse invalidates the old peer even if final GPIO
     // levels match. Inner rollback must retain the outer committed history.
@@ -126,7 +135,7 @@ int main(){
     auto restoreInner=bcm2035CaptureInput(m.b);bcm2035BeginCheckpoint(m.b);
     m.Power(false);m.Power(true);restoreInner();bcm2035EndCheckpoint(m.b);
     s.Send(reply);bcm2035EndCheckpoint(m.b);const auto closed=recv(s.peer,bytes,sizeof(bytes),0);assert(closed==0 || (closed<0 && errno==ECONNRESET));assert(m.Read().empty());
-    m.Write({1,3,12,0});s.Accept();m.Run();assert(recv(s.peer,bytes,sizeof(bytes),0)==4);
+    m.Write({1,3,12,0});s.Accept();m.Run();reopened();
     s.Send(reply);m.Run();assert(m.Read()==reply);
     bcm2035Suspend(m.b);assert(recv(s.peer,bytes,sizeof(bytes),0)==0); // Accepted replacement/reset shares this invalidation boundary.
     assert(bcm2035SetBackend(m.b,"",error));assert(bcm2035BackendState(m.b)=="off");

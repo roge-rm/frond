@@ -1,6 +1,8 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 26cd9e2..2a65ab9 100644
 --- a/src/uarm/uarm/CPU.cpp
 +++ b/src/uarm/uarm/CPU.cpp
-@@ -217,10 +217,19 @@
+@@ -220,10 +220,19 @@ struct ArmCpu {
      // and the run's budget, which such a store can shrink.
      Arm920LeanWrite leanWrite;
      uint32_t leanInstr, leanBudget;
@@ -20,7 +22,7 @@
  #endif
  
      template <typename T>
-@@ -896,7 +905,7 @@
+@@ -899,7 +908,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
                              MMU_TRANSLATE_RESULT_BUFFERABLE(r);
          if constexpr (!write) {
              uint32_t value, cost = 0;
@@ -29,7 +31,7 @@
                  cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, cpu->curInstrPC, cpu->leanDone,
                                cpu->leanBudget - cpu->leanDone - 1, cpuPrvLeanSingleLoad(cpu), &value, &cost)) {
                  memcpy(buf, &value, size);
-@@ -904,7 +913,8 @@
+@@ -907,7 +916,8 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
                  ++cpu->leanBus;
                  return true;
              }
@@ -39,7 +41,7 @@
              uint32_t value = 0, cost = 0;
              memcpy(&value, buf, size);
              const uint32_t left = cpu->leanBudget - cpu->leanDone - 1;
-@@ -1115,7 +1125,8 @@
+@@ -1118,7 +1128,8 @@ void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
  
  void cpuDropTranslatedCode(struct ArmCpu *cpu) {
  #ifdef FROND_DYNARMIC
@@ -49,7 +51,7 @@
  #else
      (void)cpu;
  #endif
-@@ -1129,7 +1140,8 @@
+@@ -1132,7 +1143,8 @@ bool cpuSetFastEngine(bool fast) {
  }
  void cpuSetJitSync(bool sync) { jitSetSync(sync); }
  bool cpuJitExecutionCounts(const ArmCpu *cpu, uint64_t *blocks, uint64_t *instructions) {
@@ -59,7 +61,7 @@
      jitExecutionCounts(cpu->jit, blocks, instructions);
      return true;
  }
-@@ -4818,7 +4830,7 @@
+@@ -4857,7 +4869,7 @@ template <int size>
  static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
      uint32_t done = 0;
      const uint32_t before = cpu->leanDone;
@@ -68,7 +70,7 @@
          cpu->leanDone = before + done;
          const uint32_t pc = cpu->regs[REG_NO_PC];
          uint32_t instr, decoded;
-@@ -4842,6 +4854,10 @@
+@@ -4881,6 +4893,10 @@ static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
  }
  
  uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64_t *busAccesses) {
@@ -79,7 +81,7 @@
      *blNext = ~0u;
      *busAccesses = 0;
      if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
-@@ -4856,11 +4872,12 @@
+@@ -4895,11 +4911,12 @@ uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64
      cpu->leanBus = 0;
      cpu->leanDone = 0;
      cpu->leanBudget = budget;
@@ -93,7 +95,7 @@
          cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
      }
      cpu->leanRun = false;
-@@ -4904,6 +4921,17 @@
+@@ -4943,6 +4960,17 @@ void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite
  
  // Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
  void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
@@ -111,7 +113,7 @@
      if (!cpu->leanCode) return;
      uint64_t &bits = cpu->leanCode[pa >> 18];
      if (likely(!(bits & (uint64_t(1) << ((pa >> 12) & 63))))) return;
-@@ -4921,6 +4949,11 @@
+@@ -4960,6 +4988,11 @@ uint32_t cpuArm920RunLean(ArmCpu *, uint32_t, uint32_t *blNext, uint64_t *busAcc
      *busAccesses = 0;
      return 0;
  }
@@ -123,7 +125,7 @@
  void cpuArm920SetLean(ArmCpu *, Arm920LeanPage, Arm920LeanGuard, void *) {}
  void cpuArm920LeanReset(ArmCpu *) {}
  void cpuArm920LeanFlush(ArmCpu *) {}
-@@ -4960,8 +4993,19 @@
+@@ -5003,8 +5036,19 @@ bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_
      return false;
  }
  
@@ -144,7 +146,7 @@
      const struct HostTlb &t = cpu->mem->hostTlb;
      const struct HostTlbEntry &e = t.read[(va >> 12) & (HOST_TLB_SIZE - 1)];
      if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
-@@ -4972,7 +5016,7 @@
+@@ -5015,7 +5059,7 @@ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
  // fast path for the current privilege (so the MMU allows it in this mode with the current
  // domains), marked dirty as ramDirectWritePage does. Null for anything else.
  uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va) {
@@ -153,7 +155,7 @@
      if (cpu->nativeCallDepth) return nullptr;
      const struct HostTlb &t = cpu->mem->hostTlb;
      const struct HostTlbEntry &e = t.write[(va >> 12) & (HOST_TLB_SIZE - 1)];
-@@ -4996,6 +5040,17 @@
+@@ -5039,6 +5083,17 @@ static uint8_t *cpuPrvJitHostCodePage(ArmCpu *cpu, uint32_t va) {
  bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
      va &= ~3u;
      if (cpu->model == ArmCpuModel::arm920t) {
@@ -171,7 +173,7 @@
          uint_fast8_t fsr;
          return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
      }
-@@ -5066,6 +5121,22 @@
+@@ -5108,6 +5163,22 @@ static const uint8_t *cpuPrvJitWatchFetch(void *ctx, uint32_t pa) {
  
  uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
      *lines = nullptr;
@@ -194,7 +196,7 @@
      if (uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, lines)) return page;
      const struct ArmMemRegion &region = cpu->mem->regions[REGION_ROM];
      if (!region.ub || !region.uD || pa < region.pa || pa >= region.ub) return nullptr;
-@@ -5076,6 +5147,7 @@
+@@ -5118,6 +5189,7 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
  }
  
  void cpuJitForgetCode(ArmCpu *cpu) {
@@ -202,7 +204,7 @@
      memForgetRamCode(cpu->mem);
      icacheWatchFetchBuffers(cpu->ic);
  }
-@@ -5211,6 +5283,17 @@
+@@ -5288,6 +5360,17 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
                  if ((((pc + 2) & 2) ? next >> 16 : next & 0xffff) < 0xf800) return false;
              }
          }
@@ -218,9 +220,9 @@
 +            }
 +        }
      }
-     // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
-     // words than memory, like the patched PACE entry a session restores while its RAM has
-@@ -5332,6 +5415,78 @@
+     // ARM coprocessor and SWI encodings other than the p15 slot's (MRC and MCR p15 c3, MCR
+     // p15 c7 c5 1) and iWMMXt never go to the JIT (cpuPrvJitPlainArm), so they're turned
+@@ -5428,6 +5511,78 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
  
      return acc;
  }
@@ -299,7 +301,7 @@
  #endif
  
  bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
-@@ -5373,7 +5528,7 @@
+@@ -5469,7 +5624,7 @@ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
  #ifndef __EMSCRIPTEN__
      // nativePc is only set by RunToNativePc around a whole run, so it holds for this batch.
  #ifdef FROND_DYNARMIC
@@ -308,9 +310,11 @@
          !cpu->nativePc[0] && !cpu->slowPath)
          return cpuPrvCycleJit(cpu, cycles);
  #endif
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index 5500985..ef15111 100644
 --- a/src/uarm/uarm/CPU.h
 +++ b/src/uarm/uarm/CPU.h
-@@ -295,6 +295,25 @@
+@@ -304,6 +304,25 @@ void cpuArm920LeanStored(ArmCpu*, uint32_t pa);
  // the guarded step. blNext is the Thumb BL suffix address after a prefix that ended the run, else ~0.
  // busAccesses gets the data accesses the step would have counted as bus accesses.
  uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses);
@@ -336,9 +340,11 @@
  // The lean TLB's generation and the times Fast dropped its decoded code for a store to it, for tests.
  uint32_t cpuArm920LeanGeneration(const ArmCpu*);
  uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 4037a13..87c0990 100644
 --- a/src/uarm/uarm/imx1_boot_probe.cpp
 +++ b/src/uarm/uarm/imx1_boot_probe.cpp
-@@ -33,6 +33,8 @@
+@@ -33,6 +33,8 @@ uint64_t deferredHclk = 0;
  bool linesPending = false;
  uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
  uint64_t leanTimerReads = 0;  // timer count reads answered on the lean path, for tests
@@ -347,7 +353,7 @@
  uint64_t leanCs5Writes = 0;  // graphics memory writes taken on the lean path, for tests
  uint64_t leanCs5Reads = 0;  // CS5 register reads answered on the lean path, for tests
  // One lean run's graphics memory writes: whether they can be taken and their wait clocks, worked out at the first
-@@ -143,7 +145,9 @@
+@@ -143,7 +145,9 @@ struct Probe {
      uint32_t i2cIssuePc = 0;
      bool irqRaised = false, fiqRaised = false;
      // The Fast engine: inside a quiet span the lean interpreter runs instead of the guarded step. Not saved.
@@ -358,7 +364,7 @@
      Imx1BootstrapAccess driveGraphicsLine(const Imx1Cs5Configuration& candidate, bool commit) {
          if (!options.graphicsIrqA13) return Imx1BootstrapAccess::ok;
          const auto line = candidate.interruptState().interruptOutput();
-@@ -710,7 +714,8 @@
+@@ -710,7 +714,8 @@ struct Probe {
              // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
              if (write && status == Imx1BootstrapAccess::ok &&
                  Imx1Bootstrap::isRamAddress(address)) {
@@ -368,7 +374,7 @@
                  if (p.fastEngine) cpuArm920LeanStored(p.cpu, address);
              }
              if (!write) std::memcpy(data, &value, size);
-@@ -969,6 +974,8 @@
+@@ -969,6 +974,8 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
      }
      leanRetired = 0;
      leanTimerReads = 0;
@@ -377,7 +383,7 @@
      leanCs5Writes = 0;
      leanCs5Reads = 0;
      deferredHclk = 0;
-@@ -1310,45 +1317,82 @@
+@@ -1310,45 +1317,82 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
          for (uint32_t slice = 0; slice < retiredBudget; ++slice)
              if (!runStep(p, idleHclkLimit)) break;
      } else {
@@ -402,31 +408,6 @@
 -            if (p->bounds) {
 -                const uint64_t used = p->work - p->sliceWorkStart;
 -                budget = used + 1 >= p->bounds->work ? 0 : std::min(budget, p->bounds->work - used - 1);
--            }
--            if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
--                budget = std::min(budget, p->options.gpioEventAfterInstructions - p->retired);
--            if (!budget) continue;
--            uint32_t blNext;
--            uint64_t busAccesses;
--            leanCs5 = {};
--            const uint32_t ran = cpuArm920RunLean(p->cpu, uint32_t(budget), &blNext, &busAccesses);
--            p->result.busAccesses += busAccesses;
--            // Graphics memory writes add their wait clocks to the work and the deferred charge, and their cost
--            // to the span used, as cs5Wait would.
--            deferredHclk += leanCs5.waitClocks;
--            p->result.cs5WaitClocks += leanCs5.waitClocks;
--            p->work += leanCs5.waitClocks;
--            quietCycles -= leanCs5.waitCost;
--            leanCs5 = {};
--            if (!ran) continue;
--            deferredCycles += ran;
--            quietCycles -= ran;
--            p->retired += ran;
--            leanRetired += ran;
--            p->work += ran;
--            slice += ran;
--            p->blPrefix = blNext != ~0u;
--            if (p->blPrefix) p->blNextPc = blNext;
 +            for (;;) {
 +                if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
 +                    cpuArm920ClockMode(p->cpu) != quietMode) break;
@@ -492,11 +473,35 @@
 +                p->blPrefix = blNext != ~0u;
 +                if (p->blPrefix) p->blNextPc = blNext;
 +                if (!p->fastJit) break;
-+            }
+             }
+-            if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
+-                budget = std::min(budget, p->options.gpioEventAfterInstructions - p->retired);
+-            if (!budget) continue;
+-            uint32_t blNext;
+-            uint64_t busAccesses;
+-            leanCs5 = {};
+-            const uint32_t ran = cpuArm920RunLean(p->cpu, uint32_t(budget), &blNext, &busAccesses);
+-            p->result.busAccesses += busAccesses;
+-            // Graphics memory writes add their wait clocks to the work and the deferred charge, and their cost
+-            // to the span used, as cs5Wait would.
+-            deferredHclk += leanCs5.waitClocks;
+-            p->result.cs5WaitClocks += leanCs5.waitClocks;
+-            p->work += leanCs5.waitClocks;
+-            quietCycles -= leanCs5.waitCost;
+-            leanCs5 = {};
+-            if (!ran) continue;
+-            deferredCycles += ran;
+-            quietCycles -= ran;
+-            p->retired += ran;
+-            leanRetired += ran;
+-            p->work += ran;
+-            slice += ran;
+-            p->blPrefix = blNext != ~0u;
+-            if (p->blPrefix) p->blNextPc = blNext;
          }
      }
      // The slice ends with every cycle charged, so the state, the time and host input see the machine whole.
-@@ -1369,6 +1413,8 @@
+@@ -1369,6 +1413,8 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
      cpuArm920SetLean(p->cpu, fast ? Probe::leanPage : nullptr, fast ? bootstrapInstruction : nullptr, p);
      cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
      cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
@@ -505,7 +510,7 @@
      // Fast keeps no cache contents: dirty data goes to memory first.
      if (fast) cpuArm920LeanReset(p->cpu);
      return true;
-@@ -1378,6 +1424,19 @@
+@@ -1378,6 +1424,19 @@ bool imx1MachineFastEngine(const Imx1Machine* machine) { return machine->probe->
  
  uint64_t imx1MachineLeanRetired(const Imx1Machine*) { return leanRetired; }
  
@@ -525,7 +530,7 @@
  uint64_t imx1MachineLeanTimerReads(const Imx1Machine*) { return leanTimerReads; }
  
  uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*) { return leanCs5Writes; }
-@@ -1551,6 +1610,9 @@
+@@ -1551,6 +1610,9 @@ void imx1MachineStop(Imx1Machine* machine) {
      p->options = {};
      p->observer = nullptr; p->observerContext = nullptr;
      p->stopped = true;
@@ -535,9 +540,11 @@
      if (activeMachine == machine) activeMachine = nullptr;
  }
  
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index e61e5c2..e6fdf62 100644
 --- a/src/uarm/uarm/imx1_boot_probe.h
 +++ b/src/uarm/uarm/imx1_boot_probe.h
-@@ -208,6 +208,14 @@
+@@ -208,6 +208,14 @@ Imx1MachineCheapStatus imx1MachineGetStatus(const Imx1Machine*);
  // switching to it cleans the data cache to memory and empties both. False inside a run or after a stop.
  bool imx1MachineSetFastEngine(Imx1Machine*, bool fast);
  bool imx1MachineFastEngine(const Imx1Machine*);
@@ -552,9 +559,11 @@
  // Instructions the Fast engine ran on its lean path since the machine was made.
  uint64_t imx1MachineLeanRetired(const Imx1Machine*);
  // Timer count reads the lean path answered, including any in an instruction the step then ran again.
+diff --git a/src/uarm/uarm/jit_dynarmic.cpp b/src/uarm/uarm/jit_dynarmic.cpp
+index 976b1bc..1df7abb 100644
 --- a/src/uarm/uarm/jit_dynarmic.cpp
 +++ b/src/uarm/uarm/jit_dynarmic.cpp
-@@ -216,6 +216,11 @@
+@@ -250,6 +250,11 @@ struct Snapshot final : public A32::CodeSnapshot {
  struct Env final : public A32::UserCallbacks {
      ArmCpu *cpu = nullptr;
      bool arm920 = false;
@@ -566,7 +575,7 @@
      uint64_t blocks = 0, instructions = 0;
      A32::Jit *jit = nullptr;
      PageTable *pages = nullptr;
-@@ -301,7 +306,12 @@
+@@ -345,7 +350,12 @@ struct Env final : public A32::UserCallbacks {
          const auto it = code.emplace(page, CodePage{pa, host, lines, access}).first;
          accessPages[access]++;
          stats.codePages++;
@@ -580,7 +589,7 @@
              byHost[host].push_back(page);
          } else {
              stats.unwatched++;
-@@ -338,6 +348,19 @@
+@@ -382,6 +392,19 @@ struct Env final : public A32::UserCallbacks {
          }
      }
  
@@ -600,7 +609,7 @@
      void CodeWritten(uint8_t *host) {
          const auto it = byHost.find(host);
          if (it == byHost.end()) return;
-@@ -389,6 +412,7 @@
+@@ -440,6 +463,7 @@ struct Env final : public A32::UserCallbacks {
          accessPages.clear();
          permContext = cpuJitPermContext(cpu);
          byHost.clear();
@@ -608,7 +617,7 @@
          unwatched.clear();
          cpuJitForgetCode(cpu);
          gen = ~0ull;
-@@ -502,7 +526,7 @@
+@@ -624,7 +648,7 @@ struct Env final : public A32::UserCallbacks {
      }
  
      bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
@@ -617,74 +626,87 @@
              ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
              return false;
          }
-@@ -825,8 +849,9 @@
+@@ -1087,6 +1111,7 @@ struct FrondJit {
+     // [0] user, made when the CPU first runs in user mode; [1] privileged.
+     std::unique_ptr<Level> level[2];
+     uint32_t maxUnchecked = 0, hot = 1;
++    bool singleStep = false;  // ARM920T probe diagnostic: one instruction per check, blocks end at each line
+     A32::Jit::CompileThread mode{};
+     unsigned ahead = 0;
+     FrondJitAbort abort{};  // the last run's, for FROND_JIT_ABORT
+@@ -1169,8 +1194,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
      A32::UserConfig conf;
-     conf.callbacks = &j->env;
-     j->env.arm920 = cpuGetModel(cpu) == ArmCpuModel::arm920t;
-+    j->env.lineBound = j->env.arm920 && singleStep;
-     conf.arch_version = j->env.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
--    if (j->env.arm920)
-+    if (j->env.lineBound)
+     conf.callbacks = &e;
+     e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
++    e.lineBound = e.arm920 && j->singleStep;
+     conf.arch_version = e.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
+-    if (e.arm920)
++    if (e.lineBound)
          conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
                                  OptimizationFlag::FastDispatch);
-     conf.page_table = &j->pages;
-@@ -836,7 +861,7 @@
-     conf.check_halt_on_link = true;
-     conf.check_halt_on_memory_access = true;
+     conf.page_table = l->pages;
+@@ -1196,8 +1222,8 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+     l->jit = std::make_unique<A32::Jit>(conf);
+     e.jit = l->jit.get();
+     e.maxInstructions = j->maxUnchecked;
+-    l->jit->SetCompileThread(e.arm920 ? A32::Jit::CompileThread::Off : j->mode);
+-    l->jit->SetCompileAhead(e.arm920 ? 0 : j->ahead);
++    l->jit->SetCompileThread(e.lineBound ? A32::Jit::CompileThread::Off : j->mode);
++    l->jit->SetCompileAhead(e.lineBound ? 0 : j->ahead);
+     if (Level *o = j->level[!privileged].get()) {
+         e.other = &o->env;
+         o->env.other = &e;
+@@ -1213,8 +1239,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep) {
+     auto *j = new FrondJit;
+     j->cpu = cpu;
++    j->singleStep = singleStep;
      j->maxUnchecked = singleStep ? 1 : jitPrvMaxUnchecked();
--    j->env.hot = j->env.arm920 ? 1 : jitPrvHot();
-+    j->env.hot = j->env.lineBound ? 1 : jitPrvHot();
-     conf.max_unchecked_instructions = j->maxUnchecked;
-     // Unaligned accesses go through the callbacks, which fault on them.
-     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
-@@ -849,9 +874,9 @@
-     j->jit = std::make_unique<A32::Jit>(conf);
-     j->env.jit = j->jit.get();
-     j->env.maxInstructions = j->maxUnchecked;
--    const A32::Jit::CompileThread mode = j->env.arm920 ? A32::Jit::CompileThread::Off : jitPrvCompileThread();
-+    const A32::Jit::CompileThread mode = j->env.lineBound ? A32::Jit::CompileThread::Off : jitPrvCompileThread();
-     j->jit->SetCompileThread(mode);
--    j->jit->SetCompileAhead(j->env.arm920 ? 0 : jitPrvAhead(mode));
-+    j->jit->SetCompileAhead(j->env.lineBound ? 0 : jitPrvAhead(mode));
-     if (stats.on) stats.jits.push_back(j->jit.get());
-     return j;
- }
-@@ -886,10 +911,11 @@
+-    j->hot = cpuGetModel(cpu) == ArmCpuModel::arm920t ? 1 : jitPrvHot();
++    j->hot = cpuGetModel(cpu) == ArmCpuModel::arm920t && singleStep ? 1 : jitPrvHot();
+     j->mode = jitPrvCompileThread();
+     j->ahead = jitPrvAhead(j->mode);
+     jitPrvMakeLevel(j, true);
+@@ -1265,8 +1292,9 @@ void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompile
  void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
      stats.invalRange++;
-     Env &e = j->env;
--    if (e.arm920) {
-+    if (e.lineBound) {
-         j->jit->InvalidateCacheRange(va, size);
-         return;
-     }
-+    if (e.arm920) return;
-     if (e.unwatched.empty()) return;
-     e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
+     jitPrvEach(j, [&](Env &e) {
+-        if (e.arm920) e.jit->InvalidateCacheRange(va, size);
+-        else if (!e.unwatched.empty()) e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
++        if (e.lineBound) e.jit->InvalidateCacheRange(va, size);
++        else if (!e.arm920 && !e.unwatched.empty())
++            e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
+     });
  }
-@@ -898,7 +924,8 @@
-     stats.invalAll++;
+ 
+@@ -1275,8 +1303,8 @@ void jitGuestInvalidateAll(FrondJit *j, uint32_t pc) {
      auto &st = stats.invalAllPc[pc];
-     if (!st.first++ && stats.on) cpuJitFetch(j->env.cpu, pc & ~3u, &st.second);
--    if (j->env.arm920) j->jit->ClearCache();
-+    if (j->env.lineBound) j->jit->ClearCache();
-+    else if (j->env.arm920) return;
-     else if (!j->env.unwatched.empty()) j->env.DropUnwatched(0, ~0u);
+     if (!st.first++ && stats.on) cpuJitFetch(j->cpu, pc & ~3u, &st.second);
+     jitPrvEach(j, [](Env &e) {
+-        if (e.arm920) e.jit->ClearCache();
+-        else if (!e.unwatched.empty()) e.DropUnwatched(0, ~0u);
++        if (e.lineBound) e.jit->ClearCache();
++        else if (!e.arm920 && !e.unwatched.empty()) e.DropUnwatched(0, ~0u);
+     });
  }
  
-@@ -906,6 +933,8 @@
+@@ -1323,6 +1351,10 @@ void jitCodeWritten(FrondJit *j, uint8_t *hostPage) {
+     jitPrvEach(j, [&](Env &e) { e.CodeWritten(hostPage); });
+ }
  
- void jitCodeWritten(FrondJit *j, uint8_t *hostPage) { j->env.CodeWritten(hostPage); }
- 
-+void jitCodeWrittenPa(FrondJit *j, uint32_t pa) { j->env.CodeWrittenPa(pa >> 12); }
++void jitCodeWrittenPa(FrondJit *j, uint32_t pa) {
++    jitPrvEach(j, [&](Env &e) { e.CodeWrittenPa(pa >> 12); });
++}
 +
  void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
-     if (!j->env.writable.empty()) j->env.Protect(host, size);
- }
+     jitPrvEach(j, [&](Env &e) {
+         if (!e.writable.empty()) e.Protect(host, size);
+diff --git a/src/uarm/uarm/jit_dynarmic.h b/src/uarm/uarm/jit_dynarmic.h
+index 4c3368c..68d3a3a 100644
 --- a/src/uarm/uarm/jit_dynarmic.h
 +++ b/src/uarm/uarm/jit_dynarmic.h
-@@ -45,6 +45,8 @@
- void jitClear(FrondJit *jit);
+@@ -65,6 +65,8 @@ void jitCparWritten(FrondJit *jit, bool changed);
+ bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
  // The first write to a watched RAM line since code was translated from it.
  void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
 +// ARM920T Fast blocks: a store to the RAM page at pa, which code was translated from.

@@ -20,7 +20,16 @@ struct Server{
  void Accept(){if(peer>=0)close(peer);peer=accept4(listener,nullptr,nullptr,SOCK_NONBLOCK|SOCK_CLOEXEC);assert(peer>=0);}
  void Send(const Bytes& p){assert(send(peer,p.data(),p.size(),MSG_NOSIGNAL)==ssize_t(p.size()));}
  void NoNew(){assert(accept4(listener,nullptr,nullptr,SOCK_NONBLOCK|SOCK_CLOEXEC)<0&&errno==EAGAIN);}
- void ReceiveReset(){uint8_t b[4];assert(recv(peer,b,4,MSG_DONTWAIT)==4);assert(!memcmp(b,"\1\3\14\0",4));}
+ // A new controller connection starts with the machine's address (Write_BD_ADDR), the same each time.
+ Bytes address;
+ void ReceiveReset(){
+  uint8_t b[10];assert(recv(peer,b,4,MSG_DONTWAIT|MSG_PEEK)==4);
+  if(!memcmp(b,"\1\1\374\6",4)){
+   assert(recv(peer,b,10,MSG_DONTWAIT)==10);if(address.empty())address.assign(b+4,b+10);
+   assert(Bytes(b+4,b+10)==address);Send({4,14,4,1,1,0xfc,0});
+  }
+  assert(recv(peer,b,4,MSG_DONTWAIT)==4);assert(!memcmp(b,"\1\3\14\0",4));
+ }
  bool Eof(){char c;return recv(peer,&c,1,MSG_DONTWAIT|MSG_PEEK)==0;}
  ~Server(){if(peer>=0)close(peer);close(listener);unlink(path.c_str());rmdir(directory.c_str());}
 };

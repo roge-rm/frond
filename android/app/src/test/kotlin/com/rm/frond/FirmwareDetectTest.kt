@@ -176,4 +176,47 @@ class FirmwareDetectTest {
         assertEquals("This Fixture NOR image has an invalid card layout.", Firmware.check(wrongOffset, f, null))
     }
 
+
+    // A Dana ROM's layout: a VZ small card at 0, a second card at 32 KiB, padding to 6 MiB.
+    private fun dana(size: Long = 6L shl 20, mutate: (java.io.RandomAccessFile) -> Unit = {}): File {
+        val dana = Device.byId("alphasmart-dana")!!
+        fun be(file: RandomAccessFile, at: Long, value: Long, bytes: Int) {
+            file.seek(at)
+            for (i in bytes - 1 downTo 0) file.write(((value shr (8 * i)) and 0xff).toInt())
+        }
+        fun card(file: RandomAccessFile, at: Long, length: Long) {
+            file.seek(at + 0x10)
+            file.write("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
+            be(file, at + 4, 0x10000000L + at + 0x2a2, 4)
+            be(file, at + 8, 0xfeedbeefL, 4)
+            be(file, at + 0x0c, 5, 2)
+            be(file, at + 0x0e, 0x0040, 2)
+            be(file, at + 0x6c, length, 4)
+            be(file, at + 0x7e, dana.companyId, 4)
+            be(file, at + 0x82, dana.halId, 4)
+        }
+        val f = tmp.newFile()
+        RandomAccessFile(f, "rw").use { file ->
+            file.setLength(size)
+            card(file, 0, 0x8000)
+            card(file, 0x8000, 0x200000)
+            mutate(file)
+        }
+        return f
+    }
+
+    @Test fun danaRomIsAcceptedForTheDanaAndTheWireless() {
+        val rom = dana()
+        assertEquals(Device.byId("alphasmart-dana"), Firmware.detect(rom))
+        assertNull(Firmware.check(Device.byId("alphasmart-dana")!!, rom, null))
+        assertNull(Firmware.check(Device.byId("alphasmart-dana-wireless")!!, rom, null))
+    }
+
+    @Test fun danaRomWithABrokenSecondCardIsRefused() {
+        val wrongSize = dana(5L shl 20)
+        assertNull(Firmware.inspectRom68k(wrongSize).device)
+        val noSecond = dana { it.seek(0x8000 + 8); it.write(ByteArray(4)) }
+        assertNull(Firmware.inspectRom68k(noSecond).device)
+        assertEquals("This ROM isn't one the AlphaSmart Dana can run.", Firmware.check(Device.byId("alphasmart-dana")!!, noSecond, null))
+    }
 }

@@ -1,0 +1,34 @@
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -370,7 +370,9 @@
+     if(packetIndex>8 || !packet[packetIndex-1]) {
+         std::memcpy(presentedScan,packet,8);
+         std::memset(packet,0,8); queueHead=(queueHead+1)%32; --queueCount;
+-        if(hostPaced) { inputLastCycle=InputCycle(); inputClockHz=InputHz(); inputDelay=inputClockHz/50; }
++        // Space reports 10 ms apart. The ROM releases every key when no report comes for three
++        // of its 10 ms ticks (20-30 ms), so a held key is reported again well inside that.
++        if(hostPaced) { inputLastCycle=InputCycle(); inputClockHz=InputHz(); inputDelay=inputClockHz/100; }
+         packetIndex=0;
+     }
+     keysDirty=queueCount!=0;
+@@ -420,6 +422,9 @@
+ }
+ void EmRegsVZDana::CycleSlowly(Bool sleeping) {
+     EmRegsVZ::CycleSlowly(sleeping);
++    ReportHeldKeys();
++}
++void EmRegsVZDana::ReportHeldKeys() {
+     if(!stAsleep && !ebReported && hostPaced && heldCount && !queueCount && !pollIndex && InputReady()) QueueKeys();
+     UpdateStIrq();
+ }
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -66,6 +66,8 @@
+     } adc;
+    protected:
+     void MigrateLegacyInput();
++    // Queues the held keys again once the report pacing allows; called from CycleSlowly.
++    void ReportHeldKeys();
+     void DispatchPwmChange() override;
+     void SoundControlWrite(emuptr, int, uint32);
+     void SoundClockWrite(emuptr, int, uint32);

@@ -1,0 +1,68 @@
+--- a/src/cloudpilot/frond/HostLink.h
++++ b/src/cloudpilot/frond/HostLink.h
+@@ -33,6 +33,9 @@
+     void Close();
+     // Accepts a client, notices a PTY peer coming and going, moves bytes both ways.
+     void Poll();
++    // A Unix socket closes while the Palm sleeps and listens again on waking, as an ARM core's
++    // port does, so a peer sees it asleep. Bytes already received stay the guest's.
++    void SetAsleep(bool asleep);
+ 
+     Kind GetKind() const { return kind; }
+     bool Connected() const;
+@@ -60,6 +63,7 @@
+     std::string path;  // Unix socket path
+     ino_t socketInode{0};
+     bool hung{false};  // PTY with no slave open
++    bool asleep{false};
+     std::string endpoint;
+     std::deque<uint8_t> rx, tx;
+     uint64_t received{0}, sent{0};
+--- a/src/cloudpilot/frond/HostLink.cpp
++++ b/src/cloudpilot/frond/HostLink.cpp
+@@ -98,6 +98,22 @@
+     return true;
+ }
+ 
++void HostLink68k::SetAsleep(bool value) {
++    if (kind != Kind::unixSocket || value == asleep) return;
++    asleep = value;
++    if (asleep) {
++        closeFd(client);
++        closeFd(fd);
++        frondUnix::Remove(path, socketInode);
++        socketInode = 0;
++        tx.clear();
++        return;
++    }
++    // On failure it stays without a listener, as a closed port.
++    std::string error;
++    fd = frondUnix::Listen(path, error, socketInode);
++}
++
+ void HostLink68k::Close() {
+     closeFd(client);
+     closeFd(fd);
+@@ -109,6 +125,7 @@
+     rx.clear();
+     tx.clear();
+     hung = false;
++    asleep = false;
+ }
+ 
+ bool HostLink68k::Connected() const {
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -1392,10 +1392,11 @@
+         if (serialLink.GetKind() == HostLink68k::Kind::off && irLink.GetKind() == HostLink68k::Kind::off &&
+             !serialTransport->ModemMode() && !irTransport->PhoneMode() && !irTransport->PrinterMode())
+             return;
++        const bool on = gSession->IsPowerOn();
++        irLink.SetAsleep(!on);
+         serialLink.Poll();
+         irLink.Poll();
+         modemSyncLink.Poll();
+-        const bool on = gSession->IsPowerOn();
+         serialTransport->Service(on && EmHAL::GetLineDriverState(kUARTSerial));
+         irTransport->Service(on && EmHAL::GetLineDriverState(kUARTIR));
+     }

@@ -150,7 +150,9 @@ A version 2 `ms.frondms` keeps every byte the Sony driver can see. The payload i
 | 64 MB | 4096 | 32 | FAT12 |
 | 128 MB | 8192 | 32 | FAT16 |
 
-A 128 MB stick takes 136.6 MB. A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
+A 128 MB stick takes 136.6 MB. A new stick (`frond --card make ms`, `ms-create`) has every logical block in its home block with zero data and no file system, so Palm OS asks to format it. On a stick of erased blocks the TG50 driver reads every page of each free block before it uses it, which takes about 50 s at 128 MB.
+
+A version 1 `ms.frondms` (the physical pages with their extra bytes, and a change counter at bytes 32-39) still loads, and its next save writes version 2 at the counter plus one.
 
 Files writes a stick as the driver does:
 
@@ -160,7 +162,7 @@ Files writes a stick as the driver does:
 
 ### Internal NAND
 
-The T|X and E2 keep their NAND in `nand.frondnand`: the 512 main bytes of each 528-byte unit in page order as the payload, then the 16 spare bytes of each in the side region (a 2112-byte T|X page is 2048 main and 64 spare, the same split). A NAND is at most 256 MiB raw. Saves journal it like a card, and settle and verify take it. It can't be opened in Files: databases go in and out through Internal. `--nand` and `save-nand` keep the raw 528-byte unit format.
+The T|X, E2 and E3 keep their NAND in `nand.frondnand`: the 512 main bytes of each 528-byte unit in page order as the payload, then the 16 spare bytes of each in the side region (a 2112-byte T|X page is 2048 main and 64 spare, the same split). A NAND is at most 256 MiB raw. Saves journal it like a card, and settle and verify take it. It can't be opened in Files: databases go in and out through Internal. `--nand` and `save-nand` keep the raw 528-byte unit format.
 
 ### Session media
 
@@ -262,6 +264,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | --- | --- | --- |
 | `device-state` | | `device`: profile name |
 | `window-id` | | `window`: `x11 ID`, the decimal X11 window id the app can embed. `unsupported` when the window isn't an X11 window (Wayland, the dummy video driver). `--window-fit fit` (or `whole` for whole steps, `fill`) makes the Palm follow the window's size; the desktop app uses `fit`. |
+| `window-layout` | | `layout`: `x y width height windowWidth windowHeight`, where the fitted device sits in the window and the window's size, both in the window's own units. `unsupported` without a window. Only `frond`. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
 | `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
@@ -835,7 +838,9 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks, and for the `palm-e2-denvfs` entry in `tests/smoke.py`. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
+| `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
+| `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
@@ -849,6 +854,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_FAST` | `0` leaves the Fast engine (Dynarmic) out. Default on for x86-64 and arm64. |
 | `BUILD_JOBS` | Parallel jobs for the desktop and Dynarmic builds. Default 4. |
 | `ARM64_JOBS` | Jobs for the arm64 Docker build. |
+| `APPIMAGE_JOBS` | Jobs for the AppImage Docker builds. |
 | `FROND_DYNARMIC_SRC`, `FROND_DYNARMIC_LIBS` | Where the core's makefile finds the Dynarmic source and libraries. `make` sets them from `DYNARMIC_SRC`. |
 | `DYNARMIC_SRC` | Where the patched Dynarmic source goes. Default `build/dynarmic-trial/src`. |
 | `DYNARMIC_DONOR` | A Dynarmic clone to export the pinned source from. Default `build/dynarmic-donor`, fetched on first use. |
@@ -912,6 +918,7 @@ All in `tools/`. Most take `--help`.
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
+| `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. They carry mtools in `usr/lib/frond` for SD file exchange. |
 | `clean` | Remove build output. |
 | `dynarmic-source` | Export the pinned Dynarmic source again. |
 | `device-profiles` | Build the device profile dump. |
@@ -990,7 +997,7 @@ Tests in `make test`, by area:
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
-| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions) |
+| Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
 | Dana USB, printing and Wi-Fi | `test-68k-card-provider`, `test-68k-dana`, `test-68k-sd`, `test-68k-vz-registers`, `test-dana-card-inventory`, `test-isp-frame`, `test-isp-host-atl`, `test-isp-host-irq`, `test-isp-host-pio`, `test-isp-host-root`, `test-print-text`, `test-raw-print-file`, `test-raw-print-job`, `test-usb-raw-printer`, `test-usb-printer-runtime`, `test-usb-prism2-adapter` (the adapter leaf), `test-net-wifi-router` (the shared Ethernet router), `test-usb-wifi-runtime` (the Dana's adapter on the ISP1161 port: enumeration, slirp ARP, supply, port reset, swap with the printer, reset, load, a load mid frame and a rejected load), `test-dana-wifi-module` (the Dana Wireless's built-in Wi-Fi module). `desktop-print` in `make test-desktop` covers the USB port row |

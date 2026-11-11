@@ -40,6 +40,16 @@ static bool run(uint32_t instr) {
     return cpuGetRegisters(cpu)[15] == base + 4;
 }
 static uint32_t reg(unsigned r) { return cpuGetRegExternal(cpu, r); }
+// Runs one instruction; true if it took the data abort (vector 0x10, abort mode, LR + 8).
+static bool runAbort(uint32_t instr) {
+    put(base, instr);
+    cpuInvalidateCodeCache(cpu);
+    cpuSetReg(cpu, ARM_REG_NUM_CPSR, ARM_SR_MODE_SVC);
+    cpuSetReg(cpu, 15, base);
+    cpuCyclePure(cpu);
+    return cpuGetRegisters(cpu)[15] == 0x10 && (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 0x1f) == ARM_SR_MODE_ABT &&
+           cpuGetRegExternal(cpu, 14) == base + 8;
+}
 static void setW(unsigned n, uint64_t v) {
     cpuSetReg(cpu, 0, uint32_t(v)); cpuSetReg(cpu, 1, uint32_t(v >> 32));
     must(run(0xec410000 | n));  // TMCRR wRn, r0, r1
@@ -311,6 +321,26 @@ int main() {
     check(word == 0xcafef00d, "wstrw wcgr1 wrote the word");
     setC(9, 0);
     check(run(0xfd929101) && getC(9) == 0xcafef00d, "wldrw wcgr1, [r2, #4]");
+
+    // A failed access takes the data abort with FSR and FAR set and no base writeback; a
+    // WSTRD whose second word fails has written the first. Memory ends at base + 0x4000.
+    setW(1, 0x1111'2222'3333'4444ull);
+    std::memset(memory.data() + 0x3ff8, 0, 8);
+    cpuSetReg(cpu, 2, base + 0x3ffc);
+    check(runAbort(0xece21102), "wstrd [r2], #8 into a hole aborts");
+    std::memcpy(&word, memory.data() + 0x3ffc, 4);
+    check(reg(2) == base + 0x3ffc && word == 0x33334444, "wstrd wrote the first word, no writeback");
+    check(run(0xee150f10) && (reg(0) & 0xf) == 0xa, "wstrd abort FSR " + std::to_string(reg(0)));
+    check(run(0xee161f10) && reg(1) == base + 0x4000, "wstrd abort FAR " + std::to_string(reg(1)));
+    setW(1, 0x5555'6666'7777'8888ull);
+    cpuSetReg(cpu, 2, base + 0x3ff4);
+    check(runAbort(0xedf21102), "wldrd [r2, #8]! from a hole aborts");
+    check(reg(2) == base + 0x3ff4 && getW(1) == 0x5555'6666'7777'8888ull, "wldrd left wR1 and r2");
+    check(run(0xee161f10) && reg(1) == base + 0x4000, "wldrd abort FAR " + std::to_string(reg(1)));
+    cpuSetReg(cpu, 2, base + 0x4000);
+    check(runAbort(0xfd929101), "wldrw wcgr1 from a hole aborts");
+    check(getC(9) == 0xcafef00d, "wldrw wcgr1 left wCGR1");
+    check(!run(0xfd920101), "wldrw wcid is undefined before any access");
 
     if (failures) {
         fprintf(stderr, "%d failures\n", failures);

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.print.PrintJobInfo
 import android.print.PrintManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,16 +111,18 @@ class PrintJobs(
         }
     }
 
-    // Draws the held pages through the system print dialog, which also saves as PDF. The job is dropped when
-    // the pages were written; a cancelled print keeps it.
+    // Draws the held pages through the system print dialog, which also saves as PDF, on Letter paper unless
+    // the dialog changes it. The job is dropped once the system print job went ahead; the preview writes the
+    // pages too, so a dialog closed without printing keeps it.
     fun print(activity: Activity) {
         val h = held ?: return
         if (!h.pages.renderable) return
         val manager = activity.getSystemService(Context.PRINT_SERVICE) as PrintManager
         val name = "${device.label} print"
-        manager.print(name, PagesAdapter(activity, name, h.pages.pages) { wrote ->
-            if (wrote) host.lifecycleScope.launch(Dispatchers.IO) { store.dropIfVersion(h.version, ::publish) }
-        }, null)
+        var job: android.print.PrintJob? = null
+        job = manager.print(name, PagesAdapter(activity, name, h.pages.pages) { wrote ->
+            if (wrote && wentAhead(job?.info?.state)) host.lifecycleScope.launch(Dispatchers.IO) { store.dropIfVersion(h.version, ::publish) }
+        }, PagesAdapter.letter())
     }
 
     // Copies the held job to the chosen file, then deletes it. A failed copy deletes the new file and keeps the job.
@@ -155,5 +158,11 @@ class PrintJobs(
     companion object {
         // A bigger job is held for Save raw only.
         const val MAX_RENDER = 8L shl 20
+
+        // Whether a system print job in this PrintJobInfo state was printed or saved, or is on its way.
+        fun wentAhead(state: Int?): Boolean = when (state) {
+            PrintJobInfo.STATE_QUEUED, PrintJobInfo.STATE_STARTED, PrintJobInfo.STATE_BLOCKED, PrintJobInfo.STATE_COMPLETED -> true
+            else -> false
+        }
     }
 }

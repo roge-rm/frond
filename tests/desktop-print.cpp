@@ -4,6 +4,7 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QComboBox>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 #include "FirmwareInput.h"
 #include "PrintJob.h"
@@ -42,6 +43,8 @@ class DesktopPrint : public QObject {
         QVERIFY(s.valid && s.powered && s.linkUp);
         QCOMPARE(s.ip, QString("10.0.2.15"));
         QCOMPARE(frondPrint::wifiReadout(s), QString("Connected, 10.0.2.15"));
+        s = frondPrint::parseUsbPort("wifi powered link=up ip=none mac=02:00:00:00:00:01 tx=2 rx=2 dropped=0");
+        QCOMPARE(frondPrint::wifiReadout(s), QString("Connected"));
         s = frondPrint::parseUsbPort("wifi powered link=down ip= mac=02:00:00:00:00:01 tx=0 rx=0 dropped=0");
         QVERIFY(s.valid && !s.linkUp);
         QCOMPARE(frondPrint::wifiReadout(s), QString("Not connected"));
@@ -89,6 +92,18 @@ class DesktopPrint : public QObject {
         QStringList choices;
         for (int i = 0; i < box->count(); i++) choices << box->itemText(i);
         QCOMPARE(choices, (QStringList{"Off", "Printer", "Wi-Fi adapter"}));
+        // The box widens for the longest choice when the choices come after the first show.
+        PrinterPanel fresh;
+        fresh.setFixedWidth(260);
+        fresh.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&fresh));
+        fresh.setSupported(true, true);
+        fresh.setPort("wifi");
+        fresh.setLinkReadout("Connected, 10.0.2.15");
+        QApplication::processEvents();
+        auto* freshBox = fresh.findChild<QComboBox*>("usbPortChoice");
+        QVERIFY(freshBox->width() >= freshBox->fontMetrics().horizontalAdvance("Wi-Fi adapter"));
+        QVERIFY(freshBox->width() >= freshBox->sizeHint().width());
         panel.setSupported(true, false);
         QCOMPARE(box->count(), 2);
     }
@@ -220,14 +235,22 @@ class DesktopPrint : public QObject {
         QTemporaryDir dir;
         const auto path = dir.filePath("job.pdf");
         QPrinter printer(QPrinter::HighResolution);
-        printer.setOutputFormat(QPrinter::PdfFormat);
-        printer.setOutputFileName(path);
+        frondPrint::pdfOutput(&printer, path);
         QCOMPARE(frondPrint::drawPages(&printer, text), 3);
         QFile file(path);
         QVERIFY(file.open(QIODevice::ReadOnly));
         const auto bytes = file.readAll();
         QVERIFY(bytes.startsWith("%PDF"));
         QCOMPARE(bytes.count("/Type /Page\n"), 3);
+        // Letter paper, 8.5 x 11 in: 612 x 792 points on every page.
+        static const QRegularExpression box(R"(/MediaBox \[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\])");
+        int boxes = 0;
+        for (auto it = box.globalMatch(QString::fromLatin1(bytes)); it.hasNext(); boxes++) {
+            const auto m = it.next();
+            QCOMPARE(qRound(m.captured(3).toDouble() - m.captured(1).toDouble()), 612);
+            QCOMPARE(qRound(m.captured(4).toDouble() - m.captured(2).toDouble()), 792);
+        }
+        QCOMPARE(boxes, 3);
     }
 };
 QTEST_MAIN(DesktopPrint)

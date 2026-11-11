@@ -1,7 +1,8 @@
 diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index a6e18b0..a63ab8c 100644
 --- a/src/uarm/uarm/CPU.cpp
 +++ b/src/uarm/uarm/CPU.cpp
-@@ -174,6 +174,7 @@
+@@ -177,6 +177,7 @@ struct ArmCpu {
      uint32_t paceOffset;
      bool modePace;
      bool sleeping;
@@ -9,7 +10,7 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
  
      struct stub *debugStub;
      struct PatchDispatch *patchDispatch;
-@@ -3554,6 +3555,7 @@
+@@ -3593,6 +3594,7 @@ static ImmShift cpuPrvImmShiftImmTableEntry(uint32_t key) {
  }
  
  void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
@@ -17,7 +18,7 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
      cpu->exceptionSequence = 0;
  #ifndef __EMSCRIPTEN__
      cpuClearNativeRuntime(cpu);
-@@ -4780,6 +4782,7 @@
+@@ -4876,6 +4878,7 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
  #endif
  
  bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
@@ -25,7 +26,7 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
      if (cpu->waitingFiqs && !cpu->F) {
          cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
                          ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
-@@ -4795,6 +4798,7 @@
+@@ -4891,6 +4894,7 @@ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
  
  template <int memorySystemKind, bool injected>
  ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
@@ -33,7 +34,7 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
      cpuProcessPendingInterrupts(cpu);
  
      if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
-@@ -4849,6 +4853,7 @@
+@@ -4945,6 +4949,7 @@ static uint32_t cpuPrvCycleOne(struct ArmCpu *cpu) {
  }
  
  uint32_t cpuCyclePure(struct ArmCpu *cpu) {
@@ -41,11 +42,10 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
      cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
                                SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
                                SLOW_PATH_REASON_INJECTED_CALL_DONE);
-@@ -4936,6 +4941,16 @@
- uint16_t cpuGetCPAR(struct ArmCpu *cpu) { return cpu->CPAR; }
+@@ -5042,6 +5047,16 @@ void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) {
  
- void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) { cpu->CPAR = cpar; }
-+
+ void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx) { cpu->wmmx = wmmx; }
+ 
 +void cpuArm920EnableWait(ArmCpu* cpu) { cpu->arm920WaitEnabled = true; }
 +bool cpuArm920BeginWait(ArmCpu* cpu) {
 +    if (!cpu->arm920WaitEnabled) return false;
@@ -55,13 +55,15 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
 +}
 +bool cpuArm920Waiting(const ArmCpu* cpu) { return cpu->arm920Waiting; }
 +void cpuArm920EndWait(ArmCpu* cpu) { cpu->arm920Waiting = false; }
- 
++
  void cpuSetSleeping(struct ArmCpu *cpu) {
      cpu->sleeping = true;
+     cpuUpdateSlowPath(cpu);
 diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index f9ac568..b0e55d7 100644
 --- a/src/uarm/uarm/CPU.h
 +++ b/src/uarm/uarm/CPU.h
-@@ -156,6 +156,10 @@
+@@ -156,6 +156,10 @@ uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
  
  // Take one unmasked interrupt at this boundary, without fetching or executing an instruction.
  bool cpuProcessPendingInterrupts(struct ArmCpu* cpu);
@@ -73,23 +75,25 @@ diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
  
  uint32_t cpuGetRegExternal(struct ArmCpu *cpu, uint_fast8_t reg);
 diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+index 35bbb98..59a041b 100644
 --- a/src/uarm/uarm/cp15mmu.cpp
 +++ b/src/uarm/uarm/cp15mmu.cpp
-@@ -147,6 +147,10 @@
-             if (val & 31) return false;
+@@ -148,6 +148,10 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
              icacheInvalAddr(cp15->ic, val);
              return true;
-+        }
+         }
 +        if (CRn == 7 && CRm == 0 && op2 == 4) {
 +            // DDI0151C 4.9: drain before waiting; only an attached scheduler admits WFI.
 +            return !cp15->dataCache.guard.active && cpuArm920BeginWait(cpu);
-         }
++        }
          if (CRn == 7 && CRm == 10 && op2 == 4) {
              // DDI0151C SBZ violations are UNPREDICTABLE; drain ignores the operand in this model.
+             return !cp15->dataCache.guard.active;
 diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 0651e3c..37c4c1b 100644
 --- a/src/uarm/uarm/imx1_boot_probe.cpp
 +++ b/src/uarm/uarm/imx1_boot_probe.cpp
-@@ -64,6 +64,14 @@
+@@ -64,6 +64,14 @@ struct Probe {
          return acceptGraphics(candidate, true);
      }
      Imx1BootstrapAccess graphicsWireStatus = Imx1BootstrapAccess::ok;
@@ -104,7 +108,7 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.c
      void updateInterrupts() {
          const auto lines = peripherals.interruptLines();
          const bool irq = lines.irq == Imx1AitcLine::asserted;
-@@ -551,6 +559,7 @@
+@@ -551,6 +559,7 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
      p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
                       patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
      patchDispatchSetCpu(patches, p->cpu);
@@ -112,7 +116,7 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.c
      cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
      cpuArm920SetIcacheIndexCompatibility(p->cpu, p->options.arm920IcacheIndexCompatibility);
      p->result.stop = Imx1ProbeStop::budget;
-@@ -559,6 +568,39 @@
+@@ -559,6 +568,39 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
      struct InterruptedContext { uint32_t pc, cpsr, mode; bool prefix; uint32_t nextPc; };
      std::vector<InterruptedContext> interruptedContexts;
      for (uint32_t step = 0; step < steps; ++step) {
@@ -152,7 +156,7 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.c
          // Conservative bus stall: jump to the reference event without retiring instructions.
          if (p->options.bootstrapPeripherals) {
              p->finishGraphicsBusStall();
-@@ -698,6 +740,8 @@
+@@ -698,6 +740,8 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
  
  const char* imx1ProbeStopName(Imx1ProbeStop stop) {
      switch (stop) {
@@ -162,9 +166,10 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.c
          case Imx1ProbeStop::unsupportedDataCache: return "unsupported-data-cache";
          case Imx1ProbeStop::unsupportedInstruction: return "unsupported-instruction";
 diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index c37785c..01c8da8 100644
 --- a/src/uarm/uarm/imx1_boot_probe.h
 +++ b/src/uarm/uarm/imx1_boot_probe.h
-@@ -13,7 +13,7 @@
+@@ -13,7 +13,7 @@ inline constexpr uint32_t imx1ProbeMaximumSteps = 100000000;
  enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
  enum class Imx1ProbeStop {
      budget, unsupportedInstruction, unsupportedCp15, unsupportedRead, unsupportedWrite, exception, engineUnavailable,
@@ -173,7 +178,7 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
  };
  struct Imx1ProbeTrace {
      uint32_t step, pc, instruction, cpsr, operand;
-@@ -70,6 +70,8 @@
+@@ -70,6 +70,8 @@ struct Imx1ProbeOptions {
      Imx1I2cBus* i2cBus = nullptr;
      Imx1ProbeI2cObserver i2cObserver = nullptr;
      void* i2cContext = nullptr;
@@ -182,7 +187,7 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
      bool bootstrapPeripherals = false;
      bool arm920IcacheIndexCompatibility = false;
      bool lcdcContrastOnly = false;
-@@ -101,6 +103,7 @@
+@@ -101,6 +103,7 @@ struct Imx1ProbeResult {
      uint64_t jitBlocks, jitInstructions;
      uint64_t busAccesses;
      uint64_t cs5WaitClocks = 0;
@@ -191,9 +196,10 @@ diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
      bool graphicsLcdEnabled = false;
      uint64_t irqEntries = 0, fiqEntries = 0;
 diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+index 6ba04a8..d131a28 100644
 --- a/src/uarm/uarm/imx1_bootstrap.cpp
 +++ b/src/uarm/uarm/imx1_bootstrap.cpp
-@@ -554,6 +554,8 @@
+@@ -554,6 +554,8 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
          // Holding System PLL output high requires the independent asynchronous MCU clock.
          if (write && address == 0x0021b000 && (value & 0x00400000) && cpuClockMode != 3)
              return Imx1BootstrapAccess::sideEffect;
@@ -203,9 +209,10 @@ diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
          const auto result = next.access(address, size, write, value);
          if (result == Imx1CgmAccess::ok && write) {
 diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+index f6a27da..b58d694 100644
 --- a/src/uarm/uarm/imx1_bootstrap.h
 +++ b/src/uarm/uarm/imx1_bootstrap.h
-@@ -60,6 +60,30 @@
+@@ -60,6 +60,30 @@ class Imx1Bootstrap {
      // Elapsed HCLK periods while the CPU waits, independently of retired instructions.
      void advanceHclkCycles(uint32_t cycles);
      Imx1AitcPending interruptPending() const;
@@ -237,9 +244,10 @@ diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
      InterruptLines interruptLines() const;
      void connectCpuInterrupts() { cpuInterruptsConnected = true; }
 diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
+index 6019ae0..5eb9c98 100644
 --- a/src/uarm/uarm/imx1_cgm.cpp
 +++ b/src/uarm/uarm/imx1_cgm.cpp
-@@ -26,6 +26,7 @@
+@@ -26,6 +26,7 @@ bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
      const auto supports = [](uint64_t d, uint64_t old) {
          return d / std::gcd(d, old) <= (std::numeric_limits<uint64_t>::max() / 2) / old;
      };
@@ -247,7 +255,7 @@ diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
      if (mcuReferenceRemaining && !supports(denominator, mcuReferenceDenominator)) return false;
      if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
          const auto rate = mcuPllTargetRatio();
-@@ -36,9 +37,32 @@
+@@ -36,9 +37,32 @@ bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
      return true;
  }
  
@@ -280,7 +288,7 @@ diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
      if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
          // Every legal internal-source MCU ratio supplies at least 160 FCLK periods per CLK32.
          if (numerator / denominator) mcuWriteDelay = 0;
-@@ -143,7 +167,13 @@
+@@ -143,7 +167,13 @@ Imx1CgmAccess Imx1Cgm::access(uint32_t address, uint32_t size, bool write, uint3
          return Imx1CgmAccess::reservedBits;
      if (address == 0x0021b000) {
          if ((value >> 29) > 5) return Imx1CgmAccess::reservedBits;
@@ -295,7 +303,7 @@ diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
          if ((value ^ cscr) & 0x00070000) return Imx1CgmAccess::externalInput;
          if ((value & 0x00400000) && (!nominalSystemPll || systemRestartUnits || mcuReferenceRemaining))
              return Imx1CgmAccess::sideEffect;
-@@ -172,6 +202,7 @@
+@@ -172,6 +202,7 @@ Imx1CgmAccess Imx1Cgm::access(uint32_t address, uint32_t size, bool write, uint3
                 (systemRestartUnits ? 0x00400000u : 0);
          return Imx1CgmAccess::ok;
      } else if (address == 0x0021b004) {
@@ -304,9 +312,10 @@ diff --git a/src/uarm/uarm/imx1_cgm.cpp b/src/uarm/uarm/imx1_cgm.cpp
          if (nominalMcuRetune && mcuOutputQualified && !mcuTimingUnknown)
              return Imx1CgmAccess::sideEffect;
 diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
+index cd2b19f..cd81d23 100644
 --- a/src/uarm/uarm/imx1_cgm.h
 +++ b/src/uarm/uarm/imx1_cgm.h
-@@ -31,7 +31,12 @@
+@@ -31,7 +31,12 @@ class Imx1Cgm {
      Imx1PllRatio mcuPllTargetRatio() const;
      // Reset output is known; programmed output needs restart completion and an explicit assumption.
      // The equal-frequency retune scenario keeps that qualified nominal output continuous.
@@ -319,7 +328,7 @@ diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
          return !mcuTimingUnknown || (assumeSettled && (mcuContinuous ||
              (mcuRestartComplete && !mcuRestartCycles)));
      }
-@@ -45,7 +50,8 @@
+@@ -45,7 +50,8 @@ class Imx1Cgm {
      uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
      uint32_t mpctl0 = 0x003f1437, mpctl1 = 0;
      uint32_t spctl0 = 0x043f1437, spctl1 = 0;
@@ -330,9 +339,10 @@ diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
      uint32_t systemWriteDelay = 0;
      uint64_t systemWritePhase = 0;
 diff --git a/src/uarm/uarm/imx1_rtc.h b/src/uarm/uarm/imx1_rtc.h
+index 4ac3d5b..ec80e96 100644
 --- a/src/uarm/uarm/imx1_rtc.h
 +++ b/src/uarm/uarm/imx1_rtc.h
-@@ -18,6 +18,11 @@
+@@ -18,6 +18,11 @@ class Imx1Rtc {
      void advanceReference(uint64_t numerator, uint64_t denominator);
      static constexpr uint64_t interruptSources = (uint64_t(1) << 17) | (uint64_t(1) << 18);
      uint64_t assertedInterrupts() const;
@@ -345,9 +355,10 @@ diff --git a/src/uarm/uarm/imx1_rtc.h b/src/uarm/uarm/imx1_rtc.h
      bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
      bool preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const;
 diff --git a/src/uarm/uarm/imx1_timer.h b/src/uarm/uarm/imx1_timer.h
+index 7114d97..1a2666c 100644
 --- a/src/uarm/uarm/imx1_timer.h
 +++ b/src/uarm/uarm/imx1_timer.h
-@@ -11,6 +11,7 @@
+@@ -11,6 +11,7 @@ class Imx1Timer {
      Imx1TimerAccess access(uint32_t offset, uint32_t size, bool write, uint32_t& value,
                             bool outputIsolated = false);
      void advance(uint64_t perclk1Cycles);

@@ -1,3 +1,5 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index da78b9e..2eb2e3d 100644
 --- a/src/uarm/uarm/CPU.cpp
 +++ b/src/uarm/uarm/CPU.cpp
 @@ -1,5 +1,6 @@
@@ -7,7 +9,7 @@
  #include "CPU.h"
  #include "arm920_state.h"
  #include "cpu_diagnostics.h"
-@@ -217,6 +218,11 @@
+@@ -220,6 +221,11 @@ struct ArmCpu {
      // and the run's budget, which such a store can shrink.
      Arm920LeanWrite leanWrite;
      uint32_t leanInstr, leanBudget;
@@ -19,7 +21,7 @@
      // Most instructions this lean run may retire (cpuArm920RunLeanFor), and whether the JIT's callbacks are
      // using the lean memory path (no read or write answers from the probe there).
      uint32_t leanCount;
-@@ -907,16 +913,20 @@
+@@ -910,16 +916,20 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
                              MMU_TRANSLATE_RESULT_BUFFERABLE(r);
          if constexpr (!write) {
              uint32_t value, cost = 0;
@@ -45,7 +47,7 @@
              uint32_t value = 0, cost = 0;
              memcpy(&value, buf, size);
              const uint32_t left = cpu->leanBudget - cpu->leanDone - 1;
-@@ -4945,7 +4955,26 @@
+@@ -4984,7 +4994,26 @@ void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
  uint32_t cpuArm920LeanGeneration(const ArmCpu *cpu) { return cpu->mem->hostTlb.gen; }
  
  uint64_t cpuArm920LeanCodeDrops(const ArmCpu *cpu) { return cpu->leanCodeDrops; }
@@ -72,7 +74,7 @@
  uint32_t cpuArm920RunLean(ArmCpu *, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
      *blNext = ~0u;
      *busAccesses = 0;
-@@ -5164,6 +5193,14 @@
+@@ -5211,6 +5240,14 @@ bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
  
  uint32_t *cpuJitSpsr(ArmCpu *cpu) { return &cpu->SPSR; }
  
@@ -86,8 +88,8 @@
 +
  bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
  
- // MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
-@@ -5277,21 +5314,24 @@
+ Pxa270wmmx *cpuJitWmmx(ArmCpu *cpu) { return cpu->wmmx; }
+@@ -5354,21 +5391,24 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
              const uint16_t h = (pc & 2) ? word >> 16 : word;
              if ((h & 0xff80) == 0x4780 || (h & 0xf800) == 0xe800 ||
                  (h & 0xff00) == 0xbe00) return false;
@@ -116,7 +118,7 @@
              } else if (cpuPrvLeanClassThumb((pc & 2) ? word >> 16 : word & 0xffff) == LeanClass::exit) {
                  return false;
              }
-@@ -5466,6 +5506,8 @@
+@@ -5562,6 +5602,8 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop) {
      cpu->leanRun = true;
      cpu->leanJit = true;
      cpu->leanExit = false;
@@ -125,9 +127,11 @@
      uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
      int jitStop;
      const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index fe45eb9..2801a5d 100644
 --- a/src/uarm/uarm/CPU.h
 +++ b/src/uarm/uarm/CPU.h
-@@ -317,6 +317,12 @@
+@@ -326,6 +326,12 @@ uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop);
  // The lean TLB's generation and the times Fast dropped its decoded code for a store to it, for tests.
  uint32_t cpuArm920LeanGeneration(const ArmCpu*);
  uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
@@ -140,9 +144,11 @@
  // Sets the Fast engine's counters. False without a JIT.
  bool cpuJitSetExecutionCounts(ArmCpu*, uint64_t blocks, uint64_t instructions);
  
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 546841e..b10556d 100644
 --- a/src/uarm/uarm/imx1_boot_probe.cpp
 +++ b/src/uarm/uarm/imx1_boot_probe.cpp
-@@ -47,6 +47,11 @@
+@@ -47,6 +47,11 @@ struct LeanCs5 {
      uint64_t waitClocks, waitCost;
  };
  LeanCs5 leanCs5{};
@@ -154,7 +160,7 @@
  // Spans shorter than this are left to the step.
  constexpr uint64_t leanMinimumSpan = 8;
  
-@@ -442,6 +447,13 @@
+@@ -442,6 +447,13 @@ struct Probe {
      // (single loads only) goes to leanRegisterRead.
      static bool leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left, bool single,
                           uint32_t* value, uint32_t* cost) {
@@ -168,7 +174,7 @@
          auto& p = *static_cast<Probe*>(context);
          *cost = 0;
          if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
-@@ -552,6 +564,7 @@
+@@ -552,6 +564,7 @@ struct Probe {
      static bool leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t left,
                            uint32_t* cost) {
          auto& p = *static_cast<Probe*>(context);
@@ -176,7 +182,7 @@
          if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
              p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
              return false;
-@@ -570,6 +583,82 @@
+@@ -570,6 +583,82 @@ struct Probe {
          *cost = leanCs5.cost;
          return true;
      }
@@ -259,7 +265,7 @@
      // A board register read on the lean path (quietReadAddress): inside the quiet span it reads what the step would
      // after charging, so it needs no charge.
      __attribute__((noinline)) bool leanBoardRead(uint32_t pa, uint32_t ran, uint32_t& value) {
-@@ -1373,9 +1462,24 @@
+@@ -1373,9 +1462,24 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                      hard = std::min(hard, p->options.gpioEventAfterInstructions - p->retired);
                  if (!hard) break;
                  uint32_t leanCount = UINT32_MAX;
@@ -286,7 +292,7 @@
                      ++jitRuns;
                      if (ran) {
                          deferredCycles += ran;
-@@ -1387,6 +1491,7 @@
+@@ -1387,6 +1491,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                          p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
                      }
                      if (stop == arm920JitBudget) {
@@ -294,7 +300,7 @@
                          if (ran) continue;
                          break;
                      }
-@@ -1447,6 +1552,10 @@
+@@ -1447,6 +1552,10 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
      cpuArm920SetLean(p->cpu, fast ? Probe::leanPage : nullptr, fast ? bootstrapInstruction : nullptr, p);
      cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
      cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
@@ -305,7 +311,7 @@
      p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
      if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
      // Fast keeps no cache contents: dirty data goes to memory first.
-@@ -1461,6 +1570,11 @@
+@@ -1461,6 +1570,11 @@ uint64_t imx1MachineLeanRetired(const Imx1Machine*) { return leanRetired; }
  uint64_t imx1MachineJitRetired(const Imx1Machine*) { return jitRetired; }
  
  uint64_t imx1MachineJitRuns(const Imx1Machine*) { return jitRuns; }
@@ -317,9 +323,11 @@
  
  void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
  
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index e0898dc..fe62585 100644
 --- a/src/uarm/uarm/imx1_boot_probe.h
 +++ b/src/uarm/uarm/imx1_boot_probe.h
-@@ -216,6 +216,13 @@
+@@ -216,6 +216,13 @@ void imx1SetFastBlocksDefault(bool blocks);
  // Instructions and runs of the Fast engine's JIT since the machine was made, for tests.
  uint64_t imx1MachineJitRetired(const Imx1Machine*);
  uint64_t imx1MachineJitRuns(const Imx1Machine*);
@@ -333,9 +341,11 @@
  // Instructions the Fast engine ran on its lean path since the machine was made.
  uint64_t imx1MachineLeanRetired(const Imx1Machine*);
  // Timer count reads the lean path answered, including any in an instruction the step then ran again.
+diff --git a/src/uarm/uarm/jit_dynarmic.cpp b/src/uarm/uarm/jit_dynarmic.cpp
+index 1df7abb..a9197b4 100644
 --- a/src/uarm/uarm/jit_dynarmic.cpp
 +++ b/src/uarm/uarm/jit_dynarmic.cpp
-@@ -133,6 +133,11 @@
+@@ -167,6 +167,11 @@ inline bool Cp15Slot(uint32_t w) { return (w & 0x0fef0f10) == 0x0e030f10 || (w &
  // Translation and emission of a block run back to back on one thread (the guest thread or
  // the compile thread), so the block's one p15 instruction is still current there when the
  // coprocessor compiles it.
@@ -347,7 +357,7 @@
  thread_local uint32_t cp15Pc = ~0u, cp15Rd = 0;
  
  // PreCodeReadHook's work: the instruction at pc goes to the JIT if plain(pc, word) says
-@@ -186,6 +191,7 @@
+@@ -220,6 +225,7 @@ struct Snapshot final : public A32::CodeSnapshot {
      std::vector<uint32_t> words;
      std::vector<uint8_t> fetched, read;  // per word
      std::vector<std::pair<uint32_t, bool>> plain;  // each instruction in order, and its check
@@ -355,7 +365,7 @@
      size_t next = 0;
  
      std::optional<std::uint32_t> MemoryReadCode(A32::VAddr va) override {
-@@ -200,7 +206,7 @@
+@@ -234,7 +240,7 @@ struct Snapshot final : public A32::CodeSnapshot {
      }
  
      bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
@@ -364,7 +374,7 @@
              while (next < plain.size() && plain[next].first != at) next++;
              if (next == plain.size()) {
                  overflow = true;
-@@ -210,6 +216,9 @@
+@@ -244,6 +250,9 @@ struct Snapshot final : public A32::CodeSnapshot {
              w = words[i];
              return plain[next].second;
          });
@@ -374,7 +384,7 @@
      }
  };
  
-@@ -530,11 +539,15 @@
+@@ -652,11 +661,15 @@ struct Env final : public A32::UserCallbacks {
              ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
              return false;
          }
@@ -391,7 +401,7 @@
      }
  
      // Compile thread. The snapshot runs from pc up to the first instruction that surely
-@@ -564,6 +577,7 @@
+@@ -686,6 +699,7 @@ struct Env final : public A32::UserCallbacks {
              const bool plain = s->fetched[i] && cpuJitPlain(cpu, at, w, thumb);
              s->plain.push_back({at, plain});
              if (!plain) break;
@@ -399,7 +409,7 @@
              uint32_t size = 4;
              if (thumb) {
                  const uint32_t h = (at & 2) ? w >> 16 : w & 0xffff;
-@@ -721,9 +735,6 @@
+@@ -957,9 +971,6 @@ struct Env final : public A32::UserCallbacks {
      bool undoTick = false;
  };
  
@@ -409,7 +419,7 @@
  
  struct PsrCoprocessor final : public A32::Coprocessor {
      Env *env;
-@@ -734,7 +745,8 @@
+@@ -970,7 +981,8 @@ struct PsrCoprocessor final : public A32::Coprocessor {
                                                       A32::CoprocReg, unsigned) override {
          return std::nullopt;
      }
@@ -419,9 +429,11 @@
          return std::monostate{};
      }
      // opc 0: MSR CPSR, opc 1: MSR SPSR (written whole, mask ignored), opc 2: MOVS PC.
+diff --git a/src/uarm/uarm/jit_dynarmic.h b/src/uarm/uarm/jit_dynarmic.h
+index 68d3a3a..2a2e902 100644
 --- a/src/uarm/uarm/jit_dynarmic.h
 +++ b/src/uarm/uarm/jit_dynarmic.h
-@@ -91,6 +91,9 @@
+@@ -120,6 +120,9 @@ bool cpuJitSlowPath(ArmCpu *cpu);
  // with the field mask as the interpreter does, from cpsr (the JIT's current CPSR) and the
  // JIT's registers, switching their banked r8-r14 on a mode change. Returns the new CPSR.
  uint32_t *cpuJitSpsr(ArmCpu *cpu);

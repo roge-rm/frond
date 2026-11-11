@@ -409,7 +409,12 @@ def common(c, root, device, unsupported, saved):
     unix_modes(c, device in SERIAL)
     c.ok('display', 'smooth=on')
     c.fails('display', 'smooth=maybe', code='argument')
-    c.fails('display', 'jog=screen', code='argument')
+    if device == 'sony-clie-tg50':
+        # The TG50's jog dial and keyboard are on-screen controls the window can place.
+        c.ok('display', 'jog=screen', code='display')
+        c.fails('display', 'jog=sideways', code='argument')
+    else:
+        c.fails('display', 'jog=screen', code='argument')
     for command, argument in unsupported:
         c.fails(command, argument, code='unsupported')
     c.until_ok('guest-ready')
@@ -479,9 +484,15 @@ def check_arm(core, session, root):
     c = Client(core, [copy], root, 'arm')
     try:
         device = c.ok('device-state')
-        unsupported = [('ms-state', ''), ('ms-files', '/')]
+        # The TG50 has a Memory Stick slot and no SD slot; the others answer the ms- commands as absent.
+        unsupported = ([('sd-create', '32'), ('sd-eject', ''), ('sd-take-out', ''), ('sd-export', str(work / 'sd.img'))]
+                       if device == 'sony-clie-tg50' else [('ms-state', ''), ('ms-files', '/')])
         if device == 'palm-tx':
             unsupported.append(('hold', 'on'))
+        # The E3 ROM has no Bluetooth stack, so the E3 has no Bluetooth or infrared phone.
+        no_phone = device == 'palm-e2-franken'
+        if no_phone:
+            unsupported += [('bluetooth-state', ''), ('bluetooth-mode', 'off')]
         # As the desktop does, the ARM core saves over the session it runs in its machine folder.
         # A lone file is extracted to <stem>/ on load, so the save goes to <stem>/<stem>.frond.
         # A lone v7 or later file runs in the folder it was copied to and saves back to itself.
@@ -495,16 +506,19 @@ def check_arm(core, session, root):
         c.fails('serial-mode', 'modem', code='argument' if device in SERIAL else 'unsupported')
         # The infrared phone takes the IR port, and the IR keyboard and the phone keep each other out.
         c.events.clear()
-        assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
-        assert c.ok('irda-state', code='infrared') == 'phone idle'
-        assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
-        c.ok('speed-state')
-        assert ('infrared', 'phone idle') in c.events, c.events
-        c.fails('keyboard-attach', 'on', code='infrared')
+        if no_phone:
+            c.fails('irda-mode', 'phone', code='unsupported')
+        else:
+            assert c.ok('irda-mode', 'phone', code='infrared') == 'phone idle'
+            assert c.ok('irda-state', code='infrared') == 'phone idle'
+            assert c.ok('irda-stats', code='infrared').startswith('frames_in=0 ')
+            c.ok('speed-state')
+            assert ('infrared', 'phone idle') in c.events, c.events
+            c.fails('keyboard-attach', 'on', code='infrared')
         assert c.ok('irda-mode', 'pty', code='infrared').startswith('pty /dev/pts/')
         assert c.ok('irda-mode', 'off', code='infrared') == 'off'
         assert c.ok('keyboard-attach', 'on', code='keyboard') == 'attached'
-        c.fails('irda-mode', 'phone', code='infrared')
+        c.fails('irda-mode', 'phone', code='unsupported' if no_phone else 'infrared')
         assert c.ok('keyboard-attach', 'off', code='keyboard') == 'detached'
         if lone:
             # Saving back to the lone file goes to the folder it was loaded into and leaves the file as it was.
@@ -578,7 +592,28 @@ def check_arm(core, session, root):
     gone = work / 'gone'
     shutil.copytree(saved.parent, gone, ignore=shutil.ignore_patterns('*.tmp-*'))
     disconnect(core, [gone / saved.name], gone / saved.name, root, 'arm')
+    if device == 'sony-clie-tg50':
+        stick_console(core, saved, work)
     return device
+
+
+def stick_console(core, saved, work):
+    """The console's SD commands refuse on a Memory Stick device, whose card store holds the stick."""
+    folder = work / 'sd-console'
+    shutil.copytree(saved.parent, folder, ignore=shutil.ignore_patterns('*.tmp-*'))
+    image = work / 'sd32.img'
+    with image.open('wb') as f:
+        f.truncate(32 << 20)
+    palm_boot.CORE = Path(core).resolve()
+    c = palm_boot.Core([folder / saved.name], work / 'sd-console.log')
+    try:
+        # The start's own lines first, so a reply below isn't one of them.
+        c.send('', 'using RAM size')
+        for command in (f'mount "{image}"', 'unmount', f'save-sd "{work / "out.img"}"'):
+            assert 'This device has no SD slot.' in c.send(command, ('slot', 'size', 'mounted', 'wrote', 'failed')), command
+        assert not (work / 'out.img').exists()
+    finally:
+        assert c.close() == 0
 
 
 def core_locked(target):

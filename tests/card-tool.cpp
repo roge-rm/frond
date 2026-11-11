@@ -12,6 +12,7 @@
 #include <dlfcn.h>
 #include <sys/statvfs.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -190,14 +191,23 @@ static void MakeFiles() {
         // A Pro stick fits no SD-only machine.
         OpensInStore(path, frondMachine::kindMsPro, deviceTypeTX, 0, false);
     }
-    // Classic sticks: a v2 .frondms of a new stick.
+    // Classic sticks: a v2 .frondms of a new stick, every L held by its home block with zero data, so
+    // the TG50 driver's first mount doesn't check every free block page by page (50 s at 128 MB).
     for (const unsigned mb : {4u, 128u}) {
         const auto path = dir / ("ms" + std::to_string(mb));
         assert(Ok(frondCardTool::make(Kind::ms, mb, path)));
         const auto file = ReadAll(path);
         std::vector<uint8_t> physical;
+        const auto& g = *frondMsGeometry::byMegabytes(mb);
         assert(frondMs::get32(file.data() + 8) == 2 && frondMs::readPhysical(path, physical) &&
-               physical == frondMs::create(*frondMsGeometry::byMegabytes(mb)));
+               physical == frondMs::blank(g) && frondMs::validBoot(physical));
+        const auto& l = *frondMs::layoutOf(g);
+        for (uint32_t L = 0; L < l.UserBlocks(); ++L)
+            for (uint32_t p = 0; p < g.pagesPerBlock; ++p) {
+                const auto* r = physical.data() + (size_t(l.Home(L)) * g.pagesPerBlock + p) * MemoryStickMedia::recordBytes;
+                assert(r[512] == 0xf8 && r[513] == 0xff && frondMs::getBe16(r + 514) == L);
+                assert(std::all_of(r, r + 512, [](uint8_t b) { return b == 0; }));
+            }
         LoadsAsPutIn(path, "ms.frondms", "sony-clie-tg50");
     }
     // The tool replaces an existing output and leaves only the card.

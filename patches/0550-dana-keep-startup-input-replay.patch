@@ -1,0 +1,33 @@
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -2808,8 +2808,9 @@
+     }
+ 
+     // Lifts the pen and any held key, when the window loses focus or the app is hidden.
+-    void ReleaseInput(bool cancel=true) {
+-        replay=Replay();
++    // keepReplay leaves a replay that hasn't started yet, like one from --input-replay.
++    void ReleaseInput(bool cancel=true, bool keepReplay=false) {
++        if (!keepReplay) replay=Replay();
+         if(deviceTypeIsDana5(profile->deviceType)) {
+             CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
+             danaInput.Clear();EmHAL::ReleaseDanaInput(cancel);
+@@ -2838,13 +2839,14 @@
+                     break;
+                 case SDL_WINDOWEVENT:
+                     if (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) Layout();
+-                    // Hidden events from opening the window must keep balanced input from the loaded session.
++                    // Hidden events from opening the window must keep balanced input from the loaded session
++                    // and a replay from --input-replay.
+                     if(deviceTypeIsDana5(profile->deviceType) && (event.window.event==SDL_WINDOWEVENT_HIDDEN||
+-                        event.window.event==SDL_WINDOWEVENT_MINIMIZED))ReleaseInput(windowPolled);
++                        event.window.event==SDL_WINDOWEVENT_MINIMIZED))ReleaseInput(windowPolled,!windowPolled);
+                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) windowFocused=true;
+                     if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
+-                        // Initial focus events must keep balanced input from the loaded session.
+-                        if(windowFocused) ReleaseInput(windowPolled);
++                        // Initial focus events must keep balanced input from the loaded session and the replay.
++                        if(windowFocused) ReleaseInput(windowPolled,!windowPolled);
+                         windowFocused=false;
+                     }
+                     break;

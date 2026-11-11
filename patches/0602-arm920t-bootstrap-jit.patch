@@ -1,8 +1,8 @@
 diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
-index eb847e8..49f493a 100644
+index f5edc84..b94791a 100644
 --- a/src/uarm/uarm/CPU.cpp
 +++ b/src/uarm/uarm/CPU.cpp
-@@ -281,17 +281,19 @@ static FORCE_INLINE void cpuPrvSetRegNotPC(struct ArmCpu *cpu, uint_fast8_t reg,
+@@ -284,17 +284,19 @@ static FORCE_INLINE void cpuPrvSetRegNotPC(struct ArmCpu *cpu, uint_fast8_t reg,
  }
  
  static FORCE_INLINE void cpuPrvSetReg(struct ArmCpu *cpu, uint_fast8_t reg, uint32_t val) {
@@ -26,7 +26,7 @@ index eb847e8..49f493a 100644
          cpuPrvSetRegNotPC(cpu, reg, val);
  }
  
-@@ -973,6 +975,11 @@ bool cpuSetFastEngine(bool fast) {
+@@ -976,6 +978,11 @@ bool cpuSetFastEngine(bool fast) {
      return true;
  }
  void cpuSetJitSync(bool sync) { jitSetSync(sync); }
@@ -38,7 +38,7 @@ index eb847e8..49f493a 100644
  bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
      if (!cpu || !cpu->jit) return false;
      jitCompileCounts(cpu->jit, stale, aheadCompiled, aheadUsed);
-@@ -981,6 +988,7 @@ bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *ah
+@@ -984,6 +991,7 @@ bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *ah
  #else
  bool cpuSetFastEngine(bool fast) { return !fast; }
  void cpuSetJitSync(bool) {}
@@ -46,7 +46,7 @@ index eb847e8..49f493a 100644
  bool cpuJitCompileCounts(const struct ArmCpu *, uint64_t *, uint64_t *, uint64_t *) { return false; }
  #endif
  
-@@ -1133,7 +1141,13 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
+@@ -1172,7 +1180,13 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
  }
  
  template <int memorySystemKind, bool wasT>
@@ -61,7 +61,7 @@ index eb847e8..49f493a 100644
  
  // PACE entrypoint was called from ARM: regular invocation
  template <int memorySystemKind>
-@@ -1288,6 +1302,8 @@ static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1327,6 +1341,8 @@ static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
  
  template <int memorySystemKind, bool wasT, bool align2>
  static void execFn_b2thumb(struct ArmCpu *cpu, uint32_t instr) {
@@ -70,7 +70,7 @@ index eb847e8..49f493a 100644
      uint32_t ea;
  
      ea = instr << 8;
-@@ -1309,6 +1325,7 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1348,6 +1364,7 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
      uint_fast8_t mode, cpNo;
      uint8_t memVal8;
  
@@ -78,7 +78,7 @@ index eb847e8..49f493a 100644
      if (cpuPrvConditionFails(cpu, instr)) return;
  
      cpNo = (instr >> 8) & 0x0F;
-@@ -1320,6 +1337,7 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1359,6 +1376,7 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
          goto invalid_instr;
  
      if (mode & ARM_MODE_5_RR) {  // handle MCRR, MRCC
@@ -86,7 +86,7 @@ index eb847e8..49f493a 100644
  
          if (!cpu->coproc[cpNo].twoRegF ||
              !cpu->coproc[cpNo].twoRegF(cpu, cpu->coproc[cpNo].userData, !!(instr & 0x00100000UL),
-@@ -1346,6 +1364,7 @@ template <int memorySystemKind, bool wasT, bool two>
+@@ -1385,6 +1403,7 @@ template <int memorySystemKind, bool wasT, bool two>
  static void execFn_cp_dp(struct ArmCpu *cpu, uint32_t instr) {
      uint_fast8_t cpNo;
  
@@ -94,7 +94,7 @@ index eb847e8..49f493a 100644
      if (cpuPrvConditionFails(cpu, instr)) return;
  
      cpNo = (instr >> 8) & 0x0F;
-@@ -1515,6 +1534,8 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1554,6 +1573,8 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
      uint32_t doubleMem[2];
  
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -103,7 +103,7 @@ index eb847e8..49f493a 100644
  
      reg = (instr >> 16) & 0x0F;
  
-@@ -1619,6 +1640,7 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1658,6 +1679,7 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
  template <int memorySystemKind, bool wasT>
  static void execFn_clz(struct ArmCpu *cpu, uint32_t instr) {
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -111,7 +111,7 @@ index eb847e8..49f493a 100644
  
      cpuPrvSetRegNotPC(cpu, (instr >> 12) & 0x0F, cpuPrvClz(cpuPrvGetRegNotPC(cpu, instr & 0xF)));
  }
-@@ -1626,6 +1648,7 @@ static void execFn_clz(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1665,6 +1687,7 @@ static void execFn_clz(struct ArmCpu *cpu, uint32_t instr) {
  template <int memorySystemKind, bool wasT, bool link>
  static void execFn_bl_reg(struct ArmCpu *cpu, uint32_t instr) {
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -119,7 +119,7 @@ index eb847e8..49f493a 100644
  
      cpuPrvSetPC(cpu, cpuPrvGetReg<wasT>(cpu, instr & 0x0F));
  
-@@ -1653,6 +1676,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1692,6 +1715,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
      uint32_t op1, op2, res;
  
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -127,7 +127,7 @@ index eb847e8..49f493a 100644
  
      op1 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);          // Rm
      op2 = cpuPrvGetRegNotPC(cpu, (instr >> 16) & 0x0F);  // Rn
-@@ -1717,6 +1741,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1756,6 +1780,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
  template <int memorySystemKind, bool wasT>
  static void execFn_softbreak(struct ArmCpu *cpu, uint32_t instr) {
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -135,7 +135,7 @@ index eb847e8..49f493a 100644
  
      cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_P_ABT, cpu->curInstrPC + 4,
                      ARM_SR_MODE_ABT | ARM_SR_I);
-@@ -1728,6 +1753,7 @@ static void execFn_dspmul(struct ArmCpu *cpu, uint32_t instr) {
+@@ -1767,6 +1792,7 @@ static void execFn_dspmul(struct ArmCpu *cpu, uint32_t instr) {
      uint64_t res64;
  
      if (cpuPrvConditionFails(cpu, instr)) return;
@@ -143,7 +143,7 @@ index eb847e8..49f493a 100644
  
      op1 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);         // Rm
      op2 = cpuPrvGetRegNotPC(cpu, (instr >> 8) & 0x0F);  // Rs
-@@ -2882,6 +2908,8 @@ static void execFn_thumb_3_mov(struct ArmCpu *cpu, uint32_t instr) {
+@@ -2921,6 +2947,8 @@ static void execFn_thumb_3_mov(struct ArmCpu *cpu, uint32_t instr) {
  
  template <int memorySystemKind, bool blx, bool pcS>
  static void execFn_thumb_bl_x(struct ArmCpu *cpu, uint32_t instr) {
@@ -152,7 +152,7 @@ index eb847e8..49f493a 100644
      if constexpr (blx) cpu->regs[REG_NO_LR] = cpu->regs[REG_NO_PC] + 1;
  
      if constexpr (pcS)
-@@ -2920,6 +2948,8 @@ static void execFn_thumb_bl_suffix(struct ArmCpu *cpu, uint32_t instr) {
+@@ -2959,6 +2987,8 @@ static void execFn_thumb_bl_suffix(struct ArmCpu *cpu, uint32_t instr) {
  
  template <int memorySystemKind>
  static void execFn_thumb_blx_suffix(struct ArmCpu *cpu, uint32_t instr) {
@@ -161,7 +161,7 @@ index eb847e8..49f493a 100644
      const uint32_t lr = cpu->regs[REG_NO_PC] | 1ul;
      const uint32_t offsetLo = instr & 0x7FF;
  
-@@ -3518,6 +3548,14 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
+@@ -3557,6 +3587,14 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
                         bool omap, int debugPort, uint32_t cpuid, uint32_t cacheId,
                         struct PatchDispatch *patchDispatch, struct PacePatch *pacePatch,
                         struct SystemState *systemState, ArmCpuModel model) {
@@ -176,7 +176,7 @@ index eb847e8..49f493a 100644
      if (model == ArmCpuModel::arm920t && (xscale || omap || memorySystemKind != ARM_MEMORY_SYSTEM_MMU))
          ERR("ARM920T bootstrap requires the non-XScale MMU");
      initStatic();
-@@ -3563,8 +3601,8 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
+@@ -3602,8 +3640,8 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
      cpuReset(cpu, pc);
  
  #ifdef FROND_DYNARMIC
@@ -187,7 +187,7 @@ index eb847e8..49f493a 100644
          icacheSetInvalHook(cpu->ic, cpuPrvJitInval, cpu);
          icacheSetFetchWatch(cpu->ic, cpuPrvJitWatchFetch, cpu);
      }
-@@ -4522,6 +4560,28 @@ static int cpuPrvJitSyscallPlain(ArmCpu *cpu, uint32_t pc, uint32_t i) {
+@@ -4599,6 +4637,28 @@ static int cpuPrvJitSyscallPlain(ArmCpu *cpu, uint32_t pc, uint32_t i) {
  }
  
  bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
@@ -213,11 +213,11 @@ index eb847e8..49f493a 100644
 +            }
 +        }
 +    }
-     // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
-     // words than memory, like the patched PACE entry a session restores while its RAM has
-     // the original, so those instructions go to the interpreter.
+     // ARM coprocessor and SWI encodings other than the p15 slot's (MRC and MCR p15 c3, MCR
+     // p15 c7 c5 1) and iWMMXt never go to the JIT (cpuPrvJitPlainArm), so they're turned
+     // down before any other check. iWMMXt (cp0 and cp1, not SWI) also needs the unit and
 diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
-index e7fb9e2..c7e6fc5 100644
+index 6d740f3..0c4d6e2 100644
 --- a/src/uarm/uarm/CPU.h
 +++ b/src/uarm/uarm/CPU.h
 @@ -101,6 +101,11 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
@@ -336,18 +336,18 @@ index 075f9d3..d9208bb 100644
  
  #endif
 diff --git a/src/uarm/uarm/jit_dynarmic.cpp b/src/uarm/uarm/jit_dynarmic.cpp
-index 67b54c2..a2e4f66 100644
+index c2ef350..6dde8a0 100644
 --- a/src/uarm/uarm/jit_dynarmic.cpp
 +++ b/src/uarm/uarm/jit_dynarmic.cpp
-@@ -15,6 +15,7 @@
+@@ -18,6 +18,7 @@
  #include <unordered_map>
  #include <vector>
  
 +#include "CPU.h"
  #include "MMU.h"
+ #include "pxa270_WMMX.h"
  #include "dynarmic/frontend/A32/a32_ir_emitter.h"
- #include "dynarmic/interface/A32/a32.h"
-@@ -214,6 +215,8 @@ struct Snapshot final : public A32::CodeSnapshot {
+@@ -248,6 +249,8 @@ struct Snapshot final : public A32::CodeSnapshot {
  
  struct Env final : public A32::UserCallbacks {
      ArmCpu *cpu = nullptr;
@@ -355,8 +355,8 @@ index 67b54c2..a2e4f66 100644
 +    uint64_t blocks = 0, instructions = 0;
      A32::Jit *jit = nullptr;
      PageTable *pages = nullptr;
-     std::vector<uint32_t> filled;  // page table entries to clear
-@@ -499,8 +502,14 @@ struct Env final : public A32::UserCallbacks {
+     // Page table entries to clear, and each one's domain when filled (cpuJitPageAccess).
+@@ -621,8 +624,14 @@ struct Env final : public A32::UserCallbacks {
      }
  
      bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
@@ -372,82 +372,82 @@ index 67b54c2..a2e4f66 100644
          });
      }
  
-@@ -809,21 +818,25 @@ static uint32_t jitPrvMaxUnchecked() {
-     return kMaxUnchecked;
+@@ -1159,7 +1168,11 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+     e.hot = j->hot;
+     A32::UserConfig conf;
+     conf.callbacks = &e;
+-    conf.arch_version = A32::ArchVersion::v5TE;
++    e.arm920 = cpuGetModel(j->cpu) == ArmCpuModel::arm920t;
++    conf.arch_version = e.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
++    if (e.arm920)
++        conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
++                                OptimizationFlag::FastDispatch);
+     conf.page_table = l->pages;
+     conf.page_table_writes_via_callbacks = false;
+     conf.page_table_write_protect_bit = true;
+@@ -1183,8 +1196,8 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+     l->jit = std::make_unique<A32::Jit>(conf);
+     e.jit = l->jit.get();
+     e.maxInstructions = j->maxUnchecked;
+-    l->jit->SetCompileThread(j->mode);
+-    l->jit->SetCompileAhead(j->ahead);
++    l->jit->SetCompileThread(e.arm920 ? A32::Jit::CompileThread::Off : j->mode);
++    l->jit->SetCompileAhead(e.arm920 ? 0 : j->ahead);
+     if (Level *o = j->level[!privileged].get()) {
+         e.other = &o->env;
+         o->env.other = &e;
+@@ -1197,11 +1210,11 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
+     return j->level[privileged].get();
  }
  
 -FrondJit *jitCreate(ArmCpu *cpu) {
 +FrondJit *jitCreate(ArmCpu *cpu, bool singleStep) {
      auto *j = new FrondJit;
-     j->env.cpu = cpu;
-     j->env.pages = &j->pages;
-     A32::UserConfig conf;
-     conf.callbacks = &j->env;
--    conf.arch_version = A32::ArchVersion::v5TE;
-+    j->env.arm920 = cpuGetModel(cpu) == ArmCpuModel::arm920t;
-+    conf.arch_version = j->env.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
-+    if (j->env.arm920)
-+        conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
-+                                OptimizationFlag::FastDispatch);
-     conf.page_table = &j->pages;
-     conf.page_table_writes_via_callbacks = false;
-     conf.page_table_write_protect_bit = true;
-     conf.page_table_pointer_mask_bits = 1;
-     conf.check_halt_on_link = true;
-     conf.check_halt_on_memory_access = true;
+     j->cpu = cpu;
 -    j->maxUnchecked = jitPrvMaxUnchecked();
--    j->env.hot = jitPrvHot();
+-    j->hot = jitPrvHot();
 +    j->maxUnchecked = singleStep ? 1 : jitPrvMaxUnchecked();
-+    j->env.hot = j->env.arm920 ? 1 : jitPrvHot();
-     conf.max_unchecked_instructions = j->maxUnchecked;
-     // Unaligned accesses go through the callbacks, which fault on them.
-     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
-@@ -836,9 +849,9 @@ FrondJit *jitCreate(ArmCpu *cpu) {
-     j->jit = std::make_unique<A32::Jit>(conf);
-     j->env.jit = j->jit.get();
-     j->env.maxInstructions = j->maxUnchecked;
--    const A32::Jit::CompileThread mode = jitPrvCompileThread();
-+    const A32::Jit::CompileThread mode = j->env.arm920 ? A32::Jit::CompileThread::Off : jitPrvCompileThread();
-     j->jit->SetCompileThread(mode);
--    j->jit->SetCompileAhead(jitPrvAhead(mode));
-+    j->jit->SetCompileAhead(j->env.arm920 ? 0 : jitPrvAhead(mode));
-     if (stats.on) stats.jits.push_back(j->jit.get());
-     return j;
- }
-@@ -853,6 +866,11 @@ void jitDestroy(FrondJit *j) {
++    j->hot = cpuGetModel(cpu) == ArmCpuModel::arm920t ? 1 : jitPrvHot();
+     j->mode = jitPrvCompileThread();
+     j->ahead = jitPrvAhead(j->mode);
+     jitPrvMakeLevel(j, true);
+@@ -1222,6 +1235,15 @@ void jitDestroy(FrondJit *j) {
  
  uint32_t jitMaxUnchecked(const FrondJit *j) { return j->maxUnchecked; }
  
 +void jitExecutionCounts(const FrondJit *j, uint64_t *blocks, uint64_t *instructions) {
-+    *blocks = j->env.blocks;
-+    *instructions = j->env.instructions;
++    *blocks = *instructions = 0;
++    for (const auto &l : j->level) {
++        if (!l) continue;
++        *blocks += l->env.blocks;
++        *instructions += l->env.instructions;
++    }
 +}
 +
  void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
-     const A32::Jit::CompileStats c = j->jit->GetCompileStats();
-     *stale = c.stale;
-@@ -863,6 +881,10 @@ void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompile
+     *stale = *aheadCompiled = *aheadUsed = 0;
+     for (const auto &l : j->level) {
+@@ -1236,7 +1258,8 @@ void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompile
  void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
      stats.invalRange++;
-     Env &e = j->env;
-+    if (e.arm920) {
-+        j->jit->InvalidateCacheRange(va, size);
-+        return;
-+    }
-     if (e.unwatched.empty()) return;
-     e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
- }
-@@ -871,7 +893,8 @@ void jitGuestInvalidateAll(FrondJit *j, uint32_t pc) {
-     stats.invalAll++;
-     auto &st = stats.invalAllPc[pc];
-     if (!st.first++ && stats.on) cpuJitFetch(j->env.cpu, pc & ~3u, &st.second);
--    if (!j->env.unwatched.empty()) j->env.DropUnwatched(0, ~0u);
-+    if (j->env.arm920) j->jit->ClearCache();
-+    else if (!j->env.unwatched.empty()) j->env.DropUnwatched(0, ~0u);
+     jitPrvEach(j, [&](Env &e) {
+-        if (!e.unwatched.empty()) e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
++        if (e.arm920) e.jit->InvalidateCacheRange(va, size);
++        else if (!e.unwatched.empty()) e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
+     });
  }
  
- void jitClear(FrondJit *j) { j->env.Clear(); }
-@@ -912,6 +935,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
+@@ -1245,7 +1268,8 @@ void jitGuestInvalidateAll(FrondJit *j, uint32_t pc) {
+     auto &st = stats.invalAllPc[pc];
+     if (!st.first++ && stats.on) cpuJitFetch(j->cpu, pc & ~3u, &st.second);
+     jitPrvEach(j, [](Env &e) {
+-        if (!e.unwatched.empty()) e.DropUnwatched(0, ~0u);
++        if (e.arm920) e.jit->ClearCache();
++        else if (!e.unwatched.empty()) e.DropUnwatched(0, ~0u);
+     });
+ }
+ 
+@@ -1336,6 +1360,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
      cpsr = jit.Cpsr();
      uint64_t ran = e.ran;
      if (e.undoTick && ran) ran--;
@@ -456,11 +456,11 @@ index 67b54c2..a2e4f66 100644
      stats.ran += ran;
      if (Has(hr, kFault)) stats.fault++;
 diff --git a/src/uarm/uarm/jit_dynarmic.h b/src/uarm/uarm/jit_dynarmic.h
-index 7ceb200..5db3e1c 100644
+index c4a2753..2887257 100644
 --- a/src/uarm/uarm/jit_dynarmic.h
 +++ b/src/uarm/uarm/jit_dynarmic.h
-@@ -19,11 +19,12 @@ enum FrondJitStop {
-                           // up to its next taken branch
+@@ -32,11 +32,12 @@ struct FrondJitAbort {
+     bool write;
  };
  
 -FrondJit *jitCreate(ArmCpu *cpu);
@@ -471,5 +471,5 @@ index 7ceb200..5db3e1c 100644
  void jitSetSync(bool sync);
 +void jitExecutionCounts(const FrondJit* jit, uint64_t* blocks, uint64_t* instructions);
  void jitDestroy(FrondJit *jit);
+ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
  // Runs up to about cycles instructions. Returns how many ran, at most
- // cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.

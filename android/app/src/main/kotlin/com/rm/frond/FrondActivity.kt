@@ -46,6 +46,11 @@ open class FrondActivity : SDLActivity() {
     private lateinit var settings: Settings
     private var machineSettings = MachineSettings()
     private var savingNote: TextView? = null
+    // The bar's and keyboard button's visibility as leave() found them, for Keep running after a failed save.
+    private var shownBeforeLeave: Pair<Int, Int>? = null
+    private var mipsNote: TextView? = null
+    private val mipsGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+    private var mipsLayout: MipsReadout.Layout? = null
     // The core's loopback gdb port while the debugger is on (Settings), else null, and the socket holding it.
     private var debugPort: Int? = null
     private var debugReservation: java.net.Socket? = null
@@ -151,6 +156,7 @@ open class FrondActivity : SDLActivity() {
         fitInsideSystemBars()
         requestFrameRate()
         addSavingNote()
+        addMipsNote()
         startDebugger()
         addKeyboard()
         addController()
@@ -204,6 +210,7 @@ open class FrondActivity : SDLActivity() {
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
+        applyMips()
         if (Build.VERSION.SDK_INT >= 33) {
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) { back() }
         }
@@ -494,6 +501,7 @@ open class FrondActivity : SDLActivity() {
         runOnUiThread {
             controller.releaseAll()
             hideKeyboard()
+            shownBeforeLeave = (barView?.visibility ?: View.VISIBLE) to (keyboardButton?.visibility ?: View.GONE)
             keyboardButton?.visibility = View.GONE
             barView?.visibility = View.GONE
             savingNote?.visibility = View.VISIBLE
@@ -1136,6 +1144,77 @@ open class FrondActivity : SDLActivity() {
         savingNote = note
     }
 
+    // A small MIPS readout at the bottom right of the Palm as the core draws it, for ARM devices. It
+    // stays hidden until the first figure arrives.
+    private fun addMipsNote() {
+        val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
+        val note = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            setPadding(12, 4, 12, 4)
+            setBackgroundColor(Color.argb(0x99, 0x00, 0x00, 0x00))
+            visibility = View.GONE
+        }
+        layout.addView(note, RelativeLayout.LayoutParams(RelativeLayout.LayoutParams.WRAP_CONTENT, RelativeLayout.LayoutParams.WRAP_CONTENT).apply {
+            addRule(RelativeLayout.ALIGN_PARENT_BOTTOM)
+            addRule(RelativeLayout.ALIGN_PARENT_RIGHT)
+        })
+        layout.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> placeMips() }
+        mipsNote = note
+    }
+
+    // Moves the box to the Palm's corner from the core's last window-layout. UI thread.
+    private fun placeMips() {
+        val note = mipsNote ?: return
+        val parent = note.parent as? View ?: return
+        val surface = SDLActivity.mSurface ?: return
+        val palm = mipsLayout ?: return
+        if (surface.width <= 0 || parent.width <= 0) return
+        val (right, bottom) = MipsReadout.margins(palm, surface.left, surface.top, surface.width, surface.height,
+            parent.width, parent.height, (6 * resources.displayMetrics.density).toInt())
+        val params = note.layoutParams as RelativeLayout.LayoutParams
+        if (params.rightMargin != right || params.bottomMargin != bottom) {
+            params.rightMargin = right
+            params.bottomMargin = bottom
+            note.layoutParams = params
+        }
+    }
+
+    // Shows or hides the readout from the saved setting. While on, a thread reads the core's speed-state and
+    // window-layout once a second; each call starts a new generation, so an older thread stops and can't
+    // touch the box after the setting went off.
+    fun applyMips() {
+        if (launchDevice().runs68k) return
+        val on = Sessions.forPath(this, sessionPath)?.settings?.showMips ?: return
+        val generation = mipsGeneration.incrementAndGet()
+        if (!on) {
+            runOnUiThread { mipsNote?.visibility = View.GONE }
+            return
+        }
+        Thread({
+            while (!leaving && !destroyed && mipsGeneration.get() == generation) {
+                if (!stopped) {
+                    val speed = link.request("speed-state", timeoutSeconds = 5)
+                    if (speed.code == "closed") break
+                    val mips = if (speed.ok) MipsReadout.parseMips(speed.message) else null
+                    val palm = link.request("window-layout", timeoutSeconds = 5).takeIf { it.ok }?.let { MipsReadout.parseLayout(it.message) }
+                    if (mips != null && mipsGeneration.get() == generation) runOnUiThread {
+                        if (mipsGeneration.get() != generation) return@runOnUiThread
+                        if (palm != null) mipsLayout = palm
+                        mipsNote?.let { note ->
+                            note.text = "$mips MIPS"
+                            note.visibility = if (mipsLayout != null && bar.sheet == null) View.VISIBLE else View.GONE
+                            placeMips()
+                            note.bringToFront()
+                            barView?.bringToFront()
+                        }
+                    }
+                }
+                try { Thread.sleep(1000) } catch (e: InterruptedException) { break }
+            }
+        }, "FrondMips").apply { isDaemon = true }.start()
+    }
+
     // Debug builds log the core's speed every 5 s while shown.
     private fun logSpeed() {
         Thread({
@@ -1191,13 +1270,24 @@ open class FrondActivity : SDLActivity() {
         AlertDialog.Builder(this)
             .setTitle("Couldn't save the session")
             .setMessage(message)
-            .setPositiveButton("Keep running") { _, _ ->
-                leaving = false
-                savingNote?.visibility = View.GONE
-            }
+            .setPositiveButton("Keep running") { _, _ -> keepRunning() }
             .setNegativeButton("Quit without saving") { _, _ -> Thread(::quit, "FrondQuit").start() }
             .setCancelable(false)
             .show()
+    }
+
+    // Back to the running machine after a failed save: the bar, the keyboard button and the Palm's
+    // focus as leave() found them.
+    private fun keepRunning() {
+        leaving = false
+        savingNote?.visibility = View.GONE
+        layoutBar()
+        shownBeforeLeave?.let { (bar, keyboard) ->
+            barView?.visibility = bar
+            keyboardButton?.visibility = keyboard
+        }
+        shownBeforeLeave = null
+        if (hasWindowFocus()) SDLActivity.nativeFocusChanged(true)
     }
 
     override fun onDestroy() {
@@ -1232,7 +1322,8 @@ open class FrondActivity : SDLActivity() {
         // A core that stopped by itself, before anyone asked it to quit, failed to start or crashed.
         if (isFinishing && !quitSent) {
             File(filesDir, START_ERROR).writeText(
-                startRefused ?: if (link.connectedOnce) "The emulator stopped unexpectedly." else "The emulator couldn't start this session.",
+                startRefused ?: if (link.connectedOnce) "The emulator stopped unexpectedly."
+                else CoreLog.refusal(CoreLog.read(this)) ?: "The emulator couldn't start this session.",
             )
         }
         if (running === this) running = null

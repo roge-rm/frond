@@ -106,3 +106,49 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_rm_frond_CardTool_exportFd(JNIEnv*
         return reply(fail("write", "Could not write the output file."));
     return reply({true, "exported", "image " + std::to_string(info.payloadBytes)});
 }
+
+// CardTool.importFd(fd, kind, dest, listener, cancel): a raw SD or Memory Stick Pro image read straight
+// from an open regular file (a picked document) into a new card file, with no temp copy. Reopening the
+// document as /proc/self/fd/N goes back through its path, which shared storage refuses to the app.
+// Same checks, progress and replies as the tool's import; a classic stick ("ms") is "error kind".
+extern "C" JNIEXPORT jstring JNICALL Java_com_rm_frond_CardTool_importFd(JNIEnv* env, jclass, jint in, jstring kindWord,
+                                                                       jstring destPath, jobject listener, jobject cancel) {
+    jmethodID progress = nullptr, cancelled = nullptr;
+    lookUp(env, listener, cancel, progress, cancelled);
+    const frondCardTool::Progress report = [&](uint64_t done, uint64_t total) {
+        return ::report(env, listener, cancel, progress, cancelled, done, total);
+    };
+    auto text = [&](jstring s) {
+        const char* chars = env->GetStringUTFChars(s, nullptr);
+        std::string out(chars ? chars : "");
+        if (chars) env->ReleaseStringUTFChars(s, chars);
+        return out;
+    };
+    const std::string word = text(kindWord);
+    const std::filesystem::path dest(text(destPath));
+    auto reply = [&](const frondCardTool::Result& r) {
+        const std::string out = r.ok ? "ok " + r.message : "error " + r.code + " " + r.message;
+        return env->NewStringUTF(out.c_str());
+    };
+    using namespace frondCardTool;
+    Kind kind;
+    if (!parseKind(word, kind)) return reply(fail("usage", "The card kind is sd, ms or mspro."));
+    if (kind == Kind::ms) return reply(fail("kind", "A classic Memory Stick is imported through a copy."));
+    struct stat st{};
+    if (::fstat(in, &st) < 0 || !S_ISREG(st.st_mode)) return reply(fail("read", "Could not read the card image."));
+    const uint64_t bytes = uint64_t(st.st_size);
+    const bool taken = kind == Kind::sd ? sdBytesTaken(bytes) : msProMibTaken(frondMsPro::mibOfBytes(bytes));
+    if (!taken)
+        return reply(fail("size", kind == Kind::sd ? "Use a raw SD image of " + sizeList(kind) + ", aligned to 512 bytes."
+                                                   : "Use a raw Memory Stick Pro image of " + sizeList(kind) + "."));
+    uint8_t first[8]{};
+    if (!frondSession::readAllAt(in, first, sizeof(first), 0) || frondMagic(first))
+        return reply(fail("image", "That is a Frond card file, not a raw card image."));
+    if (auto space = checkSpace(dest, sdFileBytes(bytes)); !space.ok) return reply(space);
+    Run run{report};
+    auto result = writeSd(dest, bytes, run, [&](uint64_t off, uint64_t n, uint8_t* out) {
+        return frondSession::readAllAt(in, out, size_t(n), off);
+    });
+    if (result.ok) result.message = std::string(kindName(kind)) + " " + std::to_string(sizeOf(dest));
+    return reply(result);
+}

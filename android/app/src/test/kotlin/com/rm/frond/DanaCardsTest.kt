@@ -14,10 +14,10 @@ class DanaCardsTest {
     private val second = "23456789000000000000000000000000"
     private val linked get() = "frond-linked-sd 3\n0 sd \"/cards/first.frondsd\" $key 305419896 33554432 1 0 1 2 3 sd 9\n2 sd \"/cards/second.frondsd\" $second 591751049 33554432 0 1 1 4 5 mmc 7\n"
     private val portable get() = "frond-portable-sd 3\n0 sd sd0.frondsd $key 305419896 33554432 1 0 123 sd\n2 sd sd2.frondsd $second 591751049 33554432 0 1 456 mmc\n"
-    private fun fixture(manifest: String, portable: Boolean = false, name: String = "alphasmart-dana"): File {
+    private fun fixture(manifest: String, portable: Boolean = false, name: String = "alphasmart-dana", version: Long = 8): File {
         val inner = ByteArray(80)
         fun put(bytes: ByteArray, at: Int, value: Long) { for (n in 0..3) bytes[at+n] = (value shr (8*n)).toByte() }
-        put(inner,0,0x19800819); put(inner,4,8)
+        put(inner,0,0x19800819); put(inner,4,version)
         name.toByteArray().copyInto(inner,8)
         fun hash(bytes: ByteArray): Long { var hash=2166136261L; for (b in bytes) hash=((hash xor (b.toLong() and 255))*16777619) and 0xffffffffL; return hash }
         val text=manifest.toByteArray()
@@ -53,6 +53,11 @@ class DanaCardsTest {
         assertFalse(state.inserted); assertTrue(state.writeProtected); assertTrue(state.failed); assertEquals("mmc",state.protocol)
         assertEquals("sd",DanaCardProtocol.state("inserted $key writable")!!.protocol)
         for (text in listOf("inserted", "ejected $key maybe", "inserted $key writable mmc mmc", "ejected bad protected")) assertNull(DanaCardProtocol.state(text))
+    }
+    @Test fun currentSessionVersionIsInspected() {
+        // The core saves wrapped Dana sessions at the current session version.
+        assertEquals(9L,DanaSession.inspect(fixture(linked,version=9))!!.version)
+        assertNull(DanaSession.inspect(fixture(linked,version=5)))
     }
     @Test fun wirelessSessionsKeepTheirDevice() {
         assertEquals("alphasmart-dana",DanaSession.inspect(fixture(linked))!!.device)

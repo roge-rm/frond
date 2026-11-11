@@ -22,6 +22,11 @@ class PagesAdapter(private val context: Context, private val name: String, priva
 
     override fun onFinish() = finished(wrote)
 
+    companion object {
+        // PrintBoy's and the Dana's printers' paper, 8.5 x 11 in.
+        fun letter(): PrintAttributes = PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.NA_LETTER).build()
+    }
+
     private var attributes: PrintAttributes? = null
     private val count get() = pages.size.coerceAtLeast(1)
 

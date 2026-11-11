@@ -51,7 +51,8 @@ class PrintStore(
         if (!status.received) return Poll.Bytes(status.bytes + status.receiving)
         // A fresh name each time: a save that timed out may still be written by the core later.
         val job = File(dir, "job-${++counter}-${System.nanoTime()}.raw")
-        val reply = request("save " + job.absolutePath)
+        // The core won't follow symlinks and /data/user/0 is one inside an app, so it gets the resolved path.
+        val reply = request("save " + File(dir.canonicalFile, job.name).path)
         if (!reply.ok || !job.isFile) {
             return Poll.Failed(PrintJob.parseStatus(reply.message).error.ifEmpty { reply.message })
         }

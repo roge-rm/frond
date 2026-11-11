@@ -13,6 +13,11 @@ class DesktopClient : public QObject {
     ~DesktopClient();
     bool start(const QString& core, const QStringList& arguments);
     bool request(const QString& command, const QString& argument = {});
+    // A read-only query that doesn't take the request slot: available() and the pending command are
+    // untouched, and the answer comes as backgroundResult. Sent only when the slot is free and no other
+    // background query is out.
+    bool requestBackground(const QString& command);
+    bool backgroundOut() const { return backgroundId != 0; }
     bool cancelFiles();
     bool running() const { return process.state() != QProcess::NotRunning; }
     bool available() const { return ready && pending.isEmpty(); }
@@ -21,6 +26,7 @@ class DesktopClient : public QObject {
     void started();
     void finished();
     void result(const QString& command, bool ok, const QString& code, const QString& message);
+    void backgroundResult(const QString& command, bool ok, const QString& message);
     void error(const QString& message);
     void closeRequested();
     void shortcut(const QString& name);  // a key pressed over the Palm that the app owns
@@ -45,6 +51,7 @@ class DesktopClient : public QObject {
     QTimer lostConnection;  // the socket closed while the core still runs
     QByteArray input;
     QString pending;
-    quint64 serial{0};
+    quint64 serial{0}, backgroundId{0};
+    QString backgroundCommand;
     bool ready{false}, expectingExit{false};
 };

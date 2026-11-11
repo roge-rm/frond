@@ -12,6 +12,16 @@ import java.util.zip.CRC32
 class SessionsLayoutTest {
     @get:Rule val tmp = TemporaryFolder()
 
+    @Test fun saveCopyGivesThe68kCoreAFile() {
+        val copy = tmp.newFolder("copy")
+        assertEquals(copy.path, copySavePath(copy, runs68k = false))
+        val file = File(copySavePath(copy, runs68k = true))
+        assertEquals(copy, file.parentFile)
+        assertTrue(packableName(file.name))
+        file.writeText("x")
+        assertEquals(file, sessionFile(copy))
+    }
+
     @Test fun packableNamesIgnoreTempsAndGenerations() {
         assertTrue(packableName("session.frond"))
         assertTrue(packableName("Palm TX.frond"))

@@ -1,0 +1,15 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -711,7 +711,11 @@
+         soc->ReleaseKeyboard();
+         if (savestate.data) free(savestate.data);
+ 
+-        if (sdSwapped) {
++        if (memoryStick) {
++            // A Memory Stick device has no SD slot; its stick only shares the card store. An SD
++            // flag an older save kept from that store is dropped instead of checked against it.
++            soc->SdEject();
++        } else if (sdSwapped) {
+             // The saved card is gone: eject it as a hot eject would; the one there now goes in later.
+             soc->SdEject();
+             sdInsertPending = sdCardInitialized();

@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -23,6 +24,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <atomic>
+#include <limits>
 
 // The bar at the start of a Cards row: lit (highlight colour) while the card is in a machine,
 // a faint line otherwise.
@@ -49,7 +51,8 @@ QString runCardJob(QWidget* parent, const QString& text, std::function<QString(c
     dialog.setWindowModality(Qt::WindowModal);
     dialog.setAutoClose(false);
     dialog.setAutoReset(false);
-    dialog.setMinimumDuration(300);
+    // Shown by the timer below after 300 ms, never over a question the job asks.
+    dialog.setMinimumDuration(std::numeric_limits<int>::max());
     dialog.setValue(0);
     QObject::connect(&dialog, &QProgressDialog::canceled, &dialog, [&] { cancel = true; });
     QEventLoop loop;
@@ -63,8 +66,16 @@ QString runCardJob(QWidget* parent, const QString& text, std::function<QString(c
     QObject::connect(thread.get(), &QThread::finished, &loop, &QEventLoop::quit);
     QTimer timer;
     timer.setInterval(50);
+    QElapsedTimer started;
+    started.start();
     QObject::connect(&timer, &QTimer::timeout, &dialog, [&] {
+        // A question the job asks (a name clash) stays on top: progress waits until it's answered.
+        if (auto* modal = QApplication::activeModalWidget(); modal && modal != &dialog) {
+            dialog.hide();
+            return;
+        }
         if (!cancel && total > 0) dialog.setValue(int(done * 1000 / total));
+        if (!dialog.isVisible() && started.elapsed() >= 300) dialog.show();
     });
     thread->start();
     timer.start();

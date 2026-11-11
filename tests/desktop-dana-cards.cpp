@@ -10,10 +10,10 @@ class DanaCardsTest : public QObject {
         if (portable) return "frond-portable-sd 3\n0 sd sd0.frondsd "+key+" 305419896 33554432 1 0 123 sd\n2 sd sd2.frondsd "+second+" 591751049 33554432 0 1 456 mmc\n";
         return "frond-linked-sd 3\n0 sd \"/cards/a.frondsd\" "+key+" 305419896 33554432 1 0 1 2 3 sd 9\n2 sd \"/cards/b.frondsd\" "+second+" 591751049 33554432 0 1 1 4 5 mmc 7\n";
     }
-    void write(const QString& path, const QByteArray& manifest,bool portable=false,const QByteArray& name="alphasmart-dana") {
+    void write(const QString& path, const QByteArray& manifest,bool portable=false,const QByteArray& name="alphasmart-dana",quint32 version=8) {
         QByteArray machine(80,'\0');
         auto put=[](QByteArray& bytes,int at,quint32 value) { for (int n=0;n<4;++n) bytes[at+n]=char(value>>(8*n)); };
-        put(machine,0,frondSessions::magic); put(machine,4,8); machine.replace(8,14,name);
+        put(machine,0,frondSessions::magic); put(machine,4,version); machine.replace(8,14,name);
         QByteArray descriptor(12,'\0'); put(descriptor,0,manifest.size()); put(descriptor,4,frondDanaSession::hash(machine)); put(descriptor,8,frondDanaSession::hash(manifest));
         QFile file(path); QVERIFY(file.open(QIODevice::WriteOnly)); file.write(portable?"FRONDPORTSD1\n":"FRONDLINKSD1\n"); file.write(descriptor); file.write(manifest); file.write(machine);
     }
@@ -58,6 +58,34 @@ class DanaCardsTest : public QObject {
         QVERIFY(frondSessions::openable(header));
         write(path,manifest(),false,"alphasmart-dana-other");
         QVERIFY(!frondDanaSession::inspect(path).valid);
+    }
+    void currentVersionWrapper() {
+        // The core saves wrapped Dana sessions at the current session version.
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        const auto path=dir.path()+"/machine.frond";
+        for (bool portable : {false,true}) {
+            write(path,manifest(portable),portable,"alphasmart-dana",frondSessions::newestVersion);
+            QVERIFY(frondDanaSession::inspect(path).valid);
+            QVERIFY(frondSessions::openable(frondSessions::readHeader(path)));
+        }
+        write(path,manifest(),false,"alphasmart-dana",frondSessions::newestVersion+1);
+        QVERIFY(!frondSessions::openable(frondSessions::readHeader(path)));
+        write(path,manifest(),false,"alphasmart-dana",5);
+        QVERIFY(!frondDanaSession::inspect(path).valid);
+    }
+    void refusalMessages() {
+        // Core refusals the user can meet get plain text; anything else passes through.
+        QCOMPARE(frondDanaCards::message("error: duplicate identity or serial"),QString("That card is already in the other slot."));
+        QCOMPARE(frondDanaCards::message("error: cannot lock card file"),QString("That card is open somewhere else."));
+        QCOMPARE(frondDanaCards::message("error: something new"),QString("error: something new"));
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        QVERIFY(frondDanaCards::exportProblem(dir.filePath("card.frondsd")).isEmpty());
+        QFile existing(dir.filePath("old.frondsd")); QVERIFY(existing.open(QIODevice::WriteOnly)); existing.close();
+        QVERIFY(frondDanaCards::exportProblem(existing.fileName()).contains("new file"));
+        QVERIFY(QDir(dir.path()).mkdir("locked"));
+        QVERIFY(QFile::setPermissions(dir.filePath("locked"),QFile::ReadOwner|QFile::ExeOwner));
+        QCOMPARE(frondDanaCards::exportProblem(dir.filePath("locked/card.frondsd")),QString("Can't write to that folder."));
+        QVERIFY(QFile::setPermissions(dir.filePath("locked"),QFile::ReadOwner|QFile::WriteOwner|QFile::ExeOwner));
     }
     void state() {
         const auto card=frondDanaCards::state("ejected "+key+" protected io-error mmc");

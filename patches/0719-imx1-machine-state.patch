@@ -1,3 +1,198 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 44381f8..2a5b799 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include "CPU.h"
++#include "arm920_state.h"
+ #include "cpu_diagnostics.h"
+ #ifdef FROND_DYNARMIC
+ #include "jit_dynarmic.h"
+@@ -5302,6 +5303,88 @@ Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
+     return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
+ }
+ 
++static bool cpuPrvArm920StateIdle(const ArmCpu* cpu) {
++    if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
++    if (cpu->modePace || cpu->sleeping || cpu->earlyAudioHook) return false;
++#ifndef __EMSCRIPTEN__
++    if (cpu->nativePc[0] || cpu->nativePc[1] || cpu->nativeCallDepth || cpu->nativeSessionActive) return false;
++#endif
++    return true;
++}
++
++bool cpuArm920CaptureState(const ArmCpu* cpu, Arm920SavedState& s) {
++    if (!cpuPrvArm920StateIdle(cpu)) return false;
++    s.exceptionSequence = cpu->exceptionSequence;
++    memcpy(s.regs, cpu->regs, sizeof(s.regs));
++    memcpy(s.extraRegs, cpu->extra_regs, sizeof(s.extraRegs));
++    const ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
++                                    &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
++    for (unsigned n = 0; n < 6; ++n) {
++        s.banks[n][0] = banks[n]->R13; s.banks[n][1] = banks[n]->R14; s.banks[n][2] = banks[n]->SPSR;
++    }
++    s.spsr = cpu->SPSR;
++    s.flags = cpu->flags;
++    s.curInstrPC = cpu->curInstrPC;
++    s.vectorBase = cpu->vectorBase;
++    s.pid = cpu->pid;
++    s.slowPath = cpu->slowPath;
++    s.waitingIrqs = cpu->waitingIrqs;
++    s.waitingFiqs = cpu->waitingFiqs;
++    s.cpar = cpu->CPAR;
++    s.mode = cpu->M;
++    s.q = cpu->Q; s.t = cpu->T; s.i = cpu->I; s.f = cpu->F;
++    s.privileged = cpu->privileged;
++    s.waiting = cpu->arm920Waiting;
++    s.waitEnabled = cpu->arm920WaitEnabled;
++    cp15MMUArm920Capture(cpu->cp15.cp15mmu, s);
++    mmuArm920Capture(cpu->memorySystem.mmu, s);
++    icacheArm920Capture(cpu->ic, s);
++    return true;
++}
++
++bool cpuArm920StateFits(const ArmCpu* cpu, const Arm920SavedState& s) {
++    return cpuPrvArm920StateIdle(cpu) && s.cpar == cpu->CPAR && s.waitEnabled == cpu->arm920WaitEnabled &&
++           (!s.waiting || s.waitEnabled);
++}
++
++void cpuArm920ApplyState(ArmCpu* cpu, const Arm920SavedState& s) {
++    cpu->exceptionSequence = s.exceptionSequence;
++    memcpy(cpu->regs, s.regs, sizeof(s.regs));
++    memcpy(cpu->extra_regs, s.extraRegs, sizeof(s.extraRegs));
++    ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
++                              &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
++    for (unsigned n = 0; n < 6; ++n) {
++        banks[n]->R13 = s.banks[n][0]; banks[n]->R14 = s.banks[n][1]; banks[n]->SPSR = s.banks[n][2];
++    }
++    cpu->SPSR = s.spsr;
++    cpu->flags = s.flags;
++    cpu->curInstrPC = s.curInstrPC;
++    cpu->vectorBase = s.vectorBase;
++    cpu->pid = s.pid;
++    cpu->slowPath = s.slowPath;
++    cpu->waitingIrqs = s.waitingIrqs;
++    cpu->waitingFiqs = s.waitingFiqs;
++    cpu->waitingEventsTotal = s.waitingIrqs + s.waitingFiqs;
++    cpu->M = s.mode;
++    cpu->Q = s.q; cpu->T = s.t; cpu->I = s.i; cpu->F = s.f;
++    cpu->privileged = s.privileged;
++    cpu->arm920Waiting = s.waiting;
++    cp15MMUArm920Apply(cpu->cp15.cp15mmu, s);
++    mmuArm920Apply(cpu->memorySystem.mmu, s);
++    icacheArm920Apply(cpu->ic, s);
++}
++
++bool cpuJitSetExecutionCounts(ArmCpu* cpu, uint64_t blocks, uint64_t instructions) {
++#ifdef FROND_DYNARMIC
++    if (cpu->jit) {
++        jitSetExecutionCounts(cpu->jit, blocks, instructions);
++        return true;
++    }
++#endif
++    (void)cpu; (void)blocks; (void)instructions;
++    return false;
++}
++
+ void cpuEmitArm920Diagnostic(const ArmCpu* cpu, const ArmDiagnosticSink& sink) {
+     if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return;
+     sink.emit("registers", cpu->regs, 16);
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index b0e55d7..3261dc9 100644
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -262,5 +262,14 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader);
+ void cpuArm920SetIcacheIndexCompatibility(ArmCpu*, bool);
+ void cpuArm920SetMemoryCheck(ArmCpu*, Arm920MemoryCheck, void*);
+ Arm920DataGuard cpuArm920DataGuard(ArmCpu*);
++// Machine state between two run calls. Capture fails outside ARM920T, in PACE, asleep or
++// inside a native call. Apply takes a state that cpuArm920StateFits accepted, and leaves
++// translated code alone: drop it with cpuDropTranslatedCode.
++struct Arm920SavedState;
++bool cpuArm920CaptureState(const ArmCpu*, Arm920SavedState&);
++bool cpuArm920StateFits(const ArmCpu*, const Arm920SavedState&);
++void cpuArm920ApplyState(ArmCpu*, const Arm920SavedState&);
++// Sets the Fast engine's counters. False without a JIT.
++bool cpuJitSetExecutionCounts(ArmCpu*, uint64_t blocks, uint64_t instructions);
+ 
+ #endif
+diff --git a/src/uarm/uarm/MMU.cpp b/src/uarm/uarm/MMU.cpp
+index 89dd8a8..f52e5f8 100644
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "MMU.h"
+ #include "MMU_internal.h"
++#include "arm920_state.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -509,6 +510,46 @@ template void mmuSave<Savestate<ChunkType>>(ArmMmu *mmu, Savestate<ChunkType> &s
+ template void mmuSave<SavestateProbe<ChunkType>>(ArmMmu *mmu, SavestateProbe<ChunkType> &savestate);
+ template void mmuLoad<SavestateLoader<ChunkType>>(ArmMmu *mmu, SavestateLoader<ChunkType> &loader);
+ 
++void mmuArm920Capture(const ArmMmu* mmu, Arm920SavedState& s) {
++    s.transTablPA = mmu->transTablPA;
++    s.domainCfg = mmu->domainCfg;
++    s.mmuS = mmu->S;
++    s.mmuR = mmu->R;
++    s.tlbRevision = mmu->revision;
++    s.tlbFlushes = mmu->flushes;
++    s.tlb.clear();
++    for (uint32_t i = 0; i < TLB_SIZE; ++i) {
++        const auto& e = mmu->tlb[i];
++        if (e.revision != mmu->revision) continue;
++        s.tlb.push_back(i);
++        s.tlb.push_back(uint32_t(e.pa) | uint32_t(e.ap) << 20 | uint32_t(e.domain) << 22 |
++                        uint32_t(e.c) << 26 | uint32_t(e.section) << 27 | uint32_t(e.b) << 28);
++    }
++}
++
++void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
++    mmu->transTablPA = s.transTablPA;
++    mmu->domainCfg = s.domainCfg;
++    mmu->S = s.mmuS;
++    mmu->R = s.mmuR;
++    // Revision 0 is never current, so every other entry is dead.
++    memset(mmu->tlb, 0, sizeof(mmu->tlb));
++    mmu->revision = s.tlbRevision;
++    mmu->flushes = s.tlbFlushes;
++    for (size_t n = 0; n + 1 < s.tlb.size(); n += 2) {
++        const uint32_t packed = s.tlb[n + 1];
++        auto& e = mmu->tlb[s.tlb[n] & (TLB_SIZE - 1)];
++        e.pa = packed & 0xfffff;
++        e.ap = (packed >> 20) & 3;
++        e.domain = (packed >> 22) & 15;
++        e.c = (packed >> 26) & 1;
++        e.section = (packed >> 27) & 1;
++        e.b = (packed >> 28) & 1;
++        e.revision = s.tlbRevision;
++    }
++    mmuPrvPermChanged(mmu);
++}
++
+ void mmuEmitDiagnostic(const ArmMmu* mmu, const ArmDiagnosticSink& sink) {
+     const uint32_t state[] = {mmu->transTablPA,mmu->domainCfg,mmu->S,mmu->R,mmu->revision,mmu->flushes};
+     sink.emit("mmu",state,6);
+diff --git a/src/uarm/uarm/MMU.h b/src/uarm/uarm/MMU.h
+index 6be3410..3476ab5 100644
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -75,4 +75,8 @@ template <typename T>
+ void mmuLoad(struct ArmMmu *mmu, T &loader);
+ 
+ void mmuEmitDiagnostic(const ArmMmu*, const ArmDiagnosticSink&);
++// Registers and the live TLB entries. Apply keeps the saved revision and flush count.
++struct Arm920SavedState;
++void mmuArm920Capture(const ArmMmu*, Arm920SavedState&);
++void mmuArm920Apply(ArmMmu*, const Arm920SavedState&);
+ #endif
+diff --git a/src/uarm/uarm/arm920_state.h b/src/uarm/uarm/arm920_state.h
+new file mode 100644
+index 0000000..f02f8da
 --- /dev/null
 +++ b/src/uarm/uarm/arm920_state.h
 @@ -0,0 +1,99 @@
@@ -100,6 +295,8 @@
 +#endif
 +
 +#endif
+diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+index 56181e4..65dc515 100644
 --- a/src/uarm/uarm/cp15mmu.cpp
 +++ b/src/uarm/uarm/cp15mmu.cpp
 @@ -7,6 +7,7 @@
@@ -110,7 +307,7 @@
  #include "cputil.h"
  #include "icache.h"
  #include "savestate/savestateAll.h"
-@@ -541,6 +542,56 @@
+@@ -541,6 +542,56 @@ template void cp15MMUSave<SavestateProbe<ChunkType>>(ArmCP15MMU* cp15,
  template void cp15MMULoad<SavestateLoader<ChunkType>>(ArmCP15MMU* cp15,
                                                        SavestateLoader<ChunkType>& loader);
  
@@ -167,9 +364,11 @@
  void cp15MMUEmitArm920Diagnostic(const ArmCP15MMU* cp, const ArmDiagnosticSink& sink) {
      const uint32_t state[] = {cp->control,cp->ttb,cp->FSR,cp->FAR,cp->mmuSwitchCy,
          uint32_t(cp->arm920Bootstrap),uint32_t(cp->arm920IcacheIndexCompatibility)};
+diff --git a/src/uarm/uarm/cp15mmu.h b/src/uarm/uarm/cp15mmu.h
+index 1b193a0..922ef53 100644
 --- a/src/uarm/uarm/cp15mmu.h
 +++ b/src/uarm/uarm/cp15mmu.h
-@@ -31,4 +31,7 @@
+@@ -31,4 +31,7 @@ template <typename T>
  void cp15MMULoad(struct ArmCP15MMU* cp15, T& loader);
  
  void cp15MMUEmitArm920Diagnostic(const ArmCP15MMU*, const ArmDiagnosticSink&);
@@ -177,122 +376,8 @@
 +void cp15MMUArm920Capture(const ArmCP15MMU*, Arm920SavedState&);
 +void cp15MMUArm920Apply(ArmCP15MMU*, const Arm920SavedState&);
  #endif  // _CP15_MMU_H_
---- a/src/uarm/uarm/CPU.cpp
-+++ b/src/uarm/uarm/CPU.cpp
-@@ -1,6 +1,7 @@
- //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
- 
- #include "CPU.h"
-+#include "arm920_state.h"
- #include "cpu_diagnostics.h"
- #ifdef FROND_DYNARMIC
- #include "jit_dynarmic.h"
-@@ -5197,6 +5198,88 @@
-     return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
- }
- 
-+static bool cpuPrvArm920StateIdle(const ArmCpu* cpu) {
-+    if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
-+    if (cpu->modePace || cpu->sleeping || cpu->earlyAudioHook) return false;
-+#ifndef __EMSCRIPTEN__
-+    if (cpu->nativePc[0] || cpu->nativePc[1] || cpu->nativeCallDepth || cpu->nativeSessionActive) return false;
-+#endif
-+    return true;
-+}
-+
-+bool cpuArm920CaptureState(const ArmCpu* cpu, Arm920SavedState& s) {
-+    if (!cpuPrvArm920StateIdle(cpu)) return false;
-+    s.exceptionSequence = cpu->exceptionSequence;
-+    memcpy(s.regs, cpu->regs, sizeof(s.regs));
-+    memcpy(s.extraRegs, cpu->extra_regs, sizeof(s.extraRegs));
-+    const ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
-+                                    &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
-+    for (unsigned n = 0; n < 6; ++n) {
-+        s.banks[n][0] = banks[n]->R13; s.banks[n][1] = banks[n]->R14; s.banks[n][2] = banks[n]->SPSR;
-+    }
-+    s.spsr = cpu->SPSR;
-+    s.flags = cpu->flags;
-+    s.curInstrPC = cpu->curInstrPC;
-+    s.vectorBase = cpu->vectorBase;
-+    s.pid = cpu->pid;
-+    s.slowPath = cpu->slowPath;
-+    s.waitingIrqs = cpu->waitingIrqs;
-+    s.waitingFiqs = cpu->waitingFiqs;
-+    s.cpar = cpu->CPAR;
-+    s.mode = cpu->M;
-+    s.q = cpu->Q; s.t = cpu->T; s.i = cpu->I; s.f = cpu->F;
-+    s.privileged = cpu->privileged;
-+    s.waiting = cpu->arm920Waiting;
-+    s.waitEnabled = cpu->arm920WaitEnabled;
-+    cp15MMUArm920Capture(cpu->cp15.cp15mmu, s);
-+    mmuArm920Capture(cpu->memorySystem.mmu, s);
-+    icacheArm920Capture(cpu->ic, s);
-+    return true;
-+}
-+
-+bool cpuArm920StateFits(const ArmCpu* cpu, const Arm920SavedState& s) {
-+    return cpuPrvArm920StateIdle(cpu) && s.cpar == cpu->CPAR && s.waitEnabled == cpu->arm920WaitEnabled &&
-+           (!s.waiting || s.waitEnabled);
-+}
-+
-+void cpuArm920ApplyState(ArmCpu* cpu, const Arm920SavedState& s) {
-+    cpu->exceptionSequence = s.exceptionSequence;
-+    memcpy(cpu->regs, s.regs, sizeof(s.regs));
-+    memcpy(cpu->extra_regs, s.extraRegs, sizeof(s.extraRegs));
-+    ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
-+                              &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
-+    for (unsigned n = 0; n < 6; ++n) {
-+        banks[n]->R13 = s.banks[n][0]; banks[n]->R14 = s.banks[n][1]; banks[n]->SPSR = s.banks[n][2];
-+    }
-+    cpu->SPSR = s.spsr;
-+    cpu->flags = s.flags;
-+    cpu->curInstrPC = s.curInstrPC;
-+    cpu->vectorBase = s.vectorBase;
-+    cpu->pid = s.pid;
-+    cpu->slowPath = s.slowPath;
-+    cpu->waitingIrqs = s.waitingIrqs;
-+    cpu->waitingFiqs = s.waitingFiqs;
-+    cpu->waitingEventsTotal = s.waitingIrqs + s.waitingFiqs;
-+    cpu->M = s.mode;
-+    cpu->Q = s.q; cpu->T = s.t; cpu->I = s.i; cpu->F = s.f;
-+    cpu->privileged = s.privileged;
-+    cpu->arm920Waiting = s.waiting;
-+    cp15MMUArm920Apply(cpu->cp15.cp15mmu, s);
-+    mmuArm920Apply(cpu->memorySystem.mmu, s);
-+    icacheArm920Apply(cpu->ic, s);
-+}
-+
-+bool cpuJitSetExecutionCounts(ArmCpu* cpu, uint64_t blocks, uint64_t instructions) {
-+#ifdef FROND_DYNARMIC
-+    if (cpu->jit) {
-+        jitSetExecutionCounts(cpu->jit, blocks, instructions);
-+        return true;
-+    }
-+#endif
-+    (void)cpu; (void)blocks; (void)instructions;
-+    return false;
-+}
-+
- void cpuEmitArm920Diagnostic(const ArmCpu* cpu, const ArmDiagnosticSink& sink) {
-     if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return;
-     sink.emit("registers", cpu->regs, 16);
---- a/src/uarm/uarm/CPU.h
-+++ b/src/uarm/uarm/CPU.h
-@@ -253,5 +253,14 @@
- void cpuArm920SetIcacheIndexCompatibility(ArmCpu*, bool);
- void cpuArm920SetMemoryCheck(ArmCpu*, Arm920MemoryCheck, void*);
- Arm920DataGuard cpuArm920DataGuard(ArmCpu*);
-+// Machine state between two run calls. Capture fails outside ARM920T, in PACE, asleep or
-+// inside a native call. Apply takes a state that cpuArm920StateFits accepted, and leaves
-+// translated code alone: drop it with cpuDropTranslatedCode.
-+struct Arm920SavedState;
-+bool cpuArm920CaptureState(const ArmCpu*, Arm920SavedState&);
-+bool cpuArm920StateFits(const ArmCpu*, const Arm920SavedState&);
-+void cpuArm920ApplyState(ArmCpu*, const Arm920SavedState&);
-+// Sets the Fast engine's counters. False without a JIT.
-+bool cpuJitSetExecutionCounts(ArmCpu*, uint64_t blocks, uint64_t instructions);
- 
- #endif
+diff --git a/src/uarm/uarm/icache.cpp b/src/uarm/uarm/icache.cpp
+index 7a23994..2f8dbb4 100644
 --- a/src/uarm/uarm/icache.cpp
 +++ b/src/uarm/uarm/icache.cpp
 @@ -7,6 +7,7 @@
@@ -303,7 +388,7 @@
  #include "cputil.h"
  
  void icacheConfigureArm920(struct icache* ic) {
-@@ -126,6 +127,45 @@
+@@ -126,6 +127,45 @@ bool icacheArm920ContinuationPending(const struct icache* ic) {
  
  void icacheArm920Branch(struct icache* ic) { ic->arm920ContinuationCount = 0; }
  
@@ -349,9 +434,11 @@
  void icacheSetXscale(struct icache* ic, bool xscale) { ic->xscale = xscale; }
  
  void icacheGetFetchState(struct icache* ic, uint32_t* state) {
+diff --git a/src/uarm/uarm/icache.h b/src/uarm/uarm/icache.h
+index 0c40864..98f7be7 100644
 --- a/src/uarm/uarm/icache.h
 +++ b/src/uarm/uarm/icache.h
-@@ -29,6 +29,11 @@
+@@ -29,6 +29,11 @@ bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
  void icacheArm920PrepareMmuSwitch(struct icache*, uint32_t nextPc, bool privileged);
  bool icacheArm920ContinuationPending(const struct icache*);
  void icacheArm920Branch(struct icache*);
@@ -363,9 +450,11 @@
  void icacheSetXscale(struct icache* ic, bool xscale);
  void icacheGetFetchState(struct icache* ic, uint32_t* state);
  bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
+diff --git a/src/uarm/uarm/imx1_aitc.h b/src/uarm/uarm/imx1_aitc.h
+index 0613608..9fe4d43 100644
 --- a/src/uarm/uarm/imx1_aitc.h
 +++ b/src/uarm/uarm/imx1_aitc.h
-@@ -24,6 +24,11 @@
+@@ -24,6 +24,11 @@ class Imx1Aitc {
      Imx1AitcPending pendingState() const {
          return {pending(false), pending(true), unknown(false), unknown(true)};
      }
@@ -377,7 +466,7 @@
      static const char* registerName(uint32_t address);
  
     private:
-@@ -39,5 +44,8 @@
+@@ -39,5 +44,8 @@ class Imx1Aitc {
      uint32_t vector(bool fast) const;
      unsigned level(unsigned source) const { return (priority[source / 8] >> ((source % 8) * 4)) & 15; }
  };
@@ -386,9 +475,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_asp.h b/src/uarm/uarm/imx1_asp.h
+index 1549058..565e02d 100644
 --- a/src/uarm/uarm/imx1_asp.h
 +++ b/src/uarm/uarm/imx1_asp.h
-@@ -51,6 +51,19 @@
+@@ -51,6 +51,19 @@ class Imx1Asp {
          return requests;
      }
      unsigned clockDivider() const { return (control & (1u << 25)) && divider ? divider + 1 : 0; }
@@ -408,7 +499,7 @@
  
     private:
      // Software reset preserves external inputs.
-@@ -95,5 +108,8 @@
+@@ -95,5 +108,8 @@ class Imx1Asp {
          return (nextControl & (1u << 25)) && nextDivider && (nextControl & 2) && (nextControl & 0x3000);
      }
  };
@@ -417,6 +508,8 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 65ec422..979a505 100644
 --- a/src/uarm/uarm/imx1_boot_probe.cpp
 +++ b/src/uarm/uarm/imx1_boot_probe.cpp
 @@ -1,15 +1,20 @@
@@ -440,7 +533,7 @@
  #include "patch_dispatch.h"
  #include "system_state.h"
  
-@@ -25,12 +30,19 @@
+@@ -25,12 +30,19 @@ struct Probe {
              peripherals.replaceAspPenInputs(config.aspPenInputs);
          peripherals.setLcdcContrastOnly(config.lcdcContrastOnly);
          peripherals.setMmcsdEmptySlot(config.mmcsdEmptySlot);
@@ -464,7 +557,7 @@
      uint32_t alias;
      Imx1ProbeResult result{};
      struct Recent { uint64_t step; uint32_t pc, instruction, cpsr, sp, lr, r0, r1, r2, r3; };
-@@ -564,6 +576,17 @@
+@@ -564,6 +576,17 @@ bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
      if ((i & 0xf800) == 0xe000 || (i & 0xf800) == 0xf000) return true; // B, BL prefix.
      return (i & 0xf800) == 0xf800 && blPrefix; // BL suffix needs its preceding halfword.
  }
@@ -482,7 +575,7 @@
  }  // namespace
  
  struct Imx1Machine { Probe* probe; };
-@@ -636,13 +659,9 @@
+@@ -636,13 +659,9 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
      }
      if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
      if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
@@ -497,7 +590,7 @@
      if (rom && size) p->rom.assign(rom, rom + size);
      p->alias = entry == Imx1ProbeEntry::resetAlias ? 0 :
                 entry == Imx1ProbeEntry::linkedAlias ? 0x20000000 : 0x10000000;
-@@ -1102,3 +1121,582 @@
+@@ -1102,3 +1121,582 @@ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
      }
      return "unknown";
  }
@@ -1080,6 +1173,8 @@
 +    }
 +    return "unknown";
 +}
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index f3ed13e..57e193b 100644
 --- a/src/uarm/uarm/imx1_boot_probe.h
 +++ b/src/uarm/uarm/imx1_boot_probe.h
 @@ -2,7 +2,9 @@
@@ -1092,7 +1187,7 @@
  #include "imx1_bootstrap.h"
  #include "imx1_cs4_capture.h"
  #include "imx1_cs5_reset.h"
-@@ -223,6 +225,42 @@
+@@ -223,6 +225,42 @@ struct Imx1MachineDiagnosticSink {
      void* context = nullptr;
  };
  void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
@@ -1135,9 +1230,11 @@
  void imx1MachineStop(Imx1Machine*);
  // One process-owned CPU with optional bootstrap registers/RAM and qualified interrupt inputs.
  Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+index 63db4b0..d738adc 100644
 --- a/src/uarm/uarm/imx1_bootstrap.h
 +++ b/src/uarm/uarm/imx1_bootstrap.h
-@@ -152,6 +152,39 @@
+@@ -152,6 +152,39 @@ class Imx1Bootstrap {
          return (address >= 0x00300000 && address < 0x00400000) ||
                 (address >= 0x08000000 && address < 0x10000000);
      }
@@ -1177,7 +1274,7 @@
  
     private:
      bool referenceRatioSupported(uint64_t denominator) const {
-@@ -226,6 +259,10 @@
+@@ -226,6 +259,10 @@ class Imx1Bootstrap {
      Imx1BootstrapAccess sdramAccess(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value);
  };
  
@@ -1188,9 +1285,11 @@
  const char* imx1BootstrapAccessName(Imx1BootstrapAccess access);
  
  #endif
+diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
+index 053a5c1..3c353b0 100644
 --- a/src/uarm/uarm/imx1_cgm.h
 +++ b/src/uarm/uarm/imx1_cgm.h
-@@ -53,6 +53,16 @@
+@@ -53,6 +53,16 @@ class Imx1Cgm {
      uint32_t perclk2Divider() const { return ((pcdr >> 4) & 15) + 1; }
      uint32_t perclk3Divider() const { return ((pcdr >> 16) & 127) + 1; }
      uint32_t perclk1Divider() const { return (pcdr & 15) + 1; }
@@ -1207,7 +1306,7 @@
  
     private:
      uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
-@@ -73,5 +83,8 @@
+@@ -73,5 +83,8 @@ class Imx1Cgm {
      bool mcuTimingUnknown = false;
      bool mcuRestartComplete = false;
  };
@@ -1216,9 +1315,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_cs4_capture.h b/src/uarm/uarm/imx1_cs4_capture.h
+index 810fbf1..577ab2a 100644
 --- a/src/uarm/uarm/imx1_cs4_capture.h
 +++ b/src/uarm/uarm/imx1_cs4_capture.h
-@@ -18,6 +18,10 @@
+@@ -18,6 +18,10 @@ class Imx1Cs4IndexedInputs {
          return bank < 0 || bank > 1 || index < 0 || index > 255 ? -1 : values[bank * 256 + index];
      }
      bool empty() const { return !supplied; }
@@ -1229,7 +1330,7 @@
     private:
      std::array<int16_t,512> values{};
      unsigned supplied = 0;
-@@ -54,12 +58,23 @@
+@@ -54,12 +58,23 @@ class Imx1Cs4Capture {
          }
          return Imx1BootstrapAccess::ok;
      }
@@ -1253,9 +1354,11 @@
  
  struct Imx1ProbeCs4Event {
      uint64_t step;
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+index be93050..dcdcdeb 100644
 --- a/src/uarm/uarm/imx1_cs5_configuration.h
 +++ b/src/uarm/uarm/imx1_cs5_configuration.h
-@@ -48,6 +48,18 @@
+@@ -48,6 +48,18 @@ class Imx1Cs5Configuration {
          timeFraction = {};
          waitCpuFraction = {};
      }
@@ -1274,7 +1377,7 @@
      bool referencePeriodSupported(Imx1PllRatio period) const {
          return !clocks.programmed() || timeFraction.supports(uint64_t(period.denominator) * 64);
      }
-@@ -372,6 +384,9 @@
+@@ -372,6 +384,9 @@ class Imx1Cs5Configuration {
      bool selected = false, programmed = false;
      uint8_t defaults = 0, interfaceMode = 0;
  };
@@ -1284,9 +1387,11 @@
  
  struct Imx1ProbeCs5ConfigurationEvent {
      uint64_t step;
+diff --git a/src/uarm/uarm/imx1_cs5_reset.h b/src/uarm/uarm/imx1_cs5_reset.h
+index edf1968..8a5d3b6 100644
 --- a/src/uarm/uarm/imx1_cs5_reset.h
 +++ b/src/uarm/uarm/imx1_cs5_reset.h
-@@ -28,12 +28,19 @@
+@@ -28,12 +28,19 @@ class Imx1Cs5Reset {
          phase = (phase + 1) % 5;
          return Imx1BootstrapAccess::ok;
      }
@@ -1306,9 +1411,11 @@
  
  struct Imx1ProbeCs5ResetEvent {
      uint64_t step;
+diff --git a/src/uarm/uarm/imx1_eim.h b/src/uarm/uarm/imx1_eim.h
+index a3803f5..77de421 100644
 --- a/src/uarm/uarm/imx1_eim.h
 +++ b/src/uarm/uarm/imx1_eim.h
-@@ -33,6 +33,10 @@
+@@ -33,6 +33,10 @@ class Imx1Eim {
          if ((upper[5] & 0x3f00) == 0x3f00 && size > bytes) return Imx1EimAccess::width;
          return Imx1EimAccess::ok;
      }
@@ -1319,7 +1426,7 @@
  
     private:
      uint32_t upper[6] = {0x3e00, 0, 0, 0, 0, 0};
-@@ -40,5 +44,8 @@
+@@ -40,5 +44,8 @@ class Imx1Eim {
      bool bootWidthKnown = false;
      uint32_t configuration = 0;
  };
@@ -1328,9 +1435,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_gpio.h b/src/uarm/uarm/imx1_gpio.h
+index 7512f4f..d74e5af 100644
 --- a/src/uarm/uarm/imx1_gpio.h
 +++ b/src/uarm/uarm/imx1_gpio.h
-@@ -46,6 +46,13 @@
+@@ -46,6 +46,13 @@ class Imx1Gpio {
              if ((outputs & (1u << pin)) && ((r[pin < 16 ? 1 : 2] >> ((pin % 16) * 2)) & 3) != 3) return false;
          return true;
      }
@@ -1344,7 +1453,7 @@
      static const char* registerName(uint32_t address);
  
     private:
-@@ -64,5 +71,8 @@
+@@ -64,5 +71,8 @@ class Imx1Gpio {
      static void resolvePad(Port& port);
      static Imx1GpioAccess updateInterrupts(Port& next, const Port& old, unsigned index, bool sampleEvent);
  };
@@ -1353,9 +1462,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_acquisition.h b/src/uarm/uarm/imx1_graphics_acquisition.h
+index d963098..eefa978 100644
 --- a/src/uarm/uarm/imx1_graphics_acquisition.h
 +++ b/src/uarm/uarm/imx1_graphics_acquisition.h
-@@ -50,6 +50,15 @@
+@@ -50,6 +50,15 @@ class Imx1GraphicsAcquisition {
          fifo = capturedRecords;
      }
      uint32_t queued() const { return count; }
@@ -1371,7 +1482,7 @@
      uint64_t deadlineRemaining() const { return remaining; }
      Imx1BootstrapAccess access(uint32_t, uint32_t a, uint32_t size, bool write, uint32_t& v) {
          using A = Imx1BootstrapAccess;
-@@ -127,4 +136,7 @@
+@@ -127,4 +136,7 @@ class Imx1GraphicsAcquisition {
      uint32_t count = 0, head = 0, capturedCount = 0, selectedSource = 3;
      uint64_t remaining = 0;
  };
@@ -1379,9 +1490,11 @@
 +static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_clocks.h b/src/uarm/uarm/imx1_graphics_clocks.h
+index 6bf40fa..a351c07 100644
 --- a/src/uarm/uarm/imx1_graphics_clocks.h
 +++ b/src/uarm/uarm/imx1_graphics_clocks.h
-@@ -22,6 +22,9 @@
+@@ -22,6 +22,9 @@ struct Imx1GraphicsFraction {
          denominator = common;
          return n / d + fraction / common;
      }
@@ -1391,7 +1504,7 @@
  };
  
  // Nominal virtual analogue policy. Frequencies and deadlines use guest time only.
-@@ -32,6 +35,13 @@
+@@ -32,6 +35,13 @@ class Imx1GraphicsClocks {
      static constexpr uint32_t testPrescaler = 4;
      static bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
      void reset() { *this = {}; }
@@ -1405,7 +1518,7 @@
      bool programmed() const { return started; }
      uint32_t word(uint32_t offset) const { return words[(offset - 0x80) / 4]; }
      uint16_t count() const { return counter; }
-@@ -249,4 +259,7 @@
+@@ -249,4 +259,7 @@ class Imx1GraphicsClocks {
      uint16_t counter = 0;
      bool started = false, gpuBusy = false, normal = false;
  };
@@ -1413,9 +1526,11 @@
 +static_assert(sizeof(Imx1GraphicsClocks) == 104, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
+index f1e7cf3..aa20a77 100644
 --- a/src/uarm/uarm/imx1_graphics_commands.h
 +++ b/src/uarm/uarm/imx1_graphics_commands.h
-@@ -13,6 +13,31 @@
+@@ -13,6 +13,31 @@ class Imx1GraphicsCommands {
     public:
      void reset() { *this = {}; }
      uint64_t duration() const { return ticks; }
@@ -1447,7 +1562,7 @@
      Imx1BootstrapAccess prepare(const Imx1Cs5Configuration& configuration,
                                  const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
          // Candidate decoding owns its inline pixels and publishes nothing on rejection.
-@@ -342,4 +367,7 @@
+@@ -342,4 +367,7 @@ class Imx1GraphicsCommands {
      uint32_t queuedWords = 0;
      uint64_t ticks = 0;
  };
@@ -1455,9 +1570,11 @@
 +static_assert(sizeof(Imx1GraphicsCommands) == 10336, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_controller.h b/src/uarm/uarm/imx1_graphics_controller.h
+index e712878..0880132 100644
 --- a/src/uarm/uarm/imx1_graphics_controller.h
 +++ b/src/uarm/uarm/imx1_graphics_controller.h
-@@ -18,6 +18,10 @@
+@@ -18,6 +18,10 @@ class Imx1GraphicsController {
      bool externalInitialised() const { return initialised && delay == 0; }
      bool configured() const { return stage >= 2; }
      bool ready() const { return stage == 3 && externalInitialised(); }
@@ -1468,7 +1585,7 @@
      Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
          if (size != 4) return Imx1BootstrapAccess::width;
          if (address == 0x16010194 && pc == 0x200c5f20 && write) {
-@@ -114,4 +118,7 @@
+@@ -114,4 +118,7 @@ class Imx1GraphicsController {
      uint32_t stage = 0, externalStep = 0, delay = 0;
      bool initialised = false;
  };
@@ -1476,9 +1593,11 @@
 +static_assert(sizeof(Imx1GraphicsController) == 32, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+index 0f6d47d..1353be3 100644
 --- a/src/uarm/uarm/imx1_graphics_display.h
 +++ b/src/uarm/uarm/imx1_graphics_display.h
-@@ -25,6 +25,28 @@
+@@ -25,6 +25,28 @@ class Imx1GraphicsDisplay {
          return false;
      }
      void reset() { *this = {}; }
@@ -1507,7 +1626,7 @@
      uint32_t stagedWord(uint32_t offset) const { return offset >= 0x410 && offset <= 0x59c && !(offset & 3) ? staged[index(offset)] : 0; }
      uint32_t activeWord(uint32_t offset) const { return offset >= 0x410 && offset <= 0x59c && !(offset & 3) ? active[index(offset)] : 0; }
      bool latchPending() const { return pending; }
-@@ -362,4 +384,7 @@
+@@ -362,4 +384,7 @@ class Imx1GraphicsDisplay {
      bool pixelSource = true, systemSource = true, activeRequested = false, latchAtFrame = false;
      bool pclk = false, sclk = false;
  };
@@ -1515,9 +1634,11 @@
 +static_assert(sizeof(Imx1GraphicsDisplay) == 1504, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_engine.h b/src/uarm/uarm/imx1_graphics_engine.h
+index 1386506..7706e60 100644
 --- a/src/uarm/uarm/imx1_graphics_engine.h
 +++ b/src/uarm/uarm/imx1_graphics_engine.h
-@@ -51,6 +51,21 @@
+@@ -51,6 +51,21 @@ class Imx1GraphicsEngine {
          optionRead = false;
      }
      uint32_t nativeOptionWord() const { return nativeOption; }
@@ -1539,7 +1660,7 @@
      Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,
                                 uint32_t size, bool write, uint32_t& value) {
          using A = Imx1BootstrapAccess;
-@@ -174,4 +189,7 @@
+@@ -174,4 +189,7 @@ class Imx1GraphicsEngine {
      uint32_t nativeOption = 0;
      bool optionRead = false;
  };
@@ -1547,9 +1668,11 @@
 +static_assert(sizeof(Imx1GraphicsEngine) == 96, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_frame.h b/src/uarm/uarm/imx1_graphics_frame.h
+index df5ef4e..29996e2 100644
 --- a/src/uarm/uarm/imx1_graphics_frame.h
 +++ b/src/uarm/uarm/imx1_graphics_frame.h
-@@ -17,6 +17,28 @@
+@@ -17,6 +17,28 @@ class Imx1GraphicsFrame {
          ++generation;
      }
      bool lcdEnabled() const { return enabled; }
@@ -1578,7 +1701,7 @@
      uint32_t width() const { return valid ? surface.width : 0; }
      uint32_t height() const { return valid ? surface.height : 0; }
      const uint32_t* peekFrame() const { return valid && enabled ? pixels.data() : nullptr; }
-@@ -97,4 +119,7 @@
+@@ -97,4 +119,7 @@ class Imx1GraphicsFrame {
      uint32_t firstRow = 0, lastRow = 0;
      bool enabled = false, valid = false, pending = false, acquired = false;
  };
@@ -1586,9 +1709,11 @@
 +static_assert(sizeof(Imx1GraphicsFrame) == 136, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_gpio.h b/src/uarm/uarm/imx1_graphics_gpio.h
+index 01e482e..b0305a0 100644
 --- a/src/uarm/uarm/imx1_graphics_gpio.h
 +++ b/src/uarm/uarm/imx1_graphics_gpio.h
-@@ -92,6 +92,12 @@
+@@ -92,6 +92,12 @@ class Imx1GraphicsGpio {
          }
          return Imx1BootstrapAccess::ok;
      }
@@ -1601,7 +1726,7 @@
  
     private:
      // Under admitted selector ffff, direction 1 drives the latch at an ideal pad.
-@@ -100,5 +106,8 @@
+@@ -100,5 +106,8 @@ class Imx1GraphicsGpio {
      bool slotRead = false;
      uint32_t slotData = 0;
  };
@@ -1610,9 +1735,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_interrupts.h b/src/uarm/uarm/imx1_graphics_interrupts.h
+index 8a21779..c012e01 100644
 --- a/src/uarm/uarm/imx1_graphics_interrupts.h
 +++ b/src/uarm/uarm/imx1_graphics_interrupts.h
-@@ -65,9 +65,14 @@
+@@ -65,9 +65,14 @@ class Imx1GraphicsInterrupts {
          }
          return A::ok;
      }
@@ -1627,9 +1754,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_lookup.h b/src/uarm/uarm/imx1_graphics_lookup.h
+index 6083540..dd01552 100644
 --- a/src/uarm/uarm/imx1_graphics_lookup.h
 +++ b/src/uarm/uarm/imx1_graphics_lookup.h
-@@ -53,9 +53,18 @@
+@@ -53,9 +53,18 @@ class Imx1GraphicsLookup {
          }
          return Imx1BootstrapAccess::ok;
      }
@@ -1648,9 +1777,11 @@
 +static_assert(sizeof(Imx1GraphicsLookup) == 3080, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_memory.h b/src/uarm/uarm/imx1_graphics_memory.h
+index c6f17a2..26708c8 100644
 --- a/src/uarm/uarm/imx1_graphics_memory.h
 +++ b/src/uarm/uarm/imx1_graphics_memory.h
-@@ -38,6 +38,17 @@
+@@ -38,6 +38,17 @@ class Imx1GraphicsMemory {
              if (change.generation == generation) change = {};
          }
      }
@@ -1668,7 +1799,7 @@
      void clearDirty(unsigned bank) { acknowledgeDirty(bank, Consumer::legacy, dirty(bank).generation); }
      bool contains(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                    uint32_t address, uint64_t length, unsigned* bank = nullptr, uint32_t* offset = nullptr) const {
-@@ -138,4 +149,7 @@
+@@ -138,4 +149,7 @@ class Imx1GraphicsMemory {
      std::array<std::array<Dirty, 2>, unsigned(Consumer::count)> changes{};
      uint64_t generation = 0;
  };
@@ -1676,9 +1807,11 @@
 +static_assert(sizeof(Imx1GraphicsMemory) == 248, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_sd.h b/src/uarm/uarm/imx1_graphics_sd.h
+index e0c9c0a..67d5ae4 100644
 --- a/src/uarm/uarm/imx1_graphics_sd.h
 +++ b/src/uarm/uarm/imx1_graphics_sd.h
-@@ -12,6 +12,13 @@
+@@ -12,6 +12,13 @@ class Imx1GraphicsSd {
                 (address >= 0x16202000 && address < 0x16202200);
      }
      void reset() { *this = {}; }
@@ -1692,7 +1825,7 @@
      void advance(uint64_t ticks) {
          if (resetHeld) resetElapsed = std::min<uint64_t>(32, resetElapsed + std::min<uint64_t>(ticks,32));
          if (clockRemaining) {
-@@ -139,4 +146,7 @@
+@@ -139,4 +146,7 @@ class Imx1GraphicsSd {
      uint64_t clockRemaining = 0, commandRemaining = 0, resetElapsed = 0;
      bool commandPending = false, resetHeld = false, released = false;
  };
@@ -1700,9 +1833,11 @@
 +static_assert(sizeof(Imx1GraphicsSd) == 80, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_graphics_windows.h b/src/uarm/uarm/imx1_graphics_windows.h
+index b130c2e..9d622c2 100644
 --- a/src/uarm/uarm/imx1_graphics_windows.h
 +++ b/src/uarm/uarm/imx1_graphics_windows.h
-@@ -42,6 +42,11 @@
+@@ -42,6 +42,11 @@ class Imx1GraphicsWindows {
          }
          return Imx1BootstrapAccess::unmapped;
      }
@@ -1714,7 +1849,7 @@
     private:
      Range range(unsigned index) const {
          return {(words[index] & 0xffff) << 8, ((words[index] >> 16) + 1) * 256 - 1, known[index]};
-@@ -53,4 +58,7 @@
+@@ -53,4 +58,7 @@ class Imx1GraphicsWindows {
      std::array<uint32_t, 6> words{};
      std::array<bool, 6> known{};
  };
@@ -1722,9 +1857,11 @@
 +static_assert(sizeof(Imx1GraphicsWindows) == 32, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_i2c.h b/src/uarm/uarm/imx1_i2c.h
+index bc2e394..ef281ba 100644
 --- a/src/uarm/uarm/imx1_i2c.h
 +++ b/src/uarm/uarm/imx1_i2c.h
-@@ -17,12 +17,20 @@
+@@ -17,12 +17,20 @@ struct Imx1I2cReply {
  };
  // Single master, initially idle, no clock stretching. Missing slaves have unknown responses.
  // A bus implementation supplies a measured/modelled response, including an explicit NACK.
@@ -1745,7 +1882,7 @@
  };
  using Imx1I2cObserver = void (*)(void*, const Imx1I2cTransfer&, Imx1I2cResponse);
  
-@@ -46,6 +54,15 @@
+@@ -46,6 +54,15 @@ class Imx1I2c {
      uint32_t statusValue() const { return status; }
      uint32_t dividerValue() const { return frequency; }
      const Imx1I2cTransfer& pendingTransfer() const { return pending; }
@@ -1761,7 +1898,7 @@
      static const char* registerName(uint32_t address);
  
     private:
-@@ -61,6 +78,9 @@
+@@ -61,6 +78,9 @@ class Imx1I2c {
      void notify(const Imx1I2cTransfer&, Imx1I2cResponse) const;
      void launch(Imx1I2cTransfer transfer);
  };
@@ -1771,9 +1908,51 @@
  const char* imx1I2cPhaseName(Imx1I2cPhase);
  const char* imx1I2cResponseName(Imx1I2cResponse);
  
+diff --git a/src/uarm/uarm/imx1_i2c_read_window.h b/src/uarm/uarm/imx1_i2c_read_window.h
+index b04f08c..3d8465c 100644
+--- a/src/uarm/uarm/imx1_i2c_read_window.h
++++ b/src/uarm/uarm/imx1_i2c_read_window.h
+@@ -4,6 +4,7 @@
+ #include <array>
+ 
+ #include "imx1_i2c.h"
++#include "machine_state_archive.h"
+ 
+ // Explicit diagnostic read window, without a physical part or capacity claim.
+ class Imx1I2cReadWindow : public Imx1I2cBus {
+@@ -42,6 +43,27 @@ class Imx1I2cReadWindow : public Imx1I2cBus {
+         return unknown();
+     }
+ 
++    // FNV-1a of the image, so a state made with other bytes is refused.
++    uint32_t stateIdentity() const override {
++        uint32_t hash = 2166136261u;
++        for (const uint8_t byte : bytes) hash = (hash ^ byte) * 16777619u;
++        return hash ? hash : 1;
++    }
++    void saveState(StateWriter& a) const override {
++        uint32_t position = cursor;
++        State protocol = state;
++        a.Do32(position).DoEnum(protocol, 8);
++    }
++    bool loadState(StateReader& a, bool commit) override {
++        uint32_t position = 0;
++        State protocol = State::idle;
++        // The cursor stops one past the last byte.
++        a.Do32(position).DoEnum(protocol, 8).Require(position <= bytes.size(), "cursor");
++        if (!a.complete()) return false;
++        if (commit) { cursor = position; state = protocol; }
++        return true;
++    }
++
+    private:
+     enum class State { idle, writeAddress, offset, offsetSet, readAddress, reading, ended, blocked };
+     const Image bytes;
+diff --git a/src/uarm/uarm/imx1_mmcsd.h b/src/uarm/uarm/imx1_mmcsd.h
+index 5ff5dea..4c9757f 100644
 --- a/src/uarm/uarm/imx1_mmcsd.h
 +++ b/src/uarm/uarm/imx1_mmcsd.h
-@@ -134,6 +134,14 @@
+@@ -134,6 +134,14 @@ class Imx1Mmcsd {
          if (index >= 10) staged |= 1u << (index - 10);
          return A::ok;
      }
@@ -1788,7 +1967,7 @@
     private:
      void resetRegisters() {
          control = 0; recovery = 0; ready = false;
-@@ -149,5 +157,8 @@
+@@ -149,5 +157,8 @@ class Imx1Mmcsd {
      bool running = false, interrupt = false, responseExpected = false;
      bool emptySlot = false, resetAsserted = false, ready = false;
  };
@@ -1797,9 +1976,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_pwm.h b/src/uarm/uarm/imx1_pwm.h
+index 136b6c6..a12c1ef 100644
 --- a/src/uarm/uarm/imx1_pwm.h
 +++ b/src/uarm/uarm/imx1_pwm.h
-@@ -34,6 +34,14 @@
+@@ -34,6 +34,14 @@ class Imx1Pwm {
      }
      // -1 means the active sample has not been supplied.
      int output() const;
@@ -1814,7 +1995,7 @@
  
     private:
      uint32_t resetRemaining = 0;
-@@ -49,5 +57,8 @@
+@@ -49,5 +57,8 @@ class Imx1Pwm {
      void newPeriod();
      void freeze();
  };
@@ -1823,9 +2004,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_rtc.h b/src/uarm/uarm/imx1_rtc.h
+index 6b1578f..b2d09f0 100644
 --- a/src/uarm/uarm/imx1_rtc.h
 +++ b/src/uarm/uarm/imx1_rtc.h
-@@ -29,6 +29,12 @@
+@@ -29,6 +29,12 @@ class Imx1Rtc {
      // The normal watchdog input is absent or at most CLK32 / 16384 in this subset.
      bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
      bool preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const;
@@ -1838,7 +2021,7 @@
  
     private:
      bool known = false, used = false, elapsed = false;
-@@ -38,4 +44,7 @@
+@@ -38,4 +44,7 @@ class Imx1Rtc {
      uint32_t divisor() const { return ((control >> 5) & 3) == 1 ? 32000 : 32768; }
      void advanceTicks(uint64_t ticks);
  };
@@ -1846,9 +2029,11 @@
 +static_assert(sizeof(Imx1Rtc) == 48, "update state() and stateVersion");
 +#endif
  #endif
+diff --git a/src/uarm/uarm/imx1_sysctrl.h b/src/uarm/uarm/imx1_sysctrl.h
+index 6ecda00..6affd4b 100644
 --- a/src/uarm/uarm/imx1_sysctrl.h
 +++ b/src/uarm/uarm/imx1_sysctrl.h
-@@ -11,11 +11,18 @@
+@@ -11,11 +11,18 @@ class Imx1Sysctrl {
      bool dmaClockEnabled() const { return gccr & 8; }
      Imx1SysctrlAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
      static const char* registerName(uint32_t address);
@@ -1867,9 +2052,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_timer.h b/src/uarm/uarm/imx1_timer.h
+index ad63fe0..f7164eb 100644
 --- a/src/uarm/uarm/imx1_timer.h
 +++ b/src/uarm/uarm/imx1_timer.h
-@@ -17,6 +17,10 @@
+@@ -17,6 +17,10 @@ class Imx1Timer {
      bool enabled() const { return control & 1; }
      bool outputIsolationRequired() const { return enabled() && (control & 0x20); }
      bool interruptOutput() const { return (control & 0x10) && (status & 1); }
@@ -1880,7 +2067,7 @@
      static const char* registerName(uint32_t address);
  
     private:
-@@ -24,5 +28,8 @@
+@@ -24,5 +28,8 @@ class Imx1Timer {
      uint32_t counter = 0, status = 0, statusRead = 0;
      uint32_t phase = 0;
  };
@@ -1889,9 +2076,11 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/imx1_watchdog.h b/src/uarm/uarm/imx1_watchdog.h
+index d09299a..75aa189 100644
 --- a/src/uarm/uarm/imx1_watchdog.h
 +++ b/src/uarm/uarm/imx1_watchdog.h
-@@ -21,6 +21,12 @@
+@@ -21,6 +21,12 @@ class Imx1Watchdog {
      }
      static const char* registerName(uint32_t address);
      static constexpr uint64_t interruptSource = uint64_t(1) << 63;
@@ -1904,7 +2093,7 @@
  
     private:
      uint32_t control = 0, service = 0;
-@@ -28,5 +34,8 @@
+@@ -28,5 +34,8 @@ class Imx1Watchdog {
      uint64_t remainingTicks = 0, referencePhase = 0, referenceDenominator = 1;
      void reloadBound();
  };
@@ -1913,30 +2102,39 @@
 +#endif
  
  #endif
+diff --git a/src/uarm/uarm/jit_dynarmic.cpp b/src/uarm/uarm/jit_dynarmic.cpp
+index 6dde8a0..976b1bc 100644
 --- a/src/uarm/uarm/jit_dynarmic.cpp
 +++ b/src/uarm/uarm/jit_dynarmic.cpp
-@@ -871,6 +871,11 @@
-     *instructions = j->env.instructions;
+@@ -1244,6 +1244,13 @@ void jitExecutionCounts(const FrondJit *j, uint64_t *blocks, uint64_t *instructi
+     }
  }
  
++// The counts go to the privileged level, the user level's start again.
 +void jitSetExecutionCounts(FrondJit *j, uint64_t blocks, uint64_t instructions) {
-+    j->env.blocks = blocks;
-+    j->env.instructions = instructions;
++    jitPrvEach(j, [](Env &e) { e.blocks = e.instructions = 0; });
++    j->level[1]->env.blocks = blocks;
++    j->level[1]->env.instructions = instructions;
 +}
 +
  void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
-     const A32::Jit::CompileStats c = j->jit->GetCompileStats();
-     *stale = c.stale;
+     *stale = *aheadCompiled = *aheadUsed = 0;
+     for (const auto &l : j->level) {
+diff --git a/src/uarm/uarm/jit_dynarmic.h b/src/uarm/uarm/jit_dynarmic.h
+index 2887257..4c3368c 100644
 --- a/src/uarm/uarm/jit_dynarmic.h
 +++ b/src/uarm/uarm/jit_dynarmic.h
-@@ -25,6 +25,7 @@
+@@ -38,6 +38,7 @@ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep);
  // does the same). Without it, blocks compile in the background and runs don't repeat.
  void jitSetSync(bool sync);
  void jitExecutionCounts(const FrondJit* jit, uint64_t* blocks, uint64_t* instructions);
 +void jitSetExecutionCounts(FrondJit* jit, uint64_t blocks, uint64_t instructions);
  void jitDestroy(FrondJit *jit);
+ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
  // Runs up to about cycles instructions. Returns how many ran, at most
- // cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.
+diff --git a/src/uarm/uarm/machine_state_archive.h b/src/uarm/uarm/machine_state_archive.h
+new file mode 100644
+index 0000000..84fac2b
 --- /dev/null
 +++ b/src/uarm/uarm/machine_state_archive.h
 @@ -0,0 +1,249 @@
@@ -2189,109 +2387,3 @@
 +}
 +
 +#endif
---- a/src/uarm/uarm/MMU.cpp
-+++ b/src/uarm/uarm/MMU.cpp
-@@ -2,6 +2,7 @@
- 
- #include "MMU.h"
- #include "MMU_internal.h"
-+#include "arm920_state.h"
- 
- #include <cstdlib>
- #include <cstring>
-@@ -499,6 +500,46 @@
- template void mmuSave<SavestateProbe<ChunkType>>(ArmMmu *mmu, SavestateProbe<ChunkType> &savestate);
- template void mmuLoad<SavestateLoader<ChunkType>>(ArmMmu *mmu, SavestateLoader<ChunkType> &loader);
- 
-+void mmuArm920Capture(const ArmMmu* mmu, Arm920SavedState& s) {
-+    s.transTablPA = mmu->transTablPA;
-+    s.domainCfg = mmu->domainCfg;
-+    s.mmuS = mmu->S;
-+    s.mmuR = mmu->R;
-+    s.tlbRevision = mmu->revision;
-+    s.tlbFlushes = mmu->flushes;
-+    s.tlb.clear();
-+    for (uint32_t i = 0; i < TLB_SIZE; ++i) {
-+        const auto& e = mmu->tlb[i];
-+        if (e.revision != mmu->revision) continue;
-+        s.tlb.push_back(i);
-+        s.tlb.push_back(uint32_t(e.pa) | uint32_t(e.ap) << 20 | uint32_t(e.domain) << 22 |
-+                        uint32_t(e.c) << 26 | uint32_t(e.section) << 27 | uint32_t(e.b) << 28);
-+    }
-+}
-+
-+void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
-+    mmu->transTablPA = s.transTablPA;
-+    mmu->domainCfg = s.domainCfg;
-+    mmu->S = s.mmuS;
-+    mmu->R = s.mmuR;
-+    // Revision 0 is never current, so every other entry is dead.
-+    memset(mmu->tlb, 0, sizeof(mmu->tlb));
-+    mmu->revision = s.tlbRevision;
-+    mmu->flushes = s.tlbFlushes;
-+    for (size_t n = 0; n + 1 < s.tlb.size(); n += 2) {
-+        const uint32_t packed = s.tlb[n + 1];
-+        auto& e = mmu->tlb[s.tlb[n] & (TLB_SIZE - 1)];
-+        e.pa = packed & 0xfffff;
-+        e.ap = (packed >> 20) & 3;
-+        e.domain = (packed >> 22) & 15;
-+        e.c = (packed >> 26) & 1;
-+        e.section = (packed >> 27) & 1;
-+        e.b = (packed >> 28) & 1;
-+        e.revision = s.tlbRevision;
-+    }
-+    mmuPrvPermChanged(mmu);
-+}
-+
- void mmuEmitDiagnostic(const ArmMmu* mmu, const ArmDiagnosticSink& sink) {
-     const uint32_t state[] = {mmu->transTablPA,mmu->domainCfg,mmu->S,mmu->R,mmu->revision,mmu->flushes};
-     sink.emit("mmu",state,6);
---- a/src/uarm/uarm/MMU.h
-+++ b/src/uarm/uarm/MMU.h
-@@ -70,4 +70,8 @@
- void mmuLoad(struct ArmMmu *mmu, T &loader);
- 
- void mmuEmitDiagnostic(const ArmMmu*, const ArmDiagnosticSink&);
-+// Registers and the live TLB entries. Apply keeps the saved revision and flush count.
-+struct Arm920SavedState;
-+void mmuArm920Capture(const ArmMmu*, Arm920SavedState&);
-+void mmuArm920Apply(ArmMmu*, const Arm920SavedState&);
- #endif
---- a/src/uarm/uarm/imx1_i2c_read_window.h
-+++ b/src/uarm/uarm/imx1_i2c_read_window.h
-@@ -4,6 +4,7 @@
- #include <array>
- 
- #include "imx1_i2c.h"
-+#include "machine_state_archive.h"
- 
- // Explicit diagnostic read window, without a physical part or capacity claim.
- class Imx1I2cReadWindow : public Imx1I2cBus {
-@@ -42,6 +43,27 @@
-         return unknown();
-     }
- 
-+    // FNV-1a of the image, so a state made with other bytes is refused.
-+    uint32_t stateIdentity() const override {
-+        uint32_t hash = 2166136261u;
-+        for (const uint8_t byte : bytes) hash = (hash ^ byte) * 16777619u;
-+        return hash ? hash : 1;
-+    }
-+    void saveState(StateWriter& a) const override {
-+        uint32_t position = cursor;
-+        State protocol = state;
-+        a.Do32(position).DoEnum(protocol, 8);
-+    }
-+    bool loadState(StateReader& a, bool commit) override {
-+        uint32_t position = 0;
-+        State protocol = State::idle;
-+        // The cursor stops one past the last byte.
-+        a.Do32(position).DoEnum(protocol, 8).Require(position <= bytes.size(), "cursor");
-+        if (!a.complete()) return false;
-+        if (commit) { cursor = position; state = protocol; }
-+        return true;
-+    }
-+
-    private:
-     enum class State { idle, writeAddress, offset, offsetSet, readAddress, reading, ended, blocked };
-     const Image bytes;

@@ -50,6 +50,8 @@ data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Bo
 data class MachineSettings(
     val size: ScreenSize = ScreenSize.FIT,
     val smoothing: Boolean = false,
+    // ARM devices: a MIPS readout in the corner of the screen.
+    val showMips: Boolean = false,
     val sound: Boolean = true,
     val fastAudio: Boolean = false,
     val microphone: Boolean = false,
@@ -78,7 +80,7 @@ data class MachineSettings(
     // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
     val wifiModule: Boolean = true,
 ) {
-    fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing)
+    fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
@@ -132,6 +134,7 @@ data class MachineSettings(
             return MachineSettings(
                 size = ScreenSize.entries.firstOrNull { it.name == json.optString("size") } ?: fallback.size,
                 smoothing = json.optBoolean("smoothing", fallback.smoothing),
+                showMips = json.optBoolean("showMips", fallback.showMips),
                 sound = json.optBoolean("sound", fallback.sound),
                 fastAudio = json.optBoolean("fastAudio", fallback.fastAudio),
                 microphone = json.optBoolean("microphone", fallback.microphone),

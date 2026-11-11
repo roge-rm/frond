@@ -1,0 +1,26 @@
+--- a/src/dynarmic/common/frond_compile_thread.h
++++ b/src/dynarmic/common/frond_compile_thread.h
+@@ -279,6 +279,12 @@
+             stats.stale++;
+             return;
+         }
++        // One TakeDone batch can queue a target that is in the same batch, so the same block
++        // can be kept twice. The first copy stays; a second index entry would outlive it.
++        if (ready.count(job->location.Value())) {
++            stats.stale++;
++            return;
++        }
+         while (ready.size() >= max_ready && !ready_order.empty()) {
+             const auto [key, seq] = ready_order.front();
+             ready_order.pop_front();
+@@ -427,6 +433,10 @@
+             auto it = ready_by_pc.lower_bound(first > ready_span ? first - ready_span : 0);
+             while (it != ready_by_pc.end() && it->first <= last) {
+                 const auto r = ready.find(it->second);
++                if (r == ready.end()) {
++                    it = ready_by_pc.erase(it);
++                    continue;
++                }
+                 if (r->second->HasCode() && r->second->last_pc >= first) {
+                     stats.stale++;
+                     ready.erase(r);

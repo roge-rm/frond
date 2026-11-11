@@ -1,6 +1,7 @@
 // The JIT compile thread's bookkeeping, with asserts on. A block whose first instruction is
 // left to the interpreter ends where it starts (last_pc is first_pc - 1); taking it off the
-// done list while an invalidation is logged must not look the empty range up.
+// done list while an invalidation is logged must not look the empty range up. A block kept
+// ready twice is kept once.
 #undef NDEBUG
 
 #include <cstdio>
@@ -67,6 +68,34 @@ int main() {
         seen++;
     }
     Expect(seen == 3, "three jobs done");
+
+    // The same ahead block kept ready twice (one TakeDone batch queued it again): the second
+    // copy is dropped, so an invalidation over it finds every indexed block.
+    const std::uint32_t twice_pc = 0x4000;
+    for (int i = 0; i < 2; i++) {
+        auto job = std::make_unique<Thread::Job>();
+        job->location = IR::LocationDescriptor{twice_pc};
+        job->ahead = true;
+        job->first_pc = twice_pc;
+        job->last_pc = twice_pc + 0x0f;
+        job->status = Thread::Status::Done;
+        thread.KeepReady(std::move(job));
+    }
+    Expect(thread.TakeReady(IR::LocationDescriptor{twice_pc}) != nullptr, "kept block taken");
+    Expect(thread.TakeReady(IR::LocationDescriptor{twice_pc}) == nullptr, "kept only once");
+    boost::icl::interval_set<std::uint32_t> twice;
+    twice.add(boost::icl::discrete_interval<std::uint32_t>::closed(twice_pc, twice_pc + 3));
+    thread.KeepReady([&] {
+        auto job = std::make_unique<Thread::Job>();
+        job->location = IR::LocationDescriptor{miss_pc};
+        job->ahead = true;
+        job->first_pc = miss_pc;
+        job->last_pc = miss_pc + 0x0f;
+        job->status = Thread::Status::Done;
+        return job;
+    }());
+    thread.Invalidated(twice);
+    Expect(thread.TakeReady(IR::LocationDescriptor{miss_pc}) != nullptr, "block outside the invalidation still ready");
 
     if (failures) {
         return 1;

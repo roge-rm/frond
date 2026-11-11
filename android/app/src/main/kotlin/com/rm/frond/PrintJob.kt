@@ -11,7 +11,9 @@ object PrintJob {
         val port = words.firstOrNull() ?: return Port()
         if (port != UsbPort.OFF && port != UsbPort.PRINTER && port != UsbPort.WIFI) return Port()
         if (port != UsbPort.WIFI) return Port(true, port)
-        return Port(true, port, words.getOrNull(1) == "powered", "link=up" in words, words.firstOrNull { it.startsWith("ip=") }?.substring(3) ?: "")
+        // The core says ip=none until the guest has sent from its address.
+        val ip = words.firstOrNull { it.startsWith("ip=") }?.substring(3)?.takeIf { it != "none" } ?: ""
+        return Port(true, port, words.getOrNull(1) == "powered", "link=up" in words, ip)
     }
 
     // The Wi-Fi adapter's readout in the Connections sheet.
@@ -61,12 +63,13 @@ object PrintJob {
     class Pages(val renderable: Boolean, val reason: String, val pages: List<List<String>>)
 
     private val high = intArrayOf(
-        0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0xfffd, 0x017d, 0xfffd,
-        0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0x017e, 0x0178)
+        0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x2666, 0x2663, 0x2665,
+        0x2660, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0x017e, 0x0178)
 
     // CR, LF and CRLF end a line, form feed a page, tab goes to the next multiple of 8, lines wrap at 80
     // columns and pages hold 66 lines. A line ending exactly at a limit adds nothing until more text comes.
-    // Any other control byte means the job isn't plain text. 0x80-0xff read as Windows-1252, 0xa0 as a space.
+    // Any other control byte means the job isn't plain text. 0x80-0xff read as Windows-1252
+    // apart from 0x8d-0x90, the card suits Palm's fonts draw there, and 0xa0 as a space.
     fun render(data: ByteArray, size: Int = data.size): Pages {
         val pages = ArrayList<List<String>>()
         var page = ArrayList<String>()

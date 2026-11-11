@@ -2,6 +2,8 @@
 #include "RunningRules.h"
 #include <QApplication>
 #include <QCursor>
+#include <QLabel>
+#include <QRegularExpression>
 #include <QGuiApplication>
 #include <QMenuBar>
 #include <QTimer>
@@ -54,6 +56,14 @@ PalmHolder::PalmHolder(QWidget* parent) : QWidget(parent) {
     connect(pollTimer, &QTimer::timeout, this, &PalmHolder::poll);
     keySink = new KeySink(this);
     keySink->hide();
+    // A native window of its own, so it stays above the Palm's X window; the pointer goes through it.
+    mips = new QLabel(this);
+    mips->setObjectName("mipsReadout");
+    mips->setAttribute(Qt::WA_NativeWindow);
+    mips->setAttribute(Qt::WA_TransparentForMouseEvents);
+    mips->setAlignment(Qt::AlignCenter);
+    mips->setStyleSheet("QLabel { color: white; background: rgba(0, 0, 0, 150); padding: 1px 6px; font-size: 11px; }");
+    mips->hide();
     qApp->installEventFilter(this);
 }
 
@@ -106,6 +116,7 @@ bool PalmHolder::embed(quint64 id) {
 }
 
 void PalmHolder::release() {
+    mips->hide();
     pollTimer->stop();
     if (container) delete container.data();
     container.clear();
@@ -115,6 +126,38 @@ void PalmHolder::release() {
     buttonWasDown = false;
     wantPalm = true;
     wanted = {};
+}
+
+void PalmHolder::setMips(const QString& reply) {
+    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*MIPS)");
+    const auto match = figure.match(reply);
+    if (!container || !match.hasMatch()) { mips->hide(); return; }
+    mips->setText(tr("%1 MIPS").arg(qRound(match.captured(1).toDouble())));
+    mips->adjustSize();
+    placeMips();
+    mips->show();
+    if (auto* handle = mips->windowHandle()) {
+        handle->setFlag(Qt::WindowTransparentForInput, true);
+        handle->raise();
+    }
+}
+
+void PalmHolder::placeMips() {
+    if (!container) return;
+    // The core draws the device fitted and centred in its window, so the corner is the fitted rectangle's.
+    QRect area = container->geometry();
+    if (wanted.isValid() && area.width() > 0 && area.height() > 0) {
+        const double fit = std::min(double(area.width()) / wanted.width(), double(area.height()) / wanted.height());
+        const QSize drawn(qRound(wanted.width() * fit), qRound(wanted.height() * fit));
+        area = QRect(area.center() - QPoint(drawn.width() / 2, drawn.height() / 2), drawn);
+    }
+    const auto corner = area.bottomRight();
+    mips->move(corner.x() + 1 - mips->width() - 4, corner.y() + 1 - mips->height() - 4);
+}
+
+void PalmHolder::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (mips->isVisible()) { placeMips(); if (auto* handle = mips->windowHandle()) handle->raise(); }
 }
 
 void PalmHolder::setPalmSize(QSize size) {
@@ -245,4 +288,5 @@ bool PalmHolder::eventFilter(QObject* watched, QEvent* event) {
 
 void PalmHolder::raisePalm() {
     if (palm) palm->raise();
+    if (mips->isVisible()) if (auto* handle = mips->windowHandle()) handle->raise();
 }

@@ -23,7 +23,7 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device);
     QSlider* windowScale;
     QLabel* scaleLabel;
-    QCheckBox *smoothLcd, *audio, *fastAudio, *showKeyboard;
+    QCheckBox *smoothLcd, *showMips, *audio, *fastAudio, *showKeyboard;
     DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;

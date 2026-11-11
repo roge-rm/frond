@@ -440,7 +440,7 @@ deb: desktop out/frond-68k build/bluetooth-provider/emulator/btvirt bluetooth-op
 
 # This Frond's Bluetooth radio. The pinned BlueZ source is fetched once with
 # python3 tools/build-bluetooth-provider.py --fetch.
-build/bluetooth-provider/emulator/btvirt:
+build/bluetooth-provider/emulator/btvirt: tools/bluez-bdaddr.patch
 	python3 tools/build-bluetooth-provider.py --jobs $(BUILD_JOBS)
 
 # arm64 package for Raspberry Pi OS trixie, cross built in Docker. Needs Docker and the BlueZ
@@ -449,6 +449,9 @@ build/bluetooth-provider/emulator/btvirt:
 ARM64_JOBS ?= 10
 .PHONY: deb-arm64
 deb-arm64: build/dynarmic-trial/src/.frond-source
+# btvirt is cross built from the BlueZ checkout as it stands, so it must carry the current patch.
+	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
+		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
 	rm -rf build/arm64/source
 	python3 tools/prepare.py --destination $(CURDIR)/build/arm64/source
 	docker build -t frond-arm64-cross tools/arm64
@@ -456,6 +459,27 @@ deb-arm64: build/dynarmic-trial/src/.frond-source
 		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
 		-v $(CURDIR):/src -v $(CURDIR)/build/arm64/source:/src/build/source \
 		-w /src frond-arm64-cross tools/arm64/build.sh
+
+# AppImages for x86-64 and arm64, built in Docker on Debian 12 so they run on glibc 2.36 and newer
+# (tools/appimage/). Needs Docker and the BlueZ checkout from tools/build-bluetooth-provider.py --fetch.
+# The core is prepared fresh in build/appimage/ARCH/source. The arm64 one is cross built.
+APPIMAGE_JOBS ?= 10
+define build-appimage
+	git -C $(BLUETOOTH_PROVIDER) diff --no-ext-diff --no-color HEAD | cmp -s - tools/bluez-bdaddr.patch || \
+		{ echo "$(BLUETOOTH_PROVIDER) doesn't carry tools/bluez-bdaddr.patch: run python3 tools/build-bluetooth-provider.py" >&2; exit 1; }
+	rm -rf build/appimage/$(1)/source
+	python3 tools/prepare.py --destination $(CURDIR)/build/appimage/$(1)/source
+	docker build -t frond-appimage-$(2) --build-arg ARCH=$(2) tools/appimage
+	docker run --rm --user $$(id -u):$$(id -g) -e JOBS=$(APPIMAGE_JOBS) -e ARCH=$(1) \
+		-e SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} \
+		-v $(CURDIR):/src -w /src frond-appimage-$(2) tools/appimage/build.sh
+	SOURCE_DATE_EPOCH=$${SOURCE_DATE_EPOCH:-$$(git log -1 --format=%ct)} python3 tools/appimage/make-appimage.py --arch $(1)
+endef
+.PHONY: appimage appimage-arm64
+appimage: build/dynarmic-trial/src/.frond-source
+	$(call build-appimage,x86_64,amd64)
+appimage-arm64: build/dynarmic-trial/src/.frond-source
+	$(call build-appimage,aarch64,arm64)
 
 .PHONY: test-sd-image test-sd
 test-sd-image: prepare
@@ -660,7 +684,7 @@ test-pace-debug: build/test-gdbstub-target
 benchmark-replay: out/frond
 	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name timeutil.o > build/replay-core.rsp
 	$(CXX) -std=c++17 -O2 -g $(shell sdl2-config --cflags) \
-		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/uarm/native -Ibuild/source/src/common \
 		tools/benchmark-replay.cpp @build/replay-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) $(shell pkg-config --libs sdl2 SDL2_image) -o build/benchmark-replay
 
@@ -1002,6 +1026,16 @@ test-checkpoint-input: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-checkpoint-input
 	./build/test-checkpoint-input
 
+.PHONY: test-nand-store-fail
+test: test-nand-store-fail
+test-nand-store-fail: out/frond
+	find build/source/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/nand-store-fail-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
+		tests/nand-store-fail.cpp @build/nand-store-fail-core.rsp build/source/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-nand-store-fail
+	./build/test-nand-store-fail
+
 test-native-database: prepare build/source/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/native \
 		-Ibuild/source/src/uarm -Ibuild/source/src/uarm/uarm -Ibuild/source/src/common -Ibuild/source/src/common/zip \
@@ -1188,6 +1222,15 @@ device-session-probe: out/frond
 	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/device-session.cpp @build/device-session-core.rsp build/source/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-device-session
+
+.PHONY: test-savestate-layout
+test: test-savestate-layout
+test-savestate-layout: prepare
+	$(CXX) -std=c++17 -O1 -g -Ibuild/source/src/common -Ibuild/source/src/common/savestate \
+		tests/savestate-layout.cpp build/source/src/common/savestate/Chunk.cpp \
+		build/source/src/common/savestate/ChunkProbe.cpp build/source/src/common/Logging.cpp \
+		-o build/test-savestate-layout
+	./build/test-savestate-layout
 
 .PHONY: test-pxa-i2s-audio
 test-pxa-i2s-audio: prepare

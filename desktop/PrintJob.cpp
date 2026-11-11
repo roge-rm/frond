@@ -3,6 +3,7 @@
 #include <QFont>
 #include <QFontDatabase>
 #include <QFontMetricsF>
+#include <QPageSize>
 #include <QPainter>
 #include <QObject>
 #include <QPrinter>
@@ -39,6 +40,8 @@ UsbPort parseUsbPort(const QString& message) {
         if (word == "link=up") s.linkUp = true;
         else if (word.startsWith("ip=")) s.ip = word.mid(3);
     }
+    // The core says ip=none until the guest has sent from its address.
+    if (s.ip == "none") s.ip.clear();
     return s;
 }
 
@@ -52,6 +55,13 @@ QString moduleReadout(const QString& state, bool radioOn) {
     if (!radioOn) return QObject::tr("Off");
     if (state.trimmed() == "off") return QObject::tr("Waiting for the Dana");
     return wifiReadout(parseUsbPort("wifi " + state));
+}
+
+void pdfOutput(QPrinter* printer, const QString& path) {
+    printer->setOutputFormat(QPrinter::PdfFormat);
+    printer->setOutputFileName(path);
+    printer->setPageSize(QPageSize(QPageSize::Letter));
+    printer->setPageOrientation(QPageLayout::Portrait);
 }
 
 int drawPages(QPrinter* printer, const frond::PrintText& text) {

@@ -43,8 +43,9 @@ object Cards {
     // Free space where `dir` is, and the card tool. Tests replace them.
     @Volatile var freeSpace: (File) -> Long = { it.usableSpace }
     @Volatile var tool: (Array<String>, CardToolProgress?, AtomicBoolean?) -> String = { args, listener, cancel ->
-        // "export-fd CARD FD" writes the raw image into an open file.
+        // "export-fd CARD FD" writes the raw image into an open file, "import-fd FD KIND OUTPUT" reads one from it.
         if (args.size == 3 && args[0] == "export-fd") CardTool.exportFd(args[1], args[2].toInt(), listener, cancel)
+        else if (args.size == 4 && args[0] == "import-fd") CardTool.importFd(args[1].toInt(), args[2], args[3], listener, cancel)
         else CardTool.run(args, listener, cancel)
     }
 
@@ -139,7 +140,7 @@ object Cards {
     class Descriptor(val kind: Long, val inserted: Boolean, val writeProtected: Boolean, val identity: ByteArray,
                      val logical: Long, val physical: Long, val generation: Long)
 
-    // The .frond's version (0 if unreadable) and its media descriptors (v7 and v8).
+    // The .frond's version (0 if unreadable) and its media descriptors (v7, v8 and v9).
     fun descriptorsOf(frond: File?): Pair<Long, List<Descriptor>> = try {
         if (frond == null || !frond.isFile) 0L to emptyList()
         else RandomAccessFile(frond, "r").use { f ->
@@ -147,7 +148,7 @@ object Cards {
             val n = f.read(head)
             if (n < 8 || le32(head, 0) != 0x19800819L) return 0L to emptyList()
             val version = le32(head, 4)
-            if ((version != 7L && version != 8L) || n != 92) return version to emptyList()
+            if ((version != 7L && version != 8L && version != 9L) || n != 92) return version to emptyList()
             val size = if (version == 7L) 92 else 100
             val list = ArrayList<Descriptor>()
             for (i in 0 until minOf(le32(head, 88), 4L).toInt()) {
@@ -869,13 +870,16 @@ object Cards {
     }
 
     // An image into the drawer as a new card named `base` (numbered if taken).
+    // With `fd`, an open regular file holding a raw SD or Pro image, it's read from there and `image` is unused.
     fun importCard(sessions: File, image: File, kind: String, base: String, cancelled: () -> Boolean = { false },
-                   progress: ((Long, Long) -> Unit)? = null, made: ((String) -> Unit)? = null): String? {
+                   progress: ((Long, Long) -> Unit)? = null, made: ((String) -> Unit)? = null, fd: Int? = null): String? {
         val library = libraryFor(sessions)
         NewCopy(library).use { copy ->
             if (!copy.ok) return "Couldn't add the card."
             val file = File(copy.dir, fileOfKind(kind))
-            val r = runTool(arrayOf("import", image.path, toolKind(kind), file.path), cancelled, progress)
+            val args = if (fd != null) arrayOf("import-fd", fd.toString(), toolKind(kind), file.path)
+                else arrayOf("import", image.path, toolKind(kind), file.path)
+            val r = runTool(args, cancelled, progress)
             if (!r.ok) return toolError(r)
             val logical = cardHeader(file)?.second ?: return "Couldn't add the card."
             val name = LibraryLock(library).use { lock ->

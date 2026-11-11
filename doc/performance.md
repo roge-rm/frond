@@ -4,7 +4,7 @@ How to measure speed, latency and audio, and which diagnostic patches exist. Com
 
 ## Engines
 
-Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. On the Tapwave Zodiac 2, Fast is the interpreter without the cache models instead of the JIT, and new Zodiac machines start on it. The Palm IIIx (`frond-68k`) only has the Exact engine, there is no JIT for 68k and the setting is hidden for it.
+Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. On the Tapwave Zodiac 2, Fast is the interpreter without the cache models instead of the JIT, and new Zodiac machines start on it. The Palm IIIx, Dana and Dana Wireless (`frond-68k`) only have the Exact engine, there is no JIT for 68k and the setting is hidden for them.
 
 Fast interprets code until a block has been reached a few times, then compiles it on a background thread. Tuning variables, for measuring and tests only:
 
@@ -30,7 +30,7 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 - Bus time: LCD DMA and DRAM refresh take bus cycles from the CPU, worked out from the registers the guest programmed (line length from LRRA, LXMAX, PCD and the PLL dividers, burst length, refresh period). `bus-timing` shows the figures and the LCD frame rate.
 - The 328 and VZ chips use the same cycle table. The EZ has the full bus model; the VZ one (chip select waits, EDO, fast page and SDRAM page hits) is only unit-tested against the manual. The 328 gets no bus timing.
 - Not modelled: collisions between DRAM refresh and a single access.
-- `Original` runs the machine at the IIIx's real 16.58 MHz (cycles and timers, `speed-state` says 100%). `Uncapped` runs the CPU 8 times faster, or as fast as the host allows, with timers and the clock on real time. Set it in Edit settings, the Android running menu, `--speed original|uncapped` or the `speed` console and socket command.
+- `Original` runs the machine at the IIIx's real 16.58 MHz (cycles and timers, `speed-state` says 100%). `Uncapped` runs the CPU 8 times faster, or as fast as the host allows, with timers and the clock on real time. Set it in Edit settings, the Display panel or sheet, `--speed original|uncapped` or the `speed` console and socket command.
 - Original is worked out from the clock and the manual's tables, there was no real IIIx to time it on. The timing probe (`tests/palm/timing68k-probe.c`) runs a dozen short loops (branches, calls, reads, MULU, DIVU, DBRA, shifts, MOVEM, ROM and register work) and `python3 tests/timing68k.py --rom ROM --output DIR` compares each loop's measured clocks with the manual's count plus the wait states and bus time. They agree within 1%, allowing for the 100 Hz tick interrupt. `make test-frond-68k` runs the table test.
 - Host cost: Original is mostly asleep after boot (a few percent of one core); Uncapped is bound by the host. A debugger costs about 3% host time while attached and almost nothing while no gdb is connected. FrondBench runs on the OS 3.5 and 4.1 ROMs (it needs 3.5), at Original and Uncapped; it is Frond's own, so there are no real IIIx scores to compare against.
 
@@ -40,18 +40,20 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 
 ```sh
 ./build/benchmark-replay SESSION REPLAY GUEST_MS MIPS on|off NEWDIR [PALM_EPOCH_SECONDS]
+./build/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MIPS on|off NEWDIR
 ```
 
-- `MIPS` is the virtual CPU budget, not a hardware clock. `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
-- It needs a complete TX session with networking off and no SD card. Events are sent through the normal pen and key queues at the first 1 ms boundary after their time. The RTC follows guest time so runs repeat.
-- `NEWDIR` gets `summary.json` (CPU and wall time after restore, guest time and cycles, LCD frame counts, frame-sequence hash, PCM count, hash, peak and silence), `frames.csv`, `inputs.csv` and numbered PNGs for `snapshot` lines. Observation and PNG writing are in the measured cost.
+- `MIPS` is the virtual CPU budget, not a hardware clock; `original` takes the device's real speed (96 on the TG50). `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
+- It runs a complete session of any ARM device (TX, Zire 72, E2, TG50) with networking off and no SD card; SESSION can be a machine folder. Boards that aren't PXA are refused. A Memory Stick in the session runs from a copy. A NOR image with `--device` cold boots instead (not the TX, which needs its NAND). `REPLAY` takes the runner's `--input-replay` lines, or `-` for none (pen, key, keyboard-down/up, keyboard-attach/detach and snapshot lines work). Events are sent through the normal pen and key queues at the first 1 ms boundary after their time. The RTC follows guest time so runs repeat. `FROND_JIT=0|1` picks Exact or Fast, `FROND_JIT_STATS=1` prints the JIT's counters at the end. Fast compiles each block where it's asked for so runs repeat; `BENCH_JIT_ASYNC=1` (any value but empty or 0) compiles on the compile thread as the app does, closer to the app's time but Fast hashes change from run to run.
+- `NEWDIR` gets `summary.json` (device, CPU and wall time after restore, user and system CPU, host MIPS, guest time and cycles, LCD frame counts, frame-sequence hash, PCM count, hash, peak and silence), `frames.csv`, `inputs.csv` and numbered PNGs for `snapshot` lines; a session other than a v6 TX one is copied into `NEWDIR/machine` and run from there. The same figures go to stdout as one line. Observation and PNG writing are in the measured cost.
+- On Android, `-Pfrond.jitDifferential=true` builds it as `benchmark-replay` in the APK's build tree, for `adb push` to `/data/local/tmp`.
 - `BENCH_DUMP_RAM=1` also writes guest RAM at start and end (`ram-start.bin`, `ram-end.bin`).
 - `python3 tools/analyze-gameplay.py DIR [--compare OTHERDIR]` summarises a run and fails if guest progress, frames or PCM differ. Hashes catch regressions, they don't prove identical state.
 - `FROND_HOST_PROFILE=1` (Linux x86-64) samples the host PC into `host-pc.csv`. Resolve `executable_relative_pc` with `addr2line -f -C -e` on the same binary. Profile in separate runs from timings.
 
 Workloads:
 - A game level: `tests/fixtures/bike-level1.replay` (10000 guest ms) on a paused level-one session you make with the runner (install the app, resume it with `--resume-app`, save). Check the screenshots to see the replay really plays.
-- `make frondbench` builds `build/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run.replay` (40000 guest ms) from it.
+- `make frondbench` builds `build/frondbench/FrondBench.prc`, a Palm benchmark with Integer, Memory, Drawing and Database tests (needs `m68k-palmos-gcc`, `pilrc`, `build-prc` and `PALM_SDK`). Run it once in the guest, save the session, and replay `tests/fixtures/frondbench-run-tx0414.replay` (40000 guest ms) from it. Its Run tap is placed for the reference session, which was calibrated by hand; `frondbench-run.replay` is the same tap for cores before 0414.
 - `make benchmark-menu` builds `build/benchmark-menu`; `./build/benchmark-menu SESSION [MIPS]` runs 24 guest seconds of a playing SunVox session with the menu closed and reports CPU cost, guest latency and the first menu region's hash.
 - `make benchmark-session` builds `build/benchmark-session`; `./build/benchmark-session SESSION SECONDS MIPS [NEW.raw]` runs a playing session without pacing and drains the codec directly, to compare execution cost apart from SDL starvation. Silence statistics skip the first 132300 frames. It rejects sessions with an embedded card.
 

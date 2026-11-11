@@ -1,0 +1,44 @@
+--- a/src/uarm/native/Commands.cpp
++++ b/src/uarm/native/Commands.cpp
+@@ -73,7 +73,16 @@
+         static_cast<commands::Context*>(context)->audioDriver.Pause();
+     }
+ 
++    // On a Memory Stick device the card store holds the stick, so the SD commands refuse.
++    bool refuseSd(void* context) {
++        auto* pxa = dynamic_cast<SocPXA*>(reinterpret_cast<commands::Context*>(context)->soc);
++        if (!pxa || !pxa->GetMemoryStick()) return false;
++        cout << "This device has no SD slot." << endl;
++        return true;
++    }
++
+     void CmdUnmount(vector<string> args, cli::CommandEnvironment& env, void* context) {
++        if (refuseSd(context)) return;
+         if (!sdCardInitialized()) {
+             cout << "no sd card mounted" << endl;
+             return;
+@@ -87,6 +96,7 @@
+     }
+ 
+     void CmdMount(vector<string> args, cli::CommandEnvironment& env, void* context) {
++        if (refuseSd(context)) return;
+         if (sdCardInitialized()) {
+             cout << "sd card already mounted" << endl;
+             return;
+@@ -203,7 +213,7 @@
+         }
+         cout << "wrote session to " << args[0] << endl;
+ 
+-        if (args.size() == 2 && sdCardInitialized()) {
++        if (args.size() == 2 && !refuseSd(context) && sdCardInitialized()) {
+             if (!frondNative::exportSd(args[1]).ok) {
+                 cout << "failed to write SD image to " << args[1] << endl;
+             } else {
+@@ -214,6 +224,7 @@
+ 
+     void CmdSaveSd(vector<string> args, cli::CommandEnvironment& env, void* context) {
+         if (args.size() != 1) return env.PrintUsage();
++        if (refuseSd(context)) return;
+ 
+         if (!sdCardInitialized()) {
+             cout << "no SD card mounted" << endl;

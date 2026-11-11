@@ -148,7 +148,7 @@ if(FROND_JIT_DIFFERENTIAL AND TARGET dynarmic)
     target_link_libraries(jit-differential PRIVATE frondcore dynarmic log)
     # tools/benchmark-replay.cpp too, for Bike and FrondBench speed and hashes on a device.
     add_executable(benchmark-replay "${FROND_CORE}/../../tools/benchmark-replay.cpp")
-    target_include_directories(benchmark-replay PRIVATE "${FROND_CORE}/../../tools")
+    target_include_directories(benchmark-replay PRIVATE "${FROND_CORE}/../../tools" "${UARM}/native")
     target_compile_definitions(benchmark-replay PRIVATE SDL_MAIN_HANDLED)
     target_compile_options(benchmark-replay PRIVATE -O2 -g)
     target_link_libraries(benchmark-replay PRIVATE frondcore SDL2 SDL2_image log)

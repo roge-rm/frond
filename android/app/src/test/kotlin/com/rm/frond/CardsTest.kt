@@ -43,13 +43,13 @@ class CardsTest {
     class Media(val kind: Long = 1, val logical: Long = 512, val physical: Long = 512, val generation: Long = 1,
                 val identity: String = "c4c4c4c4frondcardstoretest0251c4", val writeProtected: Boolean = false)
 
-    // A v8 .frond header with media descriptors, enough for the store.
-    private fun frond(device: String, media: List<Media>): ByteArray {
+    // A v8 (or `version`) .frond header with media descriptors, enough for the store.
+    private fun frond(device: String, media: List<Media>, version: Long = 8): ByteArray {
         val out = ByteArrayOutputStream()
-        out.write(put32(0x19800819) + put32(8) + device.toByteArray(Charsets.US_ASCII).copyOf(32))
+        out.write(put32(0x19800819) + put32(version) + device.toByteArray(Charsets.US_ASCII).copyOf(32))
         out.write(put32(0) + put32(0) + ByteArray(40) + put32(media.size.toLong()))
         for (m in media) {
-            val name = Cards.cardFiles[(m.kind - 1).toInt()]
+            val name = if (m.kind == 4L) "nand.frondnand" else Cards.cardFiles[(m.kind - 1).toInt()]
             out.write(put32(m.kind) + name.toByteArray(Charsets.US_ASCII).copyOf(32) + put32(1) + put32(if (m.writeProtected) 1 else 0) +
                 m.identity.toByteArray(Charsets.US_ASCII).copyOf(32) + put64(m.logical) + put64(m.physical) + put64(m.generation))
         }
@@ -122,6 +122,7 @@ class CardsTest {
         return when (args[0]) {
             "make" -> { File(args[3]).writeBytes(sdCard(1, ByteArray(512))); "ok ${args[1]} 512" }
             "import" -> { val raw = File(args[1]).readBytes(); File(args[3]).writeBytes(sdCard(1, raw)); "ok ${args[2]} ${raw.size}" }
+            "import-fd" -> { File(args[3]).writeBytes(sdCard(1, ByteArray(512))); "ok ${args[2]} 512" }
             "export" -> { File(args[2]).writeBytes(payloadOf(File(args[1]))); "ok image 512" }
             // The fake "fd" is a path, so the test can read the result.
             "export-fd" -> { File(args[2]).writeBytes(payloadOf(File(args[1]))); "ok image 512" }
@@ -210,6 +211,20 @@ class CardsTest {
     }
 
     // ---- Delete ----
+
+    // Every device saves v9 now: its SD descriptor counts, so the card keeps the machine's serial.
+    @Test fun v9Descriptors() {
+        val a = machine("Palm TX", true)
+        File(a, "session.frond").writeBytes(frond("palm-tx", listOf(Media(identity = "Palm TX".padEnd(32, '#')),
+            Media(kind = 4, logical = 32L * 1024, physical = 33L * 1024)), version = 9))
+        val (version, list) = Cards.descriptorsOf(File(a, "session.frond"))
+        assertEquals(9L, version)
+        assertEquals(listOf(1L, 4L), list.map { it.kind })
+        Cards.startUp(sessions)
+        val card = cards().single()
+        assertArrayEquals("Palm TX".padEnd(32, '#').toByteArray(), card.identity)
+        assertFalse(Cards.readSlot(a).swap)
+    }
 
     @Test fun deleteKeepsTheCard() {
         // Not moved in yet: delete moves it in first.
@@ -691,6 +706,10 @@ class CardsTest {
         val raw = File(tmp.root, "photos.img").apply { writeBytes(ByteArray(1024) { 7 }) }
         assertNull(Cards.importCard(sessions, raw, "sd", "photos"))
         assertArrayEquals(raw.readBytes(), payloadOf(File(Cards.entryDir(library, named("photos")!!.id), "sd.frondsd")))
+        // A picked document is read through its descriptor, not reopened by path.
+        assertNull(Cards.importCard(sessions, File("/proc/self/fd/41"), "sd", "picked", fd = 41))
+        assertEquals(listOf("import-fd", "41", "sd"), toolCalls.last().take(3))
+        assertNotNull(named("picked"))
         assertNull(Cards.duplicateCard(sessions, music.id))
         assertFalse(named("Music 2")!!.identity.contentEquals(music.identity))
         assertEquals("There's already a card called Music 2.", Cards.renameCard(sessions, music.id, "Music 2"))

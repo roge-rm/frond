@@ -87,6 +87,7 @@ struct LegacyLoader : St {
     void Load(SavestateLoader<ChunkType>& s) { LoadLegacy(s); }
 };
 struct PacedSt : St {
+    using EmRegsVZDana::ReportHeldKeys;
     uint64 now=0;
     uint64 InputCycle() const override { return now; }
     uint64 InputHz() const override { return 1000; }
@@ -875,10 +876,10 @@ int main() {
     assert(paced.DispatchDanaInput({{scan,true},{scan,false}}));
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
     auto waiting=Save(paced);
-    paced.now=19; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
+    paced.now=9; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
     paced.now=0; assert(Load(paced,waiting));
-    paced.now=19; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
-    paced.now=20; assert(paced.Byte(0)==0x40);
+    paced.now=9; assert(paced.Byte(0)==0x41); assert(paced.Byte(0)==scan.Code());
+    paced.now=10; assert(paced.Byte(0)==0x40);
 
     paced.now=40;
     assert(paced.DispatchDanaInput({{scan,true}}));
@@ -893,6 +894,21 @@ int main() {
     assert(paced.Byte(0)==0x41);assert(paced.Byte(0)==scan.Code());
     assert(paced.DispatchDanaInput({{scan,false}}));
     paced.ResetSt();assert(paced.Byte(0)==0xaa);assert(paced.Byte(0)==0x40);
+    {
+        // The ROM releases every key when no report comes for three 10 ms ticks (20-30 ms), so a
+        // held key is reported again 10 ms after the last report and a change waits no longer.
+        PacedSt held; assert(held.Byte(0)==0xaa); held.SetWord(0xfffff302,0);
+        auto request=[&]() { return (held.GetWord(0xfffff310)&1)!=0; };
+        held.now=100; assert(held.DispatchDanaInput({{scan,true}}));
+        assert(held.Byte(0)==0x41); assert(held.Byte(0)==scan.Code());
+        held.now=109; held.ReportHeldKeys(); assert(!request());
+        held.now=110; held.ReportHeldKeys(); assert(request());
+        assert(held.Byte(0)==0x41); assert(held.Byte(0)==scan.Code()); assert(!request());
+        held.now=115; assert(held.DispatchDanaInput({{scan,false}}));
+        held.now=119; held.ReportHeldKeys(); assert(!request());
+        held.now=120; held.ReportHeldKeys(); assert(request()); assert(held.Byte(0)==0x40);
+        held.now=200; held.ReportHeldKeys(); assert(!request());
+    }
     St reserved; assert(reserved.Byte(0)==0xaa);
     std::vector<DanaTransition5> fill;
     for(unsigned i=0;i<24;i++) fill.push_back({scan,(i%2)==0});

@@ -45,7 +45,8 @@ internal object DanaSession {
             input.seek(offset)
             if (u32() != 0x19800819L) return null
             val version = u32()
-            if (version !in 6..8) return null
+            // The newest version is checked by Sessions with the rest of the header.
+            if (version < 6) return null
             val name = ByteArray(32).also { input.readFully(it) }.toString(Charsets.US_ASCII).substringBefore('\u0000')
             if (name != "alphasmart-dana" && name != "alphasmart-dana-wireless") return null
             Header(offset, version, portable, name)
