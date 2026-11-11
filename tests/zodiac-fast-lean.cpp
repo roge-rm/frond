@@ -1028,6 +1028,45 @@ void jitBoardWrites() {
     assert(writes >= 300);
 }
 
+// A graphics memory store and 62 other instructions a round while timer 1's compare IRQ comes due, with the display
+// off so the quiet spans are long. Each store's wait clocks count against the JIT run's budget with the cycles the
+// run has already done, so the IRQ comes at Exact's round, not up to a whole run late.
+Lines storeTimerLines(bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.clocks();
+    g.store(0x00223008, 59);                              // INTENNUM 59: timer 1
+    g.store(0x00202004, 255);                             // TPRER1
+    g.store(0x00202008, 3000);                            // TCMP1
+    g.store(0x00202000, 0x13);                            // TCTL1: on, PERCLK1, IRQ
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+    std::vector<uint32_t> words;
+    load(words, 2, 0x16800100); load(words, 7, 1000000);
+    const size_t top = words.size();
+    words.push_back(0xe5827000);                          // loop: str r7, [r2]
+    for (unsigned i = 0; i < 60; ++i) words.push_back(0xe2855001);  // add r5, r5, #1
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return runLines(g.words, fast, false);
+}
+void jitStoreTimer() {
+    const uint64_t runs = imx1MachineJitRuns(nullptr);
+    const auto exact = storeTimerLines(false), fast = storeTimerLines(true);
+    std::printf("jit store timer: %llu JIT runs\n", (unsigned long long)(imx1MachineJitRuns(nullptr) - runs));
+    printLines("jit store timer exact", exact); printLines("jit store timer blocks", fast);
+    assert(exact.entries.size() == 1 && fast.entries.size() == 1);
+    const uint32_t e = 1000000 - exact.out.run.result.registers[7], f = 1000000 - fast.out.run.result.registers[7];
+    std::printf("jit store timer: IRQ after %u stores against %u, ticks %llu against %llu, %llu stores on the lean path\n",
+                f, e, (unsigned long long)fast.out.cheap.time.ticks, (unsigned long long)exact.out.cheap.time.ticks,
+                (unsigned long long)fast.out.cs5Writes);
+    std::fflush(stdout);
+    assert(exact.out.run.result.trace.pc == 0x18 && fast.out.run.result.trace.pc == 0x18);
+    assert(fast.out.cs5Writes * 2 >= f);
+    // A round is 63 instructions; Fast takes the IRQ at a block end, so within a round of Exact's.
+    assert(f <= e + 1 && f + 1 >= e);
+}
+
 // CGM CSCR, both timers' control and status and DMA DISR and DIMR, read 150 times, with watchdog service and DISR
 // writes in the same loop: Fast blocks answer all of them in generated code, with Exact's results.
 void jitBoardRegisters() {
@@ -1070,13 +1109,16 @@ void delayLoop() {
     g.store(0x00202004, 255);                             // TPRER1
     g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
     std::vector<uint32_t> words;
-    load(words, 6, 0x00202000); load(words, 7, 20);
+    load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0);
     const size_t outer = words.size();
     words.push_back(0xe5960010);                          // outer: ldr r0, [r6, #16]
     words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
     words.push_back(0xe0411000);                          // sub r1, r1, r0
     words.push_back(0xe3510078);                          // cmp r1, #120
     words.push_back(0x3afffffb);                          // bcc loop
+    words.push_back(0xe1510008);                          // cmp r1, r8
+    words.push_back(0x81a08001);                          // movhi r8, r1: the most counts any wait saw
+    words.push_back(0xe0899001);                          // add r9, r9, r1: all the counts the waits saw
     words.push_back(0xe2577001);                          // subs r7, r7, #1
     words.push_back(0x1a000000 | ((uint32_t(outer) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
@@ -1093,11 +1135,13 @@ void delayLoop() {
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] == 120);
     // The timer counts each wait starts from differ with the time Fast keeps, so only the loop's end is compared.
     const auto& f = fast.run.result;
-    std::printf("delay blocks r0=%08x r1=%u\n", f.registers[0], f.registers[1]);
+    std::printf("delay blocks r0=%08x r1=%u, most %u against %u, sum %u against %u\n", f.registers[0], f.registers[1],
+                f.registers[8], e.registers[8], f.registers[9], e.registers[9]);
     std::fflush(stdout);
-    // Each wait ends within a count or so of 120, at least one skip per wait, and in Exact's time to 2% and a tick.
-    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
-           f.registers[1] <= 121);
+    // Each wait ends at the count Exact's does, at least one skip per wait, and in Exact's time to 2% and a tick.
+    assert(e.registers[8] == 120 && e.registers[9] == 20 * 120);
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[8] == e.registers[8] &&
+           f.registers[9] == e.registers[9]);
     assert(n >= 20 && fast.cheap.retired * 5 < exact.cheap.retired * 4);
     const uint64_t et = exact.cheap.time.ticks, ft = fast.cheap.time.ticks;
     assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
@@ -1112,13 +1156,16 @@ void delayShort() {
     g.store(0x00202004, 0);                               // TPRER1
     g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
     std::vector<uint32_t> words;
-    load(words, 6, 0x00202000); load(words, 7, 20);
+    load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0);
     const size_t outer = words.size();
     words.push_back(0xe5960010);                          // outer: ldr r0, [r6, #16]
     words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
     words.push_back(0xe0411000);                          // sub r1, r1, r0
     words.push_back(0xe3510078);                          // cmp r1, #120
     words.push_back(0x3afffffb);                          // bcc loop
+    words.push_back(0xe1510008);                          // cmp r1, r8
+    words.push_back(0x81a08001);                          // movhi r8, r1: the most counts any wait saw
+    words.push_back(0xe0899001);                          // add r9, r9, r1: all the counts the waits saw
     words.push_back(0xe2577001);                          // subs r7, r7, #1
     words.push_back(0x1a000000 | ((uint32_t(outer) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
@@ -1127,13 +1174,16 @@ void delayShort() {
     print("delay short exact", exact); print("delay short blocks", fast);
     const auto& e = exact.run.result;
     const auto& f = fast.run.result;
-    std::printf("delay short: r1 %u against %u, retired %llu against %llu\n", f.registers[1], e.registers[1],
+    std::printf("delay short: r1 %u against %u, most %u against %u, sum %u against %u, retired %llu against %llu\n",
+                f.registers[1], e.registers[1], f.registers[8], e.registers[8], f.registers[9], e.registers[9],
                 (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired);
     std::fflush(stdout);
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] >= 120 &&
            e.registers[1] <= 124);
+    // Generated code sees the timer at block ends, so a wait may end a count or two after Exact's, not more, and
+    // the 20 waits together no fewer counts than Exact's and at most 5 more.
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
-           f.registers[1] <= e.registers[1] + 4);
+           f.registers[8] <= e.registers[8] + 2 && f.registers[9] <= e.registers[9] + 5 && f.registers[9] >= e.registers[9]);
     assert(fast.cheap.retired * 4 <= exact.cheap.retired * 5);
 }
 
@@ -1296,6 +1346,34 @@ Outcome cacheOpLoop(uint32_t count, bool fast) {
     return finish(make(g.words, fast, false, true));  // c7, c5, 2 as the Zodiac takes it
 }
 
+// MCR c7, c5, 1 (I-cache line invalidate) 200 times on a line address, then once with bit 0 set, which the
+// ARM920T refuses as Exact does: Fast blocks stop on it as Exact does.
+Outcome lineInvalidate(bool fast) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 7, 200);
+    load(words, 1, 0x20000000);
+    const size_t top = words.size();
+    words.push_back(0xee071f35);                          // mcr p15, 0, r1, c7, c5, 1
+    words.push_back(0xe2844001);                          // add r4, r4, #1
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    words.push_back(0xe3811001);                          // orr r1, r1, #1
+    words.push_back(0xee071f35);                          // mcr p15, 0, r1, c7, c5, 1: refused
+    words.push_back(0xe2844001);                          // add r4, r4, #1
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return finish(make(g.words, fast, false, true));
+}
+
+void jitLineInvalidate() {
+    const auto exact = lineInvalidate(false), fast = lineInvalidate(true);
+    print("jit line invalidate exact", exact); print("jit line invalidate blocks", fast);
+    assert(exact.run.result.registers[4] == 200 && exact.run.result.registers[7] == 0);
+    sameResult(exact, fast);
+}
+
 void jitCacheOps() {
     const auto exact = cacheOpLoop(200, false), fast = cacheOpLoop(200, true), once = cacheOpLoop(1, true);
     const auto steps = [](const Outcome& o) { return o.cheap.retired - o.lean - o.jit; };
@@ -1314,6 +1392,7 @@ void jitLong() {
     setenv("FROND_JIT_HOT", "1", 1);
     jitReads();
     jitBoardWrites();
+    jitStoreTimer();
     jitBoardRegisters();
     delayLoop();
     delayShort();
@@ -1321,6 +1400,7 @@ void jitLong() {
     jitReturns();
     jitSwi();
     jitCacheOps();
+    jitLineInvalidate();
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
 }
