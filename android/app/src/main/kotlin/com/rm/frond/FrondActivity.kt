@@ -381,10 +381,8 @@ open class FrondActivity : SDLActivity() {
         requestedOrientation = orientationRequest()
     }
 
-    // The Zodiac is a landscape device, so it stays landscape whatever the setting.
-    private fun orientationRequest() =
-        if (launchDevice().zodiac) android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        else settings.orientation.request
+    // Every device follows the setting; the core shows the Zodiac's panel upright in portrait.
+    private fun orientationRequest() = settings.orientation.request
 
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()

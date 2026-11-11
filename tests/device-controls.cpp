@@ -1745,6 +1745,62 @@ static void zodiacControls() {
         press(SDL_MOUSEBUTTONDOWN,left+320,479);turned.noPen();press(SDL_MOUSEBUTTONUP,left+320,479);
     }
 
+    // A fitted portrait window shows the Zodiac's panel upright: the chosen rotation goes a quarter
+    // further counter-clockwise. Landscape, square, unfitted windows and other devices keep it.
+    assert(windowRotation(Rotation::portrait_0,true,true,1080,2400)==Rotation::landscape_90);
+    assert(windowRotation(Rotation::landscape_90,true,true,1080,2400)==Rotation::portrait_180);
+    assert(windowRotation(Rotation::landscape_270,true,true,1080,2400)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,true,true,2400,1080)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::landscape_90,true,true,1000,1000)==Rotation::landscape_90);
+    assert(windowRotation(Rotation::portrait_0,true,false,1080,2400)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,true,true,0,0)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,false,true,1080,2400)==Rotation::portrait_0);
+    // The panel as the GPU shows it, upright in portrait and turned in landscape, and the pen on a
+    // shown pixel reaching the digitizer at that panel pixel both ways.
+    {
+        struct PanelGuest : ZodiacGuest {
+            bool FrameQuarterTurn() const override {return true;}
+            uint32_t* GetPendingFrame(uint32_t& first,uint32_t& last) override {
+                if(frame.empty())return nullptr;
+                first=0;last=zodiacPanelHeight-1;return frame.data();
+            }
+        };
+        PanelGuest panel;auto panelDisplay=panel.display();
+        // Corner blocks of the panel in ABGR: red top left, green top right, blue bottom left.
+        panel.frame.assign(zodiacPanelWidth*zodiacPanelHeight,0xff808080);
+        auto block=[&](int x0,int y0,uint32_t c) {for(int y=y0;y<y0+4;++y)for(int x=x0;x<x0+4;++x)panel.frame[size_t(y)*zodiacPanelWidth+x]=c;};
+        block(0,0,0xff0000ff);block(316,0,0xff00ff00);block(0,476,0xffff0000);
+        for(bool upright:{true,false}) {
+            const Rotation rotation=upright ? Rotation::landscape_90 : Rotation::portrait_0;
+            const int sw=upright ? 320 : 480,sh=upright ? 480 : 320;
+            auto* win=SDL_CreateWindow("Zodiac panel",0,0,deviceControlsWidth(p,sw,below),sh+deviceControlsHeight(p,sw,below),0);assert(win);
+            {
+                SdlRenderer renderer(win,&panel,1,panelDisplay,rotation,false,WindowFit::none,0,below);
+                assert(renderer.Valid());renderer.Draw(true);
+                int ww=0,wh=0;SDL_GetWindowSize(win,&ww,&wh);
+                auto* shot=SDL_CreateRGBSurfaceWithFormat(0,ww,wh,32,SDL_PIXELFORMAT_RGBA32);
+                assert(SDL_RenderReadPixels(SDL_GetRenderer(win),nullptr,shot->format->format,shot->pixels,shot->pitch)==0);
+                // Panel pixel (x, y) shows at (x, y) upright and at (479 - y, x) turned.
+                auto shown=[&](int x,int y) {return upright ? readPixel(shot,x,y) : readPixel(shot,479-y,x);};
+                auto is=[](SDL_Color c,int r,int g,int b) {return c.r==r && c.g==g && c.b==b;};
+                for(auto [x,y]:{std::pair{1,1},std::pair{2,2}}) {
+                    assert(is(shown(x,y),255,0,0));assert(is(shown(318-x+1,y),0,255,0));assert(is(shown(x,478-y+1),0,0,255));
+                }
+                assert(is(shown(160,240),128,128,128));
+                SDL_FreeSurface(shot);
+            }
+            SDL_DestroyWindow(win);
+            ZodiacHandler input(&panel,1.f,panelDisplay,rotation,below);input.SetDirectCapture(false);
+            for(auto [x,y]:{std::pair{0,0},std::pair{319,0},std::pair{0,479},std::pair{319,479},std::pair{100,300}}) {
+                // A shown point for that panel pixel, and the view position the pen takes there.
+                const int px=upright ? x : 479-y,py=upright ? y : x;
+                SDL_Event e{};e.type=SDL_MOUSEBUTTONDOWN;e.button.button=SDL_BUTTON_LEFT;e.button.x=px;e.button.y=py;
+                input.HandleEvent(e);panel.pen(true,479-y,x);
+                e.type=SDL_MOUSEBUTTONUP;input.HandleEvent(e);panel.pen(false);
+            }
+        }
+    }
+
     // Drawing at both LCD shapes: panels beside a magenta LCD, the strip below; each key darkens
     // where it hits, the knob moves and darkens when pushed in.
     for(auto [sw,sh]:{std::pair{480,320},std::pair{320,480}})
@@ -1793,7 +1849,8 @@ static void zodiacControls() {
     }
     // A fitted renderer lays out each arrangement at its own shape.
     for(auto [view,ww,wh,rotation]:{std::tuple{around,1560,800,Rotation::portrait_0},std::tuple{below,800,1560,Rotation::portrait_0},
-                                    std::tuple{around,1200,1000,Rotation::landscape_90},std::tuple{below,800,1280,Rotation::landscape_270}}) {
+                                    std::tuple{around,1200,1000,Rotation::landscape_90},std::tuple{below,800,1280,Rotation::landscape_270},
+                                    std::tuple{below,1080,2400,Rotation::landscape_90}}) {
         assert(deviceControlViewForWindow(p,{},ww,wh).arrangement==view.arrangement);
         auto* win=SDL_CreateWindow("Zodiac",0,0,ww,wh,SDL_WINDOW_RESIZABLE);assert(win);
         guest.frame.assign(480*320,0xffffffff);
