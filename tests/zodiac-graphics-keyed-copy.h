@@ -40,7 +40,7 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
         uint32_t value = (first+uint32_t(batch.size()))&16383;
         auto status = candidate.access(eim,pc,0x16010220,4,true,value);
         if (status != A::ok) return status;
-        status = commands.prepare(candidate,eim,memory);
+        status = checkedPrepare(commands,candidate,eim,memory);
         if (status != A::ok) return status;
         candidate.startEngine(commands.duration());
         state = std::move(candidate);
@@ -305,7 +305,7 @@ inline void checkKeyedCopy(const Imx1Cs5Configuration& ready, const Imx1Graphics
     const auto end = state.engineState().consumer();
     uint32_t noOp = end;
     assert(state.access(eim,0x200b0200,0x16010220,4,true,noOp) == A::ok);
-    assert(commands.prepare(state,eim,memory) == A::ok);
+    assert(checkedPrepare(commands,state,eim,memory) == A::ok);
     state.startEngine(commands.duration());
     assert(state.advanceCpuCycles(1000) && state.engineState().emptyRing() && !state.engineState().completed());
     // One ring word stays free even when the producer wraps past the consumer.

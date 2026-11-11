@@ -22,7 +22,7 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
     for (unsigned i = 0; i < bridge.size(); ++i) put(state,47+i,bridge[i]);
     uint32_t value = 64;
     assert(state.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
-    assert(commands.prepare(state,eim,memory) == A::ok);
+    assert(checkedPrepare(commands,state,eim,memory) == A::ok);
     state.startEngine(commands.duration());
     assert(state.advanceCpuCycles(uint32_t(commands.duration())));
     assert(commands.complete(state,eim,memory) == A::ok && state.engineState().consumer() == 64);
@@ -45,7 +45,7 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
         load(batch);
         uint32_t producer = (64+uint32_t(batch.size())) & 16383;
         const auto status = candidate.access(eim,pc,0x16010220,4,true,producer);
-        return status == A::ok ? work.prepare(candidate,eim,memory) : status;
+        return status == A::ok ? checkedPrepare(work,candidate,eim,memory) : status;
     };
     auto read = [&](uint32_t address, uint32_t size = 2) {
         uint32_t v = 0;
@@ -64,7 +64,7 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
         assert(candidate.engineState().hostDataSubmission());
         uint32_t producer = (64+uint32_t(batch.size())) & 16383;
         assert(candidate.access(eim,0x200ac300,0x16010220,4,true,producer) == A::sequence);
-        assert(work.prepare(candidate,eim,memory) == A::sequence);
+        assert(checkedPrepare(work,candidate,eim,memory) == A::sequence);
         assert(candidate.interruptState().pendingValue() == pending && candidate.clockState().count() == count);
         if (overwriteRing) for (unsigned i = 0; i < batch.size(); ++i) put(ready,64+i,0);
         // Copying a pending command also owns all pixels independently.
@@ -163,7 +163,7 @@ inline void checkHostData(const Imx1Cs5Configuration& boot, const Imx1GraphicsCo
         const auto internal = memory.dirty(0), external = memory.dirty(1);
         uint32_t producer = (64+uint32_t(bad.size())) & 16383;
         assert(candidate.access(eim,pc,0x16010220,4,true,producer) == A::ok);
-        assert(work.prepare(candidate,eim,memory) != A::ok);
+        assert(checkedPrepare(work,candidate,eim,memory) != A::ok);
         assert(work.duration() == readyCommands.duration());
         assert(memory.dirty(0).generation == internal.generation && memory.dirty(1).generation == external.generation);
         assert(ready.engineState().consumer() == 64 && ready.engineState().producer() == 64);
@@ -263,7 +263,7 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
     for (unsigned i = 0; i < bridge.size(); ++i) put(47+i,bridge[i]);
     uint32_t value = 64;
     assert(state.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
-    assert(commands.prepare(state,eim,memory) == A::ok);
+    assert(checkedPrepare(commands,state,eim,memory) == A::ok);
     state.startEngine(commands.duration());
     assert(state.advanceCpuCycles(uint32_t(commands.duration())));
     assert(commands.complete(state,eim,memory) == A::ok && state.engineState().consumer() == 64);
@@ -297,7 +297,7 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
         for (unsigned i = 0; i < batch.size(); ++i) put(64+i,batch[i]);
         uint32_t producer = (64+uint32_t(batch.size())) & 16383;
         const auto status = candidate.access(eim,pc,0x16010220,4,true,producer);
-        return status == A::ok ? work.prepare(candidate,eim,memory) : status;
+        return status == A::ok ? checkedPrepare(work,candidate,eim,memory) : status;
     };
     auto read = [&](uint32_t x, uint32_t y) {
         uint32_t v = 0;
@@ -316,7 +316,7 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
         const auto internal = memory.dirty(0), external = memory.dirty(1);
         uint32_t producer = (64+uint32_t(batch.size())) & 16383;
         assert(candidate.access(eim,0x200ac300,0x16010220,4,true,producer) == A::ok);
-        assert(work.prepare(candidate,eim,memory) != A::ok);
+        assert(checkedPrepare(work,candidate,eim,memory) != A::ok);
         assert(work.duration() == readyCommands.duration());
         assert(memory.dirty(0).generation == internal.generation && memory.dirty(1).generation == external.generation);
     };
@@ -466,7 +466,7 @@ inline void checkPackedMono(const Imx1Cs5Configuration& boot, const Imx1Graphics
         for (unsigned y = 221; y < 307; ++y) for (unsigned x = 333; x < 431; ++x) pixel(x,y,true,0x1234);
         uint32_t producer = begin+uint32_t(witness.size());
         assert(candidate.access(eim,0x200ac300,0x16010220,4,true,producer) == A::ok);
-        assert(work.prepare(candidate,eim,memory) == A::ok);
+        assert(checkedPrepare(work,candidate,eim,memory) == A::ok);
         assert(work.duration() == witness.size()+1+84*84);
         candidate.startEngine(work.duration());
         assert(candidate.advanceCpuCycles(uint32_t(work.duration())) && work.complete(candidate,eim,memory) == A::ok);

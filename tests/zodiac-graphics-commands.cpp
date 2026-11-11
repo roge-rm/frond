@@ -2,8 +2,47 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#include <string>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
+
+// Each test prepare also runs prepareCopy on a copy: the same status and refusal, and where it succeeds the same
+// saved state.
+struct CommandsRecord {
+    std::vector<uint64_t> v;
+    CommandsRecord& Do32(uint32_t& x) { v.push_back(x); return *this; }
+    CommandsRecord& Do64(uint64_t& x) { v.push_back(x); return *this; }
+    CommandsRecord& DoBool(bool& x) { v.push_back(x); return *this; }
+    CommandsRecord& DoBuffer32(uint32_t* x, size_t n) { v.insert(v.end(), x, x + n); return *this; }
+    template <class T> CommandsRecord& DoVector(std::vector<T>& x, size_t) {
+        v.push_back(x.size()); v.insert(v.end(), x.begin(), x.end()); return *this;
+    }
+    CommandsRecord& Require(bool, const char*) { return *this; }
+    bool ok() const { return true; }
+};
+static std::vector<uint64_t> commandsRecord(const Imx1GraphicsCommands& commands) {
+    auto copy = commands;
+    CommandsRecord record;
+    copy.state(record);
+    return record.v;
+}
+static unsigned preparedCopies = 0;
+static Imx1BootstrapAccess checkedPrepare(Imx1GraphicsCommands& commands, const Imx1Cs5Configuration& configuration,
+                                          const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+    auto copy = commands;
+    const auto copied = copy.prepareCopy(configuration, eim, memory);
+    const auto status = commands.prepare(configuration, eim, memory);
+    const char* a = copy.refusal().what;
+    const char* b = commands.refusal().what;
+    if (copied != status || (a ? !b || std::string(a) != b : b != nullptr) ||
+        copy.refusal().value != commands.refusal().value ||
+        (status == Imx1BootstrapAccess::ok && commandsRecord(copy) != commandsRecord(commands))) {
+        std::fprintf(stderr, "FAIL: prepareCopy %d, prepare %d\n", int(copied), int(status));
+        std::abort();
+    }
+    ++preparedCopies;
+    return status;
+}
 #include "zodiac-graphics-hostdata.h"
 #include "zodiac-graphics-keyed-copy.h"
 
@@ -52,7 +91,19 @@ static void checkCommands(bool packedMono) {
     auto submitted = state;
     value = uint32_t(batch.size());
     assert(submitted.access(eim,0x200a9ed4,0x16010220,4,true,value) == A::ok);
-    assert(commands.prepare(submitted,eim,memory) == A::ok);
+    {
+        // An object carrying a refusal prepares the next batch as a fresh one does.
+        Imx1GraphicsMemory lineMemory;
+        value = 0xc0001500;
+        assert(lineMemory.accessGpu(state,eim,0x150000,4,true,value) == A::ok);
+        auto line = state;
+        value = 1;
+        assert(line.access(eim,0x200a9ed4,0x16010220,4,true,value) == A::ok);
+        Imx1GraphicsCommands stale;
+        assert(checkedPrepare(stale,line,eim,lineMemory) == A::sideEffect && stale.refusal().what);
+        assert(checkedPrepare(stale,submitted,eim,memory) == A::ok && !stale.refusal().what);
+    }
+    assert(checkedPrepare(commands,submitted,eim,memory) == A::ok);
     submitted.startEngine(commands.duration());
     assert(submitted.engineState().nativeOptionWord() == 0x10000);
     value = 0;
@@ -105,7 +156,7 @@ static void checkCommands(bool packedMono) {
         value = uint32_t(packet.size());
         assert(candidate.access(eim,0x200a9ed4,0x16010220,4,true,value) == A::ok);
         Imx1GraphicsCommands work;
-        const auto status = work.prepare(candidate,eim,storage);
+        const auto status = checkedPrepare(work,candidate,eim,storage);
         assert((status == A::ok) == valid);
         assert(storage.accessGpu(state,eim,0x100000,2,false,value) == A::ok && value == 0);
         assert(state.engineState().emptyRing());
@@ -161,7 +212,7 @@ static void checkCommands(bool packedMono) {
         value = uint32_t(batch.size());
         assert(candidate.access(eim,0x200a9ed4,0x16010220,4,true,value) == A::ok);
         Imx1GraphicsCommands rejected;
-        assert(rejected.prepare(candidate,eim,memory) != A::ok);
+        assert(checkedPrepare(rejected,candidate,eim,memory) != A::ok);
         assert(state.engineState().emptyRing());
     }
     // Captured native rectangle submission follows the completed 47-word boot batch.
@@ -189,7 +240,7 @@ static void checkCommands(bool packedMono) {
         assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::ok);
         assert(candidate.engineState().consumer() == 47 && candidate.engineState().producer() == 59);
         assert(candidate.access(eim,0x200b0200,0x16010220,4,true,value) == A::sequence);
-        assert((work.prepare(candidate,eim,storage) == A::ok) == valid);
+        assert((checkedPrepare(work,candidate,eim,storage) == A::ok) == valid);
         assert(submitted.engineState().emptyRing() && submitted.engineState().producer() == 47);
         for (uint32_t address : {0x100000u,0x1003beu,0x1003c0u,0x14affeu,0x14b000u})
             assert(storage.accessGpu(candidate,eim,address,2,false,value) == A::ok && value == 0);
@@ -325,6 +376,8 @@ int main() {
     checkCommands(false);
     checkCommands(true);
     assert(Imx1GraphicsCommands::directFillCount == direct);
+    assert(preparedCopies > 0);
+    std::printf("PASS: prepareCopy matched prepare %u times\n", preparedCopies);
     std::printf("PASS: %llu fills completed straight on the bank storage, and the same through accessGpu\n",
                 (unsigned long long)direct);
 }

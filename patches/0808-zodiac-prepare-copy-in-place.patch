@@ -1,0 +1,27 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -886,7 +886,7 @@
+                  p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
+                  p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc)) && p.graphicsMemory) {
+                 auto commands = p.graphicsCommands;
+-                const auto prepared = commands.prepare(candidate,p.peripherals.eimState(),*p.graphicsMemory);
++                const auto prepared = commands.prepareCopy(candidate,p.peripherals.eimState(),*p.graphicsMemory);
+                 if (prepared != Imx1BootstrapAccess::ok) {
+                     p.graphicsRefusal = commands.refusal();
+                     return prepared;
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -49,6 +49,13 @@
+         else refused = candidate.refused;
+         return status;
+     }
++    // prepare for a copy the caller drops on refusal, reading only refusal() from it then: decodes in place, with
++    // the same result as prepare where it succeeds.
++    Imx1BootstrapAccess prepareCopy(const Imx1Cs5Configuration& configuration,
++                                    const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
++        refused = {};
++        return decode(configuration, eim, memory);
++    }
+     // What the decoder named in the batch it last refused, with one value. Not saved.
+     struct Refusal { const char* what = nullptr; uint32_t value = 0; };
+     const Refusal& refusal() const { return refused; }
