@@ -203,8 +203,63 @@ class HomeModel(private val activity: HomeActivity) {
         cards = null
     }
 
+    private var startJob: Job? = null
+
+    // Starts a session. With an emulator process still listed it brings a shown emulator forward,
+    // or waits for a closing one and ends it if it stays, then starts.
     fun start(requested: Session) {
-        if (copying || emulatorRunning()) return
+        if (copying || startJob?.isActive == true) return
+        startJob = activity.lifecycleScope.launch {
+            val asked = System.currentTimeMillis()
+            var ended = false
+            var told = false
+            while (isActive) {
+                val waited = System.currentTimeMillis() - asked
+                when (EmulatorStart.decide(emulatorRunning(), bringEmulatorForward(dryRun = true), waited, ended)) {
+                    EmulatorStart.Action.START -> { launch(requested); return@launch }
+                    EmulatorStart.Action.BRING_FORWARD -> { bringEmulatorForward(dryRun = false); return@launch }
+                    EmulatorStart.Action.WAIT -> if (!told) {
+                        told = true
+                        notice = "Waiting for the last session to close"
+                    }
+                    EmulatorStart.Action.END_STALE -> {
+                        ended = true
+                        endEmulatorProcesses()
+                    }
+                    EmulatorStart.Action.GIVE_UP -> {
+                        alert = "Couldn't start" to "The last session's emulator is still running. Force stop Frond in Android's app settings and try again."
+                        return@launch
+                    }
+                }
+                delay(EmulatorStart.POLL_MS)
+            }
+        }
+    }
+
+    // Brings a task with an emulator activity on top to the front. With dryRun it only says
+    // whether there is one.
+    private fun bringEmulatorForward(dryRun: Boolean): Boolean {
+        val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return false
+        val names = setOf(FrondActivity::class.java.name, Frond68kActivity::class.java.name)
+        val task = manager.appTasks.orEmpty().firstOrNull { task ->
+            val top = try { task.taskInfo?.topActivity } catch (_: IllegalArgumentException) { null }
+            top != null && top.className in names
+        } ?: return false
+        if (!dryRun) task.moveToFront()
+        return true
+    }
+
+    // Ends emulator processes left with no activity. They run under this app's uid, so this is allowed.
+    private fun endEmulatorProcesses() {
+        val manager = activity.getSystemService(android.app.ActivityManager::class.java) ?: return
+        val names = Emulators.processes.map { activity.packageName + it }
+        manager.runningAppProcesses.orEmpty().filter { it.processName in names }.forEach {
+            android.util.Log.w(FrondActivity.TAG, "ending ${it.processName} (${it.pid}): no activity after ${EmulatorStart.GRACE_MS} ms")
+            android.os.Process.killProcess(it.pid)
+        }
+    }
+
+    private fun launch(requested: Session) {
         val session = Sessions.read(activity, requested.id) ?: return
         val device = session.device
         if (session.old || device == null) {

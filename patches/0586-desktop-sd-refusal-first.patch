@@ -1,0 +1,31 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -237,6 +237,14 @@
+         };
+     }
+     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
++        // On a Memory Stick device the card store holds a Memory Stick Pro, reached through ms-*.
++        // This comes before the argument checks so every sd-* command gets the same answer.
++        if (command.rfind("sd-", 0) == 0) {
++            auto* pxa = dynamic_cast<SocPXA*>(ctx.soc);
++            if (pxa && pxa->GetMemoryStick())
++                return command == "sd-state" && path.empty() ? Reply{true, "card", "none"}
++                                                             : Reply{false, "unsupported", "This device has no SD slot."};
++        }
+         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
+             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
+         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+@@ -549,13 +557,6 @@
+             }
+             return {false,"command","Unknown Memory Stick command."};
+         }
+-        // On a Memory Stick device the card store holds a Memory Stick Pro, reached through ms-*.
+-        if (command.rfind("sd-", 0) == 0) {
+-            auto* pxa = dynamic_cast<SocPXA*>(ctx.soc);
+-            if (pxa && pxa->GetMemoryStick())
+-                return command == "sd-state" ? Reply{true, "card", "none"}
+-                                             : Reply{false, "unsupported", "This device has no SD slot."};
+-        }
+         if (command == "sd-state") return {true, "card", !sdCardInitialized() ? "none" : ctx.soc->SdInserted() ? "inserted" : "ejected"};
+         if (command == "sd-create" || command == "sd-insert") {
+             if (ctx.soc->SdInserted()) return {false, "busy", "Eject the current card before replacing it."};

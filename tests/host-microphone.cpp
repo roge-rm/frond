@@ -82,6 +82,22 @@ int main() {
         mic.Service({});assert(mic.State()=="off");
         assert(dispatch>0);
     }
+    {
+        // The user's choice outlasts a guest sleep: capture the guest dropped comes back once it's awake,
+        // and only while the user has it on.
+        SdlMicrophone mic;
+        bool awake=true;
+        mic.awake=[&]{return awake;};
+        auto source=mic.Source();
+        mic.Service({});assert(mic.State()=="off");
+        assert(mic.Arm() && mic.State()=="on");
+        awake=false;source.disarm(source.context);assert(mic.State()=="off");
+        mic.Service({});assert(mic.State()=="off");
+        awake=true;mic.Service({});assert(mic.State()=="on");
+        mic.Disarm();mic.Service({});assert(mic.State()=="off");
+        assert(mic.Arm());mic.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND);
+        mic.AppEventOnDeviceThread(SDL_APP_DIDENTERFOREGROUND);mic.Service({});assert(mic.State()=="off");
+    }
     SDL_Quit();
-    std::cout<<"Bounded capture, rates, alias rejection, fence, generations and SDL dummy lifecycle pass\n";
+    std::cout<<"Bounded capture, rates, alias rejection, fence, generations, re-arm after sleep and SDL dummy lifecycle pass\n";
 }

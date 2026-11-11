@@ -624,6 +624,11 @@ class RunningModel(
         }
     }
 
+    // The core's microphone state as it changed, unless a request of ours is waiting.
+    fun acceptMicrophone(state: String) {
+        if (device.microphone && microphone != "pending") microphone = state
+    }
+
     // The request has gone to the core: reads what it says now.
     fun settleMicrophone() {
         if (microphone == "pending") microphone = "off"

@@ -99,6 +99,21 @@ class CardChoicesTest {
         assertEquals(emptyList<String>(), CardChoices.imageKinds(none, (64L shl 20) + 1))
     }
 
+    // A raw logical classic stick image, as CloudpilotEmu or a PC sees the stick: user blocks of
+    // n * 496 - 2 per 512-block segment, 16 KB blocks from 16 MB up.
+    @Test fun rawLogicalStickImageIsOfferedAsAStick() {
+        val none = ByteArray(8)
+        assertEquals(128, CardChoices.stickOfLogicalBytes(7934L * 16384))
+        assertEquals(4, CardChoices.stickOfLogicalBytes(494L * 8192))
+        assertEquals(32, CardChoices.stickOfLogicalBytes(1982L * 16384))
+        assertNull(CardChoices.stickOfLogicalBytes(128L shl 20))
+        assertEquals(listOf("ms", "sd"), CardChoices.imageKinds(none, 7934L * 16384))
+        assertEquals(listOf("ms", "sd"), CardChoices.imageKinds(none, 3966L * 16384))
+        assertEquals(listOf("ms"), CardChoices.imageKinds(none, 1982L * 16384))
+        assertEquals(listOf("ms"), CardChoices.imageKinds(none, 494L * 8192))
+        assertEquals(listOf("sd"), CardChoices.imageKinds(none, 7934L * 16384, listOf(e2)))
+    }
+
     // ---- Cards screen ----
 
     @Test fun rowsSayWhereEachCardIs() {

@@ -203,6 +203,11 @@ clean:
 	rm -rf build out
 
 
+.PHONY: test-tg50-sd-refusal
+test: test-tg50-sd-refusal
+test-tg50-sd-refusal: out/frond
+	python3 tests/tg50-sd-refusal.py
+
 .PHONY: test-replay-snapshot
 test: test-replay-snapshot
 test-replay-snapshot: out/frond

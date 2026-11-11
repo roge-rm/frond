@@ -68,7 +68,8 @@ object CardChoices {
     }
 
     // What an image file holds from its first bytes and size: "ms" for a Frond stick file, else the
-    // raw kinds some device takes at that size (SD and Pro can both fit). Empty when none does.
+    // raw kinds some device takes at that size (SD, a classic stick's logical image and Pro can fit).
+    // Empty when none does.
     fun imageKinds(head: ByteArray, bytes: Long, devices: List<Device> = Device.entries): List<String> {
         val magic = head.copyOf(8)
         if (magic.contentEquals("FRONDMS\u0000".toByteArray(Charsets.US_ASCII))) return listOf("ms")
@@ -76,10 +77,21 @@ object CardChoices {
         if (bytes <= 0 || bytes % 512 != 0L) return emptyList()
         val kinds = mutableListOf<String>()
         if (devices.any { deviceTakesKind(it, "sd") && bytes in it.sdMin..it.sdMax } && bytes in (32L shl 20)..(1886L shl 20)) kinds += "sd"
+        // An exact stick size is far more likely a stick than an SD card, so it comes first and is picked.
+        val stick = stickOfLogicalBytes(bytes)
+        if (stick != null && devices.any { fits(it, "ms", stick) }) kinds.add(0, "ms")
         if (bytes % (1 shl 20) == 0L && (bytes shr 20).toInt() in Device.MEMORY_STICK_PRO_SIZES &&
             devices.any { fits(it, "ms-pro", (bytes shr 20).toInt()) }) kinds += "ms-pro"
         return kinds
     }
+
+    // The classic stick size in MB whose raw logical image (as CloudpilotEmu or a PC sees the stick)
+    // is exactly `bytes`, or null. A stick of n segments of 512 blocks holds n * 496 - 2 logical
+    // blocks of 16 pages (4 and 8 MB) or 32 pages, 512 bytes each, as frondMsLayout in the core.
+    fun stickOfLogicalBytes(bytes: Long): Int? =
+        listOf(Triple(4, 512, 16), Triple(8, 1024, 16), Triple(16, 1024, 32), Triple(32, 2048, 32),
+            Triple(64, 4096, 32), Triple(128, 8192, 32))
+            .firstOrNull { (_, blocks, pages) -> (blocks / 512 * 496 - 2).toLong() * pages * 512 == bytes }?.first
 
     // ---- Machines and rows ----
 
