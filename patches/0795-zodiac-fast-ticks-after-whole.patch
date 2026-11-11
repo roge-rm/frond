@@ -1,0 +1,37 @@
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -111,12 +111,16 @@
+             !timeFraction.supports(uint64_t(bus.denominator) * 64)) return false;
+         auto fraction = timeFraction;
+         ticks = 0;
++        // Once the fraction's denominator holds the period's, each part goes in one add (addWhole).
++        if (fraction.addWhole(cycles, uint64_t(cpu.numerator) * 390625, uint64_t(cpu.denominator) * 64, ticks)) cycles = 0;
+         while (cycles) {
+             const uint64_t chunk = std::min<uint64_t>(cycles, 1000000);
+             if (!fraction.supports(uint64_t(cpu.denominator) * 64)) return false;
+             ticks += fraction.add(chunk * cpu.numerator * 390625, uint64_t(cpu.denominator) * 64);
+             cycles -= chunk;
+         }
++        if (fraction.addWhole(busClocks, uint64_t(bus.numerator) * 390625, uint64_t(bus.denominator) * 64, ticks))
++            busClocks = 0;
+         while (busClocks) {
+             const uint64_t piece = std::min<uint64_t>(busClocks, 1022);
+             for (uint64_t numerator = piece * bus.numerator; numerator;) {
+--- a/src/uarm/uarm/imx1_graphics_clocks.h
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -30,6 +30,15 @@
+         denominator = common;
+         return n / d + fraction / common;
+     }
++    // add(units * scale, d) in one step where d divides the denominator: the phase keeps the exact remainder, so
++    // this gives the ticks and phase that adding the same total in any pieces would. False, adding nothing, where
++    // d doesn't divide it or the total doesn't fit.
++    bool addWhole(uint64_t units, uint64_t scale, uint64_t d, uint64_t& ticks) {
++        constexpr uint64_t max = std::numeric_limits<uint64_t>::max();
++        if (!d || denominator % d || denominator > max / 2 || (scale && units > max / scale)) return false;
++        ticks += add(units * scale, d);
++        return true;
++    }
+     template <class A> void state(A& a) {
+         a.Do64(phase).Do64(denominator).Require(denominator && phase < denominator, "graphics fraction");
+     }

@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdio>
+#include <iterator>
 #include "imx1_graphics_clocks.h"
 using A = Imx1BootstrapAccess;
 static void put(Imx1GraphicsClocks& c, uint32_t pc, uint32_t off, uint32_t v) {
@@ -204,6 +205,31 @@ int main() {
             if (!r.supports(d)) continue;
             assert(h.add(n,d)==r.add(n,d) && h.phase==r.phase && h.denominator==r.denominator);
         }
+    }
+    {
+        // addWhole gives what the same total in pieces gives, and adds nothing where d doesn't divide the denominator.
+        uint64_t seed=0x2545f4914f6cdd1du;
+        const uint64_t ds[]{64,128,6400,25000000,64*3,7};
+        for (int i=0;i<5000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            Imx1GraphicsFraction a;
+            a.add((seed>>11)&0xffff,ds[(seed>>40)%std::size(ds)]);
+            a.add((seed>>27)&0xffff,ds[(seed>>45)%std::size(ds)]);
+            auto b=a;
+            const uint64_t d=ds[(seed>>50)%std::size(ds)], units=(seed>>3)&0xfffff, scale=1+((seed>>23)&0x3ffffff);
+            uint64_t whole=0, parts=0;
+            const bool divides=a.denominator%d==0;
+            assert(a.addWhole(units,scale,d,whole)==divides);
+            if (!divides) { assert(!whole && a.phase==b.phase && a.denominator==b.denominator); continue; }
+            for (uint64_t left=units; left;) {
+                const uint64_t chunk=std::min<uint64_t>(left,1+(seed>>33)%1000);
+                parts+=b.add(chunk*scale,d);
+                left-=chunk;
+            }
+            assert(whole==parts && a.phase==b.phase && a.denominator==b.denominator);
+        }
+        Imx1GraphicsFraction big; uint64_t t=0;
+        assert(!big.addWhole(uint64_t(1)<<40,uint64_t(1)<<30,1,t) && !t);
     }
     uint32_t pclk=0;
     assert(c.access(0x200c54a8,0x16010090,4,false,pclk)==A::ok && pclk==0x20);
