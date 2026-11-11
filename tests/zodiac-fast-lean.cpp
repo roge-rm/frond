@@ -4,7 +4,8 @@
 // either engine carry on under Fast as an uninterrupted Exact run does. Code rewritten in place drops what Fast
 // decoded from it. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
 // mapping stops both engines at the same read, and a DMA controller write that starts the PCM DMA takes its buffer
-// page off the lean path.
+// page off the lean path while the DMA sends what both paths wrote. An IRQ raised by an MMIO write and an FIQ that
+// comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -158,31 +159,50 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         break;
     case Tail::dma:
     case Tail::dmaOther: {
-        // 200 stores to an SRAM page put it on the lean path. The PCM DMA then starts, repeating over the
-        // first 16 bytes of that page, and 200 more stores follow, to the same page or (dmaOther) the next.
+        // 200 stores to an SRAM page put it on the lean path, and a lean loop fills the first 16 bytes of it.
+        // The PCM DMA then starts, repeating over those 16 bytes into SSI1, which sends them out. 2048 rounds of
+        // stores of a count to all four words follow, to the buffer or (dmaOther) the next page. The run ends
+        // while they are still sent, so in the dma case the last sample shows when the DMA read its word.
         const uint32_t buffer = 0x00409000;               // SRAM 0x00309000, uncached
         load(words, 2, buffer + 0x100);
-        const auto stores = [&] {
-            words.push_back(0xe3a070c8);                  // mov r7, #200
+        const auto stores = [&](bool many) {
+            words.push_back(many ? 0xe3a07b02 : 0xe3a070c8);  // mov r7, #2048 or #200
             words.push_back(0xe5827000);                  // loop: str r7, [r2]
+            if (many) {
+                words.push_back(0xe5827004);              // str r7, [r2, #4]
+                words.push_back(0xe5827008);              // str r7, [r2, #8]
+                words.push_back(0xe582700c);              // str r7, [r2, #12]
+            }
             words.push_back(0xe2577001);                  // subs r7, r7, #1
-            words.push_back(0x1afffffc);                  // bne loop
+            words.push_back(many ? 0x1afffff9 : 0x1afffffc);  // bne loop
         };
-        stores();
+        stores(false);
+        // r3 = 4 * (r7 & 3), [buffer + r3] = r7 * 0x00010001 + 0x01000100 for r7 = 200..1: the words end as
+        // 0x01040104, 0x01010101, 0x01020102, 0x01030103.
+        load(words, 2, buffer);
+        load(words, 4, 0x01000100);
+        words.push_back(0xe3a070c8);                      // mov r7, #200
+        words.push_back(0xe2073003);                      // loop: and r3, r7, #3
+        words.push_back(0xe0875807);                      // add r5, r7, r7, lsl #16
+        words.push_back(0xe0855004);                      // add r5, r5, r4
+        words.push_back(0xe7825103);                      // str r5, [r2, r3, lsl #2]
+        words.push_back(0xe2577001);                      // subs r7, r7, #1
+        words.push_back(0x1afffff9);                      // bne loop
         load(words, 0, 0x00209000);
         store(words, 0, 0, 1); store(words, 0, 8, 0x3ff);
         load(words, 0, 0x00218000);
         store(words, 0, 8, 0x9900); store(words, 0, 0x14, 0x6100); store(words, 0, 0x20, 4); store(words, 0, 0xc, 0xe8);
         for (unsigned i = 0; i < 8; ++i) store(words, 0, 0, 0);
-        load(words, 0, buffer);
-        for (unsigned i = 0; i < 4; ++i) store(words, 0, i * 4, 0x12340001 + i * 0x10002);
         load(words, 0, 0x00209300);
         store(words, 0, 0, buffer - 0x00100000); load(words, 1, 0x00218000); words.push_back(0xe5801004);
         store(words, 0, 8, 16); store(words, 0, 0xc, 0x208c); store(words, 0, 0x10, 16); store(words, 0, 0x14, 8);
         store(words, 0, 0xc, 0x208d);
+        // DMA requests on, then transmit.
+        load(words, 0, 0x00218000);
+        store(words, 0, 0xc, 0x2e8); store(words, 0, 8, 0x9b00);
         if (tail == Tail::dmaOther) load(words, 2, buffer + 0x1100);
-        else load(words, 2, buffer + 0x100);
-        stores();
+        else load(words, 2, buffer);
+        stores(true);
         stopPc = pc();
         break;
     }
@@ -208,6 +228,7 @@ struct Outcome {
     Imx1MachineRun run;
     Imx1MachineCheapStatus cheap;
     uint64_t lean, drops, timerReads;
+    uint16_t pcmLast;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -229,7 +250,7 @@ bool running(Imx1Machine* m) { return imx1MachineGetStatus(m).status == Imx1Mach
 Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
-                imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m)};
+                imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -284,10 +305,114 @@ void same(const Outcome& exact, const Outcome& fast) {
 }
 
 constexpr uint32_t sramWord = 0x11111111, sdramWord = 0x22222222;
+
+// An instruction whose access charged the span waits in the next one, and the step after it still looks at the
+// interrupt lines. Checked against the stepped run, where every instruction and wait clock is charged alone.
+struct Entries {
+    std::vector<Imx1ProbeInterrupt> all;
+};
+struct Lines {
+    Outcome out;
+    std::vector<Imx1ProbeInterrupt> entries;
+};
+Lines runLines(const std::vector<uint32_t>& words, bool fast, bool stepped) {
+    Entries e;
+    auto o = graphicsOptions(false);
+    o.idleStepped = stepped;
+    o.interruptObserver = [](void* c, const Imx1ProbeInterrupt& i) { static_cast<Entries*>(c)->all.push_back(i); };
+    o.interruptContext = &e;
+    Imx1ProbeResult error{};
+    Imx1Machine* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                       Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
+    assert(m);
+    if (fast) assert(imx1MachineSetFastEngine(m, true));
+    const auto out = finish(m);
+    return {out, e.all};
+}
+bool sameLines(const Lines& a, const Lines& b) {
+    if (a.entries.size() != b.entries.size()) return false;
+    for (size_t n = 0; n < a.entries.size(); ++n)
+        if (a.entries[n].step != b.entries[n].step || a.entries[n].interruptedPc != b.entries[n].interruptedPc ||
+            a.entries[n].fiq != b.entries[n].fiq) return false;
+    const auto& x = a.out.run.result;
+    const auto& y = b.out.run.result;
+    return !std::memcmp(x.registers, y.registers, sizeof(x.registers)) && x.stop == y.stop && x.trace.pc == y.trace.pc &&
+           a.out.cheap.retired == b.out.cheap.retired && a.out.cheap.time.ticks == b.out.cheap.time.ticks &&
+           x.graphicsFrameHash == y.graphicsFrameHash && x.cs5WaitClocks == y.cs5WaitClocks;
+}
+void printLines(const char* name, const Lines& l) {
+    std::printf("%s: stop=%s pc=%08x address=%08x r8=%u retired=%llu ticks=%llu cs5wait=%llu lean=%llu entries=%zu", name,
+                imx1ProbeStopName(l.out.run.result.stop), l.out.run.result.trace.pc, l.out.run.result.address,
+                l.out.run.result.registers[8], (unsigned long long)l.out.cheap.retired,
+                (unsigned long long)l.out.cheap.time.ticks, (unsigned long long)l.out.run.result.cs5WaitClocks,
+                (unsigned long long)l.out.lean, l.entries.size());
+    for (const auto& i : l.entries) std::printf(" [%llu %08x%s]", (unsigned long long)i.step, i.interruptedPc, i.fiq ? " fiq" : "");
+    std::printf("\n");
+    std::fflush(stdout);
+}
+
+// An AITC force write raises the IRQ: it is taken right after the store, at the bx lr of GraphicsGuest::op (0x200ff004).
+void forcedIrq() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00223008, 31);
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+    g.spin(300);
+    const auto mark = g.store(0x00223054, 1u << 31);
+    g.spin(50);
+    g.end();
+    const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
+    const auto stepped = runLines(g.words, false, true);
+    printLines("forced irq exact", exact); printLines("forced irq fast", fast); printLines("forced irq stepped", stepped);
+    assert(stepped.entries.size() == 1 && stepped.entries[0].step == mark && stepped.entries[0].interruptedPc == 0x200ff004);
+    // Nothing is mapped at the vector, so the run stops there.
+    assert(stepped.out.run.result.trace.pc == 0x18);
+    assert(sameLines(exact, stepped) && sameLines(fast, stepped));
+}
+
+// Timer 2 raises an FIQ after comp counts while the guest fills the engine's ring and submits the fill at
+// 0xa9ed4 (graphics memory and register writes, each with CS5 wait clocks). Nothing is mapped at the vector,
+// so the run stops there. Returns 1 when the FIQ came right after the submission, 2 right after a ring store.
+unsigned commandFiq(uint32_t comp) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00223018, 1u << 26); g.store(0x00223008, 58);
+    g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;
+    g.store(0x00203008, comp); g.store(0x00203000, 0x13);
+    const auto submitted = g.fill();
+    g.busy();
+    g.spin(500);
+    g.end();
+    const auto exact = runLines(g.words, false, false), fast = runLines(g.words, true, false);
+    const auto stepped = runLines(g.words, false, true);
+    const bool ok = sameLines(exact, stepped) && sameLines(fast, stepped) && stepped.entries.size() == 1 &&
+                    stepped.out.run.result.trace.pc == 0x1c;
+    const bool atSubmit = stepped.entries.size() == 1 && stepped.entries[0].step == submitted &&
+                          stepped.entries[0].interruptedPc == 0x200a9ed8;
+    if (!ok || (atSubmit && comp % 16 == 0)) {
+        std::printf("comp %u%s\n", comp, atSubmit ? " (after the submission)" : "");
+        printLines("  exact", exact); printLines("  fast", fast); printLines("  stepped", stepped);
+    }
+    assert(ok);
+    return atSubmit ? 1 : stepped.entries[0].interruptedPc == 0x200ff004 && stepped.entries[0].step > submitted - 300 ? 2 : 0;
+}
 }  // namespace
 
 int main() {
     uint32_t stopPc = 0, savePc = 0;
+    forcedIrq();
+    {
+        // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
+        // the engine runs.
+        unsigned atSubmit = 0, atStore = 0;
+        for (uint32_t comp = 1; comp <= 3460; comp = comp == 400 ? 3300 : comp + 1) {
+            const auto at = commandFiq(comp);
+            atSubmit += at == 1;
+            atStore += at == 2;
+        }
+        std::printf("command fiq: %u taken right after the submission, %u right after a ring store\n", atSubmit, atStore);
+        assert(atSubmit >= 32 && atStore >= 200);
+    }
     {
         const auto words = guest(Tail::tlb, stopPc, savePc);
         const auto exact = runGuest(words, false), fast = runGuest(words, true);
@@ -365,6 +490,9 @@ int main() {
         same(exact, observed);
         assert(fast.timerReads >= 250 && observed.lean == 0 && observed.timerReads == 0);
         assert(fast.run.result.busAccesses == observed.run.result.busAccesses);
+        // Exact's D-cache fills the line the Thumb loop reads once, eight words, where Fast reads each of the
+        // 200 loads from memory.
+        assert(fast.run.result.busAccesses == exact.run.result.busAccesses + 200 - 8);
     }
     {
         const auto words = guest(Tail::cachedTimer, stopPc, savePc);
@@ -381,13 +509,23 @@ int main() {
         const auto otherExact = runGuest(other, false), otherFast = runGuest(other, true);
         print("dma exact", exact); print("dma fast", fast);
         print("dma other page exact", otherExact); print("dma other page fast", otherFast);
-        const auto& pcm = exact.run.result.pcm;
-        std::printf("dma pcm: active=%d source=%08x remaining=%u words=%llu\n", pcm.dmaActive, pcm.source, pcm.remaining,
-                    (unsigned long long)pcm.transmittedWords); std::fflush(stdout);
+        for (const auto* o : {&exact, &fast, &otherExact, &otherFast}) {
+            const auto& pcm = o->run.result.pcm;
+            std::printf("dma pcm: active=%d source=%08x remaining=%u words=%llu last=%04x\n", pcm.dmaActive, pcm.source,
+                        pcm.remaining, (unsigned long long)pcm.transmittedWords, o->pcmLast);
+        }
+        std::fflush(stdout);
         assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.trace.pc == stopPc);
         same(exact, fast);
         same(otherExact, otherFast);
         assert(otherFast.lean >= fast.lean + 150);
+        // The DMA sent the samples the lean loop wrote (dmaOther) and the counts the step stored while it ran
+        // (dma), the same ones at the same times in both engines.
+        const auto sent = [](const Outcome& o) { return o.run.result.pcm.transmittedWords; };
+        assert(sent(exact) >= 16 && sent(fast) == sent(exact) && fast.pcmLast == exact.pcmLast);
+        assert(exact.pcmLast >= 1 && exact.pcmLast <= 2048);
+        assert(sent(otherExact) >= 16 && sent(otherFast) == sent(otherExact) && otherFast.pcmLast == otherExact.pcmLast);
+        assert(otherExact.pcmLast >= 0x0101 && otherExact.pcmLast <= 0x0104);
     }
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
               "rewritten code, unsupported access, timer reads, a cacheable timer and the PCM DMA buffer match Exact");
