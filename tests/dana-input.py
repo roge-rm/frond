@@ -93,9 +93,11 @@ def run(args):
             before=records();time.sleep(.5);assert records()==before
             print('PASS guest repeat and release',flush=True)
         # A letter typed twice in a row reaches the guest as two presses.
-        for value in ['hello','line0011','aaaaaaaaaaaa']:
-            launch();before=len(records());text(value);time.sleep(2.5)
-            got=[e[1] for e in records()[before:] if e[0]==4]
+        # More than eight different keys released just before a repeat still hold it back.
+        for chunks in [['hello'],['line0011'],['aaaaaaaaaaaa'],['abcdefghijll'],['the bookkeep','er will see ','three apples']]:
+            launch();before=len(records())
+            for chunk in chunks: text(chunk);time.sleep(2.5)
+            value=''.join(chunks);got=[e[1] for e in records()[before:] if e[0]==4]
             assert got==list(map(ord,value)),(value,bytes(got))
         print('PASS repeated letters',flush=True)
         launch();before=len(records())

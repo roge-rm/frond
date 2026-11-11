@@ -933,6 +933,29 @@ int main() {
         typed.now=209; typed.ReportHeldKeys(); assert(!request());
         typed.now=210; typed.ReportHeldKeys(); assert(request());
 
+        // Ten different keys released 10 ms apart before l is typed twice: each key keeps its own
+        // window, so the second l still waits 100 ms after the first l's release.
+        PacedSt many; assert(many.Byte(0)==0xaa); many.SetWord(0xfffff302,0);
+        auto report=[&]() {
+            std::vector<uint8> codes; unsigned n=many.Byte(0)&15;
+            for(unsigned i=0;i<n;i++) codes.push_back(uint8(many.Byte(0)));
+            return codes;
+        };
+        many.now=100; assert(many.DispatchDanaInput(*DanaInput5::TextTransitions("abcdefghijll")));
+        std::vector<std::pair<uint64,std::vector<uint8>>> seen;
+        for(uint64 t=100;t<1000;t++) {
+            many.now=t; many.ReportHeldKeys();
+            if(many.GetWord(0xfffff310)&1) seen.push_back({t,report()});
+        }
+        assert(seen.size()==24);
+        const char* letters="abcdefghijll";
+        for(unsigned i=0;i<24;i++) {
+            if(i%2) assert(seen[i].second.empty());
+            else assert(seen[i].second==std::vector<uint8>{DanaScan5::Named(std::string(1,letters[i/2]))->Code()});
+        }
+        assert(seen[20].first-seen[19].first==10);
+        assert(seen[22].first-seen[21].first==100);
+
         // With shift held, its set is reported again every 10 ms while a waits.
         PacedSt shifted; assert(shifted.Byte(0)==0xaa); shifted.SetWord(0xfffff302,0);
         auto shift=*DanaScan5::Named("lshift");
@@ -957,6 +980,34 @@ int main() {
         cancelled.ReleaseDanaInput(); assert(cancelled.Byte(0)==shift.Code());
         cancelled.now=140; assert(cancelled.Byte(0)==0x40);
         cancelled.now=300; assert(cancelled.Byte(0)==0x40);
+    }
+    {
+        // A common HALT while a repeat is being clocked finishes it and drops the held-back press.
+        PacedSt halted; assert(halted.Byte(0)==0xaa);
+        auto shift=*DanaScan5::Named("lshift");
+        halted.now=100; assert(halted.DispatchDanaInput({{shift,true},{scan,true},{scan,false},{scan,true}}));
+        halted.Byte(0); halted.Byte(0);
+        halted.now=110; halted.Byte(0); halted.Byte(0); halted.Byte(0);
+        halted.now=120; halted.Byte(0); halted.Byte(0);
+        halted.now=130; assert(halted.Byte(0)==0x41);
+        for(auto b:halt) halted.Byte(b);
+        assert(halted.Byte(0)==shift.Code());
+        halted.now=300; assert(halted.Byte(0)==0);
+    }
+    {
+        // With all 32 reports queued, a release folds into the newest one instead of being refused.
+        St full; assert(full.Byte(0)==0xaa);
+        auto b=*DanaScan5::Named("b");
+        assert(full.DispatchScanCode(b.Code(),true));
+        for(unsigned i=0;i<31;i++) assert(full.DispatchScanCode(scan.Code(),i%2==0));
+        assert(!full.DispatchScanCode(DanaScan5::Named("c")->Code(),true));
+        assert(full.DispatchScanCode(b.Code(),false)); assert(full.DispatchScanCode(scan.Code(),false));
+        std::vector<uint8> last;
+        for(unsigned r=0;r<32;r++) {
+            last.clear(); unsigned n=full.Byte(0)&15;
+            for(unsigned i=0;i<n;i++) last.push_back(uint8(full.Byte(0)));
+        }
+        assert(last.empty());
     }
     St reserved; assert(reserved.Byte(0)==0xaa);
     std::vector<DanaTransition5> fill;
