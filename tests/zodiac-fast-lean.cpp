@@ -8,7 +8,7 @@
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
 // Graphics memory stores right after a change that makes the frame scan again show in the frame as in Exact, and a
 // timer read after a lean graphics memory store leaves the lean path. Scan status and acquisition reads on the lean
-// path give Exact's values at Exact's times.
+// path give Exact's values at Exact's times, in ARM and in Thumb.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -555,6 +555,79 @@ void scanReads() {
     std::fflush(stdout);
     assert(reads >= 5000 && writes >= 1000 && mixed >= 30);
 }
+// The same in Thumb, the scan status read by LDR(1) at 200adb14, LDR(2) at 200adb08 and LDR(4) at 200ad7b0 (sp
+// points at 54c), with STR(1) and STR(2) to graphics memory in half the runs. The lean path takes them as it takes
+// the ARM ones: in Thumb the loop sees the translated ARM word.
+std::vector<uint32_t> thumbScanGuest(uint32_t delay, bool store) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.spin(1 + delay);
+    g.word(0xadb14, 0x6804 | 0x4770u << 16);              // ldr r4, [r0, #0]; bx lr
+    g.word(0xadb08, 0x5844 | 0x4770u << 16);              // ldr r4, [r0, r1]; bx lr
+    g.word(0xad7b0, 0x9c00 | 0x4770u << 16);              // ldr r4, [sp, #0]; bx lr
+    std::vector<uint32_t> words;
+    load(words, 0, 0x1601054c); load(words, 1, 0); load(words, 2, 0x16800100);
+    words.push_back(0xe1a0b00d);                          // mov r11, sp
+    load(words, 13, 0x1601054c);
+    words.push_back(0xe3a06000);                          // mov r6, #0
+    words.push_back(0xe3a03c01);                          // mov r3, #256
+    words.push_back(0xe28fc001);                          // add r12, pc, #1
+    words.push_back(0xe12fff1c);                          // bx r12: Thumb from the next word
+    const uint32_t base = 0x20000000 + g.cursor;
+    const uint32_t thumb = base + uint32_t(words.size()) * 4;
+    std::vector<uint16_t> h;
+    const auto here = [&] { return thumb + uint32_t(h.size()) * 2; };
+    const auto bl = [&](uint32_t target) {
+        const uint32_t off = target - (here() + 4);
+        h.push_back(uint16_t(0xf000 | ((off >> 12) & 0x7ff)));
+        h.push_back(uint16_t(0xf800 | ((off >> 1) & 0x7ff)));
+    };
+    const uint32_t top = here();
+    for (uint32_t stub : {0x200adb14u, 0x200adb08u, 0x200ad7b0u}) {
+        bl(stub);
+        h.push_back(0x0076);                              // lsls r6, r6, #1
+        h.push_back(0x4066);                              // eors r6, r4
+    }
+    if (store) {
+        h.push_back(0x6013);                              // str r3, [r2, #0]
+        h.push_back(0x5054);                              // str r4, [r2, r1]
+    }
+    h.push_back(0x3b01);                                  // subs r3, #1
+    h.push_back(uint16_t(0xd100 | (((top - (here() + 4)) >> 1) & 0xff)));  // bne loop
+    // adr r5, back; bx r5; back is the next word boundary after both.
+    const uint32_t back = (here() + 4 + 3) & ~3u;
+    h.push_back(uint16_t(0xa500 | ((back - ((here() + 4) & ~3u)) >> 2)));
+    h.push_back(0x4728);
+    while (here() < back) h.push_back(0x46c0);           // nop
+    for (size_t i = 0; i < h.size(); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
+    words.push_back(0xe1a0d00b);                          // mov sp, r11
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return g.words;
+}
+void thumbScanReads() {
+    uint64_t reads = 0, writes = 0;
+    unsigned mixed = 0, runs = 0;
+    for (bool store : {false, true})
+        for (uint32_t delay = 0; delay < 64; delay += 3, ++runs) {
+            const auto words = thumbScanGuest(delay, store);
+            const auto exact = runGuest(words, false), fast = runGuest(words, true);
+            if (delay == 0) { print(store ? "thumb scan reads, stores exact" : "thumb scan reads exact", exact);
+                              print(store ? "thumb scan reads, stores fast" : "thumb scan reads fast", fast); }
+            assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[3] == 0);
+            assert(!(exact.run.result.cpsr & 0x20) && exact.run.result.registers[13] != 0x1601054c);
+            same(exact, fast);
+            assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks &&
+                   exact.run.result.graphicsFrameHash == fast.run.result.graphicsFrameHash);
+            reads += fast.cs5Reads;
+            writes += fast.cs5Writes;
+            mixed += exact.run.result.registers[6] != 0;
+        }
+    std::printf("thumb scan reads: %llu CS5 register reads and %llu graphics memory writes on the lean path, %u of %u "
+                "runs saw the status set\n", (unsigned long long)reads, (unsigned long long)writes, mixed, runs);
+    std::fflush(stdout);
+    assert(reads >= 10000 && writes >= 2000 && mixed >= 10);
+}
 }  // namespace
 
 int main() {
@@ -564,6 +637,7 @@ int main() {
     leanDraw(Trigger::transaction, "draw after transaction");
     storeThenTimer();
     scanReads();
+    thumbScanReads();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
         // the engine runs.
