@@ -1,0 +1,161 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -959,7 +959,8 @@
+         // runs the loop below; everything that reaches the guest, input included, happens
+         // on it in the same order and at the same points as with one thread. RenderLink
+         // carries SDL events to it in order and its LCD frames back.
+-        RenderLink link(displayConfiguration.width, displayConfiguration.height);
++        RenderLink link(soc->FrameQuarterTurn() ? displayConfiguration.height : displayConfiguration.width,
++                        soc->FrameQuarterTurn() ? displayConfiguration.width : displayConfiguration.height);
+         link.beforeEvent = [&](const SDL_Event& event) {
+             microphone.AppEventOnDeviceThread(event.type);
+ #ifndef __ANDROID__
+--- a/src/uarm/native/SdlRenderer.cpp
++++ b/src/uarm/native/SdlRenderer.cpp
+@@ -30,6 +30,7 @@
+     : window(window),
+       soc(soc),
+       deviceType(soc->GetDeviceType()),
++      quarterTurn(soc->FrameQuarterTurn()),
+       // A fitted window draws in device pixels and lets the renderer scale and place them.
+       scale(fit == WindowFit::none ? scale : 1.f),
+       rotation(rotation),
+@@ -85,7 +86,8 @@
+ 
+     intermediateTexture =
+         SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_STREAMING,
+-                          displayConfiguration.width, displayConfiguration.height);
++                          quarterTurn ? displayConfiguration.height : displayConfiguration.width,
++                          quarterTurn ? displayConfiguration.width : displayConfiguration.height);
+ 
+     SDL_SetTextureScaleMode(frameTexture, smoothLcd ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+     SDL_SetTextureScaleMode(intermediateTexture, SDL_ScaleModeNearest);
+@@ -157,20 +159,20 @@
+     this->lcdEnabled = lcdEnabled;
+ 
+     if (frame) {
+-        frame += firstDirtyLine * displayConfiguration.width;
++        const int frameWidth = quarterTurn ? displayConfiguration.height : displayConfiguration.width;
++        frame += firstDirtyLine * frameWidth;
+         uint8_t* pixels;
+         int pitch;
+         SDL_LockTexture(intermediateTexture, NULL, (void**)&pixels, &pitch);
+ 
+         pixels += firstDirtyLine * pitch;
+ 
+-        if (pitch == 4 * displayConfiguration.width) {
+-            memcpy(pixels, frame,
+-                   4 * displayConfiguration.width * (lastDirtyLine - firstDirtyLine + 1));
++        if (pitch == 4 * frameWidth) {
++            memcpy(pixels, frame, 4 * frameWidth * (lastDirtyLine - firstDirtyLine + 1));
+         } else {
+             for (uint32_t y = firstDirtyLine; y < lastDirtyLine; y++) {
+-                memcpy(pixels, frame, 4 * displayConfiguration.width);
+-                frame += displayConfiguration.width;
++                memcpy(pixels, frame, 4 * frameWidth);
++                frame += frameWidth;
+                 pixels += pitch;
+             }
+         }
+@@ -179,7 +181,7 @@
+ 
+         SDL_Rect rect = {.x = 0,
+                          .y = static_cast<int>(firstDirtyLine),
+-                         .w = displayConfiguration.width,
++                         .w = frameWidth,
+                          .h = static_cast<int>(lastDirtyLine - firstDirtyLine + 1)};
+ 
+         if (!frameTextureValid) {
+@@ -188,7 +190,15 @@
+         }
+ 
+         SDL_SetRenderTarget(renderer, frameTexture);
+-        SDL_RenderCopyEx(renderer, intermediateTexture, &rect, &rect, 0, nullptr, SDL_FLIP_NONE);
++        if (quarterTurn) {
++            // The panel's rows become the frame's columns, right to left: turned a quarter
++            // clockwise about the centre of a panel-shaped rect in the middle of the frame.
++            const int width = displayConfiguration.width, height = displayConfiguration.height;
++            const SDL_Rect panel = {.x = (width - height) / 2, .y = (height - width) / 2, .w = height, .h = width};
++            SDL_RenderCopyEx(renderer, intermediateTexture, nullptr, &panel, 90, nullptr, SDL_FLIP_NONE);
++        } else {
++            SDL_RenderCopyEx(renderer, intermediateTexture, &rect, &rect, 0, nullptr, SDL_FLIP_NONE);
++        }
+         SDL_SetRenderTarget(renderer, nullptr);
+ 
+         frameTextureValid = true;
+--- a/src/uarm/native/SdlRenderer.h
++++ b/src/uarm/native/SdlRenderer.h
+@@ -57,6 +57,8 @@
+ 
+     SoC* soc{nullptr};
+     DeviceType5 deviceType;
++    // The frame comes as the panel is wired and the GPU turns it into frameTexture (the Zodiac).
++    const bool quarterTurn;
+ 
+     const float scale;
+     float artworkScale{1};
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -142,6 +142,9 @@
+     // Actual SoC needs to implement those, the other virtuals are taken
+     // care of in soc_generic.h
+     virtual uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) = 0;
++    // Whether GetPendingFrame gives the panel as it is wired, the display's height wide and its
++    // width high, for the frontend to turn a quarter clockwise as it draws.
++    virtual bool FrameQuarterTurn() const { return false; }
+     virtual void ResetPendingFrame() = 0;
+     virtual DeviceType5 GetDeviceType() = 0;
+     virtual DisplayMode GetDisplayMode() = 0;
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -195,7 +195,7 @@
+     // After a load or a reset the frame the machine already has is shown again.
+     if (!panel && redraw) panel = imx1MachinePeekFrame(machine, width, height);
+     if (panel && width == zodiacPanelWidth && height == zodiacPanelHeight) {
+-        zodiacRotateFrame(panel, view.data());
++        std::copy(panel, panel + view.size(), view.begin());
+         framePending = true;
+     }
+     if (acquired) imx1MachineAcknowledgeFrame(machine);
+@@ -206,7 +206,7 @@
+     }
+     if (!framePending) return nullptr;
+     firstDirtyLine = 0;
+-    lastDirtyLine = zodiacViewHeight - 1;
++    lastDirtyLine = zodiacPanelHeight - 1;
+     return view.data();
+ }
+ 
+--- a/src/uarm/uarm/soc_IMX1.h
++++ b/src/uarm/uarm/soc_IMX1.h
+@@ -45,6 +45,7 @@
+     uint64_t GetTime() override;
+     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
+     void ResetPendingFrame() override { framePending = false; }
++    bool FrameQuarterTurn() const override { return true; }
+     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
+     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
+     void SuspendTimerInterrupts(bool) override {}
+@@ -87,8 +88,9 @@
+     Imx1Machine* machine{nullptr};
+     bool halted{false};
+ 
+-    // The view handed to the frontend, a copy, so the machine's frame is acknowledged at once.
+-    std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacViewWidth) * zodiacViewHeight);
++    // The panel frame handed to the frontend, a copy, so the machine's frame is acknowledged at
++    // once. The frontend turns it on the GPU.
++    std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
+     bool framePending{false}, redraw{true};
+ 
+     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
+--- a/src/uarm/uarm/zodiac_panel.h
++++ b/src/uarm/uarm/zodiac_panel.h
+@@ -15,7 +15,7 @@
+ inline constexpr uint32_t zodiacPanelWidth = 320, zodiacPanelHeight = 480;
+ inline constexpr uint32_t zodiacViewWidth = 480, zodiacViewHeight = 320;
+ 
+-// Panel pixel (sx, sy) goes to view pixel (479 - sy, sx).
++// Panel pixel (sx, sy) goes to view pixel (479 - sy, sx). The frontend makes the same turn on the GPU.
+ inline void zodiacRotateFrame(const uint32_t* panel, uint32_t* view) {
+     for (uint32_t sy = 0; sy < zodiacPanelHeight; ++sy) {
+         const uint32_t* row = panel + size_t(sy) * zodiacPanelWidth;
