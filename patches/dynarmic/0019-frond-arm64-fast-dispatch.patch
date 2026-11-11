@@ -1,0 +1,293 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -211,6 +211,19 @@
+     }
+ }
+ 
++// The run entry's lookup: the fast dispatch table, then GetOrEmitIfWanted.
++CodePtr A32AddressSpace::GetForRun(IR::LocationDescriptor descriptor) {
++    if (fast_dispatch_table) {
++        const FastDispatchEntry& slot = FastDispatchSlot(descriptor);
++        if (slot.location_descriptor == descriptor.Value()) {
++            return slot.code_ptr;
++        }
++    }
++    const CodePtr entry = GetOrEmitIfWanted(descriptor);
++    FillFastDispatch(descriptor, entry);
++    return entry;
++}
++
+ CodePtr A32AddressSpace::GetOrEmitIfWanted(IR::LocationDescriptor descriptor) {
+     if (CodePtr block_entry = Get(descriptor)) {
+         return block_entry;
+@@ -444,7 +457,7 @@
+     prelude_info.add_ticks = EmitCallTrampoline<&A32::UserCallbacks::AddTicks>(code, conf.callbacks);
+     prelude_info.get_ticks_remaining = EmitCallTrampoline<&A32::UserCallbacks::GetTicksRemaining>(code, conf.callbacks);
+ 
+-    oaknut::Label return_from_run_code, l_return_to_dispatcher;
++    oaknut::Label return_from_run_code, l_return_to_dispatcher, l_fast_dispatch_table;
+ 
+     prelude_info.run_code = code.xptr<PreludeInfo::RunCodeFuncType>();
+     {
+@@ -466,6 +479,10 @@
+                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
+             }
+         }
++        if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            code.LDR(Xscratch0, l_fast_dispatch_table);
++            code.STR(Xscratch0, SP, offsetof(StackLayout, fast_dispatch_table));
++        }
+ 
+         if (conf.enable_cycle_counting) {
+             code.BL(prelude_info.get_ticks_remaining);
+@@ -512,6 +529,10 @@
+                 code.STR(Xscratch0, SP, offsetof(StackLayout, rsb) + offsetof(RSBEntry, code_ptr) + i * sizeof(RSBEntry));
+             }
+         }
++        if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            code.LDR(Xscratch0, l_fast_dispatch_table);
++            code.STR(Xscratch0, SP, offsetof(StackLayout, fast_dispatch_table));
++        }
+ 
+         if (conf.enable_cycle_counting) {
+             code.MOV(Xticks, 1);
+@@ -554,6 +575,15 @@
+             code.B(LE, return_from_run_code);
+         }
+ 
++        // Frond: the fast dispatch table first; its empty slots point at the call below.
++        if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++            oaknut::Label miss;
++            code.LDR(Xscratch1, l_fast_dispatch_table);
++            EmitA32FastDispatch(code, miss);
++            code.l(miss);
++            fast_dispatch_miss = code.xptr<void*>();
++        }
++
+         code.LDR(X0, l_this);
+         code.MOV(X1, Xstate);
+         code.LDR(Xscratch0, l_addr);
+@@ -561,7 +591,10 @@
+         code.BR(X0);
+ 
+         const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+-            return self.GetOrEmitIfWanted(context.GetLocationDescriptor());
++            const IR::LocationDescriptor descriptor = context.GetLocationDescriptor();
++            const CodePtr entry = self.GetOrEmitIfWanted(descriptor);
++            self.FillFastDispatch(descriptor, entry);
++            return entry;
+         };
+ 
+         code.align(8);
+@@ -604,6 +637,12 @@
+     code.align(8);
+     code.l(l_return_to_dispatcher);
+     code.dx(mcl::bit_cast<u64>(prelude_info.return_to_dispatcher));
++    if (conf.HasOptimization(OptimizationFlag::FastDispatch)) {
++        fast_dispatch_table = std::make_unique<std::array<FastDispatchEntry, 1u << fast_dispatch_bits>>();
++        ClearFastDispatchTable();
++    }
++    code.l(l_fast_dispatch_table);
++    code.dx(mcl::bit_cast<u64>(fast_dispatch_table ? fast_dispatch_table->data() : nullptr));
+ 
+     prelude_info.end_of_prelude = code.offset();
+ 
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -31,6 +31,7 @@
+     // Frond: GetOrEmit, unless the callbacks leave new code to the caller for now (they halt
+     // the run); then the dispatcher, which ends the run.
+     CodePtr GetOrEmitIfWanted(IR::LocationDescriptor descriptor);
++    CodePtr GetForRun(IR::LocationDescriptor descriptor);
+ 
+     // Frond: the compile thread (A32::Jit::SetCompileThread).
+     void SetCompileThread(A32::Jit::CompileThread mode);
+--- a/src/dynarmic/backend/arm64/a32_core.h
++++ b/src/dynarmic/backend/arm64/a32_core.h
+@@ -16,7 +16,7 @@
+ 
+     HaltReason Run(A32AddressSpace& process, A32JitState& thread_ctx, volatile u32* halt_reason) {
+         const auto location_descriptor = thread_ctx.GetLocationDescriptor();
+-        const auto entry_point = process.GetOrEmitIfWanted(location_descriptor);
++        const auto entry_point = process.GetForRun(location_descriptor);
+         return process.prelude_info.run_code(entry_point, &thread_ctx, halt_reason);
+     }
+ 
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -74,6 +74,12 @@
+     UnprotectCodeMemory();
+ 
+     for (const auto& descriptor : descriptors) {
++        if (fast_dispatch_table) {
++            if (FastDispatchEntry& slot = FastDispatchSlot(descriptor); slot.location_descriptor == descriptor.Value()) {
++                slot = {~u64(0), static_cast<CodePtr>(fast_dispatch_miss)};
++            }
++        }
++
+         const auto iter = block_entries.find(descriptor);
+         if (iter == block_entries.end()) {
+             continue;
+@@ -90,6 +96,7 @@
+ }
+ 
+ void AddressSpace::ClearCache() {
++    ClearFastDispatchTable();
+     block_entries.clear();
+     reverse_block_entries.clear();
+     block_infos.clear();
+@@ -97,6 +104,20 @@
+     code.set_offset(prelude_info.end_of_prelude);
+ }
+ 
++// Only entries in block_entries go in: never the dispatcher, which a cold block's lookup returns.
++void AddressSpace::FillFastDispatch(IR::LocationDescriptor descriptor, CodePtr entry) {
++    if (fast_dispatch_table && entry != prelude_info.return_to_dispatcher) {
++        FastDispatchSlot(descriptor) = {descriptor.Value(), entry};
++    }
++}
++
++void AddressSpace::ClearFastDispatchTable() {
++    if (!fast_dispatch_table) {
++        return;
++    }
++    fast_dispatch_table->fill({~u64(0), static_cast<CodePtr>(fast_dispatch_miss)});
++}
++
+ void AddressSpace::DumpDisassembly() const {
+     for (u32* ptr = mem.ptr(); ptr < code.xptr<u32*>(); ptr++) {
+         std::printf("%s", Common::DisassembleAArch64(*ptr, mcl::bit_cast<u64>(ptr)).c_str());
+--- a/src/dynarmic/backend/arm64/address_space.h
++++ b/src/dynarmic/backend/arm64/address_space.h
+@@ -5,7 +5,9 @@
+ 
+ #pragma once
+ 
++#include <array>
+ #include <map>
++#include <memory>
+ #include <optional>
+ 
+ #include <mcl/stdint.hpp>
+@@ -45,6 +47,29 @@
+ 
+     void DumpDisassembly() const;
+ 
++    // Frond: fast dispatch. A direct-mapped table from location descriptor to entry point,
++    // read by the emitted dispatcher and by the indirect branches in blocks, so a jump to a
++    // block that isn't linked doesn't leave JIT code. Only the guest thread fills or clears
++    // it; a block leaves it whenever it leaves block_entries.
++    struct FastDispatchEntry {
++        u64 location_descriptor;
++        CodePtr code_ptr;
++    };
++    static_assert(sizeof(FastDispatchEntry) == 16);
++    static constexpr unsigned fast_dispatch_bits = 12;
++    // Matches EmitFastDispatchIndex: PC bits 1-12 xor bits 13-24 and the T flag. Index bit 0 is
++    // PC bit 1 xor bit 13, so ARM blocks use every slot over 16 KB of code, Thumb over 8 KB.
++    static u32 FastDispatchIndex(u64 location_descriptor) {
++        u32 x = static_cast<u32>(location_descriptor ^ (location_descriptor >> 31));
++        x ^= x >> 12;
++        return (x >> 1) & ((1u << fast_dispatch_bits) - 1);
++    }
++    FastDispatchEntry& FastDispatchSlot(IR::LocationDescriptor descriptor) {
++        return (*fast_dispatch_table)[FastDispatchIndex(descriptor.Value())];
++    }
++    void FillFastDispatch(IR::LocationDescriptor descriptor, CodePtr entry);
++    void ClearFastDispatchTable();
++
+ protected:
+     virtual EmitConfig GetEmitConfig() = 0;
+     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;
+@@ -88,6 +113,12 @@
+     ExceptionHandler exception_handler;
+     FastmemManager fastmem_manager;
+ 
++    // Empty slots point at the dispatcher's slow path, so even a false match is safe. Allocated
++    // on its own: making AddressSpace 64 KB bigger changed the arm64 Fast results (cause not
++    // found).
++    std::unique_ptr<std::array<FastDispatchEntry, 1u << fast_dispatch_bits>> fast_dispatch_table;
++    void* fast_dispatch_miss = nullptr;
++
+     struct PreludeInfo {
+         std::ptrdiff_t end_of_prelude;
+ 
+--- a/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
++++ b/src/dynarmic/backend/arm64/emit_arm64_a32.cpp
+@@ -7,6 +7,7 @@
+ #include <oaknut/oaknut.hpp>
+ 
+ #include "dynarmic/backend/arm64/a32_jitstate.h"
++#include "dynarmic/backend/arm64/address_space.h"
+ #include "dynarmic/backend/arm64/abi.h"
+ #include "dynarmic/backend/arm64/emit_arm64.h"
+ #include "dynarmic/backend/arm64/emit_context.h"
+@@ -151,10 +152,40 @@
+     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+ }
+ 
+-void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool) {
+-    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
++void EmitA32FastDispatch(oaknut::CodeGenerator& code, oaknut::Label& miss) {
++    static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
++    static_assert(offsetof(AddressSpace::FastDispatchEntry, location_descriptor) == 0);
++    static_assert(offsetof(AddressSpace::FastDispatchEntry, code_ptr) == 8);
++
++    // The index as AddressSpace::FastDispatchIndex works it out.
++    code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
++    code.EOR(X1, X0, X0, LSR, 31);
++    code.EOR(W1, W1, W1, LSR, 12);
++    code.UBFX(W1, W1, 1, AddressSpace::fast_dispatch_bits);
++    code.ADD(Xscratch1, Xscratch1, X1, LSL, 4);
++    code.LDP(X1, Xscratch0, Xscratch1);
++    code.CMP(X1, X0);
++    code.B(NE, miss);
++    code.BR(Xscratch0);
++}
++
++void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
++    // Frond: the dispatcher's halt and cycle checks, then the table, in the block itself so
++    // each indirect branch gets its own branch prediction. A miss goes to the dispatcher.
++    if (ctx.conf.HasOptimization(OptimizationFlag::FastDispatch) && !is_single_step) {
++        oaknut::Label miss;
++        code.LDAR(Wscratch0, Xhalt);
++        code.CBNZ(Wscratch0, miss);
++        if (ctx.conf.enable_cycle_counting) {
++            code.CMP(Xticks, 0);
++            code.B(LE, miss);
++        }
++        code.LDR(Xscratch1, SP, offsetof(StackLayout, fast_dispatch_table));
++        EmitA32FastDispatch(code, miss);
++        code.l(miss);
++    }
+ 
+-    // TODO: Implement FastDispatchHint optimization
++    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+ }
+ 
+ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::If terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
+--- a/src/dynarmic/backend/arm64/emit_arm64.h
++++ b/src/dynarmic/backend/arm64/emit_arm64.h
+@@ -176,6 +176,9 @@
+ void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget link_target);
+ void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type);
+ oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Cond cond);
++// Frond: looks up the current location in the fast dispatch table at Xscratch1 and jumps to
++// its block, or goes to miss. Uses X0, X1 and both scratch registers.
++void EmitA32FastDispatch(oaknut::CodeGenerator& code, oaknut::Label& miss);
+ oaknut::Label EmitA64Cond(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Cond cond);
+ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx);
+ void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx);
+--- a/src/dynarmic/backend/arm64/stack_layout.h
++++ b/src/dynarmic/backend/arm64/stack_layout.h
+@@ -38,6 +38,10 @@
+     u32 save_host_fpcr;
+ 
+     bool check_bit;
++
++    // Frond: AddressSpace::fast_dispatch_table, for the lookups emitted in blocks. Last, in
++    // what was padding, so the frame keeps its size.
++    u64 fast_dispatch_table;
+ };
+ 
+ #ifdef _MSC_VER

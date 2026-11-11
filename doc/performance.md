@@ -14,7 +14,7 @@ Fast interprets code until a block has been reached a few times, then compiles i
 | `FROND_JIT_HOT` | Times a block is reached before it is compiled. Default 4, `1` compiles everything at once. |
 | `FROND_JIT_THREAD` | `0` compiles in place instead of on the thread. |
 | `FROND_JIT_SYNC` | `1` waits for each compile where it was asked for, so runs stop at the same places every time. The benchmark tools and tests turn this on themselves. |
-| `FROND_JIT_AHEAD` | How many links ahead of a requested block the thread also compiles. Default 1, `0` is off. |
+| `FROND_JIT_AHEAD` | How many links ahead of a requested block the thread also compiles. `0` is off, the default. |
 | `FROND_JIT_MAX_UNCHECKED` | Longest run of guest instructions between checks of the cycle budget. Default 64, `0` no limit. |
 | `FROND_JIT_STATS` | `1` prints compile and exit counters when the process ends. |
 
@@ -46,6 +46,7 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 - `MIPS` is the virtual CPU budget, not a hardware clock; `original` takes the device's real speed (96 on the TG50). `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
 - It runs a complete session of any ARM device (TX, Zire 72, E2, TG50) with networking off and no SD card; SESSION can be a machine folder. Boards that aren't PXA are refused. A Memory Stick in the session runs from a copy. A NOR image with `--device` cold boots instead (not the TX, which needs its NAND). `REPLAY` takes the runner's `--input-replay` lines, or `-` for none (pen, key, keyboard-down/up, keyboard-attach/detach and snapshot lines work). Events are sent through the normal pen and key queues at the first 1 ms boundary after their time. The RTC follows guest time so runs repeat. `FROND_JIT=0|1` picks Exact or Fast, `FROND_JIT_STATS=1` prints the JIT's counters at the end. Fast compiles each block where it's asked for so runs repeat; `BENCH_JIT_ASYNC=1` (any value but empty or 0) compiles on the compile thread as the app does, closer to the app's time but Fast hashes change from run to run.
 - `NEWDIR` gets `summary.json` (device, CPU and wall time after restore, user and system CPU, host MIPS, guest time and cycles, LCD frame counts, frame-sequence hash, PCM count, hash, peak and silence), `frames.csv`, `inputs.csv` and numbered PNGs for `snapshot` lines; a session other than a v6 TX one is copied into `NEWDIR/machine` and run from there. The same figures go to stdout as one line. Observation and PNG writing are in the measured cost.
+- A second line, `pauses:`, times each 1 ms work request on the guest thread: the longest, the 99th and 99.9th percentiles, the most host time in any 20 in a row, how many took over 5 ms and where the longest ones were, and the underruns a real-time player would get running the guest 10 or 40 ms ahead of its sound.
 - On Android, `-Pfrond.jitDifferential=true` builds it as `benchmark-replay` in the APK's build tree, for `adb push` to `/data/local/tmp`.
 - `BENCH_DUMP_RAM=1` also writes guest RAM at start and end (`ram-start.bin`, `ram-end.bin`).
 - `python3 tools/analyze-gameplay.py DIR [--compare OTHERDIR]` summarises a run and fails if guest progress, frames or PCM differ. Hashes catch regressions, they don't prove identical state.
