@@ -143,7 +143,7 @@ Ctrl works.
 
 | Host keys | Dana key |
 |---|---|
-| Ctrl+F1 | Calendar (Alt+Ctrl+F1 is New) |
+| Ctrl+F1 | Calendar |
 | Ctrl+F2 | Address |
 | Ctrl+F3 | To Do |
 | Ctrl+F4 | Memo |
@@ -152,10 +152,12 @@ Ctrl works.
 | Ctrl+F7 | Apps |
 | Ctrl+F8 | Send |
 | Ctrl+Esc | Power |
+| Ctrl+Shift+F1 to F8 | Function with that key: New, Cancel, Done, Note, Contrast, Calc, the Apps function key and Sync |
 | PgUp, PgDn | Function+Up, Function+Down |
 
 F1 to F8 and Esc on their own press the Dana's F1 to F8 and Esc. F11 and F12 stay
-Frond's.
+Frond's. In full screen Frond takes the desktop's shortcuts, so these reach the
+Dana; on X11 Ctrl+Alt+F1 to F7 may still switch consoles.
 
 These choices are saved with the machine. Android's Orientation setting chooses
 portrait, landscape or following the phone; it does not rotate the guest image.

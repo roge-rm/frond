@@ -984,12 +984,20 @@ attachment.
 
 Host keys for the Dana keys a laptop lacks are in `uarm/native/DanaHostKeys.h`
 (`make test-dana-host-keys`). Ctrl+F1 to F8 are calendar, address, todo, memo,
-find, menu, apps and send, Ctrl+Esc is power, and PgUp and PgDn are function+up
-and function+down (their own `DanaSource5::physicalPage`, so Alt keeps function).
-The Dana's ctrl press waits until a key that isn't one of these chords comes or
-Ctrl is let go alone, so a chord never shows ctrl to the guest. A host key
-releases what it pressed even if Ctrl is let go first, and `ReleaseInput()`
-clears the state. Either Ctrl works, and Alt+Ctrl+F1 is function+calendar.
+find, menu, apps and send, Ctrl+Esc is power, Ctrl+Shift+F1 to F8 are the same
+keys with function held, and PgUp and PgDn are function+up and function+down.
+Chords use `DanaSource5::physicalChord` and PgUp and PgDn `physicalPage`, so
+releasing one never releases the same Dana key held by another host key, and Alt
+keeps function. The Dana's ctrl press (and shift, while ctrl is held) waits until
+a key that isn't one of these chords comes, a mouse or screen key is pressed, or
+the key is let go alone, so a chord never shows ctrl or shift to the guest. Alt and
+GUI pass straight through. A host key releases what it pressed even if Ctrl is let
+go first, and `ReleaseInput()` clears the state. Either Ctrl and Shift work.
+
+In full screen on the Dana, `PalmHolder::setKeyboardGrab()` takes the X keyboard on
+the Palm's embedded window (`xcb_grab_keyboard`, owner events on), so the desktop's
+own Ctrl+F1 to F4 and Ctrl+Esc reach it. It is let go on leaving full screen,
+when the focus is in another application and when the Palm is released.
 
 The native Dana keyboard art shares these physical names. `danaKeyboardArt()`
 supplies key bounds and legends; `danaKeyAt()` returns an art index, not a scan or

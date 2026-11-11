@@ -1336,6 +1336,8 @@ void MainWindow::enterFullScreen() {
     bodyLayout->removeWidget(panels);
     barHandle->hide();
     showFullScreen();
+    // Full screen takes the desktop's shortcuts, so Ctrl+F1 to F8 and Ctrl+Esc reach the Dana.
+    if (frondFirmware::isDana(runningDevice)) palmHolder->setKeyboardGrab(true);
     overlayBarShown = true;
     panels->setVisible(panels->current() >= 0);
     refresh();
@@ -1347,6 +1349,7 @@ void MainWindow::leaveFullScreen() {
     // A panel left open would squeeze the Palm in the smaller window.
     panels->open(-1);
     fullScreenOn = false;
+    palmHolder->setKeyboardGrab(false);
     overlayTimer->stop();
     edgeTimer->stop();
     panels->setParent(runArea);

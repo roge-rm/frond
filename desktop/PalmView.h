@@ -30,6 +30,9 @@ class PalmHolder : public QWidget {
     void focusPalm();
     void focusFrond();
     bool palmWantsKeys() const { return wantPalm; }
+    // Grabs the keyboard for the Palm's window while on, so the desktop's own shortcuts reach the
+    // Palm. It is let go while the focus is in another application, and when the Palm is released.
+    void setKeyboardGrab(bool on);
     // The MIPS readout in the Palm's bottom right corner. The reply text starts with the figure;
     // empty text hides it.
     void setMips(const QString& reply);
@@ -55,7 +58,8 @@ class PalmHolder : public QWidget {
     // The Palm's X window and its parents, refreshed about once a second and on each press.
     std::vector<quint32> holders;
     int holdersAge{0};
-    bool buttonWasDown{false}, wantPalm{true};
+    bool buttonWasDown{false}, wantPalm{true}, grabWanted{false}, grabbed{false};
+    void grabKeyboard(bool on);
 };
 
 // Frond's key window while the Palm is embedded: a 1x1 native window under the Palm's, so the
