@@ -87,11 +87,12 @@ fun HomeScreen(model: HomeModel) {
         val app = context.applicationContext
         model.runCopy("Couldn't export the session", "Session exported", reload = false) { Sessions.export(app, s, uri) }
     }
-    model.notice?.let { text ->
-        LaunchedEffect(text) {
-            model.notice = null
-            snackbar.showSnackbar(text)
-        }
+    // Cleared after the snackbar has shown: clearing it first would leave composition and cancel it.
+    val notice = model.notice
+    LaunchedEffect(notice) {
+        if (notice == null) return@LaunchedEffect
+        snackbar.showSnackbar(notice)
+        if (model.notice == notice) model.notice = null
     }
 
     Scaffold(
