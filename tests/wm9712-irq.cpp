@@ -1,6 +1,7 @@
 // Exercise the real codec model through its AC97 register callbacks.
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 #include "ac97dev_WM9712L.h"
 #include "audio_queue.h"
@@ -8,6 +9,7 @@
 static Ac97CodecRegR readRegister;
 static Ac97CodecRegW writeRegister;
 static void* codec;
+static unsigned clients;
 static bool levels[128]{};
 static uint32_t samples[16]{};
 static unsigned sampleCount = 0;
@@ -21,6 +23,7 @@ static void check(bool success) {
 
 void pxaAC97clientAdd(PxaAC97*, Ac97Codec which, Ac97CodecRegR read,
                      Ac97CodecRegW write, void* context) {
+    ++clients;
     if (which == Ac97PrimaryAudio) {
         readRegister = read;
         writeRegister = write;
@@ -49,6 +52,17 @@ static uint16_t read(unsigned address) {
 
 int main() {
     auto* tx = wm9712LInit(nullptr, nullptr, -1, 27);
+    check(clients == 1);  // only the primary audio space answers
+    // Register map: reset values, phone volume at 0x0c reads back, the others drop writes.
+    check(read(0x08) == 0x0f0f && read(0x0a) == 0xaaa0 && read(0x0c) == 0xc008);
+    check(read(0x12) == 0xaaa0 && read(0x20) == 0 && read(0x22) == 0 && read(0x3a) == 0x2000);
+    check(read(0x60) == 0xb032 && read(0x62) == 0x3e00);
+    write(0x0c, 0x8808);
+    check(read(0x0c) == 0x8808);
+    for (unsigned reg : {0x08u, 0x0au, 0x12u, 0x20u, 0x22u, 0x3au, 0x60u, 0x62u}) write(reg, 0x1234);
+    check(read(0x08) == 0x0f0f && read(0x0a) == 0xaaa0 && read(0x60) == 0xb032);
+    uint16_t unknown = 0;
+    check(!readRegister(codec, 0x3c, &unknown));
     check(read(0x26) == 0x000f);
     write(0x26, 0x410f);  // ready bits are read-only; PR0 powers down the ADC
     check(read(0x26) == 0x410e);
@@ -121,5 +135,5 @@ int main() {
     check(levels[50]);
     wm9712LsetPen(e2, -1, -1, 0);
     check(!levels[50]);
-    std::puts("PASS: TX IRQ, digitiser wake-up, coordinate samples, and E2 direct pen output");
+    std::puts("PASS: TX IRQ, digitiser wake-up, coordinate samples, register map and E2 direct pen output");
 }
