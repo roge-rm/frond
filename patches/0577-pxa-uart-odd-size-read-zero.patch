@@ -1,0 +1,11 @@
+--- a/src/uarm/uarm/pxa_UART.cpp
++++ b/src/uarm/uarm/pxa_UART.cpp
+@@ -372,6 +372,8 @@
+     if (size != 4 && size != 1 && !(size == 2 && packedFifo)) {
+         fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+                 write ? "write" : "read", size, (unsigned long)pa);
++        // Ignored, and a read gives zero, the same in both engines.
++        if (!write) memset(buf, 0, size);
+         return true;
+     }
+ 
