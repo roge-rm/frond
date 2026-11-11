@@ -1,0 +1,694 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -217,10 +217,19 @@
+     // and the run's budget, which such a store can shrink.
+     Arm920LeanWrite leanWrite;
+     uint32_t leanInstr, leanBudget;
++    // Most instructions this lean run may retire (cpuArm920RunLeanFor), and whether the JIT's callbacks are
++    // using the lean memory path (no read or write answers from the probe there).
++    uint32_t leanCount;
++    bool leanJit;
+ #ifdef FROND_DYNARMIC
+     struct FrondJit *jit;
+     // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
+     bool jitMemoryOnly, jitRefused;
++    // ARM920T Fast blocks (cpuArm920SetJit): the JIT is run only by cpuArm920RunJit, never by cpuCycle
++    // (jitLoopOnly), and while jitBlocks is on it reads code and data from the lean pages. jitCode has one
++    // bit per 4 KiB RAM page it has translated code from, as leanCode.
++    bool jitLoopOnly, jitBlocks;
++    uint64_t *jitCode;
+ #endif
+ 
+     template <typename T>
+@@ -896,7 +905,7 @@
+                             MMU_TRANSLATE_RESULT_BUFFERABLE(r);
+         if constexpr (!write) {
+             uint32_t value, cost = 0;
+-            if (size == 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
++            if (size == 4 && !cpu->leanJit && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
+                 cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, cpu->curInstrPC, cpu->leanDone,
+                               cpu->leanBudget - cpu->leanDone - 1, cpuPrvLeanSingleLoad(cpu), &value, &cost)) {
+                 memcpy(buf, &value, size);
+@@ -904,7 +913,8 @@
+                 ++cpu->leanBus;
+                 return true;
+             }
+-        } else if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanWrite && cpuPrvLeanSingleStore(cpu)) {
++        } else if (size <= 4 && !cpu->leanJit && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanWrite &&
++                   cpuPrvLeanSingleStore(cpu)) {
+             uint32_t value = 0, cost = 0;
+             memcpy(&value, buf, size);
+             const uint32_t left = cpu->leanBudget - cpu->leanDone - 1;
+@@ -1115,7 +1125,8 @@
+ 
+ void cpuDropTranslatedCode(struct ArmCpu *cpu) {
+ #ifdef FROND_DYNARMIC
+-    if (cpu->jit) jitClear(cpu->jit);
++    // Fast blocks turned off hold nothing that runs; turning them on again drops it all.
++    if (cpu->jit && (cpu->jitBlocks || !cpu->jitLoopOnly)) jitClear(cpu->jit);
+ #else
+     (void)cpu;
+ #endif
+@@ -1129,7 +1140,8 @@
+ }
+ void cpuSetJitSync(bool sync) { jitSetSync(sync); }
+ bool cpuJitExecutionCounts(const ArmCpu *cpu, uint64_t *blocks, uint64_t *instructions) {
+-    if (!cpu || !cpu->jit) return false;
++    // The ARM920T Fast blocks JIT is the lean path's, outside the saved engine (stateFlagFast).
++    if (!cpu || !cpu->jit || cpu->jitLoopOnly) return false;
+     jitExecutionCounts(cpu->jit, blocks, instructions);
+     return true;
+ }
+@@ -4818,7 +4830,7 @@
+ static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
+     uint32_t done = 0;
+     const uint32_t before = cpu->leanDone;
+-    while (before + done < cpu->leanBudget) {
++    while (before + done < cpu->leanBudget && before + done < cpu->leanCount) {
+         cpu->leanDone = before + done;
+         const uint32_t pc = cpu->regs[REG_NO_PC];
+         uint32_t instr, decoded;
+@@ -4842,6 +4854,10 @@
+ }
+ 
+ uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64_t *busAccesses) {
++    return cpuArm920RunLeanFor(cpu, budget, UINT32_MAX, blNext, busAccesses);
++}
++
++uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint32_t *blNext, uint64_t *busAccesses) {
+     *blNext = ~0u;
+     *busAccesses = 0;
+     if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
+@@ -4856,11 +4872,12 @@
+     cpu->leanBus = 0;
+     cpu->leanDone = 0;
+     cpu->leanBudget = budget;
++    cpu->leanCount = count;
+     uint32_t done = 0;
+     for (;;) {
+         done += cpu->T ? cpuPrvLeanLoop<2>(cpu) : cpuPrvLeanLoop<4>(cpu);
+         // Carry on only past an ARM/Thumb switch; a failed fetch leaves no slow path reason.
+-        if (done >= cpu->leanBudget || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
++        if (done >= cpu->leanBudget || done >= count || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
+         cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
+     }
+     cpu->leanRun = false;
+@@ -4904,6 +4921,17 @@
+ 
+ // Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
+ void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
++#ifdef FROND_DYNARMIC
++    // Translated code is dropped by page: the virtual pages it was translated from at pa.
++    if (cpu->jitCode) {
++        uint64_t &bits = cpu->jitCode[pa >> 18];
++        const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
++        if (unlikely(bits & bit)) {
++            bits &= ~bit;
++            jitCodeWrittenPa(cpu->jit, pa);
++        }
++    }
++#endif
+     if (!cpu->leanCode) return;
+     uint64_t &bits = cpu->leanCode[pa >> 18];
+     if (likely(!(bits & (uint64_t(1) << ((pa >> 12) & 63))))) return;
+@@ -4921,6 +4949,11 @@
+     *busAccesses = 0;
+     return 0;
+ }
++uint32_t cpuArm920RunLeanFor(ArmCpu *, uint32_t, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
++    *blNext = ~0u;
++    *busAccesses = 0;
++    return 0;
++}
+ void cpuArm920SetLean(ArmCpu *, Arm920LeanPage, Arm920LeanGuard, void *) {}
+ void cpuArm920LeanReset(ArmCpu *) {}
+ void cpuArm920LeanFlush(ArmCpu *) {}
+@@ -4960,8 +4993,19 @@
+     return false;
+ }
+ 
++// ARM920T Fast blocks: the lean TLB's page for va, live only for plain pages the MMU allows now in this mode.
++// Its write entries are dropped whenever a page gets translated code (cpuPrvJitNoteArm920Code), and the slow
++// path that fills one again drops the code first (cpuArm920LeanStored), so a writable page holds no code.
++static uint8_t *cpuPrvJitArm920Page(ArmCpu *cpu, uint32_t va, bool write) {
++    if (!cpu->jitBlocks) return nullptr;
++    const struct HostTlb &t = cpu->mem->hostTlb;
++    const struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
++    if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
++    return (uint8_t *)((e.addend & ~uintptr_t(1)) + (va & ~0xfffu));
++}
++
+ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
+-    if (cpu->model == ArmCpuModel::arm920t) return nullptr;
++    if (cpu->model == ArmCpuModel::arm920t) return cpuPrvJitArm920Page(cpu, va, false);
+     const struct HostTlb &t = cpu->mem->hostTlb;
+     const struct HostTlbEntry &e = t.read[(va >> 12) & (HOST_TLB_SIZE - 1)];
+     if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+@@ -4972,7 +5016,7 @@
+ // fast path for the current privilege (so the MMU allows it in this mode with the current
+ // domains), marked dirty as ramDirectWritePage does. Null for anything else.
+ uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va) {
+-    if (cpu->model == ArmCpuModel::arm920t) return nullptr;
++    if (cpu->model == ArmCpuModel::arm920t) return cpuPrvJitArm920Page(cpu, va, true);
+     if (cpu->nativeCallDepth) return nullptr;
+     const struct HostTlb &t = cpu->mem->hostTlb;
+     const struct HostTlbEntry &e = t.write[(va >> 12) & (HOST_TLB_SIZE - 1)];
+@@ -4996,6 +5040,17 @@
+ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
+     va &= ~3u;
+     if (cpu->model == ArmCpuModel::arm920t) {
++        if (cpu->jitBlocks) {
++            // Plain pages only, straight from memory: Fast keeps no I-cache contents.
++            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, va, cpu->privileged, false);
++            if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
++            bool counted;
++            const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
++            const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
++            if (!page) return false;
++            memcpy(word, page + (pa & 0xfffu), 4);
++            return true;
++        }
+         uint_fast8_t fsr;
+         return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
+     }
+@@ -5066,6 +5121,22 @@
+ 
+ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
+     *lines = nullptr;
++    if (cpu->model == ArmCpuModel::arm920t) {
++        // ARM920T Fast blocks: a RAM page gets its jitCode bit, and a newly marked one loses its lean TLB
++        // entries (so the JIT's page table empties too), so every later store to it drops its code.
++        if (!cpu->jitBlocks || !cpu->leanPage) return nullptr;
++        bool ram = false;
++        uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
++        if (page && ram) {
++            uint64_t &bits = cpu->jitCode[pa >> 18];
++            const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
++            if (!(bits & bit)) {
++                bits |= bit;
++                hostTlbFlush(&cpu->mem->hostTlb);
++            }
++        }
++        return page;
++    }
+     if (uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, lines)) return page;
+     const struct ArmMemRegion &region = cpu->mem->regions[REGION_ROM];
+     if (!region.ub || !region.uD || pa < region.pa || pa >= region.ub) return nullptr;
+@@ -5076,6 +5147,7 @@
+ }
+ 
+ void cpuJitForgetCode(ArmCpu *cpu) {
++    if (cpu->jitCode) memset(cpu->jitCode, 0, (1u << 14) * sizeof(uint64_t));
+     memForgetRamCode(cpu->mem);
+     icacheWatchFetchBuffers(cpu->ic);
+ }
+@@ -5211,6 +5283,17 @@
+                 if ((((pc + 2) & 2) ? next >> 16 : next & 0xffff) < 0xf800) return false;
+             }
+         }
++        // Fast blocks: what the lean path leaves to the step stays out too (CP15, SWI, exception returns, S-bit
++        // LDM/STM, unpredictable forms), except MSR of the CPSR control field, which the JIT runs through
++        // cpuJitSetCpsr; a pending interrupt it unmasks ends the run.
++        if (cpu->jitBlocks) {
++            if (!thumb) {
++                const bool msrCpsr = (word & 0x0ff0fff0) == 0x0120f000 || (word & 0x0ff0f000) == 0x0320f000;
++                if (!msrCpsr && cpuPrvLeanClassArm(word) == LeanClass::exit) return false;
++            } else if (cpuPrvLeanClassThumb((pc & 2) ? word >> 16 : word & 0xffff) == LeanClass::exit) {
++                return false;
++            }
++        }
+     }
+     // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
+     // words than memory, like the patched PACE entry a session restores while its RAM has
+@@ -5332,6 +5415,78 @@
+ 
+     return acc;
+ }
++
++bool cpuArm920SetJit(ArmCpu *cpu, bool on) {
++    if (cpu->model != ArmCpuModel::arm920t) return false;
++    if (!on) {
++        cpu->jitBlocks = false;
++        return true;
++    }
++    if (!cpu->leanPage) return false;
++    if (!cpu->jit) {
++        cpu->jitCode = (uint64_t *)calloc(1u << 14, sizeof(uint64_t));
++        if (!cpu->jitCode) ERR("cannot alloc the JIT code page map");
++        cpu->jitLoopOnly = true;
++        cpu->jitBlocks = true;
++        cpu->jit = jitCreate(cpu, false);
++        icacheSetInvalHook(cpu->ic, cpuPrvJitInval, cpu);
++    } else if (!cpu->jitLoopOnly) {
++        return false;  // the single-step diagnostic JIT
++    }
++    cpu->jitBlocks = true;
++    jitClear(cpu->jit);
++    return true;
++}
++
++bool cpuArm920JitOn(const ArmCpu *cpu) { return cpu->jitBlocks; }
++
++void cpuArm920DropJit(ArmCpu *cpu) {
++    if (!cpu->jit || !cpu->jitLoopOnly) return;
++    icacheSetInvalHook(cpu->ic, nullptr, nullptr);
++    jitDestroy(cpu->jit);
++    cpu->jit = nullptr;
++    cpu->jitBlocks = cpu->jitLoopOnly = false;
++    free(cpu->jitCode);
++    cpu->jitCode = nullptr;
++}
++
++uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *cpu) { return cpu->jit ? jitMaxUnchecked(cpu->jit) : 0; }
++
++uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop) {
++    *stop = arm920JitExit;
++    if (!cpu->jitBlocks || !budget) return 0;
++    cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
++                              SLOW_PATH_REASON_PACE_SYSCALL_BREAK | SLOW_PATH_REASON_INJECTED_CALL_DONE);
++    if (cpu->slowPath || cpu->arm920Waiting || cpu->modePace || cpu->nativeCallDepth || cpu->nativePc[0] ||
++        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic))
++        return 0;
++    // Data goes through the lean memory path: host pages, or an exit (leanExit) that faults the access.
++    cpu->leanRun = true;
++    cpu->leanJit = true;
++    cpu->leanExit = false;
++    uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
++    int jitStop;
++    const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
++    *stop = jitStop == FROND_JIT_BUDGET ? arm920JitBudget :
++            jitStop == FROND_JIT_HALT   ? arm920JitHalt :
++            jitStop == FROND_JIT_COLD   ? arm920JitCold : arm920JitExit;
++    cpu->flags = cpsr & 0xf0000000UL;
++    cpu->Q = !!(cpsr & ARM_SR_Q);
++    cpu->T = !!(cpsr & ARM_SR_T);
++    cpu->leanRun = false;
++    cpu->leanJit = false;
++    cpu->leanExit = false;
++    return ran;
++}
++#else
++bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
++bool cpuArm920JitOn(const ArmCpu *) { return false; }
++void cpuArm920DropJit(ArmCpu *) {}
++uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
++uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop) {
++    *stop = arm920JitExit;
++    return 0;
++}
+ #endif
+ 
+ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
+@@ -5373,7 +5528,7 @@
+ #ifndef __EMSCRIPTEN__
+     // nativePc is only set by RunToNativePc around a whole run, so it holds for this batch.
+ #ifdef FROND_DYNARMIC
+-    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !injected && !cpu->debugStub &&
++    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !cpu->jitLoopOnly && !injected && !cpu->debugStub &&
+         !cpu->nativePc[0] && !cpu->slowPath)
+         return cpuPrvCycleJit(cpu, cycles);
+ #endif
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -295,6 +295,25 @@
+ // the guarded step. blNext is the Thumb BL suffix address after a prefix that ended the run, else ~0.
+ // busAccesses gets the data accesses the step would have counted as bus accesses.
+ uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses);
++// The same, retiring at most count instructions.
++uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t* blNext, uint64_t* busAccesses);
++// ARM920T Fast blocks: Dynarmic in normal blocks over the lean pages, run only through cpuArm920RunJit. On
++// needs cpuArm920SetLean first and makes the JIT on first use; false when there is no JIT in the build or the
++// CPU has the single-step diagnostic JIT. Turning it on again drops translated code.
++bool cpuArm920SetJit(ArmCpu*, bool on);
++bool cpuArm920JitOn(const ArmCpu*);
++// Frees the Fast blocks JIT, for a CPU that won't run again.
++void cpuArm920DropJit(ArmCpu*);
++// Most instructions a JIT run can pass its budget by, plus one.
++uint32_t cpuArm920JitMaxUnchecked(const ArmCpu*);
++// Runs about budget instructions in translated code and returns how many ran, at most budget - 1 +
++// cpuArm920JitMaxUnchecked. stop gets arm920JitBudget when the budget ran out (or translated code was
++// dropped), arm920JitExit when the CPU is left at an instruction or access the JIT can't take (MMIO, CS5,
++// faults, CP15...) for the lean path or the step, arm920JitCold at code not compiled yet, arm920JitHalt for a
++// slow path reason (an interrupt). The JIT compiles as on the other devices (cpuSetJitSync for runs that
++// repeat).
++enum Arm920JitStop { arm920JitBudget, arm920JitExit, arm920JitCold, arm920JitHalt };
++uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop);
+ // The lean TLB's generation and the times Fast dropped its decoded code for a store to it, for tests.
+ uint32_t cpuArm920LeanGeneration(const ArmCpu*);
+ uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -33,6 +33,8 @@
+ bool linesPending = false;
+ uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
+ uint64_t leanTimerReads = 0;  // timer count reads answered on the lean path, for tests
++uint64_t jitRetired = 0, jitRuns = 0;
++bool fastBlocksDefault = true;  // what new machines start with (imx1SetFastBlocksDefault)  // instructions and runs of the Fast engine's JIT since the machine was made
+ uint64_t leanCs5Writes = 0;  // graphics memory writes taken on the lean path, for tests
+ uint64_t leanCs5Reads = 0;  // CS5 register reads answered on the lean path, for tests
+ // One lean run's graphics memory writes: whether they can be taken and their wait clocks, worked out at the first
+@@ -143,7 +145,9 @@
+     uint32_t i2cIssuePc = 0;
+     bool irqRaised = false, fiqRaised = false;
+     // The Fast engine: inside a quiet span the lean interpreter runs instead of the guarded step. Not saved.
+-    bool fastEngine = false;
++    // fastJit: Dynarmic blocks run there first (cpuArm920RunJit), falling back to the lean path and the step.
++    // fastBlocks is whether Fast may use them (on by default, off for lean-only runs).
++    bool fastEngine = false, fastJit = false, fastBlocks = fastBlocksDefault;
+     Imx1BootstrapAccess driveGraphicsLine(const Imx1Cs5Configuration& candidate, bool commit) {
+         if (!options.graphicsIrqA13) return Imx1BootstrapAccess::ok;
+         const auto line = candidate.interruptState().interruptOutput();
+@@ -710,7 +714,8 @@
+             // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
+             if (write && status == Imx1BootstrapAccess::ok &&
+                 Imx1Bootstrap::isRamAddress(address)) {
+-                cpuDropTranslatedCode(p.cpu);
++                // Fast blocks drop only the code translated from this page (cpuArm920LeanStored).
++                if (!p.fastJit) cpuDropTranslatedCode(p.cpu);
+                 if (p.fastEngine) cpuArm920LeanStored(p.cpu, address);
+             }
+             if (!write) std::memcpy(data, &value, size);
+@@ -969,6 +974,8 @@
+     }
+     leanRetired = 0;
+     leanTimerReads = 0;
++    jitRetired = 0;
++    jitRuns = 0;
+     leanCs5Writes = 0;
+     leanCs5Reads = 0;
+     deferredHclk = 0;
+@@ -1310,45 +1317,82 @@
+         for (uint32_t slice = 0; slice < retiredBudget; ++slice)
+             if (!runStep(p, idleHclkLimit)) break;
+     } else {
+-        // Fast: after each step, the rest of a quiet span runs on the lean path. Its instructions are charged
+-        // as the step would charge them, one cycle each through the deferred charge, and it stops before
+-        // anything the step has to see (MMIO, CP15, faults, a guard refusal), which the next step runs.
+-        // The last instruction before the slice's retired or work limit is left to the step, so the slice
+-        // always ends on a step and result.trace is the last instruction run.
++        // Fast: after each step, the rest of a quiet span runs in the JIT and on the lean path. Their instructions
++        // are charged one cycle each through the deferred charge, and they stop before anything the step has
++        // to see (MMIO, CP15, faults, a guard refusal), which the next step runs. The JIT may pass the span by
++        // up to its block length (the charge then comes a little late); the slice, the bounds and the GPIO
++        // event it never passes. The last instruction before the slice's retired or work limit is left to the
++        // step, so the slice always ends on a step and result.trace is the last instruction run.
++        const uint32_t jitSlack = p->fastJit ? cpuArm920JitMaxUnchecked(p->cpu) : 0;
+         for (uint32_t slice = 0; slice < retiredBudget;) {
+             if (!runStep(p, idleHclkLimit)) break;
+             ++slice;
+-            if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
+-                cpuArm920ClockMode(p->cpu) != quietMode) continue;
+-            uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
+-            if (p->bounds) {
+-                const uint64_t used = p->work - p->sliceWorkStart;
+-                budget = used + 1 >= p->bounds->work ? 0 : std::min(budget, p->bounds->work - used - 1);
+-            }
+-            if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
+-                budget = std::min(budget, p->options.gpioEventAfterInstructions - p->retired);
+-            if (!budget) continue;
+-            uint32_t blNext;
+-            uint64_t busAccesses;
+-            leanCs5 = {};
+-            const uint32_t ran = cpuArm920RunLean(p->cpu, uint32_t(budget), &blNext, &busAccesses);
+-            p->result.busAccesses += busAccesses;
+-            // Graphics memory writes add their wait clocks to the work and the deferred charge, and their cost
+-            // to the span used, as cs5Wait would.
+-            deferredHclk += leanCs5.waitClocks;
+-            p->result.cs5WaitClocks += leanCs5.waitClocks;
+-            p->work += leanCs5.waitClocks;
+-            quietCycles -= leanCs5.waitCost;
+-            leanCs5 = {};
+-            if (!ran) continue;
+-            deferredCycles += ran;
+-            quietCycles -= ran;
+-            p->retired += ran;
+-            leanRetired += ran;
+-            p->work += ran;
+-            slice += ran;
+-            p->blPrefix = blNext != ~0u;
+-            if (p->blPrefix) p->blNextPc = blNext;
++            for (;;) {
++                if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
++                    cpuArm920ClockMode(p->cpu) != quietMode) break;
++                uint64_t hard = retiredBudget - slice - 1;
++                if (p->bounds) {
++                    const uint64_t used = p->work - p->sliceWorkStart;
++                    hard = used + 1 >= p->bounds->work ? 0 : std::min(hard, p->bounds->work - used - 1);
++                }
++                if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
++                    hard = std::min(hard, p->options.gpioEventAfterInstructions - p->retired);
++                if (!hard) break;
++                uint32_t leanCount = UINT32_MAX;
++                if (p->fastJit && jitSlack && hard >= jitSlack) {
++                    int stop;
++                    const uint32_t ran = cpuArm920RunJit(p->cpu, uint32_t(std::min(quietCycles, hard - jitSlack + 1)), &stop);
++                    ++jitRuns;
++                    if (ran) {
++                        deferredCycles += ran;
++                        quietCycles = ran < quietCycles ? quietCycles - ran : 0;
++                        p->retired += ran;
++                        jitRetired += ran;
++                        p->work += ran;
++                        slice += ran;
++                        p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
++                    }
++                    if (stop == arm920JitBudget) {
++                        if (ran) continue;
++                        break;
++                    }
++                    if (stop == arm920JitHalt) break;
++                    // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
++                    // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
++                    leanCount = stop == arm920JitCold || ran < 4 ? 32 : 1;
++                }
++                if (quietCycles < leanMinimumSpan || slice + 1 >= retiredBudget) break;
++                uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
++                if (p->bounds) {
++                    const uint64_t used = p->work - p->sliceWorkStart;
++                    budget = used + 1 >= p->bounds->work ? 0 : std::min(budget, p->bounds->work - used - 1);
++                }
++                if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
++                    budget = std::min(budget, p->options.gpioEventAfterInstructions - p->retired);
++                if (!budget) break;
++                uint32_t blNext;
++                uint64_t busAccesses;
++                leanCs5 = {};
++                const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses);
++                p->result.busAccesses += busAccesses;
++                // Graphics memory writes add their wait clocks to the work and the deferred charge, and their
++                // cost to the span used, as cs5Wait would.
++                deferredHclk += leanCs5.waitClocks;
++                p->result.cs5WaitClocks += leanCs5.waitClocks;
++                p->work += leanCs5.waitClocks;
++                quietCycles -= leanCs5.waitCost;
++                leanCs5 = {};
++                if (!ran) break;
++                deferredCycles += ran;
++                quietCycles -= ran;
++                p->retired += ran;
++                leanRetired += ran;
++                p->work += ran;
++                slice += ran;
++                p->blPrefix = blNext != ~0u;
++                if (p->blPrefix) p->blNextPc = blNext;
++                if (!p->fastJit) break;
++            }
+         }
+     }
+     // The slice ends with every cycle charged, so the state, the time and host input see the machine whole.
+@@ -1369,6 +1413,8 @@
+     cpuArm920SetLean(p->cpu, fast ? Probe::leanPage : nullptr, fast ? bootstrapInstruction : nullptr, p);
+     cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
+     cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
++    p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
++    if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
+     // Fast keeps no cache contents: dirty data goes to memory first.
+     if (fast) cpuArm920LeanReset(p->cpu);
+     return true;
+@@ -1378,6 +1424,19 @@
+ 
+ uint64_t imx1MachineLeanRetired(const Imx1Machine*) { return leanRetired; }
+ 
++uint64_t imx1MachineJitRetired(const Imx1Machine*) { return jitRetired; }
++
++uint64_t imx1MachineJitRuns(const Imx1Machine*) { return jitRuns; }
++
++void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
++
++bool imx1MachineSetFastBlocks(Imx1Machine* machine, bool blocks) {
++    auto* p = machine->probe;
++    if (p->bounds || p->stopped) return false;
++    p->fastBlocks = blocks;
++    return !p->fastEngine || imx1MachineSetFastEngine(machine, true);
++}
++
+ uint64_t imx1MachineLeanTimerReads(const Imx1Machine*) { return leanTimerReads; }
+ 
+ uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*) { return leanCs5Writes; }
+@@ -1551,6 +1610,9 @@
+     p->options = {};
+     p->observer = nullptr; p->observerContext = nullptr;
+     p->stopped = true;
++    // The core lives on, but nothing runs it again: give back the JIT's memory.
++    cpuArm920DropJit(p->cpu);
++    p->fastJit = false;
+     if (activeMachine == machine) activeMachine = nullptr;
+ }
+ 
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -208,6 +208,14 @@
+ // switching to it cleans the data cache to memory and empties both. False inside a run or after a stop.
+ bool imx1MachineSetFastEngine(Imx1Machine*, bool fast);
+ bool imx1MachineFastEngine(const Imx1Machine*);
++// Whether Fast runs Dynarmic blocks before the lean path (on by default). Off gives the lean-only Fast engine,
++// for tests and measuring. False inside bounds or after a stop.
++bool imx1MachineSetFastBlocks(Imx1Machine*, bool blocks);
++// The same for machines made after this call.
++void imx1SetFastBlocksDefault(bool blocks);
++// Instructions and runs of the Fast engine's JIT since the machine was made, for tests.
++uint64_t imx1MachineJitRetired(const Imx1Machine*);
++uint64_t imx1MachineJitRuns(const Imx1Machine*);
+ // Instructions the Fast engine ran on its lean path since the machine was made.
+ uint64_t imx1MachineLeanRetired(const Imx1Machine*);
+ // Timer count reads the lean path answered, including any in an instruction the step then ran again.
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -216,6 +216,11 @@
+ struct Env final : public A32::UserCallbacks {
+     ArmCpu *cpu = nullptr;
+     bool arm920 = false;
++    // ARM920T: lineBound for the probe's single-step diagnostic mode, blocks ended at each 32-byte line.
++    // Otherwise (Fast blocks) code pages are watched by physical page through the lean path's stores
++    // (jitCodeWrittenPa), so the guest's I-cache invalidations change nothing.
++    bool lineBound = false;
++    std::unordered_map<uint32_t, std::vector<uint32_t>> byPa;  // Fast blocks: virtual code pages by physical page
+     uint64_t blocks = 0, instructions = 0;
+     A32::Jit *jit = nullptr;
+     PageTable *pages = nullptr;
+@@ -301,7 +306,12 @@
+         const auto it = code.emplace(page, CodePage{pa, host, lines, access}).first;
+         accessPages[access]++;
+         stats.codePages++;
+-        if (host) {
++        if (arm920 && host) {
++            // A newly watched RAM page may have dropped the lean TLB; empty the page table now, as code
++            // can run straight on after this compile.
++            byPa[pa].push_back(page);
++            CheckGen();
++        } else if (host) {
+             byHost[host].push_back(page);
+         } else {
+             stats.unwatched++;
+@@ -338,6 +348,19 @@
+         }
+     }
+ 
++    void CodeWrittenPa(uint32_t pa) {
++        const auto it = byPa.find(pa);
++        if (it == byPa.end()) return;
++        for (uint32_t page : it->second) {
++            const auto c = code.find(page);
++            if (c == code.end() || c->second.pa != pa) continue;
++            stats.pagesWritten++;
++            if (stats.on) stats.writtenPage[page]++;
++            Drop(page);
++        }
++        byPa.erase(it);
++    }
++
+     void CodeWritten(uint8_t *host) {
+         const auto it = byHost.find(host);
+         if (it == byHost.end()) return;
+@@ -389,6 +412,7 @@
+         accessPages.clear();
+         permContext = cpuJitPermContext(cpu);
+         byHost.clear();
++        byPa.clear();
+         unwatched.clear();
+         cpuJitForgetCode(cpu);
+         gen = ~0ull;
+@@ -502,7 +526,7 @@
+     }
+ 
+     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
+-        if (arm920 && (pc & ~31u) != (A32::LocationDescriptor{ir.block.Location()}.PC() & ~31u)) {
++        if (lineBound && (pc & ~31u) != (A32::LocationDescriptor{ir.block.Location()}.PC() & ~31u)) {
+             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
+             return false;
+         }
+@@ -825,8 +849,9 @@
+     A32::UserConfig conf;
+     conf.callbacks = &j->env;
+     j->env.arm920 = cpuGetModel(cpu) == ArmCpuModel::arm920t;
++    j->env.lineBound = j->env.arm920 && singleStep;
+     conf.arch_version = j->env.arm920 ? A32::ArchVersion::v4T : A32::ArchVersion::v5TE;
+-    if (j->env.arm920)
++    if (j->env.lineBound)
+         conf.optimizations &= ~(OptimizationFlag::BlockLinking | OptimizationFlag::ReturnStackBuffer |
+                                 OptimizationFlag::FastDispatch);
+     conf.page_table = &j->pages;
+@@ -836,7 +861,7 @@
+     conf.check_halt_on_link = true;
+     conf.check_halt_on_memory_access = true;
+     j->maxUnchecked = singleStep ? 1 : jitPrvMaxUnchecked();
+-    j->env.hot = j->env.arm920 ? 1 : jitPrvHot();
++    j->env.hot = j->env.lineBound ? 1 : jitPrvHot();
+     conf.max_unchecked_instructions = j->maxUnchecked;
+     // Unaligned accesses go through the callbacks, which fault on them.
+     conf.detect_misaligned_access_via_page_table = 16 | 32 | 64;
+@@ -849,9 +874,9 @@
+     j->jit = std::make_unique<A32::Jit>(conf);
+     j->env.jit = j->jit.get();
+     j->env.maxInstructions = j->maxUnchecked;
+-    const A32::Jit::CompileThread mode = j->env.arm920 ? A32::Jit::CompileThread::Off : jitPrvCompileThread();
++    const A32::Jit::CompileThread mode = j->env.lineBound ? A32::Jit::CompileThread::Off : jitPrvCompileThread();
+     j->jit->SetCompileThread(mode);
+-    j->jit->SetCompileAhead(j->env.arm920 ? 0 : jitPrvAhead(mode));
++    j->jit->SetCompileAhead(j->env.lineBound ? 0 : jitPrvAhead(mode));
+     if (stats.on) stats.jits.push_back(j->jit.get());
+     return j;
+ }
+@@ -886,10 +911,11 @@
+ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
+     stats.invalRange++;
+     Env &e = j->env;
+-    if (e.arm920) {
++    if (e.lineBound) {
+         j->jit->InvalidateCacheRange(va, size);
+         return;
+     }
++    if (e.arm920) return;
+     if (e.unwatched.empty()) return;
+     e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
+ }
+@@ -898,7 +924,8 @@
+     stats.invalAll++;
+     auto &st = stats.invalAllPc[pc];
+     if (!st.first++ && stats.on) cpuJitFetch(j->env.cpu, pc & ~3u, &st.second);
+-    if (j->env.arm920) j->jit->ClearCache();
++    if (j->env.lineBound) j->jit->ClearCache();
++    else if (j->env.arm920) return;
+     else if (!j->env.unwatched.empty()) j->env.DropUnwatched(0, ~0u);
+ }
+ 
+@@ -906,6 +933,8 @@
+ 
+ void jitCodeWritten(FrondJit *j, uint8_t *hostPage) { j->env.CodeWritten(hostPage); }
+ 
++void jitCodeWrittenPa(FrondJit *j, uint32_t pa) { j->env.CodeWrittenPa(pa >> 12); }
++
+ void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
+     if (!j->env.writable.empty()) j->env.Protect(host, size);
+ }
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -45,6 +45,8 @@
+ void jitClear(FrondJit *jit);
+ // The first write to a watched RAM line since code was translated from it.
+ void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
++// ARM920T Fast blocks: a store to the RAM page at pa, which code was translated from.
++void jitCodeWrittenPa(FrondJit *jit, uint32_t pa);
+ // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
+ void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
+ // The same for the one RAM page at hostPage, after a line of it was flagged.

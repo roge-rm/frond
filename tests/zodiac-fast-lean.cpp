@@ -13,6 +13,8 @@
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
+#include <string>
+
 namespace {
 // 200 rounds of: load [r2], add it to reg.
 void sumLoop(std::vector<uint32_t>& words, unsigned reg) {
@@ -47,7 +49,7 @@ void thumbLoop(std::vector<uint32_t>& words) {
     for (size_t i = 0; i < std::size(h); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
 }
 
-enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther };
+enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode };
 
 // The graphics guest's setup with programmed clocks gives the step quiet spans, which the lean path runs.
 // The test code follows it, running from the linked alias at 0x20000000.
@@ -210,10 +212,66 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         stopPc = pc();
         break;
     }
+    case Tail::ttbr: {
+        // A second table at 0x0030c000 (written through the uncached view), a copy of the first with section 5
+        // mapping SDRAM. After the TTBR write and a TLB flush the loop sees SDRAM.
+        load(words, 2, 0x00508100);
+        sumLoop(words, 8);                                // r8 = 200 * SRAM word, from a host page
+        load(words, 0, 0x00404000); load(words, 1, 0x0040c000);
+        words.push_back(0xe3a07f81);                      // mov r7, #0x204: words 0 to 0x200 (the ROM section)
+        words.push_back(0xe4903004);                      // loop: ldr r3, [r0], #4
+        words.push_back(0xe4813004);                      // str r3, [r1], #4
+        words.push_back(0xe2577001);                      // subs r7, r7, #1
+        words.push_back(0x1afffffb);                      // bne loop
+        load(words, 3, 0x0040c014);
+        load(words, 1, 0x08000c1e); words.push_back(0xe5831000);
+        load(words, 0, 0x0030c000);
+        words.push_back(0xee020f10);                      // TTB
+        words.push_back(0xe3a00000);                      // mov r0, #0
+        words.push_back(0xee070f16);                      // invalidate the D-cache
+        words.push_back(0xee080f17);                      // invalidate the TLBs
+        sumLoop(words, 9);                                // r9 = 200 * SDRAM word
+        load(words, 11, 0x00600040);
+        stopPc = pc();
+        words.push_back(0xe59bc000);                      // ldr r12, [r11]: cacheable and unbacked
+        break;
+    }
+    case Tail::user:
+        // Section 10: SRAM, privileged access only. Read in SVC from a host page, then in user mode, where the
+        // first load aborts.
+        load(words, 3, 0x00404028);
+        load(words, 1, 0x00300412); words.push_back(0xe5831000);
+        load(words, 2, 0x00a08100);
+        sumLoop(words, 8);                                // r8 = 200 * SRAM word
+        words.push_back(0xe321f0d0);                      // msr cpsr_c, #0xd0: user, IRQ and FIQ masked
+        sumLoop(words, 9);
+        stopPc = pc() - 16;
+        break;
     case Tail::code:
         load(words, 0, 0x00310000);
         words.push_back(0xe1a0e00f);                      // mov lr, pc
         words.push_back(0xe12fff10);                      // bx r0: r9 = 1
+        words.push_back(0xe1a0a009);                      // mov r10, r9
+        sumLoop(words, 8);
+        load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
+        sumLoop(words, 11);
+        words.push_back(0xe1a0e00f);                      // mov lr, pc
+        words.push_back(0xe12fff10);                      // bx r0
+        stopPc = pc();
+        break;
+    case Tail::hotCode:
+        // As code, but the function's page is stored to and the function called often enough to be translated
+        // before it is rewritten.
+        load(words, 0, 0x00310000);
+        load(words, 3, 64);
+        words.push_back(0xe5800100);                      // str r0, [r0, #0x100]
+        words.push_back(0xe2533001);                      // subs r3, r3, #1
+        words.push_back(0x1afffffc);                      // bne back to the str
+        load(words, 3, 8);
+        words.push_back(0xe1a0e00f);                      // mov lr, pc
+        words.push_back(0xe12fff10);                      // bx r0: r9 = 1
+        words.push_back(0xe2533001);                      // subs r3, r3, #1
+        words.push_back(0x1afffffb);                      // bne back to the call
         words.push_back(0xe1a0a009);                      // mov r10, r9
         sumLoop(words, 8);
         load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
@@ -234,6 +292,7 @@ struct Outcome {
     uint64_t lean, drops, timerReads;
     uint16_t pcmLast;
     uint64_t cs5Writes, cs5Reads;
+    uint64_t jit;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -256,7 +315,7 @@ Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
                 imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m),
-                imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m)};
+                imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m), imx1MachineJitRetired(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -308,6 +367,14 @@ void same(const Outcome& exact, const Outcome& fast) {
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.trace.step == e.trace.step && f.address == e.address);
     assert(exact.cheap.retired == fast.cheap.retired && exact.cheap.status == fast.cheap.status);
     assert(exact.cheap.time.ticks == fast.cheap.time.ticks);
+}
+
+// Fast with Dynarmic blocks ends with Exact's results: registers, stop, pc and address, at other times.
+void sameResult(const Outcome& exact, const Outcome& fast) {
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    assert(!std::memcmp(e.registers, f.registers, sizeof(e.registers)) && e.cpsr == f.cpsr);
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.address == e.address);
 }
 
 constexpr uint32_t sramWord = 0x11111111, sdramWord = 0x22222222;
@@ -679,8 +746,88 @@ void engineSwitch() {
 }
 }  // namespace
 
+// The MMU guests again with Dynarmic blocks in Fast: direct host pages across a TLB flush, a domain change, an
+// SDRAM mode change, a TTBR change and a switch to user mode, code rewritten in place, and stores to the PCM DMA
+// buffer page, which never get a direct page.
+void blocks() {
+    imx1SetFastBlocksDefault(true);
+    // Every block compiled at once, in place, so runs repeat and the loops run in the JIT.
+    cpuSetJitSync(true);
+    setenv("FROND_JIT_HOT", "1", 1);
+    uint32_t stopPc = 0, savePc = 0;
+    const auto both = [&](Tail tail, const char* name) {
+        const auto words = guest(tail, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        std::string n = name;
+        print((n + " exact").c_str(), exact); print((n + " blocks").c_str(), fast);
+        std::printf("%s blocks: %llu instructions in the JIT\n", name, (unsigned long long)fast.jit);
+        assert(fast.jit > 400);
+        return std::pair{exact, fast};
+    };
+    {
+        const auto [exact, fast] = both(Tail::tlb, "tlb");
+        assert(exact.run.result.registers[9] == 200u * sramWord && exact.run.result.registers[10] == 200u * sdramWord);
+        sameResult(exact, fast);
+    }
+    {
+        const auto [exact, fast] = both(Tail::ttbr, "ttbr");
+        const auto& e = exact.run.result;
+        assert(e.registers[8] == 200u * sramWord && e.registers[9] == 200u * sdramWord);
+        assert(e.stop == Imx1ProbeStop::unsupportedDataCache && e.trace.pc == stopPc);
+        sameResult(exact, fast);
+    }
+    {
+        const auto [exact, fast] = both(Tail::domain, "domain");
+        assert(exact.run.result.stop == Imx1ProbeStop::exception && exact.run.result.trace.pc == stopPc);
+        sameResult(exact, fast);
+    }
+    {
+        const auto [exact, fast] = both(Tail::user, "user");
+        assert(exact.run.result.registers[8] == 200u * sramWord);
+        assert(exact.run.result.stop == Imx1ProbeStop::exception && exact.run.result.trace.pc == stopPc);
+        sameResult(exact, fast);
+    }
+    {
+        const auto [exact, fast] = both(Tail::sdram, "sdram");
+        assert(exact.run.result.stop != Imx1ProbeStop::budget && exact.run.result.trace.pc == stopPc);
+        sameResult(exact, fast);
+    }
+    {
+        // Rewritten without an I-cache invalidate: the JIT drops what it translated from the page.
+        const auto [exact, fast] = both(Tail::code, "code");
+        assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
+    }
+    {
+        // The same once the function is translated and its page was writable in the JIT.
+        const auto [exact, fast] = both(Tail::hotCode, "hot code");
+        assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
+    }
+    {
+        const auto [exact, fast] = both(Tail::timer, "timer");
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == stopPc);
+    }
+    {
+        // The 8192 stores to the buffer page while the DMA runs go to the step, where each one is a bus access;
+        // the same stores to the next page run on a direct page and aren't counted.
+        const auto [exact, fast] = both(Tail::dma, "dma");
+        const auto [otherExact, otherFast] = both(Tail::dmaOther, "dma other page");
+        assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.trace.pc == stopPc);
+        sameResult(exact, fast);
+        sameResult(otherExact, otherFast);
+        std::printf("dma blocks: bus accesses %llu, other page %llu\n", (unsigned long long)fast.run.result.busAccesses,
+                    (unsigned long long)otherFast.run.result.busAccesses);
+        assert(fast.run.result.busAccesses >= 8192 && otherFast.run.result.busAccesses < 4096);
+        assert(fast.run.result.pcm.transmittedWords >= 16);
+    }
+    std::fflush(stdout);
+}
+
 int main() {
     uint32_t stopPc = 0, savePc = 0;
+    // Lean-only Fast first, which gives Exact's times as well.
+    imx1SetFastBlocksDefault(false);
     forcedIrq();
     leanDraw(Trigger::eim, "draw after eim");
     leanDraw(Trigger::transaction, "draw after transaction");
@@ -815,6 +962,9 @@ int main() {
         assert(sent(otherExact) >= 16 && sent(otherFast) == sent(otherExact) && otherFast.pcmLast == otherExact.pcmLast);
         assert(otherExact.pcmLast >= 0x0101 && otherExact.pcmLast <= 0x0104);
     }
+    blocks();
+    std::puts("PASS: Fast blocks match Exact's results across TLB, TTBR, domain, mode and SDRAM changes, rewritten code "
+              "and the PCM DMA buffer page");
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
               "rewritten code, unsupported access, timer reads, a cacheable timer and the PCM DMA buffer match Exact");
 }
