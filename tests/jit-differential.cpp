@@ -2172,6 +2172,67 @@ int staleLink() {
     return 0;
 }
 
+// An indirect jump (BX) from A to B, which the JIT takes through its fast dispatch table,
+// with B rewritten from outside twice: each time the table has to drop B, so A's next BX runs
+// the new code. With --thread the second rewrite hits a B installed from the compile thread.
+// Fast only. 0: as expected, -1: not.
+int staleDispatch() {
+    const char* name = "indirect jump to a block rewritten while dispatch holds it";
+    cpuSetJitSync(false);
+    static Machine m = makeMachine(true);
+    cpuSetJitSync(!gThread);
+    Case c = generate(97);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    const uint32_t A = kCode, B = kCode + 0x1000, S = kCode + 0x2000;  // separate pages
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    put(A, 0xe3a05000);      // mov r5, #0
+    put(A + 4, 0xe12fff17);  // bx r7
+    put(B, 0xe3a05001);      // mov r5, #1 (rewritten to #2, then #3)
+    put(B + 4, 0xea0003fd);  // b S
+    put(S, kSpinArm);
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        cpuSetReg(m.cpu, 5, 9);
+        cpuSetReg(m.cpu, 7, B);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S ? cpuGetRegExternal(m.cpu, 5) : 99u;
+    };
+    // Runs from A a while, so A and B are compiled (and installed) and the BX is in the table.
+    auto settle = [&](uint32_t want) {
+        uint32_t bad = 0;
+        for (int i = 0; i < 30; ++i) {
+            if (runFrom(A) != want) bad++;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return bad;
+    };
+    const uint32_t bad1 = settle(1);
+    const uint32_t word2 = 0xe3a05002, word3 = 0xe3a05003;
+    memAccess(m.mem, B, 4, true, (void*)&word2);
+    const uint32_t bad2 = settle(2);
+    memAccess(m.mem, B, 4, true, (void*)&word3);
+    const uint32_t bad3 = settle(3);
+    printf("%s: runs of 30 not as expected: %u before, %u after the first rewrite, %u after the second\n", name,
+           bad1, bad2, bad3);
+    if (bad1 || bad2 || bad3) {
+        printf("FAIL %s: expected 1, then 2, then 3\n", name);
+        return -1;
+    }
+    return 0;
+}
+
 // A block compiled ahead (B, a branch target of A that hasn't run) whose code is rewritten
 // from outside before the guest first goes there: the new B has to run. Fast, thread on,
 // compiling ahead on (it's off by default).
@@ -2556,6 +2617,7 @@ int main(int argc, char** argv) {
         ok = fetchBuffer(e, true, true) == 0 && ok;
         ok = fetchBuffer(e, false, true) == 0 && ok;
         ok = staleLink() == 0 && ok;
+        ok = staleDispatch() == 0 && ok;
         ok = staleAhead() == 0 && ok;
     }
     const auto t0 = std::chrono::steady_clock::now();
