@@ -268,7 +268,7 @@ test-dana-view: $(if $(filter build/source,$(DANA_VIEW_SOURCE)),prepare)
 test: test-render-link
 test-render-link: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell sdl2-config --cflags) \
-		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm \
+		-Ibuild/source/src/uarm/native -Ibuild/source/src/uarm/uarm -Ibuild/source/src/uarm -Ibuild/source/src/common \
 		tests/render-link.cpp $(shell sdl2-config --libs) -lpthread -o build/test-render-link
 	./build/test-render-link
 
