@@ -1,0 +1,188 @@
+diff --git a/src/cloudpilot/frond/main.cpp b/src/cloudpilot/frond/main.cpp
+index 844b7a5..cbbd423 100644
+--- a/src/cloudpilot/frond/main.cpp
++++ b/src/cloudpilot/frond/main.cpp
+@@ -44,6 +44,7 @@
+ 
+ #include "../../uarm/native/DeviceControls.h"
+ #include "../../uarm/native/ShortcutKeys.h"
++#include "../../uarm/native/DanaHostKeys.h"
+ #include "../../uarm/native/WindowId.h"
+ #include "../../uarm/native/WindowLayout.h"
+ #include "../../uarm/native/DanaView.h"
+@@ -2859,7 +2860,7 @@ class Runner {
+         if (!keepReplay) replay=Replay();
+         if(deviceTypeIsDana5(profile->deviceType)) {
+             CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
+-            danaInput.Clear();EmHAL::ReleaseDanaInput(cancel);
++            danaInput.Clear();danaHostKeys.Clear();EmHAL::ReleaseDanaInput(cancel);
+         }
+         if (penDown) gSession->QueuePenEvent(PenEvent::up());
+         penDown = false;
+@@ -2991,13 +2992,13 @@ class Runner {
+                             case SDL_SCANCODE_APPLICATION: name="apps"; break;
+                             default: break;
+                         }
+-                        auto scan=DanaScan5::Named(name);
+-                        if(scan) {
+-                            const auto source=(event.key.keysym.scancode==SDL_SCANCODE_RCTRL || event.key.keysym.scancode==SDL_SCANCODE_RALT || event.key.keysym.scancode==SDL_SCANCODE_RGUI)?DanaSource5::physicalRight:DanaSource5::physical;
+-                            const auto key=make_pair(int(source),scan->Code());
+-                            if(!keyDown)danaReleases.insert_or_assign(key,*scan);
++                        for(const auto& change:danaHostKeys.Event(event.key.keysym.scancode,keyDown,name)) {
++                            const auto scan=DanaScan5::Named(change.name);
++                            if(!scan) continue;
++                            const auto key=make_pair(int(change.source),scan->Code());
++                            if(!change.down)danaReleases.insert_or_assign(key,*scan);
+                             RetryDanaReleases();
+-                            if(keyDown && (danaReleases.count(key)||!DanaKey(source,*scan,true)))cerr<<"Dana keyboard busy"<<endl;
++                            if(change.down && (danaReleases.count(key)||!DanaKey(change.source,*scan,true)))cerr<<"Dana keyboard busy"<<endl;
+                         }
+                         break;
+                     }
+@@ -3071,6 +3072,7 @@ class Runner {
+     struct DanaPointer {int key;bool pen,pan;double x,y;};
+     map<pair<int64_t,int64_t>,DanaPointer> danaPointers;
+     map<pair<int,uint8_t>,DanaScan5> danaReleases;
++    DanaHostKeys danaHostKeys;
+     // Fingers: held buttons and the pen, besides the mouse.
+     struct TouchHost : TouchSink68k {
+         explicit TouchHost(Runner& runner) : runner(runner) {}
+diff --git a/src/common/dana_input5.h b/src/common/dana_input5.h
+index b1fb489..75d92cf 100644
+--- a/src/common/dana_input5.h
++++ b/src/common/dana_input5.h
+@@ -18,7 +18,7 @@ class DanaScan5 {
+     }
+ };
+ struct DanaTransition5 { DanaScan5 scan; bool down; };
+-enum class DanaSource5 { physical, physicalRight, console, replay, screen, count };
++enum class DanaSource5 { physical, physicalRight, physicalPage, console, replay, screen, count };
+ 
+ // Source ownership commits only after the complete ST batch is accepted.
+ class DanaInput5 {
+diff --git a/src/uarm/native/DanaHostKeys.h b/src/uarm/native/DanaHostKeys.h
+new file mode 100644
+index 0000000..1f81ebb
+--- /dev/null
++++ b/src/uarm/native/DanaHostKeys.h
+@@ -0,0 +1,120 @@
++#ifndef _DANA_HOST_KEYS_H_
++#define _DANA_HOST_KEYS_H_
++
++#include <SDL.h>
++
++#include <map>
++#include <string>
++#include <vector>
++
++#include "../../common/dana_input5.h"
++
++// Host keys for the Dana keys a laptop keyboard lacks. Ctrl+F1 to F8 are calendar, address, todo,
++// memo, find, menu, apps and send, Ctrl+Esc is power, and PgUp and PgDn are function+up and
++// function+down. The Dana's ctrl press is held back until a key that isn't one of these chords
++// comes or the Ctrl key is let go alone, so the guest never sees ctrl during a chord. Each host key
++// releases what it pressed, even when Ctrl or Alt is let go first.
++struct DanaHostChange {
++    std::string name;
++    DanaSource5 source;
++    bool down;
++};
++
++class DanaHostKeys {
++public:
++    // name is the Dana key the host key has on its own. Returns the changes to apply in order.
++    std::vector<DanaHostChange> Event(SDL_Scancode scancode, bool down, const std::string& name) {
++        std::vector<DanaHostChange> out;
++        if (scancode == SDL_SCANCODE_LCTRL || scancode == SDL_SCANCODE_RCTRL) {
++            Ctrl& ctrl = scancode == SDL_SCANCODE_LCTRL ? left : right;
++            const DanaSource5 source = scancode == SDL_SCANCODE_LCTRL ? DanaSource5::physical : DanaSource5::physicalRight;
++            if (down) {
++                ctrl = {true, false, false};
++            } else {
++                if (ctrl.sent) out.push_back({"ctrl", source, false});
++                else if (ctrl.held && !ctrl.chorded) {
++                    out.push_back({"ctrl", source, true});
++                    out.push_back({"ctrl", source, false});
++                }
++                ctrl = {};
++            }
++            return out;
++        }
++        if (!down) {
++            const auto it = pressed.find(scancode);
++            if (it == pressed.end()) {
++                out.push_back({name, Source(scancode), false});
++            } else {
++                out = it->second;
++                pressed.erase(it);
++            }
++            return out;
++        }
++        if (pressed.count(scancode)) return out;
++        const char* chord = (left.held || right.held) ? ChordName(scancode) : nullptr;
++        if (chord) {
++            // A ctrl already sent comes up before the app key goes down.
++            for (Ctrl* ctrl : {&left, &right}) {
++                if (ctrl->sent) out.push_back({"ctrl", ctrl == &left ? DanaSource5::physical : DanaSource5::physicalRight, false});
++                if (ctrl->held) ctrl->chorded = true;
++                ctrl->sent = false;
++            }
++            out.push_back({chord, DanaSource5::physical, true});
++            pressed[scancode] = {{chord, DanaSource5::physical, false}};
++        } else if (scancode == SDL_SCANCODE_PAGEUP || scancode == SDL_SCANCODE_PAGEDOWN) {
++            const std::string arrow = scancode == SDL_SCANCODE_PAGEUP ? "up" : "down";
++            Flush(out);
++            out.push_back({"function", DanaSource5::physicalPage, true});
++            out.push_back({arrow, DanaSource5::physicalPage, true});
++            pressed[scancode] = {{arrow, DanaSource5::physicalPage, false}, {"function", DanaSource5::physicalPage, false}};
++        } else {
++            Flush(out);
++            out.push_back({name, Source(scancode), true});
++        }
++        return out;
++    }
++
++    // The window lost focus, or anything else released all keys.
++    void Clear() {
++        left = right = {};
++        pressed.clear();
++    }
++
++    static const char* ChordName(SDL_Scancode scancode) {
++        switch (scancode) {
++            case SDL_SCANCODE_F1: return "calendar";
++            case SDL_SCANCODE_F2: return "address";
++            case SDL_SCANCODE_F3: return "todo";
++            case SDL_SCANCODE_F4: return "memo";
++            case SDL_SCANCODE_F5: return "find";
++            case SDL_SCANCODE_F6: return "menu";
++            case SDL_SCANCODE_F7: return "apps";
++            case SDL_SCANCODE_F8: return "send";
++            case SDL_SCANCODE_ESCAPE: return "power";
++            default: return nullptr;
++        }
++    }
++
++private:
++    struct Ctrl {
++        bool held{false}, sent{false}, chorded{false};
++    };
++
++    static DanaSource5 Source(SDL_Scancode scancode) {
++        return (scancode == SDL_SCANCODE_RALT || scancode == SDL_SCANCODE_RGUI) ? DanaSource5::physicalRight : DanaSource5::physical;
++    }
++
++    // A key that isn't a chord sends the ctrl presses held back.
++    void Flush(std::vector<DanaHostChange>& out) {
++        for (Ctrl* ctrl : {&left, &right})
++            if (ctrl->held && !ctrl->sent) {
++                out.push_back({"ctrl", ctrl == &left ? DanaSource5::physical : DanaSource5::physicalRight, true});
++                ctrl->sent = true;
++            }
++    }
++
++    Ctrl left, right;
++    std::map<SDL_Scancode, std::vector<DanaHostChange>> pressed;
++};
++
++#endif  // _DANA_HOST_KEYS_H_

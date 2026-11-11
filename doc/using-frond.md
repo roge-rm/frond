@@ -137,6 +137,26 @@ then once more to release it. The full keyboard uses held keys, including
 multi-finger chords. Connecting a physical keyboard does not override an explicit
 onscreen keyboard choice.
 
+On desktop a host keyboard has these for the Dana keys it lacks. Ctrl is the
+Dana's ctrl, Alt is function and the Windows or Command key is command; either
+Ctrl works.
+
+| Host keys | Dana key |
+|---|---|
+| Ctrl+F1 | Calendar (Alt+Ctrl+F1 is New) |
+| Ctrl+F2 | Address |
+| Ctrl+F3 | To Do |
+| Ctrl+F4 | Memo |
+| Ctrl+F5 | Find |
+| Ctrl+F6 | Menu |
+| Ctrl+F7 | Apps |
+| Ctrl+F8 | Send |
+| Ctrl+Esc | Power |
+| PgUp, PgDn | Function+Up, Function+Down |
+
+F1 to F8 and Esc on their own press the Dana's F1 to F8 and Esc. F11 and F12 stay
+Frond's.
+
 These choices are saved with the machine. Android's Orientation setting chooses
 portrait, landscape or following the phone; it does not rotate the guest image.
 Panning is manual.
