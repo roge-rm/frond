@@ -1102,6 +1102,40 @@ void delayLoop() {
     assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
 }
 
+// The same loop with timer 1 at PERCLK1 (prescaler 1), a count every few instructions, so a wait ends inside one JIT
+// run. Timer reads in generated code see the cycles run so far, so each wait ends as Exact's does, within a few
+// counts of 120, and the loop runs about as many instructions as Exact.
+void delayShort() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 0);                               // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    std::vector<uint32_t> words;
+    load(words, 6, 0x00202000); load(words, 7, 20);
+    const size_t outer = words.size();
+    words.push_back(0xe5960010);                          // outer: ldr r0, [r6, #16]
+    words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
+    words.push_back(0xe0411000);                          // sub r1, r1, r0
+    words.push_back(0xe3510078);                          // cmp r1, #120
+    words.push_back(0x3afffffb);                          // bcc loop
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(outer) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("delay short exact", exact); print("delay short blocks", fast);
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    std::printf("delay short: r1 %u against %u, retired %llu against %llu\n", f.registers[1], e.registers[1],
+                (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired);
+    std::fflush(stdout);
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[1] >= 120 &&
+           e.registers[1] <= 124);
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[1] >= 120 &&
+           f.registers[1] <= e.registers[1] + 4);
+    assert(fast.cheap.retired * 4 <= exact.cheap.retired * 5);
+}
+
 // An exception return (MOVS PC, LR to a Thumb loop) and a Thumb BL whose prefix is the last halfword of a 32-byte
 // line, 200 times: both run in generated code, the returns counted there. The mode change ends the run, so one run
 // per return and no more.
@@ -1169,6 +1203,7 @@ void jitLong() {
     jitBoardWrites();
     jitBoardRegisters();
     delayLoop();
+    delayShort();
     jitReturns();
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
