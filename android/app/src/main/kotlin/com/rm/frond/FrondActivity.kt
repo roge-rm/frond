@@ -19,6 +19,7 @@ import android.graphics.drawable.ColorDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.content.pm.ActivityInfo
 import android.util.Log
 import android.window.OnBackInvokedDispatcher
 import androidx.core.view.ViewCompat
@@ -252,6 +253,8 @@ open class FrondActivity : SDLActivity() {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
         arguments += listOf("--window-background", BACKGROUND_HEX)
+        // The core turns the Zodiac's view with its OS only when the app turns with it too.
+        if (launchDevice().zodiac && !followsProgram()) arguments += listOf("--view-turn", "window")
         arguments += machineSettings.audioArguments(launchDevice().lowLatencyAudio, audioPeriod()) { fastAudioQualified() }
         debugPort?.let { arguments += listOf("--gdb", it.toString()) }
         arguments += listOf("--desktop-socket", link.path.path)
@@ -381,8 +384,23 @@ open class FrondActivity : SDLActivity() {
         requestedOrientation = orientationRequest()
     }
 
-    // Every device follows the setting; the core shows the Zodiac's panel upright in portrait.
-    private fun orientationRequest() = settings.orientation.request
+    // Every device follows the setting; the core shows the Zodiac's panel upright in portrait. With
+    // Follow the program the Zodiac turns with its OS, landscape until the core has said.
+    private fun orientationRequest() =
+        if (followsProgram()) Orientation.programRequest(guestOrientation) ?: ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        else settings.orientation.request
+
+    private fun followsProgram() = settings.orientation == Orientation.PROGRAM && launchDevice().zodiac
+
+    // The guest OS's orientation, as SysGetOrientation numbers it; 0 until the core says. UI thread.
+    private var guestOrientation = 0
+
+    // From the core's guest thread (android_main.cpp, by name) when the guest OS turns its screen.
+    fun onGuestOrientation(orientation: Int) = runOnUiThread {
+        Log.i(TAG, "guest orientation $orientation")
+        guestOrientation = orientation
+        if (followsProgram()) requestedOrientation = orientationRequest()
+    }
 
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()

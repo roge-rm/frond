@@ -11,16 +11,30 @@ enum class ScreenSize(val label: String, val arg: String) {
     FILL("Fill", "fill"),
 }
 
+// PROGRAM turns the app the way the running program holds the device, on a device whose OS turns its
+// screen (the Zodiac); elsewhere it follows the phone.
 enum class Orientation(val label: String, val request: Int) {
+    PROGRAM("Follow the program", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
     PHONE("Follow the phone", ActivityInfo.SCREEN_ORIENTATION_FULL_USER),
     PORTRAIT("Portrait", ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT),
-    LANDSCAPE("Landscape", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+    LANDSCAPE("Landscape", ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+
+    companion object {
+        // The request for the guest OS's orientation (SysGetOrientation's numbers, from the core), or null
+        // when unknown. The core already turns the view upright for the reverse ones, so only the shape
+        // matters here, and either way up of it is fine.
+        fun programRequest(guest: Int): Int? = when (guest) {
+            1, 3 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            2, 4 -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else -> null
+        }
+    }
 }
 
 data class Settings(
     val size: ScreenSize = ScreenSize.FIT,
     val smoothing: Boolean = false,
-    val orientation: Orientation = Orientation.PHONE,
+    val orientation: Orientation = Orientation.PROGRAM,
     val sound: Boolean = true,
     // The core's gdb server, relayed by DebugLink on debuggerPort. The Palm waits for gdb before it runs.
     val debugger: Boolean = false,
@@ -55,7 +69,7 @@ data class Settings(
             return Settings(
                 size = enumOr(p.getString(EXTRA_SIZE, null), ScreenSize.FIT),
                 smoothing = p.getBoolean(EXTRA_SMOOTHING, false),
-                orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PHONE),
+                orientation = enumOr(p.getString(EXTRA_ORIENTATION, null), Orientation.PROGRAM),
                 sound = p.getBoolean(EXTRA_SOUND, true),
                 debugger = p.getBoolean(EXTRA_DEBUGGER, false),
                 debuggerPort = NetRelay.port(p.getInt(EXTRA_DEBUGGER_PORT, DebugLink.DEFAULT_PORT).toString()) ?: DebugLink.DEFAULT_PORT,

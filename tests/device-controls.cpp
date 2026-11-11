@@ -1755,6 +1755,15 @@ static void zodiacControls() {
     assert(windowRotation(Rotation::portrait_0,true,false,1080,2400)==Rotation::portrait_0);
     assert(windowRotation(Rotation::portrait_0,true,true,0,0)==Rotation::portrait_0);
     assert(windowRotation(Rotation::portrait_0,false,true,1080,2400)==Rotation::portrait_0);
+    // Following the program: the guest's orientation picks the turn, a portrait one being the panel as wired.
+    assert(guestQuarterTurns(2)==0 && guestQuarterTurns(1)==1 && guestQuarterTurns(4)==2 && guestQuarterTurns(3)==3);
+    assert(guestQuarterTurns(0)==-1 && guestQuarterTurns(5)==-1);
+    assert(std::string(guestOrientationName(1))=="portrait" && std::string(guestOrientationName(2))=="landscape");
+    assert(std::string(guestOrientationName(3))=="reverse-portrait" && std::string(guestOrientationName(4))=="reverse-landscape");
+    assert(!*guestOrientationName(0));
+    // Then the window's shape adds nothing: main.cpp passes quarterTurn false.
+    assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,1080,2400)==Rotation::landscape_90);
+    assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,2400,1080)==Rotation::landscape_90);
     // The panel as the GPU shows it, upright in portrait and turned in landscape, and the pen on a
     // shown pixel reaching the digitizer at that panel pixel both ways.
     {

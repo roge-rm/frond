@@ -1,0 +1,239 @@
+--- a/src/uarm/native/DesktopControl.h
++++ b/src/uarm/native/DesktopControl.h
+@@ -675,6 +675,12 @@ class DesktopControl {
+             return {true, "databases", text};
+         }
+         if (command == "guest-orientation") {
++            // The Zodiac's comes from how its display scans the frame out, which the OS sets with it.
++            if (ctx.soc->FrameQuarterTurn()) {
++                const char* orientation = guestOrientationName(ctx.soc->GuestOrientation());
++                if (!*orientation) return {false, "unknown", "The screen orientation can't be read right now."};
++                return {true, "orientation", orientation};
++            }
+             if (ctx.soc->GetDeviceType() != DeviceType5::deviceTypeTX)
+                 return {false, "unsupported", "This device has no screen rotation."};
+             const auto orientation = TxOrientation(ctx.soc->GetCpu());
+--- a/src/uarm/native/Rotation.h
++++ b/src/uarm/native/Rotation.h
+@@ -11,4 +11,27 @@ inline Rotation windowRotation(Rotation chosen, bool quarterTurn, bool fitted, i
+     return quarterTurn && portrait ? Rotation((int(chosen) + 1) % 4) : chosen;
+ }
+ 
++// The quarter turns, on top of the chosen rotation, that show a quarter-turned frame (the Zodiac's)
++// upright for the guest OS's orientation in SysGetOrientation's numbers: none for landscape, one for
++// portrait (the panel as wired), two for reverse landscape, three for reverse portrait. -1 when unknown.
++inline int guestQuarterTurns(unsigned orientation) {
++    switch (orientation) {
++        case 1: return 1;
++        case 2: return 0;
++        case 3: return 3;
++        case 4: return 2;
++        default: return -1;
++    }
++}
++
++inline const char* guestOrientationName(unsigned orientation) {
++    switch (orientation) {
++        case 1: return "portrait";
++        case 2: return "landscape";
++        case 3: return "reverse-portrait";
++        case 4: return "reverse-landscape";
++        default: return "";
++    }
++}
++
+ #endif  // _ROTATION_H_
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -37,6 +37,11 @@
+ #include "RenderThread.h"
+ #include "Rotation.h"
+ #include "ZodiacSpeed.h"
++
++#ifdef __ANDROID__
++// In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
++void frondGuestOrientationChanged(int orientation);
++#endif
+ #include "SdlAudioDriver.h"
+ #include "SdlMicrophone.h"
+ #include "SdlEventHandler.h"
+@@ -105,6 +110,7 @@ struct Options {
+     optional<string> cardIdentity;  // the card put in: 64 hex digits
+     bool cardProtected;
+     bool fastEngine;  // --engine fast
++    bool viewFollowsWindow;  // --view-turn window
+ };
+ 
+ namespace {
+@@ -790,6 +796,11 @@ bool gFastEngineMissing = false;
+         mainLoop.SetCyclesPerSecondLimit(uint64_t(options.mips.value_or(deviceProfileOriginalMips5(deviceType))) * 1000000);
+ 
+         Rotation rotation = Rotation::portrait_0;
++        // The view turns with the guest OS's orientation (the Zodiac, unless --view-turn window). The
++        // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
++        const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
++        unsigned guestOrientation = 0;
++        int guestTurns = 0;
+ 
+         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
+ 
+@@ -825,7 +836,7 @@ bool gFastEngineMissing = false;
+         auto rotationForWindow = [&](Rotation chosen) {
+             int w = 0, h = 0;
+             SDL_GetWindowSize(window, &w, &h);
+-            return windowRotation(chosen, soc->FrameQuarterTurn(), fitted, w, h);
++            return windowRotation(chosen, soc->FrameQuarterTurn() && !followGuest, fitted, w, h);
+         };
+         Rotation drawnRotation = rotationForWindow(rotation);
+ 
+@@ -1201,6 +1212,18 @@ bool gFastEngineMissing = false;
+                     }
+                     if (zodiacSpeed && frame) zodiacSpeed->HandedOver(timestampUsec() - handoffStart);
+                 }
++                // A word from the display state, so once a slice. An unknown one (display off) keeps the last.
++                if (followGuest) {
++                    const unsigned orientation = soc->GuestOrientation();
++                    if (orientation && orientation != guestOrientation) {
++                        guestOrientation = orientation;
++                        guestTurns = guestQuarterTurns(orientation);
++                        cout << "guest orientation: " << guestOrientationName(orientation) << endl;
++#ifdef __ANDROID__
++                        frondGuestOrientationChanged(int(orientation));
++#endif
++                    }
++                }
+                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
+                 if (zodiacSpeed && zodiacSpeed->Due(now)) {
+                     const auto status = zodiac->Status();
+@@ -1247,8 +1270,9 @@ bool gFastEngineMissing = false;
+ 
+                 // The SDL thread resizes the window and sends the new layout back with the
+                 // rotation; input uses the old rotation until then.
+-                if (commandContext.rotation != rotation) {
+-                    rotation = commandContext.rotation;
++                const Rotation wanted = Rotation((int(commandContext.rotation) + guestTurns) % 4);
++                if (wanted != rotation) {
++                    rotation = wanted;
+                     link.RequestRotation(rotation);
+                 }
+ 
+@@ -1472,6 +1496,16 @@ int main(int argc, char** argv) {
+             return value;
+         });
+ 
++    program.add_argument("--view-turn")
++        .help("what turns a device whose OS turns its screen (the Zodiac): program (upright for the running "
++              "program) or window (upright for the window's shape)")
++        .metavar("<program|window>")
++        .default_value(string("program"))
++        .action([](const string& value) {
++            if (value != "program" && value != "window") throw runtime_error("--view-turn is program or window");
++            return value;
++        });
++
+     program.add_argument("--fast-audio", "--experimental-fast-audio")
+         .help("preview one qualified stereo stream before the firmware audio queue")
+         .default_value(false).implicit_value(true);
+@@ -1665,7 +1699,8 @@ int main(int argc, char** argv) {
+                        .cardSwap = program.get<bool>("--card-swap"),
+                        .cardIdentity = program.present("--card-identity"),
+                        .cardProtected = program.get<bool>("--card-protected"),
+-                       .fastEngine = program.get("--engine") == "fast"};
++                       .fastEngine = program.get("--engine") == "fast",
++                       .viewFollowsWindow = program.get("--view-turn") == "window"};
+ 
+     logEnable();
+ 
+--- a/src/uarm/uarm/SoC.h
++++ b/src/uarm/uarm/SoC.h
+@@ -145,6 +145,10 @@ class SoC {
+     // Whether GetPendingFrame gives the panel as it is wired, the display's height wide and its
+     // width high, for the frontend to turn a quarter clockwise as it draws.
+     virtual bool FrameQuarterTurn() const { return false; }
++    // The orientation the guest OS shows its screen in, as SysGetOrientation numbers it (1 portrait,
++    // 2 landscape, 3 reverse portrait, 4 reverse landscape), or 0 when unknown or the device has none.
++    // Guest thread only.
++    virtual unsigned GuestOrientation() { return 0; }
+     virtual void ResetPendingFrame() = 0;
+     virtual DeviceType5 GetDeviceType() = 0;
+     virtual DisplayMode GetDisplayMode() = 0;
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1786,6 +1786,15 @@ const uint32_t* imx1MachineAcquireFrame(Imx1Machine* machine, uint32_t& width, u
+     return frame.getPendingFrame(first, last);
+ }
+ void imx1MachineAcknowledgeFrame(Imx1Machine* machine) { machine->probe->graphicsFrame.acknowledgeFrame(); }
++unsigned imx1MachineScanOrientation(const Imx1Machine* machine) {
++    if (!machine) return 0;
++    const auto& display = machine->probe->cs5Configuration.displayState();
++    if (!display.lcdEnabled()) return 0;
++    // 0x414 bits 3 and 4 are the scan rotation 200ae8e4 sets from the OS's degrees: 0 for 0, 1 for 90,
++    // 3 for 180 and 2 for 270. TwScreen's landscape (SysGetOrientation 2) is 270.
++    static const unsigned orientations[] = {1, 4, 2, 3};
++    return orientations[(display.activeWord(0x414) >> 3) & 3];
++}
+ Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
+     auto* p = machine->probe;
+     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -256,6 +256,10 @@ const uint32_t* imx1MachinePeekFrame(const Imx1Machine*, uint32_t& width, uint32
+ const uint32_t* imx1MachineAcquireFrame(Imx1Machine*, uint32_t& width, uint32_t& height,
+                                       uint32_t& firstRow, uint32_t& lastRow);
+ void imx1MachineAcknowledgeFrame(Imx1Machine*);
++// How the display scans the guest's frame onto the panel, which follows the OS's orientation:
++// 1 portrait (as wired), 2 landscape, 3 reverse portrait, 4 reverse landscape, the SysGetOrientation
++// numbers. 0 while the display is off or not set up.
++unsigned imx1MachineScanOrientation(const Imx1Machine*);
+ Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine*, const Imx1AspPenInputs&, bool commit = true);
+ // The pen inputs the machine has now, as the options or the last replace left them.
+ Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -129,9 +129,17 @@ void SocIMX1::Reset() {
+     const auto info = imx1MachineLoadState(machine, powerOn.data(), powerOn.size(), imx1StateExternalReset, "power-on");
+     if (info.status != Imx1StateStatus::ok)
+         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
++    booting = true;
+     StateChanged();
+ }
+ 
++// The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
++unsigned SocIMX1::GuestOrientation() {
++    const unsigned orientation = imx1MachineScanOrientation(machine);
++    if (booting && orientation == 2) booting = false;
++    return booting ? 0 : orientation;
++}
++
+ // A stopped machine can't run again, so its state is not worth keeping over a session that can.
+ bool SocIMX1::Save() {
+     if (halted) {
+@@ -153,6 +161,8 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
+         return false;
+     }
+     SoC::Reset();
++    // A saved machine is taken as past its boot.
++    booting = false;
+     StateChanged();
+     return true;
+ }
+--- a/src/uarm/uarm/soc_IMX1.h
++++ b/src/uarm/uarm/soc_IMX1.h
+@@ -46,6 +46,7 @@ class SocIMX1 : public SoC {
+     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
+     void ResetPendingFrame() override { framePending = false; }
+     bool FrameQuarterTurn() const override { return true; }
++    unsigned GuestOrientation() override;
+     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
+     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
+     void SuspendTimerInterrupts(bool) override {}
+@@ -92,6 +93,9 @@ class SocIMX1 : public SoC {
+     // once. The frontend turns it on the GPU.
+     std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
+     bool framePending{false}, redraw{true};
++    // From reset until the OS first turns the scan to landscape: the boot logo's unturned scan is no
++    // orientation the OS chose.
++    bool booting{true};
+ 
+     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
+     uint64_t creditRemainder{0};

@@ -1,10 +1,12 @@
 package com.rm.frond
 
+import android.content.pm.ActivityInfo
 import android.view.KeyEvent
 import com.rm.frond.ZodiacPad.Event.Axis
 import com.rm.frond.ZodiacPad.Event.Button
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -126,5 +128,18 @@ class ZodiacTest {
         events.clear()
         pad.releaseAll()
         assertTrue(events.isEmpty())
+    }
+
+    @Test fun followTheProgramTurnsToTheGuestsShape() {
+        assertEquals(Orientation.PROGRAM, Settings().orientation)
+        assertEquals("Follow the program", Orientation.PROGRAM.label)
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT, Orientation.programRequest(1))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, Orientation.programRequest(2))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT, Orientation.programRequest(3))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE, Orientation.programRequest(4))
+        assertNull(Orientation.programRequest(0))
+        assertNull(Orientation.programRequest(5))
+        // Other devices have no program orientation: it follows the phone.
+        assertEquals(Orientation.PHONE.request, Orientation.PROGRAM.request)
     }
 }

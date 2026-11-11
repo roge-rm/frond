@@ -149,3 +149,18 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, 
     event.caxis.value = Sint16(value);
     SDL_PushEvent(&event);
 }
+
+// The core's guest thread, when the guest OS turns its screen (the Zodiac): tells FrondActivity, which
+// turns the app to match when its Orientation is Follow the program. orientation is SysGetOrientation's
+// number (1 portrait, 2 landscape, 3 reverse portrait, 4 reverse landscape).
+void frondGuestOrientationChanged(int orientation) {
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(type, "onGuestOrientation", "(I)V");
+    if (method) env->CallVoidMethod(activity, method, jint(orientation));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
+}
