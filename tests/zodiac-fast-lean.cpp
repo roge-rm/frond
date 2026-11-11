@@ -293,6 +293,7 @@ struct Outcome {
     uint16_t pcmLast;
     uint64_t cs5Writes, cs5Reads;
     uint64_t jit;
+    uint64_t memoryReads, boardReads;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -315,7 +316,8 @@ Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
                 imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m),
-                imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m), imx1MachineJitRetired(m)};
+                imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m), imx1MachineJitRetired(m),
+                imx1MachineLeanCs5MemoryReads(m), imx1MachineLeanBoardReads(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -696,6 +698,90 @@ void thumbScanReads() {
     std::fflush(stdout);
     assert(reads >= 10000 && writes >= 2000 && mixed >= 10);
 }
+// A loop of graphics memory loads of every width (LDR, LDRB, LDRH, LDRSB, LDRSH, in ARM and in Thumb), the
+// identity read of the register read helper at 200871dc, and GPIO, AITC and ASP status reads, with graphics memory
+// stores between them. On the lean path they give Exact's values, and the graphics memory reads add their wait
+// clocks. delay moves the loop against the display's frames.
+std::vector<uint32_t> readsGuest(uint32_t delay) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.spin(1 + delay);
+    g.word(0x871dc, 0xe5906000);                          // ldr r6, [r0]
+    g.word(0x871e0, 0xe12fff1e);                          // bx lr
+    std::vector<uint32_t> words;
+    load(words, 0, 0x16010000); load(words, 1, 0x0021c000); load(words, 2, 0x16800100);
+    load(words, 3, 0x00223000); load(words, 4, 0x0021501c);
+    words.push_back(0xe3a08000);                          // mov r8, #0
+    words.push_back(0xe3a09000);                          // mov r9, #0
+    words.push_back(0xe3a0a000);                          // mov r10, #0
+    words.push_back(0xe3a0b000);                          // mov r11, #0
+    words.push_back(0xe3a070c8);                          // mov r7, #200
+    const size_t top = words.size();
+    words.push_back(0xe1e05007);                          // loop: mvn r5, r7
+    words.push_back(0xe5825000);                          // str r5, [r2]
+    words.push_back(0xe5827004);                          // str r7, [r2, #4]
+    for (uint32_t insn : {0xe1d250b0u, 0xe1d250d1u, 0xe1d250f2u, 0xe5d25003u, 0xe5925004u}) {
+        words.push_back(insn);                            // ldrh [r2], ldrsb [r2, #1], ldrsh [r2, #2], ldrb [r2, #3], ldr [r2, #4]
+        words.push_back(0xe0888005);                      // add r8, r8, r5
+    }
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    const size_t call = words.size();
+    words.push_back(0);                                   // b 200871dc
+    words.push_back(0xe0269fe9);                          // eor r9, r6, r9, ror #31
+    for (uint32_t insn : {0xe5915030u, 0xe5935014u}) {    // ldr r5, [r1, #0x30] (IMR_A), ldr r5, [r3, #0x14] (INTENABLEL)
+        words.push_back(insn);
+        words.push_back(0xe08aa005);                      // add r10, r10, r5
+    }
+    words.push_back(0xe5945000);                          // ldr r5, [r4] (ASP ISTATR)
+    words.push_back(0xe08bb005);                          // add r11, r11, r5
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    words.push_back(0xe28fc001);                          // add r12, pc, #1
+    words.push_back(0xe12fff1c);                          // bx r12: Thumb from the next word
+    const uint32_t base = 0x20000000 + g.cursor;
+    const uint32_t thumb = base + uint32_t(words.size()) * 4;
+    std::vector<uint16_t> h = {0x2000, 0x2602, 0x2364};   // movs r0, #0; movs r6, #2; movs r3, #100
+    const auto here = [&] { return thumb + uint32_t(h.size()) * 2; };
+    const uint32_t loop = here();
+    h.push_back(0x8013);                                  // loop: strh r3, [r2, #0]
+    // ldrh r5, [r2, #2]; ldrb r5, [r2, #1]; ldrsh r5, [r2, r6]; ldrsb r5, [r2, r6]; ldrb r5, [r2, r6]; ldr r5, [r2, #4]
+    for (uint16_t insn : {0x8855, 0x7855, 0x5f95, 0x5795, 0x5d95, 0x6855}) {
+        h.push_back(insn);
+        h.push_back(0x1940);                              // adds r0, r0, r5
+    }
+    h.push_back(0x3b01);                                  // subs r3, #1
+    h.push_back(uint16_t(0xd100 | (((loop - (here() + 4)) >> 1) & 0xff)));  // bne loop
+    const uint32_t back = (here() + 4 + 3) & ~3u;
+    h.push_back(uint16_t(0xa500 | ((back - ((here() + 4) & ~3u)) >> 2)));  // adr r5, back
+    h.push_back(0x4728);                                  // bx r5
+    while (here() < back) h.push_back(0x46c0);            // nop
+    for (size_t i = 0; i < h.size(); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
+    words.push_back(0xe1a0c000);                          // mov r12, r0
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base - 0x20000000 + uint32_t(call) * 4, 0x871dc);
+    g.end();
+    return g.words;
+}
+void leanReads() {
+    uint64_t memory = 0, identity = 0, board = 0;
+    for (uint32_t delay = 0; delay < 64; delay += 3) {
+        const auto words = readsGuest(delay);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        if (delay == 0) { print("lean reads exact", exact); print("lean reads fast", fast); }
+        const auto& e = exact.run.result;
+        assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[3] == 0);
+        assert(e.registers[8] && e.registers[12] && !(e.cpsr & 0x20));
+        same(exact, fast);
+        assert(e.cs5WaitClocks == fast.run.result.cs5WaitClocks && e.graphicsFrameHash == fast.run.result.graphicsFrameHash);
+        memory += fast.memoryReads;
+        identity += fast.cs5Reads;
+        board += fast.boardReads;
+    }
+    std::printf("lean reads: %llu graphics memory reads, %llu CS5 register reads and %llu board reads on the lean path\n",
+                (unsigned long long)memory, (unsigned long long)identity, (unsigned long long)board);
+    std::fflush(stdout);
+    assert(memory >= 20000 && identity >= 2000 && board >= 4000);
+}
 // The engine changes between slices, every two slices, starting on either engine: in the scan read guests with
 // graphics memory stores and in the MMU guests with the caches on (dirty lines left by Exact must reach memory
 // before Fast reads it). Each run ends as an Exact run does, and the Fast slices still run on the lean path.
@@ -834,6 +920,7 @@ int main() {
     storeThenTimer();
     scanReads();
     thumbScanReads();
+    leanReads();
     engineSwitch();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while

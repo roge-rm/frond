@@ -1,0 +1,184 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -875,15 +875,17 @@
+     return (i & 0x0c100000) == 0x04000000 || (i & 0x0e1000f0) == 0x000000b0;
+ }
+ 
+-// The lean loop's current instruction has a single data access, a word load: ARM LDR, Thumb LDR in all its forms,
+-// translated or not.
++// The lean loop's current instruction has a single data access, a load: ARM LDR, LDRB, LDRH, LDRSB, LDRSH,
++// Thumb LDR, LDRB, LDRH, LDRSB, LDRSH in all their forms, translated or not.
+ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
+     const uint32_t i = cpu->leanInstr;
+     if (cpu->T && i <= 0xffff) {
+         const uint32_t top = i & 0xf800;
+-        return top == 0x6800 || top == 0x4800 || top == 0x9800 || (i & 0xfe00) == 0x5800;
++        const uint32_t reg = i & 0xfe00;
++        return top == 0x6800 || top == 0x4800 || top == 0x9800 || top == 0x7800 || top == 0x8800 ||
++               reg == 0x5800 || reg == 0x5600 || reg == 0x5a00 || reg == 0x5c00 || reg == 0x5e00;
+     }
+-    return (i & 0x0c500000) == 0x04100000;
++    return (i & 0x0c100000) == 0x04100000 || ((i & 0x0e100090) == 0x00100090 && (i & 0x60));
+ }
+ 
+ template <int size, bool write>
+@@ -905,7 +907,7 @@
+                             MMU_TRANSLATE_RESULT_BUFFERABLE(r);
+         if constexpr (!write) {
+             uint32_t value, cost = 0;
+-            if (size == 4 && !cpu->leanJit && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
++            if (size <= 4 && !cpu->leanJit && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
+                 cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, cpu->curInstrPC, cpu->leanDone,
+                               cpu->leanBudget - cpu->leanDone - 1, cpuPrvLeanSingleLoad(cpu), &value, &cost)) {
+                 memcpy(buf, &value, size);
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -269,10 +269,10 @@
+ using Arm920LeanPage = uint8_t* (*)(void* context, uint32_t pa, bool write, bool* counted);
+ using Arm920LeanGuard = bool (*)(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
+ void cpuArm920SetLean(ArmCpu*, Arm920LeanPage page, Arm920LeanGuard guard, void* context);
+-// read(context, pa, size, pc, ran, left, single, value, cost) may answer a word read of a page that isn't plain
+-// without the step, pc being the instruction's, ran the instructions the lean run finished before this one and
+-// single whether the read is the instruction's only data access (LDR). left and cost are as for write below.
+-// False sends it to the step.
++// read(context, pa, size, pc, ran, left, single, value, cost) may answer a read of up to a word from a page that
++// isn't plain without the step, pc being the instruction's, ran the instructions the lean run finished before this
++// one and single whether the read is the instruction's only data access (a single load). left and cost are as for
++// write below. False sends it to the step.
+ using Arm920LeanRead = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left,
+                                 bool single, uint32_t* value, uint32_t* cost);
+ void cpuArm920SetLeanRead(ArmCpu*, Arm920LeanRead read);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -37,6 +37,8 @@
+ bool fastBlocksDefault = true;  // what new machines start with (imx1SetFastBlocksDefault)  // instructions and runs of the Fast engine's JIT since the machine was made
+ uint64_t leanCs5Writes = 0;  // graphics memory writes taken on the lean path, for tests
+ uint64_t leanCs5Reads = 0;  // CS5 register reads answered on the lean path, for tests
++uint64_t leanCs5MemoryReads = 0;  // graphics memory reads answered on the lean path, for tests
++uint64_t leanBoardReads = 0;  // ASP, GPIO and AITC reads answered on the lean path, for tests
+ // One lean run's graphics memory writes: whether they can be taken and their wait clocks, worked out at the first
+ // one, and the wait clocks and budget they took.
+ struct LeanCs5 {
+@@ -442,8 +444,12 @@
+                          uint32_t* value, uint32_t* cost) {
+         auto& p = *static_cast<Probe*>(context);
+         *cost = 0;
++        if (p.graphicsMemory && Imx1GraphicsMemory::owns(pa))
++            return single && p.leanGraphicsRead(pa, size, ran, left, *value, *cost);
++        if (size != 4) return false;
++        if (Imx1Bootstrap::quietReadAddress(pa)) return single && p.leanBoardRead(pa, ran, *value);
+         if (!Imx1Bootstrap::timerCountAddress(pa))
+-            return single && size == 4 && p.leanRegisterRead(pa, pc, ran, left, *value, *cost);
++            return single && p.leanRegisterRead(pa, pc, ran, left, *value, *cost);
+         if (quietCycles <= ran || p.failed || deferredHclk || leanCs5.waitClocks ||
+             p.graphicsWireStatus != Imx1BootstrapAccess::ok ||
+             !p.peripherals.timerCountAfter(pa, size, deferredCycles + ran, quietMode, *value)) return false;
+@@ -564,6 +570,32 @@
+         *cost = leanCs5.cost;
+         return true;
+     }
++    // A board register read on the lean path (quietReadAddress): inside the quiet span it reads what the step would
++    // after charging, so it needs no charge.
++    __attribute__((noinline)) bool leanBoardRead(uint32_t pa, uint32_t ran, uint32_t& value) {
++        if (quietCycles <= ran || failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return false;
++        if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return false;
++        ++leanBoardReads;
++        return true;
++    }
++    // A graphics memory read on the lean path, as leanWrite takes a write: inside the quiet span no batch completes,
++    // so the memory holds what the step would read, and only the wait clocks are left, deferred as for writes.
++    __attribute__((noinline)) bool leanGraphicsRead(uint32_t pa, uint32_t size, uint32_t ran, uint32_t left,
++                                                    uint32_t& value, uint32_t& cost) {
++        if (!cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver || failed || quietCycles <= ran)
++            return false;
++        if (!leanCs5Ready() || left < leanCs5.cost) return false;
++        const bool user = (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_USR;
++        if (peripherals.eimState().cs5Transfer(pa, size, false, user) != Imx1EimAccess::ok ||
++            graphicsMemory->validate(cs5Configuration, peripherals.eimState(), pa, size) != Imx1BootstrapAccess::ok ||
++            graphicsMemory->access(cs5Configuration, peripherals.eimState(), pa, size, false, value) != Imx1BootstrapAccess::ok)
++            return false;
++        leanCs5.waitClocks += leanCs5.clocks;
++        leanCs5.waitCost += leanCs5.cost;
++        ++leanCs5MemoryReads;
++        cost = leanCs5.cost;
++        return true;
++    }
+     static bool cacheMemoryCheck(void* context, uint32_t address, uint32_t size, bool write) {
+         auto& p = *static_cast<Probe*>(context);
+         if (!write && p.resolve(address, size)) return true;
+@@ -978,6 +1010,8 @@
+     jitRuns = 0;
+     leanCs5Writes = 0;
+     leanCs5Reads = 0;
++    leanCs5MemoryReads = 0;
++    leanBoardReads = 0;
+     deferredHclk = 0;
+     // The core has process lifetime, as in the existing standalone CPU diagnostics.
+     auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
+@@ -1442,6 +1476,8 @@
+ uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*) { return leanCs5Writes; }
+ 
+ uint64_t imx1MachineLeanCs5Reads(const Imx1Machine*) { return leanCs5Reads; }
++uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*) { return leanCs5MemoryReads; }
++uint64_t imx1MachineLeanBoardReads(const Imx1Machine*) { return leanBoardReads; }
+ 
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine* machine) { return cpuArm920LeanCodeDrops(machine->probe->cpu); }
+ 
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -224,6 +224,10 @@
+ uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*);
+ // CS5 register reads the Fast engine answered on its lean path, wait clocks deferred.
+ uint64_t imx1MachineLeanCs5Reads(const Imx1Machine*);
++// Graphics memory reads the Fast engine answered on its lean path, wait clocks deferred.
++uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*);
++// ASP status, GPIO and AITC reads the Fast engine answered on its lean path.
++uint64_t imx1MachineLeanBoardReads(const Imx1Machine*);
+ // Times the Fast engine dropped its decoded code for a store to a page it came from.
+ uint64_t imx1MachineLeanCodeDrops(const Imx1Machine*);
+ // The last PCM sample SSI1 shifted out, for tests.
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -90,6 +90,11 @@
+     // access, or when the sum is too big to work out in one piece.
+     bool timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value) const;
+     static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
++    // Registers whose reads change nothing access commits but the GPIO port's accessed mark, and read the same
++    // anywhere in a span where no interrupt line or input changes: the ASP status, GPIO and AITC.
++    static bool quietReadAddress(uint32_t address) {
++        return address == 0x0021501c || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address);
++    }
+     Imx1BootstrapAccess clockStatus() const;
+     const Imx1ReferenceTime& referenceTime() const { return elapsedReference; }
+     bool referenceChargeSupported(uint64_t n, uint64_t d) const {
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -134,6 +134,7 @@
+     // wherever access would refuse it.
+     bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value) const {
+         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address)) return false;
++        if (address == 0x16010000 && pc == 0x200871dc) return quietIdentityRead(eim, value);
+         if (Imx1GraphicsAcquisition::owns(address))
+             return memoryReady(eim) && clocks.programmed() && acquisition.peek(address, value);
+         if (address != 0x1601054c || Imx1GraphicsInterrupts::owns(address) || Imx1GraphicsClocks::owns(address))
+@@ -142,6 +143,20 @@
+         if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return false;
+         return display.scanStatusAfter(pc, ticks, value);
+     }
++    // The identity read in the register read helper (200871dc) as access answers it, changing nothing. No other
++    // model owns 0x16010000, so access reaches its identity case.
++    bool quietIdentityRead(const Imx1Eim& eim, uint32_t& value) const {
++        constexpr uint32_t address = 0x16010000;
++        if (Imx1GraphicsAcquisition::owns(address) || Imx1GraphicsInterrupts::owns(address) ||
++            Imx1GraphicsClocks::owns(address) || Imx1GraphicsDisplay::owns(address) || Imx1GraphicsEngine::owns(address) ||
++            Imx1GraphicsController::owns(address) || Imx1GraphicsLookup::owns(address) || Imx1GraphicsWindows::owns(address) ||
++            Imx1GraphicsGpio::owns(address))
++            return false;
++        if (!deviceConfigured(eim) || !controller.configured() || !memoryReady(eim) || !clocks.programmed() || !programmed)
++            return false;
++        value = virtualIdentity;
++        return true;
++    }
+     bool busPeriodSupported(Imx1PllRatio bus, Imx1PllRatio cpu) const {
+         return referencePeriodSupported(bus) && waitCpuFraction.supports(uint64_t(bus.denominator) * cpu.numerator);
+     }
