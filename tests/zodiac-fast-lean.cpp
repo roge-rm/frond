@@ -7,7 +7,8 @@
 // page off the lean path while the DMA sends what both paths wrote. An IRQ raised by an MMIO write and an FIQ that
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
 // Graphics memory stores right after a change that makes the frame scan again show in the frame as in Exact, and a
-// timer read after a lean graphics memory store leaves the lean path.
+// timer read after a lean graphics memory store leaves the lean path. Scan status and acquisition reads on the lean
+// path give Exact's values at Exact's times.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -231,7 +232,7 @@ struct Outcome {
     Imx1MachineCheapStatus cheap;
     uint64_t lean, drops, timerReads;
     uint16_t pcmLast;
-    uint64_t cs5Writes;
+    uint64_t cs5Writes, cs5Reads;
 };
 
 // A bus observer keeps Fast off the lean path, so every access goes through the step and is counted once there.
@@ -254,7 +255,7 @@ Outcome finish(Imx1Machine* m) {
     for (unsigned n = 0; n < 100000 && running(m); ++n) imx1MachineRunSlice(m, 997, 0);
     Outcome out{imx1MachineInspect(m), imx1MachineGetStatus(m), imx1MachineLeanRetired(m),
                 imx1MachineLeanCodeDrops(m), imx1MachineLeanTimerReads(m), imx1MachinePcmLastTransmitted(m),
-                imx1MachineLeanCs5Writes(m)};
+                imx1MachineLeanCs5Writes(m), imx1MachineLeanCs5Reads(m)};
     imx1MachineStop(m);
     return out;
 }
@@ -502,6 +503,58 @@ void storeThenTimer() {
     same(exact, fast);
     assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks);
 }
+// The ROM's vertical wait reads the scan status (54c at 200adb14) in a loop, here with the acquisition
+// configuration (d10) and, with store, a graphics memory store each round. On the lean path the reads give
+// Exact's values at Exact's times and add their wait clocks. delay moves the loop against the display's frames.
+std::vector<uint32_t> scanGuest(uint32_t delay, bool store) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.spin(1 + delay);
+    g.word(0xadb14, 0xe5906000);                          // ldr r6, [r0]
+    g.word(0xadb18, 0xe12fff1e);                          // bx lr
+    std::vector<uint32_t> words;
+    load(words, 0, 0x1601054c); load(words, 1, 0x16010d10); load(words, 2, 0x16800100);
+    words.push_back(0xe3a08000);                          // mov r8, #0
+    words.push_back(0xe3a09000);                          // mov r9, #0
+    words.push_back(0xe3a07c01);                          // mov r7, #256
+    const size_t top = words.size();
+    words.push_back(0xe1a0e00f);                          // loop: mov lr, pc
+    const size_t call = words.size();
+    words.push_back(0);                                   // b 200adb14
+    words.push_back(0xe0268fe8);                          // eor r8, r6, r8, ror #31
+    words.push_back(0xe5915000);                          // ldr r5, [r1]
+    words.push_back(0xe0899005);                          // add r9, r9, r5
+    if (store) words.push_back(0xe5827000);               // str r7, [r2]
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(call) * 4, 0xadb14);
+    g.end();
+    return g.words;
+}
+void scanReads() {
+    uint64_t reads = 0, writes = 0;
+    unsigned mixed = 0;
+    for (bool store : {false, true})
+        for (uint32_t delay = 0; delay < 64; delay += 3) {
+            const auto words = scanGuest(delay, store);
+            const auto exact = runGuest(words, false), fast = runGuest(words, true);
+            if (delay == 0) { print(store ? "scan reads, stores exact" : "scan reads exact", exact);
+                              print(store ? "scan reads, stores fast" : "scan reads fast", fast); }
+            assert(exact.run.result.stop == Imx1ProbeStop::unsupportedInstruction && exact.run.result.registers[7] == 0);
+            same(exact, fast);
+            assert(exact.run.result.cs5WaitClocks == fast.run.result.cs5WaitClocks &&
+                   exact.run.result.graphicsFrameHash == fast.run.result.graphicsFrameHash);
+            reads += fast.cs5Reads;
+            writes += fast.cs5Writes;
+            mixed += exact.run.result.registers[8] != 0 && exact.run.result.registers[8] != ~0u;
+        }
+    std::printf("scan reads: %llu CS5 register reads and %llu graphics memory writes on the lean path, %u of 44 runs "
+                "saw the status change\n", (unsigned long long)reads, (unsigned long long)writes, mixed);
+    std::fflush(stdout);
+    assert(reads >= 5000 && writes >= 1000 && mixed >= 30);
+}
 }  // namespace
 
 int main() {
@@ -510,6 +563,7 @@ int main() {
     leanDraw(Trigger::eim, "draw after eim");
     leanDraw(Trigger::transaction, "draw after transaction");
     storeThenTimer();
+    scanReads();
     {
         // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
         // the engine runs.
