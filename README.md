@@ -231,10 +231,11 @@ It needs FUSE, which most desktops have. If it won't start, install `fuse3`, or 
 | Tungsten E3 | the modified 8 MiB E2 ROM | optional |
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
+| Tapwave Zodiac | the 8,192,000 byte ROM, or Tapwave's Zodiac 1.1 update (the zip or the PRC in it) | none |
 | Palm IIIx | one ROM file, 1.2 to 1.7 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
 
-The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana.
+The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 
 Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through Palm OS setup the first time, and if taps land in the wrong spot, calibrate the screen in Prefs.

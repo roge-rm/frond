@@ -29,6 +29,7 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 - `make test-zodiac-uart-startup` checks disabled UART1/2 control, independent reset/readback, guarded effects and Exact/Fast startup.
 - `make test-zodiac-dma-channel` checks disabled channel allocation/configuration, independent state, reset, guarded transfers and Exact/Fast execution.
 - `make test-zodiac-dma-startup` checks idle DMA global state, reset pulse timing, guarded transfers and Exact/Fast startup.
+- `make test-desktop` includes `zodiac-rom`, which makes a ROM from a made-up update PRC and zip (success, wrong hash, no ROMZ, cut short). No firmware.
 - `make test-zodiac-normal-runtime` checks the Zodiac's quarter turn of the panel, pen samples, stick offsets and the EEPROM identity read from a made-up ROM. No firmware.
 - `make test-zodiac-graphics-commands` checks bounded native ring packets, delayed solid RGB565 paint, pointer and busy state, rejected-batch atomicity, clipping and byte order.
 - `make test-zodiac-graphics-gpu` checks the Zodiac's host GPU fills (`FROND_ZODIAC_GPU`) against the CPU model, with CPU accesses between them, the differential mode and recovery from a GL error. It's skipped where there's no usable GPU.

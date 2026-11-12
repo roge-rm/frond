@@ -159,7 +159,9 @@ object Firmware {
     private const val PICK_LIMIT = 32L shl 20
 
     // Copies a picked NOR into picked(). Returns an error message or null. Runs off the main thread.
-    fun pick(context: Context, uri: Uri): String? {
+    // For the Zodiac (or when `device` is not chosen yet) Tapwave's Zodiac 1.1 update, the zip or the PRC, is
+    // swapped for the ROM it holds; any other file is kept as it is.
+    fun pick(context: Context, uri: Uri, device: Device? = null): String? {
         val to = picked(context)
         to.parentFile?.mkdirs()
         try {
@@ -178,6 +180,21 @@ object Firmware {
                         }
                         o.write(buffer, 0, n)
                     }
+                }
+            }
+            if (device == null || device.zodiac) {
+                val rom = File(to.path + ".rom")
+                try {
+                    when (val made = ZodiacRom.make(to, rom)) {
+                        is ZodiacRom.Result.Made -> if (!rom.renameTo(to)) throw IOException("rename")
+                        is ZodiacRom.Result.Failed -> {
+                            to.delete()
+                            return made.message
+                        }
+                        is ZodiacRom.Result.NotUpdate -> {}
+                    }
+                } finally {
+                    rom.delete()
                 }
             }
             return null

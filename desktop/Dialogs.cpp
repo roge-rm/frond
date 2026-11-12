@@ -57,7 +57,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         choose->setObjectName(key + "Choose");
         row->addWidget(edit, 1); row->addWidget(choose);
         connect(choose, &QPushButton::clicked, this, [this, edit, label] {
-            const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom);;All files (*)"));
+            const auto file = QFileDialog::getOpenFileName(this, label, edit->text(), tr("Firmware images (*.bin *.rom *.zip *.prc);;All files (*)"));
             if (!file.isEmpty()) edit->setText(file);
         });
         auto* text = new QLabel(label, this);
@@ -94,7 +94,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
         machineSettings->setNewMachine();
         auto update = [this] {
             auto selected = frondFirmware::deviceFromId(device->currentData().toString());
-            if (selected == Device::automatic) selected = frondFirmware::detectDevice(nor->text());
+            if (selected == Device::automatic) selected = frondFirmware::detectPicked(nor->text());
             machineSettings->setDevice(selected);
         };
         connect(device, &QComboBox::currentIndexChanged, this, update);

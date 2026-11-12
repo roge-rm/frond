@@ -202,10 +202,12 @@ target_link_libraries(main68k PRIVATE frond68kcore frondcommon SDL2 SDL2main SDL
 # The card tool (native/CardTool.h) and the storage library (common/storage) for the app's home
 # process as libfrondcard.so: the core's card file code and the JNI entries, without SDL, so it
 # loads outside the :emulator process. Unit tests load a host build of CardStorageJni.cpp alone.
-add_library(frondcard SHARED CardToolJni.cpp CardStorageJni.cpp)
-target_include_directories(frondcard PRIVATE "${UARM}/native")
+# ZodiacRomJni.cpp and firmware/ZodiacRom.cpp make the Zodiac ROM from Tapwave's update (zlib from the NDK).
+set(ZODIAC_ROM "${FROND_CORE}/../../zodiac-rom")
+add_library(frondcard SHARED CardToolJni.cpp CardStorageJni.cpp ZodiacRomJni.cpp "${ZODIAC_ROM}/ZodiacRom.cpp")
+target_include_directories(frondcard PRIVATE "${UARM}/native" "${ZODIAC_ROM}")
 target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
-target_link_libraries(frondcard PRIVATE frondcore log)
+target_link_libraries(frondcard PRIVATE frondcore log z)
 
 # The link library (link/: pairing, Noise KK, records, mux) for Connections as libfrondlink.so,
 # loaded by LinkNative.kt in the home and emulator processes. Same sources as the desktop's.
