@@ -36,7 +36,7 @@ add_library(frond-sd-exchange STATIC SdExchange.cpp)
 target_link_libraries(frond-sd-exchange PUBLIC frond-card-files Qt6::Core)
 target_include_directories(frond-sd-exchange PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(frond-dialogs STATIC Dialogs.cpp DanaViewControls.cpp)
-target_link_libraries(frond-dialogs PUBLIC Qt6::Widgets Qt6::Network ZLIB::ZLIB)
+target_link_libraries(frond-dialogs PUBLIC Qt6::Widgets Qt6::Network ZLIB::ZLIB frond-zodiac-rom)
 target_include_directories(frond-dialogs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # The USB printer row and drawing a received job on a printer or PDF.
 add_library(frond-print STATIC PrintJob.cpp PrinterPanel.cpp)

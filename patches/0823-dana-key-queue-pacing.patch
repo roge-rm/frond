@@ -1,0 +1,128 @@
+A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys of 7 bytes) could overflow, counting the presses already in the FIFO, so a fast burst into a slow app (the memo key's editor) isn't dropped. A release of a key that is down goes ahead of a waiting press (not a modifier, and not past the release of a key pressed in the backlog, so chords keep their order), a press that wakes the ST always goes in, and the queue is only read from RAM. Unblocking is seen when the backlog is next fed (a report read or CycleSlowly); an app that never reads keys lets presses build up to the 8192 backlog instead of being dropped.
+
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
+@@ -55,6 +55,7 @@
+     uint64 regapLeft[8]{};
+     bool repeatReply=false;
+     bool RegapBlocked() const;
++    bool KeyQueueBlocked() const;
+     void NoteRelease(const uint8* next);
+     void ClearRegap() { std::memset(regapScan,0,8); std::memset(regapLeft,0,sizeof regapLeft); repeatReply=false; }
+     void AgeRegap(uint64 elapsed);
+@@ -69,6 +70,7 @@
+     void FeedBacklog(bool direct=false);
+     bool Wakes(uint8 code) const;
+     bool PullWakingKey();
++    bool PullRelease();
+     // Not saved: after a load the next halted feed scans once and sets it again.
+     bool noWakeValid=false;
+     std::array<uint32,14> noWakeAt{};
+@@ -123,6 +125,8 @@
+     void ScaleCycles(uint32 factor) override;
+     virtual uint64 InputCycle() const;
+     virtual uint64 InputHz() const;
++    // Free bytes in Palm OS's key queue, or ~0u when it can't be read.
++    virtual uint32 KeyQueueRoom() const;
+     bool DispatchDanaInput(const std::vector<DanaTransition5>&) override;
+     void ReleaseDanaInput(bool cancel=true) override;
+     void DispatchButtonEvent(ButtonEvent) override;
+@@ -130,6 +134,22 @@
+     // invalid code, a ninth held key or a full backlog; a full FIFO makes the change wait.
+     bool DispatchScanCode(uint8 code, bool down);
+     static constexpr size_t kBacklogLimit=8192;
++    // Free bytes in the guest key queue below which a new press waits (KeyQueueBlocked), and the
++    // bytes the ROM puts in per key.
++    static constexpr uint32 kKeyQueueReserve=16, kKeyQueueEntry=7;
++    // Free bytes in the KeyQueueType that SysEvtMgrGlobalsType at globals points to (keyQP at
++    // +10; start, end and size at +0, +2, +4, start==end empty). ~0u unless both lie in RAM
++    // [ramStart, ramStart+ramSize) and the fields are in range, so registers are never read.
++    template<class Read16,class Read32> static uint32 KeyQueueRoomIn(emuptr globals,emuptr ramStart,uint32 ramSize,Read16 read16,Read32 read32) {
++        auto inRam=[&](emuptr a,uint32 n) { return !(a&1) && a>=ramStart && a-ramStart<=ramSize && n<=ramSize-(a-ramStart); };
++        if(!globals || !inRam(globals,14)) return ~0u;
++        emuptr queue=read32(globals+10);
++        if(!queue || !inRam(queue,6)) return ~0u;
++        uint32 start=read16(queue),end=read16(queue+2),size=read16(queue+4);
++        // A queue too small to hold one key past the reserve isn't gated, or it would block for ever.
++        if(size<=kKeyQueueReserve+kKeyQueueEntry || size>0x4000 || start>=size || end>=size || !inRam(queue,6+size)) return ~0u;
++        return size-(end>=start ? end-start : size-start+end);
++    }
+     // 150 ms also passes on the guest; 200 leaves room for slow guest reads.
+     static constexpr uint64 kRegapMs=200;
+     size_t BacklogSize() const { return backlog.size(); }
+--- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
++++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.cpp
+@@ -8,6 +8,9 @@
+ #include <stdexcept>
+ #include "ExternalStorage.h"
+ #include "DanaUnqualified.h"
++#include "EmLowMem.h"
++#include "EmBankSRAM.h"
++#include "EmMemory.h"
+ 
+ Bool EmRegsVZDana::GetLCDScreenOn() { return (StdRead(0xfffff441,1)&0x80)!=0; }
+ bool EmRegsVZDana::CopyLCDFrame(Frame& frame,bool fullRefresh) {
+@@ -356,6 +359,10 @@
+             fed=true; continue;
+         }
+         if(!stAsleep && (down ? queueCount+1+heldCount+1>32 || heldCount==8 : queueCount>=32)) break;
++        if(!stAsleep && down && KeyQueueBlocked()) {
++            if(!PullRelease()) break;
++            fed=true; continue;
++        }
+         backlog.pop_front(); noWakeValid=false;
+         ApplyScanCode(code,down); fed=true;
+     }
+@@ -568,6 +575,52 @@
+     }
+     return false;
+ }
++// True when a press now could overflow Palm OS's key queue. The ROM puts each press in that
++// queue as its report comes, so presses faster than the app takes them would be dropped there.
++// They wait in the backlog instead, counting the presses already in the FIFO, and only while the
++// ST is awake, so a waking press always goes in. Host input only. Unblocking is seen when
++// FeedBacklog next runs, from a report read or CycleSlowly. An app that never reads keys lets
++// presses build up to kBacklogLimit instead of being dropped.
++bool EmRegsVZDana::KeyQueueBlocked() const {
++    if(!hostPaced) return false;
++    uint32 presses=0;
++    const uint8* before=presentedScan;
++    for(unsigned i=0;i<queueCount;i++) {
++        const uint8* packet=packets[(queueHead+i)%32];
++        for(unsigned k=0;k<8 && packet[k];k++)
++            if(std::find(before,before+8,packet[k])==before+8) ++presses;
++        before=packet;
++    }
++    const uint32 room=KeyQueueRoom();
++    return room!=~0u && room<=kKeyQueueReserve+presses*kKeyQueueEntry;
++}
++// While a press waits, a release of a key that is down goes ahead of it, so a key held across
++// the next press (a down, b down, a up) isn't left down. Only up to the first release of a key
++// pressed in the backlog, so a chord's order stays (shift up after a down and a up), and never a
++// modifier (caps, shifts, ctrl, function, command), whose release changes what the press types.
++bool EmRegsVZDana::PullRelease() {
++    if(queueCount>=32) return false;
++    bool seen[128]{},pressed[128]{};
++    for(size_t i=0;i<backlog.size();i++) {
++        uint8 code=backlog[i]&0x7f;
++        if(backlog[i]&0x80) { pressed[code]=seen[code]=true; continue; }
++        if(pressed[code]) return false;
++        bool modifier=code==0x0c || code==0x09 || code==0x69 || code==0x7b || code==0x46 || code==0x13;
++        if(!seen[code] && !modifier && std::find(heldScan,heldScan+heldCount,code)!=heldScan+heldCount) {
++            backlog.erase(backlog.begin()+i); noWakeValid=false;
++            ApplyScanCode(code,false);
++            return true;
++        }
++        seen[code]=true;
++    }
++    return false;
++}
++uint32 EmRegsVZDana::KeyQueueRoom() const {
++    CEnableFullAccess munge;
++    return KeyQueueRoomIn(EmLowMem_GetGlobal(sysEvtMgrGlobalsP),EmBankSRAM::GetMemoryStart(),
++        EmMemory::GetRegionSize(MemoryRegion::ram),
++        [](emuptr a) { return uint32(EmMemGet16(a)); },[](emuptr a) { return uint32(EmMemGet32(a)); });
++}
+ // Counts each entry down and drops the expired ones, keeping regapScan packed.
+ void EmRegsVZDana::AgeRegap(uint64 elapsed) {
+     unsigned n=0;

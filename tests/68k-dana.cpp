@@ -54,7 +54,10 @@ static std::vector<uint8> LegacyIsp(std::vector<uint8> state) {
 }
 // Exercise the same board parser/state fields without VZ CPU/timer dependencies.
 struct St : EmRegsVZDana {
+    // Free bytes in the guest's key queue; no guest memory here.
+    uint32 keyQueueRoom=~0u;
     St() { SetSubBankHandlers(); }
+    uint32 KeyQueueRoom() const override { return keyQueueRoom; }
     void Raw(emuptr address,int size,uint32 value) { StdWrite(address,size,value); }
     template<class T> void Save(T& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana); if(!c)return;
@@ -1113,6 +1116,151 @@ int main() {
         held.now=119; held.ReportHeldKeys(); assert(!request());
         held.now=120; held.ReportHeldKeys(); assert(request()); assert(held.Byte(0)==0x40);
         held.now=200; held.ReportHeldKeys(); assert(!request());
+    }
+    {
+        // A press waits in the backlog while Palm OS's key queue could overflow, counting the
+        // presses already in the FIFO; nothing else is reported meanwhile.
+        const uint32 one=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        auto b=*DanaScan5::Named("b");
+        PacedSt full; assert(full.Byte(0)==0xaa); full.SetWord(0xfffff302,0);
+        auto request=[&]() { return (full.GetWord(0xfffff310)&1)!=0; };
+        full.keyQueueRoom=one;
+        full.now=100; assert(full.DispatchDanaInput({{scan,true},{scan,false},{b,true},{b,false}}));
+        assert(full.BacklogSize()==2);
+        // The guest took a into its queue and the app hasn't read it yet.
+        full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==scan.Code());
+        full.now=110; full.ReportHeldKeys(); assert(request()); assert(full.Byte(0)==0x40);
+        full.now=500; full.ReportHeldKeys(); assert(!request()); assert(full.BacklogSize()==2);
+        auto waiting=Save(full);
+        full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+1;
+        full.now=501; full.ReportHeldKeys(); assert(request());
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==b.Code());
+        full.now=511; full.ReportHeldKeys(); assert(request()); assert(full.Byte(0)==0x40);
+        // The waiting press survives a save and load.
+        full.keyQueueRoom=0; assert(Load(full,waiting)); full.now=501; full.ReportHeldKeys(); assert(!request());
+        full.keyQueueRoom=~0u; full.ReportHeldKeys(); assert(request());
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==b.Code());
+    }
+    {
+        // Overlapping keys (a down, b down, a up): a's release goes ahead of the waiting b, so a
+        // isn't left down (and repeated) while b waits.
+        auto b=*DanaScan5::Named("b");
+        PacedSt overlap; assert(overlap.Byte(0)==0xaa); overlap.SetWord(0xfffff302,0);
+        auto request=[&]() { return (overlap.GetWord(0xfffff310)&1)!=0; };
+        overlap.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        overlap.now=100; assert(overlap.DispatchDanaInput({{scan,true}}));
+        assert(overlap.DispatchDanaInput({{b,true}})); assert(overlap.DispatchDanaInput({{scan,false}}));
+        assert(overlap.BacklogSize()==2);
+        overlap.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(overlap.Byte(0)==0x41); assert(overlap.Byte(0)==scan.Code());
+        assert(overlap.BacklogSize()==1);
+        overlap.now=110; overlap.ReportHeldKeys(); assert(request()); assert(overlap.Byte(0)==0x40);
+        for(uint64 t=120;t<=1000;t+=10) { overlap.now=t; overlap.ReportHeldKeys(); assert(!request()); }
+        assert(overlap.DispatchDanaInput({{b,false}})); assert(overlap.BacklogSize()==2);
+        overlap.keyQueueRoom=~0u; overlap.now=1010; overlap.ReportHeldKeys(); assert(request());
+        assert(overlap.Byte(0)==0x41); assert(overlap.Byte(0)==b.Code());
+        overlap.now=1020; overlap.ReportHeldKeys(); assert(request()); assert(overlap.Byte(0)==0x40);
+        assert(!overlap.BacklogSize());
+    }
+    {
+        // A modifier held over a waiting press stays down across it: shift+a typed fast while the
+        // press waits still gives shift with a, and a release after a's own release doesn't jump it.
+        auto shift=*DanaScan5::Named("lshift"); auto b=*DanaScan5::Named("b");
+        PacedSt chord; assert(chord.Byte(0)==0xaa); chord.SetWord(0xfffff302,0);
+        auto request=[&]() { return (chord.GetWord(0xfffff310)&1)!=0; };
+        auto report=[&]() {
+            std::vector<uint8> got; unsigned n=chord.Byte(0)&15;
+            for(unsigned i=0;i<n;i++) got.push_back(uint8(chord.Byte(0)));
+            std::sort(got.begin(),got.end()); return got;
+        };
+        auto sorted=[](std::vector<uint8> v) { std::sort(v.begin(),v.end()); return v; };
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        chord.now=100; assert(chord.DispatchDanaInput({{shift,true},{scan,true},{scan,false},{shift,false}}));
+        assert(chord.BacklogSize()==3);
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(report()==std::vector<uint8>{shift.Code()});
+        for(uint64 t=110;t<=300;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) assert(report()==std::vector<uint8>{shift.Code()});
+        }
+        assert(chord.BacklogSize()==3);
+        chord.keyQueueRoom=~0u;
+        std::vector<std::vector<uint8>> seen;
+        for(uint64 t=310;t<=400;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) { auto r=report(); if(seen.empty() || r!=seen.back()) seen.push_back(r); }
+        }
+        assert((seen==std::vector<std::vector<uint8>>{sorted({shift.Code(),scan.Code()}),{shift.Code()},{}}));
+        // shift down, b down waiting, shift up: shift's release waits behind b.
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        // Past the regap after shift's last release.
+        chord.now=1000; assert(chord.DispatchDanaInput({{shift,true}})); assert(chord.DispatchDanaInput({{b,true}}));
+        assert(chord.DispatchDanaInput({{shift,false}})); assert(chord.BacklogSize()==2);
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(report()==std::vector<uint8>{shift.Code()});
+        chord.now=1010; chord.ReportHeldKeys(); assert(chord.BacklogSize()==2);
+        if(request()) assert(report()==std::vector<uint8>{shift.Code()});
+        chord.keyQueueRoom=~0u; seen.clear();
+        for(uint64 t=1020;t<=1100;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) { auto r=report(); if(seen.empty() || r!=seen.back()) seen.push_back(r); }
+        }
+        assert((seen==std::vector<std::vector<uint8>>{sorted({shift.Code(),b.Code()}),{b.Code()}}));
+    }
+    {
+        // A backlog already waiting when the ST halts: PullWakingKey still takes the waking press
+        // with the key queue full, and the waiting press stays.
+        const uint8 halt[]={ '1','2','3',' ','H','a','l','t',0,0x80 };
+        auto power=*DanaScan5::Named("power");
+        PacedSt late; assert(late.Byte(0)==0xaa);
+        late.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        late.now=100; assert(late.DispatchDanaInput({{scan,true},{scan,false}})); assert(late.BacklogSize()==2);
+        for(auto byte:halt) assert(late.Byte(byte)==0);
+        assert(late.DispatchDanaInput({{power,true},{power,false}})); assert(late.BacklogSize()==4);
+        late.keyQueueRoom=0;
+        late.now=110; late.ReportHeldKeys();
+        assert(!(late.GetPortInternalValue('D')&0x10));
+        assert(late.Byte(0)==0x41); assert(late.Byte(0)==power.Code());
+        late.now=120; late.ReportHeldKeys(); assert(late.Byte(0)==0x40);
+        assert(late.BacklogSize()==2);
+    }
+    {
+        // A press that wakes the halted ST goes in even with the key queue full; the next waits.
+        const uint8 halt[]={ '1','2','3',' ','H','a','l','t',0,0x80 };
+        auto power=*DanaScan5::Named("power");
+        PacedSt woken; assert(woken.Byte(0)==0xaa);
+        for(auto byte:halt) assert(woken.Byte(byte)==0);
+        woken.keyQueueRoom=0;
+        woken.now=100; assert(woken.DispatchDanaInput({{power,true},{power,false},{scan,true},{scan,false}}));
+        assert(!(woken.GetPortInternalValue('D')&0x10));
+        assert(woken.Byte(0)==0x41); assert(woken.Byte(0)==power.Code());
+        woken.now=110; woken.ReportHeldKeys(); assert(woken.Byte(0)==0x40);
+        assert(woken.BacklogSize()==2);
+    }
+    {
+        // The guest read: keyQP at +10 in the event manager globals, start, end and size, the
+        // wrap, and pointers outside RAM or fields out of range give ~0u.
+        std::vector<uint8> ram(0x1000);
+        auto put16=[&](emuptr a,uint32 v) { ram[a]=uint8(v>>8); ram[a+1]=uint8(v); };
+        auto put32=[&](emuptr a,uint32 v) { put16(a,v>>16); put16(a+2,v&0xffff); };
+        auto room=[&](emuptr globals,uint32 size=0x1000) {
+            return EmRegsVZDana::KeyQueueRoomIn(globals,0,size,
+                [&](emuptr a) { assert(a+2<=ram.size()); return uint32(ram[a]<<8|ram[a+1]); },
+                [&](emuptr a) { assert(a+4<=ram.size()); return uint32(ram[a]<<24|ram[a+1]<<16|ram[a+2]<<8|ram[a+3]); });
+        };
+        put32(0x100+10,0x200); put16(0x200,14); put16(0x202,14); put16(0x204,56);
+        assert(room(0x100)==56);
+        put16(0x200,21); put16(0x202,7); assert(room(0x100)==14);
+        put16(0x200,7); put16(0x202,49); assert(room(0x100)==14);
+        assert(room(0)==~0u); assert(room(0x101)==~0u); assert(room(0xff8)==~0u);
+        assert(room(0x100,0x200)==~0u);
+        put32(0x100+10,0xfffff300); assert(room(0x100)==~0u);
+        put32(0x100+10,0xff0); assert(room(0x100)==~0u);
+        put32(0x100+10,0x200); put16(0x204,4); assert(room(0x100)==~0u);
+        put16(0x200,0); put16(0x202,0); put16(0x204,EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry); assert(room(0x100)==~0u);
+        put16(0x204,EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry+2); assert(room(0x100)==EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry+2);
+        put16(0x204,56); put16(0x200,56); assert(room(0x100)==~0u);
     }
     {
         // A key pressed again soon after its release waits until the guest has seen it released
