@@ -168,9 +168,14 @@ int main() {
     r = run(words); finished(r);
     assert(r.registers[2] == 0xfffffffa && r.registers[4] == 1 && !r.registers[5]);
     assert(r.cpsr == 0xd3);
-    for (uint32_t instruction : {0xe0021190u, 0xe0000190u,
+    // Rd may be Rm: the ARM920T gives the ordinary product.
+    words.clear(); literal(words, 0, 0xfffffffe); words.push_back(0xe3a01003);
+    words.push_back(0xe0000190);  // MUL r0,r0,r1
+    r = run(words); finished(r);
+    assert(r.registers[0] == 0xfffffffa && r.registers[1] == 3 && r.cpsr == 0xd3);
+    for (uint32_t instruction : {0xe0021190u,
                                  0xe00f0190u, 0xe0020f90u, 0xe002019fu, 0xe022f190u,
-                                 0xe0802190u, 0xe1002091u}) {
+                                 0xe0802190u, 0xe1000091u}) {  // SWP with Rn == Rd
         r = run({instruction});
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0);
     }

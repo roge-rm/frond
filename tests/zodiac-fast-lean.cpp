@@ -1803,11 +1803,49 @@ void jitLong() {
     unsetenv("FROND_JIT_HOT");
 }
 
+// MULS with Rd == Rm and a Thumb BX PC from a halfword address (an armlink veneer) run on the lean path, with
+// Exact's results.
+void aliasOps(bool veneer) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 0, 1); load(words, 1, 3); load(words, 7, 200); load(words, 9, 0); load(words, 10, 0);
+    const size_t top = words.size();
+    if (veneer) {
+        words.push_back(0xe28f2001);                      // top: add r2, pc, #1
+        words.push_back(0xe12fff12);                      // bx r2: Thumb from the next word
+        words.push_back(0x477846c0);                      // nop; bx pc from top+10, so ARM from top+12
+        words.push_back(0xe28aa001);                      // add r10, r10, #1
+    } else {
+        words.push_back(0xe0100190);                      // top: muls r0, r0, r1
+        words.push_back(0xe0899000);                      // add r9, r9, r0
+    }
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const char* name = veneer ? "thumb bx pc" : "muls rd rm";
+    std::printf("%s: lean %llu\n", name, (unsigned long long)fast.lean);
+    print(name, exact);
+    const auto& e = exact.run.result;
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0);
+    uint32_t product = 1, sum = 0;
+    for (unsigned i = 0; i < 200; ++i) sum += product *= 3;
+    if (veneer) assert(e.registers[10] == 200 && !(e.cpsr & 0x20));
+    else assert(e.registers[0] == product && e.registers[9] == sum);
+    // 200 rounds of 7 (veneer) or 4 instructions, nearly all of them lean.
+    assert(exact.lean == 0 && fast.lean >= (veneer ? 1380u : 780u));
+    same(exact, fast);
+}
+
 int main() {
     uint32_t stopPc = 0, savePc = 0;
     // Lean-only Fast first, which gives Exact's times as well.
     imx1SetFastBlocksDefault(false);
     forcedIrq();
+    aliasOps(false);
+    aliasOps(true);
     leanDraw(Trigger::eim, "draw after eim");
     leanDraw(Trigger::transaction, "draw after transaction");
     storeThenTimer();

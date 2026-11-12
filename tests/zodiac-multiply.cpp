@@ -92,9 +92,9 @@ void directed() {
                     assert(cpuGetRegisters(exact.cpu)[15] == code + 2);
                     assert(cpuGetRegExternal(exact.cpu, ARM_REG_NUM_CPSR) == (cv | nz(v.product) | 0xf3));
                 }
-                // Rd may equal Rs or the accumulator; Rd==Rm stays outside the probe subset.
+                // Rd may equal Rs, the accumulator or Rm (r0): the ARM920T gives the ordinary product.
                 for (bool accumulate : {false, true}) for (bool flags : {false, true})
-                    for (unsigned d : {2u, 1u, 3u}) {
+                    for (unsigned d : {2u, 1u, 3u, 0u}) {
                         auto r = initial(); r[0] = v.a; r[1] = v.b; r[3] = v.add;
                         const uint32_t instruction = arm(d, 0, 1, accumulate ? 3 : 0, accumulate, flags);
                         for (Machine* m : {&exact, &fast}) m->setup(instruction, false, cv | oldNz, r);
@@ -119,7 +119,7 @@ Imx1ProbeResult probe(std::vector<uint32_t> words, bool fast) {
 }
 void guards() {
     for (bool fast : {false, true}) {
-        for (uint32_t instruction : {0xe0121190u, 0xe0100190u, 0xe01f0190u,
+        for (uint32_t instruction : {0xe0121190u, 0xe01f0190u,
                                      0xe0120f90u, 0xe012019fu, 0xe032f190u,
                                      0xe0902190u, 0xe1600281u}) {
             std::vector<uint32_t> p; literal(p, 0, 0x12345678); literal(p, 1, 0x76543210);
@@ -158,6 +158,16 @@ void guards() {
         r = probe(p, fast);
         assert(r.trace.instruction == 0xde00 && !r.registers[2] && !r.registers[4] &&
                r.cpsr == 0x400000f3 && !r.busAccesses && r.registers[15] == romBase + 42);
+        // Rd == Rm: Xploids' MULS r0,r0,r1 (30955e68), then MLAS r0,r0,r1,r3.
+        p.clear(); literal(p, 0, 0xfffffffe); literal(p, 1, 3); literal(p, 3, 0x10);
+        p.push_back(0xe0100190); p.push_back(0xe7f000f0);
+        r = probe(p, fast);
+        assert(r.trace.instruction == 0xe7f000f0 && r.registers[0] == 0xfffffffa && r.registers[1] == 3 &&
+               r.cpsr == 0x800000d3 && !r.busAccesses);
+        p.pop_back(); p.push_back(0xe0303190); p.push_back(0xe7f000f0);
+        r = probe(p, fast);
+        assert(r.trace.instruction == 0xe7f000f0 && r.registers[0] == 0xfffffffe &&
+               r.cpsr == 0x800000d3 && !r.busAccesses);
     }
 }
 // Ordinary Fast blocks link across cache lines, so the block ending at code + 32 also runs the
@@ -170,10 +180,11 @@ uint32_t fastRun(Machine& fast, uint32_t count) {
 }
 void normalBlocks() {
     Machine exact(false), fast(true, false);
-    for (bool thumb : {false, true}) for (bool accumulate : {false, true}) {
-        if (thumb && accumulate) continue;
+    for (bool thumb : {false, true}) for (bool accumulate : {false, true}) for (bool alias : {false, true}) {
+        if (thumb && (accumulate || alias)) continue;
         auto r = initial(); r[0] = 0xfffffffe; r[1] = 3; r[3] = 7;
-        const uint32_t instruction = thumb ? 0x4348 : arm(2, 0, 1, accumulate ? 3 : 0, accumulate, true);
+        // alias: Rd == Rm (r0), as Xploids has it.
+        const uint32_t instruction = thumb ? 0x4348 : arm(alias ? 0 : 2, 0, 1, accumulate ? 3 : 0, accumulate, true);
         for (Machine* m : {&exact, &fast}) {
             m->setup(instruction, thumb, 0x30000000, r);
             if (thumb) {
@@ -192,12 +203,13 @@ void normalBlocks() {
         for (unsigned i = 0; i < ran; ++i) exact.step();
         same(exact, fast);
         assert(cpuGetRegisters(fast.cpu)[15] == code + 32);
-        assert(cpuGetRegisters(fast.cpu)[thumb ? 0 : 2] == (accumulate ? 1u : 0xfffffffau));
+        assert(cpuGetRegisters(fast.cpu)[thumb || alias ? 0 : 2] == (accumulate ? 1u : 0xfffffffau));
         assert(cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) ==
                (0x30000000 | (accumulate ? 0 : 0x80000000) | (thumb ? 0xf3 : 0xd3)));
         assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));
         assert(blocks > beforeBlocks && instructions - before == ran);
-        std::printf("PASS: generated %s multiply block, instructions=%u\n", thumb ? "Thumb" : accumulate ? "ARM MLAS" : "ARM MULS", ran);
+        std::printf("PASS: generated %s%s multiply block, instructions=%u\n", thumb ? "Thumb" : accumulate ? "ARM MLAS" : "ARM MULS",
+                    alias ? " Rd == Rm" : "", ran);
     }
 }
 

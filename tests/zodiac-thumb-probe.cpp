@@ -272,9 +272,14 @@ void bxPc() {
     auto r = compare(p);
     assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xde00 &&
            r.trace.instructionSize == 2 && r.registers[2] == 9 && r.registers[5] == 9);
+    // At a halfword address BX pc enters the ARM word below PC+4, as the ARM linker's veneers expect (Tony
+    // Hawk 4 at 3083531e).
     Program unaligned; unaligned.enter(); unaligned.half(0x2200); unaligned.half(0x4778);
+    unaligned.word(0xe2822009); unaligned.word(0xe7f000f0); // ADD r2,#9; undefined.
     r = compare(unaligned);
-    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0x4778);
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xe7f000f0 &&
+           r.trace.instructionSize == 4 && r.trace.pc == base + unaligned.bytes.size() - 4 &&
+           r.registers[2] == 9 && !(r.cpsr & ARM_SR_T));
 }
 void guards() {
     for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdeab, 0xde00,
