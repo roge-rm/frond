@@ -184,6 +184,29 @@ int main() {
         f.finish();
         for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x2d95,i));
     }
+    // The mask is the alpha: whatever global alpha a BlendBlt left in 484 changes nothing.
+    for (uint32_t alpha : {0u,0x00030a07u}) {
+        Fixture f;
+        planes(f,8,2,20,24,0x92cb,0x2d95);
+        auto p = packet(8,2);
+        replace(p,0x484,alpha);
+        assert(f.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x2d95,i));
+    }
+    // A source 2 origin in 416 (x << 16 | y) moves where source 2 is read from.
+    {
+        Fixture f;
+        planes(f,8,2,20,24,0x92cb,0x2d95);
+        for (uint32_t y = 0; y < 4; ++y)
+            for (uint32_t x = 0; x < 24; ++x) f.write(source+(y*24+x)*2,0x1000+y*0x100+x);
+        auto p = packet(8,2);
+        replace(p,0x416,0x00030001);
+        assert(f.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 16; ++i)
+            assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x1000+(1+i/8)*0x100+3+i%8,i));
+    }
     // Any other pair in 490 and 491 is refused.
     for (auto colours : {std::pair<uint32_t,uint32_t>{0,0}, {0xffffffff,0xffff}, {0x1234,0xffff}}) {
         Fixture f;
@@ -272,9 +295,9 @@ int main() {
         };
         const auto valid = packet(8,2);
         for (auto change : {std::pair<uint32_t,uint32_t>{0x41b,0xd798d4de},{0x4b2,0x01cc0b00},
-            {0x4b1,0x40057c04},{0x4b1,0x40056d04},{0x4b1,0x40055d04},{0x4b1,0x40037d04},{0x488,0x01080004},{0x488,4},{0x484,0xe0f0f},
+            {0x4b1,0x40057c04},{0x4b1,0x40056d04},{0x4b1,0x40055d04},{0x4b1,0x40037d04},{0x488,0x01080004},{0x488,4},
             {0x48f,0xfffe},{0x4b3,0xffff},{0x472,0x3e},{0x471,0x1fff0007},
-            {0x416,1},{0x416,0xffff0000},{0x420,7},{0x421,3},{0x419,0},{0x419,8193},
+            {0x416,0x00110000},{0x416,0xffff0000},{0x416,0x1fff},{0x420,7},{0x421,3},{0x419,0},{0x419,8193},
             {0x418,source+1},{0x418,0xfffffe},{0x46b,source+2},{0x46c,25},{0x401,destination+1},
             {0x401,0xfffffffe},{0x402,0},{0x402,8193},{0x402,7},{0x418,destination},
             {0x4a1,1},{0x4a0,1},{0x42e,1},{0x41d,1},{0x30f,0}}) {

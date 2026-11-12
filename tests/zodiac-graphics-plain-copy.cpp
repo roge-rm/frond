@@ -748,21 +748,35 @@ std::vector<uint32_t> lineState(uint32_t colour) {
     return {0x41f,colour,0x401,lineSurface,0x402,128,0x46f,0,0x470,0x00800080};
 }
 uint32_t point(uint32_t x, uint32_t y) { return x | y << 16; }
-// The pixels of a segment with no Bresenham tie: the nearest across the major axis, both ends.
+// The pixels of a segment, both ends, as X's zero-width line (mizerline.c) draws them with the bias the Radeon
+// driver sets for its hardware lines: octants 5 to 8, those with y increasing.
 std::vector<std::pair<int,int>> linePixels(int x0, int y0, int x1, int y1) {
     std::vector<std::pair<int,int>> out;
-    const int dx = x1-x0, dy = y1-y0, steps = std::max(std::abs(dx),std::abs(dy));
-    for (int i = 0; i <= steps; ++i) {
-        if (!steps) { out.push_back({x0,y0}); break; }
-        const double t = double(i)/steps;
-        out.push_back({int(std::lround(x0+dx*t)),int(std::lround(y0+dy*t))});
+    const int adx = std::abs(x1-x0), ady = std::abs(y1-y0), sx = x1 < x0 ? -1 : 1, sy = y1 < y0 ? -1 : 1;
+    const int bias = y1 > y0 ? 1 : 0;
+    // mizerline takes adx > ady as x-major; equal lengths step both every time, so either way draws the same.
+    const bool xMajor = adx > ady;
+    const int major = xMajor ? adx : ady, minor = xMajor ? ady : adx;
+    const int e1 = minor*2, e3 = minor*2-major*2-e1;
+    int e = e1-major-bias-e1, x = x0, y = y0;
+    for (int n = 0; n < major; ++n) {
+        out.push_back({x,y});
+        e += e1;
+        if (e >= 0) { if (xMajor) y += sy; else x += sx; e += e3; }
+        if (xMajor) x += sx; else y += sy;
     }
+    out.push_back({x,y});
+    assert(x == x1 && y == y1);
     return out;
 }
 void lines() {
     struct Segment { int x0, y0, x1, y1; };
+    // With ties (half way between two pixels) in each of the 8 directions: 4 across and 1 or 3 down, and the
+    // y-major ones, both ways.
     const std::vector<Segment> segments{{10,10,15,12},{40,30,33,21},{5,50,25,50},{60,40,60,5},{70,10,80,20},
-        {90,90,90,90},{120,3,101,6},{3,120,8,101}};
+        {90,90,90,90},{120,3,101,6},{3,120,8,101},
+        {20,60,24,61},{24,64,20,65},{20,68,24,67},{24,72,20,71},{30,60,31,64},{36,60,35,64},{40,64,41,60},{46,64,45,60},
+        {50,60,54,63},{54,66,50,69},{60,70,64,67},{70,60,73,64},{80,64,77,60},{11,80,17,82},{30,80,24,82}};
     for (bool clip : {false,true})
         for (bool direct : {true,false}) {
             Imx1GraphicsCommands::directFills = direct;
@@ -797,9 +811,8 @@ void lines() {
         assert(f.append(batch,pc) == A::sideEffect && refused(f,what,value));
         assert(f.read(lineSurface+(10*128+10)*2) == lineBackground);
     };
-    // A tie (4 across, 1 down: half way at the middle) is refused, so is a third point that isn't the end, a
-    // packet of another length, the packet from another producer and ROP 5a.
-    refuse({0xc0021500,point(10,10),point(14,11),point(14,11)},"line-tie",point(10,10));
+    // A third point that isn't the end is refused, so is a packet of another length, the packet from another
+    // producer and ROP 5a.
     refuse({0xc0021500,point(10,10),point(16,12),point(16,13)},"line-points",point(16,13));
     refuse({0xc0031500,point(10,10),point(16,12),point(16,12),point(16,12)},"line-packet",0xc0031500);
     refuse({0xc0021500,point(10,10),point(16,12),point(16,12)},"line-packet",0xc0021500,0x200b0200);
@@ -807,7 +820,7 @@ void lines() {
     // Past the surface's pitch with the scissor off is refused as a fill is.
     auto batch = lineState(0xf800); batch.insert(batch.end(),{0x41b,0x55e0b4d7,0xc0021500,point(120,10),point(130,10),point(130,10)});
     assert(f.append(batch,0x200affe4) == A::sideEffect);
-    std::puts("PASS: line packets from 200affe4, any direction, scissored, ties and other forms refused");
+    std::puts("PASS: line packets from 200affe4, any direction, ties as the Radeon bias, scissored, other forms refused");
 }
 // A queued batch of 45 degree lines holds a fill for every pixel. Saved mid-batch it loads, and finishes with the
 // pixels of a run that never saved.
@@ -870,9 +883,122 @@ void clippedPastPitch() {
     Imx1GraphicsCommands::directFills = true;
     std::puts("PASS: plain copy past the pitch, trimmed by the scissor");
 }
+// TwGfxBlendBlt's batch as 200a9414 sends it (flag 1): state, source 2 (419/418, 420/421, 416) and one paint packet.
+constexpr uint32_t blendDestination = 0xe0a000, blendSource = 0xe0c000;
+std::vector<uint32_t> blendBatch(uint32_t alpha, uint32_t sx, uint32_t sy, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                 uint32_t scissor = 0x00100010) {
+    return {0x41b,0xd798d4df,0x4b2,0x01cc1300,0x4b1,0x40057d04,0x488,4,0x484,alpha,
+        0x401,blendDestination,0x402,16,0x46b,blendSource,0x46c,12,0x46f,0,0x470,scissor,
+        0x4020c419,12,blendSource,0x40210c20,w,h,0x416,sx << 16 | sy,
+        0xc0011a00,x << 16 | y,w << 16 | h};
+}
+uint16_t blendDestinationPixel(unsigned x, unsigned y) { return uint16_t(0x8410 + x * 0x0841 + y * 0x1003); }
+uint16_t blendSourcePixel(unsigned x, unsigned y) { return uint16_t(0x1f00 ^ (x * 0x2945 + y * 0x0c63)); }
+void blendPlanes(Fixture& f) {
+    for (unsigned y = 0; y < 16; ++y) for (unsigned x = 0; x < 16; ++x) f.write(blendDestination+(y*16+x)*2,blendDestinationPixel(x,y));
+    for (unsigned y = 0; y < 12; ++y) for (unsigned x = 0; x < 12; ++x) f.write(blendSource+(y*12+x)*2,blendSourcePixel(x,y));
+}
+// Each 5/6/5 channel: (d * (15 - a) + s * a) / 15 rounded down, with its own a (red 16-19, green 8-11, blue 0-3).
+uint16_t blendExpected(uint16_t d, uint16_t s, uint32_t alpha) {
+    const unsigned r = (alpha >> 16) & 15, g = (alpha >> 8) & 15, b = alpha & 15;
+    const unsigned dr = d >> 11, dg = (d >> 5) & 63, db = d & 31, sr = s >> 11, sg = (s >> 5) & 63, sb = s & 31;
+    return uint16_t(((dr*(15-r)+sr*r)/15) << 11 | ((dg*(15-g)+sg*g)/15) << 5 | (db*(15-b)+sb*b)/15);
+}
+void blend() {
+    struct Case { uint32_t alpha, sx, sy, x, y, w, h, scissor; };
+    // Alpha 0 keeps the destination, f0f0f copies, mixed alphas per channel; with a source origin and with the
+    // scissor taking the left and top, which moves the source origin with it.
+    const Case cases[]{{0,0,0,0,0,12,12,0x00100010},{0x000f0f0f,1,2,3,1,9,7,0x00100010},{0x00030a07,2,1,4,3,8,9,0x00100010},
+        {0x00080108,0,0,2,2,10,10,0x000c000e},{0x000f0005,3,3,5,6,6,5,0x00100010}};
+    for (const auto& c : cases)
+        for (bool direct : {true,false}) {
+            Imx1GraphicsCommands::directFills = direct;
+            Fixture f; blendPlanes(f);
+            // Scissor from 3,4 for the fourth case.
+            auto batch = blendBatch(c.alpha,c.sx,c.sy,c.x,c.y,c.w,c.h,c.scissor);
+            const bool clipLeftTop = c.scissor == 0x000c000e;
+            if (clipLeftTop) batch[19] = 0x00040003;
+            const unsigned left = clipLeftTop ? 3 : 0, top = clipLeftTop ? 4 : 0;
+            const unsigned right = c.scissor & 0xffff, bottom = c.scissor >> 16;
+            assert(f.append(batch,0x200a9788) == A::ok);
+            unsigned drawn = 0;
+            for (unsigned y = c.y; y < c.y+c.h; ++y) for (unsigned x = c.x; x < c.x+c.w; ++x)
+                drawn += x >= left && x < right && y >= top && y < bottom;
+            assert(f.commands.duration() == batch.size()+1+drawn);
+            f.finish();
+            for (unsigned y = 0; y < 16; ++y)
+                for (unsigned x = 0; x < 16; ++x) {
+                    const bool inside = x >= c.x && x < c.x+c.w && y >= c.y && y < c.y+c.h &&
+                                        x >= left && x < right && y >= top && y < bottom;
+                    const uint16_t d = blendDestinationPixel(x,y);
+                    const uint16_t want = inside ? blendExpected(d,blendSourcePixel(c.sx+x-c.x,c.sy+y-c.y),c.alpha) : d;
+                    if (f.read(blendDestination+(y*16+x)*2) != want) {
+                        std::fprintf(stderr,"blend %05x direct %d at %u,%u: %04x, not %04x\n",c.alpha,direct,x,y,
+                                     f.read(blendDestination+(y*16+x)*2),want);
+                        std::abort();
+                    }
+                }
+        }
+    Imx1GraphicsCommands::directFills = true;
+    // The host GPU never takes it, so Fast draws it on the CPU as Exact does.
+    {
+        Fixture f; blendPlanes(f);
+        Imx1GraphicsCommands::Fill fill{};
+        fill.base = blendDestination; fill.pitch = 32; fill.width = 4; fill.height = 4; fill.a4 = true;
+        fill.colour = 0x00030a07; fill.sourceBase = blendSource; fill.sourcePitch = 24;
+        Imx1GpuFill drawn;
+        assert(!Imx1GraphicsCommands::gpuFill(f.state,f.eim,f.memory,fill,drawn));
+    }
+    // Refused, with nothing queued: another packet, a second packet, other state, 420/421 not the rectangle,
+    // source 1 not source 2, source 2 past its pitch, alpha bits outside the four per channel, and a source that
+    // overlaps the destination.
+    Fixture f; blendPlanes(f);
+    auto refuse = [&](std::vector<uint32_t> batch, const char* what, uint32_t value, uint32_t pc = 0x200a9788) {
+        assert(f.append(batch,pc) == A::sideEffect && refused(f,what,value));
+        assert(f.read(blendDestination) == blendDestinationPixel(0,0) && f.state.engineState().emptyRing());
+    };
+    auto good = blendBatch(0x00030a07,0,0,0,0,4,4);
+    auto bad = good; bad[30] = 0xc0031a00; bad.insert(bad.end(),{0,0x00010001});
+    refuse(bad,"blend-packet",0xc0031a00);
+    bad = good; bad.insert(bad.end(),{0xc0011a00,0x00050005,0x00010001});
+    refuse(bad,"blend-batch",0xc0011a00);
+    bad = good; bad[7] = 0x00080004; refuse(bad,"blend-state",0xd798d4df);
+    bad = good; bad[3] = 0x01f01300; refuse(bad,"blend-state",0xd798d4df);
+    bad = good; bad[9] = 0x00100f0f; refuse(bad,"blend-state",0xd798d4df);
+    bad = good; bad[26] = 5; refuse(bad,"blend-words",0);
+    bad = good; bad[15] = blendSource+24; refuse(bad,"blend-words",0);
+    bad = good; bad[29] = 9 << 16; refuse(bad,"blend-geometry",9 << 16);
+    bad = good; bad[11] = blendSource; bad[13] = 12;
+    refuse(bad,"blend-overlap",0);
+    // The paint packet from the fill producer still needs the fill state.
+    assert(f.append(good,0x200b0200) == A::sideEffect);
+    std::puts("PASS: constant blend from 200a9788, alpha per channel, source origin and scissor, refusals");
+}
+// A queued blend saved mid-batch loads and finishes as a run that never saved.
+void blendSaved() {
+    auto build = [] {
+        return blendBatch(0x00030a07,1,1,2,2,10,9);
+    };
+    Fixture reference; blendPlanes(reference);
+    assert(reference.append(build(),0x200a9788) == A::ok);
+    reference.finish();
+    Fixture saved; blendPlanes(saved);
+    assert(saved.append(build(),0x200a9788) == A::ok);
+    std::vector<uint8_t> bytes[2];
+    StateWriter configurationOut(bytes[0]); saved.state.state(configurationOut);
+    StateWriter commandsOut(bytes[1]); saved.commands.state(commandsOut);
+    Fixture loaded; blendPlanes(loaded);
+    StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+    StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+    assert(configurationIn.complete() && commandsIn.complete());
+    loaded.finish();
+    for (unsigned i = 0; i < 16*16; ++i) assert(loaded.read(blendDestination+i*2) == reference.read(blendDestination+i*2));
+    assert(loaded.read(blendDestination+(3*16+3)*2) != blendDestinationPixel(3,3));
+    std::puts("PASS: a queued constant blend saves, loads and finishes the same");
+}
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
-    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch();
+    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
