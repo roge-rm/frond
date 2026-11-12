@@ -1738,8 +1738,9 @@ test-zodiac-sound: build/zodiac-boot-probe
 		@build/zodiac-core.rsp build/source/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-sound
 	./build/test-zodiac-sound
 
-# The Zodiac's YMF768 on CS4: register answers, FIFO and interrupt, pitch, a stored note sequence, Exact and
-# Fast alike through SSI1's words, a state saved mid-note and an older state without the chip.
+# The Zodiac's YMF768 on CS4: register answers, FIFO and interrupt, pitch, a stored note sequence, FM on guest
+# time, saves that change nothing, bad states refused, Exact and Fast alike with a save mid-note, a guest run by
+# the B15 interrupt with idle skips, a refused B15 and an older state without the chip.
 .PHONY: test-zodiac-ymf768
 test-zodiac-ymf768: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

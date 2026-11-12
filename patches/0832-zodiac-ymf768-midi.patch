@@ -1,5 +1,5 @@
 diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
-index 434a387..d1f6edb 100644
+index 434a387..c746f6e 100644
 --- a/src/uarm/uarm/imx1_boot_probe.cpp
 +++ b/src/uarm/uarm/imx1_boot_probe.cpp
 @@ -980,7 +980,8 @@ struct Probe {
@@ -21,19 +21,30 @@ index 434a387..d1f6edb 100644
  void imx1MachineSetPcmOutput(Imx1Machine* machine, void (*hook)(void*, uint16_t, unsigned), void* context) {
      machine->probe->peripherals.setPcmOutput(hook, context);
  }
-@@ -2492,6 +2495,11 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
+@@ -2361,6 +2364,8 @@ struct StagedState {
+     const uint8_t* bus = nullptr;
+     size_t busBytes = 0;
+     bool ring = false, jit = false;
++    // An older state without a YMF section keeps B15 as it was saved.
++    bool ymfSection = false;
+     std::vector<Probe::Recent> recent;
+     uint32_t recentNext = 0, recentCount = 0;
+     uint64_t jitBlocks = 0, jitInstructions = 0;
+@@ -2492,6 +2497,13 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
          staged.board->stateMemoryDma(a);
          if (!finish(a)) return info;
      } else if (info.status != S::ok) return info;
-+    // The YMF768 section, in states saved with the chip on. Without it the chip starts reset.
-+    if (open("YMF ", Imx1Bootstrap::ymf768StateVersion, false, a)) {
++    // The YMF768 section, in states saved with the chip on. Without it the chip starts reset and GPIO B15
++    // stays at the state's level, so an older session runs as it did until the ROM next touches the chip.
++    staged.ymfSection = open("YMF ", Imx1Bootstrap::ymf768StateVersion, false, a);
++    if (staged.ymfSection) {
 +        staged.board->stateYmf768(a);
 +        if (!finish(a)) return info;
 +    } else if (info.status != S::ok) return info;
      if (!open("SRAM", stateMemoryVersion, true, a)) return info;
      staged.board->stateSram(a);
      if (!finish(a)) return info;
-@@ -2623,6 +2631,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
+@@ -2623,6 +2635,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
          p->peripherals.stateMemoryDma(a);
          file.end();
      }
@@ -45,11 +56,11 @@ index 434a387..d1f6edb 100644
      { auto a = file.begin(stateFourcc("SRAM"), stateMemoryVersion); p->peripherals.stateSram(a); file.end(); }
      for (unsigned bank = 0; bank < 2; ++bank) {
          auto a = file.begin(stateFourcc(bank ? "SDR1" : "SDR0"), stateMemoryVersion);
-@@ -2683,6 +2696,7 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
+@@ -2683,6 +2700,7 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
      // starts again with no transfer.
      VSD* const card = p->peripherals.mmcsdCard();
      staged.board->takePcmOutput(p->peripherals);
-+    if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768();
++    if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768(staged.ymfSection);
      p->peripherals = std::move(*staged.board);
      p->peripherals.setI2cBus(p->options.i2cBus);
      p->peripherals.setI2cObserver(Probe::i2cEvent, p);
@@ -69,7 +80,7 @@ index 0139127..efc6c84 100644
  // while it isn't sending), the PWM duty last written and port D's direction, use, data and OCR2 registers.
  // Safe to call from the PCM output hook; apart from the System PLL's ratio these change only at CPU writes.
 diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
-index 3742136..44fe064 100644
+index 3742136..2f9a0b7 100644
 --- a/src/uarm/uarm/imx1_bootstrap.cpp
 +++ b/src/uarm/uarm/imx1_bootstrap.cpp
 @@ -1,4 +1,5 @@
@@ -90,18 +101,22 @@ index 3742136..44fe064 100644
      if (const auto cycles = mmcsd.idleQuietPerclk2())
          quiet = std::min(quiet, imx1StepsUntilDivided(cycles, cgm.perclk2Divider(), perclk2Phase, bus));
      for (const auto* timer : {&timer1, &timer2})
-@@ -153,6 +159,10 @@ uint64_t Imx1Bootstrap::finishSystemPllBusStall() {
+@@ -152,7 +158,13 @@ uint64_t Imx1Bootstrap::finishSystemPllBusStall() {
+ 
  void Imx1Bootstrap::advanceSystemOutput(uint64_t systemClocks, bool wholeWritePeriods) {
      cgm.advanceSystemPllCycles(systemClocks, wholeWritePeriods);
-     advancePcm(systemClocks);
+-    advancePcm(systemClocks);
++    const bool ymfLine = ymfEnabled && ymf.interrupt();
++    uint64_t ymfSeen = 0;
++    advancePcm(systemClocks, ymfSeen);
 +    if (ymfEnabled) {
-+        const auto pll = cgm.systemPllActiveRatio();
-+        if (ymf.advance(systemClocks, pll.numerator, pll.denominator)) ymfDriveLine();
++        ymfCatchUp(ymfSeen, systemClocks);
++        if (ymf.interrupt() != ymfLine) ymfDriveLine();
 +    }
      const uint64_t busClocks = systemClocks + bclkPhase;
      i2c.advance(busClocks / cgm.busDivider());
      pwm.advance(busClocks / cgm.busDivider());
-@@ -441,7 +451,7 @@ void Imx1Bootstrap::pcmWordBoundary() {
+@@ -441,7 +453,7 @@ void Imx1Bootstrap::pcmWordBoundary() {
          ssi1LastTransmitted = ssi1ShiftWord;
          ++ssi1Transmitted;
          ssi1Shifting = false;
@@ -110,8 +125,48 @@ index 3742136..44fe064 100644
      }
      if (ssi1Words[0] & 0x200) {
          if (ssi1TxCount) {
+@@ -465,7 +477,16 @@ void Imx1Bootstrap::pcmFrameRate(uint64_t& numerator, uint64_t& denominator) con
+     denominator = uint64_t(pll.denominator) * cgm.perclk3Divider();
+ }
+ 
+-void Imx1Bootstrap::advancePcm(uint64_t clocks) {
++// The YMF768 runs on guest time; SSI1 words take its output at the clock they finish.
++void Imx1Bootstrap::ymfCatchUp(uint64_t& seen, uint64_t upTo) {
++    if (!ymfEnabled || upTo <= seen) return;
++    const auto pll = cgm.systemPllActiveRatio();
++    ymf.advance(upTo - seen, pll.numerator, pll.denominator);
++    seen = upTo;
++}
++
++void Imx1Bootstrap::advancePcm(uint64_t clocks, uint64_t& ymfSeen) {
++    const uint64_t total = clocks;
+     // Internal continuous clocks keep their phase with TE clear; SSI_EN resets the phase.
+     const uint32_t wordPeriod = cgm.perclk3Divider() * 64;
+     const uint32_t beatPeriod = cgm.busDivider() * 2;
+@@ -497,7 +518,11 @@ void Imx1Bootstrap::advancePcm(uint64_t clocks) {
+         clocks -= step;
+         if (serial) {
+             ssi1Phase += uint32_t(step);
+-            if (ssi1Phase == wordPeriod) { ssi1Phase = 0; pcmWordBoundary(); }
++            if (ssi1Phase == wordPeriod) {
++                ssi1Phase = 0;
++                ymfCatchUp(ymfSeen, total - clocks);
++                pcmWordBoundary();
++            }
+         }
+         if (beat) {
+             dmaPcmPhase += uint32_t(step);
+@@ -634,7 +659,7 @@ Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
+ }
+ 
+ Imx1BootstrapAccess Imx1Bootstrap::clockStatus() const {
+-    if (referenceOverflow) return Imx1BootstrapAccess::sideEffect;
++    if (referenceOverflow || ymfLineRefused) return Imx1BootstrapAccess::sideEffect;
+     if (i2c.clockStatus() == Imx1I2cAccess::externalInput) return Imx1BootstrapAccess::externalInput;
+     if (i2c.clockStatus() != Imx1I2cAccess::ok) return Imx1BootstrapAccess::sideEffect;
+     if (watchdog.possibleTimeout()) return Imx1BootstrapAccess::possibleWatchdogTimeout;
 diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
-index 752be55..c85051b 100644
+index 752be55..82ac897 100644
 --- a/src/uarm/uarm/imx1_bootstrap.h
 +++ b/src/uarm/uarm/imx1_bootstrap.h
 @@ -12,6 +12,7 @@
@@ -122,14 +177,18 @@ index 752be55..c85051b 100644
  #include "imx1_bta.h"
  #include "imx1_reset.h"
  #include "imx1_mmcsd.h"
-@@ -95,6 +96,24 @@ class Imx1Bootstrap {
+@@ -95,6 +96,28 @@ class Imx1Bootstrap {
      void setPcmOutput(void (*hook)(void*, uint16_t, unsigned), void* context) { pcmHook = hook; pcmContext = context; }
      // Moves the PCM output to another board, as a state load replaces this one.
      void takePcmOutput(const Imx1Bootstrap& old) { pcmHook = old.pcmHook; pcmContext = old.pcmContext; }
 +    // The Zodiac's YMF768 on CS4, off unless enableYmf768 is called. Its FM output is added to SSI1's words on
 +    // their way to the PCM output, and its interrupt drives GPIO B15 (low while asserted). Saved in its own
 +    // section (stateYmf768), so a state saved before it existed loads with the chip reset.
-+    void enableYmf768() { ymfEnabled = true; ymfDriveLine(); }
++    // driveLine false leaves GPIO B15 where it is, for a state saved without the chip.
++    void enableYmf768(bool driveLine = true) {
++        ymfEnabled = true;
++        if (driveLine) ymfDriveLine();
++    }
 +    bool ymf768Enabled() const { return ymfEnabled; }
 +    // One CPU byte access to 0x15000000 (index) or 0x15000001 (data).
 +    Imx1BootstrapAccess ymf768Access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
@@ -138,7 +197,7 @@ index 752be55..c85051b 100644
 +        SourceChange change(*this);
 +        if (write) ymf.write(address & 1, uint8_t(value));
 +        else value = ymf.read(address & 1);
-+        ymfDriveLine();
++        if (!ymfDriveLine()) return Imx1BootstrapAccess::sideEffect;
 +        return Imx1BootstrapAccess::ok;
 +    }
 +    static constexpr uint32_t ymf768StateVersion = Imx1Ymf768::stateVersion;
@@ -147,23 +206,61 @@ index 752be55..c85051b 100644
      // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
      // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.
      void pcmFrameRate(uint64_t& numerator, uint64_t& denominator) const;
-@@ -535,6 +554,15 @@ class Imx1Bootstrap {
+@@ -227,7 +250,18 @@ class Imx1Bootstrap {
+             ((pcmDmaEndPossible() || memoryDmaEndPossible()) ? uint64_t(1) << 61 : 0);
+         candidate.setInputs(sources, ~uint64_t(0));
+         return watchdog.enabled() || candidate.irq() == Imx1AitcLine::asserted ||
+-               candidate.fiq() == Imx1AitcLine::asserted;
++               candidate.fiq() == Imx1AitcLine::asserted || ymfWakePossible();
++    }
++    // The YMF768's sequencer will assert its line and B15 low would reach the CPU through GPIO and AITC.
++    bool ymfWakePossible() const {
++        if (!ymfEnabled || ymf.interrupt()) return false;
++        const auto pll = cgm.systemPllActiveRatio();
++        if (ymf.clocksUntilChange(pll.numerator, pll.denominator) == UINT64_MAX) return false;
++        auto pins = gpio;
++        if (pins.transitionInput(1, 0, 0x8000) != Imx1GpioAccess::ok) return false;
++        auto controller = aitc;
++        setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, pins);
++        return controller.irq() == Imx1AitcLine::asserted || controller.fiq() == Imx1AitcLine::asserted;
+     }
+     struct InterruptLines { Imx1AitcLine irq, fiq; };
+     InterruptLines interruptLines() const;
+@@ -454,7 +488,9 @@ class Imx1Bootstrap {
+     bool lcdcContrastOnly = false;
+     uint32_t contrastPhase = 0, perclk2Phase = 0;
+     Imx1Uart uart1{false}, uart2{true};
+-    void advancePcm(uint64_t systemClocks);
++    // ymfSeen: the clocks of this charge the YMF768 has been moved on by, brought up to each word's end.
++    void advancePcm(uint64_t systemClocks, uint64_t& ymfSeen);
++    void ymfCatchUp(uint64_t& seen, uint64_t upTo);
+     // The MMCSD card's data DMA: a channel other than 10 on request 13 (SDHC) between BUFFER_ACCESS and RAM.
+     bool cardDmaConfigurationValid(unsigned number, const uint32_t* channel) const;
+     void cardDmaService();
+@@ -535,6 +571,22 @@ class Imx1Bootstrap {
      } cardDma;
      void (*pcmHook)(void*, uint16_t, unsigned) = nullptr;
      void* pcmContext = nullptr;
-+    // In the YMF768 section (stateYmf768). ymfEnabled is set by the machine, not saved.
++    // In the YMF768 section (stateYmf768). ymfEnabled is set by the machine, not saved. ymfLineRefused is set
++    // when B15 can't follow the chip's line; clockStatus then stops the run, so it isn't saved either.
 +    Imx1Ymf768 ymf;
-+    bool ymfEnabled = false;
-+    // B15 is fixed by the board options first, so later changes go through as transitions.
-+    void ymfDriveLine() {
++    bool ymfEnabled = false, ymfLineRefused = false;
++    // GPIO B15 follows the chip's interrupt line, low while asserted. The board options fix port B before the
++    // run, so a change is a transition; a board without fixed port B inputs gets B15 fixed here before its
++    // first access. Anything else (an interrupt on a port B output, say) refuses the change.
++    bool ymfDriveLine() {
 +        const uint32_t level = ymf.interrupt() ? 0 : 0x8000;
++        if ((gpio.fixedInputs(1) & 0x8000) && (gpio.inputSample(1) & 0x8000) == level) return true;
 +        runCache.driveSettled = false;
-+        if (gpio.transitionInput(1, level, 0x8000) != Imx1GpioAccess::ok) gpio.setInputMasked(1, level, 0x8000);
++        if (gpio.transitionInput(1, level, 0x8000) == Imx1GpioAccess::ok || gpio.setInputMasked(1, level, 0x8000))
++            return true;
++        ymfLineRefused = true;
++        return false;
 +    }
      void (*dmaStoreHook)(void*, uint32_t) = nullptr;
      void* dmaStoreContext = nullptr;
      // In the memory DMA section (stateMemoryDma): the memory-to-memory channels under way and the HCLK periods
-@@ -561,7 +589,7 @@ class Imx1Bootstrap {
+@@ -561,7 +613,7 @@ class Imx1Bootstrap {
  
     public:
      static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
@@ -172,6 +269,20 @@ index 752be55..c85051b 100644
  };
  
  #if defined(__GLIBCXX__) && defined(__x86_64__)
+diff --git a/src/uarm/uarm/imx1_gpio.h b/src/uarm/uarm/imx1_gpio.h
+index e568ff4..d22d63f 100644
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -22,6 +22,9 @@ class Imx1Gpio {
+     // Change only lanes owned by an explicit diagnostic baseline.
+     Imx1GpioAccess transitionInput(unsigned port, uint32_t sample, uint32_t mask);
+     Imx1GpioLine interruptOutput(unsigned port) const;
++    // The port's input sample and the lanes fixed by setInputMasked.
++    uint32_t inputSample(unsigned port) const { return port < 4 ? ports[port].sample : 0; }
++    uint32_t fixedInputs(unsigned port) const { return port < 4 && ports[port].sampleKnown ? ports[port].fixedMask : 0; }
+     uint32_t registerValue(unsigned port, unsigned index) const {
+         return port < 4 && index < 17 ? ports[port].registers[index] : 0;
+     }
 diff --git a/src/uarm/uarm/soc_IMX1.cpp b/src/uarm/uarm/soc_IMX1.cpp
 index 5a36a0c..8f6a99b 100644
 --- a/src/uarm/uarm/soc_IMX1.cpp
@@ -8302,10 +8413,10 @@ index 0000000..b471fa6
 +#endif // YMFM_PCM_H
 diff --git a/src/uarm/uarm/zodiac_ymf768.h b/src/uarm/uarm/zodiac_ymf768.h
 new file mode 100644
-index 0000000..13aa695
+index 0000000..55e8c2e
 --- /dev/null
 +++ b/src/uarm/uarm/zodiac_ymf768.h
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,178 @@
 +#ifndef FROND_ZODIAC_YMF768_H
 +#define FROND_ZODIAC_YMF768_H
 +
@@ -8329,8 +8440,10 @@ index 0000000..13aa695
 +//   F-number, block and key on in b0/c0 as OPL3's a0/b0, algorithm and feedback in d0. The operators,
 +//   envelopes and LFOs are ymfm's OPL3 (zodiac_ymf768_core.h); this layer maps the 16 channels onto it and
 +//   adds what OPL3 doesn't have: channel level e0 and pan f0, bank 1 channel level e0 and master level 10.
-+// Output is made one stereo frame at a time at SSI1's frame rate, so it is in guest order and the same in
-+// Exact and Fast. All the arithmetic is integer.
++// The FM engine runs on guest time, 49716 samples a guest second whatever SSI1 does, so envelopes and notes go
++// on while SSI1 is off. 49716 Hz is the rate the ROM's F-number table is tuned for (A4 = 580 in block 4 is
++// 440 Hz there, 0x200d64bc), so the chip's clock is taken as its own crystal, not an i.MX1 clock. SSI1 words
++// take the FM output at the guest time they finish, so it is the same in Exact and Fast. All integer.
 +struct Imx1Ymf768Core;
 +
 +class Imx1Ymf768 {
@@ -8362,20 +8475,25 @@ index 0000000..13aa695
 +    // The interrupt line: true while asserted (GPIO B15 low).
 +    bool interrupt() const { return running() && request(); }
 +
-+    // Moves the sequencer clock on by system clocks, with the System PLL at 32768 * numerator / denominator Hz.
-+    // Returns true when the interrupt line changed.
++    // Moves the FM engine and the sequencer clock on by system clocks, with the System PLL at
++    // 32768 * numerator / denominator Hz. Returns true when the interrupt line changed.
 +    bool advance(uint64_t clocks, uint64_t numerator, uint64_t denominator) {
-+        if (!running() || !numerator || !denominator) return false;
++        if (!numerator || !denominator) return false;
++        advanceEngine(clocks, numerator, denominator);
++        if (!running()) return false;
 +        const bool before = interrupt();
 +        timerAcc += clocks * denominator * 1000;
 +        const uint64_t period = tickPeriod(numerator);
-+        while (timerAcc >= period) {
-+            timerAcc -= period;
-+            tick();
++        if (timerAcc >= period) {
++            // More ticks than records do nothing, which also bounds the work for a loaded remainder.
++            const uint64_t ticks = std::min<uint64_t>(timerAcc / period, fifoCapacity + 1);
++            timerAcc %= period;
++            for (uint64_t n = 0; n < ticks; ++n) tick();
 +        }
 +        return interrupt() != before;
 +    }
-+    // System clocks until the interrupt line can change, UINT64_MAX when it can't.
++    // System clocks until the interrupt line can change, UINT64_MAX when it can't. The FM engine never
++    // changes the line, so an idle skip can pass over its samples.
 +    uint64_t clocksUntilChange(uint64_t numerator, uint64_t denominator) const {
 +        if (!running() || !numerator || !denominator || !fifoQueued) return UINT64_MAX;
 +        const uint64_t period = tickPeriod(numerator);
@@ -8385,28 +8503,37 @@ index 0000000..13aa695
 +        return std::max<uint64_t>(1, (needed + unit - 1) / unit);
 +    }
 +
-+    // One output frame at SSI1's rate, added to left and right.
-+    void render(int32_t& left, int32_t& right);
++    // The FM output now, added to left and right: the engine's last two samples, linear by the time since
++    // the last one.
++    void output(int32_t& left, int32_t& right) const {
++        const int64_t fraction = enginePeriod ? int64_t((engineAcc << 16) / enginePeriod) : 0;
++        left += last[0] + int32_t((int64_t(last[2] - last[0]) * fraction) >> 16);
++        right += last[1] + int32_t((int64_t(last[3] - last[1]) * fraction) >> 16);
++    }
 +
-+    static constexpr uint32_t stateVersion = 2;
++    static constexpr uint32_t engineRate = 49716;
++    static constexpr uint32_t stateVersion = 3;
 +    template <class A> void state(A& a) {
 +        a.DoBuffer(&regs[0][0], sizeof(regs));
 +        a.Do8(index).Do8(bank).Do8(fifoQueued).Do8(fifoPartial).Do8(fifoWait);
-+        a.Do64(timerAcc).Do32(phase);
++        a.Do64(timerAcc).Do64(engineAcc).Do64(enginePeriod);
 +        for (auto& v : last) a.Do32(reinterpret_cast<uint32_t&>(v));
 +        a.Do32(reinterpret_cast<uint32_t&>(pendingRight));
-+        a.Require(bank <= 1 && fifoQueued <= fifoCapacity && fifoPartial < 3 && phase < 65536, "ymf768");
++        // The accumulators stay under their periods, at most 32768 x 50 ms x 2^24 and 32768 x 2^24.
++        a.Require(bank <= 1 && fifoQueued <= fifoCapacity && fifoPartial < 3 && fifoWait == (fifoQueued ? 1 : 0) &&
++                  timerAcc < (uint64_t(1) << 46) && enginePeriod < (uint64_t(1) << 40) &&
++                  engineAcc < std::max<uint64_t>(enginePeriod, 1), "ymf768");
 +        std::vector<uint8_t> engine;
 +        if (!A::loading) saveEngine(engine);
 +        a.DoVector(engine, engineStateBytes());
-+        a.Require(engine.size() == engineStateBytes(), "ymf768 engine");
++        a.Require(engine.size() == engineStateBytes() && (!A::loading || engineStateValid(engine)), "ymf768 engine");
 +        if (A::loading && a.ok()) loadEngine(engine);
 +    }
 +
 +    // SSI1 word mixing: slot 0 makes a frame and keeps its right half for the slot 1 word.
 +    uint16_t mix(uint16_t word, unsigned slot) {
 +        int32_t extra;
-+        if (!slot) { int32_t l = 0, r = 0; render(l, r); extra = l; pendingRight = r; }
++        if (!slot) { int32_t l = 0, r = 0; output(l, r); extra = l; pendingRight = r; }
 +        else { extra = pendingRight; pendingRight = 0; }
 +        const int32_t v = std::clamp<int32_t>(int32_t(int16_t(word)) + extra, -32768, 32767);
 +        return uint16_t(int16_t(v));
@@ -8414,6 +8541,9 @@ index 0000000..13aa695
 +
 +    // For tests.
 +    unsigned queuedRecords() const { return fifoQueued; }
++    uint64_t engineSamples() const { return samples; }
++    std::vector<uint8_t> engineState() const { std::vector<uint8_t> v; saveEngine(v); return v; }
++    static bool engineStateValid(const std::vector<uint8_t>& in);
 +
 +   private:
 +    static constexpr uint8_t fifoCapacity = 8;
@@ -8448,6 +8578,7 @@ index 0000000..13aa695
 +    void syncAlgorithm(unsigned first);
 +    void syncFrequency(unsigned ch);
 +    void sample(int32_t& left, int32_t& right);
++    void advanceEngine(uint64_t clocks, uint64_t numerator, uint64_t denominator);
 +    void saveEngine(std::vector<uint8_t>& out) const;
 +    void loadEngine(const std::vector<uint8_t>& in);
 +    static size_t engineStateBytes();
@@ -8455,7 +8586,9 @@ index 0000000..13aa695
 +    uint8_t regs[2][256];
 +    uint8_t index, bank, fifoQueued, fifoPartial, fifoWait;
 +    uint64_t timerAcc;
-+    uint32_t phase;       // position between the engine's last two samples, of 65536
++    uint64_t engineAcc;     // system clocks x denominator x engineRate since the last sample, of enginePeriod
++    uint64_t enginePeriod;  // 32768 x the System PLL numerator at the last advance, 0 before the first
++    uint64_t samples;     // not saved, for tests
 +    int32_t last[4];      // the engine's last two samples, left and right, mixed
 +    int32_t pendingRight;
 +    std::unique_ptr<Imx1Ymf768Core> core;
@@ -8464,10 +8597,10 @@ index 0000000..13aa695
 +#endif
 diff --git a/src/uarm/uarm/zodiac_ymf768_core.h b/src/uarm/uarm/zodiac_ymf768_core.h
 new file mode 100644
-index 0000000..63883a0
+index 0000000..d04aabf
 --- /dev/null
 +++ b/src/uarm/uarm/zodiac_ymf768_core.h
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,294 @@
 +#ifndef FROND_ZODIAC_YMF768_CORE_H
 +#define FROND_ZODIAC_YMF768_CORE_H
 +
@@ -8493,15 +8626,39 @@ index 0000000..63883a0
 +#endif
 +
 +// The engine, with the bookkeeping ymfm's own save leaves out, so a loaded state carries on sample for sample.
++// ymfm's save_restore marks every channel modified, which would make the next sample prepare them all; a save
++// puts the mask back so it changes nothing. A load sets up what ymfm keeps outside its save: each channel's
++// operators and each operator's cached register data, as the last prepare left them.
 +struct Imx1Ymf768Engine : ymfm::fm_engine_base<ymfm::opl3_registers> {
 +    using Base = ymfm::fm_engine_base<ymfm::opl3_registers>;
++    using Operator = ymfm::fm_operator<ymfm::opl3_registers>;
++    static constexpr unsigned noOperator = 0xff;
 +    explicit Imx1Ymf768Engine(ymfm::ymfm_interface& intf) : Base(intf) {}
 +    void saveRestore(ymfm::ymfm_saved_state& s) {
++        const uint32_t modified = m_modified_channels;
 +        save_restore(s);
++        if (s.saving()) m_modified_channels = modified;
 +        s.save_restore(m_active_channels);
 +        s.save_restore(m_modified_channels);
 +        s.save_restore(m_prepare_count);
++        uint8_t map[CHANNELS][4];
++        for (unsigned ch = 0; ch < CHANNELS; ++ch)
++            for (unsigned i = 0; i < 4; ++i) map[ch][i] = operatorNumber(m_channel[ch]->debug_operator(i));
++        s.save_restore(map);
++        if (s.saving()) return;
++        for (unsigned ch = 0; ch < CHANNELS; ++ch)
++            for (unsigned i = 0; i < 4; ++i) m_channel[ch]->assign(i, map[ch][i] == noOperator ? nullptr : m_operator[map[ch][i]].get());
++        for (unsigned ch = 0; ch < CHANNELS; ++ch)
++            for (unsigned i = 0; i < 4; ++i)
++                if (Operator* op = m_channel[ch]->debug_operator(i))
++                    m_regs.cache_operator_data(op->choffs(), op->opoffs(), op->debug_cache());
 +    }
++    unsigned operatorNumber(const Operator* op) const {
++        for (unsigned n = 0; n < OPERATORS; ++n)
++            if (m_operator[n].get() == op) return n;
++        return noOperator;
++    }
++    uint8_t clockPrescale() const { return m_clock_prescale; }
 +};
 +struct Imx1Ymf768Core {
 +    ymfm::ymfm_interface intf;
@@ -8529,7 +8686,8 @@ index 0000000..63883a0
 +    if (!core) core.reset(new Imx1Ymf768Core);
 +    std::memcpy(regs, other.regs, sizeof(regs));
 +    index = other.index; bank = other.bank; fifoQueued = other.fifoQueued; fifoPartial = other.fifoPartial;
-+    fifoWait = other.fifoWait; timerAcc = other.timerAcc; phase = other.phase;
++    fifoWait = other.fifoWait; timerAcc = other.timerAcc; engineAcc = other.engineAcc;
++    enginePeriod = other.enginePeriod; samples = other.samples;
 +    std::memcpy(last, other.last, sizeof(last));
 +    pendingRight = other.pendingRight;
 +    std::vector<uint8_t> engine;
@@ -8541,7 +8699,7 @@ index 0000000..63883a0
 +void Imx1Ymf768::reset() {
 +    std::memset(regs, 0, sizeof(regs));
 +    index = 0; bank = 0; fifoQueued = 0; fifoPartial = 0; fifoWait = 0;
-+    timerAcc = 0; phase = 0; pendingRight = 0;
++    timerAcc = 0; engineAcc = 0; enginePeriod = 0; samples = 0; pendingRight = 0;
 +    for (auto& v : last) v = 0;
 +    core->engine.reset();
 +    engineWrite(0x105, 1);  // OPL3 mode: four operators and the eight waveforms
@@ -8648,17 +8806,29 @@ index 0000000..63883a0
 +    right = (r * master) >> 5;
 +}
 +
-+// SSI1's 44117.6 frames a second from the engine's 49716 samples: 73852 / 65536 samples a frame, linear
-+// between the last two.
-+void Imx1Ymf768::render(int32_t& left, int32_t& right) {
-+    phase += 73852;
-+    while (phase >= 65536) {
-+        phase -= 65536;
-+        last[0] = last[2]; last[1] = last[3];
-+        sample(last[2], last[3]);
++// Engine samples at engineRate a guest second. A call makes at most one more sample than its own clocks
++// give, so a loaded remainder can't make a long run of them.
++void Imx1Ymf768::advanceEngine(uint64_t clocks, uint64_t numerator, uint64_t denominator) {
++    const uint64_t period = 32768 * numerator;
++    if (period != enginePeriod) {
++        enginePeriod = period;
++        engineAcc = std::min(engineAcc, period - 1);
 +    }
-+    left += last[0] + int32_t((int64_t(last[2] - last[0]) * phase) >> 16);
-+    right += last[1] + int32_t((int64_t(last[3] - last[1]) * phase) >> 16);
++    while (clocks) {
++        // 2^28 clocks x a denominator under 2^14 x engineRate stays under 2^59.
++        const uint64_t chunk = std::min<uint64_t>(clocks, uint64_t(1) << 28);
++        clocks -= chunk;
++        const uint64_t add = chunk * denominator * engineRate;
++        engineAcc += add;
++        if (engineAcc < period) continue;
++        const uint64_t due = std::min(engineAcc / period, add / period + 1);
++        engineAcc %= period;
++        for (uint64_t n = 0; n < due; ++n) {
++            last[0] = last[2]; last[1] = last[3];
++            sample(last[2], last[3]);
++            ++samples;
++        }
++    }
 +}
 +
 +void Imx1Ymf768::saveEngine(std::vector<uint8_t>& out) const {
@@ -8679,6 +8849,49 @@ index 0000000..63883a0
 +        return out.size();
 +    }();
 +    return bytes;
++}
++
++// The values in a saved engine that ymfm uses as table indexes or loop bounds, checked before a load. The
++// layout is ymfm_saved_state's (little endian, enums as a byte) in fm_engine_base::save_restore's order:
++// 11 bytes of engine, the OPL3 registers (LFO counters, LFO AM, noise, 0x200 registers), 3 int16 a channel,
++// 10 bytes an operator, then Imx1Ymf768Engine's masks, prepare count and operator map.
++bool Imx1Ymf768::engineStateValid(const std::vector<uint8_t>& in) {
++    using Engine = Imx1Ymf768Engine;
++    constexpr size_t registers = 11, channels = registers + 9 + ymfm::opl3_registers::REGISTERS;
++    constexpr size_t operators = channels + 6 * Engine::CHANNELS, extra = operators + 10 * Engine::OPERATORS;
++    constexpr size_t map = extra + 12, end = map + 4 * Engine::CHANNELS;
++    if (in.size() != end || engineStateBytes() != end) return false;
++    auto u16 = [&](size_t at) { return uint32_t(in[at] | in[at + 1] << 8); };
++    auto u32 = [&](size_t at) { return u16(at) | u16(at + 2) << 16; };
++    static const uint8_t prescale = Imx1Ymf768Core().engine.clockPrescale();
++    // The envelope counter's low 2 bits stay 0 with OPL3's divider of 1; nothing here uses the timers.
++    if ((u32(0) & 3) || in[5] != prescale || in[8] > 1 || in[9] > 1) return false;
++    if (u16(registers) >= 210 * 64) return false;  // AM LFO steps
++    for (unsigned n = 0; n < Engine::OPERATORS; ++n) {
++        const size_t at = operators + 10 * n;
++        // Attenuation is 10 bits; OPL3 envelopes run attack to release (no depress or reverb).
++        if (u16(at + 4) > 0x3ff || in[at + 6] < ymfm::EG_ATTACK || in[at + 6] > ymfm::EG_RELEASE) return false;
++        if (in[at + 7] > 1 || in[at + 8] > 1 || in[at + 9] > 7) return false;
++    }
++    // The operator map is OPL3's for some set of four-operator pairs (bits 0-5 of register 104), as a load may
++    // come between a 104 write and the prepare that follows it. Active channels have operators.
++    const uint8_t* got = &in[map];
++    static constexpr uint8_t pairFirst[6] = {0, 1, 2, 9, 10, 11};
++    uint32_t four = 0;
++    for (unsigned i = 0; i < 6; ++i) four |= got[4 * pairFirst[i] + 2] != Engine::noOperator ? 1u << i : 0;
++    uint32_t empty = 0;
++    for (unsigned ch = 0; ch < Engine::CHANNELS; ++ch) {
++        const unsigned half = ch / 9, c = ch % 9, base = 18 * half;
++        const unsigned pair = half * 3 + c % 3;
++        uint8_t want[4] = {Engine::noOperator, Engine::noOperator, Engine::noOperator, Engine::noOperator};
++        const unsigned first = base + (c < 3 ? c : c < 6 ? c + 3 : c + 6);
++        if (c < 3 && (four >> pair & 1)) { want[0] = first; want[1] = first + 3; want[2] = first + 6; want[3] = first + 9; }
++        else if (c >= 3 && c < 6 && (four >> pair & 1)) empty |= 1u << ch;
++        else { want[0] = first; want[1] = first + 3; }
++        if (std::memcmp(got + 4 * ch, want, 4)) return false;
++    }
++    if (u32(extra) > Engine::ALL_CHANNELS || (u32(extra) & empty) || u32(extra + 4) > Engine::ALL_CHANNELS) return false;
++    return true;
 +}
 +
 +#endif
