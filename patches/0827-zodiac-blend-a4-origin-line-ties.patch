@@ -1,5 +1,5 @@
 diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
-index da07d06..21fadfb 100644
+index da07d06..ac24756 100644
 --- a/src/uarm/uarm/imx1_graphics_commands.h
 +++ b/src/uarm/uarm/imx1_graphics_commands.h
 @@ -130,6 +130,19 @@ class Imx1GraphicsCommands {
@@ -58,7 +58,7 @@ index da07d06..21fadfb 100644
                  }
                  out[x * 2] = uint8_t(colour);
                  out[x * 2 + 1] = uint8_t(colour >> 8);
-@@ -616,24 +633,59 @@ class Imx1GraphicsCommands {
+@@ -616,29 +633,64 @@ class Imx1GraphicsCommands {
      // virtualPackedMonoZeroPhase: bit 0 of each row lands on the encoded X, with no other offset.
      // Explicit virtual normalisation and truncation in native 5/6/5 channels.
      static uint32_t virtualA4Blend(uint32_t destination, uint32_t source, uint32_t alpha) {
@@ -122,6 +122,12 @@ index da07d06..21fadfb 100644
          const uint64_t sourceLength = (uint64_t(height - 1) * pitch + width) * 2;
          const uint64_t destination = uint64_t(values[0x401]) +
              (uint64_t(xy >> 16) * destinationPitch + (xy & 0xffff)) * 2;
+         const uint64_t destinationLength = (uint64_t(height - 1) * destinationPitch + width) * 2;
+-        if ((source & 1) || destination > 0xffffffffu || (destination & 1) ||
++        if (source > 0xffffffffu || (source & 1) || destination > 0xffffffffu || (destination & 1) ||
+             !memory.contains(configuration, eim, uint32_t(source), sourceLength) ||
+             !memory.contains(configuration, eim, uint32_t(destination), destinationLength)) return A::sequence;
+         if (source < destination + destinationLength && destination < source + sourceLength) return A::sideEffect;
 @@ -649,10 +701,10 @@ class Imx1GraphicsCommands {
          return A::ok;
      }

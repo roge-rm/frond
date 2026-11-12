@@ -1,5 +1,5 @@
 diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
-index 21fadfb..ee34bfe 100644
+index ac24756..ab1647a 100644
 --- a/src/uarm/uarm/imx1_graphics_commands.h
 +++ b/src/uarm/uarm/imx1_graphics_commands.h
 @@ -90,7 +90,9 @@ class Imx1GraphicsCommands {
@@ -103,7 +103,7 @@ index 21fadfb..ee34bfe 100644
          if (!fill.doubled) return uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2;
          return uint64_t(stretchStep(fill.sourceY + fill.height - 1, ratioY(fill))) * fill.sourcePitch +
                 (stretchStep(fill.sourceX + fill.width - 1, ratioX(fill)) + 1) * 2;
-@@ -840,6 +860,79 @@ class Imx1GraphicsCommands {
+@@ -840,6 +860,81 @@ class Imx1GraphicsCommands {
          refused = {what, value};
          return Imx1BootstrapAccess::sideEffect;
      }
@@ -128,7 +128,8 @@ index 21fadfb..ee34bfe 100644
 +        const uint32_t gmc = values[0x41b], mix = values[0x4b2], control = values[0x472];
 +        if (gmc != 0x5598b4df) return refuse("transform-state", gmc);
 +        if ((mix & 0xc1ff0700u) != 0x80cc0200u || (values[0x4b1] & ~0x7000u) != 0x40030d04 ||
-+            values[0x488] != 4 || values[0x471] != 0x1fff1fff || values[0x4b3] != 0xffffffff || values[0x41d] ||
++            values[0x488] != 4 || values[0x471] != 0x1fff1fff || values[0x48f] != 0xffffffff ||
++            values[0x4b3] != 0xffffffff || values[0x41d] ||
 +            values[0x41e] || values[0x30f] != 0x20 || values[0x4a0] || values[0x4a1] ||
 +            (control != 0x2e && control != 0x3c && control != 0x2d && control != 0x3e && control != 0x3d &&
 +             control != 0x2f && control != 0x2c && control != 0x3f)) return refuse("transform-state", control);
@@ -140,20 +141,21 @@ index 21fadfb..ee34bfe 100644
 +        const uint32_t width = values[0x466] >> 16, height = values[0x466] & 0xffff;
 +        const uint32_t sourceWidth = majorX ? width : height, sourceHeight = majorX ? height : width;
 +        const uint32_t pitch = values[0x402], sourcePitch = values[0x46c];
-+        // The destination rectangle the start corner and directions cover.
++        // The destination rectangle the start corner and directions cover. TwGfxTransformBlt (2009b2f0) checks
++        // only the source rectangle against its surface, and 200aa564 only that the destination meets the clip
++        // rectangle (200a9c00), so the destination may reach past the surface and the scissor trims it, as for
++        // the plain copy: the surface bounds apply to what is left.
 +        const uint32_t x = right ? x0 : x0 - (width - 1), y = down ? y0 : y0 - (height - 1);
 +        if (!width || !height || x0 > 8191 || y0 > 8191 || (!right && x0 < width - 1) || (!down && y0 < height - 1) ||
-+            !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
-+            !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
++            !pitch || pitch > 8192 || x + width > 8192 || y + height > 8192 ||
 +            !sourcePitch || sourcePitch > 8192 || sx + sourceWidth > sourcePitch || sy + sourceHeight > 8191)
 +            return refuse("transform-geometry", values[0x466]);
-+        uint32_t left = x, top = y, end = x + width, bottom = y + height;
-+        if (gmc & 8) {
-+            left = std::max(left, values[0x46f] & 0x1fff);
-+            top = std::max(top, (values[0x46f] >> 16) & 0x1fff);
-+            end = std::min(end, values[0x470] & 0x1fff);
-+            bottom = std::min(bottom, (values[0x470] >> 16) & 0x1fff);
-+        }
++        // GMC 5598b4df has the scissor on (bit 3).
++        const uint32_t left = std::max(x, values[0x46f] & 0x1fff), top = std::max(y, (values[0x46f] >> 16) & 0x1fff);
++        const uint32_t end = std::min(x + width, values[0x470] & 0x1fff);
++        const uint32_t bottom = std::min(y + height, (values[0x470] >> 16) & 0x1fff);
++        if (left < end && top < bottom && (end > pitch || !configuration.engineState().clipContains(end - 1, bottom - 1)))
++            return refuse("transform-geometry", values[0x466]);
 +        const uint64_t source = uint64_t(values[0x46b]) + (uint64_t(sy) * sourcePitch + sx) * 2;
 +        const uint64_t sourceLength = (uint64_t(sourceHeight - 1) * sourcePitch + sourceWidth) * 2;
 +        if (source > 0xffffffffu || (source & 1) || !memory.contains(configuration, eim, uint32_t(source), sourceLength)) return A::sequence;

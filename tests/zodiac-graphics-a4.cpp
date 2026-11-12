@@ -307,6 +307,11 @@ int main() {
         for (uint32_t address : {0u,0xfffffeu,0xfffffffeu,source+1,destination,destination+8}) {
             auto bad = valid; replace(bad,0x418,address); replace(bad,0x46b,address); reject(bad);
         }
+        // A 416 origin that carries source 2 past 32 bits is refused, not wrapped back to 0xe03000.
+        {
+            auto bad = valid; replace(bad,0x418,0xffe63000); replace(bad,0x46b,0xffe63000);
+            replace(bad,0x419,8192); replace(bad,0x46c,8192); replace(bad,0x416,1000); reject(bad);
+        }
         for (uint32_t pitch : {0u,7u,8193u,0xffffffffu}) {
             auto bad = valid; replace(bad,0x419,pitch); replace(bad,0x46c,pitch); reject(bad);
         }

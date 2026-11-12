@@ -1056,6 +1056,18 @@ void transform() {
         assert(f.read(turnDestination+(9*16+9)*2) == turnPixel(0,0) && f.read(turnDestination+(6*16+6)*2) == turnPixel(3,3) &&
                f.read(turnDestination+(9*16+6)*2) == turnPixel(3,0));
     }
+    // A destination past the surface's right edge is drawn where the scissor trims it to the surface (the ROM
+    // checks only the source against its surface), and refused where the scissor leaves part of it outside.
+    {
+        Fixture f; turnPlanes(f);
+        assert(f.append(transformBatch(0x3f,0,0,14,3,5,3),0x200aa8dc) == A::ok);
+        f.finish();
+        for (unsigned y = 0; y < 16; ++y) for (unsigned x = 0; x < 16; ++x)
+            assert(f.read(turnDestination+(y*16+x)*2) == (x >= 14 && y >= 3 && y < 6 ? turnPixel(x-14,y-3) : 0xa55a));
+        Fixture g; turnPlanes(g);
+        assert(g.append(transformBatch(0x3f,0,0,14,3,5,3,0,0x00100014),0x200aa8dc) == A::sideEffect &&
+               refused(g,"transform-geometry",5 << 16 | 3) && g.state.engineState().emptyRing());
+    }
     // The host GPU never takes it, so Fast draws it on the CPU as Exact does.
     {
         Fixture f; turnPlanes(f);
@@ -1067,7 +1079,7 @@ void transform() {
         assert(!Imx1GraphicsCommands::gpuFill(f.state,f.eim,f.memory,fill,drawn));
         f.finish();
     }
-    // Refused, with nothing queued: other GMC, mix, datatype or direction, a corner that runs past 0, the source past
+    // Refused, with nothing queued: other GMC, mix, datatype, direction or 48f, a corner that runs past 0, the source past
     // its pitch, a source that overlaps the destination, and a second blit in one batch.
     Fixture f; turnPlanes(f);
     auto refuse = [&](std::vector<uint32_t> batch, const char* what, uint32_t value, uint32_t pc = 0x200aa8dc) {
@@ -1079,6 +1091,7 @@ void transform() {
     bad = good; bad[1] = 0x00cc0a00; refuse(bad,"transform-state",0x2e);
     bad = good; bad[5] = 0x40020d04; refuse(bad,"transform-state",0x2e);
     bad = good; bad[7] = 0x2b; refuse(bad,"transform-state",0x2b);
+    bad = good; bad.insert(bad.begin(),{0x48f,0}); refuse(bad,"transform-state",0x2e);
     bad = good; bad[22] = 1 << 16 | 2; refuse(bad,"transform-geometry",good[23]);
     bad = good; bad[21] = 10 << 16; refuse(bad,"transform-geometry",good[23]);
     bad = good; bad[9] = turnSource; bad[11] = 12; refuse(bad,"transform-overlap",good[22]);
