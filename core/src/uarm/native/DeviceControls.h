@@ -110,20 +110,20 @@ inline DeviceArt deviceArt(const char* name) {
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
 inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     // App keys hit their whole pocket; the five-way entries place the direction parts. The TX's
-    // five-way fills the bar's height, with each app key in its own pocket either side.
+    // five-way nearly fills the bar's height, with each app key in its own pocket either side.
     static const DeviceButton tx[] = {
         {keyIdHard1, {4,25,44,40}, "Home", DeviceControlIcon::home},
         {keyIdHard2, {52,25,44,40}, "Calendar", DeviceControlIcon::calendar},
         {keyIdHard3, {224,25,44,40}, "Contacts", DeviceControlIcon::contacts},
         {keyIdHard4, {272,25,44,40}, "Web", DeviceControlIcon::web},
-        {keyIdUp, {150,4,20,14}, "Up", DeviceControlIcon::up},
-        {keyIdDown, {150,66,20,14}, "Down", DeviceControlIcon::down},
-        {keyIdLeft, {107,32,18,20}, "Left", DeviceControlIcon::left},
-        {keyIdRight, {195,32,18,20}, "Right", DeviceControlIcon::right},
-        {keyIdSelect, {126,25,68,34}, "Select", DeviceControlIcon::select},
+        {keyIdUp, {150,9,20,14}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {150,61,20,14}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {111,32,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {191,32,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {131,28,58,28}, "Select", DeviceControlIcon::select},
     };
-    static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{104,0,112,84},28,{126,25,68,34},
-                                                DeviceControlStyle::tx,0.3f,1,12};
+    static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{108,5,104,74},24,{131,28,58,28},
+                                                DeviceControlStyle::tx,0.3f,1,10};
     // E2: app keys hard1-4 open Calendar, Contacts, Tasks and Note Pad, in pairs on one line either
     // side of a rounded five-way that fills most of the bar, with a rounded select key.
     static const DeviceButton e2[] = {

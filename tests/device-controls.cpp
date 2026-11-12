@@ -2698,10 +2698,10 @@ int main(int argc,char** argv) {
     firmwarePowerInput();
     const auto& profile=deviceControls(deviceTypeTX);
     assert(profile.count==9 && profile.style==DeviceControlStyle::tx && profile.height==84);
-    // TX: the five-way fills the bar's height, its select key a rounded rectangle; each app
+    // TX: the five-way nearly fills the bar's height, its select key a rounded rectangle; each app
     // key stands clear of it.
-    assert(profile.navigator.y==0 && profile.navigator.h==profile.height && profile.navigator.w==112);
-    assert(profile.select.w==68 && profile.select.h==34 && profile.selectCorner>0 && profile.selectCorner<profile.select.h*0.5f);
+    assert(profile.navigator.y==5 && profile.navigator.h==74 && profile.navigator.w==104);
+    assert(profile.select.w==58 && profile.select.h==28 && profile.selectCorner>0 && profile.selectCorner<profile.select.h*0.5f);
     assert(profile.buttons[1].bounds.x+profile.buttons[1].bounds.w<profile.navigator.x &&
            profile.buttons[2].bounds.x>profile.navigator.x+profile.navigator.w);
     const auto& e2=deviceControls(deviceTypeE2);
