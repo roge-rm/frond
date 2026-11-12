@@ -72,7 +72,8 @@ static void checkFills(uint64_t minPixels) {
             assert(cpuMemory.accessGpu(*state, eim, region.base + i, 2, true, word) == A::ok);
         }
     gpu->attach(&gpuMemory);
-    unsigned fills = 0, kinds = 0, cpuFills = 0;
+    // cpuKinds: constant blends and stretches at other ratios, which only the CPU draws.
+    unsigned fills = 0, kinds = 0, cpuFills = 0, cpuKinds = 0;
     for (unsigned kind = 0; kind < 128; ++kind) {
         const bool pixels = kind & 1, copy = kind & 2, keyed = copy && (kind & 4), doubled = copy && (kind & 8);
         const bool invert = kind & 16, a4 = kind & 32, painted = keyed && (kind & 64);
@@ -89,8 +90,15 @@ static void checkFills(uint64_t minPixels) {
             if (span + 128 > region.bytes) f.height = 1;
             f.base = region.base + 64 + next((region.bytes - 64 - (f.height - 1) * f.pitch - f.width * 2) / 2) * 2;
             f.keyed = keyed; f.plain = copy && !keyed; f.a4 = a4; f.invert = invert; f.doubled = doubled;
-            f.painted = painted; f.paint = next(0x10000); f.keyEqual = next(2);
-            f.colour = a4 ? next(17) : keyed ? palette[next(4)] : next(4) ? next(0x10000) : 0x10000 | next(0x10000);
+            // keyEqual on a plain copy makes it the rotate blit and paint on a doubled one holds the stretch
+            // ratios, so plain copies leave keyEqual off and doubled ones take 0 (each pixel twice) or 40 to 100
+            // hex each way, which reads no further than the source a doubled fill has. A painted one keeps 0, as
+            // paint is its colour too. Rotate blits and shrinking ratios are in zodiac-graphics-plain-copy.
+            f.painted = painted; f.keyEqual = keyed && next(2);
+            f.paint = !doubled ? next(0x10000) : painted || next(2) ? 0 : (0x40 + next(0xc1)) | (0x40 + next(0xc1)) << 16;
+            // An A4 fill without pixels is the constant blend, with one alpha for each of blue, green and red.
+            const bool a4Pixels = a4 && next(2);
+            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? palette[next(4)] : next(4) ? next(0x10000) : 0x10000 | next(0x10000);
             if (copy || a4) {
                 const auto& from = round % 3 == 2 ? region : regions[next(2)];
                 f.sourcePitch = f.width * 2 + next(30) * 2;
@@ -99,13 +107,17 @@ static void checkFills(uint64_t minPixels) {
                 f.sourceBase = round % 3 == 2 && f.base >= region.base + 64 ? f.base - 64 + next(64) * 2 :
                     from.base + next((from.bytes - sourceSpan) / 2) * 2;
             }
-            if (pixels || (a4 && next(2)))
+            if (pixels || a4Pixels)
                 for (uint32_t i = 0; i < f.width * f.height; ++i)
                     f.pixels.push_back(uint16_t(a4 ? (next(3) ? next(2) * 15 : next(16)) : next(0x10000)));
             const uint64_t before = gpu->statistics().fills;
             assert(C::completeFill(*state, eim, gpuMemory, f) == A::ok);
             assert(C::completeFillCpu(*state, eim, cpuMemory, f) == A::ok);
             if (gpu->statistics().fills == before) ++cpuFills;
+            if ((a4 && f.pixels.empty()) || (doubled && f.paint && f.paint != 0x00800080)) {
+                assert(gpu->statistics().fills == before);
+                ++cpuKinds;
+            }
             // The saved dirty ranges and write counts match the CPU model's, keyed fills included.
             for (unsigned bank = 0; bank < 2; ++bank) {
                 const auto a = gpuMemory.dirty(bank), b = cpuMemory.dirty(bank);
@@ -156,10 +168,11 @@ static void checkFills(uint64_t minPixels) {
     assert(s.solid && s.inlinePixels && s.copies && s.keyed && s.doubled && s.inverts && s.a4 && s.downloads && s.uploads);
     assert(s.maskedWrites && s.patches && s.patchPages && !s.recoveries);
     assert(minPixels ? gpu->smallFills > 50 : !gpu->smallFills);
-    assert(cpuFills > 0 && cpuFills - gpu->smallFills < fills / 2);
+    assert(cpuFills > cpuKinds && cpuFills - cpuKinds - gpu->smallFills < (fills - cpuKinds) / 2);
     gpu->detach();
-    std::printf("PASS: %u fills of %u kinds, %llu on the GPU and %u on the CPU (%llu small, under %llu pixels), match the "
-                "CPU model\n", fills, kinds, (unsigned long long)s.fills, cpuFills, (unsigned long long)gpu->smallFills,
+    std::printf("PASS: %u fills of %u kinds, %llu on the GPU and %u on the CPU (%u blends or other ratios, %llu small, under %llu "
+                "pixels), match the CPU model\n", fills, kinds, (unsigned long long)s.fills, cpuFills, cpuKinds,
+                (unsigned long long)gpu->smallFills,
                 (unsigned long long)minPixels);
 }
 

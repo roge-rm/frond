@@ -270,9 +270,13 @@ static void checkCommands(bool packedMono) {
     auto badRectangle = rectangleBatch;
     badRectangle[5] = 0x1df;
     submitRectangle(badRectangle,false);
-    badRectangle = rectangleBatch;
-    badRectangle[11] = 0x01e10140;
-    submitRectangle(badRectangle,false);
+    // One column past the pitch: the scissor (GMC bit 3, 470 at the surface's edge) trims it to the same fill.
+    // With the scissor one column past the pitch too, it's refused.
+    auto wideRectangle = rectangleBatch;
+    wideRectangle[11] = 0x01e10140;
+    submitRectangle(wideRectangle,true);
+    wideRectangle[2] = 0x014001e1;
+    submitRectangle(wideRectangle,false);
     checkHostData(submitted,commands,eim);
     checkPackedMono(submitted,commands,eim);
     checkKeyedCopy(submitted,commands,eim);
@@ -321,15 +325,22 @@ static void checkFillKinds() {
             f.pitch = next(4) ? f.width * 2 + next(40) * 2 : 2 + next(f.width) * 2;
             f.base = region + 64 + next(0x1000) * 2;
             f.keyed = keyed; f.plain = copy && !keyed; f.a4 = a4; f.invert = invert; f.doubled = doubled;
-            f.painted = painted; f.paint = next(0x10000); f.keyEqual = next(2);
-            f.colour = a4 ? next(17) : keyed ? palette[next(4)] : next(0x10000);
+            // keyEqual on a plain copy makes it the rotate blit and paint on a doubled one holds the stretch
+            // ratios, so plain copies leave keyEqual off and doubled ones take 0 (each pixel twice) or 40 to 100
+            // hex each way, which reads no further than the source a doubled fill has. A painted one keeps 0, as
+            // paint is its colour too. Rotate blits and shrinking ratios are in zodiac-graphics-plain-copy.
+            f.painted = painted; f.keyEqual = keyed && next(2);
+            f.paint = !doubled ? next(0x10000) : painted || next(2) ? 0 : (0x40 + next(0xc1)) | (0x40 + next(0xc1)) << 16;
+            // An A4 fill without pixels is the constant blend, with one alpha for each of blue, green and red.
+            const bool a4Pixels = a4 && next(2);
+            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? palette[next(4)] : next(0x10000);
             if (copy || a4) {
                 f.sourcePitch = f.width * 2 + next(30) * 2;
                 f.sourceX = doubled ? next(5) : 0; f.sourceY = doubled ? next(5) : 0;
                 // Every third fill reads from just around the destination.
                 f.sourceBase = round % 3 ? region + next(0x1000) * 2 : f.base - 64 + next(64) * 2;
             }
-            if (pixels || (a4 && next(2)))
+            if (pixels || a4Pixels)
                 for (uint32_t i = 0; i < f.width * f.height; ++i)
                     f.pixels.push_back(uint16_t(a4 ? (next(3) ? next(2) * 15 : next(16)) : next(0x10000)));
             const auto before = C::directFillCount;
