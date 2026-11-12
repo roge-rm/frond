@@ -439,13 +439,13 @@ benchmark-menu: out/frond
 
 .PHONY: desktop test-desktop deb
 desktop: out/frond
-	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo
+	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core
 	+cmake --build build/desktop --target frond-desktop --parallel $(BUILD_JOBS)
 	cp build/desktop/frond-desktop out/frond-desktop.new
 	mv -f out/frond-desktop.new out/frond-desktop
 
 test-desktop: desktop
-	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=ON
+	cmake -S desktop -B build/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=$(CURDIR)/core -DBUILD_TESTING=ON
 	+cmake --build build/desktop --parallel $(BUILD_JOBS)
 	ctest --test-dir build/desktop --output-on-failure
 
@@ -572,6 +572,8 @@ test-ir-printer: prepare core/src/common/libcommon.a
 		core/src/common/libcommon.a -o build/test-ir-printer
 	./build/test-ir-printer
 
+# Always checked, like libcommon.a, so edits in core/src/common/net are rebuilt.
+.PHONY: core/src/common/libcommon-net.a
 core/src/common/libcommon-net.a:
 	$(MAKE) -C core/src/common net
 
@@ -1353,8 +1355,10 @@ speed-check: benchmark-replay
 
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there
-# are rebuilt; the stamp only moves when the library changed.
+# are rebuilt; the stamp only moves when libdynarmic.a changed. A build folder configured from
+# another source path is wiped first.
 build/dynarmic/.built: FORCE
+	grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=$(abspath $(DYNARMIC_SRC))' build/dynarmic/CMakeCache.txt 2>/dev/null || rm -rf build/dynarmic
 	[ -f build/dynarmic/build.ninja ] || cmake -S $(DYNARMIC_SRC) -B build/dynarmic -G Ninja -DCMAKE_BUILD_TYPE=Release \
 		-DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
 		-DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF

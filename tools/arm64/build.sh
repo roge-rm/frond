@@ -11,6 +11,7 @@ SDL_LIBS=$(pkg-config --libs sdl2)
 TOOLS="CC_NATIVE=$TRIPLE-gcc CXX_NATIVE=$TRIPLE-g++ LD_NATIVE=$TRIPLE-g++ AR_NATIVE=$TRIPLE-ar RANLIB_NATIVE=$TRIPLE-ranlib"
 # Dynarmic for the Fast engine, from vendor/dynarmic (arm64 back end).
 DYN=/src/build/arm64/dynarmic
+grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=/src/vendor/dynarmic' $DYN/CMakeCache.txt 2>/dev/null || rm -rf $DYN
 cmake -S vendor/dynarmic -B $DYN -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
     -DCMAKE_C_COMPILER=$TRIPLE-gcc -DCMAKE_CXX_COMPILER=$TRIPLE-g++ -DBoost_INCLUDE_DIR=/usr/include \
@@ -28,7 +29,7 @@ mkdir -p build/arm64/out
 cp core/src/uarm/cp-uarm build/arm64/out/frond
 make -j"$JOBS" -C core/src/cloudpilot FROND_68K=1 frond-68k $TOOLS
 cp core/src/cloudpilot/frond-68k build/arm64/out/frond-68k
-cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFROND_PREPARED_SOURCE=/src/core \
     -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
     -DCMAKE_C_COMPILER=$TRIPLE-gcc -DCMAKE_CXX_COMPILER=$TRIPLE-g++ \
     -DCMAKE_FIND_ROOT_PATH=/usr/lib/$TRIPLE -DCMAKE_LIBRARY_ARCHITECTURE=$TRIPLE \

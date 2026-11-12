@@ -36,6 +36,7 @@ pkg-config --atleast-version=4.8 slirp || COMPAT="-Dslirp_ssize_t=ssize_t"
 mk() { make -j"$JOBS" "CC_NATIVE=$CC $COMPAT" "CXX_NATIVE=$CXX $COMPAT" "AR_NATIVE=${CROSS}ar" "RANLIB_NATIVE=${CROSS}ranlib" "$@"; }
 # Dynarmic for the Fast engine, from vendor/dynarmic.
 DYN=$WORK/dynarmic
+grep -qx 'CMAKE_HOME_DIRECTORY:INTERNAL=/src/vendor/dynarmic' $DYN/CMakeCache.txt 2>/dev/null || rm -rf $DYN
 cmake -S vendor/dynarmic -B $DYN -G Ninja -DCMAKE_BUILD_TYPE=Release $TOOLCHAIN -DBoost_INCLUDE_DIR=/usr/include \
     -DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
     -DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
