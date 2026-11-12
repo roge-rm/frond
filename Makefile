@@ -2136,7 +2136,7 @@ test-zodiac-graphics-packed-mono: build/zodiac-boot-probe
 .PHONY: test-zodiac-graphics-plain-copy
 test-zodiac-graphics-plain-copy: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Ibuild/source/src/uarm/uarm tests/zodiac-graphics-plain-copy.cpp \
+		-Ibuild/source/src/uarm/uarm -Ibuild/source/src/common tests/zodiac-graphics-plain-copy.cpp \
 		build/source/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-plain-copy
 	./build/test-zodiac-graphics-plain-copy
 	python3 tests/zodiac-graphics-plain-copy.py

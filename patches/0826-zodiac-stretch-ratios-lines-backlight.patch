@@ -15,7 +15,7 @@ index f702ee7..853c3aa 100644
          }
          if (virtualProfile() && Imx1GraphicsEngine::owns(address)) {
 diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
-index f39a304..5f010a2 100644
+index f39a304..da07d06 100644
 --- a/src/uarm/uarm/imx1_graphics_commands.h
 +++ b/src/uarm/uarm/imx1_graphics_commands.h
 @@ -3,6 +3,7 @@
@@ -26,7 +26,17 @@ index f39a304..5f010a2 100644
  #include <vector>
  #include <deque>
  #include <utility>
-@@ -118,8 +119,16 @@ class Imx1GraphicsCommands {
+@@ -25,7 +26,8 @@ class Imx1GraphicsCommands {
+         for (auto& batch : batches) {
+             a.Do32(batch.end).Do32(batch.words).Do32(batch.option);
+             uint64_t fills = batch.fills.size();
+-            a.Do64(fills).Require(fills <= 16384, "command fills");
++            // A line packet is 4 words and draws up to 8192 runs, so the limit goes with the batch's words.
++            a.Do64(fills).Require(fills <= 16384 || fills <= uint64_t(batch.words) * 2048, "command fills");
+             if (!a.ok()) return;
+             batch.fills.resize(size_t(fills));
+             for (auto& f : batch.fills) {
+@@ -118,8 +120,16 @@ class Imx1GraphicsCommands {
                  if (header & 0x3fc00000u || !take(first) || !take(second) ||
                      !put(header & 0x7ff, first) || !put((header >> 11) & 0x7ff, second)) return A::sideEffect;
              } else if ((header & 0xc000ffffu) == 0xc0001500u) {
@@ -45,7 +55,7 @@ index f39a304..5f010a2 100644
              } else if (other == Imx1GraphicsEngine::monoBrush || other == Imx1GraphicsEngine::colourBrush) {
                  // The brush upload of 200aedd0: a one row rectangle on the brush surface (423), then the
                  // pattern as host words through 4f0. They land in memory as sent: 8 words with a pattern
-@@ -200,6 +209,9 @@ class Imx1GraphicsCommands {
+@@ -200,6 +210,9 @@ class Imx1GraphicsCommands {
                      // Both copy producers send 48f with every copy and never 490 or 491. A colour source
                      // copy reads neither.
                      if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
@@ -55,7 +65,7 @@ index f39a304..5f010a2 100644
                      Fill fill{};
                      const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
                      if (status != A::ok) return status;
-@@ -263,9 +275,10 @@ class Imx1GraphicsCommands {
+@@ -263,9 +276,10 @@ class Imx1GraphicsCommands {
                  // Packed 1bpp rows are padded to 32 pixels, one word per 32.
                  const uint64_t payload = mono ? uint64_t(width / 32) * height :
                      a4 ? (uint64_t(width) * height + 7) / 8 : uint64_t(width / 2) * height;
@@ -69,7 +79,7 @@ index f39a304..5f010a2 100644
                      payload + 1 != ((header >> 16) & 0x3fff))
                      return A::sideEffect;
                  if (payload > left) return A::sequence;
-@@ -299,7 +312,7 @@ class Imx1GraphicsCommands {
+@@ -299,7 +313,7 @@ class Imx1GraphicsCommands {
          if ((engine.hostDataSubmission() && hostPackets != 1) ||
              (engine.keyedCopySubmission() && copyPackets != 1) ||
              (engine.a4Submission() && a4Packets != 1) || (other && otherPackets != 1) ||
@@ -78,7 +88,7 @@ index f39a304..5f010a2 100644
          batch.option = values[0x4a0];
          queuedWords += batch.words;
          batches.push_back(std::move(batch));
-@@ -320,8 +333,7 @@ class Imx1GraphicsCommands {
+@@ -320,8 +334,7 @@ class Imx1GraphicsCommands {
              // Validate both surfaces before writing this batch, including after reset.
              for (const auto& fill : batch.fills) {
                  const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
@@ -88,7 +98,7 @@ index f39a304..5f010a2 100644
                  if (destinationLength && ((fill.base & 1) || !memory.contains(configuration, eim, fill.base, destinationLength) ||
                      ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, fill.sourceBase, sourceLength)))) return A::sequence;
              }
-@@ -339,7 +351,8 @@ class Imx1GraphicsCommands {
+@@ -339,7 +352,8 @@ class Imx1GraphicsCommands {
          uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
          uint32_t sourceBase = 0, sourcePitch = 0;
          bool keyed = false, plain = false, a4 = false, invert = false;
@@ -98,7 +108,7 @@ index f39a304..5f010a2 100644
          uint32_t paint = 0;
          bool doubled = false, keyEqual = false, painted = false;
          std::vector<uint16_t> pixels;
-@@ -370,6 +383,7 @@ class Imx1GraphicsCommands {
+@@ -370,6 +384,7 @@ class Imx1GraphicsCommands {
      static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
                          const Fill& fill, Imx1GpuFill& out) {
          if (!gpuFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
@@ -106,7 +116,7 @@ index f39a304..5f010a2 100644
              (fill.height > 1 && fill.pitch < fill.width * 2) ||
              (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
          const bool copy = fill.keyed || fill.plain, source = copy || fill.a4;
-@@ -390,8 +404,7 @@ class Imx1GraphicsCommands {
+@@ -390,8 +405,7 @@ class Imx1GraphicsCommands {
          out.paint = fill.paint;
          out.pixels = !copy && !fill.pixels.empty() ? fill.pixels.data() : nullptr;
          if (source) {
@@ -116,7 +126,7 @@ index f39a304..5f010a2 100644
              if (!memory.contains(configuration, eim, fill.sourceBase, sourceLength, &out.sourceBank, &out.sourceBase)) return false;
              if (out.sourceBank == out.bank && out.sourceBase < out.base + length && out.base < out.sourceBase + sourceLength)
                  return false;
-@@ -411,9 +424,10 @@ class Imx1GraphicsCommands {
+@@ -411,9 +425,10 @@ class Imx1GraphicsCommands {
              for (uint32_t x = 0; x < fill.width; ++x) {
                  uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
                  if (fill.keyed || fill.plain) {
@@ -129,7 +139,7 @@ index f39a304..5f010a2 100644
                          fill.sourceBase + y * fill.sourcePitch + x * 2;
                      const auto status = memory.accessGpu(configuration, eim, at, 2, false, colour);
                      if (status != A::ok) return status;
-@@ -453,13 +467,13 @@ class Imx1GraphicsCommands {
+@@ -453,13 +468,13 @@ class Imx1GraphicsCommands {
              uint8_t* out = destination + row;
              const uint16_t* in = kPixels ? fill.pixels.data() + size_t(y) * fill.width : nullptr;
              const uint8_t* source = !kCopy ? nullptr :
@@ -145,7 +155,7 @@ index f39a304..5f010a2 100644
                      if (kKeyed && (colour == fill.colour) != fill.keyEqual) continue;
                      if (fill.painted) colour = fill.paint;
                  }
-@@ -511,8 +525,7 @@ class Imx1GraphicsCommands {
+@@ -511,8 +526,7 @@ class Imx1GraphicsCommands {
          const uint8_t* from = nullptr;
          if (source) {
              // The source range the batch check worked out.
@@ -155,7 +165,7 @@ index f39a304..5f010a2 100644
              from = memory.gpuSpan(configuration, eim, fill.sourceBase, length, sourceBank, sourceOffset);
              if (!from) return false;
          }
-@@ -549,6 +562,17 @@ class Imx1GraphicsCommands {
+@@ -549,6 +563,17 @@ class Imx1GraphicsCommands {
              return false;
          }
      };
@@ -173,7 +183,7 @@ index f39a304..5f010a2 100644
      struct Batch {
          uint32_t end = 0, words = 0, option = 0;
          std::vector<Fill> fills;
-@@ -562,12 +586,17 @@ class Imx1GraphicsCommands {
+@@ -562,12 +587,17 @@ class Imx1GraphicsCommands {
          known[reg] = true;
          // GMC selects the same source and ROP fields as DP_MIX in the native helpers.
          if (reg == 0x41b && known[0x4b2] &&
@@ -193,7 +203,7 @@ index f39a304..5f010a2 100644
      // Packed 1bpp drawing below is explicit virtual policy. The original writer copies
      // source halfwords unchanged and proves none of it, and physical W4200 behaviour is unknown.
      // virtualPackedMonoMsbFirst: source bytes run left to right, bit 7 of each byte first.
-@@ -668,8 +697,11 @@ class Imx1GraphicsCommands {
+@@ -668,8 +698,11 @@ class Imx1GraphicsCommands {
          const uint32_t x = host ? xy & 0xffff : xy >> 16, y = host ? xy >> 16 : xy & 0xffff;
          const uint32_t width = host ? wh & 0xffff : wh >> 16, height = host ? wh >> 16 : wh & 0xffff;
          const uint32_t pitch = values[0x402];
@@ -207,7 +217,7 @@ index f39a304..5f010a2 100644
          uint32_t left = x, top = y, right = x + width, bottom = y + height;
          if (gmc & 8) {
              left = std::max(left, values[0x46f] & 0x1fff);
-@@ -681,6 +713,8 @@ class Imx1GraphicsCommands {
+@@ -681,6 +714,8 @@ class Imx1GraphicsCommands {
              right = std::min(right, values[0x470] & 0x1fff);
              bottom = std::min(bottom, (values[0x470] >> 16) & 0x1fff);
          }
@@ -216,7 +226,7 @@ index f39a304..5f010a2 100644
          fill.sourceX = left - x;
          fill.sourceY = top - y;
          fill.colour = values[0x41f] & 0xffff;
-@@ -694,16 +728,62 @@ class Imx1GraphicsCommands {
+@@ -694,16 +729,62 @@ class Imx1GraphicsCommands {
          return memory.contains(configuration,eim,fill.base,
              uint64_t(fill.height - 1) * fill.pitch + fill.width * 2) ? A::ok : A::sequence;
      }
@@ -284,7 +294,7 @@ index f39a304..5f010a2 100644
      Imx1BootstrapAccess stretchBlit(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                      const Imx1GraphicsMemory& memory, Fill& fill) const {
          using A = Imx1BootstrapAccess;
-@@ -711,7 +791,14 @@ class Imx1GraphicsCommands {
+@@ -711,7 +792,14 @@ class Imx1GraphicsCommands {
                           0x416,0x418,0x419,0x410,0x411,0x412,0x420,0x421,0x422,0x464,0x465,0x466,
                           0x42e,0x42f,0x430,0x431,0x432,0x433}) if (!known[reg]) return A::sequence;
          // The state words 200b0830-200b08dc leave: ROP cc, colour sources, scissor on, left to right and down.
@@ -300,7 +310,7 @@ index f39a304..5f010a2 100644
                   {0x472,0x3f}, {0x488,0x02020009}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
                   {0x42e,0}, {0x42f,0}, {0x430,0}, {0x431,0}, {0x432,0}, {0x433,0}})
              if (values[item.first] != item.second) return refuse("stretch-state", item.first);
-@@ -721,12 +808,14 @@ class Imx1GraphicsCommands {
+@@ -721,12 +809,14 @@ class Imx1GraphicsCommands {
              values[0x410] != (values[0x466] >> 16) + 1 || values[0x411] != (values[0x466] & 0xffff) ||
              (values[0x464] & 0x00030003) || ((values[0x46f] | values[0x470]) & ~0x1fff1fffu))
              return refuse("stretch-words", values[0x464]);
@@ -317,7 +327,7 @@ index f39a304..5f010a2 100644
          if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
              !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
              !sourcePitch || sourcePitch > 8192 || sx + sourceWidth > sourcePitch || sy + sourceHeight > 8191)
-@@ -742,6 +831,7 @@ class Imx1GraphicsCommands {
+@@ -742,6 +832,7 @@ class Imx1GraphicsCommands {
          fill.sourcePitch = sourcePitch * 2;
          fill.sourceBase = uint32_t(source);
          fill.plain = fill.doubled = true;

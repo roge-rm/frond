@@ -8,6 +8,7 @@
 #include <string>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
+#include "machine_state_archive.h"
 
 using A = Imx1BootstrapAccess;
 namespace {
@@ -808,6 +809,44 @@ void lines() {
     assert(f.append(batch,0x200affe4) == A::sideEffect);
     std::puts("PASS: line packets from 200affe4, any direction, scissored, ties and other forms refused");
 }
+// A queued batch of 45 degree lines holds a fill for every pixel. Saved mid-batch it loads, and finishes with the
+// pixels of a run that never saved.
+void linesSaved() {
+    auto build = [] {
+        auto batch = lineState(0x07e0);
+        unsigned fills = 0;
+        for (unsigned pass = 0; pass < 3; ++pass) {
+            batch.insert(batch.end(),{0x41f,0x07e0u+pass*0x1111});
+            for (unsigned k = 0; k < 64; ++k) {
+                const unsigned end = 127-k;
+                batch.insert(batch.end(),{0xc0021500,point(0,k),point(end,127),point(end,127)});
+                fills += 128-k;
+            }
+        }
+        assert(fills > 16384);
+        return batch;
+    };
+    Fixture reference; linePlanes(reference);
+    assert(reference.append(build(),0x200affe4) == A::ok);
+    reference.finish();
+    Fixture saved; linePlanes(saved);
+    assert(saved.append(build(),0x200affe4) == A::ok);
+    std::vector<uint8_t> bytes[2];
+    StateWriter configurationOut(bytes[0]); saved.state.state(configurationOut);
+    StateWriter commandsOut(bytes[1]); saved.commands.state(commandsOut);
+    Fixture loaded; linePlanes(loaded);
+    StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+    StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+    if (!configurationIn.complete() || !commandsIn.complete()) {
+        std::fprintf(stderr,"line batch state: %s %s\n",configurationIn.detail() ? configurationIn.detail() : "ok",
+                     commandsIn.detail() ? commandsIn.detail() : "ok");
+        std::abort();
+    }
+    loaded.finish();
+    for (unsigned i = 0; i < 128*128; ++i) assert(loaded.read(lineSurface+i*2) == reference.read(lineSurface+i*2));
+    assert(loaded.read(lineSurface+(5*128+5)*2) != lineBackground);
+    std::puts("PASS: a queued batch of over 16384 line fills saves, loads and finishes the same");
+}
 // A plain copy past its surface's pitch with the scissor on draws what the scissor keeps, as the software
 // stretch's runs need on a small surface.
 void clippedPastPitch() {
@@ -834,6 +873,6 @@ void clippedPastPitch() {
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
-    stretchStaleGmc(); stretchRatios(); lines(); clippedPastPitch();
+    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
