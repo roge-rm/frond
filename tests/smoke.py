@@ -110,7 +110,7 @@ class Run:
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy')
         # Fast compiles in sync mode, so a run repeats; FROND_JIT_SYNC=0 tries the compile thread.
         env.setdefault('FROND_JIT_SYNC', '1')
-        # Under a heavy emulator slot where the machine has heavy (not on the test host).
+        # Under a heavy emulator slot where the machine has heavy (not on a plain test host).
         command = (['heavy', 'emulator'] if shutil.which('heavy') else []) + [str(CORE), *boot, *map(str, extra), '--desktop-socket', address]
         if sound:
             env.update(SDL_AUDIODRIVER='disk', SDL_DISKAUDIOFILE=str(sound))

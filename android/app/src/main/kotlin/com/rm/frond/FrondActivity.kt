@@ -1309,8 +1309,8 @@ open class FrondActivity : SDLActivity() {
     // Host audio period in frames, normal and low-latency audio alike: a power of two (SDL rounds
     // to one) of at least 1024 and at least the phone's output buffer in 44.1 kHz frames. SDL's
     // AAudio and OpenSL output is filled in bursts of the mixer's period, so 512, the desktop's,
-    // underran 8-13 times a second on the x86_64 AVD against 3-4 at 1024 (doc/step9-plan.md, M4
-    // notes), and low latency at 512 fell back on a phone within 0.2 s. The core sizes its
+    // underran 8-13 times a second on the x86_64 AVD against 3-4 at 1024,
+    // and low latency at 512 fell back on a phone within 0.2 s. The core sizes its
     // low-latency limits from this period.
     private fun audioPeriod(): Int {
         audioTest.getOrNull(1)?.toIntOrNull()?.takeIf { it in 64..8192 }?.let { return it }

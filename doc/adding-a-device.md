@@ -43,7 +43,24 @@ Hardware that exists on the real device but isn't done yet stays in the profile 
 
 For a shared board, audit checks for the existing device type and name in the core, frontends and tools. Share hardware selection through the board model, and use capabilities for supported host interfaces. Keep ROM signatures, firmware-specific patches and qualified audio hooks separate. Test the existing device too when changing a shared path.
 
-The [Zodiac 2 bring-up notes](zodiac2-bringup.md) track the staged i.MX1 model and remaining boot work.
+## Zodiac 2 hardware
+
+The Tapwave Zodiac 2 (`tapwave-zodiac-2`) is the only device on the i.MX1 board model. It isn't a PXA or OMAP board, and it runs ARM code only.
+
+| Part | In Frond |
+|---|---|
+| CPU | ARM920T at 200 MHz: MMU, instruction and data caches, Thumb. Exact and Fast engines |
+| Memory | 8,192,000 byte NOR ROM (small and big PalmCards at offsets 0 and 0x20000, company `Tpwv`, HAL `MX1a`), 128 MiB SDRAM |
+| SoC blocks | i.MX1 AITC, system control and PLLs, EIM chip selects, timers, watchdog, RTC, GPIO, DMA, LCDC (contrast only), PWM, ASP pen ADC, I2C, SSI, UARTs (idle), MMCSD |
+| Graphics | Virtual W4200-compatible graphics chip behind chip select 5: ring of command packets, solid fills, copies, stretch blits, line packets, 480x320 RGB565 display. Fast can draw fills on the host GPU (`FROND_ZODIAC_GPU`) |
+| Sound | Virtual YMF768 on chip select 4 |
+| Storage | One SD slot (the card sits on the graphics chip side) |
+| Controls | Pen, four Action keys, Home, Function, two triggers, analogue stick |
+| Not done | Network, serial, USB, infrared, Bluetooth, modem, camera, microphone |
+
+The ROM is read-only input: `tools/zodiac-rom.py` takes it out of Tapwave's Zodiac 1.1 update. Hardware the ROM touches that has no model yet stops the machine with the address, rather than answering with a guess. Where the chip documents no behaviour, the model takes an explicit input or policy (`zodiac-boot-probe` options such as `--gpio-a-input`, `--rtc-initial-time` and `--ram-mib`).
+
+The `zodiac-boot-probe` tool runs the ROM from reset without the frontend, with a trace and an optional end-stop snapshot (`--diagnostic-snapshot=PREFIX`). Use it to find what the ROM needs next. The Zodiac tests are listed in Testing and the developer reference.
 
 ## Profile fields
 

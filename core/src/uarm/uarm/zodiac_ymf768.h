@@ -9,7 +9,7 @@
 
 // The Zodiac's Yamaha YMF768 on CS4: an index port at 0x15000000 and a data port at 0x15000001, two banks of
 // 256 registers (common register 0f bit 0 picks the bank). There is no register manual; everything here is
-// read from the ROM's driver (DAL 0x200b5c00..0x200c0e40) and labelled ASSUMPTION in doc/zodiac2-cs4.md.
+// read from the ROM's driver (DAL 0x200b5c00..0x200c0e40).
 //
 // - Identity: bank 1 0e reads 3, bank 1 38 bit 0 (ready) reads 1, bank 1 00 bit 6 (busy) reads 0.
 // - Sequencer FIFO: bank 0 register 0 takes 3-byte records. The ROM only ever writes 01 ff 00, a 1 tick wait,

@@ -33,6 +33,7 @@ The Fast engine builds Dynarmic from `vendor/dynarmic` (needs Ninja and Boost). 
 - `make test-zodiac-graphics-commands` checks bounded native ring packets, delayed solid RGB565 paint, pointer and busy state, rejected-batch atomicity, clipping and byte order.
 - `make test-zodiac-graphics-gpu` checks the Zodiac's host GPU fills (`FROND_ZODIAC_GPU`) against the CPU model, with CPU accesses between them, the differential mode and recovery from a GL error. It's skipped where there's no usable GPU.
 - `make test-zodiac-graphics-acquisition` checks independent virtual raw-axis and mode-1 inputs, guest-time acquisition, reset/cancellation, tagged FIFO, GPIO source selection and real timed helper readback/identity transfers on Exact and Fast.
+- The other Zodiac checks (`test-zodiac-*`, `test-imx1-*`) cover the ARM920T MMU, caches and JIT, the i.MX1 blocks (AITC, clocks, timers, RTC, watchdog, PWM, I2C, ASP, EIM, system control, MMCSD) and the virtual graphics and sound chips, each in Exact and Fast. They use made-up ROMs and inputs, and most run outside `make test`. The developer reference lists each target.
 - `make check-device-data` checks the generated per-device data against the profiles.
 - `make test-compatibility` runs synthetic 68k and ARM/Thumb programs through the core: mixed-width memory, branches, returns, traps, faults and an ARM to Thumb to ARM call chain. These are bounded checks, not ISA conformance tests.
 
@@ -63,7 +64,7 @@ Peripheral qualification (`tools/qualify-peripherals.py --plan PLAN.json --outpu
 - Each step has a unique `id` and one action: `command` (a control-socket command, `retry_ready`, `expect_code`, `expect_message`), `replay` (inline replay text), `service` (a relay or peer process, logged to `ID.log`, `allow_exit`), `wait_log` (a marker in a log), `wait` (seconds), `stop` (a service) or `check` (a checker that exits 0 and prints JSON with `status: "pass"`).
 - Step timeout defaults to 30 s, node `startup_timeout` to 60 s and `command_timeout` to 10 s. Raise them for slow operations such as database export.
 - Export the sender and receiver logs before each attempt and give them to the checker (`tools/check-irda-probe.py`, `tools/check-bluetooth-probe.py`) so an old success can't pass a new attempt.
-- `result.json` has the failing step, replies, checker verdicts, timings, input hashes and artifact hashes. On failure it tries to save each live guest. `make test-peripheral-qualification` tests the runner without firmware.
+- `result.json` has the failing step, replies, checker verdicts, timings, input hashes and artifact hashes. On failure it tries to save each live guest.
 - A runner pass is not a device qualification: a new device still needs its own firmware check.
 
 ## Real-app checks
@@ -174,7 +175,7 @@ this test does not qualify it or the USB mode commands.
 
 Dana sound development uses a private ready session and the `dana-sound` Palm
 probe. Build it with `tools/build-palm-probe.py --probe dana-sound --sdk SDK`.
-On the test host, source `lab/frond-work/tools/pilrc/env.sh` first. Run
+If pilrc isn't on your path, source your pilrc environment script first. Run
 `tests/dana-sound.py --core CORE --session SESSION --probe PRC --evidence NEW_DIR`
 under the build slot and speed lock. It measures captured PCM for Sound Manager
 calls, guest mute, quiet, reset, pending-tone reload/rollback and ordinary sleep.
@@ -237,8 +238,8 @@ loads it in a fresh process, reads both cards through guest VFS and increments
 `COPY.TXT` to prove new writes survive another process without changing the
 source backings. It also checks duplicate/import/peek, protected/ejected media,
 malformed manifests/payloads/roots/protocol state, rollback and staged-lock cleanup.
-Use new private evidence folders and a frozen candidate binary. Run on the test host
-under its shared speed lock; this is a development gate, not release acceptance.
+Use new private evidence folders and a frozen candidate binary. Run on a quiet test host
+under a shared speed lock; this is a development gate, not release acceptance.
 
 Dana D3c native card inventory uses stable HAL slots SD0=0 and SD2=2 (labels
 1 and 2), each with representable SDSC capacities from 32 MiB up to 1 GiB

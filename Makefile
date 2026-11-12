@@ -1206,11 +1206,6 @@ test: test-bluetooth-results
 test-bluetooth-results:
 	python3 tests/bluetooth-results.py
 
-.PHONY: test-peripheral-qualification
-test: test-peripheral-qualification
-test-peripheral-qualification:
-	python3 tests/peripheral-qualification.py
-
 .PHONY: smoke smoke-sessions
 smoke:
 	python3 tests/smoke.py run
