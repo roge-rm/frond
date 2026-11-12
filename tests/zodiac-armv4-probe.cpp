@@ -51,9 +51,8 @@ void jumpTable() {
     finished(skipped);
     assert(skipped.trace.pc == 0x10000010 && skipped.registers[4] == 0x99 &&
            skipped.cpsr == 0x200000d3);
-    // Flag-setting PC writes and nearby unqualified addressing forms stay gated.
-    for (uint32_t instruction : {0xe09ff103u, 0xe08ff10fu, 0xe08ff083u,
-                                 0xe08ff213u, 0xe08ef103u}) {
+    // Flag-setting PC writes, other data-processing opcodes and register-specified shifts stay gated.
+    for (uint32_t instruction : {0xe09ff103u, 0xe0cff103u, 0xe19ff103u, 0xe08ff213u}) {
         const auto r = run({instruction});
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.step == 0 &&
                r.trace.instruction == instruction && r.registers[15] == 0x10000000 &&
