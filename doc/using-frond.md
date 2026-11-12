@@ -49,7 +49,7 @@ On Linux the bar sits at the top of Frond's window while a machine runs, above a
 
 F11 or the Full screen row in the Machine menu fills the screen. The bar hides after 3 seconds and comes back when the pointer touches the top edge. Panels open over the Palm instead of widening the window.
 
-Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached the Ctrl keys go to the Palm, and only F11 and F12 still come back to Frond.
+Shortcuts work in the Palm window and in Frond's: Ctrl+S Save, Ctrl+Shift+S Save a copy, Ctrl+W Save and Stop, Ctrl+I Install, Ctrl+M Sound, Ctrl+B Hide bar, Ctrl+L Emulator log, Ctrl+R Reset, F12 Screenshot, Ctrl+Q Quit. With the infrared keyboard attached, and on a Dana while it has the keys, the Ctrl keys go to the Palm and only F11 and F12 still come back to Frond.
 
 - Applications lists the installed apps, each with Launch, Export and Delete. Double-click launches. Dropping PRC and PDB files on the window installs them.
 - Storage has the card controls below. Display also has Contrast (Palm IIIx and Dana), Sound, Microphone and Rotate (not on the IIIx and Dana). Connections has infrared beaming, Bluetooth, serial, USB HotSync, the Dana's USB port and Wi-Fi, HotSync and Pair with another Frond…, which opens Connections.
