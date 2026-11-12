@@ -16,9 +16,10 @@
 
 enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, right, select, power, tasks, notes,
                                media, music, phone, memo, graffiti, back, legend, stick, action, function,
-                               trigger, bluetooth };
-enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac };
-// Parts of a strip that can be hidden: the TG50's keyboard and its side tab. A device with two
+                               trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
+                               calendarGrid };
+enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350 };
+// Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
 enum class DeviceControlSection { main, keyboard, sideTab, below, around };
@@ -99,6 +100,8 @@ inline DeviceArt deviceArt(const char* name) {
     const auto* profile = deviceProfileNamed5(name);
     return profile ? profile->art : DeviceArt::none;
 }
+// h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
+constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
 inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     // App keys hit their whole pocket; the five-way entries place the direction parts.
     static const DeviceButton tx[] = {
@@ -279,6 +282,99 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     };
     static const DeviceControlProfile zodiacProfile{480,200,zodiac,std::size(zodiac),{0,0,0,0},0,{0,0,0,0},
                                                     DeviceControlStyle::zodiac,0.5f,1,0,0,{0,0,0,0},0,150,320};
+    // Windows Mobile iPAQs. Their strips are authored 480 units wide: 2 units per pixel under a
+    // 240-wide screen, 1 under the iPAQ 210's 480-wide one.
+    // iPAQ 210: a thin black strip of four flat keys (Calendar, Start, OK, Messaging) split by a
+    // chrome shield five-way, wider than tall, level with the strip's top and hanging about
+    // 40% of its height below it, with a small recessed select key. The shield's art tapers to
+    // big rounded lower corners; its hit area is the navigator rect with a 24-unit corner.
+    static const DeviceButton ipaq210[] = {
+        {keyIdHard1, {2,11,80,70}, "Calendar", DeviceControlIcon::calendarGrid},
+        {keyIdHard2, {85,11,77,70}, "Start", DeviceControlIcon::start},
+        {keyIdHard3, {318,11,77,70}, "OK", DeviceControlIcon::ok},
+        {keyIdHard4, {398,11,80,70}, "Messaging", DeviceControlIcon::inbox},
+        {keyIdUp, {222,16,36,34}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {222,98,36,31}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {168,52,38,44}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {274,52,38,44}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {209,51,62,42}, "Select", DeviceControlIcon::select},
+    };
+    static const DeviceControlProfile ipaq210Profile{480,150,ipaq210,std::size(ipaq210),{166,14,148,117},24,{209,51,62,42},
+                                                     DeviceControlStyle::ipaq210,0.06f,1,6};
+    // iPAQ rx1950 on a 240-wide screen: four round dark keys in silver rings (Calendar, Contacts,
+    // Inbox, Wireless), the outer ones higher, close round a near-square mirror chrome five-way
+    // with a dark glossy centre key. Power is on the top edge.
+    static const DeviceButton rx1950[] = {
+        {keyIdHard1, {9,51,66,66}, "Calendar", DeviceControlIcon::calendar},
+        {keyIdHard2, {80,73,66,66}, "Contacts", DeviceControlIcon::contacts},
+        {keyIdHard3, {334,73,66,66}, "Inbox", DeviceControlIcon::inbox},
+        {keyIdHard4, {405,51,66,66}, "Wireless", DeviceControlIcon::wireless},
+        {keyIdUp, {222,44,36,30}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {222,128,36,30}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {174,84,36,34}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {270,84,36,34}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {214,78,52,46}, "Select", DeviceControlIcon::select},
+    };
+    static const DeviceControlProfile rx1950Profile{480,178,rx1950,std::size(rx1950),{170,40,140,122},40,{214,78,52,46},
+                                                    DeviceControlStyle::rx1950,0.5f,2,14};
+    // iPAQ h4350 on a 240-wide screen, the body scaled to the strip's width: four round keys
+    // (Calendar, Contacts, Inbox, Task switcher), the outer ones higher, round a chrome five-way
+    // in a blue chrome band, then the thumb keyboard on a slate panel: ten columns on a 46-unit
+    // pitch in four rows 44 units apart, each row sagging 24 units in the middle. Hiding the
+    // keyboard leaves the row. The keyboard keys take placeholder ids from the keyboard range
+    // until a board maps them.
+    static const DeviceButton h4350[] = {
+        {keyIdHard1, {48,42,44,44}, "Calendar", DeviceControlIcon::calendar},
+        {keyIdHard2, {120,52,44,44}, "Contacts", DeviceControlIcon::contacts},
+        {keyIdHard3, {316,52,44,44}, "Inbox", DeviceControlIcon::inbox},
+        {keyIdHard4, {388,42,44,44}, "Task switcher", DeviceControlIcon::taskSwitch},
+        {keyIdUp, {228,34,24,18}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {228,90,24,16}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {192,58,22,24}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {266,58,22,24}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {222,54,36,32}, "Select", DeviceControlIcon::select},
+        {h4350Key(0), {17,117,32,30}, "Q", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(1), {63,126,32,30}, "W", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(2), {109,134,32,30}, "E", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(3), {155,138,32,30}, "R", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(4), {201,141,32,30}, "T", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(5), {247,141,32,30}, "Y", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(6), {293,138,32,30}, "U", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(7), {339,134,32,30}, "I", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(8), {385,126,32,30}, "O", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(9), {431,117,32,30}, "P", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(10), {17,161,32,30}, "A", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(11), {63,170,32,30}, "S", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(12), {109,178,32,30}, "D", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(13), {155,182,32,30}, "F", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(14), {201,185,32,30}, "G", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(15), {247,185,32,30}, "H", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(16), {293,182,32,30}, "J", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(17), {339,178,32,30}, "K", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(18), {385,170,32,30}, "L", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(19), {431,161,32,30}, "Backspace", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(20), {17,205,32,30}, "Shift", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(21), {63,214,32,30}, "Z", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(22), {109,222,32,30}, "X", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(23), {155,226,32,30}, "C", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(24), {201,229,32,30}, "V", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(25), {247,229,32,30}, "B", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(26), {293,226,32,30}, "N", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(27), {339,222,32,30}, "M", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(28), {385,214,32,30}, "Exclamation mark", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(29), {431,205,32,30}, "OK", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(30), {17,249,32,30}, "Fn", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(31), {63,258,32,30}, "Tab", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(32), {109,266,32,30}, "Start", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(33), {155,270,32,30}, "Today", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(34), {200,273,80,30}, "Space", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(35), {293,270,32,30}, "Full stop", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(36), {339,266,32,30}, "Comma", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(37), {385,258,32,30}, "Question mark", DeviceControlIcon::legend, 0, kb},
+        {h4350Key(38), {431,249,32,30}, "Apostrophe", DeviceControlIcon::legend, 0, kb},
+    };
+    static const DeviceControlProfile h4350Profile{480,324,h4350,std::size(h4350),{190,32,100,76},26,{222,54,36,32},
+                                                   DeviceControlStyle::h4350,0.5f,2,10,208};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
@@ -288,6 +384,9 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         case DeviceArt::iiix: return iiixProfile;
         case DeviceArt::tg50: return tg50Profile;
         case DeviceArt::zodiac: return zodiacProfile;
+        case DeviceArt::hpIpaq210: return ipaq210Profile;
+        case DeviceArt::hpIpaqRx1950: return rx1950Profile;
+        case DeviceArt::hpIpaqH4350: return h4350Profile;
         default: return empty;
     }
 }

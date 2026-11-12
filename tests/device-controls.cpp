@@ -942,6 +942,145 @@ static void tg50JogBesideKeyboard() {
 }
 
 static void tg50HostKeyboard();
+// Windows Mobile iPAQs: no board yet. Strips 480 units wide under 480- and 240-wide screens:
+// four app keys either side of a five-way, and the h4350's thumb keyboard, which hides.
+static void ipaqArt() {
+    struct Case { const char* name; DeviceArt art; int width, height, unit, units; DeviceControlStyle style; };
+    const Case cases[]={{"hp-ipaq-210",DeviceArt::hpIpaq210,480,640,1,150,DeviceControlStyle::ipaq210},
+                        {"hp-ipaq-rx1950",DeviceArt::hpIpaqRx1950,240,320,2,178,DeviceControlStyle::rx1950},
+                        {"hp-ipaq-h4350",DeviceArt::hpIpaqH4350,240,320,2,324,DeviceControlStyle::h4350}};
+    for(const auto& c:cases) {
+        assert(deviceArt(c.name)==c.art && !deviceSilkscreen(c.art).count);
+        const auto& p=deviceControls(c.art);
+        const int width=c.width,height=c.height,u=c.unit;
+        assert(p.width==480 && p.height==c.units && p.unit==u && p.style==c.style && p.width==width*u);
+        const bool keyboard=c.art==DeviceArt::hpIpaqH4350;
+        assert(p.count==(keyboard ? 48u : 9u) && p.keyboardHeight==(keyboard ? 208 : 0));
+        const KeyId keys[]={keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdUp,keyIdDown,keyIdLeft,keyIdRight,keyIdSelect};
+        for(size_t i=0;i<9;++i)assert(p.buttons[i].key==keys[i] && p.buttons[i].section==DeviceControlSection::main);
+        auto at=[&](float x,float y,const DeviceControlView& view={}) {
+            return deviceControlAt(p,width,height,int(std::floor(x/u)),height+int(std::floor(y/u)),view);
+        };
+        const auto* b=p.buttons;const auto& n=p.navigator;const auto& sel=p.select;
+        // App keys: their middles and the middles of their sides hit; corners of the round ones miss.
+        for(int k=0;k<4;++k) {
+            const auto& r=b[k].bounds;
+            assert(r.x>=0 && r.x+r.w<=p.width && r.y>=0 && r.y+r.h<=p.height-p.keyboardHeight);
+            assert(at(r.x+r.w*0.5f,r.y+r.h*0.5f)==b[k].key);
+            assert(at(r.x+3,r.y+r.h*0.5f)==b[k].key && at(r.x+r.w-4,r.y+r.h*0.5f)==b[k].key);
+            assert(at(r.x+r.w*0.5f,r.y-3)==keyInvalid && at(r.x+r.w*0.5f,r.y+r.h+2)==keyInvalid);
+            if(c.art!=DeviceArt::hpIpaq210)assert(at(r.x+2,r.y+2)==keyInvalid);
+            // Window rectangles stay under the screen and inside its width.
+            const auto rect=deviceButtonRect(p,b[k],width,height);
+            assert(rect.x>=0 && rect.x+rect.w<=width && rect.y>=height);
+            assert(deviceControlAt(p,width,height,rect.x+rect.w/2,rect.y+rect.h/2)==b[k].key);
+            if(k)assert(r.x>b[k-1].bounds.x+b[k-1].bounds.w);
+        }
+        // Two keys each side of the five-way, with gaps to it and between them.
+        assert(b[1].bounds.x+b[1].bounds.w<n.x && b[2].bounds.x>n.x+n.w);
+        for(int k=1;k<4;++k)if(k!=2) {
+            const float gap=(b[k-1].bounds.x+b[k-1].bounds.w+b[k].bounds.x)*0.5f;
+            assert(at(gap,b[k].bounds.y+b[k].bounds.h*0.5f)==keyInvalid);
+        }
+        assert(at((b[1].bounds.x+b[1].bounds.w+n.x)*0.5f,n.y+n.h*0.5f)==keyInvalid);
+        assert(at((n.x+n.w+b[2].bounds.x)*0.5f,n.y+n.h*0.5f)==keyInvalid);
+        // Five-way: select in the middle, the four directions round it, nothing past its corners.
+        const float ncx=n.x+n.w*0.5f,ncy=n.y+n.h*0.5f;
+        assert(at(sel.x+sel.w*0.5f,sel.y+sel.h*0.5f)==keyIdSelect);
+        assert(at(ncx,n.y+5)==keyIdUp && at(ncx,n.y+n.h-6)==keyIdDown);
+        assert(at(n.x+5,ncy)==keyIdLeft && at(n.x+n.w-6,ncy)==keyIdRight);
+        assert(at(n.x+1,n.y+1)==keyInvalid && at(n.x+n.w-2,n.y+n.h-2)==keyInvalid);
+        if(c.art==DeviceArt::hpIpaq210) {
+            // A shield wider than tall, its top level with the key strip's, hanging less than half
+            // its height below the keys, round a small select key in its middle.
+            const int strip=b[0].bounds.y,stripEnd=b[0].bounds.y+b[0].bounds.h;
+            assert(n.w*10>=n.h*12 && n.w*10<=n.h*14 && std::abs(n.y-strip)<=4);
+            assert(n.y+n.h>stripEnd && (n.y+n.h-stripEnd)*2<n.h && p.height-(n.y+n.h)<=20);
+            assert(sel.w*2<n.w && sel.h*2<n.h && std::abs(sel.x+sel.w/2-int(ncx))<=1);
+            assert(std::abs(sel.y+sel.h*0.5f-ncy)<=4);
+            for(int k=0;k<4;++k)assert(b[k].bounds.y==strip && b[k].bounds.h==stripEnd-strip);
+        }
+        if(c.art==DeviceArt::hpIpaqRx1950) {
+            // A near-square pad, the keys close together and to it, the outer ones higher.
+            assert(n.w*100>=n.h*110 && n.w*100<=n.h*120);
+            assert(b[1].bounds.x-(b[0].bounds.x+b[0].bounds.w)<=8 && b[3].bounds.x-(b[2].bounds.x+b[2].bounds.w)<=8);
+            assert(n.x-(b[1].bounds.x+b[1].bounds.w)<=30 && b[2].bounds.x-(n.x+n.w)<=30);
+            assert(b[0].bounds.y<b[1].bounds.y && b[3].bounds.y<b[2].bounds.y);
+        }
+        // Every key and direction has a visible pressed state at 1x, 2x and 3x.
+        for(float scale:{1.f,2.f,3.f}) {
+            const int ph=deviceControlsHeight(p,width);
+            auto* surface=SDL_CreateRGBSurfaceWithFormat(0,int(width*scale),int(ph*scale),32,SDL_PIXELFORMAT_RGBA32);
+            auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+            auto sum=[&](float x,float y) {return brightness(readPixel(surface,int(x/u*scale),int(y/u*scale)));};
+            auto check=[&](KeyId key,float x,float y) {
+                drawDeviceControls(renderer,p,width,0,scale,0);
+                const int idle=sum(x,y);
+                drawDeviceControls(renderer,p,width,0,scale,deviceKeyBit(key));
+                const int held=sum(x,y);
+                if(held>=idle-12)std::fprintf(stderr,"%s key %d at %g,%g: idle %d held %d\n",c.name,key,x,y,idle,held);
+                assert(held<idle-12);
+            };
+            for(size_t i=0;i<p.count;++i) {
+                const auto& r=b[i].bounds;
+                if(deviceNavigatorButton(p,b[i]))continue;
+                // Away from the icon or legend.
+                check(b[i].key,r.x+r.w*0.5f,r.y+r.h*(i<4 ? 0.74f : 0.86f));
+            }
+            check(keyIdSelect,sel.x+sel.w*0.5f,sel.y+sel.h*0.75f);
+            check(keyIdUp,ncx-14,n.y+13);
+            check(keyIdDown,ncx+14,n.y+n.h-13);
+            check(keyIdLeft,n.x+13,ncy+8);
+            check(keyIdRight,n.x+n.w-13,ncy-8);
+            SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+        }
+        if(!keyboard)continue;
+
+        // h4350 keyboard: 39 keys in four rows below the app row, in key id order, with gaps.
+        const int row=p.height-p.keyboardHeight;
+        for(size_t i=9;i<p.count;++i) {
+            const auto& r=b[i].bounds;
+            assert(b[i].section==DeviceControlSection::keyboard && b[i].key==h4350Key(int(i-9)));
+            assert(r.y>=row && r.y+r.h<=p.height && r.x>=0 && r.x+r.w<=p.width);
+            assert(at(r.x+r.w*0.5f,r.y+r.h*0.5f)==b[i].key);
+            assert(at(r.x+r.w*0.5f,r.y-3)==keyInvalid && at(r.x-3,r.y+r.h*0.5f)==keyInvalid);
+        }
+        for(size_t i=0;i<9;++i)assert(b[i].bounds.y+b[i].bounds.h<=row);
+        // Hiding the keyboard takes off exactly its rows: the window loses keyboardHeight units,
+        // the row's keys hit where they did, the keyboard's don't hit at all, and the row draws the
+        // same down to where its lower corners start.
+        const DeviceControlView hidden{false,true,false};
+        assert(deviceControlsHeight(p,width)==p.height/u && deviceControlsHeight(p,width,hidden)==row/u);
+        assert(deviceControlsUnits(p,hidden)==row && deviceControlsWidth(p,width,hidden)==width);
+        for(int y=0;y<row;y+=2)for(int x=0;x<p.width;x+=2)assert(at(x,y)==at(x,y,hidden));
+        for(size_t i=9;i<p.count;++i) {
+            const auto& r=b[i].bounds;
+            for(int y=r.y;y<r.y+r.h;y+=2)for(int x=r.x;x<r.x+r.w;x+=2)assert(at(x,y,hidden)!=b[i].key);
+        }
+        for(float scale:{1.f,2.f}) {
+            const int w=int(width*scale),hShown=int(deviceControlsHeight(p,width)*scale),hHidden=int(deviceControlsHeight(p,width,hidden)*scale);
+            auto* shown=SDL_CreateRGBSurfaceWithFormat(0,w,hShown,32,SDL_PIXELFORMAT_RGBA32);
+            auto* bare=SDL_CreateRGBSurfaceWithFormat(0,w,hShown,32,SDL_PIXELFORMAT_RGBA32);
+            auto* r1=SDL_CreateSoftwareRenderer(shown);auto* r2=SDL_CreateSoftwareRenderer(bare);
+            SDL_SetRenderDrawColor(r2,255,0,255,255);SDL_RenderClear(r2);
+            drawDeviceControls(r1,p,width,0,scale,0);
+            drawDeviceControls(r2,p,width,0,scale,0,hidden);
+            // Nothing drawn below the row when hidden.
+            for(int x=0;x<w;x+=3) {
+                const auto px=readPixel(bare,x,hHidden+1);
+                assert(px.r==255 && px.g==0 && px.b==255);
+            }
+            // Above its rounded corners the row is identical.
+            const int same=int((row-32)/u*scale);
+            for(int y=0;y<same;++y)for(int x=0;x<w;x+=2) {
+                const auto a=readPixel(shown,x,y),d=readPixel(bare,x,y);
+                assert(a.r==d.r && a.g==d.g && a.b==d.b);
+            }
+            SDL_DestroyRenderer(r1);SDL_DestroyRenderer(r2);SDL_FreeSurface(shown);SDL_FreeSurface(bare);
+        }
+    }
+}
+
 static void zireAndM515() {
     // Art comes from the device table, by internal type for built devices and by name for all.
     assert(deviceArt(deviceTypeTX)==DeviceArt::tx && deviceArt(deviceTypeE2)==DeviceArt::e2);
@@ -961,6 +1100,7 @@ static void zireAndM515() {
     tg50JogBesideKeyboard();
     tg50HostKeyboard();
     viewsLeaveOlderDevices();
+    ipaqArt();
 }
 
 static void tg50ScreenBounds() {
@@ -1939,5 +2079,5 @@ int main(int argc,char** argv) {
     tg50RuntimeTab();
     tg50LiveDisplay();
     zodiacControls();
-    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys");
+    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding");
 }

@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <utility>
 #include "device_profile5.h"
 #include "device_configuration.h"
 #include "rom_info5.h"
@@ -28,7 +29,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"palm-m515"};
+    const std::vector<std::string> reserved{"palm-m515", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -105,7 +106,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 9 && names.size() == 11 && types.size() == 10);
+    assert(desktopCount == 9 && names.size() == 14 && types.size() == 10);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -408,8 +409,20 @@ int main() {
         }
         for (int type : {deviceTypeE2, deviceTypeTX, deviceTypeZire72, deviceTypeFrankenE2, deviceTypePV})
             assert(deviceProfileRunnerEligible5(type));
-        for (const char* name : {"palm-iiix", "palm-m515"})
+        for (const char* name : {"palm-iiix", "palm-m515", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"})
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
+        // Windows Mobile iPAQs are reserved names with art and their screen's display mode.
+        const std::pair<const char*, DisplayMode> ipaqs[] = {{"hp-ipaq-210", DisplayMode::mode_480x640},
+                                                             {"hp-ipaq-rx1950", DisplayMode::mode_240x320},
+                                                             {"hp-ipaq-h4350", DisplayMode::mode_240x320}};
+        for (auto [name, mode] : ipaqs) {
+            const auto* p = deviceProfileNamed5(name);
+            assert(p && p->deviceType == deviceTypeInvalid && p->board == DeviceBoard5::none && p->defaultDisplay == mode);
+            assert(!p->frontend.available && p->displayModes == 0 && deviceTypeNamed5(name) == deviceTypeInvalid);
+        }
+        assert(deviceProfileNamed5("hp-ipaq-210")->art == DeviceArt::hpIpaq210 &&
+               deviceProfileNamed5("hp-ipaq-rx1950")->art == DeviceArt::hpIpaqRx1950 &&
+               deviceProfileNamed5("hp-ipaq-h4350")->art == DeviceArt::hpIpaqH4350);
     }
 
     palmIIIx();

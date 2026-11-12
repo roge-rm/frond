@@ -50,6 +50,9 @@ DisplayConfiguration deviceConfigurationDisplayConfigForMode(DisplayMode mode) {
         case DisplayMode::mode_560x160:
             return {.width = 560, .height = 160, .graffitiHeight = 0, .density = 72};
 
+        case DisplayMode::mode_480x640:
+            return {.width = 480, .height = 640, .graffitiHeight = 0, .density = 216};
+
         default:
             return DisplayConfiguration{};
     }

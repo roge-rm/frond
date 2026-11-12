@@ -10,7 +10,7 @@
 enum class DisplayMode {
     mode_160x160 = 1, mode_160x220 = 2, mode_240x240 = 3, mode_240x320 = 4,
     mode_320x320 = 5, mode_320x480 = 6, mode_480x480 = 7, mode_480x720 = 8, mode_560x160 = 9,
-    mode_480x320 = 10
+    mode_480x320 = 10, mode_480x640 = 11
 };
 
 enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k, zodiacNor };
@@ -22,7 +22,7 @@ enum class DeviceDetect5 { cardHeader, norSize, none, romHeader68k };
 // guarded i.MX1 machine behind SocIMX1.
 enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328, imx1Zodiac };
 // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
-enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac };
+enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac, hpIpaq210, hpIpaqRx1950, hpIpaqH4350 };
 // Settings and peripherals a device supports; the desktop and core gate on these.
 // backgroundPanel: the device menu keeps the machine running without drawing and fences its audio.
 // modem: a snap-on Hayes modem for the serial port (the core's own, through PPP to slirp).
@@ -196,6 +196,16 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     {deviceTypeInvalid, "palm-m515", "Palm m515", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::m515, {},
      0, 0, 0, 0, DisplayMode::mode_160x160, 0, false},
+    // Windows Mobile iPAQs: button bar art only, no Windows CE core yet.
+    {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceCohort5::reserved, DeviceSupport5::reserved,
+     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaq210, {},
+     0, 0, 0, 0, DisplayMode::mode_480x640, 0, false},
+    {deviceTypeInvalid, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::reserved, DeviceSupport5::reserved,
+     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqRx1950, {},
+     0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
+    {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceCohort5::reserved, DeviceSupport5::reserved,
+     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqH4350, {},
+     0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
 };
 
 // Firmware variants keep their board's device and session identity.
@@ -539,7 +549,7 @@ inline bool deviceProfileSupportsRam5(int32_t deviceType, uint32_t bytes) {
 
 inline bool deviceProfileSupportsDisplay5(int32_t deviceType, int32_t mode) {
     const auto* profile = deviceProfile5(deviceType);
-    return profile && mode >= 1 && mode <= 10 && (profile->displayModes & (1u << mode));
+    return profile && mode >= 1 && mode <= 11 && (profile->displayModes & (1u << mode));
 }
 
 enum class DeviceFirmwareError5 { none, unknownDevice, norSize, explicitNand, nandSize, norLayout };

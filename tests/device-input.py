@@ -115,7 +115,7 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
                           'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'alphasmart-dana', 'alphasmart-dana-wireless',
-                          'tapwave-zodiac-2', 'palm-m515'])
+                          'tapwave-zodiac-2', 'palm-m515', 'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
                          ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
