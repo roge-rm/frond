@@ -62,18 +62,8 @@ Workloads:
 
 ## Input and menu latency
 
-These tools measure from emulator input enqueue to PCM callback or screen presentation. They leave out the stylus, the sound server, the output device and display scanout. They need debug patches, see below. Two are in `tools/debug/`, the others in git history (see below).
+These tools measure from emulator input enqueue to screen presentation. They leave out the stylus, the sound server, the output device and display scanout. They need debug patches, see below. The patches are in `tools/debug/` or git history (see below).
 
-- Keyboard onset: install `tests/fixtures/frond-latency.pdb` in SunVox, load `A:/frond-latency.sunvox` (Generator straight to Output, short release), stop playback, open the input area so the keyboard sits at y=151, and save a session. Take the input latency patch (`input-latency-trace`) from git history, refresh it against the current source, apply it, then:
-
-```sh
-FROND_LATENCY_PCM=out/keyboard.raw ./out/frond IDLE_SESSION --run-for 27 \
-  --input-replay tests/fixtures/frond-latency.replay > out/keyboard.log 2>&1
-python3 tools/analyze-input-latency.py out/keyboard.log out/keyboard.raw --y 151
-```
-
-  Onset is the first sample of magnitude 100 or more after a quiet baseline, and the analyser stops at the next press. Expect about one audio callback of uncertainty.
-- Guest stages: with `tools/debug/guest-audio-stages.patch` as well and `FROND_GUEST_TRACE=1`, `tools/analyze-guest-latency.py LOG RAW` splits the delay into render and DMA. The patch has addresses specific to one app and firmware, so check them first.
 - Menu response: with the menu response patch (`menu-response-trace`, from git history) and `FROND_MENU_TRACE=1`, start with the SunVox menu closed and run `tests/fixtures/menu-response.replay` for 26 seconds, then `python3 tools/analyze-menu-response.py LOG`. It looks for a new menu framebuffer followed by presentation. Check the screenshots too.
 - `--fast-audio` and `--low-latency-queue` take the same protocol, to compare with the normal path. A shorter queue lowers response time and makes playback more sensitive to host scheduling.
 - Count missing responses as failures. `check-native-audio.py --cpu N` pins the emulation thread, and it records each thread's scheduling policy, priority and CPU time every second so you can see whether a real-time policy was granted. Pair latency with a PCM continuity check.
