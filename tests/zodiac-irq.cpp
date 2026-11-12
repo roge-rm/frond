@@ -235,15 +235,16 @@ void controllerGates() {
     write(4, 0);
     assert(soc.interruptPending().normal == uint64_t(1) << 31);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear);
-    write(8, 1); // Unknown source 1 is ineligible at its reset priority zero.
+    // Source 1 is a known reset-state source now, so source 6, which nothing models, stands in as the unknown one.
+    write(8, 6); // Unknown source 6 is ineligible at its reset priority zero.
     assert(soc.clockStatus() == Imx1BootstrapAccess::ok);
     write(4, 31, Imx1BootstrapAccess::externalInput);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear);
-    write(0x30, 0x10000000); // Source 31 priority 1, source 1 still masked.
+    write(0x30, 0x10000000); // Source 31 priority 1, source 6 still masked.
     assert(soc.interruptLines().irq == Imx1AitcLine::asserted);
     write(4, 31, Imx1BootstrapAccess::externalInput); // A known request does not hide eligible uncertainty.
-    write(0x1c, 2, Imx1BootstrapAccess::externalInput); // FIQ bypasses NIMASK.
-    write(0x0c, 1); write(4, 31);
+    write(0x1c, 1u << 6, Imx1BootstrapAccess::externalInput); // FIQ bypasses NIMASK.
+    write(0x0c, 6); write(4, 31);
     write(0x1c, 1u << 31);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear && soc.interruptLines().fiq == Imx1AitcLine::asserted);
     write(0x54, 0);

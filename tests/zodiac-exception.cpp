@@ -333,6 +333,8 @@ void probeGuards() {
 } // namespace
 int main() {
     unsetenv("FROND_JIT"); cpuSetJitSync(true); setenv("FROND_JIT_HOT", "1", 1);
+    // Compile on this thread, so the block counts include the generated blocks.
+    setenv("FROND_JIT_THREAD", "0", 1);
     software(); guestOperations(); legacyOperations(); conditionalOperations(); otherExceptions(); normalBlocks(); fetchContinuation(); probeGuards();
     std::puts("PASS: ARM920T and ARMv5 SWI entry, F mask, exception banks and return, Exact/Fast parity");
 }
