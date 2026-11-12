@@ -211,6 +211,12 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
                 break;
 
             case 28:
+                // Turning overlay 2 on in planar 4:2:0 underruns its input FIFO (LCSR1 IU2);
+                // Palm OS waits for that, up to 1 s, before reloading FDADR2-4 (0x2009bce4).
+                if ((val & ~lcd->ovl2c1 & 0x80000000UL) && ((lcd->ovl2c2 >> 20) & 7) == 4) {
+                    lcd->lcsr1 |= 1UL << 25;
+                    pxaLcdPrvUpdateInts(lcd);
+                }
                 lcd->ovl2c1 = val;
                 lcd->framebufferDirty = true;
                 break;
@@ -511,6 +517,16 @@ static void pxaLcdPrvOverlayFrame(struct PxaLcd *lcd) {
             pxaLcdPrvOverlayDescriptor(lcd, 4);
         }
     }
+    // An overlay is turned off by clearing OEN, loading FBRx with a branch and waiting for
+    // LCSR1 BSx, so a stopped channel still takes a branch (the Zire 72 Camera waits up to 1 s
+    // for it at 0x2009bdac). It moves no data, so only BSx is set.
+    for (unsigned ch = 1; ch <= 4; ch++) {
+        const uint32_t c1 = ch == 1 ? lcd->ovl1c1 : lcd->ovl2c1;
+        if ((c1 & 0x80000000UL) || !(lcd->fbr[ch] & 1)) continue;
+        lcd->fbr[ch] &= ~1UL;
+        if (lcd->fbr[ch] & 2) lcd->lcsr1 |= 1UL << (16 + ch - 1);
+        lcd->fdadr[ch] = lcd->fbr[ch] & ~0xFUL;
+    }
 }
 
 // Reads one plane of `lines` rows from channel ch's current descriptor. The row stride is the
@@ -528,20 +544,21 @@ static bool pxaLcdPrvOverlayPlane(struct PxaLcd *lcd, unsigned ch, uint32_t byte
 
 static inline uint8_t pxaLcdPrvClamp8(int32_t v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-// ITU-R BT.601 studio range, in 16.16 fixed point.
+// Full-range BT.601 as in JFIF, the mapping the Zire 72's camera (pxa27x_QCI) encodes with,
+// in 16.16 fixed point.
 static inline uint32_t pxaLcdPrvYCbCr(int32_t y, int32_t cb, int32_t cr) {
-    y = (y - 16) * 76309;
+    y <<= 16;
     cb -= 128;
     cr -= 128;
-    const uint8_t r = pxaLcdPrvClamp8((y + 104597 * cr + 32768) >> 16);
-    const uint8_t g = pxaLcdPrvClamp8((y - 25675 * cb - 53279 * cr + 32768) >> 16);
-    const uint8_t b = pxaLcdPrvClamp8((y + 132201 * cb + 32768) >> 16);
+    const uint8_t r = pxaLcdPrvClamp8((y + 91881 * cr + 32768) >> 16);
+    const uint8_t g = pxaLcdPrvClamp8((y - 22554 * cb - 46802 * cr + 32768) >> 16);
+    const uint8_t b = pxaLcdPrvClamp8((y + 116130 * cb + 32768) >> 16);
     return 0xff000000 | (b << 16) | (g << 8) | r;
 }
 
 // Draws one overlay over the finished frame. c1 and c2 are its OVLxC1 and OVLxC2. Overlay 1
-// is RGB on channel 1; overlay 2 is RGB on channel 2 or planar YCbCr on channels 2 (Y), 3 (Cb)
-// and 4 (Cr). Only 16 bpp RGB is drawn.
+// is RGB on channel 1; overlay 2 is RGB or packed YCbCr on channel 2, or planar YCbCr on
+// channels 2 (Y), 3 (Cb) and 4 (Cr). Only 16 bpp RGB is drawn.
 static void pxaLcdPrvDrawOverlay(struct PxaLcd *lcd, uint32_t *frame, unsigned overlay, uint32_t c1,
                                  uint32_t c2) {
     const uint32_t w = (c1 & 0x3FF) + 1, h = ((c1 >> 10) & 0x3FF) + 1;
@@ -556,6 +573,8 @@ static void pxaLcdPrvDrawOverlay(struct PxaLcd *lcd, uint32_t *frame, unsigned o
 
     if (format == 0) {
         if (bpp != 4 || !pxaLcdPrvOverlayPlane(lcd, ch, w * 2, h, y, ys)) return;
+    } else if (format == 1) {
+        if (!pxaLcdPrvOverlayPlane(lcd, 2, w * 4, h, y, ys)) return;
     } else if (format >= 2 && format <= 4) {
         if (!pxaLcdPrvOverlayPlane(lcd, 2, w, h, y, ys) || !pxaLcdPrvOverlayPlane(lcd, 3, cw, chh, cb, cbs) ||
             !pxaLcdPrvOverlayPlane(lcd, 4, cw, chh, cr, crs))
@@ -571,6 +590,10 @@ static void pxaLcdPrvDrawOverlay(struct PxaLcd *lcd, uint32_t *frame, unsigned o
                 uint16_t rgb16;
                 memcpy(&rgb16, &y[row * ys + col * 2], 2);
                 dst[x0 + col] = unpack_rgb16(le16toh(rgb16));
+            } else if (format == 1) {
+                // Packed 4:4:4 words hold Y in bits 7:0, Cb in 15:8 and Cr in 23:16.
+                const uint8_t *p = &y[row * ys + col * 4];
+                dst[x0 + col] = pxaLcdPrvYCbCr(p[0], p[1], p[2]);
             } else {
                 const uint32_t cx = format == 2 ? col : col / 2, cy = format == 4 ? row / 2 : row;
                 dst[x0 + col] = pxaLcdPrvYCbCr(y[row * ys + col], cb[cy * cbs + cx], cr[cy * crs + cx]);
