@@ -1418,7 +1418,7 @@ static void zodiacControls() {
             if(p.buttons[i].icon==DeviceControlIcon::stick) ++sticks; else keys.push_back(p.buttons[i].key);
         }
         std::sort(keys.begin(),keys.end());
-        const std::vector<KeyId> expected{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,
+        const std::vector<KeyId> expected{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdPower,keyIdHome,
                                           keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth};
         assert(keys==expected && sticks==1);
     }
@@ -1441,7 +1441,7 @@ static void zodiacControls() {
         const int width=deviceControlsWidth(p,sw,view),height=sh+deviceControlsHeight(p,sw,view);
         assert(width==(side ? sw+300 : sw));
         if(!side) assert(deviceControlsHeight(p,sw,view)==(sw==480 ? 200 : 134));
-        std::vector<SDL_Rect> shown;
+        std::vector<SDL_Rect> shown;std::vector<bool> shownActions;
         for(size_t i=0;i<p.count;++i) {
             const auto& b=p.buttons[i];if(!deviceControlShown(b,view))continue;
             const auto r=deviceButtonRect(p,b,sw,sh,view);
@@ -1450,8 +1450,10 @@ static void zodiacControls() {
             if(side) assert(r.x+r.w<=150 || r.x>=150+sw); else assert(r.y>=sh);
             // Scaled to 320 wide the smallest keys stay a usable size.
             assert(std::min(r.w,r.h)>=(sw==480 ? 24 : 16));
-            for(const auto& o:shown) assert(!SDL_HasIntersection(&r,&o));
-            shown.push_back(r);
+            // The Action keys' bounds meet at their tips; they hit by quarter of their recess.
+            for(size_t j=0;j<shown.size();++j)
+                assert(!SDL_HasIntersection(&r,&shown[j]) || (b.icon==DeviceControlIcon::action && shownActions[j]));
+            shown.push_back(r);shownActions.push_back(b.icon==DeviceControlIcon::action);
             const int cx=r.x+r.w/2,cy=r.y+r.h/2;
             if(b.icon==DeviceControlIcon::stick) {
                 assert(deviceControlAt(p,sw,sh,cx,cy,view)==keyInvalid && deviceStickGrab(r,cx+0.5f,cy+0.5f));
@@ -1462,31 +1464,40 @@ static void zodiacControls() {
                 assert(std::fabs(half.x)<1e-4f && std::fabs(half.y+0.5f)<1e-4f);
             } else {
                 assert(deviceControlAt(p,sw,sh,cx,cy,view)==b.key);
-                // Round Action keys miss at their corners.
-                if(b.icon==DeviceControlIcon::action) assert(deviceControlAt(p,sw,sh,r.x,r.y,view)==keyInvalid);
+                // Action keys miss at their outer corners, past the recess.
+                if(b.icon==DeviceControlIcon::action) {
+                    // The bounds' corner farthest from the recess's centre, in window pixels.
+                    const float rx=b.shape.x+b.shape.w*0.5f,ry=b.shape.y+b.shape.h*0.5f;
+                    const bool far=std::fabs(b.bounds.x-rx)>std::fabs(b.bounds.x+b.bounds.w-rx);
+                    const bool low=std::fabs(b.bounds.y-ry)<std::fabs(b.bounds.y+b.bounds.h-ry);
+                    assert(deviceControlAt(p,sw,sh,far ? r.x : r.x+r.w-1,low ? r.y+r.h-1 : r.y,view)==keyInvalid);
+                }
             }
         }
         const SDL_Rect stick=deviceStickRect(p,sw,sh,view);
-        assert(shown.size()==10 && stick.w>0);
+        assert(shown.size()==11 && stick.w>0);
         // The middle of the Action diamond is a gap; Bottom is hard1 and Top hard4.
         const auto a=rectOf(keyIdHard1,view,sw,sh),d=rectOf(keyIdHard4,view,sw,sh);
         assert(a.y>d.y && deviceControlAt(p,sw,sh,a.x+a.w/2,(a.y+d.y+d.h)/2,view)==keyInvalid);
         const auto fn=rectOf(keyIdFunction,view,sw,sh),home=rectOf(keyIdHome,view,sw,sh);
         const auto tl=rectOf(keyIdTriggerLeft,view,sw,sh),tr=rectOf(keyIdTriggerRight,view,sw,sh);
-        // Function sits above Home in both arrangements.
-        assert(fn.y+fn.h<=home.y);
+        // Power above Function above Home in one column in both arrangements, power above the stick's middle.
+        const auto power=rectOf(keyIdPower,view,sw,sh);
+        assert(power.y+power.h<=fn.y && fn.y+fn.h<=home.y && std::abs(power.x-fn.x)<=1 && std::abs(home.x-fn.x)<=1);
+        assert(power.y>=tl.y+tl.h && power.y+power.h<=stick.y+stick.h/2);
+        assert(deviceControlAt(p,sw,sh,power.x,power.y,view)==keyInvalid);
         // Bluetooth is round, on the diamond's side, above its middle and under the trigger.
         const auto bt=rectOf(keyIdBluetooth,view,sw,sh),right=rectOf(keyIdHard2,view,sw,sh);
         assert(std::abs(bt.w-bt.h)<=1 && deviceControlAt(p,sw,sh,bt.x,bt.y,view)==keyInvalid);
         assert(bt.y>=tr.y+tr.h && bt.y+bt.h<=right.y && bt.x>=fn.x+fn.w);
         if(side) {
-            // Left panel top to bottom: trigger, stick, Function, Home; the right panel has the
+            // Left panel top to bottom: trigger, power, stick, Function, Home; the right panel has the
             // trigger, Bluetooth and the diamond. The triggers stay at the top of a taller panel and the
             // rest are centred on it.
             const int top=(sh-320)/2;
             assert(tl.y==8 && tr.y==8 && tr.x>=150+sw);
             assert(stick.x+stick.w<=150 && fn.x+fn.w<=150 && home.x+home.w<=150);
-            assert(tl.y+tl.h<=stick.y && stick.y+stick.h<=fn.y && stick.y==52+top && home.y==272+top);
+            assert(tl.y+tl.h<=stick.y && stick.y+stick.h<=fn.y && stick.y==76+top && home.y==258+top);
             for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdBluetooth}) assert(rectOf(k,view,sw,sh).x>=150+sw);
         } else {
             // Under the screen: Function and Home between the stick and the diamond.
@@ -1518,7 +1529,7 @@ static void zodiacControls() {
     auto keyEvent=[&](SDL_Keycode k,bool down) {
         SDL_Event e{};e.type=down ? SDL_KEYDOWN : SDL_KEYUP;e.key.keysym.sym=k;input.HandleEvent(e);
     };
-    for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
+    for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdPower,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
         const auto [x,y]=centre(k,around);
         pointer(SDL_MOUSEBUTTONDOWN,x,y);guest.expect({{k,true}});assert(input.PressedButtons()==deviceKeyBit(k));
         pointer(SDL_MOUSEBUTTONUP,x,y);guest.expect({{k,false}});guest.noPen();
