@@ -166,7 +166,7 @@ class RunningRulesTest : public QObject {
     void zodiacRows() {
         const auto t = traitsFor(named("tapwave-zodiac-2"));
         State s; s.ready = true; s.network = "off";
-        QVERIFY(!t.runs68k && !t.guestServices && !t.cardSlot && t.powerKey);
+        QVERIFY(!t.runs68k && !t.guestServices && t.cardSlot && t.powerKey);
         for (Id id : {Id::Keyboard, Id::Microphone, Id::Network, Id::HardReset}) QVERIFY(!row(t, s, id).enabled);
         for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot}) QVERIFY(row(t, s, id).enabled);
         QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);

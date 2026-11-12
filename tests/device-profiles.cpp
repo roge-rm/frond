@@ -644,7 +644,7 @@ static void zodiac2() {
     assert(!deviceProfileRuns68k5(p->deviceType) && deviceProfileSupportsDesktop5(p->deviceType));
     // Landscape, no silkscreen, and no card slot, Hold or camera until those are done.
     assert(p->frontend.width == 480 && p->frontend.height == 320 && !p->frontend.silkscreenHeight);
-    assert(!p->frontend.sdSlot && !p->frontend.memoryStick && !p->frontend.holdPresent && !p->frontend.camera);
+    assert(p->frontend.sdSlot && !p->frontend.memoryStick && !p->frontend.holdPresent && !p->frontend.camera);
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared &&
            !c.bluetooth && !c.sound && !c.microphone && !c.backgroundPanel);
