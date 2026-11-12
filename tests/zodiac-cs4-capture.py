@@ -47,11 +47,11 @@ def main():
             assert 'Supply one 8-bit --cs4-port0-input value' in run(bootstrap, supplied + bad)
         assert 'Supply one 8-bit --cs4-port0-input value' in run(bootstrap, supplied + '0', supplied + '255')
         assert 'Unknown diagnostic option:' in run(bootstrap, '--cs4-port0-input')
-        for budget in ('0', '100000001', '4294967296'):
-            assert 'Instruction budget must be 1..100000000' in run(bootstrap, budget=budget)
+        for budget in ('0', '1000000001', '4294967296'):
+            assert 'Instruction budget must be 1..1000000000' in run(bootstrap, budget=budget)
         # The maximum parses, but the unsupplied data read stops this fixture promptly.
-        capped = run(bootstrap, supplied + '0', code=2, budget='100000000')
-        assert 'budget=100000000' in capped and 'stop=unsupported-peripheral' in capped
+        capped = run(bootstrap, supplied + '0', code=2, budget='1000000000')
+        assert 'budget=1000000000' in capped and 'stop=unsupported-peripheral' in capped
         normal = run(bootstrap, code=2)
         assert 'cs4-capture ' not in normal and 'DIAGNOSTIC CS4 RECORDER' not in normal
         assert 'stop=unsupported-write' in normal
