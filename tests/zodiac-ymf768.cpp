@@ -1,7 +1,8 @@
 // The Zodiac's YMF768 model. On the model: the register answers the ROM's driver waits for, the sequencer FIFO
 // and its interrupt line, A4's pitch, four-operator channels, a known note sequence against a stored hash, the
 // FM engine running on guest time with or without SSI1 words and in any batching, a save or copy changing
-// nothing in the run, a loaded copy carrying on the same, and bad saved values refused. Through the machine:
+// nothing in the run, a loaded copy carrying on the same, quiet idling giving a full run's samples and state,
+// and bad saved values refused. Through the machine:
 // FM added to SSI1's words the same in Exact and Fast with a state saved mid-note; a guest that takes the
 // FIFO tick as an interrupt on GPIO B15 through the AITC from a wait (idle skips bounded by the next tick)
 // with SSI1 off and then on, alike in Exact, Fast and Exact with stepped idle; a B15 change the GPIO refuses
@@ -241,6 +242,68 @@ static void saveHasNoEffect() {
         assert(l == out[1][i] && r == out[1][i + 1]);
     }
     assert(loaded.engineState() == saved.engineState());
+}
+
+// Quiet idling: once every operator is past ymfm's quiet level the model skips the output calls but still
+// clocks the engine. Against a model that runs every sample in full: the same samples and engine state through
+// silence from the start, notes, long silences (ymfm's 4096 sample sweep included), a four-operator change and
+// a pan write while quiet, a key on with a slow attack and two saves loaded mid-silence; and most silent
+// samples are skipped.
+static Imx1Ymf768 quietVoices(bool skipping) {
+    Imx1Ymf768 y;
+    y.setQuietSkipping(skipping);
+    put(y, 0x0f, 1); put(y, 0x10, 31); put(y, 0x0f, 0);
+    voice(y, 0, 20, 0x08); voice(y, 1, 30, 0x01); voice(y, 8, 16, 0); voice(y, 12, 16, 0);
+    // Release rate 10, so notes end within the script.
+    for (unsigned slot : {0x70u, 0x74u, 0x71u, 0x75u, 0x80u, 0x84u, 0x88u, 0x8cu}) put(y, slot, 0x2a);
+    return y;
+}
+// Plays the script from frame `start` to the end, with the writes due at each frame, saving at `saveAt`.
+static void quietScript(Imx1Ymf768& y, unsigned start, std::vector<int32_t>& out, unsigned saveAt,
+                        std::vector<uint8_t>* saved) {
+    static constexpr unsigned end = 36000;
+    for (unsigned f = start; f < end; ++f) {
+        switch (f) {
+            case 2000: key(y, 0, 60, true); key(y, 1, 64, true); break;
+            case 5000: key(y, 0, 60, false); key(y, 1, 64, false); break;
+            case 14000: put(y, 0xd8, 0x05); put(y, 0xf0, 20); break;  // four operators on 8 and 12, a pan
+            case 16000:  // a slow attack (rate 1) stays quiet for a while after its key on
+                put(y, 0x50, 0x12); put(y, 0x54, 0x12); key(y, 0, 62, true); break;
+            case 20000: key(y, 8, 48, true); break;
+            case 23000: key(y, 0, 62, false); key(y, 8, 48, false); break;
+        }
+        if (saved && f == saveAt) { StateWriter w(*saved); y.state(w); }
+        int32_t l, r;
+        frame(y, l, r);
+        out.push_back(l); out.push_back(r);
+    }
+}
+static void quietIdle() {
+    Imx1Ymf768 full = quietVoices(false), quick = quietVoices(true);
+    std::vector<int32_t> fullOut, quickOut;
+    std::vector<uint8_t> early, late;
+    quietScript(full, 0, fullOut, 0, nullptr);
+    quietScript(quick, 0, quickOut, 1000, &early);
+    assert(fullOut == quickOut && full.engineState() == quick.engineState());
+    assert(full.engineQuietSamples() == 0);
+    fprintf(stderr, "quiet idle: %llu of %llu samples skipped\n", (unsigned long long)quick.engineQuietSamples(),
+            (unsigned long long)quick.engineSamples());
+    assert(quick.engineQuietSamples() > quick.engineSamples() / 2);
+    // Saves in the opening silence and mid-silence after the release, loaded, carry on the same.
+    {
+        Imx1Ymf768 again = quietVoices(true);
+        std::vector<int32_t> unused;
+        quietScript(again, 0, unused, 12000, &late);
+    }
+    for (auto [bytes, at] : {std::pair{&early, 1000u}, std::pair{&late, 12000u}}) {
+        Imx1Ymf768 loaded;
+        StateReader reader(bytes->data(), bytes->size());
+        loaded.state(reader);
+        assert(reader.complete());
+        std::vector<int32_t> out;
+        quietScript(loaded, at, out, 0, nullptr);
+        assert(std::equal(out.begin(), out.end(), fullOut.begin() + 2 * at) && loaded.engineState() == full.engineState());
+    }
 }
 
 // Bad values in a saved engine or model are refused before the engine sees them.
@@ -565,12 +628,13 @@ int main() {
     assert(h == 0xf1879438u && sequence() == h);
     guestTime();
     saveHasNoEffect();
+    quietIdle();
     badState();
     machine();
     guestInterrupts();
     lineRefused();
     olderState();
     std::puts("PASS: YMF768 registers, FIFO and interrupt, A4 pitch, four operators, the stored note sequence, FM on "
-              "guest time, saves change nothing, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
+              "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
               "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states");
 }
