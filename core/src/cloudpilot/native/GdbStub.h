@@ -66,6 +66,10 @@ class GdbStub {
     unique_ptr<char[]> pktBuf;
     size_t pktBufUsed{0};
 
+    // Newer GDBs ask qSupported and want the 68881 registers in 'g' replies; 5.3 asks nothing.
+    bool fullRegisters{false};
+    // With an app set, a new connection waits for the app's first instruction before it answers.
+    bool holdUntilApp{false};
     bool packetFirstChar{true};
     bool packetInEsc{false};
     bool packetInProgress{false};

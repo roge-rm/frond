@@ -137,7 +137,7 @@ def main():
             saver = run(engine, frame(engine + '-saver.ppm'), '--save-state', str(first), '--save-after', str(early),
                         '--save-state', str(second), '--save-after', str(late))
             assert f'state-saved={first} retired={early}' in saver.stdout and f'state-saved={second} retired={late}' in saver.stdout
-            assert re.search(r'^state-build="[0-9a-f]*\+? patches=\d+" core-revision=\d+$', saver.stdout, re.M), saver.stdout[:3000]
+            assert re.search(r'^state-build="[0-9a-f]*\+?" core-revision=\d+$', saver.stdout, re.M), saver.stdout[:3000]
             # Saving drops translated code, so only the Fast block count may differ from the uninterrupted run.
             assert without_blocks(end(saver)) == without_blocks(end(plain))
             if engine == 'exact':
@@ -192,7 +192,7 @@ def main():
         changed = [flag if not flag.startswith('--graphics-raw-mode1') else '--graphics-raw-mode1=700' for flag in scenario]
         refused = run('exact', '--load-state', str(first), code=1, options=changed)
         assert 'load refused: options-mismatch section=IDNT detail=graphicsRawMode1' in refused.stderr, refused.stderr
-        assert re.search(r'state core revision \d+, this build \d+, [0-9a-f]*\+? patches=\d+\)', refused.stderr), refused.stderr
+        assert re.search(r'state core revision \d+, this build \d+, [0-9a-f]*\+?\)', refused.stderr), refused.stderr
         assert 'stop=' not in refused.stdout
         other_rom = bytearray(rom)
         other_rom[0x7c0000] ^= 1

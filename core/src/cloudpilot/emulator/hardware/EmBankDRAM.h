@@ -15,6 +15,7 @@
 #define EmBankDRAM_h
 
 #include "EmCommon.h"
+#include "EmMemory.h"  // EmBusWait
 class EmBankDRAM {
    public:
     static void Initialize(void);
@@ -22,6 +23,7 @@ class EmBankDRAM {
     static void Dispose(void);
 
     static void SetBankHandlers(void);
+    static void SetWaitStates(EmBusWait wait);
 
     static uint32 GetLong(emuptr address);
     static uint32 GetWord(emuptr address);

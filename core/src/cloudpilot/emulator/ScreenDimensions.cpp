@@ -2,6 +2,12 @@
 
 ScreenDimensions::ScreenDimensions(Kind kind) {
     switch (kind) {
+        case screen560x160:
+            width = 560;
+            height = 160;
+            silkscreenHeight = 0;
+            break;
+
         case screen160x160:
             width = height = 160;
             silkscreenHeight = 60;

@@ -1142,3 +1142,13 @@ template int EmMem_strncmp<const char*, emuptr>(const char* dst, emuptr src, siz
 template int EmMem_strncmp<emuptr, char*>(emuptr dst, char* src, size_t len);
 template int EmMem_strncmp<emuptr, const char*>(emuptr dst, const char* src, size_t len);
 template int EmMem_strncmp<emuptr, emuptr>(emuptr dst, emuptr src, size_t len);
+
+// ---------------------------------------------------------------------------
+//		Memory::SetWaitStates
+// ---------------------------------------------------------------------------
+
+void Memory::SetWaitStates(EmBusWait rom, EmBusWait ram) {
+    EmBankROM::SetWaitStates(rom);
+    EmBankDRAM::SetWaitStates(ram);
+    EmBankSRAM::SetWaitStates(ram);
+}

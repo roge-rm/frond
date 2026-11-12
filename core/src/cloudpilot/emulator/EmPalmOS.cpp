@@ -36,7 +36,7 @@
 #define LOG_FUNCTION_CALLS 0
 
 namespace {
-    constexpr int MIN_CYCLES_BETWEEN_EVENTS = 10000;
+    constexpr int MIN_CYCLES_BETWEEN_EVENTS = 20000;  // in 68000 clocks
     constexpr int EVENT_QUEUE_SIZE = 20;
 }  // namespace
 
@@ -48,7 +48,11 @@ EmThreadSafeQueue<PenEvent> EmPalmOS::penEventQueueIncoming{EVENT_QUEUE_SIZE};
 EmThreadSafeQueue<KeyboardEvent> EmPalmOS::keyboardEventQueueIncoming{EVENT_QUEUE_SIZE};
 uint64 EmPalmOS::lastEventPromotedAt{0};
 LocalID EmPalmOS::dbForLaunch{0};
+LocalID EmPalmOS::pendingDelete{0};
+std::optional<EmPalmOS::DeleteResult> EmPalmOS::deleteResult;
 bool EmPalmOS::postNilEvent{false};
+std::function<void()> EmPalmOS::safePointHandler;
+bool EmPalmOS::safePointRequested{false};
 
 /***********************************************************************
  *
@@ -76,6 +80,8 @@ void EmPalmOS::Initialize(void) {
     ClearQueues();
     dbForLaunch = 0;
     postNilEvent = false;
+    pendingDelete = 0;
+    deleteResult.reset();
 
     EmPatchMgr::Initialize();
 }
@@ -103,6 +109,8 @@ void EmPalmOS::Reset(void) {
     ClearQueues();
     dbForLaunch = 0;
     postNilEvent = false;
+    // A delete that finished before the reset keeps its result for the reply.
+    pendingDelete = 0;
 }
 
 /***********************************************************************
@@ -418,6 +426,8 @@ void EmPalmOS::InjectSystemEvent(CallROMType& callROM) {
             return;
         }
 
+        RunSafePoint();
+
         EmAssert(gSession);
 
         if (HasKeyboardEvent()) {
@@ -452,7 +462,12 @@ void EmPalmOS::InjectSystemEvent(CallROMType& callROM) {
 }
 
 void EmPalmOS::InjectUIEvent() {
-    if (dbForLaunch != 0) SysUIAppSwitch(0, dbForLaunch, sysAppLaunchCmdNormalLaunch, 0);
+    // A launch from a safe point gets here in the same EvtGetEvent, so its nil event isn't needed
+    // and would only wake the new app.
+    if (dbForLaunch != 0) {
+        SysUIAppSwitch(0, dbForLaunch, sysAppLaunchCmdNormalLaunch, 0);
+        postNilEvent = false;
+    }
     dbForLaunch = 0;
 }
 
@@ -475,4 +490,131 @@ bool EmPalmOS::LaunchAppByName(const string& name) {
     return true;
 }
 
+EmPalmOS::DeleteResult EmPalmOS::DeleteDatabaseByName(const string& name) {
+    if (!gSystemState.IsUIInitialized() || gSession->IsCpuStopped()) return DeleteResult::notReady;
+
+    const LocalID id = DmFindDatabase(0, name.c_str());
+    if (id == 0) return DeleteResult::missing;
+    if ((id & 0x01) == 0) return DeleteResult::rom;
+
+    UInt16 card = 0;
+    LocalID current = 0;
+    if (SysCurAppDatabase(&card, &current) == 0 && current == id) return DeleteResult::running;
+
+    UInt32 type = 0, currentCreator = 0;
+    DmDatabaseInfo(0, id, 0, 0, 0, 0, 0, 0, 0, 0, 0, &type, 0);
+    if (type == sysFileTApplication && current != 0 &&
+        DmDatabaseInfo(card, current, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, &currentCreator) == 0 &&
+        currentCreator == sysFileCLauncher) {
+        if (pendingDelete != 0) return DeleteResult::failed;
+        // A launch already on its way ends the launcher just the same.
+        pendingDelete = id;
+        deleteResult.reset();
+        if (dbForLaunch == 0) dbForLaunch = current;
+        postNilEvent = true;
+        return DeleteResult::pending;
+    }
+
+    const Err error = DmDeleteDatabase(0, id);
+    if (error == 0) return DeleteResult::deleted;
+    return error == dmErrDatabaseOpen ? DeleteResult::open : error == dmErrROMBased ? DeleteResult::rom : DeleteResult::failed;
+}
+
+std::optional<EmPalmOS::DeleteResult> EmPalmOS::TakeDeleteResult() {
+    auto result = deleteResult;
+    deleteResult.reset();
+    return result;
+}
+
+bool EmPalmOS::DeleteWaiting() { return pendingDelete != 0; }
+
+void EmPalmOS::CancelPendingDelete() {
+    pendingDelete = 0;
+    deleteResult.reset();
+}
+
+void EmPalmOS::BeforeUIAppLaunch(LocalID next) {
+    if (pendingDelete == 0) return;
+    const LocalID id = pendingDelete;
+    pendingDelete = 0;
+    // A tap on its icon got there first.
+    if (next == id) {
+        deleteResult = DeleteResult::running;
+        return;
+    }
+    const Err error = DmDeleteDatabase(0, id);
+    deleteResult = error == 0                    ? DeleteResult::deleted
+                   : error == dmErrDatabaseOpen ? DeleteResult::open
+                   : error == dmErrROMBased     ? DeleteResult::rom
+                                                : DeleteResult::failed;
+}
+
 bool EmPalmOS::HasPendingAppForLaunch() { return dbForLaunch != 0; }
+
+namespace {
+    // The first app on card 0 with this creator, or 0.
+    LocalID FindApp(UInt32 creator) {
+        const UInt16 count = DmNumDatabases(0);
+        for (UInt16 index = 0; index < count; ++index) {
+            const LocalID id = DmGetDatabase(0, index);
+            UInt32 type = 0, appCreator = 0;
+            if (id != 0 && DmDatabaseInfo(0, id, 0, 0, 0, 0, 0, 0, 0, 0, 0, &type, &appCreator) == 0 &&
+                type == sysFileTApplication && appCreator == creator)
+                return id;
+        }
+        return 0;
+    }
+}  // namespace
+
+void EmPalmOS::FinishInstall(const string& name) {
+    if (!gSystemState.IsUIInitialized() || gSession->IsCpuStopped()) return;
+
+    const LocalID installed = DmFindDatabase(0, name.c_str());
+    UInt32 type = 0, creator = 0;
+    if (installed == 0 ||
+        DmDatabaseInfo(0, installed, 0, 0, 0, 0, 0, 0, 0, 0, 0, &type, &creator) != 0)
+        return;
+
+    UInt16 card = 0;
+    LocalID current = 0;
+    UInt32 currentType = 0, currentCreator = 0;
+    if (SysCurAppDatabase(&card, &current) != 0 ||
+        (current != 0 && DmDatabaseInfo(card, current, 0, 0, 0, 0, 0, 0, 0, 0, 0, &currentType,
+                                        &currentCreator) != 0))
+        current = 0;
+
+    // HotSync sends the notify once no app of the user's is running, so the app in front never
+    // gets it while its own instance has its databases open.
+    const LocalID app = type == sysFileTApplication ? installed : FindApp(creator);
+    if (app != 0 && app != current) {
+        UInt32 result = 0;
+        SysAppLaunch(0, app, 0, sysAppLaunchCmdSyncNotify, 0, &result);
+    }
+
+    // The launch runs from EvtGetEvent like LaunchAppByName. Any event already waiting, a tap or
+    // the appStopEvent of a switch under way, goes first and the launcher keeps its list.
+    if (type != sysFileTApplication || currentCreator != sysFileCLauncher || dbForLaunch != 0 ||
+        HasPenEvent() || HasKeyboardEvent() || EvtEventAvail() || EvtSysEventAvail(true))
+        return;
+
+    dbForLaunch = current;
+    postNilEvent = true;
+}
+
+void EmPalmOS::SetSafePointHandler(std::function<void()> handler) {
+    safePointHandler = std::move(handler);
+}
+
+void EmPalmOS::RequestSafePoint() {
+    safePointRequested = true;
+    postNilEvent = true;
+}
+
+void EmPalmOS::RunSafePoint() {
+    if (!safePointRequested || !safePointHandler || gSession->IsNested()) return;
+
+    // The event loop came round, so the nil event that asked for it is done with.
+    safePointRequested = false;
+    postNilEvent = false;
+    safePointHandler();
+}

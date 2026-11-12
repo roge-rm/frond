@@ -38,6 +38,9 @@ class EmSPISlave {
     virtual uint16 DoExchange(uint16 control, uint16 data) = 0;
     virtual void Enable(void);
     virtual void Disable(void);
+
+    // A hardware reset deselects the chip, which drops any command it was shifting in.
+    virtual void Reset(void) {}
 };
 
 #endif  // EmSPISlave_h

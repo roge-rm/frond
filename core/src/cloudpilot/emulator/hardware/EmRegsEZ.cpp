@@ -21,6 +21,8 @@
 #include "EmMemory.h"  // gMemAccessFlags, EmMem_memcpy
 #include "EmRegsEZPrv.h"
 #include "EmSPISlave.h"  // DoExchange
+#include "EmBankROM.h"
+#include "EmBusTiming.h"
 #include "EmSession.h"   // GetDevice
 #include "EmSystemState.h"
 #include "Frame.h"
@@ -497,12 +499,15 @@ void EmRegsEZ::Reset(Bool hardwareReset) {
         fPortDEdge = 0;
         fPortDDataCount = 0;
         pwmActive = false;
+        if (fSPISlaveADC) fSPISlaveADC->Reset();
 
         // React to the new data in the UART registers.
 
         Bool sendTxData = false;
         EmRegsEZ::UARTStateChanged(sendTxData);
     }
+
+    UpdateWaitStates();
 
     UpdateTimer();
     powerOffCached = GetAsleep();
@@ -544,6 +549,7 @@ void EmRegsEZ::Load(SavestateLoader<ChunkType>& savestate) {
     EmRegsEZ::UARTStateChanged(sendTxData);
 
     gMemAccessFlags.fProtect_SRAMSet = (READ_REGISTER(csDSelect) & 0x2000) != 0;
+    UpdateWaitStates();
     markScreenScheduled = true;
     screenMarked = false;
 
@@ -608,6 +614,9 @@ void EmRegsEZ::Dispose(void) {
     gSystemState.onMarkScreenClean.RemoveHandler(onMarkScreenCleanHandle);
     EmHAL::onDayRollover.RemoveHandler(onDayRolloverHandle);
     EmHAL::RemoveCycleConsumer(cycleThunk, this);
+
+    Memory::SetWaitStates(EmBusWait{0, 0, 0, 0}, EmBusWait{0, 0, 0, 0});
+    EmBusTiming::Set(EmBusSteal{}, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -633,8 +642,8 @@ void EmRegsEZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, StdWrite, csDGroupBase);
 
     INSTALL_HANDLER(StdRead, csASelectWrite, csASelect);
-    INSTALL_HANDLER(StdRead, StdWrite, csBSelect);
-    INSTALL_HANDLER(StdRead, StdWrite, csCSelect);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, csBSelect);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, csCSelect);
     INSTALL_HANDLER(StdRead, csDSelectWrite, csDSelect);
 
     INSTALL_HANDLER(StdRead, StdWrite, emuCS);
@@ -725,9 +734,9 @@ void EmRegsEZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanelControl);
     INSTALL_HANDLER(StdRead, StdWrite, lcdPolarity);
     INSTALL_HANDLER(StdRead, StdWrite, lcdACDRate);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdPixelClock);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdClockControl);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshRateAdj);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdPixelClock);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdClockControl);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, lcdRefreshRateAdj);
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanningOffset);
     INSTALL_HANDLER(StdRead, StdWrite, lcdFrameRate);
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdGrayPalette);
@@ -743,8 +752,8 @@ void EmRegsEZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, StdWrite, rtcDay);
     INSTALL_HANDLER(StdRead, StdWrite, rtcDayAlarm);
 
-    INSTALL_HANDLER(StdRead, StdWrite, dramConfig);
-    INSTALL_HANDLER(StdRead, StdWrite, dramControl);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, dramConfig);
+    INSTALL_HANDLER(StdRead, waitStateRegisterWrite, dramControl);
 
     INSTALL_HANDLER(StdRead, StdWrite, emuAddrCompare);
     INSTALL_HANDLER(StdRead, StdWrite, emuAddrMask);
@@ -1468,6 +1477,7 @@ void EmRegsEZ::csASelectWrite(emuptr address, int size, uint32 value) {
     // Do a standard update of the register.
 
     EmRegsEZ::StdWrite(address, size, value);
+    UpdateWaitStates();
 
     // Check to see if the unprotected memory range changed.
 
@@ -1475,6 +1485,65 @@ void EmRegsEZ::csASelectWrite(emuptr address, int size, uint32 value) {
         EmAssert(gSession);
         gSession->ScheduleResetBanks();
     }
+}
+
+// ---------------------------------------------------------------------------
+//		EmRegsEZ::waitStateRegisterWrite
+// ---------------------------------------------------------------------------
+
+void EmRegsEZ::waitStateRegisterWrite(emuptr address, int size, uint32 value) {
+    EmRegsEZ::StdWrite(address, size, value);
+    UpdateWaitStates();
+}
+
+// ---------------------------------------------------------------------------
+//		EmRegsEZ::UpdateWaitStates
+// ---------------------------------------------------------------------------
+// Wait states for CPU bus cycles from the chip selects as the ROM programs them (MC68EZ328
+// manual, sections 4 and 14). The ROM is on CSA. RAM is on CSD: with its DRAM bit set the DRAM
+// controller times it (DRAMC WS1-0, plus one for MSW), otherwise CSD's own WS and BSW. WS 7
+// (external DTACK) has nothing to wait on here and counts as none. On an 8-bit bus a word takes
+// two bus cycles, so it adds a whole second cycle of 4 clocks.
+
+void EmRegsEZ::UpdateWaitStates(void) {
+    auto chipSelect = [](uint16 select) {
+        const uint8 ws = (select >> 4) & 7;
+        const uint8 wait = ws == 7 ? 0 : ws;
+        const bool wide = select & 0x0080;
+        return EmBusWait{wait, uint8(wide ? wait : 4 + 2 * wait), 0, 0};
+    };
+
+    const EmBusWait rom = chipSelect(READ_REGISTER(csASelect));
+    const uint16 csDSelect = READ_REGISTER(csDSelect);
+    EmBusWait ram;
+    if (csDSelect & 0x0200) {
+        const uint16 dramControl = READ_REGISTER(dramControl);
+        const uint8 wait = ((dramControl >> 6) & 3) + ((dramControl >> 5) & 1);
+        ram = EmBusWait{wait, wait, 0, 0};
+    } else {
+        ram = chipSelect(csDSelect);
+    }
+    ram.dram = (csDSelect & 0x0200) != 0;
+
+    Memory::SetWaitStates(rom, ram);
+
+    // LCD DMA and DRAM refresh from the same registers (EmBusTiming.h).
+    // The screen is in RAM (the DRAM chip select) when it sits below the ROM.
+    const emuptr screen = READ_REGISTER(lcdStartAddr);
+    const EmEzBusRegisters bus{READ_REGISTER(pllControl),
+                               READ_REGISTER(lcdScreenWidth),
+                               READ_REGISTER(lcdScreenHeight),
+                               READ_REGISTER(lcdPanelControl),
+                               READ_REGISTER(lcdPixelClock),
+                               READ_REGISTER(lcdClockControl),
+                               READ_REGISTER(lcdRefreshRateAdj),
+                               READ_REGISTER(lcdPanningOffset),
+                               ram.dram != 0 && screen < EmBankROM::GetMemoryStart(),
+                               READ_REGISTER(dramConfig),
+                               READ_REGISTER(dramControl),
+                               ram.dram != 0,
+                               uint32(GetSystemClockFrequency())};
+    EmBusTiming::Set(EmEzBusSteal(bus), gSession ? gSession->GetSystemCycles() : 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1489,6 +1558,7 @@ void EmRegsEZ::csDSelectWrite(emuptr address, int size, uint32 value) {
     // Do a standard update of the register.
 
     EmRegsEZ::StdWrite(address, size, value);
+    UpdateWaitStates();
 
     // Check its new state and update our ram-protect flag.
 
@@ -1617,6 +1687,10 @@ void EmRegsEZ::portXDataWrite(emuptr address, int size, uint32 value) {
     Bool driverStates[kUARTEnd];
     EmHAL::GetLineDriverStates(driverStates);
 
+    // Take a snapshot of the cradle's DTR.
+
+    Bool dtrOn = EmHAL::GetDTR(0);
+
     // Now update the value with a standard write.
 
     StdWrite(address, size, value);
@@ -1632,6 +1706,12 @@ void EmRegsEZ::portXDataWrite(emuptr address, int size, uint32 value) {
     // Respond to any changes in the line driver states.
 
     EmHAL::CompareLineDriverStates(driverStates);
+
+    // DTR is the cradle's line, whichever device the UART is on now.
+
+    if (EmHAL::GetDTR(0) != dtrOn) {
+        EmHAL::DTRChanged(0, kUARTSerial);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,6 +1871,7 @@ void EmRegsEZ::lcdRegisterWrite(emuptr address, int size, uint32 value) {
     EmRegsEZ::StdWrite(address, size, value);
 
     MarkScreenDirty();
+    UpdateWaitStates();
 }
 
 void EmRegsEZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
@@ -1800,6 +1881,7 @@ void EmRegsEZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
     gSystemState.MarkScreenDirty();
     EmHAL::onSystemClockChange.Dispatch();
     powerOffCached = GetAsleep();
+    UpdateWaitStates();
 }
 
 void EmRegsEZ::tmr1RegisterWrite(emuptr address, int size, uint32 value) {
@@ -2539,6 +2621,14 @@ int EmRegsEZ::GetPort(emuptr address) {
 
     EmAssert(false);
     return 0;
+}
+
+void EmRegsEZ::ScaleCycles(uint32 factor) {
+    lastProcessedSystemCycles *= factor;
+    systemCycles = gSession->GetSystemCycles();
+    UpdateTimer();
+    UpdateWaitStates();
+    EmHALHandler::ScaleCycles(factor);
 }
 
 uint32 EmRegsEZ::CyclesToNextInterrupt(uint64 systemCycles) {

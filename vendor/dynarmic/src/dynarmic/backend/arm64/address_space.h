@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include <array>
 #include <map>
+#include <memory>
 #include <optional>
 
 #include <mcl/stdint.hpp>
@@ -45,6 +47,29 @@ public:
 
     void DumpDisassembly() const;
 
+    // Frond: fast dispatch. A direct-mapped table from location descriptor to entry point,
+    // read by the emitted dispatcher and by the indirect branches in blocks, so a jump to a
+    // block that isn't linked doesn't leave JIT code. Only the guest thread fills or clears
+    // it; a block leaves it whenever it leaves block_entries.
+    struct FastDispatchEntry {
+        u64 location_descriptor;
+        CodePtr code_ptr;
+    };
+    static_assert(sizeof(FastDispatchEntry) == 16);
+    static constexpr unsigned fast_dispatch_bits = 12;
+    // Matches EmitFastDispatchIndex: PC bits 1-12 xor bits 13-24 and the T flag. Index bit 0 is
+    // PC bit 1 xor bit 13, so ARM blocks use every slot over 16 KB of code, Thumb over 8 KB.
+    static u32 FastDispatchIndex(u64 location_descriptor) {
+        u32 x = static_cast<u32>(location_descriptor ^ (location_descriptor >> 31));
+        x ^= x >> 12;
+        return (x >> 1) & ((1u << fast_dispatch_bits) - 1);
+    }
+    FastDispatchEntry& FastDispatchSlot(IR::LocationDescriptor descriptor) {
+        return (*fast_dispatch_table)[FastDispatchIndex(descriptor.Value())];
+    }
+    void FillFastDispatch(IR::LocationDescriptor descriptor, CodePtr entry);
+    void ClearFastDispatchTable();
+
 protected:
     virtual EmitConfig GetEmitConfig() = 0;
     virtual void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) = 0;
@@ -63,6 +88,11 @@ protected:
 
     size_t GetRemainingSize();
     EmittedBlockInfo Emit(IR::Block ir_block);
+    // Frond: Emit in two steps, for the compile thread. EmitUnregistered writes and links
+    // the code but leaves it unreachable; Install registers it and links the blocks that
+    // jump to it.
+    EmittedBlockInfo EmitUnregistered(IR::Block ir_block);
+    void Install(IR::LocationDescriptor location, const EmittedBlockInfo& block_info);
     void Link(EmittedBlockInfo& block);
     void LinkBlockLinks(const CodePtr entry_point, const CodePtr target_ptr, const std::vector<BlockRelocation>& block_relocations_list);
     void RelinkForDescriptor(IR::LocationDescriptor target_descriptor, CodePtr target_ptr);
@@ -70,6 +100,8 @@ protected:
     FakeCall FastmemCallback(u64 host_pc);
 
     const size_t code_cache_size;
+    // Frond: ClearCache calls, for A32::Jit::CompileStats. Guest thread only.
+    u64 cache_clears = 0;
     oaknut::CodeBlock mem;
     oaknut::CodeGenerator code;
 
@@ -82,6 +114,12 @@ protected:
 
     ExceptionHandler exception_handler;
     FastmemManager fastmem_manager;
+
+    // Empty slots point at the dispatcher's slow path, so even a false match is safe. Allocated
+    // on its own: making AddressSpace 64 KB bigger changed the arm64 Fast results (cause not
+    // found).
+    std::unique_ptr<std::array<FastDispatchEntry, 1u << fast_dispatch_bits>> fast_dispatch_table;
+    void* fast_dispatch_miss = nullptr;
 
     struct PreludeInfo {
         std::ptrdiff_t end_of_prelude;
@@ -124,6 +162,7 @@ protected:
         void* exclusive_write_memory_128;
 
         void* call_svc;
+        void* interpreter_fallback;
         void* exception_raised;
         void* dc_raised;
         void* ic_raised;

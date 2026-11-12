@@ -21,6 +21,7 @@
 #include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/jitstate_info.h"
 #include "dynarmic/common/atomic.h"
+#include "dynarmic/common/frond_compile_thread.h"
 #include "dynarmic/common/x64_disassemble.h"
 #include "dynarmic/frontend/A32/translate/a32_translate.h"
 #include "dynarmic/interface/A32/a32.h"
@@ -72,6 +73,9 @@ struct Jit::Impl {
     HaltReason Run() {
         ASSERT(!jit_interface->is_executing);
         PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+        if (compile_thread && InstallCompiled(false)) {
+            PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+        }
 
         jit_interface->is_executing = true;
         SCOPE_EXIT {
@@ -194,7 +198,234 @@ private:
     }
 
     CodePtr GetCurrentBlock() {
-        return GetBasicBlock(GetCurrentLocation()).entrypoint;
+        const IR::LocationDescriptor location = GetCurrentLocation();
+        if (const auto block = emitter.GetBasicBlock(location)) {
+            return block->entrypoint;
+        }
+        // Frond: the callbacks can leave new code to the caller for now (they halt the run).
+        const A32::LocationDescriptor a32_location{location};
+        if (!conf.callbacks->ShouldCompile(a32_location.PC(), a32_location.TFlag())) {
+            if (compile_thread && compile_thread->AheadOn()) {
+                compile_thread->QueueCold(location, compiled_fn(), snapshot_fn());
+            }
+            return block_of_code.GetReturnFromRunCodeAddress();
+        }
+        if (compile_thread) {
+            if (const CodePtr entry = CompileOffThread(location)) {
+                return entry;
+            }
+        }
+        return GetBasicBlock(location).entrypoint;
+    }
+
+    using CompileThread = Common::FrondCompileThread<A32EmitX64::EmittedBlock>;
+    static constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
+    // The worker leaves blocks to the guest thread below this, which clears the cache.
+    static constexpr size_t WORKER_MINIMUM_CODESIZE = 256 * 1024;
+
+public:
+    void SetCompileThread(Jit::CompileThread mode) {
+        ASSERT(!jit_interface->is_executing);
+        compile_thread.reset();
+        compile_sync = mode == Jit::CompileThread::Sync;
+        if (mode != Jit::CompileThread::Off) {
+            compile_thread = std::make_unique<CompileThread>([this](CompileThread::Job& job) { CompileJob(job); });
+        }
+    }
+
+    void SetCompileAhead(unsigned depth) {
+        if (compile_thread) {
+            compile_thread->SetAhead(depth);
+        }
+    }
+
+    // Frond: on the guest thread. Queues the block at location and returns the dispatcher's
+    // exit (the callbacks halt the run), or in sync mode compiles it (or waits for it) and returns it.
+    // Null leaves it to be compiled in place.
+    CodePtr CompileOffThread(IR::LocationDescriptor location) {
+        const A32::LocationDescriptor a32_location{location};
+        const u32 pc = a32_location.PC();
+        const bool thumb = a32_location.TFlag();
+        if (auto job = compile_thread->TakeReady(location)) {
+            std::lock_guard lock{code_mutex};
+            if (conf.callbacks->CodeUnchanged(*job->snapshot)) {
+                const auto block = emitter.Install(job->result);
+                compile_thread->NoteInstalled();
+                compile_thread->NoteAheadUsed();
+                QueueAhead(*job, 1);
+                return block.entrypoint;
+            }
+            compile_thread->NoteStale();
+        }
+        if (compile_thread->IsPending(location)) {
+            compile_thread->Want(location);
+            if (!compile_sync) {
+                conf.callbacks->CompileQueued(pc, thumb);
+                return block_of_code.GetReturnFromRunCodeAddress();
+            }
+            // Sync, with an ahead job for it in flight.
+            compile_thread->WaitIdle();
+            InstallCompiled(true);
+            if (const auto block = emitter.GetBasicBlock(location)) {
+                return block->entrypoint;
+            }
+        }
+        if (space_remaining.load(std::memory_order_acquire) < MINIMUM_REMAINING_CODESIZE) {
+            invalidate_entire_cache = true;
+            PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
+        }
+        for (bool whole = compile_thread->Overflowed(location);; whole = true) {
+            auto snapshot = conf.callbacks->SnapshotCode(pc, thumb, whole);
+            if (!snapshot) {
+                return nullptr;
+            }
+            if (compile_sync && !compile_thread->AheadOn()) {
+                compile_thread->CompileHere(location, std::move(snapshot));
+            } else {
+                compile_thread->Push(location, std::move(snapshot));
+                if (!compile_sync) {
+                    conf.callbacks->CompileQueued(pc, thumb);
+                    return block_of_code.GetReturnFromRunCodeAddress();
+                }
+                compile_thread->WaitIdle();
+            }
+            InstallCompiled(true);
+            if (const auto block = emitter.GetBasicBlock(location)) {
+                return block->entrypoint;
+            }
+            if (whole || !compile_thread->Overflowed(location)) {
+                return nullptr;
+            }
+        }
+    }
+
+    // Frond: on the worker, or on the guest thread in sync mode (CompileHere).
+    void CompileJob(CompileThread::Job& job) {
+        if (job.ahead && space_remaining.load(std::memory_order_acquire) < conf.code_cache_size / 4) {
+            job.status = CompileThread::Status::Skipped;
+            compile_thread->NoteHighWater();
+            return;
+        }
+        IR::Block ir_block = Translate(job.location, job.snapshot.get());
+        if (job.snapshot->overflow) {
+            job.status = CompileThread::Status::Overflow;
+            return;
+        }
+        Common::FrondBlockTargets(ir_block, job.targets);
+        std::lock_guard lock{code_mutex};
+        if (job.epoch != compile_thread->Epoch()) {
+            job.status = CompileThread::Status::Cancelled;
+            return;
+        }
+        if (block_of_code.SpaceRemaining() < WORKER_MINIMUM_CODESIZE) {
+            job.status = CompileThread::Status::NoSpace;
+            return;
+        }
+        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+        job.result = emitter.EmitUnregistered(ir_block);
+        job.first_pc = job.result.first_pc;
+        job.last_pc = job.result.last_pc;
+        job.status = CompileThread::Status::Done;
+        space_remaining.store(block_of_code.SpaceRemaining(), std::memory_order_release);
+    }
+
+    // Frond: on the guest thread, between runs (or in sync mode where the block was asked
+    // for). Without wait it gives up if the worker is emitting. True if the cache has to be
+    // cleared first (it ran out of space).
+    bool InstallCompiled(bool wait) {
+        if (!compile_thread->HasDone()) {
+            return false;
+        }
+        std::unique_lock lock{code_mutex, std::defer_lock};
+        if (wait) {
+            lock.lock();
+        } else if (!lock.try_lock()) {
+            return false;
+        }
+        bool clear = false;
+        for (auto& job : compile_thread->TakeDone()) {
+            if (job->status == CompileThread::Status::NoSpace) {
+                clear = true;
+                continue;
+            }
+            if (job->status != CompileThread::Status::Done) {
+                continue;
+            }
+            if (job->ahead && !job->wanted) {
+                if (!emitter.GetBasicBlock(job->location)) {
+                    if (compile_thread->StillValid(*job)) {
+                        QueueAhead(*job, job->depth + 1);
+                    }
+                    compile_thread->KeepReady(std::move(job));
+                }
+                continue;
+            }
+            if (!compile_thread->StillValid(*job) || emitter.GetBasicBlock(job->location) || !conf.callbacks->CodeUnchanged(*job->snapshot)) {
+                compile_thread->NoteStale();
+                continue;
+            }
+            emitter.Install(job->result);
+            compile_thread->NoteInstalled();
+            if (job->ahead) {
+                compile_thread->NoteAheadUsed();
+            }
+            QueueAhead(*job, 1);
+        }
+        lock.unlock();
+        if (clear) {
+            std::unique_lock inval_lock{invalidation_mutex};
+            invalidate_entire_cache = true;
+            HaltExecution(HaltReason::CacheInvalidation);
+        }
+        return clear;
+    }
+
+    s64 TicksRemainingNow() const { return block_of_code.TicksRemainingNow(); }
+
+    Jit::CompileStats GetCompileStats() const {
+        Jit::CompileStats stats = compile_thread ? compile_thread->GetStats() : Jit::CompileStats{};
+        stats.cache_clears = cache_clears;
+        return stats;
+    }
+
+private:
+    // Frond: on the guest thread. Queues the blocks job's block goes to, depth from one asked for.
+    void QueueAhead(const CompileThread::Job& job, unsigned depth) {
+        if (!compile_thread->AheadOn()) {
+            return;
+        }
+        compile_thread->QueueAhead(job.targets, depth, compiled_fn(), snapshot_fn());
+    }
+
+    std::function<bool(IR::LocationDescriptor)> compiled_fn() {
+        return [this](IR::LocationDescriptor location) { return emitter.GetBasicBlock(location).has_value(); };
+    }
+
+    std::function<std::unique_ptr<A32::CodeSnapshot>(IR::LocationDescriptor)> snapshot_fn() {
+        return [this](IR::LocationDescriptor location) {
+            const A32::LocationDescriptor a32_location{location};
+            return conf.callbacks->SnapshotCodeAhead(a32_location.PC(), a32_location.TFlag(), compile_thread->Overflowed(location));
+        };
+    }
+
+    IR::Block Translate(IR::LocationDescriptor descriptor, A32::TranslateCallbacks* tcb) {
+        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets});
+        Optimization::PolyfillPass(ir_block, polyfill_options);
+        Optimization::NamingPass(ir_block);
+        if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
+            Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true, .memory_barriers = conf.check_halt_on_memory_access});
+            Optimization::DeadCodeElimination(ir_block);
+        }
+        if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+            Optimization::A32ConstantMemoryReads(ir_block, conf.callbacks);
+            Optimization::ConstantPropagation(ir_block);
+            Optimization::DeadCodeElimination(ir_block);
+        }
+        Optimization::IdentityRemovalPass(ir_block);
+#ifndef NDEBUG
+        Optimization::VerificationPass(ir_block);
+#endif
+        return ir_block;
     }
 
     CodePtr GetCurrentSingleStep() {
@@ -206,28 +437,17 @@ private:
         if (block)
             return *block;
 
-        constexpr size_t MINIMUM_REMAINING_CODESIZE = 1 * 1024 * 1024;
         if (block_of_code.SpaceRemaining() < MINIMUM_REMAINING_CODESIZE) {
             invalidate_entire_cache = true;
             PerformRequestedCacheInvalidation(HaltReason::CacheInvalidation);
         }
-        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
 
-        IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
-        Optimization::PolyfillPass(ir_block, polyfill_options);
-        Optimization::NamingPass(ir_block);
-        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
-            Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true});
-            Optimization::DeadCodeElimination(ir_block);
-        }
-        if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
-            Optimization::A32ConstantMemoryReads(ir_block, conf.callbacks);
-            Optimization::ConstantPropagation(ir_block);
-            Optimization::DeadCodeElimination(ir_block);
-        }
-        Optimization::IdentityRemovalPass(ir_block);
-        Optimization::VerificationPass(ir_block);
-        return emitter.Emit(ir_block);
+        IR::Block ir_block = Translate(descriptor, conf.callbacks);
+        std::lock_guard lock{code_mutex};
+        block_of_code.EnsureMemoryCommitted(MINIMUM_REMAINING_CODESIZE);
+        const auto block_desc = emitter.Emit(ir_block);
+        space_remaining.store(block_of_code.SpaceRemaining(), std::memory_order_release);
+        return block_desc;
     }
 
     void PerformRequestedCacheInvalidation(HaltReason hr) {
@@ -241,11 +461,21 @@ private:
             }
 
             jit_state.ResetRSB();
+            // Frond: waits for a block the compile thread is emitting.
+            std::lock_guard code_lock{code_mutex};
             if (invalidate_entire_cache) {
+                cache_clears++;
                 block_of_code.ClearCache();
                 emitter.ClearCache();
+                if (compile_thread) {
+                    compile_thread->Cleared();
+                }
+                space_remaining.store(block_of_code.SpaceRemaining(), std::memory_order_release);
             } else {
                 emitter.InvalidateCacheRanges(invalid_cache_ranges);
+                if (compile_thread) {
+                    compile_thread->Invalidated(invalid_cache_ranges);
+                }
             }
             invalid_cache_ranges.clear();
             invalidate_entire_cache = false;
@@ -265,10 +495,22 @@ private:
     bool invalidate_entire_cache = false;
     boost::icl::interval_set<u32> invalid_cache_ranges;
     std::mutex invalidation_mutex;
+
+    // Frond: the code cache, emitter and code space are shared with the compile thread
+    // under code_mutex. space_remaining follows SpaceRemaining for the guest thread.
+    std::mutex code_mutex;
+    std::atomic<size_t> space_remaining{block_of_code.SpaceRemaining()};
+    // Frond: whole cache clears, for GetCompileStats. Guest thread only.
+    u64 cache_clears = 0;
+    bool compile_sync = false;
+    std::unique_ptr<CompileThread> compile_thread;  // last, so its worker stops first
 };
 
 Jit::Jit(UserConfig conf)
-        : impl(std::make_unique<Impl>(this, std::move(conf))) {}
+        : impl(std::make_unique<Impl>(this, std::move(conf))) {
+    // Frond: the decoder tables are built here, so the first compile doesn't stall.
+    PrepareDecoders();
+}
 
 Jit::~Jit() = default;
 
@@ -334,6 +576,22 @@ void Jit::SetFpscr(std::uint32_t value) {
 
 void Jit::ClearExclusiveState() {
     impl->ClearExclusiveState();
+}
+
+void Jit::SetCompileThread(CompileThread mode) {
+    impl->SetCompileThread(mode);
+}
+
+void Jit::SetCompileAhead(unsigned depth) {
+    impl->SetCompileAhead(depth);
+}
+
+Jit::CompileStats Jit::GetCompileStats() const {
+    return impl->GetCompileStats();
+}
+
+std::int64_t Jit::TicksRemainingNow() const {
+    return impl->TicksRemainingNow();
 }
 
 void Jit::DumpDisassembly() const {

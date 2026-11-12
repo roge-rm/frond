@@ -21,16 +21,12 @@ jobs:
             libreadline-dev libcurl4-openssl-dev libslirp-dev mtools gdb-multiarch
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          submodules: true
           persist-credentials: false
       - name: Trust this container checkout
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE/vendor/cloudpilot"
-      - name: Check build tools and independent source reconstruction
-        run: make test-build-tools check-reconstruction check-docs
+      - name: Check build tools and docs
+        run: make test-build-tools check-docs
       - name: Build and run firmware-free core and desktop tests
         run: make -j2 test test-desktop
-      - name: Check prepared source after tests
-        run: make check-reconstruction
       # No release artifacts, firmware, sessions, or test logs are uploaded.

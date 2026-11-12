@@ -19,6 +19,8 @@ namespace {
 
 Debugger gDebugger;
 void* gDebuggerPtr = &gDebugger;
+int gDebuggerActive = 0;
+int gDebuggerWatching = 0;
 
 Debugger::BreakState Debugger::GetBreakState() const { return breakState; }
 
@@ -35,6 +37,12 @@ void Debugger::Reset() {
     breakpoints.clear();
     watchpointsRead.clear();
     watchpointsWrite.clear();
+    UpdateActive();
+}
+
+void Debugger::UpdateActive() {
+    gDebuggerActive = enabled;
+    gDebuggerWatching = enabled && (!watchpointsRead.empty() || !watchpointsWrite.empty());
 }
 
 void Debugger::Enable() {
@@ -42,6 +50,7 @@ void Debugger::Enable() {
 
     romStart = EmHAL::GetROMBaseAddress();
     romSize = EmHAL::GetROMSize();
+    UpdateActive();
 }
 
 void Debugger::ResetBreakMode() { breakMode = BreakMode::all; }
@@ -169,6 +178,7 @@ void Debugger::SetWatchpoint(emuptr address, WatchpointType type, size_t len) {
                 break;
         }
     }
+    UpdateActive();
 }
 
 void Debugger::ClearWatchpoint(emuptr address, WatchpointType type, size_t len) {
@@ -188,6 +198,7 @@ void Debugger::ClearWatchpoint(emuptr address, WatchpointType type, size_t len) 
                 break;
         }
     }
+    UpdateActive();
 }
 
 void Debugger::SetSyscallTrap(uint16 trapWord) { syscallTraps.insert(trapWord); }

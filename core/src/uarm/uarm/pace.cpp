@@ -48,6 +48,11 @@ namespace {
 
     uint32_t pendingStatus = 0;
     uint32_t statePtr;
+
+    // The state before the last instruction that faulted after its opcode fetch.
+    regstruct faultedRegs;
+    struct flag_struct faultedFlags;
+    bool faultedRestorable = false;
     bool priviledged = false;
 
     template <int size>
@@ -249,6 +254,8 @@ uint8_t uae_get8(uint32_t addr) { return pace_get_le<1>(addr); }
 
 uint16_t uae_get16(uint32_t addr) {
     if (!fsr && addr & 0x01) {
+        lastAddr = addr;
+        wasWrite = false;
         fsr = 10;
         return 0;
     }
@@ -276,6 +283,8 @@ void uae_put8(uint32_t addr, uint8_t value) { pace_put_le<1>(addr, value); };
 
 void uae_put16(uint32_t addr, uint16_t value) {
     if (!fsr && addr & 0x01) {
+        lastAddr = addr;
+        wasWrite = true;
         fsr = 1;
         return;
     }
@@ -614,6 +623,20 @@ void paceSetAreg(uint8_t index, uint32_t value) { m68k_areg(regs, index) = value
 
 void paceSetPriviledged(bool _priviledged) { priviledged = _priviledged; }
 
+PaceDebugState paceDebugState() {
+    PaceDebugState result{};
+    for (unsigned i = 0; i < 8; ++i) {
+        result.d[i] = m68k_dreg(regs, i);
+        result.a[i] = m68k_areg(regs, i);
+    }
+    result.pc = regs.pc;
+    result.statePtr = statePtr;
+    // Compose lazy flags without changing regs.sr or the memory fault latch.
+    result.sr = (regs.sr & 0xff00) | (GET_XFLG << 4) | (GET_NFLG << 3) |
+                (GET_ZFLG << 2) | (GET_VFLG << 1) | GET_CFLG;
+    return result;
+}
+
 enum paceStatus paceExecute() {
     fsr = 0;
     pendingStatus = pace_status_ok;
@@ -621,9 +644,15 @@ enum paceStatus paceExecute() {
     uint16_t opcode = uae_get16(regs.pc);
     regs.lastOpcode = opcode;
 
-    if (fsr != 0) return pace_status_memory_fault;
+    if (fsr != 0) {
+        faultedRestorable = false;
+        return pace_status_memory_fault;
+    }
 
     // fprintf(stderr, "execute m68k opcode %#06x at %#010x\n", opcode, regs.pc);
+
+    const regstruct before = regs;
+    const struct flag_struct beforeFlags = regflags;
 
 #ifdef __EMSCRIPTEN__
     ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
@@ -634,8 +663,25 @@ enum paceStatus paceExecute() {
     //    fprintf(stderr, "a7 now %#010x, top of stack is %#010x\n", m68k_areg(regs, 7),
     //            uae_get32(m68k_areg(regs, 7)));
 
-    return fsr == 0 ? static_cast<enum paceStatus>(pendingStatus) : pace_status_memory_fault;
+    if (fsr == 0) return static_cast<enum paceStatus>(pendingStatus);
+
+    faultedRegs = before;
+    faultedFlags = beforeFlags;
+    faultedRestorable = true;
+    return pace_status_memory_fault;
 }
+
+bool paceRestoreFaultedInstruction() {
+    if (!faultedRestorable) return false;
+
+    regs = faultedRegs;
+    regflags = faultedFlags;
+    faultedRestorable = false;
+    fsr = 0;
+    return true;
+}
+
+uint32_t paceGetStatePtr() { return statePtr; }
 
 template <typename T>
 void paceSave(T& savestate) {

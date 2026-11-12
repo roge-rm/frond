@@ -70,6 +70,7 @@ static EmAddressBank gAddressBank = {EmBankRegs::GetLong,
                                      NULL,
                                      NULL};
 
+EmEvent<> EmBankRegs::onBeforeDispose;
 EmRegsList EmBankRegs::fgSubBanks;
 EmRegsList EmBankRegs::fgDisabledSubBanks;
 
@@ -186,6 +187,7 @@ void EmBankRegs::Load(SavestateLoader<ChunkType>& loader) {
  ***********************************************************************/
 
 void EmBankRegs::Dispose(void) {
+    onBeforeDispose.Dispatch();
     EmRegsList::iterator iter = fgSubBanks.begin();
     while (iter != fgSubBanks.end()) {
         (*iter)->Dispose();

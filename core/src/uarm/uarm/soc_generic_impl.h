@@ -6,6 +6,7 @@
 // clang-format on
 
 #include "CPU.h"
+#include "Defer.h"
 #include "MMU.h"
 #include "MPU.h"
 #include "SoC.h"
@@ -35,7 +36,7 @@ bool SocGeneric<T>::RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
         RunUntil<SLOW_PATH_REASON_PACE_SYSCALL_BREAK, false>(maxCycles, cyclesPerSecond);
     cpuSetBreakPaceSyscall(cpu, 0);
 
-    injectedTimeNsec += (cycles * 1000000) / (cyclesPerSecond / 1000);
+    this->AccountInjectedCycles(cycles, cyclesPerSecond);
 
     if ((cpuGetSlowPathReason(cpu) & SLOW_PATH_REASON_PACE_SYSCALL_BREAK) == 0) return false;
 
@@ -44,38 +45,68 @@ bool SocGeneric<T>::RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
     return true;
 }
 
+#ifndef __EMSCRIPTEN__
+template <class T>
+bool SocGeneric<T>::RunToNativePc(uint32_t first, uint32_t second, uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!first || !maxCycles || cyclesPerSecond < 1000 || maxCycles > 50000000 ||
+        !cpuSetNativePcBreak(this->cpu, first, second)) return false;
+    paceBreakSyscall = 0;
+    Defer clear([&] { cpuSetNativePcBreak(this->cpu, 0, 0); });
+    const uint64_t cycles = RunUntil<SLOW_PATH_REASON_NATIVE_PC, false>(maxCycles, cyclesPerSecond);
+    this->AccountInjectedCycles(cycles, cyclesPerSecond);
+    return cpuGetSlowPathReason(this->cpu) & SLOW_PATH_REASON_NATIVE_PC;
+}
+
+#endif
+
 template <class T>
 bool SocGeneric<T>::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     auto cpu = this->cpu;
 
     const uint64_t cycles =
-        RunUntil<SLOW_PATH_REASON_INJECTED_CALL_DONE, true>(maxCycles, cyclesPerSecond);
+        RunUntil<SLOW_PATH_REASON_INJECTED_CALL_DONE | SLOW_PATH_REASON_NATIVE_FAULT, true>(maxCycles, cyclesPerSecond);
 
-    injectedTimeNsec += (cycles * 1000000) / (cyclesPerSecond / 1000);
+    this->AccountInjectedCycles(cycles, cyclesPerSecond);
 
     return cpuGetSlowPathReason(cpu) & SLOW_PATH_REASON_INJECTED_CALL_DONE;
 }
 
 template <class T>
 void SocGeneric<T>::Reset() {
+    this->BeforeStateReplacement();
+    this->StateReplaced();
+    paceBreakSyscall = 0;
     SoC::Reset();
 
+#ifndef __EMSCRIPTEN__
+    const auto networkMode = std::string(networkSimulation.GetModeName());
+#endif
+    const bool keyboardAttached = KeyboardAttached();
     const bool pcmOutputEnabled = pcmEnabled;
     const bool cardInserted = this->cardInserted;
     const uint64_t accumulatedTime = scheduler->GetTime();
 
     pcmSuspended = false;
 
+    static_cast<T&>(*this).OnBeforeReset();
     SavestateLoader<ChunkType> loader;
-    loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), static_cast<T&>(*this));
+    if (!loader.Load(powerOnState->GetBuffer(), powerOnState->GetSize(), static_cast<T&>(*this)))
+        ERR("failed to restore power-on state");
 
+#ifndef __EMSCRIPTEN__
+    networkSimulation.SetMode(networkMode);
+    networkSimulation.Reset();
+#endif
+    AttachKeyboard(keyboardAttached);
     if (cardInserted) SdInsert();
 
     SetPcmOutputEnabled(pcmOutputEnabled);
 
-    if (jammedKey != keyInvalid && releaseJammedKeyAt > accumulatedTime) {
+    if (jammedKey != keyInvalid && releaseJammedKeyAt > accumulatedTime && jammedKeyAt == accumulatedTime) {
         JamKey(jammedKey, (releaseJammedKeyAt - accumulatedTime) / 1_msec);
-    } else {
+    } else if (jammedKey != keyInvalid) {
+        // A reset during a hold (a hard reset's power) lets the key go.
+        static_cast<T&>(*this).OnEngageKey(jammedKey, false);
         jammedKey = keyInvalid;
     }
 
@@ -93,33 +124,56 @@ void SocGeneric<T>::DumpMMU() {
 
 template <class T>
 bool SocGeneric<T>::Save() {
+    Defer discard([&] { this->DiscardMemoryStickSaveImage(); });
+    if (GetDeviceType()==deviceTypeTG50) savestate->Reset();
     return savestate->Save(*this);
 }
 
 template <class T>
 bool SocGeneric<T>::Load(size_t savestateSize, void* savestateData) {
     if (savestateSize == 0 || !savestateData) return true;
+    // Host input sits outside the savestate; a refused load puts it back too.
+    SoC::InputCheckpoint input(*this);
 
     Savestate<ChunkType> savestate;
     SavestateLoader<ChunkType> loader;
 
-    savestate.Save(*this);
+    // A failed probe never reaches the real controller Save callback.
+    {
+        Defer discard([&] { this->DiscardMemoryStickSaveImage(); });
+        if (!savestate.Save(*this)) return false;
+    }
+    if (!this->RestoringCheckpoint()) {
+        jammedKey = keyInvalid;
+        releaseJammedKeyAt = 0;
+    }
+    this->BeforeStateReplacement();
 
     if (!loader.Load(savestateData, savestateSize, *this)) {
-        if (!loader.Load(savestate.GetBuffer(), savestate.GetSize(), *this))
-            ERR("failed to restore initial state after load failure");
+        // Restore as a checkpoint, so scheduler phases, the keypad, queued host input
+        // and attached serial clients are left as they were before this call.
+        bool restored = false;
+        this->StateReplacementRefused(
+            [&] { restored = input.Restore(savestate.GetSize(), savestate.GetBuffer()); });
+        if (!restored) ERR("failed to restore initial state after load failure");
 
         return false;
     }
 
+    this->StateReplaced();
     return true;
 }
 
 template <class T>
 void SocGeneric<T>::Load(SavestateLoader<ChunkType>& loader) {
+    // The cached injection boundary belongs to the previous CPU execution state.
+    paceBreakSyscall = 0;
     cpuLoad(cpu, loader);
     scheduler->Load(loader);
     systemStateLoad(systemState, loader);
+#ifndef __EMSCRIPTEN__
+    networkSimulation.Load(loader);
+#endif
 
     uint32_t version;
     Chunk* chunk = loader.GetChunkOrFail(ChunkType::socGeneric, SOC_GENERIC_SAVESTATE_VERSION,
@@ -138,6 +192,9 @@ void SocGeneric<T>::Save(U& savestate) {
     cpuSave(cpu, savestate);
     scheduler->Save(savestate);
     systemStateSave(systemState, savestate);
+#ifndef __EMSCRIPTEN__
+    networkSimulation.Save(savestate);
+#endif
 
     auto* chunk = savestate.GetChunk(ChunkType::socGeneric, SOC_GENERIC_SAVESTATE_VERSION);
     if (!chunk) ERR("unable to allocate chunk");
@@ -166,15 +223,19 @@ void SocGeneric<T>::DoSaveLoad(U& chunkHelper, uint32_t version) {
 template <class T>
 template <unsigned int breakReason, bool injected>
 uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!cyclesPerSecond) return 0;
     auto cpu = this->cpu;
     Scheduler<T>* scheduler = this->scheduler.get();
 
+    const uint64_t previousBudget = runningCyclesPerSecond;
+    runningCyclesPerSecond = cyclesPerSecond;
+    Defer restoreBudget([&] { runningCyclesPerSecond = previousBudget; });
     uint64_t cycles = 0;
 
     while (cycles < maxCycles) {
         uint64_t cyclesToAdvance = scheduler->CyclesToNextUpdate(cyclesPerSecond);
 
-        if (cyclesToAdvance + cycles > maxCycles) cyclesToAdvance = maxCycles - cycles;
+        if (cyclesToAdvance > maxCycles - cycles) cyclesToAdvance = maxCycles - cycles;
 
         uint64_t cyclesAdvanced;
 
@@ -238,6 +299,7 @@ void SocGeneric<T>::PumpKeyEventQueue() {
     }
 
     if (keyEventQueue->GetSize() > 0) {
+        if (HoldKeyEvent(keyEventQueue->Peek())) return;
         KeyEvent evt(keyEventQueue->Pop());
         if (evt.key == jammedKey) return;
 
@@ -252,8 +314,11 @@ uint64_t SocGeneric<T>::GetTime() {
 
 template <class T>
 void SocGeneric<T>::JamKey(enum KeyId key, uint32_t durationMsec) {
+    // A new hold lets go of the one it replaces, so no line stays pressed.
+    if (jammedKey != keyInvalid && jammedKey != key) static_cast<T&>(*this).OnEngageKey(jammedKey, false);
     jammedKey = key;
-    releaseJammedKeyAt = scheduler->GetTime() + durationMsec * 1_msec;
+    jammedKeyAt = scheduler->GetTime();
+    releaseJammedKeyAt = jammedKeyAt + durationMsec * 1_msec;
 
     static_cast<T&>(*this).OnEngageKey(jammedKey, true);
 }

@@ -36,7 +36,9 @@ bool TranslatorVisitor::arm_LDC(Cond cond, bool p, bool u, bool d, bool w, Reg n
     const bool two = cond == Cond::NV;
 
     if (two || ArmConditionPassed(cond)) {
-        const u32 imm32 = imm8.ZeroExtend() << 2;
+        // Frond: coprocessors in coprocessor_unscaled_offsets take imm8 as a byte offset.
+        const bool unscaled = (options.coprocessor_unscaled_offsets >> coproc_no) & 1;
+        const u32 imm32 = imm8.ZeroExtend() << (unscaled ? 0 : 2);
         const bool index = p;
         const bool add = u;
         const bool wback = w;
@@ -147,7 +149,9 @@ bool TranslatorVisitor::arm_STC(Cond cond, bool p, bool u, bool d, bool w, Reg n
     const bool two = cond == Cond::NV;
 
     if (two || ArmConditionPassed(cond)) {
-        const u32 imm32 = imm8.ZeroExtend() << 2;
+        // Frond: coprocessors in coprocessor_unscaled_offsets take imm8 as a byte offset.
+        const bool unscaled = (options.coprocessor_unscaled_offsets >> coproc_no) & 1;
+        const u32 imm32 = imm8.ZeroExtend() << (unscaled ? 0 : 2);
         const bool index = p;
         const bool add = u;
         const bool wback = w;

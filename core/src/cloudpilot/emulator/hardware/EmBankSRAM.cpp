@@ -372,3 +372,18 @@ void EmBankSRAM::ProtectedAccess(emuptr address, long size, Bool forRead) {
     EmAssert(gCPU68K);
     gCPU68K->BusError(address, size, forRead);
 }
+
+// ---------------------------------------------------------------------------
+//		EmBankSRAM::SetWaitStates
+// ---------------------------------------------------------------------------
+
+void EmBankSRAM::SetWaitStates(EmBusWait wait) {
+    gAddressBank.waitByte = wait.byte;
+    gAddressBank.waitWord = wait.word;
+    gAddressBank.sdram = wait.sdram;
+    gAddressBank.busTag = 1 | (uint32(wait.dram) << 16);
+    gAddressBankDisabled.waitByte = wait.byte;
+    gAddressBankDisabled.waitWord = wait.word;
+    gAddressBankDisabled.sdram = wait.sdram;
+    gAddressBankDisabled.busTag = 1 | (uint32(wait.dram) << 16);
+}

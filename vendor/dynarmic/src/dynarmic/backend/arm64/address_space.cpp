@@ -74,6 +74,12 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
     UnprotectCodeMemory();
 
     for (const auto& descriptor : descriptors) {
+        if (fast_dispatch_table) {
+            if (FastDispatchEntry& slot = FastDispatchSlot(descriptor); slot.location_descriptor == descriptor.Value()) {
+                slot = {~u64(0), static_cast<CodePtr>(fast_dispatch_miss)};
+            }
+        }
+
         const auto iter = block_entries.find(descriptor);
         if (iter == block_entries.end()) {
             continue;
@@ -90,11 +96,27 @@ void AddressSpace::InvalidateBasicBlocks(const tsl::robin_set<IR::LocationDescri
 }
 
 void AddressSpace::ClearCache() {
+    cache_clears++;
+    ClearFastDispatchTable();
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();
     block_references.clear();
     code.set_offset(prelude_info.end_of_prelude);
+}
+
+// Only entries in block_entries go in: never the dispatcher, which a cold block's lookup returns.
+void AddressSpace::FillFastDispatch(IR::LocationDescriptor descriptor, CodePtr entry) {
+    if (fast_dispatch_table && entry != prelude_info.return_to_dispatcher) {
+        FastDispatchSlot(descriptor) = {descriptor.Value(), entry};
+    }
+}
+
+void AddressSpace::ClearFastDispatchTable() {
+    if (!fast_dispatch_table) {
+        return;
+    }
+    fast_dispatch_table->fill({~u64(0), static_cast<CodePtr>(fast_dispatch_miss)});
 }
 
 void AddressSpace::DumpDisassembly() const {
@@ -129,6 +151,41 @@ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
     RegisterNewBasicBlock(block, block_info);
 
     return block_info;
+}
+
+EmittedBlockInfo AddressSpace::EmitUnregistered(IR::Block block) {
+    UnprotectCodeMemory();
+
+    EmittedBlockInfo block_info = EmitArm64(code, std::move(block), GetEmitConfig(), fastmem_manager);
+    Link(block_info);
+
+    mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
+    ProtectCodeMemory();
+
+    return block_info;
+}
+
+void AddressSpace::Install(IR::LocationDescriptor location, const EmittedBlockInfo& block_info) {
+    UnprotectCodeMemory();
+
+    ASSERT(block_entries.insert({location, block_info.entry_point}).second);
+    ASSERT(reverse_block_entries.insert({block_info.entry_point, location}).second);
+    ASSERT(block_infos.insert({block_info.entry_point, block_info}).second);
+
+    // Outgoing links were resolved when the block was emitted; targets may have been dropped
+    // or installed since, so link them again against what is there now.
+    for (const auto& [target_descriptor, list] : block_info.block_relocations) {
+        block_references[target_descriptor].insert(block_info.entry_point);
+        LinkBlockLinks(block_info.entry_point, Get(target_descriptor), list);
+    }
+    mem.invalidate(reinterpret_cast<u32*>(block_info.entry_point), block_info.size);
+
+    RelinkForDescriptor(location, block_info.entry_point);
+
+    ProtectCodeMemory();
+
+    // The rest of the code was written and its cache lines cleaned on the compile thread.
+    __asm__ volatile("isb" ::: "memory");
 }
 
 void AddressSpace::Link(EmittedBlockInfo& block_info) {
@@ -238,6 +295,9 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
             break;
         case LinkTarget::CallSVC:
             c.BL(prelude_info.call_svc);
+            break;
+        case LinkTarget::InterpreterFallback:
+            c.BL(prelude_info.interpreter_fallback);
             break;
         case LinkTarget::ExceptionRaised:
             c.BL(prelude_info.exception_raised);

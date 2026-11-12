@@ -30,6 +30,21 @@ enum PxaGpioState pxaGpioGetState(struct PxaGpio* gpio, uint_fast8_t gpioNum);
 void pxaGpioSetState(struct PxaGpio* gpio, uint_fast8_t gpioNum,
                      bool on);  // we can only set value (and only of input pins), not direction
 
+// Power-manager input sensing is independent of GPIO edge IRQs.
+void pxaGpioSetInputObserver(PxaGpio* gpio, GpioChangedNotifF callback, void* context);
+bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin);
+bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin);
+unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin);
+void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels);
+void pxaGpioReleaseSleepOutputs(PxaGpio* gpio);
+void pxaGpioSleepReset(PxaGpio* gpio);
+
+// Independent of keypad direction callbacks; observes guest register writes.
+void pxaGpioSetConfigurationObserver(PxaGpio* gpio,void (*notify)(void*),void* context);
+
+// Observes committed GPIO and sleep-output changes, independently of transport callbacks.
+void pxaGpioSetPeripheralObserver(PxaGpio* gpio, void (*notify)(void*), void* context);
+
 // only for output pins!
 void pxaGpioSetNotif(struct PxaGpio* gpio, uint_fast8_t gpioNum, GpioChangedNotifF notifF,
                      void* userData);  // one per pin. set ot NULL to disable

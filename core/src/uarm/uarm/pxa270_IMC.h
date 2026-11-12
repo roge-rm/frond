@@ -9,4 +9,9 @@ struct PxaImc;
 
 struct PxaImc* pxaImcInit(struct ArmMem* physMem);
 
+#include "savestate/ChunkTypeUarm.h"
+template <typename T> class SavestateLoader;
+template <typename T> void pxaImcSave(PxaImc *state, T &savestate);
+void pxaImcLoad(PxaImc *state, SavestateLoader<ChunkType> &loader);
+
 #endif

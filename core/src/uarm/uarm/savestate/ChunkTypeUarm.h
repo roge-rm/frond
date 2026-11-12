@@ -24,6 +24,22 @@ enum class ChunkType : uint32_t {
     pxa255udc = 0x0130,
     wm9712L = 0x0140,
     bcm2035 = 0x0150,
+    pxa270imc = 0x0160,
+    pxa270kpc = 0x0170,
+    pxa270udc = 0x0180,
+    pxa270wmmx = 0x0190,
+    palmTx = 0x01a0,
+    sonyTg50Uc = 0x01b0,
+    sonyTg50Touch = 0x01c0,
+    sonyTg50Codec = 0x01d0,
+    sonyTg50Power = 0x01e0,
+    sonyTg50Ms = 0x01f0,
+    sonyTg50Board = 0x0200,
+    sonyTg50Audio = 0x0210,
+    sonyTg50MsCard = 0x0220,
+    sonyTg50Configuration = 0x0230,
+    sonyTg50Bluetooth = 0x0240,
+    bluetoothAddress = 0x0250,
 
     pvIc = 0x1000,
     pvTimer = 0x1010,
@@ -44,6 +60,10 @@ enum class ChunkType : uint32_t {
     systemState = 0x10080,
     mpu = 0x10090,
     cp15mpu = 0x100a0,
+    networkSimulation = 0x100b0,
+    irKeyboard = 0x100c0,
+    libertasCF = 0x100d0,
+    xscaleDcache = 0x100e0,
 };
 
 inline ChunkType operator+(ChunkType chunkType, uint32_t index) {

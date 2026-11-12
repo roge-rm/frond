@@ -25,9 +25,10 @@ bool dbListGet(struct SyscallDispatch* sd, DbMetadataList& metadataList) {
     for (uint16_t cardNo = 0; cardNo < numCards; cardNo++)
         numDbsTotal += syscall68k_DmNumDatabases(sd, SC_EXECUTE_FULL, cardNo);
 
-    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 44);
+    const uint32_t scratch = syscall68k_MemPtrNew(sd, SC_EXECUTE_PURE, 42);
     if (scratch == 0) {
         cout << "failed to get DB list: failed to allocate scratch space" << endl;
+        return false;
     }
 
     Defer releaseScratch([=]() { syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, scratch); });
@@ -35,7 +36,7 @@ bool dbListGet(struct SyscallDispatch* sd, DbMetadataList& metadataList) {
     const uint32_t nameP = scratch;
     const uint32_t creatorP = scratch + 32;
     const uint32_t typeP = scratch + 36;
-    const uint32_t attrP = scratch + 44;
+    const uint32_t attrP = scratch + 40;
 
     metadataList.resize(numDbsTotal);
 
@@ -80,7 +81,7 @@ bool dbListGet(struct SyscallDispatch* sd, DbMetadataList& metadataList) {
 
             meta.creator = paceGet32(creatorP);
             meta.type = paceGet32(typeP);
-            meta.attr = paceGet32(attrP);
+            meta.attr = paceGet16(attrP);
 
             i++;
         }

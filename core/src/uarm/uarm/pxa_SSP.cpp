@@ -146,10 +146,15 @@ static bool pxaSspPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
             break;
 
         case 4:
-            if (write)
-                return pxaSspPrvFifoW(ssp, val);
-            else
-                return pxaSspPrvFifoR(ssp, (uint16_t *)buf);
+            if (write) return pxaSspPrvFifoW(ssp, val);
+            {
+                // SSDR is a 32-bit register with the sample in the low 16 bits; the top half
+                // reads as zero.
+                uint16_t sample;
+                pxaSspPrvFifoR(ssp, &sample);
+                val = sample;
+            }
+            break;
 
         default:
             return false;
@@ -223,6 +228,17 @@ bool pxaSspAddClient(struct PxaSsp *ssp, SspClientProcF procF, void *userData) {
         return true;
     }
 
+    return false;
+}
+
+bool pxaSspRemoveClient(struct PxaSsp *ssp, void *userData) {
+    if (!userData) return false;
+    for (unsigned i = 0; i < sizeof(ssp->procF) / sizeof(*ssp->procF); ++i) {
+        if (!ssp->procF[i] || ssp->procD[i] != userData) continue;
+        ssp->procF[i] = nullptr;
+        ssp->procD[i] = nullptr;
+        return true;
+    }
     return false;
 }
 

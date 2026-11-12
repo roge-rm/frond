@@ -2,6 +2,8 @@
 
 #include "ac97dev_WM9712L.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -10,19 +12,21 @@
 #include "cputil.h"
 #include "savestate/savestateAll.h"
 
+// Version 1 adds the ADC model (Zire 72 only); boards without it keep writing version 0.
 #define SAVESTATE_VERSION 0
+#define SAVESTATE_VERSION_ADC 1
 
 enum WM9712REG {
     RESET = 0x00,
     OUT2VOL = 0x02,
     HPVOL = 0x04,
     MONOOUTVOL = 0x06,
-    DACTONECTL = 0x06,
-    PCBEEPIN = 0x08,
-    PHONEVOL = 0x0a,
+    DACTONECTL = 0x08,
+    PCBEEPIN = 0x0a,
+    PHONEVOL = 0x0c,
     MICVOL = 0x0e,
     LENEINVOL = 0x10,
-    AUDAC = 0x12,
+    AUXDACVOL = 0x12,
     SIDETONEVOL = 0x14,
     OUT3VOL = 0x16,
     DACVOL = 0x18,
@@ -37,7 +41,7 @@ enum WM9712REG {
     DACRATE = 0x2c,
     AUXDACRATE = 0x2e,
     ADCRATE = 0x32,
-    SPDIFCLT = 0x3a,
+    SPDIFCTL = 0x3a,
     GPIOCFG = 0x4c,
     GPIOPOLTYP = 0x4e,
     GPIOSTICKY = 0x50,
@@ -72,6 +76,7 @@ struct WM9712L {
     struct PxaGpio *gpio;
     struct PxaAC97 *ac97;
     int8_t penDownPin;
+    int8_t irqPin;
 
     uint16_t digiRegs[3];
     uint16_t addFunc1, vendorTest, addFunc2, pdown1, pdown2, extdCtl, recSel;
@@ -98,6 +103,33 @@ struct WM9712L {
 
     struct AudioQueue *audioQueue;
 
+    // ADC model, on boards with a microphone. Guest-time pacing: adcClock is the guest ns of the
+    // last PCM period, adcPhase the leftover ns*rate below one frame (always < 1e9).
+    bool adcModel;
+    struct GetEmuTime getTime;
+    AudioInputSource input;
+    unsigned inputFences;
+    uint16_t alcCtl, alcNoiseGate;  // 0x60 and 0x62
+    bool adcClockValid;
+    uint64_t adcClock, adcPhase;
+    // ALC: PGA index in 0.75 dB steps (0 is -17.25 dB, 23 is 0 dB, 63 is +30 dB), the output peak
+    // since the last step, frames since the last step and frames since the peak last went over.
+    uint8_t alcGain;
+    uint16_t alcPeak;
+    uint32_t alcElapsed, alcSinceOver;
+
+    template <typename T>
+    void DoSaveLoadAdc(T &chunkHelper) {
+        chunkHelper.Do(typename T::Pack16() << alcCtl << alcNoiseGate)
+            .DoBool(adcClockValid)
+            .Do64(adcClock)
+            .Do64(adcPhase)
+            .Do(typename T::Pack8() << alcGain)
+            .Do16(alcPeak)
+            .Do32(alcElapsed)
+            .Do32(alcSinceOver);
+    }
+
     template <typename T>
     void DoSaveLoad(T &chunkHelper) {
         chunkHelper.DoBuffer16(digiRegs, sizeof(digiRegs) >> 1)
@@ -122,14 +154,35 @@ struct WM9712L {
 };
 
 static void wm9712LprvGpioRecalc(struct WM9712L *wm) {
+    // PRP=01 arms automatic digitiser wake-up on pen down (WM9712L table 26).
+    if (wm->penDown && (wm->digiRegs[1] & 0xc000) == 0x4000)
+        wm->digiRegs[1] |= 0x8000;
+    // GPIO13 is the virtual pen detector. Non-sticky inputs reflect their level;
+    // sticky inputs are latched on a new active pen transition in setPen().
+    constexpr uint16_t pen = 1u << 13;
+    const bool active = wm->penDown == bool(wm->gpioPolTyp & pen);
+    if (!(wm->gpioSticky & pen)) {
+        wm->gpioStatus = (wm->gpioStatus & ~pen) | (active ? pen : 0);
+    }
     if (wm->penDownPin >= 0)
-        pxaGpioSetState(wm->gpio, wm->penDownPin, (wm->gpioSharing & 8) ? false : wm->penDown);
+        pxaGpioSetState(wm->gpio, wm->penDownPin,
+                       !(wm->gpioSharing & 8) && !(wm->gpioCfg & 8) && wm->penDown);
+    if (wm->irqPin >= 0) {
+        const bool enabled = !(wm->gpioSharing & 4) && !(wm->gpioCfg & 4);
+        const bool irq = (wm->gpioStatus & wm->gpioWake) != 0;
+        pxaGpioSetState(wm->gpio, wm->irqPin, enabled && (irq != bool(wm->addFunc1 & 1)));
+    }
 }
 
 static bool wm9712LprvCodecRegR(void *userData, uint32_t regAddr, uint16_t *regValP) {
     struct WM9712L *wm = (struct WM9712L *)userData;
     enum WM9712REG which = (enum WM9712REG)regAddr;
     uint16_t val;
+
+    if (wm->adcModel && (which == ALCCTL || which == ALCNOISEGATE)) {
+        *regValP = which == ALCCTL ? wm->alcCtl : wm->alcNoiseGate;
+        return true;
+    }
 
     switch (which) {
         case RESET:
@@ -185,7 +238,12 @@ static bool wm9712LprvCodecRegR(void *userData, uint32_t regAddr, uint16_t *regV
             break;
 
         case PDOWN2:
-            val = wm->pdown2;
+            // Read-only ready flags follow PR0/PR1/PR3/PR2 (WM9712L table 41).
+            // This model has no analogue settling delay.
+            val = (wm->pdown2 & 0x7f00) |
+                  ((~wm->pdown2 >> 8) & 0x03) |
+                  ((~wm->pdown2 >> 9) & 0x04) |
+                  ((~wm->pdown2 >> 7) & 0x08);
             break;
 
         case EXTDAUDIOID:
@@ -266,6 +324,33 @@ static bool wm9712LprvCodecRegR(void *userData, uint32_t regAddr, uint16_t *regV
             val = 0x4C12;
             break;
 
+        // Registers nothing here models read their WM9712L reset values; writes are dropped.
+        case DACTONECTL:
+            val = 0x0f0f;
+            break;
+
+        case PCBEEPIN:
+        case AUXDACVOL:
+            val = 0xaaa0;
+            break;
+
+        case GENPURPOSE:
+        case DEC3DCTL:
+            val = 0;
+            break;
+
+        case SPDIFCTL:
+            val = 0x2000;
+            break;
+
+        case ALCCTL:
+            val = 0xb032;
+            break;
+
+        case ALCNOISEGATE:
+            val = 0x3e00;
+            break;
+
         default:
             fprintf(stderr, "unknown reg read [0x%04x]\n", (unsigned)regAddr);
             return false;
@@ -281,6 +366,11 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val) 
     enum WM9712REG which = (enum WM9712REG)regAddr;
 
     // fprintf(stderr, "codec wri [0x%04x] -> [0x%04x]\n", (unsigned)val, (unsigned)regAddr);
+
+    if (wm->adcModel && (which == ALCCTL || which == ALCNOISEGATE)) {
+        (which == ALCCTL ? wm->alcCtl : wm->alcNoiseGate) = val;
+        return true;
+    }
 
     switch (which) {
         case OUT2VOL:
@@ -332,7 +422,7 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val) 
             break;
 
         case PDOWN2:
-            wm->pdown2 = val;
+            wm->pdown2 = val & 0x7f00;
             break;
 
         case EXTDAUDIOCTL:
@@ -368,7 +458,8 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val) 
             break;
 
         case GPIOSTA:
-            wm->gpioStatus = val;
+            // Writing zero acknowledges sticky events; writing one does not set them.
+            wm->gpioStatus &= val;
             break;
 
         case GPIOSHARE:
@@ -396,21 +487,27 @@ static bool wm9712LprvCodecRegW(void *userData, uint32_t regAddr, uint16_t val) 
             wm->digiRegs[1] = val;
             break;
 
+        case DACTONECTL:
+        case PCBEEPIN:
+        case AUXDACVOL:
+        case GENPURPOSE:
+        case DEC3DCTL:
+        case SPDIFCTL:
+        case ALCCTL:
+        case ALCNOISEGATE:
+            return true;
+
         default:
             fprintf(stderr, "unknown reg wri [0x%04x] -> [0x%04x]\n", (unsigned)val,
                     (unsigned)regAddr);
             return false;
     }
-    return false;
+    wm9712LprvGpioRecalc(wm);
+    return true;
 }
 
-static bool wm9712LprvUnusedRegR(void *userData, uint32_t regAddr, uint16_t *regValP) {
-    return false;
-}
-
-static bool wm9712LprvUnusedRegW(void *userData, uint32_t regAddr, uint16_t val) { return false; }
-
-struct WM9712L *wm9712LInit(struct PxaAC97 *ac97, struct PxaGpio *gpio, int8_t penDownPin) {
+struct WM9712L *wm9712LInit(struct PxaAC97 *ac97, struct PxaGpio *gpio, int8_t penDownPin,
+                          int8_t irqPin) {
     struct WM9712L *wm = (struct WM9712L *)malloc(sizeof(*wm));
 
     if (!wm) ERR("cannot alloc WM9712L");
@@ -418,6 +515,7 @@ struct WM9712L *wm9712LInit(struct PxaAC97 *ac97, struct PxaGpio *gpio, int8_t p
     memset(wm, 0, sizeof(*wm));
 
     wm->penDownPin = penDownPin;
+    wm->irqPin = irqPin;
     wm->ac97 = ac97;
     wm->gpio = gpio;
 
@@ -448,9 +546,8 @@ struct WM9712L *wm9712LInit(struct PxaAC97 *ac97, struct PxaGpio *gpio, int8_t p
     wm->auxDacRate = 0xbb80;
     wm->adcRate = 0xbb80;
 
+    // Only the primary audio space has a codec; the others get no completion, as before.
     pxaAC97clientAdd(ac97, Ac97PrimaryAudio, wm9712LprvCodecRegR, wm9712LprvCodecRegW, wm);
-    pxaAC97clientAdd(ac97, Ac97SecondaryAudio, wm9712LprvUnusedRegR, wm9712LprvUnusedRegW, wm);
-    pxaAC97clientAdd(ac97, Ac97PrimaryModem, wm9712LprvUnusedRegR, wm9712LprvUnusedRegW, wm);
 
     return wm;
 }
@@ -462,6 +559,168 @@ static void wm9712LprvNewAudioPlaybackSample(struct WM9712L *wm, uint32_t samp) 
 static bool wm9712LprvHaveAudioOutSample(struct WM9712L *wm, uint32_t *sampP) {
     *sampP = 0;
     return true;
+}
+
+// ADC power (WM9712L tables 40-41): PR0 in 0x26 powers the ADCs, 0x24 bits 12 and 11 the left
+// and right ADC. VRA (0x2a bit 0) sets the rate from ADCRATE; without it the model keeps the
+// old one zero sample per PCM period.
+static bool wm9712LprvAdcLeft(const struct WM9712L *wm) { return !(wm->pdown1 & 0x1000); }
+static bool wm9712LprvAdcRight(const struct WM9712L *wm) { return !(wm->pdown1 & 0x0800); }
+static bool wm9712LprvAdcRunning(const struct WM9712L *wm) {
+    return wm->adcModel && !(wm->pdown2 & 0x0100) && (wm->extdCtl & 1) && wm->adcRate &&
+           (wm9712LprvAdcLeft(wm) || wm9712LprvAdcRight(wm));
+}
+// RECSEL 0x1a bits 10:8 and 2:0 pick the left and right record source; 0 is the microphone.
+// Other sources read silence: the Zire has nothing on them.
+static bool wm9712LprvMicLeft(const struct WM9712L *wm) {
+    return wm9712LprvAdcLeft(wm) && !(wm->recSel & 0x0700);
+}
+static bool wm9712LprvMicRight(const struct WM9712L *wm) {
+    return wm9712LprvAdcRight(wm) && !(wm->recSel & 0x0007);
+}
+
+AudioInputDemand wm9712LInputDemand(struct WM9712L *wm) {
+    AudioInputDemand demand;
+    demand.route = AudioInputRoute::internalMic;
+    demand.fenced = wm->inputFences != 0;
+    demand.active = wm9712LprvAdcRunning(wm) && (wm9712LprvMicLeft(wm) || wm9712LprvMicRight(wm));
+    if (demand.active) {
+        demand.rateNumerator = wm->adcRate;
+        demand.rateDenominator = 1;
+    }
+    return demand;
+}
+
+void wm9712LDisarmInput(struct WM9712L *wm) {
+    if (wm->input.disarm) wm->input.disarm(wm->input.context);
+    wm->input = {};
+}
+
+void wm9712LSetInputSource(struct WM9712L *wm, const AudioInputSource *source) {
+    if (!wm->adcModel) return;
+    wm9712LDisarmInput(wm);
+    if (source) wm->input = *source;
+    if (wm->inputFences && wm->input.fence) wm->input.fence(wm->input.context, true);
+}
+
+void wm9712LFenceInput(struct WM9712L *wm, bool fence) {
+    if (!wm->adcModel) return;
+    const auto before = wm->inputFences;
+    if (fence) ++wm->inputFences;
+    else if (wm->inputFences) --wm->inputFences;
+    if (bool(before) != bool(wm->inputFences) && wm->input.fence)
+        wm->input.fence(wm->input.context, wm->inputFences != 0);
+}
+
+void wm9712LEnableAdc(struct WM9712L *wm, struct GetEmuTime getTime) {
+    wm->adcModel = true;
+    wm->getTime = getTime;
+    wm->alcGain = 23;
+}
+
+// Static record PGA (0x1c): bit 15 mutes; bits 13:8 and 5:0 are the left and right gain, in
+// 0.75 dB steps from -17.25 dB when bit 14 or 6 is set, else 1.5 dB steps from 0 dB up to
+// +22.5 dB as on a standard AC'97 codec. Returned as a 0.75 dB index like alcGain.
+static uint8_t wm9712LprvPgaIndex(const struct WM9712L *wm, bool right) {
+    const unsigned field = right ? wm->recGain & 0x7f : (wm->recGain >> 8) & 0x7f;
+    const unsigned gain = field & 0x3f;
+    return (field & 0x40) ? gain : 23 + 2 * std::min(gain, 15u);
+}
+
+// ALC (0x60, 0x62), an approximation of WM9712L section "Automatic level control": target
+// -22.5 dBFS plus 1.4 dB per step up to -1.5 dBFS, maximum PGA gain -12 dB plus 6 dB per step,
+// attack 1.05 ms * 2^ATK and decay 4.2 ms * 2^DCY per 0.75 dB step, hold 2.67 ms * 2^(HLD-1).
+// The noise gate (0x62 bit 7) holds the gain, or mutes with bit 5, below -76.5 dBFS plus
+// 1.5 dB per step of bits 4:0.
+static unsigned wm9712LprvAlcChannels(const struct WM9712L *wm) { return wm->alcNoiseGate >> 14; }
+
+static int32_t wm9712LprvApplyGain(int32_t input, unsigned boostDb, uint8_t pga) {
+    const double db = double(boostDb) - 17.25 + 0.75 * pga;
+    const double value = std::round(input * std::pow(10.0, db / 20.0));
+    return int32_t(std::clamp(value, -32768.0, 32767.0));
+}
+
+static void wm9712LprvAlcStep(struct WM9712L *wm, int32_t output, bool alcActive) {
+    if (!alcActive) {
+        // Start from the PGA of the channel the ALC controls: right only (1) seeds from the
+        // right, left or both from the left.
+        wm->alcGain = wm9712LprvPgaIndex(wm, wm9712LprvAlcChannels(wm) == 1);
+        wm->alcPeak = 0;
+        wm->alcElapsed = wm->alcSinceOver = 0;
+        return;
+    }
+    const double rate = wm->adcRate;
+    const auto frames = [&](double ms) { return std::max<uint32_t>(1, uint32_t(rate * ms / 1000.0)); };
+    const uint32_t attack = frames(1.05 * (1u << (wm->alcCtl & 0xf)));
+    const uint32_t decay = frames(4.2 * (1u << ((wm->alcCtl >> 4) & 0xf)));
+    const unsigned holdBits = (wm->alcCtl >> 8) & 0xf;
+    const uint32_t hold = holdBits ? frames(2.67 * (1u << (holdBits - 1))) : 0;
+    const uint16_t target = uint16_t(32768.0 * std::pow(10.0, (-22.5 + 1.4 * (wm->alcCtl >> 12)) / 20.0));
+    const uint8_t maxGain = uint8_t(std::min(63.0, (-12.0 + 6.0 * ((wm->alcNoiseGate >> 11) & 7) + 17.25) / 0.75));
+    const uint16_t magnitude = uint16_t(std::min(32767, std::abs(output)));
+    wm->alcPeak = std::max(wm->alcPeak, magnitude);
+    ++wm->alcElapsed;
+    if (magnitude > target) wm->alcSinceOver = 0;
+    else if (wm->alcSinceOver < UINT32_MAX) ++wm->alcSinceOver;
+    if (wm->alcPeak > target) {
+        if (wm->alcElapsed < attack) return;
+        if (wm->alcGain) --wm->alcGain;
+    } else {
+        if (wm->alcElapsed < decay) return;
+        const uint16_t gate = uint16_t(32768.0 * std::pow(10.0, (-76.5 + 1.5 * (wm->alcNoiseGate & 0x1f)) / 20.0));
+        const bool gated = (wm->alcNoiseGate & 0x80) && wm->alcPeak < gate;
+        if (!gated && wm->alcSinceOver >= hold && wm->alcGain < maxGain) ++wm->alcGain;
+        else if (wm->alcGain > maxGain) wm->alcGain = maxGain;
+    }
+    wm->alcPeak = 0;
+    wm->alcElapsed = 0;
+}
+
+// One ADC frame: left in bits 15:0, right in bits 31:16 of the PCM-in slot pair.
+static uint32_t wm9712LprvAdcFrame(struct WM9712L *wm) {
+    const bool left = wm9712LprvMicLeft(wm), right = wm9712LprvMicRight(wm);
+    int32_t input = 0;
+    if ((left || right) && !wm->inputFences && wm->input.pull)
+        input = wm->input.pull(wm->input.context, AudioInputRoute::internalMic, wm->adcRate, 1);
+    // Mic preamp boost 0x0e bit 7 and record boost 0x1a bit 14, 20 dB each.
+    const unsigned boost = ((wm->volMic & 0x80) ? 20 : 0) + ((wm->recSel & 0x4000) ? 20 : 0);
+    const unsigned alc = wm9712LprvAlcChannels(wm);
+    const bool alcLeft = alc & 2, alcRight = alc & 1;
+    const auto channel = [&](bool on, bool useAlc, bool isRight) -> int32_t {
+        if (!on || (wm->recGain & 0x8000)) return 0;
+        return wm9712LprvApplyGain(input, boost, useAlc ? wm->alcGain : wm9712LprvPgaIndex(wm, isRight));
+    };
+    const int32_t l = channel(left, alcLeft, false), r = channel(right, alcRight, true);
+    const bool alcActive = (alcLeft && left) || (alcRight && right);
+    const int32_t detected = std::max(alcLeft && left ? std::abs(l) : 0, alcRight && right ? std::abs(r) : 0);
+    bool gateMute = false;
+    if (alcActive && (wm->alcNoiseGate & 0xa0) == 0xa0) {
+        const double gate = 32768.0 * std::pow(10.0, (-76.5 + 1.5 * (wm->alcNoiseGate & 0x1f)) / 20.0);
+        gateMute = detected < gate;
+    }
+    wm9712LprvAlcStep(wm, detected, alcActive);
+    if (gateMute) return 0;
+    return (uint32_t(uint16_t(r)) << 16) | uint16_t(l);
+}
+
+// Frames due since the last PCM period at ADCRATE. At most 64 a period (the FIFO holds 16);
+// a longer gap, such as the PCM task being held, drops the rest without pulling them.
+static void wm9712LprvAdcAdvance(struct WM9712L *wm) {
+    const uint64_t now = wm->getTime.getTimeF(wm->getTime.userdata);
+    if (!wm->adcClockValid || now < wm->adcClock) {
+        wm->adcClockValid = true;
+        wm->adcClock = now;
+        wm->adcPhase = 0;
+        return;
+    }
+    const uint64_t elapsed = std::min<uint64_t>(now - wm->adcClock, 1000000000ull);
+    wm->adcClock = now;
+    wm->adcPhase += elapsed * wm->adcRate;
+    uint64_t due = wm->adcPhase / 1000000000ull;
+    wm->adcPhase %= 1000000000ull;
+    if (due > 64) due = 64;
+    for (uint64_t i = 0; i < due; ++i)
+        pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, wm9712LprvAdcFrame(wm));
 }
 
 static bool wm9712LprvHaveMicOutSample(struct WM9712L *wm, uint32_t *sampP) {
@@ -528,6 +787,11 @@ static bool wm9712LprvHaveModemOutSample(struct WM9712L *wm, uint32_t *sampP) {
     // it anyways, plus this is callback for modem data (slot5)
     if ((wm->digiRegs[0] & 0x08) && (wm->digiRegs[0] & 0x07)) return false;
 
+    // Continuous pen conversions require the digitiser to be powered. Auxiliary
+    // polling remains available while pen detection is armed for wake-up.
+    if (!wm->numUnreadDatas && !(wm->digiRegs[0] & 0x8000) &&
+        (wm->digiRegs[1] & 0xc000) != 0xc000) return false;
+
     // if we have unread data, send it and do nothing else
     if (wm->numUnreadDatas) retVal = wm->otherTwo[2 - wm->numUnreadDatas--];
     // else, if needed do a sampling (poll is set or continuous is set and pdet is off or pen is
@@ -535,9 +799,6 @@ static bool wm9712LprvHaveModemOutSample(struct WM9712L *wm, uint32_t *sampP) {
     else if ((wm->digiRegs[0] & 0x8000) ||
              ((wm->digiRegs[0] & 0x0400) && (wm->penDown || !(wm->digiRegs[1] & 0x0800)))) {
         enum WM9712LsampleIdx addrIdx = (enum WM9712LsampleIdx)((wm->digiRegs[0] >> 12) & 7);
-
-        // clear poll immediately
-        wm->digiRegs[0] &= ~0x8000;
 
         // see if we need a set
         if (wm->digiRegs[0] & 0x0800) {
@@ -568,6 +829,10 @@ static bool wm9712LprvHaveModemOutSample(struct WM9712L *wm, uint32_t *sampP) {
     else
         return false;
 
+    // Slot streaming and register readback expose the same conversion result.
+    wm->digiRegs[2] = retVal;
+    // A coordinate poll finishes after its final conversion, not after X.
+    if (!wm->numUnreadDatas) wm->digiRegs[0] &= ~0x8000;
     // provide ret val (not necessarily in the slot)
     if (wm->digiRegs[0] & 0x08) {
         // fprintf(stderr, "touch reply (slot) 0x%04x (%s %u %u)\n", retVal, (retVal & 0x8000) ?
@@ -576,7 +841,6 @@ static bool wm9712LprvHaveModemOutSample(struct WM9712L *wm, uint32_t *sampP) {
         return true;
     }
 
-    wm->digiRegs[2] = retVal;
     return false;
 }
 
@@ -586,8 +850,13 @@ void wm9712Lperiodic(struct WM9712L *wm) {
     if (pxaAC97clientClientWantData(wm->ac97, Ac97PrimaryAudio, &val))
         wm9712LprvNewAudioPlaybackSample(wm, val);
 
-    if (wm9712LprvHaveAudioOutSample(wm, &val))
-        pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, val);
+    if (wm9712LprvAdcRunning(wm))
+        wm9712LprvAdcAdvance(wm);
+    else {
+        wm->adcClockValid = false;
+        if (wm9712LprvHaveAudioOutSample(wm, &val))
+            pxaAC97clientClientHaveData(wm->ac97, Ac97PrimaryAudio, val);
+    }
 
     if (wm9712LprvHaveMicOutSample(wm, &val))
         pxaAC97clientClientHaveData(wm->ac97, Ac97SecondaryAudio, val);
@@ -610,6 +879,7 @@ void wm9712LsetAuxVoltage(struct WM9712L *wm, enum WM9712LauxPin which, uint32_t
 void wm9712LsetPen(struct WM9712L *wm, int16_t x, int16_t y,
                    int16_t press)  // raw ADC values, negative for pen up
 {
+    const bool wasDown = wm->penDown;
     if (x >= 0 && y >= 0 && press >= 0) {
         wm->penX = x;
         wm->penY = y;
@@ -622,6 +892,9 @@ void wm9712LsetPen(struct WM9712L *wm, int16_t x, int16_t y,
         wm->penDown = false;
     }
 
+    constexpr uint16_t pen = 1u << 13;
+    if (wm->penDown != wasDown && (wm->gpioSticky & pen) &&
+        wm->penDown == bool(wm->gpioPolTyp & pen)) wm->gpioStatus |= pen;
     wm9712LprvGpioRecalc(wm);
 }
 
@@ -631,26 +904,56 @@ void wm9712LsetAudioQueue(struct WM9712L *wm, struct AudioQueue *audioQueue) {
 
 template <typename T>
 void wm9712Lsave(struct WM9712L *wm, T &savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::wm9712L, SAVESTATE_VERSION);
+    auto chunk = savestate.GetChunk(ChunkType::wm9712L,
+                                    wm->adcModel ? SAVESTATE_VERSION_ADC : SAVESTATE_VERSION);
     if (!chunk) ERR("unable to allocate chunk");
 
     SaveChunkHelper helper(*chunk);
     wm->DoSaveLoad(helper);
+    if (wm->adcModel) wm->DoSaveLoadAdc(helper);
+}
+
+std::function<void()> wm9712CaptureInput(struct WM9712L *wm) {
+    const auto x = wm->penX, y = wm->penY, z = wm->penZ;
+    const bool down = wm->penDown;
+    return [wm, x, y, z, down] {
+        wm->penX = x; wm->penY = y; wm->penZ = z; wm->penDown = down;
+    };
 }
 
 template <typename T>
-void wm9712Load(struct WM9712L *wm, T &loader) {
-    auto chunk = loader.GetChunkOrFail(ChunkType::wm9712L, SAVESTATE_VERSION, "wm9712L");
+void wm9712Load(struct WM9712L *wm, T &loader, bool preserveInput) {
+    uint32_t version = 0;
+    auto chunk = loader.GetChunkOrFail(ChunkType::wm9712L,
+                                       wm->adcModel ? SAVESTATE_VERSION_ADC : SAVESTATE_VERSION,
+                                       "wm9712L", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
     wm->DoSaveLoad(helper);
+    if (wm->adcModel) {
+        // Version 0 has no ADC state: the ALC starts from the register gain and the clock
+        // restarts at the next PCM period. Host input is never saved.
+        wm->alcCtl = wm->alcNoiseGate = 0;
+        wm->adcClockValid = false;
+        wm->adcClock = wm->adcPhase = 0;
+        wm->alcGain = wm9712LprvPgaIndex(wm, false);
+        wm->alcPeak = 0;
+        wm->alcElapsed = wm->alcSinceOver = 0;
+        if (version >= SAVESTATE_VERSION_ADC) {
+            wm->DoSaveLoadAdc(helper);
+            if (wm->adcPhase >= 1000000000ull || wm->alcGain > 63 || wm->alcPeak > 32767) {
+                loader.NotifyError();
+                return;
+            }
+        }
+    }
 
-    wm9712LsetPen(wm, 0, 0, -1);
+    if (!preserveInput) wm9712LsetPen(wm, 0, 0, -1);
 }
 
 template void wm9712Lsave<Savestate<ChunkType>>(WM9712L *wm, Savestate<ChunkType> &savestate);
 template void wm9712Lsave<SavestateProbe<ChunkType>>(WM9712L *wm,
                                                      SavestateProbe<ChunkType> &savestate);
 template void wm9712Load<SavestateLoader<ChunkType>>(WM9712L *wm,
-                                                     SavestateLoader<ChunkType> &loader);
+                                                     SavestateLoader<ChunkType> &loader, bool);

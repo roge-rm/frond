@@ -110,6 +110,23 @@ void pxaDmaPeriodic(struct PxaDma* dma);
 void pxaDmaExternalReq(struct PxaDma* dma, uint_fast8_t chNum,
                        bool requested);  // request a transfer burst
 
+// Receive handshakes for a FIFO peripheral on one request line (PXA27x 5.4.6).
+// validBytes: bytes the next flow-controlled read may take (the data-valid bus).
+// endOfReceive: checked after each read burst; true signals EOR.
+// endOfChain: the channel serving the line stopped at the end of its chain (EOC).
+// Peripheral targets also take byte writes for a short tail. Not session state.
+struct PxaDmaPeripheral {
+    uint_fast8_t (*validBytes)(void* ctx);
+    bool (*endOfReceive)(void* ctx);
+    void (*endOfChain)(void* ctx);
+    void* ctx;
+    // A companion-chip FIFO on the external memory bus uses WIDTH=00.
+    uint32_t externalBusAddress{0};
+    // Optional physical request level, sampled when this line is mapped/rebound.
+    bool (*requested)(void* ctx){nullptr};
+};
+void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum, const struct PxaDmaPeripheral* peripheral);
+
 bool pxaDmaTaskRequired(struct PxaDma* dma);
 
 template <typename T>

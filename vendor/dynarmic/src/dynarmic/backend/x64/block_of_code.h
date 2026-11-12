@@ -174,6 +174,10 @@ public:
 
     JitStateInfo GetJitStateInfo() const { return jsi; }
 
+    /// Frond: cycles_remaining of the run in progress, through the stack pointer RunCode and
+    /// StepCode keep. Only valid from a callback during a run.
+    s64 TicksRemainingNow() const;
+
     bool HasHostFeature(HostFeature feature) const {
         return (host_features & feature) == feature;
     }
@@ -181,6 +185,7 @@ public:
 private:
     RunCodeCallbacks cb;
     JitStateInfo jsi;
+    u64 run_rsp = 0;  // Frond: rsp of the run in progress
 
     bool prelude_complete = false;
     CodePtr code_begin = nullptr;

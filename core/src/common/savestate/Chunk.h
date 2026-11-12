@@ -40,6 +40,7 @@ class Chunk {
     std::string GetString(size_t maxLength);
 
     bool HasError() const;
+    bool IsAtEnd() const { return !error && static_cast<size_t>(next - buffer) == chunkSize; }
 
    private:
     bool AssertOkForSize(size_t size);

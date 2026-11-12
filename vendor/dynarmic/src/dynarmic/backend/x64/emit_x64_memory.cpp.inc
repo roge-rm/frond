@@ -144,7 +144,7 @@ void AxxEmitX64::EmitMemoryWrite(AxxEmitContext& ctx, IR::Inst* inst) {
     const bool ordered = IsOrdered(args[3].GetImmediateAccType());
     const auto fastmem_marker = ShouldFastmem(ctx, inst);
 
-    if (!conf.page_table && !fastmem_marker) {
+    if ((!conf.page_table || conf.page_table_writes_via_callbacks) && !fastmem_marker) {
         // Neither fastmem nor page table: Use callbacks
         if constexpr (bitsize == 128) {
             ctx.reg_alloc.Use(args[1], ABI_PARAM2);
@@ -206,7 +206,7 @@ void AxxEmitX64::EmitMemoryWrite(AxxEmitContext& ctx, IR::Inst* inst) {
     } else {
         // Use page table
         ASSERT(conf.page_table);
-        const auto dest_ptr = EmitVAddrLookup(code, ctx, bitsize, *abort, vaddr);
+        const auto dest_ptr = EmitVAddrLookup(code, ctx, bitsize, *abort, vaddr, true);
         EmitWriteMemoryMov<bitsize>(code, dest_ptr, value_idx, ordered);
 
         ctx.deferred_emits.emplace_back([=, this, &ctx] {

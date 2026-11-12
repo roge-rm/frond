@@ -22,6 +22,7 @@
 #include "Byteswapping.h"  // Canonical
 #include "Debugger.h"
 #include "EmBankROM.h"  // EmBankROM::GetMemoryStart
+#include "EmBusTiming.h"
 #include "EmCommon.h"
 #include "EmHAL.h"      // EmHAL::GetInterruptLevel
 #include "EmMemory.h"   // CEnableFullAccess
@@ -34,6 +35,7 @@
 #include "SuspendContext.h"
 #include "SuspendManager.h"
 #include "UAE.h"  // cpuop_func, etc.
+#include "cputiming.h"
 #include "savestate/ChunkHelper.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
@@ -360,6 +362,11 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
 
     EmValueChanger<uint32> resetCurrentCycles(fCurrentCycles, 0);
 
+    // A nested Execute (a ROM call from a trap patch) keeps the outer instruction's counts.
+    EmValueChanger<uae_u32> keepAccessWait(gUaeAccessWait, 0);
+    EmValueChanger<uae_u32> keepTimingExtra(gUaeTimingExtra, 0);
+    EmValueChanger<uae_u32> keepBusCount(gUaeBusCount, 0);
+
     // Do not run cycleSlowly on each call if single stepping
     int counter = maxCycles ? 0 : 1;
 
@@ -402,8 +409,10 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
         // -----------------------------------------------------------------------
 
 #ifdef ENABLE_DEBUGGER
-        gDebugger.NotificyPc(pc);
-        if (gDebugger.IsStopped() && !gSession->IsNested()) break;
+        if (__builtin_expect(gDebuggerActive, 0)) {
+            gDebugger.NotificyPc(pc);
+            if (gDebugger.IsStopped() && !gSession->IsNested()) break;
+        }
 #endif
 
         if (MetaMemory::IsCPUBreak(m68k_getpc())) {
@@ -423,11 +432,88 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
         traceFunctionCalls(opcode, pc);
 #endif
 
+        // 68000 clocks from the timing table, with the data-dependent parts worked out from the
+        // registers before (shift counts, MOVEM masks, bit numbers) or after (conditions) the
+        // opcode runs, plus the wait states of program and operand bus cycles.
+        {
+            const emuptr instructionPC = pc;
+            const uint16 timing = gCpuTiming[opcode];
+            const uint32 kind = timing >> 12;
+            uint32 clocks = (timing & 0xff) << 1;
+            uint32 programReads = (timing >> 8) & 0x0f;
+            const EmAddressBank& programBank = EmMemGetBank(instructionPC);
+
+            switch (kind) {
+                case kTimingShiftReg:
+                    clocks += 2 * (m68k_dreg(regs, (opcode >> 9) & 7) & 63);
+                    break;
+                case kTimingMovemWord:
+                    clocks += 4 * __builtin_popcount(EmMemGet16(instructionPC + 2));
+                    break;
+                case kTimingMovemLong:
+                    clocks += 8 * __builtin_popcount(EmMemGet16(instructionPC + 2));
+                    break;
+                case kTimingBitReg:
+                    if ((m68k_dreg(regs, (opcode >> 9) & 7) & 31) >= 16) clocks += 2;
+                    break;
+                case kTimingBitImm:
+                    if ((EmMemGet16(instructionPC + 2) & 31) >= 16) clocks += 2;
+                    break;
+            }
+
+            gUaeAccessWait = 0;
+            gUaeTimingExtra = 0;
+            gUaeBusCount = 0;
+
 #ifdef __EMSCRIPTEN__
-        cycles = ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
+            ((cpuop_func*)((long)cpufunctbl_base + opcode))(opcode);
 #else
-        cycles = (cpufunctbl[opcode])(opcode);
+            (cpufunctbl[opcode])(opcode);
 #endif
+
+            switch (kind) {
+                case kTimingBccShort:
+                    if (cctrue((opcode >> 8) & 15)) {
+                        clocks = 10;
+                        programReads = 2;
+                    }
+                    break;
+                case kTimingBccWord:
+                    if (cctrue((opcode >> 8) & 15)) clocks = 10;
+                    break;
+                case kTimingDBcc:
+                    if (cctrue((opcode >> 8) & 15)) {
+                        clocks = 12;
+                    } else if ((m68k_dreg(regs, opcode & 7) & 0xffff) == 0xffff) {
+                        clocks = 14;
+                        programReads = 3;
+                    }
+                    break;
+                case kTimingSccReg:
+                    if (cctrue((opcode >> 8) & 15)) clocks = 6;
+                    break;
+            }
+
+            if (kind == kTimingReadFirst) {
+                gUaeAccessWait *= 2;
+                gUaeBusCount *= 2;
+            }
+
+            // Program reads run in order from the instruction, so on SDRAM all but the first
+            // hit the open page.
+            const uint32 programWait =
+                unlikely(programBank.sdram) && programReads
+                    ? EmSdramAccess(instructionPC, 0, programReads)
+                    : programReads * programBank.waitWord;
+            cycles = clocks + programWait + gUaeAccessWait + gUaeTimingExtra;
+
+            // LCD DMA and DRAM refresh take their share of the bus time since the last one.
+            EmBusTiming::windowCount += programReads * programBank.busTag + gUaeBusCount;
+            EmBusTiming::windowWait += programWait + gUaeAccessWait;
+            EmBusTiming::windowCycles += cycles;
+            const uint64 end = session->GetSystemCycles() + fCurrentCycles + cycles;
+            if (unlikely(end >= EmBusTiming::next)) cycles += EmBusTiming::ChargeWindow(end - cycles, end);
+        }
         fCurrentCycles += cycles;
         // =======================================================================
 
@@ -535,6 +621,17 @@ Bool EmCPU68K::ExecuteStoppedLoop(uint32 maxCycles) {
     // Do not run cycleSlowly on each call if single stepping
     int counter = maxCycles ? 0 : 1;
 
+    // An interrupt already pending above the mask that STOP loaded is taken at once, as on the
+    // 68000. Otherwise one raised just before the STOP (with the mask still up) would wait for the
+    // next interrupt, so the EZ tick timer would drop a tick.
+    if (const int32 pending = EmHAL::GetInterruptLevel();
+        pending != -1 && pending > regs.intmask && !gKernelStackOverflowed) {
+        regs.spcflags &= ~(SPCFLAG_INT | SPCFLAG_DOINT);
+        this->ProcessInterrupt(pending);
+        m68k_setstopped(0);
+        return false;
+    }
+
     // While the CPU is stopped (because a STOP instruction was
     // executed) do some idle tasks.
 
@@ -580,6 +677,8 @@ void EmCPU68K::CycleSlowly(Bool sleeping) { EmHAL::CycleSlowly(sleeping); }
 // ---------------------------------------------------------------------------
 //		� EmCPU68K::CheckAfterCycle
 // ---------------------------------------------------------------------------
+
+uint64 EmCPU68K::CycleNow() const { return fSession->GetSystemCycles() + fCurrentCycles; }
 
 void EmCPU68K::CheckAfterCycle(void) { regs.spcflags |= SPCFLAG_END_OF_CYCLE; }
 
@@ -783,6 +882,7 @@ Bool EmCPU68K::CheckForBreak(void) {
 // ---------------------------------------------------------------------------
 
 void EmCPU68K::ProcessInterrupt(int32 interrupt) {
+    EmValueChanger<Bool> processingInterrupt(fProcessingInterrupt, true);
     this->ProcessException((ExceptionNumber)(EmHAL::GetInterruptBase() + interrupt));
 
     regs.intmask = interrupt;
@@ -839,6 +939,7 @@ void EmCPU68K::ProcessException(ExceptionNumber exception) {
         }
 
         if (handled) {
+            this->ChargeException(exception, m68k_areg(regs, 7) - 6, m68k_getpc());
             return;
         }
     }
@@ -901,11 +1002,37 @@ void EmCPU68K::ProcessException(ExceptionNumber exception) {
     // Check the exception handler address and jam it into the PC.
 
     m68k_setpc(newpc);
+    this->ChargeException(exception, m68k_areg(regs, 7), newpc);
 
     // Turn tracing off.
 
     regs.t1 = regs.t0 = regs.m = 0;
     regs.spcflags &= ~(SPCFLAG_TRACE | SPCFLAG_DOTRACE);
+}
+
+// ---------------------------------------------------------------------------
+//		EmCPU68K::ChargeException
+// ---------------------------------------------------------------------------
+// Adds an exception's 68000 clocks (Table 8-14) to the current run: the stack frame writes,
+// vector read and first two handler fetches, with their wait states. CHK, TRAPV and divide by
+// zero already counted the instruction itself.
+
+void EmCPU68K::ChargeException(ExceptionNumber exception, emuptr frame, emuptr newpc) {
+    uint32 clocks = 34, writes = 3;
+    if (fProcessingInterrupt) {
+        clocks = 44;
+    } else if (exception == kException_BusErr || exception == kException_AddressErr) {
+        clocks = 50;
+        writes = 7;
+    } else if (exception == kException_Chk || exception == kException_Trap) {
+        clocks = 30;
+    } else if (exception == kException_DivideByZero) {
+        clocks = 38;
+    }
+
+    fCurrentCycles += clocks + writes * EmMemGetBank(frame).waitWord +
+                      2 * EmMemGetBank(regs.vbr + 4 * exception).waitWord +
+                      2 * EmMemGetBank(newpc).waitWord;
 }
 
 // ---------------------------------------------------------------------------
@@ -1231,6 +1358,8 @@ void EmCPU68K::InitializeUAETables(void) {
 
     free(cpufunctbl);
 #endif
+
+    BuildCpuTiming();
 
     // (hey readcpu doesn't free this guy!)
 

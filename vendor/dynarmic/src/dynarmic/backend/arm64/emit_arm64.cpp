@@ -199,7 +199,9 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     EmittedBlockInfo ebi;
 
     FpsrManager fpsr_manager{code, conf.state_fpsr_offset};
-    RegAlloc reg_alloc{code, fpsr_manager, GPR_ORDER, FPR_ORDER};
+    static const std::vector<int> gpr_order{GPR_ORDER};
+    static const std::vector<int> fpr_order{FPR_ORDER};
+    RegAlloc reg_alloc{code, fpsr_manager, gpr_order, fpr_order};
     EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
 
     ebi.entry_point = code.xptr<CodePtr>();
@@ -243,7 +245,9 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
         }
 
         reg_alloc.UpdateAllUses();
+#ifndef NDEBUG
         reg_alloc.AssertAllUnlocked();
+#endif
 
         if (conf.very_verbose_debugging_output) {
             EmitVerboseDebuggingOutput(code, ctx);

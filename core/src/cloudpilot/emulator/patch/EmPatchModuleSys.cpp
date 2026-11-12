@@ -293,6 +293,7 @@ namespace {
 
         // Set the current date.
 
+        gSystemState.SetTimeInitialized();
         SetCurrentDate();
 
         PRINTF("syscall: TimInit");
@@ -411,7 +412,26 @@ namespace {
         return kSkipROM;
     }
 
+    // The UI shell starts the next UI application here, after the last one quit: a delete that
+    // waits for the launcher to let go runs now.
+    CallROMType HeadpatchSysAppLaunch() {
+        if (!EmPalmOS::DeleteWaiting()) return kExecuteROM;
+
+        CALLED_SETUP("Err",
+                     "UInt16 cardNo, LocalID dbID, UInt16 launchFlags, UInt16 cmd, MemPtr cmdPBP,"
+                     "UInt32* resultP");
+
+        CALLED_GET_PARAM_VAL(LocalID, dbID);
+        CALLED_GET_PARAM_VAL(UInt16, launchFlags);
+
+        if (launchFlags & sysAppLaunchFlagUIApp)
+            EmPalmOS::BeforeUIAppLaunch(dbID);
+
+        return kExecuteROM;
+    }
+
     CallROMType HeadpatchEvtGetEvent() {
+        EmPalmOS::RunSafePoint();
         EmPalmOS::InjectUIEvent();
 
         return kExecuteROM;
@@ -441,6 +461,7 @@ namespace {
         {sysTrapHwrIRQ4Handler, HeadpatchHwrIRQ4Handler, TailpatchHwrIRQ4Handler},
         {sysTrapSysSleep, HeadpatchSysSleep, NULL},
         {sysTrapEvtGetEvent, HeadpatchEvtGetEvent, NULL},
+        {sysTrapSysAppLaunch, HeadpatchSysAppLaunch, NULL},
         {0, NULL, NULL}};
 }  // namespace
 

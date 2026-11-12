@@ -6,7 +6,10 @@
 #include "dynarmic/backend/x64/reg_alloc.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <numeric>
+#include <span>
 #include <utility>
 
 #include <fmt/ostream.h>
@@ -504,8 +507,11 @@ void RegAlloc::ReleaseStackSpace(size_t stack_space) {
 }
 
 void RegAlloc::EndOfAllocScope() {
-    for (auto& iter : hostloc_info) {
-        iter.ReleaseAll();
+    for (size_t w = 0; w < touched_locs.size(); w++) {
+        for (u64 bits = touched_locs[w]; bits; bits &= bits - 1) {
+            hostloc_info[w * 64 + std::countr_zero(bits)].ReleaseAll();
+        }
+        touched_locs[w] = 0;
     }
 }
 
@@ -520,13 +526,16 @@ void RegAlloc::EmitVerboseDebuggingOutput() {
 }
 
 HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations) const {
-    std::vector<HostLoc> candidates = desired_locations;
+    // Frond: the same partitions on a copy in a fixed buffer instead of a new vector.
+    std::array<HostLoc, 64> buffer;
+    ASSERT(desired_locations.size() <= buffer.size());
+    const auto candidates_end = std::copy(desired_locations.begin(), desired_locations.end(), buffer.begin());
 
     // Find all locations that have not been allocated..
-    const auto allocated_locs = std::partition(candidates.begin(), candidates.end(), [this](auto loc) {
+    const auto allocated_locs = std::partition(buffer.begin(), candidates_end, [this](auto loc) {
         return !this->LocInfo(loc).IsLocked();
     });
-    candidates.erase(allocated_locs, candidates.end());
+    const std::span<HostLoc> candidates{buffer.begin(), allocated_locs};
     ASSERT_MSG(!candidates.empty(), "All candidate registers have already been allocated");
 
     // Selects the best location out of the available locations.
@@ -540,7 +549,7 @@ HostLoc RegAlloc::SelectARegister(const std::vector<HostLoc>& desired_locations)
 }
 
 std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
-    for (size_t i = 0; i < hostloc_info.size(); i++) {
+    for (size_t i = 0; i < used_locs; i++) {
         if (hostloc_info[i].ContainsValue(value)) {
             return static_cast<HostLoc>(i);
         }
@@ -667,7 +676,11 @@ HostLoc RegAlloc::FindFreeSpill() const {
 
 HostLocInfo& RegAlloc::LocInfo(HostLoc loc) {
     ASSERT(loc != HostLoc::RSP && loc != HostLoc::R15);
-    return hostloc_info[static_cast<size_t>(loc)];
+    const size_t i = static_cast<size_t>(loc);
+    static_assert(NonSpillHostLocCount + SpillCount <= 128);
+    touched_locs[i / 64] |= u64(1) << (i % 64);
+    used_locs = std::max(used_locs, i + 1);
+    return hostloc_info[i];
 }
 
 const HostLocInfo& RegAlloc::LocInfo(HostLoc loc) const {

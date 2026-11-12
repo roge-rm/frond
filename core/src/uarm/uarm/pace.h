@@ -62,6 +62,20 @@ void paceSetDreg(uint8_t index, uint32_t value);
 uint32_t paceGetAreg(uint8_t index);
 void paceSetAreg(uint8_t index, uint32_t value);
 
+// Host-only inspection: copies interpreter state without touching guest memory.
+// The CPU/debugger caller must establish whether this state is currently active.
+struct PaceDebugState {
+    uint32_t d[8], a[8], pc, statePtr;
+    uint16_t sr;
+};
+PaceDebugState paceDebugState();
+
+// After paceExecute returns pace_status_memory_fault for a fault past the opcode fetch:
+// puts the registers, PC and flags back as they were before that instruction. False if
+// there's nothing to restore. Memory the instruction wrote before the fault stays written.
+bool paceRestoreFaultedInstruction();
+uint32_t paceGetStatePtr();
+
 enum paceStatus paceExecute();
 
 template <typename T>

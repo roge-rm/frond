@@ -390,6 +390,7 @@ void A64AddressSpace::EmitPrelude() {
     prelude_info.exclusive_write_memory_64 = EmitExclusiveWriteCallTrampoline<&A64::UserCallbacks::MemoryWriteExclusive64, u64>(code, conf);
     prelude_info.exclusive_write_memory_128 = EmitExclusiveWrite128CallTrampoline(code, conf);
     prelude_info.call_svc = EmitCallTrampoline<&A64::UserCallbacks::CallSVC>(code, conf.callbacks);
+    prelude_info.interpreter_fallback = EmitCallTrampoline<&A64::UserCallbacks::InterpreterFallback>(code, conf.callbacks);
     prelude_info.exception_raised = EmitCallTrampoline<&A64::UserCallbacks::ExceptionRaised>(code, conf.callbacks);
     prelude_info.isb_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionSynchronizationBarrierRaised>(code, conf.callbacks);
     prelude_info.ic_raised = EmitCallTrampoline<&A64::UserCallbacks::InstructionCacheOperationRaised>(code, conf.callbacks);
@@ -559,6 +560,7 @@ EmitConfig A64AddressSpace::GetEmitConfig() {
         .page_table_pointer = mcl::bit_cast<u64>(conf.page_table),
         .page_table_address_space_bits = conf.page_table_address_space_bits,
         .page_table_pointer_mask_bits = conf.page_table_pointer_mask_bits,
+        .page_table_write_protect_bit = false,
         .silently_mirror_page_table = conf.silently_mirror_page_table,
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,

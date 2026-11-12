@@ -30,6 +30,10 @@ struct PolyfillOptions {
 struct A32GetSetEliminationOptions {
     bool convert_nzc_to_nz = false;
     bool convert_nz_to_nzc = false;
+    // Frond: with check_halt_on_memory_access a memory access can end the run, so a set
+    // before one is never dropped for a later one, and anything else that may hand the
+    // registers to host code (coprocessors, exceptions, host calls) ends what is known.
+    bool memory_barriers = false;
 };
 
 void PolyfillPass(IR::Block& block, const PolyfillOptions& opt);

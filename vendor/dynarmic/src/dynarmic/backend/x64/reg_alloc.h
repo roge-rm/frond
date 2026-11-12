@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
 #include <mcl/stdint.hpp>
 #include <xbyak/xbyak.h>
 
@@ -61,8 +62,8 @@ private:
     size_t accumulated_uses = 0;
     size_t total_uses = 0;
 
-    // Value state
-    std::vector<IR::Inst*> values;
+    // Value state. Frond: a location rarely holds more than two values, so these stay off the heap.
+    boost::container::small_vector<IR::Inst*, 2> values;
     size_t max_bit_width = 0;
 };
 
@@ -174,6 +175,10 @@ private:
     HostLoc FindFreeSpill() const;
 
     std::vector<HostLocInfo> hostloc_info;
+    // Frond: locations changed since the last EndOfAllocScope (ReleaseAll is a no-op on the
+    // rest), and one past the highest location ever changed (the rest are still empty).
+    std::array<u64, 2> touched_locs{};
+    size_t used_locs = NonSpillHostLocCount;
     HostLocInfo& LocInfo(HostLoc loc);
     const HostLocInfo& LocInfo(HostLoc loc) const;
 

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <iterator>
 
 #include <mcl/assert.hpp>
@@ -133,8 +134,10 @@ RegAlloc::ArgumentInfo RegAlloc::GetArgumentInfo(IR::Inst* inst) {
         const IR::Value arg = inst->GetArg(i);
         ret[i].value = arg;
         if (!arg.IsImmediate() && !IsValuelessType(arg.GetType())) {
-            ASSERT_MSG(ValueLocation(arg.GetInst()), "argument must already been defined");
-            ValueInfo(arg.GetInst()).uses_this_inst++;
+            const auto loc = FindValue(arg.GetInst());
+            ASSERT_MSG(loc, "argument must already been defined");
+            Touch(*loc);
+            LocAt(*loc).uses_this_inst++;
         }
     }
     return ret;
@@ -198,7 +201,10 @@ void RegAlloc::DefineAsExisting(IR::Inst* inst, Argument& arg) {
         return;
     }
 
-    auto& info = ValueInfo(arg.value.GetInst());
+    const auto loc = FindValue(arg.value.GetInst());
+    ASSERT(loc);
+    Touch(*loc);
+    auto& info = LocAt(*loc);
     info.values.push_back(inst);
     info.expected_uses += inst->UseCount();
 }
@@ -207,6 +213,7 @@ void RegAlloc::DefineAsRegister(IR::Inst* inst, oaknut::Reg reg) {
     defined_insts.insert(inst);
 
     ASSERT(!ValueLocation(inst));
+    Touch(reg.is_vector() ? 32 + reg.index() : reg.index());
     auto& info = reg.is_vector() ? fprs[reg.index()] : gprs[reg.index()];
     ASSERT(info.IsCompletelyEmpty());
     info.values.push_back(inst);
@@ -214,15 +221,12 @@ void RegAlloc::DefineAsRegister(IR::Inst* inst, oaknut::Reg reg) {
 }
 
 void RegAlloc::UpdateAllUses() {
-    for (auto& gpr : gprs) {
-        gpr.UpdateUses();
-    }
-    for (auto& fpr : fprs) {
-        fpr.UpdateUses();
-    }
-    flags.UpdateUses();
-    for (auto& spill : spills) {
-        spill.UpdateUses();
+    // Frond: only the locations changed during this instruction.
+    for (size_t w = 0; w < touched_locs.size(); w++) {
+        for (u64 bits = touched_locs[w]; bits; bits &= bits - 1) {
+            LocAt(static_cast<int>(w * 64 + std::countr_zero(bits))).UpdateUses();
+        }
+        touched_locs[w] = 0;
     }
 }
 
@@ -275,6 +279,7 @@ int RegAlloc::GenerateImmediate(const IR::Value& value) {
     if constexpr (kind == HostLoc::Kind::Gpr) {
         const int new_location_index = AllocateRegister(gprs, gpr_order);
         SpillGpr(new_location_index);
+        Touch(new_location_index);
         gprs[new_location_index].SetupScratchLocation();
 
         code.MOV(oaknut::XReg{new_location_index}, value.GetImmediateAsU64());
@@ -283,6 +288,7 @@ int RegAlloc::GenerateImmediate(const IR::Value& value) {
     } else if constexpr (kind == HostLoc::Kind::Fpr) {
         const int new_location_index = AllocateRegister(fprs, fpr_order);
         SpillFpr(new_location_index);
+        Touch(32 + new_location_index);
         fprs[new_location_index].SetupScratchLocation();
 
         code.MOV(Xscratch0, value.GetImmediateAsU64());
@@ -291,6 +297,7 @@ int RegAlloc::GenerateImmediate(const IR::Value& value) {
         return new_location_index;
     } else if constexpr (kind == HostLoc::Kind::Flags) {
         SpillFlags();
+        Touch(64);
         flags.SetupScratchLocation();
 
         code.MOV(Xscratch0, value.GetImmediateAsU64());
@@ -339,6 +346,7 @@ int RegAlloc::RealizeReadImpl(const IR::Value& value) {
             break;
         }
 
+        Touch(new_location_index);
         gprs[new_location_index] = std::exchange(ValueInfo(*current_location), {});
         gprs[new_location_index].realized = true;
         return new_location_index;
@@ -361,6 +369,7 @@ int RegAlloc::RealizeReadImpl(const IR::Value& value) {
             break;
         }
 
+        Touch(32 + new_location_index);
         fprs[new_location_index] = std::exchange(ValueInfo(*current_location), {});
         fprs[new_location_index].realized = true;
         return new_location_index;
@@ -380,15 +389,18 @@ int RegAlloc::RealizeWriteImpl(const IR::Inst* value) {
     if constexpr (kind == HostLoc::Kind::Gpr) {
         const int new_location_index = AllocateRegister(gprs, gpr_order);
         SpillGpr(new_location_index);
+        Touch(new_location_index);
         gprs[new_location_index].SetupLocation(value);
         return new_location_index;
     } else if constexpr (kind == HostLoc::Kind::Fpr) {
         const int new_location_index = AllocateRegister(fprs, fpr_order);
         SpillFpr(new_location_index);
+        Touch(32 + new_location_index);
         fprs[new_location_index].SetupLocation(value);
         return new_location_index;
     } else if constexpr (kind == HostLoc::Kind::Flags) {
         SpillFlags();
+        Touch(64);
         flags.SetupLocation(value);
         return 0;
     } else {
@@ -433,13 +445,18 @@ int RegAlloc::AllocateRegister(const std::array<HostLocInfo, 32>& regs, const st
         return *empty;
     }
 
-    std::vector<int> candidates;
-    std::copy_if(order.begin(), order.end(), std::back_inserter(candidates), [&](int i) { return regs[i].MaybeAllocatable(); });
+    std::array<int, 32> candidates;
+    size_t candidate_count = 0;
+    for (int i : order) {
+        if (regs[i].MaybeAllocatable()) {
+            candidates[candidate_count++] = i;
+        }
+    }
 
     // TODO: The candidate was chosen randomly before, and a LRU was
     // suggested as an improvement. However, using an incrementing index
     // seems to be close enough. Determine if an LRU is still needed.
-    return candidates[alloc_candidate_index++ % candidates.size()];
+    return candidates[alloc_candidate_index++ % candidate_count];
 }
 
 void RegAlloc::SpillGpr(int index) {
@@ -449,6 +466,7 @@ void RegAlloc::SpillGpr(int index) {
     }
     const int new_location_index = FindFreeSpill();
     code.STR(oaknut::XReg{index}, SP, spill_offset + new_location_index * spill_slot_size);
+    Touch(65 + new_location_index);
     spills[new_location_index] = std::exchange(gprs[index], {});
 }
 
@@ -459,6 +477,7 @@ void RegAlloc::SpillFpr(int index) {
     }
     const int new_location_index = FindFreeSpill();
     code.STR(oaknut::QReg{index}, SP, spill_offset + new_location_index * spill_slot_size);
+    Touch(65 + new_location_index);
     spills[new_location_index] = std::exchange(fprs[index], {});
 }
 
@@ -488,6 +507,7 @@ void RegAlloc::ReadWriteFlags(Argument& read, IR::Inst* write) {
     }
 
     if (write) {
+        Touch(64);
         flags.SetupLocation(write);
         flags.realized = false;
     }
@@ -501,6 +521,7 @@ void RegAlloc::SpillFlags() {
     const int new_location_index = AllocateRegister(gprs, gpr_order);
     SpillGpr(new_location_index);
     code.MRS(oaknut::XReg{new_location_index}, oaknut::SystemReg::NZCV);
+    Touch(new_location_index);
     gprs[new_location_index] = std::exchange(flags, {});
 }
 
@@ -562,21 +583,54 @@ void RegAlloc::LoadCopyInto(const IR::Value& value, oaknut::QReg reg) {
 }
 
 std::optional<HostLoc> RegAlloc::ValueLocation(const IR::Inst* value) const {
-    const auto contains_value = [value](const HostLocInfo& info) { return info.Contains(value); };
-
-    if (const auto iter = std::find_if(gprs.begin(), gprs.end(), contains_value); iter != gprs.end()) {
-        return HostLoc{HostLoc::Kind::Gpr, static_cast<int>(iter - gprs.begin())};
-    }
-    if (const auto iter = std::find_if(fprs.begin(), fprs.end(), contains_value); iter != fprs.end()) {
-        return HostLoc{HostLoc::Kind::Fpr, static_cast<int>(iter - fprs.begin())};
-    }
-    if (contains_value(flags)) {
-        return HostLoc{HostLoc::Kind::Flags, 0};
-    }
-    if (const auto iter = std::find_if(spills.begin(), spills.end(), contains_value); iter != spills.end()) {
-        return HostLoc{HostLoc::Kind::Spill, static_cast<int>(iter - spills.begin())};
+    if (const auto i = FindValue(value)) {
+        return LocOf(*i);
     }
     return std::nullopt;
+}
+
+std::optional<int> RegAlloc::FindValue(const IR::Inst* value) const {
+    // Frond: searches the locations used in this block, in the same order as before
+    // (gprs, fprs, flags, spills).
+    for (size_t w = 0; w < used_locs.size(); w++) {
+        for (u64 bits = used_locs[w]; bits; bits &= bits - 1) {
+            const int i = static_cast<int>(w * 64 + std::countr_zero(bits));
+            if (LocAt(i).Contains(value)) {
+                return i;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+HostLocInfo& RegAlloc::LocAt(int i) {
+    return const_cast<HostLocInfo&>(std::as_const(*this).LocAt(i));
+}
+
+const HostLocInfo& RegAlloc::LocAt(int i) const {
+    if (i < 32) {
+        return gprs[static_cast<size_t>(i)];
+    }
+    if (i < 64) {
+        return fprs[static_cast<size_t>(i - 32)];
+    }
+    if (i == 64) {
+        return flags;
+    }
+    return spills[static_cast<size_t>(i - 65)];
+}
+
+HostLoc RegAlloc::LocOf(int i) {
+    if (i < 32) {
+        return HostLoc{HostLoc::Kind::Gpr, i};
+    }
+    if (i < 64) {
+        return HostLoc{HostLoc::Kind::Fpr, i - 32};
+    }
+    if (i == 64) {
+        return HostLoc{HostLoc::Kind::Flags, 0};
+    }
+    return HostLoc{HostLoc::Kind::Spill, i - 65};
 }
 
 HostLocInfo& RegAlloc::ValueInfo(HostLoc host_loc) {
@@ -594,19 +648,8 @@ HostLocInfo& RegAlloc::ValueInfo(HostLoc host_loc) {
 }
 
 HostLocInfo& RegAlloc::ValueInfo(const IR::Inst* value) {
-    const auto contains_value = [value](const HostLocInfo& info) { return info.Contains(value); };
-
-    if (const auto iter = std::find_if(gprs.begin(), gprs.end(), contains_value); iter != gprs.end()) {
-        return *iter;
-    }
-    if (const auto iter = std::find_if(fprs.begin(), fprs.end(), contains_value); iter != fprs.end()) {
-        return *iter;
-    }
-    if (contains_value(flags)) {
-        return flags;
-    }
-    if (const auto iter = std::find_if(spills.begin(), spills.end(), contains_value); iter != spills.end()) {
-        return *iter;
+    if (const auto i = FindValue(value)) {
+        return LocAt(*i);
     }
     ASSERT_FALSE("RegAlloc::ValueInfo: Value not found");
 }

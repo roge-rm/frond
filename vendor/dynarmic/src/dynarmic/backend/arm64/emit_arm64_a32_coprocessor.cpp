@@ -263,6 +263,7 @@ void EmitIR<IR::Opcode::A32CoprocLoadWords>(oaknut::CodeGenerator& code, EmitCon
     }
 
     CallCoprocCallback(code, ctx, *action, nullptr, args[1]);
+    EmitA32CheckCoprocessorAbort(code, ctx, inst);
 }
 
 template<>
@@ -294,6 +295,7 @@ void EmitIR<IR::Opcode::A32CoprocStoreWords>(oaknut::CodeGenerator& code, EmitCo
     }
 
     CallCoprocCallback(code, ctx, *action, nullptr, args[1]);
+    EmitA32CheckCoprocessorAbort(code, ctx, inst);
 }
 
 }  // namespace Dynarmic::Backend::Arm64

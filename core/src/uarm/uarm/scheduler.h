@@ -36,6 +36,12 @@ class Scheduler {
     void Advance(uint64_t cycles, uint64_t cyclesPerSecond);
 
     uint64_t GetTime() const;
+    bool TaskPeriodIs(uint32_t type, uint64_t period) const { return tasks[type].period == period; }
+    uint64_t ElapsedTicks(uint32_t taskType, uint64_t extraNsec = 0) const {
+        const auto& task = tasks[taskType];
+        const uint64_t now = accTime + extraNsec;
+        return now >= task.lastUpdate ? (now - task.lastUpdate) / task.period : 0;
+    }
 
     template <typename U>
     void Save(U& savestate);
@@ -126,6 +132,16 @@ void Scheduler<T>::RescheduleTaskImpl(uint32_t taskType, uint32_t batchTicks) {
     task.batchedTicks = batchTicks;
     uint64_t nextUpdate = task.nextUpdate = task.lastUpdate + batchTicks * task.period;
 
+    // The high-frequency timer usually remains the first task. Keep its
+    // queue link when its new deadline is still strictly before its successor.
+    // Equal deadlines use normal reinsertion to retain the existing tie order.
+    if (queue[-1] == taskType &&
+        (queue[taskType] > SCHEDULER_TASK_MAX ||
+         nextUpdate < tasks[queue[taskType]].nextUpdate)) {
+        UpdateNextUpdate();
+        return;
+    }
+
     int32_t idx = -1;
     bool inserted = false;
     bool deleted = false;
@@ -175,7 +191,14 @@ void Scheduler<T>::UnscheduleTask(uint32_t taskType) {
 
 template <typename T>
 uint64_t Scheduler<T>::CyclesToNextUpdate(uint64_t cyclesPerSecond) {
-    return ((nextUpdate - accTime) * cyclesPerSecond) / 1_sec + 1;
+    if (nextUpdate <= accTime) return 1;
+    // The product nearly always fits in 64 bits, where dividing by the constant is a multiply;
+    // a 128-bit divide is a library call on arm64. Same result either way.
+    uint64_t product;
+    if (!__builtin_mul_overflow(nextUpdate - accTime, cyclesPerSecond, &product))
+        return product / 1_sec + 1;
+    const __uint128_t requested = __uint128_t(nextUpdate - accTime) * cyclesPerSecond / 1_sec + 1;
+    return requested > UINT64_MAX ? UINT64_MAX : uint64_t(requested);
 }
 
 template <typename T>
@@ -191,8 +214,12 @@ void Scheduler<T>::Advance(uint64_t cycles, uint64_t cyclesPerSecond) {
 
         if (task.nextUpdate > accTime) break;
 
-        const uint32_t batchTicks = dispatchDelegate.DispatchTicks(taskType, task.batchedTicks);
-        task.lastUpdate += task.batchedTicks * task.period;
+        // IRQ delivery can wake the CPU and reschedule this very task. Account
+        // for the batch actually dispatched, not a size changed by that callback.
+        const uint32_t dispatchedTicks = task.batchedTicks;
+        const uint64_t dispatchedPeriod = task.period;
+        const uint32_t batchTicks = dispatchDelegate.DispatchTicks(taskType, dispatchedTicks);
+        task.lastUpdate += dispatchedTicks * dispatchedPeriod;
 
         RescheduleTaskImpl<false>(taskType, batchTicks);
     }

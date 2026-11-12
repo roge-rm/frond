@@ -120,6 +120,7 @@ export interface Uarm {
     SdCardInitialized(): boolean;
     GetSdCardId(): string;
     Reset(): void;
+    HardReset(): void;
 
     Save(): void;
     GetSavestateSize(): number;

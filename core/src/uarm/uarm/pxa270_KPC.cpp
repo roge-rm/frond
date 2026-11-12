@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "cputil.h"
+#include "savestate/savestateAll.h"
 #include "pxa_IC.h"
 
 #define PXA270_KPC_BASE 0x41500000ul
@@ -17,7 +18,7 @@ struct PxaKpc {
     // regs
     uint32_t kpc, kpmk, kpas, kpasmkp[4];
     uint16_t kpkdi;
-    uint8_t kpdkChanged : 1;
+    bool kpdkChanged;
 
     // stimuli
     uint64_t prevKeys;
@@ -27,6 +28,15 @@ struct PxaKpc {
     uint8_t numMatrixKeysPressed;
     uint16_t jogSta[2];  // same format as KPREC reg, except we use bits 12..13 for jog sensor
                          // status
+    bool directActiveHigh;  // board wiring, not saved
+
+    template <typename T>
+    void DoSaveLoad(T &h) {
+        h.Do32(kpc).Do32(kpmk).Do32(kpas).DoBuffer32(kpasmkp, 4)
+            .Do16(kpkdi).DoBool(kpdkChanged).Do64(prevKeys)
+            .DoBuffer(matrixKeys, sizeof(matrixKeys)).Do8(directKeys)
+            .Do8(numMatrixKeysPressed).DoBuffer16(jogSta, 2);
+    }
 };
 
 static void pxaKpcPrvDoAutoScan(struct PxaKpc *kpc, bool causeIrq) {
@@ -96,14 +106,14 @@ static void pxaKpcPrvMatrixRecalc(struct PxaKpc *kpc, bool lastKeyChangeWasDown)
     } else {  // manual mode?
 
         // calculate
-        for (c = 0; c < ((kpc->kpc >> 23) & 7); c++) {
-            if (!(kpc->kpc & (1 << (12 + c)))) continue;
+        for (c = 0; c <= ((kpc->kpc >> 23) & 7); c++) {
+            if (!(kpc->kpc & (1 << (13 + c)))) continue;
 
             val |= kpc->matrixKeys[c];
         }
 
         // mask off unused row
-        val &= ~((1 << (((kpc->kpc >> 26) & 7) + 1)) - 1);
+        val &= (1 << (((kpc->kpc >> 26) & 7) + 1)) - 1;
 
         // irq if nonzero
         if (val) kpc->kpc |= 0x00400000ul;
@@ -162,7 +172,8 @@ static bool pxaKpcPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
             if (write)
                 ;  // ignored
             else {
-                val = (kpc->kpdkChanged ? 0x80000000ul : 0) | ((~kpc->directKeys) & 0xff);
+                val = (kpc->kpdkChanged ? 0x80000000ul : 0) |
+                      ((kpc->directActiveHigh ? kpc->directKeys : ~kpc->directKeys) & 0xff);
                 if (kpc->kpc & 4) {
                     val &= ~0x03;
                     val |= (kpc->jogSta[0] >> 12) & 0x03;
@@ -273,13 +284,16 @@ void pxaKpcDirectKeyChange(struct PxaKpc *kpc, uint_fast8_t keyIdx, bool isDown)
 
     if (keyIdx >= 8) ERR("only eight direct keys exist\n");
 
-    if (!(kpc->kpc & 2)) fprintf(stderr, "setting direct keys when direct keypad is disabled\n");
-
     if (!cur != !isDown) {  // change
+        if (!(kpc->kpc & 2)) fprintf(stderr, "setting direct keys when direct keypad is disabled\n");
 
         kpc->directKeys ^= 1 << keyIdx;
         pxaKpcPrvDirectKeysRecalc(kpc);
     }
+}
+
+void pxaKpcSetDirectKeysActiveHigh(struct PxaKpc *kpc, bool activeHigh) {
+    kpc->directActiveHigh = activeHigh;
 }
 
 void pxaKpcJogInput(struct PxaKpc *kpc, uint_fast8_t jogIdx, bool up) {
@@ -315,3 +329,51 @@ void pxaKpcJogInput(struct PxaKpc *kpc, uint_fast8_t jogIdx, bool up) {
     }
     pxaKpcPrvJogRecalcRecalc(kpc);
 }
+
+
+uint8_t pxaKpcMatrixWakeLevels(const PxaKpc* kpc) {
+    if (!(kpc->kpc & 0x1000)) return 0;  // ME must remain enabled (18.4.5).
+    uint8_t rows = 0;
+    for (unsigned col = 0; col <= ((kpc->kpc >> 23) & 7); ++col)
+        if ((kpc->kpc & 0x20000000) || (kpc->kpc & (1u << (13 + col))))
+            rows |= kpc->matrixKeys[col];
+    return rows & ((1u << (((kpc->kpc >> 26) & 7) + 1)) - 1);
+}
+
+uint8_t pxaKpcDirectWakeLevels(const PxaKpc* kpc) {
+    if (!(kpc->kpc & 2)) return 0;
+    uint8_t keys = kpc->directKeys & ((1u << (((kpc->kpc >> 6) & 7) + 1)) - 1);
+    if (kpc->kpc & 4) keys &= ~3u;  // Rotary encoders cannot wake sleep.
+    if (kpc->kpc & 8) keys &= ~12u;
+    return keys;
+}
+
+void pxaKpcSleepReset(PxaKpc* kpc) {
+    kpc->kpc = kpc->kpmk = 0;
+    kpc->kpas = 0xff;
+    memset(kpc->kpasmkp, 0, sizeof(kpc->kpasmkp));
+    kpc->kpkdi = 0x64;
+    kpc->kpdkChanged = false;
+    kpc->prevKeys = 0;
+    kpc->jogSta[0] = kpc->jogSta[1] = 0;
+    pxaKpcPrvIrqRecals(kpc);
+}
+
+template <typename T>
+void pxaKpcSave(PxaKpc *state, T &savestate) {
+    auto chunk = savestate.GetChunk(ChunkType::pxa270kpc, 0);
+    if (!chunk) ERR("cannot allocate pxa270kpc state");
+    SaveChunkHelper helper(*chunk);
+    state->DoSaveLoad(helper);
+}
+
+void pxaKpcLoad(PxaKpc *state, SavestateLoader<ChunkType> &loader) {
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270kpc, 0, "pxa270kpc");
+    if (!chunk) return;
+    LoadChunkHelper helper(*chunk);
+    state->DoSaveLoad(helper);
+    pxaKpcPrvIrqRecals(state);
+}
+
+template void pxaKpcSave<Savestate<ChunkType>>(PxaKpc *, Savestate<ChunkType> &);
+template void pxaKpcSave<SavestateProbe<ChunkType>>(PxaKpc *, SavestateProbe<ChunkType> &);

@@ -153,8 +153,9 @@ void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
 
     const A64::LocationDescriptor current_location{IR::LocationDescriptor{inst->GetArg(0).GetU64()}};
 
-    code.LDAR(Xscratch0, Xhalt);
-    code.TST(Xscratch0, static_cast<u32>(HaltReason::MemoryAbort));
+    // Frond: halt_reason is a u32, so a 64-bit load faults (SIGBUS) where it isn't 8-aligned.
+    code.LDAR(Wscratch0, Xhalt);
+    code.TST(Wscratch0, static_cast<u32>(HaltReason::MemoryAbort));
     code.B(EQ, end);
     code.MOV(Xscratch0, current_location.PC());
     code.STR(Xscratch0, Xstate, offsetof(A64JitState, pc));

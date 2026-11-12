@@ -25,7 +25,8 @@ enum EmADSChannelType {
     kChannelDockSerial,
     kChannelDockTwister,
     kChannelTemp0,
-    kChannelTemp1
+    kChannelTemp1,
+    kChannelVirtualInput
 };
 
 #define kChannelSet1                                                                  \
@@ -52,8 +53,10 @@ class EmSPISlaveADS784x : public EmSPISlave {
     virtual void Load(SavestateLoader<ChunkType>&);
 
     virtual uint16 DoExchange(uint16 control, uint16 data);
+    virtual void Reset(void);
 
    protected:
+    virtual uint16 ReadVirtualInput(unsigned channel) const { return 0; }
     void ProcessCommand(uint8);
     void LoadPendingConversion(void);
 

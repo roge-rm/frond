@@ -59,7 +59,23 @@ typedef struct EmAddressBank {
 
     EmMemTranslateMetaFunc xlatemetaaddr;
     EmMemCycleFunc EmMemAddOpcodeCycles;
+
+    /* Clocks of wait state a CPU byte or word bus access to this bank adds (a long is two words).
+     * Zero unless the chip-select model sets them. */
+    uint8 waitByte, waitWord;
+    /* Set when this bank is SDRAM, whose wait depends on the open page (EmSdram). */
+    uint8 sdram;
+    /* Added to gUaeBusCount per word access: bus cycles in the low half, DRAM cycles in the high
+     * half (EmBusTiming shares LCD DMA and refresh out by them). */
+    uint32 busTag;
 } EmAddressBank;
+
+/* Wait states for one region, in clocks: see EmAddressBank. dram is set for DRAM (refresh
+ * holds it up), sdram for SDRAM. */
+typedef struct EmBusWait {
+    uint8 byte, word;
+    uint8 dram, sdram;
+} EmBusWait;
 
 #ifndef ECM_DYNAMIC_PATCH
 
@@ -101,7 +117,7 @@ extern EmAddressBank** gDynEmMemBanksP;
 
 STATIC_INLINE uint32 EmMemGet32(emuptr addr) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyRead32(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyRead32(addr);
 #endif
 
     return EmMemCallGetFunc(lget, addr);
@@ -113,7 +129,7 @@ STATIC_INLINE uint32 EmMemGet32(emuptr addr) {
 
 STATIC_INLINE uint16 EmMemGet16(emuptr addr) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyRead16(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyRead16(addr);
 #endif
 
     return EmMemCallGetFunc(wget, addr);
@@ -125,7 +141,7 @@ STATIC_INLINE uint16 EmMemGet16(emuptr addr) {
 
 STATIC_INLINE uint8 EmMemGet8(emuptr addr) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyRead8(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyRead8(addr);
 #endif
 
     return EmMemCallGetFunc(bget, addr);
@@ -137,7 +153,7 @@ STATIC_INLINE uint8 EmMemGet8(emuptr addr) {
 
 STATIC_INLINE void EmMemPut32(emuptr addr, uint32 l) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyWrite32(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyWrite32(addr);
 #endif
 
     EmMemCallPutFunc(lput, addr, l);
@@ -149,7 +165,7 @@ STATIC_INLINE void EmMemPut32(emuptr addr, uint32 l) {
 
 STATIC_INLINE void EmMemPut16(emuptr addr, uint16 w) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyWrite16(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyWrite16(addr);
 #endif
 
     EmMemCallPutFunc(wput, addr, w);
@@ -161,7 +177,7 @@ STATIC_INLINE void EmMemPut16(emuptr addr, uint16 w) {
 
 STATIC_INLINE void EmMemPut8(emuptr addr, uint8 b) {
 #ifdef ENABLE_DEBUGGER
-    DbgNotifyWrite8(addr);
+    if (__builtin_expect(gDebuggerWatching, 0)) DbgNotifyWrite8(addr);
 #endif
 
     EmMemCallPutFunc(bput, addr, b);
@@ -313,6 +329,9 @@ class Memory {
                                 int32 iNumberOfBanks);
 
     static void ResetBankHandlers(void);
+
+    // Sets the wait states CPU accesses to ROM and RAM add; registers have none.
+    static void SetWaitStates(EmBusWait rom, EmBusWait ram);
 
     static void MapPhysicalMemory(const void*, uint32);
     static void UnmapPhysicalMemory(const void*);

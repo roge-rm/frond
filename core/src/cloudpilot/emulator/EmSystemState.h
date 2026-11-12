@@ -32,6 +32,10 @@ class EmSystemState {
     void SetSetupComplete();
     bool IsSetupComplete() const;
 
+    // TimInit has run since the last reset, so timGlobalsP points at the time manager's globals.
+    void SetTimeInitialized();
+    bool IsTimeInitialized() const;
+
     void SetHotsyncUserName(string hotsyncUserName);
     const string& GetHotsyncUserName() const;
 
@@ -58,6 +62,7 @@ class EmSystemState {
 
     bool uiInitialized{false};
     bool setupComplete{false};
+    bool timeInitialized{false};
 
     string hotsyncUserName;
 

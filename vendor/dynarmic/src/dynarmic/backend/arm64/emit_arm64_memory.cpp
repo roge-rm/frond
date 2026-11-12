@@ -250,7 +250,9 @@ void EmitDetectMisalignedVAddr(oaknut::CodeGenerator& code, EmitContext& ctx, oa
 // May use Xscratch1 as scratch register
 // Address to read/write = [ret0 + ret1], ret0 is always Xscratch0 and ret1 is either Xaddr or Xscratch1
 // Trashes NZCV
-template<size_t bitsize>
+// write: the lookup is for a store, which goes to fallback for an entry with bit 0 set
+// when page_table_write_protect_bit is on (Frond).
+template<size_t bitsize, bool write = false>
 std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::CodeGenerator& code, EmitContext& ctx, oaknut::XReg Xaddr, const SharedLabel& fallback) {
     const size_t valid_page_index_bits = ctx.conf.page_table_address_space_bits - page_bits;
     const size_t unused_top_bits = 64 - ctx.conf.page_table_address_space_bits;
@@ -266,6 +268,11 @@ std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::Cod
     }
 
     code.LDR(Xscratch0, Xpagetable, Xscratch0, LSL, 3);
+
+    if (write && ctx.conf.page_table_write_protect_bit) {
+        code.TST(Xscratch0, u64(1));
+        code.B(NE, *fallback);
+    }
 
     if (ctx.conf.page_table_pointer_mask_bits != 0) {
         const u64 mask = u64(~u64(0)) << ctx.conf.page_table_pointer_mask_bits;
@@ -460,7 +467,7 @@ void InlinePageTableEmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ct
 
     SharedLabel fallback = GenSharedLabel(), end = GenSharedLabel();
 
-    const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize>(code, ctx, Xaddr, fallback);
+    const auto [Xbase, Xoffset] = InlinePageTableEmitVAddrLookup<bitsize, true>(code, ctx, Xaddr, fallback);
     EmitMemoryStr<bitsize>(code, Rvalue->index(), Xbase, Xoffset, ordered);
 
     ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end] {

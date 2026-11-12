@@ -14,6 +14,7 @@
 #ifndef EmBankRegs_h
 #define EmBankRegs_h
 
+#include "EmEvent.h"
 #include "EmRegs.h"  // EmRegsList
 #include "savestate/ChunkType.h"
 
@@ -29,6 +30,8 @@ class EmBankRegs {
     static void Save(T& savestate);
     static void Load(SavestateLoader<ChunkType>& loader);
     static void Dispose(void);
+    // Release borrowed bank references before any bank is disposed.
+    static EmEvent<> onBeforeDispose;
 
     static void SetBankHandlers(void);
 
@@ -46,8 +49,10 @@ class EmBankRegs {
     static void EnableSubBank(emuptr address);
     static void DisableSubBank(emuptr address);
 
-   private:
+    // Borrowed register bank, valid until Dispose.
     static EmRegs* GetSubBank(emuptr address, long size);
+
+   private:
     static void AddressError(emuptr address, long size, Bool forRead);
     static void InvalidAccess(emuptr address, long size, Bool forRead);
 

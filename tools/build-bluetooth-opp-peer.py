@@ -18,14 +18,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=ROOT / 'build/bluetooth-provider')
     parser.add_argument('--output', type=Path, default=ROOT / 'build/bluetooth-opp-peer')
-    # The DUN phone's modem, PPP and slirp: libcommon.a and libcommon-net.a from the prepared core.
-    parser.add_argument('--common', type=Path, default=ROOT / 'build/source/src/common')
+    # The DUN phone's modem, PPP and slirp: libcommon.a and libcommon-net.a from the core.
+    parser.add_argument('--common', type=Path, default=ROOT / 'core/src/common')
     parser.add_argument('--test', action='store_true')
     args = parser.parse_args()
     source, output, common = args.source.resolve(), args.output.resolve(), args.common.resolve()
     for library in ('libcommon.a', 'libcommon-net.a'):
         if not (common / library).is_file():
-            parser.error(f'{common / library} is missing (make prepare, then make -C build/source/src/common bin net)')
+            parser.error(f'{common / library} is missing (make -C core/src/common bin net)')
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
     changes = subprocess.check_output(['git', 'diff', '--no-ext-diff', '--no-color', 'HEAD'], cwd=source, text=True)
     if revision != REVISION or changes != (ROOT / 'tools/bluez-bdaddr.patch').read_text():

@@ -5,7 +5,7 @@
 #include "card-history-limits.h"
 #include <fstream>
 #include <filesystem>
-#include "../build/source/src/cloudpilot/frond/PortablePublication.h"
+#include "../core/src/cloudpilot/frond/PortablePublication.h"
 #include <iostream>
 int main(int argc,char** argv) {
     assert(argc==2);

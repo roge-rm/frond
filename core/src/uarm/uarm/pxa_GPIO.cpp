@@ -13,7 +13,7 @@
 #define PXA_GPIO_BASE 0x40E00000UL
 #define PXA_GPIO_SIZE 0x00001000UL
 
-#define SAVESTATE_VERSION 0
+#define SAVESTATE_VERSION 1
 
 struct PxaGpio {
     struct PxaIc *ic;
@@ -31,11 +31,19 @@ struct PxaGpio {
     GpioChangedNotifF notifF[121];
     void *notifD[121];
 
+    void (*configurationObserver)(void*);void* configurationContext;
+    void (*peripheralObserver)(void*);
+    void* peripheralContext;
     GpioDirsChangedF dirNotifF;
     void *dirNotifD;
 
+    GpioChangedNotifF inputObserver;
+    void* inputObserverContext;
+    bool holdOutputs;
+    uint32_t heldDirs[4], heldLatches[4];
+
     template <typename T>
-    void DoSaveLoad(T &chunkHelper) {
+    void DoSaveLoad(T &chunkHelper, uint32_t version) {
         chunkHelper.DoBuffer32(latches, sizeof(latches) >> 2)
             .DoBuffer32(inputs, sizeof(inputs) >> 2)
             .DoBuffer32(levels, sizeof(levels) >> 2)
@@ -44,6 +52,8 @@ struct PxaGpio {
             .DoBuffer32(fallDet, sizeof(fallDet) >> 2)
             .DoBuffer32(detStatus, sizeof(detStatus) >> 2)
             .DoBuffer32(AFRs, sizeof(AFRs) >> 2);
+        if (version >= 1)
+            chunkHelper.DoBool(holdOutputs).DoBuffer32(heldDirs, 4).DoBuffer32(heldLatches, 4);
     }
 };
 
@@ -55,8 +65,9 @@ static void pxaGpioPrvRecalcValues(struct PxaGpio *gpio, uint_fast8_t which) {
         uarmAbort();
     }
 
-    val = gpio->dirs[which];
-    newVal = (gpio->latches[which] & val) | (gpio->inputs[which] & (~val));
+    val = gpio->holdOutputs ? gpio->heldDirs[which] : gpio->dirs[which];
+    const uint32_t latch = gpio->holdOutputs ? gpio->heldLatches[which] : gpio->latches[which];
+    newVal = (latch & val) | (gpio->inputs[which] & (~val));
 
     // process change notifs
     t = newVal ^ oldVal;
@@ -309,6 +320,8 @@ static bool pxaGpioPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
     }
 
 done:
+    if (write && gpio->peripheralObserver) gpio->peripheralObserver(gpio->peripheralContext);
+    if (write && gpio->configurationObserver) gpio->configurationObserver(gpio->configurationContext);
     return true;
 }
 
@@ -346,6 +359,7 @@ void pxaGpioSetState(struct PxaGpio *gpio, uint_fast8_t gpioNum, bool on) {
     if (gpioNum >= gpio->nGpios) return;
 
     p = gpio->inputs + set;
+    const bool oldLevel = (*p & v) != 0;
     if (on)
         *p |= v;
     else
@@ -353,6 +367,8 @@ void pxaGpioSetState(struct PxaGpio *gpio, uint_fast8_t gpioNum, bool on) {
 
     pxaGpioPrvRecalcValues(gpio, set);
     pxaGpioPrvRecalcIntrs(gpio);
+    if (oldLevel != on && gpio->inputObserver)
+        gpio->inputObserver(gpio->inputObserverContext, gpioNum, oldLevel, on);
 }
 
 enum PxaGpioState pxaGpioGetState(struct PxaGpio *gpio, uint_fast8_t gpioNum) {
@@ -364,6 +380,11 @@ enum PxaGpioState pxaGpioGetState(struct PxaGpio *gpio, uint_fast8_t gpioNum) {
     uint_fast8_t afr;
 
     if (gpioNum >= gpio->nGpios) return PxaGpioStateNoSuchGpio;
+
+    if (gpio->holdOutputs)
+        return (gpio->heldDirs[sSet] & sV)
+            ? ((gpio->heldLatches[sSet] & sV) ? PxaGpioStateHigh : PxaGpioStateLow)
+            : PxaGpioStateHiZ;
 
     afr = (gpio->AFRs[bSet] & bV) >> bShift;
 
@@ -388,27 +409,88 @@ void pxaGpioSetNotif(struct PxaGpio *gpio, uint_fast8_t gpioNum, GpioChangedNoti
     gpio->notifD[gpioNum] = userData;
 }
 
+void pxaGpioSetPeripheralObserver(PxaGpio* gpio, void (*notify)(void*), void* context) {
+    gpio->peripheralObserver = notify;
+    gpio->peripheralContext = context;
+}
+
+void pxaGpioSetConfigurationObserver(PxaGpio* gpio,void (*notify)(void*),void* context) {
+    gpio->configurationObserver=notify;gpio->configurationContext=context;
+}
+
 void pxaGpioSetDirsChangedNotif(struct PxaGpio *gpio, GpioDirsChangedF notifF, void *userData) {
     gpio->dirNotifF = notifF;
     gpio->dirNotifD = userData;
 }
 
+void pxaGpioSetInputObserver(PxaGpio* gpio, GpioChangedNotifF callback, void* context) {
+    gpio->inputObserver = callback;
+    gpio->inputObserverContext = context;
+}
+
+bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin) {
+    return pin < gpio->nGpios && !(gpio->dirs[pin / 32] & (1u << (pin % 32)));
+}
+
+bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin) {
+    return pin < gpio->nGpios && (gpio->inputs[pin / 32] & (1u << (pin % 32)));
+}
+
+unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin) {
+    return pin < gpio->nGpios ? (gpio->AFRs[pin / 16] >> (2 * (pin % 16))) & 3 : 0;
+}
+
+void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels) {
+    memcpy(gpio->heldDirs, gpio->dirs, sizeof(gpio->heldDirs));
+    memcpy(gpio->heldLatches, levels, sizeof(gpio->heldLatches));
+    gpio->holdOutputs = true;
+    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
+    if (gpio->peripheralObserver) gpio->peripheralObserver(gpio->peripheralContext);
+}
+
+void pxaGpioReleaseSleepOutputs(PxaGpio* gpio) {
+    gpio->holdOutputs = false;
+    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
+    if (gpio->peripheralObserver) gpio->peripheralObserver(gpio->peripheralContext);
+    if (gpio->dirNotifF) gpio->dirNotifF(gpio->dirNotifD);
+    pxaGpioPrvRecalcIntrs(gpio);
+}
+
+void pxaGpioSleepReset(PxaGpio* gpio) {
+    // External pin stimuli and the power-manager output hold are not GPIO registers.
+    memset(gpio->latches, 0, sizeof(gpio->latches));
+    memset(gpio->dirs, 0, sizeof(gpio->dirs));
+    memset(gpio->riseDet, 0, sizeof(gpio->riseDet));
+    memset(gpio->fallDet, 0, sizeof(gpio->fallDet));
+    memset(gpio->detStatus, 0, sizeof(gpio->detStatus));
+    memset(gpio->AFRs, 0, sizeof(gpio->AFRs));
+    for (unsigned i = 0; i < 4; ++i) pxaGpioPrvRecalcValues(gpio, i);
+    if (gpio->peripheralObserver) gpio->peripheralObserver(gpio->peripheralContext);
+    pxaGpioPrvRecalcIntrs(gpio);
+}
+
 template <typename T>
 void pxaGpioSave(struct PxaGpio *gpio, T &savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::pxaGpio, SAVESTATE_VERSION);
+    // Version 1 keeps sleep output holds on both PXA25x and PXA27x; version 0 still loads.
+    const uint32_t version = SAVESTATE_VERSION;
+    auto chunk = savestate.GetChunk(ChunkType::pxaGpio, version);
     if (!chunk) ERR("unable to allocate chunk");
 
     SaveChunkHelper helper(*chunk);
-    gpio->DoSaveLoad(helper);
+    gpio->DoSaveLoad(helper, version);
 }
 
 template <typename T>
 void pxaGpioLoad(struct PxaGpio *gpio, T &loader) {
-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaGpio, SAVESTATE_VERSION, "pxa gpio");
+    uint32_t version;
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaGpio, SAVESTATE_VERSION, "pxa gpio", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
-    gpio->DoSaveLoad(helper);
+    gpio->holdOutputs = false;
+    memset(gpio->heldDirs, 0, sizeof(gpio->heldDirs));
+    memset(gpio->heldLatches, 0, sizeof(gpio->heldLatches));
+    gpio->DoSaveLoad(helper, version);
 }
 
 template void pxaGpioSave<Savestate<ChunkType>>(PxaGpio *gpio, Savestate<ChunkType> &savestate);

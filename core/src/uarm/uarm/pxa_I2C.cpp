@@ -61,6 +61,16 @@ bool pxaI2cDeviceAdd(struct PxaI2c *i2c, I2cDeviceActionF actF, void *userData) 
     return false;
 }
 
+bool pxaI2cDeviceRemove(struct PxaI2c *i2c, void *userData) {
+    if (!userData) return false;
+    for (auto &device : i2c->devs) {
+        if (!device.actF || device.userData != userData) continue;
+        device = {};
+        return true;
+    }
+    return false;
+}
+
 static void pxaI2cPrvRecalcIrq(struct PxaI2c *i2c) {
     uint32_t effectiveIsr = i2c->isr & 0x6f0;
 

@@ -5,6 +5,7 @@
 
 #include "dynarmic/backend/x64/emit_x64.h"
 
+#include <cstdlib>
 #include <iterator>
 
 #include <mcl/assert.hpp>
@@ -335,7 +336,11 @@ Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {
 }
 
 EmitX64::BlockDescriptor EmitX64::RegisterBlock(const IR::LocationDescriptor& descriptor, CodePtr entrypoint, size_t size) {
-    PerfMapRegister(entrypoint, code.getCurr(), LocationDescriptorToFriendlyName(descriptor));
+    // Frond: only name the block when the perf map is written.
+    static const bool perf_map = std::getenv("PERF_BUILDID_DIR") != nullptr;
+    if (perf_map) {
+        PerfMapRegister(entrypoint, static_cast<const u8*>(entrypoint) + size, LocationDescriptorToFriendlyName(descriptor));
+    }
     Patch(descriptor, entrypoint);
 
     BlockDescriptor block_desc{entrypoint, size};

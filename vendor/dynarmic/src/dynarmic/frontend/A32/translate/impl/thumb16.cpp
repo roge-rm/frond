@@ -741,13 +741,16 @@ bool TranslatorVisitor::thumb16_PUSH(bool M, RegList reg_list) {
 
     const u32 num_bytes_to_push = static_cast<u32>(4 * mcl::bit::count_ones(reg_list));
     const auto final_address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(num_bytes_to_push));
-    auto address = final_address;
-    for (size_t i = 0; i < 16; i++) {
+    // Frond: from the highest register down, as the interpreter's STMDB does, so a fault
+    // part-way leaves the same words stored.
+    auto address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(4));
+    for (size_t k = 0; k < 16; k++) {
+        const size_t i = 15 - k;
         if (mcl::bit::get_bit(i, reg_list)) {
             // TODO: Deal with alignment
             const auto Ri = ir.GetRegister(static_cast<Reg>(i));
             ir.WriteMemory32(address, Ri, IR::AccType::ATOMIC);
-            address = ir.Add(address, ir.Imm32(4));
+            address = ir.Sub(address, ir.Imm32(4));
         }
     }
 
@@ -877,16 +880,25 @@ bool TranslatorVisitor::thumb16_LDMIA(Reg n, RegList reg_list) {
     const bool write_back = !mcl::bit::get_bit(static_cast<size_t>(n), reg_list);
     auto address = ir.GetRegister(n);
 
+    // Frond: a loaded base is set after the last load, so a transfer that faults leaves it as
+    // it was for the interpreter to run the instruction again.
+    IR::U32 base_data;
     for (size_t i = 0; i < 8; i++) {
         if (mcl::bit::get_bit(i, reg_list)) {
             const auto data = ir.ReadMemory32(address, IR::AccType::ATOMIC);
-            ir.SetRegister(static_cast<Reg>(i), data);
+            if (static_cast<Reg>(i) == n) {
+                base_data = data;
+            } else {
+                ir.SetRegister(static_cast<Reg>(i), data);
+            }
             address = ir.Add(address, ir.Imm32(4));
         }
     }
 
     if (write_back) {
         ir.SetRegister(n, address);
+    } else {
+        ir.SetRegister(n, base_data);
     }
     return true;
 }

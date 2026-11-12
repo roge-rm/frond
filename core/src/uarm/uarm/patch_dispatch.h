@@ -14,6 +14,10 @@ struct ArmCpu;
 
 struct PatchDispatch* initPatchDispatch();
 
+bool patchDispatchCanTrackTail(PatchDispatch* pd);
+// Whether LDR R12, [R9, #-table] then LDR PC, [R12, #offset] reaches a patched syscall.
+bool patchDispatchHasPatch(struct PatchDispatch* pd, uint32_t table, uint32_t offset);
+
 void destroyPatchDispatch(struct PatchDispatch* pd);
 void patchDispatchReset(struct PatchDispatch* pd);
 

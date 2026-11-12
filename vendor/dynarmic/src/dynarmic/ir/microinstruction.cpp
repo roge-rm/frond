@@ -556,6 +556,7 @@ bool Inst::MayHaveSideEffects() const {
         || WritesToFPSR()
         || AltersExclusiveState()
         || IsMemoryWrite()
+        || IsMemoryRead()  // Frond: device reads have side effects (FIFOs), keep unused loads
         || IsCoprocessorInstruction();
 }
 

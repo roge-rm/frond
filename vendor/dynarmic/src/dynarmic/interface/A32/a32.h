@@ -81,6 +81,34 @@ public:
     /// Clears exclusive state for this core.
     void ClearExclusiveState();
 
+    /// Frond: compiling on a thread of this Jit's own. Off compiles in place. On queues each
+    /// block ShouldCompile wants (UserCallbacks::CompileQueued) and installs it at the start
+    /// of a later Run. Sync waits for each one where it was asked for, so runs stop where
+    /// they would with Off. Set before the first Run.
+    enum class CompileThread { Off, On, Sync };
+    void SetCompileThread(CompileThread mode);
+
+    /// Frond: compile ahead on the compile thread when it is idle: blocks reached but not
+    /// wanted yet (ShouldCompile false), and blocks up to depth links on from one that was
+    /// asked for. 0, the default, is off.
+    void SetCompileAhead(unsigned depth);
+
+    /// Frond: counts for the compile thread, since the Jit was made. Ahead: jobs queued,
+    /// compiled, later asked for and installed, and left undone (cache past its high-water
+    /// mark, or cleared first). Cache clears: whole code cache clears, asked for or for lack of
+    /// space, counted with the compile thread off too.
+    struct CompileStats {
+        std::uint64_t queued = 0, installed = 0, stale = 0, cancelled = 0, overflow = 0, no_space = 0;
+        std::uint64_t ahead_queued = 0, ahead_compiled = 0, ahead_used = 0, ahead_skipped = 0;
+        std::uint64_t cache_clears = 0;
+    };
+    CompileStats GetCompileStats() const;
+
+    /// Frond: the cycles left in the current Run, as GetTicksRemaining gave them less the
+    /// blocks finished since (a block's cycles are counted at its end). Only valid inside a
+    /// memory read or write callback during Run. Negative past the budget.
+    std::int64_t TicksRemainingNow() const;
+
     /**
      * Returns true if Jit::Run was called but hasn't returned yet.
      * i.e.: We're in a callback.

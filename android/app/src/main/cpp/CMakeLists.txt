@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.22)
 project(frond C CXX)
 
-# FROND_CORE is the reconstructed core (build/source), SDL2_SOURCE and
+# FROND_CORE is the core's source (core/ in the repo), SDL2_SOURCE and
 # SDL2_IMAGE_SOURCE the pinned SDL2 and SDL2_image trees.
 if(NOT IS_DIRECTORY "${FROND_CORE}/src/uarm" OR NOT IS_DIRECTORY "${SDL2_SOURCE}"
         OR NOT IS_DIRECTORY "${SDL2_IMAGE_SOURCE}")
-    message(FATAL_ERROR "Run the prepareCore, fetchSdl and fetchSdlImage Gradle tasks first")
+    message(FATAL_ERROR "Run the fetchSdl and fetchSdlImage Gradle tasks first")
 endif()
+# The repo root, for the sources outside core/.
+set(FROND_REPO "${CMAKE_CURRENT_SOURCE_DIR}/../../../../..")
 option(FROND_SELF_TEST "Build the M1 CPU self-test as libmain.so instead of the emulator" OFF)
 
 set(CMAKE_C_STANDARD 11)
@@ -54,7 +56,7 @@ core_sources("${UARM}" SOURCE_CXX_NATIVE uarm_cxx)
 core_sources("${COMMON}" SOURCE_C common_c)
 core_sources("${COMMON}" SOURCE_CXX common_cxx)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${UARM}/Makefile" "${COMMON}/Makefile" "${FROND_CORE}/.prepared")
+    "${UARM}/Makefile" "${COMMON}/Makefile")
 
 # The SDL front end in native/ builds into libmain.so with the Android entry point.
 set(front_end ${uarm_cxx})
@@ -93,7 +95,7 @@ target_compile_options(frondcore PRIVATE -O2 -g
     -Wno-constant-conversion -Wno-constant-logical-operand)
 
 # The Fast engine: Dynarmic on arm64-v8a (its arm64 back end) and x86_64, from FROND_DYNARMIC,
-# the patched source make dynarmic-source exports. Other ABIs build with the interpreter only.
+# vendor/dynarmic in the repo. Other ABIs build with the interpreter only.
 if(FROND_DYNARMIC AND ANDROID_ABI MATCHES "^(arm64-v8a|x86_64)$")
     # Dynarmic only needs Boost's header-only parts; FROND_BOOST_INCLUDE holds the host's boost/.
     set(boost "${CMAKE_CURRENT_BINARY_DIR}/boost")
@@ -148,12 +150,12 @@ endif()
 # programs, built with -Pfrond.jitDifferential=true, for adb push to /data/local/tmp.
 option(FROND_JIT_DIFFERENTIAL "Also build the jit-differential program" OFF)
 if(FROND_JIT_DIFFERENTIAL AND TARGET dynarmic)
-    add_executable(jit-differential "${FROND_CORE}/../../tests/jit-differential.cpp")
+    add_executable(jit-differential "${FROND_REPO}/tests/jit-differential.cpp")
     target_compile_options(jit-differential PRIVATE -O2 -g)
     target_link_libraries(jit-differential PRIVATE frondcore dynarmic log)
     # tools/benchmark-replay.cpp too, for Bike and FrondBench speed and hashes on a device.
-    add_executable(benchmark-replay "${FROND_CORE}/../../tools/benchmark-replay.cpp")
-    target_include_directories(benchmark-replay PRIVATE "${FROND_CORE}/../../tools" "${UARM}/native")
+    add_executable(benchmark-replay "${FROND_REPO}/tools/benchmark-replay.cpp")
+    target_include_directories(benchmark-replay PRIVATE "${FROND_REPO}/tools" "${UARM}/native")
     target_compile_definitions(benchmark-replay PRIVATE SDL_MAIN_HANDLED)
     target_compile_options(benchmark-replay PRIVATE -O2 -g)
     target_link_libraries(benchmark-replay PRIVATE frondcore SDL2 SDL2_image log)
@@ -203,7 +205,7 @@ target_link_libraries(main68k PRIVATE frond68kcore frondcommon SDL2 SDL2main SDL
 # process as libfrondcard.so: the core's card file code and the JNI entries, without SDL, so it
 # loads outside the :emulator process. Unit tests load a host build of CardStorageJni.cpp alone.
 # ZodiacRomJni.cpp and firmware/ZodiacRom.cpp make the Zodiac ROM from Tapwave's update (zlib from the NDK).
-set(ZODIAC_ROM "${FROND_CORE}/../../zodiac-rom")
+set(ZODIAC_ROM "${FROND_REPO}/zodiac-rom")
 add_library(frondcard SHARED CardToolJni.cpp CardStorageJni.cpp ZodiacRomJni.cpp "${ZODIAC_ROM}/ZodiacRom.cpp")
 target_include_directories(frondcard PRIVATE "${UARM}/native" "${ZODIAC_ROM}")
 target_compile_options(frondcard PRIVATE -O2 -g -Wno-unused-parameter)
@@ -211,7 +213,7 @@ target_link_libraries(frondcard PRIVATE frondcore log z)
 
 # The link library (link/: pairing, Noise KK, records, mux) for Connections as libfrondlink.so,
 # loaded by LinkNative.kt in the home and emulator processes. Same sources as the desktop's.
-set(LINK "${FROND_CORE}/../../link")
+set(LINK "${FROND_REPO}/link")
 add_library(frondlink SHARED LinkJni.cpp
     "${LINK}/crypto.cpp" "${LINK}/noise.cpp" "${LINK}/wire.cpp" "${LINK}/pairing.cpp"
     "${LINK}/messages.cpp" "${LINK}/mux.cpp" "${LINK}/link.cpp" "${LINK}/monocypher/monocypher.c")
@@ -221,7 +223,7 @@ target_compile_options(frondlink PRIVATE -O2 -g)
 if(FROND_SELF_TEST)
     # The CPU tests from tests/ run as the synthetic self-test.
     add_library(main SHARED self_test.cpp test_arm_alignment.cpp test_instruction_cache.cpp)
-    target_include_directories(main PRIVATE "${FROND_CORE}/../../tests")
+    target_include_directories(main PRIVATE "${FROND_REPO}/tests")
     target_compile_options(main PRIVATE -O2)
     target_link_libraries(main PRIVATE frondcore SDL2 SDL2main log)
     return()

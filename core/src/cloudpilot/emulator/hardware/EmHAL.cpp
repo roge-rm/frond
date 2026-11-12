@@ -13,6 +13,8 @@
 
 #include "EmHAL.h"
 
+#include <algorithm>
+
 #include "EmCommon.h"
 #include "EmSession.h"
 #include "EmTransportSerial.h"
@@ -134,6 +136,11 @@ void EmHAL::CycleSlowly(Bool sleeping) {
 // ---------------------------------------------------------------------------
 //		� EmHAL::ButtonEvent
 // ---------------------------------------------------------------------------
+
+bool EmHAL::DispatchDanaInput(const std::vector<DanaTransition5>& batch) {
+    return GetRootHandler()->DispatchDanaInput(batch);
+}
+void EmHAL::ReleaseDanaInput(bool cancel) { GetRootHandler()->ReleaseDanaInput(cancel); }
 
 void EmHAL::DispatchButtonEvent(ButtonEvent evt) {
     EmAssert(EmHAL::GetRootHandler());
@@ -414,6 +421,13 @@ void EmHAL::DTRChanged(int uartNum) {
     transport->SetDTR(state);
 }
 
+// The same for a DTR wired to one device's connector, which the UART may have left.
+
+void EmHAL::DTRChanged(int uartNum, EmUARTDeviceType device) {
+    EmTransportSerial* transport = gSession->GetTransportSerial(device);
+    if (transport) transport->SetDTR(EmHAL::GetDTR(uartNum));
+}
+
 // ---------------------------------------------------------------------------
 //		� EmHAL::GetVibrateOn
 // ---------------------------------------------------------------------------
@@ -432,9 +446,35 @@ uint16 EmHAL::GetLEDState(void) {
     return EmHAL::GetRootHandler()->GetLEDState();
 }
 
+namespace {
+    uint64 wakeAt = ~uint64(0);
+}
+
 uint32 EmHAL::CyclesToNextInterrupt(uint64 systemCycles) {
     EmAssert(EmHAL::GetRootHandler());
-    return EmHAL::GetRootHandler()->CyclesToNextInterrupt(systemCycles);
+    const uint32 next = EmHAL::GetRootHandler()->CyclesToNextInterrupt(systemCycles);
+    if (wakeAt == ~uint64(0)) return next;
+    if (systemCycles >= wakeAt) {
+        wakeAt = ~uint64(0);
+        return next;
+    }
+    // A skip that reaches the wake uses it up, so a wake asked for after the CPU wakes there
+    // isn't ignored behind a stale earlier one.
+    if (wakeAt - systemCycles <= next) {
+        const uint64 until = wakeAt - systemCycles;
+        wakeAt = ~uint64(0);
+        return uint32(until);
+    }
+    return next;
+}
+
+void EmHAL::WakeAt(uint64 systemCycles, uint64 now) {
+    if (wakeAt <= now || systemCycles < wakeAt) wakeAt = systemCycles;
+}
+
+void EmHAL::ScaleCycles(uint32 factor) {
+    EmAssert(EmHAL::GetRootHandler());
+    EmHAL::GetRootHandler()->ScaleCycles(factor);
 }
 
 bool EmHAL::EnableRAM() {
@@ -775,6 +815,10 @@ uint32 EmHALHandler::CyclesToNextInterrupt(uint64 systemCycles) {
 
     EmAssert(this->GetNextHandler());
     return this->GetNextHandler()->CyclesToNextInterrupt(systemCycles);
+}
+
+void EmHALHandler::ScaleCycles(uint32 factor) {
+    if (this->GetNextHandler()) this->GetNextHandler()->ScaleCycles(factor);
 }
 
 bool EmHALHandler::EnableRAM() {

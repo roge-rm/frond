@@ -78,9 +78,10 @@ export interface ZipfileWalker<VoidPtr> {
 export interface SessionFile5<VoidPtr> {
     IsSessionFile(size: number, data: VoidPtr): boolean;
 
-    GetDeviceType(): DeviceType5;
+    // The device's fixed name, like "palm-tx".
+    GetDeviceName(): string;
     GetDisplayMode(): number;
-    SetDeviceType(deviceTyoe: DeviceType5): SessionFile5<VoidPtr>;
+    SetDeviceName(name: string): SessionFile5<VoidPtr>;
     SetDisplayMode(displayMode: DisplayMode): SessionFile5<VoidPtr>;
 
     GetMetadata(): VoidPtr;

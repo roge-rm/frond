@@ -25,7 +25,8 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifdef _WIN32
+// Android has backtrace() only from API 33.
+#if defined(_WIN32) || (defined(__ANDROID__) && __ANDROID_API__ < 33)
     #include <string>
 
 std::string Backtrace(int skip = 1) { return "<backtrace unavailable>"; }

@@ -15,6 +15,7 @@
 #define EmBankSRAM_h
 
 #include "EmCommon.h"
+#include "EmMemory.h"  // EmBusWait
 
 extern emuptr gMemoryStart;
 
@@ -29,6 +30,7 @@ class EmBankSRAM {
     static void Dispose(void);
 
     static void SetBankHandlers(void);
+    static void SetWaitStates(EmBusWait wait);
 
     static uint32 GetLong(emuptr address);
     static uint32 GetWord(emuptr address);

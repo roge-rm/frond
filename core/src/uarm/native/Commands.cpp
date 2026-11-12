@@ -1,8 +1,11 @@
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
 
 #include "Commands.h"
+#include "GuestExport.h"
+#include "GuestDatabaseOps.h"
 
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -18,9 +21,14 @@
 #include "db_installer.h"
 #include "db_list.h"
 #include "md5.h"
+#include "nand.h"
 #include "sdcard.h"
+#include "device_profile5.h"
 #include "session/session_file5.h"
+#include "MachineSession.h"
+#include "CardSwap.h"
 #include "syscall_dispatch.h"
+#include "cputil.h"
 
 using namespace std;
 
@@ -65,7 +73,16 @@ namespace {
         static_cast<commands::Context*>(context)->audioDriver.Pause();
     }
 
+    // On a Memory Stick device the card store holds the stick, so the SD commands refuse.
+    bool refuseSd(void* context) {
+        auto* pxa = dynamic_cast<SocPXA*>(reinterpret_cast<commands::Context*>(context)->soc);
+        if (!pxa || !pxa->GetMemoryStick()) return false;
+        cout << "This device has no SD slot." << endl;
+        return true;
+    }
+
     void CmdUnmount(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (refuseSd(context)) return;
         if (!sdCardInitialized()) {
             cout << "no sd card mounted" << endl;
             return;
@@ -75,9 +92,11 @@ namespace {
 
         ctx->soc->SdEject();
         sdCardReset();
+        frondSdCandidate::releaseUnused();
     }
 
     void CmdMount(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (refuseSd(context)) return;
         if (sdCardInitialized()) {
             cout << "sd card already mounted" << endl;
             return;
@@ -85,24 +104,79 @@ namespace {
 
         if (args.size() != 1) return env.PrintUsage();
 
-        size_t len{0};
-        unique_ptr<uint8_t[]> data;
-
-        if (!util::ReadFile(args[0], data, len)) {
-            cout << "failed to read " << args[0];
-            return;
-        }
-
-        if (len % SD_SECTOR_SIZE) {
-            cout << "sd card image has bad size" << endl;
-            return;
-        }
-
         auto ctx = reinterpret_cast<commands::Context*>(context);
-        string key = md5(data.get(), len);
-
-        sdCardInitializeWithData(len / SD_SECTOR_SIZE, data.release(), key.c_str());
+        const auto loaded = frondNative::loadSdImage(ctx->sessionFolder, ctx->soc->GetDeviceType(), args[0]);
+        if (!loaded.ok) {
+            cout << (loaded.code == "read" ? "failed to read " + args[0] : loaded.message) << endl;
+            return;
+        }
         ctx->soc->SdInsert();
+    }
+
+    // The same card moves as the control socket's sd-take-out, sd-put-in, ms-take-out and ms-put-in.
+    MemoryStickController* memoryStick(commands::Context* ctx) {
+        auto* pxa = dynamic_cast<SocPXA*>(ctx->soc);
+        return pxa ? pxa->GetMemoryStick() : nullptr;
+    }
+
+    void CmdTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context, bool stick) {
+        if (!args.empty()) return env.PrintUsage();
+        auto ctx = reinterpret_cast<commands::Context*>(context);
+        auto* ms = memoryStick(ctx);
+        frondNative::CardIdentity identity{};
+        bool protect = false;
+        frondNative::SdResult result;
+        if (stick) {
+            result = frondNative::takeOutMs(ctx->sessionFolder, ms, identity, protect);
+        } else if (ms) {
+            result = frondSdCandidate::fail("unsupported", "This device has no SD slot.");
+        } else if (ctx->soc->SdInserted()) {
+            result = frondSdCandidate::fail("busy", "Eject the card before taking it out.");
+        } else {
+            protect = frondNative::slotCards().sdProtected;
+            result = frondNative::takeOutFileCard(ctx->sessionFolder, frondMachine::kindSd, protect, identity);
+            if (result.ok) frondNative::slotCards().sdProtected = false;
+        }
+        cout << (result.ok ? frondNative::takenOutReply(identity, protect) : result.message) << endl;
+    }
+
+    void CmdPutIn(vector<string> args, cli::CommandEnvironment& env, void* context, bool stick) {
+        frondNative::CardIdentity identity{};
+        bool protect = false;
+        if (args.empty() || args.size() > 2 ||
+            !frondNative::parsePutIn(args.size() == 2 ? args[0] + " " + args[1] : args[0], identity, protect))
+            return env.PrintUsage();
+        auto ctx = reinterpret_cast<commands::Context*>(context);
+        auto* ms = memoryStick(ctx);
+        const auto device = ctx->soc->GetDeviceType();
+        frondNative::SdResult result;
+        if (stick) {
+            result = frondNative::putInMs(ctx->sessionFolder, ms, device, identity, protect);
+        } else if (ms) {
+            result = frondSdCandidate::fail("unsupported", "This device has no SD slot.");
+        } else {
+            result = frondNative::putInSd(ctx->sessionFolder, device, identity, protect);
+            if (result.ok) ctx->soc->SdInsert();
+        }
+        if (!result.ok) cout << result.message << endl;
+    }
+
+    void CmdSdTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdTakeOut(args, env, context, false); }
+    void CmdMsTakeOut(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdTakeOut(args, env, context, true); }
+    void CmdSdPutIn(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdPutIn(args, env, context, false); }
+    void CmdMsPutIn(vector<string> args, cli::CommandEnvironment& env, void* context) { CmdPutIn(args, env, context, true); }
+
+    void CmdHoldState(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (!args.empty()) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        cout << "hold: " << (!soc->HoldSwitchSupported() ? "unavailable" :
+                            soc->HoldSwitchOn() ? "on" : "off") << endl;
+    }
+    void CmdHold(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() != 1 || (args[0] != "on" && args[0] != "off")) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        if (!soc->SetHoldSwitch(args[0] == "on")) cout << "Hold is unavailable for this device" << endl;
+        else cout << "hold: " << (soc->HoldSwitchOn() ? "on" : "off") << endl;
     }
 
     void CmdReset(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -119,10 +193,12 @@ namespace {
     }
 
     void CmdResetHard(vector<string> args, cli::CommandEnvironment& env, void* context) {
-        auto ctx = reinterpret_cast<commands::Context*>(context);
-
-        ctx->soc->JamKey(keyIdPower, 2000);
-        ctx->soc->Reset();
+        auto* soc = reinterpret_cast<commands::Context*>(context)->soc;
+        if (!soc->HardResetSupported()) {
+            cout << "not available on this device" << endl;
+            return;
+        }
+        soc->HardReset();
     }
 
     void CmdRotate(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -136,47 +212,14 @@ namespace {
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
 
-        if (sdCardInitialized()) {
-            string key = md5(reinterpret_cast<uint8_t*>(sdCardData().data), sdCardData().size);
-            sdCardRekey(key.c_str());
-        }
-
-        if (!ctx->soc->Save()) {
-            cout << "failed to save state" << endl;
+        if (!frondNative::saveMachine(args[0], *ctx->soc, ctx->sessionPath, ctx->sessionFolder)) {
+            cout << "failed to save session" << endl;
             return;
         }
+        cout << "wrote session to " << args[0] << endl;
 
-        SessionFile5 sessionFile;
-
-        const Buffer rom = ctx->soc->GetRomData();
-        const Buffer nand = ctx->soc->GetNandData();
-        const Buffer memory = ctx->soc->GetMemoryData();
-        const Buffer savestate = ctx->soc->GetSavestate();
-        const Buffer sd = sdCardData();
-
-        sessionFile.SetDeviceType(static_cast<int32_t>(ctx->soc->GetDeviceType()))
-            .SetDisplayMode(static_cast<int32_t>(ctx->soc->GetDisplayMode()))
-            .SetRamSize(ctx->soc->GetRamSize())
-            .SetNor(rom.size, reinterpret_cast<uint8_t*>(rom.data))
-            .SetNand(nand.size, reinterpret_cast<uint8_t*>(nand.data))
-            .SetMemory(memory.size, reinterpret_cast<uint8_t*>(memory.data))
-            .SetSavestate(savestate.size, reinterpret_cast<uint8_t*>(savestate.data));
-
-        if (!sessionFile.Serialize()) {
-            cout << "failed to serialize session" << endl;
-            return;
-        }
-
-        if (!util::WriteFile(args[0],
-                             reinterpret_cast<const uint8_t*>(sessionFile.GetSerializedSession()),
-                             sessionFile.GetSerializedSessionSize())) {
-            cout << "failed to write session to " << args[0] << endl;
-        } else {
-            cout << "wrote session to " << args[0] << endl;
-        }
-
-        if (args.size() == 2 && sdCardInitialized()) {
-            if (!util::WriteFile(args[1], reinterpret_cast<uint8_t*>(sd.data), sd.size)) {
+        if (args.size() == 2 && !refuseSd(context) && sdCardInitialized()) {
+            if (!frondNative::exportSd(args[1]).ok) {
                 cout << "failed to write SD image to " << args[1] << endl;
             } else {
                 cout << "wrote SD image to " << args[1] << endl;
@@ -186,15 +229,14 @@ namespace {
 
     void CmdSaveSd(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() != 1) return env.PrintUsage();
+        if (refuseSd(context)) return;
 
         if (!sdCardInitialized()) {
             cout << "no SD card mounted" << endl;
             return;
         }
 
-        const Buffer sd = sdCardData();
-
-        if (!util::WriteFile(args[0], reinterpret_cast<uint8_t*>(sd.data), sd.size)) {
+        if (!frondNative::exportSd(args[0]).ok) {
             cout << "failed to write SD image to " << args[0] << endl;
         } else {
             cout << "wrote SD image to " << args[0] << endl;
@@ -212,34 +254,36 @@ namespace {
         if (args.size() != 0) return env.PrintUsage();
         auto ctx = reinterpret_cast<commands::Context*>(context);
         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+        if (!sd) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         if (!syscallDispatchM68kSupport(sd)) {
             cout << "m68k syscalls not supported" << endl;
             return;
         }
 
-        if (!syscallDispatchPrepare(sd)) {
-            cout << "unable to prepare save environment for syscalls" << endl;
-            return;
+        try {
+            GuestExport guest(*ctx->soc);
+            if (!guest.Ready()) {
+                cout << "Palm OS is not ready for the OS version" << endl;
+                return;
+            }
+            char version[32];
+            const uint32_t ptr = syscall68k_SysGetOsVersionString(sd, SC_EXECUTE_FULL);
+            if (!ptr || !syscallDispatch_strncpy_toHost(sd, version, ptr, sizeof(version)))
+                throw std::runtime_error("could not read OS version");
+            version[sizeof(version) - 1] = '\0';
+            // The read-only checkpoint reclaims the version string on TG50.
+            if (ctx->soc->GetDeviceType() != deviceTypeTG50 &&
+                syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, ptr) != 0)
+                throw std::runtime_error("could not free OS version string");
+            guest.Finish();
+            cout << version << endl;
+        } catch (const std::exception& error) {
+            cout << "OS version failed: " << error.what() << "; guest restored" << endl;
         }
-
-        char version[32];
-        const uint32_t ptr = syscall68k_SysGetOsVersionString(sd, SC_EXECUTE_FULL);
-
-        if (!ptr) {
-            cout << "failed to retrieve OS version string" << endl;
-            return;
-        }
-
-        syscallDispatch_strncpy_toHost(sd, version, ptr, sizeof(version));
-        version[sizeof(version) - 1] = '\0';
-
-        if (syscall68k_MemPtrFree(sd, SC_EXECUTE_PURE, ptr) != 0) {
-            cout << "very bad: failed to release m68k pointer" << endl;
-            return;
-        }
-
-        cout << version << endl;
     }
 
     void CmdSetAutoOff(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -252,7 +296,15 @@ namespace {
         }
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
+        if (ctx->soc->GetDeviceType() == deviceTypeTG50) {
+            cout << "set-auto-off is not supported on TG50" << endl;
+            return;
+        }
         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+        if (!sd) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         if (!syscallDispatchM68kSupport(sd)) {
             cout << "m68k syscalls not supported" << endl;
@@ -269,6 +321,10 @@ namespace {
 
     void CmdInstall(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() != 1) return env.PrintUsage();
+        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         size_t len;
         unique_ptr<uint8_t[]> data;
@@ -279,7 +335,9 @@ namespace {
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
 
-        const auto result = dbInstallerInstall(ctx->soc->GetSyscallDispatch(), len, data.get());
+        int result;
+        try { result = GuestDatabaseOps::Install(*ctx->soc, len, data.get()); }
+        catch (const std::exception& error) { cout << "installation failed: " << error.what() << endl; return; }
 
         switch (result) {
             case DB_INSTALL_RESULT_NEEDS_RESET:
@@ -324,9 +382,24 @@ namespace {
         if (args.size() != 0) return env.PrintUsage();
         auto ctx = reinterpret_cast<commands::Context*>(context);
         SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+        if (!sd) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         DbMetadataList metadataList;
-        if (!dbListGet(sd, metadataList)) return;
+        std::unique_ptr<GuestExport> guest;
+        try {
+            guest = std::make_unique<GuestExport>(*ctx->soc);
+            if (!guest->Ready() || !dbListGet(sd, metadataList)) {
+                cout << "Palm OS is not ready for the database list" << endl;
+                return;
+            }
+            guest->Finish();
+        } catch (const std::exception& error) {
+            cout << "database list failed: " << error.what() << "; guest restored" << endl;
+            return;
+        }
 
         for (const auto& meta : metadataList) {
             union {
@@ -345,39 +418,24 @@ namespace {
 
     void CmdDbExport(vector<string> args, cli::CommandEnvironment& env, void* context, int type) {
         if (args.size() != 1) return env.PrintUsage();
+        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
-        SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
-
-        DbBackup backup(sd, type);
-
-        if (!backup.Init()) {
-            cout << "failed to initialize export" << endl;
-            return;
-        }
-
-        while (backup.GetState() == DbBackup::STATE_IN_PROGRESS) {
-            if (backup.Continue()) {
-                if (backup.HasLastProcessedDb()) {
-                    cout << "OK " << backup.GetLastProcessedDb() << endl;
-                }
-            } else {
-                cout << "FAILED " << backup.GetLastProcessedDb() << endl;
+        try {
+            std::vector<uint8_t> archive;
+            if (!GuestDatabaseOps::Export(*ctx->soc, "", archive, type)) {
+                cout << "Palm OS is not ready for database export; try again" << endl;
+                return;
             }
-        }
-
-        cout << endl;
-
-        if (backup.GetState() != DbBackup::STATE_DONE) {
-            cout << "export FAILED" << endl;
-            return;
-        }
-
-        if (util::WriteFile(args[0], reinterpret_cast<const uint8_t*>(backup.GetArchiveData()),
-                            backup.GetArchiveSize())) {
-            cout << "export written to " << args[0] << endl;
-        } else {
-            cout << "failed to write export to " << args[0] << endl;
+            if (util::WriteFile(args[0], archive.data(), archive.size()))
+                cout << "export written to " << args[0] << endl;
+            else
+                cout << "failed to write export to " << args[0] << endl;
+        } catch (const std::exception& error) {
+            cout << "export FAILED: " << error.what() << "; guest restored" << endl;
         }
     }
 
@@ -395,11 +453,53 @@ namespace {
 
     void CmdLaunch(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() != 1) return env.PrintUsage();
+        if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
+            cout << "not available on this device" << endl;
+            return;
+        }
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
-        SyscallDispatch* sd = ctx->soc->GetSyscallDispatch();
+        try {
+            if (GuestDatabaseOps::Launch(*ctx->soc, args[0]) != GuestDatabaseOps::LaunchResult::launched)
+                cout << "application could not be launched at this time" << endl;
+        } catch (const std::exception& error) { cout << "launch failed: " << error.what() << endl; }
+    }
 
-        launchAppByName(sd, args[0].c_str());
+    void CmdSaveNand(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() != 1) return env.PrintUsage();
+        auto* ctx = static_cast<commands::Context*>(context);
+        auto* chip = ctx->soc->GetNand();
+        if (!chip || !nandRawBytes(chip)) {
+            cout << "this device has no NAND image" << endl;
+            return;
+        }
+        // The raw image, main then spare bytes of each page, as --nand takes it.
+        std::ofstream out(args[0], std::ios::binary | std::ios::trunc);
+        std::vector<uint8_t> page(nandPageBytes(chip));
+        const uint64_t pages = nandRawBytes(chip) / page.size();
+        bool ok = bool(out);
+        for (uint64_t p = 0; ok && p < pages; ++p)
+            ok = nandReadRawPage(chip, uint32_t(p), page.data()) &&
+                 bool(out.write(reinterpret_cast<const char*>(page.data()), std::streamsize(page.size())));
+        out.close();
+        if (ok && out)
+            cout << "NAND image saved" << endl;
+        else
+            cout << "failed to save NAND image" << endl;
+    }
+
+    void CmdInputReplay(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() != 1) return env.PrintUsage();
+        auto* ctx = static_cast<commands::Context*>(context);
+        InputReplay replacement;
+        string error;
+        if (!replacement.Load(args[0], ctx->screenWidth, ctx->screenHeight, error)) {
+            cout << error << endl;
+            return;
+        }
+        ctx->replay = std::move(replacement);
+        ctx->replayStartedAt = timestampUsec();
+        cout << "input replay loaded" << endl;
     }
 
     const vector<cli::Command> commandList(
@@ -407,13 +507,37 @@ namespace {
           .usage = "set-mips <mips>",
           .description = "Set target MIPS.",
           .cmd = CmdSetMips},
+         {.name = "input-replay",
+          .usage = "input-replay <file>",
+          .description = "Load pen/key/snapshot events relative to now.",
+          .cmd = CmdInputReplay},
+         {.name = "save-nand",
+          .usage = "save-nand <new NAND image>",
+          .description = "Export the current raw NAND, including spare bytes.",
+          .cmd = CmdSaveNand},
+         {.name = "hold-state", .description = "Show the Hold switch.", .cmd = CmdHoldState},
+         {.name = "hold", .usage = "hold <on|off>", .description = "Set the Hold switch.", .cmd = CmdHold},
          {.name = "audio-on", .description = "Enable audio.", .cmd = CmdEnableAudio},
          {.name = "audio-off", .description = "Disable audio.", .cmd = CmdDisableAudio},
          {.name = "unmount", .description = "Unmount SD card.", .cmd = CmdUnmount},
          {.name = "mount",
           .usage = "mount <image>",
-          .description = "Unmount SD card.",
+          .description = "Mount an SD card image.",
           .cmd = CmdMount},
+         {.name = "sd-take-out",
+          .description = "Leave the ejected SD card in the machine folder's card file and empty the slot.",
+          .cmd = CmdSdTakeOut},
+         {.name = "sd-put-in",
+          .usage = "sd-put-in <identity> [protected|writable]",
+          .description = "Insert the SD card file in the machine folder.",
+          .cmd = CmdSdPutIn},
+         {.name = "ms-take-out",
+          .description = "Leave the ejected Memory Stick in the machine folder's card file and empty the slot.",
+          .cmd = CmdMsTakeOut},
+         {.name = "ms-put-in",
+          .usage = "ms-put-in <identity> [protected|writable]",
+          .description = "Insert the Memory Stick file in the machine folder.",
+          .cmd = CmdMsPutIn},
          {.name = "reset", .description = "Reset Pilot.", .cmd = CmdReset},
          {.name = "reset-no-ext",
           .description = "Reset Pilot w/o loading extensions.",
@@ -431,7 +555,7 @@ namespace {
          {.name = "dump-mmu", .description = "Dump MMU mappings.", .cmd = CmdDumpMMU},
          {.name = "os-version", .description = "Retrieve OS version. ", .cmd = CmdOsVersion},
          {.name = "set-auto-off",
-          .usage = "set-auto-off",
+          .usage = "set-auto-off <timeout>",
           .description = "Set auto off timeout (warning: wakeup will currently fail). ",
           .cmd = CmdSetAutoOff},
          {.name = "install",

@@ -13,6 +13,10 @@
 #define PXA_PWM3_BASE 0x40C00010UL
 
 struct PxaPwm;
+struct PxaPwmRegisters { uint32_t control, duty, period; };
+PxaPwmRegisters pxaPwmRegisters(const PxaPwm *);
+// Quiesced board observer, called after a guest PWM write.
+void pxaPwmSetObserver(PxaPwm *, void *, void (*)(void *));
 
 struct PxaPwm* pxaPwmInit(struct ArmMem* physMem, uint32_t base);
 

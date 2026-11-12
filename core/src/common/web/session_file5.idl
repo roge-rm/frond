@@ -3,9 +3,9 @@ interface SessionFile5 {
 
     boolean IsSessionFile(long size, [Const] VoidPtr data);
 
-    long GetDeviceType();
+    DOMString GetDeviceName();
     long GetDisplayMode();
-    [Ref] SessionFile5 SetDeviceType(long deviceType);
+    [Ref] SessionFile5 SetDeviceName(DOMString name);
     [Ref] SessionFile5 SetDisplayMode(long displayMode);
 
     [Const] VoidPtr GetMetadata();

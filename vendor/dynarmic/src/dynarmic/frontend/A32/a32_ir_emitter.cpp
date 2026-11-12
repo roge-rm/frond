@@ -421,7 +421,8 @@ void IREmitter::CoprocLoadWords(size_t coproc_no, bool two, bool long_transfer, 
                                                  static_cast<u8>(CRd),
                                                  static_cast<u8>(has_option ? 1 : 0),
                                                  static_cast<u8>(option)};
-    Inst(Opcode::A32CoprocLoadWords, IR::Value(coproc_info), address);
+    // Frond: the instruction's location, for the abort check after the call.
+    Inst(Opcode::A32CoprocLoadWords, IR::Value(coproc_info), address, ImmCurrentLocationDescriptor());
 }
 
 void IREmitter::CoprocStoreWords(size_t coproc_no, bool two, bool long_transfer, CoprocReg CRd, const IR::U32& address, bool has_option, u8 option) {
@@ -432,7 +433,7 @@ void IREmitter::CoprocStoreWords(size_t coproc_no, bool two, bool long_transfer,
                                                  static_cast<u8>(CRd),
                                                  static_cast<u8>(has_option ? 1 : 0),
                                                  static_cast<u8>(option)};
-    Inst(Opcode::A32CoprocStoreWords, IR::Value(coproc_info), address);
+    Inst(Opcode::A32CoprocStoreWords, IR::Value(coproc_info), address, ImmCurrentLocationDescriptor());
 }
 
 IR::U64 IREmitter::ImmCurrentLocationDescriptor() {

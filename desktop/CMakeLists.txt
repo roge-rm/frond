@@ -6,7 +6,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_S
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
-set(FROND_PREPARED_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../build/source" CACHE PATH "Prepared patched core source")
+set(FROND_PREPARED_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../core" CACHE PATH "The core's source")
 include_directories(${FROND_PREPARED_SOURCE}/src/common ${FROND_PREPARED_SOURCE}/src/uarm/native)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Network PrintSupport)
 find_package(ZLIB REQUIRED)

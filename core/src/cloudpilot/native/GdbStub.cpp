@@ -125,7 +125,8 @@ void GdbStub::Listen() {
         .sin_port = htons(listenPort),
     };
 
-    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    // Loopback only: the stub reads and writes all of the guest's memory.
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
     int newSock = withRetry(socket, PF_INET, SOCK_STREAM, 0);
     if (newSock < 0) {
@@ -167,7 +168,11 @@ void GdbStub::Stop() {
 
     connectionState = ConnectionState::socketClosed;
 
-    debugger.Continue();
+    // Clears breakpoints and the debugger-active flag, as Disconnect does.
+    runState = RunState::running;
+    debugger.Reset();
+    pktBufUsed = 0;
+    connectionSock = 0;
 }
 
 void GdbStub::Cycle(int timeout) {
@@ -237,14 +242,25 @@ void GdbStub::AcceptConnection(int timeout) {
 
     debugger.Reset();
     debugger.Enable();
-    debugger.Interrupt();
 
     ResetPacketParser();
-    runState = RunState::stopped;
+    fullRegisters = false;
+
+    // prc-tools' gdb 5.3 crashes when it first stops outside the app's symbols, so with an app set
+    // the stub leaves gdb's first packets queued and stops where the app starts.
+    holdUntilApp = debugger.GetBreakMode() == Debugger::BreakMode::appOnly;
+    if (holdUntilApp) {
+        debugger.Step();
+        runState = RunState::running;
+    } else {
+        debugger.Interrupt();
+        runState = RunState::stopped;
+    }
 }
 
 void GdbStub::CheckForInterrupt(int timeout) {
-    if (connectionState != ConnectionState::connected || runState != RunState::running) return;
+    if (connectionState != ConnectionState::connected || runState != RunState::running || holdUntilApp)
+        return;
 
     if (PollSocket(connectionSock, timeout) != SocketState::data) return;
 
@@ -281,7 +297,11 @@ void GdbStub::CheckForBreak() {
     debugger.UpdateBreakState();
 
     runState = RunState::stopped;
-    SendPacket(stopReason, false);
+    // A held connection's '?' is still queued and gets the stop reason as its reply.
+    if (holdUntilApp)
+        holdUntilApp = false;
+    else
+        SendPacket(stopReason, false);
 }
 
 bool GdbStub::ReceivePacket(int timeout) {
@@ -358,8 +378,10 @@ bool GdbStub::HandlePacket() {
     char* out = pktBuf.get();
 
     try {
-        if (in == strstr(in, "qSupported"))
+        if (in == strstr(in, "qSupported")) {
+            fullRegisters = true;
             strcpy(out, "PacketSize=1024");
+        }
 
         else if (in == strstr(in, "qAttached"))
             strcpy(out, "1");
@@ -397,6 +419,8 @@ bool GdbStub::HandlePacket() {
             strcpy(out, StopReason());
 
         else if (!strcmp(in, "D")) {
+            // gdb waits for the OK before it closes its end.
+            SendPacket("OK", true);
             Disconnect();
             return false;
         } else if (in[0] == 'Z' || in[0] == 'z') {
@@ -571,11 +595,12 @@ void GdbStub::SerializeRegisters(char* destination) {
     auto registers = debugger.ReadRegisters();
     for (uint32 reg : registers) sstream << hex << setfill('0') << setw(8) << reg;
 
-    // fp[0] .. fp[7] are 96bit long doubles
-    for (int i = 0; i < 12 * 8; i++) sstream << "00";
-
-    // fudge the three int32 FPU registers
-    for (int i = 0; i < 3; i++) sstream << "00000000";
+    // prc-tools' m68k-palmos-gdb 5.3 dies on a reply with the 68881 registers after D0-D7, A0-A7,
+    // SR and PC; newer GDBs need them. FP0-FP7 are 96-bit, then the three 32-bit FPU registers.
+    if (fullRegisters) {
+        for (int i = 0; i < 12 * 8; i++) sstream << "00";
+        for (int i = 0; i < 3; i++) sstream << "00000000";
+    }
 
     strcat(destination, sstream.str().c_str());
 }

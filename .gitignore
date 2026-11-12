@@ -10,6 +10,14 @@ __pycache__/
 /.local/
 /doc/local-handoff.md
 
-# Crash dumps can contain guest RAM and firmware
-/core
+# Crash dumps can contain guest RAM and firmware (a plain core file can't sit beside core/)
 /core.[0-9]*
+
+# The core builds in place in core/
+/core/src/*/.build/
+/core/src/*/.build-*/
+/core/src/*/.deps/
+/core/src/*/.deps-*/
+/core/src/common/libcommon-net.a
+/core/src/cloudpilot/frond-68k
+/core/src/uarm/cp-uarm-zodiac-developer

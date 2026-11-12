@@ -82,16 +82,22 @@ struct PxaAC97 {
 };
 
 static void pxaAC97prvIrqUpdate(struct PxaAC97 *ac97) {
-    bool irq = false;
-
-    irq = irq || !!(ac97->posr & (ac97->pocr << 1) & 0x14);
-    irq = irq || !!(ac97->pisr & (ac97->picr << 1) & 0x14);
-    irq = irq || !!(ac97->mccr & (ac97->mcsr << 1) & 0x14);
-    irq = irq || !!(ac97->mocr & (ac97->mosr << 1) & 0x14);
-    irq = irq || !!(ac97->micr & (ac97->misr << 1) & 0x14);
+    auto fifoIrq = [](uint8_t status, uint8_t control) {
+        return (status & (control << 1) & 0x14) != 0;
+    };
+    const uint32_t fifoInterrupts =
+        (fifoIrq(ac97->posr, ac97->pocr) ? 1u << 6 : 0) |
+        (fifoIrq(ac97->pisr, ac97->picr) ? 1u << 5 : 0) |
+        (fifoIrq(ac97->mcsr, ac97->mccr) ? 1u << 7 : 0) |
+        (fifoIrq(ac97->mosr, ac97->mocr) ? 1u << 2 : 0) |
+        (fifoIrq(ac97->misr, ac97->micr) ? 1u << 1 : 0);
+    // GSR reports the same enabled FIFO sources that drive the interrupt line.
+    ac97->gsr = (ac97->gsr & ~0xe6u) | fifoInterrupts;
+    bool irq = fifoInterrupts != 0;
 
     irq = irq || (ac97->gcr & ac97->gsr & 0x300);
-    irq = irq || (ac97->gsr & 0x000c0000ul);
+    // Status/command completion flags are pollable even with their IRQs masked.
+    irq = irq || (ac97->gcr & ac97->gsr & 0x000c0000ul);
 
     pxaIcInt(ac97->ic, PXA_I_AC97, irq);
 }
@@ -105,6 +111,7 @@ static void pxaAC97PrvFifoDmaUpdate(struct PxaAC97 *ac97, struct AC97Fifo *fifo)
         *fifo->isr &= ~4;
 
     if (fifo->dmaChannelNum) pxaDmaExternalReq(ac97->dma, fifo->dmaChannelNum, fifoReadyForRead);
+    pxaAC97prvIrqUpdate(ac97);
 }
 
 static bool pxaAC97PrvFifoAdd(struct PxaAC97 *ac97, struct AC97Fifo *fifo, uint32_t val) {
@@ -130,7 +137,10 @@ static bool pxaAC97PrvFifoGet(struct PxaAC97 *ac97, struct AC97Fifo *fifo, uint3
     bool ret = false;
 
     if (!fifo->numItems) {
-        if (valP) *valP = 0;
+        // Receive underrun exposes stale FIFO storage without moving the read
+        // pointer. Transmit underrun repeats the last valid sample.
+        if (valP) *valP = fifo->data[fifo->isRxFifo ? fifo->readPtr :
+                                    (fifo->readPtr + cap - 1) % cap];
 
         *fifo->isr |= 0x10;  // empty
     } else {
@@ -271,18 +281,19 @@ static bool pxaAC97PrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
             }
             break;
 
+        // FIFO underrun/overflow sets status; it must not fault a mapped bus access.
         case 16:
             if (write)
-                return pxaAC97PrvPcmFifoW(ac97, val);
+                (void)pxaAC97PrvPcmFifoW(ac97, val);
             else
-                return pxaAC97PrvPcmFifoR(ac97, (uint32_t *)buf);
+                (void)pxaAC97PrvPcmFifoR(ac97, &val);
             break;
 
         case 24:
             if (write)
                 return false;
             else
-                return pxaAC97PrvMicFifoR(ac97, (uint32_t *)buf);
+                (void)pxaAC97PrvMicFifoR(ac97, &val);
             break;
 
         case 64:
@@ -319,9 +330,9 @@ static bool pxaAC97PrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
 
         case 80:
             if (write)
-                return pxaAC97PrvModemFifoW(ac97, val);
+                (void)pxaAC97PrvModemFifoW(ac97, val);
             else
-                return pxaAC97PrvModemFifoR(ac97, (uint32_t *)buf);
+                (void)pxaAC97PrvModemFifoR(ac97, &val);
             break;
     }
     if (pa >= 0x080 && pa < 0x0c0)
@@ -339,10 +350,17 @@ static bool pxaAC97PrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size,
         pa &= 0x3f;
         pa *= 2;
 
-        if (write && cd->regW && cd->regW(cd->userData, pa, val))
+        // A present codec always completes the link cycle: registers it doesn't have read 0
+        // and writes to them are dropped. With no codec in that space nothing completes.
+        // A read sends a command too, so it sets CDONE as well as SDONE; the T|X Linux driver
+        // waits for CDONE after reading GPIO status (0x54).
+        if (write && cd->regW) {
+            (void)cd->regW(cd->userData, pa, val);
             ac97->gsr |= 0x00080000ul;
-        else if (!write && cd->regR && cd->regR(cd->userData, pa, &cd->prevReadVal))
-            ac97->gsr |= 0x00040000ul;
+        } else if (!write && cd->regR) {
+            if (!cd->regR(cd->userData, pa, &cd->prevReadVal)) cd->prevReadVal = 0;
+            ac97->gsr |= 0x000c0000ul;
+        }
 
         ac97->car = 0;
         val = readVal;

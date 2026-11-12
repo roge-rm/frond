@@ -72,7 +72,8 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
-    inline void Cycle(uint64 systemCycles, Bool sleeping);
+    virtual void ScaleCycles(uint32 factor);
+    void Cycle(uint64 systemCycles, Bool sleeping);
 
     virtual void SetUARTSync(bool sync);
 
@@ -109,8 +110,9 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
 
     virtual uint32 GetBootKeyHoldTime();
 
-   private:
+   protected:
     uint32 pllFreqSelRead(emuptr address, int size);
+   private:
     uint32 portXDataRead(emuptr address, int size);
     uint32 tmr1StatusRead(emuptr address, int size);
     uint32 tmr2StatusRead(emuptr address, int size);
@@ -120,14 +122,20 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     uint32 rtcHourMinSecRead(emuptr address, int size);
 
     void sdctlWrite(emuptr address, int size, uint32 value);
+    void busTimingRegisterWrite(emuptr address, int size, uint32 value);
+    void UpdateBusTiming(void);
     void csControl1Write(emuptr address, int size, uint32 value);
     void csASelectWrite(emuptr address, int size, uint32 value);
     void csDSelectWrite(emuptr address, int size, uint32 value);
     void intMaskHiWrite(emuptr address, int size, uint32 value);
     void intMaskLoWrite(emuptr address, int size, uint32 value);
+   protected:
     void intStatusHiWrite(emuptr address, int size, uint32 value);
+   private:
     void portXDataWrite(emuptr address, int size, uint32 value);
+   protected:
     void pllRegisterWrite(emuptr address, int size, uint32 value);
+   private:
     void tmr1StatusWrite(emuptr address, int size, uint32 value);
     void tmr2StatusWrite(emuptr address, int size, uint32 value);
     void tmrRegisterWrite(emuptr address, int size, uint32 value);
@@ -138,10 +146,12 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     void rtcControlWrite(emuptr address, int size, uint32 value);
     void rtcIntStatusWrite(emuptr address, int size, uint32 value);
     void rtcIntEnableWrite(emuptr address, int size, uint32 value);
+   protected:
     void pwmc1Write(emuptr address, int size, uint32 value);
     void pwms1Write(emuptr address, int size, uint32 value);
     void pwmp1Write(emuptr address, int size, uint32 value);
 
+   private:
     uint32 spiRxDRead(emuptr address, int size);
     void spiTxDWrite(emuptr address, int size, uint32 value);
     void spiIntCSWrite(emuptr address, int size, uint32 value);
@@ -150,7 +160,9 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     uint32 spiTestRead(emuptr address, int size);
 
     void UpdateTimers();
-    void DispatchPwmChange();
+   protected:
+    virtual void DispatchPwmChange();
+   private:
     void HandleDayRollover();
 
     void Spi1TransmitWord();

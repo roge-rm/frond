@@ -1,6 +1,8 @@
 #include "EmSPISlaveSD.h"
 
 #include "CPCrc.h"
+#include "LegacyCardGeometry.h"
+#include <stdexcept>
 #include "ExternalStorage.h"
 #include "savestate/ChunkHelper.h"
 #include "savestate/Savestate.h"
@@ -23,27 +25,27 @@ namespace {
     constexpr uint8 DATA_RESPONSE_ACCEPTED = 0xe5;
     constexpr uint8 DATA_RESPONSE_WRITE_FAILED = 0x0d;
 
-    CardImage* image() { return gExternalStorage.GetImageInSlot(EmHAL::Slot::sdcard); }
 
-    bool determineLayout(size_t blocksTotal, uint32& cSizeMult, uint32& cSize) {
-        for (cSizeMult = 0; cSizeMult < 8; cSizeMult++) {
-            if ((blocksTotal >> (cSizeMult + 2)) < 0x1000) break;
-        }
 
-        if (cSizeMult > 7) return false;
-
-        cSize = (blocksTotal >> (cSizeMult + 2)) - 1;
-
-        return (1 << (cSizeMult + 2)) * (cSize + 1) == blocksTotal;
-    }
 }  // namespace
 
+EmSPISlaveSD::EmSPISlaveSD(EmHAL::Slot slot)
+    : slot(slot), chunkType(slot == EmHAL::Slot::sdcard ? ChunkType::spiSlaveSD : ChunkType::spiSlaveSD2) {
+    if (slot != EmHAL::Slot::sdcard && slot != EmHAL::Slot::sdcard2)
+        throw std::invalid_argument("invalid SD slot");
+}
+
+CardImage* EmSPISlaveSD::Image() const { return gExternalStorage.GetImageInSlot(slot); }
+
 void EmSPISlaveSD::Reset() {
+    if (Image()) savedProtocol = uint32(Image()->GetProtocol());
     spiState = SpiState::notSelected;
     cardState = CardState::idle;
     lastCmd = 0;
     acmd = false;
     cmd12Countdown = 0;
+    bufferSize = bufferIndex = currentBlock = 0;
+    memset(buffer, 0, sizeof(buffer));
 }
 
 void EmSPISlaveSD::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
@@ -51,19 +53,59 @@ void EmSPISlaveSD::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
 void EmSPISlaveSD::Save(SavestateProbe<ChunkType>& savestateProbe) { DoSave(savestateProbe); }
 
 void EmSPISlaveSD::Load(SavestateLoader<ChunkType>& loader) {
-    Chunk* chunk = loader.GetChunk(ChunkType::spiSlaveSD);
-    if (!chunk) return;
+    Chunk* chunk = loader.GetChunk(chunkType);
+    if (!chunk) {
+        if (slot == EmHAL::Slot::sdcard2) Reset();
+        return;
+    }
 
     const uint32 version = chunk->Get32();
-    if (version > SAVESTATE_VERSION) {
+    if (version != 1 && version != 2) {
         logPrintf("unable to restore SPISlaveSD: unsupported savestate version\n");
         loader.NotifyError();
 
         return;
     }
 
-    LoadChunkHelper helper(*chunk);
-    DoSaveLoad(helper);
+    // Validate the complete cursor before changing the live transaction.
+    const uint32 packed = chunk->Get32();
+    const uint32 size = chunk->Get32(), index = chunk->Get32();
+    const uint32 block = chunk->Get32(), application = chunk->Get32();
+    uint8 bytes[sizeof(buffer)];
+    chunk->GetBuffer(bytes, sizeof(bytes));
+    const uint32 protocol = version == 2 ? chunk->Get32() : 0;
+    const uint8 spi = packed >> 24, card = packed >> 16;
+    const uint8 command = packed >> 8, countdown = packed;
+    bool valid = protocol <= 1 && (version != 2 || protocol == 1) &&
+        (!protocol || application == 0) && !chunk->HasError() && chunk->IsAtEnd() &&
+        spi <= static_cast<uint8>(SpiState::txBlockWait) &&
+        card <= static_cast<uint8>(CardState::multiblockWrite) &&
+        command <= 63 && countdown <= 6 && application <= 1 &&
+        size <= sizeof(buffer) && index <= size;
+    if (spi == static_cast<uint8>(SpiState::rxArg))
+        valid = valid && size == 5 && index < size;
+    if (spi == static_cast<uint8>(SpiState::rxBlock))
+        valid = valid && size == 514 && index < size &&
+            (card == static_cast<uint8>(CardState::writeTransaction) ||
+             card == static_cast<uint8>(CardState::multiblockWrite));
+    if (spi == static_cast<uint8>(SpiState::rxBlockWait))
+        valid = valid && (card == static_cast<uint8>(CardState::writeTransaction) ||
+                          card == static_cast<uint8>(CardState::multiblockWrite));
+    if (spi == static_cast<uint8>(SpiState::txBlockWait))
+        valid = valid && card == static_cast<uint8>(CardState::multiblockRead);
+    if (spi == static_cast<uint8>(SpiState::txData))
+        valid = valid && size > 0 && index < size;
+    if (!valid) { loader.NotifyError(); return; }
+    savedProtocol = protocol;
+    spiState = static_cast<SpiState>(spi);
+    cardState = static_cast<CardState>(card);
+    lastCmd = command;
+    cmd12Countdown = countdown;
+    bufferSize = size;
+    bufferIndex = index;
+    currentBlock = block;
+    acmd = application;
+    memcpy(buffer, bytes, sizeof(buffer));
 }
 
 uint16 EmSPISlaveSD::DoExchange(uint16 control, uint16 data) {
@@ -90,7 +132,7 @@ uint16 EmSPISlaveSD::DoExchange(uint16 control, uint16 data) {
 void EmSPISlaveSD::Enable(void) {
     if (spiState != SpiState::notSelected) return;
 
-    if (gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) {
+    if (gExternalStorage.IsMounted(slot)) {
         spiState = SpiState::rxCmdByte;
         lastCmd = 0;
     }
@@ -100,13 +142,14 @@ void EmSPISlaveSD::Disable(void) { spiState = SpiState::notSelected; }
 
 template <typename T>
 void EmSPISlaveSD::DoSave(T& savestate) {
-    typename T::chunkT* chunk = savestate.GetChunk(ChunkType::spiSlaveSD);
+    typename T::chunkT* chunk = savestate.GetChunk(chunkType);
     if (!chunk) return;
 
-    chunk->Put32(SAVESTATE_VERSION);
+    chunk->Put32(IsMMC() ? 2 : SAVESTATE_VERSION);
 
     SaveChunkHelper helper(*chunk);
     DoSaveLoad(helper);
+    if (IsMMC()) chunk->Put32(1);
 }
 
 template <typename T>
@@ -126,7 +169,7 @@ void EmSPISlaveSD::DoSaveLoad(T& helper) {
 }
 
 uint8 EmSPISlaveSD::DoExchange8(uint8 data) {
-    if (!gExternalStorage.IsMounted(EmHAL::Slot::sdcard)) return 0x00;
+    if (!gExternalStorage.IsMounted(slot)) return 0xff;
     if (cardState == CardState::multiblockRead) HandleCmd12(data);
 
     switch (spiState) {
@@ -225,16 +268,23 @@ void EmSPISlaveSD::BufferAddBlock(uint8 token, uint8* data, size_t size) {
 }
 
 void EmSPISlaveSD::DoCmd() {
-    if (acmd) return DoAcmd();
+    if (acmd && !IsMMC()) return DoAcmd();
     acmd = false;
 
 #ifdef DUMP_COMMAND_STREAM
     cerr << "received CMD" << (int)lastCmd << endl << flush;
 #endif
 
+    if (IsMMC() && (lastCmd==17 || lastCmd==18 || lastCmd==24 || lastCmd==25) && (Param() & 511)) {
+        PrepareR1(0x20 | (cardState==CardState::idle ? ERR_CARD_IDLE : 0));
+        return;
+    }
     switch (lastCmd) {
         // Reset
         case 0:
+            cardState = CardState::idle;
+            acmd = false;
+            cmd12Countdown = 0;
             PrepareR1(ERR_CARD_IDLE);
 
             return;
@@ -309,7 +359,7 @@ void EmSPISlaveSD::DoCmd() {
         case 18:
             if (cardState == CardState::idle) {
                 PrepareR1(ERR_CARD_IDLE);
-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
+            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
                 PrepareR1(ERR_PARAMETER);
             } else {
                 cardState = CardState::multiblockRead;
@@ -324,7 +374,7 @@ void EmSPISlaveSD::DoCmd() {
         case 24:
             if (cardState == CardState::idle) {
                 PrepareR1(ERR_CARD_IDLE);
-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
+            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
                 PrepareR1(ERR_PARAMETER);
             } else {
                 currentBlock = Param() >> 9;
@@ -339,7 +389,7 @@ void EmSPISlaveSD::DoCmd() {
         case 25:
             if (cardState == CardState::idle) {
                 PrepareR1(ERR_CARD_IDLE);
-            } else if (Param() >> 9 >= image()->BlocksTotal()) {
+            } else if (Param() >> 9 >= Image()->BlocksTotal()) {
                 PrepareR1(ERR_PARAMETER);
             } else {
                 cardState = CardState::multiblockWrite;
@@ -351,6 +401,7 @@ void EmSPISlaveSD::DoCmd() {
 
         // Escape to ACMD
         case 55:
+            if (IsMMC()) { PrepareR1(ERR_ILLEGAL_COMMAND | (cardState == CardState::idle ? ERR_CARD_IDLE : 0)); return; }
             PrepareR1(0x00);
             acmd = true;
 
@@ -359,14 +410,15 @@ void EmSPISlaveSD::DoCmd() {
         // Read OCR
         case 58: {
             BufferStart(0);
-            BufferAdd(0xff, 0x00, 0x00, 0xff, 0x80, 0x00);
+            BufferAdd(0xff, IsMMC() && cardState == CardState::idle ? 1 : 0,
+                      IsMMC() && cardState != CardState::idle ? 0x80 : 0, 0xff, 0x80, 0x00);
 
             return;
         }
 
         default:
             cerr << "unsupported SD CMD" << (int)lastCmd << endl << flush;
-            PrepareR1(ERR_ILLEGAL_COMMAND);
+            PrepareR1(ERR_ILLEGAL_COMMAND | (IsMMC() && cardState == CardState::idle ? ERR_CARD_IDLE : 0));
 
             return;
     }
@@ -430,7 +482,7 @@ void EmSPISlaveSD::DoReadSingleBlock() {
     uint8 block[512];
 
     BufferStart(0);
-    if (image()->Read(block, Param() >> 9, 1) != 1) {
+    if (Image()->Read(block, Param() >> 9, 1) != 1) {
         PrepareR1(ERR_PARAMETER);
         return;
     }
@@ -445,7 +497,12 @@ void EmSPISlaveSD::DoReadMulitblock() {
     uint8 block[512];
 
     BufferStart(0);
-    image()->Read(block, (currentBlock++) % image()->BlocksTotal(), 1);
+    if (Image()->Read(block, currentBlock, 1) != 1) {
+        BufferAdd(0x08);  // Data error token: out of range.
+        cardState = CardState::initialized;
+        return;
+    }
+    ++currentBlock;
 
     BufferAddBlock(DATA_TOKEN_DEFAULT, block, 512);
 }
@@ -455,12 +512,12 @@ void EmSPISlaveSD::DoReadCSD() {
     const uint32 blLen = 0x09, sectorSize = 0;
     uint32 cSizeMult, cSize;
 
-    if (!determineLayout(image()->BlocksTotal(), cSizeMult, cSize)) {
+    if (!legacyCardLayout(Image()->BlocksTotal(), cSizeMult, cSize)) {
         PrepareR1(ERR_PARAMETER);
         return;
     }
 
-    uint8 csd[15];
+    uint8 csd[16]{};
 
     csd[0] = 0x00;
     csd[1] = 0x0e;                  // TAAC
@@ -482,9 +539,21 @@ void EmSPISlaveSD::DoReadCSD() {
     csd[14] = 0x00;  // FILE_FORMAT_GRP, COPY, PERM_WRITE_PROTECT, TMP_WRITE_PROTECT, FILE_FORMAT,
                      // RESERVED
 
+    if (IsMMC()) {
+        csd[0] = 0x8c; // CSD 1.2, MMC 3.3 (SanDisk manual 80-36-00320, table 3-10).
+        csd[1] = 0x0f;
+        csd[3] = 0x2a;
+        csd[4] = 0x01; // Basic, block read and block write classes.
+        csd[5] = 0x59;
+        csd[6] &= 0x03; // Fixed aligned 512-byte blocks.
+        csd[10] &= 0x80;
+        csd[11] = 0;
+        csd[14] = Image()->IsReadOnly() ? 0x10 : 0;
+    }
     PrepareR1(0x00);
     BufferAdd(0xff);
-    BufferAddBlock(DATA_TOKEN_DEFAULT, csd, sizeof(csd));
+    if (IsMMC()) csd[15] = (crc::sdCRC7(csd, 15) << 1) | 1;
+    BufferAddBlock(DATA_TOKEN_DEFAULT, csd, IsMMC() ? 16 : 15);
 }
 
 void EmSPISlaveSD::DoReadCID() {
@@ -499,14 +568,25 @@ void EmSPISlaveSD::DoReadCID() {
     cid[6] = 'l';
     cid[7] = 't';
     cid[8] = 32;    // PRV
-    cid[9] = 0x00;  // PSN
-    cid[10] = 0x00;
-    cid[11] = 0x4A;
-    cid[12] = 0xEC;
+    const uint32 serial = Image()->Serial();
+    cid[9] = serial >> 24;  // PSN
+    cid[10] = serial >> 16;
+    cid[11] = serial >> 8;
+    cid[12] = serial;
     cid[13] = 9;   // MDT.month = sept
     cid[14] = 22;  // MDT.year = 2022
     cid[15] = crc::sdCRC7(cid, 15) << 1;
 
+    if (IsMMC()) {
+        // Virtual identity, six-byte MMC PNM and MMC date/serial positions (table 3-9).
+        cid[0] = 0xff; cid[1] = 'F'; cid[2] = 'R';
+        memcpy(cid + 3, "FRNDMC", 6);
+        cid[9] = 0x10;
+        cid[10] = serial >> 24; cid[11] = serial >> 16;
+        cid[12] = serial >> 8; cid[13] = serial;
+        cid[14] = 0x91; // September 1998, MMC year offset 1997.
+        cid[15] = (crc::sdCRC7(cid, 15) << 1) | 1;
+    }
     PrepareR1(0x00);
     BufferAdd(0xff);
     BufferAddBlock(DATA_TOKEN_DEFAULT, cid, sizeof(cid));
@@ -541,7 +621,7 @@ void EmSPISlaveSD::DoReadSDStatus() {
 void EmSPISlaveSD::FinishWriteSingleBlock() {
     BufferStart(0);
 
-    if (image()->Write(buffer, currentBlock) == 1) {
+    if (Image()->Write(buffer, currentBlock) == 1) {
         BufferAdd(DATA_RESPONSE_ACCEPTED, 0xff);
     } else {
         BufferAdd(DATA_RESPONSE_WRITE_FAILED);
@@ -554,8 +634,12 @@ void EmSPISlaveSD::FinishWriteSingleBlock() {
 void EmSPISlaveSD::FinishWriteMultiblock() {
     BufferStart(0);
 
-    image()->Write(buffer, (currentBlock++) % image()->BlocksTotal());
-    BufferAdd(DATA_RESPONSE_ACCEPTED, 0xff);
+    if (Image()->Write(buffer, currentBlock) == 1) {
+        ++currentBlock;
+        BufferAdd(DATA_RESPONSE_ACCEPTED, 0xff);
+    } else {
+        BufferAdd(DATA_RESPONSE_WRITE_FAILED);
+    }
 
     spiState = SpiState::txData;
 }
@@ -576,7 +660,7 @@ void EmSPISlaveSD::HandleCmd12(uint8 data) {
 }
 
 uint32 EmSPISlaveSD::Param() const {
-    return (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[0];
+    return (uint32(buffer[0]) << 24) | (uint32(buffer[1]) << 16) | (uint32(buffer[2]) << 8) | buffer[3];
 }
 
 void EmSPISlaveSD::PrepareR1(uint8 flags) {
@@ -587,5 +671,5 @@ void EmSPISlaveSD::PrepareR1(uint8 flags) {
 bool EmSPISlaveSD::IsSizeRepresentable(size_t blocksTotal) {
     uint32 cSizeMult, cSize;
 
-    return determineLayout(blocksTotal, cSizeMult, cSize);
+    return legacyCardLayout(blocksTotal, cSizeMult, cSize);
 }

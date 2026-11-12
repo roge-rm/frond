@@ -3,14 +3,22 @@
 
 #include "EmCommon.h"
 #include "EmSPISlave.h"
+#include "EmHAL.h"
+#include "CardImage.h"
+#include "savestate/ChunkType.h"
 
 class EmSPISlaveSD : public EmSPISlave {
    public:
     static bool IsSizeRepresentable(size_t blocksTotal);
 
-    EmSPISlaveSD() = default;
+    explicit EmSPISlaveSD(EmHAL::Slot slot = EmHAL::Slot::sdcard);
 
     void Reset();
+    bool IsProtocol(CardImage::Protocol protocol) const { return savedProtocol == uint32(protocol); }
+    bool IsBlockInRange(size_t blocksTotal) const {
+        return currentBlock <= blocksTotal &&
+            (cardState != CardState::writeTransaction || currentBlock < blocksTotal);
+    }
 
     void Save(Savestate<ChunkType>&) override;
     void Save(SavestateProbe<ChunkType>&) override;
@@ -77,13 +85,18 @@ class EmSPISlaveSD : public EmSPISlave {
     void PrepareR1(uint8 flags);
 
    private:
+    CardImage* Image() const;
+    const EmHAL::Slot slot;
+    const ChunkType chunkType;
     bool acmd = false;
+    uint32 savedProtocol = 0;
+    bool IsMMC() const { return Image() ? Image()->GetProtocol() == CardImage::Protocol::mmc : savedProtocol == 1; }
 
     SpiState spiState{SpiState::notSelected};
     CardState cardState{CardState::idle};
     uint8 lastCmd{0};
 
-    uint8 buffer[550];
+    uint8 buffer[550]{};
     uint32 bufferSize{0};
     uint32 bufferIndex{0};
     uint8 cmd12Countdown{0};

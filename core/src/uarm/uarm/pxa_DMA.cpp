@@ -48,6 +48,7 @@ struct PxaDma {
     uint32_t DINT;
     struct PxaDmaChannel channels[32];
     uint8_t CMR[75];  // channel map registers	[  we store lower 8 bits only :-)  ]
+    struct PxaDmaPeripheral peripherals[75];  // wiring by request line, never serialized
 
     template <typename T>
     void DoSaveLoad(T& chunkHelper) {
@@ -76,6 +77,10 @@ static void pxaDmaPrvChannelIrqRecalc(struct PxaDma* dma, uint_fast8_t channel) 
         dma->DINT |= 1 << channel;
     }
     if (dma->channels[channel].CSR & 1) {  // busints on?
+
+        dma->DINT |= 1 << channel;
+    }
+    if ((dma->channels[channel].CSR & 0x10000200ul) == 0x10000200ul) {  // EORINT with EORIRQEN
 
         dma->DINT |= 1 << channel;
     }
@@ -133,6 +138,25 @@ static void pxaDmaPrvChannelDescrFetch(
     // nextS, nextT, nextC);
 }
 
+// The handshake-capable peripheral mapped to this channel, if it is the only
+// request line mapped there. A stale mapping shared with another line is ignored.
+static struct PxaDmaPeripheral* pxaDmaPrvPeripheral(struct PxaDma* dma, uint_fast8_t channel) {
+    struct PxaDmaPeripheral* found = nullptr;
+    for (unsigned i = 0; i < sizeof(dma->CMR); i++) {
+        if (!(dma->CMR[i] & 0x80) || (dma->CMR[i] & 0x1f) != channel) continue;
+        if (found || !dma->peripherals[i].validBytes) return nullptr;
+        found = &dma->peripherals[i];
+    }
+    return found;
+}
+
+// A receive channel stopping at the end of its chain signals EOC to its peripheral.
+static void pxaDmaPrvEndOfChain(struct PxaDma* dma, uint_fast8_t channel) {
+    if (!(dma->channels[channel].CR & 0x20000000ul)) return;
+    struct PxaDmaPeripheral* peripheral = pxaDmaPrvPeripheral(dma, channel);
+    if (peripheral && peripheral->endOfChain) peripheral->endOfChain(peripheral->ctx);
+}
+
 static bool pxaDmaPrvChannelCheckForEnd(
     struct PxaDma* dma, uint_fast8_t channel)  // return true if irq need updating after what we did
 {
@@ -155,11 +179,13 @@ static bool pxaDmaPrvChannelCheckForEnd(
 
             // fprintf(stderr, "end cause no descr\n");
             pxaDmaPrvChannelStop(dma, ch);
+            pxaDmaPrvEndOfChain(dma, channel);
             irqUpdate = true;
         } else if (ch->DAR & 1) {  // no more descriptors?
 
             // fprintf(stderr, "end cause DAR\n");
             pxaDmaPrvChannelStop(dma, ch);
+            pxaDmaPrvEndOfChain(dma, channel);
             irqUpdate = true;
         } else {  // fetch next descriptor
 
@@ -172,48 +198,112 @@ static bool pxaDmaPrvChannelCheckForEnd(
     return irqUpdate;
 }
 
+static bool pxaDmaPrvBusError(PxaDma* dma, PxaDmaChannel* ch) {
+    ch->CSR |= 1;
+    pxaDmaPrvChannelStop(dma, ch);
+    return true; // caller must recalculate IRQ
+}
+
 static bool pxaDmaPrvChannelDoBurst(
     struct PxaDma* dma, uint_fast8_t channel)  // return true if irq need updating after what we did
 {
     struct PxaDmaChannel* ch = &dma->channels[channel];
-    uint32_t each = 1 << (((ch->CR >> 14) & 3) - 1);
     uint32_t num = 4 << ((ch->CR >> 16) & 3);
-
-    if (!((ch->CR >> 14) & 3)) {
-        fprintf(stderr, "DMA is on but WIDTH is misprogrammed\n");
-        uarmAbort();
-    }
-
-    // we never transfer more than there is left
     if (num > (ch->CR & 0x1fff)) num = ch->CR & 0x1fff;
+    // Flow-controlled FIFO peripherals: reads take only the valid bytes, and a
+    // short tail goes to or from the peripheral in byte lanes (PXA27x 5.4.6).
+    struct PxaDmaPeripheral* peripheral =
+        (ch->CR & 0x30000000u) ? pxaDmaPrvPeripheral(dma, channel) : nullptr;
+    const bool fromPeripheral = peripheral && (ch->CR & 0x20000000u);
+    const bool toPeripheral = peripheral && !fromPeripheral && (ch->CR & 0x10000000u);
+    if (fromPeripheral || (toPeripheral && peripheral->externalBusAddress)) {
+        const uint32_t valid = peripheral->validBytes(peripheral->ctx);
+        if (num > valid) num = valid;
+    }
+    const bool memoryMove = !(ch->CR & 0x30000000u) &&
+        memIsBufferRange(dma->mem, ch->SAR, num, false) &&
+        memIsBufferRange(dma->mem, ch->TAR, num, true);
+    const uint32_t width = (ch->CR >> 14) & 3;
+    // PXA255 DCMD: WIDTH=00 is required for memory and companion-chip transfers.
+    // On-chip peripherals keep their documented nonzero widths.
+    const bool externalMemory = peripheral && peripheral->externalBusAddress &&
+        ((fromPeripheral && !(ch->CR&0x80000000u) && ch->SAR == peripheral->externalBusAddress &&
+          memIsBufferRange(dma->mem,ch->TAR,num,true)) ||
+         (toPeripheral && !(ch->CR&0x40000000u) && ch->TAR == peripheral->externalBusAddress &&
+          memIsBufferRange(dma->mem,ch->SAR,num,false)));
+    if (!width && !memoryMove && !externalMemory) return pxaDmaPrvBusError(dma, ch);
+    const uint32_t each = width ? 1u << (width - 1) : 4;
 
-    if (num % each) {  // xfer size not multiple of xfer item sz?
+    // A short memory-to-memory tail can be split into byte lanes. Never do
+    // that to MMIO: each read/write may consume FIFO data or acknowledge status.
+    const uint32_t tail = num % each;
+    const uint64_t tailSource = uint64_t(ch->SAR) + ((ch->CR & 0x80000000u) ? num - tail : 0);
+    const uint64_t tailTarget = uint64_t(ch->TAR) + ((ch->CR & 0x40000000u) ? num - tail : 0);
+    if (tail && (fromPeripheral || toPeripheral) &&
+        (tailSource > 0xffffffffull || tailTarget > 0xffffffffull ||
+         !memIsBufferRange(dma->mem, fromPeripheral ? tailTarget : tailSource, tail, fromPeripheral)))
+        return pxaDmaPrvBusError(dma, ch);
+    if (tail && !fromPeripheral && !toPeripheral &&
+        (tailSource > 0xffffffffull || tailTarget > 0xffffffffull || (ch->CR & 0x30000000u) ||
+                 !memIsBufferRange(dma->mem, tailSource, tail, false) ||
+                 !memIsBufferRange(dma->mem, tailTarget, tail, true)))
+        return pxaDmaPrvBusError(dma, ch);
 
-        fprintf(stderr, "cannot xfer %u bytes using %u-byte piece. Halting\n", (unsigned)num,
-                (unsigned)each);
-        uarmAbort();
+    while (num) {
+        const uint32_t count = num < each ? num : each;
+        // The physical memory map cannot represent a wrapping access.
+        if (uint64_t(ch->SAR) + count > 0xffffffffull ||
+            uint64_t(ch->TAR) + count > 0xffffffffull)
+            return pxaDmaPrvBusError(dma, ch);
+        uint32_t value = 0;
+        bool ok = true;
+        if (count == each) {
+            ok = memAccess(dma->mem, ch->SAR, each, false, &value);
+            if (ok) {
+                ok = memAccess(dma->mem, ch->TAR, each, true, &value);
+            }
+        } else if (fromPeripheral) {
+            // A short read takes exactly count bytes from the peripheral FIFO,
+            // in halfword and byte reads, then lands in memory byte by byte.
+            uint8_t bytes[4]{};
+            for (unsigned i = 0; i < count && ok;) {
+                const unsigned piece = count - i >= 2 ? 2 : 1;
+                uint32_t part = 0;
+                ok = memAccess(dma->mem, ch->SAR, piece, false, &part);
+                for (unsigned k = 0; k < piece; ++k) bytes[i + k] = part >> (8 * k);
+                i += piece;
+            }
+            for (unsigned i = 0; i < count && ok; ++i)
+                ok = memAccess(dma->mem, ch->TAR + i, 1, true, &bytes[i]);
+        } else {
+            uint8_t bytes[4]{};
+            for (unsigned i = 0; i < count && ok; ++i)
+                ok = memAccess(dma->mem, ch->SAR + i, 1, false, &bytes[i]);
+            for (unsigned i = 0; i < count && ok; ++i)
+                ok = memAccess(dma->mem, ch->TAR + (toPeripheral ? 0 : i), 1, true, &bytes[i]);
+        }
+        if (!ok) return pxaDmaPrvBusError(dma, ch);
+        if (ch->CR & 0x80000000u) ch->SAR += count;
+        if (ch->CR & 0x40000000u) ch->TAR += count;
+        ch->CR -= count;
+        num -= count;
     }
 
-    num /= each;  // convert from bytes to transfers
-
-    // fprintf(stderr, "dma ch %u burst, %u bytes left before it\n", channel, ch->CR & 0x1fff);
-
-    while (num--) {
-        uint32_t src = ch->SAR;
-        uint32_t dst = ch->TAR;
-        uint32_t t;
-
-        if (!memAccess(dma->mem, src, each, false, &t) ||
-            !memAccess(dma->mem, dst, each, true, &t)) {
-            fprintf(stderr, "DMA xfer bus error\n");
-            dma->channels[channel].CSR |= 1;  // signl bus error, not running
-            pxaDmaPrvChannelStop(dma, ch);
-            return true;
+    // End of receive (figure 5-9): stop, jump to the next descriptor or keep waiting.
+    if (fromPeripheral && peripheral->endOfReceive && peripheral->endOfReceive(peripheral->ctx)) {
+        ch->CSR |= 0x200;
+        if (!(ch->CSR & 0x40000000ul) && (ch->CR & 0x1fff)) {
+            if (ch->CSR & 0x04000000ul) {
+                pxaDmaPrvChannelStop(dma, ch);
+            } else if (ch->CSR & 0x08000000ul) {
+                if (ch->DAR & 1)
+                    pxaDmaPrvChannelStop(dma, ch);
+                else
+                    pxaDmaPrvChannelDescrFetch(dma, ch);
+            }
         }
-
-        if (ch->CR & 0x80000000ul) ch->SAR += each;
-        if (ch->CR & 0x40000000ul) ch->TAR += each;
-        ch->CR -= each;
+        pxaDmaPrvChannelCheckForEnd(dma, channel);
+        return true;
     }
 
     // check for end
@@ -245,10 +335,16 @@ static void pxaDmaPrvChannelActIfNeeded(struct PxaDma* dma, uint_fast8_t channel
         }
 
         if (doWork) {
+            // A descriptor chain may be a ring. Yield even for unpaced memory
+            // transfers so guest execution, reset and checkpoint requests can
+            // run. One maximum-length descriptor still fits in this budget
+            // at the smallest burst size; running channels remain scheduled.
+            unsigned bursts = 0;
             do {
                 if (pxaDmaPrvChannelDoBurst(dma, channel)) irqUpdate = true;
 
-            } while ((ch->CR & 0x1fff) && !justOne);
+            } while (++bursts < 2048 && pxaDmaPrvChannelRunning(dma, ch) &&
+                     (ch->CR & 0x1fff) && !justOne);
         }
     }
 
@@ -262,8 +358,8 @@ static void pxaDmaPrvChannelMaybeStart(struct PxaDma* dma, struct PxaDmaChannel*
 
         dma->reschedule.rescheduleCb(dma->reschedule.ctx, RESCHEDULE_TASK_DMA);
 
-        ch->CSR &= ~0x100;
-
+        // REQPEND reflects the peripheral request level. Starting a channel must not
+        // discard a request that was asserted before RUN was set.
         if (!(ch->CSR & 0x40000000ul)) {  // not no-fetch mode
 
             ch->CR &= ~0x1fff;  // so we fatch descr on first request
@@ -385,6 +481,22 @@ void pxaDmaExternalReq(struct PxaDma* dma, uint_fast8_t chNum, bool requested) {
     }
 }
 
+void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum,
+                         const struct PxaDmaPeripheral* peripheral) {
+    if (chNum >= sizeof(dma->CMR)) return;
+    if (peripheral)
+        dma->peripherals[chNum] = *peripheral;
+    else
+        dma->peripherals[chNum] = PxaDmaPeripheral{};
+}
+
+// PXA250 5.1.2.1: internal PREQs are level sensitive. Query-backed lines
+// can assert while unmapped; sampling a new mapping must not lose that level.
+static void pxaDmaPrvRefreshRequest(PxaDma* dma, unsigned line) {
+    const auto& p = dma->peripherals[line];
+    if (p.requested) pxaDmaExternalReq(dma, line, p.requested(p.ctx));
+}
+
 void pxaDmaPeriodic(struct PxaDma* dma) {
     uint32_t i;
 
@@ -435,7 +547,10 @@ static bool pxaDmaPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
             case 1:
                 pa -= 64;
                 if (pa >= 75) return false;
+                if (dma->peripherals[pa].requested && (dma->CMR[pa] & 0x80))
+                    pxaDmaExternalReq(dma, pa, false);
                 dma->CMR[pa] = val;
+                pxaDmaPrvRefreshRequest(dma, pa);
                 break;
 
             case 2:

@@ -226,6 +226,10 @@ struct UserConfig {
     ///       So there might be wrongly faulted pages which maps to nullptr.
     ///       This can be avoided by carefully allocating the memory region.
     bool absolute_offset_page_table = false;
+
+    /// Frond: writes always go through the MemoryWrite callbacks, the page table is only
+    /// used for reads.
+    bool page_table_writes_via_callbacks = false;
     /// Determines if we should detect memory accesses via page_table that straddle are
     /// misaligned. Accesses that straddle page boundaries will fallback to the relevant
     /// memory callback.

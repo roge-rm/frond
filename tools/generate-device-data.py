@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export deviceProfiles5 for Python and Android. Run after make prepare; --check refuses stale files."""
+"""Export deviceProfiles5 for Python and Android from core/; --check refuses stale files."""
 import argparse
 import json
 import os
@@ -87,7 +87,7 @@ def outputs(profiles):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
-    parser.add_argument('--source', type=Path, default=ROOT / 'build/source', help='prepared native source root')
+    parser.add_argument('--source', type=Path, default=ROOT / 'core', help='native core source root')
     parser.add_argument('--build-dir', type=Path, default=ROOT / 'build/device-data', help='exporter build folder')
     args = parser.parse_args()
     work = args.build_dir.absolute()
@@ -105,7 +105,7 @@ def main():
         else:
             path.write_text(data)
     if stale:
-        parser.exit(1, 'Stale device data: ' + ', '.join(stale) + '\nRun tools/generate-device-data.py after make prepare.\n')
+        parser.exit(1, 'Stale device data: ' + ', '.join(stale) + '\nRun tools/generate-device-data.py.\n')
 
 
 if __name__ == '__main__':

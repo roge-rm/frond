@@ -786,6 +786,58 @@ Err SysUIAppSwitch(UInt16 cardNo, LocalID dbID, UInt16 cmd, emuptr cmdPBP) {
     RETURN_RESULT_VAL(Err);
 }
 
+Err SysCurAppDatabase(UInt16* cardNoP, LocalID* dbIDP) {
+    CALLER_SETUP("Err", "UInt16* cardNoP, LocalID* dbIDP");
+
+    CALLER_PUT_PARAM_REF(UInt16, cardNoP, Marshal::kOutput);
+    CALLER_PUT_PARAM_REF(LocalID, dbIDP, Marshal::kOutput);
+
+    sub.Call(sysTrapSysCurAppDatabase);
+
+    CALLER_GET_PARAM_REF(cardNoP);
+    CALLER_GET_PARAM_REF(dbIDP);
+
+    RETURN_RESULT_VAL(Err);
+}
+
+Boolean EvtEventAvail(void) {
+    CALLER_SETUP("Boolean", "void");
+
+    sub.Call(sysTrapEvtEventAvail);
+
+    RETURN_RESULT_VAL(Boolean);
+}
+
+Boolean EvtSysEventAvail(Boolean ignorePenUps) {
+    CALLER_SETUP("Boolean", "Boolean ignorePenUps");
+
+    CALLER_PUT_PARAM_VAL(Boolean, ignorePenUps);
+
+    sub.Call(sysTrapEvtSysEventAvail);
+
+    RETURN_RESULT_VAL(Boolean);
+}
+
+Err SysAppLaunch(UInt16 cardNo, LocalID dbID, UInt16 launchFlags, UInt16 cmd, emuptr cmdPBP,
+                 UInt32* resultP) {
+    CALLER_SETUP("Err",
+                 "UInt16 cardNo, LocalID dbID, UInt16 launchFlags, UInt16 cmd, emuptr cmdPBP, "
+                 "UInt32* resultP");
+
+    CALLER_PUT_PARAM_VAL(UInt16, cardNo);
+    CALLER_PUT_PARAM_VAL(LocalID, dbID);
+    CALLER_PUT_PARAM_VAL(UInt16, launchFlags);
+    CALLER_PUT_PARAM_VAL(UInt16, cmd);
+    CALLER_PUT_PARAM_VAL(emuptr, cmdPBP);
+    CALLER_PUT_PARAM_REF(UInt32, resultP, Marshal::kOutput);
+
+    sub.Call(sysTrapSysAppLaunch);
+
+    CALLER_GET_PARAM_REF(resultP);
+
+    RETURN_RESULT_VAL(Err);
+}
+
 UInt16 DmNumResources(emuptr dbP) {
     CALLER_SETUP("UInt16", "DmOpenRef dbP");
 

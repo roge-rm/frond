@@ -24,7 +24,7 @@ A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
 }
 
 IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets});
 
     Optimization::PolyfillPass(ir_block, {});
     if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {

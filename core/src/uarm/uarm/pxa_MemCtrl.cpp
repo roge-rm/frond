@@ -11,7 +11,8 @@
 #define PXA_MEM_CONTROLLER_BASE 0x48000000UL
 #define PXA_MEM_CONTROLLER_SIZE 0x00004000UL
 
-#define SAVESTATE_VERSION 0
+// Version 1 adds the SDRAM hold after PXA25x sleep exit.
+#define SAVESTATE_VERSION 1
 
 struct PxaMemCtrlr {
     uint32_t mdcnfg, mdrefr, msc[3], mecr, sxcnfg, sxmrs, mcmem[2], mcatt[2], mcio[2], mdmrs;
@@ -20,9 +21,13 @@ struct PxaMemCtrlr {
     uint16_t sa1110;
     uint8_t lcdbscntr;
     bool g2;
+    // SDRAM stays in self-refresh after a PXA25x sleep exit until MDCNFG enables a
+    // partition again, so boot code that clears RAM before that never reaches it.
+    bool sdramHeld;
+    struct ArmMem* mem;
 
     template <typename T>
-    void DoSaveLoad(T& chunkHelper) {
+    void DoSaveLoad(T& chunkHelper, uint32_t version) {
         chunkHelper.Do32(mdcnfg)
             .Do32(mdrefr)
             .DoBuffer32(msc, sizeof(msc) >> 2)
@@ -42,6 +47,7 @@ struct PxaMemCtrlr {
             .Do32(reg_0x20)
             .Do16(sa1110)
             .Do8(lcdbscntr);
+        if (version >= 1) chunkHelper.DoBool(sdramHeld);
     }
 };
 
@@ -65,9 +71,14 @@ static bool pxaMemCtrlrPrvClockMgrMemAccessF(void* userData, uint32_t pa, uint_f
 
     switch (pa) {
         case 0:  // MDCNFG
-            if (write)
+            if (write) {
                 mc->mdcnfg = val;
-            else
+                // DE0-DE3 (3.5.2.1): any enabled partition ends the sleep-exit hold.
+                if (mc->sdramHeld && (val & 0x00030003)) {
+                    mc->sdramHeld = false;
+                    memHoldRam(mc->mem, false);
+                }
+            } else
                 val = mc->mdcnfg;
             break;
 
@@ -218,6 +229,7 @@ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev)
 
     memset(mc, 0, sizeof(*mc));
     mc->g2 = socRev == 2;
+    mc->mem = physMem;
 
     mc->mdcnfg = 0x0b000b00ul;
     mc->mdmrs = 0x00220022ul;
@@ -237,23 +249,31 @@ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev)
     return mc;
 }
 
+void pxaMemCtrlrHoldSdram(struct PxaMemCtrlr* mc) {
+    if (!memHoldRam(mc->mem, true)) ERR("cannot hold SDRAM");
+    mc->sdramHeld = true;
+}
+
 template <typename T>
 void pxaMemCtrlrSave(struct PxaMemCtrlr* pxaMemCtrlr, T& savestate) {
     auto chunk = savestate.GetChunk(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION);
     if (!chunk) ERR("unable to allocate chunk");
 
     SaveChunkHelper helper(*chunk);
-    pxaMemCtrlr->DoSaveLoad(helper);
+    pxaMemCtrlr->DoSaveLoad(helper, SAVESTATE_VERSION);
 }
 
 template <typename T>
 void pxaMemCtrlrLoad(struct PxaMemCtrlr* pxaMemCtrlr, T& loader) {
-    auto chunk =
-        loader.GetChunkOrFail(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION, "pxa memory controller");
+    uint32_t version;
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaMemCtrlr, SAVESTATE_VERSION,
+                                       "pxa memory controller", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
-    pxaMemCtrlr->DoSaveLoad(helper);
+    pxaMemCtrlr->sdramHeld = false;  // v0 never held SDRAM.
+    pxaMemCtrlr->DoSaveLoad(helper, version);
+    if (!memHoldRam(pxaMemCtrlr->mem, pxaMemCtrlr->sdramHeld)) loader.NotifyError();
 }
 
 template void pxaMemCtrlrSave<Savestate<ChunkType>>(PxaMemCtrlr* pxaMemCtrlr,

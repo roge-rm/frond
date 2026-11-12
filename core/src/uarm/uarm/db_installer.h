@@ -20,4 +20,10 @@ struct SyscallDispatch;
 
 int32_t dbInstallerInstall(struct SyscallDispatch* sd, size_t len, void* data);
 
+// What Palm OS gets after a HotSync install, for the database just installed from data: the app
+// with its creator gets sysAppLaunchCmdSyncNotify unless it's the app in front, and an app install
+// while the launcher is in front relaunches the launcher so it lists the app. Any other app in front
+// stays. Runs at the same EvtGetEvent safe point as the install, in its own guest transaction.
+void dbInstallerFinish(struct SyscallDispatch* sd, size_t len, const void* data);
+
 #endif  // _DB_INSTALLER_H_

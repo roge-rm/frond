@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <stdexcept>
 #include <utility>
 
 #include "ButtonEvent.h"
@@ -23,6 +24,13 @@ template <typename ChunkType>
 class SavestateLoader;
 
 class SessionImage;
+
+// A Palm OS call made for the host that didn't return within the cycle limit. Only thrown inside a
+// HostCallScope; elsewhere the limit stays an assertion.
+class EmGuestCallTimeout : public std::runtime_error {
+   public:
+    EmGuestCallTimeout() : std::runtime_error("Palm OS did not return from a host call") {}
+};
 
 class EmSession {
    public:
@@ -67,6 +75,8 @@ class EmSession {
     void SetClockFactor(double clockFactor);
     uint32 GetClocksPerSecond() const { return clocksPerSecond; }
     uint64 GetSystemCycles() const { return systemCycles; }
+    // Converts a loaded session whose cycles were in other units (factor new per old).
+    void ScaleCycles(uint32 factor);
 
     bool LaunchAppByName(const string& name);
 
@@ -98,6 +108,16 @@ class EmSession {
     ButtonEvent NextButtonEvent();
 
     void TriggerDeadMansSwitch();
+
+    // While one is alive, a Palm OS call for the host that runs past the cycle limit throws
+    // EmGuestCallTimeout with the CPU registers put back, instead of asserting.
+    class HostCallScope {
+       public:
+        HostCallScope();
+        ~HostCallScope();
+        HostCallScope(const HostCallScope&) = delete;
+        HostCallScope& operator=(const HostCallScope&) = delete;
+    };
 
     EmTransportSerial* GetTransportSerial(EmUARTDeviceType);
 
@@ -147,6 +167,7 @@ class EmSession {
     Savestate<ChunkType> savestate;
 
     bool deadMansSwitch{false};
+    int hostCalls{0};
 
     EmTransportSerialNull defaultTransportIR;
     EmTransportSerialNull defaultTransportSerial;

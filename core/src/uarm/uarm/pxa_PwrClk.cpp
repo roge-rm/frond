@@ -1,12 +1,17 @@
 //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
 
 #include "pxa_PwrClk.h"
+#include "pxa_I2S.h"
+#include "pxa255_UDC.h"
 
 #include <cstdlib>
 #include <cstring>
 
 #include "SoC.h"
 #include "cputil.h"
+#include "pxa_GPIO.h"
+#include "pxa_RTC.h"
+#include "pxa270_KPC.h"
 #include "savestate/savestateAll.h"
 
 #define PXA_CLOCK_MANAGER_BASE 0x41300000UL
@@ -15,9 +20,15 @@
 #define PXA_POWER_MANAGER_BASE 0x40F00000UL
 #define PXA_POWER_MANAGER_SIZE 0x00000180UL
 
-#define SAVESTATE_VERSION 0
+#define SAVESTATE_VERSION 3
+// PXA25x saves stay at version 2; version 3 adds CLKCFG's HT and B on PXA27x.
+#define SAVESTATE_VERSION_PXA25X 2
 
 struct PxaPwrClk {
+    PxaI2s *i2s;
+    Pxa255Udc *udc;
+    void *clockContext;
+    void (*clockObserver)(void *);
     struct ArmCpu *cpu;
     class SoC *soc;
     uint32_t CCCR, CKEN, OSCR;  // clocks manager regs
@@ -26,10 +37,14 @@ struct PxaPwrClk {
     // power mgr 270 only
     uint32_t PSTR, PVCR, PUCR, PKWR, PKSR, PCMD[32];
     bool turbo, isPXA270;
+    uint32_t clkcfgBits;  // CLKCFG HT (bit 2) and B (bit 3) from the last write, PXA27x only
+    bool sleeping, wakePending;
+    bool restoring;
+    PxaGpio* gpio;
+    PxaKpc* kpc;
 
     template <typename T>
-    void DoSaveLoad(T &chunkHelper) {
-        // PX255 only for now
+    void DoSaveLoad(T &chunkHelper, uint32_t version) {
         chunkHelper.Do32(CCCR)
             .Do32(CKEN)
             .Do32(OSCR)
@@ -45,8 +60,17 @@ struct PxaPwrClk {
             .Do32(RCSR)
             .Do32(PMFW)
             .DoBool(turbo);
+        if (version >= 1)
+            chunkHelper.Do32(PSTR).Do32(PVCR).Do32(PUCR).Do32(PKWR).Do32(PKSR)
+                .DoBuffer32(PCMD, 32);
+        if (version >= 2) chunkHelper.DoBool(sleeping).DoBool(wakePending);
+        if (version >= 3) chunkHelper.Do32(clkcfgBits);
     }
 };
+
+static void pxaPwrClkSyncUdc(PxaPwrClk* pc,bool refresh=true) {
+    if(pc->udc)pxa255UdcSetClockEnabled(pc->udc,!pc->sleeping && (pc->CKEN&0x800),refresh);
+}
 
 static bool pxaPwrClkPrvCoproc7regXferFunc(struct ArmCpu *cpu, void *userData, bool two, bool read,
                                            uint8_t op1, uint8_t Rx, uint8_t CRn, uint8_t CRm,
@@ -74,10 +98,11 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
         switch (CRn) {
             case 6:
                 if (op2 != 0) break;
-                if (read)
-                    val = 0;
+                if (read)  // CLKCFG: PXA27x reads back T, HT and B; F reads 0
+                    val = pc->isPXA270 ? (pc->turbo ? 1 : 0) | pc->clkcfgBits : 0;
                 else {
                     pc->turbo = (val & 1) != 0;
+                    if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
                     if (val & 2)
                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
                                 (unsigned long)pc->CCCR, (unsigned long)val);
@@ -87,13 +112,27 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
             case 7:
                 if (read)
                     val = 0;
-                else if (val == 1 && op2 == 0) {
+                else if (op2 != 0) {
+                } else if (pc->isPXA270 && val == 8) {
+                    // PXA27x VC: the sequencer sends PCMD over PWR_I2C to the PMIC. There is no
+                    // PMIC to answer, so the change is done at once.
+                } else if (val == 1) {
                     pc->soc->Sleep();
-                } else if (val == 3 && op2 == 0) {
-                    // pretend we woke up
-                    pc->RCSR |= 4;
-                    cpuReset(pc->cpu, 0);
-                } else if (op2 == 0) {
+                } else if (val == 3 || (pc->isPXA270 && val == 7)) {  // 7 is PXA27x deep sleep
+                    if (pc->gpio) {
+                        // Sleep ignores ordinary IRQs; only programmed PM sources exit it.
+                        pc->sleeping = true;
+                        pxaPwrClkSyncUdc(pc);
+                        pc->wakePending = false;
+                        // SSS, PH, RDH; PXA27x adds OTGPH.
+                        pc->PSSR |= pc->isPXA270 ? 0x71 : 0x31;
+                        pxaGpioHoldSleepOutputs(pc->gpio, pc->PGSR);
+                        pc->soc->Sleep();
+                    } else {
+                        pc->RCSR |= 4;
+                        cpuReset(pc->cpu, 0);
+                    }
+                } else {
                     fprintf(stderr,
                             "Someone tried to set processor power mode (cp14 reg7) to 0x%08lx\n",
                             (unsigned long)val);
@@ -141,7 +180,10 @@ static bool pxaPwrClkPrvClockMgrMemAccessF(void *userData, uint32_t pa, uint8_t 
 
         case 1:  // CKEN
             if (write)
-                pc->CKEN = val;
+                { pc->CKEN = val;
+                  if (pc->clockObserver) pc->clockObserver(pc->clockContext);
+                  pxaPwrClkSyncUdc(pc);
+                  if (pc->i2s) pxaI2sSetClockEnabled(pc->i2s, !!(val & 0x100)); }
             else
                 val = pc->CKEN;
             break;
@@ -149,6 +191,10 @@ static bool pxaPwrClkPrvClockMgrMemAccessF(void *userData, uint32_t pa, uint8_t 
         case 2:  // OSCR
             if (!write) val = pc->OSCR;
             // no writing to this register
+            break;
+
+        case 3:  // PXA27x CCSR: PLLs locked, running the L and 2N that CCCR asks for
+            if (!write && pc->isPXA270) val = 0x30000000u | (pc->CCCR & 0x79fu);
             break;
     }
 
@@ -181,10 +227,10 @@ static bool pxaPwrClkPrvPowerMgrMemAccessF(void *userData, uint32_t pa, uint_fas
             break;
 
         case 0x04 / 4:  // PSSR
-            if (write)
+            if (write) {
                 pc->PSSR &= ~val;
-
-            else
+                if ((val & 0x10) && pc->gpio) pxaGpioReleaseSleepOutputs(pc->gpio);
+            } else
                 val = pc->PSSR;
             break;
 
@@ -292,7 +338,7 @@ static bool pxaPwrClkPrvPowerMgrMemAccessF(void *userData, uint32_t pa, uint_fas
         case 0x54 / 4:  // PKSR
             if (!pc->isPXA270) return false;
             if (write)
-                pc->PKWR &= ~val;
+                pc->PKSR &= ~val;
             else
                 val = pc->PKSR;
             break;
@@ -356,8 +402,100 @@ struct PxaPwrClk *pxaPwrClkInit(struct ArmCpu *cpu, struct ArmMem *physMem, clas
     return pc;
 }
 
+static void pxaPwrClkGpioEdge(void* context, uint32_t pin, bool oldLevel, bool newLevel) {
+    auto* pc = static_cast<PxaPwrClk*>(context);
+    if (!pc->sleeping || pc->restoring || oldLevel == newLevel || !pxaGpioIsInput(pc->gpio, pin))
+        return;
+
+    // PXA25x wakes on GPIO0-15 (Table 3-12); PXA27x on a subset plus GPIO35 and muxed pins.
+    uint32_t source = !pc->isPXA270 ? (pin < 16 ? 1u << pin : 0)
+        : pin < 16 ? ((1u << pin) & 0xfe1b) : pin == 35 ? 0x01000000 : 0;
+    if (source && (pc->PWER & source) && ((newLevel ? pc->PRER : pc->PFER) & source))
+        pc->PEDR |= source, pc->wakePending = true;
+    if (!pc->isPXA270) return;
+
+    const unsigned mux2[] = {121, 38, 53, 40, 36, 121, 121, 121};
+    const unsigned mux3[] = {121, 31, 113, 121};
+    if (pin == mux2[(pc->PWER >> 16) & 7])
+        pc->PEDR |= 1u << 17, pc->wakePending = true;
+    if (pin == mux3[(pc->PWER >> 19) & 3])
+        pc->PEDR |= 1u << 20, pc->wakePending = true;
+}
+
+static void pxaPwrClkRtcAlarm(void* context) {
+    auto* pc = static_cast<PxaPwrClk*>(context);
+    if (pc->sleeping && !pc->restoring && (pc->PWER & 0x80000000)) {
+        pc->PEDR |= 0x80000000;
+        pc->wakePending = true;
+    }
+}
+
+void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaKpc* kpc) {
+    pc->gpio = gpio;
+    pc->kpc = kpc;
+    pxaGpioSetInputObserver(gpio, pxaPwrClkGpioEdge, pc);
+    pxaRtcSetWakeCallback(rtc, pxaPwrClkRtcAlarm, pc);
+}
+
+void pxaPwrClkSetResetCause(PxaPwrClk* pc, uint32_t rcsr) { pc->RCSR = rcsr; }
+bool pxaPwrClkSleeping(const PxaPwrClk* pc) { return pc && pc->sleeping; }
+void pxaPwrClkRestoreInProgress(PxaPwrClk* pc, bool restoring) { pc->restoring = restoring; }
+uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc) { return pc->PMFW; }
+bool pxaPwrClkRetainPowerI2c(const PxaPwrClk* pc) { return (pc->PCFR & 0x40) != 0; }
+
+bool pxaPwrClkWakePending(PxaPwrClk* pc) {
+    if (!pc->sleeping || pc->restoring) return false;
+    if (!pc->isPXA270) return pc->wakePending;  // PXA25x has no keypad wake (PKWR).
+    // PKWR/PKSR bit order and GAFR input muxes: Tables 3-28, 3-29, 24-2.
+    static const struct { unsigned pin, matrixAf, row, directAf, key; } pads[] = {
+        {13,3,7,2,7}, {16,1,5,0,0}, {17,1,6,0,0}, {34,2,3,0,0},
+        {36,3,7,0,0}, {37,3,3,0,0}, {38,2,4,0,0}, {39,1,4,0,0},
+        {90,1,5,0,0}, {91,1,6,0,0}, {93,0,0,1,0}, {94,0,0,1,1},
+        {95,3,6,1,2}, {96,0,0,1,3}, {97,3,3,1,4}, {98,3,4,1,5},
+        {99,3,5,1,6}, {100,1,0,0,0}, {101,1,1,0,0}, {102,1,2,0,0}
+    };
+    const uint8_t rows = pxaKpcMatrixWakeLevels(pc->kpc);
+    const uint8_t keys = pxaKpcDirectWakeLevels(pc->kpc);
+    for (unsigned bit = 0; bit < 20; ++bit) {
+        const auto& pad = pads[bit];
+        if (!(pc->PKWR & (1u << bit)) || !pxaGpioIsInput(pc->gpio, pad.pin)) continue;
+        const unsigned af = pxaGpioAlternateFunction(pc->gpio, pad.pin);
+        const bool matrix = pad.matrixAf && af == pad.matrixAf;
+        const bool direct = pad.directAf && af == pad.directAf;
+        if ((matrix || direct) &&
+            (pxaGpioInputLevel(pc->gpio, pad.pin) ||
+             (matrix && (rows & (1u << pad.row))) || (direct && (keys & (1u << pad.key))))) {
+            pc->PKSR |= 1u << bit;
+            pc->wakePending = true;
+        }
+    }
+    return pc->wakePending;
+}
+
+void pxaPwrClkFinishSleep(PxaPwrClk* pc) {
+    // Table 3-2: retain wake configuration/status, scratchpad, RTC and clocks.
+    memset(pc->PGSR, 0, sizeof(pc->PGSR));
+    if (!pxaPwrClkRetainPowerI2c(pc)) {
+        pc->PVCR = 0;
+        memset(pc->PCMD, 0, sizeof(pc->PCMD));
+    }
+    pc->RCSR |= 4;  // SMR: sleep-exit reset, never set at sleep entry.
+    pc->turbo = false;
+    pc->clkcfgBits = 0;
+    pc->sleeping = pc->wakePending = false;
+    pxaPwrClkSyncUdc(pc);
+    if (pc->PCFR & 0x4000) {
+        pc->PSSR &= ~0x10u;
+        pxaGpioReleaseSleepOutputs(pc->gpio);
+    }
+}
+
 void pxaPwrClkReset(struct PxaPwrClk *pc) {
-    pc->CCCR = 0x00000122UL;  // set CCCR to almost default value (we use mult 32 not 27)
+    pc->sleeping = pc->wakePending = false;
+    pc->clkcfgBits = 0;
+    // PXA25x: almost the default (we use mult 32 not 27). PXA27x: L 16, 2N 3, the 208 MHz run
+    // and 312 MHz turbo these devices run at.
+    pc->CCCR = pc->isPXA270 ? 0x00000190UL : 0x00000122UL;
     pc->CKEN = 0x000179EFUL;  // set CKEN to default value
     pc->OSCR = 0x00000003UL;  // 32KHz oscillator on and stable
     pc->PMCR = 0;
@@ -379,25 +517,39 @@ void pxaPwrClkReset(struct PxaPwrClk *pc) {
 
     // pretend we just power-no-resetted
     pc->RCSR |= 1;
+    pxaPwrClkSyncUdc(pc);
 }
 
 template <typename T>
 void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, SAVESTATE_VERSION);
+    // PXA25x moved to version 2 with power sleep; older versions still load.
+    const uint32_t version = pc->isPXA270 ? SAVESTATE_VERSION : SAVESTATE_VERSION_PXA25X;
+    auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, version);
     if (!chunk) ERR("unable to allocate chunk");
 
     SaveChunkHelper helper(*chunk);
-    pc->DoSaveLoad(helper);
+    pc->DoSaveLoad(helper, version);
 }
 
 template <typename T>
 void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
-    auto chunk =
-        loader.GetChunkOrFail(ChunkType::pxaPwrClk, SAVESTATE_VERSION, "pxa power / clock CP");
+    uint32_t version;
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwrClk, SAVESTATE_VERSION,
+                                       "pxa power / clock CP", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
-    pc->DoSaveLoad(helper);
+    pc->sleeping = pc->wakePending = false;  // v0/v1 never represented power sleep.
+    // Before v3 a PXA27x takes B as set, as Palm OS sets it (CLKCFG 0xb) while it boots.
+    pc->clkcfgBits = pc->isPXA270 ? 0x8 : 0;
+    if (version == 0) {
+        pc->PSTR = pc->PVCR = pc->PUCR = pc->PKWR = pc->PKSR = 0;
+        memset(pc->PCMD, 0, sizeof(pc->PCMD));
+    }
+    pc->DoSaveLoad(helper, version);
+    if (pc->wakePending && !pc->sleeping) loader.NotifyError();
+    // The later UDC load refreshes requests from its restored FIFO state.
+    pxaPwrClkSyncUdc(pc,false);
 }
 
 template void pxaPwrClkSave<Savestate<ChunkType>>(PxaPwrClk *pc, Savestate<ChunkType> &savestate);
@@ -405,3 +557,17 @@ template void pxaPwrClkSave<SavestateProbe<ChunkType>>(PxaPwrClk *pc,
                                                        SavestateProbe<ChunkType> &savestate);
 template void pxaPwrClkLoad<SavestateLoader<ChunkType>>(PxaPwrClk *pc,
                                                         SavestateLoader<ChunkType> &loader);
+
+bool pxaPwrClkI2sClock(const PxaPwrClk *pc) { return pc->CKEN & 0x100; }
+void pxaPwrClkConnectI2s(PxaPwrClk *pc, PxaI2s *i2s) {
+    pc->i2s = i2s;
+    pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pc));
+}
+
+uint32_t pxaPwrClkClockMask(const PxaPwrClk *p) { return p->CKEN; }
+void pxaPwrClkSetClockObserver(PxaPwrClk *p, void *c, void (*f)(void *)) { p->clockContext=c; p->clockObserver=f; }
+
+void pxaPwrClkConnectUdc(PxaPwrClk* pc,Pxa255Udc* udc) {
+    pc->udc=udc;
+    pxaPwrClkSyncUdc(pc);
+}

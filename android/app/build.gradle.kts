@@ -14,12 +14,12 @@ val signingProperties: Properties? = rootProject.file("../../../AndroidStudioPro
     ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
 val releaseStoreFile = signingProperties?.getProperty("storeFile")
 
-// The repo root, one above android/. The core is reconstructed there in build/source.
+// The repo root, one above android/. The core's source is in core/ there.
 val repoRoot: File = rootProject.projectDir.parentFile
-// An isolated prepared source can be used without replacing another session's build/source.
+// frond.coreSource builds from a copy of core/ in that folder instead, made by tools/copy-core.py.
 val coreSourceOverride = providers.gradleProperty("frond.coreSource").orNull
 val coreSource: File = coreSourceOverride?.let { File(it).let { path -> if (path.isAbsolute) path else File(repoRoot, it) } }
-    ?: File(repoRoot, "build/source")
+    ?: File(repoRoot, "core")
 
 // SDL2 and SDL2_image match the desktop build (Debian's libsdl2 2.32.4 and
 // libsdl2-image 2.8.8). The tarballs are the GitHub releases, checked against these
@@ -45,28 +45,16 @@ val jitDifferential = providers.gradleProperty("frond.jitDifferential").map { it
 
 val prepareCore = tasks.register<Exec>("prepareCore") {
     group = "build"
-    description = "Reconstructs the patched core in build/source with tools/prepare.py"
+    description = "Copies core/ to frond.coreSource when that is set"
+    onlyIf { coreSourceOverride != null }
     workingDir(repoRoot)
-    if (coreSourceOverride == null) commandLine("python3", "tools/prepare.py")
-    else commandLine("python3", "tools/prepare.py", "--destination", coreSource.absolutePath)
+    commandLine("python3", "tools/copy-core.py", coreSource.absolutePath)
 }
 
-// The Fast engine's Dynarmic source, exported and patched into build/dynarmic-trial/src by the
-// repo's Makefile (which fetches the pinned revisions once if there's no donor clone). Dynarmic
-// also needs Boost's headers; frond.boostInclude is the folder holding boost/, /usr/include by default.
-val dynarmicSource: File = File(repoRoot, "build/dynarmic-trial/src")
+// The Fast engine's Dynarmic source, with Frond's changes, in vendor/dynarmic. Dynarmic also
+// needs Boost's headers; frond.boostInclude is the folder holding boost/, /usr/include by default.
+val dynarmicSource: File = File(repoRoot, "vendor/dynarmic")
 val boostInclude = providers.gradleProperty("frond.boostInclude").getOrElse("/usr/include")
-val prepareDynarmic = tasks.register<Exec>("prepareDynarmic") {
-    group = "build"
-    description = "Exports the patched Dynarmic source into build/dynarmic-trial/src"
-    workingDir(repoRoot)
-    commandLine("make", "--no-print-directory", "build/dynarmic-trial/src/.frond-source")
-}
-tasks.configureEach {
-    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
-        dependsOn(prepareDynarmic)
-    }
-}
 
 // The licence notices shown by About: the repo's licences/ folder plus the GPL text from LICENSE.
 val licencesAssets = layout.buildDirectory.dir("generated/licences-assets")

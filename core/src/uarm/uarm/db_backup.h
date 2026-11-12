@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "db_list.h"
 
@@ -24,7 +25,7 @@ class DbBackup {
     static constexpr int STATE_ERROR = -1;
 
    public:
-    DbBackup(SyscallDispatch* syscallDispatch, int backupType);
+    DbBackup(SyscallDispatch* syscallDispatch, int backupType, std::string databaseName = {});
     ~DbBackup();
 
     bool Init();
@@ -44,6 +45,7 @@ class DbBackup {
    private:
     SyscallDispatch* sd{nullptr};
 
+    std::string databaseName;
     int backupType{BACKUP_TYPE_RAM};
     int state{STATE_CREATED};
 

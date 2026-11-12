@@ -1184,6 +1184,7 @@ void EmRegsSZ::Reset(Bool hardwareReset) {
             fPortXEdge[counter - 'D'] = 0;
         }
         fPortDDataCount = 0;
+        if (fSPISlaveADC) fSPISlaveADC->Reset();
 
         // React to the new data in the UART registers.
 

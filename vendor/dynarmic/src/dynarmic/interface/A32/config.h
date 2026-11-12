@@ -57,6 +57,24 @@ enum class Exception {
     NoExecuteFault,
 };
 
+/// Frond: the code one block may read, taken on the guest thread for the compile thread.
+/// Translation reads it instead of the callbacks. The callbacks' own data must not be
+/// touched from it, as it is used on the compile thread.
+struct CodeSnapshot : public TranslateCallbacks {
+    virtual ~CodeSnapshot() = default;
+
+    void PreCodeTranslationHook(bool /*is_thumb*/, VAddr /*pc*/, A32::IREmitter& /*ir*/) override {}
+    std::uint64_t GetTicksForCode(bool /*is_thumb*/, VAddr /*vaddr*/, std::uint32_t /*instruction*/) override { return 1; }
+
+    /// Set by the snapshot when translation reads past what was taken; the block is
+    /// thrown away and the next request takes a whole snapshot.
+    bool overflow = false;
+
+    /// Frond: false if the first instruction can't go to the JIT, so a block compiled ahead
+    /// from it would be no use.
+    bool runnable = true;
+};
+
 /// These function pointers may be inserted into compiled code.
 struct UserCallbacks : public TranslateCallbacks {
     virtual ~UserCallbacks() = default;
@@ -109,6 +127,25 @@ struct UserCallbacks : public TranslateCallbacks {
     virtual void ExceptionRaised(VAddr pc, Exception exception) = 0;
 
     virtual void InstructionSynchronizationBarrierRaised() {}
+
+    // Frond: asked before the block at pc is compiled. Returning false compiles nothing and
+    // the run goes back to the dispatcher, so the callback must halt execution then.
+    virtual bool ShouldCompile(VAddr /*pc*/, bool /*thumb*/) { return true; }
+
+    // Frond: with the compile thread on (Jit::SetCompileThread), a block ShouldCompile
+    // wants is translated from a snapshot of its code taken here, on the guest thread.
+    // whole asks for as much as one block can read (an earlier snapshot was too short).
+    // Null compiles the block in place as before.
+    virtual std::unique_ptr<CodeSnapshot> SnapshotCode(VAddr /*pc*/, bool /*thumb*/, bool /*whole*/) { return nullptr; }
+    // The same for a block compiled ahead (Jit::SetCompileAhead), which the guest may never
+    // run, so the callback should read no memory with side effects. Null skips the block.
+    virtual std::unique_ptr<CodeSnapshot> SnapshotCodeAhead(VAddr pc, bool thumb, bool whole) { return SnapshotCode(pc, thumb, whole); }
+    // Before a block compiled off-thread is installed, on the guest thread: false drops it
+    // (the code it was translated from has changed since the snapshot).
+    virtual bool CodeUnchanged(CodeSnapshot& /*snapshot*/) { return true; }
+    // The block at pc is queued for the compile thread and the run goes back to the
+    // dispatcher, so the callback must halt execution, as for ShouldCompile's false.
+    virtual void CompileQueued(VAddr /*pc*/, bool /*thumb*/) {}
 
     // Timing-related callbacks
     // ticks ticks have passed
@@ -163,6 +200,25 @@ struct UserConfig {
     ///       So there might be wrongly faulted pages which maps to nullptr.
     ///       This can be avoided by carefully allocating the memory region.
     bool absolute_offset_page_table = false;
+
+    /// Frond: writes always go through the MemoryWrite callbacks, the page table is only
+    /// used for reads.
+    bool page_table_writes_via_callbacks = false;
+
+    /// Frond: linked blocks also check for a halt, so HaltExecution from a callback ends
+    /// the run at the next branch instead of when the cycles run out.
+    bool check_halt_on_link = false;
+
+    /// Frond: when non-zero, a block holds at most this many instructions and every block
+    /// link checks the cycles left (LinkBlockFast as well as LinkBlock), so a run goes at
+    /// most this many cycles, less one, past its budget. Needs enable_cycle_counting.
+    /// x64 and arm64.
+    std::size_t max_unchecked_instructions = 0;
+
+    /// Frond: bit 0 of a page table entry marks the page read-only. Reads mask it off
+    /// (set page_table_pointer_mask_bits to at least 1), stores to such a page go to the
+    /// MemoryWrite callbacks. x64 and arm64.
+    bool page_table_write_protect_bit = false;
     /// Masks out the first N bits in host pointers from the page table.
     /// The intention behind this is to allow users of Dynarmic to pack attributes in the
     /// same integer and update the pointer attribute pair atomically.
@@ -200,6 +256,18 @@ struct UserConfig {
 
     // Coprocessors
     std::array<std::shared_ptr<Coprocessor>, 16> coprocessors{};
+
+    /// Frond: a bit per coprocessor whose LDC and STC take imm8 as a byte offset instead of
+    /// a word offset, in the address and the base writeback (iWMMXt's coprocessor 0).
+    std::uint16_t coprocessor_unscaled_offsets = 0;
+
+    /// Frond: when set, MRS SPSR, MSR SPSR and MSR CPSR writes to anything but the flags
+    /// are sent to this coprocessor slot, for a privileged guest. MRS Rd, SPSR is
+    /// GetOneWord (opc1 0). MSR is SendTwoWords with the value and the field mask, opc 0
+    /// for CPSR and 1 for SPSR. MOVS PC, Rm and SUBS PC, Rn, #imm are SendTwoWords opc 2
+    /// with the target, and the callback sets PC and CPSR. A CPSR write ends the block after
+    /// the call, so the callback may change the registers and CPSR in the JIT state.
+    std::optional<std::size_t> psr_coprocessor;
 
     /// When set to true, UserCallbacks::InstructionSynchronizationBarrierRaised will be
     /// called when an ISB instruction is executed.

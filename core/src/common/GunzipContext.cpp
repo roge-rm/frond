@@ -162,7 +162,7 @@ uint8_t GunzipContext::Read8(size_t index) {
 }
 
 void GunzipContext::ReadHeaderFooter() {
-    if (uncompressedSize <= HEADER_SIZE + FOOTER_SIZE) return SetError("not enough input");
+    if (compressedSize <= HEADER_SIZE + FOOTER_SIZE) return SetError("not enough input");
 
     headerFooter.magic = Read16(0);
     headerFooter.compressionMethod = Read8(2);

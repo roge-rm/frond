@@ -1,5 +1,5 @@
 #pragma once
-// The storage library's CardFile and FatImage (build/source/src/common/storage) for the desktop:
+// The storage library's CardFile and FatImage (core/src/common/storage) for the desktop:
 // QString names and paths, QDateTime dates, and the library's errors as frondCardFile::Error.
 // The crash safety, journals and FAT code are all the library's.
 #include "storage/CardFile.h"

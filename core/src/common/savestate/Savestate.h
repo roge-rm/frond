@@ -34,12 +34,18 @@ class Savestate {
    private:
     template <typename T>
     bool AllocateBuffer(T& t);
+    template <typename T>
+    bool SaveChunks(T& t);
+
+    // No chunk was asked for that the layout lacks. A chunk that came out short is fine to load.
+    bool LayoutHeld() const;
 
    private:
     std::unique_ptr<uint32_t[]> buffer;
     size_t size{0};
 
     bool error{false};
+    bool missingChunk{false};
 
     chunkMapT chunkMap;
 
@@ -62,7 +68,24 @@ bool Savestate<ChunkType>::Save(T& target) {
         return false;
     }
 
+    if (SaveChunks(target) && LayoutHeld()) return true;
+
+    // The layout is probed at the first save, and the machine can change it since: a card in a
+    // second slot or an MMC card adds words, taking one out leaves fewer. Probe again and save once more.
+    Reset();
+    if (!AllocateBuffer(target)) {
+        error = true;
+        return false;
+    }
+
+    return SaveChunks(target);
+}
+
+template <typename ChunkType>
+template <typename T>
+bool Savestate<ChunkType>::SaveChunks(T& target) {
     error = false;
+    missingChunk = false;
     for (auto& [chunkType, chunk] : chunkMap) chunk.Reset();
 
     target.Save(*this);
@@ -70,6 +93,11 @@ bool Savestate<ChunkType>::Save(T& target) {
     for (auto& [chunkType, chunk] : chunkMap) error = error || chunk.HasError();
 
     return !error;
+}
+
+template <typename ChunkType>
+bool Savestate<ChunkType>::LayoutHeld() const {
+    return !missingChunk;
 }
 
 template <typename ChunkType>
@@ -90,7 +118,7 @@ bool Savestate<ChunkType>::AllocateBuffer(T& target) {
 
     for (auto& [chunkType, chunk] : probeMap) size = size + chunk.GetSize() * 4 + 8;
 
-    buffer = std::make_unique<uint32_t[]>(size);
+    buffer = std::make_unique<uint32_t[]>(size / sizeof(uint32_t));
 
     uint32_t* nextTocEntry = buffer.get();
     *(nextTocEntry++) = chunkCount;
@@ -123,7 +151,7 @@ Chunk* Savestate<ChunkType>::GetChunk(ChunkType type) {
     }
 
     if (chunkMap.find(type) == chunkMap.end()) {
-        logPrintf("chunk type 0x%04x not in map", type);
+        missingChunk = true;
         return nullptr;
     }
 
@@ -158,6 +186,7 @@ void Savestate<ChunkType>::Reset() {
     buffer.reset();
     size = 0;
     error = false;
+    missingChunk = false;
     chunkMap.clear();
 }
 

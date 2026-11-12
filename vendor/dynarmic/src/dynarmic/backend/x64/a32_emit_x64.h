@@ -50,6 +50,18 @@ public:
      */
     BlockDescriptor Emit(IR::Block& block);
 
+    // Frond: Emit in two steps, for the compile thread. EmitUnregistered writes the code
+    // (links to blocks there now included) but leaves it unreachable; Install registers it
+    // and links the blocks that jump to it. Both under the Jit's code lock.
+    struct EmittedBlock {
+        IR::LocationDescriptor descriptor{0};
+        CodePtr entrypoint = nullptr;
+        size_t size = 0;
+        u32 first_pc = 0, last_pc = 0;
+    };
+    EmittedBlock EmitUnregistered(IR::Block& block);
+    BlockDescriptor Install(const EmittedBlock& emitted);
+
     void ClearCache() override;
 
     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
@@ -111,6 +123,8 @@ protected:
 
     // Memory access helpers
     void EmitCheckMemoryAbort(A32EmitContext& ctx, IR::Inst* inst, Xbyak::Label* end = nullptr);
+    void EmitCheckCoprocessorAbort(A32EmitContext& ctx, IR::Inst* inst);
+    void EmitCheckMemoryAbortAt(A32EmitContext& ctx, const A32::LocationDescriptor& current_location, Xbyak::Label* end);
     template<std::size_t bitsize, auto callback>
     void EmitMemoryRead(A32EmitContext& ctx, IR::Inst* inst);
     template<std::size_t bitsize, auto callback>
@@ -130,6 +144,7 @@ protected:
     void EmitTerminalImpl(IR::Term::ReturnToDispatch terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
     void EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
     void EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
+    void EmitFrondIndirectCheck();
     void EmitTerminalImpl(IR::Term::PopRSBHint terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
     void EmitTerminalImpl(IR::Term::FastDispatchHint terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;
     void EmitTerminalImpl(IR::Term::If terminal, IR::LocationDescriptor initial_location, bool is_single_step) override;

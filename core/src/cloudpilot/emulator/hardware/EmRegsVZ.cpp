@@ -12,6 +12,7 @@
 \* ===================================================================== */
 
 #include "EmRegsVZ.h"
+#include "../FrameBounds.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,6 +25,8 @@
 #include "EmMemory.h"  // gMemAccessFlags, EmMem_memcpy
 #include "EmRegsVZPrv.h"
 #include "EmSPISlave.h"  // DoExchange
+#include "EmBankROM.h"
+#include "EmBusTiming.h"
 #include "EmSession.h"   // gSession
 #include "EmSystemState.h"
 #include "Frame.h"
@@ -578,6 +581,7 @@ void EmRegsVZ::Reset(Bool hardwareReset) {
         fLastTmr2Status = 0;
         fPortDEdge = 0;
         fPortDDataCount = 0;
+        if (fSPISlaveADC) fSPISlaveADC->Reset();
 
         pwmActive = false;
 
@@ -598,6 +602,7 @@ void EmRegsVZ::Reset(Bool hardwareReset) {
     }
 
     UpdateTimers();
+    UpdateBusTiming();
 }
 
 void EmRegsVZ::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
@@ -642,8 +647,11 @@ void EmRegsVZ::Load(SavestateLoader<ChunkType>& loader) {
     afterLoad = true;
 
     systemCycles = gSession->GetSystemCycles();
+    // The restored PLL must set the session clock before lazy timers advance.
+    EmHAL::onSystemClockChange.Dispatch();
     UpdateTimers();
     powerOffCached = GetAsleep();
+    UpdateBusTiming();
 }
 
 template <typename T>
@@ -713,6 +721,9 @@ void EmRegsVZ::Dispose(void) {
     EmHAL::onDayRollover.RemoveHandler(onDayRolloverHandle);
 
     EmHAL::RemoveCycleConsumer(cycleThunk, this);
+
+    Memory::SetWaitStates(EmBusWait{0, 0, 0, 0}, EmBusWait{0, 0, 0, 0});
+    EmBusTiming::Set(EmBusSteal{}, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -746,8 +757,8 @@ void EmRegsVZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, StdWrite, csControl3);
 
     INSTALL_HANDLER(StdRead, csASelectWrite, csASelect);
-    INSTALL_HANDLER(StdRead, StdWrite, csBSelect);
-    INSTALL_HANDLER(StdRead, StdWrite, csCSelect);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, csBSelect);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, csCSelect);
     INSTALL_HANDLER(StdRead, csDSelectWrite, csDSelect);
 
     INSTALL_HANDLER(StdRead, StdWrite, emuCS);
@@ -780,14 +791,14 @@ void EmRegsVZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, StdWrite, portCPulldnEn);
     INSTALL_HANDLER(StdRead, StdWrite, portCSelect);
 
-    INSTALL_HANDLER(StdRead, StdWrite, portDDir);
+    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDDir);
     INSTALL_HANDLER(portXDataRead, portXDataWrite, portDData);
     INSTALL_HANDLER(StdRead, StdWrite, portDPullupEn);
     INSTALL_HANDLER(StdRead, StdWrite, portDSelect);
-    INSTALL_HANDLER(StdRead, StdWrite, portDPolarity);
+    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDPolarity);
     INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDIntReqEn);
-    INSTALL_HANDLER(StdRead, StdWrite, portDKbdIntEn);
-    INSTALL_HANDLER(StdRead, StdWrite, portDIntEdge);
+    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDKbdIntEn);
+    INSTALL_HANDLER(StdRead, portDIntReqEnWrite, portDIntEdge);
 
     INSTALL_HANDLER(StdRead, StdWrite, portEDir);
     INSTALL_HANDLER(portXDataRead, portXDataWrite, portEData);
@@ -880,15 +891,15 @@ void EmRegsVZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanelControl);
     INSTALL_HANDLER(StdRead, StdWrite, lcdPolarity);
     INSTALL_HANDLER(StdRead, StdWrite, lcdACDRate);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdPixelClock);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdClockControl);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshRateAdj);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdPixelClock);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdClockControl);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdRefreshRateAdj);
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdPanningOffset);
     INSTALL_HANDLER(StdRead, StdWrite, lcdFrameRate);
     INSTALL_HANDLER(StdRead, lcdRegisterWrite, lcdGrayPalette);
     INSTALL_HANDLER(StdRead, StdWrite, lcdContrastControlPWM);
     INSTALL_HANDLER(StdRead, StdWrite, lcdRefreshModeControl);
-    INSTALL_HANDLER(StdRead, StdWrite, lcdDMAControl);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, lcdDMAControl);
 
     INSTALL_HANDLER(rtcHourMinSecRead, StdWrite, rtcHourMinSec);
     INSTALL_HANDLER(StdRead, StdWrite, rtcAlarm);
@@ -900,8 +911,8 @@ void EmRegsVZ::SetSubBankHandlers(void) {
     INSTALL_HANDLER(StdRead, StdWrite, rtcDay);
     INSTALL_HANDLER(StdRead, StdWrite, rtcDayAlarm);
 
-    INSTALL_HANDLER(StdRead, StdWrite, dramConfig);
-    INSTALL_HANDLER(StdRead, StdWrite, dramControl);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, dramConfig);
+    INSTALL_HANDLER(StdRead, busTimingRegisterWrite, dramControl);
     INSTALL_HANDLER(StdRead, sdctlWrite, sdramControl);
     INSTALL_HANDLER(StdRead, StdWrite, sdramPwDn);
 
@@ -943,7 +954,7 @@ uint32 EmRegsVZ::GetAddressRange(void) { return kMemorySize; }
 // Emulator::Execute.  Interestingly, the loop runs 3% FASTER if this function
 // is in its own separate function instead of being inline.
 
-inline void EmRegsVZ::Cycle(uint64 systemCycles, Bool sleeping) {
+void EmRegsVZ::Cycle(uint64 systemCycles, Bool sleeping) {
     if (unlikely(afterLoad)) {
         DispatchPwmChange();
         afterLoad = false;
@@ -990,7 +1001,7 @@ void EmRegsVZ::CycleSlowly(Bool sleeping) {
         if (event.GetButton() == ButtonEvent::Button::cradle)
             EmRegsVZ::HotSyncEvent(event.GetType() == ButtonEvent::Type::press);
         else
-            EmRegsVZ::DispatchButtonEvent(event);
+            this->DispatchButtonEvent(event);
     }
 
     // See if there's anything new ("Put the data on the bus")
@@ -1135,13 +1146,6 @@ int32 EmRegsVZ::GetInterruptLevel(void) {
 
     if (intLevel[0x05] == 0) intLevel[0x05] = 6;
 
-#ifndef NDEBUG
-    for (int ii = 0; ii < 32; ++ii) {
-        EmAssert(intLevel[ii] != 0);
-        EmAssert(intLevel[ii] != 7 || ii == 0x17);
-    }
-#endif
-
     // Find the highest interrupt level.
 
     int8 result = -1;
@@ -1154,7 +1158,8 @@ int32 EmRegsVZ::GetInterruptLevel(void) {
     while (intStatus) {
         if (intStatus & 1) {
             // Make sure no undefined bits are set.
-            EmAssert(intLevel[index] >= 0);
+            EmAssert(intLevel[index] > 0);
+            EmAssert(intLevel[index] != 7 || index == 0x17);
 
             if (result < intLevel[index]) {
                 result = intLevel[index];
@@ -1193,6 +1198,15 @@ bool EmRegsVZ::CopyLCDFrame(Frame& frame, bool fullRefresh) {
     const emuptr baseAddr = READ_REGISTER(lcdStartAddr);
     if (baseAddr == 0) return false;
 
+    switch (frame.bpp) {
+        case 1: frame.margin &= 0x0f; break;
+        case 2: frame.margin &= 0x07; break;
+        case 4: frame.margin &= 0x03; break;
+        default: return false;
+    }
+    if (!FrameBoundsValid(frame.lineWidth, frame.lines, frame.bytesPerLine, frame.margin,
+                          frame.bpp, frame.GetBufferSize(), baseAddr)) return false;
+
     if (!gSystemState.IsScreenDirty() && !fullRefresh) {
         frame.hasChanges = false;
         return true;
@@ -1200,33 +1214,18 @@ bool EmRegsVZ::CopyLCDFrame(Frame& frame, bool fullRefresh) {
 
     frame.UpdateDirtyLines(gSystemState, baseAddr, frame.bytesPerLine, fullRefresh);
     if (!frame.hasChanges) return true;
-
-    switch (frame.bpp) {
-        case 1:
-            frame.margin &= 0x0f;
-            break;
-
-        case 2:
-            frame.margin &= 0x07;
-            break;
-
-        case 4:
-            frame.margin &= 0x03;
-            break;
-
-        default:
-            return false;
-    }
+    if (!FrameDirtyLinesValid(frame.lines, frame.firstDirtyLine, frame.lastDirtyLine))
+        return false;
 
     // Determine first and last scanlines to fetch, and fetch them.
 
     emuptr firstLineAddr = baseAddr + frame.firstDirtyLine * frame.bytesPerLine;
-    emuptr lastLineAddr = baseAddr + (frame.lastDirtyLine + 1) * frame.bytesPerLine;
+    const size_t copyBytes = (frame.lastDirtyLine - frame.firstDirtyLine + 1) *
+                             size_t(frame.bytesPerLine);
 
     uint8* dst = frame.GetBuffer() + frame.firstDirtyLine * frame.bytesPerLine;
 
-    EmASSERT(frame.GetBufferSize() >= lastLineAddr - firstLineAddr);
-    EmMem_memcpy((void*)dst, firstLineAddr, lastLineAddr - firstLineAddr);
+    EmMem_memcpy((void*)dst, firstLineAddr, copyBytes);
 
     return true;
 }
@@ -1562,15 +1561,8 @@ uint32 EmRegsVZ::portXDataRead(emuptr address, int) {
 
     uint8 result = output | input | intFn;
 
-    // If this is port D, flip the bits if the POLARITY register says to.
-    // (!!! Does this inversion apply only to input bits?  That is, the
-    // bits where the "dir" register has 0 bits?)
-
-    if (0 && port == 'D') {
-        uint8 polarity = READ_REGISTER(portDPolarity);
-        PRINTF("EmRegsVZ::portXDataRead: polarity = 0x%02lX", (uint32)polarity);
-        result ^= polarity;
-    }
+    // PDPOL inverts INT[3:0] inputs before the data holding register.
+    if (port == 'D') result ^= READ_REGISTER(portDPolarity) & ~dir & 0x0f;
 
     PRINTF("EmRegsVZ::port%cDataRead: sel    dir    output input  intFn  result", (char)port);
     PRINTF("EmRegsVZ::port%cDataRead: 0x%02lX   0x%02lX   0x%02lX   0x%02lX   0x%02lX   0x%02lX",
@@ -1689,6 +1681,75 @@ void EmRegsVZ::sdctlWrite(emuptr address, int size, uint32 value) {
     EmRegsVZ::StdWrite(address, size, value);
 
     ApplySdctl();
+
+    UpdateBusTiming();
+}
+
+// ---------------------------------------------------------------------------
+//		EmRegsVZ::busTimingRegisterWrite
+// ---------------------------------------------------------------------------
+
+void EmRegsVZ::busTimingRegisterWrite(emuptr address, int size, uint32 value) {
+    EmRegsVZ::StdWrite(address, size, value);
+    UpdateBusTiming();
+}
+
+// ---------------------------------------------------------------------------
+//		EmRegsVZ::UpdateBusTiming
+// ---------------------------------------------------------------------------
+// Wait states for CPU bus cycles from the chip selects (MC68VZ328 manual 6.3: WS3-1 in the
+// chip-select register count two each, WS0 in CSCTRL1 one, 111 is external DTACK and counts as
+// none), RAM from the DRAM controller (SDRAM by page, EDO or fast page DRAM with no wait states
+// but MSW's one), then LCD DMA and refresh (EmBusTiming.h). On an 8-bit bus a word takes two
+// bus cycles.
+
+void EmRegsVZ::UpdateBusTiming(void) {
+    const uint16 csControl1 = READ_REGISTER(csControl1);
+    auto chipSelect = [csControl1](uint16 select, int index) {
+        const uint8 ws3 = (select >> 4) & 7;
+        const uint8 wait = ws3 == 7 ? 0 : 2 * ws3 + ((csControl1 >> (8 + index)) & 1);
+        const bool wide = select & 0x0080;
+        return EmBusWait{wait, uint8(wide ? wait : 4 + 2 * wait), 0, 0};
+    };
+
+    const EmBusWait rom = chipSelect(READ_REGISTER(csASelect), 0);
+    const uint16 csDSelect = READ_REGISTER(csDSelect);
+    const uint16 dramControl = READ_REGISTER(dramControl);
+    const uint16 sdramControl = READ_REGISTER(sdramControl);
+    const bool dram = csDSelect & 0x0200;
+    const bool sdram = dram && (sdramControl & 0x8000);
+    EmBusWait ram;
+    if (sdram) {
+        ram = EmBusWait{0, 0, 1, 1};
+        EmSdram::Set(EmVzSdramTiming(sdramControl, dramControl));
+    } else if (dram) {
+        const uint8 wait = (dramControl >> 5) & 1;
+        ram = EmBusWait{wait, wait, 1, 0};
+    } else {
+        ram = chipSelect(csDSelect, 3);
+    }
+
+    Memory::SetWaitStates(rom, ram);
+
+    // The screen is in RAM (the DRAM chip select) when it sits below the ROM.
+    const emuptr screen = READ_REGISTER(lcdStartAddr);
+    const EmVzBusRegisters bus{READ_REGISTER(pllControl),
+                               READ_REGISTER(lcdScreenWidth),
+                               READ_REGISTER(lcdScreenHeight),
+                               READ_REGISTER(lcdPanelControl),
+                               READ_REGISTER(lcdPixelClock),
+                               READ_REGISTER(lcdClockControl),
+                               READ_REGISTER(lcdRefreshRateAdj),
+                               READ_REGISTER(lcdPanningOffset),
+                               READ_REGISTER(lcdDMAControl),
+                               dram && screen < EmBankROM::GetMemoryStart(),
+                               READ_REGISTER(dramConfig),
+                               dramControl,
+                               sdramControl,
+                               dram,
+                               sdram,
+                               uint32(GetSystemClockFrequency())};
+    EmBusTiming::Set(EmVzBusSteal(bus), gSession ? gSession->GetSystemCycles() : 0);
 }
 
 void EmRegsVZ::ApplySdctl() {
@@ -1728,6 +1789,8 @@ void EmRegsVZ::csControl1Write(emuptr address, int size, uint32 value) {
 
         gSession->ScheduleResetBanks();
     }
+
+    UpdateBusTiming();
 }
 
 // ---------------------------------------------------------------------------
@@ -1750,6 +1813,8 @@ void EmRegsVZ::csASelectWrite(emuptr address, int size, uint32 value) {
 
         gSession->ScheduleResetBanks();
     }
+
+    UpdateBusTiming();
 }
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +1841,8 @@ void EmRegsVZ::csDSelectWrite(emuptr address, int size, uint32 value) {
 
         gSession->ScheduleResetBanks();
     }
+
+    UpdateBusTiming();
 }
 
 // ---------------------------------------------------------------------------
@@ -2129,6 +2196,8 @@ void EmRegsVZ::lcdRegisterWrite(emuptr address, int size, uint32 value) {
     EmRegsVZ::StdWrite(address, size, value);
 
     MarkScreenDirty();
+
+    UpdateBusTiming();
 }
 
 void EmRegsVZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
@@ -2140,6 +2209,8 @@ void EmRegsVZ::pllRegisterWrite(emuptr address, int size, uint32 value) {
 
     UpdateTimers();
     powerOffCached = GetAsleep();
+
+    UpdateBusTiming();
 }
 
 void EmRegsVZ::tmrRegisterWrite(emuptr address, int size, uint32 value) {
@@ -2425,10 +2496,9 @@ void EmRegsVZ::UpdatePortDInterrupts(void) {
     // We have a line-level interrupt if:
     //
     //	- line-level interrupts are requested
-    //	- the GPIO bit matches the polarity bit
+    //	- the input is high for POL=0, low for POL=1
 
-    newBits |= ~portDIntEdge & portDData & portDPolarity;
-    newBits |= ~portDIntEdge & ~portDData & ~portDPolarity;
+    newBits |= ~portDIntEdge & (portDData ^ portDPolarity);
 
     // We have an edge interrupt if:
     //
@@ -2470,7 +2540,7 @@ void EmRegsVZ::UpdatePortDInterrupts(void) {
     //	The bit is configured for input (?)
     //	The bit is configured to be OR'd into the interrupt.
 
-    if (!gSession->GetDevice().EdgeHack()) {
+    if (!portDKbdIntEn || !gSession->GetDevice().EdgeHack()) {
         uint8 KB = portDData & ~portDDir & portDKbdIntEn;
 
         if (KB)
@@ -3016,6 +3086,15 @@ void EmRegsVZ::Spi1AssertSlaveSelect() {}
 void EmRegsVZ::Spi1DeassertSlaveSelect() {}
 
 uint32 EmRegsVZ::GetBootKeyHoldTime() { return 18; }
+
+void EmRegsVZ::ScaleCycles(uint32 factor) {
+    tmr1LastProcessedSystemCycles *= factor;
+    tmr2LastProcessedSystemCycles *= factor;
+    systemCycles = gSession->GetSystemCycles();
+    UpdateTimers();
+    UpdateBusTiming();
+    EmHALHandler::ScaleCycles(factor);
+}
 
 uint32 EmRegsVZ::CyclesToNextInterrupt(uint64 systemCycles) {
     this->systemCycles = systemCycles;

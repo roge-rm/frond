@@ -764,7 +764,7 @@ A32OPC(CoprocSendOneWord,                                   Void,           Copr
 A32OPC(CoprocSendTwoWords,                                  Void,           CoprocInfo,     U32,            U32                             )
 A32OPC(CoprocGetOneWord,                                    U32,            CoprocInfo                                                      )
 A32OPC(CoprocGetTwoWords,                                   U64,            CoprocInfo                                                      )
-A32OPC(CoprocLoadWords,                                     Void,           CoprocInfo,     U32                                             )
-A32OPC(CoprocStoreWords,                                    Void,           CoprocInfo,     U32                                             )
+A32OPC(CoprocLoadWords,                                     Void,           CoprocInfo,     U32,            U64                             )
+A32OPC(CoprocStoreWords,                                    Void,           CoprocInfo,     U32,            U64                             )
 
 // clang-format on

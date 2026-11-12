@@ -15088,6 +15088,7 @@ unsigned long REGPARAM2 op_80c0_3(uae_u32 opcode) /* DIVU */
 {	uaecptr oldpc = m68k_getpc();
 {	uae_s16 src = m68k_dreg(regs, srcreg);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1097; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15112,6 +15113,7 @@ unsigned long REGPARAM2 op_80d0_3(uae_u32 opcode) /* DIVU */
 {	uaecptr srca = m68k_areg(regs, srcreg);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1098; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15137,6 +15139,7 @@ unsigned long REGPARAM2 op_80d8_3(uae_u32 opcode) /* DIVU */
 {	uae_s16 src = get_word(srca);
 	m68k_areg(regs, srcreg) += 2;
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1099; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15163,6 +15166,7 @@ unsigned long REGPARAM2 op_80e0_3(uae_u32 opcode) /* DIVU */
 	m68k_areg (regs, srcreg) = srca;
 	if (srcreg == 7) CHECK_STACK_POINTER_DECREMENT ();
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1100; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15187,6 +15191,7 @@ unsigned long REGPARAM2 op_80e8_3(uae_u32 opcode) /* DIVU */
 {	uaecptr srca = m68k_areg(regs, srcreg) + (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1101; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15211,6 +15216,7 @@ unsigned long REGPARAM2 op_80f0_3(uae_u32 opcode) /* DIVU */
 {	uaecptr srca = get_disp_ea_000(m68k_areg(regs, srcreg), get_iword(2));
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1102; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15234,6 +15240,7 @@ unsigned long REGPARAM2 op_80f8_3(uae_u32 opcode) /* DIVU */
 {	uaecptr srca = (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1103; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15257,6 +15264,7 @@ unsigned long REGPARAM2 op_80f9_3(uae_u32 opcode) /* DIVU */
 {	uaecptr srca = get_ilong(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1104; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15281,6 +15289,7 @@ unsigned long REGPARAM2 op_80fa_3(uae_u32 opcode) /* DIVU */
 	srca += (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1105; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15305,6 +15314,7 @@ unsigned long REGPARAM2 op_80fb_3(uae_u32 opcode) /* DIVU */
 	uaecptr srca = get_disp_ea_000(tmppc, get_iword(2));
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1106; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15327,6 +15337,7 @@ unsigned long REGPARAM2 op_80fc_3(uae_u32 opcode) /* DIVU */
 {	uaecptr oldpc = m68k_getpc();
 {	uae_s16 src = get_iword(2);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivu((uae_u32)dst, (uae_u16)src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1107; } else {
 	uae_u32 newv = (uae_u32)dst / (uae_u32)(uae_u16)src;
 	uae_u32 rem = (uae_u32)dst % (uae_u32)(uae_u16)src;
@@ -15722,6 +15733,7 @@ unsigned long REGPARAM2 op_81c0_3(uae_u32 opcode) /* DIVS */
 {	uaecptr oldpc = m68k_getpc();
 {	uae_s16 src = m68k_dreg(regs, srcreg);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1131; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15747,6 +15759,7 @@ unsigned long REGPARAM2 op_81d0_3(uae_u32 opcode) /* DIVS */
 {	uaecptr srca = m68k_areg(regs, srcreg);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1132; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15773,6 +15786,7 @@ unsigned long REGPARAM2 op_81d8_3(uae_u32 opcode) /* DIVS */
 {	uae_s16 src = get_word(srca);
 	m68k_areg(regs, srcreg) += 2;
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1133; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15800,6 +15814,7 @@ unsigned long REGPARAM2 op_81e0_3(uae_u32 opcode) /* DIVS */
 	m68k_areg (regs, srcreg) = srca;
 	if (srcreg == 7) CHECK_STACK_POINTER_DECREMENT ();
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1134; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15825,6 +15840,7 @@ unsigned long REGPARAM2 op_81e8_3(uae_u32 opcode) /* DIVS */
 {	uaecptr srca = m68k_areg(regs, srcreg) + (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1135; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15850,6 +15866,7 @@ unsigned long REGPARAM2 op_81f0_3(uae_u32 opcode) /* DIVS */
 {	uaecptr srca = get_disp_ea_000(m68k_areg(regs, srcreg), get_iword(2));
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1136; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15874,6 +15891,7 @@ unsigned long REGPARAM2 op_81f8_3(uae_u32 opcode) /* DIVS */
 {	uaecptr srca = (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1137; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15898,6 +15916,7 @@ unsigned long REGPARAM2 op_81f9_3(uae_u32 opcode) /* DIVS */
 {	uaecptr srca = get_ilong(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1138; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15923,6 +15942,7 @@ unsigned long REGPARAM2 op_81fa_3(uae_u32 opcode) /* DIVS */
 	srca += (uae_s32)(uae_s16)get_iword(2);
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1139; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15948,6 +15968,7 @@ unsigned long REGPARAM2 op_81fb_3(uae_u32 opcode) /* DIVS */
 	uaecptr srca = get_disp_ea_000(tmppc, get_iword(2));
 {	uae_s16 src = get_word(srca);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1140; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -15971,6 +15992,7 @@ unsigned long REGPARAM2 op_81fc_3(uae_u32 opcode) /* DIVS */
 {	uaecptr oldpc = m68k_getpc();
 {	uae_s16 src = get_iword(2);
 {	uae_s32 dst = m68k_dreg(regs, dstreg);
+	gUaeTimingExtra = TimingDivs(dst, src);
 	if(src == 0) { Exception(5,oldpc); goto endlabel1141; } else {
 	uae_s32 newv = (uae_s32)dst / (uae_s32)(uae_s16)src;
 	uae_u16 rem = (uae_s32)dst % (uae_s32)(uae_s16)src;
@@ -19511,6 +19533,7 @@ unsigned long REGPARAM2 op_c0c0_3(uae_u32 opcode) /* MULU */
 {{	uae_s16 src = m68k_dreg(regs, srcreg);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19526,6 +19549,7 @@ unsigned long REGPARAM2 op_c0d0_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19542,6 +19566,7 @@ unsigned long REGPARAM2 op_c0d8_3(uae_u32 opcode) /* MULU */
 	m68k_areg(regs, srcreg) += 2;
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19559,6 +19584,7 @@ unsigned long REGPARAM2 op_c0e0_3(uae_u32 opcode) /* MULU */
 	if (srcreg == 7) CHECK_STACK_POINTER_DECREMENT ();
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19574,6 +19600,7 @@ unsigned long REGPARAM2 op_c0e8_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19589,6 +19616,7 @@ unsigned long REGPARAM2 op_c0f0_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19603,6 +19631,7 @@ unsigned long REGPARAM2 op_c0f8_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19617,6 +19646,7 @@ unsigned long REGPARAM2 op_c0f9_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19632,6 +19662,7 @@ unsigned long REGPARAM2 op_c0fa_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19647,6 +19678,7 @@ unsigned long REGPARAM2 op_c0fb_3(uae_u32 opcode) /* MULU */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -19660,6 +19692,7 @@ unsigned long REGPARAM2 op_c0fc_3(uae_u32 opcode) /* MULU */
 {{	uae_s16 src = get_iword(2);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_u32)(uae_u16)dst * (uae_u32)(uae_u16)src;
+	gUaeTimingExtra = TimingMulu(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20082,6 +20115,7 @@ unsigned long REGPARAM2 op_c1c0_3(uae_u32 opcode) /* MULS */
 {{	uae_s16 src = m68k_dreg(regs, srcreg);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20097,6 +20131,7 @@ unsigned long REGPARAM2 op_c1d0_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20113,6 +20148,7 @@ unsigned long REGPARAM2 op_c1d8_3(uae_u32 opcode) /* MULS */
 	m68k_areg(regs, srcreg) += 2;
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20130,6 +20166,7 @@ unsigned long REGPARAM2 op_c1e0_3(uae_u32 opcode) /* MULS */
 	if (srcreg == 7) CHECK_STACK_POINTER_DECREMENT ();
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20145,6 +20182,7 @@ unsigned long REGPARAM2 op_c1e8_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20160,6 +20198,7 @@ unsigned long REGPARAM2 op_c1f0_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20174,6 +20213,7 @@ unsigned long REGPARAM2 op_c1f8_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20188,6 +20228,7 @@ unsigned long REGPARAM2 op_c1f9_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20203,6 +20244,7 @@ unsigned long REGPARAM2 op_c1fa_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20218,6 +20260,7 @@ unsigned long REGPARAM2 op_c1fb_3(uae_u32 opcode) /* MULS */
 {	uae_s16 src = get_word(srca);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);
@@ -20231,6 +20274,7 @@ unsigned long REGPARAM2 op_c1fc_3(uae_u32 opcode) /* MULS */
 {{	uae_s16 src = get_iword(2);
 {	uae_s16 dst = m68k_dreg(regs, dstreg);
 {	uae_u32 newv = (uae_s32)(uae_s16)dst * (uae_s32)(uae_s16)src;
+	gUaeTimingExtra = TimingMuls(src);
 	CLEAR_CZNV;
 	SET_ZFLG (((uae_s32)(newv)) == 0);
 	SET_NFLG (((uae_s32)(newv)) < 0);

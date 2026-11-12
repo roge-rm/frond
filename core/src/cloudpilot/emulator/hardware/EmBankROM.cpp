@@ -597,3 +597,14 @@ Bool Card::SupportsSZ(const EmAliasCardHeaderType<LAS>& cardHdr) {
 
     return szMode;
 }
+
+// ---------------------------------------------------------------------------
+//		EmBankROM::SetWaitStates
+// ---------------------------------------------------------------------------
+
+void EmBankROM::SetWaitStates(EmBusWait wait) {
+    gROMAddressBank.waitByte = wait.byte;
+    gROMAddressBank.waitWord = wait.word;
+    gROMAddressBank.sdram = wait.sdram;
+    gROMAddressBank.busTag = 1 | (uint32(wait.dram) << 16);
+}

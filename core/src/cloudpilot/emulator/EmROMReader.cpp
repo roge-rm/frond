@@ -252,7 +252,8 @@ EmROMReader::~EmROMReader(void) {}
 bool EmROMReader::AcquireCardHeader(void) {
     // Make sure the buffer is big enough for a card header
 
-    if (fSize < EmAliasROMCardHeader5Type<A>::GetSize()) return false;
+    // fPtr moves to the big ROM's header below, so check what's left of the image.
+    if (A::diff(fEndPtr, fPtr) < ptrdiff_t(EmAliasROMCardHeader5Type<A>::GetSize())) return false;
 
     EmAliasROMCardHeader5Type<A> cardHdr(fPtr);
 
@@ -307,6 +308,9 @@ bool EmROMReader::AcquireCardHeader(void) {
     if ((fCardAddress & 0x0FFFFF) != (bigROM & 0x0FFFFF)) {
         /* Whoops, we probably just read a Small ROM. Skip to the
            probable Big ROM, and continue from there. */
+
+        // One step forward from the start only: a damaged header could point back at itself.
+        if (A::diff(fEndPtr, fPtr) != ptrdiff_t(fSize) || (bigROM & 0x0FFFFF) == 0) return false;
 
         fPtr = A::add(fPtr, bigROM & 0x0FFFFF);
 

@@ -4,18 +4,10 @@
 #include <cstring>
 #include <iostream>
 
-#include "CPCrc.h"
 #include "Defer.h"
-#include "rle.h"
-#include "rom_info5.h"
 #include "zip/miniz.h"
 
 using namespace std;
-
-#define DEVICE_TYPE_E3 1
-
-#define DISPLAY_MODE_320x320 5
-#define DISPLAY_MODE_320x480 6
 
 // Versions
 //
@@ -24,20 +16,31 @@ using namespace std;
 // * V2: Add RAM size to header
 // * V3: RAM page size change 512b -> 1k: migrate memory image
 // * V4: Add display mode
+// * V5: Add an embedded SD image, committed atomically with the peripheral state
+// * V6: The device is a fixed name in a 32-byte NUL-padded field, and the SD size is always present.
+//       Earlier versions name the device by number and are refused.
+// * V7: 64-bit section lengths, 92-byte media descriptors, no embedded card payloads.
+// * V8: as V7 with 100-byte media descriptors that add the SD content generation.
+// * V9: as V8 with internal NAND in nand.frondnand (media kind 4); the NAND section is always empty.
 
 namespace {
-    constexpr uint32_t MAGIC = 0x19800819;
-    constexpr uint32_t CURRENT_VERSION = 4;
+    constexpr uint32_t MAGIC = SessionFile5::kMagic;
+    constexpr uint32_t CURRENT_VERSION = SessionFile5::kCurrentVersion;
+    constexpr uint32_t FIRST_NAMED_VERSION = SessionFile5::kVersionV6;
+    constexpr size_t SIZE_DEVICE_NAME = SessionFile5::kDeviceNameBytes;
 
-    constexpr size_t SIZE_HEADER = 12;  // 4 byte magic + 4 byte version + 4 byte device ID
-    constexpr size_t SIZE_TOC = 5 * 4;
+    constexpr size_t SIZE_HEADER = SessionFile5::kHeaderBytes;
+    constexpr size_t SIZE_TOC_V6 = 8 * 4;
 
-    constexpr size_t BUFFER_MAX_SIZE = 256 * 1024 * 1024;
+    constexpr size_t BUFFER_MAX_SIZE = SessionFile5::kMaxInflatedBytes;
     constexpr size_t BUFFER_MIN_SIZE = 1024;
 
-    int32_t fallbackDisplayMode(int32_t deviceType) {
-        // E3 = 320x480, and everything else is 320x320
-        return deviceType == DEVICE_TYPE_E3 ? DISPLAY_MODE_320x320 : DISPLAY_MODE_320x480;
+    // Lower-case letters, digits and dashes, 1 to 31 of them.
+    bool validDeviceName(const std::string& name) {
+        if (name.empty() || name.size() >= SIZE_DEVICE_NAME) return false;
+        for (char c : name)
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+        return true;
     }
 }  // namespace
 
@@ -55,12 +58,12 @@ bool SessionFile5::IsSessionFile(size_t size, const void* data) {
     return true;
 }
 
-int32_t SessionFile5::GetDeviceType() const { return deviceType; }
+const std::string& SessionFile5::GetDeviceName() const { return deviceName; }
 
 int32_t SessionFile5::GetDisplayMode() const { return displayMode; }
 
-SessionFile5& SessionFile5::SetDeviceType(int32_t deviceId) {
-    this->deviceType = deviceId;
+SessionFile5& SessionFile5::SetDeviceName(const std::string& name) {
+    deviceName = name;
 
     return *this;
 }
@@ -126,7 +129,24 @@ SessionFile5& SessionFile5::SetSavestate(size_t size, const void* data) {
     return *this;
 }
 
-size_t SessionFile5::GetRamSize() { return ramSize; }
+const void* SessionFile5::GetSd() const { return sd; }
+size_t SessionFile5::GetSdSize() const { return sdSize; }
+SessionFile5& SessionFile5::SetSd(size_t size, const void* data) {
+    sdSize = size; sd = reinterpret_cast<const uint8_t*>(data); return *this;
+}
+
+const void* SessionFile5::GetMedia() const { return media; }
+size_t SessionFile5::GetMediaSize() const { return mediaSize; }
+uint32_t SessionFile5::GetMediaCount() const {
+    return static_cast<uint32_t>(mediaSize / MediaDescriptorBytes(version));
+}
+SessionFile5& SessionFile5::SetMedia(size_t size, const void* data) {
+    mediaSize = size;
+    media = reinterpret_cast<const uint8_t*>(data);
+    return *this;
+}
+
+size_t SessionFile5::GetRamSize() const { return ramSize; }
 
 SessionFile5& SessionFile5::SetRamSize(uint32_t size) {
     ramSize = size;
@@ -134,30 +154,79 @@ SessionFile5& SessionFile5::SetRamSize(uint32_t size) {
     return *this;
 }
 
-bool SessionFile5::Serialize() {
+bool SessionFile5::Serialize() { return SerializeAs(CURRENT_VERSION); }
+
+bool SessionFile5::SerializeAs(uint32_t writeVersion) {
     serializedSessionSize = 0;
     serializedSession = nullptr;
 
-    const size_t sizeUncompressed = metadataSize + norSize + nandSize + memorySize + savestateSize;
+    if (writeVersion != kVersionV6 && writeVersion != kVersionV7 && writeVersion != kVersionV8 &&
+        writeVersion != kVersionV9)
+        return false;
+    if (writeVersion == kVersionV9 && nandSize) {
+        cerr << "v9 sessions store NAND as a sibling" << endl;
+        return false;
+    }
+    const bool folderLayout = writeVersion != kVersionV6;
+    if (folderLayout && sdSize) {
+        cerr << "v7 to v9 sessions store cards as siblings" << endl;
+        return false;
+    }
+    const size_t descriptorBytes = MediaDescriptorBytes(writeVersion);
+    if (mediaSize % descriptorBytes) return false;
+    if (writeVersion == kVersionV6 && mediaSize) return false;
 
+    const uint64_t sizeUncompressed =
+        uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize +
+        (writeVersion == kVersionV6 ? sdSize : 0);
+    if (sizeUncompressed > BUFFER_MAX_SIZE || sdSize > kMaxSdBytes || sdSize % 512 || (sdSize && !sd))
+        return false;
+    if (!validDeviceName(deviceName)) {
+        cerr << "session device name is missing or invalid" << endl;
+        return false;
+    }
+
+    const size_t tocExtra =
+        folderLayout ? (52 + mediaSize) : SIZE_TOC_V6;
     bufferSize =
-        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + SIZE_TOC + sizeUncompressed / 2);
+        max(static_cast<size_t>(BUFFER_MIN_SIZE), SIZE_HEADER + tocExtra + size_t(sizeUncompressed) / 2);
     buffer = make_unique<uint8_t[]>(bufferSize);
     cursor = buffer.get();
 
     bool success = true;
 
     success &= Write32(MAGIC);
-    success &= Write32(CURRENT_VERSION);
-    success &= Write32(deviceType);
+    success &= Write32(writeVersion);
+    if (success) {
+        memset(cursor, 0, SIZE_DEVICE_NAME);
+        memcpy(cursor, deviceName.data(), deviceName.size());
+        cursor += SIZE_DEVICE_NAME;
+    }
     success &= Write32(displayMode);
     success &= Write32(ramSize);
 
-    success &= Write32(metadataSize);
-    success &= Write32(norSize);
-    success &= Write32(nandSize);
-    success &= Write32(memorySize);
-    success &= Write32(savestateSize);
+    if (folderLayout) {
+        success &= Write64(metadataSize);
+        success &= Write64(norSize);
+        success &= Write64(nandSize);
+        success &= Write64(memorySize);
+        success &= Write64(savestateSize);
+        success &= Write32(static_cast<uint32_t>(mediaSize / descriptorBytes));
+        if (success && mediaSize) {
+            if (cursor - buffer.get() + static_cast<ssize_t>(mediaSize) >
+                static_cast<ssize_t>(bufferSize))
+                return false;
+            memcpy(cursor, media, mediaSize);
+            cursor += mediaSize;
+        }
+    } else {
+        success &= Write32(static_cast<uint32_t>(metadataSize));
+        success &= Write32(static_cast<uint32_t>(norSize));
+        success &= Write32(static_cast<uint32_t>(nandSize));
+        success &= Write32(static_cast<uint32_t>(memorySize));
+        success &= Write32(static_cast<uint32_t>(savestateSize));
+        success &= Write32(static_cast<uint32_t>(sdSize));
+    }
 
     if (!success) {
         cerr << "failed to write header" << endl;
@@ -201,6 +270,8 @@ bool SessionFile5::Serialize() {
         return false;
     }
 
+    if (writeVersion == kVersionV6 && !AppendToCompressionStream(sdSize, sd, stream)) return false;
+
     if (!Flush(stream)) {
         cerr << "failed to flush" << endl;
         return false;
@@ -208,6 +279,7 @@ bool SessionFile5::Serialize() {
 
     serializedSession = buffer.get();
     serializedSessionSize = cursor - buffer.get();
+    version = writeVersion;
 
     return true;
 }
@@ -222,6 +294,8 @@ bool SessionFile5::Deserialize(size_t size, const void* data) {
     metadataSize = norSize = nandSize = memorySize = savestateSize = 0;
     metadata = nor = nand = memory = savestate = nullptr;
 
+    sdSize = 0; sd = nullptr;
+    mediaSize = 0; media = nullptr;
     serializedSession = reinterpret_cast<const uint8_t*>(data);
     serializedSessionSize = size;
 
@@ -239,22 +313,19 @@ bool SessionFile5::Deserialize(size_t size, const void* data) {
 
     if (magic != MAGIC) {
         cerr << "bad magic" << endl;
+        return false;
     }
 
-    switch (version) {
-        case 0:
-            return Deserialize_v0();
-
-        case 1:
-        case 2:
-        case 3:
-        case 4:
-            return Deserialize_v1_v2_v3_v4(version);
-
-        default:
-            cerr << "unsupported session version " << version << endl;
-            return false;
+    if (version < FIRST_NAMED_VERSION) {
+        cerr << "this session was saved by an older Frond and can't be loaded" << endl;
+        return false;
     }
+    if (version > CURRENT_VERSION) {
+        cerr << "unsupported session version " << version << endl;
+        return false;
+    }
+    if (version == kVersionV7 || version == kVersionV8 || version == kVersionV9) return Deserialize_v7();
+    return Deserialize_v6();
 }
 
 bool SessionFile5::Write32(uint32_t data) {
@@ -266,6 +337,10 @@ bool SessionFile5::Write32(uint32_t data) {
     *(cursor++) = (data >> 24);
 
     return true;
+}
+
+bool SessionFile5::Write64(uint64_t data) {
+    return Write32(static_cast<uint32_t>(data)) && Write32(static_cast<uint32_t>(data >> 32));
 }
 
 uint32_t SessionFile5::Read32(bool& success) {
@@ -281,6 +356,12 @@ uint32_t SessionFile5::Read32(bool& success) {
     result |= (*(ccursor++) << 24);
 
     return result;
+}
+
+uint64_t SessionFile5::Read64(bool& success) {
+    const uint32_t lo = Read32(success);
+    const uint32_t hi = Read32(success);
+    return uint64_t(lo) | (uint64_t(hi) << 32);
 }
 
 bool SessionFile5::AppendToCompressionStream(size_t size, const uint8_t* data, mz_stream& stream) {
@@ -331,150 +412,43 @@ bool SessionFile5::Flush(mz_stream& stream) {
     return deflateResult == Z_STREAM_END;
 }
 
-bool SessionFile5::Deserialize_v0() {
+bool SessionFile5::Deserialize_v6() {
+    if (serializedSessionSize - (ccursor - serializedSession) < SIZE_DEVICE_NAME) {
+        cerr << "unable to read session device name" << endl;
+        return false;
+    }
+    const char* field = reinterpret_cast<const char*>(ccursor);
+    deviceName.assign(field, strnlen(field, SIZE_DEVICE_NAME));
+    ccursor += SIZE_DEVICE_NAME;
+    for (size_t i = deviceName.size(); i < SIZE_DEVICE_NAME; ++i)
+        if (field[i]) deviceName.clear();
+    if (!validDeviceName(deviceName)) {
+        cerr << "session device name is invalid" << endl;
+        return false;
+    }
+
     bool success = true;
 
-    metadataSize = Read32(success);
-
-    const uint32_t sizeNorCompressed = Read32(success);
-    const uint32_t crcNor = Read32(success);
-
-    const uint32_t sizeRamCompressed = Read32(success);
-    const uint32_t crcRam = Read32(success);
-
-    const uint32_t sizeNandCompressed = Read32(success);
-    const uint32_t crcNand = Read32(success);
-
-    if (!success) {
-        cerr << "unable to read v0 toc" << endl;
-        return false;
-    }
-
-    if (ccursor - serializedSession + metadataSize + sizeNorCompressed + sizeRamCompressed +
-            sizeNandCompressed !=
-        serializedSessionSize) {
-        cerr << "session image v0 size mismatch" << endl;
-        return false;
-    }
-
-    const uint8_t* cc = ccursor + metadataSize;
-    size_t remaining = serializedSessionSize - (cc - serializedSession);
-
-    norSize = rle_get_chunk_size(remaining, cc, success);
-    remaining -= sizeNorCompressed;
-    cc += sizeNorCompressed;
-
-    if (!success) {
-        cerr << "bad v0 nor chunk: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    memorySize = rle_get_chunk_size(remaining, cc, success);
-    remaining -= sizeRamCompressed;
-    cc += sizeRamCompressed;
-
-    if (!success) {
-        cerr << "bad v0 ram chunk: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    nandSize = rle_get_chunk_size(remaining, cc, success);
-
-    if (!success) {
-        cerr << "bad v0 nand chunk: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    bufferSize = metadataSize + norSize + nandSize + memorySize;
-    if (bufferSize > BUFFER_MAX_SIZE) {
-        cout << "v0 image: bad image size" << endl;
-        return false;
-    }
-
-    buffer = make_unique<uint8_t[]>(bufferSize);
-    cursor = buffer.get();
-
-    memcpy(cursor, ccursor, metadataSize);
-    metadata = cursor;
-    cursor += metadataSize;
-    ccursor += metadataSize;
-
-    if (!rle_decode_chunk(sizeNorCompressed, ccursor, bufferSize - (cursor - buffer.get()),
-                          cursor)) {
-        cerr << "failed to decode v0 nor: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    nor = cursor;
-    cursor += norSize;
-    ccursor += sizeNorCompressed;
-
-    if (!rle_decode_chunk(sizeRamCompressed, ccursor, bufferSize - (cursor - buffer.get()),
-                          cursor)) {
-        cerr << "failed to decode v0 ram: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    memory = cursor;
-    cursor += memorySize;
-    ccursor += sizeRamCompressed;
-
-    if (!rle_decode_chunk(sizeNandCompressed, ccursor, bufferSize - (cursor - buffer.get()),
-                          cursor)) {
-        cerr << "failed to decode v0 nand: " << rle_getLastError() << endl;
-        return false;
-    }
-
-    nand = cursor;
-
-    if (crc::CRC32(nor, norSize) != crcNor) {
-        cerr << "session image v0: nor crc mismatch" << endl;
-        return false;
-    }
-
-    if (crc::CRC32(memory, memorySize) != crcRam) {
-        cerr << "session image v0: ram crc mismatch" << endl;
-        return false;
-    }
-
-    if (crc::CRC32(nand, nandSize) != crcNand) {
-        cerr << "session image v0: nand crc mismatch" << endl;
-        return false;
-    }
-
-    RomInfo5 info(nor, norSize);
-    if (!info.IsValid()) {
-        cerr << "session image v0: unable to determine device type" << endl;
-        return false;
-    }
-
-    deviceType = static_cast<uint32_t>(info.GetDeviceType());
-    displayMode = DISPLAY_MODE_320x320;
-
-    return true;
-}
-
-bool SessionFile5::Deserialize_v1_v2_v3_v4(uint32_t sessionVersion) {
-    bool success = true;
-
-    deviceType = Read32(success);
-    displayMode = sessionVersion > 3 ? Read32(success) : fallbackDisplayMode(deviceType);
-    ramSize = sessionVersion > 1 ? Read32(success) : (16ul << 20);
+    displayMode = Read32(success);
+    ramSize = Read32(success);
 
     metadataSize = Read32(success);
     norSize = Read32(success);
     nandSize = Read32(success);
     memorySize = Read32(success);
     savestateSize = Read32(success);
+    sdSize = Read32(success);
 
     if (!success) {
-        cerr << "failed to read v1 toc" << endl;
+        cerr << "failed to read session toc" << endl;
         return false;
     }
 
-    bufferSize = metadataSize + norSize + nandSize + memorySize + savestateSize;
+    const uint64_t total = uint64_t(metadataSize) + norSize + nandSize + memorySize + savestateSize + sdSize;
+    if (total > BUFFER_MAX_SIZE || sdSize > kMaxSdBytes || sdSize % 512) return false;
+    bufferSize = size_t(total);
     if (bufferSize > BUFFER_MAX_SIZE) {
-        cout << "v1 image: bad image size" << endl;
+        cerr << "session image: bad image size" << endl;
         return false;
     }
 
@@ -486,12 +460,12 @@ bool SessionFile5::Deserialize_v1_v2_v3_v4(uint32_t sessionVersion) {
                                              serializedSessionSize - (ccursor - serializedSession));
 
     if (uncompressResult != Z_OK) {
-        cerr << "failed to uncompress v1 image" << endl;
+        cerr << "failed to uncompress session image" << endl;
         return false;
     }
 
     if (destLen != bufferSize) {
-        cerr << "v1 image: bad size" << endl;
+        cerr << "session image: bad size" << endl;
         return false;
     }
 
@@ -510,25 +484,102 @@ bool SessionFile5::Deserialize_v1_v2_v3_v4(uint32_t sessionVersion) {
     cursor += memorySize;
 
     savestate = cursor;
-
-    if (version == 2) MigrateV2Memory();
+    sd = sdSize ? cursor + savestateSize : nullptr;
 
     return true;
 }
 
-void SessionFile5::MigrateV2Memory() {
-    if (!memory) return;
+bool SessionFile5::Deserialize_v7() {
+    if (serializedSessionSize - (ccursor - serializedSession) < SIZE_DEVICE_NAME) {
+        cerr << "unable to read session device name" << endl;
+        return false;
+    }
+    const char* field = reinterpret_cast<const char*>(ccursor);
+    deviceName.assign(field, strnlen(field, SIZE_DEVICE_NAME));
+    ccursor += SIZE_DEVICE_NAME;
+    for (size_t i = deviceName.size(); i < SIZE_DEVICE_NAME; ++i)
+        if (field[i]) deviceName.clear();
+    if (!validDeviceName(deviceName)) {
+        cerr << "session device name is invalid" << endl;
+        return false;
+    }
 
-    const size_t migratedMemorySize = memorySize + 32 * 1024;
-    const size_t ramSize = memorySize - 32 * 1024;
-    migratedMemory = make_unique<uint8_t[]>(migratedMemorySize);
+    bool success = true;
+    displayMode = Read32(success);
+    ramSize = Read32(success);
 
-    memcpy(migratedMemory.get(), memory, ramSize);
-    memset(migratedMemory.get() + ramSize, 0, 64 * 1024);
+    const uint64_t metadataLen = Read64(success);
+    const uint64_t norLen = Read64(success);
+    const uint64_t nandLen = Read64(success);
+    const uint64_t memoryLen = Read64(success);
+    const uint64_t savestateLen = Read64(success);
+    const uint32_t mediaCount = Read32(success);
 
-    memcpy(migratedMemory.get() + ramSize, memory + ramSize, 16 * 1024);
-    memcpy(migratedMemory.get() + ramSize + 32 * 1024, memory + ramSize + 16 * 1024, 16 * 1024);
+    if (!success) {
+        cerr << "failed to read session toc" << endl;
+        return false;
+    }
+    if (version == kVersionV9 && nandLen) {
+        cerr << "v9 session embeds NAND" << endl;
+        return false;
+    }
 
-    memory = migratedMemory.get();
-    memorySize = migratedMemorySize;
+    const uint64_t descriptorBytes = MediaDescriptorBytes(version);
+    const uint64_t mediaBytes = uint64_t(mediaCount) * descriptorBytes;
+    if (mediaCount && mediaBytes / descriptorBytes != mediaCount) return false;
+    if (serializedSessionSize - (ccursor - serializedSession) < mediaBytes) {
+        cerr << "truncated v7 media descriptors" << endl;
+        return false;
+    }
+    media = mediaCount ? ccursor : nullptr;
+    mediaSize = size_t(mediaBytes);
+    ccursor += mediaBytes;
+
+    const uint64_t total = metadataLen + norLen + nandLen + memoryLen + savestateLen;
+    if (total > BUFFER_MAX_SIZE) return false;
+    if (metadataLen > BUFFER_MAX_SIZE || norLen > BUFFER_MAX_SIZE || nandLen > BUFFER_MAX_SIZE ||
+        memoryLen > BUFFER_MAX_SIZE || savestateLen > BUFFER_MAX_SIZE)
+        return false;
+
+    metadataSize = size_t(metadataLen);
+    norSize = size_t(norLen);
+    nandSize = size_t(nandLen);
+    memorySize = size_t(memoryLen);
+    savestateSize = size_t(savestateLen);
+
+    bufferSize = size_t(total);
+    buffer = make_unique<uint8_t[]>(bufferSize ? bufferSize : 1);
+
+    mz_ulong destLen = bufferSize;
+    const auto remaining = serializedSessionSize - (ccursor - serializedSession);
+    if (bufferSize == 0) {
+        if (remaining) {
+            cerr << "session image: bad size" << endl;
+            return false;
+        }
+        metadata = nor = nand = memory = savestate = nullptr;
+        return true;
+    }
+
+    const auto uncompressResult = uncompress(buffer.get(), &destLen, ccursor, remaining);
+    if (uncompressResult != Z_OK) {
+        cerr << "failed to uncompress session image" << endl;
+        return false;
+    }
+    if (destLen != bufferSize) {
+        cerr << "session image: bad size" << endl;
+        return false;
+    }
+
+    cursor = buffer.get();
+    metadata = cursor;
+    cursor += metadataSize;
+    nor = cursor;
+    cursor += norSize;
+    nand = cursor;
+    cursor += nandSize;
+    memory = cursor;
+    cursor += memorySize;
+    savestate = cursor;
+    return true;
 }

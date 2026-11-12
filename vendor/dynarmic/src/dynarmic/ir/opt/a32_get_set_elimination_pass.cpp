@@ -21,7 +21,30 @@ namespace Dynarmic::Optimization {
 
 namespace {
 
-void FlagsPass(IR::Block& block) {
+// Frond: for memory_barriers, ops other than memory accesses and plain register and flag
+// moves that may hand the guest state to host code. Nothing is known across them.
+bool HostSeesState(const IR::Inst& inst) {
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::A32GetRegister:
+    case IR::Opcode::A32SetRegister:
+    case IR::Opcode::A32SetCpsrNZCV:
+    case IR::Opcode::A32SetCpsrNZCVRaw:
+    case IR::Opcode::A32SetCpsrNZCVQ:
+    case IR::Opcode::A32SetCpsrNZ:
+    case IR::Opcode::A32SetCpsrNZC:
+    case IR::Opcode::A32GetCFlag:
+    case IR::Opcode::A32OrQFlag:
+    case IR::Opcode::A32GetGEFlags:
+    case IR::Opcode::A32SetGEFlags:
+    case IR::Opcode::A32SetGEFlagsCompressed:
+    case IR::Opcode::PushRSB:
+        return false;
+    default:
+        return !inst.IsMemoryReadOrWrite() && (inst.MayHaveSideEffects() || inst.ReadsFromCPSR());
+    }
+}
+
+void FlagsPass(IR::Block& block, bool memory_barriers) {
     using Iterator = std::reverse_iterator<IR::Block::iterator>;
 
     struct FlagInfo {
@@ -167,7 +190,8 @@ void FlagsPass(IR::Block& block) {
             break;
         }
         default: {
-            if (inst->ReadsFromCPSR() || inst->WritesToCPSR()) {
+            if (inst->ReadsFromCPSR() || inst->WritesToCPSR() ||
+                (memory_barriers && (inst->IsMemoryReadOrWrite() || HostSeesState(*inst)))) {
                 nzcvq = {};
                 nzcv = {};
                 nz = {};
@@ -180,7 +204,7 @@ void FlagsPass(IR::Block& block) {
     }
 }
 
-void RegisterPass(IR::Block& block) {
+void RegisterPass(IR::Block& block, bool memory_barriers) {
     using Iterator = IR::Block::iterator;
 
     struct RegInfo {
@@ -357,9 +381,14 @@ void RegisterPass(IR::Block& block) {
             break;
         }
         default: {
-            if (inst->ReadsFromCoreRegister() || inst->WritesToCoreRegister()) {
+            if (inst->ReadsFromCoreRegister() || inst->WritesToCoreRegister() ||
+                (memory_barriers && HostSeesState(*inst))) {
                 reg_info = {};
                 ext_reg_info = {};
+            } else if (memory_barriers && inst->IsMemoryReadOrWrite()) {
+                // The values stay known; the sets so far are kept for a run that ends here.
+                for (auto& info : reg_info) info.last_set_instruction.reset();
+                for (auto& info : ext_reg_info) info.last_set_instruction.reset();
             }
             break;
         }
@@ -369,9 +398,9 @@ void RegisterPass(IR::Block& block) {
 
 }  // namespace
 
-void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions) {
-    FlagsPass(block);
-    RegisterPass(block);
+void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions opt) {
+    FlagsPass(block, opt.memory_barriers);
+    RegisterPass(block, opt.memory_barriers);
 }
 
 }  // namespace Dynarmic::Optimization

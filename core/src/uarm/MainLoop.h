@@ -12,9 +12,12 @@ class MainLoop {
    public:
     MainLoop(SoC* soc);
 
-    double Cycle(uint64_t now);
+    double Cycle(uint64_t now, bool paused = false);
+    void PauseAt(uint64_t now);
+    void SetTimesliceUsec(uint64_t usec);
 
     uint64_t GetTimesliceSizeUsec() const;
+    int64_t GetSuggestedDelayUsec(uint64_t now) const;
 
     uint32_t GetCurrentIps() const;
     uint64_t GetCurrentIpsMax() const;
@@ -29,6 +32,7 @@ class MainLoop {
     SoC* soc{nullptr};
 
     uint64_t realTimeUsec{0};
+    uint64_t timesliceUsec{1000000 / MAIN_LOOP_FPS};
     uint64_t lastCyclesPerSecond{0};
 
     double virtualTimeUsec{0};

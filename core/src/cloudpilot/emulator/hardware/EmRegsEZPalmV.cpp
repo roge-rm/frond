@@ -79,6 +79,17 @@ Bool EmRegsEZPalmV::GetLineDriverState(EmUARTDeviceType type) {
 }
 
 // ---------------------------------------------------------------------------
+//		� EmRegsEZPalmV::GetDTR
+// ---------------------------------------------------------------------------
+// The cradle's DTR has no pin of its own: the serial driver of the 3.1, 3.5 and 4.1 ROMs never
+// drops it (srmCtlSetDTRAsserted off is serErrNotSupported) and it's driven while the RS-232
+// transceiver is on, so it follows the serial line driver.
+
+Bool EmRegsEZPalmV::GetDTR(int uartNum) {
+    return uartNum == 0 && this->GetLineDriverState(kUARTSerial);
+}
+
+// ---------------------------------------------------------------------------
 //		� EmRegsEZPalmV::GetPortInputValue
 // ---------------------------------------------------------------------------
 // Return the GPIO values for the pins on the port.  These values are used

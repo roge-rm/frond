@@ -85,6 +85,15 @@ bool Uarm::Launch(unsigned int romSize, void* romData) {
         return false;
     }
     deviceType = romInfo.GetDeviceType();
+    if (!deviceProfileRunnerEligible5(deviceType)) {
+        cerr << "native board is not implemented" << endl;
+        return false;
+    }
+    // The web build runs PXA255 boards only.
+    if (deviceType == deviceTypeZire72) {
+        cerr << "the Zire 72 isn't supported in the web build" << endl;
+        return false;
+    }
 
     if (sdSize > 0) sdCardInitializeWithData(sdSize / SD_SECTOR_SIZE, sdData, sdId.c_str());
 
@@ -256,6 +265,8 @@ bool Uarm::SdCardInitialized() { return ::sdCardInitialized(); }
 const char* Uarm::GetSdCardId() { return sdCardGetId(); }
 
 void Uarm::Reset() { soc->Reset(); }
+
+void Uarm::HardReset() { soc->HardReset(); }
 
 void Uarm::Save() { soc->Save(); }
 

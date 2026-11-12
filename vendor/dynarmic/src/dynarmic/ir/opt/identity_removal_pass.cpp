@@ -12,7 +12,9 @@
 namespace Dynarmic::Optimization {
 
 void IdentityRemovalPass(IR::Block& block) {
-    std::vector<IR::Inst*> to_invalidate;
+    // Frond: kept per thread, so a compile doesn't allocate it.
+    thread_local std::vector<IR::Inst*> to_invalidate;
+    to_invalidate.clear();
 
     auto iter = block.begin();
     while (iter != block.end()) {

@@ -38,6 +38,10 @@ struct alignas(16) StackLayout {
     u32 save_host_fpcr;
 
     bool check_bit;
+
+    // Frond: AddressSpace::fast_dispatch_table, for the lookups emitted in blocks. Last, in
+    // what was padding, so the frame keeps its size.
+    u64 fast_dispatch_table;
 };
 
 #ifdef _MSC_VER

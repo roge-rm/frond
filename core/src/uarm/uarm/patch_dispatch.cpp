@@ -85,6 +85,8 @@ static void updateSlowPath(struct PatchDispatch* pd) {
     }
 }
 
+bool patchDispatchCanTrackTail(PatchDispatch* pd) { return pd->nPendingTailpatches < MAX_PENDING_TAILPATCH; }
+
 void destroyPatchDispatch(struct PatchDispatch* pd) { free(pd); }
 
 void patchDispatchReset(struct PatchDispatch* pd) {
@@ -172,7 +174,7 @@ void patchOnBeforeExecute(struct PatchDispatch* pd, uint32_t* registers) {
                                                pendingTailpatch->registersAtInvocation, registers);
 
         if (i != static_cast<size_t>(pd->nPendingTailpatches - 1))
-            pd->pendingTailpatches[i] = pd->pendingTailpatches[pd->nPendingTailpatches];
+            pd->pendingTailpatches[i] = pd->pendingTailpatches[pd->nPendingTailpatches - 1];
 
         pd->nPendingTailpatches--;
         updateSlowPath(pd);
@@ -200,6 +202,14 @@ void patchDispatchAddPatch(struct PatchDispatch* pd, uint32_t syscall, Headpatch
     patch->ctx = ctx;
     patch->headpatch = headpatch;
     patch->tailpatch = tailpatch;
+
+    // The JIT runs syscall dispatches without a patch in generated code.
+    if (pd->cpu) cpuDropTranslatedCode(pd->cpu);
+}
+
+bool patchDispatchHasPatch(struct PatchDispatch* pd, uint32_t table, uint32_t offset) {
+    if (table < 4 || table > 12 || (table & 3) || offset > 0xfff || (offset & 3)) return true;
+    return pd->patchTable[(((table >> 2) - 1) << 10) | (offset >> 2)] != 0xff;
 }
 
 void patchDispatchSetCpu(struct PatchDispatch* pd, struct ArmCpu* cpu) { pd->cpu = cpu; }
@@ -238,6 +248,11 @@ void patchDispatchLoad(PatchDispatch* pd, T& loader) {
     const uint8_t loadedTalpatchesCount = pd->nPendingTailpatches;
     pd->nPendingTailpatches = 0;
 
+    if (loadedTalpatchesCount > MAX_PENDING_TAILPATCH) {
+        loader.NotifyError();
+        updateSlowPath(pd);
+        return;
+    }
     for (size_t i = 0; i < loadedTalpatchesCount; i++) {
         SerializedTailpatch& serializedTailpatch(pd->serializedTailpatches[i]);
         Patch* patch = nullptr;

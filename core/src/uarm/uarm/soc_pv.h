@@ -54,6 +54,7 @@ class SocPV : public SocGeneric<SocPV> {
 
     void OnTouch(int x, int y);
     void OnEngageKey(KeyId key, bool down);
+    void OnBeforeReset() {}
     void OnReset();
 
     void OnLoad(SavestateLoader<ChunkType> &loader);

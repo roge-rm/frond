@@ -305,6 +305,11 @@ void BlockOfCode::ForceReturnFromRunCode(bool mxcsr_already_exited) {
     jmp(return_from_run_code[index]);
 }
 
+s64 BlockOfCode::TicksRemainingNow() const {
+    if (!run_rsp) return 0;
+    return *reinterpret_cast<const s64*>(run_rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining));
+}
+
 void BlockOfCode::GenRunCode(std::function<void(BlockOfCode&)> rcp) {
     Xbyak::Label return_to_caller, return_to_caller_mxcsr_already_exited;
 
@@ -324,6 +329,8 @@ void BlockOfCode::GenRunCode(std::function<void(BlockOfCode&)> rcp) {
         cb.GetTicksRemaining->EmitCall(*this);
         mov(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_to_run)], ABI_RETURN);
         mov(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], ABI_RETURN);
+        mov(rax, reinterpret_cast<u64>(&run_rsp));
+        mov(qword[rax], rsp);
     }
 
     rcp(*this);
@@ -344,6 +351,8 @@ void BlockOfCode::GenRunCode(std::function<void(BlockOfCode&)> rcp) {
     if (cb.enable_cycle_counting) {
         mov(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_to_run)], 1);
         mov(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 1);
+        mov(rax, reinterpret_cast<u64>(&run_rsp));
+        mov(qword[rax], rsp);
     }
 
     rcp(*this);

@@ -4,8 +4,7 @@
 Collects command line options, console commands, control socket commands and events,
 replay commands and keys, GDB monitor commands, environment variables, tools and make
 targets from the sources and fails listing any that the reference does not mention in
-backticks. Core sources come from build/source (after make prepare), or from the added
-lines of patches/ when that isn't there. Needs no build and no dependencies.
+backticks. Core sources come from core/. Needs no build and no dependencies.
 """
 
 import re
@@ -32,14 +31,14 @@ def read(path):
 
 def core_text():
     """Text of the patched core sources, by relative path under src/."""
-    source = ROOT / 'build/source/src'
+    source = ROOT / 'core/src'
     files = {}
     if source.is_dir():
         for path in source.rglob('*'):
             if path.suffix in ('.cpp', '.h') and path.is_file():
                 files[str(path.relative_to(source))] = read(path)
         return files
-    raise SystemExit('build/source is missing: run make prepare first')
+    raise SystemExit('core/src is missing')
 
 
 def find(pattern, text, group=1):

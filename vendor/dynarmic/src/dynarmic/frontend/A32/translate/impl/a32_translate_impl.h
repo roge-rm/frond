@@ -401,6 +401,7 @@ struct TranslatorVisitor final {
     bool arm_MRS(Cond cond, Reg d);
     bool arm_MSR_imm(Cond cond, unsigned mask, int rotate, Imm<8> imm8);
     bool arm_MSR_reg(Cond cond, unsigned mask, Reg n);
+    bool frond_PSR(u32 instruction, bool& should_continue);
     bool arm_RFE();
     bool arm_SETEND(bool E);
     bool arm_SRS();

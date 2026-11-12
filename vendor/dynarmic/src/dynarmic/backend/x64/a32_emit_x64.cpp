@@ -94,6 +94,22 @@ A32EmitX64::A32EmitX64(BlockOfCode& code, A32::UserConfig conf, A32::Jit* jit_in
 A32EmitX64::~A32EmitX64() = default;
 
 A32EmitX64::BlockDescriptor A32EmitX64::Emit(IR::Block& block) {
+    return Install(EmitUnregistered(block));
+}
+
+A32EmitX64::BlockDescriptor A32EmitX64::Install(const EmittedBlock& emitted) {
+    code.EnableWriting();
+    SCOPE_EXIT {
+        code.DisableWriting();
+    };
+
+    const auto range = boost::icl::discrete_interval<u32>::closed(emitted.first_pc, emitted.last_pc);
+    block_ranges.AddRange(range, emitted.descriptor);
+
+    return RegisterBlock(emitted.descriptor, emitted.entrypoint, emitted.size);
+}
+
+A32EmitX64::EmittedBlock A32EmitX64::EmitUnregistered(IR::Block& block) {
     if (conf.very_verbose_debugging_output) {
         std::puts(IR::DumpBlock(block).c_str());
     }
@@ -172,10 +188,7 @@ A32EmitX64::BlockDescriptor A32EmitX64::Emit(IR::Block& block) {
     const A32::LocationDescriptor descriptor{block.Location()};
     const A32::LocationDescriptor end_location{block.EndLocation()};
 
-    const auto range = boost::icl::discrete_interval<u32>::closed(descriptor.PC(), end_location.PC() - 1);
-    block_ranges.AddRange(range, descriptor);
-
-    return RegisterBlock(descriptor, entrypoint, size);
+    return EmittedBlock{descriptor, entrypoint, size, descriptor.PC(), end_location.PC() - 1};
 }
 
 void A32EmitX64::ClearCache() {
@@ -1080,6 +1093,7 @@ void A32EmitX64::EmitA32CoprocLoadWords(A32EmitContext& ctx, IR::Inst* inst) {
     }
 
     CallCoprocCallback(code, ctx.reg_alloc, *action, nullptr, args[1]);
+    EmitCheckCoprocessorAbort(ctx, inst);
 }
 
 void A32EmitX64::EmitA32CoprocStoreWords(A32EmitContext& ctx, IR::Inst* inst) {
@@ -1110,6 +1124,7 @@ void A32EmitX64::EmitA32CoprocStoreWords(A32EmitContext& ctx, IR::Inst* inst) {
     }
 
     CallCoprocCallback(code, ctx.reg_alloc, *action, nullptr, args[1]);
+    EmitCheckCoprocessorAbort(ctx, inst);
 }
 
 std::string A32EmitX64::LocationDescriptorToFriendlyName(const IR::LocationDescriptor& ir_descriptor) const {
@@ -1163,7 +1178,13 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
         return;
     }
 
+    Xbyak::Label no_link;
     if (conf.enable_cycle_counting) {
+        // Frond: a halt requested by a callback ends the run at the next linked branch.
+        if (conf.check_halt_on_link) {
+            code.cmp(dword[r15 + offsetof(A32JitState, halt_reason)], 0);
+            code.jne(no_link, code.T_NEAR);
+        }
         code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
 
         patch_information[terminal.next].jg.push_back(code.getCurr());
@@ -1183,6 +1204,7 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlock terminal, IR::LocationDesc
         }
     }
 
+    code.L(no_link);
     code.mov(MJitStateReg(A32::Reg::PC), A32::LocationDescriptor{terminal.next}.PC());
     PushRSBHelper(rax, rbx, terminal.next);
     code.ForceReturnFromRunCode();
@@ -1197,6 +1219,21 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::Location
         return;
     }
 
+    // Frond: with max_unchecked_instructions this link checks the cycles left too (not the
+    // halt flag, as before), and leaves through the dispatcher once they run out.
+    if (conf.max_unchecked_instructions && conf.enable_cycle_counting) {
+        code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
+        patch_information[terminal.next].jg.push_back(code.getCurr());
+        if (const auto next_bb = GetBasicBlock(terminal.next)) {
+            EmitPatchJg(terminal.next, next_bb->entrypoint);
+        } else {
+            EmitPatchJg(terminal.next);
+        }
+        code.mov(MJitStateReg(A32::Reg::PC), A32::LocationDescriptor{terminal.next}.PC());
+        code.ReturnFromRunCode();
+        return;
+    }
+
     patch_information[terminal.next].jmp.push_back(code.getCurr());
     if (const auto next_bb = GetBasicBlock(terminal.next)) {
         EmitPatchJmp(terminal.next, next_bb->entrypoint);
@@ -1205,12 +1242,25 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::LinkBlockFast terminal, IR::Location
     }
 }
 
+// Frond: indirect branches go back to the dispatcher (which returns) once the cycles
+// run out or a halt is requested, so loops through them can't run forever.
+void A32EmitX64::EmitFrondIndirectCheck() {
+    if (!conf.check_halt_on_link || !conf.enable_cycle_counting) {
+        return;
+    }
+    code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], 0);
+    code.jle(code.GetReturnFromRunCodeAddress());
+    code.cmp(dword[r15 + offsetof(A32JitState, halt_reason)], 0);
+    code.jne(code.GetReturnFromRunCodeAddress());
+}
+
 void A32EmitX64::EmitTerminalImpl(IR::Term::PopRSBHint, IR::LocationDescriptor, bool is_single_step) {
     if (!conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) || is_single_step) {
         code.ReturnFromRunCode();
         return;
     }
 
+    EmitFrondIndirectCheck();
     code.jmp(terminal_handler_pop_rsb_hint);
 }
 
@@ -1220,6 +1270,7 @@ void A32EmitX64::EmitTerminalImpl(IR::Term::FastDispatchHint, IR::LocationDescri
         return;
     }
 
+    EmitFrondIndirectCheck();
     code.jmp(terminal_handler_fast_dispatch_hint);
 }
 

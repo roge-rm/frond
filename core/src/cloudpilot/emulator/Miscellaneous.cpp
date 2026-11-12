@@ -597,6 +597,10 @@ void SetHotSyncUserName(const char* userNameP) {
 }
 
 void SetCurrentDate(int32 adjust) {
+    // Until TimInit has run after a reset timGlobalsP is stale or 0, and writing through it
+    // lands in RAM the boot code is still checking, so it wipes the RAM store.
+    if (!gSystemState.IsTimeInitialized()) return;
+
     CEnableFullAccess munge;
 
     // Get the current date.
@@ -611,6 +615,7 @@ void SetCurrentDate(int32 adjust) {
     // Update the "hours adjustment" value to contain the current date.
 
     emuptr timGlobalsP = EmLowMem_GetGlobal(timGlobalsP);
+    if (!timGlobalsP) return;
     EmAliasTimGlobalsType<PAS> timGlobals(timGlobalsP);
 
     timGlobals.rtcHours = rtcHours;

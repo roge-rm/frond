@@ -120,6 +120,15 @@ class EmUARTDragonball {
         /*  +  ->  */ unsigned int RXFIFO_LEVEL_MARKER : 4;  // 68SZ328 only
     };
 
+    struct PendingState {
+        uint32 rxCount=0, txCount=0;
+        uint8 rx[64]{}, tx[64]{};
+        bool receiving=false;
+    };
+    // Capture on the emulation thread between CPU slices, non-sync mode only.
+    // Endpoint queues and peer state are outside the checkpoint.
+    PendingState CapturePending();
+    bool RestorePending(const PendingState&);
     EmUARTDragonball(UART_Type, int uartNum);
     ~EmUARTDragonball(void);
 

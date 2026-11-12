@@ -65,7 +65,7 @@ class GunzipContext {
     const uint8_t* payload;
 
     std::unique_ptr<uint8_t[]> uncompressedData;
-    size_t uncompressedSize;
+    size_t uncompressedSize{0};
 
     std::string errorDescription{"no error"};
     GzipHeaderFooter headerFooter;

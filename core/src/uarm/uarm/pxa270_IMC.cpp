@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include "cputil.h"
+#include "savestate/savestateAll.h"
 #include "mem.h"
 
 #define PXA270_IMC_BASE 0x58000000ul
@@ -14,6 +15,11 @@
 struct PxaImc {
     uint32_t mcr;
     uint8_t impmsr;
+
+    template <typename T>
+    void DoSaveLoad(T &h) {
+        h.Do32(mcr).Do8(impmsr);
+    }
 };
 
 static bool pxaImcPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write,
@@ -64,3 +70,22 @@ struct PxaImc* pxaImcInit(struct ArmMem* physMem) {
 
     return imc;
 }
+
+
+template <typename T>
+void pxaImcSave(PxaImc *state, T &savestate) {
+    auto chunk = savestate.GetChunk(ChunkType::pxa270imc, 0);
+    if (!chunk) ERR("cannot allocate pxa270imc state");
+    SaveChunkHelper helper(*chunk);
+    state->DoSaveLoad(helper);
+}
+
+void pxaImcLoad(PxaImc *state, SavestateLoader<ChunkType> &loader) {
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxa270imc, 0, "pxa270imc");
+    if (!chunk) return;
+    LoadChunkHelper helper(*chunk);
+    state->DoSaveLoad(helper);
+}
+
+template void pxaImcSave<Savestate<ChunkType>>(PxaImc *, Savestate<ChunkType> &);
+template void pxaImcSave<SavestateProbe<ChunkType>>(PxaImc *, SavestateProbe<ChunkType> &);

@@ -74,6 +74,7 @@ enum class LinkTarget {
     ExclusiveWriteMemory64,
     ExclusiveWriteMemory128,
     CallSVC,
+    InterpreterFallback,
     ExceptionRaised,
     InstructionSynchronizationBarrierRaised,
     InstructionCacheOperationRaised,
@@ -121,11 +122,16 @@ struct EmitConfig {
 
     // Memory
     bool check_halt_on_memory_access;
+    // Frond: LinkBlock and PopRSBHint also check for a halt (A32 only).
+    bool check_halt_on_link = false;
+    // Frond: LinkBlockFast checks the cycles left like LinkBlock (A32 only).
+    std::size_t max_unchecked_instructions = 0;
 
     // Page table
     u64 page_table_pointer;
     size_t page_table_address_space_bits;
     int page_table_pointer_mask_bits;
+    bool page_table_write_protect_bit;
     bool silently_mirror_page_table;
     bool absolute_offset_page_table;
     u8 detect_misaligned_access_via_page_table;
@@ -170,12 +176,16 @@ void EmitIR(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
 void EmitRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, LinkTarget link_target);
 void EmitBlockLinkRelocation(oaknut::CodeGenerator& code, EmitContext& ctx, const IR::LocationDescriptor& descriptor, BlockRelocationType type);
 oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Cond cond);
+// Frond: looks up the current location in the fast dispatch table at Xscratch1 and jumps to
+// its block, or goes to miss. Uses X0, X1 and both scratch registers.
+void EmitA32FastDispatch(oaknut::CodeGenerator& code, oaknut::Label& miss);
 oaknut::Label EmitA64Cond(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Cond cond);
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx);
 void EmitA64Terminal(oaknut::CodeGenerator& code, EmitContext& ctx);
 void EmitA32ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ctx);
 void EmitA64ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ctx);
 void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
+void EmitA32CheckCoprocessorAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
 void EmitA64CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end);
 
 }  // namespace Dynarmic::Backend::Arm64

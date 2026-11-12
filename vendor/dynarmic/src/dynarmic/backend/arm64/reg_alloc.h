@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/container/small_vector.hpp>
 #include <mcl/assert.hpp>
 #include <mcl/stdint.hpp>
 #include <mcl/type_traits/is_instance_of_template.hpp>
@@ -137,7 +138,8 @@ private:
 };
 
 struct HostLocInfo final {
-    std::vector<const IR::Inst*> values;
+    // Frond: a location rarely holds more than two values, so these stay off the heap.
+    boost::container::small_vector<const IR::Inst*, 2> values;
     size_t locked = 0;
     bool realized = false;
     size_t uses_this_inst = 0;
@@ -157,7 +159,8 @@ class RegAlloc final {
 public:
     using ArgumentInfo = std::array<Argument, IR::max_arg_count>;
 
-    explicit RegAlloc(oaknut::CodeGenerator& code, FpsrManager& fpsr_manager, std::vector<int> gpr_order, std::vector<int> fpr_order)
+    // Frond: the orders are referenced, not copied, and must outlive the RegAlloc.
+    explicit RegAlloc(oaknut::CodeGenerator& code, FpsrManager& fpsr_manager, const std::vector<int>& gpr_order, const std::vector<int>& fpr_order)
             : code{code}, fpsr_manager{fpsr_manager}, gpr_order{gpr_order}, fpr_order{fpr_order} {}
 
     ArgumentInfo GetArgumentInfo(IR::Inst* inst);
@@ -323,10 +326,23 @@ private:
     HostLocInfo& ValueInfo(HostLoc host_loc);
     HostLocInfo& ValueInfo(const IR::Inst* value);
 
+    // Frond: locations are numbered gprs 0-31, fprs 32-63, flags 64, spills 65 on. touched_locs
+    // holds those changed since the last UpdateAllUses (UpdateUses is a no-op on the rest),
+    // used_locs those that ever held a value in this block (the only ones ValueLocation searches).
+    static constexpr size_t loc_count = 65 + SpillCount;
+    void Touch(int i) {
+        touched_locs[i / 64] |= u64(1) << (i % 64);
+        used_locs[i / 64] |= u64(1) << (i % 64);
+    }
+    HostLocInfo& LocAt(int i);
+    const HostLocInfo& LocAt(int i) const;
+    static HostLoc LocOf(int i);
+    std::optional<int> FindValue(const IR::Inst* value) const;
+
     oaknut::CodeGenerator& code;
     FpsrManager& fpsr_manager;
-    std::vector<int> gpr_order;
-    std::vector<int> fpr_order;
+    const std::vector<int>& gpr_order;
+    const std::vector<int>& fpr_order;
 
     std::array<HostLocInfo, 32> gprs;
     std::array<HostLocInfo, 32> fprs;
@@ -334,6 +350,9 @@ private:
     std::array<HostLocInfo, SpillCount> spills;
 
     mutable size_t alloc_candidate_index{};
+
+    std::array<u64, (loc_count + 63) / 64> touched_locs{};
+    std::array<u64, (loc_count + 63) / 64> used_locs{};
 
     tsl::robin_set<const IR::Inst*> defined_insts;
 };

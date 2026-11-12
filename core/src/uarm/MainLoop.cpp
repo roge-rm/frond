@@ -13,10 +13,11 @@ namespace {
     constexpr uint32_t BIN_SIZE = 1000000;
     constexpr uint32_t CYCLES_PER_SECOND_LIMIT_DEFAULT = 100000000;
     constexpr uint32_t MAX_LOAD_MAX = 97;
+#ifdef __EMSCRIPTEN__
     constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 20;
-    constexpr uint32_t TIMESLICE_SIZE_USEC = 1000000 / MAIN_LOOP_FPS;
-    constexpr uint32_t LAG_THRESHOLD_CATCHUP_USEC = (3 * TIMESLICE_SIZE_USEC / 2);
-    constexpr uint32_t LAG_THRESHOLD_SKIP_USEC = 3 * TIMESLICE_SIZE_USEC;
+#else
+    constexpr uint32_t MAX_LOAD_CATCHUP_MARGIN = 10;
+#endif
     constexpr int PRESERVE_TIMESLICES_FOR_CATCHUP = 3;
 }  // namespace
 
@@ -33,21 +34,39 @@ MainLoop::MainLoop(SoC* soc)
     cyclesPerSecondAverage.Add(cyclesPerSecondLimit);
 }
 
-double MainLoop::Cycle(uint64_t now) {
+void MainLoop::PauseAt(uint64_t now) {
+    // Audio pacing intentionally pauses guest time; discard the resulting host-time lag.
+    realTimeUsec = now;
+    virtualTimeUsec = now;
+    lastDeltaUsec = 0;
+}
+
+void MainLoop::SetTimesliceUsec(uint64_t usec) {
+    timesliceUsec = std::clamp<uint64_t>(usec,1000,1000000);
+}
+
+double MainLoop::Cycle(uint64_t now, bool paused) {
+    if (paused) {
+        PauseAt(now);
+        return 0;
+    }
+
+    const uint64_t lagCatchup = 3 * timesliceUsec / 2;
+    const uint64_t lagSkip = 3 * timesliceUsec;
     // virtualTimeUsec += static_cast<double>(socGetInjectedTimeNsec(soc)) / 1000;
     soc->ResetInjectedTimeNsec();
 
     double deltaUsec = now - virtualTimeUsec;
     if (deltaUsec < 0) return 0;
 
-    if (deltaUsec > LAG_THRESHOLD_SKIP_USEC) {
-        deltaUsec = TIMESLICE_SIZE_USEC;
+    if (deltaUsec > lagSkip) {
+        deltaUsec = timesliceUsec;
         virtualTimeUsec = now - deltaUsec;
         cyclesPerSecondAverage.Reset(1);
 
         // cerr << "too much lag, skipping forward" << endl << flush;
-    } else if (lastDeltaUsec < LAG_THRESHOLD_CATCHUP_USEC &&
-               deltaUsec >= LAG_THRESHOLD_CATCHUP_USEC) {
+    } else if (lastDeltaUsec < lagCatchup &&
+               deltaUsec >= lagCatchup) {
         cyclesPerSecondAverage.Reset(PRESERVE_TIMESLICES_FOR_CATCHUP);
     }
 
@@ -55,9 +74,14 @@ double MainLoop::Cycle(uint64_t now) {
     realTimeUsec = now;
 
     double cyclesPerSecond = CalculateCyclesPerSecond(
-        deltaUsec >= LAG_THRESHOLD_CATCHUP_USEC ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+#ifdef __EMSCRIPTEN__
+    const double runUsec = deltaUsec;
+#else
+    const double runUsec = std::min(deltaUsec, double(timesliceUsec));
+#endif
     const uint64_t cyclesEmulated =
-        soc->Run(deltaUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
+        soc->Run(runUsec * cyclesPerSecond / 1E6, round(cyclesPerSecond));
 
     const double slizeSizeSeconds = cyclesEmulated / cyclesPerSecond;
 
@@ -72,7 +96,12 @@ double MainLoop::Cycle(uint64_t now) {
     return slizeSizeSeconds;
 }
 
-uint64_t MainLoop::GetTimesliceSizeUsec() const { return TIMESLICE_SIZE_USEC; }
+uint64_t MainLoop::GetTimesliceSizeUsec() const { return timesliceUsec; }
+
+int64_t MainLoop::GetSuggestedDelayUsec(uint64_t now) const {
+    // Catch up in short batches without sleeping away the remaining headroom.
+    return std::clamp<double>(timesliceUsec - (double(now) - virtualTimeUsec), 0, timesliceUsec);
+}
 
 uint32_t MainLoop::GetCurrentIps() const { return currentIps; }
 

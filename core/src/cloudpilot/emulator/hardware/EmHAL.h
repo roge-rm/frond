@@ -17,6 +17,7 @@
 #include <algorithm>
 
 #include "ButtonEvent.h"
+#include "dana_input5.h"
 #include "CardImage.h"
 #include "EmCommon.h"
 #include "EmEvent.h"
@@ -35,8 +36,8 @@ class EmHALHandler;
 
 class EmHAL {
    public:
-    enum class Slot { none = -1, sdcard = 0, memorystick = 1 };
-    constexpr static Slot MAX_SLOT = Slot::memorystick;
+    enum class Slot { none = -1, sdcard = 0, memorystick = 1, sdcard2 = 2 };
+    constexpr static Slot MAX_SLOT = Slot::sdcard2;
 
    public:
     typedef void (*CycleHandler)(void*, uint64, bool);
@@ -48,6 +49,10 @@ class EmHAL {
 
     static void CycleSlowly(Bool sleeping);
 
+    static bool DispatchDanaInput(const std::vector<DanaTransition5>& batch);
+    // Set by a load that refused a state version newer than this core knows.
+    inline static bool loadedNewerState=false;
+    static void ReleaseDanaInput(bool cancel=true);
     static void DispatchButtonEvent(ButtonEvent evt);
     static void TurnSoundOff(void);
     static void ResetTimer(void);
@@ -83,11 +88,19 @@ class EmHAL {
 
     static Bool GetDTR(int uartNum);
     static void DTRChanged(int uartNum);
+    static void DTRChanged(int uartNum, EmUARTDeviceType device);
 
     static Bool GetVibrateOn(void);
     static uint16 GetLEDState(void);
 
     static uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    // A host transport whose bytes become readable at this system cycle: a stopped CPU runs its
+    // idle tasks (and so the UART) by then instead of sleeping on to the next timer interrupt.
+    // One deadline at a time, the earliest still ahead of now (the CPU's cycle count); it clears
+    // once passed. A deadline the CPU ran through without sleeping gives way to the next one.
+    static void WakeAt(uint64 systemCycles, uint64 now);
+    // Multiplies every saved cycle stamp after the session's counter changed units.
+    static void ScaleCycles(uint32 factor);
     static bool EnableRAM();
 
     static void AddCycleConsumer(CycleHandler handler, void* context);
@@ -126,6 +139,8 @@ class EmHALHandler {
 
     virtual void CycleSlowly(Bool sleeping);
 
+    virtual bool DispatchDanaInput(const std::vector<DanaTransition5>&) { return false; }
+    virtual void ReleaseDanaInput(bool cancel=true) {}
     virtual void DispatchButtonEvent(ButtonEvent evt);
     virtual void TurnSoundOff(void);
     virtual void ResetTimer(void);
@@ -161,6 +176,7 @@ class EmHALHandler {
     virtual uint16 GetLEDState(void);
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    virtual void ScaleCycles(uint32 factor);
     virtual bool EnableRAM();
 
     virtual bool SupportsImageInSlot(EmHAL::Slot slot, uint32 blocksTotal);

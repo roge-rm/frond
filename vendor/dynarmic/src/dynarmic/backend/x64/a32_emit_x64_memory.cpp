@@ -236,13 +236,21 @@ void A32EmitX64::EmitA32ExclusiveWriteMemory64(A32EmitContext& ctx, IR::Inst* in
 }
 
 void A32EmitX64::EmitCheckMemoryAbort(A32EmitContext& ctx, IR::Inst* inst, Xbyak::Label* end) {
+    EmitCheckMemoryAbortAt(ctx, A32::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetU64()}}, end);
+}
+
+// Frond: LDC and STC carry their location as argument 2. A callback that faults halts with
+// MemoryAbort and the run ends on the instruction, before the base writeback.
+void A32EmitX64::EmitCheckCoprocessorAbort(A32EmitContext& ctx, IR::Inst* inst) {
+    EmitCheckMemoryAbortAt(ctx, A32::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(2).GetU64()}}, nullptr);
+}
+
+void A32EmitX64::EmitCheckMemoryAbortAt(A32EmitContext& ctx, const A32::LocationDescriptor& current_location, Xbyak::Label* end) {
     if (!conf.check_halt_on_memory_access) {
         return;
     }
 
     Xbyak::Label skip;
-
-    const A32::LocationDescriptor current_location{IR::LocationDescriptor{inst->GetArg(0).GetU64()}};
 
     code.test(dword[r15 + offsetof(A32JitState, halt_reason)], static_cast<u32>(HaltReason::MemoryAbort));
     if (end) {

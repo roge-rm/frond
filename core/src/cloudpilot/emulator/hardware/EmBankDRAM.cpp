@@ -315,3 +315,18 @@ void EmBankDRAM::InvalidAccess(emuptr address, long size, Bool forRead) {
     EmAssert(gCPU68K);
     gCPU68K->BusError(address, size, forRead);
 }
+
+// ---------------------------------------------------------------------------
+//		EmBankDRAM::SetWaitStates
+// ---------------------------------------------------------------------------
+
+void EmBankDRAM::SetWaitStates(EmBusWait wait) {
+    addressBank.waitByte = wait.byte;
+    addressBank.waitWord = wait.word;
+    addressBank.sdram = wait.sdram;
+    addressBank.busTag = 1 | (uint32(wait.dram) << 16);
+    addressBankDisabled.waitByte = wait.byte;
+    addressBankDisabled.waitWord = wait.word;
+    addressBankDisabled.sdram = wait.sdram;
+    addressBankDisabled.busTag = 1 | (uint32(wait.dram) << 16);
+}

@@ -85,6 +85,7 @@ class Uarm {
     bool SdCardInitialized();
     const char* GetSdCardId();
     void Reset();
+    void HardReset();
 
     void Save();
     uint32_t GetSavestateSize();

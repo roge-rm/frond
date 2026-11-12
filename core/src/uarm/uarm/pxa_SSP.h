@@ -35,6 +35,8 @@ struct PxaSsp* pxaSspInit(struct ArmMem* physMem, struct Reschedule reschedule, 
                           uint_fast8_t dmaReqNoBase);
 void pxaSspPeriodic(struct PxaSsp* ssp);
 bool pxaSspAddClient(struct PxaSsp* ssp, SspClientProcF procF, void* userData);
+// Quiesced bus only, not from inside a client callback.
+bool pxaSspRemoveClient(struct PxaSsp* ssp, void* userData);
 
 bool pxaSspTaskRequired(struct PxaSsp* ssp);
 

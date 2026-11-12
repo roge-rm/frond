@@ -9,7 +9,8 @@ class ScreenDimensions {
         screen160x160 = 0x00,
         screen320x320 = 0x01,
         screen240x320 = 0x02,
-        screen320x480 = 0x03
+        screen320x480 = 0x03,
+        screen560x160 = 0x04
     };
 
     ScreenDimensions() = default;

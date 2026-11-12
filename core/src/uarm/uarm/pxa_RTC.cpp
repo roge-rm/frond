@@ -25,6 +25,8 @@ struct PxaRtc {
     uint32_t RTAR;  // RTC alarm
     uint32_t RTTR;  // RTC trim - we ignore this alltogether
     uint8_t RTSR;   // RTC status
+    void (*wakeCallback)(void*);
+    void* wakeContext;
 
     template <typename T>
     void DoSaveLoad(T &chunkHelper, uint32_t version) {
@@ -46,12 +48,28 @@ static void pxaRtcPrvUpdateAlarm(struct PxaRtc *rtc) {
     if (rtc->lastAlarmCheck < rtc->RTAR) {
         const uint64_t now = palmEpochSeconds();
 
-        if ((rtc->RTSR & 0x04) && now >= rtc->RTAR) rtc->RTSR |= 1;
+        if (now >= rtc->RTAR) {
+            if (rtc->RTSR & 0x04) rtc->RTSR |= 1;
+            // PXA27x 21.4.6.2: sleep wake is independent of RTSR[ALE].
+            if (rtc->wakeCallback) rtc->wakeCallback(rtc->wakeContext);
+        }
 
         rtc->lastAlarmCheck = now;
     }
 
     pxaIcInt(rtc->ic, PXA_I_RTC_ALM, !!(rtc->RTSR & 1));
+}
+
+PxaRtcRetained pxaRtcRetained(const PxaRtc* rtc) {
+    return {rtc->lastAlarmCheck, rtc->RTAR, rtc->RTTR, rtc->RTSR};
+}
+
+void pxaRtcRestoreRetained(PxaRtc* rtc, const PxaRtcRetained& retained) {
+    rtc->lastAlarmCheck = retained.lastAlarmCheck;
+    rtc->RTAR = retained.RTAR;
+    rtc->RTTR = retained.RTTR;
+    rtc->RTSR = retained.RTSR;
+    pxaRtcPrvUpdateInterrupts(rtc);
 }
 
 static void pxaRtcTickHz(struct PxaRtc *rtc) {
@@ -141,6 +159,13 @@ void pxaRtcTick(struct PxaRtc *rtc) {
     pxaRtcPrvUpdateAlarm(rtc);
     pxaRtcTickHz(rtc);
 }
+
+void pxaRtcSetWakeCallback(PxaRtc* rtc, void (*callback)(void*), void* context) {
+    rtc->wakeCallback = callback;
+    rtc->wakeContext = context;
+}
+
+void pxaRtcRefreshInterrupts(PxaRtc* rtc) { pxaRtcPrvUpdateInterrupts(rtc); }
 
 template <typename T>
 void pxaRtcSave(struct PxaRtc *rtc, T &savestate) {

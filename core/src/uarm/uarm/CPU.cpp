@@ -1,27 +1,43 @@
 //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
 
+#include <utility>
 #include "CPU.h"
+#include "arm920_state.h"
+#include "cpu_diagnostics.h"
+#ifdef FROND_DYNARMIC
+#include "jit_dynarmic.h"
+#endif
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <iostream>
 #include <unordered_map>
 
 #include "CPEndian.h"
 #include "MMU.h"
+#ifndef __EMSCRIPTEN__
+#include "MMU_internal.h"
+#endif
 #include "MPU.h"
 #include "cp15mmu.h"
 #include "cp15mpu.h"
 #include "cputil.h"
 #include "gdbstub.h"
 #include "icache.h"
+#ifndef __EMSCRIPTEN__
+#include "icache_internal.h"
+#include "mem_internal.h"
+#endif
 #include "mem.h"
+#include "ROM.h"
 #include "memcpy.h"
 #include "pace.h"
 #include "patch68k.h"
 #include "patch_dispatch.h"
 #include "peephole.h"
+#include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
 
@@ -108,6 +124,10 @@ struct ArmBankedRegs {
 using M68kTrapHandlerMap = std::unordered_map<uint32_t, M68kTrapHandler>;
 
 struct ArmCpu {
+    uint64_t exceptionSequence;
+    ArmCpuModel model;
+    M68kSyscallHandler m68kSyscallHandler;
+    void* m68kSyscallContext;
     uint32_t regs[16];  // current active regs as per current mode
     uint32_t SPSR;
     uint32_t flags;
@@ -116,6 +136,9 @@ struct ArmCpu {
     bool privileged;
 
     uint32_t curInstrPC;
+#ifndef __EMSCRIPTEN__
+    const uint32_t* cyclesInProgress;
+#endif
 
     struct ArmBankedRegs bank_usr;  // usr regs when in another mode
     struct ArmBankedRegs bank_svc;  // svc regs when in another mode
@@ -131,6 +154,7 @@ struct ArmCpu {
     uint16_t CPAR;
 
     struct ArmCoprocessor coproc[16];  // coprocessors
+    struct Pxa270wmmx *wmmx;            // iWMMXt on coprocessors 0 and 1, or null
 
     // various other cpu config options
     uint32_t vectorBase;  // address of vector base
@@ -155,15 +179,67 @@ struct ArmCpu {
     uint32_t paceOffset;
     bool modePace;
     bool sleeping;
+    bool arm920WaitEnabled, arm920Waiting;
 
     struct stub *debugStub;
     struct PatchDispatch *patchDispatch;
     struct SystemState *systemState;
 
     uint32_t slowPath;
+    void (*earlyAudioHook)(ArmCpu*,void*,uint32_t,uint32_t) = nullptr;
+    void* earlyAudioContext = nullptr;
+    uint32_t earlyAudioFrom[2]{};
     uint16_t breakPaceSyscall;
+    #ifndef __EMSCRIPTEN__
+    uint32_t nativePc[2];
+    struct { uint32_t address; NativeCallback callback; void* context; } nativeCallbacks[8];
+    uint8_t nativeCallDepth;
+    bool nativeSessionActive;
+    uint32_t nativeStackLower, nativeStackUpper;
+    uint32_t nativeStackOwnerAddress, nativeStackOwnerValue;
+    uint32_t nativeScratchBase, nativeScratchSize;
+    uint8_t* nativeScratchData;
+    #endif
+
 
     M68kTrapHandlerMap *m68kTrap0Handlers;
+    // ARM920T Fast engine, not saved. leanRun is set only inside cpuArm920RunLean; leanExit asks it to stop
+    // before the current instruction.
+    bool leanRun, leanExit;
+    uint32_t leanBlNext;
+    Arm920LeanPage leanPage;
+    Arm920LeanGuard leanGuard;
+    void* leanContext;
+    // One bit per 4 KiB RAM page the decode cache holds code from (a 4 GiB physical map), and the data
+    // accesses this lean run made that the step would count as bus accesses.
+    uint64_t* leanCode;
+    uint64_t leanBus, leanCodeDrops;
+    // Instructions this lean run has finished, and the probe's answer for reads of pages that aren't plain.
+    uint32_t leanDone;
+    Arm920LeanRead leanRead;
+    // The probe's answer for single stores to pages that aren't plain, the instruction the lean loop is running
+    // and the run's budget, which such a store can shrink.
+    Arm920LeanWrite leanWrite;
+    uint32_t leanInstr, leanBudget;
+    // Fast blocks: the pc of the last access-pc instruction generated code ran (cpuArm920SetJitAccessPcs), taken by
+    // the lean read callback for the access it makes, then cleared.
+    uint32_t jitAccessPc;
+    const uint32_t *jitAccessPcs;
+    uint32_t jitAccessPcCount;
+    // Most instructions this lean run may retire (cpuArm920RunLeanFor), and whether the JIT's callbacks are
+    // using the lean memory path (no read or write answers from the probe there).
+    uint32_t leanCount;
+    bool leanJit;
+#ifdef FROND_DYNARMIC
+    struct FrondJit *jit;
+    // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
+    bool jitMemoryOnly, jitRefused;
+    // ARM920T Fast blocks (cpuArm920SetJit): the JIT is run only by cpuArm920RunJit, never by cpuCycle
+    // (jitLoopOnly), and while jitBlocks is on it reads code and data from the lean pages. jitCode has one
+    // bit per 4 KiB RAM page it has translated code from, as leanCode.
+    bool jitLoopOnly, jitBlocks;
+    uint64_t *jitCode;
+#endif
 
     template <typename T>
     void DoSaveLoad(T &chunkHelper, uint32_t version);
@@ -190,6 +266,12 @@ static bool table_conditions[256];
 static ImmShift table_immShiftReg[1024];
 static ImmShift table_immShiftImm[128];
 
+// AL (0xE) always passes, so it skips the flags and table lookup.
+static FORCE_INLINE bool cpuPrvConditionFails(const struct ArmCpu *cpu, uint32_t instr) {
+    if ((instr >> 28) == 0x0e) return false;
+    return table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)];
+}
+
 static FORCE_INLINE uint32_t cpuPrvClz(uint32_t val) {
     if (!val) return 32;
 
@@ -208,6 +290,7 @@ static FORCE_INLINE uint32_t cpuPrvROR(uint32_t val, uint_fast8_t ror) {
 
 static FORCE_INLINE void cpuPrvSetPC(struct ArmCpu *cpu, uint32_t pc)  // with interworking
 {
+    if (cpu->model == ArmCpuModel::arm920t) icacheArm920BranchInline(cpu->ic);
     const bool wasT = cpu->T;
 
     cpu->regs[REG_NO_PC] = pc & ~1UL;
@@ -239,17 +322,19 @@ static FORCE_INLINE void cpuPrvSetRegNotPC(struct ArmCpu *cpu, uint_fast8_t reg,
 }
 
 static FORCE_INLINE void cpuPrvSetReg(struct ArmCpu *cpu, uint_fast8_t reg, uint32_t val) {
-    if (reg == REG_NO_PC)
+    if (reg == REG_NO_PC) {
+        if (cpu->model == ArmCpuModel::arm920t) val = (val & (cpu->T ? ~1u : ~3u)) | uint32_t(cpu->T);
         cpuPrvSetPC(cpu, val);
-    else
+    } else
         cpuPrvSetRegNotPC(cpu, reg, val);
 }
 
 template <bool pc>
 static FORCE_INLINE void cpuPrvSetReg(struct ArmCpu *cpu, uint_fast8_t reg, uint32_t val) {
-    if constexpr (pc)
+    if constexpr (pc) {
+        if (cpu->model == ArmCpuModel::arm920t) val = (val & (cpu->T ? ~1u : ~3u)) | uint32_t(cpu->T);
         cpuPrvSetPC(cpu, val);
-    else
+    } else
         cpuPrvSetRegNotPC(cpu, reg, val);
 }
 
@@ -282,7 +367,10 @@ static FORCE_INLINE struct ArmBankedRegs *cpuPrvModeToBankedRegsPtr(struct ArmCp
 }
 
 static void cpuUpdateSlowPath(struct ArmCpu *cpu) {
-    if (cpu->waitingEventsTotal && !cpu->F) {
+    // The ARM920T stops for an interrupt it can take; the other cores for any event while F
+    // is clear, as they always have, so their timing stays.
+    if (cpu->model == ArmCpuModel::arm920t ? (cpu->waitingFiqs && !cpu->F) || (cpu->waitingIrqs && !cpu->I)
+                                           : cpu->waitingEventsTotal && !cpu->F) {
         cpuSetSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
     } else {
         cpuClearSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
@@ -315,19 +403,22 @@ static FORCE_INLINE void cpuPrvSwitchToMode(struct ArmCpu *cpu, uint_fast8_t new
     saveTo = cpuPrvModeToBankedRegsPtr(cpu, curMode);
     getFrom = cpuPrvModeToBankedRegsPtr(cpu, newMode);
 
-    if (saveTo == getFrom)
-        return;  // we're done if no regs to switch [this happens if we switch user<->system]
+    if (saveTo != getFrom) {
+        saveTo->R13 = cpu->regs[REG_NO_SP];
+        saveTo->R14 = cpu->regs[REG_NO_LR];
+        saveTo->SPSR = cpu->SPSR;
 
-    saveTo->R13 = cpu->regs[REG_NO_SP];
-    saveTo->R14 = cpu->regs[REG_NO_LR];
-    saveTo->SPSR = cpu->SPSR;
-
-    cpu->regs[REG_NO_SP] = getFrom->R13;
-    cpu->regs[REG_NO_LR] = getFrom->R14;
-    cpu->SPSR = getFrom->SPSR;
+        cpu->regs[REG_NO_SP] = getFrom->R13;
+        cpu->regs[REG_NO_LR] = getFrom->R14;
+        cpu->SPSR = getFrom->SPSR;
+    }
+    // User and system share a bank, but still change mode and privilege.
 
     cpu->M = newMode;
-    cpu->privileged = cpu->M != ARM_SR_MODE_USR;
+    const bool privileged = cpu->M != ARM_SR_MODE_USR;
+    // Fetches are checked for the mode: the I-cache fast paths check their line again.
+    if (privileged != cpu->privileged && cpu->ic) cpu->ic->epoch++;
+    cpu->privileged = privileged;
 }
 
 static FORCE_INLINE void cpuPrvSetPSRlo8(struct ArmCpu *cpu, uint_fast8_t val) {
@@ -383,6 +474,13 @@ void cpuSetReg(struct ArmCpu *cpu, uint_fast8_t reg, uint32_t val) {
 static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
                             uint_fast8_t newLowBits)  // enters arm mode
 {
+    ++cpu->exceptionSequence;
+    if (cpu->model == ArmCpuModel::arm920t) icacheArm920BranchInline(cpu->ic);
+#ifndef __EMSCRIPTEN__
+    if (cpu->nativeCallDepth && ((newLowBits & 0x1f) == ARM_SR_MODE_ABT ||
+                                  (newLowBits & 0x1f) == ARM_SR_MODE_UND))
+        cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT);
+#endif
     if (cpu->modePace) {
 #ifdef TRACE_PACE
         fprintf(stderr, "exception in PACE %#010x %#010x\n", lr,
@@ -408,7 +506,9 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
 
     uint32_t spsr = cpuPrvMaterializeCPSR(cpu);
 
-    cpuPrvSetPSRlo8(cpu, newLowBits);
+    // ARM DDI0100I A2.6: only Reset and FIQ force F; other exceptions preserve it. Only on the
+    // ARM920T, so the other cores' timing and results stay as they were.
+    cpuPrvSetPSRlo8(cpu, cpu->model == ArmCpuModel::arm920t ? newLowBits | (spsr & ARM_SR_F) : newLowBits);
     cpu->SPSR = spsr;
     cpu->regs[REG_NO_LR] = lr;
     cpu->regs[REG_NO_PC] = vector_pc;
@@ -417,13 +517,23 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
 // input addr is VA not MVA
 static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
                                uint_fast8_t fsr) {
+    // A lean access that stops the lean run takes no abort: the guarded step runs the instruction again.
+    if (unlikely(cpu->leanExit)) return;
+    if (cpu->model == ArmCpuModel::arm920t &&
+        cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard.active) {
+        // An unmodelled cache/buffer target is a diagnostic trap, with FSR/FAR retained.
+        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (cpu->T ? 2 : 4),
+                        ARM_SR_MODE_UND | ARM_SR_I);
+        return;
+    }
 // FCSE
 #ifdef SUPPORT_FCSE
     if (addr < 0x02000000UL)  // report addr is MVA
         addr |= cpu->pid;
 #endif
 
-    if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+    if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
+        !(instrFetch && cpu->model == ArmCpuModel::arm920t)) {
         cp15MMUSetFaultStatus(cpu->cp15.cp15mmu, addr, fsr);
     }
 
@@ -451,6 +561,8 @@ static FORCE_INLINE uint32_t cpuPrvArmAdrMode_1(struct ArmCpu *cpu, uint32_t ins
         v = (instr >> 7) & 0x1E;
         ret = cpuPrvROR(instr & 0xFF, v);
         if (v) co = !!(ret & 0x80000000UL);
+    } else if ((instr & 0x00000FF0UL) == 0) {  // Rm, LSL #0: Rm as it is, carry unchanged
+        ret = cpuPrvGetReg<wasT>(cpu, instr & 0x0F);
     } else {
         v = (instr >> 5) & 3;                         // get shift type
         ret = cpuPrvGetReg<wasT>(cpu, instr & 0x0F);  // get Rm
@@ -698,15 +810,214 @@ static FORCE_INLINE int32_t cpuPrvMedia_signedSaturate32(int32_t sign) {
     return (sign < 0) ? -0x80000000L : 0x7fffffffl;
 }
 
-template <int memorySystemKind, int size, bool write>
-static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
-                                       bool priviledged, uint_fast8_t *fsrP) {
-    gdbStubReportMemAccess(cpu->debugStub, vaddr, size, write);
+#ifndef __EMSCRIPTEN__
+// The read half of ramAccessInline, for RAM and ROM (which reads the same way).
+template <int size>
+static FORCE_INLINE void cpuPrvHostRead(const uint8_t *addr, void *bufP) {
+    switch (size) {
+        case 1:
+            *(uint8_t *)bufP = *addr;
+            break;
+        case 2:
+            *(uint16_t *)bufP = le16toh(*((const uint16_t *)addr));
+            break;
+        case 4:
+            *(uint32_t *)bufP = le32toh(*((const uint32_t *)addr));
+            break;
+        case 8:
+            ((uint64_t *)bufP)[0] = le64toh(*((const uint64_t *)addr));
+            break;
+    }
+}
+
+// After an access that went through the MMU to primary RAM or ROM, cache the page's
+// host address. Only for pages the MMU TLB holds now, so a hit gives what
+// mmuTranslateCached would. Writes are RAM only. Both are keyed by privilege, since the
+// permission check passed for that privilege and the current domains, S and R.
+template <bool write>
+static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
+                                            bool privileged) {
+    const struct ArmMmu *mmu = cpu->memorySystem.mmu;
+    if (mmu->transTablPA != MMU_DISABLED_TTP) {
+        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+    } else if (mmu->staleOn) {
+        return;  // the stale D-cache window: every access goes through mmuStaleTranslate
+    }
+    struct ArmMem *mem = cpu->mem;
+    struct HostTlb &hostTlb = mem->hostTlb;
+    const uint32_t vpage = va & ~0xfffu, ppage = pa & ~0xfffu;
+    const auto holds = [&](const struct ArmMemRegion &r) {
+        return r.ub && r.pa <= ppage && uint64_t(ppage) + 0x1000 <= r.ub;
+    };
+    const struct ArmMemRegion &ram = mem->regions[REGION_RAM];
+    const struct ArmMemRegion &rom = mem->regions[REGION_ROM];
+    if constexpr (write) {
+        if (!holds(ram)) return;
+        hostTlb.ram = (struct ArmRam *)ram.uD;
+        hostTlb.write[(va >> 12) & (HOST_TLB_SIZE - 1)] = {
+            hostTlbKey(hostTlb.gen, va, privileged), uintptr_t(uint32_t(ppage - vpage))};
+    } else {
+        uint8_t *host;
+        if (holds(ram)) {
+            const struct ArmRam *r = (const struct ArmRam *)ram.uD;
+            host = (uint8_t *)r->buf.buffer + (ppage - r->adr);
+        } else if (holds(rom)) {
+            host = (uint8_t *)romResolveAddress((struct ArmRom *)rom.uD, ppage, 0x1000);
+            if (!host) return;
+        } else {
+            return;
+        }
+        hostTlb.read[(va >> 12) & (HOST_TLB_SIZE - 1)] = {hostTlbKey(hostTlb.gen, va, privileged),
+                                                          uintptr_t(host) - vpage};
+    }
+}
+#endif
+
+#ifndef __EMSCRIPTEN__
+// ARM920T Fast data accesses, only inside cpuArm920RunLean. The host TLB arrays hold host page addresses
+// (host - va) for reads and writes alike, filled only for pages the lean page callback calls plain and the
+// MMU TLB holds now, keyed by privilege; mem->hostTlb.gen moves on every TLB, domain, S, R, TTB and
+// control change. Anything else sets leanExit, so the guarded step runs the instruction again.
+// The lean loop's current instruction has a single data access, a store: ARM STR, STRB, STRH, Thumb STR,
+// STRB, STRH in all their forms. In Thumb, leanInstr holds the table_thumb2arm translation where there is one
+// (always above 0xffff, as its condition is AL) and the Thumb halfword where there isn't.
+static bool cpuPrvLeanSingleStore(const struct ArmCpu *cpu) {
+    const uint32_t i = cpu->leanInstr;
+    if (cpu->T && i <= 0xffff) {
+        const uint32_t top = i & 0xf800;
+        return top == 0x6000 || top == 0x7000 || top == 0x8000 || top == 0x9000 ||
+               (i & 0xfe00) == 0x5000 || (i & 0xfe00) == 0x5200 || (i & 0xfe00) == 0x5400;
+    }
+    return (i & 0x0c100000) == 0x04000000 || (i & 0x0e1000f0) == 0x000000b0;
+}
+
+// The lean loop's current instruction has a single data access, a load: ARM LDR, LDRB, LDRH, LDRSB, LDRSH,
+// Thumb LDR, LDRB, LDRH, LDRSB, LDRSH in all their forms, translated or not.
+static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
+    const uint32_t i = cpu->leanInstr;
+    if (cpu->T && i <= 0xffff) {
+        const uint32_t top = i & 0xf800;
+        const uint32_t reg = i & 0xfe00;
+        return top == 0x6800 || top == 0x4800 || top == 0x9800 || top == 0x7800 || top == 0x8800 ||
+               reg == 0x5800 || reg == 0x5600 || reg == 0x5a00 || reg == 0x5c00 || reg == 0x5e00;
+    }
+    return (i & 0x0c100000) == 0x04100000 || ((i & 0x0e100090) == 0x00100090 && (i & 0x60));
+}
+
+template <int size, bool write>
+static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
+                                                         bool privileged) {
+    if (va & (size - 1)) {
+        cpu->leanExit = true;
+        return false;
+    }
+    struct ArmMmu *mmu = cpu->memorySystem.mmu;
+    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, va, privileged);
+    bool counted = false;
+    uint8_t *page = MMU_TRANSLATE_RESULT_OK(r) && cpu->leanPage
+                        ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)
+                        : nullptr;
+    if (!page) {
+        // Only where the step's D-cache model would bypass: a cacheable or bufferable access stops there.
+        const bool cached = ((cp15MMUArm920Control(cpu->cp15.cp15mmu) & 4) && MMU_TRANSLATE_RESULT_CACHEABLE(r)) ||
+                            MMU_TRANSLATE_RESULT_BUFFERABLE(r);
+        if constexpr (!write) {
+            uint32_t value, cost = 0;
+            // Fast blocks answer reads the same way, with ran the cycles of the blocks the run has finished (its
+            // time is charged at its end). An access there that a later one in the same instruction leaves to the
+            // step is taken again by the step, which changes nothing for the reads and writes these callbacks answer.
+            uint32_t ran = cpu->leanDone;
+#ifdef FROND_DYNARMIC
+            if (cpu->leanJit) ran = jitRanNow(cpu->jit);
+#endif
+            const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
+            if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
+                cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size,
+                              cpu->leanJit ? std::exchange(cpu->jitAccessPc, 0) : cpu->curInstrPC, ran, left,
+                              cpu->leanJit || cpuPrvLeanSingleLoad(cpu), &value, &cost)) {
+                memcpy(buf, &value, size);
+                cpu->leanBudget -= cost;
+                ++cpu->leanBus;
+                return true;
+            }
+        } else if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanWrite &&
+                   (cpu->leanJit || cpuPrvLeanSingleStore(cpu))) {
+            uint32_t value = 0, cost = 0;
+            memcpy(&value, buf, size);
+            // ran as for reads: in Fast blocks the cycles of the blocks the run has finished.
+            uint32_t ran = cpu->leanDone;
+#ifdef FROND_DYNARMIC
+            if (cpu->leanJit) ran = jitRanNow(cpu->jit);
+#endif
+            const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
+            if (cpu->leanWrite(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, value, ran, left, &cost)) {
+                cpu->leanBudget -= cost;
+                ++cpu->leanBus;
+                return true;
+            }
+        }
+        cpu->leanExit = true;
+        return false;
+    }
+    if constexpr (write) cpuArm920LeanStored(cpu, MMU_TRANSLATE_RESULT_PA(r));
+    uint8_t *host = page + (MMU_TRANSLATE_RESULT_PA(r) & 0xfffu);
+    if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
+    cpu->leanBus += counted;
+    // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[va >> 12].revision == mmu->revision) &&
+        !(uintptr_t(page) & 1)) {
+        struct HostTlb &t = cpu->mem->hostTlb;
+        struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
+        e.key = hostTlbKey(t.gen, va, privileged);
+        e.addend = (uintptr_t(page) - (va & ~0xfffu)) | uintptr_t(counted);
+    }
+    return true;
+}
+
+template <int size, bool write>
+static FORCE_INLINE bool cpuPrvLeanMemOp(struct ArmCpu *cpu, void *buf, uint32_t va, bool privileged) {
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    const struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
+    if (likely(!(va & (size - 1)) && e.key == hostTlbKey(t.gen, va, privileged))) {
+        uint8_t *host = (uint8_t *)((e.addend & ~uintptr_t(1)) + va);
+        if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
+        cpu->leanBus += e.addend & 1;
+        return true;
+    }
+    return cpuPrvLeanMemOpSlow<size, write>(cpu, buf, va, privileged);
+}
+#endif
+
+// arm920 is cpu->model == ArmCpuModel::arm920t, decided once per access by cpuPrvMemOpEx.
+template <int memorySystemKind, int size, bool write, bool arm920>
+static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
+                                            bool priviledged, uint_fast8_t *fsrP) {
+#ifndef __EMSCRIPTEN__
+    if (unlikely(cpu->nativeCallDepth && cpu->nativeScratchData &&
+                 vaddr >= cpu->nativeScratchBase &&
+                 uint64_t(vaddr) + size <= uint64_t(cpu->nativeScratchBase) + cpu->nativeScratchSize)) {
+        auto* scratch = cpu->nativeScratchData + vaddr - cpu->nativeScratchBase;
+        if constexpr (write) memcpy(scratch, buf, size); else memcpy(buf, scratch, size);
+        return true;
+    }
+    if constexpr (arm920 && memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size <= 4) {
+        if (unlikely(cpu->leanRun)) return cpuPrvLeanMemOp<size, write>(cpu, buf, vaddr, priviledged);
+    }
+#endif
 
     if constexpr (size > 1) {
         if (vaddr & (size - 1)) {
-            if (fsrP) *fsrP = 1;  // alignment fault;
-            return false;
+            if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size == 4) {
+                if (!cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu)) {
+                    vaddr &= ~3u;
+                } else {
+                    if (fsrP) *fsrP = 1;
+                    return false;
+                }
+            } else {
+                if (fsrP) *fsrP = 1;  // alignment fault;
+                return false;
+            }
         }
     }
 
@@ -715,27 +1026,62 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
     if (vaddr < 0x02000000UL) vaddr |= cpu->pid;
 #endif
 
+#ifndef __EMSCRIPTEN__
+    if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
+      if constexpr (!arm920) {
+        struct HostTlb &hostTlb = cpu->mem->hostTlb;
+        if constexpr (write) {
+            const struct HostTlbEntry &e = hostTlb.write[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
+            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged)))
+                return ramAccessInline<size, true>(hostTlb.ram, vaddr + uint32_t(e.addend), buf);
+        } else {
+            const struct HostTlbEntry &e = hostTlb.read[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
+            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
+                cpuPrvHostRead<size>((const uint8_t *)(e.addend + vaddr), buf);
+                return true;
+            }
+        }
+      }
+    }
+#endif
+
     uint32_t pa;
     if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         MMUTranslateResult translateResult =
+#ifndef __EMSCRIPTEN__
+            mmuTranslateCached<write, true>(cpu->memorySystem.mmu, vaddr, priviledged);
+#else
             mmuTranslate(cpu->memorySystem.mmu, vaddr, priviledged, write);
+#endif
 
         if (!MMU_TRANSLATE_RESULT_OK(translateResult)) {
-            *fsrP = MMU_TRANSLATE_RESULT_FSR(translateResult);
+            if (fsrP) *fsrP = MMU_TRANSLATE_RESULT_FSR(translateResult);
             return false;
         }
 
         pa = MMU_TRANSLATE_RESULT_PA(translateResult);
+        if constexpr (arm920) {
+            auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+            dc->mem = cpu->mem;
+            const auto ctl = cp15MMUArm920Control(cpu->cp15.cp15mmu);
+            const auto result = dc->access(vaddr, translateResult, size, write, buf, ctl & 4, ctl & 0x4000);
+            if (result == Arm920DataResult::ok) return true;
+            if (result == Arm920DataResult::unsupported) { if (fsrP) *fsrP = 0; return false; }
+        }
     } else {
         if (!MPU_TEST_RESULT_OK(mpuTestAddress(cpu->memorySystem.mpu, vaddr, priviledged, write))) {
-            *fsrP = 1;
+            if (fsrP) *fsrP = 1;
             return false;
         }
 
         pa = vaddr;
     }
 
+#ifndef __EMSCRIPTEN__
+    bool ok = memAccessRamInline<size, write>(cpu->mem, pa, buf);
+#else
     bool ok = memAccess<size, write>(cpu->mem, pa, buf);
+#endif
 
     if (!ok) {
         if (fsrP) *fsrP = 10;  // external abort on non-linefetch
@@ -743,7 +1089,24 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
         return false;
     }
 
+#ifndef __EMSCRIPTEN__
+    if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size <= 8 && !arm920)
+        cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged);
+#endif
+
     return true;
+}
+
+// The ARM920T's lean run, data cache model and missing host TLB stay out of the other cores' path
+// behind one model check.
+template <int memorySystemKind, int size, bool write>
+static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
+                                       bool priviledged, uint_fast8_t *fsrP) {
+    if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+        if (unlikely(cpu->model == ArmCpuModel::arm920t))
+            return cpuPrvMemOpExModel<memorySystemKind, size, write, true>(cpu, buf, vaddr, priviledged, fsrP);
+    }
+    return cpuPrvMemOpExModel<memorySystemKind, size, write, false>(cpu, buf, vaddr, priviledged, fsrP);
 }
 
 template <int size, bool write>
@@ -767,9 +1130,11 @@ static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vad
 #else
     if (cpuPrvMemOpEx<memorySystemKind, size, write>(cpu, buf, vaddr, priviledged, fsrP))
         return true;
+    if (cpu->leanExit) return false;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed!\n", (int)(write ? 'W' : 'R'), (unsigned)size,
-            (unsigned long)vaddr);
+    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
+            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
+            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
@@ -786,12 +1151,89 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
 #else
     if (cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP)) return true;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed!\n", (int)(write ? 'W' : 'R'), (unsigned)size,
-            (unsigned long)vaddr);
+    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
+            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
+            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
     return false;
+#endif
+}
+
+bool cpuFetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t* fsr) {
+    if (cpu->model != ArmCpuModel::arm920t) return false;
+    return icacheArm920Fetch(cpu->ic, va, cpu->T ? 2 : 4, cpu->privileged, fsr, word);
+}
+
+void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
+
+void cpuDropTranslatedCode(struct ArmCpu *cpu) {
+#ifdef FROND_DYNARMIC
+    // Fast blocks turned off hold nothing that runs; turning them on again drops it all.
+    if (cpu->jit && (cpu->jitBlocks || !cpu->jitLoopOnly)) jitClear(cpu->jit);
+#else
+    (void)cpu;
+#endif
+}
+
+#ifdef FROND_DYNARMIC
+static bool cpuPrvFastEngine;
+bool cpuSetFastEngine(bool fast) {
+    cpuPrvFastEngine = fast;
+    return true;
+}
+void cpuSetJitSync(bool sync) { jitSetSync(sync); }
+bool cpuJitExecutionCounts(const ArmCpu *cpu, uint64_t *blocks, uint64_t *instructions) {
+    // The ARM920T Fast blocks JIT is the lean path's, outside the saved engine (stateFlagFast).
+    if (!cpu || !cpu->jit || cpu->jitLoopOnly) return false;
+    jitExecutionCounts(cpu->jit, blocks, instructions);
+    return true;
+}
+bool cpuJitCompileCounts(const struct ArmCpu *cpu, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
+    if (!cpu || !cpu->jit) return false;
+    jitCompileCounts(cpu->jit, stale, aheadCompiled, aheadUsed);
+    return true;
+}
+void cpuSetJitCodeCacheSize(size_t bytes) { jitSetCodeCacheSize(bytes); }
+bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears) {
+    if (!cpu || !cpu->jit) return false;
+    *clears = jitCacheClears(cpu->jit);
+    return true;
+}
+#else
+bool cpuSetFastEngine(bool fast) { return !fast; }
+void cpuSetJitSync(bool) {}
+bool cpuJitExecutionCounts(const ArmCpu *, uint64_t *, uint64_t *) { return false; }
+bool cpuJitCompileCounts(const struct ArmCpu *, uint64_t *, uint64_t *, uint64_t *) { return false; }
+void cpuSetJitCodeCacheSize(size_t) {}
+bool cpuJitCacheClears(const struct ArmCpu *, uint64_t *) { return false; }
+#endif
+
+uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
+    constexpr uint32_t interpreter = 19;
+#ifdef FROND_DYNARMIC
+    if (cpu && cpu->jit) {
+        // cpuPrvCycleJit: a run passes its budget by at most L - 1 (every link checks, no
+        // block is longer than L), then a run that stopped for the interpreter runs one
+        // more instruction before the budget check. PACE batches stay at 19.
+        const uint32_t l = jitMaxUnchecked(cpu->jit);
+        if (!l) return UINT32_MAX;
+        return l > interpreter ? l : interpreter;
+    }
+#else
+    (void)cpu;
+#endif
+    return interpreter;
+}
+
+void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size) {
+#ifdef FROND_DYNARMIC
+    if (cpu && cpu->jit) jitWriteProtect(cpu->jit, host, size);
+#else
+    (void)cpu;
+    (void)host;
+    (void)size;
 #endif
 }
 
@@ -836,6 +1278,42 @@ bool cpuMemOpExternal(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_
     }
 }
 
+// A coprocessor's data access for the guest, checked for the current mode. False with *fsr
+// set on a fault, which cpuDataAbortExternal then logs and takes.
+bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t size, bool write,
+                   uint_fast8_t *fsr) {
+    const bool p = cpu->privileged;
+    switch (size) {
+        case 1:
+            return write ? cpuPrvMemOpExGeneric<1, true>(cpu, buf, vaddr, p, fsr)
+                         : cpuPrvMemOpExGeneric<1, false>(cpu, buf, vaddr, p, fsr);
+        case 2:
+            return write ? cpuPrvMemOpExGeneric<2, true>(cpu, buf, vaddr, p, fsr)
+                         : cpuPrvMemOpExGeneric<2, false>(cpu, buf, vaddr, p, fsr);
+        case 4:
+            return write ? cpuPrvMemOpExGeneric<4, true>(cpu, buf, vaddr, p, fsr)
+                         : cpuPrvMemOpExGeneric<4, false>(cpu, buf, vaddr, p, fsr);
+        default:
+            ERR("invalid size %i\n", size);
+    }
+    return false;
+}
+
+// A failed data access of the instruction at curInstrPC: logged as cpuPrvMemOp logs the
+// interpreter's own, then the data abort.
+static void cpuPrvDataAbort(struct ArmCpu *cpu, uint32_t vaddr, unsigned size, bool write, uint_fast8_t fsr) {
+#ifndef __EMSCRIPTEN__
+    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
+            (unsigned long)vaddr, cpu->curInstrPC, unsigned(fsr));
+    gdbStubDebugBreakRequested(cpu->debugStub);
+#endif
+    cpuPrvHandleMemErr(cpu, vaddr, write, false, fsr);
+}
+
+void cpuDataAbortExternal(struct ArmCpu *cpu, uint32_t vaddr, uint_fast8_t size, bool write, uint_fast8_t fsr) {
+    cpuPrvDataAbort(cpu, vaddr, size, write, fsr);
+}
+
 static FORCE_INLINE uint64_t cpuPrv64FromHalves(uint64_t hi, uint32_t lo) {
     // better than shifting in almost all compilers
     union {
@@ -871,12 +1349,44 @@ static FORCE_INLINE bool cpuPrvSignedAdditionWithPossibleCarryOverflows(uint32_t
     return ((a ^ b ^ 0x80000000UL) & (a ^ sum)) >> 31;
 }
 
-static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu) {
+static bool cpuPrvPaceFaultDiagnostics() {
+#ifndef __EMSCRIPTEN__
+    static const bool enabled = std::getenv("FROND_PACE_FAULT_DIAGNOSTICS") != nullptr;
+    return enabled;
+#else
+    return false;
+#endif
+}
+
+static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
+                                      uint32_t instructionPc = 0,
+                                      const PaceDebugState* before = nullptr) {
     uint32_t addr;
     bool wasWrite;
     uint_fast8_t fsr;
 
     paceGetMemeryFault(&addr, &wasWrite, &fsr);
+#ifndef __EMSCRIPTEN__
+    if (cpuPrvPaceFaultDiagnostics()) {
+        const auto after = paceDebugState();
+        fprintf(stderr, "PACE-FAULT origin=%s addr=%08x write=%u fsr=%02x arm_pc=%08x cpsr=%08x modePace=%u internal_state=%08x instruction_pc_available=%u instruction_pc=%08x retained_opcode_unvalidated=%04x\n",
+                origin, addr, unsigned(wasWrite), unsigned(fsr), cpu->curInstrPC,
+                cpuPrvMaterializeCPSR(cpu), unsigned(cpu->modePace), after.statePtr,
+                unsigned(before != nullptr), instructionPc,
+                before ? unsigned(paceGetLastOpcode()) : 0);
+        for (unsigned i = 0; i < 16; ++i)
+            fprintf(stderr, "PACE-FAULT arm r%u=%08x\n", i, cpu->regs[i]);
+        for (const auto* state : {before, &after}) {
+            if (!state) continue;
+            fprintf(stderr, "PACE-FAULT %s pc=%08x sr=%04x state=%08x\n",
+                    state == before ? "before" : "after", state->pc, unsigned(state->sr), state->statePtr);
+            for (unsigned i = 0; i < 8; ++i)
+                fprintf(stderr, "PACE-FAULT %s d%u=%08x a%u=%08x\n",
+                        state == before ? "before" : "after", i, state->d[i], i, state->a[i]);
+        }
+        fflush(stderr);
+    }
+#endif
     cpuPrvHandleMemErr(cpu, addr, wasWrite, false, fsr);
 
 #ifndef __EMSCRIPTEN__
@@ -885,7 +1395,13 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu) {
 }
 
 template <int memorySystemKind, bool wasT>
-static void execFn_noop(struct ArmCpu *cpu, uint32_t instr) {}
+static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr);
+
+template <int memorySystemKind, bool wasT>
+static void execFn_noop(struct ArmCpu *cpu, uint32_t instr) {
+    if (cpu->model == ArmCpuModel::arm920t && (instr >> 28) == 15)
+        execFn_invalid<memorySystemKind, wasT>(cpu, instr);
+}
 
 // PACE entrypoint was called from ARM: regular invocation
 template <int memorySystemKind>
@@ -903,7 +1419,7 @@ static void execFn_paceEnter(struct ArmCpu *cpu, uint32_t instr) {
     paceSetPriviledged(cpu->privileged);
     paceSetStatePtr(cpu->regs[0]);
 
-    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu);
+    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
 
     cpu->modePace = true;
     cpu->paceOffset = cpu->curInstrPC - cpu->pacePatch->enterPace;
@@ -922,7 +1438,7 @@ static void execFn_paceResume(struct ArmCpu *cpu, uint32_t instr) {
     paceSetPriviledged(cpu->privileged);
     paceSetStatePtr(cpu->regs[0]);
 
-    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu);
+    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
 
     cpu->modePace = true;
     cpu->paceOffset = cpu->curInstrPC - 4 - cpu->pacePatch->enterPace;
@@ -953,7 +1469,7 @@ static void execFn_paceReturnFromCallout(struct ArmCpu *cpu, uint32_t instr) {
     paceSetPriviledged(cpu->privileged);
     paceSetStatePtr(cpu->regs[0]);
 
-    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu);
+    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
 
     cpu->modePace = true;
     cpu->paceOffset = cpu->curInstrPC - 8 - cpu->pacePatch->enterPace;
@@ -964,6 +1480,64 @@ static void execFn_paceReturnFromCallout(struct ArmCpu *cpu, uint32_t instr) {
 #ifdef TRACE_PACE
     fprintf(stderr, "PACE return from callout\n");
 #endif
+}
+
+// The ROM PACE has finished the instruction native PACE faulted on (cpuPrvPaceRomFallback)
+// and is about to dispatch the next one: r10 is its address + 4, r4 the SR, r8 its opcode
+// and [sp] the state. Stores them as the ROM PACE's own exit does, then resumes native PACE.
+template <int memorySystemKind>
+static void execFn_paceDispatch(struct ArmCpu *cpu, uint32_t instr) {
+    uint_fast8_t fsr = 0;
+    uint32_t state = 0;
+
+    if (!cpuPrvMemOp<memorySystemKind, 4, false>(cpu, &state, cpu->regs[REG_NO_SP], cpu->privileged,
+                                                 &fsr))
+        return cpuPrvHandleMemErr(cpu, cpu->regs[REG_NO_SP], false, false, fsr);
+
+    const struct {
+        uint32_t offset, value;
+    } stores[] = {{0x44, cpu->regs[10] - 4}, {0x48, cpu->regs[4]}, {0, cpu->regs[8]}};
+    for (auto store : stores) {
+        if (!cpuPrvMemOp<memorySystemKind, 4, true>(cpu, &store.value, state + store.offset,
+                                                    cpu->privileged, &fsr))
+            return cpuPrvHandleMemErr(cpu, state + store.offset, true, false, fsr);
+    }
+
+    // r9 is the caller's again, as native PACE callouts expect.
+    if (!cpuPrvMemOp<memorySystemKind, 4, false>(cpu, &cpu->regs[9], cpu->regs[REG_NO_SP] + 24,
+                                                 cpu->privileged, &fsr))
+        return cpuPrvHandleMemErr(cpu, cpu->regs[REG_NO_SP] + 24, false, false, fsr);
+
+    cpu->regs[0] = state;
+    paceSetPriviledged(cpu->privileged);
+    paceSetStatePtr(state);
+
+    if (!paceLoad68kState()) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
+
+    cpu->modePace = true;
+    cpu->regs[REG_NO_PC] = cpu->paceOffset + cpu->pacePatch->resumePace;
+
+    cpuSetSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
+}
+
+// TG50 automatic library Sleep/Wake, in place of "mov r3, #0" before "bl 200ec798".
+// r7 is the 68k state, r1 the library table index. The refnum goes in the free stack word
+// below A7; 200de128 then reserves argBytes + 4 under A7, so the library sees it at 8(A6)
+// after LINK, and A7 is back where it was when the call returns. If A7 is odd or the write
+// fails, the call keeps the firmware's zero-argument form.
+template <int memorySystemKind>
+static void execFn_tg50LibraryRefnum(struct ArmCpu *cpu, uint32_t instr) {
+    uint_fast8_t fsr = 0;
+    uint32_t a7 = 0;
+    cpu->regs[3] = 0;
+    if (!cpuPrvMemOpEx<memorySystemKind, 4, false>(cpu, &a7, cpu->regs[7] + 0x40,
+                                                   cpu->privileged, &fsr) ||
+        (a7 & 1) || a7 < 2)
+        return;
+    // 68k memory is big-endian.
+    uint16_t refnum = __builtin_bswap16(uint16_t(cpu->regs[1]));
+    if (cpuPrvMemOpEx<memorySystemKind, 2, true>(cpu, &refnum, a7 - 2, cpu->privileged, &fsr))
+        cpu->regs[3] = 2;
 }
 
 static void execFn_peephole_ADC_udiv10(struct ArmCpu *cpu, uint32_t instr) {
@@ -1020,6 +1594,8 @@ static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT, bool align2>
 static void execFn_b2thumb(struct ArmCpu *cpu, uint32_t instr) {
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
+
     uint32_t ea;
 
     ea = instr << 8;
@@ -1041,7 +1617,8 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
     uint_fast8_t mode, cpNo;
     uint8_t memVal8;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (two && cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     cpNo = (instr >> 8) & 0x0F;
     mode = cpuPrvArmAdrMode_5(cpu, instr, &addBefore, &addAfter, &memVal8);
@@ -1052,6 +1629,7 @@ static void execFn_cp_mem2reg(struct ArmCpu *cpu, uint32_t instr) {
         goto invalid_instr;
 
     if (mode & ARM_MODE_5_RR) {  // handle MCRR, MRCC
+        if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
         if (!cpu->coproc[cpNo].twoRegF ||
             !cpu->coproc[cpNo].twoRegF(cpu, cpu->coproc[cpNo].userData, !!(instr & 0x00100000UL),
@@ -1078,7 +1656,8 @@ template <int memorySystemKind, bool wasT, bool two>
 static void execFn_cp_dp(struct ArmCpu *cpu, uint32_t instr) {
     uint_fast8_t cpNo;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (two && cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     cpNo = (instr >> 8) & 0x0F;
 
@@ -1117,7 +1696,28 @@ static void execFn_swb(struct ArmCpu *cpu, uint32_t instr) {
     uint_fast8_t fsr;
     uint8_t memVal8;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+
+    if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+        if (cpu->model == ArmCpuModel::arm920t && (tag == 0 || tag == 4)) {
+            ea = cpuPrvGetRegNotPC(cpu, (instr >> 16) & 0x0f);
+            const unsigned size = tag == 0 ? 4 : 1;
+            if (size == 4 && (ea & 3)) {
+                if (cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu))
+                    return cpuPrvHandleMemErr(cpu, ea, false, false, 1);
+                ea &= ~3u;
+            }
+            for (bool writing : {false, true}) {
+                const auto translation = mmuTranslate(cpu->memorySystem.mmu, ea, cpu->privileged, writing);
+                if (!MMU_TRANSLATE_RESULT_OK(translation))
+                    return cpuPrvHandleMemErr(cpu, ea, writing, false, MMU_TRANSLATE_RESULT_FSR(translation));
+                auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+                dc->mem = cpu->mem;
+                if (!dc->supported(MMU_TRANSLATE_RESULT_PA(translation), size, writing))
+                    return cpuPrvHandleMemErr(cpu, ea, writing, false, 0);
+            }
+        }
+    }
 
     switch (tag) {
         case 0:  // SWP
@@ -1128,7 +1728,7 @@ static void execFn_swb(struct ArmCpu *cpu, uint32_t instr) {
                 cpuPrvHandleMemErr(cpu, ea, false, false, fsr);
                 return;
             }
-            op1 = memVal32;
+            op1 = (ea & 3) ? cpuPrvROR(memVal32, (ea & 3) * 8) : memVal32;
             memVal32 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);
             ok = cpuPrvMemOp<memorySystemKind, 4, true>(cpu, &memVal32, ea, cpu->privileged, &fsr);
             if (!ok) {
@@ -1166,7 +1766,7 @@ static void execFn_mult(struct ArmCpu *cpu, uint32_t instr) {
     uint32_t op1, op2, res;
     uint64_t res64;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     switch (tag) {  // multiplies
 
@@ -1246,7 +1846,9 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
     uint8_t memVal8;
     uint32_t doubleMem[2];
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if ((mode & ARM_MODE_3_TYPE) == ARM_MODE_3_D && cpu->model == ArmCpuModel::arm920t)
+        return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     reg = (instr >> 16) & 0x0F;
 
@@ -1350,14 +1952,16 @@ static void execFn_load_store_1(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT>
 static void execFn_clz(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     cpuPrvSetRegNotPC(cpu, (instr >> 12) & 0x0F, cpuPrvClz(cpuPrvGetRegNotPC(cpu, instr & 0xF)));
 }
 
 template <int memorySystemKind, bool wasT, bool link>
 static void execFn_bl_reg(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if (link && cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     cpuPrvSetPC(cpu, cpuPrvGetReg<wasT>(cpu, instr & 0x0F));
 
@@ -1368,14 +1972,14 @@ static void execFn_bl_reg(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT, bool spsr>
 static void execFn_psr2reg(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     cpuPrvSetRegNotPC(cpu, (instr >> 12) & 0x0F, spsr ? cpu->SPSR : cpuPrvMaterializeCPSR(cpu));
 }
 
 template <int memorySystemKind, bool wasT, bool spsr, bool pc>
 static void execFn_reg2psr(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     cpuPrvSetPSR<spsr>(cpu, (instr >> 16) & 0x0F, cpuPrvGetReg<wasT, pc>(cpu, instr & 0x0F));
 }
@@ -1384,7 +1988,8 @@ template <int memorySystemKind, bool wasT, int tag>
 static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
     uint32_t op1, op2, res;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     op1 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);          // Rm
     op2 = cpuPrvGetRegNotPC(cpu, (instr >> 16) & 0x0F);  // Rn
@@ -1402,7 +2007,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
         case 1:  // QSUB
 
             res = op1 - op2;
-            if (cpuPrvSignedAdditionOverflows(op1, op2, res)) {
+            if (cpuPrvSignedSubtractionOverflows(op1, op2, res)) {
                 cpu->Q = 1;
                 res = cpuPrvMedia_signedSaturate32(op1);
             }
@@ -1433,7 +2038,7 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
             op2 = res;
 
             res = op1 - op2;
-            if (cpuPrvSignedAdditionOverflows(op1, op2, res)) {
+            if (cpuPrvSignedSubtractionOverflows(op1, op2, res)) {
                 cpu->Q = 1;
                 res = cpuPrvMedia_signedSaturate32(op1);
             }
@@ -1448,7 +2053,8 @@ static void execFn_dspadd(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT>
 static void execFn_softbreak(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_P_ABT, cpu->curInstrPC + 4,
                     ARM_SR_MODE_ABT | ARM_SR_I);
@@ -1459,7 +2065,8 @@ static void execFn_dspmul(struct ArmCpu *cpu, uint32_t instr) {
     uint32_t op1, op2, res;
     uint64_t res64;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 
     op1 = cpuPrvGetRegNotPC(cpu, instr & 0x0F);         // Rm
     op2 = cpuPrvGetRegNotPC(cpu, (instr >> 8) & 0x0F);  // Rs
@@ -1546,7 +2153,7 @@ static void execFn_dproc(struct ArmCpu *cpu, uint32_t instr) {
     uint64_t res64;
     bool cOut;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     op2 = cpuPrvArmAdrMode_1<wasT>(cpu, instr, &cOut);
 
@@ -1596,9 +2203,9 @@ static void execFn_dproc(struct ArmCpu *cpu, uint32_t instr) {
             res = res64 = (uint64_t)op1 + op2 + ((cpu->flags & ARM_SR_C) >> 29);
             if (setFlags) {  // hard to get this right in C in 32 bits so go to 64...
                 cOut = res64 >> 32;
-                cpuPrvSignedAdditionWithPossibleCarryOverflows(op1, op2, res);
                 cpu->flags &= ~ARM_SR_V;
-                if ((res64 >> 31) == 1 || (res64 >> 31) == 2) cpu->flags |= ARM_SR_V;
+                if (cpuPrvSignedAdditionWithPossibleCarryOverflows(op1, op2, res))
+                    cpu->flags |= ARM_SR_V;
             }
             break;
 
@@ -1689,6 +2296,7 @@ static void execFn_dproc(struct ArmCpu *cpu, uint32_t instr) {
     else if (destPc) {  // copy SPSR to CPSR. we allow in user
                         // mode too - allowed and faster
 
+        if (cpu->model == ArmCpuModel::arm920t) icacheArm920BranchInline(cpu->ic);
         sr = cpu->SPSR;
         cpuPrvSetPSRlo8(cpu, sr);
         cpuPrvSetPSRhi8(cpu, sr);
@@ -1715,7 +2323,7 @@ static void execFn_memop_load_store_2(struct ArmCpu *cpu, uint32_t instr) {
     uint8_t memVal8;
     bool privileged = cpu->privileged;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     sourceReg = (instr >> 16) & 0x0F;
     if constexpr (mode & ARM_MODE_2_T) privileged = false;
@@ -1765,6 +2373,7 @@ static void execFn_memop_load_store_2(struct ArmCpu *cpu, uint32_t instr) {
                 return;
             }
 
+            if (ea & 3) memVal32 = cpuPrvROR(memVal32, (ea & 3) * 8);
             destReg = (instr >> 12) & 0x0F;
 
             // from RePalm:
@@ -1796,6 +2405,8 @@ static void execFn_memop_load_store_2(struct ArmCpu *cpu, uint32_t instr) {
         }
     } else {
         op1 = cpuPrvGetReg<wasT, destPc>(cpu, (instr >> 12) & 0x0F);
+        if constexpr (!wasT && destPc && (mode & ARM_MODE_2_WORD))
+            if (cpu->model == ArmCpuModel::arm920t) op1 = cpu->curInstrPC + 12;
 
         if (mode & ARM_MODE_2_WORD) {
             memVal32 = op1;
@@ -1824,7 +2435,7 @@ static void execFn_memop_load_store_2(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT, int mode, bool isLoad, bool sBit>
 static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     bool userModeRegs = false, copySPSR = false, ok;
     uint32_t loadedPc = 0xfffffffful;
@@ -1849,6 +2460,8 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
                                                                                                    \
         if (!isLoad) {                                                                             \
             memVal32 = cpuPrvGetReg<wasT>(cpu, regNo);                                             \
+            if (!wasT && regNo == REG_NO_PC && cpu->model == ArmCpuModel::arm920t)                  \
+                memVal32 = cpu->curInstrPC + 12;                                                   \
             if (unlikely(userModeRegs)) {                                                          \
                 if (regNo >= 8 && regNo <= 12 && (cpu->M == ARM_SR_MODE_FIQ))                      \
                     memVal32 = cpu->extra_regs[regNo - 8];                                         \
@@ -1862,8 +2475,9 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
         if (mode & ARM_MODE_4_BFR) ea += (mode & ARM_MODE_4_INC) ? 4 : -4;                         \
         ok = cpuPrvMemOp<memorySystemKind, 4, !isLoad>(cpu, &memVal32, ea, cpu->privileged, &fsr); \
         if (!ok) {                                                                                 \
-            cpuPrvHandleMemErr(cpu, ea, !isLoad, false, fsr);                                      \
+            /* Put a loaded base back before the abort switches mode and bank. */                 \
             if (regsList & (1 << reg)) cpuPrvSetReg(cpu, reg, origBaseRegVal);                     \
+            cpuPrvHandleMemErr(cpu, ea, !isLoad, false, fsr);                                      \
                                                                                                    \
             return;                                                                                \
         }                                                                                          \
@@ -1911,6 +2525,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
 
     if (mode & ARM_MODE_4_WBK) cpuPrvSetRegNotPC(cpu, reg, ea);
     if (copySPSR) {
+        if (cpu->model == ArmCpuModel::arm920t) icacheArm920BranchInline(cpu->ic);
         sr = cpu->SPSR;
         cpuPrvSetPSRlo8(cpu, sr);
         cpuPrvSetPSRhi8(cpu, sr);
@@ -1926,7 +2541,7 @@ template <int memorySystemKind, bool wasT, bool link>
 static void execFn_bl(struct ArmCpu *cpu, uint32_t instr) {
     uint32_t ea;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
     ea = instr << 8;
     ea = ((int32_t)ea) >> 7;
@@ -1944,10 +2559,12 @@ template <int memorySystemKind, bool wasT>
 static void execFn_swi(struct ArmCpu *cpu, uint32_t instr) {
     uint_fast8_t fsr;
 
-    if (table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)]) return;
+    if (cpuPrvConditionFails(cpu, instr)) return;
 
-    if ((wasT && (instr & 0x00fffffful) == 0xab) ||
-        (!wasT && (instr & 0x00fffffful) == 0x123456ul)) {
+    // ARM920T always enters the guest SWI vector, for every immediate and operation.
+    if (cpu->model != ArmCpuModel::arm920t &&
+        ((wasT && (instr & 0x00fffffful) == 0xab) ||
+         (!wasT && (instr & 0x00fffffful) == 0x123456ul))) {
         if (cpu->regs[0] == 4) {
             uint32_t addr = cpu->regs[1];
             uint8_t ch;
@@ -2047,6 +2664,12 @@ static ExecFn ATTR_EMCC_NOINLINE cpuPrvDecoderArm(uint32_t instr) {
 
                 case INSTR_PACE_RETURN_FROM_CALLOUT:
                     return PREFIX_EXEC_FN(execFn_paceReturnFromCallout<memorySystemKind>);
+
+                case INSTR_TG50_LIBRARY_REFNUM:
+                    return PREFIX_EXEC_FN(execFn_tg50LibraryRefnum<memorySystemKind>);
+
+                case INSTR_PACE_DISPATCH:
+                    return PREFIX_EXEC_FN(execFn_paceDispatch<memorySystemKind>);
 
                 case INSTR_PEEPHOLE_ADS_UDIVMOD:
                     return PREFIX_EXEC_FN(execFn_peephole_ADC_udivmod<memorySystemKind>);
@@ -2609,6 +3232,8 @@ static void execFn_thumb_3_mov(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool blx, bool pcS>
 static void execFn_thumb_bl_x(struct ArmCpu *cpu, uint32_t instr) {
+    if (blx && cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, true>(cpu, instr);
+
     if constexpr (blx) cpu->regs[REG_NO_LR] = cpu->regs[REG_NO_PC] + 1;
 
     if constexpr (pcS)
@@ -2630,7 +3255,7 @@ static void execFn_thumb_bl_x_prefix(struct ArmCpu *cpu, uint32_t instr) {
     uint32_t offsetHi = instr & 0x7FF;
 
     if (instr & 0x0400) offsetHi |= 0x000FF800UL;
-    cpu->regs[REG_NO_LR] = cpu->regs[REG_NO_PC] + (offsetHi << 12);
+    cpu->regs[REG_NO_LR] = cpu->regs[REG_NO_PC] + 2 + (offsetHi << 12);
 }
 
 template <int memorySystemKind>
@@ -2638,18 +3263,23 @@ static void execFn_thumb_bl_suffix(struct ArmCpu *cpu, uint32_t instr) {
     const uint32_t lr = cpu->regs[REG_NO_PC] | 1ul;
     const uint32_t offsetLo = instr & 0x7FF;
 
-    cpu->regs[REG_NO_PC] = cpu->regs[REG_NO_LR] + 2 + (offsetLo << 1);
+    cpu->regs[REG_NO_PC] = cpu->regs[REG_NO_LR] + (offsetLo << 1);
     cpu->regs[REG_NO_LR] = lr;
+    if (unlikely(cpu->earlyAudioHook!=nullptr) &&
+        (cpu->curInstrPC==cpu->earlyAudioFrom[0] || cpu->curInstrPC==cpu->earlyAudioFrom[1]))
+        cpu->earlyAudioHook(cpu,cpu->earlyAudioContext,cpu->regs[REG_NO_PC]|1u,cpu->curInstrPC);
 }
 
 template <int memorySystemKind>
 static void execFn_thumb_blx_suffix(struct ArmCpu *cpu, uint32_t instr) {
+    if (cpu->model == ArmCpuModel::arm920t) return execFn_invalid<memorySystemKind, true>(cpu, instr);
+
     const uint32_t lr = cpu->regs[REG_NO_PC] | 1ul;
     const uint32_t offsetLo = instr & 0x7FF;
 
     if (cpu->T) cpuSetSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
 
-    cpu->regs[REG_NO_PC] = (cpu->regs[REG_NO_LR] + 2 + (offsetLo << 1)) & ~3ul;
+    cpu->regs[REG_NO_PC] = (cpu->regs[REG_NO_LR] + (offsetLo << 1)) & ~3ul;
     cpu->regs[REG_NO_LR] = lr;
     cpu->T = 0;
 }
@@ -2975,9 +3605,10 @@ static uint32_t translateThumb(uint16_t instrT) {
 
         case 12:  // LDMIA STMIA		(bit11 set = ldmia)
             instr |= 0x08800000UL | (((uint32_t)(instrT & 0x700)) << 8) | (instrT & 0xFF);
+            // STMIA always writes back; LDMIA only when the base isn't loaded.
             if (instrT & 0x0800) instr |= 0x00100000UL;
-            if (!((1UL << ((instrT >> 8) & 0x07)) & instrT))
-                instr |= 0x00200000UL;  // set W bit if needed
+            if (!(instrT & 0x0800) || !((1UL << ((instrT >> 8) & 0x07)) & instrT))
+                instr |= 0x00200000UL;
             break;
 
         case 13:  // B(1), SWI, undefined instr space
@@ -3189,6 +3820,13 @@ static ImmShift cpuPrvImmShiftImmTableEntry(uint32_t key) {
 }
 
 void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
+    cpu->arm920Waiting = false;
+    cpu->exceptionSequence = 0;
+#ifndef __EMSCRIPTEN__
+    cpuClearNativeRuntime(cpu);
+#endif
+    gdbStubResetPace(cpu->debugStub);
+    cpu->modePace = false; // Reset starts at the native vector, never stale 68k state.
     cpu->I = true;  // start w/o interrupts in supervisor mode
     cpu->F = true;
     cpu->M = ARM_SR_MODE_SVC;
@@ -3201,6 +3839,7 @@ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
     switch (cpu->memorySystemKind) {
         case ARM_MEMORY_SYSTEM_MMU:
             mmuReset(cpu->memorySystem.mmu);
+            if (cpu->model == ArmCpuModel::arm920t) cp15MMUConfigureArm920Bootstrap(cpu->cp15.cp15mmu);
             break;
 
         case ARM_MEMORY_SYSTEM_MPU:
@@ -3225,10 +3864,26 @@ static void initStatic() {
     for (int i = 0; i < 128; i++) table_immShiftImm[i] = cpuPrvImmShiftImmTableEntry(i);
 }
 
+#ifdef FROND_DYNARMIC
+static bool cpuPrvJitWanted();
+static void cpuPrvJitInval(void *ctx, uint32_t va, uint32_t size, bool guest);
+static const uint8_t *cpuPrvJitWatchFetch(void *ctx, uint32_t pa);
+#endif
+
 struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind, bool xscale,
                        bool omap, int debugPort, uint32_t cpuid, uint32_t cacheId,
                        struct PatchDispatch *patchDispatch, struct PacePatch *pacePatch,
-                       struct SystemState *systemState) {
+                       struct SystemState *systemState, ArmCpuModel model) {
+    return cpuInit(pc, mem, memorySystemKind, xscale, omap, debugPort, cpuid, cacheId,
+                   patchDispatch, pacePatch, systemState, model, false);
+}
+
+struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind, bool xscale,
+                       bool omap, int debugPort, uint32_t cpuid, uint32_t cacheId,
+                       struct PatchDispatch *patchDispatch, struct PacePatch *pacePatch,
+                       struct SystemState *systemState, ArmCpuModel model, bool jitSingleStep) {
+    if (model == ArmCpuModel::arm920t && (xscale || omap || memorySystemKind != ARM_MEMORY_SYSTEM_MMU))
+        ERR("ARM920T bootstrap requires the non-XScale MMU");
     initStatic();
 
     struct ArmCpu *cpu = (struct ArmCpu *)malloc(sizeof(*cpu));
@@ -3236,9 +3891,9 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
     if (!cpu) ERR("cannot alloc CPU");
 
     memset(cpu, 0, sizeof(*cpu));
+    cpu->model = model;
 
     cpu->debugStub = gdbStubInit(cpu, debugPort);
-    if (!cpu->debugStub) ERR("Cannot init debug stub");
 
     cpu->mem = mem;
 
@@ -3271,14 +3926,229 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
 
     cpuReset(cpu, pc);
 
+#ifdef FROND_DYNARMIC
+    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpuPrvJitWanted()) {
+        cpu->jit = jitCreate(cpu, jitSingleStep);
+        icacheSetInvalHook(cpu->ic, cpuPrvJitInval, cpu);
+        icacheSetFetchWatch(cpu->ic, cpuPrvJitWatchFetch, cpu);
+    }
+#endif
+
     return cpu;
+}
+
+ArmCpuModel cpuGetModel(const ArmCpu* cpu) { return cpu->model; }
+uint64_t cpuExceptionSequence(const ArmCpu* cpu) { return cpu->exceptionSequence; }
+
+uint32_t cpuArm920ClockMode(const ArmCpu* cpu) {
+    return cp15MMUClockMode(cpu->cp15.cp15mmu);
+}
+
+#ifndef __EMSCRIPTEN__
+void cpuClearNativeRuntime(ArmCpu* cpu) {
+    cpu->nativePc[0] = cpu->nativePc[1] = 0;
+    memset(cpu->nativeCallbacks, 0, sizeof(cpu->nativeCallbacks));
+    cpu->nativeCallDepth = 0;
+    cpu->nativeSessionActive = false;
+    cpu->nativeStackLower = cpu->nativeStackUpper = 0;
+    cpu->nativeStackOwnerAddress = cpu->nativeStackOwnerValue = 0;
+    cpu->nativeScratchData = nullptr;
+    cpu->nativeScratchBase = cpu->nativeScratchSize = 0;
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC | SLOW_PATH_REASON_NATIVE_FAULT);
+}
+
+bool cpuAcquireNativeSession(ArmCpu* cpu) {
+    if (cpu->nativeSessionActive || cpu->nativeCallDepth || cpu->nativePc[0] || cpu->nativeScratchData) return false;
+    for (const auto& h:cpu->nativeCallbacks) if (h.callback) return false;
+    cpu->nativeSessionActive=true; return true;
+}
+
+bool cpuSetNativePcBreak(ArmCpu* cpu, uint32_t first, uint32_t second) {
+    if (cpu->nativeCallDepth || (first && !(first & 1) && (first & 3)) ||
+        (second && !(second & 1) && (second & 3))) return false;
+    cpu->nativePc[0] = first; cpu->nativePc[1] = second;
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC);
+    return true;
+}
+
+bool cpuRegisterNativeCallback(ArmCpu* cpu, uint32_t address, NativeCallback callback, void* context) {
+    if (!address || !callback || (!(address & 1) && (address & 3))) return false;
+    for (const auto& slot : cpu->nativeCallbacks)
+        if (slot.callback && slot.address == address) return false;
+    for (auto& slot : cpu->nativeCallbacks) if (!slot.callback) {
+        slot.address = address; slot.callback = callback; slot.context = context; return true;
+    }
+    return false;
+}
+void cpuUnregisterNativeCallback(ArmCpu* cpu, uint32_t address) {
+    for (auto& slot : cpu->nativeCallbacks) if (slot.address == address) slot = {};
+}
+
+bool cpuStartNativeCall(ArmCpu* cpu, uint32_t entry) {
+    if (cpu->nativeCallDepth >= 4 || !entry || (!(entry & 1) && (entry & 3))) return false;
+    ++cpu->nativeCallDepth;
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT | SLOW_PATH_REASON_INJECTED_CALL_DONE);
+    cpu->modePace = false;
+    cpuPrvSetReg(cpu, REG_NO_PC, entry);
+    cpu->regs[REG_NO_LR] = INJECTED_CALL_LR_MAGIC;
+    return true;
+}
+void cpuSetNativeStackBounds(ArmCpu* cpu, uint32_t lower, uint32_t upper,
+                             uint32_t ownerAddress, uint32_t ownerValue) {
+    cpu->nativeStackLower=lower; cpu->nativeStackUpper=upper;
+    cpu->nativeStackOwnerAddress=ownerAddress; cpu->nativeStackOwnerValue=ownerValue;
+}
+void cpuEndNativeCall(ArmCpu* cpu) {
+    if (cpu->nativeCallDepth) --cpu->nativeCallDepth;
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_FAULT | SLOW_PATH_REASON_INJECTED_CALL_DONE);
+}
+
+// Validate each 1KB mapping segment before any transfer. Virtual buffers may
+// span discontiguous physical pages. MMIO is never read as a side effect.
+static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false, bool privileged = true) {
+    if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
+#ifdef SUPPORT_FCSE
+    if (address < 0x02000000u) address |= cpu->pid;
+#endif
+    // Inspected reads skip the permission check so the debugger sees every mapped page.
+    auto t = inspect ? (write ? mmuTranslateInspectAccess(cpu->memorySystem.mmu,address,privileged,true) :
+                                mmuTranslateInspect(cpu->memorySystem.mmu,address,false)) :
+                       mmuTranslate(cpu->memorySystem.mmu,address,privileged,write);
+    if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
+    pa = MMU_TRANSLATE_RESULT_PA(t);
+    return memIsBufferRange(cpu->mem,pa,size,write);
+}
+bool cpuInspectMapping(ArmCpu* cpu, uint32_t address, uint32_t size, uint32_t& physical) {
+    if (!size || uint64_t(address) + size > 0x100000000ull) return false;
+    for (uint32_t offset = 0; offset < size;) {
+        const auto count = std::min<uint32_t>(0x400 - ((address + offset) & 0x3ff), size - offset);
+        uint32_t pa;
+        if (!nativeSegment(cpu, address + offset, count, false, pa, true)) return false;
+        if (!offset) physical = pa;
+        else if (uint64_t(physical) + offset != pa) return false;
+        offset += count;
+    }
+    return true;
+}
+static bool nativeRange(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, bool inspect = false, bool privileged = true) {
+    if (!size) return true;
+    if (uint64_t(address)+size>0x100000000ull) return false;
+    for (uint64_t va=address; va<uint64_t(address)+size;) {
+        const uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va);
+        uint32_t pa;
+        if (!nativeSegment(cpu,va,count,write,pa,inspect,privileged)) return false;
+        va+=count;
+    }
+    return true;
+}
+bool cpuNativeRamRange(ArmCpu* cpu, uint32_t address, uint32_t size) {
+    return nativeRange(cpu,address,size,true);
+}
+bool cpuNativeBuffer(ArmCpu* cpu, uint32_t address, void* data, uint32_t size, bool write, bool privileged) {
+    if (!size) return true;
+    if (!data || !nativeRange(cpu,address,size,write,false,privileged)) return false;
+    for (uint32_t offset=0; offset<size;) {
+        const uint32_t count=std::min<uint32_t>(0x400-((address+offset)&0x3ff),size-offset);
+        uint32_t pa;
+        if (!nativeSegment(cpu,address+offset,count,write,pa,false,privileged)) return false;
+        for (uint32_t i=0;i<count;++i) {
+            auto* byte=static_cast<uint8_t*>(data)+offset+i;
+            if (write ? !memAccess<1,true>(cpu->mem,pa+i,byte) : !memAccess<1,false>(cpu->mem,pa+i,byte)) return false;
+        }
+        offset+=count;
+    }
+    return true;
+}
+
+static bool inspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size,bool write,bool privileged = true) {
+    if (!size || uint64_t(address)+size>0x100000000ull) return false;
+    for (uint64_t va=address;va<uint64_t(address)+size;) {
+        uint32_t count=std::min<uint64_t>(0x400-(va&0x3ff),uint64_t(address)+size-va),pa;
+        if (!nativeSegment(cpu,va,count,write,pa,true,privileged) || !memIsBufferRange(cpu->mem,pa,count,true)) return false;
+        va+=count;
+    }
+    return true;
+}
+bool cpuInspectRamRange(ArmCpu* cpu,uint32_t address,uint32_t size) {
+    return inspectRamRange(cpu,address,size,false);
+}
+bool cpuInspectWritableRamRange(ArmCpu* cpu,uint32_t address,uint32_t size,bool privileged) {
+    return inspectRamRange(cpu,address,size,true,privileged);
+}
+bool cpuInspectRead(ArmCpu* cpu,uint32_t address,void* dest,uint32_t size) {
+    if (!size || size>1048576 || !dest || !nativeRange(cpu,address,size,false,true)) return false;
+    for (uint32_t offset=0;offset<size;) {
+        uint32_t count=std::min<uint32_t>(0x400-((address+offset)&0x3ff),size-offset),pa;
+        if (!nativeSegment(cpu,address+offset,count,false,pa,true)) return false;
+        for (uint32_t i=0;i<count;++i)
+            if (!memAccess<1,false>(cpu->mem,pa+i,static_cast<uint8_t*>(dest)+offset+i)) return false;
+        offset+=count;
+    }
+    return true;
+}
+void cpuSetDebugSoc(ArmCpu* cpu,SoC* soc) { gdbStubSetSoc(cpu->debugStub,soc); }
+
+bool cpuSetNativeScratch(ArmCpu* cpu, uint32_t base, void* data, uint32_t size) {
+    if (cpu->nativeCallDepth) return false;
+    if (!data) {
+        cpu->nativeScratchData = nullptr; cpu->nativeScratchBase = cpu->nativeScratchSize = 0;
+        return true;
+    }
+    if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU || !mmuIsOn(cpu->memorySystem.mmu) ||
+        (base & 0xfff) || !size || (size & 0xfff) || size > 0x40000 ||
+        uint64_t(base) + size > 0xffff0000ull) return false;
+    for (uint32_t offset = 0; offset < size; offset += 0x400) {
+        if (MMU_TRANSLATE_RESULT_OK(mmuTranslate(cpu->memorySystem.mmu, base + offset, true, false)) ||
+            MMU_TRANSLATE_RESULT_OK(mmuTranslate(cpu->memorySystem.mmu, base + offset, true, true))) return false;
+    }
+    cpu->nativeScratchBase = base; cpu->nativeScratchSize = size;
+    cpu->nativeScratchData = static_cast<uint8_t*>(data);
+    return true;
+}
+
+static bool nativeHook(ArmCpu* cpu, bool injected) {
+    const uint32_t address = cpu->regs[REG_NO_PC] | (cpu->T ? 1u : 0u);
+    if (!injected) {
+        if (address && (address == cpu->nativePc[0] || address == cpu->nativePc[1])) {
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC); return true;
+        }
+        return false;
+    }
+    if (!cpu->nativeCallDepth) return false;
+    if ((cpu->M==ARM_SR_MODE_SYS || cpu->M==ARM_SR_MODE_USR) && cpu->nativeStackUpper &&
+        (cpu->regs[REG_NO_SP]<cpu->nativeStackLower || cpu->regs[REG_NO_SP]>cpu->nativeStackUpper)) {
+        // A full call may legitimately schedule other tasks. The owned UI
+        // scratch bounds do not describe their stacks. Invalid metadata fails closed.
+        uint32_t owner=0;
+        if (!cpu->nativeStackOwnerAddress ||
+            !cpuNativeBuffer(cpu,cpu->nativeStackOwnerAddress,&owner,4,false) ||
+            owner==cpu->nativeStackOwnerValue) {
+            cpuSetSlowPath(cpu,SLOW_PATH_REASON_NATIVE_FAULT); return true;
+        }
+    }
+    for (const auto& slot : cpu->nativeCallbacks) if (slot.callback && slot.address == address) {
+        // Copy before invoking: a callback may unregister itself. Exceptions propagate to recovery.
+        const auto callback = slot.callback; void* context = slot.context;
+        callback(cpu, context);
+        cpuPrvSetReg(cpu, REG_NO_PC, cpu->regs[REG_NO_LR]);
+        if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_INJECTED_CALL_DONE);
+        return true;
+    }
+    return false;
+}
+
+#endif
+
+void cpuSetM68kSyscallHandler(ArmCpu* cpu, M68kSyscallHandler handler, void* context) {
+    cpu->m68kSyscallHandler=handler; cpu->m68kSyscallContext=context;
 }
 
 uint32_t *cpuGetRegisters(struct ArmCpu *cpu) { return cpu->regs; }
 
 static bool cpuPrvPaceCallout(struct ArmCpu *cpu, uint32_t destination) {
     if (!paceSave68kState()) {
-        cpuPrvHandlePaceMemoryFault(cpu);
+        cpuPrvHandlePaceMemoryFault(cpu, __func__);
         return false;
     }
 
@@ -3299,7 +4169,7 @@ static void cpuPrvPaceSyscall(struct ArmCpu *cpu, uint16_t trapWord) {
 
 static void cpuPrvPaceSyscall(struct ArmCpu *cpu) {
     const uint16_t trapWord = paceReadTrapWord();
-    if (paceGetFsr() != 0) return cpuPrvHandlePaceMemoryFault(cpu);
+    if (paceGetFsr() != 0) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
 
     if (cpu->breakPaceSyscall && cpu->breakPaceSyscall == trapWord) {
         paceSetPC(paceGetPC() - 4);
@@ -3308,6 +4178,7 @@ static void cpuPrvPaceSyscall(struct ArmCpu *cpu) {
         return;
     }
 
+    if (cpu->m68kSyscallHandler && cpu->m68kSyscallHandler(cpu->m68kSyscallContext, cpu, trapWord)) return;
     if (patch68kHandle(trapWord)) return;
 
     cpuPrvPaceSyscall(cpu, trapWord);
@@ -3320,7 +4191,7 @@ static void cpuPrvPaceSyscall(struct ArmCpu *cpu) {
 static void cpuPrvPaceReturn(struct ArmCpu *cpu) {
     uint_fast8_t fsr = 0;
 
-    if (!paceSave68kState()) return cpuPrvHandlePaceMemoryFault(cpu);
+    if (!paceSave68kState()) return cpuPrvHandlePaceMemoryFault(cpu, __func__);
 
     for (uint_fast8_t reg : {1, 4, 5, 6, 7, 8, 9, 10, 11, REG_NO_LR}) {
         if (!cpuPrvMemOpGeneric<4, false>(cpu, &cpu->regs[reg], cpu->regs[REG_NO_SP],
@@ -3412,8 +4283,81 @@ static void cpuPrvPaceUnimplementedlInstruction(struct ArmCpu *cpu) {
 #endif
 }
 
+// Native PACE faulted on a 68k memory access past the opcode fetch. Runs that instruction
+// again from the state before it on the ROM's own PACE, so each access is the ARM load or
+// store the device makes, in the same mode. The OS's data abort handler then does what it
+// does on the device (Palm OS 5 skips an access that hits a permission fault, so a 68k read
+// of address 0 gives whatever the ROM PACE's register held). The registers the ROM PACE has
+// at dispatch are set as its loop sets them; its scratch registers keep their ARM values.
+// INSTR_PACE_DISPATCH returns to native PACE at the next instruction.
+static bool cpuPrvPaceRomFallback(struct ArmCpu *cpu) {
+    const PacePatch *patch = cpu->pacePatch;
+    if (!patch->romDispatchHooked) return false;
+
+    const uint16_t opcode = paceGetLastOpcode();
+    const uint32_t table = patch->enterPace + cpu->paceOffset + 0x68;
+    uint_fast8_t fsr = 0;
+    uint32_t handler = 0;
+    // A data read: the table is the ROM's own, also where the instructions are hooked.
+    if (!cpuPrvMemOpExGeneric<4, false>(cpu, &handler, table + 4 * (opcode >> 12), cpu->privileged,
+                                        &fsr))
+        return false;
+
+    uint32_t faultAddr;
+    bool faultWrite;
+    paceGetMemeryFault(&faultAddr, &faultWrite, &fsr);
+    if (!paceRestoreFaultedInstruction()) return false;
+    const uint32_t state = paceGetStatePtr(), pc = paceGetPC();
+#ifndef __EMSCRIPTEN__
+    // The first 8, then each power of two, so an app that faults every frame can't flood the log.
+    static uint32_t faultCount = 0;
+    faultCount++;
+    if (faultCount <= 8 || !(faultCount & (faultCount - 1)))
+        fprintf(stderr, "68k %s 0x%08x faulted (fsr=%u, pc=0x%08x), running it on the ROM PACE (fault %u)\n",
+                faultWrite ? "write to" : "read of", faultAddr, unsigned(fsr), pc, faultCount);
+#endif
+    if (!paceSave68kState()) {
+        cpuPrvHandlePaceMemoryFault(cpu, __func__);
+        return true;
+    }
+
+    uint32_t sr = 0;
+    if (!cpuPrvMemOpExGeneric<4, false>(cpu, &sr, state + 0x48, cpu->privileged, &fsr)) {
+        cpuPrvHandleMemErr(cpu, state + 0x48, false, false, fsr);
+        return true;
+    }
+
+    // ldrh r7, [r10], #2 after the opcode: a little-endian read of the 68k word. If it faults,
+    // the abort handler leaves r7 as it was, the opcode as fetched.
+    const uint32_t opcodeLe = __builtin_bswap16(opcode);
+    uint16_t prefetch = opcodeLe;
+    if (!cpuPrvMemOpExGeneric<2, false>(cpu, &prefetch, pc + 2, cpu->privileged, &fsr))
+        prefetch = opcodeLe;
+
+    cpu->regs[0] = handler;
+    cpu->regs[4] = sr;
+    cpu->regs[5] = state + 4;
+    cpu->regs[6] = state + 0x24;
+    cpu->regs[7] = prefetch;
+    cpu->regs[8] = (opcodeLe << 8) | (opcodeLe >> 8);
+    cpu->regs[10] = pc + 4;
+    cpu->regs[11] = table;
+    cpu->regs[REG_NO_PC] = table + handler;
+
+    cpu->modePace = false;
+    cpuSetSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
+
+    return true;
+}
+
 FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
-    switch (paceExecute()) {
+    const bool diagnose = cpuPrvPaceFaultDiagnostics();
+    const uint32_t instructionPc = (cpu->debugStub || diagnose) ? paceGetPC() : 0;
+    PaceDebugState before;
+    if (diagnose) before = paceDebugState();
+    const auto status = paceExecute();
+    if (cpu->debugStub) gdbStubPaceInstructionCompleted(cpu->debugStub, instructionPc, status);
+    switch (status) {
         case pace_status_ok:
             return;
 
@@ -3434,7 +4378,8 @@ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
             break;
 
         case pace_status_memory_fault:
-            cpuPrvHandlePaceMemoryFault(cpu);
+            if (cpuPrvPaceRomFallback(cpu)) break;
+            cpuPrvHandlePaceMemoryFault(cpu, __func__, instructionPc, diagnose ? &before : nullptr);
             break;
 
         case pace_status_syscall:
@@ -3461,10 +4406,30 @@ FORCE_INLINE static void cpuPrvCyclePace(struct ArmCpu *cpu) {
     }
 }
 
+#ifndef __EMSCRIPTEN__
+// Expose progress only while a CPU batch is on the stack. Peripheral reads can
+// observe the current instruction's time without forcing a batch every clock tick.
+struct CycleProgress {
+    ArmCpu* cpu;
+    const uint32_t* previous;
+    CycleProgress(ArmCpu* cpu, const uint32_t* count) : cpu(cpu), previous(cpu->cyclesInProgress) {
+        cpu->cyclesInProgress = count;
+    }
+    ~CycleProgress() { cpu->cyclesInProgress = previous; }
+};
+uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
+    return cpu->cyclesInProgress ? *cpu->cyclesInProgress : 0;
+}
+#endif
+
 ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
+#ifndef __EMSCRIPTEN__
+    CycleProgress progress(cpu, &cycleAcc);
+#endif
 
     while (cycleAcc < cycles) {
+        if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
         cpuPrvCyclePace(cpu);
         cycleAcc += 20;
 
@@ -3474,33 +4439,172 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
     return cycleAcc;
 }
 
-template <int memorySystemKind, bool injected>
+#ifndef __EMSCRIPTEN__
+// icacheFetchCached for a va in the same 32-byte line as the previous fetch. The line
+// was valid for lineVa when ic->epoch was lineEpoch, and the epoch moves on every
+// invalidation and refill, so an unchanged epoch means the line still holds lineVa.
+// On the ARM920T lineVa never matches (cpuPrvRememberLine).
+// The decoded slot is still checked, since execFns can decode other slots of the line.
+template <int size>
+static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const struct icacheline* line,
+                                             uint32_t lineVa, uint32_t lineEpoch, uint32_t va,
+                                             uint32_t& instr, uint32_t& decoded) {
+    // lineVa is line aligned, so this also requires va to be aligned to size.
+    if ((va & ~uint32_t((1u << CACHE_LINE_WIDTH_BITS) - size)) != lineVa) return false;
+    if (ic->epoch != lineEpoch) return false;
+    const unsigned offset = calculateLineIndex(va);
+    const uint32_t cached = line->decoded[offset >> 1];
+    constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+    if ((cached & DECODED_BITS) != kind) return false;
+    decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
+    if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
+    else instr = line->translatedThumbInstructions[offset >> 1];
+    return true;
+}
+
+// After a fetch outside the fast path: remember pc's line for cpuPrvFetchSameLine if the
+// cache holds it now, otherwise make the fast path miss until the next slow fetch.
+static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc, uint32_t key,
+                                            const struct icacheline*& line, uint32_t& lineVa,
+                                            uint32_t& lineEpoch) {
+    line = ic->cache + calculateIndex(pc);
+    lineVa = !ic->arm920 && line->revision == ic->revision && line->tag == calculateTag(pc) && line->fetchKey == key
+                 ? maskLine(pc)
+                 : 0xffffffff;
+    lineEpoch = ic->epoch;
+}
+#endif
+
+#ifndef __EMSCRIPTEN__
+// cpuCycleArm and cpuCycleThumb without a debugger, injected call or native PC break.
+// After a fetch from a valid icache line it runs on through that line for as long as
+// each instruction leaves the PC at the next one, the epoch holds and the next slot is
+// decoded. Per instruction it keeps the general loop's order: curInstrPC and the cycle
+// count, then the PC, the execFn and the slow path check.
+// arm920 is ic->arm920: the ARM920T fetches every instruction through icacheFetch.
+template <int memorySystemKind, int size, bool arm920>
+ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cycles) {
+    uint32_t cycleAcc = 0;
+    uint32_t acc = 0;
+    CycleProgress progress(cpu, &cycleAcc);
+    struct icache *const ic = cpu->ic;
+    constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+    constexpr uint32_t lineSize = 1u << CACHE_LINE_WIDTH_BITS;
+
+    while (acc < cycles) {
+        uint32_t pc = cpu->regs[REG_NO_PC];
+        cpu->curInstrPC = pc;
+        acc += 1;
+        cycleAcc = acc;
+
+        const struct icacheline *line = ic->cache + calculateIndex(pc);
+        uint32_t offset = calculateLineIndex(pc);
+        uint32_t cached = line->decoded[offset >> 1];
+        if (unlikely(arm920 || (pc & (size - 1)) || line->revision != ic->revision ||
+                     line->tag != calculateTag(pc) || (cached & DECODED_BITS) != kind ||
+                     line->fetchKey != icacheFetchKey(ic, cpu->privileged))) {
+            uint32_t instr = 0, decoded = 0;
+            uint_fast8_t fsr;
+            if (!icacheFetch<memorySystemKind, size, false>(ic, pc, cpu->privileged, &fsr, instr, decoded)) {
+                cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+                return acc;
+            }
+            cpu->regs[REG_NO_PC] = pc + size;
+            cpuPrvDecompressExecFn(decoded)(cpu, instr);
+            if (cpu->slowPath) break;
+            continue;
+        }
+
+        const uint32_t epoch = ic->epoch;
+        for (;;) {
+            uint32_t instr;
+            if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
+            else instr = line->translatedThumbInstructions[offset >> 1];
+            cpu->regs[REG_NO_PC] = pc + size;
+            cpuPrvDecompressExecFn(int32_t(cached) >> DECODED_BITS_SHIFT)(cpu, instr);
+            if (cpu->slowPath) return acc;
+
+            pc += size;
+            offset += size;
+            if (cpu->regs[REG_NO_PC] != pc || offset == lineSize || ic->epoch != epoch ||
+                acc >= cycles)
+                break;
+            cached = line->decoded[offset >> 1];
+            if ((cached & DECODED_BITS) != kind) break;
+
+            cpu->curInstrPC = pc;
+            acc += 1;
+            cycleAcc = acc;
+        }
+    }
+
+    return acc;
+}
+#endif
+
+// debug is cpu->debugStub != NULL, which is fixed when the CPU is created.
+// cycleAcc is what peripherals see through cyclesInProgress; acc is the loop's copy.
+template <int memorySystemKind, bool injected, bool debug>
 ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
+    uint32_t acc = 0;
+#ifndef __EMSCRIPTEN__
+    CycleProgress progress(cpu, &cycleAcc);
+    struct icache* const ic = cpu->ic;
+    const struct icacheline* line = ic->cache;
+    uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
+    uint32_t lineEpoch = ic->epoch;
+#endif
     bool ok;
     uint32_t translatedInstr;
     uint32_t decoded;
     uint_fast8_t fsr;
 
-    while (cycleAcc < cycles) {
+    while (acc < cycles) {
+#ifndef __EMSCRIPTEN__
+        if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
+            return acc + (injected ? 1 : 0);
+#endif
         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
-        gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC],
-                        true);  // early in case it changes PC
+        if constexpr (debug) {
+            gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], true);
+            // Register commands may redirect the next fetch or change ARM/Thumb.
+            cpu->curInstrPC = cpu->regs[REG_NO_PC];
+            if (!cpu->T) return acc;
+        }
 
-        cycleAcc += 1;
+        acc += 1;
+        cycleAcc = acc;
 
         // FCSE
 #ifdef SUPPORT_FCSE
         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
 #endif
 
-        ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, &fsr,
+#ifndef __EMSCRIPTEN__
+        const uint32_t pc = cpu->curInstrPC;
+        ok = cpuPrvFetchSameLine<2>(ic, line, lineVa, lineEpoch, pc, translatedInstr, decoded);
+        if (!ok) {
+            // Fetch through copies, so the fast path's values stay in registers.
+            uint32_t slowInstr = 0, slowDecoded = 0;
+            const uint32_t key = icacheFetchKey(ic, cpu->privileged);
+            ok = icacheFetchCached<2>(ic, pc, key, slowInstr, slowDecoded);
+            if (!ok)
+                ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
+                                                                slowDecoded);
+            translatedInstr = slowInstr;
+            decoded = slowDecoded;
+            cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
+        }
+#else
+        ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr,
                                                         translatedInstr, decoded);
+#endif
 
         if (!ok) {
             cpuPrvHandleMemErr(cpu, cpu->curInstrPC, false, true, fsr);
-            return cycleAcc;  // exit here so that debugger can see us execute first instr
-                              // of execption handler
+            return acc;  // exit here so that debugger can see us execute first instr
+                         // of execption handler
         }
 
         cpu->regs[REG_NO_PC] += 2;
@@ -3512,6 +4616,8 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
 #endif
 
+        if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
+
         if constexpr (injected) {
             if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)
                 cpuSetSlowPath(cpu, SLOW_PATH_REASON_INJECTED_CALL_DONE);
@@ -3520,35 +4626,69 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         if (cpu->slowPath) break;
     }
 
-    return cycleAcc;
+    return acc;
 }
 
-template <int memorySystemKind, bool injected>
+template <int memorySystemKind, bool injected, bool debug>
 ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t cycleAcc = 0;
+    uint32_t acc = 0;
+#ifndef __EMSCRIPTEN__
+    CycleProgress progress(cpu, &cycleAcc);
+    struct icache* const ic = cpu->ic;
+    const struct icacheline* line = ic->cache;
+    uint32_t lineVa = 0xffffffff;  // never matches: the fast path mask clears bits 1-4
+    uint32_t lineEpoch = ic->epoch;
+#endif
     bool ok;
     uint32_t instr, decoded;
     uint_fast8_t fsr;
 
-    while (cycleAcc < cycles) {
+    while (acc < cycles) {
+#ifndef __EMSCRIPTEN__
+        if (unlikely(cpu->nativePc[0] || (injected && cpu->nativeCallDepth)) && nativeHook(cpu, injected))
+            return acc + (injected ? 1 : 0);
+#endif
         cpu->curInstrPC = cpu->regs[REG_NO_PC];  // needed for stub to get proper pc
-        gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC],
-                        true);  // early in case it changes PC
+        if constexpr (debug) {
+            gdbStubReportPc(cpu->debugStub, cpu->regs[REG_NO_PC], false);
+            // Register commands may redirect the next fetch or change ARM/Thumb.
+            cpu->curInstrPC = cpu->regs[REG_NO_PC];
+            if (cpu->T) return acc;
+        }
 
-        cycleAcc += 1;
+        acc += 1;
+        cycleAcc = acc;
 
         // FCSE
 #ifdef SUPPORT_FCSE
         if (fetchPc < 0x02000000UL) fetchPc |= cpu->pid;
 #endif
 
-        ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, &fsr, instr,
+#ifndef __EMSCRIPTEN__
+        const uint32_t pc = cpu->curInstrPC;
+        ok = cpuPrvFetchSameLine<4>(ic, line, lineVa, lineEpoch, pc, instr, decoded);
+        if (!ok) {
+            // Fetch through copies, so the fast path's values stay in registers.
+            uint32_t slowInstr = 0, slowDecoded = 0;
+            const uint32_t key = icacheFetchKey(ic, cpu->privileged);
+            ok = icacheFetchCached<4>(ic, pc, key, slowInstr, slowDecoded);
+            if (!ok)
+                ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
+                                                                slowDecoded);
+            instr = slowInstr;
+            decoded = slowDecoded;
+            cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
+        }
+#else
+        ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr, instr,
                                                         decoded);
+#endif
 
         if (!ok) {
             cpuPrvHandleMemErr(cpu, cpu->curInstrPC, false, true, fsr);
-            return cycleAcc;  // exit here so that debugger can see us execute first instr
-                              // of execption handler
+            return acc;  // exit here so that debugger can see us execute first instr
+                         // of execption handler
         }
 
         cpu->regs[REG_NO_PC] += 4;
@@ -3560,6 +4700,8 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         cpuPrvDecompressExecFn(decoded)(cpu, instr);
 #endif
 
+        if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
+
         if constexpr (injected) {
             if (cpu->regs[REG_NO_PC] == INJECTED_CALL_LR_MAGIC)
                 cpuSetSlowPath(cpu, SLOW_PATH_REASON_INJECTED_CALL_DONE);
@@ -3568,19 +4710,1162 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         if (cpu->slowPath) break;
     }
 
-    return cycleAcc;
+    return acc;
+}
+
+#ifndef __EMSCRIPTEN__
+// ARM920T Fast engine: the interpreter over the decode cache (ic->cache, which the ARM920T Exact path never
+// uses) and host pages, with no I- or D-cache contents. Each instruction is classed when it is decoded:
+// plain forms run as they are; forms the probe guard decides from registers go through a check first; the
+// rest stop the run before them (leanExit), so the guarded step takes them with Exact's checks and stops.
+enum class LeanClass { plain, check, exit, thumbBx, blPrefix, blSuffix };
+
+// The probe guard's encoding-only answers (imx1_boot_probe.cpp bootstrapInstruction). Misaligned accesses
+// stop the run in the memory path, which covers the guard's alignment checks. SWI, CP15, MSR of the
+// control field, S-bit LDM/STM and exception returns always go to the step.
+static LeanClass cpuPrvLeanClassArm(uint32_t i) {
+    if (i >> 28 == 15 || (i & 0x0f000000) == 0x0f000000) return LeanClass::exit;
+    if ((i & 0x0ffffff0) == 0x012fff10) return LeanClass::plain;  // BX
+    if ((i & 0x0e000000) == 0x0a000000) return LeanClass::plain;  // B, BL
+    if ((i & 0x0fbf0fff) == 0x010f0000) return LeanClass::plain;  // MRS
+    if ((i & 0x0fb0fff0) == 0x0120f000 || (i & 0x0fb0f000) == 0x0320f000)  // MSR: SPSR, or CPSR flags only
+        return (i & 0x00400000) || ((i >> 16) & 15) == 8 ? LeanClass::plain : LeanClass::exit;
+    if ((i & 0x0f000f10) == 0x0e000f10) return LeanClass::exit;  // CP15
+    if ((i & 0x0e000000) == 0x08000000) {
+        const unsigned base = (i >> 16) & 15;
+        if (i & 0x00400000) return LeanClass::exit;
+        return (i & 0xffff) && base != 15 && (!(i & 0x00200000) || !(i & (1u << base))) ?
+               LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0x0c000000) == 0x04000000) {
+        const bool pc = ((i >> 12) & 15) == 15;
+        if (pc && !(i & 0x00100000)) {
+            const bool pre = i & 0x01000000, immediate = !(i & 0x02000000);
+            const bool writeback = !pre || (i & 0x00200000);
+            if ((i & 0x00400000) || (!pre && (i & 0x00200000)) ||
+                (writeback && ((i >> 16) & 15) == 15) || (!immediate && (i & 15) == 15)) return LeanClass::exit;
+        }
+        return (!pc || !(i & 0x00400000)) && !((i & 0x02000010) == 0x02000010) ? LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0x0c000000) != 0) return LeanClass::exit;
+    if ((i & 0x0fc000f0) == 0x00000090) {
+        const unsigned dest = (i >> 16) & 15, add = (i >> 12) & 15, rs = (i >> 8) & 15, rm = i & 15;
+        return dest != 15 && rs != 15 && rm != 15 && ((i & 0x00200000) ? add != 15 : add == 0) ?
+               LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0x0f8000f0) == 0x00800090) {
+        const unsigned hi = (i >> 16) & 15, lo = (i >> 12) & 15, rs = (i >> 8) & 15, rm = i & 15;
+        return hi != 15 && lo != 15 && rs != 15 && rm != 15 && hi != lo && hi != rm && lo != rm ?
+               LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0x0e000090) == 0x00000090 && (i & 0x60)) {
+        const bool load = i & 0x00100000, pre = i & 0x01000000;
+        const bool immediate = i & 0x00400000, writeback = !pre || (i & 0x00200000);
+        const unsigned base = (i >> 16) & 15, dest = (i >> 12) & 15, rm = i & 15;
+        if ((!load && (i & 0x60) != 0x20) || dest == 15 || (!pre && (i & 0x00200000)) ||
+            (writeback && (base == 15 || base == dest || (!immediate && base == rm))) ||
+            (!immediate && ((i & 0xf00) || rm == 15))) return LeanClass::exit;
+        return LeanClass::plain;
+    }
+    if (((i >> 12) & 15) == 15) {
+        if ((i & 0x0ffffff0) == 0x01b0f000 || (i & 0x0fffffff) == 0x025ef004) return LeanClass::exit;
+        if ((i & 0x0fff0ff0) == 0x01a00000) return LeanClass::plain;  // MOV pc, Rm
+        return LeanClass::check;
+    }
+    const unsigned opcode = (i >> 21) & 15;
+    if (opcode >= 8 && opcode <= 11 && !(i & 0x00100000)) return LeanClass::exit;
+    return (i & 0x02000000) || !(i & 0x10) || !(i & 0x80) ? LeanClass::plain : LeanClass::exit;
+}
+
+// bootstrapThumb's encoding-only answers, as for ARM.
+static LeanClass cpuPrvLeanClassThumb(uint16_t i) {
+    if (i < 0x4000) return LeanClass::plain;
+    if ((i & 0xfc00) == 0x4000)
+        return ((i >> 6) & 15) != 13 || (i & 7) != ((i >> 3) & 7) ? LeanClass::plain : LeanClass::exit;
+    if ((i & 0xfc00) == 0x4400) {
+        const unsigned op = (i >> 8) & 3, source = (i >> 3) & 15, dest = (i & 7) | ((i >> 4) & 8);
+        if (op == 3) return !(i & 0x87) ? LeanClass::thumbBx : LeanClass::exit;
+        if (op == 1 && (source == 15 || dest == 15)) return LeanClass::exit;
+        return op != 0 || dest != 15 || source != 15 ? LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0xf800) == 0x4800 || (i & 0xf000) == 0x5000 || (i & 0xe000) == 0x6000 ||
+        (i & 0xf000) == 0x8000 || (i & 0xf000) == 0x9000 || (i & 0xf000) == 0xa000 || (i & 0xff00) == 0xb000)
+        return LeanClass::plain;
+    if ((i & 0xf600) == 0xb400) return (i & 0x1ff) ? LeanClass::plain : LeanClass::exit;
+    if ((i & 0xf000) == 0xc000) {
+        const unsigned base = (i >> 8) & 7;
+        return (i & 0xff) && ((i & 0x0800) || !(i & (1u << base))) ? LeanClass::plain : LeanClass::exit;
+    }
+    if ((i & 0xff00) == 0xdf00) return LeanClass::exit;  // SWI
+    if ((i & 0xf000) == 0xd000) return (i & 0xf00) < 0xe00 ? LeanClass::plain : LeanClass::exit;
+    if ((i & 0xf800) == 0xe000) return LeanClass::plain;
+    if ((i & 0xf800) == 0xf000) return LeanClass::blPrefix;
+    if ((i & 0xf800) == 0xf800) return LeanClass::blSuffix;
+    return LeanClass::exit;
+}
+
+static void execFn_leanExit(struct ArmCpu *cpu, uint32_t) { cpu->leanExit = true; }
+
+// Data processing that writes pc: the guard looks at the target, so ask it with the registers the step
+// would show it (pc at the instruction).
+static void execFn_leanCheckArm(struct ArmCpu *cpu, uint32_t instr) {
+    if (!cpuPrvConditionFails(cpu, instr)) {
+        const uint32_t next = cpu->regs[REG_NO_PC];
+        cpu->regs[REG_NO_PC] = cpu->curInstrPC;
+        const bool admitted = cpu->leanGuard &&
+            cpu->leanGuard(instr, cpu->regs, cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR),
+                           cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR));
+        cpu->regs[REG_NO_PC] = next;
+        if (!admitted) {
+            cpu->leanExit = true;
+            return;
+        }
+    }
+    cpuPrvDecoderArm<ARM_MEMORY_SYSTEM_MMU, false>(instr)(cpu, instr);
+}
+
+// Thumb BX: the guard refuses a halfword-aligned ARM target, except BX PC, which goes to the word below.
+template <bool pcS>
+static void execFn_leanThumbBx(struct ArmCpu *cpu, uint32_t instr) {
+    const unsigned source = (instr >> 3) & 15;
+    const uint32_t target = source == 15 ? cpu->curInstrPC + 4 : cpu->regs[source];
+    if (!pcS && (target & 3) == 2) {
+        cpu->leanExit = true;
+        return;
+    }
+    execFn_thumb_bl_x<ARM_MEMORY_SYSTEM_MMU, false, pcS>(cpu, instr);
+}
+
+// The raw halfword at va if the decode cache holds its line under the current fetch key.
+static bool cpuPrvLeanPeekHalf(const struct ArmCpu *cpu, uint32_t va, uint16_t &half) {
+    const struct icache *ic = cpu->ic;
+    const struct icacheline *line = ic->cache + calculateIndex(va);
+    if (line->revision != ic->revision || line->tag != calculateTag(va) ||
+        line->fetchKey != icacheFetchKey(ic, cpu->privileged)) return false;
+    memcpy(&half, line->data + calculateLineIndex(va), sizeof(half));
+    return true;
+}
+
+// A BL prefix runs here only when its suffix follows, as the step would stop at anything else. The suffix
+// runs only straight after its prefix in the same run; others go to the step, which knows interrupted ones.
+static void execFn_leanBlPrefix(struct ArmCpu *cpu, uint32_t instr) {
+    uint16_t next;
+    if (!cpuPrvLeanPeekHalf(cpu, cpu->curInstrPC + 2, next) || (next & 0xf800) != 0xf800) {
+        cpu->leanExit = true;
+        return;
+    }
+    execFn_thumb_bl_x_prefix<ARM_MEMORY_SYSTEM_MMU>(cpu, instr);
+    cpu->leanBlNext = cpu->curInstrPC + 2;
+}
+
+static void execFn_leanBlSuffix(struct ArmCpu *cpu, uint32_t instr) {
+    if (cpu->leanBlNext != cpu->curInstrPC) {
+        cpu->leanExit = true;
+        return;
+    }
+    cpu->leanBlNext = ~0u;
+    execFn_thumb_bl_suffix<ARM_MEMORY_SYSTEM_MMU>(cpu, instr);
+}
+
+static uint32_t cpuPrvLeanDecodeArm(uint32_t instr) {
+    switch (cpuPrvLeanClassArm(instr)) {
+        case LeanClass::plain: return cpuDecodeArm<ARM_MEMORY_SYSTEM_MMU>(instr);
+        case LeanClass::check: return cpuPrvCompressExecFn(execFn_leanCheckArm);
+        default: return cpuPrvCompressExecFn(execFn_leanExit);
+    }
+}
+
+static uint32_t cpuPrvLeanDecodeThumb(uint16_t raw, uint32_t &translated) {
+    translated = raw;
+    switch (cpuPrvLeanClassThumb(raw)) {
+        case LeanClass::plain: return cpuDecodeThumb<ARM_MEMORY_SYSTEM_MMU>(raw, translated);
+        case LeanClass::thumbBx:
+            return ((raw >> 3) & 15) == 15 ? cpuPrvCompressExecFn(execFn_leanThumbBx<true>)
+                                           : cpuPrvCompressExecFn(execFn_leanThumbBx<false>);
+        case LeanClass::blPrefix: return cpuPrvCompressExecFn(execFn_leanBlPrefix);
+        case LeanClass::blSuffix: return cpuPrvCompressExecFn(execFn_leanBlSuffix);
+        default: return cpuPrvCompressExecFn(execFn_leanExit);
+    }
+}
+
+template <int size>
+static FORCE_INLINE void cpuPrvLeanDecodeSlot(struct icacheline *line, unsigned offset, uint32_t &instr,
+                                              uint32_t &decoded) {
+    if constexpr (size == 4) {
+        memcpy(&instr, line->data + offset, 4);
+        decoded = cpuPrvLeanDecodeArm(instr);
+        line->decoded[offset >> 1] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_ARM;
+    } else {
+        uint16_t raw;
+        memcpy(&raw, line->data + offset, 2);
+        decoded = cpuPrvLeanDecodeThumb(raw, instr);
+        line->decoded[offset >> 1] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_THUMB;
+        line->translatedThumbInstructions[offset >> 1] = instr;
+    }
+}
+
+// Notes that the decode cache holds code from the RAM page at pa. A newly noted page loses its lean TLB
+// write entries, so every later store to it takes the slow path, which drops the decoded code first.
+static void cpuPrvLeanNoteCode(struct ArmCpu *cpu, uint32_t pa) {
+    uint64_t &bits = cpu->leanCode[pa >> 18];
+    const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
+    if (bits & bit) return;
+    bits |= bit;
+    hostTlbFlush(&cpu->mem->hostTlb);
+}
+
+// Fills the decode cache line for va from the host page at pa, as the ARM920T I-cache would fill its line.
+static struct icacheline *cpuPrvLeanFillLine(struct ArmCpu *cpu, uint32_t va, bool privileged, uint32_t pa,
+                                             const uint8_t *page, bool ram) {
+    struct icache *ic = cpu->ic;
+    if (ram) cpuPrvLeanNoteCode(cpu, pa);
+    struct icacheline *line = ic->cache + calculateIndex(va);
+    const uint8_t *data = page + (pa & 0xfe0u);
+    // Decoding depends only on the word, so slots whose words are unchanged keep their decode.
+    for (unsigned i = 0; i < sizeof(line->data); i += 4) {
+        if (memcmp(line->data + i, data + i, 4)) {
+            line->decoded[i >> 1] = 0;
+            line->decoded[(i >> 1) + 1] = 0;
+            memcpy(line->data + i, data + i, 4);
+        }
+    }
+    line->revision = ic->revision;
+    line->tag = calculateTag(va);
+    line->fetchKey = icacheFetchKey(ic, privileged);
+    ic->epoch++;
+    return line;
+}
+
+// The guarded step's fetch in Fast: the word from the decode cache, filling its line from a plain page
+// where the I-cache would cache it, or straight from a plain page where it wouldn't. False for anything
+// else (faults, pages that aren't plain), which the I-cache model then reads uncached.
+static bool cpuPrvLeanStepWord(void *ctx, uint32_t va, unsigned size, bool privileged, uint32_t *word) {
+    struct ArmCpu *cpu = (struct ArmCpu *)ctx;
+    struct icache *ic = cpu->ic;
+    struct icacheline *line = ic->cache + calculateIndex(va);
+    if (!(line->revision == ic->revision && line->tag == calculateTag(va) &&
+          line->fetchKey == icacheFetchKey(ic, privileged))) {
+        struct ArmMmu *mmu = cpu->memorySystem.mmu;
+        const MMUTranslateResult r = mmuTranslate(mmu, va, privileged, false);
+        if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+        const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+        bool ram = false;
+        const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
+        if (!page) return false;
+        if (!ic->arm920Enabled || (mmuIsOn(mmu) && !MMU_TRANSLATE_RESULT_CACHEABLE(r))) {
+            if (size == 2) {
+                uint16_t half;
+                memcpy(&half, page + (pa & 0xfffu), 2);
+                *word = half;
+            } else {
+                memcpy(word, page + (pa & 0xfffu), 4);
+            }
+            return true;
+        }
+        line = cpuPrvLeanFillLine(cpu, va, privileged, pa, page, ram);
+    }
+    if (size == 2) {
+        uint16_t half;
+        memcpy(&half, line->data + calculateLineIndex(va), 2);
+        *word = half;
+    } else {
+        memcpy(word, line->data + calculateLineIndex(va), 4);
+    }
+    return true;
+}
+
+// A fetch the decode cache can't answer: translate as the ARM920T I-cache does, and fill the line from the
+// host page when Exact's I-cache would cache it. Uncached fetches are read and decoded every time, so they
+// see memory as Exact does. False (nothing run) for anything that isn't a plain page or faults.
+template <int size>
+static __attribute__((noinline)) bool cpuPrvLeanFetchSlow(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr,
+                                                         uint32_t &decoded) {
+    struct icache *ic = cpu->ic;
+    if ((pc & (size - 1)) || icacheArm920ContinuationPending(ic) || !cpu->leanPage) return false;
+    struct ArmMmu *mmu = cpu->memorySystem.mmu;
+    const MMUTranslateResult r = mmuTranslate(mmu, pc, cpu->privileged, false);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+    bool ram = false;
+    const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
+    if (!page) return false;
+    if (!ic->arm920Enabled || (mmuIsOn(mmu) && !MMU_TRANSLATE_RESULT_CACHEABLE(r))) {
+        if constexpr (size == 4) {
+            memcpy(&instr, page + (pa & 0xfffu), 4);
+            decoded = cpuPrvLeanDecodeArm(instr);
+        } else {
+            uint16_t raw;
+            memcpy(&raw, page + (pa & 0xfffu), 2);
+            decoded = cpuPrvLeanDecodeThumb(raw, instr);
+        }
+        return true;
+    }
+    struct icacheline *line = cpuPrvLeanFillLine(cpu, pc, cpu->privileged, pa, page, ram);
+    cpuPrvLeanDecodeSlot<size>(line, calculateLineIndex(pc), instr, decoded);
+    return true;
+}
+
+template <int size>
+static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr, uint32_t &decoded) {
+    struct icache *ic = cpu->ic;
+    struct icacheline *line = ic->cache + calculateIndex(pc);
+    if (likely(!(pc & (size - 1)) && line->revision == ic->revision && line->tag == calculateTag(pc) &&
+               line->fetchKey == icacheFetchKey(ic, cpu->privileged))) {
+        const unsigned offset = calculateLineIndex(pc);
+        const uint32_t cached = line->decoded[offset >> 1];
+        constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+        if (likely((cached & DECODED_BITS) == kind)) {
+            decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
+            if constexpr (size == 4) memcpy(&instr, line->data + offset, 4);
+            else instr = line->translatedThumbInstructions[offset >> 1];
+            return true;
+        }
+        cpuPrvLeanDecodeSlot<size>(line, offset, instr, decoded);
+        return true;
+    }
+    return cpuPrvLeanFetchSlow<size>(cpu, pc, instr, decoded);
+}
+
+template <int size>
+static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
+    uint32_t done = 0;
+    const uint32_t before = cpu->leanDone;
+    while (before + done < cpu->leanBudget && before + done < cpu->leanCount) {
+        cpu->leanDone = before + done;
+        const uint32_t pc = cpu->regs[REG_NO_PC];
+        uint32_t instr, decoded;
+        cpu->curInstrPC = pc;
+        if (!cpuPrvLeanFetch<size>(cpu, pc, instr, decoded)) break;
+        cpu->regs[REG_NO_PC] = pc + size;
+        cpu->leanInstr = instr;
+        // Accesses of an instruction the step runs again are counted there, not here.
+        const uint64_t bus = cpu->leanBus;
+        cpuPrvDecompressExecFn(decoded)(cpu, instr);
+        if (unlikely(cpu->leanExit)) {
+            cpu->regs[REG_NO_PC] = pc;
+            cpu->leanBus = bus;
+            break;
+        }
+        ++done;
+        if (cpu->slowPath) break;
+    }
+    cpu->leanDone = before + done;
+    return done;
+}
+
+uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64_t *busAccesses) {
+    return cpuArm920RunLeanFor(cpu, budget, UINT32_MAX, blNext, busAccesses);
+}
+
+uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint32_t *blNext, uint64_t *busAccesses) {
+    *blNext = ~0u;
+    *busAccesses = 0;
+    if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
+                              SLOW_PATH_REASON_PACE_SYSCALL_BREAK | SLOW_PATH_REASON_INJECTED_CALL_DONE);
+    if (cpu->slowPath || cpu->arm920Waiting || cpu->modePace || cpu->nativeCallDepth || cpu->nativePc[0] ||
+        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic))
+        return 0;
+    cpu->leanRun = true;
+    cpu->leanExit = false;
+    cpu->leanBlNext = ~0u;
+    cpu->leanBus = 0;
+    cpu->leanDone = 0;
+    cpu->leanBudget = budget;
+    cpu->leanCount = count;
+    uint32_t done = 0;
+    for (;;) {
+        done += cpu->T ? cpuPrvLeanLoop<2>(cpu) : cpuPrvLeanLoop<4>(cpu);
+        // Carry on only past an ARM/Thumb switch; a failed fetch leaves no slow path reason.
+        if (done >= cpu->leanBudget || done >= count || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
+        cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
+    }
+    cpu->leanRun = false;
+    cpu->leanExit = false;
+    *blNext = cpu->leanBlNext;
+    *busAccesses = cpu->leanBus;
+    return done;
+}
+
+void cpuArm920SetLean(ArmCpu *cpu, Arm920LeanPage page, Arm920LeanGuard guard, void *context) {
+    if (cpu->model != ArmCpuModel::arm920t) return;
+    cpu->leanPage = page;
+    cpu->leanGuard = guard;
+    cpu->leanContext = context;
+    cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->lean = page != nullptr;
+    if (page && !cpu->leanCode) {
+        cpu->leanCode = (uint64_t *)calloc(1u << 14, sizeof(uint64_t));
+        if (!cpu->leanCode) ERR("cannot alloc the Fast code page map");
+    }
+    icacheArm920SetLeanWord(cpu->ic, page ? cpuPrvLeanStepWord : nullptr, cpu);
+    hostTlbFlush(&cpu->mem->hostTlb);
+}
+
+void cpuArm920LeanReset(ArmCpu *cpu) {
+    if (cpu->model != ArmCpuModel::arm920t) return;
+    auto *dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+    dc->mem = cpu->mem;
+    for (auto &segment : dc->lines)
+        for (auto &line : segment) dc->clean(line);
+    dc->invalidate();
+    icacheInval(cpu->ic);
+    if (cpu->leanCode) memset(cpu->leanCode, 0, (1u << 14) * sizeof(uint64_t));
+    hostTlbFlush(&cpu->mem->hostTlb);
+}
+
+void cpuArm920LeanFlush(ArmCpu *cpu) { hostTlbFlush(&cpu->mem->hostTlb); }
+
+void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = read; }
+
+void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
+
+// Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
+void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
+#ifdef FROND_DYNARMIC
+    // Translated code is dropped by page: the virtual pages it was translated from at pa.
+    if (cpu->jitCode) {
+        uint64_t &bits = cpu->jitCode[pa >> 18];
+        const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
+        if (unlikely(bits & bit)) {
+            bits &= ~bit;
+            jitCodeWrittenPa(cpu->jit, pa);
+        }
+    }
+#endif
+    if (!cpu->leanCode) return;
+    uint64_t &bits = cpu->leanCode[pa >> 18];
+    if (likely(!(bits & (uint64_t(1) << ((pa >> 12) & 63))))) return;
+    memset(cpu->leanCode, 0, (1u << 14) * sizeof(uint64_t));
+    icacheArm920DropDecoded(cpu->ic);
+    ++cpu->leanCodeDrops;
+}
+
+uint32_t cpuArm920LeanGeneration(const ArmCpu *cpu) { return cpu->mem->hostTlb.gen; }
+
+uint64_t cpuArm920LeanCodeDrops(const ArmCpu *cpu) { return cpu->leanCodeDrops; }
+
+void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
+    cpu->jitAccessPcs = pcs;
+    cpu->jitAccessPcCount = count;
+}
+
+bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
+    // The lean and JIT loads' translation, with the current mode's permissions.
+    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, va & ~3u, cpu->privileged);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    if (!word) return true;
+    bool counted;
+    const uint8_t *page = cpu->leanPage ? cpu->leanPage(cpu->leanContext, *pa & ~0xfffu, false, &counted) : nullptr;
+    if (!page) return false;
+    memcpy(word, page + (*pa & 0xfffu), 4);
+    return true;
+}
+#else
+void cpuArm920SetJitAccessPcs(ArmCpu *, const uint32_t *, uint32_t) {}
+bool cpuArm920PeekWord(ArmCpu *, uint32_t, uint32_t *, uint32_t *) { return false; }
+uint32_t cpuArm920RunLean(ArmCpu *, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
+    *blNext = ~0u;
+    *busAccesses = 0;
+    return 0;
+}
+uint32_t cpuArm920RunLeanFor(ArmCpu *, uint32_t, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
+    *blNext = ~0u;
+    *busAccesses = 0;
+    return 0;
+}
+void cpuArm920SetLean(ArmCpu *, Arm920LeanPage, Arm920LeanGuard, void *) {}
+void cpuArm920LeanReset(ArmCpu *) {}
+void cpuArm920LeanFlush(ArmCpu *) {}
+void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
+void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
+void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
+uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
+uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
+#endif
+
+#ifdef FROND_DYNARMIC
+// JIT glue. The JIT runs only outside injected calls, the debugger and native PC breaks,
+// with the MMU, and only while no slow path reason is set.
+
+bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr) {
+    if (va & (size - 1)) {
+        *fsr = 0;
+        return false;
+    }
+    switch (size) {
+        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, false>(cpu, buf, va, cpu->privileged, fsr);
+        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, false>(cpu, buf, va, cpu->privileged, fsr);
+        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, false>(cpu, buf, va, cpu->privileged, fsr);
+        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, false>(cpu, buf, va, cpu->privileged, fsr);
+    }
+    return false;
+}
+
+bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr) {
+    if (va & (size - 1)) {
+        *fsr = 0;
+        return false;
+    }
+    void *b = const_cast<void *>(buf);
+    switch (size) {
+        case 1: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 1, true>(cpu, b, va, cpu->privileged, fsr);
+        case 2: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 2, true>(cpu, b, va, cpu->privileged, fsr);
+        case 4: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 4, true>(cpu, b, va, cpu->privileged, fsr);
+        case 8: return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, 8, true>(cpu, b, va, cpu->privileged, fsr);
+    }
+    return false;
+}
+
+// ARM920T Fast blocks: the lean TLB's page for va, live only for plain pages the MMU allows now in this mode.
+// Its write entries are dropped whenever a page gets translated code (cpuPrvJitNoteArm920Code), and the slow
+// path that fills one again drops the code first (cpuArm920LeanStored), so a writable page holds no code.
+static uint8_t *cpuPrvJitArm920Page(ArmCpu *cpu, uint32_t va, bool write) {
+    if (!cpu->jitBlocks) return nullptr;
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    const struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
+    if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+    return (uint8_t *)((e.addend & ~uintptr_t(1)) + (va & ~0xfffu));
+}
+
+uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
+    if (cpu->model == ArmCpuModel::arm920t) return cpuPrvJitArm920Page(cpu, va, false);
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    const struct HostTlbEntry &e = t.read[(va >> 12) & (HOST_TLB_SIZE - 1)];
+    if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+    return (uint8_t *)(e.addend + (va & ~0xfffu));
+}
+
+// Host address of the RAM page holding va if a store there would take the host TLB's
+// fast path for the current privilege (so the MMU allows it in this mode with the current
+// domains), marked dirty as ramDirectWritePage does. Null for anything else.
+uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va) {
+    if (cpu->model == ArmCpuModel::arm920t) return cpuPrvJitArm920Page(cpu, va, true);
+    if (cpu->nativeCallDepth) return nullptr;
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    const struct HostTlbEntry &e = t.write[(va >> 12) & (HOST_TLB_SIZE - 1)];
+    if (!t.ram || e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+    return ramDirectWritePage(t.ram, va + uint32_t(e.addend));
+}
+
+// Code is read like icacheFetch reads it: ROM from its peephole copy, which holds the PACE
+// entry and peephole patches the data side doesn't see. This is the host TLB's page for va,
+// moved to the peephole copy for ROM.
+static uint8_t *cpuPrvJitHostCodePage(ArmCpu *cpu, uint32_t va) {
+    uint8_t *page = cpuJitReadPage(cpu, va);
+    const struct ArmMemRegion &region = cpu->mem->regions[REGION_ROM];
+    if (!page || !region.uD) return page;
+    struct ArmRom *rom = (struct ArmRom *)region.uD;
+    uint8_t *data = (uint8_t *)romGetData(rom);
+    if (page < data || page >= data + romGetSize(rom)) return page;
+    return (uint8_t *)romGetPeepholeBuffer(rom) + (page - data);
+}
+
+bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
+    va &= ~3u;
+    if (cpu->model == ArmCpuModel::arm920t) {
+        if (cpu->jitBlocks) {
+            // Plain pages only, straight from memory: Fast keeps no I-cache contents.
+            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, va, cpu->privileged, false);
+            if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
+            bool counted;
+            const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+            const uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &counted);
+            if (!page) return false;
+            memcpy(word, page + (pa & 0xfffu), 4);
+            return true;
+        }
+        uint_fast8_t fsr;
+        return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
+    }
+    if (const uint8_t *page = cpuPrvJitHostCodePage(cpu, va)) {
+        memcpy(word, page + (va & 0xfffu), 4);
+        return true;
+    }
+    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, va, cpu->privileged);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    if (cpu->jitMemoryOnly && !memIsMemory(cpu->mem, MMU_TRANSLATE_RESULT_PA(r), 4)) {
+        cpu->jitRefused = true;
+        return false;
+    }
+    return memInstructionFetch<4>(cpu->mem, MMU_TRANSLATE_RESULT_PA(r), word);
+}
+
+void cpuJitMemoryOnly(ArmCpu *cpu, bool on) {
+    cpu->jitMemoryOnly = on;
+    if (on) cpu->jitRefused = false;
+}
+
+bool cpuJitRefused(const ArmCpu *cpu) { return cpu->jitRefused; }
+
+bool cpuJitCodePa(ArmCpu *cpu, uint32_t va, uint32_t *pa, uint32_t *access) {
+    const MMUTranslateResult r = mmuTranslateCodeAccess(cpu->memorySystem.mmu, va, access);
+    if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+    *pa = MMU_TRANSLATE_RESULT_PA(r);
+    return true;
+}
+
+bool cpuJitAccessReadable(ArmCpu *cpu, uint32_t access) {
+    return mmuAccessReadable(cpu->memorySystem.mmu, access, cpu->privileged);
+}
+
+uint64_t cpuJitPermContext(ArmCpu *cpu) {
+    ArmMmu *mmu = cpu->memorySystem.mmu;
+    return uint64_t(mmuGetDomainCfg(mmu)) | (uint64_t(mmuGetS(mmu)) << 32) | (uint64_t(mmuGetR(mmu)) << 33);
+}
+
+// A store to a flagged RAM line: drop the JIT's code from the page and any fetch buffer it
+// hit. The page's flags are clear by now, so the buffers left are watched again.
+static void cpuPrvJitCodeWritten(void *ctx, uint8_t *page, uint32_t offset, uint32_t size) {
+    ArmCpu *cpu = (ArmCpu *)ctx;
+    icacheDropFetchedHost(cpu->ic, page + offset, size);
+    jitCodeWritten(cpu->jit, page);
+    icacheWatchFetchBuffers(cpu->ic);
+}
+
+// Fast only. The fetch buffers keep a line's old words until the guest invalidates, as an
+// XScale does, and Exact runs them. Fast drops a buffer when a store hits its line instead:
+// the JIT runs code past a buffered line without moving the buffers on, so the old words
+// would otherwise run long after Exact had refetched. Flags the line's code flag, which
+// every store to RAM checks (interpreter, the JIT's callbacks, DMA, ramMarkDirty), and sends
+// the JIT's direct stores to the page back through the callbacks.
+static const uint8_t *cpuPrvJitWatchFetch(void *ctx, uint32_t pa) {
+    ArmCpu *cpu = (ArmCpu *)ctx;
+    uint8_t *lines;
+    uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, &lines);
+    if (!page) return nullptr;
+    uint8_t &flag = lines[(pa & 0xfffu) >> 6];
+    if (!flag) {
+        flag = 1;
+        jitWriteProtectPage(cpu->jit, page);
+    }
+    return page + (pa & 0xfffu);
+}
+
+uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
+    *lines = nullptr;
+    if (cpu->model == ArmCpuModel::arm920t && cpu->jitBlocks) {
+        // ARM920T Fast blocks: a RAM page gets its jitCode bit, and a newly marked one loses its lean TLB
+        // entries (so the JIT's page table empties too), so every later store to it drops its code.
+        // The single-step JIT (no blocks) watches RAM lines like the other cores.
+        if (!cpu->leanPage) return nullptr;
+        bool ram = false;
+        uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
+        if (page && ram) {
+            uint64_t &bits = cpu->jitCode[pa >> 18];
+            const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
+            if (!(bits & bit)) {
+                bits |= bit;
+                hostTlbFlush(&cpu->mem->hostTlb);
+            }
+        }
+        return page;
+    }
+    if (uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, lines)) return page;
+    const struct ArmMemRegion &region = cpu->mem->regions[REGION_ROM];
+    if (!region.ub || !region.uD || pa < region.pa || pa >= region.ub) return nullptr;
+    struct ArmRom *rom = (struct ArmRom *)region.uD;
+    uint8_t *data = (uint8_t *)romResolveAddress(rom, pa & ~0xfffu, 0x1000);
+    if (!data) return nullptr;
+    return (uint8_t *)romGetPeepholeBuffer(rom) + (data - (uint8_t *)romGetData(rom));
+}
+
+void cpuJitForgetCode(ArmCpu *cpu) {
+    if (cpu->jitCode) memset(cpu->jitCode, 0, (1u << 14) * sizeof(uint64_t));
+    memForgetRamCode(cpu->mem);
+    icacheWatchFetchBuffers(cpu->ic);
+}
+
+uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu); }
+
+// The host TLB's keys hold the privilege, so its generation alone covers both levels. A
+// domain change that only adds rights keeps the host TLB, so gains are counted in too.
+uint64_t cpuJitPageGen(ArmCpu *cpu) {
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    return (uint64_t(t.epoch) << 32) | uint32_t(t.gen + t.gains);
+}
+
+int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
+    return mmuPageClientAccess(cpu->memorySystem.mmu, va, privileged);
+}
+
+bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
+
+uint32_t *cpuJitSpsr(ArmCpu *cpu) { return &cpu->SPSR; }
+
+uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu) { return &cpu->jitAccessPc; }
+
+bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc) {
+    for (uint32_t i = 0; i < cpu->jitAccessPcCount; ++i)
+        if (cpu->jitAccessPcs[i] == pc) return true;
+    return false;
+}
+
+bool cpuJitPrivileged(ArmCpu *cpu) { return cpu->privileged; }
+
+Pxa270wmmx *cpuJitWmmx(ArmCpu *cpu) { return cpu->wmmx; }
+
+bool cpuJitWmmxCompiles(ArmCpu *cpu, uint32_t word) { return cpu->jit && jitWmmxCompiles(cpu->jit, word); }
+
+void cpuJitIcacheInvalLine(ArmCpu *cpu, uint32_t va) { icacheInvalAddr(cpu->ic, va); }
+
+// MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
+uint64_t cpuJitDomainCalls() { return jitDomainCalls(); }
+uint32_t cpuJitGetDomain(ArmCpu *cpu) { return mmuGetDomainCfg(cpu->memorySystem.mmu); }
+void cpuJitSetDomain(ArmCpu *cpu, uint32_t value) { mmuSetDomainCfg(cpu->memorySystem.mmu, value); }
+
+// Rd goes through cpu->regs as execFn_cp_dp passes it, and is put back after.
+bool cpuJitCp15Xfer(ArmCpu *cpu, uint32_t word, uint32_t *value) {
+    const struct ArmCoprocessor &cp = cpu->coproc[15];
+    const uint8_t rd = (word >> 12) & 15;
+    const uint32_t saved = cpu->regs[rd];
+    cpu->regs[rd] = *value;
+    const bool ok = cp.regXfer && cp.regXfer(cpu, cp.userData, false, !!(word & (1u << 20)), 0, rd,
+                                             (word >> 16) & 15, word & 15, (word >> 5) & 7);
+    *value = cpu->regs[rd];
+    cpu->regs[rd] = saved;
+    return ok;
+}
+
+uint32_t cpuJitSwi(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr) {
+    cpu->flags = cpsr & 0xf0000000UL;
+    cpu->Q = !!(cpsr & ARM_SR_Q);
+    cpu->T = !!(cpsr & ARM_SR_T);
+    memcpy(cpu->regs + 8, regs + 8, 7 * sizeof(uint32_t));
+    cpu->curInstrPC = regs[REG_NO_PC] - (cpu->T ? 2 : 4);
+    cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_SWI, regs[REG_NO_PC], ARM_SR_MODE_SVC | ARM_SR_I);
+    memcpy(regs + 8, cpu->regs + 8, 8 * sizeof(uint32_t));
+    return cpuPrvMaterializeCPSR(cpu);
+}
+
+uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value) {
+    cpu->flags = cpsr & 0xf0000000UL;
+    cpu->Q = !!(cpsr & ARM_SR_Q);
+    cpu->T = !!(cpsr & ARM_SR_T);
+    memcpy(cpu->regs + 8, regs + 8, 7 * sizeof(uint32_t));
+    cpuPrvSetPSR<false>(cpu, mask, value);
+    memcpy(regs + 8, cpu->regs + 8, 7 * sizeof(uint32_t));
+    return cpuPrvMaterializeCPSR(cpu);
+}
+
+static uint64_t jitExceptionReturns;
+uint64_t cpuJitExceptionReturns() { return jitExceptionReturns; }
+
+uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target) {
+    ++jitExceptionReturns;
+    cpu->flags = cpsr & 0xf0000000UL;
+    cpu->Q = !!(cpsr & ARM_SR_Q);
+    cpu->T = !!(cpsr & ARM_SR_T);
+    memcpy(cpu->regs + 8, regs + 8, 7 * sizeof(uint32_t));
+    const uint32_t sr = cpu->SPSR;
+    cpuPrvSetPSRlo8(cpu, sr);
+    cpuPrvSetPSRhi8(cpu, sr);
+    memcpy(regs + 8, cpu->regs + 8, 7 * sizeof(uint32_t));
+    regs[REG_NO_PC] = target;
+    return cpuPrvMaterializeCPSR(cpu);
+}
+
+// ARM encodings (or Thumb ones Frond translates to ARM) that dynarmic would get wrong
+// for a privileged XScale, or that Frond gives special meaning.
+static bool cpuPrvJitPlainArm(uint32_t i, bool thumb) {
+    const uint32_t cond = i >> 28;
+    if (cond == 0xf) {
+        const uint32_t op = (i >> 24) & 0xf;
+        if (op == 10 || op == 11) return true;                                  // BLX imm
+        if ((op == 5 || op == 7) && (i & 0x0D70F000UL) == 0x0550F000UL) return true;  // PLD
+        return false;  // coprocessor 2 forms, PACE, peepholes, undefined
+    }
+    if (thumb ? cpuPrvDecoderArm<ARM_MEMORY_SYSTEM_MMU, true>(i) ==
+                    PREFIX_EXEC_FN(execFn_invalid<ARM_MEMORY_SYSTEM_MMU, true>)
+              : cpuPrvDecoderArm<ARM_MEMORY_SYSTEM_MMU, false>(i) ==
+                    PREFIX_EXEC_FN(execFn_invalid<ARM_MEMORY_SYSTEM_MMU, false>))
+        return false;
+    // MRS and MSR: the JIT's psr_coprocessor runs the SPSR and CPSR control forms.
+    if ((i & 0x0fb000f0) == 0x01000000) return (i & 0x000f0fff) == 0x000f0000 && ((i >> 12) & 15) != 15;
+    if ((i & 0x0fb0f0f0) == 0x0120f000) return !(i & 0xf00) && (i & 15) != 15 && (i & 0x000f0000);
+    if ((i & 0x0fb0f000) == 0x0320f000) return (i & 0x000f0000) != 0;
+    if ((i & 0x0ff000f0) == 0x01200070) return false;                           // BKPT
+    // The JIT's p15 slot (jitCp15SlotWord), Rd not PC.
+    if (jitCp15SlotWord(i)) return !thumb && ((i >> 12) & 15) != 15;
+    // iWMMXt CDP, MCR, MRC, MCRR, MRRC, LDC and STC: the JIT's cp0 and cp1 slots, on a CPU
+    // that has iWMMXt with the coprocessor's CPAR bit set (checked in cpuJitPlain, outside
+    // the memo).
+    if ((i & 0x0c000000) == 0x0c000000 && (i & 0x0f000000) != 0x0f000000 && ((i >> 8) & 14) == 0 && !thumb)
+        return pxa270wmmxJitValid(i);
+    // SWI, but not the semihosting ones execFn_swi answers itself. Only unconditional ones,
+    // so each ends the run as a step through the interpreter did, even where the condition
+    // would fail.
+    if ((i & 0x0f000000) == 0x0f000000) return (i >> 28) == 0xe && (i & 0x00ffffff) != (thumb ? 0xabu : 0x123456u);
+    if ((i & 0x0c000000) == 0x0c000000) return false;                           // coprocessor
+    if ((i & 0x0e000000) == 0x08000000 && (i & (1 << 22))) return false;        // LDM^, STM^
+    if ((i & 0x0d200000) == 0x04200000 && !(i & (1 << 24))) return false;       // LDRT, STRT...
+    if ((i & 0x0c100000) == 0x04100000 && !(i & (1 << 22))) {                   // LDR word
+        const uint32_t rn = (i >> 16) & 15, rd = (i >> 12) & 15;
+        if ((rn == 9 && rd == 12) || (rn == 12 && rd == 15)) return false;      // syscall dispatch
+    }
+    if ((i & 0x0c000000) == 0 && ((i >> 12) & 15) == 15 && (i & (1 << 20))) {
+        const uint32_t op = (i >> 21) & 15;
+        const bool extra = !(i & (1 << 25)) && (i & 0x90) == 0x90;
+        if (!extra && (op < 8 || op > 11)) {                                    // S with PC
+            // MOVS PC, Rm and SUBS PC, Rn, #imm run through the psr_coprocessor.
+            if ((i & 0x0ffffff0) == 0x01b0f000) return (i & 15) != 15;
+            if ((i & 0x0ff0f000) == 0x0250f000) return ((i >> 16) & 15) != 15;
+            return false;
+        }
+    }
+    return true;
+}
+
+// cpuPrvJitPlainArm depends only on the word and the Thumb flag, so its answers are kept
+// in a small direct-mapped table shared by every CPU. An entry holds the word in its top
+// half and, in its low bits, whether the ARM (bits 0-1) and Thumb (bits 2-3) answers are
+// known and plain. Entries are single 64-bit words, so threads racing on one only lose an
+// answer, never mix two words.
+static std::atomic<uint64_t> cpuPrvJitPlainMemo[1024];
+
+static bool cpuPrvJitPlainArmMemo(uint32_t i, bool thumb) {
+    std::atomic<uint64_t> &slot = cpuPrvJitPlainMemo[(i * 0x9e3779b1u) >> 22];
+    uint64_t e = slot.load(std::memory_order_relaxed);
+    const unsigned shift = thumb ? 2 : 0;
+    if (uint32_t(e >> 32) != i) e = uint64_t(i) << 32;
+    else if (e & (1u << shift)) return e & (2u << shift);
+    const bool plain = cpuPrvJitPlainArm(i, thumb);
+    slot.store(e | (1u << shift) | (plain ? 2u << shift : 0), std::memory_order_relaxed);
+    return plain;
+}
+
+static bool cpuPrvJitLdrWord(uint32_t i, uint32_t rn, uint32_t rd) {
+    return (i & 0x0c500000) == 0x04100000 && ((i >> 16) & 15) == rn && ((i >> 12) & 15) == rd;
+}
+
+// The syscall dispatch pair LDR R12, [R9, #-table] then LDR PC, [R12, #offset], which the
+// interpreter reports to the patch dispatch. The JIT may run the pair when the syscall has
+// no patch (patchDispatchAddPatch drops translated code). Other forms of the two loads
+// stay with the interpreter. Returns -1 for any other instruction.
+static int cpuPrvJitSyscallPlain(ArmCpu *cpu, uint32_t pc, uint32_t i) {
+    const bool load = cpuPrvJitLdrWord(i, 9, 12), jump = cpuPrvJitLdrWord(i, 12, 15);
+    if (!load && !jump) return -1;
+    const bool exactLoad = (i & 0x0ffff000) == 0x0519c000, exactJump = (i & 0x0ffff000) == 0x059cf000;
+    if (!exactLoad && !exactJump) return 0;
+    uint32_t other;
+    if (!cpuJitFetch(cpu, load ? pc + 4 : pc - 4, &other)) return 0;
+    if (load) {
+        if ((other & 0x0ffff000) == 0x059cf000) return !patchDispatchHasPatch(cpu->patchDispatch, i & 0xfff, other & 0xfff);
+        return !cpuPrvJitLdrWord(other, 12, 15);
+    }
+    if ((other & 0x0ffff000) == 0x0519c000) return !patchDispatchHasPatch(cpu->patchDispatch, other & 0xfff, i & 0xfff);
+    return !cpuPrvJitLdrWord(other, 9, 12);
+}
+
+bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+    if (cpu->model == ArmCpuModel::arm920t) {
+        // Fast blocks: MRC and MCR p15, 0, Rd, c3, c0, 0 (the domain access control register) run in the JIT's
+        // p15 slot, which does what the ARM920T's coprocessor 15 does for them. So do the slot's other words
+        // (jitCp15SlotWord920: ID, control and table base reads, cache operations), through its handler.
+        const bool dacr = cpu->jitBlocks && !thumb && (word & 0x0fef0fff) == 0x0e030f10 && ((word >> 12) & 15) != 15;
+        if (cpu->jitBlocks && !thumb && !dacr && ((word >> 12) & 15) != 15 && (word >> 28) != 15 &&
+            jitCp15SlotWord920(word)) {
+            // As below, a fetch buffer word other than memory's stays with the interpreter.
+            uint32_t buffered;
+            return !(icacheBufferedWord(cpu->ic, pc & ~3u, &buffered) && buffered != word);
+        }
+        if (!thumb) {
+            // ARM920T word stores use PC+12; the JIT uses the ARMv5 PC+8 value.
+            if ((word & 0x0e108000) == 0x08008000 ||
+                (word & 0x0c50f000) == 0x0400f000) return false;
+            if ((word >> 28) == 15 || (word & 0x0ffffff0) == 0x012fff30 ||
+                (word & 0x0fff0ff0) == 0x016f0f10 ||
+                (word & 0x0f9000f0) == 0x01000050 ||
+                (word & 0x0f900090) == 0x01000080 ||
+                (word & 0x0e1000d0) == 0x000000d0 ||
+                (word & 0x0ff000f0) == 0x01200070 ||
+                (word & 0x0fb00ff0) == 0x01000090 || // Swap shares the backing-range preflight.
+
+                ((word & 0x0c000000) == 0x0c000000 && !dacr)) return false;
+        } else {
+            const uint16_t h = (pc & 2) ? word >> 16 : word;
+            if ((h & 0xff80) == 0x4780 || (h & 0xf800) == 0xe800 ||
+                (h & 0xff00) == 0xbe00) return false;
+            // CMP with two low registers (Zodiac only): dynarmic calls it unpredictable, so the interpreter runs
+            // it. PXA devices keep handing it to dynarmic as before.
+            if ((h & 0xffc0) == 0x4500) return false;
+            // The second half is interpreted separately at a line boundary (Fast blocks: at a page boundary).
+            if (h >= 0xf000 && h < 0xf800) {
+                if (cpu->jit && jitMaxUnchecked(cpu->jit) == 1) return false;
+                uint32_t next;
+                if ((pc & (cpu->jitBlocks ? 0xfff : 31)) == (cpu->jitBlocks ? 0xffe : 30) ||
+                    !cpuJitFetch(cpu, (pc + 2) & ~3u, &next)) return false;
+                if ((((pc + 2) & 2) ? next >> 16 : next & 0xffff) < 0xf800) return false;
+            }
+        }
+        // Fast blocks: what the lean path leaves to the step stays out too (CP15, exception returns, S-bit
+        // LDM/STM, unpredictable forms), except MSR of the CPSR control field, which the JIT runs through
+        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below and SWI,
+        // which cpuJitSwi takes as the step would (the run ends at the vector).
+        if (cpu->jitBlocks) {
+            if (!thumb) {
+                const bool msrCpsr = (word & 0x0ff0fff0) == 0x0120f000 || (word & 0x0ff0f000) == 0x0320f000;
+                // MOVS PC, LR and SUBS PC, LR, #4 return through cpuJitExceptionReturn.
+                const bool exceptionReturn = (word & 0x0fffffff) == 0x01b0f00e || (word & 0x0fffffff) == 0x025ef004;
+                const bool swi = (word & 0x0f000000) == 0x0f000000 && (word >> 28) != 15;
+                if (!msrCpsr && !exceptionReturn && !dacr && !swi && cpuPrvLeanClassArm(word) == LeanClass::exit)
+                    return false;
+            } else {
+                const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
+                if ((h & 0xff00) != 0xdf00 && cpuPrvLeanClassThumb(h) == LeanClass::exit) return false;
+            }
+        }
+    }
+    // ARM coprocessor encodings other than the p15 slot's (jitCp15SlotWord) and iWMMXt
+    // never go to the JIT (cpuPrvJitPlainArm), so they're turned down before any other
+    // check, and so is everything with cond NV there. iWMMXt (cp0 and cp1) also needs the
+    // unit and its CPAR bit. SWI goes on to cpuPrvJitPlainArm.
+    if (!thumb && (word & 0x0c000000) == 0x0c000000 && !jitCp15SlotWord(word)) {
+        const uint32_t cp = (word >> 8) & 15;
+        if ((word & 0x0f000000) == 0x0f000000) {
+            if ((word >> 28) == 15) return false;
+        } else if (cp > 1 || !cpu->wmmx || !(cpu->CPAR & (1u << cp))) {
+            return false;
+        }
+    }
+    // The interpreter runs a fetch buffer's words before memory's. A buffer can hold other
+    // words than memory, like the patched PACE entry a session restores while its RAM has
+    // the original, so those instructions go to the interpreter.
+    uint32_t buffered;
+    if (icacheBufferedWord(cpu->ic, pc & ~3u, &buffered) && buffered != word) return false;
+    if (!thumb) {
+        const int syscall = cpuPrvJitSyscallPlain(cpu, pc, word);
+        return syscall >= 0 ? syscall : cpuPrvJitPlainArmMemo(word, false);
+    }
+    const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
+    const uint32_t top = h >> 11;
+    // Dynarmic reads any halfword from 0xe800 up as the first half of a Thumb-2 pair. Only a
+    // BL or BLX prefix with its suffix next goes to it; a suffix on its own, or a prefix
+    // followed by anything else, runs in the interpreter.
+    if (h >= 0xe800) {
+        if (top != 0x1e) return false;
+        const uint32_t next = pc + 2;
+        uint32_t w;
+        if (next & 2) {
+            w = word;
+        } else {
+            if (!cpuJitFetch(cpu, next, &w)) return false;
+            if (icacheBufferedWord(cpu->ic, next, &buffered) && buffered != w) return false;
+        }
+        const uint16_t s = (next & 2) ? w >> 16 : w & 0xffff;
+        if (!(s >= 0xf800 || ((s >> 11) == 0x1d && !(s & 1)))) return false;
+        return !(cpu->earlyAudioHook &&
+                 (next == cpu->earlyAudioFrom[0] || next == cpu->earlyAudioFrom[1]));
+    }
+    if (const uint32_t t = table_thumb2arm[h]) return cpuPrvJitPlainArmMemo(t, true);
+    // Forms the interpreter runs as Thumb: LDR PC-relative, ADD Rd, PC/SP, and ADD, MOV,
+    // BX and BLX with high registers.
+    if (top == 0x09 || (h >> 12) == 0xa || (h & 0xfc00) == 0x4400) return true;
+    return false;
+}
+
+static void cpuPrvJitInval(void *ctx, uint32_t va, uint32_t size, bool guest) {
+    ArmCpu *cpu = (ArmCpu *)ctx;
+    if (size)
+        jitInvalidate(cpu->jit, va, size);
+    else if (guest)
+        jitGuestInvalidateAll(cpu->jit, cpu->curInstrPC);
+    else
+        jitClear(cpu->jit);
+}
+
+static bool cpuPrvJitWanted() {
+    const char *v = getenv("FROND_JIT");
+    if (v && *v) return strcmp(v, "0") != 0;
+    return cpuPrvFastEngine;
+}
+
+// One instruction through the interpreter, as cpuCycleLine's slow path does it. With abort,
+// the instruction is fetched as usual and then takes that data abort instead of running
+// (FROND_JIT_ABORT: the JIT already ran it up to its failed access).
+template <int memorySystemKind>
+static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, const FrondJitAbort *abort = nullptr) {
+    const uint32_t pc = cpu->regs[REG_NO_PC];
+    cpu->curInstrPC = pc;
+    acc += 1;
+    uint32_t instr = 0, decoded = 0;
+    uint_fast8_t fsr;
+    const uint32_t size = cpu->T ? 2 : 4;
+    const bool ok = cpu->T ? icacheFetch<memorySystemKind, 2, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded)
+                           : icacheFetch<memorySystemKind, 4, false>(cpu->ic, pc, cpu->privileged, &fsr, instr, decoded);
+    // The JIT fetched this instruction before its access, so a fetch that fails now (the
+    // access changed the mapping) doesn't stop the abort.
+    if (!ok && !abort) {
+        cpuPrvHandleMemErr(cpu, pc, false, true, fsr);
+        return;
+    }
+    cpu->regs[REG_NO_PC] = pc + size;
+    if (abort)
+        cpuPrvDataAbort(cpu, abort->addr, abort->size, abort->write, abort->fsr);
+    else
+        cpuPrvDecompressExecFn(decoded)(cpu, instr);
+}
+
+static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
+    uint32_t acc = 0;
+    CycleProgress progress(cpu, &acc);
+    static bool faultReported = false;
+
+    while (acc < cycles) {
+        if (cpu->model == ArmCpuModel::arm920t && icacheArm920ContinuationPending(cpu->ic)) {
+            cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc);
+            if (cpu->slowPath) break;
+            continue;
+        }
+        uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
+        int stop;
+        acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
+        cpu->flags = cpsr & 0xf0000000UL;
+        cpu->Q = !!(cpsr & ARM_SR_Q);
+        cpu->T = !!(cpsr & ARM_SR_T);
+        if (stop == FROND_JIT_FAULT && !faultReported) {
+            faultReported = true;
+            fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
+                    cpu->regs[REG_NO_PC]);
+        }
+        // Before the slow path check: in Exact the data abort is taken inside the same
+        // instruction as the access, before any interrupt an earlier access raised.
+        const FrondJitAbort *abort = stop == FROND_JIT_ABORT ? &jitLastAbort(cpu->jit) : nullptr;
+        if (cpu->slowPath && !abort) break;
+        if (stop == FROND_JIT_INTERPRET || abort) {
+            // Stay in the interpreter while the next instruction would come straight back.
+            for (bool first = true;; first = false) {
+                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc, first ? abort : nullptr);
+                if (cpu->slowPath || acc >= cycles) break;
+                const uint32_t pc = cpu->regs[REG_NO_PC];
+                uint32_t word;
+                if (cpuJitFetch(cpu, pc, &word) && cpuJitPlain(cpu, pc, word, cpu->T)) break;
+            }
+            if (cpu->slowPath) break;
+        } else if (stop == FROND_JIT_COLD) {
+            // Code not compiled yet: the interpreter runs it up to its next taken branch,
+            // where the JIT looks again.
+            for (;;) {
+                const uint32_t pc = cpu->regs[REG_NO_PC];
+                const bool thumb = cpu->T;
+                cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc);
+                if (cpu->slowPath || acc >= cycles) break;
+                if (cpu->T != thumb || cpu->regs[REG_NO_PC] != pc + (thumb ? 2 : 4)) break;
+            }
+            if (cpu->slowPath) break;
+        }
+    }
+
+    return acc;
+}
+
+bool cpuArm920SetJit(ArmCpu *cpu, bool on) {
+    if (cpu->model != ArmCpuModel::arm920t) return false;
+    if (!on) {
+        cpu->jitBlocks = false;
+        return true;
+    }
+    if (!cpu->leanPage) return false;
+    if (!cpu->jit) {
+        cpu->jitCode = (uint64_t *)calloc(1u << 14, sizeof(uint64_t));
+        if (!cpu->jitCode) ERR("cannot alloc the JIT code page map");
+        cpu->jitLoopOnly = true;
+        cpu->jitBlocks = true;
+        cpu->jit = jitCreate(cpu, false);
+        icacheSetInvalHook(cpu->ic, cpuPrvJitInval, cpu);
+    } else if (!cpu->jitLoopOnly) {
+        return false;  // the single-step diagnostic JIT
+    }
+    cpu->jitBlocks = true;
+    jitClear(cpu->jit);
+    return true;
+}
+
+bool cpuArm920JitOn(const ArmCpu *cpu) { return cpu->jitBlocks; }
+
+void cpuArm920DropJit(ArmCpu *cpu) {
+    if (!cpu->jit || !cpu->jitLoopOnly) return;
+    icacheSetInvalHook(cpu->ic, nullptr, nullptr);
+    jitDestroy(cpu->jit);
+    cpu->jit = nullptr;
+    cpu->jitBlocks = cpu->jitLoopOnly = false;
+    free(cpu->jitCode);
+    cpu->jitCode = nullptr;
+}
+
+uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *cpu) { return cpu->jit ? jitMaxUnchecked(cpu->jit) : 0; }
+
+// Slow path reasons cpuArm920RunJit clears before it runs: none of them needs the step.
+static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE |
+                                                     SLOW_PATH_REASON_RESCHEDULE | SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
+                                                     SLOW_PATH_REASON_INJECTED_CALL_DONE;
+
+bool cpuArm920JitCanRun(const ArmCpu *cpu) {
+    return cpu->jitBlocks && !(cpu->slowPath & ~arm920JitClearedSlowPath) && !cpu->arm920Waiting && !cpu->modePace &&
+           !cpu->nativeCallDepth && !cpu->nativePc[0] && !cpu->debugStub &&
+           !icacheArm920ContinuationPending(cpu->ic);
+}
+
+uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span) {
+    *stop = arm920JitExit;
+    if (!cpu->jitBlocks || !budget) return 0;
+    cpuClearSlowPath(cpu, arm920JitClearedSlowPath);
+    if (!cpuArm920JitCanRun(cpu)) return 0;
+    // Data goes through the lean memory path: host pages, or an exit (leanExit) that faults the access.
+    cpu->leanRun = true;
+    cpu->leanJit = true;
+    cpu->leanExit = false;
+    cpu->leanDone = 0;
+    // In a JIT run leanBudget only gives the access hooks their left.
+    cpu->leanBudget = span ? span : budget;
+    cpu->jitAccessPc = 0;
+    uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
+    int jitStop;
+    const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
+    *stop = jitStop == FROND_JIT_BUDGET ? arm920JitBudget :
+            jitStop == FROND_JIT_HALT   ? arm920JitHalt :
+            jitStop == FROND_JIT_COLD   ? arm920JitCold : arm920JitExit;
+    cpu->flags = cpsr & 0xf0000000UL;
+    cpu->Q = !!(cpsr & ARM_SR_Q);
+    cpu->T = !!(cpsr & ARM_SR_T);
+    cpu->leanRun = false;
+    cpu->leanJit = false;
+    cpu->leanExit = false;
+    return ran;
+}
+#else
+uint64_t cpuJitExceptionReturns() { return 0; }
+uint64_t cpuJitDomainCalls() { return 0; }
+bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
+bool cpuArm920JitOn(const ArmCpu *) { return false; }
+void cpuArm920DropJit(ArmCpu *) {}
+uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
+bool cpuArm920JitCanRun(const ArmCpu *) { return false; }
+uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t) {
+    *stop = arm920JitExit;
+    return 0;
+}
+#endif
+
+bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
+    if (cpu->arm920Waiting) return false;
+    if (cpu->waitingFiqs && !cpu->F) {
+        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
+                        ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
+        return true;
+    }
+    if (cpu->waitingIrqs && !cpu->I) {
+        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_IRQ, cpu->regs[REG_NO_PC] + 4,
+                        ARM_SR_MODE_IRQ | ARM_SR_I);
+        return true;
+    }
+    return false;
 }
 
 template <int memorySystemKind, bool injected>
 ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
-    if (cpu->waitingEventsTotal) {
-        if (cpu->waitingFiqs && !cpu->F)
-            cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
-                            ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
-        else if (unlikely(cpu->waitingIrqs && !cpu->I))
-            cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_IRQ, cpu->regs[REG_NO_PC] + 4,
-                            ARM_SR_MODE_IRQ | ARM_SR_I);
-    }
+    if (cpu->arm920Waiting) return 0;
+    cpuProcessPendingInterrupts(cpu);
 
     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         cp15MMUCycle(cpu->cp15.cp15mmu);
@@ -3591,12 +5876,35 @@ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
                               SLOW_PATH_REASON_INJECTED_CALL_DONE);
 
-    if (cpu->modePace)
-        return cpuCyclePace(cpu, cycles);
-    else if (cpu->T)
-        return cpuCycleThumb<memorySystemKind, injected>(cpu, cycles);
+#ifdef FROND_DYNARMIC
+    // Fetch buffers loaded from a save are watched once the guest state is all in.
+    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && unlikely(icacheFetchUnwatched(cpu->ic)))
+        icacheWatchFetchBuffers(cpu->ic);
+#endif
+    if (cpu->modePace) return cpuCyclePace(cpu, cycles);
+
+#ifndef __EMSCRIPTEN__
+    // nativePc is only set by RunToNativePc around a whole run, so it holds for this batch.
+#ifdef FROND_DYNARMIC
+    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->jit && !cpu->jitLoopOnly && !injected && !cpu->debugStub &&
+        !cpu->nativePc[0] && !cpu->slowPath)
+        return cpuPrvCycleJit(cpu, cycles);
+#endif
+    if (!injected && !cpu->debugStub && !cpu->nativePc[0]) {
+        if (unlikely(cpu->ic->arm920))
+            return cpu->T ? cpuCycleLine<memorySystemKind, 2, true>(cpu, cycles)
+                          : cpuCycleLine<memorySystemKind, 4, true>(cpu, cycles);
+        return cpu->T ? cpuCycleLine<memorySystemKind, 2, false>(cpu, cycles)
+                      : cpuCycleLine<memorySystemKind, 4, false>(cpu, cycles);
+    }
+#endif
+
+    if (cpu->T)
+        return cpu->debugStub ? cpuCycleThumb<memorySystemKind, injected, true>(cpu, cycles)
+                              : cpuCycleThumb<memorySystemKind, injected, false>(cpu, cycles);
     else
-        return cpuCycleArm<memorySystemKind, injected>(cpu, cycles);
+        return cpu->debugStub ? cpuCycleArm<memorySystemKind, injected, true>(cpu, cycles)
+                              : cpuCycleArm<memorySystemKind, injected, false>(cpu, cycles);
 }
 
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MMU, true>(struct ArmCpu *cpu, uint32_t cycles);
@@ -3604,7 +5912,17 @@ template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MPU, true>(struct ArmCpu *cpu, uint
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(struct ArmCpu *cpu, uint32_t cycles);
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MPU, false>(struct ArmCpu *cpu, uint32_t cycles);
 
+template <int memorySystemKind, bool thumb>
+static uint32_t cpuPrvCycleOne(struct ArmCpu *cpu) {
+    if (cpu->debugStub)
+        return thumb ? cpuCycleThumb<memorySystemKind, true, true>(cpu, 1)
+                     : cpuCycleArm<memorySystemKind, true, true>(cpu, 1);
+    return thumb ? cpuCycleThumb<memorySystemKind, true, false>(cpu, 1)
+                 : cpuCycleArm<memorySystemKind, true, false>(cpu, 1);
+}
+
 uint32_t cpuCyclePure(struct ArmCpu *cpu) {
+    if (cpu->arm920Waiting) return 0;
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
                               SLOW_PATH_REASON_INJECTED_CALL_DONE);
@@ -3615,12 +5933,12 @@ uint32_t cpuCyclePure(struct ArmCpu *cpu) {
         return cpuCyclePace(cpu, 1);
     else if (cpu->T)
         return (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU)
-                   ? cpuCycleThumb<ARM_MEMORY_SYSTEM_MMU, true>(cpu, 1)
-                   : cpuCycleThumb<ARM_MEMORY_SYSTEM_MPU, true>(cpu, 1);
+                   ? cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MMU, true>(cpu)
+                   : cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MPU, true>(cpu);
     else
         return (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU)
-                   ? cpuCycleArm<ARM_MEMORY_SYSTEM_MMU, true>(cpu, 1)
-                   : cpuCycleArm<ARM_MEMORY_SYSTEM_MPU, true>(cpu, 1);
+                   ? cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MMU, false>(cpu)
+                   : cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MPU, false>(cpu);
 }
 
 void cpuStartInjectedSyscall(struct ArmCpu *cpu, uint32_t syscall) {
@@ -3691,7 +6009,26 @@ void cpuSetVectorAddr(struct ArmCpu *cpu, uint32_t adr) { cpu->vectorBase = adr;
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu) { return cpu->CPAR; }
 
-void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) { cpu->CPAR = cpar; }
+// Fast only runs iWMMXt instructions whose coprocessor CPAR allows (cpuJitPlain), so a
+// change to bit 0 or 1 drops the translated code.
+void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar) {
+#ifdef FROND_DYNARMIC
+    if (cpu->jit) jitCparWritten(cpu->jit, cpu->wmmx && ((cpu->CPAR ^ cpar) & 3));
+#endif
+    cpu->CPAR = cpar;
+}
+
+void cpuSetWmmx(struct ArmCpu *cpu, struct Pxa270wmmx *wmmx) { cpu->wmmx = wmmx; }
+
+void cpuArm920EnableWait(ArmCpu* cpu) { cpu->arm920WaitEnabled = true; }
+bool cpuArm920BeginWait(ArmCpu* cpu) {
+    if (!cpu->arm920WaitEnabled) return false;
+    cpu->arm920Waiting = true;
+    cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+    return true;
+}
+bool cpuArm920Waiting(const ArmCpu* cpu) { return cpu->arm920Waiting; }
+void cpuArm920EndWait(ArmCpu* cpu) { cpu->arm920Waiting = false; }
 
 void cpuSetSleeping(struct ArmCpu *cpu) {
     cpu->sleeping = true;
@@ -3745,6 +6082,26 @@ void cpuRemoveM68kTrap0Handler(struct ArmCpu *cpu, uint32_t address) {
     cpu->m68kTrap0Handlers->erase(address);
 }
 
+#ifndef __EMSCRIPTEN__
+bool cpuOriginalTg50PaceEntryForDiagnostic(ArmCpu* cpu) {
+    if (!std::getenv("FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC") || cpu->modePace || cpu->T ||
+        cpu->regs[REG_NO_PC] != cpu->curInstrPC || cpu->curInstrPC != 0x20100064 ||
+        cpu->regs[REG_NO_LR] != 0x20106468) return false;
+    uint32_t pc;
+    if (cpu->regs[0] > UINT32_MAX - 0x48 ||
+        !cpuInspectRead(cpu, cpu->regs[0] + 0x44, &pc, sizeof(pc)) || pc != 0x20c1ed14)
+        return false;
+    const auto& region = cpu->mem->regions[REGION_ROM];
+    auto* rom = static_cast<ArmRom*>(region.uD);
+    if (!region.ub || !rom ||
+        !pacePatchOriginalTg50EntryForDiagnostic(cpu->pacePatch, region.pa, romGetData(rom),
+                                                romGetPeepholeBuffer(rom), romGetSize(rom)))
+        return false;
+    cpuInvalidateCodeCache(cpu);
+    return true;
+}
+#endif
+
 bool cpuIsModePace(struct ArmCpu *cpu) { return cpu->modePace; }
 
 void cpuSetModePace(struct ArmCpu *cpu, bool modePace) { cpu->modePace = modePace; }
@@ -3780,6 +6137,10 @@ void cpuSave(ArmCpu *cpu, T &savestate) {
 
 template <typename T>
 void cpuLoad(ArmCpu *cpu, T &loader) {
+#ifndef __EMSCRIPTEN__
+    cpuClearNativeRuntime(cpu);
+#endif
+    gdbStubResetPace(cpu->debugStub);
     icacheInval(cpu->ic);
 
     paceLoad(loader);
@@ -3806,6 +6167,9 @@ void cpuLoad(ArmCpu *cpu, T &loader) {
     LoadChunkHelper helper(*chunk);
     cpu->DoSaveLoad(helper, version);
 
+#ifndef __EMSCRIPTEN__
+    cpuClearSlowPath(cpu, SLOW_PATH_REASON_NATIVE_PC | SLOW_PATH_REASON_NATIVE_FAULT);
+#endif
     cpu->waitingEventsTotal = cpu->waitingFiqs + cpu->waitingIrqs;
     cpuUpdateSlowPath(cpu);
 }
@@ -3846,7 +6210,26 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader) {
     auto waitingIrqs = cpu->waitingIrqs;
     auto waitingFiqs = cpu->waitingFiqs;
 
+#ifndef __EMSCRIPTEN__
+    const auto nativeDepth = cpu->nativeCallDepth;
+    const auto nativeSession = cpu->nativeSessionActive;
+    const auto stackLower=cpu->nativeStackLower, stackUpper=cpu->nativeStackUpper;
+    const auto stackOwnerAddress=cpu->nativeStackOwnerAddress, stackOwnerValue=cpu->nativeStackOwnerValue;
+    const auto scratchBase = cpu->nativeScratchBase, scratchSize = cpu->nativeScratchSize;
+    auto* scratchData = cpu->nativeScratchData;
+    decltype(cpu->nativeCallbacks) callbacks;
+    memcpy(callbacks, cpu->nativeCallbacks, sizeof(callbacks));
+#endif
     cpuLoad(cpu, loader);
+#ifndef __EMSCRIPTEN__
+    memcpy(cpu->nativeCallbacks, callbacks, sizeof(callbacks));
+    cpu->nativeCallDepth = nativeDepth;
+    cpu->nativeSessionActive = nativeSession;
+    cpu->nativeStackLower=stackLower; cpu->nativeStackUpper=stackUpper;
+    cpu->nativeStackOwnerAddress=stackOwnerAddress; cpu->nativeStackOwnerValue=stackOwnerValue;
+    cpu->nativeScratchBase = scratchBase; cpu->nativeScratchSize = scratchSize;
+    cpu->nativeScratchData = scratchData;
+#endif
 
     cpu->sleeping = sleeping;
     cpu->waitingIrqs = waitingIrqs;
@@ -3866,3 +6249,135 @@ template void cpuPrepareInjectedCall<SavestateProbe<ChunkType>>(
     ArmCpu *cpu, SavestateProbe<ChunkType> &savestate);
 template void cpuFinishInjectedCall<SavestateLoader<ChunkType>>(ArmCpu *cpu,
                                                                 SavestateLoader<ChunkType> &loader);
+
+// Execution-thread observer; ownership follows this CPU instance.
+void cpuSetEarlyAudioHook(ArmCpu* cpu,void (*hook)(ArmCpu*,void*,uint32_t,uint32_t),void* context,uint32_t ready,uint32_t dispose) {
+    cpu->earlyAudioHook=hook;cpu->earlyAudioContext=context;
+    cpu->earlyAudioFrom[0]=ready;cpu->earlyAudioFrom[1]=dispose;
+}
+
+void cpuGetInstructionFetchState(ArmCpu* cpu,uint32_t* state) {icacheGetFetchState(cpu->ic,state);}
+bool cpuRestoreInstructionFetchState(ArmCpu* cpu,const uint32_t* state) {return icacheSetFetchState(cpu->ic,state);}
+
+void cpuArm920SetIcacheIndexCompatibility(ArmCpu* cpu, bool enabled) {
+    if (cpu->model == ArmCpuModel::arm920t)
+        cp15MMUArm920SetIcacheIndexCompatibility(cpu->cp15.cp15mmu, enabled);
+}
+
+void cpuArm920SetMemoryCheck(ArmCpu* cpu, Arm920MemoryCheck check, void* context) {
+    if (cpu->model != ArmCpuModel::arm920t) return;
+    auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+    dc->mem = cpu->mem;
+    dc->check = check;
+    dc->context = context;
+}
+Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
+    return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
+}
+
+static bool cpuPrvArm920StateIdle(const ArmCpu* cpu) {
+    if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
+    if (cpu->modePace || cpu->sleeping || cpu->earlyAudioHook) return false;
+#ifndef __EMSCRIPTEN__
+    if (cpu->nativePc[0] || cpu->nativePc[1] || cpu->nativeCallDepth || cpu->nativeSessionActive) return false;
+#endif
+    return true;
+}
+
+bool cpuArm920CaptureState(const ArmCpu* cpu, Arm920SavedState& s) {
+    if (!cpuPrvArm920StateIdle(cpu)) return false;
+    s.exceptionSequence = cpu->exceptionSequence;
+    memcpy(s.regs, cpu->regs, sizeof(s.regs));
+    memcpy(s.extraRegs, cpu->extra_regs, sizeof(s.extraRegs));
+    const ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
+                                    &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
+    for (unsigned n = 0; n < 6; ++n) {
+        s.banks[n][0] = banks[n]->R13; s.banks[n][1] = banks[n]->R14; s.banks[n][2] = banks[n]->SPSR;
+    }
+    s.spsr = cpu->SPSR;
+    s.flags = cpu->flags;
+    s.curInstrPC = cpu->curInstrPC;
+    s.vectorBase = cpu->vectorBase;
+    s.pid = cpu->pid;
+    s.slowPath = cpu->slowPath;
+    s.waitingIrqs = cpu->waitingIrqs;
+    s.waitingFiqs = cpu->waitingFiqs;
+    s.cpar = cpu->CPAR;
+    s.mode = cpu->M;
+    s.q = cpu->Q; s.t = cpu->T; s.i = cpu->I; s.f = cpu->F;
+    s.privileged = cpu->privileged;
+    s.waiting = cpu->arm920Waiting;
+    s.waitEnabled = cpu->arm920WaitEnabled;
+    cp15MMUArm920Capture(cpu->cp15.cp15mmu, s);
+    mmuArm920Capture(cpu->memorySystem.mmu, s);
+    icacheArm920Capture(cpu->ic, s);
+    return true;
+}
+
+bool cpuArm920StateFits(const ArmCpu* cpu, const Arm920SavedState& s) {
+    return cpuPrvArm920StateIdle(cpu) && s.cpar == cpu->CPAR && s.waitEnabled == cpu->arm920WaitEnabled &&
+           (!s.waiting || s.waitEnabled);
+}
+
+void cpuArm920ApplyState(ArmCpu* cpu, const Arm920SavedState& s) {
+    cpu->exceptionSequence = s.exceptionSequence;
+    memcpy(cpu->regs, s.regs, sizeof(s.regs));
+    memcpy(cpu->extra_regs, s.extraRegs, sizeof(s.extraRegs));
+    ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
+                              &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
+    for (unsigned n = 0; n < 6; ++n) {
+        banks[n]->R13 = s.banks[n][0]; banks[n]->R14 = s.banks[n][1]; banks[n]->SPSR = s.banks[n][2];
+    }
+    cpu->SPSR = s.spsr;
+    cpu->flags = s.flags;
+    cpu->curInstrPC = s.curInstrPC;
+    cpu->vectorBase = s.vectorBase;
+    cpu->pid = s.pid;
+    cpu->slowPath = s.slowPath;
+    cpu->waitingIrqs = s.waitingIrqs;
+    cpu->waitingFiqs = s.waitingFiqs;
+    cpu->waitingEventsTotal = s.waitingIrqs + s.waitingFiqs;
+    cpu->M = s.mode;
+    cpu->Q = s.q; cpu->T = s.t; cpu->I = s.i; cpu->F = s.f;
+    cpu->privileged = s.privileged;
+    cpu->arm920Waiting = s.waiting;
+    cp15MMUArm920Apply(cpu->cp15.cp15mmu, s);
+    mmuArm920Apply(cpu->memorySystem.mmu, s);
+    icacheArm920Apply(cpu->ic, s);
+}
+
+bool cpuJitSetExecutionCounts(ArmCpu* cpu, uint64_t blocks, uint64_t instructions) {
+#ifdef FROND_DYNARMIC
+    if (cpu->jit) {
+        jitSetExecutionCounts(cpu->jit, blocks, instructions);
+        return true;
+    }
+#endif
+    (void)cpu; (void)blocks; (void)instructions;
+    return false;
+}
+
+void cpuEmitArm920Diagnostic(const ArmCpu* cpu, const ArmDiagnosticSink& sink) {
+    if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return;
+    sink.emit("registers", cpu->regs, 16);
+    const uint32_t state[] = {uint32_t(cpu->flags | (cpu->Q ? ARM_SR_Q : 0) |
+        (cpu->T ? ARM_SR_T : 0) | (cpu->I ? ARM_SR_I : 0) | (cpu->F ? ARM_SR_F : 0) | cpu->M),
+        cpu->SPSR, cpu->pid, cpu->curInstrPC, cpu->vectorBase, uint32_t(cpu->privileged),
+        uint32_t(cpu->sleeping), uint32_t(cpu->arm920WaitEnabled), uint32_t(cpu->arm920Waiting),
+        cpu->waitingIrqs, cpu->waitingFiqs, cpu->waitingEventsTotal, cpu->slowPath,
+        uint32_t(cpu->exceptionSequence), uint32_t(cpu->exceptionSequence >> 32)};
+    sink.emit("cpu", state, sizeof(state)/4);
+    // The current bank's R13/R14/SPSR live in registers/cpu, not its saved slot.
+    const ArmBankedRegs* banks[] = {&cpu->bank_usr,&cpu->bank_svc,&cpu->bank_abt,
+        &cpu->bank_und,&cpu->bank_irq,&cpu->bank_fiq};
+    const uint32_t modes[] = {ARM_SR_MODE_USR,ARM_SR_MODE_SVC,ARM_SR_MODE_ABT,
+        ARM_SR_MODE_UND,ARM_SR_MODE_IRQ,ARM_SR_MODE_FIQ};
+    for (unsigned i=0;i<6;++i) {
+        const auto& b = *banks[i];
+        const uint32_t bank[] = {modes[i],b.R13,b.R14,b.SPSR};
+        sink.emit("saved-bank",bank,4);
+    }
+    sink.emit("extra-r8-r12",cpu->extra_regs,5);
+    cp15MMUEmitArm920Diagnostic(cpu->cp15.cp15mmu,sink);
+    mmuEmitDiagnostic(cpu->memorySystem.mmu,sink);
+}

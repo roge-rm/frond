@@ -15,6 +15,7 @@
 #define EmBankROM_h
 
 #include "EmCommon.h"
+#include "EmMemory.h"  // EmBusWait
 
 class EmStream;
 const emuptr kDefaultROMMemoryStart = 0x10C00000;
@@ -26,6 +27,7 @@ class EmBankROM {
     static void Dispose(void);
 
     static void SetBankHandlers(void);
+    static void SetWaitStates(EmBusWait wait);
 
     static uint32 GetLong(emuptr address);
     static uint32 GetWord(emuptr address);

@@ -7,6 +7,7 @@
 #include <oaknut/oaknut.hpp>
 
 #include "dynarmic/backend/arm64/a32_jitstate.h"
+#include "dynarmic/backend/arm64/address_space.h"
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/backend/arm64/emit_arm64.h"
 #include "dynarmic/backend/arm64/emit_context.h"
@@ -33,8 +34,18 @@ oaknut::Label EmitA32Cond(oaknut::CodeGenerator& code, EmitContext&, IR::Cond co
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Terminal terminal, IR::LocationDescriptor initial_location, bool is_single_step);
 
-void EmitA32Terminal(oaknut::CodeGenerator&, EmitContext&, IR::Term::Interpret, IR::LocationDescriptor, bool) {
-    ASSERT_FALSE("Interpret should never be emitted.");
+// Frond: as the x64 back end, PC is set to the instruction and InterpreterFallback is called
+// for it, then back to the dispatcher.
+void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Interpret terminal, IR::LocationDescriptor initial_location, bool) {
+    ASSERT_MSG(A32::LocationDescriptor{terminal.next}.TFlag() == A32::LocationDescriptor{initial_location}.TFlag(), "Unimplemented");
+    ASSERT_MSG(A32::LocationDescriptor{terminal.next}.EFlag() == A32::LocationDescriptor{initial_location}.EFlag(), "Unimplemented");
+    ASSERT_MSG(terminal.num_instructions == 1, "Unimplemented");
+
+    code.MOV(W1, A32::LocationDescriptor{terminal.next}.PC());
+    code.STR(W1, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
+    code.MOV(X2, 1);
+    EmitRelocation(code, ctx, LinkTarget::InterpreterFallback);
+    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::ReturnToDispatch, IR::LocationDescriptor, bool) {
@@ -65,6 +76,11 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 
     if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
         if (ctx.conf.enable_cycle_counting) {
+            // Frond: a halt requested by a callback ends the run at the next linked branch.
+            if (ctx.conf.check_halt_on_link) {
+                code.LDAR(Wscratch0, Xhalt);
+                code.CBNZ(Wscratch0, fail);
+            }
             code.CMP(Xticks, 0);
             code.B(LE, fail);
             EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
@@ -84,10 +100,19 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::LinkBlockFast terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
     EmitSetUpperLocationDescriptor(code, ctx, terminal.next, initial_location);
 
+    oaknut::Label fail;
+
     if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
+        // Frond: with max_unchecked_instructions this link checks the cycles left too (not
+        // the halt flag, as before), and leaves through the dispatcher once they run out.
+        if (ctx.conf.max_unchecked_instructions) {
+            code.CMP(Xticks, 0);
+            code.B(LE, fail);
+        }
         EmitBlockLinkRelocation(code, ctx, terminal.next, BlockRelocationType::Branch);
     }
 
+    code.l(fail);
     code.MOV(Wscratch0, A32::LocationDescriptor{terminal.next}.PC());
     code.STR(Wscratch0, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
@@ -96,6 +121,15 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::PopRSBHint, IR::LocationDescriptor, bool is_single_step) {
     if (ctx.conf.HasOptimization(OptimizationFlag::ReturnStackBuffer) && !is_single_step) {
         oaknut::Label fail;
+
+        // Frond: loops through returns go back to the dispatcher once the cycles run out or
+        // a halt is requested.
+        if (ctx.conf.check_halt_on_link && ctx.conf.enable_cycle_counting) {
+            code.CMP(Xticks, 0);
+            code.B(LE, fail);
+            code.LDAR(Wscratch0, Xhalt);
+            code.CBNZ(Wscratch0, fail);
+        }
 
         code.LDR(Wscratch2, SP, offsetof(StackLayout, rsb_ptr));
         code.AND(Wscratch2, Wscratch2, RSBIndexMask);
@@ -118,10 +152,40 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Po
     EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
-void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool) {
-    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
+void EmitA32FastDispatch(oaknut::CodeGenerator& code, oaknut::Label& miss) {
+    static_assert(offsetof(A32JitState, regs) + 16 * sizeof(u32) == offsetof(A32JitState, upper_location_descriptor));
+    static_assert(offsetof(AddressSpace::FastDispatchEntry, location_descriptor) == 0);
+    static_assert(offsetof(AddressSpace::FastDispatchEntry, code_ptr) == 8);
 
-    // TODO: Implement FastDispatchHint optimization
+    // The index as AddressSpace::FastDispatchIndex works it out.
+    code.LDUR(X0, Xstate, offsetof(A32JitState, regs) + 15 * sizeof(u32));
+    code.EOR(X1, X0, X0, LSR, 31);
+    code.EOR(W1, W1, W1, LSR, 12);
+    code.UBFX(W1, W1, 1, AddressSpace::fast_dispatch_bits);
+    code.ADD(Xscratch1, Xscratch1, X1, LSL, 4);
+    code.LDP(X1, Xscratch0, Xscratch1);
+    code.CMP(X1, X0);
+    code.B(NE, miss);
+    code.BR(Xscratch0);
+}
+
+void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::FastDispatchHint, IR::LocationDescriptor, bool is_single_step) {
+    // Frond: the dispatcher's halt and cycle checks, then the table, in the block itself so
+    // each indirect branch gets its own branch prediction. A miss goes to the dispatcher.
+    if (ctx.conf.HasOptimization(OptimizationFlag::FastDispatch) && !is_single_step) {
+        oaknut::Label miss;
+        code.LDAR(Wscratch0, Xhalt);
+        code.CBNZ(Wscratch0, miss);
+        if (ctx.conf.enable_cycle_counting) {
+            code.CMP(Xticks, 0);
+            code.B(LE, miss);
+        }
+        code.LDR(Xscratch1, SP, offsetof(StackLayout, fast_dispatch_table));
+        EmitA32FastDispatch(code, miss);
+        code.l(miss);
+    }
+
+    EmitRelocation(code, ctx, LinkTarget::ReturnToDispatcher);
 }
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::If terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
@@ -163,15 +227,28 @@ void EmitA32ConditionFailedTerminal(oaknut::CodeGenerator& code, EmitContext& ct
     EmitA32Terminal(code, ctx, IR::Term::LinkBlock{ctx.block.ConditionFailedLocation()}, location.SetSingleStepping(false), location.SingleStepping());
 }
 
+static void EmitA32CheckMemoryAbortAt(oaknut::CodeGenerator& code, EmitContext& ctx, const A32::LocationDescriptor& current_location, oaknut::Label& end);
+
 void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst, oaknut::Label& end) {
+    EmitA32CheckMemoryAbortAt(code, ctx, A32::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetU64()}}, end);
+}
+
+// Frond: LDC and STC carry their location as argument 2. A callback that faults halts with
+// MemoryAbort and the run ends on the instruction, before the base writeback.
+void EmitA32CheckCoprocessorAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    oaknut::Label end;
+    EmitA32CheckMemoryAbortAt(code, ctx, A32::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(2).GetU64()}}, end);
+    code.l(end);
+}
+
+static void EmitA32CheckMemoryAbortAt(oaknut::CodeGenerator& code, EmitContext& ctx, const A32::LocationDescriptor& current_location, oaknut::Label& end) {
     if (!ctx.conf.check_halt_on_memory_access) {
         return;
     }
 
-    const A32::LocationDescriptor current_location{IR::LocationDescriptor{inst->GetArg(0).GetU64()}};
-
-    code.LDAR(Xscratch0, Xhalt);
-    code.TST(Xscratch0, static_cast<u32>(HaltReason::MemoryAbort));
+    // Frond: halt_reason is a u32, so a 64-bit load faults (SIGBUS) where it isn't 8-aligned.
+    code.LDAR(Wscratch0, Xhalt);
+    code.TST(Wscratch0, static_cast<u32>(HaltReason::MemoryAbort));
     code.B(EQ, end);
     EmitSetUpperLocationDescriptor(code, ctx, current_location, ctx.block.Location());
     code.MOV(Wscratch0, current_location.PC());

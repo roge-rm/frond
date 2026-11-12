@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 
 using namespace std;
 
@@ -42,6 +43,7 @@ bool CardVolume::Write(uint32_t offset, uint32_t size, const uint8_t* source) {
 }
 
 void CardVolume::Format() {
+    if (image.IsReadOnly()) throw std::runtime_error("card is read-only");
     memset(imageData, 0, imageSize);
 
     CalculateGeometry();
@@ -68,6 +70,7 @@ void CardVolume::Format() {
 uint32_t CardVolume::AdvicedClusterSize() { return imageSize > 8 * 1024 * 1024 ? 32 : 16; }
 
 void CardVolume::FixupPartitionType() {
+    if (image.IsReadOnly()) throw std::runtime_error("card is read-only");
     if (Read8(partitionOffset + 0x3a) == '6') {
         Write8(0x01c2, 0x06);
     }

@@ -107,6 +107,15 @@ EmSPISlaveADS784x::EmSPISlaveADS784x(EmADSChannelType ch0, EmADSChannelType ch1,
 
 EmSPISlaveADS784x::~EmSPISlaveADS784x(void) {}
 
+void EmSPISlaveADS784x::Reset(void) {
+    fBitBufferIn = 0;
+    fBitBufferOut = 0;
+    fNumBitsIn = 0;
+    fPendingResult = 0;
+    fHavePending = false;
+    fCommandBitsSeen = 0;
+}
+
 void EmSPISlaveADS784x::Load(SavestateLoader<ChunkType>& loader) {
     Chunk* chunk = loader.GetChunk(ChunkType::spiSlaveADS784);
     if (!chunk) return;
@@ -121,6 +130,9 @@ void EmSPISlaveADS784x::Load(SavestateLoader<ChunkType>& loader) {
 
     LoadChunkHelper helper(*chunk);
     DoSaveLoad(helper);
+    // Exchanges leave at most seven bits of an unfinished command.
+    if (fNumBitsIn < 0 || fNumBitsIn > 7 || fCommandBitsSeen != fNumBitsIn)
+        loader.NotifyError();
 }
 
 void EmSPISlaveADS784x::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
@@ -271,6 +283,9 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
     EmAssert(channel >= 0 && channel <= 7);
 
     switch (fChannelUse[channel]) {
+        case kChannelVirtualInput:
+            result = ReadVirtualInput(channel) & 0x0fff;
+            break;
         case kChannelPenX:
         case kChannelPenY: {
             result = 0;

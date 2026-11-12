@@ -30,9 +30,12 @@ class ExternalStorage {
     void Load(SavestateLoader<ChunkType>&);
 
     bool HasImage(const string& key) const;
+    size_t ImageCount() const { return images.size(); }
+    bool HasImages() const { return !images.empty(); }
     CardImage* GetImage(const string& key);
-    bool AddImage(const string& key, uint8* imageData, size_t size);
+    bool AddImage(const string& key, uint8* imageData, size_t size, bool readOnly = false);
 
+    bool AddImage(const string& key, std::shared_ptr<CardImage> image);
     bool Mount(const string& key, EmHAL::Slot slot);
     bool Mount(const string& key);
     bool Unmount(EmHAL::Slot);

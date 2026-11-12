@@ -1,7 +1,9 @@
+#include <chrono>
 #include "SoC.h"
 
 #include <cstring>
 
+#include "CPU.h"
 #include "RAM.h"
 #include "ROM.h"
 #include "audio_queue.h"
@@ -16,17 +18,25 @@
 
 using namespace std;
 
-SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y}; }
-SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1}; }
+namespace {
+    uint64_t hostMsecNow() {
+        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+}
 
-SoC::KeyEvent SoC::KeyEvent::KeyDown(enum KeyId key) { return {.keyDown = true, .key = key}; }
-SoC::KeyEvent SoC::KeyEvent::KeyUp(enum KeyId key) { return {.keyDown = false, .key = key}; }
+SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
+SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1, .hostMsec = hostMsecNow()}; }
+
+SoC::KeyEvent SoC::KeyEvent::KeyDown(enum KeyId key) { return {.keyDown = true, .key = key, .hostMsec = hostMsecNow()}; }
+SoC::KeyEvent SoC::KeyEvent::KeyUp(enum KeyId key) { return {.keyDown = false, .key = key, .hostMsec = hostMsecNow()}; }
 
 SoC::SoC()
     : savestate(make_unique<Savestate<ChunkType>>()),
       powerOnState(make_unique<Savestate<ChunkType>>()),
       penEventQueue(make_unique<Queue<PenEvent>>(EVENT_QUEUE_CAPACITY)),
-      keyEventQueue(make_unique<Queue<KeyEvent>>(EVENT_QUEUE_CAPACITY)) {
+      keyEventQueue(make_unique<Queue<KeyEvent>>(EVENT_QUEUE_CAPACITY)),
+      audioQueue(nullptr) {
     pacePatch = createPacePatch();
     mem = memInit();
 
@@ -34,9 +44,13 @@ SoC::SoC()
     systemState = createSystemState();
 }
 
-void SoC::KeyDown(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyDown(key)); }
+void SoC::KeyDown(enum KeyId key) {
+    if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));
+}
 
-void SoC::KeyUp(enum KeyId key) { keyEventQueue->Push(KeyEvent::KeyUp(key)); }
+void SoC::KeyUp(enum KeyId key) {
+    if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyUp(key));
+}
 
 void SoC::PenDown(int x, int y) {
     penEventQueue->Push(PenEvent::PenDown(
@@ -59,7 +73,22 @@ void SoC::SetFramebufferDirty(uint32_t pa, uint32_t size) {
 }
 
 bool SoC::SetFramebuffer(uint32_t start, uint32_t size) {
-    if (start < ramBase || start - ramBase + size > ramSize) {
+    const bool tracked = SetFramebufferRange(start, size);
+    WriteProtectFramebuffer();
+    return tracked;
+}
+
+bool SoC::SetFramebufferRange(uint32_t start, uint32_t size) {
+    const bool inSram = sramFb && size && start >= sramBase && start - sramBase + size <= sramSize;
+    if (sramFb) {
+        if (inSram) ramSetFramebuffer(sramFb, start, size);
+        else ramSetNoFramebuffer(sramFb);
+    }
+    if (inSram) {
+        ramSetNoFramebuffer(ram);
+        return true;
+    }
+    if (size && (start < ramBase || start - ramBase + size > ramSize)) {
         fprintf(stderr, "framebuffer not in RAM\n");
         size = 0;
     }
@@ -74,6 +103,16 @@ void SoC::ClearFramebufferDirty() {
     framebufferAccessHighWatermark = 0;
 
     framebufferDirty = false;
+    WriteProtectFramebuffer();
+}
+
+void SoC::WriteProtectFramebuffer() {
+    if (!cpu) return;
+    for (ArmRam *r : {ram, sramFb}) {
+        uint8_t *host;
+        uint32_t size;
+        if (r && ramFramebufferHost(r, &host, &size)) cpuWriteProtectHost(cpu, host, size);
+    }
 }
 
 void SoC::Sleep() {
@@ -175,7 +214,21 @@ void SoC::SdEject() {
 
 bool SoC::IsPacePatched() { return pacePatch->enterPace; }
 
+void SoC::HardReset() {
+    // The Zire's DAL only checks the power key after it's released, so its hard reset is a
+    // power-on reset: the small ROM marks the RAM store invalid and Palm OS boots clean.
+    // The TX and E2 ask "Erase all data?" when power is released after the Palm Powered logo,
+    // which shows about 7.5 s into the boot, so power is held for 9 s.
+    if (GetDeviceType() == DeviceType5::deviceTypeZire72) RequestPowerOnReset();
+    else JamKey(keyIdPower, 9000);
+    Reset();
+}
+
 void SoC::Reset() {
+    penEventQueue->Clear();
+    keyEventQueue->Clear();
+    penDown = false;
+    if (audioQueue) audioQueueClear(audioQueue);
     framebufferAccessLowWatermark = 0;
     framebufferAccessHighWatermark = ~0u;
 }

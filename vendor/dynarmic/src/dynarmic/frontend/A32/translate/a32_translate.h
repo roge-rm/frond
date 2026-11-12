@@ -4,6 +4,10 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+
 #include <mcl/stdint.hpp>
 
 #include "dynarmic/interface/A32/arch_version.h"
@@ -29,6 +33,15 @@ struct TranslationOptions {
     /// If this is false, we treat the instruction as a NOP.
     /// If this is true, we emit an ExceptionRaised instruction.
     bool hook_hint_instructions = true;
+
+    /// Frond: see UserConfig::psr_coprocessor.
+    std::optional<std::size_t> psr_coprocessor;
+
+    /// Frond: see UserConfig::max_unchecked_instructions. 0 means no limit.
+    std::size_t max_instructions = 0;
+
+    /// Frond: see UserConfig::coprocessor_unscaled_offsets.
+    std::uint16_t coprocessor_unscaled_offsets = 0;
 };
 
 /**
@@ -48,5 +61,9 @@ IR::Block Translate(LocationDescriptor descriptor, TranslateCallbacks* tcb, cons
  * @return The translated instruction translated to the intermediate representation.
  */
 bool TranslateSingleInstruction(IR::Block& block, LocationDescriptor descriptor, u32 instruction);
+
+/// Frond: builds the decoder tables, which are otherwise built by the first translation
+/// (the ARM one takes about 17 ms on x64). Safe to call more than once and from any thread.
+void PrepareDecoders();
 
 }  // namespace Dynarmic::A32

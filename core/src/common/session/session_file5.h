@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 
 struct mz_stream_s;
 
@@ -12,11 +13,28 @@ class SessionFile5 {
    public:
     explicit SessionFile5() = default;
 
+    static constexpr uint32_t kMagic = 0x19800819;
+    static constexpr uint32_t kVersionV6 = 6;
+    static constexpr uint32_t kVersionV7 = 7;
+    static constexpr uint32_t kVersionV8 = 8;
+    static constexpr uint32_t kVersionV9 = 9;
+    static constexpr uint32_t kCurrentVersion = kVersionV9;
+    static constexpr size_t kDeviceNameBytes = 32;
+    static constexpr size_t kHeaderBytes = 8 + kDeviceNameBytes;
+    static constexpr size_t kMediaDescriptorBytesV7 = 92;
+    static constexpr size_t kMediaDescriptorBytes = 100;
+    static size_t MediaDescriptorBytes(uint32_t version) {
+        return version == kVersionV7 ? kMediaDescriptorBytesV7 : kMediaDescriptorBytes;
+    }
+    static constexpr size_t kMaxInflatedBytes = 512 * 1024 * 1024;
+    static constexpr size_t kMaxSdBytes = 128u << 20;
+
     static bool IsSessionFile(size_t size, const void* data);
 
-    int32_t GetDeviceType() const;
+    // The device's fixed name from device_profile5.h, like "palm-tx".
+    const std::string& GetDeviceName() const;
     int32_t GetDisplayMode() const;
-    SessionFile5& SetDeviceType(int32_t deviceId);
+    SessionFile5& SetDeviceName(const std::string& name);
     SessionFile5& SetDisplayMode(int32_t displayMode);
 
     const void* GetMetadata() const;
@@ -39,10 +57,20 @@ class SessionFile5 {
     size_t GetSavestateSize() const;
     SessionFile5& SetSavestate(size_t size, const void* data);
 
-    size_t GetRamSize();
+    const void* GetSd() const;
+    size_t GetSdSize() const;
+    SessionFile5& SetSd(size_t size, const void* data);
+
+    const void* GetMedia() const;
+    size_t GetMediaSize() const;
+    uint32_t GetMediaCount() const;
+    SessionFile5& SetMedia(size_t size, const void* data);
+
+    size_t GetRamSize() const;
     SessionFile5& SetRamSize(uint32_t size);
 
     bool Serialize();
+    bool SerializeAs(uint32_t version);
     const void* GetSerializedSession() const;
     size_t GetSerializedSessionSize() const;
 
@@ -52,19 +80,19 @@ class SessionFile5 {
 
    private:
     bool Write32(uint32_t data);
+    bool Write64(uint64_t data);
     uint32_t Read32(bool& success);
+    uint64_t Read64(bool& success);
 
     bool AppendToCompressionStream(size_t size, const uint8_t* data, mz_stream_s& stream);
     bool GrowBuffer(mz_stream_s& stream);
     bool Flush(mz_stream_s& stream);
 
-    bool Deserialize_v0();
-    bool Deserialize_v1_v2_v3_v4(uint32_t version);
-
-    void MigrateV2Memory();
+    bool Deserialize_v6();
+    bool Deserialize_v7();
 
    private:
-    int32_t deviceType{0};
+    std::string deviceName;
     int32_t displayMode{0};
 
     size_t metadataSize{0};
@@ -82,13 +110,17 @@ class SessionFile5 {
     size_t savestateSize{0};
     const uint8_t* savestate{nullptr};
 
+    size_t sdSize{0};
+    const uint8_t* sd{nullptr};
+
+    size_t mediaSize{0};
+    const uint8_t* media{nullptr};
+
     size_t serializedSessionSize{0};
     const uint8_t* serializedSession{nullptr};
 
     size_t bufferSize{0};
     std::unique_ptr<uint8_t[]> buffer;
-
-    std::unique_ptr<uint8_t[]> migratedMemory;
 
     uint32_t ramSize{0};
 

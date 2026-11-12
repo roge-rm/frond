@@ -9,7 +9,7 @@
 EmSystemState gSystemState;
 
 namespace {
-    constexpr uint32 SAVESTATE_VERSION = 2;
+    constexpr uint32 SAVESTATE_VERSION = 3;
 }
 
 void EmSystemState::Initialize() {
@@ -17,6 +17,7 @@ void EmSystemState::Initialize() {
     screenLowWatermark = screenHighWatermark = 0;
     screenState = ScreenState::needsFullRefresh;
     setupComplete = false;
+    timeInitialized = false;
     osVersion = 0;
     hotsyncUserName = "";
 }
@@ -26,6 +27,7 @@ void EmSystemState::Reset() {
     screenLowWatermark = screenHighWatermark = 0;
     screenState = ScreenState::needsFullRefresh;
     setupComplete = false;
+    timeInitialized = false;
 }
 
 template <typename T>
@@ -70,6 +72,12 @@ void EmSystemState::DoSaveLoad(T& helper, uint32 version) {
     if (version > 1) {
         helper.DoBool(setupComplete);
     }
+
+    // Older sessions don't say; TimInit runs before UIInitialize.
+    if (version > 2)
+        helper.DoBool(timeInitialized);
+    else
+        timeInitialized = uiInitialized;
 }
 
 void EmSystemState::SetOSVersion(uint32 version) { osVersion = version; }
@@ -91,6 +99,10 @@ bool EmSystemState::IsUIInitialized() const { return uiInitialized; }
 void EmSystemState::SetSetupComplete() { setupComplete = true; }
 
 bool EmSystemState::IsSetupComplete() const { return setupComplete; }
+
+void EmSystemState::SetTimeInitialized() { timeInitialized = true; }
+
+bool EmSystemState::IsTimeInitialized() const { return timeInitialized; }
 
 void EmSystemState::SetHotsyncUserName(string hotsyncUserName) {
     if (hotsyncUserName.size() > dlkMaxUserNameLength) return;

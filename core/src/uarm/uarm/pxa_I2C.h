@@ -21,6 +21,8 @@ typedef uint_fast8_t (*I2cDeviceActionF)(void *userData, enum ActionI2C stimulus
 struct PxaI2c *pxaI2cInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma,
                           uint32_t base, uint32_t irqNo);
 bool pxaI2cDeviceAdd(struct PxaI2c *i2c, I2cDeviceActionF actF, void *userData);
+// Quiesced bus only, not from inside a device action.
+bool pxaI2cDeviceRemove(struct PxaI2c *i2c, void *userData);
 
 template <typename T>
 void pxaI2cSave(struct PxaI2c *i2c, T &savestate, uint32_t index = 0);

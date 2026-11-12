@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the binaries and the AppDir for one AppImage inside the frond-appimage-ARCH image.
-# The checkout is at /src and the core is prepared in build/appimage/ARCH/source.
+# The checkout is at /src and core/ is copied to build/appimage/ARCH/source.
 # ARCH is x86_64 or aarch64; aarch64 is cross built.
 set -eu
 cd /src
@@ -34,13 +34,13 @@ SDL_LIBS=$(pkg-config --libs sdl2)
 COMPAT=""
 pkg-config --atleast-version=4.8 slirp || COMPAT="-Dslirp_ssize_t=ssize_t"
 mk() { make -j"$JOBS" "CC_NATIVE=$CC $COMPAT" "CXX_NATIVE=$CXX $COMPAT" "AR_NATIVE=${CROSS}ar" "RANLIB_NATIVE=${CROSS}ranlib" "$@"; }
-# Dynarmic for the Fast engine, from the source make dynarmic-source exported.
+# Dynarmic for the Fast engine, from vendor/dynarmic.
 DYN=$WORK/dynarmic
-cmake -S build/dynarmic-trial/src -B $DYN -G Ninja -DCMAKE_BUILD_TYPE=Release $TOOLCHAIN -DBoost_INCLUDE_DIR=/usr/include \
+cmake -S vendor/dynarmic -B $DYN -G Ninja -DCMAKE_BUILD_TYPE=Release $TOOLCHAIN -DBoost_INCLUDE_DIR=/usr/include \
     -DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
     -DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
 cmake --build $DYN --target dynarmic --parallel "$JOBS"
-JIT="FROND_DYNARMIC_SRC=/src/build/dynarmic-trial/src"
+JIT="FROND_DYNARMIC_SRC=/src/vendor/dynarmic"
 JIT_LIBS="FROND_DYNARMIC_LIBS=$DYN/src/dynarmic/libdynarmic.a $DYN/externals/mcl/src/libmcl.a $DYN/externals/fmt/libfmt.a $JIT_EXTRA"
 mk -C $SRC/common bin "CFLAGS_NATIVE=-O2 -g $SDL_CFLAGS"
 # The modem and phones' slirp side, linked into both cores and the Bluetooth phone.

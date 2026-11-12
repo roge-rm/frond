@@ -908,3 +908,23 @@ Bool PrvPinBaud(EmTransportSerial::Baud& newBaud, EmTransportSerial::Baud testBa
 
     return false;
 }
+
+EmUARTDragonball::PendingState EmUARTDragonball::CapturePending() {
+    PendingState pending;
+    pending.rxCount=fRxFIFO.GetUsed(); pending.txCount=fTxFIFO.GetUsed();
+    pending.receiving=receiveInProgress;
+    for(unsigned i=0;i<pending.rxCount;i++) { pending.rx[i]=fRxFIFO.Get(); fRxFIFO.Put(pending.rx[i]); }
+    for(unsigned i=0;i<pending.txCount;i++) { pending.tx[i]=fTxFIFO.Get(); fTxFIFO.Put(pending.tx[i]); }
+    return pending;
+}
+bool EmUARTDragonball::RestorePending(const PendingState& pending) {
+    if(sync || pending.rxCount>unsigned(fRxFIFO.GetMaxSize()) || pending.txCount>unsigned(fTxFIFO.GetMaxSize())) return false;
+    for(unsigned i=pending.rxCount;i<64;i++) if(pending.rx[i]) return false;
+    for(unsigned i=pending.txCount;i<64;i++) if(pending.tx[i]) return false;
+    fRxFIFO.Clear(); fTxFIFO.Clear();
+    for(unsigned i=0;i<pending.rxCount;i++) fRxFIFO.Put(pending.rx[i]);
+    for(unsigned i=0;i<pending.txCount;i++) fTxFIFO.Put(pending.tx[i]);
+    receiveInProgress=pending.receiving;
+    fState=State(fState.UART_TYPE);
+    return true;
+}

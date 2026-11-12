@@ -13,7 +13,7 @@
 #define PXA_I2S_BASE 0x40400000UL
 #define PXA_I2S_SIZE 0x00010000UL
 
-#define SAVESTATE_VERSION 0
+#define SAVESTATE_VERSION 1
 
 struct PxaI2s {
     struct PxaDma *dma;
@@ -30,6 +30,15 @@ struct PxaI2s {
     uint8_t txFifoEnts;
     uint8_t rxFifoEnts;
 
+    void *codec{};
+    PxaI2sFrame frame{};
+    PxaI2sBoundary boundary{};
+    uint32_t externalHz{};
+    uint32_t lastTx{};
+    uint64_t phase{};
+    bool clockEnabled{true};
+    bool legacyState{};
+
     template <typename T>
     void DoSaveLoad(T &chunkHelper) {
         chunkHelper.Do(typename T::Pack16() << sacr0 << sasr0)
@@ -40,54 +49,76 @@ struct PxaI2s {
     }
 };
 
-static void pxaI2sPrvIrqUpdate(struct PxaI2s *i2s) {
-    pxaIcInt(i2s->ic, PXA_I_I2S, !!(i2s->sasr0 & i2s->saimr & 0x78));
+static bool pxaI2sEnabled(const PxaI2s *i2s) {
+    return (i2s->sacr0 & 9) == 1 && i2s->clockEnabled;
 }
 
-static void pxaI2sPrvTxFifoRecalc(struct PxaI2s *i2s) {
-    i2s->sasr0 &= ~0x0f09;
-
-    i2s->sasr0 |= (i2s->txFifoEnts & 0x0f) << 8;
-    if (i2s->txFifoEnts != sizeof(i2s->txFifo) / sizeof(*i2s->txFifo)) i2s->sasr0 |= 0x01;
-
-    if (i2s->txFifoEnts < ((i2s->sacr0 >> 8) & 0x0f)) i2s->sasr0 |= 0x08;
-
-    pxaI2sPrvIrqUpdate(i2s);
-    pxaDmaExternalReq(i2s->dma, DMA_CMR_I2S_TX, !!(i2s->sasr0 & 0x08));
-}
-
-static void pxaI2sPrvRxFifoRecalc(struct PxaI2s *i2s) {
-    i2s->sasr0 &= ~0xf012;
-
-    i2s->sasr0 |= (i2s->rxFifoEnts & 0x0f) << 12;
-    if (!i2s->rxFifoEnts) i2s->sasr0 |= 0x02;
-
-    if (i2s->rxFifoEnts >= ((i2s->sacr0 >> 12) & 0x0f) + 1) i2s->sasr0 |= 0x10;
-
-    pxaI2sPrvIrqUpdate(i2s);
-
+static void pxaI2sPrvRecalc(PxaI2s *i2s) {
+    const bool enabled = pxaI2sEnabled(i2s);
+    i2s->sasr0 &= 0x60;
+    i2s->sasr0 |= (i2s->txFifoEnts & 15) << 8;
+    i2s->sasr0 |= (i2s->rxFifoEnts & 15) << 12;
+    if (i2s->txFifoEnts < 16) i2s->sasr0 |= 1;
+    if (i2s->rxFifoEnts) i2s->sasr0 |= 2;
+    if (enabled && ((i2s->sacr0 & 4) ? i2s->sadiv != 0 : i2s->externalHz != 0)) i2s->sasr0 |= 4;
+    if (enabled && !(i2s->sacr1 & 0x10) &&
+        i2s->txFifoEnts < ((i2s->sacr0 >> 8) & 15) + 1) i2s->sasr0 |= 8;
+    if (enabled && !(i2s->sacr1 & 8) &&
+        i2s->rxFifoEnts >= ((i2s->sacr0 >> 12) & 15) + 1) i2s->sasr0 |= 0x10;
+    pxaIcInt(i2s->ic, PXA_I_I2S, enabled && (i2s->sasr0 & i2s->saimr & 0x78));
+    pxaDmaExternalReq(i2s->dma, DMA_CMR_I2S_TX, !!(i2s->sasr0 & 8));
     pxaDmaExternalReq(i2s->dma, DMA_CMR_I2S_RX, !!(i2s->sasr0 & 0x10));
 }
 
+static void pxaI2sPrvBoundary(PxaI2s *i2s) {
+    i2s->phase = 0;
+    if (i2s->boundary) i2s->boundary(i2s->codec);
+}
+
+static void pxaI2sPrvResetRegisters(PxaI2s *i2s) {
+    i2s->sacr1 = i2s->saimr = 0;
+    i2s->sadiv = 26;
+    i2s->txFifoEnts = i2s->rxFifoEnts = 0;
+    i2s->sasr0 = 1;
+    i2s->lastTx = 0;
+    memset(i2s->txFifo, 0, sizeof(i2s->txFifo));
+    memset(i2s->rxFifo, 0, sizeof(i2s->rxFifo));
+    pxaI2sPrvBoundary(i2s);
+}
+
 static bool pxaI2sPrvFifoW(struct PxaI2s *i2s, uint32_t val) {
+    if ((i2s->sacr0 & 0x30) == 0x30) {
+        if (i2s->rxFifoEnts < 16) i2s->rxFifo[i2s->rxFifoEnts++] = val;
+        pxaI2sPrvRecalc(i2s);
+        return true;
+    }
+    if ((i2s->sacr0 & 8) || (i2s->sacr1 & 0x10)) return true;
     if (i2s->txFifoEnts == sizeof(i2s->txFifo) / sizeof(*i2s->txFifo)) {
         fprintf(stderr, "TX fifo overrun\n");
         return true;
     }
     i2s->txFifo[i2s->txFifoEnts++] = val;
-    pxaI2sPrvTxFifoRecalc(i2s);
+    pxaI2sPrvRecalc(i2s);
 
     return true;
 }
 
 static bool pxaI2sPrvFifoR(struct PxaI2s *i2s, uint32_t *valP) {
+    if ((i2s->sacr0 & 0x30) == 0x10) {
+        *valP = i2s->txFifoEnts ? i2s->txFifo[0] : 0;
+        if (i2s->txFifoEnts) memmove(i2s->txFifo, i2s->txFifo + 1,
+            sizeof(*i2s->txFifo) * --i2s->txFifoEnts);
+        pxaI2sPrvRecalc(i2s);
+        return true;
+    }
+    if ((i2s->sacr0 & 8) || (i2s->sacr1 & 8)) { *valP = 0; return true; }
     if (!i2s->rxFifoEnts) {
         fprintf(stderr, "RX fifo underrun\n");
         return false;
     }
     *valP = i2s->rxFifo[0];
     memmove(i2s->rxFifo + 0, i2s->rxFifo + 1, sizeof(*i2s->rxFifo) * --i2s->rxFifoEnts);
-    pxaI2sPrvRxFifoRecalc(i2s);
+    pxaI2sPrvRecalc(i2s);
 
     return true;
 }
@@ -106,19 +137,27 @@ static bool pxaI2sPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
     pa = (pa - PXA_I2S_BASE) >> 2;
 
     if (write) val = *(uint32_t *)buf;
+    if (write && pa != 0 && (i2s->sacr0 & 8)) return true;
 
     switch (pa) {
         case 0:
-            if (write)
+            if (write) {
+                const auto previous = i2s->sacr0;
                 i2s->sacr0 = val & 0xff3d;
-            else
+                if (val & 8) pxaI2sPrvResetRegisters(i2s);
+                else if ((previous ^ i2s->sacr0) & 5) pxaI2sPrvBoundary(i2s);
+            } else
                 val = i2s->sacr0;
             break;
 
         case 1:
-            if (write)
+            if (write) {
+                const auto changed = i2s->sacr1 ^ (val & 0x39);
                 i2s->sacr1 = val & 0x39;
-            else
+                if (val & 0x10) { i2s->txFifoEnts = 0; i2s->lastTx = 0; }
+                if (val & 8) i2s->rxFifoEnts = 0;
+                if (changed & 0x11) pxaI2sPrvBoundary(i2s);
+            } else
                 val = i2s->sacr1;
             break;
 
@@ -144,9 +183,10 @@ static bool pxaI2sPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
             break;
 
         case 24:
-            if (write)
+            if (write) {
+                if (i2s->sadiv != (val & 0x7f)) pxaI2sPrvBoundary(i2s);
                 i2s->sadiv = val & 0x7f;
-            else
+            } else
                 val = i2s->sadiv;
             break;
 
@@ -161,6 +201,7 @@ static bool pxaI2sPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
             return false;
     }
 
+    if (write) pxaI2sPrvRecalc(i2s);
     if (!write) *(uint32_t *)buf = val;
 
     return true;
@@ -172,6 +213,7 @@ struct PxaI2s *pxaI2sInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDm
     if (!i2s) ERR("cannot alloc I2C");
 
     memset(i2s, 0, sizeof(*i2s));
+    i2s->clockEnabled = true;
     i2s->ic = ic;
     i2s->dma = dma;
     i2s->sacr0 = 0x7700;
@@ -184,29 +226,75 @@ struct PxaI2s *pxaI2sInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDm
     return i2s;
 }
 
-void pxaI2sPeriodic(struct PxaI2s *i2s) {
-    uint32_t val = 0;
-
-    // consume a sample if tx is allowed
-    if (!(i2s->sacr1 & 0x10)) {
-        if (i2s->txFifoEnts) {
-            val = i2s->txFifo[0];
-            memmove(i2s->txFifo + 0, i2s->txFifo + 1, sizeof(*i2s->txFifo) * --i2s->txFifoEnts);
-        } else
-            i2s->sasr0 |= 0x20;
-    }
-
-    // get a sample if RX is allowed
-    if (!(i2s->sacr1 & 0x08)) {
-        if (i2s->rxFifoEnts != sizeof(i2s->rxFifo) / sizeof(*i2s->rxFifo)) {
-            i2s->rxFifo[i2s->rxFifoEnts++] = val;
-        } else
-            i2s->sasr0 |= 0x40;
-    }
-
-    pxaI2sPrvTxFifoRecalc(i2s);
-    pxaI2sPrvRxFifoRecalc(i2s);
+void pxaI2sAttach(PxaI2s *i2s, void *codec, PxaI2sFrame frame, PxaI2sBoundary boundary) {
+    pxaI2sPrvBoundary(i2s);
+    i2s->codec = codec;
+    i2s->frame = frame;
+    i2s->boundary = boundary;
+    pxaI2sPrvBoundary(i2s);
 }
+
+void pxaI2sSetExternalRate(PxaI2s *i2s, uint32_t hz, bool discontinuity) {
+    if (hz == i2s->externalHz) return;
+    i2s->externalHz = hz;
+    if (discontinuity) pxaI2sPrvBoundary(i2s);
+}
+
+void pxaI2sSetClockEnabled(PxaI2s *i2s, bool enabled, bool discontinuity) {
+    if (i2s->clockEnabled != enabled) {
+        i2s->clockEnabled = enabled;
+        if (discontinuity) pxaI2sPrvBoundary(i2s);
+        pxaI2sPrvRecalc(i2s);
+    }
+}
+
+void pxaI2sPeriodic(struct PxaI2s *i2s) {
+    if (!pxaI2sEnabled(i2s)) return;
+    uint32_t val = 0;
+    const bool playing = !(i2s->sacr1 & 0x10);
+    if (playing) {
+        if ((i2s->sacr0 & 0x30) == 0x10) {
+            val = 0;
+        } else if (i2s->txFifoEnts) {
+            i2s->lastTx = i2s->txFifo[0];
+            memmove(i2s->txFifo, i2s->txFifo + 1, sizeof(*i2s->txFifo) * --i2s->txFifoEnts);
+        } else {
+            i2s->sasr0 |= 0x20;
+        }
+        if ((i2s->sacr0 & 0x30) != 0x10) val = i2s->lastTx;
+    }
+    // A disconnected ADC supplies zeros, never samples from the host microphone.
+    uint32_t rx = i2s->frame ? i2s->frame(i2s->codec, val, playing, !!(i2s->sacr1 & 1),
+        (i2s->sacr0 & 4) ? 576000 : i2s->externalHz, (i2s->sacr0 & 4) ? i2s->sadiv : 1) : 0;
+    if (i2s->sacr1 & 0x20) rx = val;
+    if (!(i2s->sacr1 & 8) && (i2s->sacr0 & 0x30) != 0x30) {
+        if (i2s->rxFifoEnts < 16) i2s->rxFifo[i2s->rxFifoEnts++] = rx;
+        else i2s->sasr0 |= 0x40;
+    }
+    pxaI2sPrvRecalc(i2s);
+}
+
+// The scheduler supplies exact 20 us quanta. Phase retains sub-frame time.
+void pxaI2sAdvance(PxaI2s *i2s, uint64_t elapsedNs) {
+    if (!pxaI2sEnabled(i2s)) return;
+    const bool master = i2s->sacr0 & 4;
+    const uint32_t numerator = master ? 576000 : i2s->externalHz;
+    const uint32_t denominator = master ? i2s->sadiv : 1;
+    if (!numerator || !denominator) return;
+    const uint64_t limit = 1000000000ull * denominator;
+    // Bound intermediate arithmetic without silently dropping emulated time.
+    while (elapsedNs) {
+        const auto slice = elapsedNs > 1000000 ? 1000000 : elapsedNs;
+        i2s->phase += slice * numerator;
+        elapsedNs -= slice;
+        while (i2s->phase >= limit) {
+            i2s->phase -= limit;
+            pxaI2sPeriodic(i2s);
+        }
+    }
+}
+
+bool pxaI2sHasCodec(const PxaI2s *i2s) { return i2s && i2s->frame; }
 
 template <typename T>
 void pxaI2sSave(struct PxaI2s *i2s, T &savestate) {
@@ -215,15 +303,32 @@ void pxaI2sSave(struct PxaI2s *i2s, T &savestate) {
 
     SaveChunkHelper helper(*chunk);
     i2s->DoSaveLoad(helper);
+    helper.Do32(i2s->lastTx).Do64(i2s->phase);
 }
 
 template <typename T>
 void pxaI2sLoad(struct PxaI2s *i2s, T &loader) {
-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaI2s, SAVESTATE_VERSION, "pxa i2s");
+    uint32_t version{};
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaI2s, SAVESTATE_VERSION, "pxa i2s", version);
     if (!chunk) return;
-
+    auto next = *i2s;
     LoadChunkHelper helper(*chunk);
-    i2s->DoSaveLoad(helper);
+    next.DoSaveLoad(helper);
+    next.lastTx = 0;
+    next.phase = 0;
+    if (version >= 1) helper.Do32(next.lastTx).Do64(next.phase);
+    const auto denominator = (next.sacr0 & 4) ? next.sadiv : 1;
+    if (chunk->HasError() || next.txFifoEnts > 16 || next.rxFifoEnts > 16 ||
+        (next.sacr0 & ~0xff3d) || (next.sacr1 & ~0x39) || (next.saimr & ~0x78) ||
+        next.sadiv > 127 || (!denominator && next.phase) ||
+        (denominator && next.phase >= 1000000000ull * denominator)) {
+        loader.NotifyError();
+        return;
+    }
+    next.legacyState = version == 0;
+    *i2s = next;
+    // Reconcile IRQ/DMA only after the board, GPIO, IC and DMA loads complete.
+
 }
 
 template void pxaI2sSave<Savestate<ChunkType>>(PxaI2s *i2s, Savestate<ChunkType> &savestate);
@@ -231,3 +336,23 @@ template void pxaI2sSave<SavestateProbe<ChunkType>>(PxaI2s *i2s,
                                                     SavestateProbe<ChunkType> &savestate);
 template void pxaI2sLoad<SavestateLoader<ChunkType>>(PxaI2s *i2s,
                                                      SavestateLoader<ChunkType> &loader);
+
+void pxaI2sRefresh(PxaI2s *i2s) { pxaI2sPrvRecalc(i2s); }
+
+void pxaI2sOutputBoundary(PxaI2s *i2s) { pxaI2sPrvBoundary(i2s); }
+bool pxaI2sLegacyState(const PxaI2s *i2s) { return i2s->legacyState; }
+void pxaI2sGetRate(const PxaI2s *i2s, uint32_t &numerator, uint32_t &denominator) {
+    numerator = (i2s->sacr0 & 4) ? 576000 : i2s->externalHz;
+    denominator = (i2s->sacr0 & 4) ? i2s->sadiv : 1;
+}
+
+bool pxaI2sClocking(const PxaI2s *i2s) {
+    uint32_t numerator{}, denominator{};
+    pxaI2sGetRate(i2s, numerator, denominator);
+    return pxaI2sEnabled(i2s) && numerator && denominator;
+}
+bool pxaI2sClockStateValid(const PxaI2s *i2s) {
+    return pxaI2sClocking(i2s) || !i2s->phase;
+}
+
+bool pxaI2sLinkEnabled(const PxaI2s *i2s) { return pxaI2sEnabled(i2s); }

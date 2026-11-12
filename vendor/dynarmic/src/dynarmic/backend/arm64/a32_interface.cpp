@@ -15,6 +15,7 @@
 #include "dynarmic/backend/arm64/a32_core.h"
 #include "dynarmic/backend/arm64/a32_jitstate.h"
 #include "dynarmic/common/atomic.h"
+#include "dynarmic/frontend/A32/translate/a32_translate.h"
 #include "dynarmic/interface/A32/a32.h"
 
 namespace Dynarmic::A32 {
@@ -37,6 +38,7 @@ struct Jit::Impl final {
             jit_interface->is_executing = false;
         };
 
+        current_address_space.InstallCompiled(false);
         HaltReason hr = core.Run(current_address_space, current_state, &halt_reason);
 
         PerformRequestedCacheInvalidation(hr);
@@ -82,6 +84,11 @@ struct Jit::Impl final {
     }
 
     void ClearHalt(HaltReason hr) {
+        // Frond: the run's exit already cleared every reason, so this nearly always finds
+        // nothing to clear; skip the atomic and the barrier then.
+        if ((Atomic::Load(&halt_reason) & static_cast<u32>(hr)) == 0) {
+            return;
+        }
         Atomic::And(&halt_reason, ~static_cast<u32>(hr));
         Atomic::Barrier();
     }
@@ -122,6 +129,23 @@ struct Jit::Impl final {
         current_state.exclusive_state = false;
     }
 
+    void SetCompileThread(Jit::CompileThread mode) {
+        ASSERT(!jit_interface->is_executing);
+        current_address_space.SetCompileThread(mode);
+    }
+
+    void SetCompileAhead(unsigned depth) {
+        current_address_space.SetCompileAhead(depth);
+    }
+
+    Jit::CompileStats GetCompileStats() const {
+        return current_address_space.GetCompileStats();
+    }
+
+    s64 TicksRemainingNow() const {
+        return current_address_space.TicksRemainingNow();
+    }
+
     void DumpDisassembly() const {
         ASSERT_FALSE("Unimplemented");
     }
@@ -134,7 +158,7 @@ private:
             ClearHalt(HaltReason::CacheInvalidation);
 
             if (invalidate_entire_cache) {
-                current_address_space.ClearCache();
+                current_address_space.ClearCacheLocked();
 
                 invalidate_entire_cache = false;
                 invalid_cache_ranges.clear();
@@ -164,7 +188,10 @@ private:
 };
 
 Jit::Jit(UserConfig conf)
-        : impl(std::make_unique<Impl>(this, conf)) {}
+        : impl(std::make_unique<Impl>(this, conf)) {
+    // Frond: the decoder tables are built here, so the first compile doesn't stall.
+    PrepareDecoders();
+}
 
 Jit::~Jit() = default;
 
@@ -234,6 +261,22 @@ void Jit::ClearExclusiveState() {
 
 void Jit::DumpDisassembly() const {
     impl->DumpDisassembly();
+}
+
+void Jit::SetCompileThread(CompileThread mode) {
+    impl->SetCompileThread(mode);
+}
+
+void Jit::SetCompileAhead(unsigned depth) {
+    impl->SetCompileAhead(depth);
+}
+
+Jit::CompileStats Jit::GetCompileStats() const {
+    return impl->GetCompileStats();
+}
+
+std::int64_t Jit::TicksRemainingNow() const {
+    return impl->TicksRemainingNow();
 }
 
 }  // namespace Dynarmic::A32

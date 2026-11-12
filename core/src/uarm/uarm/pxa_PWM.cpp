@@ -14,6 +14,8 @@
 #define SAVESTATE_VERSION 0
 
 struct PxaPwm {
+    void *context;
+    void (*notify)(void *);
     uint32_t duty;
     uint32_t per;
     uint32_t ctrl;
@@ -64,6 +66,7 @@ static bool pxaPwmPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
     }
 
     if (!write) *(uint32_t*)buf = val;
+    else if (pwm->notify) pwm->notify(pwm->context);
 
     return true;
 }
@@ -92,7 +95,7 @@ void pxaPwmSave(struct PxaPwm* pwm, T& savestate, uint32_t index) {
 
 template <typename T>
 void pxaPwmLoad(struct PxaPwm* pwm, T& loader, uint32_t index) {
-    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwm, SAVESTATE_VERSION, "pxa pwm");
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaPwm + index, SAVESTATE_VERSION, "pxa pwm");
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
@@ -107,3 +110,6 @@ template void pxaPwmSave<SavestateProbe<ChunkType>>(PxaPwm* pwm,
 template void pxaPwmLoad<SavestateLoader<ChunkType>>(PxaPwm* pwm,
                                                      SavestateLoader<ChunkType>& loader,
                                                      uint32_t index);
+
+PxaPwmRegisters pxaPwmRegisters(const PxaPwm *p) { return {p->ctrl,p->duty,p->per}; }
+void pxaPwmSetObserver(PxaPwm *p, void *c, void (*f)(void *)) { p->context=c; p->notify=f; }

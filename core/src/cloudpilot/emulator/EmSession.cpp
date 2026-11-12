@@ -7,6 +7,7 @@
 #include "Debugger.h"
 #include "EmBankSRAM.h"
 #include "EmCPU.h"
+#include "EmBusTimingSavestate.h"
 #include "EmHAL.h"
 #include "EmLowMem.h"
 #include "EmMemory.h"
@@ -30,12 +31,14 @@
 namespace {
     constexpr uint32 SAVESTATE_VERSION = 3;
 
-    constexpr int MIN_CYCLES_BETWEEN_BUTTON_EVENTS = 400000;
+    // Cycles are whole 68000 clocks (cputiming.h), so this is about 48 ms at 16.58 MHz.
+    constexpr int MIN_CYCLES_BETWEEN_BUTTON_EVENTS = 800000;
 
     constexpr uint32 YIELD_MEMMGR_LIMIT = 10000000;
     constexpr uint32 EXECUTE_SUBROUTINE_LIMIT = 100000000;
 
-    constexpr double DEFAULT_CLOCK_FACTOR = 0.5;
+    // One cycle is one clock of the system clock.
+    constexpr double DEFAULT_CLOCK_FACTOR = 1;
 
     EmSession _gSession;
 
@@ -55,6 +58,7 @@ bool EmSession::Initialize(EmDevice* device, uint8* romImage, size_t romLength) 
         Deinitialize();
     }
     isInitialized = true;
+    EmBusTiming::Clear();
 
     this->romImage = unique_ptr<uint8[]>(romImage);
     romSize = romLength;
@@ -219,6 +223,7 @@ void EmSession::Save(T& savestate) {
     gSystemState.Save(savestate);
     Memory::Save(savestate);
     gExternalStorage.Save(savestate);
+    EmBusTiming::Save(savestate);
 }
 
 template void EmSession::Save(Savestate<ChunkType>& savestate);
@@ -268,6 +273,14 @@ void EmSession::Load(SavestateLoader<ChunkType>& loader) {
     if (version <= 2) lastDate = 0;
 
     RecalculateClocksPerSecond();
+    EmBusTiming::Load(loader, systemCycles);
+}
+
+void EmSession::ScaleCycles(uint32 factor) {
+    systemCycles *= factor;
+    lastButtonEventReadAt *= factor;
+    dateCheckedAt *= factor;
+    EmHAL::ScaleCycles(factor);
 }
 
 bool EmSession::Save() {
@@ -327,6 +340,7 @@ void EmSession::Reset(ResetType resetType) {
 
     gNetworkProxy.Reset();
     SuspendManager::Reset();
+    EmBusTiming::Reset(systemCycles);
     Memory::Reset(resetType != ResetType::sys);
     cpu->Reset(resetType != ResetType::sys);
     EmPalmOS::Reset();
@@ -473,9 +487,14 @@ void EmSession::ExecuteSubroutine() {
             deadMansSwitch = false;
         }
 
+        if (cycles >= EXECUTE_SUBROUTINE_LIMIT && hostCalls > 0) throw EmGuestCallTimeout();
         EmAssert(cycles < EXECUTE_SUBROUTINE_LIMIT);
     }
 }
+
+EmSession::HostCallScope::HostCallScope() { ++gSession->hostCalls; }
+
+EmSession::HostCallScope::~HostCallScope() { --gSession->hostCalls; }
 
 void EmSession::YieldMemoryMgr() {
     EmAssert(gCPU);
@@ -489,6 +508,7 @@ void EmSession::YieldMemoryMgr() {
 
     while (memSemaphoreID.xsmuse != 0 && !EmPatchMgr::IsExecutingPatch() &&
            !SuspendManager::IsSuspended() && !gDebugger.IsStopped()) {
+        if (cycles >= YIELD_MEMMGR_LIMIT && hostCalls > 0) throw EmGuestCallTimeout();
         EmAssert(cycles < YIELD_MEMMGR_LIMIT);
 
         cycles += gCPU68K->Execute(0);

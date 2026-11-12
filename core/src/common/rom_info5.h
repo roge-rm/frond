@@ -8,6 +8,8 @@
 
 #include "device_type5.h"
 
+struct DeviceFirmwareVariant5;
+
 class RomInfo5 {
    public:
     RomInfo5() = default;
@@ -27,13 +29,23 @@ class RomInfo5 {
 
     uint32_t GetRecommendedRamSize() const;
 
+    // Byte offset of the parsed card header within the image.
+    size_t GetHeaderOffset() const;
+
     DeviceType5 GetDeviceType() const;
+
+    const DeviceFirmwareVariant5* GetFirmwareVariant() const;
+
+    // True for a card at 0x0 plus a big card at 0x20000 with the same name and IDs,
+    // whose size runs to the end of the image (the Zire 72 layout).
+    bool HasSmallAndBigCards() const;
 
    private:
     bool Parse();
     bool ParseAt(size_t offset);
 
     bool IsDmitryPatched() const;
+    bool IsZire72() const;
 
     uint32_t Read32(size_t offset, bool& error) const;
     std::string ReadString(size_t offset, uint8_t maxLen, bool& error) const;
@@ -50,6 +62,7 @@ class RomInfo5 {
 
     uint32_t companyId{0};
     uint32_t halId{0};
+    size_t headerOffset{0};
 };
 
 std::ostream& operator<<(std::ostream& stream, RomInfo5& romInfo);

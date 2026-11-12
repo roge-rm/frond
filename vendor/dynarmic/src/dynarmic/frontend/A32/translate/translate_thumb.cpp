@@ -107,6 +107,9 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
     TranslatorVisitor visitor{block, descriptor, options};
 
     bool should_continue = true;
+    // Frond: options.max_instructions ends the block with a checked link.
+    std::size_t instructions = 0;
+    bool capped = false;
     do {
         const u32 arm_pc = visitor.ir.current_location.PC();
         u64 ticks_for_instruction = 1;
@@ -161,11 +164,12 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
 
         visitor.ir.current_location = visitor.ir.current_location.AdvancePC(static_cast<int>(visitor.current_instruction_size)).AdvanceIT();
         block.CycleCount() += ticks_for_instruction;
-    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step);
+        capped = options.max_instructions && ++instructions >= options.max_instructions;
+    } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step && !capped);
 
-    if (visitor.cond_state == ConditionalState::Translating || visitor.cond_state == ConditionalState::Trailing || single_step) {
+    if (visitor.cond_state == ConditionalState::Translating || visitor.cond_state == ConditionalState::Trailing || single_step || capped) {
         if (should_continue) {
-            if (single_step) {
+            if (single_step || capped) {
                 visitor.ir.SetTerm(IR::Term::LinkBlock{visitor.ir.current_location});
             } else {
                 visitor.ir.SetTerm(IR::Term::LinkBlockFast{visitor.ir.current_location});

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Firmware-free preparation and packaging regressions; packages contain dummy ELF only."""
+"""Firmware-free core copy and packaging regressions; packages contain dummy ELF only."""
 
 import contextlib
 import hashlib
@@ -17,8 +17,11 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
-import prepare
 import package_policy as policy
+
+copy_spec = importlib.util.spec_from_file_location('copy_core', ROOT / 'tools/copy-core.py')
+copy_core = importlib.util.module_from_spec(copy_spec)
+copy_spec.loader.exec_module(copy_core)
 
 spec = importlib.util.spec_from_file_location('package_deb', ROOT / 'tools/package-deb.py')
 packager = importlib.util.module_from_spec(spec)
@@ -45,100 +48,48 @@ class PackageCliTests(unittest.TestCase):
             self.assertFalse((Path(directory) / 'out').exists())
 
 
-class PrepareTests(unittest.TestCase):
+class CopyCoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='frond-build-test-')
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'checkout'
-        self.root.mkdir()
-        self.upstream = self.root / 'vendor/cloudpilot'
-        self.upstream.mkdir(parents=True)
+        (self.root / 'core/src/common').mkdir(parents=True)
         git(self.root, 'init', '--quiet')
-        git(self.upstream, 'init', '--quiet')
-        for name in ('common/value.txt', 'uarm/value.txt', 'cloudpilot/value.txt', 'argparse/LICENSE',
-                     'Makefile.common'):
-            target = self.upstream / 'src' / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text('one\n')
-        (self.upstream / 'LICENSE').write_text('synthetic license\n')
-        git(self.upstream, 'add', '.')
-        git(self.upstream, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
-            'commit', '--quiet', '-m', 'Synthetic upstream')
-        self.revision = git(self.upstream, 'rev-parse', 'HEAD')
-        git(self.root, 'update-index', '--add', '--cacheinfo', f'160000,{self.revision},vendor/cloudpilot')
-        (self.root / 'tools').mkdir()
-        (self.root / 'tools/prepare.py').write_text('synthetic preparation identity')
-        (self.root / 'patches').mkdir()
-        self.first = self.make_patch('0001-first.patch', 'one', 'two')
-        self.second = self.make_patch('0003-second.patch', 'two', 'three')
-        self.destination = self.root / 'build/source'
+        (self.root / 'core/src/common/value.txt').write_text('one\n')
+        (self.root / 'core/src/common/gone.txt').write_text('gone\n')
+        (self.root / 'core/.gitignore').write_text('*.o\n')
+        (self.root / 'core/src/common/built.o').write_text('object\n')
+        git(self.root, 'add', 'core')
+        self.destination = self.root / 'build/copy'
 
-    def make_patch(self, name, before, after):
-        target = self.root / 'patches' / name
-        target.write_text(f'--- a/src/common/value.txt\n+++ b/src/common/value.txt\n@@ -1 +1 @@\n-{before}\n+{after}\n')
-        return target
-
-    def stage(self):
+    def copy(self):
         with contextlib.redirect_stdout(io.StringIO()):
-            prepare.prepare(self.destination, self.root, self.upstream, self.revision)
+            copy_core.copy(self.destination, self.root)
 
-    def test_order_idempotence_and_dirty_upstream_preserved(self):
-        (self.upstream / 'src/common/value.txt').write_text('private local edit\n')
-        self.stage()
+    def test_copy_update_and_removal(self):
+        self.copy()
         value = self.destination / 'src/common/value.txt'
-        self.assertEqual(value.read_text(), 'three\n')
-        marker = self.destination / '.prepared'
-        before = marker.stat().st_mtime_ns
-        value.write_text('local generated edit\n')
-        self.stage()
-        self.assertEqual(marker.stat().st_mtime_ns, before)
-        self.assertEqual(value.read_text(), 'local generated edit\n')
-        self.assertEqual((self.upstream / 'src/common/value.txt').read_text(), 'private local edit\n')
+        self.assertEqual(value.read_text(), 'one\n')
+        self.assertFalse((self.destination / 'src/common/built.o').exists())
+        built = self.destination / 'src/common/other.o'
+        built.write_text('kept\n')
+        (self.root / 'core/src/common/value.txt').write_text('two\n')
+        (self.root / 'core/src/common/new.txt').write_text('new\n')
+        (self.root / 'core/src/common/gone.txt').unlink()
+        self.copy()
+        self.assertEqual(value.read_text(), 'two\n')
+        self.assertTrue((self.destination / 'src/common/new.txt').is_file())
+        self.assertFalse((self.destination / 'src/common/gone.txt').exists())
+        self.assertEqual(built.read_text(), 'kept\n')
 
-    def test_removed_patch_preserves_source(self):
-        self.stage()
-        self.second.unlink()
-        with self.assertRaisesRegex(ValueError, 'Preserve local edits'):
-            self.stage()
-        self.assertEqual((self.destination / 'src/common/value.txt').read_text(), 'three\n')
-
-    def test_changed_patch_preserves_source(self):
-        self.stage()
-        self.first.write_text(self.first.read_text() + '\n')
-        with self.assertRaisesRegex(ValueError, 'inputs changed'):
-            self.stage()
-        self.assertTrue((self.destination / '.prepared').is_file())
-
-    def test_duplicate_patch_prefix_is_rejected(self):
-        self.make_patch('0001-duplicate.patch', 'two', 'three')
-        with self.assertRaisesRegex(ValueError, 'unique four-digit'):
-            self.stage()
-        self.assertFalse(self.destination.exists())
-
-    def test_gitlink_mismatch_is_rejected(self):
-        git(self.root, 'update-index', '--cacheinfo', '160000,' + '1' * 40 + ',vendor/cloudpilot')
-        with self.assertRaisesRegex(ValueError, 'gitlink disagrees'):
-            self.stage()
-
-    def test_unmarked_directory_and_symlink_are_preserved(self):
+    def test_unmarked_directory_is_preserved(self):
         self.destination.mkdir(parents=True)
         saved = self.destination / 'user.session'
         saved.write_text('private marker')
         with self.assertRaises(ValueError):
-            self.stage()
+            self.copy()
         self.assertEqual(saved.read_text(), 'private marker')
-        link = self.root / 'source-link'
-        link.symlink_to(self.destination)
-        with self.assertRaises(ValueError):
-            prepare.prepare(link, self.root, self.upstream, self.revision)
-        self.assertEqual(saved.read_text(), 'private marker')
-
-    def test_patch_failure_does_not_publish_partial_source(self):
-        self.second.write_text('invalid patch\n')
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.stage()
-        self.assertFalse(self.destination.exists())
-        self.assertEqual(list(self.destination.parent.glob('.frond-prepare-*')), [])
+        self.assertFalse((self.destination / 'src').exists())
 
 
 class PackagePolicyTests(unittest.TestCase):

@@ -3,7 +3,9 @@
 #ifndef _VIRTUAL_SD_H_
 #define _VIRTUAL_SD_H_
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 struct VSD;
 typedef struct VSD VSD;
@@ -27,12 +29,19 @@ typedef bool (*SdSectorW)(uint32_t secNum, const void *buf);
 
 struct VSD *vsdInit(SdSectorR, SdSectorW, uint32_t nSec);
 void vsdReset(struct VSD *vsd, uint32_t nSec);
+// Card supply switched off: the card forgets its bus state and starts idle when powered again.
+void vsdPowerOff(struct VSD *vsd);
 
 enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t command, uint32_t param,
                             void *replyOut /* should be big enough for any reply */);
 bool vsdIsCardBusy(struct VSD *vsd);
 enum SdDataReplyType vsdDataXferBlockToCard(struct VSD *vsd, const void *data, uint32_t blockSz);
 enum SdDataReplyType vsdDataXferBlockFromCard(struct VSD *vsd, void *data, uint32_t blockSz);
+
+// The card's state for a machine state (machine_state_archive.h), in a layout of its own. Load leaves the
+// card as it was and returns false for another card size or a state the card can't be in.
+void vsdMachineSave(struct VSD *vsd, std::vector<uint8_t> &out);
+bool vsdMachineLoad(struct VSD *vsd, const uint8_t *data, size_t size);
 
 // util
 uint8_t vsdCRC7(uint8_t *data, uint32_t sz);

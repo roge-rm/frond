@@ -228,6 +228,10 @@ class EmCPU68K : public EmCPU {
     virtual uint32 Execute(uint32 maxCycles);
     virtual void CheckAfterCycle(void);
 
+    // The system cycle count including the instructions run so far in this Execute, for
+    // peripherals that timestamp guest writes (the piezo).
+    uint64 CycleNow() const;
+
     // Low-level access to CPU state.
 
     virtual emuptr GetPC(void);
@@ -277,6 +281,7 @@ class EmCPU68K : public EmCPU {
     Bool CheckForBreak(void);
 
     void ProcessInterrupt(int32 interrupt);
+    void ChargeException(ExceptionNumber exception, emuptr frame, emuptr newpc);
 
     void InitializeUAETables(void);
 
@@ -292,6 +297,7 @@ class EmCPU68K : public EmCPU {
     Hook68KJSR_IndList fHookJSR_Ind;
     uint32 fCurrentCycles{0};
     Bool isSettingUpExceptionFrame{false};
+    Bool fProcessingInterrupt{false};
 
 #if REGISTER_HISTORY
     #define kRegHistorySize 512

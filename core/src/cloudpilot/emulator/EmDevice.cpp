@@ -93,6 +93,8 @@
 #include "EmRegsVZHandEra330c.h"
 #include "EmRegsVZPalmI705.h"
 #include "EmRegsVZPalmM125.h"
+#include "EmRegsVZDana.h"
+#include "EmRegsISPDana.h"
 #include "EmRegsVZPalmM130.h"
 #include "EmRegsVZPalmM505.h"
 #include "EmRegsVZPegModena.h"
@@ -171,6 +173,8 @@ enum  // DeviceType
     kDeviceAcerS11,
     kDeviceAcerS65,
     kDeviceLP168,
+    kDeviceDana,
+    kDeviceDanaWireless,
     kDeviceLast
 };
 
@@ -565,6 +569,12 @@ static const DeviceInfo kDeviceInfo[] = {
     {kDevicePEGS500C, "PEG-S500C series", {"PEG-S500C"}, kSupports68EZ328, 8192, 0, 0, {}},
     {kDeviceAcerS65, "Acer S65", {"Acer-S65"}, kSupports68VZ328, 16384, 0, 0, {{'acer', 'colr'}}},
     {kDeviceAcerS11, "Acer S11", {"Acer-S11"}, kSupports68VZ328, 16384, 0, 0, {{'acer', 'momo'}}},
+    {kDeviceDana, "AlphaSmart Dana", {"AlphaSmartDana"}, kSupports68VZ328, 8192, 0, 0,
+     {{0x61736d74, 0x44616e61}}},
+    // The Dana board with 16 MiB and the built-in Wi-Fi module on the ISP1161's second root port. Savestates keep
+    // at most 16 characters of the ID.
+    {kDeviceDanaWireless, "AlphaSmart Dana Wireless", {"DanaWireless"}, kSupports68VZ328, 16384, 0, 0,
+     {{0x61736d74, 0x44616e61}}},
     {kDeviceLP168,
      "Legend P168",
      {"Legend-P168"},
@@ -1102,6 +1112,19 @@ void EmDevice::CreateRegs(void) const {
         case kDevicePalmM100:
             EmBankRegs::AddSubBank(new EmRegsEZPalmM100);
             break;
+
+        case kDeviceDana:
+        case kDeviceDanaWireless: {
+            auto* board=new EmRegsVZDana;
+            auto* isp=new EmRegsISPDana;
+            isp->SetHostIrq([board](bool high) { board->SetHcIrqPin(high); });
+            isp->SetDeviceIrq([board](bool high) { board->SetDcIrqPin(high); });
+            board->usbSupplySink=[isp](unsigned port, bool on) { isp->SetPortSupply(port,on); };
+            board->cycleScaleSink=[isp](uint32 factor) { isp->ScaleCycles(factor); };
+            EmBankRegs::AddSubBank(board);
+            EmBankRegs::AddSubBank(isp);
+            break;
+        }
 
         case kDevicePalmM125:
             EmBankRegs::AddSubBank(new EmRegsVZPalmM125);
@@ -1721,7 +1744,8 @@ bool EmDevice::EmulatesDockStatus() const {
 bool EmDevice::NeedsSDCTLHack() const { return fDeviceID == kDevicePalmM515; }
 
 bool EmDevice::HasCustomDigitizerTransform() const {
-    return fDeviceID == kDeviceHandEra330 || fDeviceID == kDeviceHandEra330c ||
+    // Dana converts display input to its centred compatibility screen in the ROM.
+    return fDeviceID == kDeviceDana || fDeviceID == kDeviceDanaWireless || fDeviceID == kDeviceHandEra330 || fDeviceID == kDeviceHandEra330c ||
            fDeviceID == kDeviceYSX1100;
 }
 
@@ -1798,6 +1822,9 @@ bool EmDevice::BuggySleep() const {
 
 ScreenDimensions::Kind EmDevice::GetScreenDimensions() const {
     switch (fDeviceID) {
+        case kDeviceDana:
+        case kDeviceDanaWireless:
+            return ScreenDimensions::screen560x160;
         case kDevicePalmI710:
         case kDevicePalmPacifiC:
         case kDevicePEGT400:

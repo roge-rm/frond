@@ -2690,6 +2690,14 @@ int EmRegs328::GetPort(emuptr address) {
     return 0;
 }
 
+void EmRegs328::ScaleCycles(uint32 factor) {
+    tmr1LastProcessedSystemCycles *= factor;
+    tmr2LastProcessedSystemCycles *= factor;
+    systemCycles = gSession->GetSystemCycles();
+    UpdateTimers();
+    EmHALHandler::ScaleCycles(factor);
+}
+
 uint32 EmRegs328::CyclesToNextInterrupt(uint64 systemCycles) {
     this->systemCycles = systemCycles;
 

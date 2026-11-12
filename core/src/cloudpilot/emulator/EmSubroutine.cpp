@@ -2104,9 +2104,17 @@ Err EmSubroutineCPU68K::Call(uint16 trapWord) {
     m68k_areg(newRegs, 7) = fStackPtr;
     gCPU68K->SetRegisters(newRegs);
 
-    // Call the Palm OS function.
+    // Call the Palm OS function. A host call abandoned at the cycle limit (EmGuestCallTimeout)
+    // gets the caller's registers and stack back before it goes on up.
 
-    err = this->DoCall(trapWord);
+    try {
+        err = this->DoCall(trapWord);
+    } catch (...) {
+        gCPU68K->SetRegisters(oldRegs);
+        EmBankMapped::UnmapPhysicalMemory(this->GetStackBase());
+        gCPU68K->CheckAfterCycle();
+        throw;
+    }
 
     // Save the result.
 
@@ -2153,7 +2161,12 @@ Err EmSubroutineCPU68K::CallSelector(uint16 trapWord, uint16 selector) {
 
     // Call the function.
 
-    err = this->Call(trapWord);
+    try {
+        err = this->Call(trapWord);
+    } catch (...) {
+        gCPU68K->SetRegisters(oldRegs);
+        throw;
+    }
 
     // Restore the original state.
 
@@ -2240,7 +2253,12 @@ Err EmSubroutineCPU68K::DoCall(uint16 trapWord) {
     // Execute until the next break.
 
     EmAssert(gSession);
-    gSession->ExecuteSubroutine();
+    try {
+        gSession->ExecuteSubroutine();
+    } catch (...) {
+        gCPU68K->RemoveHookException(kException_ATrapReturn, HandleTrap12);
+        throw;
+    }
 
     // Remove the TRAP 12 exception handler.
 

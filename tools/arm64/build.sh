@@ -1,6 +1,6 @@
 #!/bin/sh
 # Cross builds the arm64 core, desktop and package inside the frond-arm64-cross image.
-# The checkout is at /src with build/arm64/source mounted over build/source.
+# The checkout is at /src with build/arm64/source, a copy of core/, mounted over core/.
 set -eu
 cd /src
 JOBS=${JOBS:-10}
@@ -9,25 +9,25 @@ export PKG_CONFIG_LIBDIR=/usr/lib/$TRIPLE/pkgconfig:/usr/share/pkgconfig
 SDL_CFLAGS=$(pkg-config --cflags sdl2)
 SDL_LIBS=$(pkg-config --libs sdl2)
 TOOLS="CC_NATIVE=$TRIPLE-gcc CXX_NATIVE=$TRIPLE-g++ LD_NATIVE=$TRIPLE-g++ AR_NATIVE=$TRIPLE-ar RANLIB_NATIVE=$TRIPLE-ranlib"
-# Dynarmic for the Fast engine, from the source make dynarmic-source exported (arm64 back end).
+# Dynarmic for the Fast engine, from vendor/dynarmic (arm64 back end).
 DYN=/src/build/arm64/dynarmic
-cmake -S build/dynarmic-trial/src -B $DYN -DCMAKE_BUILD_TYPE=Release \
+cmake -S vendor/dynarmic -B $DYN -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
     -DCMAKE_C_COMPILER=$TRIPLE-gcc -DCMAKE_CXX_COMPILER=$TRIPLE-g++ -DBoost_INCLUDE_DIR=/usr/include \
     -DDYNARMIC_TESTS=OFF -DDYNARMIC_USE_BUNDLED_EXTERNALS=ON -DDYNARMIC_WARNINGS_AS_ERRORS=OFF \
     -DDYNARMIC_FRONTENDS=A32 -DDYNARMIC_USE_PRECOMPILED_HEADERS=OFF
 cmake --build $DYN --target dynarmic --parallel "$JOBS"
-JIT="FROND_DYNARMIC_SRC=/src/build/dynarmic-trial/src"
+JIT="FROND_DYNARMIC_SRC=/src/vendor/dynarmic"
 JIT_LIBS="FROND_DYNARMIC_LIBS=$DYN/src/dynarmic/libdynarmic.a $DYN/externals/mcl/src/libmcl.a $DYN/externals/fmt/libfmt.a"
-make -j"$JOBS" -C build/source/src/common bin $TOOLS "CFLAGS_NATIVE=-O2 -g $SDL_CFLAGS"
+make -j"$JOBS" -C core/src/common bin $TOOLS "CFLAGS_NATIVE=-O2 -g $SDL_CFLAGS"
 # The modem and phones' slirp side, linked into both cores and the Bluetooth phone.
-make -j"$JOBS" -C build/source/src/common net $TOOLS
-make -j"$JOBS" -C build/source/src/uarm bin $TOOLS "CFLAGS_NATIVE=-O2 -g $SDL_CFLAGS" \
+make -j"$JOBS" -C core/src/common net $TOOLS
+make -j"$JOBS" -C core/src/uarm bin $TOOLS "CFLAGS_NATIVE=-O2 -g $SDL_CFLAGS" \
     "LDFLAGS_NATIVE=$SDL_LIBS -lSDL2_image -lreadline -lcurl -lpthread -lresolv" "$JIT" "$JIT_LIBS"
 mkdir -p build/arm64/out
-cp build/source/src/uarm/cp-uarm build/arm64/out/frond
-make -j"$JOBS" -C build/source/src/cloudpilot FROND_68K=1 frond-68k $TOOLS
-cp build/source/src/cloudpilot/frond-68k build/arm64/out/frond-68k
+cp core/src/uarm/cp-uarm build/arm64/out/frond
+make -j"$JOBS" -C core/src/cloudpilot FROND_68K=1 frond-68k $TOOLS
+cp core/src/cloudpilot/frond-68k build/arm64/out/frond-68k
 cmake -S desktop -B build/arm64/desktop -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
     -DCMAKE_C_COMPILER=$TRIPLE-gcc -DCMAKE_CXX_COMPILER=$TRIPLE-g++ \
@@ -57,10 +57,10 @@ patch --batch -p1 -d $PHONE -i /src/tools/bluez-bthost-config.patch
 SLIRP=$(pkg-config --cflags --libs slirp)
 $TRIPLE-gcc -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -c $PHONE/emulator/bthost.c -o $PHONE/bthost.o
 $TRIPLE-gcc -std=gnu11 -O2 -DHAVE_CONFIG_H -I$BT -I$BLUEZ -I$BLUEZ/emulator -Itools -c tools/bluetooth-opp-peer.c -o $PHONE/peer.o
-$TRIPLE-g++ -std=c++17 -O2 -Ibuild/source/src/common $SLIRP -c tools/bluetooth-dun.cpp -o $PHONE/dun.o
+$TRIPLE-g++ -std=c++17 -O2 -Icore/src/common $SLIRP -c tools/bluetooth-dun.cpp -o $PHONE/dun.o
 $TRIPLE-g++ $PHONE/peer.o $PHONE/dun.o $PHONE/bthost.o $(ls $BT/*.o | grep -v -e emulator_main -e emulator_bthost -e emulator_serial \
     -e emulator_server -e emulator_vhci -e emulator_btdev -e emulator_phy -e emulator_le) \
-    build/source/src/common/libcommon-net.a build/source/src/common/libcommon.a $SLIRP -o build/arm64/out/bluetooth-phone
+    core/src/common/libcommon-net.a core/src/common/libcommon.a $SLIRP -o build/arm64/out/bluetooth-phone
 export QEMU_LD_PREFIX=/
 python3 tools/package-deb.py --core build/arm64/out/frond --core-68k build/arm64/out/frond-68k --desktop build/arm64/out/frond-desktop \
     --btvirt build/arm64/out/btvirt --phone build/arm64/out/bluetooth-phone --architecture arm64 --strip $TRIPLE-strip --runner qemu-aarch64

@@ -68,6 +68,7 @@ class EmRegs328 : public EmRegs, public EmHALHandler {
     virtual void PortDataChanged(int, uint8, uint8);
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    virtual void ScaleCycles(uint32 factor);
     void Cycle(uint64 systemCycles, Bool sleeping);
 
     virtual void SetUARTSync(bool sync);

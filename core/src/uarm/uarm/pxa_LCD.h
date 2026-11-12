@@ -26,7 +26,7 @@ void pxaLcdSetFramebufferDirty(struct PxaLcd *lcd);
 bool pxaLcdIsEnabled(struct PxaLcd *lcd);
 
 template <typename T>
-void pxaLcdSave(struct PxaLcd *lcd, T &savestate);
+void pxaLcdSave(struct PxaLcd *lcd, T &savestate, bool pxa270 = false);
 
 template <typename T>
 void pxaLcdLoad(struct PxaLcd *lcd, T &loader);

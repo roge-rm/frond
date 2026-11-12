@@ -90,6 +90,8 @@ class Debugger {
 
    private:
     void Break(BreakState state);
+    // Sets gDebuggerActive and gDebuggerWatching from enabled and the watchpoints.
+    void UpdateActive();
 
    private:
     bool enabled{false};

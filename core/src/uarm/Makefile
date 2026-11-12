@@ -48,6 +48,20 @@ SOURCE_CXX =		 					\
 	uarm/SoC.cpp 						\
 	uarm/soc_PXA.cpp					\
 	uarm/soc_pv.cpp						\
+	uarm/soc_IMX1.cpp					\
+	uarm/imx1_boot_probe.cpp			\
+	uarm/imx1_bootstrap.cpp				\
+	uarm/imx1_watchdog.cpp				\
+	uarm/imx1_rtc.cpp					\
+	uarm/imx1_aitc.cpp					\
+	uarm/imx1_cgm.cpp					\
+	uarm/imx1_gpio.cpp					\
+	uarm/imx1_sysctrl.cpp				\
+	uarm/imx1_eim.cpp					\
+	uarm/imx1_timer.cpp					\
+	uarm/imx1_i2c.cpp					\
+	uarm/imx1_asp.cpp					\
+	uarm/imx1_pwm.cpp					\
 	uarm/pv_ic.cpp						\
 	uarm/pv_timer.cpp					\
 	uarm/pv_uart.cpp					\
@@ -76,6 +90,7 @@ SOURCE_CXX =		 					\
 	uarm/patches.cpp					\
 	MainLoop.cpp						\
 	uarm/patch_dispatch.cpp				\
+	uarm/arm920_dcache.cpp					\
 	uarm/icache.cpp						\
 	uarm/CPU.cpp						\
 	uarm/pace.cpp 						\
@@ -108,24 +123,43 @@ SOURCE_CXX =		 					\
 	uarm/uartdev_bcm2035.cpp			\
 	uarm/vSD.cpp						\
 	uarm/devicePalmTungstenE2.cpp 		\
+	uarm/deviceSonyTG50.cpp \
+	uarm/mmiodev_TG50uc.cpp \
+	uarm/sspdev_AD7873.cpp \
+	uarm/i2sdev_AK4534.cpp \
+	uarm/i2cdev_AN32502A.cpp \
+	uarm/mmiodev_MemoryStickController.cpp \
 	uarm/cp15mmu.cpp 					\
 	uarm/cp15mpu.cpp 					\
 	uarm/memcpy.cpp						\
+	uarm/native_boundary.cpp \
 	uarm/syscall_dispatch.cpp			\
 	uarm/db_installer.cpp				\
 	uarm/audio_queue.cpp				\
 	uarm/db_list.cpp					\
 	uarm/db_backup.cpp					\
+	uarm/LibertasCF.cpp \
+	uarm/HostNetwork.cpp			\
+	uarm/HostSerial.cpp			\
+	uarm/HostInfrared.cpp \
+	uarm/BcspTransport.cpp					\
+	uarm/CsrBcspRadio.cpp					\
+	uarm/BluetoothBackend.cpp \
+	uarm/UsbBusHost.cpp			\
+	uarm/UsbHostBridge.cpp			\
+	uarm/NetworkSimulation.cpp			\
 	uarm/system_state.cpp
 
 SOURCE_C_NATIVE = $(SOURCE_C)
 SOURCE_CXX_NATIVE =						\
 	$(SOURCE_CXX)						\
 	native/Silkscreen.cpp				\
+	native/DeviceControls.cpp			\
 	native/SdlRenderer.cpp				\
 	native/SdlEventHandler.cpp			\
 	native/SdlAudioDriver.cpp			\
 	native/Commands.cpp					\
+	native/InputReplay.cpp				\
 	native/main.cpp
 
 SOURCE_C_EMCC = $(SOURCE_C)
@@ -142,9 +176,17 @@ SOURCE_CXX_TEST =						\
 	test/scheduler.cpp 					\
 	test/queue.cpp
 
-OBJECTS_EXTRA_NATIVE = ../common/libcommon.a
-OBJECTS_EXTRA_TEST = ../common/libcommon.a
+# The infrared phone's and Wi-Fi's slirp side (common/net), ahead of libcommon.a.
+OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
+OBJECTS_EXTRA_TEST = ../common/libcommon-net.a ../common/libcommon.a
 OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a
+
+# Fast engine: FROND_DYNARMIC_SRC is a patched Dynarmic source tree and FROND_DYNARMIC_LIBS its
+# built static libraries, in link order. Without them the core builds with the interpreter only.
+ifneq ($(FROND_DYNARMIC_SRC),)
+SOURCE_CXX_NATIVE += uarm/jit_dynarmic.cpp
+OBJECTS_EXTRA_NATIVE += $(FROND_DYNARMIC_LIBS)
+endif
 
 BINARY_NATIVE = cp-uarm$(EXE_SUFFIX)
 BINARY_EMCC = uarm_web.wasm
@@ -162,6 +204,16 @@ include ../Makefile.common
 
 bin: $(BINARY_NATIVE)
 
+# The Zodiac developer build, for tests and bring-up: the same core, with main.cpp also taking a
+# bring-up state file from FROND_ZODIAC_STATE. Its object follows main.o for the header dependencies.
+BINARY_ZODIAC_DEVELOPER = cp-uarm-zodiac-developer$(EXE_SUFFIX)
+MAIN_ZODIAC_DEVELOPER = $(BUILDDIR_NATIVE)/native/main-zodiac-developer.o
+$(MAIN_ZODIAC_DEVELOPER): native/main.cpp $(BUILDDIR_NATIVE)/native/main.o
+	$(CXX_NATIVE) $(STD_CXX) $(CXXFLAGS_COMMON) $(CXXFLAGS_NATIVE) $(CXXFLAGS_NATIVE_EXTRA) -DFROND_ZODIAC_DEVELOPER $(INCLUDE) $(INCLUDE_EXTRA) -c -o $@ $<
+$(BINARY_ZODIAC_DEVELOPER): $(filter-out $(BUILDDIR_NATIVE)/native/main.o,$(OBJECTS_NATIVE)) $(MAIN_ZODIAC_DEVELOPER)
+	$(LD_NATIVE) -o $@ $^ $(LDFLAGS_NATIVE) $(LDFLAGS_NATIVE_EXTRA)
+zodiac-developer: $(BINARY_ZODIAC_DEVELOPER)
+
 test: $(BINARY_TEST)
 	$(BINARY_TEST)
 
@@ -174,4 +226,25 @@ $(OPTIMIZED_BINARY_WASM): $(PROCESSED_BINARY_WASM)
 	if test -n "$(DEVELOP)"; then cp $^ $@; else $(WASMOPT) $(WASMOPT_FLAGS) -o $@ $^; fi
 	if test -z "$(DEVELOP)"; then $(WASMSTRIP) $@; fi
 
-.PHONY: bin emscripten clean test
+.PHONY: bin emscripten clean test zodiac-developer
+
+# Native virtual wireless router
+CXXFLAGS_NATIVE_EXTRA += $(shell pkg-config --cflags slirp)
+LDFLAGS_NATIVE_EXTRA += $(shell pkg-config --libs slirp)
+CXXFLAGS_TEST_EXTRA += $(shell pkg-config --cflags slirp)
+LDFLAGS_TEST_EXTRA += $(shell pkg-config --libs slirp)
+
+
+ifneq ($(FROND_DYNARMIC_SRC),)
+CXXFLAGS_NATIVE_EXTRA += -DFROND_DYNARMIC
+$(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: STD_CXX = -std=c++20
+# Only Dynarmic's headers: the core's include folders hide system ones (uarm/syscall.h).
+$(BUILDDIR_NATIVE)/uarm/jit_dynarmic.o: INCLUDE = -I$(FROND_DYNARMIC_SRC)/src \
+	-I$(FROND_DYNARMIC_SRC)/externals/mcl/include -I$(FROND_DYNARMIC_SRC)/externals/fmt/include
+endif
+
+# CPU.o and icache.o change with FROND_DYNARMIC, so switching it rebuilds them.
+JIT_STAMP := $(BUILDDIR_NATIVE)/.jit-$(if $(FROND_DYNARMIC_SRC),on,off)
+$(BUILDDIR_NATIVE)/uarm/CPU.o $(BUILDDIR_NATIVE)/uarm/icache.o: $(JIT_STAMP)
+$(JIT_STAMP):
+	mkdir -p $(BUILDDIR_NATIVE) && rm -f $(BUILDDIR_NATIVE)/.jit-* && touch $@

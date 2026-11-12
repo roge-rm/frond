@@ -24,6 +24,7 @@ class EmRegsEZPalmV : public EmRegsEZ {
     virtual Bool GetLCDScreenOn(void);
     virtual Bool GetLCDBacklightOn(void);
     virtual Bool GetLineDriverState(EmUARTDeviceType type);
+    Bool GetDTR(int uartNum) override;
 
     virtual uint8 GetPortInputValue(int);
     virtual uint8 GetPortInternalValue(int);

@@ -1,6 +1,8 @@
 #include "DebugSupport.h"
 
+#include <cstring>
 #include <iomanip>
+#include <optional>
 
 #include "Debugger.h"
 #include "Defer.h"
@@ -60,24 +62,52 @@ namespace {
     }
 }  // namespace
 
+namespace {
+    // The .text section of an m68k COFF executable, as prc-tools' m68k-palmos-gcc links: file
+    // header (20 bytes, big-endian, magic 0x0150), optional header, then 40-byte section headers.
+    optional<ElfParser::Section> coffText(const uint8* data, size_t size) {
+        auto get16 = [&](size_t at) { return uint32(data[at] << 8 | data[at + 1]); };
+        auto get32 = [&](size_t at) { return get16(at) << 16 | get16(at + 2); };
+        if (size < 20 || get16(0) != 0x0150) return nullopt;
+        const size_t sections = get16(2), first = 20 + get16(16);
+        for (size_t i = 0; i < sections && first + 40 * (i + 1) <= size; ++i) {
+            const uint8* header = data + first + 40 * i;
+            if (memcmp(header, ".text\0", 6) != 0) continue;
+            ElfParser::Section section{};
+            section.name = ".text";
+            section.virtualAddress = get32(first + 40 * i + 12);
+            section.size = get32(first + 40 * i + 16);
+            section.offset = get32(first + 40 * i + 20);
+            if (section.offset > size || section.size > size - section.offset) return nullopt;
+            return section;
+        }
+        return nullopt;
+    }
+}  // namespace
+
 void debug_support::SetApp(const uint8* elfData, size_t elfSize, const char* dbName,
                            GdbStub& gdbStub, Debugger& debugger) {
-    ElfParser parser;
+    optional<ElfParser::Section> sectionText = coffText(elfData, elfSize);
 
-    try {
-        parser.Parse(elfData, elfSize);
-    } catch (const ElfParser::EInvalidElf& e) {
-        cout << e.GetReason() << endl << flush;
-        return;
+    if (!sectionText) {
+        ElfParser parser;
+
+        try {
+            parser.Parse(elfData, elfSize);
+        } catch (const ElfParser::EInvalidElf& e) {
+            cout << e.GetReason() << endl << flush;
+            return;
+        }
+
+        if (parser.GetMachine() != 0x04) {
+            cout << "bad architecture" << endl << flush;
+            return;
+        }
+
+        sectionText = parser.GetSection(".text");
     }
 
-    if (parser.GetMachine() != 0x04) {
-        cout << "bad architecture" << endl << flush;
-        return;
-    }
-
-    const auto sectionText = parser.GetSection(".text");
-    if (!sectionText.has_value()) {
+    if (!sectionText.has_value() || sectionText->size == 0) {
         cout << ".text not found in binary" << endl << flush;
         return;
     }
@@ -112,7 +142,8 @@ emuptr debug_support::FindRegion(const uint8* region, size_t regionSize, emuptr 
                                  size_t size) {
     if (regionSize > size) return 0xffffffff;
 
-    for (emuptr address = start; address < start + size - regionSize; address++) {
+    // <=: the region may fill the whole range, as an app's code resource does.
+    for (emuptr address = start; address <= start + size - regionSize; address++) {
         for (emuptr i = 0; i < regionSize; i++)
             if (region[i] != EmMemGet8(i + address)) goto nextAddress;
 

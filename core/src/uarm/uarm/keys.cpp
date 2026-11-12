@@ -157,6 +157,11 @@ void keypadKeyEvt(struct Keypad *kp, enum KeyId key, bool wentDown) {
     keypadPrvMatrixRecalc(kp);
 }
 
+std::function<void()> keypadCaptureInput(struct Keypad *kp) {
+    const Keypad saved = *kp;
+    return [kp, saved] { *kp = saved; };
+}
+
 void keypadReset(struct Keypad *kp) {
     int i, j;
 

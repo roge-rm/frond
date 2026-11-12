@@ -56,7 +56,9 @@ SOURCE_C = \
 
 SOURCE_CXX = \
 	emulator/uae/readcpu.cpp \
+	emulator/uae/cputiming.cpp \
 	emulator/hardware/EmMemory.cpp \
+	emulator/hardware/EmBusTiming.cpp \
 	emulator/hardware/EmHAL.cpp \
 	emulator/hardware/EmCPU.cpp \
 	emulator/hardware/EmCPU68K.cpp \
@@ -70,6 +72,8 @@ SOURCE_CXX = \
 	emulator/hardware/EmUARTDragonball.cpp \
 	emulator/hardware/EmRegsEZ.cpp \
 	emulator/hardware/EmRegsVZ.cpp \
+	emulator/hardware/EmRegsVZDana.cpp \
+	emulator/hardware/EmRegsISPDana.cpp \
 	emulator/hardware/EmRegsSZ.cpp \
 	emulator/hardware/EmRegsESRAM.cpp \
 	emulator/hardware/EmSPISlaveADS784x.cpp \
@@ -223,6 +227,36 @@ BINARY_NATIVE = cloudpilot-emu$(EXE_SUFFIX)
 BINARY_EMCC = cloudpilot_web.wasm
 BINARY_TEST = test/test
 
+# frond-68k (make FROND_68K=1 frond-68k): the core and Frond's runner in frond/, without the
+# network proxy, readline CLI or SDL front end.
+SOURCE_CXX_FROND = \
+	frond/UsbBusHost.cpp \
+	frond/UsbHostBridge.cpp \
+	frond/HostByteLink.cpp \
+	$(SOURCE_CXX) \
+	frond/main.cpp \
+	frond/DeviceControls.cpp \
+	frond/HostLink.cpp \
+	native/GdbStub.cpp \
+	native/DebugSupport.cpp \
+	native/ElfParser.cpp \
+	emulator/assert_native.cpp \
+	emulator/stacktrace.cpp
+
+ifdef FROND_68K
+SOURCE_CXX_NATIVE = $(SOURCE_CXX_FROND)
+BINARY_NATIVE = frond-68k
+BUILDDIR_NATIVE = .build-frond
+DEPDIR_NATIVE = .deps-frond
+# frond/ first, for its keys.h in front of the shared art.
+INCLUDE := -Ifrond $(INCLUDE) -Inative
+# ENABLE_DEBUGGER: breakpoints and watchpoints for the GDB stub; idle checks while none is connected.
+CFLAGS_NATIVE = -O2 -g -DENABLE_DEBUGGER $(shell sdl2-config --cflags)
+LDFLAGS_NATIVE = $(shell sdl2-config --libs) -lSDL2_image -lpthread $(shell pkg-config --libs slirp)
+# The snap-on modem's slirp side (common/net), ahead of libcommon.a.
+OBJECTS_EXTRA_NATIVE = ../common/libcommon-net.a ../common/libcommon.a
+endif
+
 include ../Makefile.common
 
 bin: $(BINARY_NATIVE)
@@ -233,3 +267,6 @@ test: $(BINARY_TEST)
 	$(BINARY_TEST)
 
 .PHONY: bin emscripten clean test
+ifeq ($(FROND_68K),1)
+$(BUILDDIR_NATIVE)/frond/main.o: frond/RuntimeCards.h emulator/ExternalStorage.h ../uarm/uarm/SessionIo.h ../uarm/uarm/FileCardBacking.h ../uarm/uarm/CardBacking.h ../common/CardImage.h
+endif

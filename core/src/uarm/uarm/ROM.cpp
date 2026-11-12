@@ -132,7 +132,7 @@ uint32_t romGetSize(struct ArmRom *rom) { return rom->size; }
 void *romGetData(struct ArmRom *rom) { return rom->data; }
 
 void *romResolveAddress(struct ArmRom *rom, uint32_t pa, uint32_t size) {
-    if (pa < rom->base || pa + size > rom->base + rom->size) return nullptr;
+    if (pa < rom->base || uint64_t(pa) + size > uint64_t(rom->base) + rom->size) return nullptr;
 
     return reinterpret_cast<uint8_t *>(rom->data) + (pa - rom->base);
 }

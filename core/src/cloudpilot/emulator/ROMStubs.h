@@ -99,5 +99,10 @@ void ClipboardAddItem(const ClipboardFormatType format, const void* ptr, UInt16 
 emuptr ClipboardGetItem(const ClipboardFormatType format, UInt16* length);
 
 Err SysUIAppSwitch(UInt16 cardNo, LocalID dbID, UInt16 cmd, emuptr cmdPBP);
+Err SysCurAppDatabase(UInt16* cardNoP, LocalID* dbIDP);
+Boolean EvtEventAvail(void);
+Boolean EvtSysEventAvail(Boolean ignorePenUps);
+Err SysAppLaunch(UInt16 cardNo, LocalID dbID, UInt16 launchFlags, UInt16 cmd, emuptr cmdPBP,
+                 UInt32* resultP);
 
 #endif /* _ROMSTUBS_H_ */

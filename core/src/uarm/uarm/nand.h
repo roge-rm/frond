@@ -4,6 +4,8 @@
 #define _NAND_H_
 
 #include <cstdio>
+#include <memory>
+#include <vector>
 
 #include "CPU.h"
 #include "buffer.h"
@@ -13,6 +15,8 @@
 
 struct NAND;
 struct MemoryBuffer;
+class CardBacking;
+class CardSnapshot;
 
 typedef void (*NandReadyCbk)(void *userData, bool ready);
 
@@ -27,7 +31,7 @@ struct NandSpecs {
     uint8_t pagesPerBlockLg2;
     uint8_t flags;
     uint8_t devIdLen;
-    uint8_t devId[2];
+    uint8_t devId[6];
 };
 
 struct NAND *nandInit(uint8_t *nandContent, const struct MemoryBuffer *pageBuffer,
@@ -53,6 +57,28 @@ bool nandIsDirty(struct NAND *nand);
 void nandSetDirty(struct NAND *nand, bool isDirty);
 
 uint32_t nandGetWriteCnt(struct NAND *nand);
+
+// Raw NAND bytes with spare, and bytes per raw page (main then spare).
+uint64_t nandRawBytes(struct NAND *nand);
+uint32_t nandPageBytes(struct NAND *nand);
+bool nandReadRawPage(struct NAND *nand, uint32_t page, uint8_t *dest);
+// Reads nand.frondnand's stored bytes (main bytes of each page, zeros to sideOffset, then spare
+// bytes of each page), whether the NAND is in RAM or on a backing laid out that way.
+bool nandReadStored(struct NAND *nand, uint64_t offset, uint64_t length, uint8_t *dest, uint64_t sideOffset);
+// Moves the NAND onto `backing` in that layout. RAM content goes, freed by the release function if set.
+bool nandAdoptBacking(struct NAND *nand, std::unique_ptr<CardBacking> backing, uint64_t sideOffset);
+CardBacking *nandBacking(struct NAND *nand);
+void nandSetDataRelease(struct NAND *nand, void (*release)(void *));
+
+// What a read-only guest call restores: a copy of RAM content, or a pin of the backing.
+struct NandCheckpoint {
+    std::vector<uint8_t> raw;
+    std::shared_ptr<const CardSnapshot> pin;
+    std::vector<uint8_t> dirtyPages;
+    bool dirty{};
+};
+bool nandSaveCheckpoint(struct NAND *nand, NandCheckpoint &checkpoint);
+bool nandRestoreCheckpoint(struct NAND *nand, const NandCheckpoint &checkpoint);
 
 template <typename T>
 void nandSave(struct NAND *nand, T &savestate);

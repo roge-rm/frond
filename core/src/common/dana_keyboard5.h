@@ -1,0 +1,98 @@
+#pragma once
+#include <cstdint>
+#include <cstring>
+
+// Physical ST scan positions. Host text must synthesize these keys and modifiers;
+// the ROM owns layout, caps, sticky modifiers and repeat. These are not KeyId bits.
+struct DanaKey5 { uint8_t scan; const char* name; };
+inline constexpr DanaKey5 danaKeys5[] = {
+    {0x0f, "power"},
+    {0x4c, "f1"},
+    {0x4d, "f2"},
+    {0x0d, "f3"},
+    {0x1d, "f4"},
+    {0x1e, "f5"},
+    {0x17, "f6"},
+    {0x05, "f7"},
+    {0x45, "f8"},
+    {0x4e, "calendar"},
+    {0x5e, "address"},
+    {0x60, "todo"},
+    {0x53, "memo"},
+    {0x33, "find"},
+    {0x62, "menu"},
+    {0x41, "apps"},
+    {0x40, "send"},
+    {0x4b, "`"},
+    {0x5b, "1"},
+    {0x5c, "2"},
+    {0x5d, "3"},
+    {0x5a, "4"},
+    {0x4a, "5"},
+    {0x48, "6"},
+    {0x58, "7"},
+    {0x57, "8"},
+    {0x55, "9"},
+    {0x54, "0"},
+    {0x44, "-"},
+    {0x47, "="},
+    {0x0e, "backspace"},
+    {0x0b, "tab"},
+    {0x3b, "q"},
+    {0x3c, "w"},
+    {0x3d, "e"},
+    {0x3a, "r"},
+    {0x0a, "t"},
+    {0x08, "y"},
+    {0x38, "u"},
+    {0x37, "i"},
+    {0x35, "o"},
+    {0x34, "p"},
+    {0x04, "["},
+    {0x07, "]"},
+    {0x0c, "caps"},
+    {0x2b, "a"},
+    {0x2c, "s"},
+    {0x2d, "d"},
+    {0x2a, "f"},
+    {0x1a, "g"},
+    {0x18, "h"},
+    {0x28, "j"},
+    {0x27, "k"},
+    {0x25, "l"},
+    {0x24, ";"},
+    {0x14, "'"},
+    {0x6e, "enter"},
+    {0x09, "lshift"},
+    {0x2e, "\\"},
+    {0x6b, "z"},
+    {0x6c, "x"},
+    {0x6d, "c"},
+    {0x6a, "v"},
+    {0x7a, "b"},
+    {0x78, "n"},
+    {0x68, "m"},
+    {0x67, ","},
+    {0x65, "."},
+    {0x74, "/"},
+    {0x69, "rshift"},
+    {0x7b, "ctrl"},
+    {0x46, "function"},
+    {0x13, "command"},
+    {0x7e, "space"},
+    {0x73, "escape"},
+    {0x66, "delete"},
+    {0x72, "left"},
+    {0x70, "up"},
+    {0x71, "right"},
+    {0x12, "down"},
+};
+inline bool danaScanValid5(unsigned scan) {
+    for(const auto& key:danaKeys5) if(key.scan==scan) return true;
+    // Older snapshots can contain the ISO wire position; no host key exposes it.
+    return scan==0x29;
+}
+inline unsigned danaScanNamed5(const char* name) {
+    for(const auto& key:danaKeys5) if(std::strcmp(key.name,name)==0) return key.scan;
+    return 0;
+}

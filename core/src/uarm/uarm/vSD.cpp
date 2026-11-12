@@ -7,10 +7,12 @@
 #include <cstring>
 
 #include "cputil.h"
+#include "machine_state_archive.h"
 #include "memory_buffer.h"
+#include "sd_log_limit.h"
 #include "savestate/savestateAll.h"
 
-#define SAVESTATE_VERSION 0
+#define SAVESTATE_VERSION 2
 
 // this is not and will never be a full SD card emulator, deal with it!
 
@@ -44,11 +46,16 @@ struct VSD {
     bool hcCard;
     bool acmdShift;
     bool reportAcmdNext;
+    bool illegalPending;  // ILLEGAL_COMMAND goes out in the next response (spec 4.10.1)
+    bool illegalReport;   // this command's status carries it; not saved
+    bool eraseHaveStart, eraseHaveEnd;
+    uint32_t eraseStart, eraseEnd;
 
     uint8_t initWaitLeft;
     uint32_t prevAcmd41Param;
 
-    uint8_t curBuf[8];
+    uint8_t curBuf[64];
+    bool wideBus;
     uint32_t curSec;
     uint16_t curBufLen;
     bool bufIsData;
@@ -57,8 +64,10 @@ struct VSD {
     bool haveExpectedNumBlocks;
     uint32_t numBlocksExpected;
 
+    SdLogLimit rejectLog;  // not saved
+
     template <typename T>
-    void DoSaveLoad(T &chunkHelper) {
+    void DoSaveLoad(T &chunkHelper, uint32_t version) {
         uint8_t state8 = static_cast<uint8_t>(state);
 
         chunkHelper.Do32(nSec)
@@ -70,7 +79,17 @@ struct VSD {
             .Do32(prevAcmd41Param)
             .Do32(curSec)
             .Do32(numBlocksExpected)
-            .DoBuffer(curBuf, sizeof(curBuf));
+            .DoBuffer(curBuf, 8);
+        if (version >= 1) chunkHelper.Do(typename T::BoolPack() << wideBus).DoBuffer(curBuf + 8, 56);
+        else { wideBus = false; memset(curBuf + 8, 0, 56); }
+        if (version >= 2)
+            chunkHelper.Do(typename T::BoolPack() << illegalPending << eraseHaveStart << eraseHaveEnd)
+                .Do32(eraseStart)
+                .Do32(eraseEnd);
+        else {
+            illegalPending = eraseHaveStart = eraseHaveEnd = false;
+            eraseStart = eraseEnd = 0;
+        }
 
         state = static_cast<State>(state8);
     }
@@ -84,8 +103,11 @@ bool vsdIsCardBusy(struct VSD *vsd) {
 
 static void vsdCardReset(struct VSD *vsd) {
     vsd->acmdShift = false;
+    vsd->wideBus = false;
     vsd->rca = 0;
     vsd->reportAcmdNext = false;
+    vsd->illegalPending = false;
+    vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
     vsd->state = StateIdle;
     vsd->prevAcmd41Param = 0;
     vsd->initWaitLeft = 20;
@@ -97,6 +119,7 @@ static uint32_t vsdCalcR1resp(struct VSD *vsd, uint32_t r1bicBits, uint32_t r1or
     r1 |= ((uint32_t)vsd->state) << 9;
     if (vsd->acmdShift || vsd->reportAcmdNext) r1 |= 1 << 5;
     vsd->reportAcmdNext = false;
+    if (vsd->illegalReport) r1 |= 1UL << 22;
 
     /// XXX: "ready for data" bit 8?
 
@@ -135,25 +158,30 @@ static enum SdReplyType vsdRejectCmd(struct VSD *vsd, uint8_t cmd, uint32_t para
                                      enum RejectReason why, bool wasAcmd) {
     uint32_t r1orr = 1UL << 19;  // generic error
 
-    fprintf(stderr, "Rejecting %sCMD%u(0x%08lx)\n", wasAcmd ? "A" : "", cmd, (unsigned long)param);
+    bool log = sdLogAllow(&vsd->rejectLog, "vSD", "rejected commands");
+
+    if (log) fprintf(stderr, "Rejecting %sCMD%u(0x%08lx)\n", wasAcmd ? "A" : "", cmd, (unsigned long)param);
 
     switch (why) {
         case InvalidInCurrentState:
-            fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
-            r1orr = 1UL << 22;
-            break;
+            // An illegal command gets no response and leaves the state alone (SD physical
+            // layer 2.00, 4.6.1). The host sees a response timeout.
+            if (log) fprintf(stderr, " -> invalid in current state %u\n", vsd->state);
+            vsd->illegalPending = true;
+            return SdReplyNone;
 
         case UnacceptableParam:
-            fprintf(stderr, " -> parameter is unacceptable\n");
+            if (log) fprintf(stderr, " -> parameter is unacceptable\n");
             r1orr = 1UL << 31;
             break;
 
         case UnknownCommand:
-            fprintf(stderr, " -> unknown command\n");
+            if (log) fprintf(stderr, " -> unknown command\n");
+            vsd->illegalPending = true;
             return SdReplyNone;
 
         default:
-            fprintf(stderr, " -> some other reason\n");
+            if (log) fprintf(stderr, " -> some other reason\n");
             break;
     }
 
@@ -243,6 +271,10 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
     uint8_t *reply = (uint8_t *)replyOut;
     enum SdReplyType replTyp;
 
+    // A valid command clears ILLEGAL_COMMAND whatever its response type (spec 4.10.1, B);
+    // it is reported in that command's status if it has one.
+    vsd->illegalReport = vsd->illegalPending;
+    vsd->illegalPending = false;
     vsd->acmdShift = false;
     reply[0] = cmd;
 
@@ -303,16 +335,18 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             if (wasAcmd) {
                 if (vsd->state != StateTran)
                     replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
-                else
-                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);  // success
+                else if ((param & 3) != 0 && (param & 3) != 2)
+                    replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
+                else {
+                    vsd->wideBus = (param & 3) == 2;
+                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+                }
             } else {
                 if (vsd->state != StateTran)
                     replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
                 else {
-                    vsd->state = StateData;
-
-                    // exists, required, but we do not support it in vSD yet
-                    ERR("CMD6 not implemented\n");
+                    // Function switching is not modelled. Decline it without terminating the emulator.
+                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1u << 22);
                 }
             }
             break;
@@ -325,9 +359,9 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             } else if ((vsd->state == StateStby || vsd->state == StateTran ||
                         vsd->state == StateData || vsd->state == StatePrg) &&
                        vsd->rca != (param >> 16)) {  // we were not addressed
-
+                // Deselect: the card goes to stand-by and does not answer (RCA 0 or another card's).
                 vsd->state = StateStby;
-                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+                replTyp = SdReplyNone;
             } else
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
                                        false /* there is no ACMD7 */);
@@ -373,10 +407,18 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             break;
 
         case 13:
-            if (wasAcmd)
-                // XXX: ACMD13 exists
-                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
-            else if (vsd->state != StateStby && vsd->state != StateTran &&
+            if (wasAcmd) {
+                if (vsd->state != StateTran)
+                    replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+                else {
+                    memset(vsd->curBuf, 0, sizeof(vsd->curBuf));
+                    vsd->curBuf[0] = vsd->wideBus ? 0x80 : 0;
+                    // Unclassified speed; 16 KiB allocation units, no protected area.
+                    vsd->curBuf[10] = 0x10;
+                    vsd->curBufLen = 64; vsd->bufIsData = false; vsd->state = StateData;
+                    replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+                }
+            } else if (vsd->state != StateStby && vsd->state != StateTran &&
                      vsd->state != StateData && vsd->state != StateRcv && vsd->state != StatePrg &&
                      vsd->state != StateDis)
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
@@ -465,6 +507,54 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             }
             break;
 
+        case 28:  // write protect: no protection is modelled, so these only answer
+        case 29:
+        case 30:
+            if (wasAcmd || vsd->state != StateTran)
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+            else
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+            break;
+
+        case 32:  // erase start and end
+        case 33:
+            if (wasAcmd || vsd->state != StateTran)
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+            else if (!vsd->hcCard && (param % 512))
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam, wasAcmd);
+            else {
+                uint32_t sec = vsd->hcCard ? param : param / 512;
+                if (cmd == 32) {
+                    vsd->eraseStart = sec;
+                    vsd->eraseHaveStart = true;
+                } else {
+                    vsd->eraseEnd = sec;
+                    vsd->eraseHaveEnd = true;
+                }
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+            }
+            break;
+
+        case 38:  // erase: sectors read back as zero (SCR DATA_STAT_AFTER_ERASE is 0); never busy
+            if (wasAcmd || vsd->state != StateTran) {
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+            } else if (!vsd->eraseHaveStart || !vsd->eraseHaveEnd || vsd->eraseStart > vsd->eraseEnd) {
+                vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 1UL << 28);  // ERASE_SEQ_ERROR
+            } else {
+                uint8_t zero[512];
+                uint32_t sec, last = vsd->eraseEnd;
+                bool ok = true;
+
+                memset(zero, 0, sizeof(zero));
+                if (last >= vsd->nSec) last = vsd->nSec - 1;
+                for (sec = vsd->eraseStart; ok && sec <= last && sec < vsd->nSec; sec++)
+                    ok = vsd->secW(sec, zero);
+                vsd->eraseHaveStart = vsd->eraseHaveEnd = false;
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, ok ? 0 : 1UL << 19);
+            }
+            break;
+
         case 41:
             if (!wasAcmd) {
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnknownCommand, wasAcmd);
@@ -515,6 +605,18 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             }
             break;
 
+        case 42:  // ACMD42: enable/disable the DAT3 card-detect pull-up.
+            if (!wasAcmd) {  // CMD42 lock/unlock needs a data phase that is not modelled
+                replTyp = SdReplyNone;
+                break;
+            }
+            if (vsd->state != StateTran)
+                replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState, wasAcmd);
+            else
+                // DAT3 is not electrically modelled; this has no effect on the separate GPIO detector.
+                replTyp = vsdPrepareR1resp(vsd, cmd, reply, 0, 0);
+            break;
+
         case 51:
             if (!wasAcmd) {
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnknownCommand, wasAcmd);
@@ -542,6 +644,10 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
             }
             break;
 
+        case 56:  // general command needs a data phase that is not modelled: ignored, not illegal
+            replTyp = SdReplyNone;
+            break;
+
         case 55:
             if (vsd->state == StateReady || vsd->state == StateIdent) {
                 replTyp = vsdRejectCmd(vsd, cmd, param, reply, InvalidInCurrentState,
@@ -549,9 +655,9 @@ enum SdReplyType vsdCommand(struct VSD *vsd, uint8_t cmd, uint32_t param,
                 break;
             }
 
-            if ((param >> 16) != vsd->rca) {
-                replTyp = vsdRejectCmd(vsd, cmd, param, reply, UnacceptableParam,
-                                       false /* there is no ACMD55 */);
+            if ((param >> 16) != vsd->rca) {  // addressed to another card: no response
+                vsd->illegalPending = vsd->illegalReport;  // not for this card
+                replTyp = SdReplyNone;
                 break;
             }
             vsd->acmdShift = true;
@@ -597,6 +703,8 @@ enum SdDataReplyType vsdDataXferBlockToCard(struct VSD *vsd, const void *data, u
         if (!vsd->secW(vsd->curSec, data)) {
             fprintf(stderr, "failed to write SD backing store sec %lu\n",
                     (unsigned long)vsd->curSec);
+            // A failed single block ends the command; a multiple block one waits for CMD12.
+            if (!vsd->bufContinuous) vsd->state = StateTran;
             return SdDataErrBackingStore;
         }
         if (vsd->haveExpectedNumBlocks && !--vsd->numBlocksExpected)
@@ -630,6 +738,8 @@ enum SdDataReplyType vsdDataXferBlockFromCard(struct VSD *vsd, void *data, uint3
         if (!vsd->secR(vsd->curSec, data)) {
             fprintf(stderr, "failed to read SD backing store sec %lu\n",
                     (unsigned long)vsd->curSec);
+            // A failed single block ends the command; a multiple block one waits for CMD12.
+            if (!vsd->bufContinuous) vsd->state = StateTran;
             return SdDataErrBackingStore;
         }
 
@@ -668,8 +778,44 @@ struct VSD *vsdInit(SdSectorR sR, SdSectorW sW, uint32_t nSec) {
 void vsdReset(struct VSD *vsd, uint32_t nSec) {
     vsd->nSec = nSec;
     vsd->hcCard = nSec > 4194304;
+    sdLogReset(&vsd->rejectLog);
 
     vsdCardReset(vsd);
+}
+
+void vsdPowerOff(struct VSD *vsd) { vsdCardReset(vsd); }
+
+template <class A>
+static void vsdMachineFields(VSD &v, A &a) {
+    uint8_t state8 = static_cast<uint8_t>(v.state);
+    a.Do32(v.nSec).Do8(state8).Do8(v.busyCount).Do8(v.initWaitLeft).Do16(v.rca).Do16(v.curBufLen);
+    a.DoBool(v.hcCard).DoBool(v.acmdShift).DoBool(v.reportAcmdNext).DoBool(v.bufIsData).DoBool(v.bufContinuous);
+    a.DoBool(v.haveExpectedNumBlocks).DoBool(v.wideBus).DoBool(v.illegalPending);
+    a.DoBool(v.eraseHaveStart).DoBool(v.eraseHaveEnd);
+    a.Do32(v.prevAcmd41Param).Do32(v.curSec).Do32(v.numBlocksExpected).Do32(v.eraseStart).Do32(v.eraseEnd);
+    a.DoBuffer(v.curBuf, sizeof(v.curBuf));
+    v.state = static_cast<State>(state8);
+}
+
+void vsdMachineSave(struct VSD *vsd, std::vector<uint8_t> &out) {
+    out.clear();
+    StateWriter writer(out);
+    vsdMachineFields(*vsd, writer);
+}
+
+bool vsdMachineLoad(struct VSD *vsd, const uint8_t *data, size_t size) {
+    VSD v = *vsd;
+    StateReader reader(data, size);
+    vsdMachineFields(v, reader);
+    // The same checks as vsdLoad: restored lengths feed the backing callbacks or a copy from curBuf.
+    if (!reader.complete() || v.nSec != vsd->nSec || v.hcCard != vsd->hcCard || v.state > StateDis ||
+        (v.bufIsData ? v.curBufLen != 512 : v.curBufLen > sizeof(v.curBuf)) ||
+        ((v.state == StateData || v.state == StateRcv) && !v.curBufLen) ||
+        (v.state == StateRcv && !v.bufIsData))
+        return false;
+    v.illegalReport = false;
+    *vsd = v;
+    return true;
 }
 
 uint8_t vsdCRC7(uint8_t *data, uint32_t sz) {
@@ -701,20 +847,29 @@ uint8_t vsdCRC7(uint8_t *data, uint32_t sz) {
 
 template <typename T>
 void vsdSave(struct VSD *vsd, T &savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::vsd, SAVESTATE_VERSION);
+    // Savestate layouts are cached: use one fixed layout before and after card insertion.
+    const uint32_t version = SAVESTATE_VERSION;
+    auto chunk = savestate.GetChunk(ChunkType::vsd, version);
     if (!chunk) abort();
 
     SaveChunkHelper helper(*chunk);
-    vsd->DoSaveLoad(helper);
+    vsd->DoSaveLoad(helper, version);
 }
 
 template <typename T>
 void vsdLoad(struct VSD *vsd, T &loader) {
-    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, SAVESTATE_VERSION, "vsd");
+    uint32_t version;
+    auto chunk = loader.GetChunkOrFail(ChunkType::vsd, SAVESTATE_VERSION, "vsd", version);
     if (!chunk) return;
 
     LoadChunkHelper helper(*chunk);
-    vsd->DoSaveLoad(helper);
+    vsd->DoSaveLoad(helper, version);
+    // Restored lengths feed backing callbacks or a copy from the fixed status
+    // buffer. Reject corrupt state before it can be used by the controller.
+    if (vsd->state > StateDis ||
+        (vsd->bufIsData ? vsd->curBufLen != 512 : vsd->curBufLen > sizeof(vsd->curBuf)) ||
+        ((vsd->state == StateData || vsd->state == StateRcv) && !vsd->curBufLen) ||
+        (vsd->state == StateRcv && !vsd->bufIsData)) loader.NotifyError();
 }
 
 template void vsdSave<Savestate<ChunkType>>(VSD *vsd, Savestate<ChunkType> &savestate);

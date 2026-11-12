@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: 0BSD
  */
 
+#include <optional>
+
 #include <mcl/bit/bit_count.hpp>
 #include <mcl/bit/bit_field.hpp>
 
@@ -50,7 +52,16 @@ bool TranslatorVisitor::arm_STRT() {
     return UndefinedInstruction();
 }
 
-static IR::U32 GetAddress(A32::IREmitter& ir, bool P, bool U, bool W, Reg n, IR::U32 offset) {
+// Frond: the base is written back by WriteBack after the memory access, so an access that
+// faults leaves the base as it was and the interpreter can run the instruction again.
+struct Address {
+    IR::U32 address;
+    IR::U32 offset_addr;
+    bool wback;
+    Reg n;
+};
+
+static Address GetAddress(A32::IREmitter& ir, bool P, bool U, bool W, Reg n, IR::U32 offset) {
     const bool index = P;
     const bool add = U;
     const bool wback = !P || W;
@@ -58,11 +69,13 @@ static IR::U32 GetAddress(A32::IREmitter& ir, bool P, bool U, bool W, Reg n, IR:
     const IR::U32 offset_addr = add ? ir.Add(ir.GetRegister(n), offset) : ir.Sub(ir.GetRegister(n), offset);
     const IR::U32 address = index ? offset_addr : ir.GetRegister(n);
 
-    if (wback) {
-        ir.SetRegister(n, offset_addr);
-    }
+    return {address, offset_addr, wback, n};
+}
 
-    return address;
+static void WriteBack(A32::IREmitter& ir, const Address& a) {
+    if (a.wback) {
+        ir.SetRegister(a.n, a.offset_addr);
+    }
 }
 
 // LDR <Rt>, [PC, #+/-<imm>]
@@ -104,8 +117,10 @@ bool TranslatorVisitor::arm_LDR_imm(Cond cond, bool P, bool U, bool W, Reg n, Re
 
     const u32 imm32 = imm12.ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ReadMemory32(address, IR::AccType::NORMAL);
+    WriteBack(ir, addr);
 
     if (t == Reg::PC) {
         ir.LoadWritePC(data);
@@ -140,8 +155,10 @@ bool TranslatorVisitor::arm_LDR_reg(Cond cond, bool P, bool U, bool W, Reg n, Re
     }
 
     const auto offset = EmitImmShift(ir.GetRegister(m), shift, imm5, ir.GetCFlag()).result;
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ReadMemory32(address, IR::AccType::NORMAL);
+    WriteBack(ir, addr);
 
     if (t == Reg::PC) {
         ir.LoadWritePC(data);
@@ -195,8 +212,10 @@ bool TranslatorVisitor::arm_LDRB_imm(Cond cond, bool P, bool U, bool W, Reg n, R
 
     const u32 imm32 = imm12.ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ZeroExtendByteToWord(ir.ReadMemory8(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -219,8 +238,10 @@ bool TranslatorVisitor::arm_LDRB_reg(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = EmitImmShift(ir.GetRegister(m), shift, imm5, ir.GetCFlag()).result;
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ZeroExtendByteToWord(ir.ReadMemory8(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -291,10 +312,12 @@ bool TranslatorVisitor::arm_LDRD_imm(Cond cond, bool P, bool U, bool W, Reg n, R
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
 
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
 
     // NOTE: If alignment is exactly off by 4, each word is an atomic access.
     const IR::U64 data = ir.ReadMemory64(address, IR::AccType::ATOMIC);
+    WriteBack(ir, addr);
 
     if (ir.current_location.EFlag()) {
         ir.SetRegister(t, ir.MostSignificantWord(data).result);
@@ -331,10 +354,12 @@ bool TranslatorVisitor::arm_LDRD_reg(Cond cond, bool P, bool U, bool W, Reg n, R
 
     const Reg t2 = t + 1;
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
 
     // NOTE: If alignment is exactly off by 4, each word is an atomic access.
     const IR::U64 data = ir.ReadMemory64(address, IR::AccType::ATOMIC);
+    WriteBack(ir, addr);
 
     if (ir.current_location.EFlag()) {
         ir.SetRegister(t, ir.MostSignificantWord(data).result);
@@ -393,8 +418,10 @@ bool TranslatorVisitor::arm_LDRH_imm(Cond cond, bool P, bool U, bool W, Reg n, R
 
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ZeroExtendHalfToWord(ir.ReadMemory16(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -417,8 +444,10 @@ bool TranslatorVisitor::arm_LDRH_reg(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.ZeroExtendHalfToWord(ir.ReadMemory16(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -467,8 +496,10 @@ bool TranslatorVisitor::arm_LDRSB_imm(Cond cond, bool P, bool U, bool W, Reg n, 
 
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.SignExtendByteToWord(ir.ReadMemory8(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -491,8 +522,10 @@ bool TranslatorVisitor::arm_LDRSB_reg(Cond cond, bool P, bool U, bool W, Reg n, 
     }
 
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.SignExtendByteToWord(ir.ReadMemory8(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -540,8 +573,10 @@ bool TranslatorVisitor::arm_LDRSH_imm(Cond cond, bool P, bool U, bool W, Reg n, 
 
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.SignExtendHalfToWord(ir.ReadMemory16(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -564,8 +599,10 @@ bool TranslatorVisitor::arm_LDRSH_reg(Cond cond, bool P, bool U, bool W, Reg n, 
     }
 
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto data = ir.SignExtendHalfToWord(ir.ReadMemory16(address, IR::AccType::NORMAL));
+    WriteBack(ir, addr);
 
     ir.SetRegister(t, data);
     return true;
@@ -583,8 +620,10 @@ bool TranslatorVisitor::arm_STR_imm(Cond cond, bool P, bool U, bool W, Reg n, Re
     }
 
     const auto offset = ir.Imm32(imm12.ZeroExtend());
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     ir.WriteMemory32(address, ir.GetRegister(t), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -604,8 +643,10 @@ bool TranslatorVisitor::arm_STR_reg(Cond cond, bool P, bool U, bool W, Reg n, Re
     }
 
     const auto offset = EmitImmShift(ir.GetRegister(m), shift, imm5, ir.GetCFlag()).result;
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     ir.WriteMemory32(address, ir.GetRegister(t), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -625,8 +666,10 @@ bool TranslatorVisitor::arm_STRB_imm(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = ir.Imm32(imm12.ZeroExtend());
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     ir.WriteMemory8(address, ir.LeastSignificantByte(ir.GetRegister(t)), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -646,8 +689,10 @@ bool TranslatorVisitor::arm_STRB_reg(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = EmitImmShift(ir.GetRegister(m), shift, imm5, ir.GetCFlag()).result;
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     ir.WriteMemory8(address, ir.LeastSignificantByte(ir.GetRegister(t)), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -677,7 +722,8 @@ bool TranslatorVisitor::arm_STRD_imm(Cond cond, bool P, bool U, bool W, Reg n, R
 
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto value_a = ir.GetRegister(t);
     const auto value_b = ir.GetRegister(t2);
 
@@ -686,6 +732,7 @@ bool TranslatorVisitor::arm_STRD_imm(Cond cond, bool P, bool U, bool W, Reg n, R
 
     // NOTE: If alignment is exactly off by 4, each word is an atomic access.
     ir.WriteMemory64(address, data, IR::AccType::ATOMIC);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -714,7 +761,8 @@ bool TranslatorVisitor::arm_STRD_reg(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
     const auto value_a = ir.GetRegister(t);
     const auto value_b = ir.GetRegister(t2);
 
@@ -723,6 +771,7 @@ bool TranslatorVisitor::arm_STRD_reg(Cond cond, bool P, bool U, bool W, Reg n, R
 
     // NOTE: If alignment is exactly off by 4, each word is an atomic access.
     ir.WriteMemory64(address, data, IR::AccType::ATOMIC);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -743,9 +792,11 @@ bool TranslatorVisitor::arm_STRH_imm(Cond cond, bool P, bool U, bool W, Reg n, R
 
     const u32 imm32 = concatenate(imm8a, imm8b).ZeroExtend();
     const auto offset = ir.Imm32(imm32);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
 
     ir.WriteMemory16(address, ir.LeastSignificantHalf(ir.GetRegister(t)), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
@@ -765,25 +816,52 @@ bool TranslatorVisitor::arm_STRH_reg(Cond cond, bool P, bool U, bool W, Reg n, R
     }
 
     const auto offset = ir.GetRegister(m);
-    const auto address = GetAddress(ir, P, U, W, n, offset);
+    const auto addr = GetAddress(ir, P, U, W, n, offset);
+    const auto address = addr.address;
 
     ir.WriteMemory16(address, ir.LeastSignificantHalf(ir.GetRegister(t)), IR::AccType::NORMAL);
+    WriteBack(ir, addr);
     return true;
 }
 
-static bool LDMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address) {
-    auto address = start_address;
-    for (size_t i = 0; i <= 14; i++) {
+// Frond: the base (loaded or written back) is set after the last access, so a transfer that
+// faults leaves it as it was for the interpreter to run the instruction again. The other
+// registers are set as they load, as in the interpreter. DA and DB go from the highest
+// register down, as the interpreter does, so a fault part-way loads the same registers.
+static bool LDMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address, bool descending = false) {
+    const u32 count = static_cast<u32>(mcl::bit::count_ones(list));
+    IR::U32 address = start_address;
+    if (descending) {
+        address = ir.Add(start_address, ir.Imm32(4 * (count - 1)));
+    }
+    std::optional<IR::U32> base_data;
+    std::optional<IR::U32> pc_data;
+    for (size_t k = 0; k <= 15; k++) {
+        const size_t i = descending ? 15 - k : k;
         if (mcl::bit::get_bit(i, list)) {
-            ir.SetRegister(static_cast<Reg>(i), ir.ReadMemory32(address, IR::AccType::ATOMIC));
-            address = ir.Add(address, ir.Imm32(4));
+            const auto data = ir.ReadMemory32(address, IR::AccType::ATOMIC);
+            if (i == 15) {
+                pc_data = data;
+            } else if (static_cast<Reg>(i) == n) {
+                base_data = data;
+            } else {
+                ir.SetRegister(static_cast<Reg>(i), data);
+            }
+            if (descending) {
+                address = ir.Sub(address, ir.Imm32(4));
+            } else {
+                address = ir.Add(address, ir.Imm32(4));
+            }
         }
+    }
+    if (base_data) {
+        ir.SetRegister(n, *base_data);
     }
     if (W && !mcl::bit::get_bit(RegNumber(n), list)) {
         ir.SetRegister(n, writeback_address);
     }
-    if (mcl::bit::get_bit<15>(list)) {
-        ir.LoadWritePC(ir.ReadMemory32(address, IR::AccType::ATOMIC));
+    if (pc_data) {
+        ir.LoadWritePC(*pc_data);
         if (n == Reg::R13)
             ir.SetTerm(IR::Term::PopRSBHint{});
         else
@@ -826,7 +904,7 @@ bool TranslatorVisitor::arm_LDMDA(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list) - 4)));
     const auto writeback_address = ir.Sub(start_address, ir.Imm32(4));
-    return LDMHelper(ir, W, n, list, start_address, writeback_address);
+    return LDMHelper(ir, W, n, list, start_address, writeback_address, true);
 }
 
 // LDMDB <Rn>{!}, <reg_list>
@@ -844,7 +922,7 @@ bool TranslatorVisitor::arm_LDMDB(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list))));
     const auto writeback_address = start_address;
-    return LDMHelper(ir, W, n, list, start_address, writeback_address);
+    return LDMHelper(ir, W, n, list, start_address, writeback_address, true);
 }
 
 // LDMIB <Rn>{!}, <reg_list>
@@ -873,19 +951,28 @@ bool TranslatorVisitor::arm_LDM_eret() {
     return InterpretThisInstruction();
 }
 
-static bool STMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address) {
-    auto address = start_address;
-    for (size_t i = 0; i <= 14; i++) {
+// Frond: written back after the last store, so a store that faults leaves the base. DA and
+// DB store from the highest register down, as the interpreter does.
+static bool STMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address, bool descending = false) {
+    const u32 count = static_cast<u32>(mcl::bit::count_ones(list));
+    IR::U32 address = start_address;
+    if (descending) {
+        address = ir.Add(start_address, ir.Imm32(4 * (count - 1)));
+    }
+    for (size_t k = 0; k <= 15; k++) {
+        const size_t i = descending ? 15 - k : k;
         if (mcl::bit::get_bit(i, list)) {
-            ir.WriteMemory32(address, ir.GetRegister(static_cast<Reg>(i)), IR::AccType::ATOMIC);
-            address = ir.Add(address, ir.Imm32(4));
+            const auto value = i == 15 ? ir.Imm32(ir.PC()) : ir.GetRegister(static_cast<Reg>(i));
+            ir.WriteMemory32(address, value, IR::AccType::ATOMIC);
+            if (descending) {
+                address = ir.Sub(address, ir.Imm32(4));
+            } else {
+                address = ir.Add(address, ir.Imm32(4));
+            }
         }
     }
     if (W) {
         ir.SetRegister(n, writeback_address);
-    }
-    if (mcl::bit::get_bit<15>(list)) {
-        ir.WriteMemory32(address, ir.Imm32(ir.PC()), IR::AccType::ATOMIC);
     }
     return true;
 }
@@ -917,7 +1004,7 @@ bool TranslatorVisitor::arm_STMDA(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list) - 4)));
     const auto writeback_address = ir.Sub(start_address, ir.Imm32(4));
-    return STMHelper(ir, W, n, list, start_address, writeback_address);
+    return STMHelper(ir, W, n, list, start_address, writeback_address, true);
 }
 
 // STMDB <Rn>{!}, <reg_list>
@@ -932,7 +1019,7 @@ bool TranslatorVisitor::arm_STMDB(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list))));
     const auto writeback_address = start_address;
-    return STMHelper(ir, W, n, list, start_address, writeback_address);
+    return STMHelper(ir, W, n, list, start_address, writeback_address, true);
 }
 
 // STMIB <Rn>{!}, <reg_list>

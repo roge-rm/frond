@@ -71,6 +71,7 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    virtual void ScaleCycles(uint32 factor);
     void Cycle(uint64 systemCycles, Bool sleeping);
 
     virtual void SetUARTSync(bool sync);
@@ -92,6 +93,8 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
 
     void csASelectWrite(emuptr address, int size, uint32 value);
     void csDSelectWrite(emuptr address, int size, uint32 value);
+    void waitStateRegisterWrite(emuptr address, int size, uint32 value);
+    void UpdateWaitStates(void);
     void intMaskHiWrite(emuptr address, int size, uint32 value);
     void intMaskLoWrite(emuptr address, int size, uint32 value);
     void intStatusHiWrite(emuptr address, int size, uint32 value);
