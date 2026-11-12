@@ -1019,6 +1019,13 @@ test-usb-bridge-soc: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-usb-bridge-soc
 	timeout 300 ./build/test-usb-bridge-soc
 
+# TG50 Voice Recorder launch, whose NULL read runs on the ROM PACE (patch 0835); skips without the TG50
+# smoke session (tests/tg50-voicerec.py).
+.PHONY: test-tg50-voicerec
+test: test-tg50-voicerec
+test-tg50-voicerec: out/frond
+	python3 tests/tg50-voicerec.py
+
 # TG50 USB HotSync over a PTY with pilot-link; skips without the TG50 session (make smoke-sessions) or pilot-link.
 .PHONY: test-tg50-usb-hotsync
 test-tg50-usb-hotsync: out/frond
