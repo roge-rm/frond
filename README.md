@@ -65,6 +65,7 @@ Dan
 | Tungsten E3 | ARM, 200 MHz (the E2 board) | SD | Exact or Fast |
 | Zire 72 | ARM, 312 MHz | SD | Exact or Fast |
 | Sony CLIÉ TG50 | ARM, 200 MHz | Memory Stick, Memory Stick Pro | Exact or Fast |
+| Tapwave Zodiac | ARM920T, 200 MHz | SD | Exact or Fast |
 | Palm IIIx | 68k DragonBall EZ, 16.58 MHz | none | Exact |
 | AlphaSmart Dana | 68k DragonBall VZ | two SD or MMC | Exact |
 | AlphaSmart Dana Wireless | 68k DragonBall VZ | two SD or MMC | Exact |
