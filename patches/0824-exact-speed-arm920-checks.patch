@@ -156,6 +156,18 @@ diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
      }
  #endif
  
+diff --git a/src/uarm/uarm/icache.cpp b/src/uarm/uarm/icache.cpp
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -151,7 +151,7 @@
+     return ic->arm920 && ic->arm920ContinuationCount;
+ }
+ 
+-void icacheArm920Branch(struct icache* ic) { ic->arm920ContinuationCount = 0; }
++void icacheArm920Branch(struct icache* ic) { icacheArm920BranchInline(ic); }
+ 
+ void icacheArm920Capture(const struct icache* ic, Arm920SavedState& s) {
+     s.icacheEnabled = ic->arm920Enabled;
 diff --git a/src/uarm/uarm/icache_internal.h b/src/uarm/uarm/icache_internal.h
 --- a/src/uarm/uarm/icache_internal.h
 +++ b/src/uarm/uarm/icache_internal.h
