@@ -98,7 +98,7 @@ index 15c8865..296b894 100644
      p->cs4Capture = *staged.cs4;
      p->cs5Reset = *staged.cs5Reset;
 diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
-index ca10643..e14deb5 100644
+index ca10643..9fd5d83 100644
 --- a/src/uarm/uarm/imx1_bootstrap.cpp
 +++ b/src/uarm/uarm/imx1_bootstrap.cpp
 @@ -100,6 +100,9 @@ uint64_t Imx1Bootstrap::idleQuietHclk() const {
@@ -119,7 +119,7 @@ index ca10643..e14deb5 100644
      if (sysctrl.dmaClockEnabled())
          dmaResetClocks -= uint32_t(std::min<uint64_t>(dmaResetClocks, busClocks / cgm.busDivider()));
      bclkPhase = busClocks % cgm.busDivider();
-@@ -303,6 +307,106 @@ void Imx1Bootstrap::cardDmaService() {
+@@ -303,6 +307,107 @@ void Imx1Bootstrap::cardDmaService() {
      }
  }
  
@@ -131,6 +131,7 @@ index ca10643..e14deb5 100644
 +// that time. Only linear transfers with no repeat; the rest stays guarded.
 +Imx1BootstrapAccess Imx1Bootstrap::memoryDmaPlan(unsigned number, const uint32_t* channel, uint32_t& clocks) const {
 +    const uint32_t control = channel[3];
++    if (!sysctrl.dmaClockEnabled()) return Imx1BootstrapAccess::sideEffect;
 +    // FRC, RPT, REN, MSEL, MDIR, SMOD and DMOD clear; port sizes 32, 8 or 16 bits.
 +    if (number >= 10 || (control & 0x3f0e) || ((control >> 4) & 3) == 3 || ((control >> 6) & 3) == 3)
 +        return Imx1BootstrapAccess::sideEffect;
@@ -226,7 +227,7 @@ index ca10643..e14deb5 100644
  bool Imx1Bootstrap::pcmDmaConfigurationValid(const uint32_t* channel) const {
      return (channel[3] & ~5u) == 0x2088 && channel[1] == 0x00218000 &&
             channel[4] == 16 && channel[5] == 8 && channel[6] == 0 &&
-@@ -734,6 +838,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+@@ -734,6 +839,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
                      dmaResetClocks = 3;
                      dmaPcmActive = false; dmaStatus = dmaPcmCount = dmaPcmBurst = dmaPcmPhase = 0;
                      for (auto& channel : dmaChannels) for (auto& word : channel) word = 0;
@@ -234,7 +235,7 @@ index ca10643..e14deb5 100644
                  } else dmaControl = value;
              } else value = dmaControl;
              return Imx1BootstrapAccess::ok;
-@@ -754,6 +859,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+@@ -754,6 +860,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
          const auto word = (offset & 0x3f) / 4;
          if (word >= 7) return Imx1BootstrapAccess::unmapped;
          auto& channel = dmaChannels[offset / 0x40];
@@ -242,21 +243,23 @@ index ca10643..e14deb5 100644
          if (write) {
              static constexpr uint32_t masks[]{0xffffffff,0xffffffff,0xffffff,0x3fff,0x1f,0x3f,0xffff};
              if (value & ~masks[word]) return Imx1BootstrapAccess::reservedBits;
-@@ -764,7 +870,12 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+@@ -764,7 +871,14 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
                      next[3] = value;
                      const unsigned number = offset / 0x40;
                      if (dmaResetClocks || !(dmaControl & 1)) return Imx1BootstrapAccess::sideEffect;
 -                    if (number == 10 ? !pcmDmaConfigurationValid(next.data()) : !cardDmaConfigurationValid(number, next.data()))
++                    // A memory transfer under way can't start again, and neither kind can start over the other.
++                    if (number != 10 && ((memoryDma.active & (1u << number)) ||
++                                         (!(value & 8) && (cardDma.active & (1u << number)))))
++                        return Imx1BootstrapAccess::sideEffect;
 +                    if (number != 10 && !(value & 8)) {
-+                        // A memory-to-memory transfer under way can't be started again.
-+                        if (memoryDma.active & (1u << number)) return Imx1BootstrapAccess::sideEffect;
 +                        const auto planned = memoryDmaPlan(number, next.data(), memoryClocks);
 +                        if (planned != Imx1BootstrapAccess::ok) return planned;
 +                    } else if (number == 10 ? !pcmDmaConfigurationValid(next.data()) : !cardDmaConfigurationValid(number, next.data()))
                          return number != 10 && !mmcsd.card() ? Imx1BootstrapAccess::sideEffect :
                                 number != 10 && next[4] == 13 ? Imx1BootstrapAccess::memoryUnavailable :
                                 Imx1BootstrapAccess::sideEffect;
-@@ -788,12 +899,21 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
+@@ -788,12 +902,21 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool
                  }
              }
              const unsigned number = offset / 0x40;
@@ -283,7 +286,7 @@ index ca10643..e14deb5 100644
                      cardDma.moved[number] = 0;
                      cardDmaService();
 diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
-index 600a3bd..899d841 100644
+index 600a3bd..1f3a86d 100644
 --- a/src/uarm/uarm/imx1_bootstrap.h
 +++ b/src/uarm/uarm/imx1_bootstrap.h
 @@ -31,6 +31,18 @@ struct Imx1PcmState {
@@ -326,7 +329,16 @@ index 600a3bd..899d841 100644
      // Called with the physical address of each 4 KiB page a DMA transfer writes, so decoded code from it goes.
      void setDmaStoreHook(void (*hook)(void*, uint32_t), void* context) { dmaStoreHook = hook; dmaStoreContext = context; }
      void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
-@@ -424,6 +450,12 @@ class Imx1Bootstrap {
+@@ -186,7 +212,7 @@ class Imx1Bootstrap {
+             (timer1.canInterrupt() ? uint64_t(1) << 59 : 0) |
+             (timer2.canInterrupt() ? uint64_t(1) << 58 : 0) |
+             (uart1.busy() ? uint64_t(0x3f) << 25 : 0) | (uart2.busy() ? uint64_t(0x3f) << 19 : 0) |
+-            (pcmDmaEndPossible() ? uint64_t(1) << 61 : 0);
++            ((pcmDmaEndPossible() || memoryDmaEndPossible()) ? uint64_t(1) << 61 : 0);
+         candidate.setInputs(sources, ~uint64_t(0));
+         return watchdog.enabled() || candidate.irq() == Imx1AitcLine::asserted ||
+                candidate.fiq() == Imx1AitcLine::asserted;
+@@ -424,6 +450,14 @@ class Imx1Bootstrap {
      bool pcmDmaConfigurationValid(const uint32_t* channel) const;
      void pcmDmaBeat();
      uint64_t pcmIdleQuietHclk() const;
@@ -336,10 +348,12 @@ index 600a3bd..899d841 100644
 +    void memoryDmaMove(unsigned number);
 +    bool memoryDmaCounting() const { return memoryDma.active && sysctrl.dmaClockEnabled() && !dmaResetClocks && (dmaControl & 1); }
 +    void advanceMemoryDma(uint64_t hclk);
++    // A counting memory-to-memory transfer whose DISR bit will raise the DMA interrupt (source 61).
++    bool memoryDmaEndPossible() const { return memoryDmaCounting() && (memoryDma.active & ~dmaMask & 0x3ff); }
      // Channel 10 is taking beats and the end of its buffer raises the DMA interrupt (source 61).
      bool pcmDmaEndPossible() const {
          return pcmIdleQuietHclk() != UINT64_MAX && ((dmaChannels[10][3] & 4) || !(dmaMask & (1u << 10)));
-@@ -489,6 +521,13 @@ class Imx1Bootstrap {
+@@ -489,6 +523,13 @@ class Imx1Bootstrap {
      } cardDma;
      void (*dmaStoreHook)(void*, uint32_t) = nullptr;
      void* dmaStoreContext = nullptr;
@@ -353,7 +367,7 @@ index 600a3bd..899d841 100644
      // Every method that can change a source other than the GPIO ports holds one of these while it runs.
      struct SourceChange {
          const Imx1Bootstrap& board;
-@@ -505,7 +544,8 @@ class Imx1Bootstrap {
+@@ -505,7 +546,8 @@ class Imx1Bootstrap {
      };
  
     public:
