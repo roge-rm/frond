@@ -1118,16 +1118,20 @@ int main() {
         held.now=200; held.ReportHeldKeys(); assert(!request());
     }
     {
-        // A press waits while Palm OS's key queue has room for two keys or fewer, with no request
-        // raised so the app can take keys. Releases still go.
+        // A press waits in the backlog while Palm OS's key queue could overflow, counting the
+        // presses already in the FIFO; nothing else is reported meanwhile.
+        const uint32 one=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        auto b=*DanaScan5::Named("b");
         PacedSt full; assert(full.Byte(0)==0xaa); full.SetWord(0xfffff302,0);
         auto request=[&]() { return (full.GetWord(0xfffff310)&1)!=0; };
-        auto b=*DanaScan5::Named("b");
+        full.keyQueueRoom=one;
         full.now=100; assert(full.DispatchDanaInput({{scan,true},{scan,false},{b,true},{b,false}}));
-        assert(full.Byte(0)==0x41); assert(full.Byte(0)==scan.Code());
+        assert(full.BacklogSize()==2);
+        // The guest took a into its queue and the app hasn't read it yet.
         full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==scan.Code());
         full.now=110; full.ReportHeldKeys(); assert(request()); assert(full.Byte(0)==0x40);
-        full.now=500; full.ReportHeldKeys(); assert(!request()); assert(full.Byte(0)==0x40);
+        full.now=500; full.ReportHeldKeys(); assert(!request()); assert(full.BacklogSize()==2);
         auto waiting=Save(full);
         full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+1;
         full.now=501; full.ReportHeldKeys(); assert(request());
@@ -1137,6 +1141,62 @@ int main() {
         full.keyQueueRoom=0; assert(Load(full,waiting)); full.now=501; full.ReportHeldKeys(); assert(!request());
         full.keyQueueRoom=~0u; full.ReportHeldKeys(); assert(request());
         assert(full.Byte(0)==0x41); assert(full.Byte(0)==b.Code());
+    }
+    {
+        // Overlapping keys (a down, b down, a up): a's release goes ahead of the waiting b, so a
+        // isn't left down (and repeated) while b waits.
+        auto b=*DanaScan5::Named("b");
+        PacedSt overlap; assert(overlap.Byte(0)==0xaa); overlap.SetWord(0xfffff302,0);
+        auto request=[&]() { return (overlap.GetWord(0xfffff310)&1)!=0; };
+        overlap.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        overlap.now=100; assert(overlap.DispatchDanaInput({{scan,true}}));
+        assert(overlap.DispatchDanaInput({{b,true}})); assert(overlap.DispatchDanaInput({{scan,false}}));
+        assert(overlap.BacklogSize()==2);
+        overlap.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(overlap.Byte(0)==0x41); assert(overlap.Byte(0)==scan.Code());
+        assert(overlap.BacklogSize()==1);
+        overlap.now=110; overlap.ReportHeldKeys(); assert(request()); assert(overlap.Byte(0)==0x40);
+        for(uint64 t=120;t<=1000;t+=10) { overlap.now=t; overlap.ReportHeldKeys(); assert(!request()); }
+        assert(overlap.DispatchDanaInput({{b,false}})); assert(overlap.BacklogSize()==2);
+        overlap.keyQueueRoom=~0u; overlap.now=1010; overlap.ReportHeldKeys(); assert(request());
+        assert(overlap.Byte(0)==0x41); assert(overlap.Byte(0)==b.Code());
+        overlap.now=1020; overlap.ReportHeldKeys(); assert(request()); assert(overlap.Byte(0)==0x40);
+        assert(!overlap.BacklogSize());
+    }
+    {
+        // A press that wakes the halted ST goes in even with the key queue full; the next waits.
+        const uint8 halt[]={ '1','2','3',' ','H','a','l','t',0,0x80 };
+        auto power=*DanaScan5::Named("power");
+        PacedSt woken; assert(woken.Byte(0)==0xaa);
+        for(auto byte:halt) assert(woken.Byte(byte)==0);
+        woken.keyQueueRoom=0;
+        woken.now=100; assert(woken.DispatchDanaInput({{power,true},{power,false},{scan,true},{scan,false}}));
+        assert(!(woken.GetPortInternalValue('D')&0x10));
+        assert(woken.Byte(0)==0x41); assert(woken.Byte(0)==power.Code());
+        woken.now=110; woken.ReportHeldKeys(); assert(woken.Byte(0)==0x40);
+        assert(woken.BacklogSize()==2);
+    }
+    {
+        // The guest read: keyQP at +10 in the event manager globals, start, end and size, the
+        // wrap, and pointers outside RAM or fields out of range give ~0u.
+        std::vector<uint8> ram(0x1000);
+        auto put16=[&](emuptr a,uint32 v) { ram[a]=uint8(v>>8); ram[a+1]=uint8(v); };
+        auto put32=[&](emuptr a,uint32 v) { put16(a,v>>16); put16(a+2,v&0xffff); };
+        auto room=[&](emuptr globals,uint32 size=0x1000) {
+            return EmRegsVZDana::KeyQueueRoomIn(globals,0,size,
+                [&](emuptr a) { assert(a+2<=ram.size()); return uint32(ram[a]<<8|ram[a+1]); },
+                [&](emuptr a) { assert(a+4<=ram.size()); return uint32(ram[a]<<24|ram[a+1]<<16|ram[a+2]<<8|ram[a+3]); });
+        };
+        put32(0x100+10,0x200); put16(0x200,14); put16(0x202,14); put16(0x204,56);
+        assert(room(0x100)==56);
+        put16(0x200,21); put16(0x202,7); assert(room(0x100)==14);
+        put16(0x200,7); put16(0x202,49); assert(room(0x100)==14);
+        assert(room(0)==~0u); assert(room(0x101)==~0u); assert(room(0xff8)==~0u);
+        assert(room(0x100,0x200)==~0u);
+        put32(0x100+10,0xfffff300); assert(room(0x100)==~0u);
+        put32(0x100+10,0xff0); assert(room(0x100)==~0u);
+        put32(0x100+10,0x200); put16(0x204,4); assert(room(0x100)==~0u);
+        put16(0x204,56); put16(0x200,56); assert(room(0x100)==~0u);
     }
     {
         // A key pressed again soon after its release waits until the guest has seen it released
