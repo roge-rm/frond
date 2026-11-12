@@ -62,7 +62,7 @@ PalmHolder::PalmHolder(QWidget* parent) : QWidget(parent) {
     mips->setAttribute(Qt::WA_NativeWindow);
     mips->setAttribute(Qt::WA_TransparentForMouseEvents);
     mips->setAlignment(Qt::AlignCenter);
-    mips->setStyleSheet("QLabel { color: white; background: rgba(0, 0, 0, 150); padding: 1px 6px; font-size: 11px; }");
+    mips->setStyleSheet("QLabel { color: white; background: rgba(0, 0, 0, 150); padding: 0px 4px; font-size: 10px; }");
     mips->hide();
     qApp->installEventFilter(this);
 }
@@ -144,7 +144,7 @@ void PalmHolder::setMips(const QString& reply) {
 
 void PalmHolder::placeMips() {
     if (!container) return;
-    // The core draws the device fitted and centred in its window, so the corner is the fitted rectangle's.
+    // The core draws the device fitted and centred in its window; the box sits flush in that rectangle's bottom right corner.
     QRect area = container->geometry();
     if (wanted.isValid() && area.width() > 0 && area.height() > 0) {
         const double fit = std::min(double(area.width()) / wanted.width(), double(area.height()) / wanted.height());
@@ -152,7 +152,7 @@ void PalmHolder::placeMips() {
         area = QRect(area.center() - QPoint(drawn.width() / 2, drawn.height() / 2), drawn);
     }
     const auto corner = area.bottomRight();
-    mips->move(corner.x() + 1 - mips->width() - 4, corner.y() + 1 - mips->height() - 4);
+    mips->move(corner.x() + 1 - mips->width(), corner.y() + 1 - mips->height());
 }
 
 void PalmHolder::resizeEvent(QResizeEvent* event) {

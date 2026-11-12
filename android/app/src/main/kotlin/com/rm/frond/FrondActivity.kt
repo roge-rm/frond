@@ -1154,8 +1154,8 @@ open class FrondActivity : SDLActivity() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
         val note = TextView(this).apply {
             setTextColor(Color.WHITE)
-            textSize = 12f
-            setPadding(12, 4, 12, 4)
+            textSize = 10f
+            setPadding(8, 2, 8, 2)
             setBackgroundColor(Color.argb(0x99, 0x00, 0x00, 0x00))
             visibility = View.GONE
         }
@@ -1167,7 +1167,7 @@ open class FrondActivity : SDLActivity() {
         mipsNote = note
     }
 
-    // Moves the box to the Palm's corner from the core's last window-layout. UI thread.
+    // Moves the box flush into the Palm's bottom right corner, from the core's last window-layout. UI thread.
     private fun placeMips() {
         val note = mipsNote ?: return
         val parent = note.parent as? View ?: return
@@ -1175,7 +1175,7 @@ open class FrondActivity : SDLActivity() {
         val palm = mipsLayout ?: return
         if (surface.width <= 0 || parent.width <= 0) return
         val (right, bottom) = MipsReadout.margins(palm, surface.left, surface.top, surface.width, surface.height,
-            parent.width, parent.height, (6 * resources.displayMetrics.density).toInt())
+            parent.width, parent.height, 0)
         val params = note.layoutParams as RelativeLayout.LayoutParams
         if (params.rightMargin != right || params.bottomMargin != bottom) {
             params.rightMargin = right
