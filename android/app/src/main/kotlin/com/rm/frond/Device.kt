@@ -87,6 +87,8 @@ data class Device internal constructor(
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,
+    // Shown with an Experimental tag in the device list.
+    val experimental: Boolean = false,
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {

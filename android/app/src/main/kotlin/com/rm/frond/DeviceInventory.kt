@@ -518,6 +518,7 @@ internal val deviceInventory = listOf(
         msProMax = 0,
         runs68k = false,
         hotSyncButton = false,
+        experimental = true,
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
