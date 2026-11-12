@@ -23,6 +23,8 @@ BSD-2-Clause alternative is the fallback); its notice is in monocypher-LICENCE
 in this directory.
 The 68k core uses nanopb, copyright (c) 2011 Petteri Aimonen, under the zlib
 licence; its notice is in nanopb-LICENSE in this directory.
+The Zodiac's FM sound uses ymfm, copyright (c) 2021 Aaron Giles, under the
+BSD-3-Clause licence; its notice is in ymfm-LICENSE in this directory.
 The Fast engine uses Dynarmic, copyright (c) 2017 merryhime, under the 0BSD
 licence, with bundled fmt, mcl, oaknut, robin-map, zycore and zydis (MIT) and
 xbyak (BSD-3-Clause). Their notices are in dynarmic-LICENSE, fmt-LICENSE,

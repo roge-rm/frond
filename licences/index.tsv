@@ -10,6 +10,7 @@ robin-map-LICENSE	robin-map	MIT	da
 xbyak-COPYRIGHT	xbyak	BSD-3-Clause	da
 zycore-LICENSE	zycore	MIT	da
 zydis-LICENSE	Zydis	MIT	da
+ymfm-LICENSE	ymfm (Yamaha FM sound cores, OPL3 for the Zodiac YMF768)	BSD-3-Clause	da
 SDL2-LICENSE	SDL2	zlib	a
 SDL2_image-LICENSE,sdl2_image-stb-miniz-LICENSE	SDL2_image, with stb_image and miniz	zlib, MIT or public domain	a
 libslirp-COPYRIGHT	libslirp	BSD-3-Clause	a
