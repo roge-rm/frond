@@ -71,6 +71,9 @@ void software() {
                 const uint32_t old = 0xb0000000 | (model == ArmCpuModel::armv5te ? 0x08000000 : 0) |
                                      mode | masks | (thumb ? 0x20 : 0);
                 const uint32_t next = code + (thumb ? 2 : 4);
+                // The ARMv5TE core keeps the pre-Zodiac behaviour on purpose (patch 0786): entry
+                // clears F instead of preserving it. The ARM920T check is unchanged.
+                const uint32_t entryClear = model == ArmCpuModel::armv5te ? 0xffu : 0xbfu;
                 for (Machine* m : {&exact, &fast}) {
                     m->reset(old, high);
                     for (unsigned n = 0; n < 13; ++n) cpuSetReg(m->cpu, n, 0x12340000 + n);
@@ -80,7 +83,7 @@ void software() {
                 }
                 exact.step(); fast.step(); same(exact, fast);
                 assert(cpuExceptionSequence(exact.cpu) == 1);
-                assert(exact.psr() == ((old & ~0xbfu) | 0x93) && exact.spsr() == old);
+                assert(exact.psr() == ((old & ~entryClear) | 0x93) && exact.spsr() == old);
                 assert(cpuGetRegisters(exact.cpu)[14] == next);
                 assert(cpuGetRegisters(exact.cpu)[15] == (high ? 0xffff0008u : 8u));
                 assert(cpuGetRegisters(exact.cpu)[13] == (mode == 0x13 ? 0xa000u : 0x9000u));
@@ -187,7 +190,10 @@ void otherExceptions() {
                 continue;
             }
             assert(cpuExceptionSequence(exact.cpu) == 1 && exact.spsr() == old);
-            assert(exact.psr() == (0xa0000080 | mode | (kind == 4 ? 0x40 : f)));
+            // The ARMv5TE core keeps the pre-Zodiac behaviour on purpose (patch 0786): entry clears F
+            // instead of preserving it. The ARM920T check is unchanged.
+            const uint32_t keptF = model == ArmCpuModel::armv5te ? 0u : f;
+            assert(exact.psr() == (0xa0000080 | mode | (kind == 4 ? 0x40 : keptF)));
             assert(cpuGetRegisters(exact.cpu)[14] == (kind == 1 ? 0x30004u : code + (kind == 2 ? 8 : 4)));
             assert(cpuGetRegisters(exact.cpu)[15] == vector + (kind >= 3 ? 4 : 0));
         }
@@ -327,6 +333,8 @@ void probeGuards() {
 } // namespace
 int main() {
     unsetenv("FROND_JIT"); cpuSetJitSync(true); setenv("FROND_JIT_HOT", "1", 1);
+    // Compile on this thread, so the block counts include the generated blocks.
+    setenv("FROND_JIT_THREAD", "0", 1);
     software(); guestOperations(); legacyOperations(); conditionalOperations(); otherExceptions(); normalBlocks(); fetchContinuation(); probeGuards();
     std::puts("PASS: ARM920T and ARMv5 SWI entry, F mask, exception banks and return, Exact/Fast parity");
 }

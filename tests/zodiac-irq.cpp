@@ -77,20 +77,25 @@ void entryMatrix() {
             const uint32_t old = 0xb0000000 | masks | mode | (thumb ? ARM_SR_T : 0);
             const bool taken = !(masks & (fiq ? ARM_SR_F : ARM_SR_I));
             const uint32_t entryMode = fiq ? 0x11 : 0x12;
+            // The ARMv5TE core keeps the pre-Zodiac behaviour on purpose (patch 0786): the EVENTS
+            // slow path is set for any pending event while F is clear, and entry clears F
+            // instead of preserving it. The ARM920T checks are unchanged.
+            const bool v5 = model == ArmCpuModel::armv5te;
+            const bool slow = v5 ? !(masks & ARM_SR_F) : taken;
             uint32_t saved[16]{};
             for (auto* m : {&exact, &fast}) {
                 m->reset(old, high);
                 if (thumb) m->half(code, 0x46c0);
                 std::memcpy(saved, cpuGetRegisters(m->cpu), sizeof(saved));
                 cpuIrq(m->cpu, fiq, true);
-                assert(bool(cpuGetSlowPathReason(m->cpu) & SLOW_PATH_REASON_EVENTS) == taken);
+                assert(bool(cpuGetSlowPathReason(m->cpu) & SLOW_PATH_REASON_EVENTS) == slow);
                 const auto before = cpuExceptionSequence(m->cpu);
                 assert(cpuProcessPendingInterrupts(m->cpu) == taken);
                 assert(cpuExceptionSequence(m->cpu) == before + taken);
                 assert(!cpuProcessPendingInterrupts(m->cpu));
                 assert(cpuHasPendingInterrupt(m->cpu));
                 if (taken) {
-                    assert(m->psr() == ((old & ~0xbfu) | entryMode | ARM_SR_I | (fiq ? ARM_SR_F : 0)));
+                    assert(m->psr() == ((old & ~0xbfu & ~(v5 ? ARM_SR_F : 0u)) | entryMode | ARM_SR_I | (fiq ? ARM_SR_F : 0)));
                     assert(cpuGetRegExternal(m->cpu, ARM_REG_NUM_SPSR) == old);
                     assert(cpuGetRegisters(m->cpu)[14] == code + 4);
                     assert(cpuGetRegisters(m->cpu)[15] == (high ? 0xffff0000u : 0) + (fiq ? 0x1c : 0x18));
@@ -147,6 +152,10 @@ void batchedRequests() {
         Machine exact(false, model, single), fast(true, model, single);
         for (bool fiq : {false, true}) for (uint32_t masks : {0u, 0x40u, 0x80u, 0xc0u}) {
             const bool taken = !(masks & (fiq ? ARM_SR_F : ARM_SR_I));
+            // The ARMv5TE core keeps the pre-Zodiac behaviour on purpose (patch 0786): the request
+            // stops a batch only while F is clear, whichever line it is on. The ARM920T checks are
+            // unchanged. A request that does not stop the batch is still taken afterwards.
+            const bool stops = model == ArmCpuModel::armv5te ? !(masks & ARM_SR_F) : taken;
             for (auto* m : {&exact, &fast}) {
                 m->reset(masks | 0x13);
                 m->word(code, 0xe5810000); m->word(code + 4, 0xe3a04055); m->word(code + 8, 0xeafffffe);
@@ -155,19 +164,19 @@ void batchedRequests() {
                 uint64_t blocks = 0, before = 0, after = 0;
                 if (m == &fast) assert(cpuJitExecutionCounts(m->cpu, &blocks, &before));
                 const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m->cpu, 8);
-                const bool blockLatency = m == &fast && !single && taken;
-                const uint32_t expectedCycles = taken ? (blockLatency ? 3 : 1) : 8;
+                const bool blockLatency = m == &fast && !single && stops;
+                const uint32_t expectedCycles = stops ? (blockLatency ? 3 : 1) : 8;
                 if (m == &fast) {
                     assert(cpuJitExecutionCounts(m->cpu, &blocks, &after));
-                    if (!(taken ? after == before + expectedCycles : after >= before + 3))
+                    if (!(stops ? after == before + expectedCycles : after >= before + 3))
                         std::fprintf(stderr, "batch model=%u fiq=%u masks=%02x cycles=%u generated=%llu\n",
                             unsigned(model), fiq, masks, cycles, (unsigned long long)(after - before));
-                    assert(taken ? after == before + expectedCycles : after >= before + 3);
+                    assert(stops ? after == before + expectedCycles : after >= before + 3);
                 }
                 assert(cycles == expectedCycles);
-                const uint32_t next = code + (taken && !blockLatency ? 4 : 8);
+                const uint32_t next = code + (stops && !blockLatency ? 4 : 8);
                 assert(cpuGetRegisters(m->cpu)[15] == next);
-                assert(cpuGetRegisters(m->cpu)[4] == (taken && !blockLatency ? 0u : 0x55u));
+                assert(cpuGetRegisters(m->cpu)[4] == (stops && !blockLatency ? 0u : 0x55u));
                 assert(cpuExceptionSequence(m->cpu) == 0);
                 assert(cpuProcessPendingInterrupts(m->cpu) == taken);
                 cpuIrq(m->cpu, fiq, false);
@@ -178,6 +187,11 @@ void batchedRequests() {
                     if (next == code + 4) m->step();
                     assert(cpuGetRegisters(m->cpu)[15] == code + 8 && cpuGetRegisters(m->cpu)[4] == 0x55);
                 }
+            }
+            // Exact stops after the store and Fast after its block, so Exact finishes the block here.
+            if (stops && !taken && !single && model == ArmCpuModel::armv5te) {
+                assert(cpuGetRegisters(exact.cpu)[15] == code + 4 && cpuGetRegisters(fast.cpu)[15] == code + 8);
+                exact.step();
             }
             same(exact, fast);
         }
@@ -221,15 +235,16 @@ void controllerGates() {
     write(4, 0);
     assert(soc.interruptPending().normal == uint64_t(1) << 31);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear);
-    write(8, 1); // Unknown source 1 is ineligible at its reset priority zero.
+    // Source 1 is a known reset-state source now, so source 6, which nothing models, stands in as the unknown one.
+    write(8, 6); // Unknown source 6 is ineligible at its reset priority zero.
     assert(soc.clockStatus() == Imx1BootstrapAccess::ok);
     write(4, 31, Imx1BootstrapAccess::externalInput);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear);
-    write(0x30, 0x10000000); // Source 31 priority 1, source 1 still masked.
+    write(0x30, 0x10000000); // Source 31 priority 1, source 6 still masked.
     assert(soc.interruptLines().irq == Imx1AitcLine::asserted);
     write(4, 31, Imx1BootstrapAccess::externalInput); // A known request does not hide eligible uncertainty.
-    write(0x1c, 2, Imx1BootstrapAccess::externalInput); // FIQ bypasses NIMASK.
-    write(0x0c, 1); write(4, 31);
+    write(0x1c, 1u << 6, Imx1BootstrapAccess::externalInput); // FIQ bypasses NIMASK.
+    write(0x0c, 6); write(4, 31);
     write(0x1c, 1u << 31);
     assert(soc.interruptLines().irq == Imx1AitcLine::clear && soc.interruptLines().fiq == Imx1AitcLine::asserted);
     write(0x54, 0);
