@@ -43,8 +43,9 @@ class DeviceDataTest(unittest.TestCase):
         self.assertEqual((profile['width'], profile['height']), (480, 320))
         self.assertEqual(profile['default_display_mode'], 10)
         self.assertTrue(profile['available'] and profile['runner_eligible'])
-        # Done so far: the screen, pen, buttons, stick and an SD card in slot 1, up to 2 GB.
-        for key in ('runs_68k', 'sound', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone'):
+        # Done so far: the screen, pen, buttons, stick, sound and an SD card in slot 1, up to 2 GB.
+        self.assertTrue(profile['sound'])
+        for key in ('runs_68k', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone'):
             self.assertFalse(profile[key], key)
         self.assertTrue(profile['sd_slot'])
         self.assertEqual((profile['sd_min_bytes'], profile['sd_max_bytes']), (32 << 20, 2048 << 20))

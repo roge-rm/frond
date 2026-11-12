@@ -647,7 +647,7 @@ static void zodiac2() {
     assert(p->frontend.sdSlot && !p->frontend.memoryStick && !p->frontend.holdPresent && !p->frontend.camera);
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared &&
-           !c.bluetooth && !c.sound && !c.microphone && !c.backgroundPanel);
+           !c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
     assert(p->norSize == 0x7d0000 && !p->nandSize && !p->requiresExplicitNand);
     assert(p->minRam == (128u << 20) && p->maxRam == p->minRam);
     assert(!deviceProfileSdSizeValid5(p->deviceType, 512));
