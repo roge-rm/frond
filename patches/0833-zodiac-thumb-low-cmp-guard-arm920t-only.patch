@@ -1,0 +1,23 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 5550547..f277129 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -5477,6 +5477,9 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+             const uint16_t h = (pc & 2) ? word >> 16 : word;
+             if ((h & 0xff80) == 0x4780 || (h & 0xf800) == 0xe800 ||
+                 (h & 0xff00) == 0xbe00) return false;
++            // CMP with two low registers (Zodiac only): dynarmic calls it unpredictable, so the interpreter runs
++            // it. PXA devices keep handing it to dynarmic as before.
++            if ((h & 0xffc0) == 0x4500) return false;
+             // The second half is interpreted separately at a line boundary (Fast blocks: at a page boundary).
+             if (h >= 0xf000 && h < 0xf800) {
+                 if (cpu->jit && jitMaxUnchecked(cpu->jit) == 1) return false;
+@@ -5545,8 +5548,6 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+         return !(cpu->earlyAudioHook &&
+                  (next == cpu->earlyAudioFrom[0] || next == cpu->earlyAudioFrom[1]));
+     }
+-    // CMP with two low registers: dynarmic calls it unpredictable, so the interpreter runs it.
+-    if ((h & 0xffc0) == 0x4500) return false;
+     if (const uint32_t t = table_thumb2arm[h]) return cpuPrvJitPlainArmMemo(t, true);
+     // Forms the interpreter runs as Thumb: LDR PC-relative, ADD Rd, PC/SP, and ADD, MOV,
+     // BX and BLX with high registers.
