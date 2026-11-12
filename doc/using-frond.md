@@ -502,11 +502,11 @@ native localhost debug path. The app's USB computer controls stay disabled.
 | Mobile phone (infrared) | yes | yes | | yes | yes | yes |
 | Dial-up modem | | | | | | yes |
 | Bluetooth | yes | yes | | yes | yes | |
-| Camera | | | | no sensor | | |
+| Camera | | | | yes | | |
 | Hold | | | | | yes | |
 | Card | SD | SD | SD | SD | Memory Stick, Pro | none |
 
-The Zire 72's Camera shows a white screen and goes back to the launcher. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
+The Zire 72's Camera shows a test pattern, a picture or the phone's back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
 
 On the IIIx, serial HotSync is tested with pilot-link (install, fetch, backup). It has no Fast engine, no SD slot and no Bluetooth, USB or Wi-Fi, as on the real one. Its backlight shows as a green panel.
 

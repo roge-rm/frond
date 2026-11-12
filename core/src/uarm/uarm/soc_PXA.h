@@ -15,6 +15,7 @@
 #include "pxa_RTC.h"
 
 struct AudioInputSource;
+struct CameraSource;
 struct AudioInputDemand;
 struct PxaUart;
 #include "SerialHostRoute.h"
@@ -87,6 +88,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     // Current-session host source, never armed by loading portable state.
     AudioInputDemand MicrophoneDemand();
     void SetMicrophoneSource(const AudioInputSource *source);
+    // The camera's host picture source (Zire 72), same lifetime as the microphone's.
+    void SetCameraSource(const CameraSource *source);
     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);
 
     bool KeyboardAttached() const override { return irKeyboard.Attached(); }

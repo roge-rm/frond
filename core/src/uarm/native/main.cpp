@@ -888,6 +888,19 @@ bool gFastEngineMissing = false;
             return !machine->PowerSleeping();
         };
         microphone.awake = [&] { return hasMicrophone && !static_cast<SocPXA*>(soc)->PowerSleeping(); };
+        // The camera's source starts as the test pattern; the frontend picks another.
+        HostCamera camera;
+        const bool hasCamera = deviceProfile5(deviceType) && deviceProfile5(deviceType)->frontend.camera;
+        if (hasCamera) {
+            commandContext.camera = &camera;
+            camera.attach = [&](const CameraSource* source) {
+                auto* machine = static_cast<SocPXA*>(soc);
+                if (machine->PowerSleeping()) return false;
+                machine->SetCameraSource(source);
+                return true;
+            };
+            camera.detach = [&] { static_cast<SocPXA*>(soc)->SetCameraSource(nullptr); };
+        }
         HostSerial serial;
         commandContext.serial = &serial;
         const auto& capabilities = deviceProfile5(deviceType)->capabilities;
@@ -985,10 +998,11 @@ bool gFastEngineMissing = false;
         const uint32_t frameRows = soc->FrameQuarterTurn() ? displayConfiguration.width : displayConfiguration.height;
         link.beforeEvent = [&](const SDL_Event& event) {
             microphone.AppEventOnDeviceThread(event.type);
+            camera.AppEvent(event.type);
 #ifndef __ANDROID__
             if (event.type == SDL_WINDOWEVENT) {
                 if (event.window.event == SDL_WINDOWEVENT_MINIMIZED || event.window.event == SDL_WINDOWEVENT_HIDDEN)
-                    microphone.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND);
+                    { microphone.AppEventOnDeviceThread(SDL_APP_WILLENTERBACKGROUND); camera.AppEvent(SDL_APP_WILLENTERBACKGROUND); }
                 if (event.window.event == SDL_WINDOWEVENT_RESTORED || event.window.event == SDL_WINDOWEVENT_SHOWN)
                     microphone.AppEventOnDeviceThread(SDL_APP_DIDENTERFOREGROUND);
             }
@@ -1172,6 +1186,7 @@ bool gFastEngineMissing = false;
                     if (waitForPreviewAudio && pending < 4 * audioPeriod) waitForPreviewAudio = false;
                 } else waitForPreviewAudio = false;
                 if (hasMicrophone) microphone.Service(static_cast<SocPXA*>(soc)->MicrophoneDemand());
+                if (hasCamera) camera.Service();
                 serial.Service();
                 usb.Service();
                 infrared.Service();
@@ -1265,7 +1280,7 @@ bool gFastEngineMissing = false;
                     }
                 }
 
-                if (desktop) { desktop->microphoneChanged(commandContext); desktop->serialChanged(commandContext); }
+                if (desktop) { desktop->microphoneChanged(commandContext); desktop->cameraChanged(commandContext); desktop->serialChanged(commandContext); }
                 if (desktop) desktop->usbChanged(commandContext);
                 if (desktop) desktop->infraredChanged(commandContext);
                 if (desktop) desktop->bluetoothChanged(commandContext);
@@ -1428,6 +1443,7 @@ bool gFastEngineMissing = false;
         microphone.SetDeviceThread({});
         microphone.CloseOnDeviceThread();
         if (hasMicrophone) static_cast<SocPXA*>(soc)->SetMicrophoneSource(nullptr);
+        if (hasCamera) static_cast<SocPXA*>(soc)->SetCameraSource(nullptr);
         if (renderError) rethrow_exception(renderError);
         if (guestError) rethrow_exception(guestError);
         // The last frame the guest thread published, as the one-thread loop drew it.

@@ -93,6 +93,7 @@ class RunningSheetsTest {
             assertEquals(device.id, device.lcdContrast, DisplayRow.CONTRAST in rows)
             assertEquals(device.id, device.id == "sony-clie-tg50", DisplayRow.SHOW_KEYBOARD in rows && DisplayRow.JOG in rows)
             assertTrue(DisplayRow.SIZE in rows && DisplayRow.SMOOTH in rows)
+            assertEquals(device.id, device.camera, DisplayRow.CAMERA in rows)
         }
     }
 
@@ -105,6 +106,11 @@ class RunningSheetsTest {
         val rows = RunningSheets.displayRows(clie)
         assertTrue(DisplayRow.JOG in rows && DisplayRow.SHOW_KEYBOARD !in rows)
         for (device in Device.entries) assertEquals(device.id, device.sideTabWidth > 0, device.jogControls)
+    }
+
+    @Test fun onlyTheZire72HasACameraRow() {
+        assertEquals(listOf("palm-zire-72"), Device.entries.filter { DisplayRow.CAMERA in RunningSheets.displayRows(it) }.map { it.id })
+        assertEquals(DisplayRow.CAMERA, RunningSheets.displayRows(Device.ZIRE72).last())
     }
 
     @Test fun audioRowsFollowTheHardware() {
@@ -124,7 +130,6 @@ class RunningSheetsTest {
             assertEquals(device.id, !device.serialAbsent, ConnRow.SERIAL in rows)
             assertEquals(device.id, !device.runs68k || device.usb, ConnRow.USB in rows)
             assertEquals(device.id, !device.runs68k || device.bluetooth, ConnRow.BLUETOOTH in rows)
-            assertEquals(device.id, device.camera, ConnRow.CAMERA in rows)
             assertEquals(device.id, device.usbPrinter || device.usbWifi, ConnRow.USB_PORT in rows)
             assertEquals(device.id, device.builtInWifi, ConnRow.WIFI_MODULE in rows)
             assertFalse(ConnRow.DEBUGGER in rows)

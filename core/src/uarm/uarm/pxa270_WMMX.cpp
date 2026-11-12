@@ -617,9 +617,9 @@ bool twoReg(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool read, uint8_t op, 
 // unchanged; a WSTRD whose second word fails has written the first.
 bool transfer(Pxa270wmmx *w, struct ArmCpu *cpu, bool cp1, bool two, bool N, bool store, unsigned reg, uint32_t ea,
               Pxa270wmmxFault *fault) {
+    *fault = Pxa270wmmxFault{};
     if (two && (!cp1 || N)) return false;
     const unsigned size = cp1 ? (N && !two ? 8 : 4) : (N ? 2 : 1);
-    *fault = Pxa270wmmxFault{};
     const auto access = [&](void *buf, uint32_t va, unsigned bytes) {
         uint_fast8_t fsr = 0;
         if (cpuMemOpGuest(cpu, buf, va, bytes, store, &fsr)) return true;
@@ -675,7 +675,7 @@ bool memAccess(Pxa270wmmx *w, bool cp1, struct ArmCpu *cpu, bool two, bool N, bo
     if (option) return false;
     const unsigned scale = cp1 ? 4 : 1;
     const uint32_t base = cpuGetRegExternal(cpu, addrReg), ea = base + addBefore * scale;
-    Pxa270wmmxFault fault;
+    Pxa270wmmxFault fault{};
     if (!transfer(w, cpu, cp1, two, N, store, reg, ea, &fault)) {
         if (!fault.fsr) return false;
         cpuDataAbortExternal(cpu, fault.addr, fault.size, fault.write, fault.fsr);

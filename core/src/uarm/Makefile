@@ -128,6 +128,9 @@ SOURCE_CXX =		 					\
 	uarm/sspdev_AD7873.cpp \
 	uarm/i2sdev_AK4534.cpp \
 	uarm/i2cdev_AN32502A.cpp \
+	uarm/i2cdev_OV9640.cpp \
+	uarm/pxa27x_QCI.cpp \
+	uarm/camera_pattern.cpp \
 	uarm/mmiodev_MemoryStickController.cpp \
 	uarm/cp15mmu.cpp 					\
 	uarm/cp15mpu.cpp 					\

@@ -257,7 +257,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
 | `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
 | `shortcut` | A key pressed in the Palm window that belongs to the app, as `ctrl+s`, `ctrl+shift+s`, `ctrl+1` or `f12`: F11, F12, and Ctrl (with Shift) and a letter or digit. They never reach the Palm. With the infrared keyboard attached, Ctrl keys go to the Palm and only `f11` and `f12` are sent. |
-| `serial`, `usb`, `infrared`, `bluetooth`, `microphone` | The new state, sent when it changes, for example a peer connecting. |
+| `serial`, `usb`, `infrared`, `bluetooth`, `microphone`, `camera` | The new state, sent when it changes, for example a peer connecting or the camera going back to the pattern. |
 
 ### State and guest commands
 
@@ -298,6 +298,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
+| `camera-state` | | `camera`: `pattern`, `picture`, `webcam` or `frames`; `pattern` and why after a failure |
+| `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
 | `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
 | `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
@@ -313,6 +315,8 @@ State commands take no argument. Mode commands change the setting and reply with
 | `wifi-module-state` | | `wifi-module`: `off`, or `powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. `off` while the radio is off, `unpowered` while the Dana hasn't raised PK0 to power the module. Console: `wifi-module [on\|off]` |
 | `usb-port-state` | | `usb-port`: `off`, `printer ` and the `printer status` line, or `wifi powered\|unpowered link=up\|down ip=ADDRESS mac= tx= rx= dropped=`. Every device answers `off` except the Dana |
 | `usb-port` | `off`, `printer` or `wifi` | `usb-port`: the new state. The Dana's one external USB port holds a printer, the Wi-Fi adapter (a Prism 2.5 stick, 045e:006e) or nothing. Choosing what is already there does nothing. `printer attach on` is `usb-port printer`. Other devices answer `unsupported` except for `off` |
+
+The Zire 72 camera starts on the test pattern each run and goes back to it on a save, sleep, reset, a load and leaving the app; its source is never saved. The core crops the centre of each picture to the size the camera asks for and scales it. With `camera-mode frames` the core makes `.camera-frames` in the machine folder (deleted when the core quits) and the frontend writes into it: 64 header bytes, little-endian, then the pixels. The header is `FrondCam`, version 1, capacity (1280 x 960 x 4 bytes), a sequence the writer makes odd before writing and even after, then format (1 RGB24, 2 RGBA, 3 I420, 4 NV21, 5 YUYV), width, height, a clockwise rotation (0, 90, 180, 270) and flags (1 mirror, 2 limited-range YUV). The core reads the newest whole frame each time the camera takes one.
 
 ### Card commands
 
@@ -796,6 +800,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TRACE_WAKE` | Log `native: host wake` to stderr each time the core wakes an idle UI task for a host call (T|X and Zire 72), for `tests/host-call-wake.py`. |
 | `FROND_WIFI_TRACE` | Trace the virtual Wi-Fi card. |
 | `FROND_HOST_PROFILE` | Print host timing figures from the benchmark tools. |
+| `FROND_WEBCAMS` | Desktop app: a colon separated list of video devices that replaces the search of /dev/video*, for tests. |
 | `SDL_VIDEODRIVER`, `SDL_AUDIODRIVER` | Standard SDL; `dummy` for headless. |
 
 ### Tests and tools
@@ -828,7 +833,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_REQUIRE_E2_DENVFS` | The same for the E2 de-NVFS image (`palm-e2-denvfs`), whose NOR comes from `FROND_TEST_E2_DENVFS_NOR`. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
 | `FROND_IIIX_SHOTS` | Folder that run saves pictures of the Palm window to (needs ImageMagick's `import` and a display). |
-| `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo` (skipped when empty), and the fake 1 kHz microphone level that test's core build reads. |
+| `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo`, `make test-z72-camera-rom` and `make test-z72-video-rom` (skipped when empty), and the fake 1 kHz microphone level read by the core `make z72-test-mic` builds for the Voice Memo and video tests. |
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
 | `FROND_ZODIAC_ROM`, `FROND_ZODIAC_SHOTS`, `FROND_ZODIAC_STATE`, `FROND_ZODIAC_WINDOW` | Opt-in Zodiac run in the desktop workflow test: the ROM, a folder for pictures of the Palm window, a bring-up state file read by the developer build of the core, and the window to capture. |
@@ -854,6 +859,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_QUALIFIED_NOR` | TX NOR image for the firmware import test. |
 | `FROND_TEST_E2_DENVFS_NOR` | Qualified 6 MiB E2 de-NVFS NOR for desktop and Android raw/session audio checks, and for the `palm-e2-denvfs` entry in `tests/smoke.py`. Read only; changed-image checks use copies. |
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
+| `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
@@ -1046,6 +1052,7 @@ Tests in `make test`, by area:
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
+| Camera | `test-z72-camera`, `test-z72-camera-host`, `test-iwmmxt-shift`, `test-iwmmxt-ops` |
 | Serial, USB, infrared | `test-uart-lifecycle`, `test-uart-checkpoint`, `test-uart-flow`, `test-uart-dma-peer`, `test-tx-serial`, `test-hotsync-line`, `test-host-serial`, `test-pty-link`, `test-usb-enumeration`, `test-usb-host-fixture`, `test-usb-bridge`, `test-usb-bridge-soc`, `test-irda-endpoint`, `test-irda-link`, `test-irda-results`, `test-keyboard` |
 | Dana USB, printing and Wi-Fi | `test-68k-card-provider`, `test-68k-dana`, `test-68k-sd`, `test-68k-vz-registers`, `test-dana-card-inventory`, `test-isp-frame`, `test-isp-host-atl`, `test-isp-host-irq`, `test-isp-host-pio`, `test-isp-host-root`, `test-print-text`, `test-raw-print-file`, `test-raw-print-job`, `test-usb-raw-printer`, `test-usb-printer-runtime`, `test-usb-prism2-adapter` (the adapter leaf), `test-net-wifi-router` (the shared Ethernet router), `test-usb-wifi-runtime` (the Dana's adapter on the ISP1161 port: enumeration, slirp ARP, supply, port reset, swap with the printer, reset, load, a load mid frame and a rejected load), `test-dana-wifi-module` (the Dana Wireless's built-in Wi-Fi module). `desktop-print` in `make test-desktop` covers the USB port row |
 | Link protocol | `test-link-protocol` |
@@ -1058,6 +1065,8 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | Target | Needs |
 | --- | --- |
 | `test-tx-lifecycle-rom`, `test-tx-power-rom`, `test-tx-usb-rom` | Build only. Run the program with a TX session. |
+| `test-z72-camera-rom` | Zire 72 session in `Z72_SESSION` and ffmpeg. Camera viewfinder and photos at each size against the test pattern, a save and load with the viewfinder up, then a picture file and pushed frames in the viewfinder and a photo, and a save going back to the pattern. |
+| `test-z72-video-rom` | Zire 72 session in `Z72_SESSION`, ffmpeg and mtools. A 320 x 240 Camera clip on a blank SD card: every frame against the pattern and its counter, the frame rate and the 1 kHz tone's level, playback in Media, and a recording across a save and a load. |
 | `test-frond-68k-peripherals` | IIIx ROM. Piezo, backlight, sleep, serial HotSync (pilot-link) and databases. |
 | `test-frond-68k-gdb` | IIIx ROM, `build/hello-debug`, `m68k-palmos-gdb` and gdb-multiarch. |
 | `test-frond-68k-boot-save` | IIIx ROM. A session saved over the GDB stub mid-boot after a soft reset keeps its databases on reload. |

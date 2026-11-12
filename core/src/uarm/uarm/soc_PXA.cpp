@@ -269,6 +269,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     sp.mem = mem;
     sp.soc = this;
     sp.gpio = gpio;
+    sp.ic = ic;
     sp.dma = dma;
     sp.i2c = i2c;
     sp.i2s = i2s;
@@ -494,6 +495,7 @@ void SocPXA::LoadSleepReset(SavestateLoader<ChunkType>& loader) {
     pxa270UdcLoad(udc2, loader);
     pxa270wmmxLoad(wmmx, loader);
     pxaKpcSleepReset(kpc);
+    deviceCameraSleepReset(dev);
     pxaGpioSleepReset(gpio);
     pxaIcLoad(ic, loader);
     for (auto* uart : {ffUart, stUart, btUart, hwUart})
@@ -694,6 +696,11 @@ AudioInputDemand SocPXA::MicrophoneDemand() { return deviceInputDemand(dev); }
 
 void SocPXA::SetMicrophoneSource(const AudioInputSource *source) {
     deviceSetInputSource(dev, source);
+    if (PowerSleeping()) deviceDisarmInput(dev);
+}
+
+void SocPXA::SetCameraSource(const CameraSource *source) {
+    deviceSetCameraSource(dev, source);
     if (PowerSleeping()) deviceDisarmInput(dev);
 }
 

@@ -35,6 +35,7 @@ struct SocPeriphs {
     // in to deviceSetup
     struct PxaAC97 *ac97;
     struct PxaGpio *gpio;
+    struct PxaIc *ic;
     struct PxaDma *dma;
     struct PxaI2c *i2c;
     struct PxaI2s *i2s;
@@ -89,6 +90,13 @@ struct AudioInputSource;
 struct AudioInputDemand;
 AudioInputDemand deviceInputDemand(Device *);
 void deviceSetInputSource(Device *, const AudioInputSource *);
+struct CameraSource;
+// The Zire 72 camera's host picture source; other boards ignore it. Disarming or fencing the
+// microphone input does the same to the camera.
+void deviceSetCameraSource(Device *, const CameraSource *);
+bool deviceHasCamera(Device *);
+// The PXA27x sleep reset puts the camera interface back to its cold values.
+void deviceCameraSleepReset(Device *);
 void deviceFenceInput(Device *, bool);
 void deviceDisarmInput(Device *);
 void deviceAudioSleepReset(Device *);

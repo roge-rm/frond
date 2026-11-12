@@ -19,6 +19,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.rm.frond.CameraFrames
 import com.rm.frond.DanaKeyboard
 import com.rm.frond.DanaPointer
 import com.rm.frond.DanaZoom
@@ -188,5 +189,50 @@ fun MicrophoneRow(model: RunningModel) {
         },
         trailingContent = { Switch(checked = checked, enabled = supported, onCheckedChange = enable) },
         modifier = if (supported) Modifier.clickableRow { enable(!checked) } else Modifier,
+    )
+}
+
+// The camera's picture: the test pattern, a picture file or the phone's camera, which asks for the permission
+// first when it isn't granted. Shown on devices with a camera.
+@Composable
+fun CameraRow(model: RunningModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var choosing by remember { mutableStateOf(false) }
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent(),
+    ) { uri -> if (uri != null) model.chooseCamera(CameraFrames.Choice.PICTURE, uri) }
+    val permission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { granted -> if (granted) model.chooseCamera(CameraFrames.Choice.PHONE) else model.cameraDenied() }
+    val choose: (CameraFrames.Choice) -> Unit = { choice ->
+        choosing = false
+        when (choice) {
+            CameraFrames.Choice.PATTERN -> model.chooseCamera(choice)
+            CameraFrames.Choice.PICTURE -> picker.launch("image/*")
+            CameraFrames.Choice.PHONE ->
+                if (androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
+                    android.content.pm.PackageManager.PERMISSION_GRANTED) model.chooseCamera(choice)
+                else permission.launch(android.Manifest.permission.CAMERA)
+        }
+    }
+    ListItem(
+        headlineContent = { Text("Camera") },
+        supportingContent = { Text(CameraFrames.rowText(model.camera, model.cameraState)) },
+        modifier = Modifier.clickableRow { choosing = true },
+    )
+    if (choosing) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { choosing = false },
+        title = { Text("Camera") },
+        text = {
+            Column {
+                for (c in CameraFrames.choices) ListItem(
+                    headlineContent = { Text(CameraFrames.choiceLabel(c)) },
+                    leadingContent = { androidx.compose.material3.RadioButton(selected = c == model.camera, onClick = null) },
+                    modifier = Modifier.clickableRow { choose(c) },
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = { androidx.compose.material3.TextButton(onClick = { choosing = false }) { Text("Cancel") } },
     )
 }

@@ -40,6 +40,8 @@ enum class ChunkType : uint32_t {
     sonyTg50Configuration = 0x0230,
     sonyTg50Bluetooth = 0x0240,
     bluetoothAddress = 0x0250,
+    ov9640 = 0x0260,
+    pxa27xQci = 0x0270,
 
     pvIc = 0x1000,
     pvTimer = 0x1010,

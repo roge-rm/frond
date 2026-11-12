@@ -16,6 +16,8 @@
 #include "uartdev_bcm2035.h"
 #include "pxa270_KPC.h"
 #include "LibertasCF.h"
+#include "i2cdev_OV9640.h"
+#include "pxa27x_QCI.h"
 
 // clang-format off
 /*
@@ -115,6 +117,8 @@ struct Device {
     struct DirectNAND *nand;
     struct Bcm2035 *bcm2035;
     struct PxaGpio *gpio;
+    struct Ov9640 *ov9640;
+    struct PxaQci *qci;
 
     struct Reschedule reschedule;
 
@@ -278,10 +282,12 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
         dev->nand = nullptr;
         if (!memRegionAdd(sp->mem, 0x04000000, 0x04000000, zireEmptyBusAccess, dev))
             ERR("cannot map Zire 72 chip select 1");
-        // PXA27x quick capture interface (manual chapter 27) with no sensor behind it: registers
-        // read 0 and take writes, so the CameraDriver starts and finds no camera.
-        if (!memRegionAdd(sp->mem, 0x50000000, 0x1000, zireEmptyBusAccess, dev))
-            ERR("cannot map Zire 72 camera interface");
+        // OV9640 camera on the standard I2C behind the quick capture interface. The CameraDriver
+        // drives PWDN on GPIO56 and pulses RESET on GPIO57 (both active high, 0x20106774 and
+        // 0x201067b8). Linux palmz72 names GPIO91 the camera supply; the ROM holds it low as an
+        // output whenever the camera runs, so low is taken as on.
+        dev->ov9640 = ov9640Init(sp->i2c, sp->gpio, Ov9640Pins{91, false, 57, 56});
+        dev->qci = pxaQciInit(sp->mem, sp->ic, sp->dma, dev->ov9640, getTime, reschedule);
         dev->wm9712L = wm9712LInit(sp->ac97, sp->gpio, -1, 27);
         if (!dev->wm9712L || !dev->kpc) ERR("cannot initialize Zire 72 board");
         // Built-in microphone on the codec's MIC1 input, recorded through the PCM-in slots
@@ -375,6 +381,7 @@ void devicePeriodic(struct Device *dev, uint32_t tier) {
         return;
     }
     if (tier == DEVICE_PERIODIC_TIER0) {if(dev->nand)directNandPeriodic(dev->nand);
+if(dev->qci)pxaQciPeriodic(dev->qci);
 #ifndef __EMSCRIPTEN__
 if(dev->wifi)dev->wifi->Tick();
 #endif
@@ -444,6 +451,7 @@ bool deviceTaskRequired(struct Device *dev, uint32_t tier) {
     if (dev->tg50) return tier==DEVICE_PERIODIC_TIER0&&tg50BoardTaskRequired(dev->tg50);
     if (tier == DEVICE_PERIODIC_TIER0) {
         return (dev->nand && directNandTaskRequired(dev->nand))
+            || (dev->qci && pxaQciTaskRequired(dev->qci))
 #ifndef __EMSCRIPTEN__
             || (dev->wifi && dev->wifi->NeedsTick())
 #endif
@@ -495,6 +503,8 @@ void deviceSave(struct Device *dev, T &savestate) {
     if(dev->wifi)dev->wifi->Save(savestate);
 #endif
     wm9712Lsave(dev->wm9712L, savestate);
+    if (dev->ov9640) ov9640Save(dev->ov9640, savestate);
+    if (dev->qci) pxaQciSave(dev->qci, savestate);
     if (dev->nand) directNandSave(dev->nand, savestate);
     if (dev->bcm2035) bcm2035Save(dev->bcm2035, savestate);
 }
@@ -537,6 +547,8 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
     if(dev->wifi)dev->wifi->Load(loader);
 #endif
     wm9712Load(dev->wm9712L, loader, preserveInput);
+    if (dev->ov9640 && !ov9640Load(dev->ov9640, loader)) return;
+    if (dev->qci && !pxaQciLoad(dev->qci, loader)) return;
     if (dev->nand) directNandLoad(dev->nand, loader);
     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
 }
@@ -618,11 +630,21 @@ void deviceSetInputSource(Device *d, const AudioInputSource *s) {
 void deviceFenceInput(Device *d, bool fence) {
     if (d->tg50) tg50BoardFenceInput(d->tg50, fence);
     else if (d->wm9712L) wm9712LFenceInput(d->wm9712L, fence);
+    if (d->qci) pxaQciFenceSource(d->qci, fence);
 }
 void deviceDisarmInput(Device *d) {
     if (d->tg50) tg50BoardDisarmInput(d->tg50);
     else if (d->wm9712L) wm9712LDisarmInput(d->wm9712L);
+    if (d->qci) pxaQciDisarmSource(d->qci);
 }
+
+// The camera source follows the microphone's lifetime: off at start, dropped on sleep, reset,
+// a load and leaving the app, fenced in checkpoints.
+void deviceSetCameraSource(Device *d, const CameraSource *s) {
+    if (d->qci) pxaQciSetSource(d->qci, s);
+}
+bool deviceHasCamera(Device *d) { return d && d->qci; }
+void deviceCameraSleepReset(Device *d) { if (d->qci) pxaQciReset(d->qci); }
 
 AudioInputDemand deviceInputDemand(Device *d) {
     if (d->tg50) return tg50BoardInputDemand(d->tg50);

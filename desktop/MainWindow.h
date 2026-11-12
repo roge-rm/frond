@@ -330,6 +330,12 @@ class MainWindow : public QMainWindow {
     frondFirmware::Device runningDevice{frondFirmware::Device::tx};
     bool microphoneArmed{false};
     QLabel* microphoneState;
+    QComboBox* cameraBox; QLabel *cameraLabel, *cameraState;
+    bool cameraRead{false};  // camera-state is to be asked once the running commands are done
+    QString cameraWebcam;  // the webcam last chosen
+    void fillCamera();
+    void showCamera(const QString& state);
+    void chooseCamera(int index);
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
     QWidget* home;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};

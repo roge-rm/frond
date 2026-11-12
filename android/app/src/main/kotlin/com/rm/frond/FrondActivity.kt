@@ -94,6 +94,89 @@ open class FrondActivity : SDLActivity() {
             runOnUiThread { menuModel?.settleMicrophone() }
         }.apply { isDaemon = true }.start()
     }
+    // The camera's feed into the core's frames file: the phone camera while it runs. UI thread.
+    private var phoneCamera: PhoneCamera? = null
+    private var frameFile: CameraFrames.FrameFile? = null
+    // Counts camera choices and sends their camera-mode requests in order, so a slow one that finishes
+    // after a newer one or a pause is dropped before it reaches the core.
+    private val cameraModes = CameraFrames.Modes(java.util.concurrent.Executors.newSingleThreadExecutor {
+        Thread(it, "FrondCameraMode").apply { isDaemon = true }
+    }) { mode, timeout -> link.request("camera-mode", mode, timeoutSeconds = timeout) }
+
+    // Picks the camera's source. The test pattern goes straight to the core; a picture is decoded here
+    // and written once; the phone camera writes each frame. The caller has the CAMERA permission.
+    fun chooseCamera(choice: CameraFrames.Choice, picture: android.net.Uri?) {
+        if (leaving || !launchDevice().camera) return
+        stopCameraFeed()
+        val request = cameraModes.next()
+        Thread({
+            val pixels = if (choice == CameraFrames.Choice.PICTURE && picture != null) decodePicture(picture) else null
+            val unreadable = choice == CameraFrames.Choice.PICTURE && pixels == null
+            // A picture that can't be read puts the core back on the pattern too, as an earlier one may be up.
+            cameraModes.send(request, if (choice == CameraFrames.Choice.PATTERN || unreadable) "pattern" else "frames", 10) { sent ->
+                if (sent != null) runOnUiThread { chosenCamera(request, choice, pixels,
+                    if (unreadable) ControlLink.Reply(false, "camera", "pattern Couldn't read the picture") else sent) }
+            }
+        }, "FrondCamera").apply { isDaemon = true }.start()
+    }
+
+    // The core's reply to a camera choice. UI thread.
+    private fun chosenCamera(request: Int, choice: CameraFrames.Choice, pixels: Triple<Int, Int, IntArray>?, reply: ControlLink.Reply) {
+        if (request != cameraModes.current || leaving) return
+        if (!reply.ok) { menuModel?.cameraFailed(reply.message.removePrefix("pattern ").ifEmpty { "Couldn't use the camera" }); return }
+        if (choice == CameraFrames.Choice.PATTERN) { menuModel?.cameraChosen(choice); return }
+        val file = openFrameFile(reply.message)
+        if (file == null) { cameraOff("Couldn't use the camera"); return }
+        if (pixels != null) {
+            val (w, h, argb) = pixels
+            file.write(CameraFrames.FORMAT_RGBA, w, h, 0, 0) { CameraFrames.putRgba(argb, it) }
+        } else {
+            phoneCamera = PhoneCamera(this, file, ::displayDegrees) { why -> runOnUiThread { if (request == cameraModes.current) cameraOff(why) } }
+                .also { it.start() }
+        }
+        menuModel?.cameraChosen(choice)
+    }
+
+    // The picture cut down to fit the frames file, as ARGB pixels.
+    private fun decodePicture(uri: android.net.Uri): Triple<Int, Int, IntArray>? = try {
+        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+        val options = android.graphics.BitmapFactory.Options().apply { inSampleSize = CameraFrames.sampleSize(bounds.outWidth, bounds.outHeight) }
+        val decoded = contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, options) }
+        decoded?.let { bitmap ->
+            val (w, h) = CameraFrames.pictureSize(bitmap.width, bitmap.height)
+            val scaled = if (w == bitmap.width && h == bitmap.height) bitmap else android.graphics.Bitmap.createScaledBitmap(bitmap, w, h, true)
+            val argb = IntArray(w * h)
+            scaled.getPixels(argb, 0, w, 0, 0, w, h)
+            Triple(w, h, argb)
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "camera picture", e)
+        null
+    }
+
+    private fun openFrameFile(path: String): CameraFrames.FrameFile? {
+        frameFile?.let { if (it.path == path) return it }
+        frameFile?.close()
+        frameFile = try { CameraFrames.FrameFile(path).takeIf { it.valid } } catch (e: Exception) { Log.w(TAG, "camera frames", e); null }
+        return frameFile
+    }
+
+    @Suppress("DEPRECATION")
+    private fun displayDegrees() = windowManager.defaultDisplay.rotation * 90
+
+    private fun stopCameraFeed() {
+        phoneCamera?.stop()
+        phoneCamera = null
+    }
+
+    // The feed stopped by itself: back to the pattern in the core too.
+    private fun cameraOff(why: String) {
+        stopCameraFeed()
+        menuModel?.cameraFailed(why)
+        cameraModes.send(cameraModes.next(), "pattern", 10)
+    }
+
     private var keyboard: PalmKeyboard? = null
     @Volatile private var danaState: DanaViewState? = null
     private var danaEnvironment = ""
@@ -149,6 +232,11 @@ open class FrondActivity : SDLActivity() {
             }
             if (name == "dana-view" && launchDevice().isDana()) {
                 DanaViewState.parse(state)?.let { acceptDanaState(it) }
+            }
+            // A save, sleep, reset or load put the camera back to the pattern.
+            if (name == "camera") runOnUiThread {
+                if (!CameraFrames.stillFeeding(state)) stopCameraFeed()
+                menuModel?.cameraFromCore(state)
             }
         }
         chooseAudioDriver()
@@ -512,6 +600,13 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().microphone && link.connectedOnce) {
             Thread { link.request("microphone-mode", "off", timeoutSeconds = 2) }
                 .apply { isDaemon = true }.start()
+        }
+        // Leaving the app stops the camera; it's back on the pattern on return.
+        val paused = cameraModes.next()
+        stopCameraFeed()
+        if (launchDevice().camera && link.connectedOnce) {
+            menuModel?.cameraFromCore("pattern")
+            cameraModes.send(paused, "pattern", 2)
         }
         controller.releaseAll()
         zodiacPad?.releaseAll()
@@ -1360,6 +1455,7 @@ open class FrondActivity : SDLActivity() {
         destroyed = true
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()
+        stopCameraFeed()
         barOwner?.destroy()
         inputListener?.let { inputDevices?.unregisterInputDeviceListener(it) }
         inputListener = null

@@ -1435,16 +1435,67 @@ test-z72-microphone: out/frond
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-microphone.cpp @build/z72-microphone-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-z72-microphone
 	./build/test-z72-microphone
 
+.PHONY: test-z72-camera
+test: test-z72-camera
+test-z72-camera: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/z72-camera-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/z72-camera.cpp @build/z72-camera-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-z72-camera
+	./build/test-z72-camera
+
+# Zire 72 camera host sources (native/HostCamera.h): a picture file and pushed frames through the
+# QCI at each size, the conversions and the lifecycle.
+.PHONY: test-z72-camera-host
+test: test-z72-camera-host
+test-z72-camera-host: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/z72-camera-host-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common $(shell sdl2-config --cflags) tests/z72-camera-host.cpp @build/z72-camera-host-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) $(shell sdl2-config --libs) -lSDL2_image -o build/test-z72-camera-host
+	./build/test-z72-camera-host
+
+# iWMMXt shifts, rotates, TMCRR and TMRRC against a reference.
+.PHONY: test-iwmmxt-shift
+test: test-iwmmxt-shift
+test-iwmmxt-shift: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/iwmmxt-shift-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-shift.cpp @build/iwmmxt-shift-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-iwmmxt-shift
+	./build/test-iwmmxt-shift
+
+# The iWMMXt instructions the Zire 72 video encoder runs, against a plain reference.
+.PHONY: test-iwmmxt-ops
+test: test-iwmmxt-ops
+test-iwmmxt-ops: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/iwmmxt-ops-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/iwmmxt-ops.cpp @build/iwmmxt-ops-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-iwmmxt-ops
+	./build/test-iwmmxt-ops
+
+# Zire 72 Camera on the real ROM shows and photographs the built-in test pattern at each size
+# (tests/z72-camera.py), with Z72_SESSION as for test-z72-voice-memo. Needs ffmpeg.
+.PHONY: test-z72-camera-rom
+test-z72-camera-rom: out/frond
+ifeq ($(Z72_SESSION),)
+	@echo "test-z72-camera-rom: skipped, no Z72_SESSION"
+else
+	mkdir -p build/z72-camera
+	python3 tests/z72-camera.py run --core out/frond --session $(Z72_SESSION) \
+		--output build/z72-camera/run-$(shell date +%Y%m%d-%H%M%S)
+endif
+
 # Zire 72 Voice Memo on the real ROM records a fake 1 kHz microphone (tests/z72-voice-memo.py).
 # Z72_SESSION is a Zire 72 session you supply, at the launcher with the setup Reminder up (the
 # smoke session); without it the test is skipped. Each run goes in a new folder.
 Z72_SESSION ?=
 Z72_MIC_DIR = build/z72-voice-memo
-.PHONY: test-z72-voice-memo
+.PHONY: test-z72-voice-memo z72-test-mic
 test-z72-voice-memo: out/frond
 ifeq ($(Z72_SESSION),)
 	@echo "test-z72-voice-memo: skipped, no Z72_SESSION"
 else
+	$(MAKE) z72-test-mic
+	python3 tests/z72-voice-memo.py run --core $(Z72_MIC_DIR)/frond-test-mic --session $(Z72_SESSION) \
+		--output $(Z72_MIC_DIR)/run-$(shell date +%Y%m%d-%H%M%S)
+endif
+
+# The core with the fake 1 kHz microphone, for the Voice Memo and video tests.
+z72-test-mic: out/frond
 	mkdir -p $(Z72_MIC_DIR)
 	python3 tests/z72-voice-memo.py source core/src/uarm/native/main.cpp $(Z72_MIC_DIR)/main.cpp
 	$(CXX) -std=c++17 -O2 -g $(shell pkg-config --cflags sdl2 SDL2_image slirp) $(if $(filter 1,$(FROND_FAST)),-DFROND_DYNARMIC) \
@@ -1453,8 +1504,19 @@ else
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/main.o' > $(Z72_MIC_DIR)/core.rsp
 	$(CXX) -o $(Z72_MIC_DIR)/frond-test-mic $(Z72_MIC_DIR)/main.o @$(Z72_MIC_DIR)/core.rsp core/src/common/libcommon.a \
 		$(shell pkg-config --libs sdl2 SDL2_image slirp) -lreadline $(CPU_TEST_LDLIBS)
-	python3 tests/z72-voice-memo.py run --core $(Z72_MIC_DIR)/frond-test-mic --session $(Z72_SESSION) \
-		--output $(Z72_MIC_DIR)/run-$(shell date +%Y%m%d-%H%M%S)
+
+# Zire 72 Camera on the real ROM records a 320 x 240 clip of the test pattern and the fake
+# microphone to an SD card, plays it in Media and records across a save and load
+# (tests/z72-video.py), with Z72_SESSION as for test-z72-voice-memo. Needs ffmpeg and mtools.
+.PHONY: test-z72-video-rom
+test-z72-video-rom: out/frond
+ifeq ($(Z72_SESSION),)
+	@echo "test-z72-video-rom: skipped, no Z72_SESSION"
+else
+	$(MAKE) z72-test-mic
+	mkdir -p build/z72-video
+	python3 tests/z72-video.py run --core $(Z72_MIC_DIR)/frond-test-mic --session $(Z72_SESSION) \
+		--output build/z72-video/run-$(shell date +%Y%m%d-%H%M%S)
 endif
 
 .PHONY: test-host-microphone

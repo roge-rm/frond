@@ -642,6 +642,40 @@ class RunningModel(
 
     fun microphoneDenied() { changeMicrophone(false); microphone = "off Permission denied" }
 
+    // The camera's source as the app chose it, and the core's camera-state.
+    var camera by mutableStateOf(CameraFrames.Choice.PATTERN)
+        private set
+    var cameraState by mutableStateOf("pattern")
+        private set
+
+    fun readCamera() {
+        if (!device.camera) return
+        activity.lifecycleScope.launch {
+            val state = withContext(Dispatchers.IO) { link?.request("camera-state", timeoutSeconds = 10) }
+            if (state?.ok == true) cameraFromCore(state.message)
+        }
+    }
+
+    // The core's state changed; anything but frames means the feed has stopped.
+    fun cameraFromCore(state: String) {
+        cameraState = state
+        if (!CameraFrames.stillFeeding(state)) camera = CameraFrames.Choice.PATTERN
+    }
+
+    fun chooseCamera(choice: CameraFrames.Choice, picture: android.net.Uri? = null) {
+        if (!device.camera || FrondActivity.running !== microphoneOwner) return
+        microphoneOwner?.chooseCamera(choice, picture)
+    }
+
+    fun cameraChosen(choice: CameraFrames.Choice) {
+        camera = choice
+        cameraState = if (choice == CameraFrames.Choice.PATTERN) "pattern" else "frames"
+    }
+
+    fun cameraFailed(why: String) { camera = CameraFrames.Choice.PATTERN; cameraState = "pattern $why" }
+
+    fun cameraDenied() = cameraFailed("Permission denied")
+
     fun attachKeyboard(on: Boolean) {
         if (!device.infraredKeyboard) return
         device(if (on) "Attaching" else "Detaching", if (on) "Couldn't attach the keyboard" else "Couldn't detach the keyboard", false) { l ->

@@ -56,6 +56,12 @@ class DesktopControl {
         if (state == lastMicrophone || (state == "off" && lastMicrophone.empty())) return;
         lastMicrophone = state; event("microphone", state);
     }
+    // A camera event when the source changes, for example back to the pattern on sleep.
+    void cameraChanged(commands::Context& ctx) {
+        const auto state = ctx.camera ? ctx.camera->State() : "pattern";
+        if (state == lastCamera || (state == "pattern" && lastCamera.empty())) return;
+        lastCamera = state; event("camera", state);
+    }
     // Pushes the serial state when it changes, for example on a peer connect or hangup.
     void serialChanged(commands::Context& ctx) {
         // Clients that never use serial never see the event.
@@ -107,6 +113,7 @@ class DesktopControl {
                     if (ctx.microphone) ctx.microphone->Suspend();
                     ctx.audioDriver.Pause();
                 }
+                if (command == "save" && ctx.camera) ctx.camera->Disarm();
                 Reply result;
                 try {
                     result = dispatch(ctx, command, request.argument, request.id);
@@ -145,7 +152,7 @@ class DesktopControl {
         return true;
     }
     bool flush() { return channel.Flush(); }
-    std::string lastMicrophone, lastSerial, lastUsb, lastInfrared, lastBluetooth;
+    std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
         const auto state = ctx.usb->Describe();
@@ -253,7 +260,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -721,6 +728,24 @@ class DesktopControl {
             else if (!ctx.microphone->Arm()) return {false, "microphone", ctx.microphone->State()};
             return {true, "microphone", ctx.microphone->State()};
         }
+        if (command == "camera-state") return {true, "camera", ctx.camera ? ctx.camera->State() : "pattern"};
+        if (command == "camera-mode") {
+            // pattern, picture:PATH, webcam:DEVICE (V4L2, Linux) or frames (a file the frontend writes).
+            if (!ctx.camera || !deviceProfile5(ctx.soc->GetDeviceType())->frontend.camera)
+                return {false, "unsupported", "This device has no camera."};
+            auto& camera = *ctx.camera;
+            bool ok = true;
+            if (path == "pattern") camera.Pattern();
+            else if (path.rfind("picture:", 0) == 0 && path.size() > 9 && path[8] == '/') ok = camera.Picture(path.substr(8));
+            else if (path.rfind("webcam:", 0) == 0 && path.size() > 8 && path[7] == '/') ok = camera.Webcam(path.substr(7));
+            else if (path == "frames") {
+                ok = camera.Frames(ctx.sessionFolder);
+                if (ok) return {true, "camera", camera.FramesPath()};
+            }
+            else return {false, "argument", "Use pattern, picture:PATH, webcam:DEVICE or frames."};
+            if (!ok) return {false, "camera", camera.State()};
+            return {true, "camera", camera.State()};
+        }
         if (command == "window-id") {
             const auto id = ctx.windowId ? ctx.windowId() : std::string();
             if (id.empty()) return {false, "unsupported", "The window is not an X11 window."};
@@ -759,7 +784,7 @@ class DesktopControl {
         else if (command == "rotate") ctx.rotation = Rotation((int(ctx.rotation) + 1) % 4);
         else if (command == "audio-on") { ctx.audioDriver.SetMuted(false); ctx.audioDriver.Start(); sound = true; }
         else if (command == "audio-off") { ctx.audioDriver.Pause(); sound = false; }
-        else if (command == "quit") { if (ctx.microphone) ctx.microphone->Disarm(); quit = true; }
+        else if (command == "quit") { if (ctx.microphone) ctx.microphone->Disarm(); if (ctx.camera) ctx.camera->Disarm(); quit = true; }
         else return {false, "command", "Unknown desktop command."};
         return {true, "done", "Done."};
     }

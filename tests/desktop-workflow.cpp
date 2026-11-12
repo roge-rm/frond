@@ -2792,6 +2792,16 @@ def emit():
         except OSError: continue
         for name in lines: s.sendall(b'0\tevent\tshortcut\t'+name.encode().hex().encode()+b'\n')
 threading.Thread(target=emit,daemon=True).start()
+cam=b'pattern'
+# The text put in the "emitcamera" file becomes the camera state, sent as a camera event.
+def emitcam():
+    global cam
+    while True:
+        time.sleep(0.02)
+        try: text=open(here+'/emitcamera','rb').read(); os.remove(here+'/emitcamera')
+        except OSError: continue
+        cam=text; s.sendall(b'0\tevent\tcamera\t'+text.hex().encode()+b'\n')
+threading.Thread(target=emitcam,daemon=True).start()
 mic=b'off'
 for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
@@ -2800,12 +2810,15 @@ for line in s.makefile('rb'):
     if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
+    if cmd==b'camera-mode':
+        if text.endswith(b'bad'): s.sendall(i+b'\terror\tcamera\t'+b'The picture could not be read.'.hex().encode()+b'\n'); continue
+        cam=text.split(b':')[0]
     if cmd==b'window-id':
         # A "windowid" file holds the answer; without one the core refuses.
         try: s.sendall(i+b'\tok\twindow\t'+open(here+'/windowid','rb').read().strip().hex().encode()+b'\n'); continue
         except OSError: pass
         s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
-    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic}.get(cmd,b'done')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic,b'camera-state':cam,b'camera-mode':cam}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
@@ -2864,6 +2877,110 @@ for line in s.makefile('rb'):
         QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
         QTest::keyClick(&window, Qt::Key_S, Qt::ControlModifier);
         QTRY_VERIFY_WITH_TIMEOUT(commands().size() == before + 1 && commands().last().startsWith("save "), 4000);
+    }
+    // The Zire 72 has a Camera row; the T|X has none. Each choice sends its command, and the core's
+    // events and a re-read after a save show where it is.
+    void cameraControls() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Cam", 6, "palm-zire-72", 0);
+        putSession("NoCam", 6, "palm-tx", 1);
+        qputenv("FROND_WEBCAMS", "/dev/video2:/dev/video4");
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "palm-zire-72");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        auto emitCamera = [&](const QString& text) {
+            QFile f(files.path() + "/emitcamera.tmp"); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(text.toUtf8()); f.close();
+            QVERIFY(QFile::rename(f.fileName(), files.path() + "/emitcamera"));
+            QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(files.path() + "/emitcamera"), 3000);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Cam"), true);
+        auto* box = window.findChild<QComboBox*>("camera");
+        auto* note = window.findChild<QLabel*>("cameraState");
+        auto* panels = window.findChild<PanelHost*>("panelHost");
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+        panels->open(2);
+        QTRY_VERIFY_WITH_TIMEOUT(box->isVisibleTo(&window) && box->isEnabled(), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("camera-state "), 4000);
+        QStringList choices;
+        for (int i = 0; i < box->count(); i++) choices << box->itemText(i);
+        QCOMPARE(choices, QStringList({"Test pattern", "Picture…", "Webcam /dev/video2", "Webcam /dev/video4"}));
+        QCOMPARE(box->currentIndex(), 0); QVERIFY(!note->isVisibleTo(&window));
+        // The row on screen for Dan to look at.
+        if (const auto shot = qEnvironmentVariable("FROND_TEST_CAMERA_SHOT"); !shot.isEmpty()) panels->grab().save(shot);
+        auto choose = [&](int index) {
+            box->setCurrentIndex(index);
+            QMetaObject::invokeMethod(box, "activated", Q_ARG(int, index));
+        };
+        choose(3);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("camera-mode webcam:/dev/video4"), 4000);
+        QTRY_COMPARE(box->currentIndex(), 3);
+        // The webcam went away: the core is back on the pattern, with the reason.
+        emitCamera("pattern The webcam was unplugged");
+        QTRY_COMPARE_WITH_TIMEOUT(box->currentIndex(), 0, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(note->text(), QString("The webcam was unplugged"), 3000);
+        QVERIFY(note->isVisibleTo(&window));
+        choose(2);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("camera-mode webcam:/dev/video2"), 4000);
+        QTRY_VERIFY_WITH_TIMEOUT(note->text().isEmpty() && box->currentIndex() == 2, 3000);
+        // Opening the list reads the webcams again and keeps the one in use.
+        qputenv("FROND_WEBCAMS", "/dev/video1:/dev/video2:/dev/video6");
+        box->showPopup(); box->hidePopup();
+        choices.clear();
+        for (int i = 0; i < box->count(); i++) choices << box->itemText(i);
+        QCOMPARE(choices, QStringList({"Test pattern", "Picture…", "Webcam /dev/video1", "Webcam /dev/video2", "Webcam /dev/video6"}));
+        QCOMPARE(box->currentIndex(), 3);
+        qputenv("FROND_WEBCAMS", "");
+        box->showPopup(); box->hidePopup();
+        QCOMPARE(box->count(), 3); QCOMPARE(box->itemText(2), QString("Webcam"));
+        QVERIFY(!box->model()->index(2, 0).flags().testFlag(Qt::ItemIsEnabled));
+        qputenv("FROND_WEBCAMS", "/dev/video2:/dev/video4");
+        box->showPopup(); box->hidePopup();
+        QCOMPARE(box->currentIndex(), 0);
+        choose(0);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("camera-mode pattern"), 4000);
+        // A picture from the file dialog.
+        QTemporaryDir pictures; QImage image(8, 8, QImage::Format_RGB32); image.fill(Qt::red);
+        const auto picture = pictures.path() + "/photo.png"; QVERIFY(image.save(picture));
+        QTimer pick; pick.setInterval(20);
+        bool cancelled = false;
+        connect(&pick, &QTimer::timeout, &window, [&] {
+            if (auto* dialog = window.findChild<QFileDialog*>("cameraPicture"); dialog && dialog->isVisible()) {
+                if (!cancelled) { cancelled = true; QMetaObject::invokeMethod(dialog, "reject"); }
+                else { dialog->selectFile(picture); if (auto* edit = dialog->findChild<QLineEdit*>("fileNameEdit")) edit->setText(picture); QMetaObject::invokeMethod(dialog, "accept"); }
+            }
+        });
+        pick.start();
+        choose(1);  // cancelled: nothing is sent and the row shows the core's state
+        QTRY_VERIFY_WITH_TIMEOUT(cancelled, 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(box->currentIndex(), 0, 3000);
+        QVERIFY(!commands().join('\n').contains("camera-mode picture"));
+        choose(1);
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("camera-mode picture:" + picture), 4000);
+        QTRY_COMPARE_WITH_TIMEOUT(box->currentIndex(), 1, 3000);
+        pick.stop();
+        // A save re-reads the state: the core put the camera back on the pattern while saving.
+        const auto reads = commands().filter("camera-state ").size();
+        emitCamera("pattern");
+        QTRY_COMPARE_WITH_TIMEOUT(box->currentIndex(), 0, 3000);
+        window.findChild<QPushButton*>("save")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(commands().filter("camera-state ").size() > reads, 4000);
+        window.close();
+        // No camera on a T|X: no row.
+        QDir(files.path()).remove("sent");
+        menuCore(files.path(), "palm-tx");
+        MainWindow other(files.path() + "/core"); other.show(); other.openSession(managedSession("NoCam"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(other.findChild<QPushButton*>("save")->isEnabled(), 5000);
+        other.findChild<PanelHost*>("panelHost")->open(2);
+        QVERIFY(!other.findChild<QComboBox*>("camera")->isVisibleTo(&other));
+        QVERIFY(!other.findChild<QLabel*>("cameraState")->isVisibleTo(&other));
+        QVERIFY(!commands().contains("camera-state "));
+        qunsetenv("FROND_WEBCAMS");
     }
     // The menu rows show their keys, and the keys still fire once: a row never takes the key itself.
     void menuShowsKeys() {
@@ -3335,7 +3452,9 @@ for line in s.makefile('rb'):
         if (QTest::currentTestFailed()) return;
         auto commands = [&] {
             QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
-            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+            auto lines = QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+            lines.removeAll("camera-state ");
+            return lines;
         };
         MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Mic"), true);
         auto* mic = window.findChild<QAction*>("machineMicrophone");

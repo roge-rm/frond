@@ -11,6 +11,7 @@
 #include "Rotation.h"
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
+#include "HostCamera.h"
 #include "SoC.h"
 #include "SerialHostRoute.h"
 
@@ -33,6 +34,7 @@ namespace commands {
         std::string infraredError{};
         std::string bluetoothError{};
         SdlMicrophone* microphone{nullptr};
+        HostCamera* camera{nullptr};      // the Zire 72 camera's host source, never session state
         HostSerial* serial{nullptr};      // live host endpoint, never session state
         SerialHostRoute serialRoute{};
         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes

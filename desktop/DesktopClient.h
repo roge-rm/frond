@@ -31,6 +31,7 @@ class DesktopClient : public QObject {
     void closeRequested();
     void shortcut(const QString& name);  // a key pressed over the Palm that the app owns
     void microphoneState(const QString& state);
+    void cameraState(const QString& state);
     void serialState(const QString& state);  // pushed by the core on a change
     void usbState(const QString& state);
     void infraredState(const QString& state);

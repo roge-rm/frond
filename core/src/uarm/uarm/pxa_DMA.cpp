@@ -226,12 +226,14 @@ static bool pxaDmaPrvChannelDoBurst(
     const uint32_t width = (ch->CR >> 14) & 3;
     // PXA255 DCMD: WIDTH=00 is required for memory and companion-chip transfers.
     // On-chip peripherals keep their documented nonzero widths.
+    // A draining receive FIFO is read with WIDTH=00 (PXA27x 27.4.4, as Linux pxa_camera).
+    const bool drainingFifo = fromPeripheral && peripheral->drain;
     const bool externalMemory = peripheral && peripheral->externalBusAddress &&
         ((fromPeripheral && !(ch->CR&0x80000000u) && ch->SAR == peripheral->externalBusAddress &&
           memIsBufferRange(dma->mem,ch->TAR,num,true)) ||
          (toPeripheral && !(ch->CR&0x40000000u) && ch->TAR == peripheral->externalBusAddress &&
           memIsBufferRange(dma->mem,ch->SAR,num,false)));
-    if (!width && !memoryMove && !externalMemory) return pxaDmaPrvBusError(dma, ch);
+    if (!width && !memoryMove && !externalMemory && !drainingFifo) return pxaDmaPrvBusError(dma, ch);
     const uint32_t each = width ? 1u << (width - 1) : 4;
 
     // A short memory-to-memory tail can be split into byte lanes. Never do
@@ -333,6 +335,12 @@ static void pxaDmaPrvChannelActIfNeeded(struct PxaDma* dma, uint_fast8_t channel
             doWork = true;
             justOne = false;  // do it all
         }
+        // A draining peripheral is read for as long as it holds its request.
+        bool drain = false;
+        if (doWork && justOne) {
+            const struct PxaDmaPeripheral* peripheral = pxaDmaPrvPeripheral(dma, channel);
+            drain = peripheral && peripheral->drain && (ch->CR & 0x20000000u);
+        }
 
         if (doWork) {
             // A descriptor chain may be a ring. Yield even for unpaced memory
@@ -344,7 +352,7 @@ static void pxaDmaPrvChannelActIfNeeded(struct PxaDma* dma, uint_fast8_t channel
                 if (pxaDmaPrvChannelDoBurst(dma, channel)) irqUpdate = true;
 
             } while (++bursts < 2048 && pxaDmaPrvChannelRunning(dma, ch) &&
-                     (ch->CR & 0x1fff) && !justOne);
+                     (ch->CR & 0x1fff) && (!justOne || (drain && (ch->CSR & 0x100))));
         }
     }
 
@@ -540,9 +548,9 @@ static bool pxaDmaPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
                 if (!pxaDmaPrvChannelRegWrite(dma, set, reg, val)) return false;
                 break;
 
-            case 17:
+            case 17:  // DRCMR64-74 at 0x1100: on to CMR[64] after case 1 takes 64 off
                 pa -= 1088;
-                pa += 64;
+                pa += 128;
                 // fallthrough
             case 1:
                 pa -= 64;
@@ -563,6 +571,9 @@ static bool pxaDmaPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
                 break;
 
             default:
+                // The rest of the 0x1000 page is reserved and takes writes without a fault;
+                // the Zire 72 camera driver writes DRCMR68 there by mistake.
+                if ((pa >> 6) >= 16 && (pa >> 6) < 32) break;
                 return false;
         }
     } else {
@@ -586,9 +597,9 @@ static bool pxaDmaPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
                 if (!pxaDmaPrvChannelRegRead(dma, set, reg, &val)) return false;
                 break;
 
-            case 17:
+            case 17:  // DRCMR64-74 at 0x1100: on to CMR[64] after case 1 takes 64 off
                 pa -= 1088;
-                pa += 64;
+                pa += 128;
                 // fallthrough
             case 1:
                 pa -= 64;
@@ -607,6 +618,7 @@ static bool pxaDmaPrvMemAccessF(void* userData, uint32_t pa, uint_fast8_t size, 
                 break;
 
             default:
+                if ((pa >> 6) >= 16 && (pa >> 6) < 32) break;  // reserved, reads 0
                 return false;
         }
 

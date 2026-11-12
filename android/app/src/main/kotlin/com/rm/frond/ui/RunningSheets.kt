@@ -255,11 +255,12 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
 @Composable
 private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: RunningBarActions) {
     val device = model.device
-    LaunchedEffect(Unit) { model.readMicrophone() }
+    LaunchedEffect(Unit) { model.readMicrophone(); model.readCamera() }
     val rows = RunningSheets.displayRows(device)
     MachineDisplayRows(device, model.settings, true) { model.changeSettings(it) }
     if (DisplayRow.ROTATE in rows) SheetAction("Rotate") { actions.closeSheet(); model.rotate() }
     if (DisplayRow.SPEED in rows) MachineSpeedRow(model.settings, true) { model.changeSettings(it) }
+    if (DisplayRow.CAMERA in rows) CameraRow(model)
     Header("Audio", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
     for (row in RunningSheets.audioRows(device)) when (row) {
         AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
@@ -305,7 +306,6 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
             ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
             ConnRow.WIFI_MODULE -> model.printer?.let { WifiModuleRow(it) } ?: ConnItem("Wi-Fi", false, null) { }
-            ConnRow.CAMERA -> ConnItem("Camera", false, null) { }
             ConnRow.DEBUGGER -> ConnItem("Debugger", true, debuggerText(model.debugger)) { }
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
         }

@@ -124,6 +124,10 @@ struct PxaDmaPeripheral {
     uint32_t externalBusAddress{0};
     // Optional physical request level, sampled when this line is mapped/rebound.
     bool (*requested)(void* ctx){nullptr};
+    // A streaming receive FIFO on the internal bus, as the PXA27x camera interface: read
+    // with WIDTH=00 like memory, and for as long as its request is up rather than one burst
+    // a period.
+    bool drain{false};
 };
 void pxaDmaSetPeripheral(struct PxaDma* dma, uint_fast8_t chNum, const struct PxaDmaPeripheral* peripheral);
 

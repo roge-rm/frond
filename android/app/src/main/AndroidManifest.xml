@@ -3,6 +3,8 @@
 
     <!-- Virtual Wi-Fi and Internet via host, and the network's DNS servers for the Wi-Fi router. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- The phone camera as the Zire 72's camera, asked for on first use. -->
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- A notification when the Dana prints while Frond is in the background. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -14,6 +16,9 @@
     <uses-feature android:glEsVersion="0x00020000" />
     <uses-feature
         android:name="android.hardware.touchscreen"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.any"
         android:required="false" />
 
     <application

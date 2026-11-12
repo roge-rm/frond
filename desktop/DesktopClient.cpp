@@ -111,6 +111,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "microphone" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit microphoneState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "camera" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit cameraState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
             else if (fields[2] == "serial" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit serialState(QString::fromUtf8(QByteArray::fromHex(fields[3])));

@@ -44,6 +44,8 @@
 #include <QSlider>
 #include <QSignalBlocker>
 #include "WindowScale.h"
+#include "Webcams.h"
+#include <QStandardItemModel>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -61,6 +63,18 @@
 #include <QtPrintSupport/QPrinter>
 #include <QVBoxLayout>
 #include "DanaCardsDialog.h"
+#include <functional>
+
+// The Camera list, read again each time it opens so a webcam plugged in later shows up.
+class CameraBox : public QComboBox {
+public:
+    using QComboBox::QComboBox;
+    std::function<void()> beforePopup;
+    void showPopup() override {
+        if (beforePopup) beforePopup();
+        QComboBox::showPopup();
+    }
+};
 
 // frond-68k sits beside the ARM core: out/frond-68k in a build tree, frond-68k-core when installed.
 static QString siblingCore68k(const QString& core) {
@@ -350,6 +364,15 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(microphoneToggle, &QCheckBox::clicked, this, [this](bool on) {
         send("microphone-mode", on ? "on" : "off");
     });
+    auto* camera = new CameraBox(root);
+    camera->beforePopup = [this] { fillCamera(); };
+    cameraBox = camera;
+    cameraBox->setObjectName("camera");
+    cameraLabel = label(tr("Camera"), 8, displayGrid); displayGrid->addWidget(cameraBox, 8, 1, 1, 2);
+    cameraState = new QLabel(root); cameraState->setObjectName("cameraState"); cameraState->setWordWrap(true);
+    displayGrid->addWidget(cameraState, 9, 1, 1, 2);
+    fillCamera();
+    connect(cameraBox, qOverload<int>(&QComboBox::activated), this, [this](int index) { chooseCamera(index); });
     network = new QComboBox(root);
     network->setObjectName("networkMode");
     network->addItem(tr("Disabled"), "disabled");
@@ -706,6 +729,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     connect(&client, &DesktopClient::started, this, [this] {
         microphoneArmed = false; microphoneState->clear();
+        fillCamera(); showCamera("pattern");
         busy = false; hardResetAfterSave = false;
         frondSessions::touchWork(sessionPath);
         notify(tr("Running. Your session will be saved when you close Frond.")); refresh();
@@ -716,7 +740,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        holdKnown = holdOn = irdaQueued = false;
+        holdKnown = holdOn = irdaQueued = false; showCamera("pattern");
         mipsTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
@@ -745,6 +769,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         microphoneState->setText(state.startsWith("off ") ? state.mid(4) : QString());
         refresh();
     });
+    connect(&client, &DesktopClient::cameraState, this, [this](const QString& state) { showCamera(state); refresh(); });
     connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
@@ -885,6 +910,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "ms-type") msExportPending = false;
             if (command == "ms-protection" || command == "ms-read-only") { protectionKnown = false; refresh(); }
             if (command == "microphone-mode") { microphoneArmed = false; microphoneState->setText(message); }
+            if (command == "camera-mode") { showCamera(message.startsWith("pattern") ? message : "pattern " + message); refresh(); }
             // A failed switch leaves the core off (serial, infrared) or as it was (Bluetooth); the
             // picker and the hub's attach follow it.
             if (command == "serial-mode") { showSerial("off " + message); attachSerial(); }
@@ -926,6 +952,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "device-state") {
             showDevice(message);
+            cameraRead = frondFirmware::profile(runningDevice).frontend.camera;
             if (stopping) save();
             else if (embedWanted && !embedTried) { embedTried = true; send("window-id"); }
             else afterDevice();
@@ -939,6 +966,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             else send(storageSupported() ? cardCommand("state") : "network-state");
             return;
         }
+        if ((command == "save" || command == "reset" || command == "hard-reset") && !stopping &&
+            frondFirmware::profile(runningDevice).frontend.camera) cameraRead = true;
         if ((command == "hold" || command == "reset" || command == "hard-reset") &&
             !stopping && frondFirmware::profile(runningDevice).frontend.holdPresent) {
             send("hold-state");
@@ -974,6 +1003,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                 frondSessions::writePreferences(sessionPath, runningPreferences);
             }
         }
+        if (command == "camera-state" || command == "camera-mode") { showCamera(message); refresh(); if (command == "camera-state") return; }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
         if (command == "display" && contrastPending) {
             contrastPending = false;
@@ -1066,6 +1096,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (savedWorkingCopy) send("quit");
             else save();
         }
+        // The camera goes back to the pattern on a save, reset or load; read it once the other replies are in.
+        else if (cameraRead && !stopping && command != "camera-state") { cameraRead = false; send("camera-state"); }
     });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
@@ -1112,7 +1144,7 @@ void MainWindow::refresh() {
         }
         if (running) fitWindow();
     }
-    for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState}) state->setVisible(!state->text().isEmpty());
+    for (auto* state : {serialState, usbState, irdaState, bluetoothState, microphoneState, cameraState}) state->setVisible(!state->text().isEmpty());
     setWindowTitle(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : tr("Frond"));
     const auto* current = sessionList->currentItem();
     startButton->setEnabled(!running && !busy && current && !current->data(Qt::UserRole + 1).toBool());
@@ -1143,6 +1175,7 @@ void MainWindow::refresh() {
     for (auto* w : runningButtons) w->setEnabled(enabled);
     microphoneToggle->setEnabled(enabled && caps.microphone);
     microphoneToggle->setChecked(running && microphoneArmed);
+    cameraBox->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.camera);
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     note(soundToggle, caps.sound, {});
@@ -1170,6 +1203,8 @@ void MainWindow::refresh() {
     shown(!m68k || caps.usb, {usbLabel, usb, usbPort});
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
+    shown(frondFirmware::profile(currentDevice()).frontend.camera, {cameraLabel, cameraBox});
+    if (!frondFirmware::profile(currentDevice()).frontend.camera) cameraState->setVisible(false);
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
     shown(frondFirmware::lcdContrast(currentDevice()), {contrastLabel, contrast});
     shown(!m68k, {mipsToggle});
@@ -1511,6 +1546,50 @@ void MainWindow::pollMips() {
     // It doesn't use the request slot, so it never holds up or drops anything the user does.
     if (!client.running() || stopping || QApplication::activeModalWidget()) return;
     client.requestBackground("speed-state");
+}
+// The Camera choices: the test pattern, a picture, and one entry per V4L2 capture device (greyed when there are none).
+void MainWindow::fillCamera() {
+    const QSignalBlocker blocked(cameraBox);
+    const auto current = cameraBox->currentData().toString();
+    cameraBox->clear();
+    cameraBox->addItem(tr("Test pattern"), "pattern");
+    cameraBox->addItem(tr("Picture…"), "picture");
+    const auto webcams = frondWebcams::list();
+    for (const auto& path : webcams) cameraBox->addItem(webcams.size() == 1 ? tr("Webcam") : tr("Webcam %1").arg(path), "webcam:" + path);
+    if (webcams.isEmpty()) {
+        cameraBox->addItem(tr("Webcam"), "webcam:");
+        if (auto* model = qobject_cast<QStandardItemModel*>(cameraBox->model())) model->item(2)->setEnabled(false);
+    }
+    const auto index = current.isEmpty() ? -1 : cameraBox->findData(current);
+    cameraBox->setCurrentIndex(index >= 0 ? index : 0);
+}
+// Shows the core's camera state: `pattern`, `picture`, `webcam`, or `pattern REASON` after a failure.
+void MainWindow::showCamera(const QString& state) {
+    const QSignalBlocker blocked(cameraBox);
+    const auto word = state.section(' ', 0, 0);
+    cameraState->setText(word == "pattern" ? state.mid(8) : QString());
+    if (word == "pattern") cameraBox->setCurrentIndex(0);
+    else if (word == "picture") cameraBox->setCurrentIndex(1);
+    else if (word == "webcam") {
+        const auto index = cameraBox->findData("webcam:" + cameraWebcam);
+        cameraBox->setCurrentIndex(index >= 0 ? index : qMin(2, cameraBox->count() - 1));
+    }
+    cameraState->setVisible(!cameraState->text().isEmpty());
+}
+void MainWindow::chooseCamera(int index) {
+    const auto choice = cameraBox->itemData(index).toString();
+    if (choice == "picture") {
+        QFileDialog dialog(this, tr("Camera picture"), QDir::homePath(), tr("Pictures (*.png *.jpg *.jpeg *.bmp);;All files (*)"));
+        dialog.setObjectName("cameraPicture");
+        dialog.setOption(QFileDialog::DontUseNativeDialog);
+        dialog.setFileMode(QFileDialog::ExistingFile);
+        if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) { send("camera-state"); return; }
+        send("camera-mode", "picture:" + dialog.selectedFiles().first());
+    } else if (choice.startsWith("webcam:")) {
+        cameraWebcam = choice.mid(7);
+        if (cameraWebcam.isEmpty()) return;
+        send("camera-mode", choice);
+    } else send("camera-mode", "pattern");
 }
 void MainWindow::afterDevice() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :

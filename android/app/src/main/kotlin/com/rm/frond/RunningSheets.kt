@@ -79,7 +79,7 @@ object RunningSheets {
 
     // ---- Display and audio ----
 
-    enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, ROTATE, SPEED }
+    enum class DisplayRow { SIZE, SMOOTH, CONTRAST, SHOW_KEYBOARD, JOG, ROTATE, SPEED, CAMERA }
     enum class AudioRow { SOUND, MICROPHONE, AUDIO_PREVIEW }
 
     fun displayRows(device: Device): List<DisplayRow> {
@@ -89,6 +89,7 @@ object RunningSheets {
         if (device.jogControls) rows += DisplayRow.JOG
         if (!device.runs68k) rows += DisplayRow.ROTATE
         if (device.runs68k) rows += DisplayRow.SPEED
+        if (device.camera) rows += DisplayRow.CAMERA
         return rows
     }
 
@@ -101,7 +102,7 @@ object RunningSheets {
 
     // ---- Connections ----
 
-    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, USB_RETRY, USB_PORT, WIFI_MODULE, CAMERA, DEBUGGER, HOTSYNC }
+    enum class ConnRow { BEAM, BLUETOOTH, SERIAL, USB, USB_RETRY, USB_PORT, WIFI_MODULE, DEBUGGER, HOTSYNC }
 
     fun connectionRows(
         device: Device, usb: NetRelay.Phase, debuggerShown: Boolean,
@@ -114,7 +115,6 @@ object RunningSheets {
         if (device.usb && usb == NetRelay.Phase.DISCONNECTED) rows += ConnRow.USB_RETRY
         if (PrintJob.rowShown(device)) rows += ConnRow.USB_PORT
         if (device.builtInWifi) rows += ConnRow.WIFI_MODULE
-        if (device.camera) rows += ConnRow.CAMERA
         if (debuggerShown) rows += ConnRow.DEBUGGER
         if (device.hotSyncButton) rows += ConnRow.HOTSYNC
         return rows
