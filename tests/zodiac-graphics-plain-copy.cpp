@@ -996,9 +996,125 @@ void blendSaved() {
     assert(loaded.read(blendDestination+(3*16+3)*2) != blendDestinationPixel(3,3));
     std::puts("PASS: a queued constant blend saves, loads and finishes the same");
 }
+// TwGfxTransformBlt's batch as 200aa564 sends it: the copy state with DP_CNTL giving the directions, then 464
+// (source x, y), 465 (where the first source pixel goes) and 466 (destination width, height).
+constexpr uint32_t turnDestination = 0xe0a000, turnSource = 0xe0c000;
+std::vector<uint32_t> transformBatch(uint32_t control, uint32_t sx, uint32_t sy, uint32_t x0, uint32_t y0, uint32_t w, uint32_t h,
+                                     uint32_t scissorFrom = 0, uint32_t scissorTo = 0x00100010) {
+    return {0x4b2,0x80cc0a00,0x41b,0x5598b4df,0x4b1,0x40030d04,0x472,control,
+        0x401,turnDestination,0x402,16,0x46b,turnSource,0x46c,12,0x46f,scissorFrom,0x470,scissorTo,
+        0x00020464,sx << 16 | sy,x0 << 16 | y0,w << 16 | h};
+}
+uint16_t turnPixel(unsigned x, unsigned y) { return uint16_t(0x0821 * x + 0x3100 * y + 7); }
+void turnPlanes(Fixture& f) {
+    for (unsigned i = 0; i < 16*16; ++i) f.write(turnDestination+i*2,0xa55a);
+    for (unsigned y = 0; y < 12; ++y) for (unsigned x = 0; x < 12; ++x) f.write(turnSource+(y*12+x)*2,turnPixel(x,y));
+}
+void transform() {
+    // The eight values the ROM sends (200aa6d8-200aa720 and the plain 3f), each from a 5 by 3 source at 2,1.
+    struct Clip { uint32_t from, to; };
+    for (uint32_t control : {0x3fu,0x2eu,0x3cu,0x2du,0x3eu,0x3du,0x2fu,0x2cu})
+        for (Clip clip : {Clip{0,0x00100010},Clip{0x00050006,0x0009000a}})
+            for (bool direct : {true,false}) {
+                Imx1GraphicsCommands::directFills = direct;
+                const bool majorX = control & 0x10, right = control & 1, down = control & 2;
+                const unsigned sw = 5, sh = 3, w = majorX ? sw : sh, h = majorX ? sh : sw;
+                const unsigned x0 = right ? 4 : 4 + w - 1, y0 = down ? 6 : 6 + h - 1;
+                const unsigned left = clip.from & 0xffff, top = clip.from >> 16, end = clip.to & 0xffff, bottom = clip.to >> 16;
+                Fixture f; turnPlanes(f);
+                auto batch = transformBatch(control,2,1,x0,y0,w,h,clip.from,clip.to);
+                if (f.append(batch,0x200aa8dc) != A::ok) {
+                    std::fprintf(stderr,"transform %02x: %d %s %x\n",control,int(f.append(batch,0x200aa8dc)),f.commands.refusal().what ? f.commands.refusal().what : "-",
+                                 f.commands.refusal().value);
+                    std::abort();
+                }
+                std::vector<uint16_t> want(16*16,0xa55a);
+                unsigned drawn = 0;
+                for (unsigned j = 0; j < sh; ++j)
+                    for (unsigned i = 0; i < sw; ++i) {
+                        const int dx = right ? 1 : -1, dy = down ? 1 : -1;
+                        const unsigned x = majorX ? x0 + dx*int(i) : x0 + dx*int(j), y = majorX ? y0 + dy*int(j) : y0 + dy*int(i);
+                        if (x < left || x >= end || y < top || y >= bottom) continue;
+                        want[y*16+x] = turnPixel(2+i,1+j);
+                        ++drawn;
+                    }
+                assert(f.commands.duration() == batch.size()+1+drawn);
+                f.finish();
+                for (unsigned i = 0; i < 16*16; ++i)
+                    if (f.read(turnDestination+i*2) != want[i]) {
+                        std::fprintf(stderr,"transform %02x direct %d clip %08x at %u,%u: %04x, not %04x\n",control,direct,
+                                     clip.from,i%16,i/16,f.read(turnDestination+i*2),want[i]);
+                        std::abort();
+                    }
+            }
+    Imx1GraphicsCommands::directFills = true;
+    // Rotated by 180 degrees: the source's top left lands at the bottom right.
+    {
+        Fixture f; turnPlanes(f);
+        assert(f.append(transformBatch(0x3c,0,0,9,9,4,4),0x200aa8dc) == A::ok);
+        f.finish();
+        assert(f.read(turnDestination+(9*16+9)*2) == turnPixel(0,0) && f.read(turnDestination+(6*16+6)*2) == turnPixel(3,3) &&
+               f.read(turnDestination+(9*16+6)*2) == turnPixel(3,0));
+    }
+    // The host GPU never takes it, so Fast draws it on the CPU as Exact does.
+    {
+        Fixture f; turnPlanes(f);
+        assert(f.append(transformBatch(0x2e,0,0,2,2,3,5),0x200aa8dc) == A::ok);
+        Imx1GpuFill drawn;
+        Imx1GraphicsCommands::Fill fill{};
+        fill.base = turnDestination; fill.pitch = 32; fill.width = 2; fill.height = 2; fill.plain = fill.keyEqual = true;
+        fill.sourceBase = turnSource+30; fill.sourcePitch = 2; fill.colour = uint32_t(-24);
+        assert(!Imx1GraphicsCommands::gpuFill(f.state,f.eim,f.memory,fill,drawn));
+        f.finish();
+    }
+    // Refused, with nothing queued: other GMC, mix, datatype or direction, a corner that runs past 0, the source past
+    // its pitch, a source that overlaps the destination, and a second blit in one batch.
+    Fixture f; turnPlanes(f);
+    auto refuse = [&](std::vector<uint32_t> batch, const char* what, uint32_t value, uint32_t pc = 0x200aa8dc) {
+        assert(f.append(batch,pc) == A::sideEffect && refused(f,what,value));
+        assert(f.read(turnDestination) == 0xa55a && f.state.engineState().emptyRing());
+    };
+    const auto good = transformBatch(0x2e,0,0,6,2,3,5);
+    auto bad = good; bad[3] = 0x55e0b4df; refuse(bad,"transform-state",0x55e0b4df);
+    bad = good; bad[1] = 0x00cc0a00; refuse(bad,"transform-state",0x2e);
+    bad = good; bad[5] = 0x40020d04; refuse(bad,"transform-state",0x2e);
+    bad = good; bad[7] = 0x2b; refuse(bad,"transform-state",0x2b);
+    bad = good; bad[22] = 1 << 16 | 2; refuse(bad,"transform-geometry",good[23]);
+    bad = good; bad[21] = 10 << 16; refuse(bad,"transform-geometry",good[23]);
+    bad = good; bad[9] = turnSource; bad[11] = 12; refuse(bad,"transform-overlap",good[22]);
+    bad = good; bad.insert(bad.end(),{0x00020464,0,0x00060002,0x00030005}); refuse(bad,"transform-batch",0x464);
+    // Its words from any other producer are refused, and so is a paint packet from it.
+    assert(f.append(good,0x200a9ed4) == A::sideEffect);
+    bad = good; bad.resize(20); bad.insert(bad.end(),{0xc0011a00,0,0x00010001});
+    assert(f.append(bad,0x200aa8dc) != A::ok);
+    std::puts("PASS: rotate and mirror blit from 200aa8dc, all eight directions, scissor, refusals");
+}
+// A queued rotate and mirror blit saved mid-batch loads and finishes as a run that never saved.
+void transformSaved() {
+    Fixture reference; turnPlanes(reference);
+    assert(reference.append(transformBatch(0x2d,1,2,8,8,4,6,0x00030002,0x0009000a),0x200aa8dc) == A::ok);
+    reference.finish();
+    Fixture saved; turnPlanes(saved);
+    assert(saved.append(transformBatch(0x2d,1,2,8,8,4,6,0x00030002,0x0009000a),0x200aa8dc) == A::ok);
+    std::vector<uint8_t> bytes[2];
+    StateWriter configurationOut(bytes[0]); saved.state.state(configurationOut);
+    StateWriter commandsOut(bytes[1]); saved.commands.state(commandsOut);
+    Fixture loaded; turnPlanes(loaded);
+    StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+    StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+    assert(configurationIn.complete() && commandsIn.complete());
+    loaded.finish();
+    unsigned changed = 0;
+    for (unsigned i = 0; i < 16*16; ++i) {
+        assert(loaded.read(turnDestination+i*2) == reference.read(turnDestination+i*2));
+        changed += loaded.read(turnDestination+i*2) != 0xa55a;
+    }
+    assert(changed == 12);
+    std::puts("PASS: a queued rotate and mirror blit saves, loads and finishes the same");
+}
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
-    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved();
+    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
