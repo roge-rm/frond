@@ -54,7 +54,10 @@ static std::vector<uint8> LegacyIsp(std::vector<uint8> state) {
 }
 // Exercise the same board parser/state fields without VZ CPU/timer dependencies.
 struct St : EmRegsVZDana {
+    // Free bytes in the guest's key queue; no guest memory here.
+    uint32 keyQueueRoom=~0u;
     St() { SetSubBankHandlers(); }
+    uint32 KeyQueueRoom() const override { return keyQueueRoom; }
     void Raw(emuptr address,int size,uint32 value) { StdWrite(address,size,value); }
     template<class T> void Save(T& s) {
         auto*c=s.GetChunk(ChunkType::regsVZDana); if(!c)return;
@@ -1113,6 +1116,27 @@ int main() {
         held.now=119; held.ReportHeldKeys(); assert(!request());
         held.now=120; held.ReportHeldKeys(); assert(request()); assert(held.Byte(0)==0x40);
         held.now=200; held.ReportHeldKeys(); assert(!request());
+    }
+    {
+        // A press waits while Palm OS's key queue has room for two keys or fewer, with no request
+        // raised so the app can take keys. Releases still go.
+        PacedSt full; assert(full.Byte(0)==0xaa); full.SetWord(0xfffff302,0);
+        auto request=[&]() { return (full.GetWord(0xfffff310)&1)!=0; };
+        auto b=*DanaScan5::Named("b");
+        full.now=100; assert(full.DispatchDanaInput({{scan,true},{scan,false},{b,true},{b,false}}));
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==scan.Code());
+        full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        full.now=110; full.ReportHeldKeys(); assert(request()); assert(full.Byte(0)==0x40);
+        full.now=500; full.ReportHeldKeys(); assert(!request()); assert(full.Byte(0)==0x40);
+        auto waiting=Save(full);
+        full.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+1;
+        full.now=501; full.ReportHeldKeys(); assert(request());
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==b.Code());
+        full.now=511; full.ReportHeldKeys(); assert(request()); assert(full.Byte(0)==0x40);
+        // The waiting press survives a save and load.
+        full.keyQueueRoom=0; assert(Load(full,waiting)); full.now=501; full.ReportHeldKeys(); assert(!request());
+        full.keyQueueRoom=~0u; full.ReportHeldKeys(); assert(request());
+        assert(full.Byte(0)==0x41); assert(full.Byte(0)==b.Code());
     }
     {
         // A key pressed again soon after its release waits until the guest has seen it released
