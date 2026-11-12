@@ -10,11 +10,14 @@
 // zip or PRC (the caller carries on with the file as it is), or "error MESSAGE".
 extern "C" JNIEXPORT jstring JNICALL Java_com_rm_frond_ZodiacRom_convert(JNIEnv* env, jclass, jstring input, jstring output) {
     const char* in = env->GetStringUTFChars(input, nullptr);
+    if (!in) return nullptr;
     const char* out = env->GetStringUTFChars(output, nullptr);
+    if (!out) {
+        env->ReleaseStringUTFChars(input, in);
+        return nullptr;
+    }
     std::string reply;
-    if (!in || !out) {
-        reply = "error Couldn't read the file.";
-    } else {
+    {
         const auto result = frondZodiacRom::extractFile(in);
         using Status = frondZodiacRom::Result::Status;
         if (result.status == Status::error) {
@@ -28,7 +31,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_rm_frond_ZodiacRom_convert(JNIEnv*
             else reply = written ? "ok" : "error Couldn't save the firmware.";
         }
     }
-    if (in) env->ReleaseStringUTFChars(input, in);
-    if (out) env->ReleaseStringUTFChars(output, out);
+    env->ReleaseStringUTFChars(input, in);
+    env->ReleaseStringUTFChars(output, out);
     return env->NewStringUTF(reply.c_str());
 }

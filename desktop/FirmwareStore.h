@@ -45,9 +45,10 @@ inline QString norFile(const QString& path, Device device, QTemporaryDir& scratc
 
 // The device a picked NOR is for, also from a Zodiac update.
 inline Device detectPicked(const QString& path) {
-    QTemporaryDir scratch;
-    const auto file = norFile(path, Device::automatic, scratch);
-    return file.isEmpty() ? Device::automatic : detectDevice(file);
+    if (QFileInfo(path).isFile() && frondZodiacRom::looksLikeUpdateFile(path.toStdString()))
+        for (auto device : devices)
+            if (takesZodiacUpdate(device)) return device;
+    return detectDevice(path);
 }
 
 // The stored images pass the same checks as an import.

@@ -139,6 +139,20 @@ class ZodiacRomTest : public QObject {
         QVERIFY(r.status == Result::Status::error);
         QCOMPARE(r.error, std::string("This isn't the Zodiac 1.1 update."));
     }
+    void hugeClaimedSize() {
+        const auto rom = payload();
+        std::string hash;
+        const auto expected = expectedFor(rom, hash);
+        auto z = zip(prc(deflated(rom, 31)), "u.prc", true);
+        for (size_t i = 0; i + 28 < z.size(); ++i) {
+            if (z[i] == 0x50 && z[i + 1] == 0x4b && z[i + 2] == 0x01 && z[i + 3] == 0x02) {
+                z[i + 24] = 0; z[i + 25] = 0; z[i + 26] = 0; z[i + 27] = 0x03;  // 48 MB
+            }
+        }
+        const auto r = extract(z.data(), z.size(), expected);
+        QVERIFY(r.status == Result::Status::error);
+        QCOMPARE(r.error, std::string("This zip is damaged or cut short."));
+    }
     void damaged() {
         const auto rom = payload();
         std::string hash;

@@ -19,7 +19,7 @@ DAMAGED = "This update is damaged or cut short."
 
 
 def from_prc(prc):
-    if len(prc) < 0x4e or not struct.unpack_from(">H", prc, 0x20)[0] & 1:
+    if len(prc) < 0x4e or not struct.unpack_from(">H", prc, 0x20)[0] & 1 or struct.unpack_from(">I", prc, 0x48)[0] != 0:
         raise ValueError(NOT_UPDATE)
     count = struct.unpack_from(">H", prc, 0x4c)[0]
     if len(prc) < 0x4e + count * 10:
@@ -32,10 +32,17 @@ def from_prc(prc):
         if start >= len(prc) or end <= start:
             raise ValueError(DAMAGED)
         gunzip = zlib.decompressobj(31)
+        rom = b""
+        pending = prc[start:end]
         try:
-            rom = gunzip.decompress(prc[start:end], LENGTH + 1)
-            rom += gunzip.flush()
+            while pending and not gunzip.eof and len(rom) <= LENGTH:
+                rom += gunzip.decompress(pending, 1 << 20)
+                pending = gunzip.unconsumed_tail
+                if not pending:
+                    break
         except zlib.error:
+            raise ValueError(DAMAGED)
+        if len(rom) > LENGTH:
             raise ValueError(DAMAGED)
         if not gunzip.eof or gunzip.unused_data:
             raise ValueError(DAMAGED)

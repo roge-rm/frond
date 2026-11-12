@@ -30,6 +30,9 @@ Result extract(const uint8_t* data, size_t size, const Expected& expected = zodi
 // The same from a file; read errors are errors.
 Result extractFile(const std::string& path, const Expected& expected = zodiac());
 
+// Cheap: only the file's first bytes say zip or PRC. For telling what a picked file is while typing.
+bool looksLikeUpdateFile(const std::string& path);
+
 std::string sha256Hex(const uint8_t* data, size_t size);
 }  // namespace frondZodiacRom
 #endif

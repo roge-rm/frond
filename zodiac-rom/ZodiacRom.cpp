@@ -2,6 +2,7 @@
 
 #include <zlib.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -82,21 +83,27 @@ Result failure(const std::string& message) {
 }
 
 // Inflates 'in' (windowBits as for inflateInit2) to exactly one complete stream of at most 'limit' bytes.
+// The output grows as it inflates, so a claimed size costs nothing.
 bool inflateAll(const uint8_t* in, size_t size, int windowBits, size_t limit, std::vector<uint8_t>& out) {
     z_stream z{};
     if (inflateInit2(&z, windowBits) != Z_OK) return false;
-    out.assign(limit + 1, 0);
+    out.clear();
     z.next_in = const_cast<Bytef*>(in);
     z.avail_in = uInt(size);
-    z.next_out = out.data();
-    z.avail_out = uInt(out.size());
-    const int code = inflate(&z, Z_FINISH);
-    const size_t produced = z.total_out;
+    int code = Z_OK;
+    while (code == Z_OK) {
+        const size_t used = out.size();
+        if (used > limit) break;
+        const size_t step = std::min<size_t>(1u << 20, limit + 1 - used);
+        out.resize(used + step);
+        z.next_out = out.data() + used;
+        z.avail_out = uInt(step);
+        code = inflate(&z, Z_NO_FLUSH);
+        out.resize(used + (step - z.avail_out));
+    }
     const bool whole = code == Z_STREAM_END && z.avail_in == 0;
     inflateEnd(&z);
-    if (!whole || produced > limit) return false;
-    out.resize(produced);
-    return true;
+    return whole && out.size() <= limit;
 }
 
 bool endsWithPrc(const uint8_t* name, size_t n) {
@@ -109,6 +116,8 @@ bool isPrc(const uint8_t* d, size_t size) {
 }
 
 const size_t zipLimit = 64u << 20;
+// The real PRC is about 4.98 MB.
+const size_t prcLimit = 16u << 20;
 
 // The first .prc in the zip, stored or deflated. Empty and 'error' filled on a damaged or unusable zip.
 bool zipEntry(const uint8_t* d, size_t size, std::vector<uint8_t>& prc, std::string& error) {
@@ -133,7 +142,7 @@ bool zipEntry(const uint8_t* d, size_t size, std::vector<uint8_t>& prc, std::str
         if (!match) continue;
         if (local > size || size - local < 30 || le32(d + local) != 0x04034b50) { error = "This zip is damaged or cut short."; return false; }
         const size_t start = local + 30 + le16(d + local + 26) + le16(d + local + 28);
-        if (start > size || size - start < packed || unpacked > zipLimit) { error = "This zip is damaged or cut short."; return false; }
+        if (start > size || size - start < packed || unpacked > prcLimit) { error = "This zip is damaged or cut short."; return false; }
         if (method == 0 && packed == unpacked) {
             prc.assign(d + start, d + start + packed);
             return true;
@@ -198,6 +207,15 @@ Result extract(const uint8_t* data, size_t size, const Expected& expected) {
     }
     if (isPrc(data, size)) return fromPrc(data, size, expected);
     return r;
+}
+
+bool looksLikeUpdateFile(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return false;
+    uint8_t head[0x4e];
+    const size_t n = std::fread(head, 1, sizeof head, f);
+    std::fclose(f);
+    return (n >= 4 && le32(head) == 0x04034b50) || isPrc(head, n);
 }
 
 Result extractFile(const std::string& path, const Expected& expected) {
