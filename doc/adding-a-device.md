@@ -247,7 +247,7 @@ The bar should be a recognisable approximation of the real one, not a close copy
 ### Profiles (DeviceControls.h)
 
 - `DeviceControlProfile` is one device's bar: size in strip coordinates, its `DeviceButton`s, the five-way ring and select pill, a `DeviceControlStyle`, the app key corner radius, `unit` (strip units per screen pixel, 2 for 160-wide screens), and for a keyboard or side panel `keyboardHeight`, `sideTab` and `sideTabWidth`.
-- Strips are authored 320 units wide. The TX is 320x84, the E2 320x80, the Zire 72 320x96, the TG50 320x224 and the IIIx 320x44.
+- Strips are authored 320 units wide. The TX is 320x84, the E2 320x96, the Zire 72 320x104, the TG50 320x224 and the IIIx 320x44.
 - `DeviceButton` is a key (`keyIdHard1` to `keyIdHard4`, `keyIdUp` and so on), its rectangle, a label for tooltips, a `DeviceControlIcon`, an optional corner and the `section` it belongs to (`main`, `keyboard` or `sideTab`). A key that is half of a bigger shape, like a rocker, gets a `shape` to hit against.
 - `deviceControls(DeviceArt)` returns the profile for an art value. Add the new one there, and a value in `DeviceArt` in `device_profile5.h`.
 - Hit testing and drawing share the same geometry. App keys hit their whole rounded rectangle. The five-way hits the select pill first, then the ring split along its diagonals (`deviceNavigatorAt`). Moving a shape moves its hit area.

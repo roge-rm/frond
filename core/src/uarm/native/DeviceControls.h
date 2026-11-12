@@ -103,34 +103,36 @@ inline DeviceArt deviceArt(const char* name) {
 // h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
 inline const DeviceControlProfile& deviceControls(DeviceArt art) {
-    // App keys hit their whole pocket; the five-way entries place the direction parts.
+    // App keys hit their whole pocket; the five-way entries place the direction parts. The TX's
+    // five-way fills the bar's height, with each app key in its own pocket either side.
     static const DeviceButton tx[] = {
         {keyIdHard1, {4,25,44,40}, "Home", DeviceControlIcon::home},
         {keyIdHard2, {52,25,44,40}, "Calendar", DeviceControlIcon::calendar},
         {keyIdHard3, {224,25,44,40}, "Contacts", DeviceControlIcon::contacts},
         {keyIdHard4, {272,25,44,40}, "Web", DeviceControlIcon::web},
-        {keyIdUp, {150,11,20,14}, "Up", DeviceControlIcon::up},
-        {keyIdDown, {150,59,20,12}, "Down", DeviceControlIcon::down},
-        {keyIdLeft, {113,31,18,20}, "Left", DeviceControlIcon::left},
-        {keyIdRight, {189,31,18,20}, "Right", DeviceControlIcon::right},
-        {keyIdSelect, {135,30,50,22}, "Select", DeviceControlIcon::select},
+        {keyIdUp, {150,4,20,14}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {150,66,20,14}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {107,32,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {195,32,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {126,25,68,34}, "Select", DeviceControlIcon::select},
     };
-    static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{110,9,100,64},22,{135,30,50,22}};
+    static const DeviceControlProfile txProfile{320,84,tx,std::size(tx),{104,0,112,84},28,{126,25,68,34},
+                                                DeviceControlStyle::tx,0.3f,1,12};
     // E2: app keys hard1-4 open Calendar, Contacts, Tasks and Note Pad, in pairs on one line either
-    // side of a rounded five-way with a pill-shaped select key.
+    // side of a rounded five-way that fills most of the bar, with a rounded select key.
     static const DeviceButton e2[] = {
-        {keyIdHard1, {12,23,38,30}, "Calendar", DeviceControlIcon::calendar},
-        {keyIdHard2, {58,23,38,30}, "Contacts", DeviceControlIcon::contacts},
-        {keyIdHard3, {224,23,38,30}, "Tasks", DeviceControlIcon::tasks},
-        {keyIdHard4, {270,23,38,30}, "Note Pad", DeviceControlIcon::notes},
-        {keyIdUp, {150,8,20,14}, "Up", DeviceControlIcon::up},
-        {keyIdDown, {150,56,20,12}, "Down", DeviceControlIcon::down},
-        {keyIdLeft, {115,28,18,20}, "Left", DeviceControlIcon::left},
-        {keyIdRight, {187,28,18,20}, "Right", DeviceControlIcon::right},
-        {keyIdSelect, {136,27,48,22}, "Select", DeviceControlIcon::select},
+        {keyIdHard1, {4,30,44,36}, "Calendar", DeviceControlIcon::calendar},
+        {keyIdHard2, {52,30,44,36}, "Contacts", DeviceControlIcon::contacts},
+        {keyIdHard3, {224,30,44,36}, "Tasks", DeviceControlIcon::tasks},
+        {keyIdHard4, {272,30,44,36}, "Note Pad", DeviceControlIcon::notes},
+        {keyIdUp, {150,6,20,14}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {150,76,20,14}, "Down", DeviceControlIcon::down},
+        {keyIdLeft, {104,38,18,20}, "Left", DeviceControlIcon::left},
+        {keyIdRight, {198,38,18,20}, "Right", DeviceControlIcon::right},
+        {keyIdSelect, {130,31,60,34}, "Select", DeviceControlIcon::select},
     };
-    static const DeviceControlProfile e2Profile{320,80,e2,std::size(e2),{112,6,96,64},22,{136,27,48,22},
-                                                DeviceControlStyle::e2,0.27f};
+    static const DeviceControlProfile e2Profile{320,96,e2,std::size(e2),{101,3,118,90},26,{130,31,60,34},
+                                                DeviceControlStyle::e2,0.27f,1,12};
     // Zire 72: pill-shaped app keys in stacked pairs, Calendar over Contacts on the left and
     // Camera over Music on the right, round a rounded-square five-way with a rounded-rectangle
     // select key. The ROM opens RealOne on hard3 and Camera on hard4.
@@ -145,7 +147,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         {keyIdRight, {194,42,18,20}, "Right", DeviceControlIcon::right},
         {keyIdSelect, {138,36,44,32}, "Select", DeviceControlIcon::select},
     };
-    static const DeviceControlProfile zire72Profile{320,96,zire72,std::size(zire72),{105,13,110,78},25,{138,36,44,32},
+    static const DeviceControlProfile zire72Profile{320,104,zire72,std::size(zire72),{105,13,110,78},25,{138,36,44,32},
                                                     DeviceControlStyle::zire72,0.5f,1,10};
     // m515 on a 160-wide screen, 2 units per pixel: four round app keys (Date Book, Address,
     // To Do, Note Pad), the outer ones higher, either side of two round scroll keys stacked in a

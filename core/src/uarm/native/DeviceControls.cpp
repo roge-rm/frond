@@ -1,6 +1,7 @@
 #include "DeviceControls.h"
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <tuple>
@@ -327,20 +328,6 @@ void paintTxControls(Canvas& canvas, const DeviceControlProfile& profile, int wi
     canvas.paint(0,H-2,width,H,[&](float,float y) {return canvas.edge(std::fabs(y-H+0.6f)-0.6f)*0.6f;},
                  [](float,float,Rgb) {return Rgb{38,42,53};});
 
-    // Each pair of app keys sits in a shared darker tray with a lit top edge.
-    for(size_t first=0;first+1<profile.count;first+=2) {
-        if(deviceNavigatorButton(profile,profile.buttons[first]) || deviceNavigatorButton(profile,profile.buttons[first+1]))break;
-        const SDL_Rect a=shifted(profile.buttons[first].bounds),b=shifted(profile.buttons[first+1].bounds);
-        const SDL_Rect tray{a.x-5,std::min(a.y,b.y)-5,b.x+b.w-a.x+10,std::max(a.y+a.h,b.y+b.h)-std::min(a.y,b.y)+10};
-        const float corner=deviceButtonCorner(profile,a)+5;
-        auto d=[&](float x,float y) {return deviceRoundedDistance(tray,corner,x,y);};
-        canvas.paint(tray.x-2,tray.y-2,tray.x+tray.w+2,tray.y+tray.h+2,[&](float x,float y) {return canvas.edge(d(x,y));},
-                     [&](float,float y,Rgb) {return mix(Rgb{10,11,15},Rgb{15,17,22},clamp01((y-tray.y)/tray.h));});
-        canvas.paint(tray.x-2,tray.y-2,tray.x+tray.w+2,tray.y+tray.h+2,[&](float x,float y) {
-            return canvas.edge(std::fabs(d(x,y)+0.4f)-0.4f)*(0.15f+0.6f*clamp01((tray.y+tray.h*0.5f-y)/(tray.h*0.5f)));
-        },[](float,float,Rgb) {return Rgb{58,63,76};});
-    }
-
     for(size_t i=0;i<profile.count;++i) {
         const auto& button=profile.buttons[i];
         if(deviceNavigatorButton(profile,button))continue;
@@ -379,11 +366,12 @@ void paintTxControls(Canvas& canvas, const DeviceControlProfile& profile, int wi
         },[&](float,float,Rgb) {return ink;});
     }
 
-    // Gunmetal ring with a lighter bevelled rim and a dark pill.
+    // Chrome ring: a bright outer edge round a darker reflective face, then a dark groove
+    // round a light silver select key.
     if(profile.navigator.w>0)
-        paintNavigator(canvas,profile,ox,pressed,{Rgb{4,5,7},Rgb{128,133,141},Rgb{66,69,76},Rgb{60,64,70},Rgb{72,76,82},
-                                                  Rgb{160,165,174},4,0.75f,0.2f,0.55f,
-                                                  Rgb{8,9,12},Rgb{48,51,57},Rgb{24,26,30},Rgb{108,114,124}});
+        paintNavigator(canvas,profile,ox,pressed,{Rgb{4,5,7},Rgb{238,241,246},Rgb{150,154,162},Rgb{58,61,68},
+                                                  Rgb{112,116,124},Rgb{255,255,255},4,0.75f,0.3f,0.6f,
+                                                  Rgb{5,6,8},Rgb{228,231,236},Rgb{150,154,162},Rgb{255,255,255}});
 }
 
 SDL_Texture* canvasTexture(SDL_Renderer* renderer, const Canvas& canvas) {
@@ -505,27 +493,30 @@ void paintE2Controls(Canvas& canvas, const DeviceControlProfile& profile, int wi
         },[&](float,float,Rgb) {return ink;});
     }
 
-    // Polished silver five-way with a grey pill.
+    // Polished silver five-way with a light silver pill in a dark groove.
     if(profile.navigator.w>0)
         paintNavigator(canvas,profile,ox,pressed,{Rgb{78,81,87},Rgb{248,249,251},Rgb{140,144,151},Rgb{150,154,161},
                                                   Rgb{236,238,241},Rgb{255,255,255},5,0.35f,0.12f,0.7f,
-                                                  Rgb{78,82,88},Rgb{170,174,180},Rgb{128,132,139},Rgb{236,238,242}});
+                                                  Rgb{58,61,68},Rgb{232,234,238},Rgb{174,178,184},Rgb{255,255,255}});
 }
 
 // Colours of a light silver key sitting in a dark outline groove.
 struct SilverKeyLook {
     Rgb groove, faceTop, faceBottom, sheen, lip, ink, inkHeld;
     float grooveWidth, held;
+    // How much the face darkens from its centre to its edge, for a domed cap; 0 for flat.
+    float dome{0};
 };
 
 // A raised silver key of any rounded shape: a dark groove round it, a bright lip on the body
-// below the groove, a lit face and its icon. Held keys sink and darken.
+// below the groove, a lit face and its icon. Held keys sink and darken. inset draws the key
+// that many units inside its rectangle on every side.
 void paintSilverKey(Canvas& canvas, const SDL_Rect& key, float corner, bool held, DeviceControlIcon icon,
-                    float iconScale, const SilverKeyLook& look, bool drawIcon=true) {
+                    float iconScale, const SilverKeyLook& look, bool drawIcon=true, float inset=0) {
     const float sink=held ? 0.7f : 0,gw=look.grooveWidth;
     const float x0=key.x-gw-4,y0=key.y-gw-4,x1=key.x+key.w+gw+4,y1=key.y+key.h+gw+6;
     const float kcx=key.x+key.w*0.5f,kcy=key.y+key.h*0.5f+sink;
-    auto d=[&](float x,float y) {return deviceRoundedDistance(key,corner,x,y);};
+    auto d=[&](float x,float y) {return deviceRoundedDistance(key,corner,x,y)+inset;};
     // Bright lip where the body curves into the groove, strongest underneath.
     canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
         return canvas.edge(std::fabs(d(x,y)-gw-0.6f)-0.6f)*clamp01(0.15f+0.85f*(y-key.y)/key.h);
@@ -539,6 +530,11 @@ void paintSilverKey(Canvas& canvas, const SDL_Rect& key, float corner, bool held
         Rgb c=mix(look.faceTop,look.faceBottom,t);
         const float r=std::hypot((x-kcx)/(key.w*0.5f),(y-key.y-sink-key.h*0.35f)/(key.h*0.45f));
         c=c+look.sheen*std::pow(clamp01(1-r),1.5f);
+        if(look.dome>0) {
+            // Lit from above: brightest a little over the centre, falling off towards the edges.
+            const float rx=(x-kcx)/(key.w*0.5f-inset),ry=(y-kcy+key.h*0.12f)/(key.h*0.5f-inset);
+            c=c*(1+look.dome*(0.3f-clamp01(rx*rx*0.6f+ry*ry)));
+        }
         c=mix(c*0.72f,c,clamp01(-face(x,y)/2.2f));
         // Held: darker, with a shadow under the groove's top edge.
         return held ? c*(look.held+0.12f*clamp01(-face(x,y-1.6f)/3)) : c;
@@ -555,8 +551,8 @@ void paintSilverKey(Canvas& canvas, const SDL_Rect& key, float corner, bool held
     },[&](float,float,Rgb) {return ink;});
 }
 
-// Original Zire 72 body: blue-tinted satin silver. The Zire 72s is plain silver.
-const Rgb zire72Body{156,165,182};
+// Original Zire 72 body: graphite-tinted satin silver. The Zire 72s is plain silver.
+const Rgb zire72Body{126,128,137};
 
 void paintZire72Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
     const float H=profile.height;
@@ -1196,6 +1192,9 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
 
     const SilverKeyLook keys{Rgb{92,90,88},Rgb{240,239,236},Rgb{196,194,190},Rgb{14,14,14},Rgb{226,223,216},
                              Rgb{60,60,66},Rgb{50,50,56},1.1f,0.74f};
+    // Keyboard caps: slightly domed, drawn inside their hit areas so the rows show clear gaps.
+    SilverKeyLook caps=keys;caps.dome=0.3f;
+    const float capInset=1.3f;
     const Rgb ink{62,62,68},glow{226,146,44};
     const DeviceButton* up=nullptr;const DeviceButton* dn=nullptr;
     for(size_t i=0;i<profile.count;++i) {
@@ -1215,6 +1214,27 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
         canvas.paint(cx-5,4,cx+5,17,[&](float x,float y) {
             const std::array<std::array<float,2>,3> t0{{{cx-3,9},{cx+3,9},{cx,5.4f}}},t1{{{cx-3,11.4f},{cx+3,11.4f},{cx,15}}};
             return canvas.edge(std::min(polygon(x,y,t0),polygon(x,y,t1)));
+        },[&](float,float,Rgb) {return ink;});
+    }
+    // Menu and Find marks printed by the round keys, each with a dash towards the bar.
+    for(size_t i=0;i<profile.count;++i) {
+        const auto& b=profile.buttons[i];
+        if(b.key!=keyIdHome && b.key!=keyIdGraffiti)continue;
+        const SDL_Rect r=shifted(b.bounds);
+        const bool menu=b.key==keyIdHome;
+        const float cx=menu ? r.x+r.w+3.5f : r.x-3.5f,cy=10.2f,dash=menu ? 1.f : -1.f;
+        canvas.paint(cx-9,cy-5,cx+9,cy+5,[&](float x,float y) {
+            float d=segment(x,y,cx+dash*4.8f,cy,cx+dash*7.6f,cy)-0.6f;
+            if(menu) {
+                // A title bar over three lines.
+                d=std::min(d,box(x,y,cx-2.6f,cy-3.6f,cx+2.6f,cy-1.8f));
+                for(float ly:{-0.2f,1.6f,3.4f})d=std::min(d,segment(x,y,cx-2.3f,cy+ly,cx+2.3f,cy+ly)-0.42f);
+            } else {
+                // A magnifier: a ring and its handle.
+                d=std::min(d,std::fabs(std::hypot(x-cx-0.7f,y-cy+0.7f)-2.3f)-0.55f);
+                d=std::min(d,segment(x,y,cx-0.9f,cy+0.9f,cx-3.4f,cy+3.4f)-0.7f);
+            }
+            return canvas.edge(d);
         },[&](float,float,Rgb) {return ink;});
     }
     SDL_Rect bar{0,0,0,0};
@@ -1309,7 +1329,7 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
             const auto& legend=tg50Legends[index];
             const SDL_Rect r=shifted(b.bounds);
             const bool held=down(b.key);
-            paintSilverKey(canvas,r,deviceButtonCorner(profile,b),held,b.icon,1,keys,false);
+            paintSilverKey(canvas,r,deviceButtonCorner(profile,b),held,b.icon,1,caps,false,capInset);
             const float sink=held ? 0.7f : 0,cx=r.x+r.w*0.5f,cy=r.y+r.h*0.5f+sink;
             const Rgb face=held ? glow : ink;
             auto text=[&](const char* t,float tx,float ty,float size,float weight,Rgb colour) {
@@ -1366,7 +1386,9 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
                 case Tg50Mark::none: break;
             }
             // Printed under the key, towards its right.
-            if(*legend.blue)text(legend.blue,r.x+r.w-7,r.y+r.h+3.2f,0.72f,0.5f,tg50Blue);
+            // Digits under the top row are printed dark, the other symbols blue.
+            if(*legend.blue)text(legend.blue,r.x+r.w-7,r.y+r.h+3.2f,0.72f,0.5f,
+                                 std::isdigit(static_cast<unsigned char>(*legend.blue)) ? ink : tg50Blue);
             if(*legend.red)text(legend.red,r.x+r.w-9,r.y+r.h+3.2f,0.72f,0.5f,tg50Red);
         }
     }

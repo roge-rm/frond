@@ -209,7 +209,7 @@ int main() {
         assert(p->frontend.available && deviceProfileRunnerEligible5(p->deviceType));
         assert(p->support == DeviceSupport5::experimentalDesktop);
         assert(p->frontend.width == 320 && p->frontend.height == 480 && p->frontend.silkscreenHeight == 0);
-        assert(p->frontend.stripHeight == 80 && deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::sd);
+        assert(p->frontend.stripHeight == 96 && deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::sd);
         assert(!std::strstr(p->frontend.buttons, "power"));
         assert(std::strstr(deviceProfile5(deviceTypeE2)->frontend.buttons, "power"));
         const auto display = deviceConfigurationDisplayConfigForDevice(p->deviceType, p->defaultDisplay);

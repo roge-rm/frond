@@ -2053,8 +2053,18 @@ int main(int argc,char** argv) {
     firmwarePowerInput();
     const auto& profile=deviceControls(deviceTypeTX);
     assert(profile.count==9 && profile.style==DeviceControlStyle::tx && profile.height==84);
+    // TX: the five-way fills the bar's height, its select key a rounded rectangle; each app
+    // key stands clear of it.
+    assert(profile.navigator.y==0 && profile.navigator.h==profile.height && profile.navigator.w==112);
+    assert(profile.select.w==68 && profile.select.h==34 && profile.selectCorner>0 && profile.selectCorner<profile.select.h*0.5f);
+    assert(profile.buttons[1].bounds.x+profile.buttons[1].bounds.w<profile.navigator.x &&
+           profile.buttons[2].bounds.x>profile.navigator.x+profile.navigator.w);
     const auto& e2=deviceControls(deviceTypeE2);
-    assert(e2.count==9 && e2.height==80 && e2.style==DeviceControlStyle::e2);
+    assert(e2.count==9 && e2.height==96 && e2.style==DeviceControlStyle::e2);
+    // E2: a 118x90 five-way in a 96-unit bar and 44x36 app keys.
+    assert(e2.navigator.w==118 && e2.navigator.h==90 && e2.navigator.y+e2.navigator.h<e2.height);
+    assert(e2.select.w==60 && e2.select.h==34 && e2.selectCorner>0);
+    for(int k=0;k<4;++k)assert(e2.buttons[k].bounds.w==44 && e2.buttons[k].bounds.h==36);
     // E2 app keys follow the ROM: hard1-4 are Calendar, Contacts, Tasks and Note Pad, left to right.
     for(int k=0;k<4;++k)assert(e2.buttons[k].key==KeyId(keyIdHard1+k) && (k==0 || e2.buttons[k].bounds.x>e2.buttons[k-1].bounds.x));
     assert(e2.buttons[1].bounds.x+e2.buttons[1].bounds.w<e2.navigator.x && e2.buttons[2].bounds.x>e2.navigator.x+e2.navigator.w);
