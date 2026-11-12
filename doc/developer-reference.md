@@ -27,6 +27,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
+| `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
@@ -831,6 +832,17 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo` (skipped when empty), and the fake 1 kHz microphone level that test's core build reads. |
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
+| `FROND_ZODIAC_ROM`, `FROND_ZODIAC_SHOTS`, `FROND_ZODIAC_STATE`, `FROND_ZODIAC_WINDOW` | Opt-in Zodiac run in the desktop workflow test: the ROM, a folder for pictures of the Palm window, a bring-up state file read by the developer build of the core, and the window to capture. |
+| `FROND_ZODIAC_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves Zodiac screenshots to. |
+| `FROND_ZODIAC_PROBE`, `FROND_ZODIAC_PROBE_ENGINE` | Probe program and engine (`exact` or `fast`) for the Zodiac graphics Python tests. |
+| `FROND_ZODIAC_ASP_ROM`, `FROND_ZODIAC_MMCSD_ROM`, `FROND_ZODIAC_SLOT_ROM` | An original ROM for the ASP pen, empty MMC/SD and SD slot GPIO tests, which otherwise use a generated one. |
+| `FROND_ZODIAC_ASP_EVIDENCE`, `FROND_ZODIAC_MMCSD_EVIDENCE`, `FROND_ZODIAC_SLOT_EVIDENCE`, `FROND_ZODIAC_PLAIN_PROBE_EVIDENCE`, `FROND_ZODIAC_A4_PROBE_EVIDENCE`, `FROND_ZODIAC_A4_RESULTS` | File the matching Zodiac test writes its output to. |
+| `FROND_ZODIAC_BASELINE_PROBE` | Earlier probe program that `tests/zodiac-machine-frame.py` compares against. |
+| `FROND_ZODIAC_A4_PACKET`, `FROND_ZODIAC_A4_MASK`, `FROND_ZODIAC_A4_DESTINATION`, `FROND_ZODIAC_A4_SOURCE2` | Private packet, mask, destination and second source files for `test-zodiac-graphics-a4`. |
+| `FROND_ZODIAC_PLAIN_PACKET`, `FROND_ZODIAC_PLAIN_SOURCE` | Private packet and source files for `test-zodiac-graphics-plain-copy`. |
+| `FROND_ZODIAC_HOSTDATA_PACKET`, `FROND_ZODIAC_HOSTDATA_SOURCE` | Private packet and source files for the host-data and keyed-copy Zodiac graphics tests. |
+| `ZODIAC_TEST_STOP` | `1` makes `test-zodiac-normal-runtime` also check the stop path. |
+| `ZODIAC_NDK` | Android NDK for `test-zodiac-state-fingerprint`. Default the newest in `$ANDROID_HOME/ndk`. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
 | `FROND_CARD_TOOL` | The program the desktop runs as the card tool (`--card`), instead of its own core. The workflow test sets it to the ARM core. |
 | `FROND_CARD_OUT` | Folder the card file tests (`tests/card-file.cpp`, Android's `CardFileTest`) write edited cards to, with the files each should hold in `NAME.files/`, for loading them in the core. |
@@ -994,6 +1006,34 @@ All in `tools/`. Most take `--help`.
 | `test-imx1-sysctrl` | SCM GCCR/FMCR configuration, guarded boot and memory mux changes, fetch isolation and Timer 1 phase. See [System Control](zodiac2-sysctrl.md). Outside `make test`. |
 | `test-imx1-eim` | EIM chip-select register state and strict bootstrap limits. See [EIM](zodiac2-eim.md). Outside `make test`. |
 | `test-zodiac-mmio` | Bootstrap register/RAM state and Exact/Fast probe checks. Optional `build/test-zodiac-mmio-probe ROM` compares private scenarios. Outside `make test`. |
+| `test-imx1` | Every i.MX1 test below. Outside `make test`. |
+| `test-imx1-mmcsd` | MMC/SD controller registers. Outside `make test`. |
+| `test-imx1-mmcsd-card` | MMC/SD controller with a card behind it. Outside `make test`. |
+| `test-imx1-uart` | i.MX1 UART registers and FIFOs. Outside `make test`. |
+| `test-imx1-mpll-retune` | Equal-frequency MCU PLL reprogramming and the CPU handoff. Outside `make test`. |
+| `test-imx1-rtc-live-writes` | RTC interrupt configuration with an active watchdog. Outside `make test`. |
+| `test-imx1-run-cache` | The UART cache flag survives board assignment. Outside `make test`. |
+| `test-zodiac-asp-pen` | The ASP pen path with a generated ROM, or `FROND_ZODIAC_ASP_ROM`. Outside `make test`. |
+| `test-zodiac-bounded` | Bounded Zodiac machine runs. Outside `make test`. |
+| `test-zodiac-cscr-ssi-clocks` | Independent SSI serial and bus-clock divider changes. Outside `make test`. |
+| `test-zodiac-fast-lean` | The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access. Outside `make test`. |
+| `test-zodiac-gpio-event` | Firmware-free GPIO scenarios through the command-line probe. Outside `make test`. |
+| `test-zodiac-graphics-a4` | Graphics A4 copy packets, with private files from `FROND_ZODIAC_A4_*`. Outside `make test`. |
+| `test-zodiac-graphics-packed-mono` | Packed monochrome graphics through the probe. Outside `make test`. |
+| `test-zodiac-graphics-plain-copy` | Plain graphics copy packets, with private files from `FROND_ZODIAC_PLAIN_*`. Outside `make test`. |
+| `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it. Outside `make test`. |
+| `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
+| `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |
+| `test-zodiac-machine` | Qualified generated guests, one-shot against sliced execution. Outside `make test`. |
+| `test-zodiac-machine-state` | Zodiac machine save and load. Outside `make test`. |
+| `test-zodiac-machine-state-cli` | Two probe processes, one saves and the other loads and has to end like an uninterrupted run. Outside `make test`. |
+| `test-zodiac-machine-state-reject` | Zodiac machine states that must be refused. Outside `make test`. |
+| `test-zodiac-mmcsd-empty` | An empty MMC/SD slot, with a generated ROM or `FROND_ZODIAC_MMCSD_ROM`. Outside `make test`. |
+| `test-zodiac-normal-runtime` | The normal runtime's view turn, pen, stick and EEPROM identity, with no firmware. Outside `make test`. |
+| `test-zodiac-pcm-transport` | PCM transport and disabled UART startup. Outside `make test`. |
+| `test-zodiac-state-fingerprint` | The state layout fingerprint is the desktop's, so states move between hosts. Skipped without an NDK. Outside `make test`. |
+| `test-zodiac-stop-mode` | Stop mode: both PLLs off, CLK32 only, wake on the GPIO lines and the RTC. Outside `make test`. |
+| `test-zodiac-trace-window` | The trace window through the probe. Outside `make test`. |
 | `bluetooth-opp-peer` | Build the OPP test peer and Bluetooth phone. |
 
 Tests in `make test`, by area:
