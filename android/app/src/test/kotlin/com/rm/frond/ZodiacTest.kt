@@ -18,7 +18,8 @@ class ZodiacTest {
         assertTrue(zodiac.zodiac)
         assertEquals(480 to 320, zodiac.width to zodiac.height)
         assertEquals(8192000L, zodiac.norSize)
-        assertFalse(zodiac.sound)
+        assertTrue(zodiac.sound)
+        assertFalse(zodiac.lowLatencyAudio)
         assertFalse(zodiac.runs68k)
         assertFalse(Device.entries.any { it.zodiac && it != zodiac })
     }
@@ -29,7 +30,9 @@ class ZodiacTest {
         assertEquals(Engine.EXACT, MachineSettings.defaults(Device.TX).engine)
         assertTrue(MachineSettings.defaults(zodiac).arguments().containsAll(listOf("--engine", "fast")))
         assertFalse("--mips" in MachineSettings.defaults(zodiac).arguments())
-        assertTrue("--no-sound" in MachineSettings.defaults(zodiac).arguments(soundSupported = zodiac.sound))
+        assertFalse("--no-sound" in MachineSettings.defaults(zodiac).arguments(soundSupported = zodiac.sound))
+        val lowLatency = MachineSettings(fastAudio = true).audioArguments(zodiac.lowLatencyAudio, 256) { true }
+        assertFalse("--fast-audio" in lowLatency || "--low-latency-queue" in lowLatency)
     }
 
     @Test fun choosingAnotherDeviceKeepsAChosenEngine() {

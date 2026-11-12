@@ -104,8 +104,9 @@ data class Device internal constructor(
     // What the firmware file is called: a 68k device takes one ROM file.
     val firmwareLabel: String get() = if (runs68k) "ROM image" else "NOR image"
     val fastAudio: Boolean get() = fastAudioNorMd5 != null || firmwareVariants.any { it.fastAudioNorMd5 != null }
-    // ARM devices use the preview on qualified firmware, otherwise the queue limits only.
-    val lowLatencyAudio: Boolean get() = sound && !runs68k
+    // ARM devices use the preview on qualified firmware, otherwise the queue limits only. The Zodiac's
+    // sound has neither.
+    val lowLatencyAudio: Boolean get() = sound && !runs68k && !zodiac
     val coreFlags: List<String> get() = listOf("--device", id)
     // New SD card sizes in MiB, 32 MB to the device's largest card. "2 GB" is 1886 MiB like a real 2 GB card.
     val sdSizes: List<Int> get() = if (!sdSlot) emptyList() else

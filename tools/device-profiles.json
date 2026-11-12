@@ -869,7 +869,7 @@
       "hot_sync_button": false,
       "cpu_hz": 0,
       "original_mips": 100,
-      "sound": false,
+      "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
         {

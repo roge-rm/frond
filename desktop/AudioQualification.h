@@ -94,6 +94,8 @@ inline bool qualified(frondFirmware::Device device, const QString& session, cons
 // ARM devices use the preview on qualified firmware, otherwise the queue limits only.
 inline bool lowLatencyAvailable(frondFirmware::Device device) {
     if (device == frondFirmware::Device::automatic) return false;
+    // The Zodiac's sound has no low-latency path.
+    if (frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac) return false;
     const auto caps = frondFirmware::capabilities(device);
     return caps.sound && deviceProfileRunnerEligible5(int(device));
 }
