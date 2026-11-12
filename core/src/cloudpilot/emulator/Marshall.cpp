@@ -1,0 +1,787 @@
+#ifdef __linux__
+    #include <arpa/inet.h>
+#elif defined(_WIN32)
+    #include <winsock2.h>
+#endif
+
+#include "EmPalmStructs.h"
+#include "Marshal.h"
+#include "ROMStubs.h"
+
+void Marshal::GetPointType(emuptr p, PointType& dest) {
+    memset(&dest, 0, sizeof(PointType));
+
+    if (p) {
+        EmAliasPointType<PAS> src(p);
+
+        dest.x = src.x;
+        dest.y = src.y;
+    }
+}
+
+void Marshal::PutPointType(emuptr p, const PointType& src) {
+    if (p) {
+        EmAliasPointType<PAS> dest(p);
+
+        dest.x = src.x;
+        dest.y = src.y;
+    }
+}
+
+void Marshal::GetSysKernelInfoType(emuptr p, SysKernelInfoType& dest) {
+    memset(&dest, 0, sizeof(SysKernelInfoType));
+
+    if (p) {
+        EmAliasSysKernelInfoType<PAS> src(p);
+
+        dest.selector = src.selector;
+        dest.reserved = src.reserved;
+        dest.id = src.id;
+
+        switch (dest.selector) {
+            case sysKernelInfoSelCurTaskInfo:
+            case sysKernelInfoSelTaskInfo:
+                dest.param.task.id = src.task.id;
+                dest.param.task.nextID = src.task.nextID;
+                dest.param.task.tag = src.task.tag;
+                dest.param.task.status = src.task.status;
+                dest.param.task.timer = src.task.timer;
+                dest.param.task.timeSlice = src.task.timeSlice;
+                dest.param.task.priority = src.task.priority;
+                dest.param.task.attributes = src.task.attributes;
+                dest.param.task.pendingCalls = src.task.pendingCalls;
+                dest.param.task.senderTaskID = src.task.senderTaskID;
+                dest.param.task.msgExchangeID = src.task.msgExchangeID;
+                dest.param.task.tcbP = src.task.tcbP;
+                dest.param.task.stackP = src.task.stackP;
+                dest.param.task.stackStart = src.task.stackStart;
+                dest.param.task.stackSize = src.task.stackSize;
+                break;
+
+            case sysKernelInfoSelSemaphoreInfo:
+                dest.param.semaphore.id = src.semaphore.id;
+                dest.param.semaphore.nextID = src.semaphore.nextID;
+                dest.param.semaphore.tag = src.semaphore.tag;
+                dest.param.semaphore.initValue = src.semaphore.initValue;
+                dest.param.semaphore.curValue = src.semaphore.curValue;
+                dest.param.semaphore.nestLevel = src.semaphore.nestLevel;
+                dest.param.semaphore.ownerID = src.semaphore.ownerID;
+                break;
+
+            case sysKernelInfoSelTimerInfo:
+                dest.param.timer.id = src.timer.id;
+                dest.param.timer.nextID = src.timer.nextID;
+                dest.param.timer.tag = src.timer.tag;
+                dest.param.timer.ticksLeft = src.timer.ticksLeft;
+                dest.param.timer.period = src.timer.period;
+                dest.param.timer.proc = src.timer.proc;
+                break;
+
+            default:
+                EmAssert(false);
+        }
+    }
+}
+
+void Marshal::PutSysKernelInfoType(emuptr p, const SysKernelInfoType& src) {
+    if (p) {
+        EmAliasSysKernelInfoType<PAS> dest(p);
+
+        dest.selector = src.selector;
+        dest.reserved = src.reserved;
+        dest.id = src.id;
+
+        switch (dest.selector) {
+            case sysKernelInfoSelCurTaskInfo:
+            case sysKernelInfoSelTaskInfo:
+                dest.task.id = src.param.task.id;
+                dest.task.nextID = src.param.task.nextID;
+                dest.task.tag = src.param.task.tag;
+                dest.task.status = src.param.task.status;
+                dest.task.timer = src.param.task.timer;
+                dest.task.timeSlice = src.param.task.timeSlice;
+                dest.task.priority = src.param.task.priority;
+                dest.task.attributes = src.param.task.attributes;
+                dest.task.pendingCalls = src.param.task.pendingCalls;
+                dest.task.senderTaskID = src.param.task.senderTaskID;
+                dest.task.msgExchangeID = src.param.task.msgExchangeID;
+                dest.task.tcbP = src.param.task.tcbP;
+                dest.task.stackP = src.param.task.stackP;
+                dest.task.stackStart = src.param.task.stackStart;
+                dest.task.stackSize = src.param.task.stackSize;
+                break;
+
+            case sysKernelInfoSelSemaphoreInfo:
+                dest.semaphore.id = src.param.semaphore.id;
+                dest.semaphore.nextID = src.param.semaphore.nextID;
+                dest.semaphore.tag = src.param.semaphore.tag;
+                dest.semaphore.initValue = src.param.semaphore.initValue;
+                dest.semaphore.curValue = src.param.semaphore.curValue;
+                dest.semaphore.nestLevel = src.param.semaphore.nestLevel;
+                dest.semaphore.ownerID = src.param.semaphore.ownerID;
+                break;
+
+            case sysKernelInfoSelTimerInfo:
+                dest.timer.id = src.param.timer.id;
+                dest.timer.nextID = src.param.timer.nextID;
+                dest.timer.tag = src.param.timer.tag;
+                dest.timer.ticksLeft = src.param.timer.ticksLeft;
+                dest.timer.period = src.param.timer.period;
+                dest.timer.proc = src.param.timer.proc;
+                break;
+
+            default:
+                EmAssert(false);
+        }
+    }
+}
+
+void Marshal::PutDlkServerSessionType(emuptr p, const DlkServerSessionType& src) {
+    if (p) {
+        EmAliasDlkServerSessionType<PAS> dest(p);
+
+        dest.htalLibRefNum = src.htalLibRefNum;
+        dest.maxHtalXferSize = src.maxHtalXferSize;
+        dest.eventProcP = (emuptr)(uintptr_t)src.eventProcP;
+        dest.eventRef = src.eventRef;
+        dest.canProcP = (emuptr)(uintptr_t)src.canProcP;
+        dest.canRef = src.canRef;
+        dest.condFilterH = (emuptr)(uintptr_t)src.condFilterH;
+        dest.dlkDBID = src.dlkDBID;
+        dest.reserved1 = src.reserved1;
+        dest.dbR = (emuptr)(uintptr_t)src.dbR;
+        dest.cardNo = src.cardNo;
+        dest.dbCreator = src.dbCreator;
+        //	dest.dbName				= src.dbName;
+        dest.dbOpenMode = src.dbOpenMode;
+        dest.created = src.created;
+        dest.isResDB = src.isResDB;
+        dest.ramBased = src.ramBased;
+        dest.readOnly = src.readOnly;
+        dest.dbLocalID = src.dbLocalID;
+        dest.initialModNum = src.initialModNum;
+        dest.curRecIndex = src.curRecIndex;
+        //	dest.creatorList		= src.creatorList;
+        dest.syncState = src.syncState;
+        dest.complete = src.complete;
+        dest.conduitOpened = src.conduitOpened;
+        dest.logCleared = src.logCleared;
+        dest.resetPending = src.resetPending;
+        dest.gotCommand = src.gotCommand;
+        dest.cmdTID = src.cmdTID;
+        dest.reserved2 = src.reserved2;
+        dest.cmdLen = src.cmdLen;
+        dest.cmdP = (emuptr)(uintptr_t)src.cmdP;
+        dest.cmdH = (emuptr)(uintptr_t)src.cmdH;
+        dest.wStateFlags = src.wStateFlags;
+        //	dest.dbSearchState		= src.dbSearchState;
+    }
+}
+
+void Marshal::GetEventType(emuptr p, EventType& dest) {
+    memset(&dest, 0, sizeof(EventType));
+
+    if (p) {
+        EmAliasEventType<PAS> src(p);
+
+        dest.eType = src.eType;
+        dest.penDown = src.penDown;
+        dest.screenX = src.screenX;
+        dest.screenY = src.screenY;
+
+        switch (dest.eType) {
+            case nilEvent:
+                break;
+
+            case penDownEvent:
+                dest.data.penUp.start.x = src.data.penUp.start.x;
+                dest.data.penUp.start.y = src.data.penUp.start.y;
+                dest.data.penUp.end.x = src.data.penUp.end.x;
+                dest.data.penUp.end.y = src.data.penUp.end.y;
+                break;
+
+            case penUpEvent:
+                dest.data.penUp.start.x = src.data.penUp.start.x;
+                dest.data.penUp.start.y = src.data.penUp.start.y;
+                dest.data.penUp.end.x = src.data.penUp.end.x;
+                dest.data.penUp.end.y = src.data.penUp.end.y;
+                break;
+
+            case penMoveEvent:
+                dest.data.penUp.start.x = src.data.penUp.start.x;
+                dest.data.penUp.start.y = src.data.penUp.start.y;
+                dest.data.penUp.end.x = src.data.penUp.end.x;
+                dest.data.penUp.end.y = src.data.penUp.end.y;
+                break;
+
+            case keyDownEvent:
+                dest.data.keyDown.chr = src.data.keyDown.chr;
+                dest.data.keyDown.keyCode = src.data.keyDown.keyCode;
+                dest.data.keyDown.modifiers = src.data.keyDown.modifiers;
+                break;
+
+            case winEnterEvent:
+                dest.data.winEnter.enterWindow = (WinHandle)(uintptr_t)src.data.winEnter.enterWindow;
+                dest.data.winEnter.exitWindow = (WinHandle)(uintptr_t)src.data.winEnter.exitWindow;
+                break;
+
+            case winExitEvent:
+                dest.data.winExit.enterWindow = (WinHandle)(uintptr_t)src.data.winExit.enterWindow;
+                dest.data.winExit.exitWindow = (WinHandle)(uintptr_t)src.data.winExit.exitWindow;
+                break;
+
+            case ctlEnterEvent:
+                dest.data.ctlEnter.controlID = src.data.ctlEnter.controlID;
+                dest.data.ctlEnter.pControl = (struct ControlType*)(uintptr_t)src.data.ctlEnter.pControl;
+                break;
+
+            case ctlExitEvent:
+                dest.data.ctlExit.controlID = src.data.ctlExit.controlID;
+                dest.data.ctlExit.pControl = (struct ControlType*)(uintptr_t)src.data.ctlExit.pControl;
+                break;
+
+            case ctlSelectEvent:
+                dest.data.ctlSelect.controlID = src.data.ctlSelect.controlID;
+                dest.data.ctlSelect.pControl =
+                    (struct ControlType*)(uintptr_t)src.data.ctlSelect.pControl;
+                dest.data.ctlSelect.on = src.data.ctlSelect.on;
+                break;
+
+            case ctlRepeatEvent:
+                dest.data.ctlRepeat.controlID = src.data.ctlRepeat.controlID;
+                dest.data.ctlRepeat.pControl =
+                    (struct ControlType*)(uintptr_t)src.data.ctlRepeat.pControl;
+                dest.data.ctlRepeat.time = src.data.ctlRepeat.time;
+                break;
+
+            case lstEnterEvent:
+                dest.data.lstEnter.listID = src.data.lstEnter.listID;
+                dest.data.lstEnter.pList = (struct ListType*)(uintptr_t)src.data.lstEnter.pList;
+                dest.data.lstEnter.selection = src.data.lstEnter.selection;
+                break;
+
+            case lstSelectEvent:
+                dest.data.lstSelect.listID = src.data.lstSelect.listID;
+                dest.data.lstSelect.pList = (struct ListType*)(uintptr_t)src.data.lstSelect.pList;
+                dest.data.lstSelect.selection = src.data.lstSelect.selection;
+                break;
+
+            case lstExitEvent:
+                dest.data.lstExit.listID = src.data.lstExit.listID;
+                dest.data.lstExit.pList = (struct ListType*)(uintptr_t)src.data.lstExit.pList;
+                break;
+
+            case popSelectEvent:
+                dest.data.popSelect.controlID = src.data.popSelect.controlID;
+                dest.data.popSelect.controlP =
+                    (struct ControlType*)(uintptr_t)src.data.popSelect.controlP;
+                dest.data.popSelect.listID = src.data.popSelect.listID;
+                dest.data.popSelect.listP = (struct ListType*)(uintptr_t)src.data.popSelect.listP;
+                dest.data.popSelect.selection = src.data.popSelect.selection;
+                dest.data.popSelect.priorSelection = src.data.popSelect.priorSelection;
+                break;
+
+            case fldEnterEvent:
+                dest.data.fldEnter.fieldID = src.data.fldEnter.fieldID;
+                dest.data.fldEnter.pField = (struct FieldType*)(uintptr_t)src.data.fldEnter.pField;
+                break;
+
+            case fldHeightChangedEvent:
+                dest.data.fldHeightChanged.fieldID = src.data.fldHeightChanged.fieldID;
+                dest.data.fldHeightChanged.pField =
+                    (struct FieldType*)(uintptr_t)src.data.fldHeightChanged.pField;
+                dest.data.fldHeightChanged.newHeight = src.data.fldHeightChanged.newHeight;
+                dest.data.fldHeightChanged.currentPos = src.data.fldHeightChanged.currentPos;
+                break;
+
+            case fldChangedEvent:
+                dest.data.fldChanged.fieldID = src.data.fldChanged.fieldID;
+                dest.data.fldChanged.pField = (struct FieldType*)(uintptr_t)src.data.fldChanged.pField;
+                break;
+
+            case tblEnterEvent:
+                dest.data.tblEnter.tableID = src.data.tblEnter.tableID;
+                dest.data.tblEnter.pTable = (struct TableType*)(uintptr_t)src.data.tblEnter.pTable;
+                dest.data.tblEnter.row = src.data.tblEnter.row;
+                dest.data.tblEnter.column = src.data.tblEnter.column;
+                break;
+
+            case tblSelectEvent:
+                dest.data.tblEnter.tableID = src.data.tblEnter.tableID;
+                dest.data.tblEnter.pTable = (struct TableType*)(uintptr_t)src.data.tblEnter.pTable;
+                dest.data.tblEnter.row = src.data.tblEnter.row;
+                dest.data.tblEnter.column = src.data.tblEnter.column;
+                break;
+
+            case daySelectEvent:
+                dest.data.daySelect.pSelector =
+                    (struct DaySelectorType*)(uintptr_t)src.data.daySelect.pSelector;
+                dest.data.daySelect.selection = src.data.daySelect.selection;
+                dest.data.daySelect.useThisDate = src.data.daySelect.useThisDate;
+                break;
+
+            case menuEvent:
+                dest.data.menu.itemID = src.data.menu.itemID;
+                break;
+
+            case appStopEvent:
+                break;
+
+            case frmLoadEvent:
+                dest.data.frmLoad.formID = src.data.frmLoad.formID;
+                break;
+
+            case frmOpenEvent:
+                dest.data.frmOpen.formID = src.data.frmOpen.formID;
+                break;
+
+            case frmGotoEvent:
+                dest.data.frmGoto.formID = src.data.frmGoto.formID;
+                dest.data.frmGoto.recordNum = src.data.frmGoto.recordNum;
+                dest.data.frmGoto.matchPos = src.data.frmGoto.matchPos;
+                dest.data.frmGoto.matchLen = src.data.frmGoto.matchLen;
+                dest.data.frmGoto.matchFieldNum = src.data.frmGoto.matchFieldNum;
+                dest.data.frmGoto.matchCustom = src.data.frmGoto.matchCustom;
+                break;
+
+            case frmUpdateEvent:
+                dest.data.frmUpdate.formID = src.data.frmUpdate.formID;
+                dest.data.frmUpdate.updateCode = src.data.frmUpdate.updateCode;
+                break;
+
+            case frmSaveEvent:
+                break;
+
+            case frmCloseEvent:
+                dest.data.frmClose.formID = src.data.frmClose.formID;
+                break;
+
+            case frmTitleEnterEvent:
+                dest.data.frmTitleEnter.formID = src.data.frmTitleEnter.formID;
+                break;
+
+            case frmTitleSelectEvent:
+                dest.data.frmTitleSelect.formID = src.data.frmTitleSelect.formID;
+                break;
+
+            case tblExitEvent:
+                dest.data.tblExit.tableID = src.data.tblExit.tableID;
+                dest.data.tblExit.pTable = (struct TableType*)(uintptr_t)src.data.tblExit.pTable;
+                dest.data.tblExit.row = src.data.tblExit.row;
+                dest.data.tblExit.column = src.data.tblExit.column;
+                break;
+
+            case sclEnterEvent:
+                dest.data.sclEnter.scrollBarID = src.data.sclEnter.scrollBarID;
+                dest.data.sclEnter.pScrollBar =
+                    (struct ScrollBarType*)(uintptr_t)src.data.sclEnter.pScrollBar;
+                break;
+
+            case sclExitEvent:
+                dest.data.sclExit.scrollBarID = src.data.sclExit.scrollBarID;
+                dest.data.sclExit.pScrollBar =
+                    (struct ScrollBarType*)(uintptr_t)src.data.sclExit.pScrollBar;
+                dest.data.sclExit.value = src.data.sclExit.value;
+                dest.data.sclExit.newValue = src.data.sclExit.newValue;
+                break;
+
+            case sclRepeatEvent:
+                dest.data.sclRepeat.scrollBarID = src.data.sclRepeat.scrollBarID;
+                dest.data.sclRepeat.pScrollBar =
+                    (struct ScrollBarType*)(uintptr_t)src.data.sclRepeat.pScrollBar;
+                dest.data.sclRepeat.value = src.data.sclRepeat.value;
+                dest.data.sclRepeat.newValue = src.data.sclRepeat.newValue;
+                dest.data.sclRepeat.time = src.data.sclRepeat.time;
+                break;
+
+            case tsmConfirmEvent:
+                dest.data.tsmConfirm.yomiText = (Char*)(uintptr_t)src.data.tsmConfirm.yomiText;
+                dest.data.tsmConfirm.formID = src.data.tsmConfirm.formID;
+                break;
+
+            case tsmFepButtonEvent:
+                dest.data.tsmFepButton.buttonID = src.data.tsmFepButton.buttonID;
+                break;
+
+            case tsmFepModeEvent:
+                dest.data.tsmFepMode.mode = src.data.tsmFepMode.mode;
+                break;
+
+            case attnIndicatorEnterEvent:
+                dest.data.attnIndicatorEnter.formID = src.data.attnIndicatorEnter.formID;
+                break;
+
+            case attnIndicatorSelectEvent:
+                dest.data.attnIndicatorSelect.formID = src.data.attnIndicatorSelect.formID;
+                break;
+
+            case menuCmdBarOpenEvent:
+                dest.data.menuCmdBarOpen.preventFieldButtons =
+                    src.data.menuCmdBarOpen.preventFieldButtons;
+                dest.data.menuCmdBarOpen.reserved = src.data.menuCmdBarOpen.reserved;
+                break;
+
+            case menuOpenEvent:
+                dest.data.menuOpen.menuRscID = src.data.menuOpen.menuRscID;
+                dest.data.menuOpen.cause = src.data.menuOpen.cause;
+                break;
+
+            case menuCloseEvent:
+                // Doesn't appear to be used.
+                break;
+
+            case frmGadgetEnterEvent:
+                dest.data.gadgetEnter.gadgetID = src.data.gadgetEnter.gadgetID;
+                dest.data.gadgetEnter.gadgetP =
+                    (struct FormGadgetType*)(uintptr_t)src.data.gadgetEnter.gadgetP;
+                break;
+
+            case frmGadgetMiscEvent:
+                dest.data.gadgetMisc.gadgetID = src.data.gadgetMisc.gadgetID;
+                dest.data.gadgetMisc.gadgetP =
+                    (struct FormGadgetType*)(uintptr_t)src.data.gadgetMisc.gadgetP;
+                dest.data.gadgetMisc.selector = src.data.gadgetMisc.selector;
+                dest.data.gadgetMisc.dataP = (void*)(uintptr_t)src.data.gadgetMisc.dataP;
+                break;
+
+            default:
+                if ((dest.eType >= firstINetLibEvent && dest.eType < firstWebLibEvent + 0x100) ||
+                    dest.eType >= firstUserEvent) {
+                    // We don't know what's in here, so let's just blockmove it.
+
+                    EmMem_memcpy((void*)dest.data.generic.datum, src.data.generic.datum.GetPtr(),
+                                 16);
+                } else {
+                    EmAssert(false);
+                }
+        }
+    }
+}
+
+void Marshal::GetNetIOParamType(emuptr p, NetIOParamType& dest) {
+    memset(&dest, 0, sizeof(NetIOParamType));
+
+    if (p) {
+        EmAliasNetIOParamType<PAS> src(p);
+
+        // Copy the simple fields.
+
+        dest.addrLen = src.addrLen;
+        dest.iovLen = src.iovLen;
+        dest.accessRightsLen = src.accessRightsLen;
+
+        // Copy the address field.
+
+        dest.addrP = (UInt8*)GetBuffer(src.addrP, src.addrLen);
+        if (dest.addrP) {
+            // The "family" field needs to be stored in HBO, not NBO.
+            // The following sequence will assure that.
+
+            EmAliasNetSocketAddrType<PAS> addr(src.addrP);
+
+            ((NetSocketAddrType*)(dest.addrP))->family = addr.family;
+        }
+
+        // Copy the access rights field.
+
+        dest.accessRights = (UInt8*)GetBuffer(src.accessRights, dest.accessRightsLen);
+
+        // Copy the i/o buffers.
+
+        dest.iov = (NetIOVecPtr)Platform::AllocateMemory(dest.iovLen * sizeof(NetIOVecType));
+        emuptr iovP = src.iov;
+
+        for (UInt16 ii = 0; ii < dest.iovLen; ++ii) {
+            EmAliasNetIOVecType<PAS> iov(iovP);
+
+            dest.iov[ii].bufLen = iov.bufLen;
+            dest.iov[ii].bufP = (UInt8*)GetBuffer(iov.bufP, iov.bufLen);
+
+            iovP += iov.GetSize();
+        }
+    }
+}
+
+void Marshal::PutNetIOParamType(emuptr p, const NetIOParamType& src) {
+    if (p) {
+        EmAliasNetIOParamType<PAS> dest(p);
+
+        // Copy the simple fields.
+
+        dest.addrLen = src.addrLen;
+        dest.iovLen = src.iovLen;
+        dest.accessRightsLen = src.accessRightsLen;
+
+        // Copy the address field.
+
+        PutBuffer(dest.addrP, src.addrP, src.addrLen);
+
+        if (src.addrP) {
+            // The "family" field needs to be stored in HBO, not NBO.
+            // The following sequence will assure that.
+
+            EmAliasNetSocketAddrType<PAS> addr(dest.addrP);
+
+            addr.family = ((NetSocketAddrType*)(src.addrP))->family;
+        }
+
+        // Copy the access rights field.
+
+        PutBuffer(dest.accessRights, src.accessRights, src.accessRightsLen);
+
+        // Copy the i/o buffers.
+
+        emuptr iovP = dest.iov;
+
+        for (UInt16 ii = 0; ii < src.iovLen; ++ii) {
+            EmAliasNetIOVecType<PAS> iov(iovP);
+
+            iov.bufLen = src.iov[ii].bufLen;
+            PutBuffer(iov.bufP, src.iov[ii].bufP, src.iov[ii].bufLen);
+
+            iovP += iov.GetSize();
+        }
+
+        void* buffer = src.iov;
+        Platform::DisposeMemory(buffer);
+    }
+}
+
+void Marshal::GetNetSocketAddrType(emuptr p, NetSocketAddrType& d) {
+    memset(&d, 0, sizeof(NetSocketAddrType));
+
+    if (p) {
+        EmAliasNetSocketAddrType<PAS> sockAddr(p);
+
+        switch (sockAddr.family) {
+            case netSocketAddrRaw: {
+                EmAliasNetSocketAddrRawType<PAS> src(p);
+                NetSocketAddrRawType& dest = (NetSocketAddrRawType&)d;
+
+                dest.family = src.family;          // In HBO
+                dest.ifInstance = src.ifInstance;  // Unspecified order
+                dest.ifCreator = src.ifCreator;    // Unspecified order
+
+                break;
+            }
+
+            case netSocketAddrINET: {
+                EmAliasNetSocketAddrINType<PAS> src(p);
+                NetSocketAddrINType& dest = (NetSocketAddrINType&)d;
+
+                dest.family = src.family;                       // In HBO
+                dest.port = htons(NetNToHS((UInt16)src.port));  // In NBO
+                dest.addr = htonl(NetNToHL((UInt32)src.addr));  // In NBO
+
+                break;
+            }
+
+            default: {
+                // Do the best we can...
+                EmAliasNetSocketAddrType<PAS> src(p);
+                NetSocketAddrType& dest = (NetSocketAddrType&)d;
+
+                dest.family = src.family;  // In HBO
+
+                EmMem_memcpy((void*)&dest.data[0], src.data.GetPtr(), 14);
+                break;
+            }
+        }
+    }
+}
+
+void Marshal::PutNetSocketAddrType(emuptr p, const NetSocketAddrType& s) {
+    if (p) {
+        switch (s.family) {
+            case netSocketAddrRaw: {
+                EmAliasNetSocketAddrRawType<PAS> dest(p);
+                NetSocketAddrRawType& src = (NetSocketAddrRawType&)s;
+
+                dest.family = src.family;          // In HBO
+                dest.ifInstance = src.ifInstance;  // Unspecified order
+                dest.ifCreator = src.ifCreator;    // Unspecified order
+
+                break;
+            }
+
+            case netSocketAddrINET: {
+                EmAliasNetSocketAddrINType<PAS> dest(p);
+                NetSocketAddrINType& src = (NetSocketAddrINType&)s;
+
+                dest.family = src.family;               // In HBO
+                dest.port = NetHToNS(ntohs(src.port));  // In NBO
+                dest.addr = (UInt32)NetHToNL(ntohl(src.addr));  // In NBO
+
+                break;
+            }
+
+            default: {
+                // Do the best we can...
+                EmAliasNetSocketAddrType<PAS> dest(p);
+                NetSocketAddrType& src = (NetSocketAddrType&)s;
+
+                dest.family = src.family;  // In HBO
+
+                EmMem_memcpy(dest.data.GetPtr(), (void*)&src.data[0], 14);
+                break;
+            }
+        }
+    }
+}
+
+void* Marshal::GetBuffer(emuptr p, long len) {
+    void* result = NULL;
+
+    if (p) {
+        result = Platform::AllocateMemory(len);
+
+        if (result) {
+            EmMem_memcpy(result, p, len);
+        }
+    }
+
+    return result;
+}
+
+void Marshal::GetNetServInfoBufType(emuptr p, NetServInfoBufType& netServInfoBuf) {
+    memset(&netServInfoBuf, 0, sizeof(NetServInfoBufType));
+
+    if (p) {
+    }
+}
+
+void Marshal::PutNetServInfoBufType(emuptr p, const NetServInfoBufType& src) {
+    if (p) {
+        EmAliasNetServInfoBufType<PAS> dest(p);
+
+        // Copy the server name.
+
+        dest.servInfo.nameP = dest.name.GetPtr();
+        EmMem_strcpy((emuptr)dest.servInfo.nameP, src.name);
+
+        // Copy the aliases.
+
+        dest.servInfo.nameAliasesP = dest.aliasList.GetPtr();
+
+        Char** srcNameAliasesP = src.servInfo.nameAliasesP;  // Ptr to src ptrs
+        emuptr destAliasList = dest.aliasList.GetPtr();      // Ptr to dest ptrs
+        emuptr destAliases = dest.aliases.GetPtr();          // Ptr to dest buffer
+
+        while (*srcNameAliasesP) {
+            EmMem_strcpy(destAliases, *srcNameAliasesP);
+
+            EmAliasemuptr<PAS> p(destAliasList);
+            p = destAliases;
+
+            destAliasList += sizeof(emuptr);
+            destAliases += strlen(*srcNameAliasesP) + 1;
+            srcNameAliasesP += 1;
+        }
+
+        EmAliasemuptr<PAS> p1(destAliasList);
+        p1 = EmMemNULL;
+
+        // Copy the port.
+
+        dest.servInfo.port = NetHToNS(ntohs(src.servInfo.port));  // In NBO
+
+        // Copy the proto name.
+
+        dest.servInfo.protoP = dest.protoName.GetPtr();
+        EmMem_strcpy((emuptr)dest.servInfo.protoP, src.protoName);
+    }
+}
+
+void Marshal::GetNetHostInfoBufType(emuptr p, NetHostInfoBufType& netHostInfoBufType) {
+    memset(&netHostInfoBufType, 0, sizeof(NetHostInfoBufType));
+
+    if (p) {
+    }
+}
+
+void Marshal::PutNetHostInfoBufType(emuptr p, const NetHostInfoBufType& src) {
+    if (p) {
+        EmAliasNetHostInfoBufType<PAS> dest(p);
+
+        // Copy the host name.
+
+        dest.hostInfo.nameP = dest.name.GetPtr();
+        EmMem_strcpy((emuptr)dest.hostInfo.nameP, src.name);
+
+        // Copy the aliases.
+
+        dest.hostInfo.nameAliasesP = dest.aliasList.GetPtr();
+
+        Char** srcNameAliasesP = src.hostInfo.nameAliasesP;  // Ptr to src ptrs
+        emuptr destAliasList = dest.aliasList.GetPtr();      // Ptr to dest ptrs
+        emuptr destAliases = dest.aliases.GetPtr();          // Ptr to dest buffer
+
+        while (*srcNameAliasesP) {
+            EmMem_strcpy(destAliases, *srcNameAliasesP);
+
+            EmAliasemuptr<PAS> p(destAliasList);
+            p = destAliases;
+
+            destAliasList += sizeof(emuptr);
+            destAliases += strlen(*srcNameAliasesP) + 1;
+            srcNameAliasesP += 1;
+        }
+
+        EmAliasemuptr<PAS> p1(destAliasList);
+        p1 = EmMemNULL;
+
+        // Copy the easy fields.
+
+        dest.hostInfo.addrType = src.hostInfo.addrType;
+        dest.hostInfo.addrLen = src.hostInfo.addrLen;
+
+        // Copy the address list.
+
+        dest.hostInfo.addrListP = dest.addressList.GetPtr();
+
+        NetIPAddr** addrListP = (NetIPAddr**)src.hostInfo.addrListP;
+        emuptr destAddressList = dest.addressList.GetPtr();
+        emuptr destAddress = dest.address.GetPtr();
+
+        while (*addrListP) {
+            // Copy them one at a time to sort out endian issues.  Just how this
+            // is supposed to be done is not clear (NetLib documentation says that
+            // the addresses are in HBO, while the WinSock header says that the
+            // addresses are supplied in NBO but returned in HBO), but the following
+            // seems to work.
+
+            EmAliasNetIPAddr<PAS> addr(destAddress);
+            addr = (UInt32)ntohl(**addrListP);
+
+            EmAliasemuptr<PAS> p(destAddressList);
+            p = destAddress;
+
+            destAddressList += sizeof(emuptr);
+            destAddress += sizeof(NetIPAddr);
+            addrListP += 1;
+        }
+
+        EmAliasemuptr<PAS> p2(destAddressList);
+        p2 = EmMemNULL;
+    }
+}
+
+void Marshal::GetHwrBatCmdReadType(emuptr p, HwrBatCmdReadType& dest) {
+    memset(&dest, 0, sizeof(HwrBatCmdReadType));
+
+    if (p) {
+        EmAliasHwrBatCmdReadType<PAS> src(p);
+
+        dest.mVolts = src.mVolts;
+        dest.abs = src.abs;
+    }
+}
+
+void Marshal::PutHwrBatCmdReadType(emuptr p, const HwrBatCmdReadType& src) {
+    if (p) {
+        EmAliasHwrBatCmdReadType<PAS> dest(p);
+
+        dest.mVolts = src.mVolts;
+        dest.abs = src.abs;
+    }
+}

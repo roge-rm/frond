@@ -1,0 +1,34 @@
+#ifndef _MEMORY_BUFFER_H_
+#define _MEMORY_BUFFER_H_
+
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+
+#define MEMORY_BUFFER_GRANULARITY (32 * 1024)
+
+#define MEMORY_BUFFER_MARK_DIRTY(buf, addr) \
+    ((buf).dirtyPages[(addr) >> 15] |= (1u << (((addr) >> 10) & 0x1f)))
+
+struct MemoryBuffer {
+    size_t size;
+    size_t dirtyPagesSize;
+
+    uint8_t* buffer;
+    uint32_t* dirtyPages;
+
+    bool isSubBuffer;
+};
+
+bool memoryBufferValid(struct MemoryBuffer* memoryBuffer);
+
+bool memoryBufferAllocate(struct MemoryBuffer* memoryBuffer, size_t size);
+
+void memoryBufferRelease(struct MemoryBuffer* memoryBuffer);
+
+bool memoryBufferGetSubBuffer(struct MemoryBuffer* memoryBuffer, struct MemoryBuffer* subBuffer,
+                              size_t offset, size_t size);
+
+void memoryBufferMarkRangeDirty(struct MemoryBuffer* memoryBuffer, size_t address, size_t size);
+
+#endif  // _MEMORY_BACKBUFFER_H_

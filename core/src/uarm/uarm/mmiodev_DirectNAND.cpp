@@ -1,0 +1,124 @@
+//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+
+#include "mmiodev_DirectNAND.h"
+
+#include <cstdlib>
+#include <cstring>
+
+#include "CPU.h"
+#include "cputil.h"
+#include "device.h"
+#include "mem.h"
+#include "nand.h"
+#include "savestate/savestateAll.h"
+
+struct DirectNAND {
+    uint32_t baseCleAddr, baseAleAddr, baseDataAddr, maskBitsAddr;
+    struct PxaGpio *gpio;
+    struct NAND *nand;
+
+    int8_t rdyPinNo;
+};
+
+static void directNandPrvReady(void *userData, bool ready) {
+    struct DirectNAND *directNand = (struct DirectNAND *)userData;
+
+    if (directNand->rdyPinNo >= 0) pxaGpioSetState(directNand->gpio, directNand->rdyPinNo, ready);
+}
+
+static bool directNandPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                    void *buf) {
+    struct DirectNAND *directNand = (struct DirectNAND *)userData;
+    bool ret, cle = false, ale = false;
+
+    if (size != 1) {
+        fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+                write ? "write" : "read", size, (unsigned long)pa);
+        return false;
+    }
+
+    pa &= ~directNand->maskBitsAddr;
+
+    if (pa == directNand->baseCleAddr)
+        cle = true;
+    else if (pa == directNand->baseAleAddr)
+        ale = true;
+    else if (pa != directNand->baseDataAddr)
+        return false;
+
+    if (write) {
+        ret = nandWrite(directNand->nand, cle, ale, *(uint8_t *)buf);
+        //		if (pa & 6)
+        //			fprintf(stderr, "NAND w c%u a%u 0x%02x -> %s\n", cle, ale,
+        //*(uint8_t*)buf, ret ? "OK" : "FAIL");
+    } else {
+        ret = nandRead(directNand->nand, cle, ale, (uint8_t *)buf);
+        //		if (pa & 6)
+        //			fprintf(stderr, "NAND r c%u a%u 0x%02x -> %s\n", cle, ale,
+        //*(uint8_t*)buf, ret ? "OK" : "FAIL");
+    }
+
+    if (!ret) ERR("NAND ACCESS FAILS\n");
+
+    return ret;
+}
+
+struct DirectNAND *directNandInit(struct ArmMem *physMem, struct Reschedule reschedule,
+                                  uint32_t baseCleAddr, uint32_t baseAleAddr, uint32_t baseDataAddr,
+                                  uint32_t maskBitsAddr, struct PxaGpio *gpio, int rdyPin,
+                                  const struct NandSpecs *specs, uint8_t *nandContent,
+                                  size_t nandSize, const struct MemoryBuffer *pageBuffer) {
+    struct DirectNAND *directNand = (struct DirectNAND *)malloc(sizeof(*directNand));
+    uint32_t minAddr = 0xfffffffful, maxAddr = 0;
+
+    if (!directNand) ERR("cannot alloc TE2 NAND");
+
+    memset(directNand, 0, sizeof(*directNand));
+    directNand->baseCleAddr = baseCleAddr;
+    directNand->baseAleAddr = baseAleAddr;
+    directNand->baseDataAddr = baseDataAddr;
+    directNand->maskBitsAddr = maskBitsAddr;
+    directNand->gpio = gpio;
+    directNand->rdyPinNo = rdyPin;
+
+    directNand->nand = nandInit(nandContent, pageBuffer, reschedule, nandSize, specs,
+                                directNandPrvReady, directNand);
+    if (!directNand->nand) ERR("Cannot init underlying NAND\n");
+
+    if (baseCleAddr > maxAddr) maxAddr = baseCleAddr;
+    if (baseCleAddr < minAddr) minAddr = baseCleAddr;
+
+    if (baseAleAddr > maxAddr) maxAddr = baseAleAddr;
+    if (baseAleAddr < minAddr) minAddr = baseAleAddr;
+
+    if (baseDataAddr > maxAddr) maxAddr = baseDataAddr;
+    if (baseDataAddr < minAddr) minAddr = baseDataAddr;
+
+    if (!memRegionAdd(physMem, minAddr, maxAddr - minAddr + 4, directNandPrvMemAccessF, directNand))
+        ERR("cannot add NAND to MEM\n");
+
+    return directNand;
+}
+
+void directNandPeriodic(struct DirectNAND *directNand) { nandPeriodic(directNand->nand); }
+
+bool directNandTaskRequired(struct DirectNAND *nand) { return nandTaskRequired(nand->nand); }
+
+struct NAND *directNandGetNand(struct DirectNAND *nand) { return nand->nand; }
+
+template <typename T>
+void directNandSave(struct DirectNAND *nand, T &savestate) {
+    nandSave(nand->nand, savestate);
+}
+
+template <typename T>
+void directNandLoad(struct DirectNAND *nand, T &loader) {
+    nandLoad(nand->nand, loader);
+}
+
+template void directNandSave<Savestate<ChunkType>>(DirectNAND *nand,
+                                                   Savestate<ChunkType> &savestate);
+template void directNandSave<SavestateProbe<ChunkType>>(DirectNAND *nand,
+                                                        SavestateProbe<ChunkType> &savestate);
+template void directNandLoad<SavestateLoader<ChunkType>>(DirectNAND *nand,
+                                                         SavestateLoader<ChunkType> &loader);

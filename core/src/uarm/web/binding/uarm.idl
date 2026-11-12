@@ -1,0 +1,110 @@
+interface Uarm {
+    void Uarm();
+
+    [Ref] Uarm SetRamSize(long size);
+    [Ref] Uarm SetDisplayMode(long displayMode);
+    [Ref] Uarm SetNand(long size, VoidPtr data);
+    [Ref] Uarm SetMemory(long size, VoidPtr data);
+    [Ref] Uarm SetSavestate(long size, VoidPtr data);
+    [Ref] Uarm SetSd(long size, VoidPtr data, [Const] DOMString id);
+    [Ref] Uarm SetDefaultMips(long defaultMips);
+
+    boolean Launch(long romSize, VoidPtr romData);
+
+    double Cycle(unsigned long long now);
+
+    VoidPtr GetFrame();
+    long GetFirstDirtyLine();
+    long GetLastDirtyLine();
+    long GetFrameSize();
+    void ResetFrame();
+
+    unsigned long GetTimesliceSizeUsec();
+
+    void PenDown(long x, long y);
+    void PenUp();
+
+    unsigned long CurrentIps();
+    unsigned long long CurrentIpsMax();
+    void SetMaxLoad(unsigned long maxLoad);
+    void SetCyclesPerSecondLimit(unsigned long cyclesPerSecondLimit);
+
+    unsigned long long GetTimestampUsec();
+
+    void KeyDown(long key);
+    void KeyUp(long key);
+
+    unsigned long PendingSamples();
+    VoidPtr PopQueuedSamples();
+    unsigned long GetSampleQueueSize();
+    void SetPcmOutputEnabled(boolean enabled);
+    void SetPcmSuspended(boolean suspended);
+
+    unsigned long GetRomDataSize();
+    VoidPtr GetRomData();
+
+    unsigned long GetNandDataSize();
+    VoidPtr GetNandData();
+    VoidPtr GetNandDirtyPages();
+    boolean IsNandDirty();
+    void SetNandDirty(boolean isDirty);
+
+    unsigned long GetSdCardDataSize();
+    VoidPtr GetSdCardData();
+    VoidPtr GetSdCardDirtyPages();
+    boolean IsSdCardDirty();
+    void SetSdCardDirty(boolean isDirty);
+
+    unsigned long GetMemoryDataSize();
+    VoidPtr GetMemoryData();
+    VoidPtr GetMemoryDirtyPages();
+
+    unsigned long GetDeviceType();
+
+    boolean SdCardInsert(VoidPtr data, long length, [Const] DOMString id);
+    void SdCardEject();
+    boolean SdCardInitialized();
+    [Const] DOMString GetSdCardId();
+    void Reset();
+
+    void Save();
+    unsigned long GetSavestateSize();
+    VoidPtr GetSavestateData();
+    boolean IsSdInserted();
+
+    unsigned long GetRamSize();
+
+    void JamKey(long key, unsigned long durationMsec);
+
+    boolean IsUiInitialized();
+    boolean IsOsVersionSet();
+    unsigned long GetOsVersion();
+
+    boolean IsLcdEnabled();
+
+    unsigned long InstallDatabase(unsigned long len, VoidPtr data);
+
+    DbBackup NewDbBackup(long type);
+
+    boolean LaunchAppByName([Const] DOMString name);
+    boolean LaunchAppByDbHeader(VoidPtr buffer, long len);
+};
+
+interface DbBackup {
+    boolean Init();
+
+    long GetState();
+    boolean Continue();
+    boolean HasLastProcessedDb();
+    [Const] DOMString GetLastProcessedDb();
+
+    [Const] VoidPtr GetArchiveData();
+    long GetArchiveSize();
+};
+
+interface Bridge {
+    void Bridge();
+
+    VoidPtr Malloc(unsigned long size);
+    void Free(VoidPtr ptr);
+};

@@ -1,0 +1,23 @@
+//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+
+#ifndef _PXA255_UDC_H_
+#define _PXA255_UDC_H_
+
+#include <cstdio>
+
+#include "CPU.h"
+#include "mem.h"
+#include "pxa_DMA.h"
+#include "pxa_IC.h"
+
+struct Pxa255Udc;
+
+struct Pxa255Udc *pxa255UdcInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma);
+
+template <typename T>
+void pxa255UdcSave(struct Pxa255Udc *udc, T &savestate);
+
+template <typename T>
+void pxa255UdcLoad(struct Pxa255Udc *udc, T &loader);
+
+#endif

@@ -1,0 +1,280 @@
+//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+
+#include "RAM.h"
+
+#include <cstdlib>
+#include <cstring>
+
+#include "CPEndian.h"
+#include "SoC.h"
+#include "cputil.h"
+#include "memory_buffer.h"
+
+struct ArmRam {
+    uint32_t adr;
+    uint32_t sz;
+    struct MemoryBuffer buf;
+    class SoC* soc;
+
+    uint32_t framebufferStart;
+    uint32_t framebufferStart_2;
+    uint32_t framebufferStart_4;
+    uint32_t framebufferStart_8;
+    uint32_t framebufferStart_16;
+    uint32_t framebufferStart_32;
+    uint32_t framebufferStart_64;
+    uint32_t framebufferEnd;
+};
+
+template <int size, bool write>
+bool ramAccessF(void* userData, uint32_t pa, void* bufP) {
+    struct ArmRam* ram = (struct ArmRam*)userData;
+    const uint32_t offset = pa - ram->adr;
+    const uint8_t* addr = (uint8_t*)ram->buf.buffer + offset;
+
+    if constexpr (write) {
+        MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset);
+
+        switch (size) {
+            case 1:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart)
+                    ram->soc->SetFramebufferDirty(pa, 1);
+
+                *((uint8_t*)addr) = *(uint8_t*)bufP;  // our memory system is little-endian
+                break;
+
+            case 2:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_2)
+                    ram->soc->SetFramebufferDirty(pa, 2);
+
+                *((uint16_t*)addr) =
+                    htole16(*(uint16_t*)bufP);  // our memory system is little-endian
+                break;
+
+            case 4:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_4)
+                    ram->soc->SetFramebufferDirty(pa, 4);
+
+                *((uint32_t*)addr) = htole32(*(uint32_t*)bufP);
+                break;
+
+            case 64:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_64)
+                    ram->soc->SetFramebufferDirty(pa, 64);
+
+                if (offset & 0x3f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x3f);
+
+                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
+                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
+                *((uint64_t*)(addr + 32)) = htole64(((uint64_t*)bufP)[4]);
+                *((uint64_t*)(addr + 40)) = htole64(((uint64_t*)bufP)[5]);
+                *((uint64_t*)(addr + 48)) = htole64(((uint64_t*)bufP)[6]);
+                *((uint64_t*)(addr + 56)) = htole64(((uint64_t*)bufP)[7]);
+                break;
+
+            case 32:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_32)
+                    ram->soc->SetFramebufferDirty(pa, 32);
+
+                if (offset & 0x1f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x1f);
+
+                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+                *((uint64_t*)(addr + 16)) = htole64(((uint64_t*)bufP)[2]);
+                *((uint64_t*)(addr + 24)) = htole64(((uint64_t*)bufP)[3]);
+                break;
+
+            case 16:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_16)
+                    ram->soc->SetFramebufferDirty(pa, 16);
+
+                if (offset & 0x0f) MEMORY_BUFFER_MARK_DIRTY(ram->buf, offset + 0x0f);
+
+                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+                *((uint64_t*)(addr + 8)) = htole64(((uint64_t*)bufP)[1]);
+                break;
+
+            case 8:
+                if (offset < ram->framebufferEnd && offset >= ram->framebufferStart_8)
+                    ram->soc->SetFramebufferDirty(pa, 8);
+
+                *((uint64_t*)(addr + 0)) = htole64(((uint64_t*)bufP)[0]);
+                break;
+
+            default:
+                return false;
+        }
+    } else {
+        switch (size) {
+            case 1:
+
+                *(uint8_t*)bufP = *((uint8_t*)addr);
+                break;
+
+            case 2:
+
+                *(uint16_t*)bufP = le16toh(*((uint16_t*)addr));
+                break;
+
+            case 4:
+
+                *(uint32_t*)bufP = le32toh(*((uint32_t*)addr));
+                break;
+
+            case 64:
+                ((uint64_t*)bufP)[4] = le64toh(*((uint64_t*)(addr + 32)));
+                ((uint64_t*)bufP)[5] = le64toh(*((uint64_t*)(addr + 40)));
+                ((uint64_t*)bufP)[6] = le64toh(*((uint64_t*)(addr + 48)));
+                ((uint64_t*)bufP)[7] = le64toh(*((uint64_t*)(addr + 56)));
+                // fallthrough
+            case 32:
+
+                ((uint64_t*)bufP)[2] = le64toh(*((uint64_t*)(addr + 16)));
+                ((uint64_t*)bufP)[3] = le64toh(*((uint64_t*)(addr + 24)));
+                // fallthrough
+            case 16:
+
+                ((uint64_t*)bufP)[1] = le64toh(*((uint64_t*)(addr + 8)));
+                // fallthrough
+            case 8:
+                ((uint64_t*)bufP)[0] = le64toh(*((uint64_t*)(addr + 0)));
+                break;
+
+            default:
+
+                return false;
+        }
+    }
+
+    return true;
+}
+
+#define DECLARE_ACCESS_F_SIZE(size)                                                \
+    template bool ramAccessF<size, true>(void* userData, uint32_t pa, void* bufP); \
+    template bool ramAccessF<size, false>(void* userData, uint32_t pa, void* bufP);
+
+DECLARE_ACCESS_F_SIZE(1)
+DECLARE_ACCESS_F_SIZE(2)
+DECLARE_ACCESS_F_SIZE(4)
+DECLARE_ACCESS_F_SIZE(8)
+DECLARE_ACCESS_F_SIZE(16)
+DECLARE_ACCESS_F_SIZE(32)
+DECLARE_ACCESS_F_SIZE(64)
+
+bool ramAccessF(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* bufP) {
+    if (write) {
+        switch (size) {
+            case 1:
+                return ramAccessF<1, true>(userData, pa, bufP);
+
+            case 2:
+                return ramAccessF<2, true>(userData, pa, bufP);
+
+            case 4:
+                return ramAccessF<4, true>(userData, pa, bufP);
+
+            case 8:
+                return ramAccessF<8, true>(userData, pa, bufP);
+
+            case 16:
+                return ramAccessF<16, true>(userData, pa, bufP);
+
+            case 32:
+                return ramAccessF<32, true>(userData, pa, bufP);
+
+            case 64:
+                return ramAccessF<64, true>(userData, pa, bufP);
+
+            default:
+                return false;
+        }
+    } else {
+        switch (size) {
+            case 1:
+                return ramAccessF<1, false>(userData, pa, bufP);
+
+            case 2:
+                return ramAccessF<2, false>(userData, pa, bufP);
+
+            case 4:
+                return ramAccessF<4, false>(userData, pa, bufP);
+
+            case 8:
+                return ramAccessF<8, false>(userData, pa, bufP);
+
+            case 16:
+                return ramAccessF<16, false>(userData, pa, bufP);
+
+            case 32:
+                return ramAccessF<32, false>(userData, pa, bufP);
+
+            case 64:
+                return ramAccessF<64, false>(userData, pa, bufP);
+
+            default:
+                return false;
+        }
+    }
+}
+
+void ramSetFramebuffer(struct ArmRam* ram, uint32_t base, uint32_t size) {
+    if (size > 0) {
+        ram->framebufferStart = base - ram->adr;
+        ram->framebufferStart_2 = ram->framebufferStart - 2;
+        ram->framebufferStart_4 = ram->framebufferStart - 4;
+        ram->framebufferStart_8 = ram->framebufferStart - 8;
+        ram->framebufferStart_16 = ram->framebufferStart - 16;
+        ram->framebufferStart_32 = ram->framebufferStart - 32;
+        ram->framebufferStart_64 = ram->framebufferStart - 64;
+        ram->framebufferEnd = ram->framebufferStart + size;
+    } else {
+        ram->framebufferStart = base - ram->adr;
+        ram->framebufferStart_2 = 0;
+        ram->framebufferStart_4 = 0;
+        ram->framebufferStart_8 = 0;
+        ram->framebufferStart_16 = 0;
+        ram->framebufferStart_32 = 0;
+        ram->framebufferStart_64 = 0;
+        ram->framebufferEnd = 0xffffffff;
+    }
+}
+
+struct ArmRam* ramInit(struct ArmMem* mem, class SoC* soc, uint32_t adr, uint32_t sz,
+                       const struct MemoryBuffer* buf, bool primary) {
+    struct ArmRam* ram = (struct ArmRam*)malloc(sizeof(*ram));
+
+    if (!ram) ERR("cannot alloc RAM at 0x%08x", adr);
+
+    memset(ram, 0, sizeof(*ram));
+
+    ram->soc = soc;
+    ram->adr = adr;
+    ram->sz = sz;
+    memcpy(&ram->buf, buf, sizeof(ram->buf));
+
+    ramSetFramebuffer(ram, 0, 0);
+
+    if (!(primary ? memRegionAddRam(mem, adr, sz, ramAccessF, ram)
+                  : memRegionAdd(mem, adr, sz, ramAccessF, ram))) {
+        ERR("cannot add RAM at 0x%08x to MEM\n", adr);
+    }
+
+    return ram;
+}
+
+void* ramResolveAddress(struct ArmRam* ram, uint32_t pv, uint32_t size) {
+    if (pv < ram->adr || pv + size > ram->adr + ram->sz) return nullptr;
+
+    return ram->buf.buffer + (pv - ram->adr);
+}
+
+void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size) {
+    const uint32_t last = base + size;
+    const uint32_t first = base < ram->adr ? ram->adr : base;
+
+    if (last <= first) return;
+
+    memoryBufferMarkRangeDirty(&ram->buf, first - ram->adr, last - first);
+}

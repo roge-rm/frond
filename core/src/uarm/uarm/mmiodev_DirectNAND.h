@@ -1,0 +1,37 @@
+//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+
+#ifndef _DIRECT_NAND_H_
+#define _DIRECT_NAND_H_
+
+#include <cstdio>
+
+#include "CPU.h"
+#include "mem.h"
+#include "nand.h"
+#include "pxa_GPIO.h"
+#include "reschedule.h"
+
+struct DirectNAND;
+struct NAND;
+struct Device;
+struct MemoryBuffer;
+
+struct DirectNAND *directNandInit(struct ArmMem *physMem, struct Reschedule reschedule,
+                                  uint32_t baseCleAddr, uint32_t baseAleAddr, uint32_t baseDataAddr,
+                                  uint32_t maskBitsAddr, struct PxaGpio *gpio, int rdyPin,
+                                  const struct NandSpecs *specs, uint8_t *nandContent,
+                                  size_t nandSize, const struct MemoryBuffer *pageBuffer);
+
+void directNandPeriodic(struct DirectNAND *nand);
+
+bool directNandTaskRequired(struct DirectNAND *nand);
+
+struct NAND *directNandGetNand(struct DirectNAND *nand);
+
+template <typename T>
+void directNandSave(struct DirectNAND *nand, T &savestate);
+
+template <typename T>
+void directNandLoad(struct DirectNAND *nand, T &loader);
+
+#endif

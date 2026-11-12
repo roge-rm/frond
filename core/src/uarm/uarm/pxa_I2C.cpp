@@ -1,0 +1,263 @@
+//(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+
+#include "pxa_I2C.h"
+
+#include <cstdlib>
+#include <cstring>
+
+#include "cputil.h"
+#include "mem.h"
+#include "pxa_IC.h"
+#include "savestate/savestateAll.h"
+
+#define PXA_I2C_SIZE 0x00000024UL
+
+#define SAVESTATE_VERSION 0
+
+#define REG_IDX_IBMR 0
+#define REG_IDX_IDBR 1
+#define REG_IDX_ICR 2
+#define REG_IDX_ISR 3
+#define REG_IDX_ISAR 4
+
+struct PxaI2c {
+    struct PxaDma *dma;
+    struct PxaIc *ic;
+    uint32_t base;
+    uint32_t irqNo;
+    uint16_t icr;
+    uint16_t isr;
+    uint8_t db;
+    uint8_t isa;
+
+    struct DevI2C {
+        I2cDeviceActionF actF;
+        void *userData;
+    } devs[8];
+
+    bool waitForAddr;
+    bool latentBusy;
+
+    template <typename T>
+    void DoSaveLoad(T &chunkHelper) {
+        chunkHelper.Do(typename T::Pack16() << icr << isr)
+            .Do(typename T::Pack8() << db << isa)
+            .Do(typename T::BoolPack() << waitForAddr << latentBusy);
+    }
+};
+
+bool pxaI2cDeviceAdd(struct PxaI2c *i2c, I2cDeviceActionF actF, void *userData) {
+    uint_fast8_t i;
+
+    for (i = 0; i < sizeof(i2c->devs) / sizeof(*i2c->devs); i++) {
+        if (i2c->devs[i].actF) continue;
+
+        i2c->devs[i].actF = actF;
+        i2c->devs[i].userData = userData;
+
+        return true;
+    }
+
+    return false;
+}
+
+static void pxaI2cPrvRecalcIrq(struct PxaI2c *i2c) {
+    uint32_t effectiveIsr = i2c->isr & 0x6f0;
+
+    if (!(i2c->icr & 0x2000))  // SADIE
+        effectiveIsr &= ~(1 << 9);
+    if (!(i2c->icr & 0x1000))  // ALDIE
+        effectiveIsr &= ~(1 << 5);
+    if (!(i2c->icr & 0x0800))  // SSDIE
+        effectiveIsr &= ~(1 << 4);
+    if (!(i2c->icr & 0x0400))  // BEIE
+        effectiveIsr &= ~(1 << 10);
+    if (!(i2c->icr & 0x0200))  // IRFIE
+        effectiveIsr &= ~(1 << 7);
+    if (!(i2c->icr & 0x0100))  // ITEIE
+        effectiveIsr &= ~(1 << 6);
+
+    pxaIcInt(i2c->ic, i2c->irqNo, !!effectiveIsr);
+}
+
+static uint_fast8_t pxaI2cPrvAction(struct PxaI2c *i2c, enum ActionI2C action, uint8_t param) {
+    uint_fast8_t ret = 0, i;
+
+    for (i = 0; i < sizeof(i2c->devs) / sizeof(*i2c->devs); i++) {
+        if (!i2c->devs[i].actF) continue;
+
+        ret |= i2c->devs[i].actF(i2c->devs[i].userData, action, param);
+    }
+
+    // fprintf(stderr, "I2C: %s 0x%02x -> 0x%02x\n", acts[action], param, ret);
+
+    return ret;
+};
+
+static void pxaI2cPrvCrW(struct PxaI2c *i2c, uint32_t val) {
+    uint32_t diffBits = i2c->icr ^ val;
+
+    // irq masking & nonactionable bits update
+    i2c->icr = val;
+
+    if (!(val & 0x40)) return;
+
+    if (val & diffBits & 0x01) {
+        pxaI2cPrvAction(i2c, (i2c->isr & 4) ? i2cRestart : i2cStart, 0);
+        i2c->waitForAddr = true;
+        i2c->isr |= 0x4;
+    }
+    if (val & 0x08) {
+        if (i2c->waitForAddr) {
+            if (i2c->isr & 0x40) fprintf(stderr, "i2c: sending from empty buffer\n");
+
+            i2c->isr = (i2c->isr & ~1) | (i2c->db & 1);
+            i2c->isr = (i2c->isr & ~2) | (pxaI2cPrvAction(i2c, i2cTx, i2c->db) ? 0 : 2);
+            i2c->waitForAddr = false;
+            i2c->isr |= 0x40;
+        } else if (!(i2c->isr & 1)) {  // TXing
+
+            if (i2c->isr & 0x40) fprintf(stderr, "i2c: sending from empty buffer\n");
+
+            i2c->isr = (i2c->isr & ~2) | (pxaI2cPrvAction(i2c, i2cTx, i2c->db) ? 0 : 2);
+            i2c->isr |= 0x40;
+        } else {  // RXing
+
+            if (i2c->isr & 0x80) fprintf(stderr, "i2c: recving into full buffer\n");
+
+            i2c->db = pxaI2cPrvAction(i2c, i2cRx, !(i2c->icr & 4));
+            i2c->isr |= 0x80;
+            // record ack/nak we sent
+            i2c->isr &= ~2;
+            if (i2c->icr & 4) i2c->isr |= 2;
+        }
+        if (val & 2) {
+            pxaI2cPrvAction(i2c, i2cStop, 0);
+            i2c->isr &= ~0x1;
+            i2c->latentBusy = true;
+        }
+        i2c->icr &= ~8;
+    }
+    if (val & 0x10) {
+        pxaI2cPrvAction(i2c, i2cStop, 0);
+        i2c->isr &= ~0x1;
+        i2c->latentBusy = true;
+    }
+
+    pxaI2cPrvRecalcIrq(i2c);
+}
+
+static bool pxaI2cPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, bool write,
+                                void *buf) {
+    struct PxaI2c *i2c = (struct PxaI2c *)userData;
+    uint32_t val;
+
+    if (size != 4) {
+        fprintf(stderr, "%s: Unexpected %s of %u bytes to 0x%08lx\n", __func__,
+                write ? "write" : "read", size, (unsigned long)pa);
+        return false;
+    }
+
+    pa = (pa - i2c->base) >> 2;
+    if (pa & 1) return false;
+    pa >>= 1;
+
+    if (write) val = *(uint32_t *)buf;
+
+    if (write && i2c->latentBusy) {
+        i2c->isr &= ~4;
+        i2c->latentBusy = false;
+    }
+
+    switch (pa) {
+        case REG_IDX_IBMR:
+            if (write) return false;
+            val = 0x03;  // lines are high;
+            break;
+
+        case REG_IDX_IDBR:
+            if (write) {
+                i2c->isr &= ~0x40;
+                i2c->db = val;
+            } else
+                val = i2c->db;
+            pxaI2cPrvRecalcIrq(i2c);
+            break;
+
+        case REG_IDX_ICR:
+            if (write) {
+                pxaI2cPrvCrW(i2c, val);
+                pxaI2cPrvRecalcIrq(i2c);
+            } else
+                val = i2c->icr;
+            break;
+
+        case REG_IDX_ISR:
+            if (write) {
+                i2c->isr &= ~(val & 0x6f0);
+                pxaI2cPrvRecalcIrq(i2c);
+            } else
+                val = i2c->isr;
+            break;
+
+        case REG_IDX_ISAR:
+            if (write)
+                i2c->isa = val & 0x7f;
+            else
+                val = i2c->isa;
+            break;
+
+        default:
+            return false;
+    }
+
+    if (!write) *(uint32_t *)buf = val;
+
+    return true;
+}
+
+struct PxaI2c *pxaI2cInit(struct ArmMem *physMem, struct PxaIc *ic, struct PxaDma *dma,
+                          uint32_t base, uint32_t irqNo) {
+    struct PxaI2c *i2c = (struct PxaI2c *)malloc(sizeof(*i2c));
+
+    if (!i2c) ERR("cannot alloc I2C");
+
+    memset(i2c, 0, sizeof(*i2c));
+    i2c->dma = dma;
+    i2c->ic = ic;
+    i2c->base = base;
+    i2c->irqNo = irqNo;
+    i2c->isr |= 0x40;  // tx empty
+
+    if (!memRegionAdd(physMem, base, PXA_I2C_SIZE, pxaI2cPrvMemAccessF, i2c))
+        ERR("cannot add I2C to MEM at 0x%08x\n", base);
+
+    return i2c;
+}
+
+template <typename T>
+void pxaI2cSave(struct PxaI2c *i2c, T &savestate, uint32_t index) {
+    auto chunk = savestate.GetChunk(ChunkType::pxaI2c + index, SAVESTATE_VERSION);
+    if (!chunk) ERR("unable to allocate chunk");
+
+    SaveChunkHelper helper(*chunk);
+    i2c->DoSaveLoad(helper);
+}
+
+template <typename T>
+void pxaI2cLoad(struct PxaI2c *i2c, T &loader, uint32_t index) {
+    auto chunk = loader.GetChunkOrFail(ChunkType::pxaI2c + index, SAVESTATE_VERSION, "pxa i2c");
+    if (!chunk) return;
+
+    LoadChunkHelper helper(*chunk);
+    i2c->DoSaveLoad(helper);
+}
+
+template void pxaI2cSave<Savestate<ChunkType>>(PxaI2c *i2c, Savestate<ChunkType> &savestate,
+                                               uint32_t index);
+template void pxaI2cSave<SavestateProbe<ChunkType>>(PxaI2c *i2c,
+                                                    SavestateProbe<ChunkType> &savestate,
+                                                    uint32_t index);
+template void pxaI2cLoad<SavestateLoader<ChunkType>>(PxaI2c *i2c,
+                                                     SavestateLoader<ChunkType> &loader,
+                                                     uint32_t index);

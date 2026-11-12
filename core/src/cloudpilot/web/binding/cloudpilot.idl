@@ -1,0 +1,245 @@
+interface Cloudpilot {
+    void Cloudpilot();
+
+    VoidPtr Malloc(long size);
+    void Free(VoidPtr buffer);
+    VoidPtr Nullptr();
+
+    void EnableLogging(boolean logging);
+
+    boolean InitializeSession(VoidPtr buffer, long size, [Const] DOMString deviceType);
+
+    long GetCyclesPerSecond();
+    long RunEmulation(long cycles);
+    void SetClockFactor(double clockFactor);
+
+    [Ref] Frame CopyFrame();
+    boolean IsScreenDirty();
+    void MarkScreenClean();
+
+    long MinMemoryForDevice([Const] DOMString deviceId);
+    long FramebufferSizeForDevice([Const] DOMString deviceId);
+    long TotalMemoryForDevice([Const] DOMString deviceId);
+
+    void QueuePenMove(long x, long y);
+    void QueuePenUp();
+
+    void QueueButtonDown(long id);
+    void QueueButtonUp(long id);
+
+    void QueueKeyboardEvent(long c);
+
+    boolean IsPowerOff();
+    boolean IsUIInitialized();
+    long GetOSVersion();
+    boolean IsSetupComplete();
+
+    void Reset();
+    void ResetNoExtensions();
+    void ResetHard();
+
+    long InstallDb(VoidPtr buffer, long len);
+
+    long GetPalette2bitMapping();
+
+    VoidPtr GetMemoryPtr();
+    VoidPtr GetDirtyPagesPtr();
+    long GetMemorySize();
+    boolean ImportMemoryImage(VoidPtr buffer, long len);
+
+    VoidPtr GetRomPtr();
+    long GetRomSize();
+
+    VoidPtr GetSavestatePtr();
+    long GetSavestateSize();
+
+    boolean SaveState();
+    boolean LoadState(VoidPtr buffer, long len);
+
+    [Const] DOMString GetHotsyncName();
+    void SetHotsyncName([Const] DOMString name);
+
+    void RegisterPwmHandler(long handlerPtr);
+
+    DbBackup StartBackup();
+
+    void SetClipboardIntegration(boolean toggle);
+    boolean GetClipboardIntegration();
+
+    boolean IsSuspended();
+    [Ref] SuspendContext GetSuspendContext();
+
+    void SetNetworkRedirection(boolean toggle);
+    boolean GetNetworkRedirection();
+    void RegisterProxyDisconnectHandler(long handlerPtr);
+
+    void SetHotsyncNameManagement(boolean toggle);
+
+    boolean LaunchAppByName([Const] DOMString name);
+    boolean LaunchAppByDbHeader(VoidPtr buffer, long len);
+
+    void ClearExternalStorage();
+    boolean AllocateCard([Const] DOMString key, long blockCount);
+    boolean AdoptCard([Const] DOMString key, VoidPtr data, long blockCount);
+    boolean MountCard([Const] DOMString key);
+    boolean RemoveCard([Const] DOMString key);
+    VoidPtr GetCardData([Const] DOMString key);
+    VoidPtr GetCardDirtyPages([Const] DOMString key);
+    long GetCardSize([Const] DOMString key);
+    void RemountCards();
+    long GetSupportLevel(long size);
+    [Const] DOMString GetMountedKey();
+
+    EmTransportSerialBuffer GetTransportIR();
+    EmTransportSerialBuffer GetTransportSerial();
+};
+
+interface RomInfo {
+    void RomInfo(VoidPtr buffer, long size);
+
+    boolean IsValid();
+
+    long CardVersion();
+    [Const] DOMString CardName();
+    long RomVersion();
+    [Const] DOMString RomVersionString();
+
+    boolean Supports([Const] DOMString deviceId);
+};
+
+interface Frame {
+    long GetLineWidth();
+    long GetBpp();
+    long GetLines();
+    long GetMargin();
+    long GetBytesPerLine();
+
+    long GetFirstDirtyLine();
+    long GetLastDirtyLine();
+    boolean GetHasChanges();
+
+    VoidPtr GetBuffer();
+    long GetBufferSize();
+
+    long GetScaleX();
+    long GetScaleY();
+};
+
+interface DbBackup {
+    boolean Init(boolean includeRomDatabases);
+
+    boolean IsInProgress();
+    boolean IsDone();
+
+    [Const] DOMString GetCurrentDatabase();
+
+    boolean Save();
+    void Skip();
+
+    VoidPtr GetArchivePtr();
+    long GetArchiveSize();
+};
+
+interface SuspendContextClipboardCopy {
+    void Cancel();
+    void Resume();
+
+    [Const] DOMString GetClipboardContent();
+};
+
+interface SuspendContextClipboardPaste {
+    void Cancel();
+    void Resume([Const] DOMString clipboardContent);
+};
+
+interface SuspendContextNetworkConnect {
+    void Cancel();
+    void Resume();
+};
+
+interface SuspendContextNetworkRpc {
+    void Cancel();
+    long GetRequestSize();
+    [Const] VoidPtr GetRequestData();
+    void ReceiveResponse(VoidPtr data, long size);
+};
+
+interface SuspendContextSerialSync {
+    void Cancel();
+    void Resume();
+};
+
+interface SuspendContext {
+    long GetKind();
+    void Cancel();
+
+    [Ref] SuspendContextClipboardCopy AsContextClipboardCopy();
+    [Ref] SuspendContextClipboardPaste AsContextClipboardPaste();
+    [Ref] SuspendContextNetworkConnect AsContextNetworkConnect();
+    [Ref] SuspendContextNetworkRpc AsContextNetworkRpc();
+    [Ref] SuspendContextSerialSync AsContextSerialSync();
+};
+
+interface SessionImage {
+    void SessionImage();
+
+    [Const] DOMString GetDeviceId();
+    [Ref] SessionImage SetDeviceId([Const] DOMString deviceId);
+
+    VoidPtr GetRomImage();
+    long GetRomImageSize();
+    [Ref] SessionImage SetRomImage(VoidPtr image, long size);
+
+    VoidPtr GetMemoryImage();
+    long GetMemoryImageSize();
+    [Ref] SessionImage SetMemoryImage(VoidPtr image, long size);
+
+    VoidPtr GetMetadata();
+    long GetMetadataSize();
+    [Ref] SessionImage SetMetadata(VoidPtr metadata, long size);
+
+    VoidPtr GetSavestate();
+    long GetSavestateSize();
+    [Ref] SessionImage SetSavestate(VoidPtr savestate, long size);
+
+    long GetVersion();
+
+    boolean Serialize();
+    VoidPtr GetSerializedImage();
+    long GetSerializedImageSize();
+
+    boolean Deserialize(VoidPtr buffer, long size);
+};
+
+interface SkinLoader {
+    void SkinLoader([Const] DOMString name);
+
+    VoidPtr GetData();
+    long GetSize();
+};
+
+interface EmTransportSerialBuffer {
+    long RxBytesPending();
+    VoidPtr Receive();
+
+    long Send(long Count, [Const] VoidPtr data, boolean frameComplete);
+
+    boolean IsOpen();
+    long Rts();
+    boolean Dtr();
+    boolean IsBreak();
+
+    long BufferSize();
+
+    long GetBaud();
+    long GetParity();
+    long GetStopBits();
+    long GetDataBits();
+    long GetHwrHandshake();
+
+    boolean GetModeSync();
+    void SetModeSync(boolean sync);
+
+    boolean IsFrameComplete();
+    void SetRequestTransferCallback(long cb);
+};

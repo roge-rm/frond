@@ -1,0 +1,177 @@
+-include ../Makefile.local
+
+CFLAGS_COMMON := \
+	-Wextra -Wall -Wno-unused-parameter -Wno-unknown-pragmas \
+	-Wno-visibility -Wno-constant-conversion -Wno-constant-logical-operand \
+	-D_FILE_OFFSET_BITS=64
+
+CFLAGS_EMCC_EXTRA = -g
+
+LDFLAGS_TEST_EXTRA ?= -lgtest_main
+
+LDFLAGS_EMCC = $(EMCC_OPT) -Wno-version-check -Wl,-u,fileno -g \
+	--post-js $(WEBIDL_BINDING_JS) \
+	-s EXIT_RUNTIME=0 \
+	-s MODULARIZE=1 \
+	-s ENVIRONMENT="web,worker" \
+	-s EXPORT_NAME=createModule \
+	-s ALLOW_MEMORY_GROWTH=1 \
+	-s INITIAL_MEMORY=33554432 \
+	-s WASM_BIGINT=1 \
+	-s ALLOW_TABLE_GROWTH=1 \
+	-s FILESYSTEM=0 \
+	-s BINARYEN_IGNORE_IMPLICIT_TRAPS=1 \
+	-s EXPORTED_RUNTIME_METHODS=["wasmTable","callMain","HEAPU8","HEAPU32"]
+
+WEBIDL_BINDING_SRC = $(WEBIDL_BINDING_DIR)/uarm.idl ../common/web/session_file5.idl
+
+INCLUDE = -I./uarm -I. -I../common -I../common/zip -I../argparse
+
+STD_C ?= -std=gnu11
+
+WASMOPT ?= $${EMSDK}/upstream/bin/wasm-opt
+WASMOPT_FLAGS = --enable-bulk-memory --enable-bulk-memory-opt  --enable-sign-ext --enable-nontrapping-float-to-int  --inlining-optimizing \
+	-fimfs 1000 -ifwl -pii 1000  -aimfs 10 -tnh -lmu -O4
+
+WASMSTRIP ?= wasm-strip
+YARN = yarn
+
+SOURCE_C = 								\
+	cputil.c							\
+	uarm/uae/cpudefs.c 					\
+	uarm/uae/cpuemu.c 					\
+	uarm/uae/cpustbl.c 					\
+	uarm/uae/readcpu.c 					\
+	uarm/uae/newcpu.c
+
+SOURCE_CXX =		 					\
+	uarm/SoC.cpp 						\
+	uarm/soc_PXA.cpp					\
+	uarm/soc_pv.cpp						\
+	uarm/pv_ic.cpp						\
+	uarm/pv_timer.cpp					\
+	uarm/pv_uart.cpp					\
+	uarm/pv_hypercall_interface.cpp		\
+	uarm/pv_display.cpp					\
+	uarm/pv_keys.cpp					\
+	uarm/pv_rtc.cpp 					\
+	uarm/pv_audio.cpp 					\
+	uarm/pv_touch.cpp 					\
+	uarm/pv_sysctl.cpp					\
+	uarm/pv_storage.cpp					\
+	uarm/device_configuration.cpp 		\
+	uarm/patch68k.cpp 					\
+	uarm/peephole.cpp					\
+	uarm/pace_patch.cpp					\
+	uarm/app_launcher.cpp 				\
+	uarm/timeutil.cpp					\
+	uarm/keys.cpp 						\
+	uarm/gdbstub.cpp 					\
+	uarm/ROM.cpp						\
+	uarm/RAM.cpp						\
+	uarm/memory_buffer.cpp				\
+	uarm/mem.cpp						\
+	uarm/syscall.cpp					\
+	uarm/sdcard.cpp						\
+	uarm/patches.cpp					\
+	MainLoop.cpp						\
+	uarm/patch_dispatch.cpp				\
+	uarm/icache.cpp						\
+	uarm/CPU.cpp						\
+	uarm/pace.cpp 						\
+	uarm/MMU.cpp						\
+	uarm/MPU.cpp						\
+	uarm/pxa270_WMMX.cpp				\
+	uarm/pxa270_KPC.cpp					\
+	uarm/pxa270_IMC.cpp					\
+	uarm/pxa270_UDC.cpp					\
+	uarm/pxa_TIMR.cpp 					\
+	uarm/pxa_IC.cpp						\
+	uarm/pxa_LCD.cpp					\
+	uarm/pxa_DMA.cpp					\
+	uarm/pxa_UART.cpp 					\
+	uarm/pxa_SSP.cpp					\
+	uarm/pxa_GPIO.cpp 					\
+	uarm/pxa_AC97.cpp 					\
+	uarm/pxa_I2S.cpp					\
+	uarm/pxa_I2C.cpp					\
+	uarm/pxa_MemCtrl.cpp				\
+	uarm/pxa_PwrClk.cpp 				\
+	uarm/pxa_PWM.cpp					\
+	uarm/pxa_MMC.cpp					\
+	uarm/pxa_RTC.cpp					\
+	uarm/pxa255_DSP.cpp					\
+	uarm/pxa255_UDC.cpp					\
+	uarm/ac97dev_WM9712L.cpp			\
+	uarm/nand.cpp 						\
+	uarm/mmiodev_DirectNAND.cpp			\
+	uarm/uartdev_bcm2035.cpp			\
+	uarm/vSD.cpp						\
+	uarm/devicePalmTungstenE2.cpp 		\
+	uarm/cp15mmu.cpp 					\
+	uarm/cp15mpu.cpp 					\
+	uarm/memcpy.cpp						\
+	uarm/syscall_dispatch.cpp			\
+	uarm/db_installer.cpp				\
+	uarm/audio_queue.cpp				\
+	uarm/db_list.cpp					\
+	uarm/db_backup.cpp					\
+	uarm/system_state.cpp
+
+SOURCE_C_NATIVE = $(SOURCE_C)
+SOURCE_CXX_NATIVE =						\
+	$(SOURCE_CXX)						\
+	native/Silkscreen.cpp				\
+	native/SdlRenderer.cpp				\
+	native/SdlEventHandler.cpp			\
+	native/SdlAudioDriver.cpp			\
+	native/Commands.cpp					\
+	native/main.cpp
+
+SOURCE_C_EMCC = $(SOURCE_C)
+SOURCE_CXX_EMCC = 						\
+	$(SOURCE_CXX)						\
+	web/main.cpp						\
+	web/uarm.cpp						\
+	web/bridge.cpp
+
+SOURCE_C_TEST = $(SOURCE_C)
+
+SOURCE_CXX_TEST =						\
+	$(SOURCE_CXX)						\
+	test/scheduler.cpp 					\
+	test/queue.cpp
+
+OBJECTS_EXTRA_NATIVE = ../common/libcommon.a
+OBJECTS_EXTRA_TEST = ../common/libcommon.a
+OBJECTS_EXTRA_EMCC = ../common/libcommon-wasm.a
+
+BINARY_NATIVE = cp-uarm$(EXE_SUFFIX)
+BINARY_EMCC = uarm_web.wasm
+BINARY_TEST = test/test
+
+PROCESSED_BINARY_WASM = uarm_web_processed.wasm
+OPTIMIZED_BINARY_WASM = uarm_web_optimized.wasm
+
+GARBAGE_EXTRA = 						\
+	$(PROCESSED_BINARY_WASM)			\
+	$(PROCESSED_BINARY_WASM).s			\
+	$(OPTIMIZED_BINARY_WASM)
+
+include ../Makefile.common
+
+bin: $(BINARY_NATIVE)
+
+test: $(BINARY_TEST)
+	$(BINARY_TEST)
+
+emscripten: $(OPTIMIZED_BINARY_WASM)
+
+$(PROCESSED_BINARY_WASM): $(BINARY_EMCC)
+	if test -z "$(DEVELOP)"; then $(YARN) --cwd ./tools/build-jump-table && $(YARN) --cwd ./tools/build-jump-table build-jump-table "$$(pwd)/$^" "$$(pwd)/$@"; else cp $^ $@; fi
+
+$(OPTIMIZED_BINARY_WASM): $(PROCESSED_BINARY_WASM)
+	if test -n "$(DEVELOP)"; then cp $^ $@; else $(WASMOPT) $(WASMOPT_FLAGS) -o $@ $^; fi
+	if test -z "$(DEVELOP)"; then $(WASMSTRIP) $@; fi
+
+.PHONY: bin emscripten clean test
