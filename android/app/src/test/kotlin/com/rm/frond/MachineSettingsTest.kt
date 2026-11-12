@@ -42,6 +42,9 @@ class MachineSettingsTest {
             assertEquals(if (shown) JogControls.SCREEN else JogControls.HIDDEN, MachineSettings.from(switch).jogControls)
         }
         assertEquals(listOf("Hidden", "Left of screen", "Left of keyboard"), JogControls.entries.map { it.label })
+        assertEquals(listOf("Hidden", "Left of screen", "Left of keyboard"), JogControls.entries.map { it.label(false) })
+        // Without a keyboard the same saved choice puts them beside the silkscreen and buttons.
+        assertEquals(listOf("Hidden", "Left of screen", "Beside the buttons"), JogControls.entries.map { it.label(true) })
         val first = metadata("visibility-first", legacy.copy(microphone = true))
         val second = metadata("visibility-second", legacy)
         for (keyboard in listOf(false, true)) for (jog in JogControls.entries) {
@@ -58,6 +61,10 @@ class MachineSettingsTest {
             assertFalse("--hide-jog-controls" in arguments)
             assertFalse("--hide-keyboard" in loaded.arguments())
             assertFalse("--jog-controls" in loaded.arguments())
+            // A CLIE without a keyboard: the jog choice only.
+            val clie = loaded.arguments(jogControls = true)
+            assertFalse("--hide-keyboard" in clie)
+            assertEquals(jog.arg, clie[clie.indexOf("--jog-controls") + 1])
         }
     }
 
@@ -184,6 +191,8 @@ class MachineSettingsTest {
             MachineSettings(ScreenSize.FILL, showKeyboard = false, jogControls = JogControls.HIDDEN)
                 .displayArgument(tg50Controls = true))
         assertEquals("fit=fit smooth=off keyboard=on jog=keyboard", MachineSettings().displayArgument(tg50Controls = true))
+        assertEquals("fit=fit smooth=off jog=screen",
+            MachineSettings(jogControls = JogControls.SCREEN).displayArgument(jogControls = true))
     }
 
     @Test fun launchArgumentsFollowThisMachineAfterReload() {

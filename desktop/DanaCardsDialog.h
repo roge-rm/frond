@@ -28,10 +28,10 @@ inline QList<int> sizes(const DeviceProfile5& profile, DeviceCardSlot5 slot, Dev
     return result;
 }
 // Whether a .frondsd card's payload is a size this slot takes for the family.
-inline bool fits(const QString& path, DeviceCardSlot5 slot, DeviceCardFamily5 family) {
+inline bool fits(const QString& path, DeviceCardSlot5 slot, DeviceCardFamily5 family, int32_t deviceType=deviceTypeDana) {
     qint64 logical=0;
     if (!frondCards::cardHeader(path,nullptr,&logical) || logical<=0) return false;
-    return deviceProfileCardSizeValid5(deviceTypeDana,slot,family,quint64(logical));
+    return deviceProfileCardSizeValid5(deviceType,slot,family,quint64(logical));
 }
 // Desktop text for a card command the core refused; other refusals pass through as they are.
 inline QString message(const QString& core) {
@@ -65,12 +65,15 @@ inline State state(const QString& text) {
 }
 }
 
+// The card slots of a 68k device whose cards are linked card files: the Dana's two, a VZ Palm's one.
 class DanaCardsDialog : public QDialog {
  public:
-    DanaCardsDialog(DesktopClient& client, const QString& tool, QWidget* parent=nullptr) : QDialog(parent), client(client), tool(tool) {
-        setWindowTitle(tr("Dana cards"));
+    DanaCardsDialog(DesktopClient& client, const QString& tool, frondFirmware::Device device, QWidget* parent=nullptr)
+        : QDialog(parent), client(client), tool(tool), profile(frondFirmware::profile(device)),
+          slotCount(int(deviceProfileCardSlotCount5(frondFirmware::profile(device)))) {
+        setWindowTitle(slotCount>1 ? tr("Dana cards") : tr("Card"));
         auto* layout=new QVBoxLayout(this);
-        for (int n=0;n<2;++n) {
+        for (int n=0;n<slotCount;++n) {
             status[n]=new QLabel(this); layout->addWidget(status[n]);
             auto* row=new QHBoxLayout; layout->addLayout(row);
             for (const auto& operation : {QString("Choose card"),QString("Eject"),QString("Insert"),QString("Remove"),QString("Export")}) {
@@ -78,7 +81,9 @@ class DanaCardsDialog : public QDialog {
                 connect(button,&QPushButton::clicked,this,[this,n,operation] {
                     if (operation=="Choose card") choose(n);
                     else if (operation=="Export") {
-                        const auto path=QFileDialog::getSaveFileName(this,tr("Export card"),QString("Dana card %1.frondsd").arg(n+1),tr("Frond SD cards (*.frondsd)"));
+                        const auto name=slotCount>1 ? QString("Dana card %1.frondsd").arg(n+1) :
+                            QString("%1 card.frondsd").arg(QString::fromUtf8(profile.displayName));
+                        const auto path=QFileDialog::getSaveFileName(this,tr("Export card"),name,tr("Frond SD cards (*.frondsd)"));
                         if (!path.isEmpty()) {
                             if (const auto problem=frondDanaCards::exportProblem(path); !problem.isEmpty()) QMessageBox::warning(this,tr("Card"),problem);
                             else perform(n,"export",frondDanaCards::quote(path));
@@ -108,6 +113,8 @@ class DanaCardsDialog : public QDialog {
  private:
     DesktopClient& client;
     QString tool;
+    const DeviceProfile5& profile;
+    int slotCount;
     QLabel* status[2]{};
     QList<QPushButton*> buttons[2];
     frondDanaCards::State states[2];
@@ -142,14 +149,14 @@ class DanaCardsDialog : public QDialog {
         return result.ok;
     }
     void refresh() {
-        for (int n=1;n>=0;--n) {
+        for (int n=slotCount-1;n>=0;--n) {
             const auto reply=request(n?"sd2-state":"sd-state");
             states[n]=reply.ok?frondDanaCards::state(reply.message):frondDanaCards::State{};
             const auto& state=states[n];
             const auto label=!state.known?tr("Not known"):!state.present?tr("No card"):
                 QString("%1 · %2%3%4").arg(state.protocol=="mmc"?"MMC":"SD",state.inserted?tr("Inserted"):tr("Ejected"),
                     state.protectedCard?tr(" · Write protected"):QString(),state.failed?tr(" · I/O error"):QString());
-            status[n]->setText(tr("Card %1: %2").arg(n+1).arg(label));
+            status[n]->setText(slotCount>1 ? tr("Card %1: %2").arg(n+1).arg(label) : tr("Card: %1").arg(label));
             buttons[n][0]->setEnabled(state.known && !state.present);
             buttons[n][1]->setEnabled(state.present && state.inserted);
             buttons[n][2]->setEnabled(state.present && !state.inserted);
@@ -158,14 +165,14 @@ class DanaCardsDialog : public QDialog {
         }
     }
     void choose(int n) {
-        QDialog dialog(this); dialog.setWindowTitle(tr("Card %1").arg(n+1));
+        QDialog dialog(this); dialog.setWindowTitle(slotCount>1 ? tr("Card %1").arg(n+1) : tr("Card"));
         auto* layout=new QFormLayout(&dialog);
         QComboBox family,size,existing; QCheckBox protect(tr("Write protected"));
         family.addItem("SD","sd"); family.addItem("MMC","mmc");
         layout->addRow(tr("Family"),&family); layout->addRow(tr("Size"),&size); layout->addRow(tr("Saved card"),&existing); layout->addRow(&protect);
         auto update=[&] {
             size.clear(); existing.clear();
-            for (auto bytes : frondDanaCards::sizes(*deviceProfile5(deviceTypeDana),DeviceCardSlot5(n?2:0),
+            for (auto bytes : frondDanaCards::sizes(profile,DeviceCardSlot5(n?2:0),
                     family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc)) size.addItem(QString::number(bytes)+" MB",bytes);
             for (const auto& file : QDir(root()).entryInfoList({"*.json"},QDir::Files)) {
                 QFile meta(file.absoluteFilePath()); if (!meta.open(QIODevice::ReadOnly)) continue;
@@ -206,7 +213,7 @@ class DanaCardsDialog : public QDialog {
             }
             else result=frondCards::runCardTool(frondCards::cardTool(tool),importing?QStringList{"import",source,"sd",path}:QStringList{"make","sd",size.currentData().toString(),path});
             if (!result.ok) { QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),result.message); return; }
-            if (!frondDanaCards::fits(path,DeviceCardSlot5(n?2:0),family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc)) {
+            if (!frondDanaCards::fits(path,DeviceCardSlot5(n?2:0),family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc,profile.deviceType)) {
                 QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),tr("That size isn't supported by this card family.")); return;
             }
             QFile meta(root()+'/'+id+".json");

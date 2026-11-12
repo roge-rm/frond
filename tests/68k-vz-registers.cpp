@@ -21,6 +21,7 @@ class Board : public EmRegsVZ {
     void GetKeyInfo(int* r, int* c, uint16*, Bool*) override { *r = *c = 0; }
     uint8 GetPortInputValue(int) override { return pins; }
     uint8 GetPortInternalValue(int) override { return pins; }
+    bool PortDPolarityInverts() const override { return inverts; }
     void Put(emuptr addr, int size, uint32 value) { StdWrite(addr, size, value); }
     uint8 ReadD() { return GetByte(0xfffff419); }
     void UpdateD() { UpdatePortDInterrupts(); }
@@ -39,6 +40,7 @@ class Board : public EmRegsVZ {
                 tmr2LastProcessedSystemCycles};
     }
     uint8 pins = 0;
+    bool inverts = true;
 };
 
 class Display : public EmHALHandler {
@@ -202,6 +204,18 @@ int main() {
             assert((board.GetWord(0xfffff30e) & 0x0f00) == expected);
         }
     }
+    // Cloudpilot's Palm boards (m125, m500) report keys active-high: reads ignore PDPOL and a
+    // level IRQ is pending when the input matches it.
+    board.inverts = false;
+    for (unsigned pins = 0; pins < 16; ++pins) {
+        board.pins = pins;
+        for (unsigned pol = 0; pol < 16; ++pol) {
+            board.SetByte(0xfffff41c, pol);
+            assert(board.ReadD() == pins);
+            assert((board.GetWord(0xfffff312) & 0x0f00) == ((~(pins ^ pol) & 15) << 8));
+        }
+    }
+    board.inverts = true;
     // Output pins and disabled requests cannot leave a level IRQ pending.
     board.SetByte(0xfffff418, 15);
     assert(!(board.GetWord(0xfffff312) & 0x0f00));

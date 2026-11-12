@@ -237,6 +237,20 @@ string fourCc(uint32_t value) {
 const char* cloudpilotDevice(const DeviceProfile5& profile) {
     switch (profile.deviceType) {
         case deviceTypeIIIx: return "PalmIIIx";
+        case deviceTypeIIIe: return "PalmIIIe";
+        case deviceTypeIIIxe: return "PalmIIIxe";
+        case deviceTypeV: return "PalmV";
+        case deviceTypeVx: return "PalmVx";
+        case deviceTypeM100: return "PalmM100";
+        case deviceTypeM105: return "PalmM105";
+        case deviceTypeM125: return "PalmM125";
+        // The WorkPad c500 is an m500 sold by IBM, on the same ROM.
+        case deviceTypeM500: case deviceTypeC500: return "PalmM500";
+        case deviceTypeIIIc: return "PalmIIIc";
+        case deviceTypeM505: return "PalmM505";
+        case deviceTypeM515: return "PalmM515";
+        case deviceTypeM130: return "PalmM130";
+        case deviceTypeM520: return "PalmM520";
         case deviceTypeDana: return "AlphaSmartDana";
         case deviceTypeDanaWireless: return "DanaWireless";
         default: return nullptr;
@@ -261,6 +275,8 @@ string checkRom(const uint8_t* rom, size_t size, const string& deviceName, const
     if (!deviceName.empty()) {
         profile = deviceProfileNamed5(deviceName.c_str());
         if (!profile || !deviceProfileRuns68k5(profile->deviceType)) return "unknown 68k device " + deviceName;
+        if (!deviceProfileTakes68kRom5(*profile, header))
+            return string(profile->name) + ": this is a " + header.profile->displayName + " ROM";
     }
     if (profile->capabilities.builtInWifi && !danaSerialToken5(rom, size))
         return string(profile->name) + ": this ROM has no serial number token";
@@ -467,13 +483,7 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
            linkedHash(data.data()+offset+count,data.size()-offset-count)!=machineHash) return "damaged linked session";
         session.manifest.assign(reinterpret_cast<const char*>(data.data()+offset),count);
         offset+=count;
-        if(isPortable(data)) {
-            if(folder.empty()) return "portable folder required; container conversion is unsupported";
-            string linked;
-            const auto error=RuntimeCards::ResolvePortable(session.manifest,folder,linked);
-            if(!error.empty()) return error;
-            session.manifest=std::move(linked);
-        }
+        if(isPortable(data) && folder.empty()) return "portable folder required; container conversion is unsupported";
     }
     if (!session.file.Deserialize(data.size()-offset, data.data()+offset)) return "invalid session image";
     const auto* named = deviceProfileNamed5(session.file.GetDeviceName().c_str());
@@ -485,7 +495,13 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
     if (session.file.GetDisplayMode() != int32_t(named->defaultDisplay)) return "unsupported display mode";
     if (session.file.GetRamSize() != named->minRam) return "unsupported RAM size";
     if (!session.file.GetMemorySize() || !session.file.GetSavestateSize()) return "session has no machine state";
-    if (!session.manifest.empty() && !deviceTypeIsDana5(named->deviceType)) return "linked cards require Dana";
+    if (!session.manifest.empty() && !deviceProfileLinkedCards5(*named)) return "this device has no card slot";
+    if (isPortable(data)) {
+        string linked;
+        const auto error=RuntimeCards::ResolvePortable(named->deviceType,session.manifest,folder,linked);
+        if(!error.empty()) return error;
+        session.manifest=std::move(linked);
+    }
     if (const auto error = parseMetadata(session.file.GetMetadata(), session.file.GetMetadataSize(), session.metadata);
         !error.empty())
         return error;
@@ -537,13 +553,16 @@ PortablePublication savePortable(const string& path,const DeviceProfile5& profil
 // Decode the real protocol chunks into temporary devices before touching live attachments.
 struct CardStateCheck {
     const RuntimeCards::Pair& pair;
+    unsigned slots;
     void Load(SavestateLoader<ChunkType>& loader) {
         EmSPISlaveSD first(EmHAL::Slot::sdcard),second(EmHAL::Slot::sdcard2);
         first.Load(loader); second.Load(loader);
         if ((pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
             (pair.card[1] && (!second.IsBlockInRange(pair.card[1]->backing->Size()/512) || !second.IsProtocol(pair.card[1]->protocol))))
             loader.NotifyError();
-        if(!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || !loader.HasChunk(static_cast<ChunkType>(0x201)))
+        // One SPI card per slot: 0x1d0 for the first, 0x201 for the Dana's second.
+        if(!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201))!=(slots>1) ||
+           (slots<2 && pair.card[1]))
             loader.NotifyError();
         auto* chunk=loader.GetChunk(ChunkType::externalStorage);
         if(!chunk) { loader.NotifyError(); return; }
@@ -579,7 +598,7 @@ string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pa
         ids.push_back(id); offset+=size_t(length)*4;
     }
     if(offset!=bytes.size()) return "trailing machine chunk data";
-    CardStateCheck target{pair}; SavestateLoader<ChunkType> loader;
+    CardStateCheck target{pair,session.profile?deviceProfileCardSlotCount5(*session.profile):0u}; SavestateLoader<ChunkType> loader;
     return loader.Load(bytes.data(),bytes.size(),target)?"":"invalid card protocol or insertion state";
 }
 
@@ -855,7 +874,7 @@ class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
         : options(options), profile(&profile), metadata(metadata),
-          lcd(profile.frontend.width, profile.frontend.height) {
+          lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType)) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
@@ -913,7 +932,6 @@ class Runner {
     // Headless: runs for options.runFor guest seconds as fast as the host can.
     int RunHeadless() {
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
-            if (!deviceTypeIsDana5(profile->deviceType)) return 1;
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
@@ -931,7 +949,6 @@ class Runner {
 
     int RunWindow() {
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
-            if (!deviceTypeIsDana5(profile->deviceType)) return 1;
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
@@ -1697,8 +1714,7 @@ class Runner {
             const bool second=command.rfind("sd2-",0)==0;
             const auto begin=args.find_first_not_of(" ");
             args=begin==string::npos ? "" : args.substr(begin);
-            cout << "card: " << (deviceTypeIsDana5(profile->deviceType) ?
-                runtimeCards.Command(second,command.substr(second?4:3),args) : "error: unsupported device") << endl;
+            cout << "card: " << runtimeCards.Command(second,command.substr(second?4:3),args) << endl;
         } else if(command=="dana-view"||command=="dana-view-state") {
             if(!deviceTypeIsDana5(profile->deviceType))return void(cout<<"unsupported: Dana view"<<endl);
             if(command=="dana-view") {
@@ -1716,6 +1732,7 @@ class Runner {
             ReleaseInput();
             quit = true;
         } else if (command == "export-portable" || command == "copy-session" || command == "duplicate-session") {
+            if(!runtimeCards.Slots()) return void(cout << "unsupported: This command is for independent cards." << endl);
             if(!argument(path)) return void(cout << "usage: " << command << " <new-folder>" << endl);
             const auto result=savePortable(path,*profile,metadata);
             cout << (result==PortablePublication::durable?"wrote portable folder ":
@@ -2072,13 +2089,14 @@ class Runner {
     // device.
     Reply DesktopCommand(const string& command, const string& argument) {
         if (command == "export-portable" || command == "copy-session" || command == "duplicate-session") {
-            if (!deviceTypeIsDana5(profile->deviceType))
-                return {false, "unsupported", "This command is for Dana's independent cards."};
+            if (!runtimeCards.Slots())
+                return {false, "unsupported", "This command is for independent cards."};
             if (argument.empty() || argument.front() != '/' || argument.find_first_of("\r\n") != string::npos || argument.find('\0') != string::npos)
                 return {false, "argument", "An absolute new folder path is required."};
             const auto result = savePortable(argument, *profile, metadata);
             if (result == PortablePublication::durable)
-                return {true, "portable", "Portable folder saved with both card slots."};
+                return {true, "portable", runtimeCards.Slots() > 1 ? "Portable folder saved with both card slots." :
+                                                                   "Portable folder saved with its card."};
             if (result == PortablePublication::publishedUncertain)
                 return {false, "durability-uncertain", "Output published, but its directory flush failed. Keep it and verify it before use."};
             return {false, "portable", "Portable export refused. A new folder and managed cards are required."};
@@ -2095,7 +2113,7 @@ class Runner {
             if(command=="dana-view"&&!SetDanaView(argument,error))return {false,"argument",error};
             return {true,"dana-view",DanaViewDescription()};
         }
-        if ((command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) && deviceTypeIsDana5(profile->deviceType)) {
+        if ((command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) && runtimeCards.Slots()) {
             const bool second=command.rfind("sd2-",0)==0;
             auto reply=runtimeCards.Command(second,command.substr(second?4:3),argument);
             return {reply.rfind("error:",0)!=0,"card",reply};
@@ -3313,6 +3331,7 @@ int main(int argc, char** argv) {
         string error = checkSession(image, options.device, session,folder);
         RuntimeCards::Pair next;
         if(error.empty() && !startCore(*session.profile,static_cast<const uint8_t*>(session.file.GetNor()),session.file.GetNorSize())) error="core failed to start";
+        if(error.empty()) runtimeCards.SetDevice(session.profile->deviceType);
         if(error.empty()) error=runtimeCards.Stage(session.manifest,next);
         if(error.empty()) error=checkCardState(session,next);
         if(error.empty()) { runtimeCards.Install(next); error=applySession(session); }
@@ -3331,6 +3350,7 @@ int main(int argc, char** argv) {
         }
         cout << details.str() << "network redirect " << (Feature::GetNetworkRedirection() ? "on" : "off") << endl;
         if (options.checkOnly) return 0;
+        runtimeCards.SetDevice(profile->deviceType);
         if (!startCore(*profile, image.data(), image.size())) {
             cerr << "core failed to start" << endl;
             return 1;

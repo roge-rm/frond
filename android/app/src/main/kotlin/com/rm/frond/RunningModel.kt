@@ -38,7 +38,7 @@ class RunningModel(
     // The running session's name, for the copy's file name.
     val name: String,
 ) : FilesModel {
-    val danaCards = if (device.isDana() && link != null) DanaCards(activity.applicationContext, link, device) else null
+    val danaCards = if (device.linkedCards && link != null) DanaCards(activity.applicationContext, link, device) else null
     fun danaJob(work: (DanaCards) -> Unit = {}) {
         val cards = danaCards ?: return
         if (busy != null || waiting()) return

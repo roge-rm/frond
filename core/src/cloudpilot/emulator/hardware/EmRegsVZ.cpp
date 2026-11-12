@@ -1562,7 +1562,7 @@ uint32 EmRegsVZ::portXDataRead(emuptr address, int) {
     uint8 result = output | input | intFn;
 
     // PDPOL inverts INT[3:0] inputs before the data holding register.
-    if (port == 'D') result ^= READ_REGISTER(portDPolarity) & ~dir & 0x0f;
+    if (port == 'D' && PortDPolarityInverts()) result ^= READ_REGISTER(portDPolarity) & ~dir & 0x0f;
 
     PRINTF("EmRegsVZ::port%cDataRead: sel    dir    output input  intFn  result", (char)port);
     PRINTF("EmRegsVZ::port%cDataRead: 0x%02lX   0x%02lX   0x%02lX   0x%02lX   0x%02lX   0x%02lX",
@@ -2496,9 +2496,10 @@ void EmRegsVZ::UpdatePortDInterrupts(void) {
     // We have a line-level interrupt if:
     //
     //	- line-level interrupts are requested
-    //	- the input is high for POL=0, low for POL=1
+    //	- the input is high for POL=0, low for POL=1, or with the boards whose keys read
+    //	  active-high, the input matches POL
 
-    newBits |= ~portDIntEdge & (portDData ^ portDPolarity);
+    newBits |= ~portDIntEdge & (PortDPolarityInverts() ? portDData ^ portDPolarity : ~(portDData ^ portDPolarity));
 
     // We have an edge interrupt if:
     //

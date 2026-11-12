@@ -18,10 +18,13 @@ class PalmIIIxTest {
     @get:Rule val tmp = TemporaryFolder()
 
     private val iiix get() = Device.byId("palm-iiix")!!
+    private val ezIds = listOf("palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100", "palm-m105")
+    private val vzIds = listOf("palm-m125", "palm-m500", "ibm-workpad-c500")
+    private val colourIds = listOf("palm-iiic", "palm-m505", "palm-m515", "palm-m130", "palm-m520")
 
     // A 68k ROM with a big-endian card header, like tests/firmware-input.cpp's rom68k.
     private fun rom(size: Long, version: Int, flags: Int = 0x0020, company: Long = 0, hal: Long = 0,
-                    resetOffset: Long = 0x822a): File {
+                    resetOffset: Long = 0x822a, base: Long = 0x10c00000L): File {
         val f = tmp.newFile()
         RandomAccessFile(f, "rw").use { file ->
             file.setLength(size)
@@ -29,7 +32,7 @@ class PalmIIIxTest {
                 file.seek(at)
                 for (i in 0 until bytes) file.write((value shr (8 * (bytes - 1 - i))).toInt() and 0xff)
             }
-            be(0, 0x3000, 4); be(4, 0x10c00000L + resetOffset, 4); be(8, 0xfeedbeefL, 4)
+            be(0, 0x3000, 4); be(4, base + resetOffset, 4); be(8, 0xfeedbeefL, 4)
             be(0x0c, version.toLong(), 2); be(0x0e, flags.toLong(), 2)
             file.seek(0x10); file.write("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
             be(0x6c, size, 4)
@@ -56,9 +59,9 @@ class PalmIIIxTest {
     }
 
     @Test fun romsTheIiixCantRunAreRefused() {
-        // 68328 only, header version 2, another 4.1 device's IDs: the header is there but it can't run.
+        // 68328 only, header version 2, an unknown HAL: the header is there but it can't run.
         for (f in listOf(rom(0x128000, 3, flags = 0x0010), rom(0x128000, 2),
-                         rom(0x1a8000, 5, company = 0x70616c6dL, hal = 0x6173746eL))) {
+                         rom(0x1a8000, 5, company = 0x70616c6dL, hal = 0x12345678L))) {
             assertNull(Firmware.detect(f))
             assertEquals("This ROM isn't one the Palm IIIx can run.", Firmware.check(iiix, f, null))
         }
@@ -95,7 +98,115 @@ class PalmIIIxTest {
         assertFalse(d.cardSupported || d.holdPresent)
         assertEquals(listOf("--device", "palm-iiix"), d.coreFlags)
         // The Danas run on the 68k core too; every other device is ARM.
-        for (arm in Device.entries.filter { it != d && !it.isDana() }) assertFalse(arm.id, arm.runs68k)
+        for (arm in Device.entries.filter { it != d && !it.isDana() && it.id !in ezIds && it.id !in vzIds && it.id !in colourIds }) assertFalse(arm.id, arm.runs68k)
+    }
+
+    @Test fun otherEzDevicesAreInTheInventory() {
+        val expect = mapOf("palm-iiie" to (2 to true), "palm-iiixe" to (8 to true), "palm-v" to (2 to false),
+            "palm-vx" to (8 to false), "palm-m100" to (2 to false), "palm-m105" to (8 to false))
+        for ((id, ram) in expect) {
+            val d = Device.byId(id)!!
+            assertTrue(id, d in Device.shown && d.runs68k && d != iiix)
+            assertEquals("ROM image", d.firmwareLabel)
+            assertTrue(id, d.sound && d.serialPort && d.infrared)
+            assertFalse(id, d.network || d.keyboard || d.usb || d.bluetooth || d.microphone || d.camera || d.fastAudio)
+            assertFalse(id, d.cardSupported || d.hasNand)
+            assertEquals(id, ram.second, "power" in d.buttons)
+            assertEquals(listOf("--device", id), d.coreFlags)
+        }
+    }
+
+    @Test fun anyEzDeviceTakesAnEzRomAndTheM100FamilyIsToldByItsClockDatabase() {
+        for (id in listOf("palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100", "palm-m105")) {
+            val d = Device.byId(id)!!
+            for (version in 3..5) {
+                val f = rom(0x178000, version, company = 0x70616c6dL, hal = 0x73756d6fL)
+                assertNull(id, Firmware.check(d, f, null))
+                assertEquals(iiix, Firmware.detect(f))
+            }
+            assertEquals("The ${d.label} has no NAND. Leave the NAND image empty.", Firmware.check(d, rom(0x178000, 3), tmp.newFile()))
+            assertEquals("This ROM isn't one the ${d.label} can run.", Firmware.check(d, rom(0x178000, 3, flags = 0x0010), null))
+        }
+        val clock = "cclkPalmClock\u0000".toByteArray(Charsets.US_ASCII)
+        for (at in listOf(0x150000L, 0x1fffffL - 13, 0x1fffcL)) {
+            val f = rom(0x200000, 4, resetOffset = 0xa06a)
+            assertEquals(iiix, Firmware.detect(f))
+            RandomAccessFile(f, "rw").use { it.seek(at); it.write(clock) }
+            val m100 = Device.byId("palm-m100")!!
+            assertEquals(m100, Firmware.detect(f))
+            assertNull(Firmware.check(m100, f, null))
+            assertNull(Firmware.check(Device.byId("palm-m105")!!, f, null))
+        }
+    }
+
+    @Test fun vzPalmsTakeTheirOwnRomsAndHaveOneCardSlot() {
+        val m125 = Device.byId("palm-m125")!!
+        val m500 = Device.byId("palm-m500")!!
+        val c500 = Device.byId("ibm-workpad-c500")!!
+        for (d in listOf(m125, m500, c500)) {
+            assertTrue(d.id, d in Device.shown && d.runs68k && d.linkedCards)
+            assertEquals(d.id, 1, d.storageSlots.size)
+            assertEquals("USB HotSync", d.pendingUsb)
+            assertTrue(d.id, d.serialPort && d.infrared)
+            assertEquals(listOf("--device", d.id), d.coreFlags)
+        }
+        assertEquals("", iiix.pendingUsb)
+        assertEquals("USB computer", Device.byId("alphasmart-dana")!!.pendingUsb)
+        fun vz(hal: Long) = rom(0x300000, 5, flags = 0x0040, company = 0x70616c6dL, hal = hal, resetOffset = 0x2a2,
+            base = 0x10000000L)
+        val vstu = vz(0x76737475L)
+        val vtrn = vz(0x7674726eL)
+        assertEquals(m125, Firmware.detect(vstu))
+        assertEquals(m500, Firmware.detect(vtrn))
+        assertNull(Firmware.check(m125, vstu, null))
+        assertNull(Firmware.check(m500, vtrn, null))
+        // The c500 runs the m500's ROM, whose header can't tell them apart.
+        assertNull(Firmware.check(c500, vtrn, null))
+        assertEquals("This is a Palm m500 ROM. Choose Palm m500.", Firmware.check(m125, vtrn, null))
+        assertEquals("This is a Palm m125 ROM. Choose Palm m125.", Firmware.check(c500, vstu, null))
+        assertNotNull(Firmware.check(iiix, vstu, null))
+        // Past 4 MiB, or a reset vector outside the ROM.
+        assertNull(Firmware.detect(rom((4L shl 20) + 0x1000, 5, flags = 0x0040, company = 0x70616c6dL,
+            hal = 0x76737475L, base = 0x10000000L)))
+        assertNull(Firmware.detect(rom(0x300000, 5, flags = 0x0040, company = 0x70616c6dL, hal = 0x76737475L)))
+    }
+
+    @Test fun colourPalmsHaveNoContrastAndTheM520IsToldByItsBigCard() {
+        for (id in colourIds) {
+            val d = Device.byId(id)!!
+            assertTrue(id, d in Device.shown && d.runs68k && d.colourLcd && !d.lcdContrast)
+            assertEquals(MachineRows(contrast = false, speed = true, engine = false, audioPreview = false), MachineRows.of(d))
+        }
+        assertTrue(iiix.lcdContrast && !iiix.colourLcd)
+        for (id in colourIds - "palm-iiic") assertEquals(id, 1, Device.byId(id)!!.storageSlots.size)
+        val iiic = Device.byId("palm-iiic")!!
+        assertEquals(iiic, Firmware.detect(rom(0x1a8000, 5, company = 0x70616c6dL, hal = 0x6173746eL, resetOffset = 0xc6e6)))
+        // The IIIc takes only its own ROM, and the IIIx and the other EZ devices take no IIIc ROM.
+        val iiicRom = rom(0x1a8000, 5, company = 0x70616c6dL, hal = 0x6173746eL, resetOffset = 0xc6e6)
+        assertNull(Firmware.check(iiic, iiicRom, null))
+        assertEquals("This is a Palm IIIc ROM. Choose Palm IIIc.", Firmware.check(iiix, iiicRom, null))
+        assertEquals("This is a Palm IIIc ROM. Choose Palm IIIc.", Firmware.check(Device.byId("palm-v")!!, iiicRom, null))
+        assertEquals("This is a Palm IIIx ROM. Choose Palm IIIx.", Firmware.check(iiic, rom(0x178000, 3), null))
+        assertNull(Firmware.check(Device.byId("palm-iiie")!!, rom(0x178000, 3), null))
+        val m505 = Device.byId("palm-m505")!!
+        val m520 = Device.byId("palm-m520")!!
+        // The m520's small card has the m505's IDs; the big card at 64 KiB has its own.
+        val split = rom(0x400000, 5, flags = 0x0040, company = 0x70616c6dL, hal = 0x65637479L, resetOffset = 0x2a2,
+            base = 0x10000000L)
+        assertEquals(m505, Firmware.detect(split))
+        RandomAccessFile(split, "rw").use { file ->
+            fun be(at: Long, value: Long) {
+                file.seek(at)
+                for (i in 0 until 4) file.write((value shr (8 * (3 - i))).toInt() and 0xff)
+            }
+            be(0x6c, 0x8000); be(0x68, 0x10010000L); be(0x10008, 0xfeedbeefL)
+            file.seek(0x1000c); file.write(byteArrayOf(0, 5))
+            file.seek(0x10010); file.write("PalmCard\u0000".toByteArray(Charsets.US_ASCII))
+            be(0x1007e, 0x70616c6dL); be(0x10082, 0x7366676fL)
+        }
+        assertEquals(m520, Firmware.detect(split))
+        assertNull(Firmware.check(m520, split, null))
+        assertEquals("This is a Palm m520 ROM. Choose Palm m520.", Firmware.check(m505, split, null))
     }
 
     @Test fun settingsRowsFollowTheDevice() {
@@ -108,6 +219,9 @@ class PalmIIIxTest {
         val args = s.arguments(soundSupported = true, m68k = true)
         assertEquals(listOf("--window-fit", "fit", "--contrast", "30", "--speed", "uncapped"), args)
         assertFalse("--engine" in s.arguments(m68k = true))
+        // A colour LCD has no contrast, so none is passed.
+        assertFalse("--contrast" in s.arguments(m68k = true, colourLcd = true))
+        assertEquals("fit=fit smooth=off", s.displayArgument(m68k = true, colourLcd = true))
         // Without a chosen contrast the session's own stays.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
         assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())

@@ -52,7 +52,7 @@ fun DanaCardsRows(model: RunningModel) {
                 else -> "${if (card.protocol == "mmc") "MMC" else "SD"} · ${if (card.inserted) "Inserted" else "Ejected"}" +
                     if (card.failed) " · I/O error" else if (card.writeProtected) " · Write protected" else ""
             }
-            ListItem(headlineContent = { Text(slot.title) }, supportingContent = { Text(label) })
+            ListItem(headlineContent = { Text(if (cards.states.size == 1) "Card" else slot.title) }, supportingContent = { Text(label) })
             Row {
                 val usable = state.known && model.busy == null
                 if (card == null) TextButton(enabled = usable, onClick = {
@@ -65,7 +65,7 @@ fun DanaCardsRows(model: RunningModel) {
                         Text(if (card.inserted) "Eject" else "Insert")
                     }
                     if (!card.inserted) TextButton(enabled = usable && !card.failed, onClick = { model.danaJob { it.command(slot, "take-out") } }) { Text("Remove") }
-                    TextButton(enabled = usable && !card.failed, onClick = { exporting = slot; export.launch("Dana card ${slot.label}.frondsd") }) { Text("Export") }
+                    TextButton(enabled = usable && !card.failed, onClick = { exporting = slot; export.launch("${cards.device.label} card ${slot.label}.frondsd") }) { Text("Export") }
                 }
                 if (!state.known) TextButton(enabled = model.busy == null, onClick = { model.danaJob() }) { Text("Try again") }
             }

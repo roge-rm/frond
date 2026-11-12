@@ -44,6 +44,8 @@ int main() {
         std::cout << ",\"runner_eligible\":" << (deviceProfileRunnerEligible5(p.deviceType) ? "true" : "false")
                   << ",\"runs_68k\":" << (deviceProfileRuns68k5(p.deviceType) ? "true" : "false")
                   << ",\"hot_sync_button\":" << (deviceProfileHasHotSyncButton5(p.deviceType) ? "true" : "false")
+                  << ",\"pending_usb\":" << std::quoted(deviceProfilePendingUsb5(p.deviceType))
+                  << ",\"colour_lcd\":" << (deviceProfileColourLcd5(p.deviceType) ? "true" : "false")
                   << ",\"cpu_hz\":" << p.cpuHz
                   << ",\"original_mips\":" << deviceProfileOriginalMips5(p.deviceType)
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")

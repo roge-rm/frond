@@ -79,6 +79,9 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
 
    protected:
     virtual uint8 GetKeyBits(void);
+    // PDPOL inverts INT[3:0] as on the real VZ. Cloudpilot's Palm boards report their keys
+    // already active-high and keep its old reading, which ignores PDPOL.
+    virtual bool PortDPolarityInverts() const { return false; }
     virtual uint16 ButtonToBits(ButtonEvent::Button btn);
     virtual EmSPISlave* GetSPI2Slave(void);
     virtual EmSPISlave* GetSPI1Slave(void);

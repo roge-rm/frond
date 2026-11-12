@@ -3,7 +3,8 @@
 
 // The 68k LCD in RGBA: Cloudpilot's 1, 2 or 4 bpp frame as grey levels, coloured like the
 // real panel and adjusted by the contrast setting, with the green glow of the EL backlight when
-// the guest turns it on.
+// the guest turns it on. A colour panel's 24-bit frame (the IIIc's SED1375, the m505's SED1376,
+// the m130's MediaQ) is shown as it is, and its panel is dark when the LCD is off.
 
 #include <algorithm>
 #include <cstdint>
@@ -21,7 +22,8 @@ class Lcd68k {
     static constexpr int kWidth = 160, kHeight = 160;
     static constexpr int kDefaultContrast = 50;
 
-    Lcd68k(int width = kWidth, int height = kHeight) : width(width), height(height) {
+    Lcd68k(int width = kWidth, int height = kHeight, bool colour = false)
+        : width(width), height(height), colour(colour) {
         if (width <= 0 || width > 1024 || height <= 0 || height > 1024)
             throw std::invalid_argument("invalid 68k LCD dimensions");
         pixels.resize(size_t(width) * height * 4);
@@ -53,7 +55,7 @@ class Lcd68k {
         lit = on && EmHAL::GetLCDBacklightOn();
         const Rgb* palette = this->palette[lit ? 1 : 0];
         if (!on) {
-            for (int i = 0; i < width * height; ++i) Put(i, palette[0]);
+            for (int i = 0; i < width * height; ++i) Put(i, colour ? kColourOff : palette[0]);
             return false;
         }
         const uint8_t* buffer = frame.GetBuffer();
@@ -82,10 +84,14 @@ class Lcd68k {
                     break;
                 }
                 case 24: {
-                    // 24-bit colour frames don't happen on the EZ; shown as grey levels anyway.
+                    // Cloudpilot's colour pixels are 32-bit 0xAABBGGRR, so R, G, B in memory on a
+                    // little-endian host. A grey panel never gives a 24-bit frame; one is shown as grey levels.
                     const uint8_t* in = row + 4 * frame.margin;
-                    for (int x = 0; x < width; ++x, out += 4, in += 4)
-                        Copy(out, palette[15 - (in[0] + in[1] + in[2]) / 48]);
+                    if (colour)
+                        for (int x = 0; x < width; ++x, out += 4, in += 4) Copy(out, Rgb{in[0], in[1], in[2]});
+                    else
+                        for (int x = 0; x < width; ++x, out += 4, in += 4)
+                            Copy(out, palette[15 - (in[0] + in[1] + in[2]) / 48]);
                     break;
                 }
             }
@@ -94,6 +100,7 @@ class Lcd68k {
     }
 
     bool On() const { return on; }
+    bool IsColour() const { return colour; }
     // The backlight as of the last Update.
     bool Lit() const { return lit; }
     // RGBA bytes, Width() x Height().
@@ -108,6 +115,8 @@ class Lcd68k {
     static constexpr Rgb kPanel{0xc2, 0xcb, 0xb0}, kInk{0x16, 0x1c, 0x1c};
     // Lit by the backlight: the panel glows green, the ink stays dark.
     static constexpr Rgb kLitPanel{0x7e, 0xd8, 0x9a}, kLitInk{0x0e, 0x24, 0x18};
+    // A colour panel with the LCD off.
+    static constexpr Rgb kColourOff{0x1c, 0x1e, 0x20};
 
     // Level 0 is the panel, 15 full ink. Lower contrast fades the ink towards the panel; higher
     // contrast darkens the panel towards the ink, as the wheel on the real one does.
@@ -130,6 +139,7 @@ class Lcd68k {
     Frame frame{1024 * 1024};
     Rgb palette[2][16]{};
     int width, height;
+    bool colour;
     std::vector<uint8_t> pixels;
     int contrast{kDefaultContrast};
     bool on{false};

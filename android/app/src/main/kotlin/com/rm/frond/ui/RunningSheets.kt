@@ -310,7 +310,7 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             ConnRow.HOTSYNC -> SheetAction("HotSync") { actions.closeSheet(); model.hotSync() }
         }
     }
-    if (model.danaCards != null) for (title in listOf("USB computer")) ConnItem(title, false, null) { }
+    if (model.device.pendingUsb.isNotEmpty()) ConnItem(model.device.pendingUsb, false, null) { }
     choosing?.let { LinkChoiceDialog(it, model) { choosing = null } }
 }
 

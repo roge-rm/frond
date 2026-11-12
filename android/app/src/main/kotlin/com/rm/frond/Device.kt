@@ -49,6 +49,8 @@ data class StorageSlot(val id: Int, val label: Int, val kind: String, val famili
 data class Device internal constructor(
     val id: String,
     val label: String,
+    // Group from deviceProfiles5: ez68k-rom and vz68k-rom are the DragonBall EZ and VZ boards.
+    val cohort: String = "",
     val norSize: Long,
     val nandSize: Long,
     val nandRequired: Boolean,
@@ -89,6 +91,10 @@ data class Device internal constructor(
     val hotSyncButton: Boolean = false,
     // Shown with an Experimental tag in the device list.
     val experimental: Boolean = false,
+    // A connector the device has that isn't emulated yet, shown greyed out; empty for none.
+    val pendingUsb: String = "",
+    // A colour LCD, shown as the guest draws it: no contrast setting.
+    val colourLcd: Boolean = false,
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {
@@ -98,6 +104,14 @@ data class Device internal constructor(
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
     val infraredKeyboard: Boolean get() = keyboard && !isDana()
+    // A CLIE with the jog side tab gets the Jog controls choice; with a silkscreen it has no
+    // keyboard, so the keyboard choice puts them beside the silkscreen and buttons.
+    val jogControls: Boolean get() = sideTabWidth > 0
+    val jogBesideButtons: Boolean get() = sideTabWidth > 0 && silkscreenHeight > 0
+    // A 68k device's slots take linked card files through frond-68k's sd- and sd2- commands (DanaCards).
+    val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
+    // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
+    val lcdContrast: Boolean get() = runs68k && !colourLcd
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0

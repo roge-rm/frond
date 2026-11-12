@@ -20,6 +20,10 @@ static void palmIIIx();
 static void zodiac2();
 static void danaInventory();
 static void danaWirelessInventory();
+static void ezProfiles();
+static void vzProfiles();
+// The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
+static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
 static void originalMips();
 
 int main() {
@@ -29,7 +33,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"palm-m515", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
+    const std::vector<std::string> reserved{"sony-clie-t415", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -48,16 +52,17 @@ int main() {
         desktopCount += deviceProfileSupportsDesktop5(p.deviceType);
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
-                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeFrankenE2 ||
-                deviceTypeIsDana5(p.deviceType)));
+                p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
+                p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
-        for (uint32_t ram : {0u, 1u, 4u << 20, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 128u << 20, 1u << 31, UINT32_MAX}) {
+        for (uint32_t ram : {0u, 1u, 2u << 20, 4u << 20, 8u << 20, 16u << 20, 24u << 20, 32u << 20, 64u << 20, 128u << 20, 1u << 31, UINT32_MAX}) {
             const bool expected = p.deviceType == deviceTypePV
                 ? ram >= (8u << 20) && (ram & (ram - 1)) == 0
                 : p.deviceType == deviceTypeTG50 ? ram == (16u << 20)
-                : p.deviceType == deviceTypeIIIx ? ram == (4u << 20)
+                : p.board == DeviceBoard5::ez328 ? ram == p.minRam
+                : vzPalm(p) ? ram == p.minRam
                 : p.deviceType == deviceTypeZodiac2 ? ram == (128u << 20)
                 : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : p.deviceType == deviceTypeDanaWireless ? ram == (16u << 20)
@@ -106,7 +111,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 9 && names.size() == 14 && types.size() == 10);
+    assert(desktopCount == 23 && names.size() == 28 && types.size() == 24);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -114,7 +119,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 10, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 24, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -226,7 +231,7 @@ int main() {
         for (const auto& other : deviceProfiles5)
             assert(deviceProfileHasHotSyncButton5(other.deviceType) ==
                    (other.deviceType == deviceTypeTX || other.deviceType == deviceTypeE2 ||
-                    other.deviceType == deviceTypeFrankenE2 || other.deviceType == deviceTypeIIIx));
+                    other.deviceType == deviceTypeFrankenE2 || other.board == DeviceBoard5::ez328 || vzPalm(other)));
         for (int unknown : {-1, 99}) {
             assert(!deviceProfileIsE2Board5(unknown) && !deviceProfileHasHotSyncButton5(unknown));
         }
@@ -356,9 +361,11 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZire72));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.backgroundPanel == (p.deviceType == deviceTypeTG50));
-    for (const auto& p : deviceProfiles5) assert(p.capabilities.modem == (p.deviceType == deviceTypeIIIx));
+    for (const auto& p : deviceProfiles5) // The snap-on modem: the III series and the V series connectors; the m100 series has none.
+        assert(p.capabilities.modem == ((p.board == DeviceBoard5::ez328 && p.art != DeviceArt::m100 && p.art != DeviceArt::m105) ||
+                                        vzPalm(p)));
     for (const auto& p : deviceProfiles5)
-        assert(p.capabilities.irPhone == (p.deviceType == deviceTypeIIIx || p.deviceType == deviceTypeTX ||
+        assert(p.capabilities.irPhone == (p.board == DeviceBoard5::ez328 || vzPalm(p) || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
                                           p.deviceType == deviceTypeZire72));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.usbPrinter == deviceTypeIsDana5(p.deviceType));
@@ -409,7 +416,9 @@ int main() {
         }
         for (int type : {deviceTypeE2, deviceTypeTX, deviceTypeZire72, deviceTypeFrankenE2, deviceTypePV})
             assert(deviceProfileRunnerEligible5(type));
-        for (const char* name : {"palm-iiix", "palm-m515", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"})
+        for (const char* name : {"palm-iiix", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
+                                  "palm-m105", "palm-m125", "palm-m500", "ibm-workpad-c500", "palm-iiic", "palm-m505",
+                                  "palm-m130", "palm-m520", "sony-clie-t415", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"})
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
         // Windows Mobile iPAQs are reserved names with art and their screen's display mode.
         const std::pair<const char*, DisplayMode> ipaqs[] = {{"hp-ipaq-210", DisplayMode::mode_480x640},
@@ -426,6 +435,8 @@ int main() {
     }
 
     palmIIIx();
+    ezProfiles();
+    vzProfiles();
     danaInventory();
     danaWirelessInventory();
     originalMips();
@@ -563,7 +574,8 @@ static void palmIIIx() {
            deviceProfileSupportsDesktop5(p->deviceType));
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
     for (const auto& other : deviceProfiles5)
-        if (&other != p && !deviceTypeIsDana5(other.deviceType)) assert(!deviceProfileRuns68k5(other.deviceType));
+        if (&other != p && other.board != DeviceBoard5::vz328 && other.board != DeviceBoard5::ez328)
+            assert(!deviceProfileRuns68k5(other.deviceType));
     assert(p->cpuHz == 16580608);
     assert(deviceProfileSupportsRam5(p->deviceType, 4u << 20) && !deviceProfileSupportsRam5(p->deviceType, 8u << 20));
     assert(p->defaultDisplay == DisplayMode::mode_160x160 && p->displayModes == (1u << 1));
@@ -578,9 +590,6 @@ static void palmIIIx() {
     // Only the hardware a IIIx has: the piezo, the cradle serial port and IrDA.
     assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && !caps.fastAudio && caps.infrared &&
            !caps.bluetooth && caps.sound && !caps.microphone && !caps.backgroundPanel);
-    for (const auto& other : deviceProfiles5)
-        if (&other != p) assert(other.board != DeviceBoard5::ez328);
-
     constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, sumo = 0x73756d6f, ez = 0x0020;
     // The shapes of the IIIx 3.1, generic OS 3.5 EZ and IIIx/V 4.1 ROMs.
     const auto v31 = rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000);
@@ -640,7 +649,7 @@ static void palmIIIx() {
     refused(rom68k(0x128000, 6, ez, palm, sumo, base + 0x822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, 0x00c0822a, 0x128000), true);
     refused(rom68k(0x128000, 3, ez, 0, 0, base + 0x128000, 0x128000), true);
-    refused(rom68k(0x1a8000, 5, ez, palm, 0x6173746e /* astn */, base + 0xc6ea, 0x1a8000), true);
+    refused(rom68k(0x1a8000, 5, ez, palm, 0x12345678, base + 0xc6ea, 0x1a8000), true);
     refused(rom68k(0x1a8000, 5, ez, 0, 0, base + 0xc6ea, 0x1a8000), true);
     {
         auto wrongName = v31;
@@ -648,7 +657,6 @@ static void palmIIIx() {
         refused(wrongName, false);
     }
 }
-
 static void zodiac2() {
     const auto* p = deviceProfileNamed5("tapwave-zodiac-2");
     assert(p && p->deviceType == deviceTypeZodiac2 && p->support == DeviceSupport5::experimentalDesktop);
@@ -706,6 +714,100 @@ static void zodiac2() {
     assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, true) == DeviceFirmwareError5::none);
     assert(deviceProfileValidateNorLayout5(p->deviceType, 0, false, false) == DeviceFirmwareError5::norLayout);
     assert(deviceProfileValidateFirmware5(p->deviceType, good.size(), 1, false, false) == DeviceFirmwareError5::nandSize);
+}
+
+// The other EZ devices run on the IIIx's board and ROM format. Only the IIIx is told from its header; the others
+// are chosen, except an m100 series ROM, which carries its clock database.
+static void ezProfiles() {
+    struct Ez { const char* name; DeviceType5 type; DeviceArt art; uint32_t ramMiB; bool modem; bool power; };
+    const Ez devices[] = {
+        {"palm-iiie", deviceTypeIIIe, DeviceArt::iiie, 2, true, true},
+        {"palm-iiixe", deviceTypeIIIxe, DeviceArt::iiixe, 8, true, true},
+        {"palm-v", deviceTypeV, DeviceArt::v, 2, true, false},
+        {"palm-vx", deviceTypeVx, DeviceArt::vx, 8, true, false},
+        {"palm-m100", deviceTypeM100, DeviceArt::m100, 2, false, false},
+        {"palm-m105", deviceTypeM105, DeviceArt::m105, 8, false, false},
+    };
+    const auto* iiix = deviceProfileNamed5("palm-iiix");
+    for (const auto& d : devices) {
+        const auto* p = deviceProfileNamed5(d.name);
+        assert(p && p->deviceType == d.type && deviceProfile5(d.type) == p && p->art == d.art);
+        assert(p->board == DeviceBoard5::ez328 && p->cohort == DeviceCohort5::ez68k && p->detect == DeviceDetect5::none);
+        assert(p->support == DeviceSupport5::experimentalDesktop && p->frontend.available &&
+               deviceProfileSupportsDesktop5(p->deviceType));
+        assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+        assert(p->minRam == d.ramMiB << 20 && p->maxRam == p->minRam);
+        assert(deviceProfileSupportsRam5(p->deviceType, d.ramMiB << 20) && !deviceProfileSupportsRam5(p->deviceType, 4u << 20));
+        assert(p->defaultDisplay == DisplayMode::mode_160x160 && p->displayModes == (1u << 1));
+        assert(p->frontend.width == 160 && p->frontend.height == 160 && p->frontend.silkscreenHeight == 60);
+        assert(!p->nandSize && !p->norSize && !p->msSizes && deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::none);
+        const auto& caps = p->capabilities;
+        // The cradle serial port, IrDA (and the phone on it) and the piezo; nothing else is on these.
+        assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && !caps.fastAudio && caps.infrared &&
+               !caps.bluetooth && caps.sound && !caps.microphone && !caps.backgroundPanel && caps.irPhone);
+        assert(caps.modem == d.modem);
+        // The ROMs set the PLL: 16.58 MHz, the Vx's 20.25 MHz.
+        assert(p->cpuHz == (d.type == deviceTypeVx ? 20250624u : 16580608u));
+        assert((std::string(p->frontend.buttons).find("power") != std::string::npos) == d.power);
+        assert(std::string(p->frontend.appNames) == "Date Book|Address|To Do List|Memo Pad");
+        assert(deviceProfileHasHotSyncButton5(p->deviceType));
+        // The same name is not reserved any more.
+        assert(p->support != DeviceSupport5::reserved);
+        assert(p != iiix && deviceProfileTakes68kRom5(*p, Device68kRomInfo5{iiix, true}));
+    }
+    constexpr uint32_t base = 0x10c00000, palm = 0x70616c6d, sumo = 0x73756d6f, ez = 0x0020;
+    // The IIIx 3.1 ROM names the IIIx and any EZ device may be chosen for it; the IIIe has no ROM of its own.
+    const auto v31 = rom68k(0x128000, 3, ez, 0, 0, base + 0x822a, 0x128000);
+    const auto v31info = inspect68k(v31);
+    assert(v31info.profile == iiix);
+    for (const auto& d : devices) assert(deviceProfileTakes68kRom5(*deviceProfileNamed5(d.name), v31info));
+    // A version 5 ROM of another company or HAL is no EZ ROM at all; no device takes it.
+    const auto other = inspect68k(rom68k(0x1a8000, 5, ez, palm, 0x12345678, base + 0xc6ea, 0x1a8000));
+    assert(!other.profile);
+    for (const auto& d : devices) assert(!deviceProfileTakes68kRom5(*deviceProfileNamed5(d.name), other));
+    // The Dana's board is not an EZ one: a Dana ROM doesn't go to an EZ device nor an EZ ROM to the Dana.
+    const auto* dana = deviceProfileNamed5("alphasmart-dana");
+    assert(!deviceProfileTakes68kRom5(*dana, v31info));
+    assert(!deviceProfileTakes68kRom5(*deviceProfileNamed5("palm-v"), Device68kRomInfo5{dana, true}));
+    // An m100 series ROM (version 4 header, no HAL ID) is told by its clock database and offered as the m100;
+    // the m105 is chosen. The same ROM without the database is the IIIx's.
+    auto m100 = rom68k(0x200000, 4, ez, 0, 0, base + 0xa06a, 0x178000);
+    assert(inspect68k(m100).profile == iiix);
+    std::memcpy(m100.data() + 0x150000, "cclkPalmClock", 14);
+    const auto m100info = inspect68k(m100);
+    const auto* m100p = deviceProfileNamed5("palm-m100");
+    assert(m100info.profile == m100p && m100info.hasHeader && m100info.headerVersion == 4);
+    for (const char* name : {"palm-m100", "palm-m105", "palm-iiix"})
+        assert(deviceProfileTakes68kRom5(*deviceProfileNamed5(name), m100info));
+    // The name straddling the end of a 64 KiB read, and sitting in the last bytes.
+    for (size_t at : {size_t(0x1fffc), size_t(0x1ffff0), size_t(0x1fffff - 13)}) {
+        auto edge = rom68k(0x200000, 4, ez, 0, 0, base + 0xa06a, 0x178000);
+        std::memcpy(edge.data() + at, "cclkPalmClock", 14);
+        assert(inspect68k(edge).profile == m100p);
+    }
+    // A version 5 header names its device already; the database isn't looked for.
+    auto v41 = rom68k(0x1a8000, 5, ez, palm, sumo, base + 0xc6ea, 0x1a8000);
+    std::memcpy(v41.data() + 0x1000, "cclkPalmClock", 14);
+    assert(inspect68k(v41).profile == iiix);
+    // Only the IIIx and the IIIc are detected from a header; no other EZ profile takes the detection.
+    unsigned detecting = 0;
+    for (const auto& p : deviceProfiles5)
+        if (p.detect == DeviceDetect5::romHeader68k && p.board == DeviceBoard5::ez328) ++detecting;
+    assert(detecting == 2);
+    // The IIIc: a colour panel, 8 MiB, the IIIx's peripherals and power key, told by its HAL ID.
+    const auto* iiic = deviceProfileNamed5("palm-iiic");
+    assert(iiic && iiic->deviceType == deviceTypeIIIc && iiic->art == DeviceArt::iiic && iiic->board == DeviceBoard5::ez328);
+    assert(iiic->detect == DeviceDetect5::romHeader68k && iiic->companyId == palm && iiic->halId == 0x6173746e /* astn */);
+    assert(iiic->minRam == 8u << 20 && iiic->maxRam == iiic->minRam && iiic->frontend.stripHeight == 44);
+    assert(iiic->cpuHz == 20250624);
+    assert(deviceProfileColourLcd5(iiic->deviceType) && !deviceProfileColourLcd5(deviceTypeIIIx));
+    assert(iiic->capabilities.modem && iiic->capabilities.irPhone && iiic->capabilities.serial);
+    assert(std::string(iiic->frontend.buttons) == "up|down|app1|app2|app3|app4|power");
+    const auto iiicInfo = inspect68k(rom68k(0x1a8000, 5, ez, palm, 0x6173746e, base + 0xc6e6, 0x1a8000));
+    assert(iiicInfo.profile == iiic && deviceProfileTakes68kRom5(*iiic, iiicInfo));
+    // The IIIc and the IIIx's family don't take each other's ROMs.
+    assert(!deviceProfileTakes68kRom5(*iiix, iiicInfo) && !deviceProfileTakes68kRom5(*iiic, v31info));
+    assert(!deviceProfileTakes68kRom5(*iiic, m100info) && !deviceProfileTakes68kRom5(*deviceProfileNamed5("palm-v"), iiicInfo));
 }
 
 // Dana runs in the core only; frontend and peripheral acceptance are separate.
@@ -777,4 +879,107 @@ static void danaWirelessInventory() {
     auto big = rom68k(0x5c8000, 5, 0x40, p->companyId, p->halId, 0x1000c80a, 0x5c8000);
     std::copy(big.begin(), big.end(), small.begin() + 0x8000);
     assert(inspect68k(small).profile == dana);
+}
+
+// The m125, m500 and WorkPad c500 on the VZ board: told by the header's HAL ID (the c500 is chosen, as it has the
+// m500's), one SD/MMC slot of linked card files, the cradle's serial HotSync, and USB HotSync named as pending.
+static void vzProfiles() {
+    struct Vz { const char* name; DeviceType5 type; DeviceArt art; DeviceDetect5 detect; uint32_t hal; int strip;
+                uint32_t ramMiB; bool colour; int width; };
+    constexpr uint32_t palm = 0x70616c6d, vstu = 0x76737475, vtrn = 0x7674726e, base = 0x10000000, vz = 0x0040;
+    constexpr uint32_t ecty = 0x65637479, vlit = 0x766c6974, vhbs = 0x76686273, sfgo = 0x7366676f;
+    const Vz devices[] = {
+        {"palm-m125", deviceTypeM125, DeviceArt::m125, DeviceDetect5::romHeader68k, vstu, 44, 8, false, 160},
+        {"palm-m500", deviceTypeM500, DeviceArt::m500, DeviceDetect5::romHeader68k, vtrn, 44, 8, false, 160},
+        {"ibm-workpad-c500", deviceTypeC500, DeviceArt::c500, DeviceDetect5::none, vtrn, 44, 8, false, 160},
+        {"palm-m505", deviceTypeM505, DeviceArt::m505, DeviceDetect5::romHeader68k, ecty, 44, 8, true, 160},
+        {"palm-m515", deviceTypeM515, DeviceArt::m515, DeviceDetect5::romHeader68k, vlit, 44, 16, true, 160},
+        {"palm-m130", deviceTypeM130, DeviceArt::m130, DeviceDetect5::romHeader68k, vhbs, 44, 8, true, 160},
+        {"palm-m520", deviceTypeM520, DeviceArt::m520, DeviceDetect5::romHeader68k, sfgo, 88, 16, true, 320},
+    };
+    for (const auto& d : devices) {
+        const auto* p = deviceProfileNamed5(d.name);
+        assert(p && p->deviceType == d.type && deviceProfile5(d.type) == p && p->art == d.art && vzPalm(*p));
+        assert(p->cohort == DeviceCohort5::vz68k && p->detect == d.detect && p->companyId == palm && p->halId == d.hal);
+        assert(p->support == DeviceSupport5::experimentalDesktop && p->frontend.available);
+        assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+        assert(p->minRam == d.ramMiB << 20 && p->maxRam == p->minRam && p->cpuHz == 33161216);
+        assert(deviceProfileColourLcd5(p->deviceType) == d.colour);
+        // The m520 has a 320x320 LCD; its silkscreen and bar scale with it.
+        const auto display = d.width == 320 ? DisplayMode::mode_320x320 : DisplayMode::mode_160x160;
+        assert(p->defaultDisplay == display && p->displayModes == (1u << int(display)));
+        assert(p->frontend.width == d.width && p->frontend.height == d.width &&
+               p->frontend.silkscreenHeight == 60 * d.width / 160 && p->frontend.stripHeight == d.strip);
+        assert(std::string(p->frontend.buttons) == "up|down|app1|app2|app3|app4");
+        const auto& caps = p->capabilities;
+        assert(!caps.network && !caps.keyboard && caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
+               caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
+        assert(deviceProfileHasHotSyncButton5(p->deviceType));
+        assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == "USB HotSync");
+        // One slot, SD that a legacy CSD can describe and MMC up to 256 MiB, as the Dana's.
+        assert(deviceProfileLinkedCards5(*p) && deviceProfileCardSlotCount5(*p) == 1);
+        assert(deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd0, DeviceCardFamily5::sdsc, 32ull << 20));
+        assert(deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd0, DeviceCardFamily5::legacyMmc, 64ull << 20));
+        assert(!deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd2, DeviceCardFamily5::sdsc, 32ull << 20));
+        assert(deviceProfileSdSizeValid5(p->deviceType, 1023ull << 20) && !deviceProfileSdSizeValid5(p->deviceType, 1024ull << 20));
+    }
+    assert(std::string(deviceProfilePendingUsb5(deviceTypeDana)) == "USB computer");
+    assert(!*deviceProfilePendingUsb5(deviceTypeIIIx) && !*deviceProfilePendingUsb5(deviceTypeTX));
+    const auto* m125 = deviceProfileNamed5("palm-m125");
+    const auto* m500 = deviceProfileNamed5("palm-m500");
+    const auto* c500 = deviceProfileNamed5("ibm-workpad-c500");
+    // The m125 ROM's shape (3 MiB, small card first) and the m500's (one card over the ROM).
+    const auto m125rom = rom68k(0x300000, 5, vz, palm, vstu, base + 0x2a2, 0x5c12);
+    const auto m500rom = rom68k(0x250000, 5, vz, palm, vtrn, base + 0x14772, 0x250000);
+    const auto m125info = inspect68k(m125rom), m500info = inspect68k(m500rom);
+    assert(m125info.profile == m125 && m125info.headerVersion == 5 && m500info.profile == m500);
+    assert(deviceProfileTakes68kRom5(*m125, m125info) && !deviceProfileTakes68kRom5(*m500, m125info));
+    assert(deviceProfileTakes68kRom5(*m500, m500info) && deviceProfileTakes68kRom5(*c500, m500info));
+    assert(!deviceProfileTakes68kRom5(*m125, m500info) && !deviceProfileTakes68kRom5(*c500, m125info));
+    // No EZ device or Dana takes a VZ Palm ROM, and no VZ Palm takes theirs.
+    const auto* iiix = deviceProfileNamed5("palm-iiix");
+    const auto* dana = deviceProfileNamed5("alphasmart-dana");
+    for (const auto* other : {iiix, dana, deviceProfileNamed5("palm-v"), deviceProfileNamed5("alphasmart-dana-wireless")})
+        assert(!deviceProfileTakes68kRom5(*other, m125info) && !deviceProfileTakes68kRom5(*other, m500info));
+    for (const auto* p : {m125, m500, c500}) {
+        assert(!deviceProfileTakes68kRom5(*p, Device68kRomInfo5{iiix, true}));
+        assert(!deviceProfileTakes68kRom5(*p, Device68kRomInfo5{dana, true}));
+    }
+    // Header checks: a VZ ROM over 4 MiB, a reset outside it, an unknown HAL, RAM only, or a version 4 header.
+    assert(inspect68k(rom68k(0x400000, 5, vz, palm, vstu, base + 0x2a2, 0x5c12)).profile == m125);
+    assert(!inspect68k(rom68k(0x401000, 5, vz, palm, vstu, base + 0x2a2, 0x5c12)).profile);
+    assert(!inspect68k(rom68k(0x300000, 5, vz, palm, vstu, base + 0x300000, 0x5c12)).profile);
+    assert(!inspect68k(rom68k(0x300000, 5, vz, palm, vstu, 0x10c002a2, 0x5c12)).profile);
+    assert(!inspect68k(rom68k(0x300000, 5, vz, palm, 0x12345678, base + 0x2a2, 0x5c12)).profile);
+    assert(!inspect68k(rom68k(0x300000, 5, vz | 1, palm, vstu, base + 0x2a2, 0x5c12)).profile);
+    assert(!inspect68k(rom68k(0x300000, 4, vz, palm, vstu, base + 0x2a2, 0x5c12)).profile);
+    // A ROM split into a 32 KiB small card and a big card at 64 KiB (m515, m130, m520) is named by the big card's
+    // header: the m520's small card carries the m505's IDs.
+    auto split = [&](uint32_t smallHal, uint32_t bigHal) {
+        auto rom = rom68k(0x400000, 5, vz, palm, smallHal, base + 0x2a2, 0x5c12);
+        const auto big = rom68k(0x100, 5, vz, palm, bigHal, base + 0x147a6, 0x3f0000);
+        std::copy(big.begin(), big.end(), rom.begin() + 0x10000);
+        rom[0x68] = 0x10, rom[0x69] = 0x01, rom[0x6a] = 0, rom[0x6b] = 0;
+        return rom;
+    };
+    const auto* m505 = deviceProfileNamed5("palm-m505");
+    const auto* m520 = deviceProfileNamed5("palm-m520");
+    const auto m520info = inspect68k(split(ecty, sfgo));
+    assert(m520info.profile == m520 && m520info.halId == sfgo);
+    assert(deviceProfileTakes68kRom5(*m520, m520info) && !deviceProfileTakes68kRom5(*m505, m520info));
+    assert(inspect68k(split(vlit, vlit)).profile == deviceProfileNamed5("palm-m515"));
+    assert(inspect68k(split(vhbs, vhbs)).profile == deviceProfileNamed5("palm-m130"));
+    // No big card header at 64 KiB (the m505's one card): the small card's IDs.
+    auto plain = split(ecty, sfgo);
+    plain[0x10008] = 0;
+    assert(inspect68k(plain).profile == m505);
+    // A big card pointer inside the small card is ignored.
+    auto inside = split(ecty, sfgo);
+    inside[0x6c] = 0, inside[0x6d] = 0x02, inside[0x6e] = 0, inside[0x6f] = 0;
+    assert(inspect68k(inside).profile == m505);
+    // The c500 is never detected; the m500's HAL ID gives the m500.
+    unsigned detecting = 0;
+    for (const auto& p : deviceProfiles5) detecting += p.detect == DeviceDetect5::romHeader68k && vzPalm(p);
+    assert(detecting == 6);
+    std::cout << "PASS: VZ Palm profiles, ROM header detection, pairing and card slots\n";
 }

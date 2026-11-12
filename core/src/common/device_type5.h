@@ -12,6 +12,20 @@ enum DeviceType5 {
     deviceTypeDana = 7,
     deviceTypeDanaWireless = 8,
     deviceTypeZodiac2 = 9,
+    deviceTypeIIIe = 10,
+    deviceTypeIIIxe = 11,
+    deviceTypeV = 12,
+    deviceTypeVx = 13,
+    deviceTypeM100 = 14,
+    deviceTypeM105 = 15,
+    deviceTypeM125 = 16,
+    deviceTypeM500 = 17,
+    deviceTypeC500 = 18,
+    deviceTypeIIIc = 19,
+    deviceTypeM505 = 20,
+    deviceTypeM515 = 21,
+    deviceTypeM130 = 22,
+    deviceTypeM520 = 23,
     deviceTypeInvalid = -1
 };
 

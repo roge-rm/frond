@@ -137,7 +137,7 @@ open class FrondActivity : SDLActivity() {
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
@@ -252,7 +252,7 @@ open class FrondActivity : SDLActivity() {
             cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
+            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -695,7 +695,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
             changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
         }
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", m68k = launchDevice().runs68k)
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (wanted == display) return
         display = wanted
         link.whenConnected {

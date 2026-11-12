@@ -84,8 +84,9 @@ object RunningSheets {
 
     fun displayRows(device: Device): List<DisplayRow> {
         val rows = mutableListOf(DisplayRow.SIZE, DisplayRow.SMOOTH)
-        if (device.runs68k) rows += DisplayRow.CONTRAST
-        if (device.id == "sony-clie-tg50") rows += listOf(DisplayRow.SHOW_KEYBOARD, DisplayRow.JOG)
+        if (device.lcdContrast) rows += DisplayRow.CONTRAST
+        if (device.id == "sony-clie-tg50") rows += DisplayRow.SHOW_KEYBOARD
+        if (device.jogControls) rows += DisplayRow.JOG
         if (!device.runs68k) rows += DisplayRow.ROTATE
         if (device.runs68k) rows += DisplayRow.SPEED
         return rows

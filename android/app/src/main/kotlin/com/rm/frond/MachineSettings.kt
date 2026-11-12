@@ -5,11 +5,15 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.io.IOException
 
-// Where the TG50 jog controls go; arg is the saved name and the core's --jog-controls value.
+// Where the CLIE jog controls go; arg is the saved name and the core's --jog-controls value.
 enum class JogControls(val label: String, val arg: String) {
     HIDDEN("Hidden", "hidden"),
     SCREEN("Left of screen", "screen"),
     KEYBOARD("Left of keyboard", "keyboard"),
+    ;
+
+    // A CLIE without a keyboard puts KEYBOARD's jog controls beside its silkscreen and buttons.
+    fun label(besideButtons: Boolean) = if (this == KEYBOARD && besideButtons) "Beside the buttons" else label
 }
 
 // CPU engine; arg is the saved name and the core's --engine value. Fast falls back to Exact
@@ -34,11 +38,11 @@ enum class BarMode(val label: String, val arg: String) {
 }
 
 // Which per-machine rows Edit settings and the running menu show. Every device has speed. A 68k device
-// has contrast and no engine or low-latency audio.
+// has contrast (on a grey LCD) and no engine or low-latency audio.
 data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Boolean, val audioPreview: Boolean) {
     companion object {
         fun of(device: Device) = MachineRows(
-            contrast = device.runs68k,
+            contrast = device.lcdContrast,
             speed = true,
             engine = !device.runs68k,
             audioPreview = !device.runs68k,
@@ -89,14 +93,16 @@ data class MachineSettings(
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
     // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
-    fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false): List<String> = buildList {
+    // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
+    fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
+                  jogControls: Boolean = tg50Controls): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
         if (smoothing) add("--smooth-lcd")
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
-        if (tg50Controls) addAll(listOf("--jog-controls", jogControls.arg))
+        if (jogControls) addAll(listOf("--jog-controls", this@MachineSettings.jogControls.arg))
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
-            if (contrastSet) addAll(listOf("--contrast", contrast.toString()))
+            if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
             if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
         } else {
             if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
@@ -113,10 +119,12 @@ data class MachineSettings(
     }
 
     // The core's display command argument, for changing these while it runs.
-    fun displayArgument(tg50Controls: Boolean = false, m68k: Boolean = false): String = buildString {
+    fun displayArgument(tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
+                        jogControls: Boolean = tg50Controls): String = buildString {
         append("fit=${this@MachineSettings.size.arg} smooth=${if (smoothing) "on" else "off"}")
-        if (tg50Controls) append(" keyboard=${if (showKeyboard) "on" else "off"} jog=${jogControls.arg}")
-        if (m68k) append(" contrast=$contrast")
+        if (tg50Controls) append(" keyboard=${if (showKeyboard) "on" else "off"}")
+        if (jogControls) append(" jog=${this@MachineSettings.jogControls.arg}")
+        if (m68k && !colourLcd) append(" contrast=$contrast")
     }
 
     // The same settings for another device: an engine left at the old device's default takes the new one's.

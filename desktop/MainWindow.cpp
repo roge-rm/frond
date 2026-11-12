@@ -196,7 +196,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardLayout->addWidget(storageHeading);
     danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
     cardLayout->addWidget(danaCards);
-    connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,this); dialog.exec(); });
+    connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,runningDevice,this); dialog.exec(); });
     printerPanel = new PrinterPanel(root);
     connectionsLayout->addWidget(printerPanel);
     connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
@@ -247,7 +247,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     printerTimer = new QTimer(this);
     connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
     printerTimer->start(1000);
-    auto* danaPending = new QLabel(tr("USB computer: not available yet"), root);
+    auto* danaPending = new QLabel(root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
     // One row: the card in the slot (opens the picker), its state when the buttons don't say it
     // (Ejected, or why there's no button) and the card's buttons. A linked card held elsewhere
@@ -506,9 +506,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     jogLabel = label(tr("Jog controls"), 6, displayGrid);
     jogBox = new QComboBox(root);
     jogBox->setObjectName("runningJogControls");
-    jogBox->addItem(tr("Hidden"), int(frondSessions::JogControls::hidden));
-    jogBox->addItem(tr("Left of screen"), int(frondSessions::JogControls::screen));
-    jogBox->addItem(tr("Left of keyboard"), int(frondSessions::JogControls::keyboard));
+    for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard})
+        jogBox->addItem(frondSessions::jogControlsLabel(jog, false), int(jog));
     displayGrid->addWidget(jogBox, 6, 1, 1, 2);
     speedLabel = label(tr("Speed"), 7, displayGrid);
     speedBox = new QComboBox(root);
@@ -1121,14 +1120,19 @@ void MainWindow::refresh() {
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
-    const bool dana = frondFirmware::isDana(currentDevice());
-    danaCards->setVisible(dana);
-    findChild<QLabel*>("danaPendingPeripherals")->setVisible(dana);
+    const bool linkedCards = frondFirmware::linkedCards(currentDevice());
+    danaCards->setVisible(linkedCards);
+    danaCards->setText(deviceProfileCardSlotCount5(frondFirmware::profile(currentDevice())) > 1 ? tr("Cards 1 and 2…") : tr("Card…"));
+    // A connector the device has that isn't emulated yet, greyed out.
+    const QString pendingUsb = QString::fromLatin1(deviceProfilePendingUsb5(int(currentDevice())));
+    auto* pending = findChild<QLabel*>("danaPendingPeripherals");
+    pending->setText(tr("%1: not available yet").arg(pendingUsb));
+    pending->setVisible(!pendingUsb.isEmpty());
     printerPanel->setSupported(caps.usbPrinter, caps.usbWifi);
     printerPanel->setModuleSupported(caps.builtInWifi);
     printerPanel->setEnabled(running && !stopping);
     irPrint.panel->setEnabled(running && !stopping);
-    danaCards->setEnabled(dana && client.available() && !busy && !stopping);
+    danaCards->setEnabled(linkedCards && client.available() && !busy && !stopping);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
     note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
@@ -1167,10 +1171,14 @@ void MainWindow::refresh() {
     shown(!m68k || caps.bluetooth, {bluetoothLabel, bluetooth, bluetoothSocket});
     shown(!m68k || caps.microphone, {microphoneLabel, microphoneToggle});
     if (m68k) for (auto* state : {usbState, bluetoothState}) state->setVisible(false);
-    shown(m68k, {contrastLabel, contrast});
+    shown(frondFirmware::lcdContrast(currentDevice()), {contrastLabel, contrast});
     shown(!m68k, {mipsToggle});
     shown(embedded, {sizeLabel, sizeSlider});
-    shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow, jogLabel, jogBox});
+    shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow});
+    const auto& jogFrontend = frondFirmware::profile(currentDevice()).frontend;
+    shown(frondSessions::jogControlsShown(jogFrontend), {jogLabel, jogBox});
+    jogBox->setItemText(jogBox->findData(int(frondSessions::JogControls::keyboard)),
+        frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(jogFrontend)));
     shown(m68k, {speedLabel, speedBox});
     liveDisplay({});
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
@@ -2091,8 +2099,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
             frondFirmware::storedNor(firmwareRoot(), startDevice));
         if (!option.isEmpty()) arguments << option;
     }
-    // frond-68k's scale is screen pixels per Palm pixel; its 160-pixel LCD takes twice the ARM value.
-    arguments << "--window-scale" << QString::number(runningPreferences.scale / (m68k ? 2.0 : 4.0));
+    // frond-68k's scale is screen pixels per Palm pixel; a 160-pixel-high LCD takes twice the ARM value, the
+    // m520's 320x320 one the same.
+    const bool lowRes68k = m68k && frondFirmware::profile(startDevice).frontend.height == 160;
+    arguments << "--window-scale" << QString::number(runningPreferences.scale / (lowRes68k ? 2.0 : 4.0));
     // The Palm's window follows Frond's window when it is embedded.
     embedWanted = runningRules::embedPossible(QGuiApplication::platformName(), qEnvironmentVariableIsSet("FROND_TRY_EMBED"));
     embedTried = embedded = false;
@@ -2101,7 +2111,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     runningBar->setBarShown(runningPreferences.barShown);
     if (runningPreferences.smooth) arguments << "--smooth-lcd";
     if (m68k) {
-        if (runningPreferences.contrastSet) arguments << "--contrast" << QString::number(runningPreferences.contrast);
+        if (runningPreferences.contrastSet && frondFirmware::lcdContrast(startDevice))
+            arguments << "--contrast" << QString::number(runningPreferences.contrast);
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
     } else {
         if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
@@ -2111,10 +2122,10 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         const QSignalBlocker blocked(contrast);
         contrast->setValue(runningPreferences.contrast);
     }
-    if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50")) {
-        if (!runningPreferences.showKeyboard) arguments << "--hide-keyboard";
+    if (startDevice == frondFirmware::deviceFromId("sony-clie-tg50") && !runningPreferences.showKeyboard)
+        arguments << "--hide-keyboard";
+    if (frondSessions::jogControlsShown(frondFirmware::profile(startDevice).frontend))
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
-    }
     // A saved machine in the managed folder: its slot (a linked card it takes now) gives the card
     // flags. frond-68k has no cards.
     finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
@@ -2601,13 +2612,16 @@ void MainWindow::save(bool saveAs) {
 }
 void MainWindow::saveCopyTo(const QString& path) {
     if (!client.available()) return;
-    if (frondFirmware::isDana(runningDevice)) {
+    if (frondFirmware::linkedCards(runningDevice)) {
+        const bool two = deviceProfileCardSlotCount5(frondFirmware::profile(runningDevice)) > 1;
         for (const auto* slot : {"sd-state", "sd2-state"}) {
+            if (!two && QLatin1String(slot) == QLatin1String("sd2-state")) break;
             const auto result=DanaCardsDialog::requestWithClient(client,slot);
             if (!result.ok) return failure(result.message);
             const auto state=frondDanaCards::state(result.message);
-            if (!state.known) return failure(tr("Couldn't read both card slots."));
-            if (state.present) return failure(tr("Use Cards 1 and 2 to export a portable session folder with both cards."));
+            if (!state.known) return failure(two ? tr("Couldn't read both card slots.") : tr("Couldn't read the card slot."));
+            if (state.present) return failure(two ? tr("Use Cards 1 and 2 to export a portable session folder with both cards.") :
+                                                    tr("Use Card to export a portable session folder with its card."));
         }
     }
     const auto dest = frondSessions::exportDestDir(path);
@@ -2985,7 +2999,7 @@ bool MainWindow::memoryStick() const {
     return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
 }
 bool MainWindow::storageSupported() const {
-    if (frondFirmware::isDana(currentDevice())) return false;
+    if (frondFirmware::linkedCards(currentDevice())) return false;
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
 }

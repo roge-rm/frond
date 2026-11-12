@@ -16,7 +16,11 @@ inline quint32 hash(const QByteArray& bytes, quint32 value=2166136261u) {
     return value;
 }
 // Display metadata only. Loading still goes through the core's media and history checks.
-inline bool isDana(const QByteArray& name) { return name=="alphasmart-dana" || name=="alphasmart-dana-wireless"; }
+// Devices whose slots take linked card files: the Dana and the VZ Palms.
+inline bool linkedCards(const QByteArray& name) {
+    const auto* p=deviceProfileNamed5(name.constData());
+    return p && p->deviceType!=deviceTypeInvalid && deviceProfileLinkedCards5(*p);
+}
 inline Header inspect(const QString& path) {
     QFile file(path);
     Header out;
@@ -67,7 +71,7 @@ inline Header inspect(const QString& path) {
     const auto machine=file.read(40);
     // The newest version is left to frondSessions::openable, which knows it.
     if (machine.size()!=40 || u32(machine,0)!=0x19800819u || u32(machine,4)<6 ||
-        !isDana(machine.mid(8,32).split('\0').first())) return out;
+        !linkedCards(machine.mid(8,32).split('\0').first())) return out;
     out.device=QString::fromLatin1(machine.mid(8,32).split('\0').first());
     out.version=u32(machine,4); out.valid=true;
     return out;

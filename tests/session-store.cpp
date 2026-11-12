@@ -244,7 +244,7 @@ class SessionStoreTest : public QObject {
         write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
         write(folder() + "/E3.frond", header(6, "palm-e2-franken"));
         write(folder() + "/IIIx.frond", header(8, "palm-iiix"));
-        write(folder() + "/Reserved.frond", header(6, "palm-m515"));
+        write(folder() + "/Reserved.frond", header(6, "sony-clie-t415"));
         for (const auto& info : list(folder())) {
             if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
             if (info.name == "E3") QVERIFY(info.saved && !info.old && info.device == "palm-e2-franken");
@@ -960,6 +960,20 @@ class SessionStoreTest : public QObject {
             QVERIFY(roundTrip.showKeyboard && roundTrip.jogControls == JogControls::screen);
             QCOMPARE(QFileInfo(one).size(), guest);
         }
+        // The choice shows on devices with the jog side tab. The TG50 keeps left of the keyboard; a
+        // CLIE with a silkscreen and no keyboard calls the same saved choice beside the buttons.
+        const auto& tg50 = frondFirmware::profile(frondFirmware::deviceFromId("sony-clie-tg50")).frontend;
+        QVERIFY(jogControlsShown(tg50) && !jogBesideButtons(tg50));
+        QVERIFY(!jogControlsShown(frondFirmware::profile(frondFirmware::deviceFromId("palm-tx")).frontend));
+        DeviceFrontend5 noKeyboard;
+        noKeyboard.width = 320; noKeyboard.height = 320; noKeyboard.silkscreenHeight = 128; noKeyboard.stripHeight = 104;
+        noKeyboard.sideTabWidth = 38;
+        QVERIFY(jogControlsShown(noKeyboard) && jogBesideButtons(noKeyboard));
+        QCOMPARE(jogControlsLabel(JogControls::hidden, true), QString("Hidden"));
+        QCOMPARE(jogControlsLabel(JogControls::screen, true), QString("Left of screen"));
+        QCOMPARE(jogControlsLabel(JogControls::keyboard, false), QString("Left of keyboard"));
+        QCOMPARE(jogControlsLabel(JogControls::keyboard, true), QString("Beside the buttons"));
+        QCOMPARE(jogControlsName(JogControls::keyboard), QString("keyboard"));
     }
     // A Palm IIIx session: one v8 file with no cards, its contrast and speed in the machine settings.
     void iiixSession() {

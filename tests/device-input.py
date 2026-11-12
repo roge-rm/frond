@@ -114,8 +114,11 @@ class DeviceInputTest(unittest.TestCase):
         self.assertEqual([p['name'] for p in data['profiles'] if p['status'] == 'zire72-desktop'], ['palm-zire-72'])
         self.assertEqual([p['name'] for p in data['profiles']],
                          ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm',
-                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'alphasmart-dana', 'alphasmart-dana-wireless',
-                          'tapwave-zodiac-2', 'palm-m515', 'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
+                          'palm-zire-72', 'sony-clie-tg50', 'palm-iiix', 'palm-iiie', 'palm-iiixe', 'palm-v', 'palm-vx',
+                          'palm-m100', 'palm-m105', 'palm-m125', 'palm-m500', 'ibm-workpad-c500',
+                          'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520',
+                          'alphasmart-dana', 'alphasmart-dana-wireless', 'tapwave-zodiac-2', 'sony-clie-t415',
+                          'hp-ipaq-210', 'hp-ipaq-rx1950', 'hp-ipaq-h4350'])
         zire = data['profiles'][4]
         self.assertEqual((zire['cohort'], zire['status'], zire['nor_bytes'], zire['raw_nand_bytes']),
                          ('zire72-nor', 'zire72-desktop', ZIRE_SIZE, 0))
@@ -129,7 +132,9 @@ class DeviceInputTest(unittest.TestCase):
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][10:]))
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][24:]))
+        colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
+        self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 
     def test_tx_raw_geometry_and_options(self):
         base = [self.nor, '--device', 'palm-tx']
@@ -238,12 +243,13 @@ class DeviceInputTest(unittest.TestCase):
                           'invalid replay event')
 
     def test_unknown_and_mismatched_session_names(self):
-        for device in ('palm-tx2', 'tungsten-e2', 'palm-m515'):
+        for device in ('palm-tx2', 'tungsten-e2', 'sony-clie-t415'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
                 self.rejected([path], f"this session is for {device}, which Frond can't run")
-        # A IIIx session goes to frond-68k.
-        self.rejected([session(self.root / 'unknown', 'palm-iiix')], 'this session is for palm-iiix, which runs in frond-68k')
+        # IIIx and m515 sessions go to frond-68k.
+        for device in ('palm-iiix', 'palm-m515'):
+            self.rejected([session(self.root / 'unknown', device)], f'this session is for {device}, which runs in frond-68k')
         for device in ('', 'Palm TX', 'palm_tx', 'x' * 32):
             with self.subTest(device=device):
                 path = session(self.root / 'bad-name', device)

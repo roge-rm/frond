@@ -78,7 +78,7 @@ fun <T> MachineChoiceRow(
     }
 }
 
-// Size, Smooth pixels, Contrast on 68k devices, Top bar, and on the TG50 Show keyboard and Jog controls.
+// Size, Smooth pixels, Contrast on 68k grey LCDs, Top bar, Show keyboard on the TG50 and Jog controls on CLIEs with them.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     if (device.isDana()) {
@@ -96,11 +96,13 @@ fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boo
     }
     MachineSwitchRow("Smooth pixels", settings.smoothing, listStyle) { onChange(settings.copy(smoothing = it)) }
     if (!device.runs68k) MachineSwitchRow("Show MIPS", settings.showMips, listStyle) { onChange(settings.copy(showMips = it)) }
-    if (device.runs68k) MachineContrastRow(settings, listStyle, onChange)
+    if (device.lcdContrast) MachineContrastRow(settings, listStyle, onChange)
     MachineChoiceRow("Top bar", settings.barMode, BarMode.entries, { it.label }, listStyle) { onChange(settings.copy(barMode = it)) }
     if (device.isTg50()) {
         MachineSwitchRow("Show keyboard", settings.showKeyboard, listStyle) { onChange(settings.copy(showKeyboard = it)) }
-        MachineChoiceRow("Jog controls", settings.jogControls, JogControls.entries, { it.label }, listStyle) {
+    }
+    if (device.jogControls) {
+        MachineChoiceRow("Jog controls", settings.jogControls, JogControls.entries, { it.label(device.jogBesideButtons) }, listStyle) {
             onChange(settings.copy(jogControls = it))
         }
     }

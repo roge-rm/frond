@@ -34,9 +34,23 @@
 namespace frondSessions {
 constexpr quint32 magic = 0x19800819, newestVersion = 9, firstNamedVersion = 6;
 
-// TG50 jog controls: hidden, left of the LCD or left of the keyboard. The names are saved and
-// passed to the core's --jog-controls.
+// CLIE jog controls: hidden, left of the LCD or left of the keyboard. The names are saved and
+// passed to the core's --jog-controls. On a CLIE without a keyboard, keyboard puts them beside
+// the silkscreen and buttons.
 enum class JogControls { hidden, screen, keyboard };
+// Devices whose art has the jog side tab get the choice.
+inline bool jogControlsShown(const DeviceFrontend5& frontend) { return frontend.sideTabWidth > 0; }
+// A side tab and a silkscreen: no keyboard, so keyboard reads as beside the buttons.
+inline bool jogBesideButtons(const DeviceFrontend5& frontend) {
+    return frontend.sideTabWidth > 0 && frontend.silkscreenHeight > 0;
+}
+// The choice's label as the menus show it.
+inline QString jogControlsLabel(JogControls jog, bool besideButtons) {
+    return jog == JogControls::hidden ? QCoreApplication::translate("JogControls", "Hidden")
+         : jog == JogControls::screen ? QCoreApplication::translate("JogControls", "Left of screen")
+         : besideButtons ? QCoreApplication::translate("JogControls", "Beside the buttons")
+                         : QCoreApplication::translate("JogControls", "Left of keyboard");
+}
 inline QString jogControlsName(JogControls jog) {
     return jog == JogControls::hidden ? QStringLiteral("hidden") : jog == JogControls::screen ? QStringLiteral("screen")
                                                                                                : QStringLiteral("keyboard");

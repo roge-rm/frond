@@ -16,7 +16,7 @@ EXPERIMENTAL = {'tapwave-zodiac-2'}
 def outputs(profiles):
     available = [p for p in profiles['profiles'] if p['available'] and p['name'] not in DESKTOP_ONLY]
     fields = {
-        'id': 'name', 'label': 'display_name', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
+        'id': 'name', 'label': 'display_name', 'cohort': 'cohort', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',
         'sound': 'sound', 'storageSlot': 'storage_slot', 'sdSlot': 'sd_slot', 'memoryStick': 'memory_stick_supported', 'network': 'network', 'serialPort': 'serial', 'microphone': 'microphone', 'camera': 'camera',
         'keyboard': 'keyboard', 'usb': 'usb', 'infrared': 'infrared', 'bluetooth': 'bluetooth', 'modem': 'modem', 'irPhone': 'ir_phone', 'usbPrinter': 'usb_printer', 'usbWifi': 'usb_wifi', 'builtInWifi': 'built_in_wifi',
@@ -26,7 +26,8 @@ def outputs(profiles):
         'appNamesText': 'app_names', 'buttonsText': 'buttons', 'holdPresent': 'hold_present', 'holdSupported': 'hold_supported', 'homeKey': 'home_key', 'homeX': 'home_x', 'homeY': 'home_y',
         'menuX': 'menu_x', 'menuY': 'menu_y', 'rotatingStatusBar': 'rotating_status_bar',
         'sdMin': 'sd_min_bytes', 'sdMax': 'sd_max_bytes', 'msSizes': 'ms_sizes_mb', 'msProMax': 'ms_pro_max_mb',
-        'runs68k': 'runs_68k', 'hotSyncButton': 'hot_sync_button',
+        'runs68k': 'runs_68k', 'hotSyncButton': 'hot_sync_button', 'pendingUsb': 'pending_usb',
+        'colourLcd': 'colour_lcd',
     }
     longs = {'norSize', 'nandSize', 'companyId', 'halId', 'headerOffset', 'bigCardOffset', 'sdMin', 'sdMax'}
     def literal(key, value):

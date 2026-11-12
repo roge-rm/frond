@@ -48,7 +48,8 @@ internal object DanaSession {
             // The newest version is checked by Sessions with the rest of the header.
             if (version < 6) return null
             val name = ByteArray(32).also { input.readFully(it) }.toString(Charsets.US_ASCII).substringBefore('\u0000')
-            if (name != "alphasmart-dana" && name != "alphasmart-dana-wireless") return null
+            // Devices whose slots take linked card files: the Dana and the VZ Palms.
+            if (Device.entries.none { it.id == name && it.linkedCards }) return null
             Header(offset, version, portable, name)
         }
     } catch (_: Exception) { null }

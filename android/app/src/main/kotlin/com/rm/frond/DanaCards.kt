@@ -11,9 +11,9 @@ import java.io.IOException
 import java.util.UUID
 
 object DanaCardProtocol {
-    fun sessionCopyError(states: List<String?>): String? {
-        if (states.size != 2 || states.any { it == null || (it != "none" && state(it) == null) })
-            return "Couldn't read both card slots."
+    fun sessionCopyError(states: List<String?>, slots: Int = 2): String? {
+        if (states.size != slots || states.any { it == null || (it != "none" && state(it) == null) })
+            return if (slots == 2) "Couldn't read both card slots." else "Couldn't read the card slot."
         return if (states.any { it != "none" }) "Android can't copy a session with independent cards yet. Export each card separately." else null
     }
     data class State(val inserted: Boolean, val identity: String, val writeProtected: Boolean, val protocol: String, val failed: Boolean)

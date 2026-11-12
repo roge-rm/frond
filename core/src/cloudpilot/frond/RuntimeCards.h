@@ -7,6 +7,7 @@
 #include <sstream>
 
 // Linked sessions retain live external backings. Completed writes never rewind with machine state.
+// The Dana has two slots (0 and 2), the VZ Palms one (0); the device is set before any card moves.
 class RuntimeCards {
     struct Card {
         int fd{-1};
@@ -20,9 +21,10 @@ class RuntimeCards {
         ~Card() { if (fd >= 0) ::close(fd); }
     };
     std::shared_ptr<Card> cards[2];
-    static bool ValidGeometry(unsigned id, const std::string& protocol, uint64_t bytes) {
+    int32_t deviceType{deviceTypeDana};
+    static bool ValidGeometry(int32_t deviceType, unsigned id, const std::string& protocol, uint64_t bytes) {
         if (protocol != "sd" && protocol != "mmc") return false;
-        return deviceProfileCardSizeValid5(deviceTypeDana, DeviceCardSlot5(id),
+        return deviceProfileCardSizeValid5(deviceType, DeviceCardSlot5(id),
             protocol == "mmc" ? DeviceCardFamily5::legacyMmc : DeviceCardFamily5::sdsc, bytes);
     }
     static EmHAL::Slot slot(unsigned n) { return n ? EmHAL::Slot::sdcard2 : EmHAL::Slot::sdcard; }
@@ -36,7 +38,7 @@ class RuntimeCards {
     }
     std::shared_ptr<Card> Open(unsigned n, const std::string& inputPath, const std::string& key,
                                const std::string& policy, std::string& error, const std::string& protocol="sd") {
-        if (n > 1 || (protocol != "sd" && protocol != "mmc")) { error="error: invalid slot or protocol"; return {}; }
+        if (n >= Slots() || (protocol != "sd" && protocol != "mmc")) { error="error: invalid slot or protocol"; return {}; }
         const auto path=std::filesystem::path(inputPath).lexically_normal().string();
         auto fail = [&](const std::string& why) -> std::shared_ptr<Card> { error=why; return {}; };
         auto next = std::make_shared<Card>();
@@ -55,7 +57,7 @@ class RuntimeCards {
         frondSdFile::Info info;
         std::vector<uint32_t> table;
         if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok ||
-            !ValidGeometry(n ? 2 : 0, protocol, info.payloadBytes) ||
+            !ValidGeometry(deviceType, n ? 2 : 0, protocol, info.payloadBytes) ||
             !EmHAL::SupportsImageInSlot(slot(n), uint32_t(info.payloadBytes / 512)) ||
             frondMachine::checkSdPayload(path, info, table) != frondMachine::SiblingStatus::ok)
             return fail("error: invalid SD file or geometry (32 to 2048 MiB, representable SDSC; MMC 32/64/128/256 MiB)");
@@ -67,6 +69,12 @@ class RuntimeCards {
         return next;
     }
   public:
+    // Called before any card is staged or attached, while no card is held.
+    void SetDevice(int32_t type) { deviceType = type; }
+    unsigned Slots() const {
+        const auto* p = deviceProfile5(deviceType);
+        return p && deviceProfileLinkedCards5(*p) ? deviceProfileCardSlotCount5(*p) : 0;
+    }
     struct Pair {
         std::shared_ptr<Card> card[2];
         bool inserted[2]{};
@@ -122,7 +130,7 @@ class RuntimeCards {
     }
     // Portable identity is the guest identity. Ownership is the new directory and locked inode.
     // Resolve only fixed sibling names; Stage performs the full pair and root checks afterwards.
-    static std::string ResolvePortable(const std::string& text,const std::filesystem::path& dir,
+    static std::string ResolvePortable(int32_t deviceType,const std::string& text,const std::filesystem::path& dir,
                                        std::string& linked) {
         if(text.size()>8192 || text.find('\0')!=std::string::npos) return "invalid portable manifest";
         std::istringstream in(text); std::string line;
@@ -135,7 +143,7 @@ class RuntimeCards {
             std::string kind,name,key,extra,protocol="sd"; std::istringstream row(line);
             if(!(row>>id>>kind>>name>>key>>serial>>size>>protect>>insert>>crc) || (v2 && !(row>>protocol)) || (protocol!="sd" && protocol!="mmc") || row>>extra ||
                 (id!=0 && id!=2) || kind!="sd" || name!=(id?"sd2.frondsd":"sd0.frondsd") ||
-                !ValidGeometry(id,protocol,size) || (seen&(1u<<id)) || protect>1 || insert>1) return "invalid portable descriptor";
+                !ValidGeometry(deviceType,id,protocol,size) || (seen&(1u<<id)) || protect>1 || insert>1) return "invalid portable descriptor";
             seen|=1u<<id;
             const auto path=std::filesystem::absolute(dir/name).lexically_normal();
             struct stat st{}; frondSdFile::Info info;
@@ -163,7 +171,7 @@ class RuntimeCards {
                 (id!=0 && id!=2) || kind!="sd" || path.empty() || path[0]!='/' || path.size()>4096 ||
                 path.find_first_of("\r\n")!=std::string::npos || key.size()!=32 ||
                 key.find_first_not_of("0123456789abcdef")!=std::string::npos || protect>1 || insert>1 ||
-                !ValidGeometry(id,protocol,size) || serial!=std::stoul(key.substr(0,8),nullptr,16)) return "invalid card descriptor";
+                !ValidGeometry(deviceType,id,protocol,size) || serial!=std::stoul(key.substr(0,8),nullptr,16)) return "invalid card descriptor";
             path=std::filesystem::path(path).lexically_normal().string();
             unsigned n=id==2;
             if(next.card[n] || (next.card[!n] && (next.card[!n]->key==key || next.card[!n]->serial==serial)))
@@ -218,7 +226,8 @@ class RuntimeCards {
         for (auto& card : cards) if (card) gExternalStorage.RemoveImage(card->key);
     }
     std::string Command(unsigned n, const std::string& op, const std::string& argument) {
-        if (n > 1) return "error: invalid slot";
+        if (!Slots()) return "error: unsupported device";
+        if (n >= Slots()) return "error: this device has one card slot";
         auto& card = cards[n];
         if (op == "state" && argument.empty())
             return !card ? "none" : (gExternalStorage.IsMounted(slot(n)) ? "inserted " : "ejected ") +

@@ -108,6 +108,8 @@ object Firmware {
     private const val ROM68K_EZ_BASE = 0x10c00000L
     private const val ROM68K_MAX_SIZE = 2L shl 20
     private const val DANA_BASE = 0x10000000L
+    // VZ ROMs run from 0x10000000 too; the m5xx series has the largest, 4 MiB.
+    private const val ROM68K_VZ_MAX_SIZE = 4L shl 20
 
     fun inspectRom68k(rom: File, devices: List<Device> = Device.entries): Rom68kInfo = RandomAccessFile(rom, "r").use { file ->
         val size = file.length()
@@ -145,12 +147,67 @@ object Firmware {
                 bigReset < DANA_BASE + 0x8000 || bigReset - DANA_BASE - 0x8000 >= length) return@use header
             return@use Rom68kInfo(dana, true)
         }
+        // 0x0040 runs on the 68VZ328: a version 5 header whose company and HAL IDs name the device.
+        if (version == 5 && flags and 0x0040 != 0 && flags and 0x0021 == 0) {
+            if (size > ROM68K_VZ_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
+            if (reset < DANA_BASE || reset - DANA_BASE >= size) return@use header
+            // A ROM split into a small card and a big one (m515, m130, m520) names its device in the big
+            // card's header; the m520's small card carries the m505's IDs.
+            var vzCompany = company
+            var vzHal = hal
+            val bigAt = be32(0x68) - DANA_BASE
+            if (bigAt >= cardBytes && bigAt <= size - 0x100) {
+                val big = ByteArray(0x100)
+                file.seek(bigAt)
+                file.readFully(big)
+                fun bword(at: Int) = (0 until 4).fold(0L) { v, i -> (v shl 8) or (big[at + i].toLong() and 0xff) }
+                if (big.copyOfRange(0x10, 0x19).contentEquals("PalmCard\u0000".toByteArray(Charsets.US_ASCII)) &&
+                    bword(8) == 0xfeedbeefL && big[0x0c].toInt() == 0 && big[0x0d].toInt() == 5) {
+                    vzCompany = bword(0x7e)
+                    vzHal = bword(0x82)
+                }
+            }
+            val device = devices.firstOrNull {
+                it.detectKind == 3 && isVzPalm(it) && it.companyId == vzCompany && it.halId == vzHal
+            }
+            return@use Rom68kInfo(device, true)
+        }
         if (version !in 3..5 || flags and 0x0001 != 0 || flags and 0x0020 == 0) return@use header
         if (size > ROM68K_MAX_SIZE || size % 0x1000 != 0L || cardBytes > size) return@use header
         if (reset < ROM68K_EZ_BASE || reset - ROM68K_EZ_BASE >= size) return@use header
-        val device = devices.firstOrNull { it.detectKind == 3 && (version < 5 || (it.companyId == company && it.halId == hal)) }
+        // The m100 and m105 ROMs have a version 4 header with no HAL ID. Their family is told by the clock
+        // database only they carry (as in Cloudpilot), the m100 until the m105 is chosen.
+        if (version < 5 && hasText(file, size, "cclkPalmClock".toByteArray(Charsets.US_ASCII)))
+            return@use Rom68kInfo(devices.firstOrNull { it.id == "palm-m100" }, true)
+        val device = devices.firstOrNull { it.detectKind == 3 && isEz(it) && (version < 5 || (it.companyId == company && it.halId == hal)) }
         Rom68kInfo(device, true)
     }
+
+    private fun hasText(file: RandomAccessFile, size: Long, text: ByteArray): Boolean {
+        val buffer = ByteArray(0x10000 + text.size)
+        var at = 0L
+        while (at < size) {
+            val count = minOf(buffer.size.toLong(), size - at).toInt()
+            file.seek(at)
+            file.readFully(buffer, 0, count)
+            for (i in 0..count - text.size) {
+                var j = 0
+                while (j < text.size && buffer[i + j] == text[j]) j++
+                if (j == text.size) return true
+            }
+            at += 0x10000
+        }
+        return false
+    }
+
+    // The EZ devices (IIIx, IIIe, IIIxe, V, Vx, m100, m105) share the board and ROM format and the header
+    // can't tell them all apart, so any of them takes their ROMs; frond-68k's full check decides. The IIIc
+    // (its own HAL ID) takes only its own ROM and no other device takes it.
+    private const val IIIC = "palm-iiic"
+    private fun isEz(device: Device) = device.cohort == "ez68k-rom"
+    // The VZ Palms (m125, m500, WorkPad c500) take a ROM with their company and HAL IDs, so the c500 takes
+    // the m500's.
+    private fun isVzPalm(device: Device) = device.cohort == "vz68k-rom" && !device.isDana()
 
     // A picked NOR is copied here first, so the device can be found before the import.
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
@@ -275,8 +332,11 @@ object Firmware {
         if (!info.hasHeader) return "This file isn't a ${device.label} ROM."
         if (info.device == null) return "This ROM isn't one the ${device.label} can run."
         // The Dana Wireless runs the Dana's ROM, whose header still says Dana.
-        val danaRom = device.id == "alphasmart-dana-wireless" && info.device?.id == "alphasmart-dana"
-        if (info.device != device && !danaRom) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."
+        val danaRom = device.id == "alphasmart-dana-wireless" && info.device.id == "alphasmart-dana"
+        val ezRom = isEz(device) && isEz(info.device) && device.id != IIIC && info.device.id != IIIC
+        val vzRom = isVzPalm(device) && isVzPalm(info.device) &&
+            device.companyId == info.device.companyId && device.halId == info.device.halId
+        if (info.device != device && !danaRom && !ezRom && !vzRom) return "This is a ${info.device.label} ROM. Choose ${info.device.label}."
         if (nand != null) return "The ${device.label} has no NAND. Leave the NAND image empty."
         return null
     }

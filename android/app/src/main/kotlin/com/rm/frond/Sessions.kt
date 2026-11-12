@@ -315,9 +315,10 @@ object Sessions {
     // the main thread. Returns an error message or null. The copy is a zip of packable files; SAF
     // cannot promise atomic replacement of an existing document.
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
-        if (forPath(context, session)?.device?.isDana() == true) {
-            val cards = listOf("sd-state", "sd2-state").map { link.request(it) }
-            DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null })?.let { return refuseOutput(context, to, it) }
+        forPath(context, session)?.device?.takeIf { it.linkedCards }?.let { device ->
+            val cards = device.storageSlots.map { link.request(it.commandPrefix + "state") }
+            DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
+                ?.let { return refuseOutput(context, to, it) }
         }
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
         // A copy left by a process killed mid-save would lend its old card to this one.

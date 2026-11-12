@@ -122,6 +122,7 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
         return true;
     }
     void CycleSlowly(Bool sleeping) override;
+    bool PortDPolarityInverts() const override { return true; }
     void ScaleCycles(uint32 factor) override;
     virtual uint64 InputCycle() const;
     virtual uint64 InputHz() const;

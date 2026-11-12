@@ -33,14 +33,14 @@ static void zireNor(QFile& nor, qint64 size = 14942208, quint32 hal = 0x615a3732
 
 // Sparse synthetic 68k ROM: the big-endian card header at 0 with the reset vector in the ROM at 0x10c00000.
 static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0020, quint32 company = 0, quint32 hal = 0,
-                   quint32 resetOffset = 0x822a) {
+                   quint32 resetOffset = 0x822a, quint32 base = 0x10c00000) {
     rom.resize(0); rom.resize(size);
     auto be = [&](qint64 at, quint32 value, int bytes) {
         char out[4];
         for (int i = 0; i < bytes; ++i) out[i] = char(value >> (8 * (bytes - 1 - i)));
         rom.seek(at); rom.write(out, bytes);
     };
-    be(0, 0x3000, 4); be(4, 0x10c00000 + resetOffset, 4); be(8, 0xfeedbeef, 4);
+    be(0, 0x3000, 4); be(4, base + resetOffset, 4); be(8, 0xfeedbeef, 4);
     be(0x0c, version, 2); be(0x0e, flags, 2);
     rom.seek(0x10); rom.write("PalmCard", 9);
     be(0x6c, quint32(size), 4);
@@ -357,7 +357,7 @@ class FirmwareInputTest : public QObject {
         QCOMPARE(frondFirmware::detectDevice(romPath), Device::automatic);
         rom68k(rom, 0x128000, 2);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
-        rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x6173746e);
+        rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x12345678);
         QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("can run"));
         // Over the 2 MiB flash part, or truncated.
         rom68k(rom, (2 << 20) + 0x1000, 3);
@@ -375,6 +375,126 @@ class FirmwareInputTest : public QObject {
         QVERIFY(caps.sound && caps.serial && caps.infrared);
         QVERIFY(!caps.network && !caps.keyboard && !caps.usb && !caps.bluetooth && !caps.microphone && !caps.fastAudio);
         QCOMPARE(frondFirmware::profile(iiix).nandSize, size_t(0));
+    }
+    // The IIIe, IIIxe, V, Vx, m100 and m105 share the IIIx's ROM format. Any of them may be chosen for an EZ ROM
+    // (the IIIe has no ROM of its own and runs the IIIx 3.1 one); an m100 series ROM is told by its clock database.
+    void ezRoms() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const char* ids[] = {"palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100", "palm-m105"};
+        const auto iiix = frondFirmware::deviceFromId("palm-iiix");
+        const auto romPath = dir.filePath("rom"), nandPath = dir.filePath("nand");
+        QFile rom(romPath), nand(nandPath);
+        QVERIFY(rom.open(QIODevice::ReadWrite)); QVERIFY(nand.open(QIODevice::ReadWrite)); QVERIFY(nand.resize(34603008));
+        for (auto id : ids) {
+            const auto device = frondFirmware::deviceFromId(id);
+            QVERIFY2(device != Device::automatic && frondFirmware::runs68k(device) && device != iiix, id);
+            QVERIFY(std::find(frondFirmware::devices.begin(), frondFirmware::devices.end(), device) != frondFirmware::devices.end());
+            QCOMPARE(frondFirmware::deviceId(device), QString(id));
+            QVERIFY(frondFirmware::capabilities(device).serial && frondFirmware::capabilities(device).infrared);
+            // The 3.1 retail header, the 4.1 header with its IDs, and the version 4 header of the 3.5 ROMs.
+            for (auto version : {3, 4, 5}) {
+                rom68k(rom, 0x178000, quint16(version), 0x0020, 0x70616c6d, 0x73756d6f, 0x90e0);
+                Device resolved = Device::automatic;
+                QVERIFY2(frondFirmware::validateFiles(device, romPath, {}, &resolved).isEmpty(), id);
+                QCOMPARE(resolved, device);
+                QCOMPARE(frondFirmware::detectDevice(romPath), iiix);
+                QVERIFY(frondFirmware::validateFiles(device, romPath, nandPath).contains("no NAND"));
+                for (auto other : {Device::tx, Device::e2, Device::zire72})
+                    QVERIFY(!frondFirmware::validateFiles(other, romPath, {}).isEmpty());
+            }
+            rom68k(rom, 0x178000, 3, 0x0010);
+            QVERIFY(frondFirmware::validateFiles(device, romPath, {}).contains("can run"));
+        }
+        // An m100 series ROM names the m100, which the m105 may also be chosen for; a name only in the
+        // last bytes still counts.
+        rom68k(rom, 0x200000, 4, 0x0020, 0, 0, 0xa06a);
+        for (qint64 at : {qint64(0x150000), qint64(0x1fffff - 13)}) {
+            rom68k(rom, 0x200000, 4, 0x0020, 0, 0, 0xa06a);
+            QCOMPARE(frondFirmware::detectDevice(romPath), iiix);
+            rom.seek(at); rom.write("cclkPalmClock", 14); rom.flush();
+            const auto m100 = frondFirmware::deviceFromId("palm-m100");
+            QCOMPARE(frondFirmware::detectDevice(romPath), m100);
+            Device resolved = Device::automatic;
+            QVERIFY(frondFirmware::validateFiles(Device::automatic, romPath, {}, &resolved).isEmpty());
+            QCOMPARE(resolved, m100);
+            QVERIFY(frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-m105"), romPath, {}).isEmpty());
+        }
+    }
+    // The m125 and m500 are told by the header's HAL ID; the WorkPad c500 takes the m500's ROM when chosen.
+    void vzRoms() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto romPath = dir.filePath("rom");
+        QFile rom(romPath);
+        QVERIFY(rom.open(QIODevice::ReadWrite));
+        const auto m125 = frondFirmware::deviceFromId("palm-m125"), m500 = frondFirmware::deviceFromId("palm-m500"),
+                   c500 = frondFirmware::deviceFromId("ibm-workpad-c500"), iiix = frondFirmware::deviceFromId("palm-iiix");
+        for (auto device : {m125, m500, c500}) {
+            QVERIFY(device != Device::automatic && frondFirmware::runs68k(device) && frondFirmware::linkedCards(device));
+            QVERIFY(frondFirmware::hasHotSyncButton(device) && !frondFirmware::capabilities(device).usb);
+        }
+        QVERIFY(frondFirmware::linkedCards(frondFirmware::deviceFromId("alphasmart-dana")) && !frondFirmware::linkedCards(iiix));
+        rom68k(rom, 0x300000, 5, 0x0040, 0x70616c6d, 0x76737475, 0x2a2, 0x10000000);
+        QCOMPARE(frondFirmware::detectDevice(romPath), m125);
+        Device resolved = Device::automatic;
+        QVERIFY(frondFirmware::validateFiles(Device::automatic, romPath, {}, &resolved).isEmpty());
+        QCOMPARE(resolved, m125);
+        QVERIFY(frondFirmware::validateFiles(m500, romPath, {}).contains("Choose Palm m125"));
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("Choose Palm m125"));
+        rom68k(rom, 0x250000, 5, 0x0040, 0x70616c6d, 0x7674726e, 0x14772, 0x10000000);
+        QCOMPARE(frondFirmware::detectDevice(romPath), m500);
+        QVERIFY(frondFirmware::validateFiles(m500, romPath, {}).isEmpty());
+        QVERIFY(frondFirmware::validateFiles(c500, romPath, {}, &resolved).isEmpty());
+        QCOMPARE(resolved, c500);
+        QVERIFY(frondFirmware::validateFiles(m125, romPath, {}).contains("Choose Palm m500"));
+        // An EZ ROM isn't one for a VZ Palm.
+        rom68k(rom, 0x178000, 3, 0x0020);
+        QVERIFY(frondFirmware::validateFiles(m125, romPath, {}).contains("Choose Palm IIIx"));
+    }
+    // The colour Palms: the IIIc by its EZ header, the m520 by the big card at 64 KiB, as its small card has the
+    // m505's IDs. Only the grey LCDs have a contrast setting.
+    void colourRoms() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto romPath = dir.filePath("rom");
+        QFile rom(romPath);
+        QVERIFY(rom.open(QIODevice::ReadWrite));
+        const auto iiic = frondFirmware::deviceFromId("palm-iiic"), m505 = frondFirmware::deviceFromId("palm-m505"),
+                   m520 = frondFirmware::deviceFromId("palm-m520"), m515 = frondFirmware::deviceFromId("palm-m515"),
+                   m130 = frondFirmware::deviceFromId("palm-m130"), iiix = frondFirmware::deviceFromId("palm-iiix");
+        for (auto device : {iiic, m505, m515, m130, m520})
+            QVERIFY(device != Device::automatic && frondFirmware::runs68k(device) && !frondFirmware::lcdContrast(device));
+        QVERIFY(frondFirmware::lcdContrast(iiix) && frondFirmware::lcdContrast(frondFirmware::deviceFromId("palm-m125")));
+        QVERIFY(!frondFirmware::lcdContrast(Device::tx));
+        rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x6173746e, 0xc6e6);
+        QCOMPARE(frondFirmware::detectDevice(romPath), iiic);
+        // The IIIc takes only its own ROM, and no other EZ device takes it.
+        QVERIFY(frondFirmware::validateFiles(iiic, romPath, {}).isEmpty());
+        QVERIFY(frondFirmware::validateFiles(iiix, romPath, {}).contains("Choose Palm IIIc"));
+        QVERIFY(frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-v"), romPath, {}).contains("Choose Palm IIIc"));
+        rom68k(rom, 0x178000, 3, 0x0020);
+        QVERIFY(frondFirmware::validateFiles(iiic, romPath, {}).contains("Choose Palm IIIx"));
+        QVERIFY(frondFirmware::validateFiles(frondFirmware::deviceFromId("palm-iiie"), romPath, {}).isEmpty());
+        rom68k(rom, 0x1a8000, 5, 0x0020, 0x70616c6d, 0x6173746e, 0xc6e6);
+        rom68k(rom, 0x400000, 5, 0x0040, 0x70616c6d, 0x65637479, 0x2a2, 0x10000000);
+        QCOMPARE(frondFirmware::detectDevice(romPath), m505);
+        // The big card's header at 64 KiB, pointed to from 0x68 past the 32 KiB small card.
+        auto put = [&](qint64 at, quint32 value) {
+            char out[4];
+            for (int i = 0; i < 4; ++i) out[i] = char(value >> (8 * (3 - i)));
+            rom.seek(at); rom.write(out, 4);
+        };
+        put(0x6c, 0x8000); put(0x68, 0x10010000);
+        put(0x10008, 0xfeedbeef); rom.seek(0x1000c); rom.write("\x00\x05", 2);
+        rom.seek(0x10010); rom.write("PalmCard", 9);
+        put(0x1007e, 0x70616c6d); put(0x10082, 0x7366676f);
+        rom.flush();
+        QCOMPARE(frondFirmware::detectDevice(romPath), m520);
+        QVERIFY(frondFirmware::validateFiles(m505, romPath, {}).contains("Choose Palm m520"));
+        put(0x10082, 0x766c6974);
+        rom.flush();
+        QCOMPARE(frondFirmware::detectDevice(romPath), m515);
     }
     void deviceNames() {
         // Settings and the core get the fixed name; it round-trips, and other names detect.

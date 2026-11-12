@@ -1,5 +1,6 @@
 #include "DanaViewControls.h"
 #include <algorithm>
+#include <cmath>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
 #include "AudioQualification.h"
@@ -140,9 +141,8 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     jogControlsLabel = new QLabel(tr("Jog controls"), display);
     jogControls = new QComboBox(display);
     jogControls->setObjectName("jogControls");
-    jogControls->addItem(tr("Hidden"), int(frondSessions::JogControls::hidden));
-    jogControls->addItem(tr("Left of screen"), int(frondSessions::JogControls::screen));
-    jogControls->addItem(tr("Left of keyboard"), int(frondSessions::JogControls::keyboard));
+    for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard})
+        jogControls->addItem(frondSessions::jogControlsLabel(jog, false), int(jog));
     jogControlsLabel->setBuddy(jogControls);
     showKeyboard->setChecked(prefs.showKeyboard);
     jogControls->setCurrentIndex(jogControls->findData(int(prefs.jogControls)));
@@ -271,14 +271,24 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
 int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
-    // A 160x160 68k device is drawn at twice its size at 1x, the same width as a 320-pixel ARM screen.
-    if (frondFirmware::runs68k(device)) width *= 2, height *= 2;
     if (device == frondFirmware::deviceFromId("sony-clie-tg50")) {
         // The TG50 sizes the core lays out: the jog tab adds 38 across unless it is hidden or beside the keyboard.
         const bool hidden = jog == frondSessions::JogControls::hidden, beside = keyboard && jog == frondSessions::JogControls::keyboard;
         width = hidden || beside ? 320 : 358;
         height = keyboard ? (beside ? 518 : hidden ? 544 : 571) : (hidden ? 368 : 374);
+    } else if (frondSessions::jogBesideButtons(display)) {
+        // Hidden takes the tab off; beside the buttons the LCD spans the width and the silkscreen
+        // and strip shrink beside the tab, rounded as the core does: the silkscreen to whole rows,
+        // the strip up.
+        if (jog == frondSessions::JogControls::hidden) width = display.width;
+        if (jog == frondSessions::JogControls::keyboard) {
+            const double scale = double(display.width - display.sideTabWidth) / display.width;
+            width = display.width;
+            height = display.height + int(std::lround(display.silkscreenHeight * scale)) + int(std::ceil(display.stripHeight * scale));
+        }
     }
+    // A 160x160 68k device is drawn at twice its size at 1x, the same width as a 320-pixel ARM screen.
+    if (frondFirmware::runs68k(device)) width *= 2, height *= 2;
     const auto* screen = QGuiApplication::primaryScreen();
     const auto available = screen ? screen->availableGeometry().size() : QSize();
     return int(4 * fittingWindowScale(width, height, available.width(), available.height()));
@@ -357,14 +367,17 @@ void MachineSettings::setDevice(Device device) {
     danaView->setVisible(dana);
     windowScale->setVisible(!dana); scaleLabel->setVisible(!dana);
     const bool tg50 = device == frondFirmware::deviceFromId("sony-clie-tg50");
+    const auto& frontend = frondFirmware::profile(device).frontend;
     showKeyboard->setVisible(tg50);
-    jogControlsLabel->setVisible(tg50);
-    jogControls->setVisible(tg50);
+    jogControlsLabel->setVisible(frondSessions::jogControlsShown(frontend));
+    jogControls->setVisible(frondSessions::jogControlsShown(frontend));
+    jogControls->setItemText(jogControls->findData(int(frondSessions::JogControls::keyboard)),
+        frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(frontend)));
     const bool m68k = frondFirmware::runs68k(device);
     fastAudio->setVisible(!m68k);
     showMips->setVisible(!m68k);
-    contrastLabel->setVisible(m68k);
-    contrast->setVisible(m68k);
+    contrastLabel->setVisible(frondFirmware::lcdContrast(device));
+    contrast->setVisible(frondFirmware::lcdContrast(device));
     // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
     const bool engineShown = !m68k;
     speedLabel->setVisible(true);

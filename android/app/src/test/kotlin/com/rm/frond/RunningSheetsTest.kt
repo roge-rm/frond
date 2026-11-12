@@ -90,10 +90,21 @@ class RunningSheetsTest {
             val rows = RunningSheets.displayRows(device)
             assertEquals(device.id, !device.runs68k, DisplayRow.ROTATE in rows)
             assertEquals(device.id, device.runs68k, DisplayRow.SPEED in rows)
-            assertEquals(device.id, device.runs68k, DisplayRow.CONTRAST in rows)
+            assertEquals(device.id, device.lcdContrast, DisplayRow.CONTRAST in rows)
             assertEquals(device.id, device.id == "sony-clie-tg50", DisplayRow.SHOW_KEYBOARD in rows && DisplayRow.JOG in rows)
             assertTrue(DisplayRow.SIZE in rows && DisplayRow.SMOOTH in rows)
         }
+    }
+
+    @Test fun jogControlsFollowTheSideTab() {
+        val tg50 = Device.byId("sony-clie-tg50")!!
+        assertTrue(tg50.jogControls && !tg50.jogBesideButtons)
+        // A CLIE with a side tab and a silkscreen, like the T415: Jog controls, no Show keyboard.
+        val clie = Device.byId("palm-m515")!!.copy(id = "sony-clie-t415", sideTabWidth = 38, silkscreenHeight = 128)
+        assertTrue(clie.jogControls && clie.jogBesideButtons)
+        val rows = RunningSheets.displayRows(clie)
+        assertTrue(DisplayRow.JOG in rows && DisplayRow.SHOW_KEYBOARD !in rows)
+        for (device in Device.entries) assertEquals(device.id, device.sideTabWidth > 0, device.jogControls)
     }
 
     @Test fun audioRowsFollowTheHardware() {

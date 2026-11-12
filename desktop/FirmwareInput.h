@@ -47,6 +47,11 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
+// A 68k device whose slots take linked card files through frond-68k's sd- and sd2- commands (DanaCardsDialog):
+// the Dana's two slots and a VZ Palm's one.
+inline bool linkedCards(Device device) { return runs68k(device) && deviceProfileLinkedCards5(profile(device)); }
+// A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
+inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 
 // The Zodiac runs with no guest calls yet: no install, application list or hard reset.
 inline bool guestServices(Device device) {
@@ -106,9 +111,8 @@ inline QString validateRom68k(Device device, QFile& rom, const QString& nandPath
     const auto name = deviceName(device);
     if (!info.hasHeader) return QStringLiteral("This file isn't a %1 ROM.").arg(name);
     if (!info.profile) return QStringLiteral("This ROM isn't one the %1 can run.").arg(name);
-    // The Dana Wireless runs the Dana's ROM, whose header still says Dana.
-    const bool danaRom = int(device) == deviceTypeDanaWireless && info.profile->deviceType == deviceTypeDana;
-    if (info.profile != &profile(device) && !danaRom)
+    // The Dana Wireless runs the Dana's ROM, and the EZ devices share ROMs the header can't tell apart.
+    if (!deviceProfileTakes68kRom5(profile(device), info))
         return QStringLiteral("This is a %1 ROM. Choose %1.").arg(QString::fromUtf8(info.profile->displayName));
     if (!nandPath.isEmpty()) return QStringLiteral("The %1 has no NAND. Leave the NAND image empty.").arg(name);
     return {};

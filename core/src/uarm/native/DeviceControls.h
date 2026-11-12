@@ -18,7 +18,8 @@ enum class DeviceControlIcon { home, calendar, contacts, web, up, down, left, ri
                                media, music, phone, memo, graffiti, back, legend, stick, action, function,
                                trigger, bluetooth, inbox, start, ok, wireless, taskSwitch, today,
                                calendarGrid };
-enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350 };
+enum class DeviceControlStyle { tx, e2, zire72, m515, iiix, tg50, zodiac, ipaq210, rx1950, h4350, m125, v, m100, m500,
+                                iiie, iiixe, vx, m105, c500, iiic, m505, m130, m520, t415 };
 // Parts of a strip that can be hidden: the TG50's and h4350's keyboards and the TG50's side tab. A device with two
 // arrangements, like the Zodiac, puts its keys under the screen (below) or in panels either side of
 // it (around), and only the current arrangement's keys are shown.
@@ -59,6 +60,9 @@ struct DeviceControlProfile {
     // height its keys are placed in, in strip units.
     int panelWidth{0};
     int panelHeight{0};
+    // Silkscreen units between the LCD and the strip. A device with a side tab and no keyboard
+    // can put the tab beside the silkscreen and strip, which are then drawn narrower.
+    int silkscreenHeight{0};
 };
 // Where a device with two arrangements puts its controls: in a strip under the screen, or in panels
 // either side of it as on the real landscape Zodiac.
@@ -67,11 +71,13 @@ enum class DeviceControlArrangement { below, around };
 struct DeviceControlView {
     bool keyboard{true};
     bool sideTab{true};
-    // Side tab left of the keyboard under a full-width LCD; beside the LCD while the keyboard is hidden.
+    // Side tab under a full-width LCD: left of the keyboard, or on a device without one left of
+    // the silkscreen and strip. Beside the LCD while the keyboard is hidden.
     bool sideTabBesideKeyboard{false};
     DeviceControlArrangement arrangement{DeviceControlArrangement::below};
 };
-// Where the TG50 jog controls go: hidden, left of the LCD or left of the keyboard.
+// Where the CLIE jog controls go: hidden, left of the LCD, or left of the keyboard. keyboard is
+// the saved name; on a CLIE without a keyboard it puts them beside the silkscreen and buttons.
 enum class JogPlacement { hidden, screen, keyboard };
 inline bool parseJogPlacement(const std::string& value, JogPlacement& placement) {
     if(value=="hidden")placement=JogPlacement::hidden;
@@ -151,33 +157,104 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
                                                     DeviceControlStyle::zire72,0.5f,1,10};
     // m515 on a 160-wide screen, 2 units per pixel: four round app keys (Date Book, Address,
     // To Do, Note Pad), the outer ones higher, either side of two round scroll keys stacked in a
-    // pill-shaped housing. No five-way, so up and down hit as their own round keys.
+    // pill-shaped housing, on a tall chin. No five-way, so up and down hit as their own round keys.
     static const DeviceButton m515[] = {
-        {keyIdHard1, {4,12,52,52}, "Date Book", DeviceControlIcon::calendar},
-        {keyIdHard2, {68,18,52,52}, "Address", DeviceControlIcon::phone},
-        {keyIdHard3, {200,18,52,52}, "To Do", DeviceControlIcon::tasks},
-        {keyIdHard4, {264,12,52,52}, "Note Pad", DeviceControlIcon::notes},
-        {keyIdUp, {146,13,28,28}, "Up", DeviceControlIcon::up},
-        {keyIdDown, {146,43,28,28}, "Down", DeviceControlIcon::down},
+        {keyIdHard1, {4,14,56,56}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {70,22,56,56}, "Address", DeviceControlIcon::phone},
+        {keyIdHard3, {194,22,56,56}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {260,14,56,56}, "Note Pad", DeviceControlIcon::notes},
+        {keyIdUp, {145,15,30,30}, "Up", DeviceControlIcon::up},
+        {keyIdDown, {145,47,30,30}, "Down", DeviceControlIcon::down},
     };
-    static const DeviceControlProfile m515Profile{320,80,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+    static const DeviceControlProfile m515Profile{320,88,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::m515,0.5f,2};
     // Palm IIIx on a 160-wide screen, 2 units per pixel: four round app keys in dark oval
-    // pockets (Date Book, Address, To Do, Memo Pad), the outer ones a little lower, round a
+    // pockets (Date Book, Address, To Do, Memo Pad), the outer ones a hair higher, round a
     // peanut-shaped scroll rocker that rocks up and down; its halves meet across the whole
     // drawn waist. The teal power key sits at the far left; the real one is outside the
     // screen's width, so the row is pulled in to fit.
     static const DeviceButton iiix[] = {
-        {keyIdHard1, {19,24,50,44}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard1, {19,20,50,44}, "Date Book", DeviceControlIcon::calendar},
         {keyIdHard2, {78,21,50,44}, "Address", DeviceControlIcon::phone},
         {keyIdHard3, {192,21,50,44}, "To Do", DeviceControlIcon::tasks},
-        {keyIdHard4, {251,24,50,44}, "Memo Pad", DeviceControlIcon::memo},
+        {keyIdHard4, {251,20,50,44}, "Memo Pad", DeviceControlIcon::memo},
         {keyIdUp, {144,8,32,37}, "Up", DeviceControlIcon::up, 8},
         {keyIdDown, {144,45,32,37}, "Down", DeviceControlIcon::down, 8},
         {keyIdPower, {2,32,13,38}, "Power", DeviceControlIcon::power, 3},
     };
     static const DeviceControlProfile iiixProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::iiix,0.5f,2};
+    // Palm IIIe and IIIxe: the IIIx's bar, each in its own shade of grey.
+    static const DeviceControlProfile iiieProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::iiie,0.5f,2};
+    static const DeviceControlProfile iiixeProfile{320,88,iiix,std::size(iiix),{0,0,0,0},0,{0,0,0,0},
+                                                   DeviceControlStyle::iiixe,0.5f,2};
+    // Palm m125 on a 160-wide screen, 2 units per pixel: four round black keys sunk in pockets in
+    // the blue-grey face (Date Book, Address, To Do, Note Pad), the outer ones higher, either side
+    // of two black scroll keys in a peanut-shaped well. Each app key hits its whole pocket. The
+    // real outer keys sit wider than the LCD, so the row is pulled in to fit. Power is on the top
+    // edge, not on this face.
+    static const DeviceButton m125[] = {
+        {keyIdHard1, {10,14,48,48}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {72,23,48,48}, "Address", DeviceControlIcon::phone},
+        {keyIdHard3, {200,23,48,48}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {262,14,48,48}, "Note Pad", DeviceControlIcon::notes},
+        {keyIdUp, {145,14,30,29}, "Up", DeviceControlIcon::up, 9},
+        {keyIdDown, {145,49,30,29}, "Down", DeviceControlIcon::down, 9},
+    };
+    static const DeviceControlProfile m125Profile{320,88,m125,std::size(m125),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m125,0.5f,2};
+    // Palm m100 and m105: the m125's keys and scroll well on charcoal plastic, the m105 a lighter
+    // grey, with plain scroll keys.
+    static const DeviceControlProfile m100Profile{320,88,m125,std::size(m125),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m100,0.5f,2};
+    static const DeviceControlProfile m105Profile{320,88,m125,std::size(m125),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m105,0.5f,2};
+    // Palm V and Vx on a 160-wide screen, 2 units per pixel: four small black oval keys, a little
+    // wider than tall, in thin collars in the metal face (Date Book, Address, To Do, Memo Pad), the
+    // outer ones higher, either side of one narrow, tall black rocker with a slight waist that
+    // rocks up and down. The real outer keys sit wider than the LCD, so the row is pulled in to fit. Power
+    // is on the top edge, not on this face.
+    static const DeviceButton v[] = {
+        {keyIdHard1, {20,27,38,32}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {84,35,38,32}, "Address", DeviceControlIcon::phone},
+        {keyIdHard3, {198,35,38,32}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {262,27,38,32}, "Memo Pad", DeviceControlIcon::memo},
+        {keyIdUp, {144,12,32,36}, "Up", DeviceControlIcon::up, 16, DeviceControlSection::main, {144,12,32,72}},
+        {keyIdDown, {144,48,32,36}, "Down", DeviceControlIcon::down, 16, DeviceControlSection::main, {144,12,32,72}},
+    };
+    static const DeviceControlProfile vProfile{320,96,v,std::size(v),{0,0,0,0},0,{0,0,0,0},
+                                               DeviceControlStyle::v,0.5f,2};
+    // Palm Vx: the V's bar in a lighter silver.
+    static const DeviceControlProfile vxProfile{320,96,v,std::size(v),{0,0,0,0},0,{0,0,0,0},
+                                                DeviceControlStyle::vx,0.5f,2};
+    // Palm m500 and WorkPad c500: the m515's shape with black keys, on blue-grey silver and on black.
+    static const DeviceControlProfile m500Profile{320,88,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m500,0.5f,2};
+    static const DeviceControlProfile c500Profile{320,88,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::c500,0.5f,2};
+    // Palm m505 and m520: the m515's keys, on a lighter silver and on gunmetal.
+    static const DeviceControlProfile m505Profile{320,88,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m505,0.5f,2};
+    static const DeviceControlProfile m520Profile{320,88,m515,std::size(m515),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m520,0.5f,2};
+    // Palm m130: the m125's keys on a pale silver face with a blue edge.
+    static const DeviceControlProfile m130Profile{320,88,m125,std::size(m125),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::m130,0.5f,2};
+    // Palm IIIc on a 160-wide screen, 2 units per pixel: the teal power key at the far left, then
+    // four dark oval keys in matte grey collars (Date Book, Address, To Do, Memo Pad) in a straight
+    // row, either side of two small separate oval scroll keys, one over the other.
+    static const DeviceButton iiic[] = {
+        {keyIdHard1, {22,24,48,44}, "Date Book", DeviceControlIcon::calendar},
+        {keyIdHard2, {80,24,48,44}, "Address", DeviceControlIcon::phone},
+        {keyIdHard3, {192,24,48,44}, "To Do", DeviceControlIcon::tasks},
+        {keyIdHard4, {250,24,48,44}, "Memo Pad", DeviceControlIcon::memo},
+        {keyIdUp, {147,25,26,16}, "Up", DeviceControlIcon::up, 8},
+        {keyIdDown, {147,47,26,16}, "Down", DeviceControlIcon::down, 8},
+        {keyIdPower, {2,32,13,38}, "Power", DeviceControlIcon::power, 3},
+    };
+    static const DeviceControlProfile iiicProfile{320,88,iiic,std::size(iiic),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::iiic,0.5f,2};
     // CLIE PEG-TG50: round Home and Graffiti keys at the ends of the app row, five slim keys in
     // a raised bar between them (Date Book, Address, the scroll rocker split across its middle,
     // To Do, Memo Pad), then the QWERTY keyboard. The Jog Dial and Back sit beside
@@ -377,6 +454,25 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     };
     static const DeviceControlProfile h4350Profile{480,324,h4350,std::size(h4350),{190,32,100,76},26,{222,54,36,32},
                                                    DeviceControlStyle::h4350,0.5f,2,10,208};
+    // CLIE PEG-T415 under its 320-wide screen, 1 unit per pixel: four wide, flat chrome slats
+    // edge to edge (Date Book, Address, To Do, Memo Pad) either side of a narrow rocker split
+    // across its middle, under a dark metal strip with the keys' icons stamped on it. The Jog
+    // Dial and Back are on the left side, beside the top half of the LCD, as on the TG50. Power
+    // is not on this face.
+    static const DeviceButton t415[] = {
+        {keyIdHard1, {4,40,66,38}, "Date Book", DeviceControlIcon::calendar, 3},
+        {keyIdHard2, {72,40,66,38}, "Address", DeviceControlIcon::phone, 3},
+        {keyIdHard3, {182,40,66,38}, "To Do", DeviceControlIcon::tasks, 3},
+        {keyIdHard4, {250,40,66,38}, "Memo Pad", DeviceControlIcon::memo, 3},
+        {keyIdUp, {143,40,34,19}, "Up", DeviceControlIcon::up, 3, DeviceControlSection::main, {143,40,34,38}},
+        {keyIdDown, {143,59,34,19}, "Down", DeviceControlIcon::down, 3, DeviceControlSection::main, {143,40,34,38}},
+        {keyIdJogUp, {-34,-418,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
+        {keyIdJogPress, {-34,-386,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
+        {keyIdJogDown, {-34,-316,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
+        {keyIdBack, {-34,-274,30,26}, "Back", DeviceControlIcon::back, 6, tab},
+    };
+    static const DeviceControlProfile t415Profile{320,104,t415,std::size(t415),{0,0,0,0},0,{0,0,0,0},
+                                                  DeviceControlStyle::t415,0.5f,1,0,0,{-38,-424,38,208},38,0,0,128};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
@@ -384,7 +480,21 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         case DeviceArt::zire72: return zire72Profile;
         case DeviceArt::m515: return m515Profile;
         case DeviceArt::iiix: return iiixProfile;
+        case DeviceArt::m125: return m125Profile;
+        case DeviceArt::iiie: return iiieProfile;
+        case DeviceArt::iiixe: return iiixeProfile;
+        case DeviceArt::m100: return m100Profile;
+        case DeviceArt::m105: return m105Profile;
+        case DeviceArt::v: return vProfile;
+        case DeviceArt::vx: return vxProfile;
+        case DeviceArt::m500: return m500Profile;
+        case DeviceArt::c500: return c500Profile;
+        case DeviceArt::m505: return m505Profile;
+        case DeviceArt::m520: return m520Profile;
+        case DeviceArt::m130: return m130Profile;
+        case DeviceArt::iiic: return iiicProfile;
         case DeviceArt::tg50: return tg50Profile;
+        case DeviceArt::t415: return t415Profile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
         case DeviceArt::hpIpaqRx1950: return rx1950Profile;
@@ -413,11 +523,17 @@ inline int deviceControlsUnits(const DeviceControlProfile& profile, const Device
     return view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
 }
 inline bool deviceSideTabBelowScreen(const DeviceControlProfile& profile, const DeviceControlView& view) {
-    return profile.sideTabWidth>0 && view.sideTab && view.keyboard && view.sideTabBesideKeyboard;
+    return profile.sideTabWidth>0 && profile.keyboardHeight>0 && view.sideTab && view.keyboard && view.sideTabBesideKeyboard;
+}
+// A device without a keyboard: the side tab left of the silkscreen and strip, under a full-width LCD.
+inline bool deviceSideTabBesideButtons(const DeviceControlProfile& profile, const DeviceControlView& view) {
+    return profile.sideTabWidth>0 && profile.keyboardHeight==0 && profile.silkscreenHeight>0 && view.sideTab &&
+           view.sideTabBesideKeyboard;
 }
 inline int deviceScreenLeft(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
     if(deviceControlsAround(profile,view))return profile.panelWidth/profile.unit;
-    return view.sideTab && !deviceSideTabBelowScreen(profile,view) ? profile.sideTabWidth/profile.unit : 0;
+    return view.sideTab && !deviceSideTabBelowScreen(profile,view) && !deviceSideTabBesideButtons(profile,view)
+               ? profile.sideTabWidth/profile.unit : 0;
 }
 inline int deviceControlsWidth(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
     return screenWidth+deviceScreenLeft(profile,view)+
@@ -434,36 +550,48 @@ inline std::pair<int,int> deviceSideTabKeys(const DeviceControlProfile& profile)
     }
     return {top,bottom};
 }
-// Strip units to window pixels: x=left+sx*scale, y=screenHeight+sy*scale; the Zodiac's strip is
+// Strip units to window pixels: x=left+sx*scale, y=screenHeight+top+sy*scale; the Zodiac's strip is
 // scaled to the screen's width so it fits at 90 and 270 too. Side tab units map
-// 1:unit from (sidebarLeft, screenHeight+sidebarTop).
+// 1:unit from (sidebarLeft, screenHeight+sidebarTop). screenHeight is the LCD's height plus the
+// silkscreen's at full size.
 struct DeviceControlTransform {
     const float scale;
     const float left;
+    // Window pixels from screenHeight to the strip's top: negative beside the buttons, where the
+    // silkscreen above the strip is drawn at its scale, rounded to whole rows.
+    const int top;
     const float sidebarLeft;
     const int sidebarTop;
     DeviceControlTransform(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view)
         : scale(profile.style==DeviceControlStyle::zodiac ? float(screenWidth)/profile.width
-                : profile.style!=DeviceControlStyle::tg50 ? 1.f/profile.unit
-                : deviceSideTabBelowScreen(profile,view)
+                : deviceSideTabBelowScreen(profile,view) || deviceSideTabBesideButtons(profile,view)
                     ? float(screenWidth-profile.sideTabWidth/profile.unit)/profile.width
-                    : float(deviceControlsWidth(profile,screenWidth,view))/profile.width),
-          left(profile.style==DeviceControlStyle::tg50
-                    ? (deviceSideTabBelowScreen(profile,view) ? float(profile.sideTabWidth/profile.unit) : 0.f)
-                    : profile.style==DeviceControlStyle::zodiac ? float(deviceScreenLeft(profile,view))
-                    : deviceScreenLeft(profile,view)+float((screenWidth*profile.unit-profile.width)/2)/profile.unit),
-          sidebarLeft(deviceSideTabBelowScreen(profile,view) ? float(profile.sideTabWidth/profile.unit)
+                : profile.style==DeviceControlStyle::tg50 ? float(deviceControlsWidth(profile,screenWidth,view))/profile.width
+                : 1.f/profile.unit),
+          left(deviceSideTabBelowScreen(profile,view) || deviceSideTabBesideButtons(profile,view)
+                    ? float(profile.sideTabWidth/profile.unit)
+                : profile.style==DeviceControlStyle::tg50 ? 0.f
+                : profile.style==DeviceControlStyle::zodiac ? float(deviceScreenLeft(profile,view))
+                : deviceScreenLeft(profile,view)+float((screenWidth*profile.unit-profile.width)/2)/profile.unit),
+          top(deviceSideTabBesideButtons(profile,view)
+                    ? int(std::lround(profile.silkscreenHeight*scale))-profile.silkscreenHeight/profile.unit : 0),
+          sidebarLeft(deviceSideTabBelowScreen(profile,view) || deviceSideTabBesideButtons(profile,view)
+                    ? float(profile.sideTabWidth/profile.unit)
                     : deviceScreenLeft(profile,view)+(profile.style==DeviceControlStyle::tg50 ? 0
                     : (screenWidth*profile.unit-profile.width)/2/profile.unit)),
-          // Below the LCD the tab's keys are centred on the strip's height, on a whole pixel.
-          sidebarTop(deviceSideTabBelowScreen(profile,view)
-                    ? int(std::lround((deviceControlsUnits(profile,view)*scale-
+          // Below the LCD the tab's keys are centred on a whole pixel: on the strip's height left of
+          // the keyboard, on the silkscreen's and strip's together beside the buttons.
+          sidebarTop(deviceSideTabBelowScreen(profile,view) || deviceSideTabBesideButtons(profile,view)
+                    ? int(std::lround((deviceControlsUnits(profile,view)*scale+top-profile.silkscreenHeight/profile.unit*
+                                           float(deviceSideTabBesideButtons(profile,view))-
                                        float(deviceSideTabKeys(profile).second+deviceSideTabKeys(profile).first)/profile.unit)*0.5f))
                     : 0) {}
 };
-// Rounded up once in device pixels; drawing and input share the unrounded uniform scale.
+// Window rows the controls add below screenHeight, less beside the buttons, where the silkscreen
+// shrinks. Rounded up once in device pixels; drawing and input share the unrounded uniform scale.
 inline int deviceControlsHeight(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
-    return int(std::ceil(deviceControlsUnits(profile,view)*DeviceControlTransform(profile,screenWidth,view).scale));
+    const DeviceControlTransform transform(profile,screenWidth,view);
+    return transform.top+int(std::ceil(deviceControlsUnits(profile,view)*transform.scale));
 }
 inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
     return deviceControlsHeight(profile,profile.width/profile.unit,view);
@@ -505,7 +633,8 @@ inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
         r.x=r.x/profile.unit+offset.x;r.y=r.y/profile.unit+offset.y;r.w/=profile.unit;r.h/=profile.unit;
         return r;
     }
-    if(profile.style!=DeviceControlStyle::tg50 && profile.style!=DeviceControlStyle::zodiac) {
+    if(profile.style!=DeviceControlStyle::tg50 && profile.style!=DeviceControlStyle::zodiac &&
+       !deviceSideTabBesideButtons(profile,view)) {
         const int u=profile.unit;
         auto r=button.bounds;
         r.x=(r.x+(screenWidth*u-profile.width)/2)/u+deviceScreenLeft(profile,view);
@@ -516,7 +645,7 @@ inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
     const bool sidebar=button.section==DeviceControlSection::sideTab;
     const float scale=sidebar ? 1.f/profile.unit : transform.scale;
     const float left=sidebar ? transform.sidebarLeft : transform.left;
-    const int top=screenHeight+(sidebar ? transform.sidebarTop : 0);
+    const int top=screenHeight+(sidebar ? transform.sidebarTop : transform.top);
     const auto& r=button.bounds;
     const int x=int(std::lround(left+r.x*scale)),y=int(std::lround(top+r.y*scale));
     return {x,y,int(std::lround(left+(r.x+r.w)*scale))-x,
@@ -549,7 +678,7 @@ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidt
                              int screenHeight, int x, int y, const DeviceControlView& view={}) {
     // Integer window points hit-test at their pixel centre, in strip units.
     const DeviceControlTransform transform(profile,screenWidth,view);
-    const float sx=(x+0.5f-transform.left)/transform.scale,sy=(y-screenHeight+0.5f)/transform.scale;
+    const float sx=(x+0.5f-transform.left)/transform.scale,sy=(y-screenHeight-transform.top+0.5f)/transform.scale;
     const auto part=deviceNavigatorAt(profile,sx,sy);
     if(part!=keyInvalid)return part;
     for(size_t i=0;i<profile.count;++i) {
@@ -708,9 +837,9 @@ inline DanaLayout danaLayout(int viewWidth, int viewHeight, bool keyboard) {
 
 // Printed silkscreen under the LCD. Taps on it reach the guest as pen input; these
 // rectangles only place the artwork.
-enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc };
-// E2 and Zire 72: two Graffiti areas between full-height lines; m515 and IIIx: one rounded box.
-enum class SilkscreenStyle { e2, zire72, m515, iiix };
+enum class SilkscreenIcon { home, menu, favorites, find, clock, brightness, letters, numbers, calc, contrast };
+// E2 and Zire 72: two Graffiti areas between full-height lines; the 68k Palms: one rounded box.
+enum class SilkscreenStyle { e2, zire72, m515, iiix, m125, v, iiic, t415, m500 };
 struct SilkscreenButton {
     SDL_Rect bounds;
     const char* label;
@@ -781,12 +910,73 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceArt art) {
     };
     static const DeviceSilkscreen iiixSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
                                                  SilkscreenStyle::iiix,2};
+    // m125: 'silk' 10000 of the ROM's DeviceResources (clock and contrast), doubled from row 160 as
+    // for the m515. Home and Menu start at x -6 in the ROM; kept to the panel's width here.
+    static const SilkscreenButton m125[] = {
+        {{0,6,42,54}, "Home", SilkscreenIcon::home},
+        {{0,62,42,56}, "Menu", SilkscreenIcon::menu},
+        {{274,6,44,60}, "Calc", SilkscreenIcon::calc},
+        {{274,62,44,76}, "Find", SilkscreenIcon::find},
+        {{44,6,22,38}, "Clock", SilkscreenIcon::clock},
+        {{254,6,22,38}, "Contrast", SilkscreenIcon::contrast},
+        {{44,92,28,46}, "Letter keyboard", SilkscreenIcon::letters},
+        {{242,88,30,50}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen m125Silkscreen{320,120,m125,std::size(m125),{54,8,124,112},{178,8,88,112},
+                                                 SilkscreenStyle::m125,2};
+    // V and Vx: the IIIx's table, the same in the Vx 4.1 ROM; printed like the m125's.
+    static const DeviceSilkscreen vSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
+                                              SilkscreenStyle::v,2};
+    // m500 and WorkPad c500: 'silk' 10000 of the ROM's DeviceResources (clock and contrast), the
+    // m515's rectangles with contrast in place of brightness, printed light with dark icons. The
+    // c500 ROM's table is the same.
+    static const SilkscreenButton m500[] = {
+        {{0,6,42,54}, "Home", SilkscreenIcon::home},
+        {{0,62,42,56}, "Menu", SilkscreenIcon::menu},
+        {{280,6,40,60}, "Calc", SilkscreenIcon::calc},
+        {{280,62,40,76}, "Find", SilkscreenIcon::find},
+        {{44,6,22,38}, "Clock", SilkscreenIcon::clock},
+        {{254,6,22,38}, "Contrast", SilkscreenIcon::contrast},
+        {{44,92,28,46}, "Letter keyboard", SilkscreenIcon::letters},
+        {{248,88,30,50}, "Number keyboard", SilkscreenIcon::numbers},
+    };
+    static const DeviceSilkscreen m500Silkscreen{320,120,m500,std::size(m500),{54,8,124,112},{178,8,88,112},
+                                                 SilkscreenStyle::m500,2};
+    // m505 and m520: 'silk' 10000 of the ROM's DeviceResources, the m125's rectangles with clock
+    // and contrast, printed like the m515's.
+    static const DeviceSilkscreen m505Silkscreen{320,120,m125,std::size(m125),{54,8,124,112},{178,8,88,112},
+                                                 SilkscreenStyle::m515,2};
+    // IIIc: the IIIx's table, the same in the IIIc ROM, printed light on dark.
+    static const DeviceSilkscreen iiicSilkscreen{320,120,iiix,std::size(iiix),{54,8,124,112},{178,8,88,112},
+                                                 SilkscreenStyle::iiic,2};
+    // T415: the ROM's SilkScreenVenice 'silk' 10000 (19000 is the same), doubled from row 160 into
+    // LCD pixels under the 320x320 screen. Calc and Find run to x 326 in the ROM; kept to the
+    // panel's width here. The contrast spot is key 0x123 at the bottom left; the panel ends at
+    // Palm OS row 224, just below the lowest rectangle.
+    static const SilkscreenButton t415[] = {
+        {{0,16,34,40}, "Home", SilkscreenIcon::home},
+        {{0,66,34,38}, "Menu", SilkscreenIcon::menu},
+        {{286,16,34,40}, "Calc", SilkscreenIcon::calc},
+        {{286,72,34,40}, "Find", SilkscreenIcon::find},
+        {{54,106,22,18}, "Letter keyboard", SilkscreenIcon::letters},
+        {{252,108,22,18}, "Number keyboard", SilkscreenIcon::numbers},
+        {{0,110,4,16}, "Contrast", SilkscreenIcon::contrast},
+    };
+    static const DeviceSilkscreen t415Silkscreen{320,128,t415,std::size(t415),{52,16,122,106},{174,16,94,108},
+                                                 SilkscreenStyle::t415,1};
     static const DeviceSilkscreen none{0,0,nullptr,0,{0,0,0,0},{0,0,0,0}};
     switch(art) {
         case DeviceArt::e2: return e2Silkscreen;
         case DeviceArt::zire72: return zire72Silkscreen;
         case DeviceArt::m515: return m515Silkscreen;
-        case DeviceArt::iiix: return iiixSilkscreen;
+        case DeviceArt::iiix: case DeviceArt::iiie: case DeviceArt::iiixe: return iiixSilkscreen;
+        // The m100, m105 and m130 ROMs carry the m125's rectangles, with clock and contrast.
+        case DeviceArt::m125: case DeviceArt::m100: case DeviceArt::m105: case DeviceArt::m130: return m125Silkscreen;
+        case DeviceArt::m505: case DeviceArt::m520: return m505Silkscreen;
+        case DeviceArt::iiic: return iiicSilkscreen;
+        case DeviceArt::v: case DeviceArt::vx: return vSilkscreen;
+        case DeviceArt::m500: case DeviceArt::c500: return m500Silkscreen;
+        case DeviceArt::t415: return t415Silkscreen;
         default: return none;
     }
 }
@@ -797,4 +987,21 @@ inline const DeviceSilkscreen& deviceSilkscreen(DeviceType5 device) {
 }
 // Draws the silkscreen at scale (device pixels per LCD pixel) into a new texture the caller owns.
 SDL_Texture* createDeviceSilkscreen(SDL_Renderer* renderer, const DeviceSilkscreen& silkscreen, float scale);
+// Where the silkscreen goes in the window, screenHeight being the LCD's height plus its own as for
+// the strip: under the LCD at its width, or beside the side tab at the strip's scale, as many rows
+// as the strip's top moved up.
+inline SDL_Rect deviceSilkscreenRect(const DeviceControlProfile& profile, const DeviceSilkscreen& silkscreen,
+                                     int screenWidth, int screenHeight, const DeviceControlView& view={}) {
+    const int height=silkscreen.height/silkscreen.unit;
+    if(!deviceSideTabBesideButtons(profile,view))return {deviceScreenLeft(profile,view),screenHeight-height,screenWidth,height};
+    const DeviceControlTransform transform(profile,screenWidth,view);
+    const int left=int(transform.left);
+    return {left,screenHeight-height,screenWidth-left,height+transform.top};
+}
+// A window point on the silkscreen drawn in rect, in LCD pixels from the silkscreen's top left:
+// what the digitizer reads there.
+inline SDL_Point deviceSilkscreenPoint(const SDL_Rect& rect, const DeviceSilkscreen& silkscreen, int x, int y) {
+    const int width=silkscreen.width/silkscreen.unit,height=silkscreen.height/silkscreen.unit;
+    return {int(std::floor((x+0.5f-rect.x)*width/rect.w)),int(std::floor((y+0.5f-rect.y)*height/rect.h))};
+}
 #endif

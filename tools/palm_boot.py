@@ -544,35 +544,104 @@ def iiix_launcher(rows):
     return trigger and icons >= 7
 
 
-def iiix_setup(core, root):
-    """Palm OS 3.1 to 4.1 setup: two tap-anywhere pages, three calibration targets, Next, then Done."""
-    frame = root / 'boot-frame.png'
-    rows = core.wait_frame(frame, lambda rows: iiix_title(rows) or iiix_launcher(rows), 120)
-    if iiix_launcher(rows):
-        return
+def iiix_changed(core, frame, before):
+    """The next frame that differs from before and then holds still."""
+    seen = []
 
-    def changed(before):
-        seen = []
+    def settled(rows):
+        seen.append(rows)
+        return rows is not None and rows != before and len(seen) > 1 and seen[-1] == seen[-2]
+    return core.wait_frame(frame, settled, 30)
 
-        def settled(rows):
-            seen.append(rows)
-            return rows is not None and rows != before and len(seen) > 1 and seen[-1] == seen[-2]
-        return core.wait_frame(frame, settled, 30)
-    rows = core.wait_frame(frame, iiix_title, 30)
-    for step in (1, 2):
-        (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
-        core.tap(root, 80, 120)
-        rows = changed(rows)
+
+def iiix_calibrate(core, root, frame, first_timeout=30):
     for number, (x, y) in enumerate(((10, 10), (149, 149), (79, 60))):
-        rows = core.wait_frame(frame, lambda rows: iiix_target(rows, x, y), 30)
+        core.wait_frame(frame, lambda rows: iiix_target(rows, x, y), first_timeout if number == 0 else 30)
         (root / f'calibrate-{number}.png').write_bytes(frame.read_bytes())
         core.tap(root, x, y)
+
+
+def iiix_setup_pages(core, root, frame):
+    """The two setup pages (Country, time and date), then Done, and the launcher."""
     for step, count in ((3, 2), (4, 3)):
         rows = core.wait_frame(frame, lambda rows: iiix_title(rows) and len(iiix_buttons(rows)) == count, 30)
+        # Let the page finish drawing before measuring the buttons.
+        time.sleep(1.5)
+        rows = core.frame(frame)
+        assert iiix_title(rows) and len(iiix_buttons(rows)) == count, f'setup page {step} changed while it drew'
         (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
         # Next, then Done: the right-most button.
         core.tap(root, *iiix_buttons(rows)[-1])
     core.wait_frame(root / 'launcher.png', iiix_launcher, 60)
+
+
+def iiix_setup(core, root):
+    """Palm OS 3.1 to 4.1 setup: two tap-anywhere pages, three calibration targets, Next, then Done.
+    The m105's ROM calibrates first, then asks for the language (English is chosen, OK, then Yes)."""
+    frame = root / 'boot-frame.png'
+    rows = core.wait_frame(frame, lambda rows: iiix_title(rows) or iiix_launcher(rows) or iiix_target(rows, 10, 10), 120)
+    if iiix_launcher(rows):
+        return
+    if iiix_target(rows, 10, 10):
+        iiix_calibrate(core, root, frame)
+        rows = iiix_changed(core, frame, rows)
+        (root / 'language.png').write_bytes(frame.read_bytes())
+        core.tap(root, 14, 152)
+        rows = iiix_changed(core, frame, rows)
+        (root / 'language-confirm.png').write_bytes(frame.read_bytes())
+        core.tap(root, 30, 146)
+        iiix_changed(core, frame, rows)
+        iiix_setup_pages(core, root, frame)
+        return
+    rows = core.wait_frame(frame, iiix_title, 30)
+    for step in (1, 2):
+        (root / f'setup-{step}.png').write_bytes(frame.read_bytes())
+        core.tap(root, 80, 120)
+        rows = iiix_changed(core, frame, rows)
+    iiix_calibrate(core, root, frame)
+    iiix_setup_pages(core, root, frame)
+
+
+def halve(rows):
+    """A 320x320 frame as 160x160, each pixel the darkest of its 2x2 block, so the IIIx checks see thin lines."""
+    if rows is None or len(rows) != 320:
+        return rows
+    out = []
+    for y in range(0, 320, 2):
+        row = bytearray()
+        for x in range(0, 320, 2):
+            block = [rows[yy][4 * xx:4 * xx + 4] for yy in (y, y + 1) for xx in (x, x + 1)]
+            row += min(block, key=lambda p: sum(p[:3]))
+        out.append(bytes(row))
+    return out
+
+
+class HalfCore:
+    """A 320x320 Palm (the m520) seen as a 160x160 one: frames halved, taps doubled."""
+
+    def __init__(self, core):
+        self.core = core
+
+    def __getattr__(self, name):
+        return getattr(self.core, name)
+
+    def frame(self, path, timeout=10):
+        return halve(self.core.frame(path, timeout))
+
+    def wait_frame(self, path, check, timeout=60):
+        return halve(self.core.wait_frame(path, lambda rows: check(halve(rows)), timeout))
+
+    def tap(self, root, x, y, hold_ms=150):
+        return self.core.tap(root, 2 * x + 1, 2 * y + 1, hold_ms)
+
+
+def iiix_hires_setup(core, root):
+    """The IIIx setup on a 320x320 LCD."""
+    return iiix_setup(HalfCore(core), root)
+
+
+def iiix_hires_launcher(rows):
+    return iiix_launcher(halve(rows))
 
 
 def dana_geometry(rows):
@@ -646,7 +715,8 @@ def setup_device(device, core, root, variant=None):
 
 
 SETUP_RECIPES = {'tx': tx_setup, 'e2': e2_setup, 'e2-denvfs': e2_denvfs_setup, 'e3': e3_setup,
-                 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup, 'dana': dana_setup}
+                 'zire': zire_setup, 'tg50': tg50_setup, 'iiix': iiix_setup, 'iiix-hires': iiix_hires_setup,
+                 'dana': dana_setup}
 
 
 def launcher_check(device, variant=None):
@@ -660,7 +730,8 @@ def launcher_check(device, variant=None):
 LAUNCHER_CHECKS = {'wallpaper': launcher_wallpaper,
                    'e2-denvfs': e2_denvfs_launcher,
                    'wallpaper-upper': upper_wallpaper_launcher, 'tg50-clie': tg50_launcher,
-                   'iiix': iiix_launcher, 'dana': dana_launcher, 'e3-stock': e3_launcher}
+                   'iiix': iiix_launcher, 'iiix-hires': iiix_hires_launcher, 'dana': dana_launcher,
+                   'e3-stock': e3_launcher}
 
 
 def tg50_date_time_prefs(rows):
