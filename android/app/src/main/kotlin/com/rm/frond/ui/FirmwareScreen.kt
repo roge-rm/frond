@@ -68,7 +68,7 @@ fun FirmwareScreen(model: HomeModel) {
         busy = true
         scope.launch {
             val (failed, found) = withContext(Dispatchers.IO) {
-                val e = Firmware.pick(context, uri)
+                val e = Firmware.pick(context, uri, chosen)
                 e to if (e == null) Firmware.detect(Firmware.picked(context)) else null
             }
             busy = false
