@@ -1023,7 +1023,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-gpio-event` | Firmware-free GPIO scenarios through the command-line probe. Outside `make test`. |
 | `test-zodiac-graphics-a4` | Graphics A4 copy packets, with private files from `FROND_ZODIAC_A4_*`. Outside `make test`. |
 | `test-zodiac-graphics-packed-mono` | Packed monochrome graphics through the probe. Outside `make test`. |
-| `test-zodiac-graphics-plain-copy` | Plain graphics copy packets, with private files from `FROND_ZODIAC_PLAIN_*`. Outside `make test`. |
+| `test-zodiac-graphics-plain-copy` | Plain graphics copy packets, the stretch blit at every ratio, line packets and the backlight word with drawing queued, with private files from `FROND_ZODIAC_PLAIN_*`. Outside `make test`. |
 | `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it. Outside `make test`. |
 | `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
 | `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |

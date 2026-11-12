@@ -1,0 +1,327 @@
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+index f702ee7..853c3aa 100644
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -257,7 +257,10 @@ class Imx1Cs5Configuration {
+             // ASSUMPTION "scan status while drawing": 54c follows the scan phase alone, whatever the engine does.
+             const bool scanStatus = !write && (address & 0xffff) == 0x054c && (pc == 0x200adb08 || pc == 0x200adb14) &&
+                 !engine.completed();
+-            if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return Imx1BootstrapAccess::sequence;
++            // The panel pulse word (4f0, the backlight level: read by 20086cf8, written by 200869c4) is outside
++            // the drawing engine, and games change the level with drawing queued.
++            const bool panelPulse = (address & 0xffff) == 0x04f0;
++            if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus && !panelPulse)) return Imx1BootstrapAccess::sequence;
+             return display.access(windows, pc, address, size, write, value);
+         }
+         if (virtualProfile() && Imx1GraphicsEngine::owns(address)) {
+diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
+index f39a304..5f010a2 100644
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -3,6 +3,7 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstdlib>
+ #include <vector>
+ #include <deque>
+ #include <utility>
+@@ -118,8 +119,16 @@ class Imx1GraphicsCommands {
+                 if (header & 0x3fc00000u || !take(first) || !take(second) ||
+                     !put(header & 0x7ff, first) || !put((header >> 11) & 0x7ff, second)) return A::sideEffect;
+             } else if ((header & 0xc000ffffu) == 0xc0001500u) {
+-                // The line routine (200afd00, from 2008ae14). Its packet is not decoded.
+-                return refuse("line-packet", header);
++                // The line routine (200afd00, from 2008ae14) clips each segment to the surface's clip rectangle
++                // in software (200afba8) and sends it as its own packet: start, end and the end again
++                // (200aff24-200affa0), each point x | y << 16.
++                if (other != Imx1GraphicsEngine::line || header != 0xc0021500) return refuse("line-packet", header);
++                otherPackets = 1;
++                uint32_t points[3];
++                for (auto& point : points) if (!take(point)) return A::sequence;
++                if (points[2] != points[1]) return refuse("line-points", points[2]);
++                const auto status = line(configuration, eim, memory, points[0], points[1], fills);
++                if (status != A::ok) return status;
+             } else if (other == Imx1GraphicsEngine::monoBrush || other == Imx1GraphicsEngine::colourBrush) {
+                 // The brush upload of 200aedd0: a one row rectangle on the brush surface (423), then the
+                 // pattern as host words through 4f0. They land in memory as sent: 8 words with a pattern
+@@ -200,6 +209,9 @@ class Imx1GraphicsCommands {
+                     // Both copy producers send 48f with every copy and never 490 or 491. A colour source
+                     // copy reads neither.
+                     if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
++                    // The software stretch sends a run of no width or height where a shrink drops a column or
++                    // row (seen in Outpost). It doesn't filter them, so on the chip they draw nothing.
++                    if (stretch && (!(second >> 16) || !(second & 0xffff))) continue;
+                     Fill fill{};
+                     const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
+                     if (status != A::ok) return status;
+@@ -263,9 +275,10 @@ class Imx1GraphicsCommands {
+                 // Packed 1bpp rows are padded to 32 pixels, one word per 32.
+                 const uint64_t payload = mono ? uint64_t(width / 32) * height :
+                     a4 ? (uint64_t(width) * height + 7) / 8 : uint64_t(width / 2) * height;
+-                // An A4 height may be odd: with an even width the rows end on a byte and the ROM's own
+-                // word count (4002 for 252x127 at 200a9a9c) is the linear one, so the last word is part used.
+-                if (!width || (width & (mono ? 31 : 1)) || !height ||
++                // A4 width and height may be odd: the ROM's word count is the linear one, (w * h + 7) / 8 words
++                // (200a9888-200a98a0; 4002 for 252x127 at 200a9a9c), so rows don't start on a byte and the
++                // last word is part used.
++                if (!width || (width & (mono ? 31 : a4 ? 0 : 1)) || !height ||
+                     payload + 1 != ((header >> 16) & 0x3fff))
+                     return A::sideEffect;
+                 if (payload > left) return A::sequence;
+@@ -299,7 +312,7 @@ class Imx1GraphicsCommands {
+         if ((engine.hostDataSubmission() && hostPackets != 1) ||
+             (engine.keyedCopySubmission() && copyPackets != 1) ||
+             (engine.a4Submission() && a4Packets != 1) || (other && otherPackets != 1) ||
+-            (values[0x41b] == 0x5598b4df && plainPackets != 1)) return A::sideEffect;
++            (values[0x41b] == 0x5598b4df && plainPackets != 1 && other != Imx1GraphicsEngine::stretchBlit)) return A::sideEffect;
+         batch.option = values[0x4a0];
+         queuedWords += batch.words;
+         batches.push_back(std::move(batch));
+@@ -320,8 +333,7 @@ class Imx1GraphicsCommands {
+             // Validate both surfaces before writing this batch, including after reset.
+             for (const auto& fill : batch.fills) {
+                 const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
+-                const uint64_t sourceLength = !fill.height ? 0 : !fill.doubled ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 :
+-                    uint64_t((fill.sourceY + fill.height - 1) >> 1) * fill.sourcePitch + (((fill.sourceX + fill.width - 1) >> 1) + 1) * 2;
++                const uint64_t sourceLength = !fill.height ? 0 : sourceBytes(fill);
+                 if (destinationLength && ((fill.base & 1) || !memory.contains(configuration, eim, fill.base, destinationLength) ||
+                     ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, fill.sourceBase, sourceLength)))) return A::sequence;
+             }
+@@ -339,7 +351,8 @@ class Imx1GraphicsCommands {
+         uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
+         uint32_t sourceBase = 0, sourcePitch = 0;
+         bool keyed = false, plain = false, a4 = false, invert = false;
+-        // paint: the colour a keyed copy with ROP f0 writes. doubled: a stretch blit source, each pixel twice.
++        // paint: the colour a keyed copy with ROP f0 writes. doubled: a stretch blit source, read at the ratios
++        // in paint (8.8, x low, y high; 0 for 80 hex both ways, each pixel twice, as a fill saved before ratios).
+         uint32_t paint = 0;
+         bool doubled = false, keyEqual = false, painted = false;
+         std::vector<uint16_t> pixels;
+@@ -370,6 +383,7 @@ class Imx1GraphicsCommands {
+     static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
+                         const Fill& fill, Imx1GpuFill& out) {
+         if (!gpuFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
++            (fill.doubled && (ratioX(fill) != 0x80 || ratioY(fill) != 0x80)) ||
+             (fill.height > 1 && fill.pitch < fill.width * 2) ||
+             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
+         const bool copy = fill.keyed || fill.plain, source = copy || fill.a4;
+@@ -390,8 +404,7 @@ class Imx1GraphicsCommands {
+         out.paint = fill.paint;
+         out.pixels = !copy && !fill.pixels.empty() ? fill.pixels.data() : nullptr;
+         if (source) {
+-            const uint64_t sourceLength = !fill.doubled ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 :
+-                uint64_t((fill.sourceY + fill.height - 1) >> 1) * fill.sourcePitch + (((fill.sourceX + fill.width - 1) >> 1) + 1) * 2;
++            const uint64_t sourceLength = sourceBytes(fill);
+             if (!memory.contains(configuration, eim, fill.sourceBase, sourceLength, &out.sourceBank, &out.sourceBase)) return false;
+             if (out.sourceBank == out.bank && out.sourceBase < out.base + length && out.base < out.sourceBase + sourceLength)
+                 return false;
+@@ -411,9 +424,10 @@ class Imx1GraphicsCommands {
+             for (uint32_t x = 0; x < fill.width; ++x) {
+                 uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
+                 if (fill.keyed || fill.plain) {
+-                    // A doubled source starts at the unclipped origin and gives each pixel twice.
++                    // A stretch source steps from the unclipped origin at the ratios.
+                     const uint32_t at = fill.doubled ?
+-                        fill.sourceBase + ((fill.sourceY + y) >> 1) * fill.sourcePitch + ((fill.sourceX + x) >> 1) * 2 :
++                        fill.sourceBase + stretchStep(fill.sourceY + y, ratioY(fill)) * fill.sourcePitch +
++                        stretchStep(fill.sourceX + x, ratioX(fill)) * 2 :
+                         fill.sourceBase + y * fill.sourcePitch + x * 2;
+                     const auto status = memory.accessGpu(configuration, eim, at, 2, false, colour);
+                     if (status != A::ok) return status;
+@@ -453,13 +467,13 @@ class Imx1GraphicsCommands {
+             uint8_t* out = destination + row;
+             const uint16_t* in = kPixels ? fill.pixels.data() + size_t(y) * fill.width : nullptr;
+             const uint8_t* source = !kCopy ? nullptr :
+-                from + (kDoubled ? ((fill.sourceY + y) >> 1) * fill.sourcePitch : y * fill.sourcePitch);
++                from + (kDoubled ? stretchStep(fill.sourceY + y, ratioY(fill)) * fill.sourcePitch : y * fill.sourcePitch);
+             const uint8_t* alphaSource = kA4 ? from + y * fill.sourcePitch : nullptr;
+             uint32_t low = 0, high = 0;
+             for (uint32_t x = 0; x < fill.width; ++x) {
+                 uint32_t colour = kPixels ? in[x] : fill.colour;
+                 if constexpr (kCopy) {
+-                    colour = read16(source + (kDoubled ? ((fill.sourceX + x) >> 1) * 2 : x * 2));
++                    colour = read16(source + (kDoubled ? stretchStep(fill.sourceX + x, ratioX(fill)) * 2 : x * 2));
+                     if (kKeyed && (colour == fill.colour) != fill.keyEqual) continue;
+                     if (fill.painted) colour = fill.paint;
+                 }
+@@ -511,8 +525,7 @@ class Imx1GraphicsCommands {
+         const uint8_t* from = nullptr;
+         if (source) {
+             // The source range the batch check worked out.
+-            const uint64_t length = !fill.doubled ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 :
+-                uint64_t((fill.sourceY + fill.height - 1) >> 1) * fill.sourcePitch + (((fill.sourceX + fill.width - 1) >> 1) + 1) * 2;
++            const uint64_t length = sourceBytes(fill);
+             from = memory.gpuSpan(configuration, eim, fill.sourceBase, length, sourceBank, sourceOffset);
+             if (!from) return false;
+         }
+@@ -549,6 +562,17 @@ class Imx1GraphicsCommands {
+             return false;
+         }
+     };
++    // A stretch fill's x and y ratios in 8.8.
++    static uint32_t ratioX(const Fill& fill) { return fill.paint ? fill.paint & 0xffff : 0x80; }
++    static uint32_t ratioY(const Fill& fill) { return fill.paint ? fill.paint >> 16 : 0x80; }
++    // The source column or row a stretch reads for destination column or row i of the unclipped rectangle.
++    static uint32_t stretchStep(uint32_t i, uint32_t ratio) { return uint32_t((uint64_t(i) * ratio) >> 8); }
++    // The bytes from sourceBase a fill reads. A stretch's sourceBase is the unclipped origin's pixel.
++    static uint64_t sourceBytes(const Fill& fill) {
++        if (!fill.doubled) return uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2;
++        return uint64_t(stretchStep(fill.sourceY + fill.height - 1, ratioY(fill))) * fill.sourcePitch +
++               (stretchStep(fill.sourceX + fill.width - 1, ratioX(fill)) + 1) * 2;
++    }
+     struct Batch {
+         uint32_t end = 0, words = 0, option = 0;
+         std::vector<Fill> fills;
+@@ -562,12 +586,17 @@ class Imx1GraphicsCommands {
+         known[reg] = true;
+         // GMC selects the same source and ROP fields as DP_MIX in the native helpers.
+         if (reg == 0x41b && known[0x4b2] &&
+-            (value == 0x5798b4df || value == 0x4598b4df || value == 0x45e0b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df ||
+-             (packedMono && value == 0x579804df)))
++            (mixAlias(value) || (packedMono && value == 0x579804df)))
+             values[0x4b2] = (values[0x4b2] & ~0x01ff0700u) |
+                 ((value >> 1) & 0x00ff0000u) | ((value >> 17) & 0x700u) | ((value >> 7) & 0x01000000u);
+         return true;
+     }
++    // GMC words whose source and ROP fields store() copies into DP_MIX, so 4b2 holds what the engine uses after
++    // any of them, whichever of 41b and 4b2 came last. d598b4df is the stretch blit's own (200b085c-200b0868).
++    static bool mixAlias(uint32_t value) {
++        return value == 0x5798b4df || value == 0x4598b4df || value == 0x45e0b4df || value == 0x55e0b4df ||
++               value == 0xd798d4df || value == 0x5598b4df || value == 0xd598b4df;
++    }
+     // Packed 1bpp drawing below is explicit virtual policy. The original writer copies
+     // source halfwords unchanged and proves none of it, and physical W4200 behaviour is unknown.
+     // virtualPackedMonoMsbFirst: source bytes run left to right, bit 7 of each byte first.
+@@ -668,8 +697,11 @@ class Imx1GraphicsCommands {
+         const uint32_t x = host ? xy & 0xffff : xy >> 16, y = host ? xy >> 16 : xy & 0xffff;
+         const uint32_t width = host ? wh & 0xffff : wh >> 16, height = host ? wh >> 16 : wh & 0xffff;
+         const uint32_t pitch = values[0x402];
+-        if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
+-            !configuration.engineState().clipContains(x + width - 1, y + height - 1)) return A::sideEffect;
++        // With the scissor on (GMC bit 3) the bounds apply to what is left after it: the software stretch's
++        // runs (200b0644 from 200b0c10) may reach past a small surface, as TwGfxStretchBlt2 allows.
++        if (!width || !height || !pitch || pitch > 8192 || x + width > 8192 || y + height > 8192 ||
++            (!(gmc & 8) && (x + width > pitch ||
++                            !configuration.engineState().clipContains(x + width - 1, y + height - 1)))) return A::sideEffect;
+         uint32_t left = x, top = y, right = x + width, bottom = y + height;
+         if (gmc & 8) {
+             left = std::max(left, values[0x46f] & 0x1fff);
+@@ -681,6 +713,8 @@ class Imx1GraphicsCommands {
+             right = std::min(right, values[0x470] & 0x1fff);
+             bottom = std::min(bottom, (values[0x470] >> 16) & 0x1fff);
+         }
++        if ((gmc & 8) && left < right && top < bottom &&
++            (right > pitch || !configuration.engineState().clipContains(right - 1, bottom - 1))) return A::sideEffect;
+         fill.sourceX = left - x;
+         fill.sourceY = top - y;
+         fill.colour = values[0x41f] & 0xffff;
+@@ -694,16 +728,62 @@ class Imx1GraphicsCommands {
+         return memory.contains(configuration,eim,fill.base,
+             uint64_t(fill.height - 1) * fill.pitch + fill.width * 2) ? A::ok : A::sequence;
+     }
++    // One segment of the line packet, as runs of pixels in fills (rows for an x-major line, columns for a
++    // y-major one), drawn like a solid fill: same state, scissor and bounds.
++    // ASSUMPTION "line ends drawn": both ends are drawn. The driver repeats the end point after each segment
++    // (200aff74-200aff98), which only makes sense if the chip leaves out a segment's last pixel and draws a
++    // zero length one as one pixel.
++    // A pixel is the one nearest the line across the major axis. Where the line passes exactly half way
++    // between two (a Bresenham tie) the chip's choice is not known, so those segments are refused. Only ROP f0
++    // is drawn: with 5a the end pixel's two draws would matter.
++    Imx1BootstrapAccess line(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
++                             const Imx1GraphicsMemory& memory, uint32_t start, uint32_t end, std::vector<Fill>& fills) {
++        using A = Imx1BootstrapAccess;
++        if (((values[0x41b] >> 17) & 255) != 0xf0) return refuse("line-rop", (values[0x41b] >> 17) & 255);
++        const int32_t x0 = start & 0xffff, y0 = start >> 16, x1 = end & 0xffff, y1 = end >> 16;
++        if (x0 > 8191 || y0 > 8191 || x1 > 8191 || y1 > 8191) return refuse("line-points", end);
++        const int32_t dx = x1 - x0, dy = y1 - y0;
++        const bool xMajor = std::abs(dx) >= std::abs(dy);
++        const int64_t major = xMajor ? std::abs(dx) : std::abs(dy), minor = xMajor ? std::abs(dy) : std::abs(dx);
++        const int32_t majorStep = (xMajor ? dx : dy) < 0 ? -1 : 1, minorStep = (xMajor ? dy : dx) < 0 ? -1 : 1;
++        // Runs of pixels that share the minor coordinate, in drawing order.
++        int64_t runStart = 0;
++        for (int64_t i = 0; i <= major; ++i) {
++            if (major && (2 * i * minor) % (2 * major) == major) return refuse("line-tie", start);
++            const int64_t offset = major ? (2 * i * minor + major) / (2 * major) : 0;
++            const int64_t next = i < major ? (2 * (i + 1) * minor + major) / (2 * major) : -1;
++            if (next == offset) continue;
++            // Pixels runStart to i of the major axis at this minor offset.
++            const int64_t first = runStart, count = i - runStart + 1;
++            runStart = i + 1;
++            int64_t along = (xMajor ? x0 : y0) + majorStep * first;
++            if (majorStep < 0) along -= count - 1;
++            const int64_t across = (xMajor ? y0 : x0) + minorStep * offset;
++            const uint32_t x = uint32_t(xMajor ? along : across), y = uint32_t(xMajor ? across : along);
++            const uint32_t width = xMajor ? uint32_t(count) : 1, height = xMajor ? 1 : uint32_t(count);
++            Fill fill{};
++            const auto status = rectangle(configuration, eim, memory, x << 16 | y, width << 16 | height, fill, false);
++            if (status != A::ok) return status;
++            ticks += uint64_t(fill.width) * fill.height;
++            fills.push_back(std::move(fill));
++        }
++        return A::ok;
++    }
+     Imx1BootstrapAccess refuse(const char* what, uint32_t value) const {
+         refused = {what, value};
+         return Imx1BootstrapAccess::sideEffect;
+     }
+     // The chip's stretch blit as FUN_200b0644 sends it (220 at 200b0b14): source surface 46b/46c from
+-    // 464 in quarter pixels, destination 401/402 at 465, output size in 466, 8.8 ratios in 412, with
+-    // 416 to 422 repeating them (200b0998-200b0acc). It writes destination memory like a copy.
+-    // Only ratio 80 hex both ways is drawn, each source pixel twice, which is what the bitmap routine
+-    // sends for a half density bitmap (2008a72c) and must have for its keyed modes. The chip's rounding
+-    // and filter at other ratios are not known.
++    // 464 in quarter pixels, destination 401/402 at 465, output size in 466, 8.8 ratios in 412 (x low, y high,
++    // source pixels per destination pixel, the ROM keeps them in 10 to 1ff hex), with 416 to 422 repeating them
++    // (200b0998-200b0acc). It writes destination memory like a copy.
++    // Destination column i of the unclipped rectangle reads source column i * ratio >> 8 from the origin, and the
++    // same for rows: at ratio 80 hex each source pixel twice, which the bitmap routine's half density bitmaps
++    // (2008a72c) and its keyed modes must have.
++    // ASSUMPTION "stretch steps from the origin": the step starts at 464 with no half pixel offset; 464 carries
++    // the start phase in quarter pixels and the ROM only sends whole pixels (464 & 30003 is always 0).
++    // Smooth (488 bit 0 clear, twGfxStretchSmooth) filters through source 2, one row down (416); its filter is
++    // not known and stays refused.
+     Imx1BootstrapAccess stretchBlit(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                     const Imx1GraphicsMemory& memory, Fill& fill) const {
+         using A = Imx1BootstrapAccess;
+@@ -711,7 +791,14 @@ class Imx1GraphicsCommands {
+                          0x416,0x418,0x419,0x410,0x411,0x412,0x420,0x421,0x422,0x464,0x465,0x466,
+                          0x42e,0x42f,0x430,0x431,0x432,0x433}) if (!known[reg]) return A::sequence;
+         // The state words 200b0830-200b08dc leave: ROP cc, colour sources, scissor on, left to right and down.
+-        for (auto item : {std::pair<uint32_t,uint32_t>{0x41b,0xd598b4df}, {0x4b2,0x01cc1200}, {0x4b1,0x40037d04},
++        // The ROM sets GMC to (GMC & ~8e007000) | d4003000 in its shadow but sends it only when another word in
++        // the same group changed, so the chip may hold the GMC of the operation before. Its source and ROP
++        // fields alias DP_MIX, which the stretch always sends after it, so only the rest must match: the
++        // clipping, datatypes and the bits above the source field. And DP_MIX must be current (mixAlias).
++        const uint32_t gmc = values[0x41b];
++        if ((gmc & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc)) return refuse("stretch-state", 0x41b);
++        if (values[0x488] == 0x02020008) return refuse("stretch-smooth", values[0x412]);
++        for (auto item : {std::pair<uint32_t,uint32_t>{0x4b2,0x01cc1200}, {0x4b1,0x40037d04},
+                  {0x472,0x3f}, {0x488,0x02020009}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
+                  {0x42e,0}, {0x42f,0}, {0x430,0}, {0x431,0}, {0x432,0}, {0x433,0}})
+             if (values[item.first] != item.second) return refuse("stretch-state", item.first);
+@@ -721,12 +808,14 @@ class Imx1GraphicsCommands {
+             values[0x410] != (values[0x466] >> 16) + 1 || values[0x411] != (values[0x466] & 0xffff) ||
+             (values[0x464] & 0x00030003) || ((values[0x46f] | values[0x470]) & ~0x1fff1fffu))
+             return refuse("stretch-words", values[0x464]);
+-        if (values[0x412] != 0x00800080) return refuse("stretch-ratio", values[0x412]);
++        const uint32_t ratioX = values[0x412] & 0xffff, ratioY = values[0x412] >> 16;
++        if (ratioX < 0x10 || ratioX > 0x1ff || ratioY < 0x10 || ratioY > 0x1ff) return refuse("stretch-ratio", values[0x412]);
+         const uint32_t sx = values[0x464] >> 18, sy = (values[0x464] & 0xffff) >> 2;
+         const uint32_t x = values[0x465] >> 16, y = values[0x465] & 0xffff;
+         const uint32_t width = values[0x466] >> 16, height = values[0x466] & 0xffff;
+         const uint32_t pitch = values[0x402], sourcePitch = values[0x46c];
+-        const uint32_t sourceWidth = (width + 1) / 2, sourceHeight = (height + 1) / 2;
++        const uint32_t sourceWidth = width ? stretchStep(width - 1, ratioX) + 1 : 0;
++        const uint32_t sourceHeight = height ? stretchStep(height - 1, ratioY) + 1 : 0;
+         if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
+             !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
+             !sourcePitch || sourcePitch > 8192 || sx + sourceWidth > sourcePitch || sy + sourceHeight > 8191)
+@@ -742,6 +831,7 @@ class Imx1GraphicsCommands {
+         fill.sourcePitch = sourcePitch * 2;
+         fill.sourceBase = uint32_t(source);
+         fill.plain = fill.doubled = true;
++        fill.paint = values[0x412] == 0x00800080 ? 0 : values[0x412];
+         if (left >= right || top >= bottom) return A::ok;
+         const uint64_t address = uint64_t(values[0x401]) + uint64_t(top) * fill.pitch + left * 2;
+         if (address > 0xffffffffu || (address & 1)) return refuse("stretch-geometry", values[0x465]);

@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -171,7 +173,7 @@ void guards() {
         auto bad = packet(); change(bad,item.first,item.second); reject(bad);
     }
     for (auto item : {std::pair<unsigned,uint32_t>{20,0xc0031b00},{21,0xffff0000},
-        {21,0x00090001},{22,0x000d0000},{22,0x00002000},{23,0},{23,0x00010000},{23,0xffff0001}}) {
+        {21,0x00090001},{22,0x1fff0000},{22,0x00002000},{23,0},{23,0x00010000},{23,0xffff0001}}) {
         auto bad = packet(); bad[item.first] = item.second; reject(bad);
     }
     for (size_t size = 1; size < packet().size(); ++size) {
@@ -235,8 +237,9 @@ void stretchBlit() {
             const uint32_t expected = !inside ? 0xa55au : bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu;
             assert(f.read(screen+(y*480+x)*2) == expected);
         }
-    // Any other ratio stops and the stop names it. So do repeated words that disagree and other state.
-    for (uint32_t ratio : {0x00800100u,0x00400040u,0x01000100u,0x00800081u}) {
+    // A ratio outside 10 to 1ff hex either way stops and the stop names it. So do repeated words that disagree
+    // and other state.
+    for (uint32_t ratio : {0x0080000fu,0x00800200u,0x000f0080u,0x02000080u,0u}) {
         p = dateBookStretch(); p[32] = p[36] = ratio;
         assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-ratio",ratio));
     }
@@ -246,10 +249,13 @@ void stretchBlit() {
         p = dateBookStretch(); p[item.first] = item.second;
         assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-words",0));
     }
-    for (auto item : {std::pair<unsigned,uint32_t>{3,0x5598b4df},{7,0x00cc1200},{9,0x40030d04},{23,0x02020008},{23,4}}) {
+    for (auto item : {std::pair<unsigned,uint32_t>{3,0x4598b4df},{3,0xd598b4de},{3,0xd798d4df},{3,0x5398b4df},{7,0x00cc1200},{9,0x40030d04},{23,4}}) {
         p = dateBookStretch(); p[item.first] = item.second;
         assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",p[item.first-1]));
     }
+    // Smooth (488 bit 0 clear) filters, and how is not known.
+    p = dateBookStretch(); p[23] = 0x02020008;
+    assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-smooth",0x00800080));
     // The stretch words from any other producer, and other packets from this one, are refused.
     for (uint32_t pc : {0x200a9ed4u,0x200b0200u,0x200b1790u}) assert(f.append(dateBookStretch(),pc) != A::ok);
     p = dateBookStretch(); p.insert(p.end(),{0xc0011a00,0,0x00010001});
@@ -298,8 +304,8 @@ void keyedModes() {
     assert(f.append(keyed,0x200aa504) == A::sideEffect && refused(f,"keyed-copy-41b",0x45b4b4df));
     auto p = packet(); p[1] = 0x5532b4df;
     assert(f.append(p) == A::sideEffect && refused(f,"plain-copy-41b",0x5532b4df));
-    // The line packet is known by its producer and header, and not drawn.
-    assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200affe4) == A::sideEffect && refused(f,"line-packet",0xc0021500));
+    // The line packet's third point must repeat its end (lines() has the rest).
+    assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200affe4) == A::sideEffect && refused(f,"line-points",0));
     assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200b0200) == A::sideEffect);
 }
 // The brush uploads of 200aedd0 land on the brush surface as sent. A fill with a pattern brush type stops.
@@ -461,6 +467,17 @@ void stretch() {
         assert(f.read(destination+(row*13+2)*2) == 0x5678 && f.read(destination+(row*13+3)*2) == 0xffff);
         assert(f.read(destination+(row*13+4)*2) == 0xabcd && f.read(destination+(row*13+5)*2) == 0xa55a);
     }
+    // A run of no width or no height, as a shrink sends, draws nothing; the others in its packet are drawn.
+    planes(f);
+    assert(f.append({0xc0081b00,0x00020002,0x00020004,0x00000001,0x00020002,0x00020005,0x00030000,
+                     0x00020002,0x00020006,0x00030001},0x200b1790) == A::ok);
+    f.finish();
+    for (unsigned i = 0; i < 13*8; ++i) {
+        const uint32_t expected = i == 6*13+2 ? 0x5678 : i == 6*13+3 ? 0xffff : i == 6*13+4 ? 0xabcd : 0xa55a;
+        assert(f.read(destination+i*2) == expected);
+    }
+    // From the copy helper it stays refused.
+    assert(f.append(with(p,{0xc0021b00,0x00020002,0x00020004,0x00000001}),0x200a9ed4) == A::sideEffect);
     // Refused: more than one copy from the copy helper or the fill routine, a word count that is not 3n,
     // two runs to the same place, and a run's source on another run's destination.
     planes(f);
@@ -534,6 +551,12 @@ void scanStatus() {
         assert(f.state.access(f.eim,0x200ad7b0,0x1601054c,4,false,scan) == A::sequence && scan == 0xdeadbeef);
         assert(f.state.access(f.eim,0x200adb08,0x1601054c,4,true,scan) == A::sequence);
         assert(f.state.access(f.eim,0x200aeb68,0x160104d8,4,true,scan) == A::sequence);
+        // The backlight level (4f0) reads and writes with drawing queued.
+        uint32_t level = 0xdeadbeef;
+        assert(f.state.access(f.eim,0x20086d12,0x160104f0,4,false,level) == A::ok && level != 0xdeadbeef);
+        uint32_t set = (level & 0xf800ffffu) | 0x40000000u | 0x01230000u;
+        assert(f.state.access(f.eim,0x200869f0,0x160104f0,4,true,set) == A::ok);
+        assert(f.state.access(f.eim,0x20086d12,0x160104f0,4,false,level) == A::ok && level == set);
         f.finish();
     }
     std::puts("PASS: scan status read by the vertical wait with any batch queued");
@@ -637,8 +660,180 @@ void privateCapture() {
     std::puts("PASS: private native 18-word plain copy, every364 display pixels and surrounding bounds, 145 nonwhite");
 }
 }
+
+// The stretch blit at ratio 80 hex with the GMC another operation left: the ROM changes its GMC shadow for the
+// stretch but doesn't always send it. DP_MIX, sent after it, holds the stretch's source and ROP.
+void stretchStaleGmc() {
+    for (uint32_t gmc : {0x5798b4dfu,0x5598b4dfu,0x55e0b4dfu}) {
+        for (bool direct : {true,false}) {
+            Imx1GraphicsCommands::directFills = direct;
+            Fixture f; stretchPlanes(f);
+            auto p = dateBookStretch(); p[3] = gmc;
+            const auto status = f.append(p,0x200b0b14);
+            if (status != A::ok) std::fprintf(stderr,"gmc %08x: %d %s %08x\n",gmc,int(status),
+                f.commands.refusal().what ? f.commands.refusal().what : "-",f.commands.refusal().value);
+            assert(status == A::ok);
+            f.finish();
+            for (unsigned y = 290; y < 320; ++y)
+                for (unsigned x = 0; x < 64; ++x) {
+                    const bool inside = x >= 2 && x < 20 && y >= 296 && y < 318;
+                    const uint32_t expected = !inside ? 0xa55au : bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu;
+                    assert(f.read(screen+(y*480+x)*2) == expected);
+                }
+        }
+        // The same GMC sent after DP_MIX sets DP_MIX's source and ROP fields again: refused.
+        Fixture f; stretchPlanes(f);
+        auto p = dateBookStretch(); p.erase(p.begin()+2,p.begin()+4); p.insert(p.begin()+8,{0x41b,gmc});
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",0x4b2));
+    }
+    Imx1GraphicsCommands::directFills = true;
+    std::puts("PASS: stretch blit after a host upload, copy or fill GMC, DP_MIX sent last");
+}
+// The stretch blit's words for an output of width by height at the ratios (x low, y high) into (x, y).
+std::vector<uint32_t> ratioStretch(uint32_t ratio, uint32_t width, uint32_t height, uint32_t x = 2, uint32_t y = 296) {
+    auto p = dateBookStretch();
+    p[30] = p[34] = width+1; p[31] = p[35] = height; p[32] = p[36] = ratio;
+    p[39] = x << 16 | y; p[40] = width << 16 | height;
+    // The scissor from (2, 296) to (72, 320).
+    p[13] = 0x01400048;
+    return p;
+}
+// Destination pixel (dx, dy) of the stretch reads source (dx * ratio >> 8, dy * ratio >> 8) from the origin.
+void stretchRatios() {
+    struct Case { uint32_t ratio, width, height; };
+    // Spout's 46 hex both ways, a shrink, unequal ratios, the ends of the range and 1:1.
+    for (auto c : {Case{0x00460046,18,22}, Case{0x01800180,6,7}, Case{0x00800140,7,22}, Case{0x01ff0010,64,6},
+                   Case{0x00100100,9,24}, Case{0x01000100,9,11}}) {
+        const uint32_t rx = c.ratio & 0xffff, ry = c.ratio >> 16;
+        for (bool clip : {false,true})
+            for (bool direct : {true,false}) {
+                Imx1GraphicsCommands::directFills = direct;
+                Fixture f; stretchPlanes(f);
+                for (unsigned y = 290; y < 320; ++y) for (unsigned x = 64; x < 72; ++x) f.write(screen+(y*480+x)*2,0xa55a);
+                auto p = ratioStretch(c.ratio,c.width,c.height);
+                // A scissor one pixel inside the left and top edges.
+                if (clip) p[11] = 0x01290003;
+                assert(f.append(p,0x200b0b14) == A::ok);
+                f.finish();
+                for (unsigned y = 290; y < 320; ++y)
+                    for (unsigned x = 0; x < 72; ++x) {
+                        const unsigned left = clip ? 3 : 2, top = clip ? 297 : 296;
+                        const bool inside = x >= left && x < 2+c.width && y >= top && y < 296+c.height;
+                        uint32_t expected = 0xa55a;
+                        if (inside) {
+                            const unsigned sx = (x-2)*rx/256, sy = (y-296)*ry/256;
+                            assert(sx < 9 && sy < 11);
+                            expected = bitmapBit(sx,sy) ? 0u : 0xffffu;
+                        }
+                        if (f.read(screen+(y*480+x)*2) != expected) {
+                            std::fprintf(stderr,"ratio %08x clip %d direct %d at %u,%u: %04x, not %04x\n",c.ratio,clip,direct,x,y,
+                                         f.read(screen+(y*480+x)*2),expected);
+                            std::abort();
+                        }
+                    }
+            }
+    }
+    Imx1GraphicsCommands::directFills = true;
+    // A source that runs past the surface's memory is refused before anything is drawn.
+    Fixture f; stretchPlanes(f);
+    auto p = ratioStretch(0x00100010,16,16); p[19] = p[28] = 0xfffffffe;
+    assert(f.append(p,0x200b0b14) != A::ok);
+    std::puts("PASS: stretch blit at ratios 10 to 1ff hex each way, clipped or not, on both CPU paths");
+}
+constexpr uint32_t lineSurface = 0xe08000, lineBackground = 0x3333;
+// The fill state the line routine sends (2008ae14 to 200afd00): solid brush, ROP f0, scissor on.
+void linePlanes(Fixture& f) { for (unsigned i = 0; i < 128*128; ++i) f.write(lineSurface+i*2,lineBackground); }
+std::vector<uint32_t> lineState(uint32_t colour) {
+    return {0x41f,colour,0x401,lineSurface,0x402,128,0x46f,0,0x470,0x00800080};
+}
+uint32_t point(uint32_t x, uint32_t y) { return x | y << 16; }
+// The pixels of a segment with no Bresenham tie: the nearest across the major axis, both ends.
+std::vector<std::pair<int,int>> linePixels(int x0, int y0, int x1, int y1) {
+    std::vector<std::pair<int,int>> out;
+    const int dx = x1-x0, dy = y1-y0, steps = std::max(std::abs(dx),std::abs(dy));
+    for (int i = 0; i <= steps; ++i) {
+        if (!steps) { out.push_back({x0,y0}); break; }
+        const double t = double(i)/steps;
+        out.push_back({int(std::lround(x0+dx*t)),int(std::lround(y0+dy*t))});
+    }
+    return out;
+}
+void lines() {
+    struct Segment { int x0, y0, x1, y1; };
+    const std::vector<Segment> segments{{10,10,15,12},{40,30,33,21},{5,50,25,50},{60,40,60,5},{70,10,80,20},
+        {90,90,90,90},{120,3,101,6},{3,120,8,101}};
+    for (bool clip : {false,true})
+        for (bool direct : {true,false}) {
+            Imx1GraphicsCommands::directFills = direct;
+            Fixture f; linePlanes(f);
+            auto batch = lineState(0x07e0);
+            // The scissor from 12,8 to 100,100 (exclusive).
+            if (clip) batch.insert(batch.end(),{0x46f,0x0008000c,0x470,0x00640064});
+            unsigned drawn = 0;
+            std::vector<uint32_t> expected(128*128,lineBackground);
+            for (auto s : segments) {
+                batch.insert(batch.end(),{0xc0021500,point(s.x0,s.y0),point(s.x1,s.y1),point(s.x1,s.y1)});
+                for (auto px : linePixels(s.x0,s.y0,s.x1,s.y1))
+                    if (!clip || (px.first >= 12 && px.first < 100 && px.second >= 8 && px.second < 100)) {
+                        expected[px.second*128+px.first] = 0x07e0;
+                        ++drawn;
+                    }
+            }
+            assert(f.append(batch,0x200affe4) == A::ok && f.commands.duration() == batch.size()+1+drawn);
+            f.finish();
+            for (unsigned i = 0; i < 128*128; ++i)
+                if (f.read(lineSurface+i*2) != expected[i]) {
+                    std::fprintf(stderr,"line clip %d direct %d at %u,%u: %04x, not %04x\n",clip,direct,i%128,i/128,
+                                 f.read(lineSurface+i*2),expected[i]);
+                    std::abort();
+                }
+        }
+    Imx1GraphicsCommands::directFills = true;
+    Fixture f; linePlanes(f);
+    auto refuse = [&](std::vector<uint32_t> words, const char* what, uint32_t value, uint32_t pc = 0x200affe4) {
+        auto batch = lineState(0xf800);
+        batch.insert(batch.end(),words.begin(),words.end());
+        assert(f.append(batch,pc) == A::sideEffect && refused(f,what,value));
+        assert(f.read(lineSurface+(10*128+10)*2) == lineBackground);
+    };
+    // A tie (4 across, 1 down: half way at the middle) is refused, so is a third point that isn't the end, a
+    // packet of another length, the packet from another producer and ROP 5a.
+    refuse({0xc0021500,point(10,10),point(14,11),point(14,11)},"line-tie",point(10,10));
+    refuse({0xc0021500,point(10,10),point(16,12),point(16,13)},"line-points",point(16,13));
+    refuse({0xc0031500,point(10,10),point(16,12),point(16,12),point(16,12)},"line-packet",0xc0031500);
+    refuse({0xc0021500,point(10,10),point(16,12),point(16,12)},"line-packet",0xc0021500,0x200b0200);
+    refuse({0x41b,0x54b4b4df,0x4b2,0x005a0a00,0xc0021500,point(10,10),point(13,10),point(13,10)},"line-rop",0x5a);
+    // Past the surface's pitch with the scissor off is refused as a fill is.
+    auto batch = lineState(0xf800); batch.insert(batch.end(),{0x41b,0x55e0b4d7,0xc0021500,point(120,10),point(130,10),point(130,10)});
+    assert(f.append(batch,0x200affe4) == A::sideEffect);
+    std::puts("PASS: line packets from 200affe4, any direction, scissored, ties and other forms refused");
+}
+// A plain copy past its surface's pitch with the scissor on draws what the scissor keeps, as the software
+// stretch's runs need on a small surface.
+void clippedPastPitch() {
+    for (bool direct : {true,false}) {
+        Imx1GraphicsCommands::directFills = direct;
+        Fixture f; planes(f);
+        auto p = packet(); p[21] = 0x00020001; p[22] = 0x000b0003; p[23] = 0x00030002;
+        assert(f.append(p,0x200b1790) == A::ok); f.finish();
+        for (unsigned i = 0; i < 13*8; ++i) {
+            uint32_t expected = 0xa55a;
+            if (i == 3*13+11) expected = 0;
+            if (i == 3*13+12) expected = 0xf800;
+            if (i == 4*13+11) expected = 0x5678;
+            if (i == 4*13+12) expected = 0xffff;
+            assert(f.read(destination+i*2) == expected);
+        }
+        // A scissor past the pitch still stops it.
+        change(p,0x470,0x00140014);
+        assert(f.append(p,0x200b1790) == A::sideEffect);
+    }
+    Imx1GraphicsCommands::directFills = true;
+    std::puts("PASS: plain copy past the pitch, trimmed by the scissor");
+}
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
+    stretchStaleGmc(); stretchRatios(); lines(); clippedPastPitch();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }

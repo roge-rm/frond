@@ -201,10 +201,18 @@ int main() {
         f.finish();
         for (unsigned i = 0; i < 18; ++i) assert(f.read(destination+((i/6)*20+i%6)*2) == expected(0x92cb,0x2d95,i%16));
         assert(f.read(destination+(3*20)*2) == 0x92cb && f.read(destination+(2*20+6)*2) == 0x92cb);
-        // An odd width stays refused.
-        Fixture g;
-        planes(g,6,3,20,24,0x92cb,0x2d95);
-        assert(g.append(packet(5,3)) != A::ok);
+    }
+    // Odd widths, GloopZ's 7x7 among them: the samples run on linearly across rows, (w * h + 7) / 8 words.
+    for (auto size : {std::pair<uint32_t,uint32_t>{7,7},{5,3},{1,9},{3,1}}) {
+        const uint32_t w = size.first, h = size.second;
+        Fixture f;
+        planes(f,w,h,20,24,0x92cb,0x2d95);
+        const auto p = packet(w,h);
+        assert((p[p.size()-1-(w*h+7)/8-2] >> 16) == (0xc000 | ((w*h+7)/8+1)) && f.append(p) == A::ok);
+        f.finish();
+        for (unsigned y = 0; y < h+2; ++y)
+            for (unsigned x = 0; x < 20; ++x)
+                assert(f.read(destination+(y*20+x)*2) == (x < w && y < h ? expected(0x92cb,0x2d95,(y*w+x)%16) : 0x92cb));
     }
     // Different row strides, nonzero destination origin, lower-edge clipping and spatial colour planes.
     {
