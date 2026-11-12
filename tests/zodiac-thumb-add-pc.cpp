@@ -161,8 +161,8 @@ void probeGuards() {
             assert(r.registers[source] == operand && r.registers[entry] == (pc | 1));
             for (unsigned n = 0; n < 15; ++n) if (n != source && n != entry) assert(!r.registers[n]);
         }
-        // Low/low is architecturally unpredictable. PC/PC remains an unqualified backend gap.
-        for (uint16_t instruction : {0x4400, 0x443f, 0x44ff, 0x45ff, 0x4780, 0x4781}) {
+        // Low/low runs as ADD Rd, Rm (lowRegisters in zodiac-thumb-probe). PC/PC remains an unqualified backend gap.
+        for (uint16_t instruction : {0x44ff, 0x45ff, 0x4780, 0x4781}) {
             std::vector<uint32_t> words;
             literal(words, 12, (base + 16) | 1); words.push_back(0xe12fff1c);
             words.push_back(0x60010000 | instruction);

@@ -281,10 +281,19 @@ void bxPc() {
            r.trace.instructionSize == 4 && r.trace.pc == base + unaligned.bytes.size() - 4 &&
            r.registers[2] == 9 && !(r.cpsr & ARM_SR_T));
 }
+// ADD, CMP and MOV with both H bits clear run on the low registers; CMP sets the flags, ADD and MOV keep them.
+void lowRegisters() {
+    Program p; p.enter();
+    for (uint16_t h : {0x2001, 0x2102, 0x4408, 0x4508, 0x4602, 0x4501, 0x460b, 0x4419, 0xde00}) p.half(h);
+    const auto r = compare(p);
+    assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.instruction == 0xde00);
+    assert(r.registers[0] == 3 && r.registers[1] == 4 && r.registers[2] == 3 && r.registers[3] == 2);
+    assert((r.cpsr & 0xf0000000) == 0x80000000 && (r.cpsr & ARM_SR_T));
+}
 void guards() {
     for (uint16_t h : {0x4780, 0x4781, 0x4701, 0xe800, 0xbe00, 0xdeab, 0xde00,
-                       0xb400, 0xbc00, 0xc000, 0xc001, 0xf800, 0x4340, 0xb200, 0x4400,
-                       0x44ff, 0x45ff}) {
+                       0xb400, 0xbc00, 0xc000, 0xc001, 0xf800, 0x4340, 0xb200, 0x44ff,
+                       0x45ff, 0x4587, 0x4578}) {
         Program p; p.enter(); p.half(h); p.half(0xde00);
         const auto r = compare(p);
         if (r.stop != Imx1ProbeStop::unsupportedInstruction || r.trace.instruction != h)
@@ -334,6 +343,6 @@ int main() {
     unsetenv("FROND_JIT");
     cpuSetJitSync(true);
     setenv("FROND_JIT_HOT", "1", 1);
-    fetchBoundaries(); blSteps(); mixedProgram(); capturedBlVeneer(); stackReturn(); loadBaseInList(); bxPc(); guards();
+    fetchBoundaries(); blSteps(); mixedProgram(); capturedBlVeneer(); stackReturn(); loadBaseInList(); bxPc(); lowRegisters(); guards();
     std::puts("PASS: Exact/Fast Thumb fetch boundaries, retained cache, BL halfword stepping, mixed ARM/Thumb execution and probe guards");
 }

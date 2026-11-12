@@ -1,0 +1,38 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index eb54c0a..5550547 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -4676,7 +4676,7 @@ static LeanClass cpuPrvLeanClassThumb(uint16_t i) {
+     if ((i & 0xfc00) == 0x4400) {
+         const unsigned op = (i >> 8) & 3, source = (i >> 3) & 15, dest = (i & 7) | ((i >> 4) & 8);
+         if (op == 3) return !(i & 0x87) ? LeanClass::thumbBx : LeanClass::exit;
+-        if (!(i & 0xc0) || (op == 1 && (source == 15 || dest == 15))) return LeanClass::exit;
++        if (op == 1 && (source == 15 || dest == 15)) return LeanClass::exit;
+         return op != 0 || dest != 15 || source != 15 ? LeanClass::plain : LeanClass::exit;
+     }
+     if ((i & 0xf800) == 0x4800 || (i & 0xf000) == 0x5000 || (i & 0xe000) == 0x6000 ||
+@@ -5545,6 +5545,8 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+         return !(cpu->earlyAudioHook &&
+                  (next == cpu->earlyAudioFrom[0] || next == cpu->earlyAudioFrom[1]));
+     }
++    // CMP with two low registers: dynarmic calls it unpredictable, so the interpreter runs it.
++    if ((h & 0xffc0) == 0x4500) return false;
+     if (const uint32_t t = table_thumb2arm[h]) return cpuPrvJitPlainArmMemo(t, true);
+     // Forms the interpreter runs as Thumb: LDR PC-relative, ADD Rd, PC/SP, and ADD, MOV,
+     // BX and BLX with high registers.
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index c20fa8b..1cfa812 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1195,7 +1195,10 @@ bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
+             const uint32_t target = r[source] + (source == 15 ? 4 : 0);
+             return !(i & 0x87) && ((target & 3) != 2 || source == 15);
+         }
+-        if (!(i & 0xc0) || (op == 1 && (source == 15 || dest == 15))) return false;
++        // ADD, CMP and MOV with both H bits clear run on two low registers, ADD and MOV without touching the
++        // flags (ASSUMPTION "ARM920T Thumb low ADD, CMP and MOV": ARMv4T calls them unpredictable; H1/H2 are taken
++        // as the registers' top bits, as ARMv6 later defines MOV and ADD. Tony Hawk 4 runs ADD r0,r1 at 3083cf96).
++        if (op == 1 && (source == 15 || dest == 15)) return false;
+         // ADD (4) preserves Thumb state and ignores target bit 0.
+         // Dynarmic rejects PC/PC; that alias remains unqualified here.
+         return op != 0 || dest != 15 || source != 15;

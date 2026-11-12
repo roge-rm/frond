@@ -1778,6 +1778,89 @@ void jitCacheOps() {
     assert(steps(fast) < steps(once) + 100);
 }
 
+enum class Alias { muls, veneer, thumbLow, thumbAdd };
+
+// MULS with Rd == Rm, a Thumb BX PC from a halfword address (an armlink veneer) and Thumb ADD, CMP and MOV with two
+// low registers (thumbAdd sets the flags with an ARM CMP instead), with Exact's results: on the lean path (same times
+// as Exact) or in Dynarmic blocks.
+void aliasOps(Alias kind, bool blocks) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    std::vector<uint32_t> words;
+    load(words, 0, 1); const bool low = kind == Alias::thumbLow || kind == Alias::thumbAdd;
+    load(words, 1, low ? 0x30000001 : 3); load(words, 2, 0);
+    load(words, 7, 200); load(words, 9, 0); load(words, 10, 0);
+    const size_t top = words.size();
+    if (kind == Alias::veneer) {
+        words.push_back(0xe28f2001);                      // top: add r2, pc, #1
+        words.push_back(0xe12fff12);                      // bx r2: Thumb from the next word
+        words.push_back(0x477846c0);                      // nop; bx pc from top+10, so ARM from top+12
+        words.push_back(0xe28aa001);                      // add r10, r10, #1
+    } else if (kind == Alias::thumbLow) {
+        words.push_back(0xe28f3001);                      // top: add r3, pc, #1
+        words.push_back(0xe12fff13);                      // bx r3: Thumb from the next word
+        words.push_back(0x4408450a);                      // cmp r2, r1; add r0, r1
+        words.push_back(0x46c04602);                      // mov r2, r0; nop
+        words.push_back(0x46c04778);                      // bx pc from top+16, so ARM from top+20
+        words.push_back(0x22899001);                      // addcs r9, r9, #1: the CMP's flags, kept by ADD and MOV
+        words.push_back(0x428aa001);                      // addmi r10, r10, #1
+    } else if (kind == Alias::thumbAdd) {
+        words.push_back(0xe1520001);                      // top: cmp r2, r1
+        words.push_back(0xe28f3001);                      // add r3, pc, #1
+        words.push_back(0xe12fff13);                      // bx r3: Thumb from the next word
+        words.push_back(0x46024408);                      // add r0, r1; mov r2, r0
+        words.push_back(0x46c04778);                      // bx pc from top+16, so ARM from top+20
+        words.push_back(0x22899001);                      // addcs r9, r9, #1: the CMP's flags, kept by ADD and MOV
+        words.push_back(0x428aa001);                      // addmi r10, r10, #1
+    } else {
+        words.push_back(0xe0100190);                      // top: muls r0, r0, r1
+        words.push_back(0xe0899000);                      // add r9, r9, r0
+    }
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
+    const unsigned perRound = kind == Alias::veneer ? 7 : kind == Alias::thumbLow ? 11 : kind == Alias::thumbAdd ? 10 : 4;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    std::string name = kind == Alias::veneer ? "thumb bx pc" : kind == Alias::thumbLow ? "thumb low add cmp mov" :
+                       kind == Alias::thumbAdd ? "thumb low add mov" : "muls rd rm";
+    name += blocks ? " blocks" : " lean";
+    std::printf("%s: lean %llu jit %llu\n", name.c_str(), (unsigned long long)fast.lean, (unsigned long long)fast.jit);
+    print(name.c_str(), exact);
+    const auto& e = exact.run.result;
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0);
+    if (kind == Alias::veneer) {
+        assert(e.registers[10] == 200 && !(e.cpsr & 0x20));
+    } else if (low) {
+        uint32_t r0 = 1, r2 = 0, carries = 0, negatives = 0;
+        const uint32_t r1 = 0x30000001;
+        for (unsigned i = 0; i < 200; ++i) {
+            carries += r2 >= r1;
+            negatives += (r2 - r1) >> 31;
+            r0 += r1;
+            r2 = r0;
+        }
+        assert(carries > 0 && carries < 200 && negatives > 0 && negatives < 200);
+        assert(e.registers[0] == r0 && e.registers[2] == r2 && e.registers[9] == carries &&
+               e.registers[10] == negatives && !(e.cpsr & 0x20));
+    } else {
+        uint32_t product = 1, sum = 0;
+        for (unsigned i = 0; i < 200; ++i) sum += product *= 3;
+        assert(e.registers[0] == product && e.registers[9] == sum);
+    }
+    assert(exact.lean == 0 && exact.jit == 0);
+    if (blocks) {
+        // Most of the 200 rounds run in generated code. A Thumb CMP with two low registers goes to the
+        // interpreter (Dynarmic calls it unpredictable), and the lean path runs on from there.
+        assert(kind == Alias::thumbLow ? fast.jit >= 160 * 5 : fast.jit >= 160 * perRound);
+        sameResult(exact, fast);
+    } else {
+        // Nearly all of them lean.
+        assert(fast.jit == 0 && fast.lean >= 200 * perRound - 20);
+        same(exact, fast);
+    }
+}
+
 void jitLong() {
     imx1SetFastBlocksDefault(true);
     cpuSetJitSync(true);
@@ -1799,44 +1882,9 @@ void jitLong() {
     jitSwi();
     jitCacheOps();
     jitLineInvalidate();
+    for (auto kind : {Alias::muls, Alias::veneer, Alias::thumbLow, Alias::thumbAdd}) aliasOps(kind, true);
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
-}
-
-// MULS with Rd == Rm and a Thumb BX PC from a halfword address (an armlink veneer) run on the lean path, with
-// Exact's results.
-void aliasOps(bool veneer) {
-    GraphicsGuest g;
-    g.setup(); g.display(); g.clocks();
-    std::vector<uint32_t> words;
-    load(words, 0, 1); load(words, 1, 3); load(words, 7, 200); load(words, 9, 0); load(words, 10, 0);
-    const size_t top = words.size();
-    if (veneer) {
-        words.push_back(0xe28f2001);                      // top: add r2, pc, #1
-        words.push_back(0xe12fff12);                      // bx r2: Thumb from the next word
-        words.push_back(0x477846c0);                      // nop; bx pc from top+10, so ARM from top+12
-        words.push_back(0xe28aa001);                      // add r10, r10, #1
-    } else {
-        words.push_back(0xe0100190);                      // top: muls r0, r0, r1
-        words.push_back(0xe0899000);                      // add r9, r9, r0
-    }
-    words.push_back(0xe2577001);                          // subs r7, r7, #1
-    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne top
-    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
-    g.end();
-    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
-    const char* name = veneer ? "thumb bx pc" : "muls rd rm";
-    std::printf("%s: lean %llu\n", name, (unsigned long long)fast.lean);
-    print(name, exact);
-    const auto& e = exact.run.result;
-    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0);
-    uint32_t product = 1, sum = 0;
-    for (unsigned i = 0; i < 200; ++i) sum += product *= 3;
-    if (veneer) assert(e.registers[10] == 200 && !(e.cpsr & 0x20));
-    else assert(e.registers[0] == product && e.registers[9] == sum);
-    // 200 rounds of 7 (veneer) or 4 instructions, nearly all of them lean.
-    assert(exact.lean == 0 && fast.lean >= (veneer ? 1380u : 780u));
-    same(exact, fast);
 }
 
 int main() {
@@ -1844,8 +1892,7 @@ int main() {
     // Lean-only Fast first, which gives Exact's times as well.
     imx1SetFastBlocksDefault(false);
     forcedIrq();
-    aliasOps(false);
-    aliasOps(true);
+    for (auto kind : {Alias::muls, Alias::veneer, Alias::thumbLow, Alias::thumbAdd}) aliasOps(kind, false);
     leanDraw(Trigger::eim, "draw after eim");
     leanDraw(Trigger::transaction, "draw after transaction");
     storeThenTimer();
