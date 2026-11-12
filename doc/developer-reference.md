@@ -874,9 +874,7 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `ARM64_JOBS` | Jobs for the arm64 Docker build. |
 | `APPIMAGE_JOBS` | Jobs for the AppImage Docker builds. |
 | `FROND_DYNARMIC_SRC`, `FROND_DYNARMIC_LIBS` | Where the core's makefile finds the Dynarmic source and libraries. `make` sets them from `DYNARMIC_SRC`. |
-| `DYNARMIC_SRC` | Where the patched Dynarmic source goes. Default `build/dynarmic-trial/src`. |
-| `DYNARMIC_DONOR` | A Dynarmic clone to export the pinned source from. Default `build/dynarmic-donor`, fetched on first use. |
-| `DYNARMIC_MIRROR` | Where `tools/dynarmic-source.py` fetches Dynarmic from. |
+| `DYNARMIC_SRC` | The Dynarmic source. Default `vendor/dynarmic`. |
 | `JIT_DIFF_ARGS` | Arguments for `make test-jit-differential`, such as `--seeds 1: --duration 3600` or `--seed N`. Replaces the default runs. |
 | `PALM_SDK` | Palm OS SDK for `make frondbench` and the Palm probes. |
 | `SLIRP_RESOLV_CONF` | `resolv.conf` the Android build gives libslirp. |
@@ -889,8 +887,7 @@ All in `tools/`. Most take `--help`.
 | --- | --- |
 | `frond-run.py` | Developer runner, see above. |
 | `pace-report.py` | PACE report with program identity and symbols. |
-| `prepare.py` | Rebuilds `build/source` from the upstream tree and `patches/` (`make prepare`). |
-| `check-reconstruction.py` | Rebuilds the core twice independently and compares them. |
+| `copy-core.py DEST` | Copies `core/` (without build output) to another folder for builds that need their own objects. Running it again only updates what changed. |
 | `check-docs.py` | Checks this file against the sources (`make check-docs`). |
 | `check-usb-printer-capture.py` | Compares a private USB packet trace with one finished raw print job (`doc/usb-printer-runtime.md`). |
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
@@ -898,7 +895,6 @@ All in `tools/`. Most take `--help`.
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form; see [MMU](zodiac2-mmu.md). Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap; see [RTC](zodiac2-rtc.md). Optional `--cs4-port0-input=BYTE` enables the private [CS4 diagnostic recorder](zodiac2-cs4.md), requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private [W4200 reset echo](zodiac2-cs5.md) with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See [Zodiac bring-up](zodiac2-bringup.md) and [input scenarios](zodiac2-inputs.md). |
-| `dynarmic-source.py` | Exports the pinned Dynarmic source and applies its patches. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
@@ -931,7 +927,7 @@ All in `tools/`. Most take `--help`.
 | Target | What it does |
 | --- | --- |
 | `all` | Core and desktop app. |
-| `prepare` | Rebuild `build/source` from upstream and the patches. |
+| `prepare` | Does nothing, kept so older command lines work. |
 | `out/frond` | The core only. |
 | `out/frond-68k` | The Palm IIIx runner. |
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
@@ -939,10 +935,8 @@ All in `tools/`. Most take `--help`.
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |
 | `appimage`, `appimage-arm64` | AppImages for x86-64 and arm64, built in Docker on Debian 12. They carry mtools in `usr/lib/frond` for SD file exchange. |
 | `clean` | Remove build output. |
-| `dynarmic-source` | Export the pinned Dynarmic source again. |
 | `device-profiles` | Build the device profile dump. |
 | `generate-device-data`, `check-device-data` | Write, or check, the generated profile data. |
-| `check-reconstruction` | The patches rebuild to the same source twice. |
 | `check-docs` | This reference matches the sources. |
 | `test` | Everything in the groups below marked "in `make test`". |
 | `test-desktop` | The Qt tests. Needs `mtools`. |
@@ -954,6 +948,10 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. See [JIT boundary](zodiac2-jit.md). |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
 | `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. See [MMU and cache](zodiac2-mmu.md). Outside `make test`. |
+| `test-zodiac` | All the Zodiac tests below that are in `make test`. |
+| `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. See [CS4](zodiac2-cs4.md). |
+| `test-zodiac-ymf768` | YMF768 register answers, FIFO and interrupt line, A4 pitch and mixing. See [CS4](zodiac2-cs4.md). |
+| `test-tg50-voicerec` | The TG50 Voice Recorder opens on the ROM PACE. Skips without the TG50 session. |
 | `test-zodiac-dcache` | ARM920 data cache, writeback, aliases, maintenance and instruction/JIT coherence in Exact and Fast. See [data cache](zodiac2-dcache.md). Outside `make test`. |
 | `test-imx1-aitc` | i.MX1 AITC reset, enable/type/force, priority/mask/vector, masked GPIO A/B/C/D requests and transactional bootstrap rejection checks. Outside `make test`. |
 | `test-imx1-clocks-gpio` | Static i.MX1 clock/GPIO reset and configuration, access rejection and explicit clock/pin limits. Outside `make test`. |

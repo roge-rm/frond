@@ -1,10 +1,10 @@
 # Adding a device
 
-How a device is described to Frond and what to build to make a new one run. The table of devices is `deviceProfiles5` in `src/common/device_profile5.h` of the patched core (`build/source` after `make prepare`). Everything else reads from it: the core, the desktop app, the Android app and the Python tools. See [developer-reference.md](developer-reference.md) for the command line and socket, [testing.md](testing.md) for the test targets and [performance.md](performance.md) for the engines.
+How a device is described to Frond and what to build to make a new one run. The table of devices is `deviceProfiles5` in `src/common/device_profile5.h` of the core (`core/`). Everything else reads from it: the core, the desktop app, the Android app and the Python tools. See [developer-reference.md](developer-reference.md) for the command line and socket, [testing.md](testing.md) for the test targets and [performance.md](performance.md) for the engines.
 
 A 68k device (the Palm IIIx is the example) runs on a different runner, `frond-68k`, so some steps below differ. See [68k devices](#68k-devices).
 
-Core changes go in a new patch after the last one in `patches/`, or in an unpushed patch regenerated in place. Check them with `make check-reconstruction`. Keep the upstream licence headers and credit.
+Core changes are ordinary edits to `core/`. Keep the upstream licence headers and credit.
 
 ## Reuse what's there
 
@@ -269,11 +269,10 @@ The bar should be a recognisable approximation of the real one, not a close copy
 Desktop menus, firmware detection and the core read the profile table directly. Android and the Python tools read exports of the same table. JSON includes every profile; the generated Android inventory only includes profiles with `frontend.available` set. After changing a profile:
 
 ```
-make prepare
 make generate-device-data
 ```
 
-This compiles `tools/device-profiles.cpp` into `build/device-data/export` and rewrites `tools/device-profiles.json` and `android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt`. The exporter never opens firmware. Commit both generated files with the profile patch. `make check-device-data` and the Android `preBuild` task fail if they're stale. The JSON also carries `runner_eligible` for ARM boards and `runs_68k` for the separate 68k runner. Python runners use these fields, so inventory-only and art-only profiles stay out of them.
+This compiles `tools/device-profiles.cpp` into `build/device-data/export` and rewrites `tools/device-profiles.json` and `android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt`. The exporter never opens firmware. Commit both generated files with the profile change. `make check-device-data` and the Android `preBuild` task fail if they're stale. The JSON also carries `runner_eligible` for ARM boards and `runs_68k` for the separate 68k runner. Python runners use these fields, so inventory-only and art-only profiles stay out of them.
 
 Android's `Device.kt` has the fields in Kotlin. The `TX`, `E2` and `ZIRE72` names there and the desktop `Device` enum names are compatibility aliases. HotSync button presence comes from `deviceProfileHasHotSyncButton5`, exported as `hot_sync_button` and generated as Android's `hotSyncButton`. Check remaining device-specific actions in both frontends. Enable `available` once the board has passed the generic firmware run and the desktop and Android import, launch, controls, settings and session workflows work. A core screenshot alone doesn't show the frontend works.
 

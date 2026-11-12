@@ -95,7 +95,7 @@ Native audio backpressure pauses the whole guest (timers, DMA and codec) until S
 
 ## Against CloudpilotEmu
 
-Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5, the pin in `vendor/cloudpilot`). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo.
+Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo.
 
 Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
 
@@ -127,12 +127,12 @@ Palm IIIx, FrondBench on the OS 3.5 EZ ROM, from the Run tap until the results a
 
 ## Debug patches
 
-`tools/debug/` keeps two optional tracing patches, never applied by the build. Apply one to the prepared source, rebuild, and reverse it before timing or packaging:
+`tools/debug/` keeps two optional tracing patches, never applied by the build. Apply one to `core/`, rebuild, and reverse it before timing or packaging:
 
 ```sh
-git apply --directory=build/source tools/debug/NAME.patch
+git apply --directory=core tools/debug/NAME.patch
 make -j4 out/frond
-git apply -R --directory=build/source tools/debug/NAME.patch
+git apply -R --directory=core tools/debug/NAME.patch
 ```
 
 | Patch | Variables |
@@ -140,4 +140,4 @@ git apply -R --directory=build/source tools/debug/NAME.patch
 | `guest-audio-stages` | `FROND_GUEST_TRACE` |
 | `guest-pcm-trace` | `FROND_PCM_TRACE` |
 
-Older tracing patches (input-latency, menu-response, audio-timing, audio-buffer, performance-audio, frontend-stall, gameplay-timing, guest-execution-profile, tx-power, tx-serial, sunvox-abort) are in git history. To use one, take it from there (`git log --diff-filter=D --name-only -- tools/debug`, then `git show COMMIT^:tools/debug/NAME.patch`), refresh it against the current source and use it the same way. Check a patch with `git apply --check --directory=build/source`. Patches with overlapping hooks are not meant to be combined. Logs and captures stay out of Git.
+Older tracing patches (input-latency, menu-response, audio-timing, audio-buffer, performance-audio, frontend-stall, gameplay-timing, guest-execution-profile, tx-power, tx-serial, sunvox-abort) are in git history. To use one, take it from there (`git log --diff-filter=D --name-only -- tools/debug`, then `git show COMMIT^:tools/debug/NAME.patch`), refresh it against the current source and use it the same way. Check a patch with `git apply --check --directory=core`. Patches with overlapping hooks are not meant to be combined. Logs and captures stay out of Git.

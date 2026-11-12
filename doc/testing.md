@@ -6,15 +6,15 @@ Command details (options, console and socket commands, the runner) are in [devel
 
 | Level | Command | Needs |
 | --- | --- | --- |
-| Reconstruction | `make test-build-tools check-reconstruction` | nothing |
+| Build tools | `make test-build-tools` | nothing |
 | Core | `make -j4 test` | nothing |
 | Desktop | `make test-desktop` | nothing (set `QT_QPA_PLATFORM=offscreen` without a display) |
 | Smoke | `make smoke` | firmware, ready sessions |
 | Release only | the real-firmware and real-app checks below | firmware, SDK, apps |
 
-Quick checks after a change: the focused `make test-NAME` target for what you touched, `make check-reconstruction` if you changed `patches/`, and the build or compile. Put wider checks, smoke and device checks on the project's before-release list and run that list once before release.
+Quick checks after a change: the focused `make test-NAME` target for what you touched, and the build or compile. Put wider checks, smoke and device checks on the project's before-release list and run that list once before release.
 
-The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=0` skips it, and the Fast engine tests with it.
+The Fast engine builds Dynarmic from `vendor/dynarmic` (needs Ninja and Boost). `FROND_FAST=0` skips it, and the Fast engine tests with it.
 
 ## Firmware-free tests
 
@@ -22,7 +22,6 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 
 - `make test-desktop` builds the Qt desktop with tests and runs ctest: the control-socket client and the save, export and settings workflows.
 - `make test-build-tools` tests staging safety and package policy with synthetic data. It does not package Frond.
-- `make check-reconstruction` prepares the core twice in separate temporary directories from the pinned upstream and `patches/`, compares file hashes and modes, and checks them against `build/source`. A matching prepare stamp alone doesn't show that `build/source` is unmodified, so run it before judging a build. Core changes go in a new patch after the last one, then run this.
 - `make test-jit-overshoot` and `make test-jit-differential` run with `make test` when the Fast engine is built. The differential test runs random ARM and Thumb blocks on both engines and compares them, plus directed cases: seeds 1 to 30000, then two further ranges of 10000. For a long run use `make test-jit-differential JIT_DIFF_ARGS="--seeds 1: --duration 3600"`, or `--seed N` for one case.
 - `make test-zodiac-lcdc-contrast` checks the explicit contrast-only LCDC policy, native MMIO sequence, PERCLK2 counter and guarded panel/DMA in Exact and Fast.
 - `make test-zodiac-ssi-startup` checks SSI1 pin mux and idle configuration, empty-state readback, guarded transfers and Exact/Fast startup.
@@ -80,7 +79,7 @@ For a heavier workload than the probes, install the app with `install FILE` and 
 
 - `make deb` builds the amd64 package, `make deb-arm64` the arm64 one (Docker only, built from a fresh core). `python3 tools/check-package.py [--architecture arm64] FILE.deb` checks version, architecture, dependencies, ownership, modes and the full file list without installing it.
 - `make appimage` and `make appimage-arm64` build `out/Frond-VERSION-x86_64.AppImage` and `-aarch64.AppImage` in Docker on Debian 12, so they run on glibc 2.36 and newer. The arm64 one is cross built and can only be tried on arm64 hardware.
-- `.github/workflows/validate.yml` runs by hand (`workflow_dispatch`) on Debian trixie: `make test-build-tools check-reconstruction check-docs`, then `make -j2 test test-desktop`, then `check-reconstruction` again. It uploads nothing and uses no firmware.
+- `.github/workflows/validate.yml` runs by hand (`workflow_dispatch`) on Debian trixie: `make test-build-tools check-docs`, then `make -j2 test test-desktop`. It uploads nothing and uses no firmware.
 - The Qt tests run offscreen. They don't replace trying the desktop on a real display, installing a package on a clean system, or the firmware and audio checks above.
 
 ## Per-device tests

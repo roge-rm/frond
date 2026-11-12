@@ -250,7 +250,7 @@ On Debian 13 (Trixie):
 ```sh
 sudo apt install git build-essential python3 cmake ninja-build libboost-dev qt6-base-dev qt6-wayland \
   libsdl2-dev libsdl2-image-dev libreadline-dev libcurl4-openssl-dev libslirp-dev pkg-config mtools
-git clone --recurse-submodules https://github.com/roge-rm/frond.git
+git clone https://github.com/roge-rm/frond.git
 cd frond
 make -j4
 ./out/frond-desktop
@@ -260,7 +260,7 @@ make -j4
 
 The Android app is in `android/` and builds with Gradle (`./gradlew assembleDebug`).
 
-The upstream core is pinned in `vendor/cloudpilot`, and the patches in `patches/` are applied to it in order in `build/source`. See [Testing](doc/testing.md).
+The core is in `core/` (based on CloudpilotEmu) and Dynarmic is in `vendor/dynarmic`. See [Testing](doc/testing.md).
 
 ## Testing
 
@@ -269,7 +269,7 @@ These need no firmware:
 ```sh
 make test
 QT_QPA_PLATFORM=offscreen make test-desktop
-make test-build-tools check-reconstruction
+make test-build-tools
 ```
 
 ---
