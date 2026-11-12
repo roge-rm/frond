@@ -160,6 +160,14 @@ void guards() {
                r.cpsr == 0x400000f3 && !r.busAccesses && r.registers[15] == romBase + 42);
     }
 }
+// Ordinary Fast blocks link across cache lines, so the block ending at code + 32 also runs the
+// closing B . there, past the budget by no more than the JIT's overshoot bound. Exact then steps
+// as many instructions as Fast ran.
+uint32_t fastRun(Machine& fast, uint32_t count) {
+    const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, count);
+    assert(ran >= count && ran - count <= cpuMaxOvershootCycles(fast.cpu));
+    return ran;
+}
 void normalBlocks() {
     Machine exact(false), fast(true, false);
     for (bool thumb : {false, true}) for (bool accumulate : {false, true}) {
@@ -180,16 +188,16 @@ void normalBlocks() {
         assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));
         const auto before = instructions, beforeBlocks = blocks;
         const unsigned count = thumb ? 16 : 8;
-        for (unsigned i = 0; i < count; ++i) exact.step();
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, count) == count));
+        const uint32_t ran = fastRun(fast, count);
+        for (unsigned i = 0; i < ran; ++i) exact.step();
         same(exact, fast);
         assert(cpuGetRegisters(fast.cpu)[15] == code + 32);
         assert(cpuGetRegisters(fast.cpu)[thumb ? 0 : 2] == (accumulate ? 1u : 0xfffffffau));
         assert(cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) ==
                (0x30000000 | (accumulate ? 0 : 0x80000000) | (thumb ? 0xf3 : 0xd3)));
         assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));
-        assert(blocks > beforeBlocks && instructions - before == count);
-        std::printf("PASS: generated %s multiply block, instructions=%u\n", thumb ? "Thumb" : accumulate ? "ARM MLAS" : "ARM MULS", count);
+        assert(blocks > beforeBlocks && instructions - before == ran);
+        std::printf("PASS: generated %s multiply block, instructions=%u\n", thumb ? "Thumb" : accumulate ? "ARM MLAS" : "ARM MULS", ran);
     }
 }
 
@@ -305,8 +313,8 @@ void longNormalBlocks() {
             uint64_t blocks = 0, instructions = 0;
             assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));
             const auto before = instructions, beforeBlocks = blocks;
-            for (unsigned i = 0; i < 8; ++i) exact.step();
-            assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, 8) == 8));
+            const uint32_t ran = fastRun(fast, 8);
+            for (unsigned i = 0; i < ran; ++i) exact.step();
             same(exact, fast);
             const uint64_t result = (signedProduct ? 0xfffffffffffffffauLL : 0x2fffffffauLL) +
                                     (accumulate ? 7 : 0);
@@ -316,7 +324,7 @@ void longNormalBlocks() {
             assert(cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) ==
                    (0x300000d3 | (flags ? longNz(result) : 0x40000000)));
             assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));
-            assert(blocks > beforeBlocks && instructions - before == 8);
+            assert(blocks > beforeBlocks && instructions - before == ran);
         }
     std::puts("PASS: all eight long multiply forms execute in generated ARM blocks");
 }
@@ -325,6 +333,8 @@ int main() {
     unsetenv("FROND_JIT");
     cpuSetJitSync(true);
     setenv("FROND_JIT_HOT", "1", 1);
+    // Compile on this thread, so the block counts include the generated multiply blocks.
+    setenv("FROND_JIT_THREAD", "0", 1);
     directed(); guards(); normalBlocks();
     longDirected(); longGuards(); longNormalBlocks();
     std::puts("PASS: ARMv4T scalar and long multiply, C/V preservation policy, operands and Exact/Fast parity");

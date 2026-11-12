@@ -110,20 +110,17 @@ void same(Machine& a, Machine& b) {
     assert(cpuGetRegExternal(a.cpu, ARM_REG_NUM_SPSR) == cpuGetRegExternal(b.cpu, ARM_REG_NUM_SPSR));
     assert(a.ram == b.ram);
     assert(a.failedWalkRetry == b.failedWalkRetry);
-    const auto compared = [](Machine& m, unsigned failedReads) {
-        std::vector<Access> result;
-        unsigned omitted = 0;
-        for (auto access : m.accesses) {
-            if (m.failedWalkRetry && access.pa == table + 4 && access.size == 4 &&
-                !access.write && !access.value) ++omitted;
-            else result.push_back(access);
-        }
-        assert(omitted == failedReads);
-        return result;
-    };
-    // Only this directed fault case permits Fast's extra failed-descriptor read.
-    const auto ax = compared(a, a.failedWalkRetry ? 1 : 0);
-    const auto bx = compared(b, b.failedWalkRetry ? 2 : 0);
+    // The directed fault case reads the invalid descriptor once in both engines: Fast takes the
+    // JIT's data abort without walking the table again.
+    for (auto* m : {&a, &b}) {
+        unsigned failedReads = 0;
+        for (auto access : m->accesses)
+            if (m->failedWalkRetry && access.pa == table + 4 && access.size == 4 &&
+                !access.write && !access.value) ++failedReads;
+        assert(failedReads == (m->failedWalkRetry ? 1u : 0u));
+    }
+    const auto& ax = a.accesses;
+    const auto& bx = b.accesses;
     assert(ax.size() == bx.size());
     for (unsigned i = 0; i < ax.size(); ++i) {
         const auto x = ax[i], y = bx[i];
