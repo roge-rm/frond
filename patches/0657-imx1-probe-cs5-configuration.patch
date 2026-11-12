@@ -1,0 +1,123 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -5,6 +5,7 @@
+ #include "imx1_bootstrap.h"
+ #include "imx1_cs4_capture.h"
+ #include "imx1_cs5_reset.h"
++#include "imx1_cs5_configuration.h"
+ 
+ // The physical flash mapping is observed in the updater. Aliases are explicit experiments.
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+@@ -22,6 +23,7 @@
+     Imx1BootstrapAccess status;
+     bool diagnosticCs4 = false;
+     bool diagnosticCs5Reset = false;
++    bool diagnosticCs5Configuration = false;
+ };
+ using Imx1ProbeBusObserver = void (*)(void*, const Imx1ProbeAccess&);
+ struct Imx1ProbeI2cEvent {
+@@ -44,6 +46,8 @@
+     uint8_t cs5ResetStatusInput = 0;
+     Imx1ProbeCs5ResetObserver cs5ResetObserver = nullptr;
+     void* cs5ResetContext = nullptr;
++    Imx1ProbeCs5ConfigurationObserver cs5ConfigurationObserver = nullptr;
++    void* cs5ConfigurationContext = nullptr;
+     bool rtcInitialTimeKnown = false;
+     Imx1RtcTime rtcInitialTime{};
+     bool cs4Port0InputKnown = false;
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -23,6 +23,7 @@
+     Imx1Bootstrap peripherals;
+     Imx1Cs4Capture cs4Capture;
+     Imx1Cs5Reset cs5Reset;
++    Imx1Cs5Configuration cs5Configuration;
+     uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
+     bool irqRaised = false, fiqRaised = false;
+     void updateInterrupts() {
+@@ -102,15 +103,21 @@
+         }
+         const bool diagnosticCs4 = p.options.bootstrapPeripherals && p.options.cs4Port0InputKnown &&
+                                    address >= 0x15000000 && address < 0x16000000;
+-        const bool diagnosticCs5Reset = p.options.bootstrapPeripherals && p.options.cs5ResetStatusInputKnown &&
++        const bool diagnosticCs5 = p.options.bootstrapPeripherals && p.options.cs5ResetStatusInputKnown &&
+                                         address >= 0x16000000 && address < 0x17000000;
+-        const auto status = diagnosticCs5Reset ? p.cs5Reset.access(p.peripherals.eimState(),
++        const bool diagnosticCs5Reset = diagnosticCs5 && address == 0x16000018;
++        const bool diagnosticCs5Configuration = diagnosticCs5 && !diagnosticCs5Reset;
++        const auto status = diagnosticCs5Configuration ? p.cs5Configuration.access(p.peripherals.eimState(),
++            p.result.trace.pc, address, size, write, value) : diagnosticCs5Reset ? p.cs5Reset.access(p.peripherals.eimState(),
+             p.result.trace.pc, address, size, write, value) : diagnosticCs4 ? p.cs4Capture.access(p.peripherals.eimState(), address, size, write, value) :
+             p.options.bootstrapPeripherals ?
+             p.peripherals.access(address, size, write, value, cpuArm920ClockMode(p.cpu)) : Imx1BootstrapAccess::unmapped;
+         if (diagnosticCs5Reset && p.options.cs5ResetObserver)
+             p.options.cs5ResetObserver(p.options.cs5ResetContext, {p.result.trace.step, p.result.trace.pc,
+                 address, uint32_t(size), value, write, p.cs5Reset.phaseValue(), status});
++        if (diagnosticCs5Configuration && p.options.cs5ConfigurationObserver)
++            p.options.cs5ConfigurationObserver(p.options.cs5ConfigurationContext, {p.result.trace.step, p.result.trace.pc,
++                address, uint32_t(size), value, write, p.cs5Configuration.defaultsKnown(), status});
+         if (diagnosticCs4 && p.options.cs4Observer)
+             p.options.cs4Observer(p.options.cs4Context, {p.result.trace.step, p.result.trace.pc,
+                 address, uint32_t(size), value, write, p.cs4Capture.selectedIndex(), p.cs4Capture.observedBank(), status});
+@@ -121,7 +128,7 @@
+         ++p.result.busAccesses;
+         if (p.options.busObserver)
+             p.options.busObserver(p.options.busContext, {p.result.trace.step, p.result.trace.pc,
+-                                   address, uint32_t(size), value, write, status, diagnosticCs4, diagnosticCs5Reset});
++                                   address, uint32_t(size), value, write, status, diagnosticCs4, diagnosticCs5Reset, diagnosticCs5Configuration});
+         if (status == Imx1BootstrapAccess::ok || status == Imx1BootstrapAccess::command) {
+             // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
+             if (write && status == Imx1BootstrapAccess::ok &&
+--- /dev/null
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -0,0 +1,50 @@
++#ifndef FROND_IMX1_CS5_CONFIGURATION_H
++#define FROND_IMX1_CS5_CONFIGURATION_H
++
++#include "imx1_bootstrap.h"
++
++// Configured virtual aperture for the native W4200 configuration helper.
++class Imx1Cs5Configuration {
++   public:
++    bool defaultsKnown() const { return programmed; }
++    uint8_t defaultsValue() const { return defaults; }
++    bool apertureSelected() const { return selected; }
++    Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
++                              uint32_t size, bool write, uint32_t& value) {
++        if (address != 0x16000010 && address != 0x1600001c &&
++            address != 0x16010000 && address != 0x16010004)
++            return Imx1BootstrapAccess::unmapped;
++        if (size != (address >= 0x16010000 ? 4u : 1u)) return Imx1BootstrapAccess::width;
++        if (!eim.configurationMatches(5, 0x3e00, 0x11111e01)) return Imx1BootstrapAccess::sequence;
++        if (address == 0x16000010) {
++            if (write || (pc != 0x200bab4c && pc != 0x200bab80))
++                return Imx1BootstrapAccess::externalInput;
++            value = 1;
++            selected = true;
++            return Imx1BootstrapAccess::ok;
++        }
++        if (address == 0x1600001c) {
++            if (!write || pc != 0x200babf8) return Imx1BootstrapAccess::externalInput;
++            if (!selected) return Imx1BootstrapAccess::sequence;
++            if (value != 0x0e) return Imx1BootstrapAccess::sideEffect;
++            defaults = value;
++            programmed = true;
++            return Imx1BootstrapAccess::ok;
++        }
++        // Full identity and revision words have no established W4200 values.
++        return Imx1BootstrapAccess::externalInput;
++    }
++
++   private:
++    bool selected = false, programmed = false;
++    uint8_t defaults = 0;
++};
++
++struct Imx1ProbeCs5ConfigurationEvent {
++    uint32_t step, pc, address, size, value;
++    bool write, defaultsKnown;
++    Imx1BootstrapAccess status;
++};
++using Imx1ProbeCs5ConfigurationObserver = void (*)(void*, const Imx1ProbeCs5ConfigurationEvent&);
++
++#endif

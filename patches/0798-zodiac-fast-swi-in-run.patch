@@ -1,0 +1,45 @@
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -803,13 +803,22 @@
+     }
+     // SWI (not the semihosting ones, cpuJitPlain): PC is past it. The run ends at the
+     // vector, so the next one starts there in the right privilege level's JIT with the
+-    // budget and slow path checked, as after an interpreted SWI.
++    // budget and slow path checked, as after an interpreted SWI. An ARM920T SWI from a
++    // privileged mode with budget left goes on at the vector in this run: the block returns
++    // to the dispatcher, which takes the new PC and ARM state, with what is left of the
++    // budget (AddTicks has the cycles so far, GetTicksRemaining gives the rest).
+     void CallSVC(std::uint32_t) override {
+         stats.swi++;
+         jit->SetCpsr(cpuJitSwi(cpu, jit->Regs().data(), jit->Cpsr()));
+         if (cpuJitPrivileged(cpu) != privileged) stats.privSwitches++;
++        else if (arm920 && ran < budget && (ClearSetChange(), !cpuJitSlowPath(cpu))) return;
+         jit->HaltExecution(kSwi);
+     }
++    // The interpreter's ARM/Thumb switch flag: generated code follows the Thumb bit by
++    // itself, so on the ARM920T a switch alone doesn't end the run.
++    void ClearSetChange() {
++        if (arm920) cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
++    }
+ 
+     // Undefined, unpredictable and no-execute: PC is past the instruction and its tick
+     // is counted, so step back and let the interpreter run it.
+@@ -839,6 +848,7 @@
+         } else {
+             CheckGen();
+         }
++        ClearSetChange();
+         AfterIo();
+     }
+ 
+@@ -1011,7 +1021,9 @@
+     }
+ 
+     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+-    std::uint64_t GetTicksRemaining() override { return budget; }
++    // Called at the start of a run and again after a CallSVC that doesn't halt, once AddTicks has taken the cycles so
++    // far: the rest of the run's budget, so a run that goes on past a SWI still ends on time.
++    std::uint64_t GetTicksRemaining() override { return budget > ran ? budget - ran : 0; }
+ 
+     bool undoTick = false;
+ };

@@ -1,0 +1,289 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -965,8 +965,8 @@
+ }
+ 
+ bool cpuFetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t* fsr) {
+-    if (cpu->model != ArmCpuModel::arm920t || (va & 3)) return false;
+-    return icacheArm920Word(cpu->ic, va, cpu->privileged, fsr, word);
++    if (cpu->model != ArmCpuModel::arm920t) return false;
++    return icacheArm920Fetch(cpu->ic, va, cpu->T ? 2 : 4, cpu->privileged, fsr, word);
+ }
+ 
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -119,8 +119,9 @@
+ 
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc);
+ 
++// Peeks the current ARM/Thumb instruction view without consuming a retained prefetch.
++bool cpuFetchInstruction(ArmCpu*, uint32_t va, uint32_t* word, uint_fast8_t* fsr);
+ // Host code patches must discard decoded instructions as well as guest cache lines.
+-bool cpuFetchInstruction(ArmCpu*, uint32_t va, uint32_t* word, uint_fast8_t* fsr);
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
+ // Drops the JIT's translated code only, when something it was translated with changes.
+ void cpuDropTranslatedCode(struct ArmCpu *cpu);
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -29,14 +29,21 @@
+     ic->arm920RoundRobin = roundRobin;
+ }
+ 
+-bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
+-                      uint_fast8_t* fsr, uint32_t* word) {
+-    if (ic->arm920ContinuationCount && va == ic->arm920ContinuationPc) {
++bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privileged,
++                       uint_fast8_t* fsr, uint32_t* word) {
++    if ((size != 2 && size != 4) || (va & (size - 1))) {
++        *fsr = 3;
++        return false;
++    }
++    const auto extract = [=](uint32_t value) {
++        return size == 2 ? (value >> ((va & 2) * 8)) & 0xffff : value;
++    };
++    if (ic->arm920ContinuationCount && (va & ~3u) == ic->arm920ContinuationPc) {
+         if (ic->arm920ContinuationFault[0]) {
+             *fsr = ic->arm920ContinuationFault[0];
+             return false;
+         }
+-        *word = ic->arm920Continuation[0];
++        *word = extract(ic->arm920Continuation[0]);
+         return true;
+     }
+     const auto r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
+@@ -48,14 +55,20 @@
+     const bool cached = ic->arm920Enabled &&
+                         (!mmuIsOn(ic->memorySystem.mmu) || MMU_TRANSLATE_RESULT_CACHEABLE(r));
+     if (!cached) {
+-        if (memInstructionFetch<4>(ic->mem, pa, word)) return true;
++        if (size == 2) {
++            uint16_t halfword;
++            if (memInstructionFetch<2>(ic->mem, pa, &halfword)) {
++                *word = halfword;
++                return true;
++            }
++        } else if (memInstructionFetch<4>(ic->mem, pa, word)) return true;
+         *fsr = 8;  // External abort on an instruction access.
+         return false;
+     }
+     const unsigned segment = (va >> 5) & 7;
+     for (auto& line : ic->arm920Lines[segment]) {
+         if (line.valid && line.base == maskLine(va)) {
+-            *word = line.words[(va & 31) / 4];
++            *word = extract(line.words[(va & 31) / 4]);
+             return true;
+         }
+     }
+@@ -81,8 +94,13 @@
+     std::memcpy(line.words, words, sizeof(words));
+     line.valid = true;
+     ic->epoch++;
+-    *word = words[(va & 31) / 4];
++    *word = extract(words[(va & 31) / 4]);
+     return true;
++}
++
++bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
++                      uint_fast8_t* fsr, uint32_t* word) {
++    return icacheArm920Fetch(ic, va, 4, privileged, fsr, word);
+ }
+ 
+ void icacheArm920PrepareMmuSwitch(struct icache* ic, uint32_t nextPc, bool privileged) {
+@@ -353,7 +371,7 @@
+         uint32_t word;
+         if (ic->arm920ContinuationCount && (va & ~3u) != ic->arm920ContinuationPc)
+             icacheArm920Branch(ic);
+-        if (!icacheArm920Word(ic, va & ~3u, privileged, fsrP, &word)) return false;
++        if (!icacheArm920Fetch(ic, va, sz, privileged, fsrP, &word)) return false;
+         if (ic->arm920ContinuationCount) {
+             --ic->arm920ContinuationCount;
+             if (ic->arm920ContinuationCount) {
+@@ -362,7 +380,8 @@
+             }
+             ic->arm920ContinuationPc += 4;
+         }
+-        icacheDecodeFetch<msys, sz>(word, va, instr, decoded);
++        if constexpr (sz == 2) decoded = cpuDecodeThumb<msys>(word, instr);
++        else icacheDecodeFetch<msys, sz>(word, va, instr, decoded);
+         return true;
+     }
+     const uint32_t key = icacheFetchKey(ic, privileged);
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -21,6 +21,8 @@
+ constexpr unsigned ICACHE_FETCH_STATE_WORDS = 19;
+ void icacheConfigureArm920(struct icache* ic);
+ void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin);
++bool icacheArm920Fetch(struct icache*, uint32_t va, unsigned size, bool privileged,
++                       uint_fast8_t* fsr, uint32_t* instruction);
+ bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
+                       uint_fast8_t* fsr, uint32_t* word);
+ // DDI0151C 3.9: two prefetched ARM instructions can retain the old MMU mapping.
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -38,9 +38,9 @@
+         }
+         if (!write && memIsInstructionFetch(p.mem)) {
+             uint32_t word;
+-            if (size != 4 || !p.options.bootstrapPeripherals ||
+-                !p.peripherals.instructionWord(address, word)) return false;
+-            std::memcpy(data, &word, 4);
++            if (!p.options.bootstrapPeripherals ||
++                !p.peripherals.instructionRead(address, size, word)) return false;
++            std::memcpy(data, &word, size);
+             return true;
+         }
+         // A JIT fault can retry through the interpreter. Keep the first bus failure.
+@@ -142,6 +142,41 @@
+     if (opcode >= 8 && opcode <= 11 && !(i & 0x00100000)) return false;
+     // ARMv4 data processing with immediate or ordinary register shifts.
+     return (i & 0x02000000) || !(i & 0x10) || !(i & 0x80);
++}
++// ARM DDI0100I A6/A7: ordinary ARMv4T forms, with aligned memory operands.
++bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
++    if (i < 0x4000) return true;  // Shifts, add/subtract and immediate arithmetic.
++    if ((i & 0xfc00) == 0x4000) return ((i >> 6) & 15) != 13; // MUL flags stay unqualified.
++    if ((i & 0xfc00) == 0x4400) {
++        const unsigned op = (i >> 8) & 3, source = (i >> 3) & 15;
++        const unsigned dest = (i & 7) | ((i >> 4) & 8);
++        if (op == 3) {
++            const uint32_t target = r[source] + (source == 15 ? 4 : 0);
++            return !(i & 0x87) && (target & 3) != 2; // BX, excluding BLX and SBZ bits.
++        }
++        if (!(i & 0xc0) || (op == 1 && (source == 15 || dest == 15))) return false;
++        return op != 0 || dest != 15; // ADD to PC stays unqualified.
++    }
++    if ((i & 0xf800) == 0x4800) return true; // PC-relative word load.
++    if ((i & 0xf000) == 0x5000) {
++        const unsigned op = (i >> 9) & 7;
++        const uint32_t address = r[(i >> 3) & 7] + r[(i >> 6) & 7];
++        if (op == 0 || op == 4) return !(address & 3);
++        if (op == 1 || op == 5 || op == 7) return !(address & 1);
++        return true;
++    }
++    if ((i & 0xe000) == 0x6000) return (i & 0x1000) || !(r[(i >> 3) & 7] & 3);
++    if ((i & 0xf000) == 0x8000) return !(r[(i >> 3) & 7] & 1);
++    if ((i & 0xf000) == 0x9000) return !(r[13] & 3);
++    if ((i & 0xf000) == 0xa000 || (i & 0xff00) == 0xb000) return true;
++    if ((i & 0xf600) == 0xb400) return (i & 0x1ff) && !(r[13] & 3); // PUSH/POP.
++    if ((i & 0xf000) == 0xc000) {
++        const unsigned base = (i >> 8) & 7;
++        return (i & 0xff) && !(i & (1u << base)) && !(r[base] & 3);
++    }
++    if ((i & 0xf000) == 0xd000) return (i & 0xf00) < 0xe00; // No undefined/SWI.
++    if ((i & 0xf800) == 0xe000 || (i & 0xf800) == 0xf000) return true; // B, BL prefix.
++    return (i & 0xf800) == 0xf800 && blPrefix; // BL suffix needs its preceding halfword.
+ }
+ }  // namespace
+ 
+@@ -171,32 +206,37 @@
+                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
+     patchDispatchSetCpu(patches, p->cpu);
+     p->result.stop = Imx1ProbeStop::budget;
++    bool blPrefix = false;
++    uint32_t blNextPc = 0;
+     for (uint32_t step = 0; step < steps; ++step) {
+         auto& t = p->result.trace;
+         t = {step, cpuGetRegisters(p->cpu)[15], 0,
+-             cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0};
++             cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
+         uint_fast8_t fsr = 0;
+         if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
+             if (!p->failed) {
+                 p->result.stop = Imx1ProbeStop::exception;
+                 p->result.address = t.pc;
+                 p->result.value = fsr;
+-                p->result.size = 4;
++                p->result.size = t.instructionSize;
+             }
+             break;
+         }
+-        if ((t.instruction & 0x0f100f10) == 0x0e000f10) {
++        if (t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
+             const unsigned source = (t.instruction >> 12) & 15;
+             t.operand = source == 15 ? t.pc + 8 : cpuGetRegisters(p->cpu)[source];
+         }
+         if (observer) observer(context, t);
+-        if ((t.cpsr & ARM_SR_T) || t.instruction >> 28 == 15 ||
+-            (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu)))) {
++        const bool thumb = t.instructionSize == 2;
++        if ((blPrefix && (!thumb || t.pc != blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
++            (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), blPrefix && t.pc == blNextPc) :
++             t.instruction >> 28 == 15 ||
++             (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu))))) {
+             p->result.stop = Imx1ProbeStop::unsupportedInstruction;
+             break;
+         }
+         // The diagnostic time ratio is qualified only in ARM920T FastBus mode.
+-        if (p->options.bootstrapPeripherals && condition(t.instruction, t.cpsr) &&
++        if (!thumb && p->options.bootstrapPeripherals && condition(t.instruction, t.cpsr) &&
+             (t.instruction & 0x0fff0fff) == 0x0e010f10 && (t.operand & 0xc0000000)) {
+             p->result.stop = Imx1ProbeStop::unsupportedCp15;
+             break;
+@@ -205,10 +245,12 @@
+         const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
+         if (p->failed) break;
+         if (cpuExceptionSequence(p->cpu) != exceptions) {
+-            p->result.stop = (t.instruction & 0x0f000f10) == 0x0e000f10 ?
++            p->result.stop = !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10 ?
+                              Imx1ProbeStop::unsupportedCp15 : Imx1ProbeStop::exception;
+             break;
+         }
++        blPrefix = thumb && (t.instruction & 0xf800) == 0xf000;
++        blNextPc = t.pc + 2;
+         if (p->options.bootstrapPeripherals) p->peripherals.advanceFastBusCycles(cycles);
+     }
+     std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -12,6 +12,7 @@
+ };
+ struct Imx1ProbeTrace {
+     uint32_t step, pc, instruction, cpsr, operand;
++    uint32_t instructionSize;
+ };
+ struct Imx1ProbeAccess {
+     uint32_t step, pc, address, size, value;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -15,19 +15,25 @@
+ }
+ 
+ bool Imx1Bootstrap::instructionWord(uint32_t address, uint32_t& value) const {
+-    if (address & 3) return false;
++    return instructionRead(address, 4, value);
++}
++
++bool Imx1Bootstrap::instructionRead(uint32_t address, uint32_t size, uint32_t& value) const {
++    if ((size != 2 && size != 4) || (address & (size - 1))) return false;
++    value = 0;
+     if (address >= 0x00300000 && address < 0x00400000) {
++        if (size != 4 && address >= 0x00320000) return false;
+         const uint32_t offset = address < 0x00320000 ? address - 0x00300000 : 0x1fffc;
+-        std::memcpy(&value, sram.data() + offset, 4);
++        std::memcpy(&value, sram.data() + offset, size);
+         return true;
+     }
+     if (address >= 0x08000000 && address < 0x10000000) {
+         const auto& s = sdram[(address - 0x08000000) >> 26];
+         const uint32_t offset = address & 0x03ffffff;
+         if (!s.bytes || (s.control & 0xf0000000) != 0x80000000 || !s.modeSet ||
+-            offset >= s.bytes || s.bytes - offset < 4) return false;
++            offset >= s.bytes || s.bytes - offset < size) return false;
+         if (s.ram.empty()) value = 0;
+-        else std::memcpy(&value, s.ram.data() + offset, 4);
++        else std::memcpy(&value, s.ram.data() + offset, size);
+         return true;
+     }
+     return false;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -22,6 +22,7 @@
+     void advanceFastBusCycles(uint32_t cycles);
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     // Instruction reads cannot issue SDRAM commands or consume peripheral state.
++    bool instructionRead(uint32_t address, uint32_t size, uint32_t& value) const;
+     bool instructionWord(uint32_t address, uint32_t& value) const;
+     static const char* registerName(uint32_t address);
+     static bool isRamAddress(uint32_t address) {

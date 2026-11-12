@@ -14,6 +14,9 @@
 #include "SdlRenderer.h"
 #include "DisplayChange.h"
 #include "WindowScale.h"
+#include "zodiac_input.h"
+#include "guest_orientation.h"
+#include "zodiac_panel.h"
 #include <SDL_image.h>
 // Synthetic finger events come from a touch id SDL doesn't know, so count them as a touch screen.
 struct TouchInput : SdlEventHandler {
@@ -41,6 +44,12 @@ class Guest : public SoC {
     void pen(bool down,int x=0,int y=0) {
         assert(penEventQueue->GetSize()==1);auto e=penEventQueue->Pop();
         assert(e.penDown==down);if(down) { if(e.x!=x || e.y!=y)std::fprintf(stderr,"pen got %d,%d expected %d,%d\n",e.x,e.y,x,y);assert(e.x==x && e.y==y); }
+    }
+    // One pen event of either position, inside the native LCD.
+    void penInside(bool down) {
+        assert(penEventQueue->GetSize()==1);auto e=penEventQueue->Pop();
+        assert(e.penDown==down);
+        if(down) assert(e.x>=0 && e.y>=0 && e.x<int(displayConfiguration.width) && e.y<int(displayConfiguration.height));
     }
     std::vector<std::pair<uint8_t,bool>> events;
     bool KeyboardAttached() const override {return attached;}
@@ -606,10 +615,10 @@ static void tg50Art() {
     assert(deviceControlsHeight(p,noKeyboard)==54 && deviceControlsHeight(p,neither)==48);
     assert(deviceControlsWidth(p,width)==358 && deviceControlsWidth(p,width,noKeyboard)==358);
     assert(deviceControlsWidth(p,width,noTab)==320 && deviceControlsWidth(p,width,neither)==320);
-    // Every key once: the app row, all 42 keyboard keys and the tab's four.
+    // Every key once: the app row, all 42 keyboard keys and the tab's four; none of the Zodiac's keys.
     std::vector<int> seen(keyIdCount,0);
     for(size_t i=0;i<p.count;++i)++seen[p.buttons[i].key];
-    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice || k==keyIdHold || k==keyIdHotSync ? 0 : 1));
+    for(int k=keyIdHard1;k<keyIdCount;++k)assert(seen[k]==(k==keyIdLeft || k==keyIdRight || k==keyIdSelect || k==keyIdPower || k==keyIdVoice || k==keyIdHold || k==keyIdHotSync || k>=keyIdFunction ? 0 : 1));
     // Strip units to window pixels: the side tab stays 1:1, the rest scales with the window width.
     auto at=[&](float x,float y,const DeviceControlView& view) {
         const DeviceControlTransform t(p,width,view);
@@ -1359,6 +1368,523 @@ static void firmwarePowerInput() {
     std::remove(path);
 }
 
+
+// Zodiac art: no board yet, so its two arrangements, hit areas, stick, held and released input and
+// pressed drawing are checked on a stand-in guest.
+struct ZodiacGuest : Guest {
+    ZodiacGuest() : Guest(deviceTypeZodiac2) {setDisplay({480,320,0,160});}
+    std::vector<DeviceStick> sticks;
+    void AnalogStick(float x,float y) override {sticks.push_back({x,y,x!=0 || y!=0});}
+    DeviceStick lastStick() {assert(!sticks.empty());auto s=sticks.back();sticks.clear();return s;}
+    void noStick() {assert(sticks.empty());}
+};
+struct ZodiacHandler : SdlEventHandler {
+    using SdlEventHandler::SdlEventHandler;
+    bool DirectTouch(SDL_TouchID) const override {return true;}
+};
+static void zodiacControls() {
+    const auto* profile=deviceProfile5(deviceTypeZodiac2);
+    assert(profile && profile->frontend.available && profile->board==DeviceBoard5::imx1Zodiac);
+    assert(deviceArt("tapwave-zodiac-2")==DeviceArt::zodiac);
+    const auto& p=deviceControls(deviceTypeZodiac2);
+    assert(p.style==DeviceControlStyle::zodiac && p.panelWidth==150 && p.width==480);
+    DeviceControlView below,around;around.arrangement=DeviceControlArrangement::around;
+    assert(deviceControlsWidth(p,480,below)==480 && deviceControlsHeight(p,480,below)==200 && !deviceScreenLeft(p,below));
+    assert(deviceControlsWidth(p,480,around)==780 && deviceControlsHeight(p,480,around)==0 && deviceScreenLeft(p,around)==150);
+    // Older devices keep their strip whatever the arrangement says.
+    for(auto art:{DeviceArt::tx,DeviceArt::e2,DeviceArt::tg50}) {
+        const auto& o=deviceControls(art);
+        assert(deviceControlsWidth(o,320,around)==deviceControlsWidth(o,320,below));
+        assert(deviceControlsHeight(o,320,around)==deviceControlsHeight(o,320,below));
+        assert(deviceControlViewForWindow(o,below,2400,1080).arrangement==DeviceControlArrangement::below);
+    }
+    // The arrangement follows the window's shape alone: landscape or square around, portrait below,
+    // and around with no window to fit, as for a fixed desktop window.
+    auto chosen=[&](DeviceControlView from,int w,int h) {return deviceControlViewForWindow(p,from,w,h).arrangement;};
+    for(auto from:{below,around}) {
+        assert(chosen(from,2400,1080)==DeviceControlArrangement::around);
+        assert(chosen(from,1200,1000)==DeviceControlArrangement::around);
+        assert(chosen(from,1280,800)==DeviceControlArrangement::around);
+        assert(chosen(from,1000,1000)==DeviceControlArrangement::around);
+        assert(chosen(from,1080,2400)==DeviceControlArrangement::below);
+        assert(chosen(from,800,1280)==DeviceControlArrangement::below);
+        assert(chosen(from,1000,1001)==DeviceControlArrangement::below);
+        assert(chosen(from,0,0)==DeviceControlArrangement::around);
+    }
+    // Every real control in both arrangements; no five-way.
+    for(auto section:{DeviceControlSection::below,DeviceControlSection::around}) {
+        std::vector<KeyId> keys;int sticks=0;
+        for(size_t i=0;i<p.count;++i) if(p.buttons[i].section==section) {
+            if(p.buttons[i].icon==DeviceControlIcon::stick) ++sticks; else keys.push_back(p.buttons[i].key);
+        }
+        std::sort(keys.begin(),keys.end());
+        const std::vector<KeyId> expected{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,
+                                          keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth};
+        assert(keys==expected && sticks==1);
+    }
+    for(size_t i=0;i<p.count;++i) {
+        assert(p.buttons[i].key<keyIdUp || p.buttons[i].key>keyIdSelect);
+        // The stick's entry carries its press; Action keys are named by place, not A to D.
+        assert((p.buttons[i].icon==DeviceControlIcon::stick)==(p.buttons[i].key==keyIdStickPress));
+        if(p.buttons[i].icon==DeviceControlIcon::action) assert(std::strstr(p.buttons[i].label,"action button"));
+    }
+    static_assert(keyIdStickPress>=64,"a key past the old 64-bit mask");
+    auto rectOf=[&](KeyId key,const DeviceControlView& view,int sw,int sh) {
+        for(size_t i=0;i<p.count;++i) if(p.buttons[i].key==key && deviceControlShown(p.buttons[i],view))
+            return deviceButtonRect(p,p.buttons[i],sw,sh,view);
+        assert(false);return SDL_Rect{};
+    };
+    // Both arrangements at the shown LCD's size for 0/180 (480x320) and 90/270 (320x480).
+    for(auto [sw,sh]:{std::pair{480,320},std::pair{320,480}})
+    for(auto view:{below,around}) {
+        const bool side=view.arrangement==DeviceControlArrangement::around;
+        const int width=deviceControlsWidth(p,sw,view),height=sh+deviceControlsHeight(p,sw,view);
+        assert(width==(side ? sw+300 : sw));
+        if(!side) assert(deviceControlsHeight(p,sw,view)==(sw==480 ? 200 : 134));
+        std::vector<SDL_Rect> shown;
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];if(!deviceControlShown(b,view))continue;
+            const auto r=deviceButtonRect(p,b,sw,sh,view);
+            // Inside the window and off the LCD: in a side panel, or under the screen.
+            assert(r.x>=0 && r.y>=0 && r.x+r.w<=width && r.y+r.h<=height);
+            if(side) assert(r.x+r.w<=150 || r.x>=150+sw); else assert(r.y>=sh);
+            // Scaled to 320 wide the smallest keys stay a usable size.
+            assert(std::min(r.w,r.h)>=(sw==480 ? 24 : 16));
+            for(const auto& o:shown) assert(!SDL_HasIntersection(&r,&o));
+            shown.push_back(r);
+            const int cx=r.x+r.w/2,cy=r.y+r.h/2;
+            if(b.icon==DeviceControlIcon::stick) {
+                assert(deviceControlAt(p,sw,sh,cx,cy,view)==keyInvalid && deviceStickGrab(r,cx+0.5f,cy+0.5f));
+                assert(deviceStickKnobAt(r,cx+0.5f,cy+0.5f) && !deviceStickKnobAt(r,r.x+r.w*0.5f,r.y+2.f));
+                const auto full=deviceStickAt(r,cx+r.w*2.f,cy+0.5f);
+                assert(full.held && std::fabs(full.x-1)<1e-4f && std::fabs(full.y)<0.01f);
+                const auto half=deviceStickAt(r,r.x+r.w*0.5f,r.y+r.h*0.5f-r.w*deviceStickTravel*0.5f);
+                assert(std::fabs(half.x)<1e-4f && std::fabs(half.y+0.5f)<1e-4f);
+            } else {
+                assert(deviceControlAt(p,sw,sh,cx,cy,view)==b.key);
+                // Round Action keys miss at their corners.
+                if(b.icon==DeviceControlIcon::action) assert(deviceControlAt(p,sw,sh,r.x,r.y,view)==keyInvalid);
+            }
+        }
+        const SDL_Rect stick=deviceStickRect(p,sw,sh,view);
+        assert(shown.size()==10 && stick.w>0);
+        // The middle of the Action diamond is a gap; Bottom is hard1 and Top hard4.
+        const auto a=rectOf(keyIdHard1,view,sw,sh),d=rectOf(keyIdHard4,view,sw,sh);
+        assert(a.y>d.y && deviceControlAt(p,sw,sh,a.x+a.w/2,(a.y+d.y+d.h)/2,view)==keyInvalid);
+        const auto fn=rectOf(keyIdFunction,view,sw,sh),home=rectOf(keyIdHome,view,sw,sh);
+        const auto tl=rectOf(keyIdTriggerLeft,view,sw,sh),tr=rectOf(keyIdTriggerRight,view,sw,sh);
+        // Function sits above Home in both arrangements.
+        assert(fn.y+fn.h<=home.y);
+        // Bluetooth is round, on the diamond's side, above its middle and under the trigger.
+        const auto bt=rectOf(keyIdBluetooth,view,sw,sh),right=rectOf(keyIdHard2,view,sw,sh);
+        assert(std::abs(bt.w-bt.h)<=1 && deviceControlAt(p,sw,sh,bt.x,bt.y,view)==keyInvalid);
+        assert(bt.y>=tr.y+tr.h && bt.y+bt.h<=right.y && bt.x>=fn.x+fn.w);
+        if(side) {
+            // Left panel top to bottom: trigger, stick, Function, Home; the right panel has the
+            // trigger, Bluetooth and the diamond. The triggers stay at the top of a taller panel and the
+            // rest are centred on it.
+            const int top=(sh-320)/2;
+            assert(tl.y==8 && tr.y==8 && tr.x>=150+sw);
+            assert(stick.x+stick.w<=150 && fn.x+fn.w<=150 && home.x+home.w<=150);
+            assert(tl.y+tl.h<=stick.y && stick.y+stick.h<=fn.y && stick.y==52+top && home.y==272+top);
+            for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdBluetooth}) assert(rectOf(k,view,sw,sh).x>=150+sw);
+        } else {
+            // Under the screen: Function and Home between the stick and the diamond.
+            const auto left=rectOf(keyIdHard3,view,sw,sh);
+            assert(fn.x>=stick.x+stick.w && home.x>=stick.x+stick.w);
+            assert(fn.x+fn.w<=left.x && home.x+home.w<=left.x);
+        }
+    }
+
+    // Input on a stand-in guest, around the screen at scale 1.
+    ZodiacGuest guest;auto display=guest.display();
+    ZodiacHandler input(&guest,1.f,display,Rotation::portrait_0,around);
+    input.SetDirectCapture(false);
+    auto centre=[&](KeyId key,const DeviceControlView& view) {
+        for(size_t i=0;i<p.count;++i) if(p.buttons[i].key==key && deviceControlShown(p.buttons[i],view)) {
+            const auto r=deviceButtonRect(p,p.buttons[i],480,320,view);return std::pair<int,int>{r.x+r.w/2,r.y+r.h/2};
+        }
+        assert(false);return std::pair<int,int>{};
+    };
+    auto pointer=[&](Uint32 type,int x,int y) {
+        SDL_Event e{};e.type=type;
+        if(type==SDL_MOUSEMOTION) {e.motion.x=x;e.motion.y=y;} else {e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;}
+        input.HandleEvent(e);
+    };
+    auto finger=[&](Uint32 type,SDL_FingerID id,int x,int y,int w,int h) {
+        SDL_Event e{};e.type=type;e.tfinger.type=type;e.tfinger.touchId=9;e.tfinger.fingerId=id;
+        e.tfinger.x=(x+0.5f)/w;e.tfinger.y=(y+0.5f)/h;input.HandleEvent(e);
+    };
+    auto keyEvent=[&](SDL_Keycode k,bool down) {
+        SDL_Event e{};e.type=down ? SDL_KEYDOWN : SDL_KEYUP;e.key.keysym.sym=k;input.HandleEvent(e);
+    };
+    for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
+        const auto [x,y]=centre(k,around);
+        pointer(SDL_MOUSEBUTTONDOWN,x,y);guest.expect({{k,true}});assert(input.PressedButtons()==deviceKeyBit(k));
+        pointer(SDL_MOUSEBUTTONUP,x,y);guest.expect({{k,false}});guest.noPen();
+    }
+    // The pointer holds the stick and keeps full deflection off the well; letting go centres it.
+    const SDL_Rect well=deviceStickRect(p,480,320,around);
+    const int sx=well.x+well.w/2,sy=well.y+well.h/2;
+    pointer(SDL_MOUSEBUTTONDOWN,sx,sy);auto st=guest.lastStick();
+    assert(input.Stick().held && std::fabs(st.x)<0.05f && std::fabs(st.y)<0.05f);
+    pointer(SDL_MOUSEMOTION,sx+200,sy);st=guest.lastStick();assert(std::fabs(st.x-1)<0.01f && std::fabs(st.y)<0.01f);
+    pointer(SDL_MOUSEMOTION,sx,sy-int(well.w*deviceStickTravel/2));st=guest.lastStick();
+    assert(std::fabs(st.x)<0.05f && std::fabs(st.y+0.5f)<0.05f);
+    pointer(SDL_MOUSEBUTTONUP,sx,sy);st=guest.lastStick();
+    assert(st.x==0 && st.y==0 && !input.Stick().held);guest.expect({});guest.noPen();
+    // A tap on the knob pushes the stick in; a drag from it or a press off the knob doesn't.
+    pointer(SDL_MOUSEBUTTONDOWN,sx,sy);st=guest.lastStick();assert(st.x==0 && st.y==0 && input.Stick().held);
+    pointer(SDL_MOUSEMOTION,sx+1,sy);guest.noStick();
+    pointer(SDL_MOUSEBUTTONUP,sx+1,sy);guest.expect({{keyIdStickPress,true},{keyIdStickPress,false}});
+    st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+    pointer(SDL_MOUSEBUTTONDOWN,sx,sy);guest.lastStick();
+    pointer(SDL_MOUSEMOTION,sx+30,sy);st=guest.lastStick();assert(st.x>0.5f);
+    pointer(SDL_MOUSEMOTION,sx,sy);st=guest.lastStick();assert(std::fabs(st.x)<0.05f);
+    pointer(SDL_MOUSEBUTTONUP,sx,sy);guest.lastStick();guest.expect({});
+    pointer(SDL_MOUSEBUTTONDOWN,sx,well.y+3);st=guest.lastStick();assert(st.y<-0.9f);
+    pointer(SDL_MOUSEBUTTONUP,sx,well.y+3);guest.lastStick();guest.expect({});
+    finger(SDL_FINGERDOWN,7,sx,sy,780,320);guest.lastStick();
+    finger(SDL_FINGERUP,7,sx,sy,780,320);guest.expect({{keyIdStickPress,true},{keyIdStickPress,false}});guest.lastStick();
+    finger(SDL_FINGERDOWN,8,sx,sy,780,320);guest.lastStick();
+    finger(SDL_FINGERMOTION,8,sx,sy+40,780,320);st=guest.lastStick();assert(st.y>0.9f);
+    finger(SDL_FINGERUP,8,sx,sy,780,320);guest.lastStick();guest.expect({});
+    // F10 holds it in until let go, drawn pressed; a tap meanwhile doesn't press it again.
+    keyEvent(SDLK_F10,true);guest.expect({{keyIdStickPress,true}});assert(input.PressedButtons()==deviceKeyBit(keyIdStickPress));
+    pointer(SDL_MOUSEBUTTONDOWN,sx,sy);pointer(SDL_MOUSEBUTTONUP,sx,sy);guest.sticks.clear();guest.expect({});
+    keyEvent(SDLK_F10,false);guest.expect({{keyIdStickPress,false}});
+    // The LCD sits between the panels.
+    pointer(SDL_MOUSEBUTTONDOWN,150,0);guest.pen(true,0,0);pointer(SDL_MOUSEBUTTONUP,150,0);guest.pen(false);
+    pointer(SDL_MOUSEBUTTONDOWN,629,319);guest.pen(true,479,319);pointer(SDL_MOUSEBUTTONUP,629,319);guest.pen(false);
+    pointer(SDL_MOUSEBUTTONDOWN,149,160);guest.noPen();guest.expect({});pointer(SDL_MOUSEBUTTONUP,149,160);
+    // Several fingers: the stick, a trigger and an Action key at once; focus loss lets all go.
+    const auto [rx,ry]=centre(keyIdTriggerRight,around);const auto [ax,ay]=centre(keyIdHard2,around);
+    finger(SDL_FINGERDOWN,1,sx,sy,780,320);guest.lastStick();
+    finger(SDL_FINGERDOWN,2,rx,ry,780,320);finger(SDL_FINGERDOWN,3,ax,ay,780,320);
+    guest.expect({{keyIdTriggerRight,true},{keyIdHard2,true}});
+    finger(SDL_FINGERMOTION,1,sx-100,sy+100,780,320);st=guest.lastStick();
+    assert(st.x<-0.6f && st.y>0.6f && std::fabs(std::hypot(st.x,st.y)-1)<0.01f);
+    assert(input.PressedButtons()==(deviceKeyBit(keyIdTriggerRight)|deviceKeyBit(keyIdHard2)));
+    // Releasing one contact leaves the other key and the deflected stick held.
+    finger(SDL_FINGERUP,3,ax,ay,780,320);guest.expect({{keyIdHard2,false}});guest.noStick();
+    assert(input.PressedButtons()==deviceKeyBit(keyIdTriggerRight));
+    assert(input.Stick().held && input.Stick().x<-0.6f && input.Stick().y>0.6f);
+    finger(SDL_FINGERDOWN,3,ax,ay,780,320);guest.expect({{keyIdHard2,true}});guest.noStick();
+    // A second finger on the well doesn't take the stick from the first.
+    finger(SDL_FINGERDOWN,4,sx,sy,780,320);guest.noStick();guest.expect({});
+    SDL_Event lost{};lost.type=SDL_WINDOWEVENT;lost.window.event=SDL_WINDOWEVENT_FOCUS_LOST;input.HandleEvent(lost);
+    guest.expect({{keyIdTriggerRight,false},{keyIdHard2,false}});st=guest.lastStick();
+    assert(st.x==0 && st.y==0 && !input.Stick().held && !input.PressedButtons());
+    for(SDL_FingerID id:{1,2,3,4}) finger(SDL_FINGERUP,id,0,0,780,320);
+    guest.expect({});guest.noStick();
+    // Arrow keys stand in for the stick, not a five-way; F7 to F9 are Function and the triggers.
+    keyEvent(SDLK_RIGHT,true);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    keyEvent(SDLK_UP,true);st=guest.lastStick();assert(std::fabs(st.x-0.7071f)<1e-3f && std::fabs(st.y+0.7071f)<1e-3f);
+    keyEvent(SDLK_RIGHT,false);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    keyEvent(SDLK_UP,false);st=guest.lastStick();assert(st.x==0 && st.y==0);guest.expect({});
+    keyEvent(SDLK_F7,true);keyEvent(SDLK_F8,true);keyEvent(SDLK_F9,true);keyEvent(SDLK_F6,true);keyEvent(SDLK_F10,true);
+    guest.expect({{keyIdFunction,true},{keyIdTriggerLeft,true},{keyIdTriggerRight,true},{keyIdHome,true},{keyIdStickPress,true}});
+    input.HandleEvent(lost);
+    guest.expect({{keyIdHome,false},{keyIdFunction,false},{keyIdTriggerLeft,false},{keyIdTriggerRight,false},{keyIdStickPress,false}});
+    guest.noStick();
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    guest.expect({});guest.noStick();
+    // A game controller, as the mapping alone and through the handler's events.
+    {
+        GamepadState s;
+        assert(zodiacGamepadInput(s).keys==0 && zodiacGamepadInput(s).stick==DeviceStick{});
+        const std::pair<bool GamepadState::*,KeyId> buttons[]={{&GamepadState::a,keyIdHard1},{&GamepadState::b,keyIdHard2},
+            {&GamepadState::x,keyIdHard3},{&GamepadState::y,keyIdHard4},{&GamepadState::leftShoulder,keyIdTriggerLeft},
+            {&GamepadState::rightShoulder,keyIdTriggerRight},{&GamepadState::leftStick,keyIdStickPress},
+            {&GamepadState::start,keyIdHome},{&GamepadState::guide,keyIdHome},{&GamepadState::back,keyIdFunction}};
+        DeviceKeyMask all=0;
+        for(const auto& [member,key]:buttons) {
+            GamepadState one;one.*member=true;
+            assert(zodiacGamepadInput(one).keys==deviceKeyBit(key) && !zodiacGamepadInput(one).stick.held);
+            s.*member=true;all|=deviceKeyBit(key);
+        }
+        assert(zodiacGamepadInput(s).keys==all);
+        // Every key the controller sends is on the Zodiac's bar, and none is Bluetooth or power.
+        for(unsigned k=1;k<keyIdCount;++k) if(all&deviceKeyBit(KeyId(k))) assert(zodiacControlFor(KeyId(k))>=0);
+        assert(!(all&(deviceKeyBit(keyIdBluetooth)|deviceKeyBit(keyIdPower))));
+        // The stick: at rest near the centre, full at the ends of each axis and in the corners.
+        auto at=[](int x,int y) {GamepadState g;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        assert(!at(3000,-2000).held && at(3000,-2000).x==0 && at(3000,-2000).y==0);
+        assert(at(32767,0).held && at(32767,0).x==1 && at(32767,0).y==0);
+        assert(at(-32768,0).x==-1 && at(0,32767).y==1 && at(0,-32768).y==-1);
+        assert(at(32767,-32768).x==1 && at(32767,-32768).y==-1);
+        const auto half=at(16384,0),small=at(4200,0);
+        assert(half.x>0.4f && half.x<0.5f && half.y==0 && small.held && small.x>0 && small.x<0.02f);
+        // A full push reaches the machine's whole travel.
+        assert(zodiacStickOffset(at(32767,0).x)==511 && zodiacStickOffset(at(0,-32768).y)==-511);
+    }
+    auto padButton=[&](int button,bool down,int which=0) {
+        SDL_Event e{};e.type=down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;e.cbutton.which=which;e.cbutton.button=Uint8(button);input.HandleEvent(e);
+    };
+    auto padAxis=[&](int axis,int value,int which=0) {
+        SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.which=which;e.caxis.axis=Uint8(axis);e.caxis.value=Sint16(value);input.HandleEvent(e);
+    };
+    for(auto [button,key]:{std::pair{SDL_CONTROLLER_BUTTON_A,keyIdHard1},{SDL_CONTROLLER_BUTTON_B,keyIdHard2},
+                           {SDL_CONTROLLER_BUTTON_X,keyIdHard3},{SDL_CONTROLLER_BUTTON_Y,keyIdHard4},
+                           {SDL_CONTROLLER_BUTTON_LEFTSHOULDER,keyIdTriggerLeft},{SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,keyIdTriggerRight},
+                           {SDL_CONTROLLER_BUTTON_LEFTSTICK,keyIdStickPress},{SDL_CONTROLLER_BUTTON_START,keyIdHome},
+                           {SDL_CONTROLLER_BUTTON_GUIDE,keyIdHome},{SDL_CONTROLLER_BUTTON_BACK,keyIdFunction}}) {
+        padButton(button,true);guest.expect({{key,true}});assert(input.PressedButtons()==deviceKeyBit(key));
+        padButton(button,false);guest.expect({{key,false}});assert(!input.PressedButtons());
+    }
+    // Buttons with no place on the Zodiac and the other axes do nothing.
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,true);padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);
+    padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
+    // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.
+    padButton(SDL_CONTROLLER_BUTTON_START,true);padButton(SDL_CONTROLLER_BUTTON_GUIDE,true);guest.expect({{keyIdHome,true}});
+    padButton(SDL_CONTROLLER_BUTTON_START,false);guest.expect({});padButton(SDL_CONTROLLER_BUTTON_GUIDE,false);guest.expect({{keyIdHome,false}});
+    padButton(SDL_CONTROLLER_BUTTON_A,true);keyEvent(SDLK_F1,true);guest.expect({{keyIdHard1,true}});
+    padButton(SDL_CONTROLLER_BUTTON_A,false);guest.expect({});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    keyEvent(SDLK_F1,false);guest.expect({{keyIdHard1,false}});
+    // The controller's stick over its range; it wins over the arrow keys and the pointer wins over it.
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767);st=guest.lastStick();assert(st.x==1 && st.y==0 && input.Stick().held);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768);st=guest.lastStick();assert(st.x==1 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    keyEvent(SDLK_RIGHT,true);guest.noStick();
+    pointer(SDL_MOUSEBUTTONDOWN,sx,well.y+well.h-3);st=guest.lastStick();assert(st.y>0.9f);
+    pointer(SDL_MOUSEBUTTONUP,sx,well.y+well.h-3);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,1000);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    keyEvent(SDLK_RIGHT,false);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+    // Focus loss and a controller pulled out let go of what it held.
+    padButton(SDL_CONTROLLER_BUTTON_B,true);padAxis(SDL_CONTROLLER_AXIS_LEFTX,-32768);guest.expect({{keyIdHard2,true}});guest.lastStick();
+    input.HandleEvent(lost);guest.expect({{keyIdHard2,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
+    padButton(SDL_CONTROLLER_BUTTON_B,false);guest.expect({});
+    // A stick still pushed when focus returns is read in full again, not only the axis moved next.
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==-1 && std::fabs(st.y)<0.05f && input.Stick().held);guest.expect({});
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,-32768);padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.lastStick();
+    input.HandleEvent(lost);st=guest.lastStick();assert(st.x==0 && st.y==0);
+    {SDL_Event e{};e.type=SDL_WINDOWEVENT;e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==-1 && st.y==1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0);padAxis(SDL_CONTROLLER_AXIS_LEFTY,0);guest.lastStick();
+    // Two controllers share the device: a button is down while either holds it, and pulling one out
+    // lets go of only its own.
+    padButton(SDL_CONTROLLER_BUTTON_A,true,1);guest.expect({{keyIdHard1,true}});
+    padButton(SDL_CONTROLLER_BUTTON_B,true,2);guest.expect({{keyIdHard2,true}});
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=2;input.HandleEvent(e);}
+    guest.expect({{keyIdHard2,false}});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    padButton(SDL_CONTROLLER_BUTTON_A,true,2);guest.expect({});
+    padButton(SDL_CONTROLLER_BUTTON_A,false,2);guest.expect({});assert(input.PressedButtons()==deviceKeyBit(keyIdHard1));
+    padButton(SDL_CONTROLLER_BUTTON_A,false,1);guest.expect({{keyIdHard1,false}});assert(!input.PressedButtons());
+    // The stick follows the pad moved last, and falls back to the other when that one is at rest.
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767,1);st=guest.lastStick();assert(st.x==1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,-32768,2);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTY,0,2);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=1;input.HandleEvent(e);}
+    st=guest.lastStick();assert(st.x==0 && st.y==0);
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=2;input.HandleEvent(e);}
+    guest.noStick();
+    padButton(SDL_CONTROLLER_BUTTON_Y,true);padAxis(SDL_CONTROLLER_AXIS_LEFTY,32767);guest.expect({{keyIdHard4,true}});guest.lastStick();
+    {SDL_Event e{};e.type=SDL_CONTROLLERDEVICEREMOVED;e.cdevice.which=0;input.HandleEvent(e);}
+    guest.expect({{keyIdHard4,false}});st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
+    keyEvent(SDLK_F7,true);keyEvent(SDLK_F8,true);keyEvent(SDLK_F9,true);keyEvent(SDLK_F6,true);keyEvent(SDLK_F10,true);
+    guest.expect({{keyIdFunction,true},{keyIdTriggerLeft,true},{keyIdTriggerRight,true},{keyIdHome,true},{keyIdStickPress,true}});
+    // Changing arrangement lets go of the pointer and fingers on the old one; keyboard keys stay
+    // held until their key-up or focus loss.
+    keyEvent(SDLK_LEFT,true);guest.lastStick();
+    pointer(SDL_MOUSEBUTTONDOWN,sx,sy);guest.lastStick();
+    input.SetView(below,1.f);
+    // The pointer lets go and the held arrow key takes the stick.
+    st=guest.lastStick();assert(st.x==-1 && st.y==0);guest.expect({});
+    assert(input.PressedButtons()==(deviceKeyBit(keyIdHome)|deviceKeyBit(keyIdFunction)|deviceKeyBit(keyIdTriggerLeft)|
+                                    deviceKeyBit(keyIdTriggerRight)|deviceKeyBit(keyIdStickPress)));
+    input.HandleEvent(lost);
+    guest.expect({{keyIdHome,false},{keyIdFunction,false},{keyIdTriggerLeft,false},{keyIdTriggerRight,false},
+                  {keyIdStickPress,false}});
+    st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.PressedButtons());
+    // Below the screen at scale 2: the stick, keys and the LCD's corners.
+    input.SetView(below,2.f);guest.noStick();
+    const SDL_Rect low=deviceStickRect(p,480,320,below);
+    pointer(SDL_MOUSEBUTTONDOWN,2*(low.x+low.w/2),2*(low.y+low.h/2));guest.lastStick();
+    pointer(SDL_MOUSEMOTION,2*(low.x+low.w/2),2*(low.y+low.h+40));st=guest.lastStick();assert(std::fabs(st.y-1)<0.01f);
+    pointer(SDL_MOUSEBUTTONUP,0,0);st=guest.lastStick();assert(st.x==0 && st.y==0);
+    const auto [bx,by]=centre(keyIdHard3,below);
+    pointer(SDL_MOUSEBUTTONDOWN,2*bx,2*by);guest.expect({{keyIdHard3,true}});pointer(SDL_MOUSEBUTTONUP,2*bx,2*by);guest.expect({{keyIdHard3,false}});
+    pointer(SDL_MOUSEBUTTONDOWN,959,639);guest.pen(true,479,319);pointer(SDL_MOUSEBUTTONUP,959,639);guest.pen(false);
+    pointer(SDL_MOUSEBUTTONDOWN,959,641);guest.noPen();pointer(SDL_MOUSEBUTTONUP,959,641);
+    // The TX has no Function or triggers, and its arrows stay the five-way.
+    Guest tx(deviceTypeTX);auto txDisplay=tx.display();
+    SdlEventHandler txInput(&tx,1.f,txDisplay,Rotation::portrait_0);
+    for(SDL_Keycode k:{SDLK_F7,SDLK_F8,SDLK_F9,SDLK_F10}) {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=k;txInput.HandleEvent(e);}
+    tx.expect({});
+    // A game controller does nothing on the TX.
+    {SDL_Event e{};e.type=SDL_CONTROLLERBUTTONDOWN;e.cbutton.button=SDL_CONTROLLER_BUTTON_A;txInput.HandleEvent(e);tx.expect({});}
+    {SDL_Event e{};e.type=SDL_CONTROLLERAXISMOTION;e.caxis.axis=SDL_CONTROLLER_AXIS_LEFTX;e.caxis.value=32767;txInput.HandleEvent(e);tx.expect({});}
+    {SDL_Event e{};e.type=SDL_KEYDOWN;e.key.keysym.sym=SDLK_RIGHT;txInput.HandleEvent(e);tx.expect({{keyIdRight,true}});}
+    // At 90 and 270 the shown LCD is 320x480: keys, the stick and its press follow it in both arrangements.
+    for(auto rotation:{Rotation::landscape_90,Rotation::landscape_270})
+    for(auto view:{around,below}) {
+        ZodiacGuest turned;auto turnedDisplay=turned.display();
+        ZodiacHandler sideways(&turned,1.f,turnedDisplay,rotation,view);sideways.SetDirectCapture(false);
+        auto press=[&](Uint32 type,int x,int y) {
+            SDL_Event e{};e.type=type;
+            if(type==SDL_MOUSEMOTION) {e.motion.x=x;e.motion.y=y;} else {e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;}
+            sideways.HandleEvent(e);
+        };
+        for(KeyId k:{keyIdHard1,keyIdHard2,keyIdHard3,keyIdHard4,keyIdHome,keyIdFunction,keyIdTriggerLeft,keyIdTriggerRight,keyIdBluetooth}) {
+            const auto r=rectOf(k,view,320,480);
+            press(SDL_MOUSEBUTTONDOWN,r.x+r.w/2,r.y+r.h/2);turned.expect({{k,true}});
+            press(SDL_MOUSEBUTTONUP,r.x+r.w/2,r.y+r.h/2);turned.expect({{k,false}});turned.noPen();
+        }
+        const SDL_Rect w=deviceStickRect(p,320,480,view);
+        const int wx=w.x+w.w/2,wy=w.y+w.h/2;
+        press(SDL_MOUSEBUTTONDOWN,wx,wy);turned.lastStick();press(SDL_MOUSEBUTTONUP,wx,wy);
+        turned.expect({{keyIdStickPress,true},{keyIdStickPress,false}});turned.lastStick();
+        press(SDL_MOUSEBUTTONDOWN,wx,wy);turned.lastStick();
+        press(SDL_MOUSEMOTION,wx-w.w,wy);auto t=turned.lastStick();assert(std::fabs(t.x+1)<0.01f);
+        press(SDL_MOUSEBUTTONUP,wx-w.w,wy);turned.lastStick();turned.expect({});
+        // The LCD's corners still reach the pen, and the pixel past it doesn't.
+        const int left=deviceScreenLeft(p,view);
+        press(SDL_MOUSEBUTTONDOWN,left,0);turned.penInside(true);press(SDL_MOUSEBUTTONUP,left,0);turned.pen(false);
+        press(SDL_MOUSEBUTTONDOWN,left+319,479);turned.penInside(true);press(SDL_MOUSEBUTTONUP,left+319,479);turned.pen(false);
+        press(SDL_MOUSEBUTTONDOWN,left+320,479);turned.noPen();press(SDL_MOUSEBUTTONUP,left+320,479);
+    }
+
+    // A fitted portrait window shows the Zodiac's panel upright: the chosen rotation goes a quarter
+    // further counter-clockwise. Landscape, square, unfitted windows and other devices keep it.
+    assert(windowRotation(Rotation::portrait_0,true,true,1080,2400)==Rotation::landscape_90);
+    assert(windowRotation(Rotation::landscape_90,true,true,1080,2400)==Rotation::portrait_180);
+    assert(windowRotation(Rotation::landscape_270,true,true,1080,2400)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,true,true,2400,1080)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::landscape_90,true,true,1000,1000)==Rotation::landscape_90);
+    assert(windowRotation(Rotation::portrait_0,true,false,1080,2400)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,true,true,0,0)==Rotation::portrait_0);
+    assert(windowRotation(Rotation::portrait_0,false,true,1080,2400)==Rotation::portrait_0);
+    // Following the program: the guest's orientation picks the turn, a portrait one being the panel as wired.
+    assert(guestQuarterTurns(2)==0 && guestQuarterTurns(1)==1 && guestQuarterTurns(4)==2 && guestQuarterTurns(3)==3);
+    assert(guestQuarterTurns(0)==-1 && guestQuarterTurns(5)==-1);
+    assert(std::string(guestOrientationName(1))=="portrait" && std::string(guestOrientationName(2))=="landscape");
+    assert(std::string(guestOrientationName(3))=="reverse-portrait" && std::string(guestOrientationName(4))=="reverse-landscape");
+    assert(!*guestOrientationName(0));
+    // The DAL logo's unturned scan (portrait) is skipped from any startup until the OS first goes landscape.
+    // Sleep and wake turn the display off (scan 0) without a startup, so a portrait program stays portrait.
+    {
+        GuestOrientationTracker tracker;
+        tracker.Restart(0);
+        assert(tracker.Update(0,1)==0 && tracker.Update(1,1)==0 && tracker.Update(2,1)==2 && tracker.Update(1,1)==1);
+        assert(tracker.Update(0,1)==0 && tracker.Update(1,1)==1);
+        assert(tracker.Update(1,2)==0 && tracker.Update(1,2)==0 && tracker.Update(2,2)==2 && tracker.Update(1,2)==1);
+        tracker.Loaded(5);
+        assert(tracker.Update(1,5)==1);
+    }
+    // Then the window's shape adds nothing: main.cpp passes quarterTurn false.
+    assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,1080,2400)==Rotation::landscape_90);
+    assert(windowRotation(Rotation(guestQuarterTurns(1)),false,true,2400,1080)==Rotation::landscape_90);
+    // The panel as the GPU shows it, upright in portrait and turned in landscape, and the pen on a
+    // shown pixel reaching the digitizer at that panel pixel both ways.
+    {
+        struct PanelGuest : ZodiacGuest {
+            bool FrameQuarterTurn() const override {return true;}
+            uint32_t* GetPendingFrame(uint32_t& first,uint32_t& last) override {
+                if(frame.empty())return nullptr;
+                first=0;last=zodiacPanelHeight-1;return frame.data();
+            }
+        };
+        PanelGuest panel;auto panelDisplay=panel.display();
+        // Corner blocks of the panel in ABGR: red top left, green top right, blue bottom left.
+        panel.frame.assign(zodiacPanelWidth*zodiacPanelHeight,0xff808080);
+        auto block=[&](int x0,int y0,uint32_t c) {for(int y=y0;y<y0+4;++y)for(int x=x0;x<x0+4;++x)panel.frame[size_t(y)*zodiacPanelWidth+x]=c;};
+        block(0,0,0xff0000ff);block(316,0,0xff00ff00);block(0,476,0xffff0000);
+        for(bool upright:{true,false}) {
+            const Rotation rotation=upright ? Rotation::landscape_90 : Rotation::portrait_0;
+            const int sw=upright ? 320 : 480,sh=upright ? 480 : 320;
+            auto* win=SDL_CreateWindow("Zodiac panel",0,0,deviceControlsWidth(p,sw,below),sh+deviceControlsHeight(p,sw,below),0);assert(win);
+            {
+                SdlRenderer renderer(win,&panel,1,panelDisplay,rotation,false,WindowFit::none,0,below);
+                assert(renderer.Valid());renderer.Draw(true);
+                int ww=0,wh=0;SDL_GetWindowSize(win,&ww,&wh);
+                auto* shot=SDL_CreateRGBSurfaceWithFormat(0,ww,wh,32,SDL_PIXELFORMAT_RGBA32);
+                assert(SDL_RenderReadPixels(SDL_GetRenderer(win),nullptr,shot->format->format,shot->pixels,shot->pitch)==0);
+                // Panel pixel (x, y) shows at (x, y) upright and at (479 - y, x) turned.
+                auto shown=[&](int x,int y) {return upright ? readPixel(shot,x,y) : readPixel(shot,479-y,x);};
+                auto is=[](SDL_Color c,int r,int g,int b) {return c.r==r && c.g==g && c.b==b;};
+                for(auto [x,y]:{std::pair{1,1},std::pair{2,2}}) {
+                    assert(is(shown(x,y),255,0,0));assert(is(shown(318-x+1,y),0,255,0));assert(is(shown(x,478-y+1),0,0,255));
+                }
+                assert(is(shown(160,240),128,128,128));
+                SDL_FreeSurface(shot);
+            }
+            SDL_DestroyWindow(win);
+            ZodiacHandler input(&panel,1.f,panelDisplay,rotation,below);input.SetDirectCapture(false);
+            for(auto [x,y]:{std::pair{0,0},std::pair{319,0},std::pair{0,479},std::pair{319,479},std::pair{100,300}}) {
+                // A shown point for that panel pixel, and the view position the pen takes there.
+                const int px=upright ? x : 479-y,py=upright ? y : x;
+                SDL_Event e{};e.type=SDL_MOUSEBUTTONDOWN;e.button.button=SDL_BUTTON_LEFT;e.button.x=px;e.button.y=py;
+                input.HandleEvent(e);panel.pen(true,479-y,x);
+                e.type=SDL_MOUSEBUTTONUP;input.HandleEvent(e);panel.pen(false);
+            }
+        }
+    }
+
+    // Drawing at both LCD shapes: panels beside a magenta LCD, the strip below; each key darkens
+    // where it hits, the knob moves and darkens when pushed in.
+    for(auto [sw,sh]:{std::pair{480,320},std::pair{320,480}})
+    for(auto view:{around,below}) {
+        const bool side=view.arrangement==DeviceControlArrangement::around;
+        const float scale=1.5f;
+        const int w=int(deviceControlsWidth(p,sw,view)*scale),h=int((sh+deviceControlsHeight(p,sw,view))*scale);
+        const std::string name=std::string("zodiac-")+(side ? "around" : "below")+(sw==480 ? "" : "-90");
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto draw=[&](DeviceKeyMask pressed,DeviceStick stick) {
+            SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);
+            drawDeviceSidebar(renderer,p,sw,sh,scale,pressed,view,stick);
+            drawDeviceControls(renderer,p,sw,sh,scale,pressed,view,stick);
+            SDL_RenderPresent(renderer);
+        };
+        draw(0,{});
+        const auto magenta=[](SDL_Color c) {return c.r==255 && c.g==0 && c.b==255;};
+        assert(magenta(readPixel(surface,int((deviceScreenLeft(p,view)+sw/2)*scale),int(sh/2*scale))));
+        assert(!magenta(readPixel(surface,2,h-3)) && !magenta(readPixel(surface,w-3,side ? 2 : h-3)));
+        if(side) assert(!magenta(readPixel(surface,w-3,h-3)) && magenta(readPixel(surface,int((150+sw-1)*scale),2)));
+        if(const char* directory=std::getenv("FROND_ZODIAC_SCREENSHOT_DIR")) {
+            const std::string path=std::string(directory)+"/"+name+".png";
+            assert(IMG_SavePNG(surface,path.c_str())==0);
+        }
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];if(!deviceControlShown(b,view) || b.icon==DeviceControlIcon::stick)continue;
+            const auto r=deviceButtonRect(p,b,sw,sh,view);
+            const int cx=int((r.x+r.w*0.5f)*scale),cy=int((r.y+r.h*0.7f)*scale);
+            draw(0,{});const int up=brightness(readPixel(surface,cx,cy));
+            draw(deviceKeyBit(b.key),{});const int held=brightness(readPixel(surface,cx,cy));
+            assert(held<up);
+        }
+        const auto r=deviceStickRect(p,sw,sh,view);
+        const int kx=int((r.x+r.w*0.5f)*scale),ky=int((r.y+r.h*0.5f)*scale),off=int(r.w*0.42f*scale);
+        draw(0,{});const int rest=brightness(readPixel(surface,kx+off,ky)),centre=brightness(readPixel(surface,kx,ky+2));
+        draw(0,{1,0,true});const int pushed=brightness(readPixel(surface,kx+off,ky));
+        assert(pushed>rest+20);
+        draw(deviceKeyBit(keyIdStickPress),{0,0,true});assert(brightness(readPixel(surface,kx,ky+2))<centre);
+        if(const char* directory=std::getenv("FROND_ZODIAC_SCREENSHOT_DIR")) {
+            draw(deviceKeyBit(keyIdHard1)|deviceKeyBit(keyIdTriggerRight),{0.7f,-0.7f,true});
+            const std::string path=std::string(directory)+"/"+name+"-held.png";
+            assert(IMG_SavePNG(surface,path.c_str())==0);
+        }
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+    // A fitted renderer lays out each arrangement at its own shape.
+    for(auto [view,ww,wh,rotation]:{std::tuple{around,1560,800,Rotation::portrait_0},std::tuple{below,800,1560,Rotation::portrait_0},
+                                    std::tuple{around,1200,1000,Rotation::landscape_90},std::tuple{below,800,1280,Rotation::landscape_270},
+                                    std::tuple{below,1080,2400,Rotation::landscape_90}}) {
+        assert(deviceControlViewForWindow(p,{},ww,wh).arrangement==view.arrangement);
+        auto* win=SDL_CreateWindow("Zodiac",0,0,ww,wh,SDL_WINDOW_RESIZABLE);assert(win);
+        guest.frame.assign(480*320,0xffffffff);
+        SdlRenderer renderer(win,&guest,1,display,rotation,false,WindowFit::fit,0x0b0c11,view);
+        assert(renderer.Valid());renderer.Draw(true,deviceKeyBit(keyIdHard1),{0.5f,0,true});
+        const auto layout=renderer.Layout();
+        const int sw=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? 320 : 480,sh=800-sw;
+        const float aspect=float(deviceControlsWidth(p,sw,view))/(sh+deviceControlsHeight(p,sw,view));
+        assert(std::fabs(float(layout.width)/layout.height-aspect)<0.01f && (layout.width==ww || layout.height==wh));
+        SDL_DestroyWindow(win);
+    }
+}
+
 int main(int argc,char** argv) {
     SDL_setenv("SDL_VIDEODRIVER","dummy",1);assert(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_EVENTS)==0);
     if(argc==2 && std::strcmp(argv[1],"--tg50-visibility")==0) {
@@ -1366,6 +1892,9 @@ int main(int argc,char** argv) {
     }
     if(argc==2 && std::strcmp(argv[1],"--tg50-live-display")==0) {
         tg50LiveDisplay();SDL_Quit();puts("PASS: TG50 display command parsing and live view/fit changes with releases and hit areas");return 0;
+    }
+    if(argc==2 && std::strcmp(argv[1],"--zodiac")==0) {
+        zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, game controller, multi-touch, releases and pressed art");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
@@ -1398,5 +1927,6 @@ int main(int argc,char** argv) {
     lcdScaling();
     tg50RuntimeTab();
     tg50LiveDisplay();
-    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding");
+    zodiacControls();
+    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx and TG50 hit areas, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys");
 }

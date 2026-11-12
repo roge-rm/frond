@@ -1,0 +1,31 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -5211,10 +5211,11 @@
+ 
+ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
+     *lines = nullptr;
+-    if (cpu->model == ArmCpuModel::arm920t) {
++    if (cpu->model == ArmCpuModel::arm920t && cpu->jitBlocks) {
+         // ARM920T Fast blocks: a RAM page gets its jitCode bit, and a newly marked one loses its lean TLB
+         // entries (so the JIT's page table empties too), so every later store to it drops its code.
+-        if (!cpu->jitBlocks || !cpu->leanPage) return nullptr;
++        // The single-step JIT (no blocks) watches RAM lines like the other cores.
++        if (!cpu->leanPage) return nullptr;
+         bool ram = false;
+         uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
+         if (page && ram) {
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -374,9 +374,10 @@
+         const auto it = code.emplace(page, CodePage{pa, host, lines, access}).first;
+         accessPages[access]++;
+         stats.codePages++;
+-        if (arm920 && host) {
++        if (arm920 && !lineBound && host) {
+             // A newly watched RAM page may have dropped the lean TLB; empty the page table now, as code
+-            // can run straight on after this compile.
++            // can run straight on after this compile. The probe's single-step mode (lineBound) has no lean
++            // path, so its pages are watched by host page like the other cores'.
+             byPa[pa].push_back(page);
+             CheckGen();
+         } else if (host) {

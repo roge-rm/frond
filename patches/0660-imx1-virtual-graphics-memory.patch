@@ -1,0 +1,300 @@
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -3,6 +3,8 @@
+ 
+ #include "imx1_bootstrap.h"
+ #include "imx1_graphics_gpio.h"
++#include "imx1_graphics_windows.h"
++#include "imx1_graphics_lookup.h"
+ 
+ enum class Imx1GraphicsProfile { strict, virtual5744Compatible8MiB };
+ inline bool imx1GraphicsProfileValid(Imx1GraphicsProfile profile) {
+@@ -23,7 +25,12 @@
+         defaults = interfaceMode = 0;
+         interfaceControl = interfaceIo = readControl = writeControl = busTiming = memoryIo = 0;
+         gpio.reset();
++        windows.reset();
++        lookup.reset();
+     }
++    Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
++    bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && interfaceControl == 0x0c000000; }
++    const Imx1GraphicsWindows& memoryWindows() const { return windows; }
+     Imx1GraphicsGpio::Bank gpioBank(unsigned index) const { return gpio.bank(index); }
+     bool defaultsKnown() const { return programmed; }
+     uint8_t defaultsValue() const { return defaults; }
+@@ -31,6 +38,18 @@
+     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
+                               uint32_t size, bool write, uint32_t& value) {
+         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
++        if (virtualProfile() && Imx1GraphicsLookup::owns(address)) {
++            if (size != 4) return Imx1BootstrapAccess::width;
++            if (!programmed || !eim.configurationMatches(5, 0x3e00, 0x11111e01))
++                return Imx1BootstrapAccess::sequence;
++            return lookup.access(pc, address, size, write, value);
++        }
++        if (virtualProfile() && Imx1GraphicsWindows::owns(address)) {
++            if (size != 4) return Imx1BootstrapAccess::width;
++            if (!programmed || !eim.configurationMatches(5, 0x3e00, 0x11111e01))
++                return Imx1BootstrapAccess::sequence;
++            return windows.access(pc, address, size, write, value);
++        }
+         if (virtualProfile() && Imx1GraphicsGpio::owns(address)) {
+             if (size != 4) return Imx1BootstrapAccess::width;
+             if (!programmed || !eim.configurationMatches(5, 0x3e00, 0x11111e01))
+@@ -121,6 +140,8 @@
+     }
+     Imx1GraphicsProfile profile;
+     Imx1GraphicsGpio gpio;
++    Imx1GraphicsWindows windows;
++    Imx1GraphicsLookup lookup;
+     // These interface configuration words reset to zero in the virtual profile.
+     uint32_t interfaceControl = 0, interfaceIo = 0, readControl = 0, writeControl = 0, busTiming = 0, memoryIo = 0;
+     bool selected = false, programmed = false;
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1,6 +1,8 @@
+ #include "imx1_boot_probe.h"
+ 
+ #include <cstring>
++#include <memory>
++#include "imx1_graphics_memory.h"
+ #include <vector>
+ 
+ #include "CPU.h"
+@@ -13,7 +15,9 @@
+     explicit Probe(const Imx1ProbeOptions& config)
+         : options(config), peripherals(config.aspPx1HighFromReset, config.aspUSampleKnown, config.aspUSample), cs4Capture(config.cs4Port0Input),
+           cs5Reset(config.graphicsProfile == Imx1GraphicsProfile::strict ? config.cs5ResetStatusInput : 0),
+-          cs5Configuration(config.graphicsProfile) {}
++          cs5Configuration(config.graphicsProfile),
++          graphicsMemory(config.graphicsProfile == Imx1GraphicsProfile::virtual5744Compatible8MiB ?
++                         new Imx1GraphicsMemory() : nullptr) {}
+     std::vector<uint8_t> rom;
+     uint32_t alias;
+     Imx1ProbeResult result{};
+@@ -25,6 +29,7 @@
+     Imx1Cs4Capture cs4Capture;
+     Imx1Cs5Reset cs5Reset;
+     Imx1Cs5Configuration cs5Configuration;
++    std::unique_ptr<Imx1GraphicsMemory> graphicsMemory;
+     uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
+     bool irqRaised = false, fiqRaised = false;
+     void updateInterrupts() {
+@@ -108,7 +113,11 @@
+                                         address >= 0x16000000 && address < 0x17000000;
+         const bool diagnosticCs5Reset = diagnosticCs5 && address == 0x16000018;
+         const bool diagnosticCs5Configuration = diagnosticCs5 && !diagnosticCs5Reset;
+-        const auto status = diagnosticCs5Configuration ? p.cs5Configuration.access(p.peripherals.eimState(),
++        const bool graphicsMemoryAccess = diagnosticCs5Configuration && p.graphicsMemory &&
++                                          Imx1GraphicsMemory::owns(address);
++        const auto status = graphicsMemoryAccess ? p.graphicsMemory->access(p.cs5Configuration.memoryWindows(),
++            p.cs5Configuration.memoryInterfaceReady() && p.peripherals.eimState().configurationMatches(5, 0x3e00, 0x11111e01),
++            address, size, write, value) : diagnosticCs5Configuration ? p.cs5Configuration.access(p.peripherals.eimState(),
+             p.result.trace.pc, address, size, write, value) : diagnosticCs5Reset ? p.cs5Reset.access(p.peripherals.eimState(),
+             p.result.trace.pc, address, size, write, value) : diagnosticCs4 ? p.cs4Capture.access(p.peripherals.eimState(), address, size, write, value) :
+             p.options.bootstrapPeripherals ?
+diff --git a/src/uarm/uarm/imx1_graphics_windows.h b/src/uarm/uarm/imx1_graphics_windows.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_windows.h
+@@ -0,0 +1,55 @@
++#ifndef FROND_IMX1_GRAPHICS_WINDOWS_H
++#define FROND_IMX1_GRAPHICS_WINDOWS_H
++
++#include <array>
++#include "imx1_bootstrap.h"
++
++// Native 90003 ranges use 256-byte units; direct wrap bounds use halfwords.
++class Imx1GraphicsWindows {
++   public:
++    struct Range {
++        uint32_t first = 0, last = 0;
++        bool known = false;
++    };
++    static bool owns(uint32_t address) {
++        for (auto offset : offsets) if (address == 0x16010000 + offset) return true;
++        return false;
++    }
++    void reset() { words = {}; known = {}; }
++    Range internal() const { return range(0); }
++    Range external() const { return range(1); }
++    Range aperture1() const { return range(2); }
++    Range aperture2() const { return range(3); }
++    Range wrap() const {
++        return {words[4] << 1, (words[5] + 1) * 2 - 1, known[4] && known[5]};
++    }
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size,
++                              bool write, uint32_t& value) {
++        if (size != 4) return Imx1BootstrapAccess::width;
++        for (unsigned i = 0; i < offsets.size(); ++i) {
++            if (address != 0x16010000 + offsets[i]) continue;
++            if (pc != (write ? writePcs[i] : readPcs[i])) return Imx1BootstrapAccess::externalInput;
++            if (write) {
++                if (value != settings[i]) return Imx1BootstrapAccess::sideEffect;
++                words[i] = value;
++                known[i] = true;
++            } else {
++                if (!known[i]) return Imx1BootstrapAccess::sequence;
++                value = words[i];
++            }
++            return Imx1BootstrapAccess::ok;
++        }
++        return Imx1BootstrapAccess::unmapped;
++    }
++   private:
++    Range range(unsigned index) const {
++        return {(words[index] & 0xffff) << 8, ((words[index] >> 16) + 1) * 256 - 1, known[index]};
++    }
++    inline static constexpr std::array<uint32_t, 6> offsets{0x188, 0x190, 0x1bc, 0x1c0, 0x14, 0x10};
++    inline static constexpr std::array<uint32_t, 6> settings{0x15ff1000, 0xffff8000, 0x7fff4000, 0x203f2000, 0x40000, 0x5ffff};
++    inline static constexpr std::array<uint32_t, 6> writePcs{0x200c50f4, 0x200c5130, 0x200c5168, 0x200c51a0, 0x200c51d8, 0x200c51fc};
++    inline static constexpr std::array<uint32_t, 6> readPcs{0x200c50fc, 0x200c5138, 0x200c5170, 0x200c51a8, 0x200c51e4, 0x200c5204};
++    std::array<uint32_t, 6> words{};
++    std::array<bool, 6> known{};
++};
++#endif
+diff --git a/src/uarm/uarm/imx1_graphics_lookup.h b/src/uarm/uarm/imx1_graphics_lookup.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_lookup.h
+@@ -0,0 +1,61 @@
++#ifndef FROND_IMX1_GRAPHICS_LOOKUP_H
++#define FROND_IMX1_GRAPHICS_LOOKUP_H
++
++#include <array>
++#include "imx1_bootstrap.h"
++
++// Native initialization loads 256 pairs through two ordered data ports.
++class Imx1GraphicsLookup {
++   public:
++    struct Entry {
++        uint32_t first = 0, second = 0;
++        bool firstKnown = false, secondKnown = false;
++    };
++    static bool owns(uint32_t address) {
++        return address == 0x16010240 || address == 0x16010244 ||
++               address == 0x1601024c || address == 0x16010250;
++    }
++    void reset() { entries = {}; selected = indexed = secondPending = false; index = 0; }
++    Entry entry(unsigned slot) const { return slot < entries.size() ? entries[slot] : Entry{}; }
++    unsigned nextIndex() const { return index; }
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size,
++                              bool write, uint32_t& value) {
++        if (size != 4) return Imx1BootstrapAccess::width;
++        const uint32_t expectedPc = address == 0x16010240 ? 0x200baf54 :
++            address == 0x16010244 ? 0x200baf60 : address == 0x1601024c ? 0x200baf7c :
++            address == 0x16010250 ? 0x200baf88 : 0;
++        if (!expectedPc) return Imx1BootstrapAccess::unmapped;
++        if (!write || pc != expectedPc) return Imx1BootstrapAccess::externalInput;
++        if (address == 0x16010240) {
++            if (value != 0x401f0000) return Imx1BootstrapAccess::sideEffect;
++            selected = true;
++            indexed = secondPending = false;
++        } else if (address == 0x16010244) {
++            if (!selected) return Imx1BootstrapAccess::sequence;
++            if (value != 0) return Imx1BootstrapAccess::sideEffect;
++            index = 0;
++            indexed = true;
++            secondPending = false;
++        } else {
++            if (!indexed || index >= entries.size() ||
++                secondPending != (address == 0x16010250)) return Imx1BootstrapAccess::sequence;
++            auto& item = entries[index];
++            if (!secondPending) {
++                item.first = value;
++                item.firstKnown = true;
++                secondPending = true;
++            } else {
++                item.second = value;
++                item.secondKnown = true;
++                secondPending = false;
++                ++index;
++            }
++        }
++        return Imx1BootstrapAccess::ok;
++    }
++   private:
++    std::array<Entry, 256> entries{};
++    unsigned index = 0;
++    bool selected = false, indexed = false, secondPending = false;
++};
++#endif
+diff --git a/src/uarm/uarm/imx1_graphics_memory.h b/src/uarm/uarm/imx1_graphics_memory.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_memory.h
+@@ -0,0 +1,72 @@
++#ifndef FROND_IMX1_GRAPHICS_MEMORY_H
++#define FROND_IMX1_GRAPHICS_MEMORY_H
++
++#include <array>
++#include <vector>
++#include "imx1_graphics_windows.h"
++
++// Storage belongs to the probe, separately from transactional control state.
++class Imx1GraphicsMemory {
++   public:
++    static constexpr uint32_t internalBytes = 0x60000, externalBytes = 0x800000;
++    struct Dirty {
++        uint32_t first = 0, end = 0;
++        bool pending = false;
++    };
++    Imx1GraphicsMemory() : bytes{std::vector<uint8_t>(internalBytes), std::vector<uint8_t>(externalBytes)} {}
++    Imx1GraphicsMemory(const Imx1GraphicsMemory&) = delete;
++    Imx1GraphicsMemory& operator=(const Imx1GraphicsMemory&) = delete;
++    static bool owns(uint32_t address) {
++        return (address >= 0x16100000 && address < 0x16160000) ||
++               (address >= 0x16800000 && address < 0x17000000);
++    }
++    Dirty dirty(unsigned bank) const { return bank < changes.size() ? changes[bank] : Dirty{}; }
++    void clearDirty(unsigned bank) { if (bank < changes.size()) changes[bank] = {}; }
++    static bool cpuToGpu(uint32_t address, uint32_t& gpuAddress) {
++        if (!owns(address)) return false;
++        gpuAddress = address - 0x16000000;
++        return true;
++    }
++    static bool gpuToCpu(uint32_t address, uint32_t& cpuAddress) {
++        if (address > 0xffffff || !owns(0x16000000 + address)) return false;
++        cpuAddress = 0x16000000 + address;
++        return true;
++    }
++    Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, bool interfaceReady,
++                              uint32_t address, uint32_t size, bool write, uint32_t& value) {
++        uint32_t gpuAddress = 0;
++        if (!cpuToGpu(address, gpuAddress)) return Imx1BootstrapAccess::unmapped;
++        return accessGpu(windows, interfaceReady, gpuAddress, size, write, value);
++    }
++    Imx1BootstrapAccess accessGpu(const Imx1GraphicsWindows& windows, bool interfaceReady,
++                                 uint32_t gpuAddress, uint32_t size, bool write, uint32_t& value) {
++        uint32_t cpuAddress = 0;
++        if (!gpuToCpu(gpuAddress, cpuAddress)) return Imx1BootstrapAccess::unmapped;
++        if ((size != 1 && size != 2 && size != 4) || (gpuAddress & (size - 1)))
++            return Imx1BootstrapAccess::width;
++        if (!interfaceReady) return Imx1BootstrapAccess::sequence;
++        const unsigned bank = gpuAddress < 0x800000 ? 0 : 1;
++        const auto range = bank == 0 ? windows.internal() : windows.external();
++        if (!range.known || gpuAddress < range.first || uint64_t(gpuAddress) + size > uint64_t(range.last) + 1)
++            return Imx1BootstrapAccess::sequence;
++        const uint32_t offset = gpuAddress - range.first;
++        if (uint64_t(offset) + size > bytes[bank].size()) return Imx1BootstrapAccess::sequence;
++        if (write) {
++            for (uint32_t i = 0; i < size; ++i) bytes[bank][offset + i] = uint8_t(value >> (i * 8));
++            auto& change = changes[bank];
++            if (!change.pending) change = {offset, offset + size, true};
++            else {
++                if (offset < change.first) change.first = offset;
++                if (offset + size > change.end) change.end = offset + size;
++            }
++        } else {
++            value = 0;
++            for (uint32_t i = 0; i < size; ++i) value |= uint32_t(bytes[bank][offset + i]) << (i * 8);
++        }
++        return Imx1BootstrapAccess::ok;
++    }
++   private:
++    std::array<std::vector<uint8_t>, 2> bytes;
++    std::array<Dirty, 2> changes{};
++};
++#endif

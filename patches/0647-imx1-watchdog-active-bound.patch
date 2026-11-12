@@ -1,0 +1,318 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -28,6 +28,25 @@
+         p.result.i2cEvent = {p.result.trace.step, p.result.trace.pc, p.i2cIssueStep, p.i2cIssuePc,
+                              transfer, response, state.controlValue(), state.statusValue(), state.clockDivider()};
+         if (p.options.i2cObserver) p.options.i2cObserver(p.options.i2cContext, p.result.i2cEvent);
++    }
++
++    bool clockBoundary() {
++        const auto status = peripherals.clockStatus();
++        if (status == Imx1BootstrapAccess::ok) return false;
++        result.stop = Imx1ProbeStop::unsupportedPeripheral;
++        result.peripheralStatus = status;
++        if (peripherals.i2cState().clockStatus() != Imx1I2cAccess::ok) {
++            result.address = 0x00217010;
++            result.size = 4;
++            result.value = peripherals.i2cState().pendingTransfer().byte;
++        } else {
++            // Elapsed events carry no guest MMIO address and deliver no CPU exception.
++            result.address = result.size = result.value = 0;
++            result.possibleWatchdogTimeoutBoundary = status == Imx1BootstrapAccess::possibleWatchdogTimeout;
++            result.elapsedInterruptBoundary = !result.possibleWatchdogTimeoutBoundary;
++            if (result.elapsedInterruptBoundary) result.interruptPending = peripherals.interruptPending();
++        }
++        return true;
+     }
+ 
+     const uint8_t* resolve(uint32_t address, uint32_t size) const {
+@@ -272,7 +291,10 @@
+     uint32_t blNextPc = 0;
+     for (uint32_t step = 0; step < steps; ++step) {
+         // Conservative bus stall: jump to the reference event without retiring instructions.
+-        if (p->options.bootstrapPeripherals) p->peripherals.finishSystemPllBusStall();
++        if (p->options.bootstrapPeripherals) {
++            p->peripherals.finishSystemPllBusStall();
++            if (p->clockBoundary()) break;
++        }
+         auto& t = p->result.trace;
+         t = {step, cpuGetRegisters(p->cpu)[15], 0,
+              cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
+@@ -326,22 +348,7 @@
+         blNextPc = t.pc + 2;
+         if (p->options.bootstrapPeripherals) {
+             p->peripherals.advanceCpuCycles(cycles, cpuArm920ClockMode(p->cpu), p->options.assumeMpllSettled);
+-            const auto status = p->peripherals.clockStatus();
+-            if (status != Imx1BootstrapAccess::ok) {
+-                p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+-                p->result.peripheralStatus = status;
+-                if (p->peripherals.i2cState().clockStatus() != Imx1I2cAccess::ok) {
+-                    p->result.address = 0x00217010;
+-                    p->result.size = 4;
+-                    p->result.value = p->peripherals.i2cState().pendingTransfer().byte;
+-                } else {
+-                    // An elapsed interrupt request is not a guest MMIO transaction.
+-                    p->result.address = p->result.size = p->result.value = 0;
+-                    p->result.elapsedInterruptBoundary = true;
+-                    p->result.interruptPending = p->peripherals.interruptPending();
+-                }
+-                break;
+-            }
++            if (p->clockBoundary()) break;
+         }
+     }
+     std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -64,6 +64,7 @@
+     Imx1BootstrapAccess peripheralStatus;
+     Imx1ProbeI2cEvent i2cEvent{};
+     bool elapsedInterruptBoundary = false;
++    bool possibleWatchdogTimeoutBoundary = false;
+     Imx1AitcPending interruptPending{};
+ };
+ using Imx1ProbeObserver = void (*)(void*, const Imx1ProbeTrace&);
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -9,7 +9,7 @@
+     assert(cpuClockModeSupported(mode, assumeSettled));
+     if (mode != 3) {
+         const auto system = cgm.systemPllActiveRatio();
+-        rtc.advanceReference(uint64_t(cycles) * cgm.busDivider() * system.denominator, system.numerator);
++        advanceReference(uint64_t(cycles) * cgm.busDivider() * system.denominator, system.numerator);
+         advanceSystemOutput(uint64_t(cycles) * cgm.busDivider());
+         return;
+     }
+@@ -17,7 +17,7 @@
+     const auto mcu = cgm.mcuPllTargetRatio();
+     // A 32-bit charge times denominator (<= 16384) and PRESC (<= 2) fits uint64_t.
+     uint64_t units = uint64_t(cycles) * mcu.denominator * cgm.mcuPrescaler();
+-    rtc.advanceReference(units, mcu.numerator);
++    advanceReference(units, mcu.numerator);
+     if (const auto pending = cgm.systemRestartRemaining()) {
+         const auto elapsed = std::min(units, pending);
+         units -= elapsed;
+@@ -41,7 +41,7 @@
+ uint64_t Imx1Bootstrap::finishSystemPllBusStall() {
+     const auto pending = cgm.systemRestartRemaining();
+     if (pending) {
+-        rtc.advanceReference(pending, cgm.mcuPllTargetRatio().numerator);
++        advanceReference(pending, cgm.mcuPllTargetRatio().numerator);
+         cgm.advanceSystemRestart(pending);
+         systemPllPhase = 0;
+     }
+@@ -90,6 +90,7 @@
+ Imx1BootstrapAccess Imx1Bootstrap::clockStatus() const {
+     if (i2c.clockStatus() == Imx1I2cAccess::externalInput) return Imx1BootstrapAccess::externalInput;
+     if (i2c.clockStatus() != Imx1I2cAccess::ok) return Imx1BootstrapAccess::sideEffect;
++    if (watchdog.possibleTimeout()) return Imx1BootstrapAccess::possibleWatchdogTimeout;
+     return interruptGate(i2c, rtc, timer1, timer2);
+ }
+ 
+@@ -203,7 +204,7 @@
+         if (result == Imx1CgmAccess::ok && write) {
+             const auto referenceDenominator = cpuClockMode == 3 ?
+                 next.mcuPllTargetRatio().numerator : next.systemPllActiveRatio().numerator;
+-            if (!rtc.referenceRatioSupported(referenceDenominator)) return Imx1BootstrapAccess::sideEffect;
++            if (!referenceRatioSupported(referenceDenominator)) return Imx1BootstrapAccess::sideEffect;
+             if (cpuClockMode == 3 && !asynchronousRatioSupported(next.systemPllTargetRatio()))
+                 return Imx1BootstrapAccess::sideEffect;
+             const bool changed = next.busDivider() != cgm.busDivider() ||
+@@ -239,6 +240,8 @@
+             case Imx1RtcAccess::ok: break;
+         }
+         if (write) {
++            // RTC writes have no qualified CLK2HZ phase behaviour while the watchdog runs.
++            if (watchdog.enabled()) return Imx1BootstrapAccess::sideEffect;
+             const auto gate = interruptGate(i2c, next, timer1, timer2);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+         }
+@@ -270,13 +273,22 @@
+         }
+     }
+     if (Imx1Watchdog::registerName(address)) {
+-        switch (watchdog.access(address, size, write, value)) {
++        auto next = watchdog;
++        uint32_t preview = value;
++        const auto result = next.access(address, size, write, preview);
++        if (result == Imx1WatchdogAccess::ok) {
++            if (next.enabled() && !rtc.watchdogClockBoundSupported()) return Imx1BootstrapAccess::sideEffect;
++            watchdog = next;
++            value = preview;
++        }
++        switch (result) {
+             case Imx1WatchdogAccess::ok: return Imx1BootstrapAccess::ok;
+             case Imx1WatchdogAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+             case Imx1WatchdogAccess::width: return Imx1BootstrapAccess::width;
+             case Imx1WatchdogAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
+             case Imx1WatchdogAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
+             case Imx1WatchdogAccess::resetRequest: return Imx1BootstrapAccess::resetRequest;
++            case Imx1WatchdogAccess::possibleTimeout: return Imx1BootstrapAccess::possibleWatchdogTimeout;
+         }
+     }
+     if (Imx1Pwm::registerName(address)) {
+@@ -445,6 +457,7 @@
+         case Imx1BootstrapAccess::reservedBits: return "reserved-bits";
+         case Imx1BootstrapAccess::sideEffect: return "unsupported-side-effect";
+         case Imx1BootstrapAccess::resetRequest: return "unsupported-reset-request";
++        case Imx1BootstrapAccess::possibleWatchdogTimeout: return "possible-watchdog-timeout";
+         case Imx1BootstrapAccess::externalInput: return "external-input-unavailable";
+         case Imx1BootstrapAccess::memoryUnavailable: return "external-memory-unavailable";
+         case Imx1BootstrapAccess::sequence: return "unsupported-sdram-sequence";
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -16,7 +16,7 @@
+ #include "imx1_watchdog.h"
+ #include "imx1_rtc.h"
+ 
+-enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest };
++enum class Imx1BootstrapAccess { ok, command, unmapped, width, reservedBits, sideEffect, externalInput, memoryUnavailable, sequence, resetRequest, possibleWatchdogTimeout };
+ 
+ // Startup memory/register subset. External pin samples require an explicit input source.
+ class Imx1Bootstrap {
+@@ -38,10 +38,10 @@
+     void advanceFastBusCycles(uint32_t cycles) { advanceCpuCycles(cycles, 0, false); }
+     bool cpuClockModeSupported(uint32_t mode, bool assumeSettled) const {
+         if (mode == 0) return !cgm.systemRestartRemaining() &&
+-            rtc.referenceRatioSupported(cgm.systemPllActiveRatio().numerator);
++            referenceRatioSupported(cgm.systemPllActiveRatio().numerator);
+         if (mode != 3 || !cgm.mcuClockReady(assumeSettled)) return false;
+         return asynchronousRatioSupported(cgm.systemPllActiveRatio()) &&
+-            rtc.referenceRatioSupported(cgm.mcuPllTargetRatio().numerator);
++            referenceRatioSupported(cgm.mcuPllTargetRatio().numerator);
+     }
+     bool asynchronousRatioSupported(Imx1PllRatio system) const {
+         const auto pll = cgm.mcuPllTargetRatio();
+@@ -65,6 +65,13 @@
+     }
+ 
+    private:
++    bool referenceRatioSupported(uint64_t denominator) const {
++        return rtc.referenceRatioSupported(denominator) && watchdog.referenceRatioSupported(denominator);
++    }
++    void advanceReference(uint64_t numerator, uint64_t denominator) {
++        rtc.advanceReference(numerator, denominator);
++        watchdog.advanceReference(numerator, denominator);
++    }
+     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+                             const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+--- a/src/uarm/uarm/imx1_rtc.h
++++ b/src/uarm/uarm/imx1_rtc.h
+@@ -18,6 +18,8 @@
+     void advanceReference(uint64_t numerator, uint64_t denominator);
+     static constexpr uint64_t interruptSources = (uint64_t(1) << 17) | (uint64_t(1) << 18);
+     uint64_t assertedInterrupts() const;
++    // The normal watchdog input is absent or at most CLK32 / 16384 in this subset.
++    bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
+ 
+    private:
+     bool known = false, used = false, elapsed = false;
+--- a/src/uarm/uarm/imx1_watchdog.cpp
++++ b/src/uarm/uarm/imx1_watchdog.cpp
+@@ -1,4 +1,34 @@
+ #include "imx1_watchdog.h"
++
++#include <cassert>
++#include <limits>
++#include <numeric>
++
++bool Imx1Watchdog::referenceRatioSupported(uint64_t denominator) const {
++    if (!denominator) return false;
++    if (!enabled() || uncertain) return true;
++    const auto factor = denominator / std::gcd(denominator, referenceDenominator);
++    return factor <= (std::numeric_limits<uint64_t>::max() / 2) / referenceDenominator;
++}
++void Imx1Watchdog::reloadBound() {
++    // Unknown CLK2HZ phase permits one immediate edge. WT edges can reach zero.
++    // Using WT also covers the manual's longer (WT + 1) half-second range.
++    remainingTicks = ((control >> 8) - 1) * uint64_t(16384);
++    referencePhase = 0;
++    referenceDenominator = 1;
++}
++void Imx1Watchdog::advanceReference(uint64_t numerator, uint64_t denominator) {
++    assert(referenceRatioSupported(denominator));
++    if (!enabled() || uncertain || !numerator) return;
++    const auto common = referenceDenominator * (denominator / std::gcd(denominator, referenceDenominator));
++    const auto fraction = referencePhase * (common / referenceDenominator) +
++                          (numerator % denominator) * (common / denominator);
++    referencePhase = fraction % common;
++    referenceDenominator = common;
++    const auto ticks = numerator / denominator + fraction / common;
++    if (ticks >= remainingTicks) uncertain = true;
++    else remainingTicks -= ticks;
++}
+ 
+ const char* Imx1Watchdog::registerName(uint32_t address) {
+     switch (address & ~3u) {
+@@ -12,6 +42,7 @@
+ Imx1WatchdogAccess Imx1Watchdog::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
+     if (!registerName(address)) return Imx1WatchdogAccess::unmapped;
+     if (size != 4 || (address & 3)) return Imx1WatchdogAccess::width;
++    if (uncertain) return Imx1WatchdogAccess::possibleTimeout;
+     if (!write) {
+         switch (address) {
+             case 0x00201000: value = control; break;
+@@ -23,17 +54,29 @@
+     if (address == 0x00201008) return Imx1WatchdogAccess::sideEffect;
+     if (address == 0x00201004) {
+         if (value & 0xffff0000) return Imx1WatchdogAccess::reservedBits;
+-        // Disabled service writes retain the register without starting the counter.
++        if (enabled() && serviceArmed && value == 0xaaaa) reloadBound();
++        // Repeated prefixes conservatively invalidate the sequence until another value.
++        if (enabled() && value == 0x5555) {
++            serviceRepeated = serviceArmed || serviceRepeated;
++            serviceArmed = !serviceRepeated;
++        } else serviceArmed = serviceRepeated = false;
+         service = value;
+         return Imx1WatchdogAccess::ok;
+     }
+     if (value & ~0xff1fu) return Imx1WatchdogAccess::reservedBits;
+     // WDEC controls WDE write access. A write-once WDE retains its previous value.
+     const uint32_t next = (value & 2) || !enableWritten ? value : (value & ~1u) | (control & 1);
+-    // SWR requests a module reset; WDE starts the RTC-clocked counter.
+     if (next & 4) return Imx1WatchdogAccess::resetRequest;
+-    if (next & 1) return Imx1WatchdogAccess::sideEffect;
++    if (next & 1) {
++        // WT must be programmed before enable. Active retiming, halt and IRQ mode are guarded.
++        if ((next & 0x8018) || (next >> 8) < 2 || !enableWritten ||
++            ((next ^ control) & 0x7f00)) return Imx1WatchdogAccess::sideEffect;
++    }
++    const bool starting = (next & 1) && !enabled();
++    const bool stopping = !(next & 1) && enabled();
+     control = next;
++    if (starting) reloadBound();
++    if (starting || stopping) serviceArmed = serviceRepeated = false;
+     enableWritten = true;
+     return Imx1WatchdogAccess::ok;
+ }
+--- a/src/uarm/uarm/imx1_watchdog.h
++++ b/src/uarm/uarm/imx1_watchdog.h
+@@ -3,18 +3,24 @@
+ 
+ #include <cstdint>
+ 
+-enum class Imx1WatchdogAccess { ok, unmapped, width, reservedBits, sideEffect, resetRequest };
++enum class Imx1WatchdogAccess { ok, unmapped, width, reservedBits, sideEffect, resetRequest, possibleTimeout };
+ 
+-// MC9328MX1RM chapter 14. Cold-reset disabled state; active counting is guarded.
++// MC9328MX1RM chapter 14. Cold reset and a conservative interval before any possible normal-clock timeout.
+ class Imx1Watchdog {
+    public:
+     Imx1WatchdogAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
++    bool enabled() const { return control & 1; }
++    bool possibleTimeout() const { return uncertain; }
++    bool referenceRatioSupported(uint64_t denominator) const;
++    void advanceReference(uint64_t numerator, uint64_t denominator);
+     static const char* registerName(uint32_t address);
+     static constexpr uint64_t interruptSource = uint64_t(1) << 63;
+ 
+    private:
+     uint32_t control = 0, service = 0;
+-    bool enableWritten = false;
++    bool enableWritten = false, serviceArmed = false, serviceRepeated = false, uncertain = false;
++    uint64_t remainingTicks = 0, referencePhase = 0, referenceDenominator = 1;
++    void reloadBound();
+ };
+ 
+ #endif

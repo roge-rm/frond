@@ -1,0 +1,288 @@
+--- a/src/uarm/uarm/imx1_asp.cpp
++++ b/src/uarm/uarm/imx1_asp.cpp
+@@ -21,19 +21,23 @@
+     uint32_t mask = 0;
+     switch (address) {
+         case 0x00215000:
+-            // Empty FIFO reads and software sample injection have no qualified semantics.
+-            return Imx1AspAccess::sideEffect;
++            if (write || !count) return Imx1AspAccess::sideEffect;
++            value = fifo[readPointer];
++            readPointer = (readPointer + 1) % fifo.size();
++            --count;
++            return Imx1AspAccess::ok;
+         case 0x00215010: reg = &control; mask = 0x0eb0fff3; break;
+         case 0x00215014: reg = &sampleRate; mask = 0x7fff; break;
+         case 0x00215018: reg = &interrupts; mask = 0x473; break;
+         case 0x0021501c:
+-            // W1C PUIS/POV/PEN; PFF/PDR describe the empty FIFO and remain clear.
+-            if (!write) value = 0;
++            // W1C PUIS/PEN remain clear in the fixed inactive detector scenario.
++            if (write) { if (value & 0x80) overflow = false; }
++            else value = (overflow ? 0x80u : 0) | (count == 12 ? 2u : 0) | (count ? 1u : 0);
+             return Imx1AspAccess::ok;
+         case 0x0021502c: reg = &divider; mask = 0x1f; break;
+         case 0x00215030: reg = &compare; mask = 0xfffff; break;
+         case 0x00215034:
+-            if (!write) value = 0;
++            if (!write) value = (readPointer << 4) | writePointer;
+             return Imx1AspAccess::ok;
+     }
+     if (!write) { value = *reg; return Imx1AspAccess::ok; }
+@@ -42,20 +46,64 @@
+     if (address == 0x00215010) {
+         if (written & (1u << 23)) {
+             // Table 15-7 specifies complete reset and self-clear, without a cycle count.
+-            *this = Imx1Asp(px1HighFromReset);
++            *this = Imx1Asp(px1HighFromReset, uSampleKnown, uSample);
+             return Imx1AspAccess::ok;
+         }
+         // PADE must be set after the other control fields (table 15-7).
+         if (!(control & 2) && (written & 2) && ((control ^ written) & ~2u))
+             return Imx1AspAccess::sideEffect;
+-        if (samplingRequested(written, divider)) return Imx1AspAccess::externalInput;
++        if (samplingRequested(written, divider) && !qualifiedU(written, sampleRate))
++            return Imx1AspAccess::externalInput;
++        // An admitted manual conversion retains its input and configuration until completion.
++        if ((control & 2) && (written & 2) && ((written ^ control) & ~(1u << 25)) &&
++            (remaining || (written & 0x3000)))
++            return Imx1AspAccess::sideEffect;
+     }
+-    if (address == 0x0021502c && samplingRequested(control, written)) return Imx1AspAccess::externalInput;
++    if (address == 0x00215014 && remaining && written != sampleRate) return Imx1AspAccess::sideEffect;
++    if (address == 0x0021502c) {
++        if (samplingRequested(control, written) && !qualifiedU(control, sampleRate))
++            return Imx1AspAccess::externalInput;
++        if (remaining && written != divider) return Imx1AspAccess::sideEffect;
++    }
+     // Only held-high, active-low level detection proves no pending event.
+     // Edge seeding and asserted-level timing are outside this subset.
+     if (address == 0x00215018 && (written & 0x10) && !inactivePenDetection(written))
+         return Imx1AspAccess::externalInput;
+-    // INT is W1C, the comparison event cannot occur without a sample.
+-    *reg = address == 0x00215030 ? written & ~0x80000u : written;
++    if (address == 0x00215010) {
++        if (!(written & 2)) {
++            remaining = phase = count = readPointer = writePointer = 0;
++            armed = false;
++        } else if (!(control & 2)) armed = true;
++    }
++    // INT is W1C; rewriting comparison settings does not clear a latched event.
++    *reg = address == 0x00215030 ? (written & ~0x80000u) | ((compare & ~written) & 0x80000u) : written;
++    if (armed && samplingRequested(control, divider)) {
++        // One conversion uses DSCNT setup periods plus DMCNT+1 filter periods (15.4.2).
++        remaining = 1260u * ((sampleRate & 15) + ((sampleRate >> 12) & 7) + 1);
++        phase = 0;
++        armed = false;
++    }
+     return Imx1AspAccess::ok;
+ }
++
++void Imx1Asp::advance(uint64_t hclkCycles) {
++    const auto divide = clockDivider();
++    if (!remaining || !divide) return;
++    const uint64_t clocks = hclkCycles / divide + (hclkCycles % divide + phase) / divide;
++    phase = (hclkCycles % divide + phase) % divide;
++    if (clocks < remaining) { remaining -= clocks; return; }
++    remaining = phase = 0;
++    complete();
++}
++
++void Imx1Asp::complete() {
++    if (count == fifo.size()) {
++        overflow = true;
++        readPointer = (readPointer + 1) % fifo.size();
++    } else ++count;
++    fifo[writePointer] = uSample;
++    writePointer = (writePointer + 1) % fifo.size();
++    const auto threshold = compare & 0xffff;
++    if ((compare & 0x30000) == 0x30000 &&
++        ((compare & 0x40000) ? uSample > threshold : uSample < threshold)) compare |= 0x80000;
++}
+--- a/src/uarm/uarm/imx1_asp.h
++++ b/src/uarm/uarm/imx1_asp.h
+@@ -2,13 +2,17 @@
+ #define FROND_IMX1_ASP_H
+ 
+ #include <cstdint>
++#include <array>
+ 
+ enum class Imx1AspAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
+ 
+-// MC9328MX1RM chapter 15. Configuration and explicit idle PX1 input, without analogue samples.
++// MC9328MX1RM chapter 15. Fixed PX1 and explicit post-filter manual U stimulus.
+ class Imx1Asp {
+    public:
+-    explicit Imx1Asp(bool px1HighFromReset = false) : px1HighFromReset(px1HighFromReset) {}
++    explicit Imx1Asp(bool px1HighFromReset = false, bool uSampleKnown = false, uint16_t uSample = 0)
++        : px1HighFromReset(px1HighFromReset), uSampleKnown(uSampleKnown), uSample(uSample) {}
++    void advance(uint64_t hclkCycles);
++    bool converting() const { return remaining != 0; }
+     Imx1AspAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
+     static constexpr uint64_t interruptSources = (uint64_t(1) << 5) | (uint64_t(1) << 9) |
+@@ -17,13 +21,30 @@
+     uint64_t inactiveInterrupts() const {
+         uint64_t known = interruptSources & ~(uint64_t(1) << 46);
+         if (!(interrupts & 0x10) || inactivePenDetection(interrupts)) known |= uint64_t(1) << 46;
+-        return known;
++        return known & ~assertedInterrupts();
++    }
++    uint64_t assertedInterrupts() const {
++        uint64_t requests = 0;
++        if ((compare & 0x30000) && (compare & 0x80000)) requests |= uint64_t(1) << 9;
++        if ((count && (interrupts & 1)) || (count == 12 && (interrupts & 2))) requests |= uint64_t(1) << 33;
++        return requests;
+     }
+     unsigned clockDivider() const { return (control & (1u << 25)) && divider ? divider + 1 : 0; }
+ 
+    private:
+     // Fixed before reset; software reset does not change the external input.
+-    bool px1HighFromReset;
++    bool px1HighFromReset, uSampleKnown;
++    uint16_t uSample;
++    std::array<uint16_t, 12> fifo{};
++    unsigned readPointer = 0, writePointer = 0, count = 0;
++    bool overflow = false, armed = false;
++    uint32_t remaining = 0;
++    unsigned phase = 0;
++    bool qualifiedU(uint32_t nextControl, uint32_t nextRate) const {
++        return uSampleKnown && (nextControl & 0x3001) == 0x3001 &&
++               !(nextControl & ((1u << 21) | (1u << 14))) && (nextRate & 0xc00) == 0x800;
++    }
++    void complete();
+     bool inactivePenDetection(uint32_t nextInterrupts) const {
+         return px1HighFromReset && !(nextInterrupts & 0x60);
+     }
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -11,7 +11,7 @@
+ namespace {
+ struct Probe {
+     explicit Probe(const Imx1ProbeOptions& config)
+-        : options(config), peripherals(config.aspPx1HighFromReset), cs4Capture(config.cs4Port0Input),
++        : options(config), peripherals(config.aspPx1HighFromReset, config.aspUSampleKnown, config.aspUSample), cs4Capture(config.cs4Port0Input),
+           cs5Reset(config.cs5ResetStatusInput) {}
+     std::vector<uint8_t> rom;
+     uint32_t alias;
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -51,6 +51,8 @@
+     Imx1ProbeCs4Observer cs4Observer = nullptr;
+     void* cs4Context = nullptr;
+     bool aspPx1HighFromReset = false;
++    bool aspUSampleKnown = false;
++    uint16_t aspUSample = 0;
+     bool assumeI2cSingleMaster = false;
+     Imx1I2cBus* i2cBus = nullptr;
+     Imx1ProbeI2cObserver i2cObserver = nullptr;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -53,6 +53,7 @@
+     const uint64_t busClocks = systemClocks + bclkPhase;
+     i2c.advance(busClocks / cgm.busDivider());
+     pwm.advance(busClocks / cgm.busDivider());
++    asp.advance(busClocks / cgm.busDivider());
+     bclkPhase = busClocks % cgm.busDivider();
+     const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+@@ -62,11 +63,11 @@
+ }
+ 
+ void Imx1Bootstrap::setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+-                                        const Imx1Timer& first, const Imx1Timer& second) const {
++                                        const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog) const {
+     constexpr unsigned sources[] = {11, 12, 13, 62};
+-    uint64_t known = (uint64_t(1) << 39) | asp.inactiveInterrupts() | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources | Imx1Watchdog::interruptSource |
++    uint64_t known = (uint64_t(1) << 39) | (analog.inactiveInterrupts() | analog.assertedInterrupts()) | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources | Imx1Watchdog::interruptSource |
+                      (uint64_t(1) << 59) | (uint64_t(1) << 58);
+-    uint64_t asserted = (state.interruptOutput() ? uint64_t(1) << 39 : 0) | clock.assertedInterrupts() |
++    uint64_t asserted = analog.assertedInterrupts() | (state.interruptOutput() ? uint64_t(1) << 39 : 0) | clock.assertedInterrupts() |
+                         (first.interruptOutput() ? uint64_t(1) << 59 : 0) |
+                         (second.interruptOutput() ? uint64_t(1) << 58 : 0);
+     for (unsigned port = 0; port < 4; ++port) {
+@@ -80,7 +81,7 @@
+ Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                                         const Imx1Timer& first, const Imx1Timer& second) const {
+     auto next = aitc;
+-    setInterruptInputs(next, state, clock, first, second);
++    setInterruptInputs(next, state, clock, first, second, asp);
+     return interruptGate(next);
+ }
+ Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1Aitc& controller) const {
+@@ -92,7 +93,7 @@
+ }
+ Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
+     auto current = aitc;
+-    setInterruptInputs(current, i2c, rtc, timer1, timer2);
++    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp);
+     return {current.irq(), current.fiq()};
+ }
+ 
+@@ -105,7 +106,7 @@
+ 
+ Imx1AitcPending Imx1Bootstrap::interruptPending() const {
+     auto current = aitc;
+-    setInterruptInputs(current, i2c, rtc, timer1, timer2);
++    setInterruptInputs(current, i2c, rtc, timer1, timer2, asp);
+     return current.pendingState();
+ }
+ 
+@@ -193,7 +194,7 @@
+         return sdramAccess((address - 0x08000000) >> 26, address & 0x03ffffff, size, write, value);
+     if (Imx1Aitc::registerName(address)) {
+         auto next = aitc;
+-        setInterruptInputs(next, i2c, rtc, timer1, timer2);
++        setInterruptInputs(next, i2c, rtc, timer1, timer2, asp);
+         const auto status = next.access(address, size, write, value);
+         switch (status) {
+             case Imx1AitcAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+@@ -232,6 +233,7 @@
+             if (cpuClockMode == 3 && peripheralChanged) return Imx1BootstrapAccess::sideEffect;
+             if ((peripheralChanged || (busChanged && cpuClockMode != 3)) &&
+                 (timer1.enabled() || timer2.enabled())) return Imx1BootstrapAccess::sideEffect;
++            if (busChanged && asp.converting()) return Imx1BootstrapAccess::sideEffect;
+             if (busChanged && pwm.resetting()) return Imx1BootstrapAccess::sideEffect;
+             if (busChanged && i2c.active()) return Imx1BootstrapAccess::sideEffect;
+             // Idle BCLK divider changes start a functional phase at the write boundary.
+@@ -323,7 +325,18 @@
+         }
+     }
+     if (Imx1Asp::registerName(address)) {
+-        switch (asp.access(address, size, write, value)) {
++        auto next = asp;
++        uint32_t preview = value;
++        const auto status = next.access(address, size, write, preview);
++        if (status == Imx1AspAccess::ok) {
++            auto controller = aitc;
++            setInterruptInputs(controller, i2c, rtc, timer1, timer2, next);
++            const auto gate = interruptGate(controller);
++            if (gate != Imx1BootstrapAccess::ok) return gate;
++            asp = next;
++            value = preview;
++        }
++        switch (status) {
+             case Imx1AspAccess::ok: return Imx1BootstrapAccess::ok;
+             case Imx1AspAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+             case Imx1AspAccess::width: return Imx1BootstrapAccess::width;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -21,7 +21,8 @@
+ // Startup memory/register subset. External pin samples require an explicit input source.
+ class Imx1Bootstrap {
+    public:
+-    explicit Imx1Bootstrap(bool aspPx1HighFromReset = false) : asp(aspPx1HighFromReset) {}
++    explicit Imx1Bootstrap(bool aspPx1HighFromReset = false, bool aspUSampleKnown = false, uint16_t aspUSample = 0)
++        : asp(aspPx1HighFromReset, aspUSampleKnown, aspUSample) {}
+     bool setRtcInitialTime(Imx1RtcTime time) { return rtc.initialise(time); }
+     void setI2cScenario(bool enabled) { i2c.setSingleMasterScenario(enabled); }
+     void setI2cBus(Imx1I2cBus* bus) { i2c.setBus(bus); }
+@@ -80,7 +81,7 @@
+         watchdog.advanceReference(numerator, denominator);
+     }
+     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+-                            const Imx1Timer& first, const Imx1Timer& second) const;
++                            const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog) const;
+     Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                             const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1BootstrapAccess interruptGate(const Imx1Aitc& controller) const;

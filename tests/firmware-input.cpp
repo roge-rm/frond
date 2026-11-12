@@ -51,6 +51,36 @@ static void rom68k(QFile& rom, qint64 size, quint16 version, quint16 flags = 0x0
 class FirmwareInputTest : public QObject {
     Q_OBJECT
  private slots:
+    void zodiac() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto path = dir.filePath("synthetic-zodiac");
+        QFile nor(path);
+        QVERIFY(nor.open(QIODevice::ReadWrite));
+        zireNor(nor, 8192000, 0x4d583161, 0, 0x20000, 8192000 - 0x20000);
+        const char company[] = {0x76, 0x77, 0x70, 0x54};
+        for (qint64 at : {qint64(0x80), qint64(0x20080)}) {
+            QVERIFY(nor.seek(at));
+            QCOMPARE(nor.write(company, 4), qint64(4));
+        }
+        nor.flush();
+        // Detected and taken as itself, with no NAND, and never as another device.
+        const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
+        QVERIFY(zodiac != Device::automatic);
+        QCOMPARE(frondFirmware::detectDevice(path), zodiac);
+        for (Device selected : {Device::automatic, zodiac}) {
+            Device resolved = Device::automatic;
+            QCOMPARE(frondFirmware::validateFiles(selected, path, {}, &resolved), QString());
+            QCOMPARE(resolved, zodiac);
+        }
+        for (Device selected : {Device::tx, Device::e2})
+            QCOMPARE(frondFirmware::validateFiles(selected, path, {}),
+                     QStringLiteral("This is a Tapwave Zodiac 2 NOR image. Choose Tapwave Zodiac 2."));
+        QVERIFY(!frondFirmware::validateFiles(Device::zire72, path, {}).isEmpty());
+        QCOMPARE(frondFirmware::validateFiles(zodiac, path, path), QStringLiteral("This device has no NAND. Leave the NAND image empty."));
+        // No guest calls yet, so no install, application list, hard reset or engine choice.
+        QVERIFY(!frondFirmware::guestServices(zodiac) && frondFirmware::guestServices(Device::tx) && !frondFirmware::runs68k(zodiac));
+    }
     void txFiles() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

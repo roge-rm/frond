@@ -1,0 +1,296 @@
+#include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <iterator>
+#include <numeric>
+#include "imx1_graphics_clocks.h"
+using A = Imx1BootstrapAccess;
+static void put(Imx1GraphicsClocks& c, uint32_t pc, uint32_t off, uint32_t v) {
+    assert(c.access(pc,0x16010000+off,4,true,v) == A::ok);
+}
+static uint32_t sample(Imx1GraphicsClocks& c) {
+    uint32_t v = 0xdeadbeef;
+    assert(c.access(0x200c588c,0x16010094,4,false,v) == A::ok);
+    return v;
+}
+static void begin(Imx1GraphicsClocks& c, uint32_t selector = 1) {
+    put(c,0x200c5824,0x94,selector|0x200);
+    assert((sample(c)>>16) == 0);
+    put(c,0x200c5850,0x94,selector);
+    put(c,0x200c587c,0x94,selector|0x100);
+}
+static void advance(Imx1GraphicsClocks& c, uint64_t n) {
+    while (n) { auto step = n; if (c.nextEvent()) step = std::min(step,c.nextEvent()); c.advance(step); n -= step; }
+}
+// imx1Gcd against std::gcd: zero, equal, one dividing the other both ways, and unrelated values.
+static void gcdMatches() {
+    const uint64_t values[] = {0, 1, 2, 3, 4, 6, 15, 16, 32768, 65536, 200000000, 16000000, 800000000, 3200000000ull,
+                               12800000000ull, 1ull << 40, (1ull << 63) - 25, ~0ull, 0x8000000000000000ull};
+    unsigned checked = 0;
+    for (uint64_t a : values)
+        for (uint64_t b : values)
+            for (uint64_t k : {uint64_t(1), uint64_t(3), uint64_t(5)}) {
+                const uint64_t x = a, y = b / k * k;
+                if (imx1Gcd(x, y) != std::gcd(x, y) || imx1Gcd(y, x) != std::gcd(y, x)) {
+                    std::fprintf(stderr, "FAIL: gcd(%llu, %llu): %llu, std::gcd %llu\n", (unsigned long long)x, (unsigned long long)y,
+                                (unsigned long long)imx1Gcd(x, y), (unsigned long long)std::gcd(x, y));
+                    std::abort();
+                }
+                checked += 2;
+            }
+    uint64_t r = 88172645463325252ull;
+    for (unsigned i = 0; i < 100000; ++i) {
+        r ^= r << 13; r ^= r >> 7; r ^= r << 17;
+        const uint64_t x = (r >> (i % 40)) | 1, y = i & 1 ? x * (i % 7 + 1) : r >> (i % 23);
+        if (imx1Gcd(x, y) != std::gcd(x, y) || imx1Gcd(y, x) != std::gcd(y, x)) {
+            std::fprintf(stderr, "FAIL: gcd(%llu, %llu) differs\n", (unsigned long long)x, (unsigned long long)y);
+            std::abort();
+        }
+        checked += 2;
+    }
+    std::printf("imx1Gcd matches std::gcd for %u pairs\n", checked);
+}
+int main() {
+    gcdMatches();
+    Imx1GraphicsClocks c;
+    put(c,0x200c45e4,0x80,0x3f);
+    for (auto op : {std::array<uint32_t,3>{0x200c4e24,0xa4,0x1100020},
+            {0x200c4f9c,0xa8,0x4b000200},{0x200c501c,0xac,2},{0x200c5060,0xb0,0x7f}}) {
+        put(c,op[0],op[1],op[2]);
+        auto bad=op[2]^0x40000;
+        assert(c.access(op[0],0x16010000+op[1],4,true,bad)==A::sideEffect && c.word(op[1])==op[2]);
+    }
+    for (auto op : {std::array<uint32_t,3>{0x200c637c,0xa4,0x1100020},
+            {0x200c6350,0xa8,0x4b000200},{0x200c632c,0xac,2}}) {
+        uint32_t value=0;
+        assert(c.access(op[0],0x16010000+op[1],4,false,value)==A::ok && value==op[2]);
+        assert(c.access(0,0x16010000+op[1],4,false,value)==A::externalInput);
+    }
+    put(c,0x200c49ac,0x84,0x80100603);
+    // DAC voltage, gain, current offset and range change the free-running VCO.
+    uint64_t last = 0;
+    for (uint32_t gain = 0; gain < 8; ++gain) {
+        put(c,0x200c5930,0x88,0x4bd00240|(gain<<10));
+        assert(c.pllRate().numerator > last); last=c.pllRate().numerator;
+    }
+    put(c,0x200c5930,0x88,0x4b700240);
+    const auto low = c.pllRate().numerator;
+    put(c,0x200c5930,0x88,0x4ba00240);
+    const auto mid = c.pllRate().numerator;
+    put(c,0x200c5930,0x88,0x4bd00240);
+    const auto high = c.pllRate().numerator;
+    assert(low < mid && mid < high);
+    put(c,0x200c5930,0x88,0x4bd04240); assert(c.pllRate().numerator > high);
+    put(c,0x200c5930,0x88,0x4bd02240); assert(c.pllRate().numerator < high*c.pllRate().denominator);
+    put(c,0x200c5930,0x88,0x4bd00240);
+    begin(c);
+    advance(c,2000); // 10us, 33.6MHz / 4.
+    assert(sample(c)>>16 == 84);
+    auto partitioned = c;
+    advance(c,4000);
+    for (int i=0;i<4000;++i) advance(partitioned,1);
+    assert(sample(c) == sample(partitioned));
+    for (int i=0;i<1000;++i) assert(sample(c) == sample(partitioned));
+    put(c,0x200c58c4,0x94,sample(c)&~0x100u);
+    const auto stopped = sample(c); advance(c,1000); assert(sample(c)==stopped);
+    put(c,0x200c587c,0x94,0xffff0101); assert(sample(c)==(stopped|0x100));
+    advance(c,2000000);
+    const auto completed = sample(c);
+    advance(c,2000000); assert(sample(c) == completed);
+    put(c,0x200c5824,0x94,0xffff0301); assert(sample(c)==0x301);
+    advance(c,2000); assert(sample(c)==0x301);
+    uint32_t invalid=0x104;
+    assert(c.access(0x200c587c,0x16010094,4,true,invalid)==A::sideEffect);
+    assert(sample(c)==0x301);
+    invalid=0x101;
+    assert(c.access(0,0x16010094,4,true,invalid)==A::externalInput);
+    assert(c.access(0x200c587c,0x16010094,2,true,invalid)==A::width);
+    // Closed-loop frequency follows independent reference and feedback ratios.
+    for (auto setting : {std::array<uint32_t,3>{1,3,0}, {3,6,0}, {2,10,5}}) {
+        put(c,0x200c5e0c,0x84,0x1000000|setting[0]|setting[1]<<8|setting[2]<<16);
+        const uint64_t target=Imx1GraphicsClocks::referenceHz*((setting[1]+1)*8+setting[2])/((setting[0]+1)*8);
+        const uint32_t gain = (target-8000000)/16000000;
+        put(c,0x200c5ca8,0x88,0x4b000200 | gain<<10);
+        assert(!c.pllRate().numerator && c.nextEvent());
+        const auto delay=c.nextEvent(); advance(c,delay-1); assert(!c.pllRate().numerator);
+        advance(c,1);
+        const auto r=c.pllRate();
+        assert(r.numerator*(setting[0]+1)*8 == Imx1GraphicsClocks::referenceHz*((setting[1]+1)*8+setting[2])*r.denominator);
+        begin(c); advance(c,4000);
+        assert((sample(c)>>16) == r.numerator*std::min<uint64_t>(4000,c.measurementTicks())/(r.denominator*Imx1GraphicsClocks::timeHz*4));
+    }
+    const auto r=c.pllRate();
+    put(c,0x200c5ca8,0x88,0x4b000200);
+    advance(c,c.nextEvent()); assert(!c.pllRate().numerator);
+    put(c,0x200c5ca8,0x88,0x4b000e00);
+    advance(c,c.nextEvent());
+    put(c,0x200c55c0,0x8c,0x31); assert(c.systemRate().numerator==r.numerator && c.systemRate().denominator==r.denominator*4);
+    put(c,0x200c4920,0x90,0x20); assert(c.pixelRate().numerator==Imx1GraphicsClocks::referenceHz && c.pixelRate().denominator==3);
+    put(c,0x200c5ca8,0x88,0x4b000201); assert(!c.pllRate().numerator && !c.systemRate().numerator && c.pixelRate().numerator);
+    put(c,0x200c5ca8,0x88,0xcb000200); assert(!c.pllRate().numerator);
+    put(c,0x200c5ca8,0x88,0x4b000202); assert(!c.pllRate().numerator);
+    put(c,0x200c5e0c,0x84,0x1f000603);
+    begin(c); advance(c,4000); assert(!(sample(c)>>16));
+    begin(c,2); advance(c,4000); assert(!(sample(c)>>16));
+    begin(c,3); advance(c,4000); assert((sample(c)>>16)==10);
+    put(c,0x200c45e4,0x80,0); begin(c,3); advance(c,4000); assert(!(sample(c)>>16));
+    put(c,0x200c45e4,0x80,0x3f);
+    // The programmed measurement window ends independently of host reads.
+    uint16_t previous = 0;
+    for (auto row : {std::array<uint32_t,3>{4,250,10},{9,500,21},{31,1600,67}}) {
+        put(c,0x200c5e0c,0x84,row[0]<<24|0x00603);
+        put(c,0x200c5930,0x88,0x4bd00240);
+        begin(c); const auto window=c.measurementTicks(); assert(window==row[1]);
+        advance(c,window/2); const auto partial=sample(c)>>16;
+        advance(c,window-window/2); const auto final=sample(c);
+        assert((final>>16)==row[2] && (final>>16)>partial && (final>>16)>previous); previous=final>>16;
+        advance(c,window*20); assert(sample(c)==final);
+        put(c,0x200c587c,0x94,0x101); advance(c,window); assert(sample(c)==final);
+    }
+    // Independent target ratios and gate durations need different VCO bands.
+    uint32_t previousBand=~0u;
+    for (auto config : {std::array<uint32_t,3>{3,6,128},{1,6,64},{1,13,32},{3,1,128}}) {
+        put(c,0x200c5e0c,0x84,config[2]<<24|config[1]<<8|config[0]);
+        const uint64_t targetN=Imx1GraphicsClocks::referenceHz*(config[1]+1),targetD=config[0]+1;
+        const auto goal=targetN*c.measurementTicks()/(targetD*Imx1GraphicsClocks::timeHz*4);
+        bool found=false;
+        for (uint32_t range=0;range<2 && !found;++range) for (uint32_t gain=0;gain<8 && !found;++gain) for (uint32_t offset=0;offset<4 && !found;++offset) {
+            const uint32_t band=range<<13|gain<<10|offset<<14;
+            put(c,0x200c5930,0x88,0x4bd00240|band);begin(c);advance(c,c.measurementTicks());const auto upper=sample(c)>>16;
+            put(c,0x200c5930,0x88,0x4b700240|band);begin(c);advance(c,c.measurementTicks());const auto lower=sample(c)>>16;
+            if (upper<goal || lower>goal) continue;
+            put(c,0x200c5ca8,0x88,0x4b000200|band);advance(c,c.nextEvent());
+            const auto rate=c.pllRate(); assert(rate.numerator && rate.numerator*targetD==targetN*rate.denominator);
+            assert(band!=previousBand);previousBand=band;found=true;
+        }
+        assert(found);
+    }
+    put(c,0x200c573c,0x98,4);
+    put(c,0x200c56c0,0x8c,0x1810);
+    assert(c.systemRate().denominator==4);
+    put(c,0x200c573c,0x98,0);
+    assert(c.systemRate().denominator==2);
+    put(c,0x200c56c0,0x8c,0x1000);
+    assert(c.systemRate().denominator==1);
+    put(c,0x200c573c,0x98,4); assert(c.systemRate().denominator==3);
+    {
+        Imx1GraphicsClocks automatic;
+        put(automatic,0x200c45e4,0x80,0x3f);
+        put(automatic,0x200c49ac,0x84,0x25120b01);
+        put(automatic,0x200c5930,0x88,0x4b001200);
+        advance(automatic,automatic.nextEvent());
+        put(automatic,0x200c47b0,0x8c,0x1831);
+        put(automatic,0x200c4920,0x90,0x81);
+        put(automatic,0x200c4c00,0x98,0x14001);
+        put(automatic,0x200c1550,0x98,0x140c1);
+        put(automatic,0x200c14e4,0x80,0xbf);
+        put(automatic,0x200c15c0,0x80,0xa0000bf);
+        put(automatic,0x200c15f0,0x8c,0x1831);
+        const auto pixel=automatic.pixelRate(),pll=automatic.pllRate();
+        auto measured=automatic;
+        begin(measured,2);advance(measured,1900);assert((sample(measured)>>16)==19);
+        assert(automatic.nextEvent()==400 && !automatic.automaticNormal());
+        advance(automatic,399);assert(!automatic.automaticNormal());
+        advance(automatic,1);assert(automatic.automaticNormal());
+        assert(automatic.systemRate().numerator==16000000 && automatic.systemRate().denominator==4);
+        assert(automatic.pixelRate().numerator==pixel.numerator && automatic.pixelRate().denominator==pixel.denominator);
+        assert(automatic.pllRate().numerator==pll.numerator && automatic.pllRate().denominator==pll.denominator);
+        for (int i=0;i<100;++i) sample(automatic);
+        assert(automatic.automaticNormal());
+        automatic.setGpuBusy(true);assert(automatic.nextEvent()==200);
+        advance(automatic,199);assert(automatic.automaticNormal());
+        automatic.setGpuBusy(true);advance(automatic,1);assert(!automatic.automaticNormal());
+        advance(automatic,10000);assert(!automatic.automaticNormal());
+        automatic.setGpuBusy(false);auto partitioned=automatic;
+        advance(automatic,400);for (int i=0;i<400;++i) advance(partitioned,1);
+        assert(automatic.automaticNormal() && partitioned.automaticNormal());
+        put(automatic,0x200c1550,0x98,0x14001);
+        assert(!automatic.automaticNormal() && !automatic.nextEvent());
+        assert(automatic.systemRate().numerator*pll.denominator*4==pll.numerator*automatic.systemRate().denominator);
+    }
+    Imx1GraphicsFraction f,g;
+    uint64_t whole=f.add(1001,7)+f.add(2001,11);
+    uint64_t parts=0; for(int i=0;i<1001;++i) parts+=g.add(1,7); for(int i=0;i<2001;++i) parts+=g.add(1,11);
+    assert(whole==parts && f.phase==g.phase && f.denominator==g.denominator);
+    {
+        // A denominator that divides the fraction's skips the gcd; both forms give the same over mixed charges.
+        struct Reference {
+            uint64_t phase=0, denominator=1;
+            bool supports(uint64_t d) const {
+                return d && d/std::gcd(d,denominator) <= (std::numeric_limits<uint64_t>::max()/2)/denominator;
+            }
+            uint64_t add(uint64_t n, uint64_t d) {
+                const auto common=denominator*(d/std::gcd(d,denominator));
+                const auto fraction=phase*(common/denominator)+(n%d)*(common/d);
+                phase=fraction%common; denominator=common;
+                return n/d+fraction/common;
+            }
+        } r;
+        Imx1GraphicsFraction h;
+        const uint64_t ds[]{64,128,25000000,1600,6400,3*64,7,1};
+        uint64_t seed=0x9e3779b97f4a7c15u;
+        for (int i=0;i<20000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            const uint64_t d=ds[(seed>>33)%std::size(ds)], n=(seed>>20)&0xffffffffu;
+            assert(h.supports(d)==r.supports(d));
+            if (!r.supports(d)) continue;
+            assert(h.add(n,d)==r.add(n,d) && h.phase==r.phase && h.denominator==r.denominator);
+        }
+    }
+    {
+        // addWhole gives what the same total in pieces gives, and adds nothing where d doesn't divide the denominator.
+        uint64_t seed=0x2545f4914f6cdd1du;
+        const uint64_t ds[]{64,128,6400,25000000,64*3,7};
+        for (int i=0;i<5000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            Imx1GraphicsFraction a;
+            a.add((seed>>11)&0xffff,ds[(seed>>40)%std::size(ds)]);
+            a.add((seed>>27)&0xffff,ds[(seed>>45)%std::size(ds)]);
+            auto b=a;
+            const uint64_t d=ds[(seed>>50)%std::size(ds)], units=(seed>>3)&0xfffff, scale=1+((seed>>23)&0x3ffffff);
+            uint64_t whole=0, parts=0;
+            const bool divides=a.denominator%d==0;
+            assert(a.addWhole(units,scale,d,whole)==divides);
+            if (!divides) { assert(!whole && a.phase==b.phase && a.denominator==b.denominator); continue; }
+            for (uint64_t left=units; left;) {
+                const uint64_t chunk=std::min<uint64_t>(left,1+(seed>>33)%1000);
+                parts+=b.add(chunk*scale,d);
+                left-=chunk;
+            }
+            assert(whole==parts && a.phase==b.phase && a.denominator==b.denominator);
+        }
+        Imx1GraphicsFraction big; uint64_t t=0;
+        assert(!big.addWhole(uint64_t(1)<<40,uint64_t(1)<<30,1,t) && !t);
+    }
+    uint32_t pclk=0;
+    assert(c.access(0x200c54a8,0x16010090,4,false,pclk)==A::ok && pclk==0x20);
+    put(c,0x200c54c0,0x90,0x21);
+    put(c,0x200c54e0,0x90,0x81);
+    uint32_t invalidRmw=0x11;
+    assert(c.access(0x200c54c0,0x16010090,4,true,invalidRmw)==A::sideEffect && c.word(0x90)==0x81);
+    put(c,0x200c14e4,0x80,c.word(0x80)|0x80);
+    put(c,0x200c1550,0x98,c.word(0x98)|1);
+    put(c,0x200c165c,0x80,c.word(0x80)&0x7fffff);
+    put(c,0x200c16ac,0x88,c.word(0x88)&~3u);
+    const auto pll=c.pllRate();
+    put(c,0x200c1174,0x88,c.word(0x88)&~4u);
+    assert(c.pllRate().numerator==pll.numerator && c.pllRate().denominator==pll.denominator);
+    put(c,0x200c1148,0x9c,c.word(0x9c)&~0x80u);
+    uint32_t badPm=c.word(0x88)|4u;
+    assert(c.access(0x200c1174,0x16010088,4,true,badPm)==A::sideEffect);
+    // The chip power down's second half: stored words, each checked against the copy it is built from.
+    put(c,0x200c128c,0x80,c.word(0x80)|0x80u);
+    uint32_t badDown=c.word(0x88)|0xcu;
+    assert(c.access(0x200c12b8,0x16010088,4,true,badDown)==A::sideEffect);
+    put(c,0x200c12b8,0x88,c.word(0x88)|4u);
+    assert(c.pllRate().numerator==pll.numerator && c.pllRate().denominator==pll.denominator);
+    put(c,0x200c12fc,0x88,c.word(0x88)&~4u);
+    put(c,0x200c1550,0x98,c.word(0x98)|0x10u);
+    put(c,0x200c133c,0x98,(c.word(0x98)|1u)&~0xc0u);
+    assert(c.word(0x98)&0x10);
+    uint32_t badStored=c.word(0x98)|0x20u;
+    assert(c.access(0x200c4c00,0x16010098,4,true,badStored)==A::sideEffect);
+    put(c,0x200c1368,0x9c,c.word(0x9c)|0x80u);
+    c.reset(); assert(!c.programmed() && !c.count());
+    std::puts("virtual graphics clock tests passed");
+}

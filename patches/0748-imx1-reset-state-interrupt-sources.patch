@@ -1,0 +1,40 @@
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -183,6 +183,15 @@
+             if (lines & outputs[line]) asserted |= uint64_t(1) << (first + line);
+         }
+     }
++    // Modules with no model here, so no register of theirs was ever written (an access stops the machine)
++    // and each still has its reset state, which the manual gives with every interrupt disabled or masked:
++    // SSI2 36 to 38: STCR and SRCR reset to 0000, TIE and RIE clear (30.3.8, 30.3.9, tables 30-11 and 30-13).
++    // SPI2 40 and SPI1 41: INTREG resets to 0000, all eight enables clear (18.3.4, table 18-7).
++    // USBD 47 to 52: USB_EPn_MASK resets to 01ff, every endpoint interrupt masked (28.3.12, table 28-17).
++    // USBD 53: USB_MASK resets to 800000ff, every interrupt masked (28.3.8).
++    // UART3 0 to 4 and 54: UCR1 to UCR4 reset with every interrupt enable clear (27.7.3 to 27.7.6,
++    // tables 27-16, 27-17, 27-19 and 27-20, which cover UART 1, 2 and 3).
++    known |= resetStateSourcesLow;
+     controller.setInputs(asserted, known);
+ }
+ 
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -248,6 +248,8 @@
+         pwm.advanceReference(numerator, denominator);
+         return true;
+     }
++    // AITC sources of modules that have no model and stay in reset: UART3, SSI2, SPI2, SPI1 and USBD.
++    static constexpr uint64_t resetStateSourcesLow = 0x1f | (uint64_t(7) << 36) | (uint64_t(3) << 40) | (uint64_t(0xff) << 47);
+     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
+                             const Imx1Timer& first, const Imx1Timer& second, const Imx1Asp& analog, const Imx1Pwm& wave, const Imx1Gpio& pins) const;
+     Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -255,7 +255,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 746;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 748;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue

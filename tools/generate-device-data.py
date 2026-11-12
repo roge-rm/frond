@@ -7,10 +7,12 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
+# Devices the desktop runs that the Android app has no controls for yet. They stay out of its list.
+DESKTOP_ONLY = set()
 
 
 def outputs(profiles):
-    available = [p for p in profiles['profiles'] if p['available']]
+    available = [p for p in profiles['profiles'] if p['available'] and p['name'] not in DESKTOP_ONLY]
     fields = {
         'id': 'name', 'label': 'display_name', 'norSize': 'nor_bytes', 'nandSize': 'raw_nand_bytes',
         'nandRequired': 'explicit_raw_nand', 'fastAudioNorMd5': 'fast_audio_md5',

@@ -1,0 +1,293 @@
+--- a/src/uarm/uarm/imx1_aitc.h
++++ b/src/uarm/uarm/imx1_aitc.h
+@@ -5,6 +5,10 @@
+ 
+ enum class Imx1AitcAccess { ok, unmapped, width, reservedBits, externalInput };
+ enum class Imx1AitcLine { clear, asserted, unknown };
++
++struct Imx1AitcPending {
++    uint64_t normal, fast, unknownNormal, unknownFast;
++};
+ 
+ // MC9328MX1RM chapter 10. Inputs are asserted-high logical peripheral requests.
+ class Imx1Aitc {
+@@ -16,6 +20,9 @@
+     }
+     Imx1AitcLine irq() const;
+     Imx1AitcLine fiq() const;
++    Imx1AitcPending pendingState() const {
++        return {pending(false), pending(true), unknown(false), unknown(true)};
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -330,9 +330,16 @@
+             if (status != Imx1BootstrapAccess::ok) {
+                 p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
+                 p->result.peripheralStatus = status;
+-                p->result.address = 0x00217010;
+-                p->result.size = 4;
+-                p->result.value = p->peripherals.i2cState().pendingTransfer().byte;
++                if (p->peripherals.i2cState().clockStatus() != Imx1I2cAccess::ok) {
++                    p->result.address = 0x00217010;
++                    p->result.size = 4;
++                    p->result.value = p->peripherals.i2cState().pendingTransfer().byte;
++                } else {
++                    // An elapsed interrupt request is not a guest MMIO transaction.
++                    p->result.address = p->result.size = p->result.value = 0;
++                    p->result.elapsedInterruptBoundary = true;
++                    p->result.interruptPending = p->peripherals.interruptPending();
++                }
+                 break;
+             }
+         }
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -63,6 +63,8 @@
+     uint64_t busAccesses;
+     Imx1BootstrapAccess peripheralStatus;
+     Imx1ProbeI2cEvent i2cEvent{};
++    bool elapsedInterruptBoundary = false;
++    Imx1AitcPending interruptPending{};
+ };
+ using Imx1ProbeObserver = void (*)(void*, const Imx1ProbeTrace&);
+ // One process-owned CPU, optional bootstrap registers/RAM, no interrupts or session state.
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -57,13 +57,18 @@
+     const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+     timer1.advance(clocks / divider);
++    timer2.advance(clocks / divider);
+     perclk1Phase = clocks % divider;
+ }
+ 
+-void Imx1Bootstrap::setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock) const {
++void Imx1Bootstrap::setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
++                                        const Imx1Timer& first, const Imx1Timer& second) const {
+     constexpr unsigned sources[] = {11, 12, 13, 62};
+-    uint64_t known = (uint64_t(1) << 39) | asp.inactiveInterrupts() | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources;
+-    uint64_t asserted = (state.interruptOutput() ? uint64_t(1) << 39 : 0) | clock.assertedInterrupts();
++    uint64_t known = (uint64_t(1) << 39) | asp.inactiveInterrupts() | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources |
++                     (uint64_t(1) << 59) | (uint64_t(1) << 58);
++    uint64_t asserted = (state.interruptOutput() ? uint64_t(1) << 39 : 0) | clock.assertedInterrupts() |
++                        (first.interruptOutput() ? uint64_t(1) << 59 : 0) |
++                        (second.interruptOutput() ? uint64_t(1) << 58 : 0);
+     for (unsigned port = 0; port < 4; ++port) {
+         const auto output = gpio.interruptOutput(port);
+         const auto bit = uint64_t(1) << sources[port];
+@@ -72,9 +77,10 @@
+     }
+     controller.setInputs(asserted, known);
+ }
+-Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1I2c& state, const Imx1Rtc& clock) const {
++Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
++                                        const Imx1Timer& first, const Imx1Timer& second) const {
+     auto next = aitc;
+-    setInterruptInputs(next, state, clock);
++    setInterruptInputs(next, state, clock, first, second);
+     if (next.irq() == Imx1AitcLine::asserted || next.fiq() == Imx1AitcLine::asserted)
+         return Imx1BootstrapAccess::sideEffect;
+     if (next.irq() == Imx1AitcLine::unknown || next.fiq() == Imx1AitcLine::unknown)
+@@ -84,7 +90,13 @@
+ Imx1BootstrapAccess Imx1Bootstrap::clockStatus() const {
+     if (i2c.clockStatus() == Imx1I2cAccess::externalInput) return Imx1BootstrapAccess::externalInput;
+     if (i2c.clockStatus() != Imx1I2cAccess::ok) return Imx1BootstrapAccess::sideEffect;
+-    return interruptGate(i2c, rtc);
++    return interruptGate(i2c, rtc, timer1, timer2);
++}
++
++Imx1AitcPending Imx1Bootstrap::interruptPending() const {
++    auto current = aitc;
++    setInterruptInputs(current, i2c, rtc, timer1, timer2);
++    return current.pendingState();
+ }
+ 
+ void Imx1Bootstrap::setRamMiB(uint32_t size) {
+@@ -158,7 +170,7 @@
+         return sdramAccess((address - 0x08000000) >> 26, address & 0x03ffffff, size, write, value);
+     if (Imx1Aitc::registerName(address)) {
+         auto next = aitc;
+-        setInterruptInputs(next, i2c, rtc);
++        setInterruptInputs(next, i2c, rtc, timer1, timer2);
+         const auto status = next.access(address, size, write, value);
+         switch (status) {
+             case Imx1AitcAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+@@ -197,7 +209,7 @@
+                                  next.perclk1Divider() != cgm.perclk1Divider();
+             if (cpuClockMode == 3 && (changed || next.mcuPrescaler() != cgm.mcuPrescaler()))
+                 return Imx1BootstrapAccess::sideEffect;
+-            if (changed && timer1.enabled()) return Imx1BootstrapAccess::sideEffect;
++            if (changed && (timer1.enabled() || timer2.enabled())) return Imx1BootstrapAccess::sideEffect;
+             if (next.busDivider() != cgm.busDivider() && pwm.resetting()) return Imx1BootstrapAccess::sideEffect;
+             if (next.busDivider() != cgm.busDivider() && i2c.active()) return Imx1BootstrapAccess::sideEffect;
+             if (next.busDivider() != cgm.busDivider()) bclkPhase = 0;
+@@ -226,7 +238,7 @@
+             case Imx1RtcAccess::ok: break;
+         }
+         if (write) {
+-            const auto gate = interruptGate(i2c, next);
++            const auto gate = interruptGate(i2c, next, timer1, timer2);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+         }
+         rtc = next;
+@@ -243,7 +255,7 @@
+         if (result == Imx1I2cAccess::ok) {
+             if (!i2c.active() && next.active() && !gpio.i2cPinsSelected())
+                 return Imx1BootstrapAccess::sideEffect;
+-            const auto gate = interruptGate(next, rtc);
++            const auto gate = interruptGate(next, rtc, timer1, timer2);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+             result = i2c.access(address, size, write, value);
+         }
+@@ -286,11 +298,14 @@
+         }
+     }
+     if (Imx1Gpio::registerName(address)) {
+-        if (write && i2c.active()) {
++        if (write && (i2c.active() || timer2.outputIsolationRequired())) {
+             auto next = gpio;
+             uint32_t preview = value;
+-            if (next.access(address, size, write, preview) == Imx1GpioAccess::ok && !next.i2cPinsSelected())
+-                return Imx1BootstrapAccess::sideEffect;
++            if (next.access(address, size, write, preview) == Imx1GpioAccess::ok) {
++                if (i2c.active() && !next.i2cPinsSelected()) return Imx1BootstrapAccess::sideEffect;
++                if (timer2.outputIsolationRequired() && !next.timer2OutputIsolated())
++                    return Imx1BootstrapAccess::sideEffect;
++            }
+         }
+         switch (gpio.access(address, size, write, value)) {
+             case Imx1GpioAccess::ok: return Imx1BootstrapAccess::ok;
+@@ -302,14 +317,27 @@
+         }
+     }
+     if (Imx1Timer::registerName(address)) {
+-        switch (timer1.access(address - 0x00202000, size, write, value)) {
+-            case Imx1TimerAccess::ok: return Imx1BootstrapAccess::ok;
++        auto& timer = address < 0x00203000 ? timer1 : timer2;
++        auto next = timer;
++        uint32_t preview = value;
++        const auto result = next.access(address & 0xfff, size, write, preview,
++                                        address >= 0x00203000 && gpio.timer2OutputIsolated());
++        switch (result) {
++            case Imx1TimerAccess::ok: break;
+             case Imx1TimerAccess::unmapped: return Imx1BootstrapAccess::unmapped;
+             case Imx1TimerAccess::width: return Imx1BootstrapAccess::width;
+             case Imx1TimerAccess::reservedBits: return Imx1BootstrapAccess::reservedBits;
+             case Imx1TimerAccess::sideEffect: return Imx1BootstrapAccess::sideEffect;
+             case Imx1TimerAccess::externalInput: return Imx1BootstrapAccess::externalInput;
+         }
++        if (write) {
++            const auto gate = address < 0x00203000 ? interruptGate(i2c, rtc, next, timer2) :
++                                                   interruptGate(i2c, rtc, timer1, next);
++            if (gate != Imx1BootstrapAccess::ok) return gate;
++        }
++        timer = next;
++        value = preview;
++        return Imx1BootstrapAccess::ok;
+     }
+     if (Imx1Eim::registerName(address)) {
+         switch (eim.access(address, size, write, value)) {
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -28,6 +28,7 @@
+     const Imx1I2c& i2cState() const { return i2c; }
+     const Imx1Eim& eimState() const { return eim; }
+     Imx1BootstrapAccess clockStatus() const;
++    Imx1AitcPending interruptPending() const;
+     void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     bool setGpioInput(unsigned port, uint32_t value) { return gpio.setInput(port, value); }
+     bool setGpioDInput(uint32_t value) { return setGpioInput(3, value); }
+@@ -63,8 +64,10 @@
+     }
+ 
+    private:
+-    void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock) const;
+-    Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock) const;
++    void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
++                            const Imx1Timer& first, const Imx1Timer& second) const;
++    Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
++                            const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1Rtc rtc;
+     Imx1I2c i2c;
+     Imx1Asp asp;
+@@ -74,7 +77,7 @@
+     Imx1Cgm cgm;
+     Imx1Gpio gpio;
+     Imx1Eim eim;
+-    Imx1Timer timer1;
++    Imx1Timer timer1, timer2;
+     Imx1Sysctrl sysctrl;
+     uint32_t perclk1Phase = 0;
+     uint64_t systemPllPhase = 0;
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -18,6 +18,11 @@
+         constexpr uint32_t pins = (1u << 15) | (1u << 16);
+         return !((ports[0].registers[8] | ports[0].registers[14] | ports[0].registers[0]) & pins);
+     }
++    bool timer2OutputIsolated() const {
++        const auto& r = ports[3].registers;
++        // Tables 26-1 and 32-4/6/12: D31 must use GPIO input or DR output.
++        return (r[8] & 0x80000000) && (!(r[0] & 0x80000000) || (r[2] >> 30) == 3);
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+--- a/src/uarm/uarm/imx1_timer.cpp
++++ b/src/uarm/uarm/imx1_timer.cpp
+@@ -1,13 +1,17 @@
+ #include "imx1_timer.h"
+ 
+ const char* Imx1Timer::registerName(uint32_t address) {
+-    static const char* names[] = {"TIMER1.TCTL", "TIMER1.TPRER", "TIMER1.TCMP",
+-                                  "TIMER1.TCR", "TIMER1.TCN", "TIMER1.TSTAT"};
+-    if (address < 0x00202000 || address >= 0x00202018) return nullptr;
+-    return names[(address - 0x00202000) >> 2];
++    static const char* names[2][6] = {
++        {"TIMER1.TCTL", "TIMER1.TPRER", "TIMER1.TCMP", "TIMER1.TCR", "TIMER1.TCN", "TIMER1.TSTAT"},
++        {"TIMER2.TCTL", "TIMER2.TPRER", "TIMER2.TCMP", "TIMER2.TCR", "TIMER2.TCN", "TIMER2.TSTAT"}
++    };
++    const uint32_t base = address & ~0xfffu;
++    if ((base != 0x00202000 && base != 0x00203000) || address - base >= 0x18) return nullptr;
++    return names[base == 0x00203000][(address - base) >> 2];
+ }
+ 
+-Imx1TimerAccess Imx1Timer::access(uint32_t offset, uint32_t size, bool write, uint32_t& value) {
++Imx1TimerAccess Imx1Timer::access(uint32_t offset, uint32_t size, bool write, uint32_t& value,
++                                   bool outputIsolated) {
+     if (offset >= 0x18) return Imx1TimerAccess::unmapped;
+     if (size != 4 || (offset & 3)) return Imx1TimerAccess::width;
+     if (!write) {
+@@ -24,10 +28,10 @@
+     switch (offset) {
+         case 0x00: {
+             if (value & ~0x81ffu) return Imx1TimerAccess::reservedBits;
+-            // Reset has a three-SystemCLK hold. Capture and interrupt delivery are unconnected.
+-            if (value & 0x8010) return Imx1TimerAccess::sideEffect;
++            // Reset has a three-SystemCLK hold; capture and output-pin effects are unqualified.
++            if (value & 0x8000) return Imx1TimerAccess::sideEffect;
+             if (value & 0xc0) return Imx1TimerAccess::externalInput;
+-            if (value & 0x20) return Imx1TimerAccess::sideEffect;
++            if ((value & 0x21) == 0x21 && !outputIsolated) return Imx1TimerAccess::sideEffect;
+             const unsigned source = (value >> 1) & 7;
+             if (source >= 3) return Imx1TimerAccess::externalInput;
+             // Live source changes need the prescaler handoff qualified.
+--- a/src/uarm/uarm/imx1_timer.h
++++ b/src/uarm/uarm/imx1_timer.h
+@@ -8,9 +8,12 @@
+ // MC9328MX1RM chapter 26. The caller supplies elapsed PERCLK1 edges.
+ class Imx1Timer {
+    public:
+-    Imx1TimerAccess access(uint32_t offset, uint32_t size, bool write, uint32_t& value);
++    Imx1TimerAccess access(uint32_t offset, uint32_t size, bool write, uint32_t& value,
++                           bool outputIsolated = false);
+     void advance(uint64_t perclk1Cycles);
+     bool enabled() const { return control & 1; }
++    bool outputIsolationRequired() const { return enabled() && (control & 0x20); }
++    bool interruptOutput() const { return (control & 0x10) && (status & 1); }
+     static const char* registerName(uint32_t address);
+ 
+    private:

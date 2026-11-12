@@ -1,0 +1,99 @@
+--- a/src/uarm/uarm/imx1_asp.cpp
++++ b/src/uarm/uarm/imx1_asp.cpp
+@@ -42,7 +42,7 @@
+     if (address == 0x00215010) {
+         if (written & (1u << 23)) {
+             // Table 15-7 specifies complete reset and self-clear, without a cycle count.
+-            *this = Imx1Asp();
++            *this = Imx1Asp(px1HighFromReset);
+             return Imx1AspAccess::ok;
+         }
+         // PADE must be set after the other control fields (table 15-7).
+@@ -51,8 +51,10 @@
+         if (samplingRequested(written, divider)) return Imx1AspAccess::externalInput;
+     }
+     if (address == 0x0021502c && samplingRequested(control, written)) return Imx1AspAccess::externalInput;
+-    // PX1 is unknown. Enabling detection would admit unknown pending status even with AITC masked.
+-    if (address == 0x00215018 && (written & 0x10)) return Imx1AspAccess::externalInput;
++    // Only held-high, active-low level detection proves no pending event.
++    // Edge seeding and asserted-level timing are outside this subset.
++    if (address == 0x00215018 && (written & 0x10) && !inactivePenDetection(written))
++        return Imx1AspAccess::externalInput;
+     // INT is W1C, the comparison event cannot occur without a sample.
+     *reg = address == 0x00215030 ? written & ~0x80000u : written;
+     return Imx1AspAccess::ok;
+--- a/src/uarm/uarm/imx1_asp.h
++++ b/src/uarm/uarm/imx1_asp.h
+@@ -5,22 +5,28 @@
+ 
+ enum class Imx1AspAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
+ 
+-// MC9328MX1RM chapter 15. Configuration only, without analogue inputs or samples.
++// MC9328MX1RM chapter 15. Configuration and explicit idle PX1 input, without analogue samples.
+ class Imx1Asp {
+    public:
++    explicit Imx1Asp(bool px1HighFromReset = false) : px1HighFromReset(px1HighFromReset) {}
+     Imx1AspAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
+     static constexpr uint64_t interruptSources = (uint64_t(1) << 5) | (uint64_t(1) << 9) |
+                                                 (uint64_t(1) << 33) | (uint64_t(1) << 46);
+-    // No admitted operation generates samples or enables external pen detection.
++    // Admitted pen detection has held-high PX1 and active-low level polarity.
+     uint64_t inactiveInterrupts() const {
+         uint64_t known = interruptSources & ~(uint64_t(1) << 46);
+-        if (!(interrupts & 0x10)) known |= uint64_t(1) << 46;
++        if (!(interrupts & 0x10) || inactivePenDetection(interrupts)) known |= uint64_t(1) << 46;
+         return known;
+     }
+     unsigned clockDivider() const { return (control & (1u << 25)) && divider ? divider + 1 : 0; }
+ 
+    private:
++    // Fixed before reset; software reset does not change the external input.
++    bool px1HighFromReset;
++    bool inactivePenDetection(uint32_t nextInterrupts) const {
++        return px1HighFromReset && !(nextInterrupts & 0x60);
++    }
+     uint32_t control = 0x02000000, sampleRate = 0, compare = 0, interrupts = 0, divider = 0;
+     bool samplingRequested(uint32_t nextControl, uint32_t nextDivider) const {
+         return (nextControl & (1u << 25)) && nextDivider && (nextControl & 2) && (nextControl & 0x3000);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -10,6 +10,8 @@
+ 
+ namespace {
+ struct Probe {
++    explicit Probe(const Imx1ProbeOptions& config)
++        : options(config), peripherals(config.aspPx1HighFromReset) {}
+     std::vector<uint8_t> rom;
+     uint32_t alias;
+     Imx1ProbeResult result{};
+@@ -231,8 +233,7 @@
+         return result;
+     }
+     // The core has process lifetime, as in the existing standalone CPU diagnostics.
+-    auto* p = new Probe;
+-    if (options) p->options = *options;
++    auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
+     if (p->options.gpioAInputKnown) p->peripherals.setGpioInput(0, p->options.gpioAInput);
+     if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
+     if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -28,6 +28,7 @@
+ };
+ using Imx1ProbeI2cObserver = void (*)(void*, const Imx1ProbeI2cEvent&);
+ struct Imx1ProbeOptions {
++    bool aspPx1HighFromReset = false;
+     bool assumeI2cSingleMaster = false;
+     Imx1I2cBus* i2cBus = nullptr;
+     Imx1ProbeI2cObserver i2cObserver = nullptr;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -18,6 +18,7 @@
+ // Startup memory/register subset. External pin samples require an explicit input source.
+ class Imx1Bootstrap {
+    public:
++    explicit Imx1Bootstrap(bool aspPx1HighFromReset = false) : asp(aspPx1HighFromReset) {}
+     void setI2cScenario(bool enabled) { i2c.setSingleMasterScenario(enabled); }
+     void setI2cBus(Imx1I2cBus* bus) { i2c.setBus(bus); }
+     void setI2cObserver(Imx1I2cObserver observer, void* context) { i2c.setObserver(observer, context); }

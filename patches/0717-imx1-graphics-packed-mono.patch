@@ -1,0 +1,196 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -18,7 +18,7 @@
+     explicit Probe(const Imx1ProbeOptions& config)
+         : options(config), peripherals(config.aspPx1HighFromReset, config.aspUSampleKnown, config.aspUSample), cs4Capture(config.cs4Port0Input, config.cs4IndexedInputs),
+           cs5Reset(config.graphicsProfile == Imx1GraphicsProfile::strict ? config.cs5ResetStatusInput : 0),
+-          cs5Configuration(config.graphicsProfile, config.graphicsVirtualA4SourceOver),
++          cs5Configuration(config.graphicsProfile, config.graphicsVirtualA4SourceOver, config.graphicsVirtualPackedMono),
+           graphicsMemory(config.graphicsProfile == Imx1GraphicsProfile::virtual5744Compatible8MiB ?
+                          new Imx1GraphicsMemory() : nullptr) {
+         if (config.aspPenInputs.contactKnown || config.aspPenInputs.normalKnown || config.aspPenInputs.referenceKnown)
+@@ -552,7 +552,7 @@
+         (options->virtualMpllRetune && (!options->bootstrapPeripherals || !options->assumeMpllSettled)) ||
+         !imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (!options->cs4IndexedInputs.empty() && (!options->bootstrapPeripherals || !options->cs4Port0InputKnown)) ||
+-        (options->graphicsVirtualA4SourceOver && (!options->bootstrapPeripherals ||
++        ((options->graphicsVirtualA4SourceOver || options->graphicsVirtualPackedMono) && (!options->bootstrapPeripherals ||
+          options->graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB)) ||
+         (!imx1GraphicsMode2RouteValid(options->graphicsMode2Route)) ||
+         ((options->graphicsMode2Route != Imx1GraphicsMode2Route::unknown || options->graphicsRawAuxKnown) &&
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -92,6 +92,7 @@
+     bool assumeSpllSettled = false;
+     bool graphicsIrqA13 = false;
+     bool graphicsVirtualA4SourceOver = false;
++    bool graphicsVirtualPackedMono = false;
+     Imx1GraphicsMode2Route graphicsMode2Route = Imx1GraphicsMode2Route::unknown;
+     bool graphicsRawAuxKnown = false;
+     uint32_t graphicsRawAux = 0;
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -26,9 +26,10 @@
+     static constexpr uint32_t virtualInternalBytes = 0x60000;
+     static constexpr uint32_t virtualStartupOptionNibble = 0;
+     explicit Imx1Cs5Configuration(Imx1GraphicsProfile profile = Imx1GraphicsProfile::strict,
+-                                   bool virtualA4SourceOver = false)
+-        : profile(profile), virtualA4SourceOver(virtualA4SourceOver) {}
++                                   bool virtualA4SourceOver = false, bool virtualPackedMono = false)
++        : profile(profile), virtualA4SourceOver(virtualA4SourceOver), virtualPackedMono(virtualPackedMono) {}
+     bool a4SourceOverEnabled() const { return virtualProfile() && virtualA4SourceOver; }
++    bool packedMonoEnabled() const { return virtualProfile() && virtualPackedMono; }
+     bool virtualProfile() const { return profile == Imx1GraphicsProfile::virtual5744Compatible8MiB; }
+     void reset() {
+         selected = programmed = false;
+@@ -340,7 +341,7 @@
+         return Imx1BootstrapAccess::ok;
+     }
+     Imx1GraphicsProfile profile;
+-    bool virtualA4SourceOver = false;
++    bool virtualA4SourceOver = false, virtualPackedMono = false;
+     Imx1GraphicsGpio gpio;
+     Imx1GraphicsWindows windows;
+     Imx1GraphicsLookup lookup;
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -45,15 +45,17 @@
+             --left;
+             return true;
+         };
++        // Without the policy every packed 1bpp path below is inert.
++        const bool packedMono = configuration.packedMonoEnabled();
+         uint32_t header, hostPackets = 0, copyPackets = 0, plainPackets = 0, a4Packets = 0;
+         while (left) {
+             if (!take(header)) return A::sequence;
+             uint32_t first, second;
+             if ((header >> 30) == 0) {
+-                if (header & ~0x7ffu || !take(first) || !store(header, first)) return A::sideEffect;
++                if (header & ~0x7ffu || !take(first) || !store(header, first, packedMono)) return A::sideEffect;
+             } else if ((header >> 30) == 1) {
+                 if (header & 0x3fc00000u || !take(first) || !take(second) ||
+-                    !store(header & 0x7ff, first) || !store((header >> 11) & 0x7ff, second)) return A::sideEffect;
++                    !store(header & 0x7ff, first, packedMono) || !store((header >> 11) & 0x7ff, second, packedMono)) return A::sideEffect;
+             } else if (header == 0xc0011a00) {
+                 if (engine.hostDataSubmission() || engine.keyedCopySubmission() || engine.a4Submission()) return A::sideEffect;
+                 if (!take(first) || !take(second)) return A::sequence;
+@@ -102,26 +104,30 @@
+                 fills.push_back(std::move(fill));
+             } else if ((header & 0xc000ffffu) == 0xc0001900u) {
+                 const bool a4 = engine.a4Submission();
++                // The host producer writes source field 0 into GMC bits 12..14 for packed 1bpp.
++                const bool mono = packedMono && !a4 && known[0x41b] && !((values[0x41b] >> 12) & 7);
+                 if (a4 ? (!configuration.a4SourceOverEnabled() || ++a4Packets != 1) :
+                          (!engine.hostDataSubmission() || ++hostPackets != 1)) return A::sideEffect;
+                 if (!take(first) || !take(second)) return A::sequence;
+                 const uint32_t width = second & 0xffff, height = second >> 16;
+                 // A4 is linear, eight low-nibble-first samples per word, without row padding.
+-                const uint64_t payload = a4 ? (uint64_t(width) * height + 7) / 8 : uint64_t(width / 2) * height;
+-                if (!width || (width & 1) || !height || (a4 && (height & 1)) ||
++                // Packed 1bpp rows are padded to 32 pixels, one word per 32.
++                const uint64_t payload = mono ? uint64_t(width / 32) * height :
++                    a4 ? (uint64_t(width) * height + 7) / 8 : uint64_t(width / 2) * height;
++                if (!width || (width & (mono ? 31 : 1)) || !height || (a4 && (height & 1)) ||
+                     payload + 1 != ((header >> 16) & 0x3fff))
+                     return A::sideEffect;
+                 if (payload > left) return A::sequence;
+                 if (payload != left) return A::sideEffect;
+                 Fill fill{};
+-                const auto status = rectangle(configuration, eim, memory, first, second, fill, true, false, a4);
++                const auto status = rectangle(configuration, eim, memory, first, second, fill, true, false, a4, false, mono);
+                 if (status != A::ok) return status;
+                 if (a4) {
+                     const auto sourceStatus = a4Source(configuration, eim, memory, first, width, height, fill);
+                     if (sourceStatus != A::ok) return sourceStatus;
+                 }
+                 fill.pixels.reserve(size_t(fill.width) * fill.height);
+-                const uint32_t samplesPerWord = a4 ? 8 : 2;
++                const uint32_t samplesPerWord = mono ? 32 : a4 ? 8 : 2;
+                 for (uint64_t word = 0; word < payload; ++word) {
+                     uint32_t pixels;
+                     if (!take(pixels)) return A::sequence;
+@@ -131,7 +137,8 @@
+                         const uint32_t y = index / width, x = index % width;
+                         if (y >= fill.sourceY && y - fill.sourceY < fill.height &&
+                             x >= fill.sourceX && x - fill.sourceX < fill.width)
+-                            fill.pixels.push_back(uint16_t((pixels >> (sample * (a4 ? 4 : 16))) & (a4 ? 15 : 0xffff)));
++                            fill.pixels.push_back(mono ? virtualPackedMonoColour(virtualPackedMonoBit(pixels, sample)) :
++                                uint16_t((pixels >> (sample * (a4 ? 4 : 16))) & (a4 ? 15 : 0xffff)));
+                     }
+                 }
+                 ticks += uint64_t(fill.width) * fill.height;
+@@ -205,17 +212,31 @@
+     static constexpr std::array<uint32_t,35> registers{{0x4a1,0x41b,0x41f,0x472,0x4b2,0x4b1,
+         0x490,0x491,0x46f,0x470,0x401,0x402,0x46b,0x46c,0x41e,0x488,0x484,0x471,
+         0x423,0x41d,0x4b3,0x30f,0x42e,0x42f,0x430,0x431,0x432,0x433,0x4a0,0x48f,0x418,0x419,0x420,0x421,0x416}};
+-    bool store(uint32_t reg, uint32_t value) {
++    bool store(uint32_t reg, uint32_t value, bool packedMono) {
+         if (std::find(registers.begin(),registers.end(),reg) == registers.end()) return false;
+         values[reg] = value;
+         known[reg] = true;
+         // GMC selects the same source and ROP fields as DP_MIX in the native helpers.
+         if (reg == 0x41b && known[0x4b2] &&
+-            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df))
++            (value == 0x5798b4df || value == 0x4598b4df || value == 0x55e0b4df || value == 0xd798d4df || value == 0x5598b4df ||
++             (packedMono && value == 0x579804df)))
+             values[0x4b2] = (values[0x4b2] & ~0x01ff0700u) |
+                 ((value >> 1) & 0x00ff0000u) | ((value >> 17) & 0x700u) | ((value >> 7) & 0x01000000u);
+         return true;
+     }
++    // Packed 1bpp drawing below is explicit virtual policy. The original writer copies
++    // source halfwords unchanged and proves none of it, and physical W4200 behaviour is unknown.
++    // virtualPackedMonoMsbFirst: source bytes run left to right, bit 7 of each byte first.
++    static bool virtualPackedMonoBit(uint32_t word, uint32_t sample) {
++        return (word >> ((sample & ~7u) + 7 - (sample & 7))) & 1;
++    }
++    // virtualPackedMonoSetBitForeground: set bits take register 490, clear bits 491, as RGB565.
++    uint16_t virtualPackedMonoColour(bool bit) const { return uint16_t(values[bit ? 0x490 : 0x491]); }
++    // virtualPackedMonoExclusiveScissor: the right and bottom scissor values are not drawn,
++    // which leaves the producer's visible width inside the padded row.
++    static constexpr uint32_t virtualPackedMonoScissorEdge = 0;
++    // virtualPackedMonoOpaqueCopy: every visible pixel replaces the destination.
++    // virtualPackedMonoZeroPhase: bit 0 of each row lands on the encoded X, with no other offset.
+     // Explicit virtual normalisation and truncation in native 5/6/5 channels.
+     static uint32_t virtualA4Blend(uint32_t destination, uint32_t source, uint32_t alpha) {
+         uint32_t result = 0;
+@@ -251,14 +272,18 @@
+         return A::ok;
+     }
+     Imx1BootstrapAccess rectangle(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+-                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false) const {
++                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false, bool mono = false) const {
+         using A = Imx1BootstrapAccess;
+         for (auto reg : registers) if (reg != 0x48f &&
+             (a4 || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)) && !known[reg]) return A::sequence;
+         const auto gmc = values[0x41b];
+         // Host SRCCOPY is limited to the observed native RGB565 control words.
+-        if (host && !a4 && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
++        if (host && !a4 && !mono && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
+                      values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f)) return A::sideEffect;
++        // Admitted GMC and shadow words are those of the 9 November 2026 empty-card run.
++        // The producer changes its datatype shadow without emitting it, so that field is not compared.
++        if (mono && (gmc != 0x579804df || values[0x4b2] != 0x00cc0b00 ||
++                     (values[0x4b1] & ~0x00070000u) != 0x40000d04 || values[0x472] != 0x3f)) return A::sideEffect;
+         if (copy && (gmc != (plain ? 0x5598b4dfu : 0x4598b4dfu) || values[0x4b2] != 0x00cc0a00 ||
+                      values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f ||
+                      values[0x471] != 0x1fff1fff)) return A::sideEffect;
+@@ -287,15 +312,16 @@
+         if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
+             !configuration.engineState().clipContains(x + width - 1, y + height - 1)) return A::sideEffect;
+         // The captured host rectangle does not establish the scissor upper-edge convention.
+-        if ((host || copy) && (((values[0x470] & 0x1fff) >= x && (values[0x470] & 0x1fff) < x + width) ||
++        if ((host || copy) && !mono && (((values[0x470] & 0x1fff) >= x && (values[0x470] & 0x1fff) < x + width) ||
+             (((values[0x470] >> 16) & 0x1fff) >= y && ((values[0x470] >> 16) & 0x1fff) < y + height)))
+             return A::sideEffect;
+         uint32_t left = x, top = y, right = x + width, bottom = y + height;
+         if (gmc & 8) {
+             left = std::max(left, values[0x46f] & 0x1fff);
+             top = std::max(top, (values[0x46f] >> 16) & 0x1fff);
+-            right = std::min(right, (values[0x470] & 0x1fff) + 1);
+-            bottom = std::min(bottom, ((values[0x470] >> 16) & 0x1fff) + 1);
++            const uint32_t edge = mono ? virtualPackedMonoScissorEdge : 1;
++            right = std::min(right, (values[0x470] & 0x1fff) + edge);
++            bottom = std::min(bottom, ((values[0x470] >> 16) & 0x1fff) + edge);
+         }
+         fill.sourceX = left - x;
+         fill.sourceY = top - y;

@@ -1,0 +1,209 @@
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -40,7 +40,7 @@
+ bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
+     if (!denominator) return false;
+     const auto supports = [](uint64_t d, uint64_t old) {
+-        return d / std::gcd(d, old) <= (std::numeric_limits<uint64_t>::max() / 2) / old;
++        return d / imx1Gcd(d, old) <= (std::numeric_limits<uint64_t>::max() / 2) / old;
+     };
+     if (mcuWakeRemaining && !supports(denominator, mcuWakeDenominator)) return false;
+     if (mcuReferenceRemaining && !supports(denominator, mcuReferenceDenominator)) return false;
+@@ -79,7 +79,7 @@
+     if (!numerator) return;
+     assert(mcuReferenceSupported(denominator));
+     if (mcuWakeRemaining) {
+-        const auto common = mcuWakeDenominator * (denominator / std::gcd(denominator, mcuWakeDenominator));
++        const auto common = mcuWakeDenominator * (denominator / imx1Gcd(denominator, mcuWakeDenominator));
+         const auto fraction = mcuWakePhase * (common / mcuWakeDenominator) +
+                               (numerator % denominator) * (common / denominator);
+         const auto elapsed = numerator / denominator + fraction / common;
+@@ -96,7 +96,7 @@
+             const auto rate = mcuPllTargetRatio();
+             const auto d = denominator * rate.denominator * mcuPrescaler();
+             const auto n = numerator * rate.numerator;
+-            const auto common = mcuWriteDenominator * (d / std::gcd(d, mcuWriteDenominator));
++            const auto common = mcuWriteDenominator * (d / imx1Gcd(d, mcuWriteDenominator));
+             const auto fraction = mcuWritePhase * (common / mcuWriteDenominator) + (n % d) * (common / d);
+             mcuWriteDelay -= std::min<uint64_t>(n / d + fraction / common, mcuWriteDelay);
+             mcuWritePhase = fraction % common;
+@@ -104,7 +104,7 @@
+         }
+     }
+     if (!mcuReferenceRemaining) return;
+-    const auto common = mcuReferenceDenominator * (denominator / std::gcd(denominator, mcuReferenceDenominator));
++    const auto common = mcuReferenceDenominator * (denominator / imx1Gcd(denominator, mcuReferenceDenominator));
+     const auto fraction = mcuReferencePhase * (common / mcuReferenceDenominator) +
+                           (numerator % denominator) * (common / denominator);
+     const auto elapsed = numerator / denominator + fraction / common;
+--- a/src/uarm/uarm/imx1_graphics_clocks.h
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -15,7 +15,7 @@
+     // stays the same.
+     bool supports(uint64_t d) const {
+         if (d && denominator % d == 0) return denominator <= std::numeric_limits<uint64_t>::max() / 2;
+-        return d && d / std::gcd(d, denominator) <= (std::numeric_limits<uint64_t>::max() / 2) / denominator;
++        return d && d / imx1Gcd(d, denominator) <= (std::numeric_limits<uint64_t>::max() / 2) / denominator;
+     }
+     uint64_t add(uint64_t n, uint64_t d) {
+         assert(supports(d));
+@@ -24,7 +24,7 @@
+             phase = fraction % denominator;
+             return n / d + fraction / denominator;
+         }
+-        const auto common = denominator * (d / std::gcd(d, denominator));
++        const auto common = denominator * (d / imx1Gcd(d, denominator));
+         const auto fraction = phase * (common / denominator) + (n % d) * (common / d);
+         phase = fraction % common;
+         denominator = common;
+@@ -120,7 +120,7 @@
+             const auto rate = testRate(word(0x94) & 31);
+             // Callers bound each charge, so the frequency product fits uint64_t.
+             const auto d = timeHz * rate.denominator * testPrescaler;
+-            const auto common = std::gcd(rate.numerator,d);
++            const auto common = imx1Gcd(rate.numerator,d);
+             counter = uint16_t(counter + countFraction.add(ticks * (rate.numerator/common),d/common));
+         }
+         if (countRemaining) countRemaining -= ticks;
+@@ -261,9 +261,9 @@
+             const uint64_t referenceD=timeHz*post*testPrescaler;
+             const uint64_t forcedN=vcoBase()+(dac<=5?0:dac-5)*3200000u;
+             const uint64_t forcedD=timeHz*vcoDivisor()*post*testPrescaler;
+-            if (!countFraction.supports(d/std::gcd(n,d)) ||
+-                !countFraction.supports(referenceD/std::gcd(referenceHz,referenceD)) ||
+-                !countFraction.supports(forcedD/std::gcd(forcedN,forcedD))) return false;
++            if (!countFraction.supports(d/imx1Gcd(n,d)) ||
++                !countFraction.supports(referenceD/imx1Gcd(referenceHz,referenceD)) ||
++                !countFraction.supports(forcedD/imx1Gcd(forcedN,forcedD))) return false;
+         }
+         return true;
+     }
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -68,14 +68,14 @@
+     uint64_t scanPhase() const { return phase; }
+     bool clockSourcesSupported(Imx1GraphicsClocks::Rate pixel) const {
+         const auto n=pixel.numerator*pixelCycles,d=Imx1GraphicsClocks::timeHz*pixel.denominator;
+-        return pixelFraction.supports(d/std::gcd(n,d));
++        return pixelFraction.supports(d/imx1Gcd(n,d));
+     }
+     void setClockSources(Imx1GraphicsClocks::Rate pixel, Imx1GraphicsClocks::Rate system) {
+         pixelSource = pixel.numerator != 0;
+         systemSource = system.numerator != 0;
+         rateNumerator = pixel.numerator * pixelCycles;
+         rateDenominator = Imx1GraphicsClocks::timeHz * pixel.denominator;
+-        const auto divisor = std::gcd(rateNumerator, rateDenominator);
++        const auto divisor = imx1Gcd(rateNumerator, rateDenominator);
+         rateNumerator /= divisor;
+         rateDenominator /= divisor;
+         if (!clockDelay) updateClocks();
+--- a/src/uarm/uarm/imx1_pwm.cpp
++++ b/src/uarm/uarm/imx1_pwm.cpp
+@@ -28,14 +28,14 @@
+ 
+ bool Imx1Pwm::referenceRatioSupported(uint64_t denominator) const {
+     if (!denominator) return false;
+-    const auto factor = denominator / std::gcd(denominator, referenceDenominator);
++    const auto factor = denominator / imx1Gcd(denominator, referenceDenominator);
+     return factor <= (std::numeric_limits<uint64_t>::max() / 2) / referenceDenominator;
+ }
+ 
+ void Imx1Pwm::advanceReference(uint64_t numerator, uint64_t denominator) {
+     assert(referenceRatioSupported(denominator));
+     if (!enabled() || !(control & 0x8000) || !numerator) return;
+-    const auto common = referenceDenominator * (denominator / std::gcd(denominator, referenceDenominator));
++    const auto common = referenceDenominator * (denominator / imx1Gcd(denominator, referenceDenominator));
+     const auto fraction = referencePhase * (common / referenceDenominator) +
+                           (numerator % denominator) * (common / denominator);
+     referencePhase = fraction % common;
+--- a/src/uarm/uarm/imx1_reference_time.h
++++ b/src/uarm/uarm/imx1_reference_time.h
+@@ -6,6 +6,14 @@
+ #include <limits>
+ #include <numeric>
+ 
++// std::gcd, answering at once when the two are equal or one divides the other, as the clock denominators
++// nearly always do.
++inline uint64_t imx1Gcd(uint64_t a, uint64_t b) {
++    if (a == b) return a;
++    if (a && b % a == 0) return a;
++    if (b && a % b == 0) return b;
++    return std::gcd(a, b);
++}
+ // Smallest count of n/d steps after which floor(phase/den + steps*n/d) reaches target.
+ // When the product doesn't fit 128 bits it returns a smaller count, never a larger one. At least 1.
+ inline uint64_t imx1StepsUntil(uint64_t phase, uint64_t den, uint64_t n, uint64_t d, uint64_t target) {
+@@ -43,11 +51,11 @@
+     uint64_t ticks = 0, numerator = 0, denominator = 1;
+     bool valid() const { return denominator && numerator < denominator; }
+     bool supports(uint64_t d) const {
+-        return valid() && d && d / std::gcd(d, denominator) <= UINT64_MAX / denominator;
++        return valid() && d && d / imx1Gcd(d, denominator) <= UINT64_MAX / denominator;
+     }
+     bool add(uint64_t n, uint64_t d) {
+         if (!valid() || !supports(d)) return false;
+-        const auto common = denominator * (d / std::gcd(d, denominator));
++        const auto common = denominator * (d / imx1Gcd(d, denominator));
+         const __uint128_t fraction = __uint128_t(numerator) * (common / denominator) +
+                                      __uint128_t(n % d) * (common / d);
+         const __uint128_t whole = __uint128_t(ticks) + n / d + fraction / common;
+@@ -64,16 +72,16 @@
+     // Requires this >= earlier and a representable common denominator.
+     Imx1ReferenceTime since(const Imx1ReferenceTime& earlier) const {
+         assert(valid() && earlier.valid() && supports(earlier.denominator) && compare(earlier) >= 0);
+-        const auto common = denominator * (earlier.denominator / std::gcd(denominator, earlier.denominator));
++        const auto common = denominator * (earlier.denominator / imx1Gcd(denominator, earlier.denominator));
+         const auto a = numerator * (common / denominator), b = earlier.numerator * (common / earlier.denominator);
+         Imx1ReferenceTime delta{ticks - earlier.ticks - (a < b), a < b ? common - (b - a) : a - b, common};
+-        const auto divisor = std::gcd(delta.numerator, delta.denominator);
++        const auto divisor = imx1Gcd(delta.numerator, delta.denominator);
+         delta.numerator /= divisor; delta.denominator /= divisor;
+         return delta;
+     }
+     Imx1ReferenceInterval intervalSince(const Imx1ReferenceTime& earlier) const {
+         assert(valid() && earlier.valid() && compare(earlier) >= 0);
+-        const auto common = __uint128_t(denominator) * (earlier.denominator / std::gcd(denominator, earlier.denominator));
++        const auto common = __uint128_t(denominator) * (earlier.denominator / imx1Gcd(denominator, earlier.denominator));
+         const auto a = __uint128_t(numerator) * (common / denominator);
+         const auto b = __uint128_t(earlier.numerator) * (common / earlier.denominator);
+         return {ticks - earlier.ticks - (a < b), a < b ? common - (b - a) : a - b, common};
+--- a/src/uarm/uarm/imx1_rtc.cpp
++++ b/src/uarm/uarm/imx1_rtc.cpp
+@@ -29,7 +29,7 @@
+ bool Imx1Rtc::referenceRatioSupported(uint64_t denominator) const {
+     if (!denominator) return false;
+     if (!known) return true;
+-    const auto factor = denominator / std::gcd(denominator, referenceDenominator);
++    const auto factor = denominator / imx1Gcd(denominator, referenceDenominator);
+     // Two proper fractions can then be added without overflowing uint64_t.
+     return factor <= (std::numeric_limits<uint64_t>::max() / 2) / referenceDenominator;
+ }
+@@ -39,7 +39,7 @@
+     used = true;
+     elapsed = true;
+     if (!known) return;
+-    const auto common = referenceDenominator * (denominator / std::gcd(denominator, referenceDenominator));
++    const auto common = referenceDenominator * (denominator / imx1Gcd(denominator, referenceDenominator));
+     const auto fraction = referencePhase * (common / referenceDenominator) +
+                           (numerator % denominator) * (common / denominator);
+     referencePhase = fraction % common;
+--- a/src/uarm/uarm/imx1_watchdog.cpp
++++ b/src/uarm/uarm/imx1_watchdog.cpp
+@@ -7,7 +7,7 @@
+ bool Imx1Watchdog::referenceRatioSupported(uint64_t denominator) const {
+     if (!denominator) return false;
+     if (!enabled() || uncertain) return true;
+-    const auto factor = denominator / std::gcd(denominator, referenceDenominator);
++    const auto factor = denominator / imx1Gcd(denominator, referenceDenominator);
+     return factor <= (std::numeric_limits<uint64_t>::max() / 2) / referenceDenominator;
+ }
+ void Imx1Watchdog::reloadBound() {
+@@ -20,7 +20,7 @@
+ void Imx1Watchdog::advanceReference(uint64_t numerator, uint64_t denominator) {
+     assert(referenceRatioSupported(denominator));
+     if (!enabled() || uncertain || !numerator) return;
+-    const auto common = referenceDenominator * (denominator / std::gcd(denominator, referenceDenominator));
++    const auto common = referenceDenominator * (denominator / imx1Gcd(denominator, referenceDenominator));
+     const auto fraction = referencePhase * (common / referenceDenominator) +
+                           (numerator % denominator) * (common / denominator);
+     referencePhase = fraction % common;

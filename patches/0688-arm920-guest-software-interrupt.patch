@@ -1,0 +1,28 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -2298,8 +2298,10 @@
+ 
+     if (cpuPrvConditionFails(cpu, instr)) return;
+ 
+-    if ((wasT && (instr & 0x00fffffful) == 0xab) ||
+-        (!wasT && (instr & 0x00fffffful) == 0x123456ul)) {
++    // ARM920T always enters the guest SWI vector, for every immediate and operation.
++    if (cpu->model != ArmCpuModel::arm920t &&
++        ((wasT && (instr & 0x00fffffful) == 0xab) ||
++         (!wasT && (instr & 0x00fffffful) == 0x123456ul))) {
+         if (cpu->regs[0] == 4) {
+             uint32_t addr = cpu->regs[1];
+             uint8_t ch;
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -321,9 +321,7 @@
+ }
+ 
+ bool softwareInterrupt(uint32_t i, bool thumb) {
+-    // Keep the shared core's legacy host semihosting values outside this probe.
+-    return thumb ? (i & 0xff00) == 0xdf00 && i != 0xdfab :
+-                   (i & 0x0f000000) == 0x0f000000 && (i & 0xffffff) != 0x123456;
++    return thumb ? (i & 0xff00) == 0xdf00 : (i & 0x0f000000) == 0x0f000000;
+ }
+ bool armMode(uint32_t mode) {
+     return mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 ||

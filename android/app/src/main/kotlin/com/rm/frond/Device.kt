@@ -107,6 +107,10 @@ data class Device internal constructor(
         storageSlots.firstOrNull()?.families?.firstOrNull { it.family == "sdsc" }?.sizes
             ?: SD_SIZES.filter { (it.toLong() shl 20) in sdMin..sdMax }
     val appNames: List<String> get() = appNamesText.split('|')
+    // The Tapwave Zodiac: a landscape screen, an engine of its own that runs best on Fast, and an
+    // analogue stick and triggers that a controller drives through the core's own mapping.
+    val zodiac: Boolean get() = id == ZODIAC_ID
+    val defaultEngine: Engine get() = if (zodiac) Engine.FAST else Engine.EXACT
     val buttons: List<String> get() = buttonsText.split('|')
 
     internal fun unresolvedFirmware(): Device = withFirmware(firmwareVariants.firstOrNull { !it.powerSupported })
@@ -117,6 +121,7 @@ data class Device internal constructor(
 
     companion object {
         val SD_SIZES = listOf(32, 64, 128, 256, 512, 1024, 1886)
+        const val ZODIAC_ID = "tapwave-zodiac-2"
         fun sizeLabel(mib: Int) = if (mib >= 1024) "${(mib + 512) / 1024} GB" else "$mib MB"
         fun sizeLabel(bytes: Long) = if (bytes >= 1L shl 30) "${bytes shr 30} GB" else "${bytes shr 20} MB"
         // Classic Memory Stick physical bytes: each MB is 2048 pages of 512 + 9 bytes.

@@ -1,0 +1,636 @@
+diff --git a/src/uarm/Makefile b/src/uarm/Makefile
+index d4960b2..2c0d557 100644
+--- a/src/uarm/Makefile
++++ b/src/uarm/Makefile
+@@ -76,6 +76,7 @@ SOURCE_CXX =		 					\
+ 	uarm/patches.cpp					\
+ 	MainLoop.cpp						\
+ 	uarm/patch_dispatch.cpp				\
++	uarm/arm920_dcache.cpp					\
+ 	uarm/icache.cpp						\
+ 	uarm/CPU.cpp						\
+ 	uarm/pace.cpp 						\
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 688ccff..da30998 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -478,6 +478,13 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
+ // input addr is VA not MVA
+ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
+                                uint_fast8_t fsr) {
++    if (cpu->model == ArmCpuModel::arm920t &&
++        cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard.active) {
++        // An unmodelled cache/buffer target is a diagnostic trap, with FSR/FAR retained.
++        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (cpu->T ? 2 : 4),
++                        ARM_SR_MODE_UND | ARM_SR_I);
++        return;
++    }
+ // FCSE
+ #ifdef SUPPORT_FCSE
+     if (addr < 0x02000000UL)  // report addr is MVA
+@@ -858,6 +865,7 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
+ 
+ #ifndef __EMSCRIPTEN__
+     if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
++      if (cpu->model != ArmCpuModel::arm920t) {
+         struct HostTlb &hostTlb = cpu->mem->hostTlb;
+         if constexpr (write) {
+             const struct HostTlbEntry &e = hostTlb.write[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
+@@ -870,6 +878,7 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
+                 return true;
+             }
+         }
++      }
+     }
+ #endif
+ 
+@@ -888,6 +897,14 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
+         }
+ 
+         pa = MMU_TRANSLATE_RESULT_PA(translateResult);
++        if (cpu->model == ArmCpuModel::arm920t) {
++            auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
++            dc->mem = cpu->mem;
++            const auto ctl = cp15MMUArm920Control(cpu->cp15.cp15mmu);
++            const auto result = dc->access(vaddr, translateResult, size, write, buf, ctl & 4, ctl & 0x4000);
++            if (result == Arm920DataResult::ok) return true;
++            if (result == Arm920DataResult::unsupported) { if (fsrP) *fsrP = 0; return false; }
++        }
+     } else {
+         if (!MPU_TEST_RESULT_OK(mpuTestAddress(cpu->memorySystem.mpu, vaddr, priviledged, write))) {
+             if (fsrP) *fsrP = 1;
+@@ -911,7 +928,7 @@ static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t v
+ 
+ #ifndef __EMSCRIPTEN__
+     if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && size <= 8)
+-        cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged);
++        if (cpu->model != ArmCpuModel::arm920t) cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged);
+ #endif
+ 
+     return true;
+@@ -1465,6 +1482,27 @@ static void execFn_swb(struct ArmCpu *cpu, uint32_t instr) {
+ 
+     if (cpuPrvConditionFails(cpu, instr)) return;
+ 
++    if constexpr (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
++        if (cpu->model == ArmCpuModel::arm920t && (tag == 0 || tag == 4)) {
++            ea = cpuPrvGetRegNotPC(cpu, (instr >> 16) & 0x0f);
++            const unsigned size = tag == 0 ? 4 : 1;
++            if (size == 4 && (ea & 3)) {
++                if (cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu))
++                    return cpuPrvHandleMemErr(cpu, ea, false, false, 1);
++                ea &= ~3u;
++            }
++            for (bool writing : {false, true}) {
++                const auto translation = mmuTranslate(cpu->memorySystem.mmu, ea, cpu->privileged, writing);
++                if (!MMU_TRANSLATE_RESULT_OK(translation))
++                    return cpuPrvHandleMemErr(cpu, ea, writing, false, MMU_TRANSLATE_RESULT_FSR(translation));
++                auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
++                dc->mem = cpu->mem;
++                if (!dc->supported(MMU_TRANSLATE_RESULT_PA(translation), size, writing))
++                    return cpuPrvHandleMemErr(cpu, ea, writing, false, 0);
++            }
++        }
++    }
++
+     switch (tag) {
+         case 0:  // SWP
+ 
+@@ -4413,6 +4451,7 @@ bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_
+ }
+ 
+ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
++    if (cpu->model == ArmCpuModel::arm920t) return nullptr;
+     const struct HostTlb &t = cpu->mem->hostTlb;
+     const struct HostTlbEntry &e = t.read[(va >> 12) & (HOST_TLB_SIZE - 1)];
+     if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return nullptr;
+@@ -4423,6 +4462,7 @@ uint8_t *cpuJitReadPage(ArmCpu *cpu, uint32_t va) {
+ // fast path for the current privilege (so the MMU allows it in this mode with the current
+ // domains), marked dirty as ramDirectWritePage does. Null for anything else.
+ uint8_t *cpuJitWritePage(ArmCpu *cpu, uint32_t va) {
++    if (cpu->model == ArmCpuModel::arm920t) return nullptr;
+     if (cpu->nativeCallDepth) return nullptr;
+     const struct HostTlb &t = cpu->mem->hostTlb;
+     const struct HostTlbEntry &e = t.write[(va >> 12) & (HOST_TLB_SIZE - 1)];
+@@ -4706,6 +4746,8 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+                 (word & 0x0f900090) == 0x01000080 ||
+                 (word & 0x0e1000d0) == 0x000000d0 ||
+                 (word & 0x0ff000f0) == 0x01200070 ||
++                (word & 0x0fb00ff0) == 0x01000090 || // Swap shares the backing-range preflight.
++
+                 (word & 0x0c000000) == 0x0c000000) return false;
+         } else {
+             const uint16_t h = (pc & 2) ? word >> 16 : word;
+@@ -5252,3 +5294,14 @@ void cpuSetEarlyAudioHook(ArmCpu* cpu,void (*hook)(ArmCpu*,void*,uint32_t,uint32
+ 
+ void cpuGetInstructionFetchState(ArmCpu* cpu,uint32_t* state) {icacheGetFetchState(cpu->ic,state);}
+ bool cpuRestoreInstructionFetchState(ArmCpu* cpu,const uint32_t* state) {return icacheSetFetchState(cpu->ic,state);}
++
++void cpuArm920SetMemoryCheck(ArmCpu* cpu, Arm920MemoryCheck check, void* context) {
++    if (cpu->model != ArmCpuModel::arm920t) return;
++    auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
++    dc->mem = cpu->mem;
++    dc->check = check;
++    dc->context = context;
++}
++Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
++    return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
++}
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index a1c156d..bb2650e 100644
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -5,6 +5,7 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include "arm920_dcache.h"
+ #include <functional>
+ 
+ #include "mem.h"
+@@ -255,4 +256,9 @@ void cpuPrepareInjectedCall(struct ArmCpu *cpu, T &savestate);
+ template <typename T>
+ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader);
+ 
++
++// Diagnostic cache/buffer guards do not report an architectural external abort.
++void cpuArm920SetMemoryCheck(ArmCpu*, Arm920MemoryCheck, void*);
++Arm920DataGuard cpuArm920DataGuard(ArmCpu*);
++
+ #endif
+diff --git a/src/uarm/uarm/MMU.cpp b/src/uarm/uarm/MMU.cpp
+index 2404d45..95d668f 100644
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -63,7 +63,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+                                                          bool priviledged, bool write, bool inspect = false,
+                                                          bool checkRead = true, uint8_t *access = nullptr,
+                                                          bool *uniformP = nullptr) {
+-    bool c = false;
++    bool c = false, b = false;
+     bool section = false, coarse = true, pxa_tex_page = false;
+     uint32_t va, paPage = 0, sz, t, pa;
+     int_fast16_t i;
+@@ -100,6 +100,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+             sz = 1UL << 20;
+             ap = (t >> 10) & 3;
+             c = !!(t & 0x08);
++            b = !!(t & 0x04);
+             section = true;
+             goto translated;
+ 
+@@ -117,6 +118,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+     }
+ 
+     c = !!(t & 0x08);
++            b = !!(t & 0x04);
+ 
+     switch (t & 3) {
+         case 0:  // fault
+@@ -190,6 +192,7 @@ translated:
+ 
+             tlbEntry->ap = ap;
+             tlbEntry->c = c;
++            tlbEntry->b = b;
+             tlbEntry->domain = dom;
+             tlbEntry->section = section;
+             tlbEntry->pa = (paPage + offset) >> 12;
+@@ -210,6 +213,7 @@ translated:
+     result = pa;
+ 
+     if (c) result |= (1ull << 62);
++    if (b) result |= (1ull << 61);
+ 
+     return result;
+ }
+@@ -230,6 +234,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
+     uint64_t result = (addr & 0xfff) + (tlbEntry->pa << 12);
+ 
+     if (tlbEntry->c) result |= (1ull << 62);
++    if (tlbEntry->b) result |= (1ull << 61);
+ 
+     return result;
+ }
+diff --git a/src/uarm/uarm/MMU.h b/src/uarm/uarm/MMU.h
+index 95c1f7a..e729f98 100644
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -13,6 +13,7 @@ typedef uint64_t MMUTranslateResult;
+ 
+ #define MMU_TRANSLATE_RESULT_OK(x) (!(x & (1ull << 63)))
+ #define MMU_TRANSLATE_RESULT_CACHEABLE(x) (x & (1ull << 62))
++#define MMU_TRANSLATE_RESULT_BUFFERABLE(x) (x & (1ull << 61))
+ #define MMU_TRANSLATE_RESULT_PA(x) ((uint32_t)x)
+ #define MMU_TRANSLATE_RESULT_FSR(x) ((uint8_t)((x >> 32) & 0xff))
+ 
+diff --git a/src/uarm/uarm/MMU_internal.h b/src/uarm/uarm/MMU_internal.h
+index 9d87dfd..56a5191 100644
+--- a/src/uarm/uarm/MMU_internal.h
++++ b/src/uarm/uarm/MMU_internal.h
+@@ -13,6 +13,7 @@ struct TlbEntry {
+     uint32_t domain : 4;
+     uint32_t c : 1;
+     uint32_t section : 1;
++    uint32_t b : 1;
+ };
+ 
+ struct ArmMmu {
+@@ -81,6 +82,6 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t
+         return mmuTranslate(mmu, addr, privileged, write);
+     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
+     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
+-    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62);
++    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61);
+ }
+ #endif
+diff --git a/src/uarm/uarm/arm920_dcache.cpp b/src/uarm/uarm/arm920_dcache.cpp
+new file mode 100644
+index 0000000..2330a4a
+--- /dev/null
++++ b/src/uarm/uarm/arm920_dcache.cpp
+@@ -0,0 +1,144 @@
++#include "arm920_dcache.h"
++
++#include <cstring>
++#include "MMU.h"
++#include "mem.h"
++
++void Arm920DataCache::reset() {
++    for (auto& segment : lines) for (auto& line : segment) line.valid = false;
++    std::memset(victim, 0, sizeof(victim));
++    random = 1;
++    guard = {};
++}
++
++bool Arm920DataCache::reject(uint32_t pa, uint32_t size, bool write) {
++    if (!guard.active) guard = {pa, size, write, true};
++    return false;
++}
++
++bool Arm920DataCache::supported(uint32_t pa, uint32_t size, bool write) {
++    if (guard.active) return false;
++    const bool ok = check ? check(context, pa, size, write) :
++        memIsBufferRange(mem, pa, size, write);
++    return ok || reject(pa, size, write);
++}
++
++bool Arm920DataCache::clean(Line& line) {
++    if (!line.valid || !line.dirty) return true;
++    // PA TAG is retained at allocation, independently of later page-table changes.
++    for (unsigned half = 0; half < 2; ++half)
++        if ((line.dirty & (1u << half)) && !supported(line.pa + half * 16, 16, true))
++            return false;
++    for (unsigned i = 0; i < 8; ++i) {
++        if (!(line.dirty & (1u << (i / 4)))) continue;
++        if (!memAccess<4, true>(mem, line.pa + i * 4, &line.words[i]))
++            return reject(line.pa + i * 4, 4, true);
++    }
++    line.dirty = 0;
++    return true;
++}
++
++void Arm920DataCache::invalidate() {
++    for (auto& segment : lines) for (auto& line : segment) line.valid = false;
++}
++
++bool Arm920DataCache::maintain(uint32_t operand, bool index, bool cleaning, bool invalidating) {
++    if (guard.active) return false;
++    auto& segment = lines[(operand >> 5) & 7];
++    for (unsigned i = 0; i < 64; ++i) {
++        auto& line = segment[i];
++        if (index ? i != (operand >> 26) : !line.valid || line.va != (operand & ~31u)) continue;
++        if (cleaning && !clean(line)) return false;
++        if (invalidating) line.valid = false;
++    }
++    return true;
++}
++
++Arm920DataResult Arm920DataCache::access(uint32_t va, uint64_t translation, unsigned size,
++                                        bool write, void* data, bool enabled, bool roundRobin) {
++    if (guard.active) return Arm920DataResult::unsupported;
++    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(translation);
++    const bool cacheable = enabled && MMU_TRANSLATE_RESULT_CACHEABLE(translation);
++    const bool bufferable = MMU_TRANSLATE_RESULT_BUFFERABLE(translation);
++    Line* hit = nullptr;
++    if (enabled) for (auto& line : lines[(va >> 5) & 7])
++        if (line.valid && line.va == (va & ~31u)) { hit = &line; break; }
++    // DDI0151C 4.3.2: changing C/B while a line is retained is a software error.
++    if (hit && (!cacheable || hit->bufferable != bufferable)) {
++        reject(pa, size, write);
++        return Arm920DataResult::unsupported;
++    }
++    if (!cacheable && !bufferable) return Arm920DataResult::bypass;
++    if (!(hit && !write) &&
++        !supported(hit && write && bufferable ? hit->pa + (va & 31) : pa, size, write))
++        return Arm920DataResult::unsupported;
++    if (write) {
++        uint64_t value;
++        switch (size) {
++            case 1: value = *static_cast<uint8_t*>(data); break;
++            case 2: value = *static_cast<uint16_t*>(data); break;
++            case 4: value = *static_cast<uint32_t*>(data); break;
++            default: value = *static_cast<uint64_t*>(data); break;
++        }
++        // Read allocation only. Buffered writes drain synchronously to proved backing memory.
++        if (!hit || !bufferable) {
++            if (!memAccess(mem, pa, size, true, data)) {
++                reject(pa, size, true);
++                return Arm920DataResult::unsupported;
++            }
++        }
++        if (hit) {
++            // Cache words have host integer order; guest data are little endian.
++            for (unsigned i = 0; i < size; ++i) {
++                const unsigned offset = (va & 31) + i;
++                const unsigned shift = (offset & 3) * 8;
++                auto& word = hit->words[offset / 4];
++                word = (word & ~(0xffu << shift)) | (uint32_t((value >> (i * 8)) & 0xff) << shift);
++                if (bufferable) hit->dirty |= 1u << (offset / 16);
++            }
++        }
++        return Arm920DataResult::ok;
++    }
++    if (!cacheable) {
++        if (!memAccess(mem, pa, size, false, data)) {
++            reject(pa, size, false);
++            return Arm920DataResult::unsupported;
++        }
++        return Arm920DataResult::ok;
++    }
++    if (!hit) {
++        if (!supported(pa & ~31u, 32, false)) return Arm920DataResult::unsupported;
++        const unsigned segment = (va >> 5) & 7;
++        uint32_t nextRandom = random * 1664525u + 1013904223u;
++        const unsigned index = roundRobin ? victim[segment] & 63 : (nextRandom >> 24) & 63;
++        auto& line = lines[segment][index];
++        if (!clean(line)) return Arm920DataResult::unsupported;
++        uint32_t words[8];
++        for (unsigned i = 0; i < 8; ++i) {
++            if (!memAccess<4, false>(mem, (pa & ~31u) + i * 4, words + i)) {
++                reject((pa & ~31u) + i * 4, 4, false);
++                return Arm920DataResult::unsupported;
++            }
++        }
++        line.va = va & ~31u;
++        line.pa = pa & ~31u;
++        std::memcpy(line.words, words, sizeof(words));
++        line.dirty = 0;
++        line.bufferable = bufferable;
++        line.valid = true;
++        if (roundRobin) ++victim[segment]; else random = nextRandom;
++        hit = &line;
++    }
++    uint64_t value = 0;
++    for (unsigned i = 0; i < size; ++i) {
++        const unsigned offset = (va & 31) + i;
++        value |= uint64_t(uint8_t(hit->words[offset / 4] >> ((offset & 3) * 8))) << (i * 8);
++    }
++    switch (size) {
++        case 1: *static_cast<uint8_t*>(data) = value; break;
++        case 2: *static_cast<uint16_t*>(data) = value; break;
++        case 4: *static_cast<uint32_t*>(data) = value; break;
++        default: *static_cast<uint64_t*>(data) = value; break;
++    }
++    return Arm920DataResult::ok;
++}
+diff --git a/src/uarm/uarm/arm920_dcache.h b/src/uarm/uarm/arm920_dcache.h
+new file mode 100644
+index 0000000..81b0168
+--- /dev/null
++++ b/src/uarm/uarm/arm920_dcache.h
+@@ -0,0 +1,36 @@
++#ifndef FROND_ARM920_DCACHE_H
++#define FROND_ARM920_DCACHE_H
++
++#include <cstdint>
++
++struct ArmMem;
++// A successful check promises ordinary, infallible backing accesses, without issuing one.
++using Arm920MemoryCheck = bool (*)(void*, uint32_t, uint32_t, bool);
++enum class Arm920DataResult { bypass, ok, unsupported };
++struct Arm920DataGuard {
++    uint32_t address, size;
++    bool write, active;
++};
++struct Arm920DataCache {
++    struct Line {
++        uint32_t va, pa, words[8];
++        uint8_t dirty;
++        bool valid, bufferable;
++    } lines[8][64];
++    uint8_t victim[8];
++    uint32_t random;
++    ArmMem* mem;
++    Arm920MemoryCheck check;
++    void* context;
++    Arm920DataGuard guard;
++    void reset();
++    bool supported(uint32_t pa, uint32_t size, bool write);
++    bool reject(uint32_t pa, uint32_t size, bool write);
++    bool clean(Line& line);
++    void invalidate();
++    bool maintain(uint32_t operand, bool index, bool clean, bool invalidate);
++    Arm920DataResult access(uint32_t va, uint64_t translation, unsigned size, bool write,
++                           void* data, bool enabled, bool roundRobin);
++};
++
++#endif
+diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+index 95a3038..73e4cb4 100644
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -40,6 +40,7 @@ struct ArmCP15MMU {
+ 
+     bool xscale, omap;
+     bool arm920Bootstrap;
++    Arm920DataCache dataCache;
+ 
+     template <typename T>
+     void DoSaveLoad(T& chunkHelper);
+@@ -78,9 +79,9 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
+                 cpuSetReg(cpu, Rx, cp15->control);
+                 return true;
+             }
+-            // Data caching, big endian and the reserved clock mode remain unsupported.
+-            if ((val & 0x78) != 0x78 || (val & ~0xc000737bu) ||
+-                (val & 0xc0000000) == 0x80000000) return false;
++            // C requires translation-table memory attributes. Big endian remains unsupported.
++            if ((val & 0x78) != 0x78 || (val & ~0xc000737fu) ||
++                (val & 0xc0000000) == 0x80000000 || ((val & 4) && !(val & 1))) return false;
+             if ((val ^ cp15->control) & 1)
+                 icacheArm920PrepareMmuSwitch(cp15->ic, cpuGetRegisters(cpu)[15],
+                     (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & ARM_SR_M) != ARM_SR_MODE_USR);
+@@ -122,19 +123,29 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
+         }
+         if (read) return false;
+         if (CRn == 7 && op2 == 2 && (CRm == 10 || CRm == 14)) {
+-            // Reset invalidates Dcache; enable, allocation and diagnostic writes stay gated.
+             // DDI0151C 2.3.11: index bits 31:26, segment bits 7:5, all other bits SBZ.
+-            return !(cp15->control & 4) && !(val & ~0xfc0000e0u);
++            if (val & ~0xfc0000e0u) return false;
++            return cp15->dataCache.maintain(val, true, true, CRm == 14);
+         }
+         if (CRn == 7 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
++            if (val) return false;
++            if (CRm != 5) cp15->dataCache.invalidate();
+             if (CRm != 6) icacheInvalGuest(cp15->ic);
+             return true;
+         }
++        if (CRn == 7 && op2 == 1 && (CRm == 6 || CRm == 10 || CRm == 14)) {
++            if (val & 31) return false;
++            return cp15->dataCache.maintain(val, false, CRm != 6, CRm != 10);
++        }
+         if (CRn == 7 && CRm == 5 && op2 == 1) {
++            if (val & 31) return false;
+             icacheInvalAddr(cp15->ic, val);
+             return true;
+         }
+-        if (CRn == 7 && CRm == 10 && op2 == 4) return true;
++        if (CRn == 7 && CRm == 10 && op2 == 4) {
++            // DDI0151C SBZ violations are UNPREDICTABLE; drain ignores the operand in this model.
++            return !cp15->dataCache.guard.active;
++        }
+         if (CRn == 8 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
+             mmuTlbFlush(cp15->mmu);
+             return true;
+@@ -445,12 +456,16 @@ bool cp15MMUAlignmentEnabled(const struct ArmCP15MMU* cp15) {
+ 
+ uint32_t cp15MMUClockMode(const ArmCP15MMU* cp15) { return cp15->control >> 30; }
+ 
++uint32_t cp15MMUArm920Control(const ArmCP15MMU* cp15) { return cp15->control; }
++Arm920DataCache* cp15MMUArm920DataCache(ArmCP15MMU* cp15) { return &cp15->dataCache; }
++
+ void cp15MMUConfigureArm920Bootstrap(struct ArmCP15MMU* cp15) {
+     cp15->arm920Bootstrap = true;
+     cp15->control = 0x78;  // DDI0151C table 2-10, assuming VINITHI low.
+     cp15->mmuSwitchCy = 0;
+     cp15->ttb = 0;
+     cp15->FSR = cp15->FAR = 0;
++    cp15->dataCache.reset();
+     cpuClearSlowPath(cp15->cpu, SLOW_PATH_REASON_CP15);
+     icacheConfigureArm920(cp15->ic);
+     cpuSetVectorAddr(cp15->cpu, 0);
+diff --git a/src/uarm/uarm/cp15mmu.h b/src/uarm/uarm/cp15mmu.h
+index 089ab48..0c08bdc 100644
+--- a/src/uarm/uarm/cp15mmu.h
++++ b/src/uarm/uarm/cp15mmu.h
+@@ -4,6 +4,7 @@
+ #define _CP15_MMU_H_
+ 
+ #include <cstdint>
++#include "arm920_dcache.h"
+ 
+ struct ArmCP15MMU;
+ struct ArmCpu;
+@@ -13,6 +14,8 @@ struct icache;
+ struct ArmCP15MMU* cp15MMUInit(struct ArmCpu* cpu, struct ArmMmu* mmu, struct icache* ic,
+                                uint32_t cpuid, uint32_t cacheId, bool xscale, bool omap);
+ void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus);
++uint32_t cp15MMUArm920Control(const ArmCP15MMU*);
++Arm920DataCache* cp15MMUArm920DataCache(ArmCP15MMU*);
+ void cp15MMUCycle(struct ArmCP15MMU* cp15);
+ bool cp15MMUAlignmentEnabled(const struct ArmCP15MMU* cp15);
+ uint32_t cp15MMUClockMode(const struct ArmCP15MMU* cp15);
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 3dd5411..d500450 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -58,6 +58,11 @@ struct Probe {
+         }
+         return nullptr;
+     }
++    static bool cacheMemoryCheck(void* context, uint32_t address, uint32_t size, bool write) {
++        auto& p = *static_cast<Probe*>(context);
++        if (!write && p.resolve(address, size)) return true;
++        return p.options.bootstrapPeripherals && p.peripherals.cacheMemoryRange(address, size, write);
++    }
+     static bool access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+         auto& p = *static_cast<Probe*>(context);
+         // Further data accesses within one instruction also wait for the nominal bus clock.
+@@ -286,6 +291,7 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+     p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
+                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
+     patchDispatchSetCpu(patches, p->cpu);
++    cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
+     p->result.stop = Imx1ProbeStop::budget;
+     bool blPrefix = false;
+     uint32_t blNextPc = 0;
+@@ -332,6 +338,14 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+         const auto exceptions = cpuExceptionSequence(p->cpu);
+         const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
+         if (p->failed) break;
++        const auto dataGuard = cpuArm920DataGuard(p->cpu);
++        if (dataGuard.active) {
++            p->result.stop = Imx1ProbeStop::unsupportedDataCache;
++            p->result.address = dataGuard.address;
++            p->result.size = dataGuard.size;
++            p->result.value = dataGuard.write;
++            break;
++        }
+         const bool softwareEntry = softwareInterrupt(t.instruction, thumb) &&
+                                    (thumb || condition(t.instruction, t.cpsr));
+         if (cpuExceptionSequence(p->cpu) != exceptions &&
+@@ -361,6 +375,7 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
+     switch (stop) {
+         case Imx1ProbeStop::budget: return "instruction-budget";
++        case Imx1ProbeStop::unsupportedDataCache: return "unsupported-data-cache";
+         case Imx1ProbeStop::unsupportedInstruction: return "unsupported-instruction";
+         case Imx1ProbeStop::unsupportedCp15: return "unsupported-cp15";
+         case Imx1ProbeStop::unsupportedRead: return "unsupported-read";
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index eae6702..b82ff80 100644
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -9,7 +9,7 @@
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+ enum class Imx1ProbeStop {
+     budget, unsupportedInstruction, unsupportedCp15, unsupportedRead, unsupportedWrite, exception, engineUnavailable,
+-    unsupportedPeripheral
++    unsupportedPeripheral, unsupportedDataCache
+ };
+ struct Imx1ProbeTrace {
+     uint32_t step, pc, instruction, cpsr, operand;
+@@ -57,6 +57,7 @@ struct Imx1ProbeOptions {
+ struct Imx1ProbeResult {
+     Imx1ProbeStop stop;
+     Imx1ProbeTrace trace;
++    // unsupportedDataCache carries the direction in value: 0 read, 1 write.
+     uint32_t address, value, size;
+     uint32_t registers[16], cpsr, spsr;
+     uint64_t jitBlocks, jitInstructions;
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+index 428d82c..6b4e0f2 100644
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -109,6 +109,18 @@ bool Imx1Bootstrap::instructionWord(uint32_t address, uint32_t& value) const {
+     return instructionRead(address, 4, value);
+ }
+ 
++bool Imx1Bootstrap::cacheMemoryRange(uint32_t address, uint32_t size, bool /*write*/) const {
++    const uint64_t end = uint64_t(address) + size;
++    if (!size || end > 0x100000000ull) return false;
++    // The SRAM read extension is deliberately excluded from cache backing.
++    if (address >= 0x00300000 && end <= 0x00320000) return true;
++    if (address < 0x08000000 || end > 0x10000000) return false;
++    const auto& s = sdram[(address - 0x08000000) >> 26];
++    const uint32_t offset = address & 0x03ffffff;
++    return s.bytes && (s.control & 0xf0000000) == 0x80000000 && s.modeSet &&
++           size <= 0x04000000 - offset && offset < s.bytes && size <= s.bytes - offset;
++}
++
+ bool Imx1Bootstrap::instructionRead(uint32_t address, uint32_t size, uint32_t& value) const {
+     if ((size != 2 && size != 4) || (address & (size - 1))) return false;
+     value = 0;
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+index 94218ef..7f492a4 100644
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -57,6 +57,7 @@ class Imx1Bootstrap {
+     Imx1BootstrapAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode = 0);
+     // Instruction reads cannot issue SDRAM commands or consume peripheral state.
+     bool instructionRead(uint32_t address, uint32_t size, uint32_t& value) const;
++    bool cacheMemoryRange(uint32_t address, uint32_t size, bool write) const;
+     bool instructionWord(uint32_t address, uint32_t& value) const;
+     static const char* registerName(uint32_t address);
+     static bool isRamAddress(uint32_t address) {

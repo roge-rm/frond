@@ -1,0 +1,292 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -401,7 +401,8 @@
+             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
+                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
+                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
+-                 p.result.trace.pc == 0x200a9a9c) && p.graphicsMemory) {
++                 p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
++                 p.result.trace.pc == 0x200b1790) && p.graphicsMemory) {
+                 auto commands = p.graphicsCommands;
+                 const auto prepared = commands.prepare(candidate,p.peripherals.eimState(),*p.graphicsMemory);
+                 if (prepared != Imx1BootstrapAccess::ok) return prepared;
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -255,7 +255,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 750;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 751;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -177,12 +177,13 @@
+         }
+         if (virtualProfile() && Imx1GraphicsDisplay::owns(address)) {
+             if (size != 4) return Imx1BootstrapAccess::width;
+-            // Everything here needs an empty ring but the ROM's vertical wait (200adb04), whose two reads
+-            // of the scan status (54c) run while a copy-helper batch is still drawing.
+-            // Assumed, not shown: the status follows the scan phase alone, whatever the engine is doing.
++            // Everything here needs an empty ring but the ROM's vertical wait (200adaf0), whose two reads of the
++            // scan status (54c) run with any batch in the ring. Its callers are the screen unlock (2008b2ac),
++            // the application wait service dal[288] (20099a08) and the display switch (veneer 200ce4f4 from
++            // 20088180 and 2008821a), and none of them reads an engine register first.
++            // ASSUMPTION "scan status while drawing": 54c follows the scan phase alone, whatever the engine does.
+             const bool scanStatus = !write && (address & 0xffff) == 0x054c && (pc == 0x200adb08 || pc == 0x200adb14) &&
+-                engine.copyHelperSubmission() && !engine.hostDataSubmission() &&
+-                !engine.keyedCopySubmission() && !engine.a4Submission() && !engine.completed();
++                !engine.completed();
+             if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return Imx1BootstrapAccess::sequence;
+             return display.access(windows, pc, address, size, write, value);
+         }
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -14,7 +14,7 @@
+     void reset() { *this = {}; }
+     uint64_t duration() const { return ticks; }
+     // Register values and every queued batch with its fills and inline pixels.
+-    static constexpr uint32_t stateVersion = 1;
++    static constexpr uint32_t stateVersion = 2;
+     template <class A> void state(A& a) {
+         a.DoBuffer32(values.data(), values.size());
+         for (auto& k : known) a.DoBool(k);
+@@ -30,7 +30,7 @@
+             batch.fills.resize(size_t(fills));
+             for (auto& f : batch.fills) {
+                 a.Do32(f.base).Do32(f.pitch).Do32(f.width).Do32(f.height).Do32(f.colour).Do32(f.sourceX).Do32(f.sourceY);
+-                a.Do32(f.sourceBase).Do32(f.sourcePitch).DoBool(f.keyed).DoBool(f.plain).DoBool(f.a4);
++                a.Do32(f.sourceBase).Do32(f.sourcePitch).DoBool(f.keyed).DoBool(f.plain).DoBool(f.a4).DoBool(f.invert);
+                 a.DoVector(f.pixels, 1 << 20);
+                 a.Require(f.pixels.empty() || f.pixels.size() >= uint64_t(f.width) * f.height, "command pixels");
+                 if (!a.ok()) return;
+@@ -81,17 +81,32 @@
+             } else if ((header >> 30) == 1) {
+                 if (header & 0x3fc00000u || !take(first) || !take(second) ||
+                     !store(header & 0x7ff, first, packedMono) || !store((header >> 11) & 0x7ff, second, packedMono)) return A::sideEffect;
+-            } else if (header == 0xc0011a00) {
+-                if (engine.hostDataSubmission() || engine.keyedCopySubmission() || engine.a4Submission()) return A::sideEffect;
+-                if (!take(first) || !take(second)) return A::sequence;
+-                Fill fill{};
+-                const auto status = rectangle(configuration, eim, memory, first, second, fill, false);
+-                if (status != A::ok) return status;
+-                ticks += uint64_t(fill.width) * fill.height;
+-                fills.push_back(std::move(fill));
+-            } else if (header == 0xc0051c00 || header == 0xc0021b00) {
+-                const bool plain = header == 0xc0021b00;
+-                if (plain ? (!engine.copyHelperSubmission() || !fills.empty() || ++plainPackets != 1) :
++            } else if ((header & 0xc000ffffu) == 0xc0001a00u) {
++                // One packet holds n rectangles as 2n words. Only the fill routine (200b0038) sends more
++                // than one: the strips of a frame, four at most (2008aae0).
++                const uint32_t count = ((header >> 16) & 0x3fff) + 1;
++                if (engine.hostDataSubmission() || engine.keyedCopySubmission() || engine.a4Submission() ||
++                    engine.stretchCopySubmission() || (count & 1) || count > (engine.fillSubmission() ? 8u : 2u))
++                    return A::sideEffect;
++                for (uint32_t pair = 0; pair < count; pair += 2) {
++                    if (!take(first) || !take(second)) return A::sequence;
++                    Fill fill{};
++                    const auto status = rectangle(configuration, eim, memory, first, second, fill, false);
++                    if (status != A::ok) return status;
++                    // ROP3 5a is destination xor pattern, f0 is the pattern alone.
++                    fill.invert = ((values[0x41b] >> 17) & 255) == 0x5a;
++                    if (fill.invert && !engine.fillSubmission()) return A::sideEffect;
++                    ticks += uint64_t(fill.width) * fill.height;
++                    fills.push_back(std::move(fill));
++                }
++            } else if (header == 0xc0051c00 || (header & 0xc000ffffu) == 0xc0001b00u) {
++                const bool plain = header != 0xc0051c00;
++                // A plain copy packet holds n copies as 3n words. The copy helper (200a9cf8) sends one,
++                // the software stretch (200b0644) one for each run of its x and y tables.
++                const uint32_t copyWords = plain ? ((header >> 16) & 0x3fff) + 1 : 3;
++                const bool stretch = engine.stretchCopySubmission();
++                if (copyWords % 3 || (copyWords != 3 && !stretch)) return A::sideEffect;
++                if (plain ? ((!engine.copyHelperSubmission() && !stretch) || !fills.empty() || ++plainPackets != 1) :
+                             (!engine.keyedCopySubmission() || ++copyPackets != 1)) return A::sideEffect;
+                 uint32_t sourceKey = 0, sourceXY;
+                 if (!plain) {
+@@ -99,34 +114,54 @@
+                     if (!take(control) || !take(sourceKey) || !take(destinationKey)) return A::sequence;
+                     if (control != 0x01000005 || sourceKey > 0xffff || destinationKey) return A::sideEffect;
+                 }
+-                if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
+-                // Both copy producers send 48f with every copy and never 490 or 491. A colour source
+-                // copy reads neither.
+-                if (left || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
+-                Fill fill{};
+-                const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
+-                if (status != A::ok) return status;
+-                const uint32_t x = sourceXY >> 16, y = sourceXY & 0xffff;
+-                const uint32_t width = second >> 16, height = second & 0xffff;
+-                const uint32_t pitch = values[0x46c];
+-                if (!pitch || pitch > 8192 || x + width > pitch ||
+-                    x + width > 8191 || y + height > 8191)
+-                    return A::sideEffect;
+-                const uint64_t address = uint64_t(values[0x46b]) + (uint64_t(y) * pitch + x) * 2;
+-                const uint64_t length = (uint64_t(height - 1) * pitch + width) * 2;
+-                if (address > 0xffffffffu || (address & 1) ||
+-                    !memory.contains(configuration, eim, uint32_t(address), length)) return A::sequence;
+-                fill.sourcePitch = pitch * 2;
+-                fill.sourceBase = uint32_t(address + uint64_t(fill.sourceY) * fill.sourcePitch + fill.sourceX * 2);
+-                fill.keyed = !plain;
+-                fill.plain = plain;
+-                fill.colour = sourceKey;
+-                // Overlapping ranges need direction rules that this producer has not qualified.
+-                const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
+-                if (destinationLength && address < uint64_t(fill.base) + destinationLength &&
+-                    fill.base < address + length) return A::sideEffect;
+-                ticks += uint64_t(fill.width) * fill.height;
+-                fills.push_back(std::move(fill));
++                Span sources, destinations;
++                std::vector<bool> covered;
++                for (uint32_t copy = 0; copy < copyWords; copy += 3) {
++                    if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
++                    // Both copy producers send 48f with every copy and never 490 or 491. A colour source
++                    // copy reads neither.
++                    if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
++                    Fill fill{};
++                    const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
++                    if (status != A::ok) return status;
++                    const uint32_t x = sourceXY >> 16, y = sourceXY & 0xffff;
++                    const uint32_t width = second >> 16, height = second & 0xffff;
++                    const uint32_t pitch = values[0x46c];
++                    if (!pitch || pitch > 8192 || x + width > pitch ||
++                        x + width > 8191 || y + height > 8191)
++                        return A::sideEffect;
++                    const uint64_t address = uint64_t(values[0x46b]) + (uint64_t(y) * pitch + x) * 2;
++                    const uint64_t length = (uint64_t(height - 1) * pitch + width) * 2;
++                    if (address > 0xffffffffu || (address & 1) ||
++                        !memory.contains(configuration, eim, uint32_t(address), length)) return A::sequence;
++                    fill.sourcePitch = pitch * 2;
++                    fill.sourceBase = uint32_t(address + uint64_t(fill.sourceY) * fill.sourcePitch + fill.sourceX * 2);
++                    fill.keyed = !plain;
++                    fill.plain = plain;
++                    fill.colour = sourceKey;
++                    // Overlapping ranges need direction rules that this producer has not qualified.
++                    const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
++                    if (destinationLength && address < uint64_t(fill.base) + destinationLength &&
++                        fill.base < address + length) return A::sideEffect;
++                    if (copyWords != 3) {
++                        // The stretch never sends two runs to the same place (its tables partition the
++                        // destination), and what the chip does with an overlap is not known. Refused.
++                        const uint32_t dx = first >> 16, dy = first & 0xffff;
++                        if (dx + width > stretchLimit || dy + height > stretchLimit) return A::sideEffect;
++                        if (covered.empty()) covered.resize(size_t(stretchLimit) * stretchLimit);
++                        for (uint32_t row = dy; row < dy + height; ++row)
++                            for (uint32_t column = dx; column < dx + width; ++column) {
++                                if (covered[size_t(row) * stretchLimit + column]) return A::sideEffect;
++                                covered[size_t(row) * stretchLimit + column] = true;
++                            }
++                        sources.add(address, length);
++                        if (destinationLength) destinations.add(fill.base, destinationLength);
++                    }
++                    ticks += uint64_t(fill.width) * fill.height;
++                    fills.push_back(std::move(fill));
++                }
++                // With the sources clear of every destination the order of the copies changes nothing.
++                if (sources.overlaps(destinations)) return A::sideEffect;
+             } else if ((header & 0xc000ffffu) == 0xc0001900u) {
+                 const bool a4 = engine.a4Submission();
+                 // The host producer writes source field 0 into GMC bits 12..14 for packed 1bpp.
+@@ -206,6 +241,12 @@
+                             if (status != A::ok) return status;
+                             if (fill.keyed && colour == fill.colour) continue;
+                         }
++                        if (fill.invert) {
++                            uint32_t destination = 0;
++                            if (memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x * 2,
++                                                 2, false, destination) != A::ok) return A::sequence;
++                            colour = (destination ^ colour) & 0xffff;
++                        }
+                         if (fill.a4) {
+                             uint32_t source = 0, destination = 0;
+                             if (memory.accessGpu(configuration, eim, fill.sourceBase + y * fill.sourcePitch + x * 2,
+@@ -229,9 +270,16 @@
+     struct Fill {
+         uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
+         uint32_t sourceBase = 0, sourcePitch = 0;
+-        bool keyed = false, plain = false, a4 = false;
++        bool keyed = false, plain = false, a4 = false, invert = false;
+         std::vector<uint16_t> pixels;
+     };
++    // The software stretch takes at most 400 hex pixels each way (200b0c10).
++    static constexpr uint32_t stretchLimit = 0x400;
++    struct Span {
++        uint64_t first = UINT64_MAX, end = 0;
++        void add(uint64_t address, uint64_t length) { first = std::min(first, address); end = std::max(end, address + length); }
++        bool overlaps(const Span& other) const { return first < other.end && other.first < end; }
++    };
+     struct Batch {
+         uint32_t end = 0, words = 0, option = 0;
+         std::vector<Fill> fills;
+@@ -323,8 +371,11 @@
+         if (plain && (values[0x4b3] != 0xffffffff || values[0x41d] ||
+                       values[0x41e] || values[0x30f] != 0x20)) return A::sideEffect;
+         // Only native solid PATCOPY in RGB565, without transforms or blending.
++        // Solid brush with ROP3 f0 (pattern) or 5a (destination xor pattern), the two the fill routine's
++        // caller sets with a solid colour (2008a97c, 2008a0c8).
++        const uint32_t rop = (gmc >> 17) & 255;
+         if (!host && !copy && (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
+-            ((gmc >> 17) & 255) != 0xf0 || !(gmc & (1u << 28)) ||
++            (rop != 0xf0 && rop != 0x5a) || !(gmc & (1u << 28)) ||
+             !(gmc & (1u << 30)) || !(gmc & (1u << 15)) || (gmc & 0x80000000u) || values[0x488] != 4 ||
+             (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0])) return A::sideEffect;
+         if (values[0x488] != (a4 ? 0x00080004u : 4u) || values[0x4a1] || values[0x4a0]) return A::sideEffect;
+@@ -335,7 +386,7 @@
+             values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
+         const auto datatype = values[0x4b1], mix = values[0x4b2], direction = values[0x472];
+         if (!host && !copy && ((datatype & 15) != 4 || ((datatype >> 8) & 15) != 13 || !(datatype & (1u << 30)) ||
+-            (datatype & ~0x4007ff0fu) || ((mix >> 16) & 255) != 0xf0 || (mix & ~0x00ff3f00u) ||
++            (datatype & ~0x4007ff0fu) || ((mix >> 16) & 255) != rop || (mix & ~0x00ff3f00u) ||
+             (direction & 3) != 3 || (direction & ~0x3fu))) return A::sideEffect;
+         for (auto reg : {0x42e,0x42f,0x430,0x431,0x432,0x433}) if (values[reg]) return A::sideEffect;
+         if ((values[0x46f] | values[0x470]) & ~0x1fff1fffu) return A::sideEffect;
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -29,6 +29,8 @@
+     bool keyedCopySubmission() const { return keyedCopy; }
+     bool a4Submission() const { return a4; }
+     bool copyHelperSubmission() const { return copyHelper; }
++    bool fillSubmission() const { return fill; }
++    bool stretchCopySubmission() const { return stretchCopy; }
+     uint32_t submissionBegin() const { return previousProducer; }
+     void start(uint64_t ticks) {
+         if (previousProducer != writePointer) pending.push_back({writePointer, ticks});
+@@ -83,7 +85,9 @@
+             return A::ok;
+         }
+         if (address == 0x16010220 && pc != 0x200b8e88) {
+-            if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200 && pc != 0x200ac300 && pc != 0x200aa504 && pc != 0x200a9a9c) : pc != 0x200b8c70) return A::externalInput;
++            // 200b1568 and 200b1790 are the software stretch (200b0644), between its packets and after the last.
++            const bool stretch = pc == 0x200b1568 || pc == 0x200b1790;
++            if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200 && pc != 0x200ac300 && pc != 0x200aa504 && pc != 0x200a9a9c && !stretch) : pc != 0x200b8c70) return A::externalInput;
+             if (!ringEnabled) return A::sequence;
+             if (write) {
+                 const uint32_t mask = ringBytes() / 4 - 1;
+@@ -91,13 +95,15 @@
+                 const uint32_t added = (value - writePointer) & mask;
+                 const uint32_t occupied = (writePointer - readPointer) & mask;
+                 if (!added && occupied) return A::sequence;
+-                if (added > mask - occupied || (!added && (pc == 0x200ac300 || pc == 0x200aa504 || pc == 0x200a9a9c)))
++                if (added > mask - occupied || (!added && (pc == 0x200ac300 || pc == 0x200aa504 || pc == 0x200a9a9c || stretch)))
+                     return A::sideEffect;
+                 previousProducer = writePointer;
+                 hostData = pc == 0x200ac300;
+                 keyedCopy = pc == 0x200aa504;
+                 a4 = pc == 0x200a9a9c;
+                 copyHelper = pc == 0x200a9ed4;
++                fill = pc == 0x200b0200;
++                stretchCopy = stretch;
+                 writePointer = value;
+             } else value = writePointer;
+             return A::ok;
+@@ -183,6 +189,8 @@
+     uint32_t ringStage = 0, ringBase = 0, ringBaseTag = 0, ringExponent = 0;
+     uint32_t readPointer = 0, writePointer = 0, scratch = 0;
+     bool ringEnabled = false, hostData = false, keyedCopy = false, a4 = false, copyHelper = false;
++    // Set by the 220 write and read by the command decoder inside the same bus access, so not saved.
++    bool fill = false, stretchCopy = false;
+     uint32_t previousProducer = 0;
+     struct Batch { uint32_t end; uint64_t remaining; };
+     std::vector<Batch> pending;

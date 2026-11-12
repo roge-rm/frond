@@ -1,0 +1,61 @@
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -103,6 +103,7 @@
+     bool cardSwap;                  // the frontend changed the card files while the machine was off
+     optional<string> cardIdentity;  // the card put in: 64 hex digits
+     bool cardProtected;
++    bool fastEngine;  // --engine fast
+ };
+ 
+ namespace {
+@@ -645,7 +646,7 @@
+                 cerr << "--gdb and the low-latency audio options are not available on the Zodiac" << endl;
+                 return false;
+             }
+-            // Its machine runs the interpreter whatever --engine says.
++            // Its machine has an engine of its own, set below; the JIT isn't used.
+             cpuSetFastEngine(false);
+             string why;
+             soc = SocIMX1::Create(static_cast<const uint8_t*>(nor.data), nor.size, why);
+@@ -666,6 +667,8 @@
+                 }
+             }
+ #endif
++            if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
++                cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+         } else {
+             soc = (board == DeviceBoard5::paravirtual)
+                 ? static_cast<SoC*>(new SocPV(ramSize, nor.data, nor.size, *displayMode, gdbPort))
+@@ -1402,7 +1405,7 @@
+         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
+ 
+     program.add_argument("--engine")
+-        .help("CPU engine: exact (the interpreter) or fast (the JIT, where it's built in)")
++        .help("CPU engine: exact (the interpreter) or fast (the JIT where it's built in, the Zodiac's own Fast path)")
+         .metavar("<exact|fast>")
+         .default_value(string("exact"))
+         .action([](const string& value) {
+@@ -1602,7 +1605,8 @@
+                        .bluetooth = program.present("--bluetooth"),
+                        .cardSwap = program.get<bool>("--card-swap"),
+                        .cardIdentity = program.present("--card-identity"),
+-                       .cardProtected = program.get<bool>("--card-protected")};
++                       .cardProtected = program.get<bool>("--card-protected"),
++                       .fastEngine = program.get("--engine") == "fast"};
+ 
+     logEnable();
+ 
+--- a/src/uarm/uarm/soc_IMX1.h
++++ b/src/uarm/uarm/soc_IMX1.h
+@@ -50,6 +50,11 @@
+     void SuspendTimerInterrupts(bool) override {}
+     bool LcdEnabled() override;
+ 
++    // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
++    // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
++    // False on a stopped machine.
++    bool SetFastEngine(bool fast) { return imx1MachineSetFastEngine(machine, fast); }
++    bool FastEngine() const { return imx1MachineFastEngine(machine); }
+     // Instructions retired and idle clocks skipped so far, for speed readouts.
+     Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
+     bool Halted() const { return halted; }

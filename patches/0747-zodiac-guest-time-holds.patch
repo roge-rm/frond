@@ -1,0 +1,114 @@
+--- a/src/uarm/uarm/soc_IMX1.cpp
++++ b/src/uarm/uarm/soc_IMX1.cpp
+@@ -229,6 +229,8 @@
+ // Hands queued host input to the machine. An input the machine refuses just now stays queued.
+ void SocIMX1::PumpInput() {
+     MachinePort port(machine);
++    input.hostTime(uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count()));
+     input.pump(port);
+     while (keyEventQueue->GetSize()) {
+         const KeyEvent event = keyEventQueue->Peek();
+@@ -284,8 +286,9 @@
+     }
+     const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;
+     // Nothing can wake a waiting guest but input, so host time just passes. Its own clock stands
+-    // still then, and the input holds are timed on the time asked for.
+-    input.advance(waiting ? std::max(wanted, elapsed) : std::max<uint64_t>(elapsed, 1));
++    // still then, and the input holds are timed on the time asked for. A running guest's holds are
++    // timed on its own clock alone, however slowly it runs.
++    input.advance(waiting ? std::max(wanted, elapsed) : elapsed);
+     if (waiting || halted) return maxCycles;
+     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
+     creditRemainder = uint64_t(credit % ticksPerSecond);
+--- a/src/uarm/uarm/zodiac_input.h
++++ b/src/uarm/uarm/zodiac_input.h
+@@ -25,6 +25,13 @@
+     static constexpr uint64_t ticksPerSecond = 32768;
+     // A key or the pen stays down at least this long, so a quick click is still seen.
+     static constexpr uint64_t minimumHoldTicks = ticksPerSecond / 10;
++    // POLICY, host input only: the pen stays down 125 ms at least. A pen that lands inside the ROM's
++    // battery poll (20088588, every 5 s or so) has its routine (20096d58) start 99 ms late, and a tap
++    // there is seen from 108 ms of guest time on, measured on the ROM.
++    static constexpr uint64_t minimumPenHoldTicks = ticksPerSecond / 8;
++    // POLICY, host input only: a key or the pen stays down for as much guest time as the host held it,
++    // up to this much, so a tap is as long for a guest that runs slower than the host's clock.
++    static constexpr uint64_t longestOwedHoldTicks = ticksPerSecond / 2;
+     // POLICY, host input only: the stick travels like a thumb pushing it, at most stickStepCounts on
+     // an axis every stickStepTicks (15 ms), so rest to full takes 75 ms. The ROM's stick driver samples
+     // every 30 ms and drops a sample more than 200 counts from the one before (filter at 20095de6),
+@@ -45,6 +52,9 @@
+     // runs and the time it was asked to run while the guest waits, so it never stands still.
+     void advance(uint64_t ticks) { now += ticks; }
+     uint64_t time() const { return now; }
++    // The host's own clock in milliseconds, set before events are handed over. It only measures how
++    // long the host held a key or the pen.
++    void hostTime(uint64_t msec) { hostNow = msec; }
+ 
+     void stick(int x, int y) { stickX = x; stickY = y; }
+ 
+@@ -73,10 +83,13 @@
+             if (!port.setControl(control, true)) return false;
+             pressed[control] = true;
+             pressedAt[control] = now;
++            pressedHostAt[control] = hostNow;
++            releaseOwed[control] = 0;
+             return true;
+         }
+         if (!pressed[control]) return true;
+-        if (now - pressedAt[control] < minimumHoldTicks || !port.setControl(control, false)) return false;
++        if (!releaseOwed[control]) releaseOwed[control] = owedHold(pressedHostAt[control], minimumHoldTicks);
++        if (now - pressedAt[control] < releaseOwed[control] || !port.setControl(control, false)) return false;
+         pressed[control] = false;
+         return true;
+     }
+@@ -86,12 +99,17 @@
+         if (liftPending) return false;
+         if (!down) {
+             if (!penIsDown) return true;
+-            if (now - penDownAt < minimumHoldTicks || !port.setPen(false, penX, penY)) return false;
++            if (!penOwed) penOwed = owedHold(penDownHostAt, minimumPenHoldTicks);
++            if (now - penDownAt < penOwed || !port.setPen(false, penX, penY)) return false;
+             penIsDown = false;
+             return true;
+         }
+         if (!port.setPen(true, x, y)) return false;
+-        if (!penIsDown) penDownAt = now;
++        if (!penIsDown) {
++            penDownAt = now;
++            penDownHostAt = hostNow;
++        }
++        penOwed = 0;
+         penIsDown = true;
+         penX = x;
+         penY = y;
+@@ -103,6 +121,11 @@
+     bool stickSettled() const { return stickSet && stickX == stickSetX && stickY == stickSetY; }
+ 
+    private:
++    // Guest time a release waits for: what the host held since downHostAt, within the two limits.
++    uint64_t owedHold(uint64_t downHostAt, uint64_t least) const {
++        const uint64_t held = (hostNow - downHostAt) * ticksPerSecond / 1000;
++        return held < least ? least : held > longestOwedHoldTicks ? longestOwedHoldTicks : held;
++    }
+     static int stickToward(int from, int to) {
+         return to > from ? (to - from > stickStepCounts ? from + stickStepCounts : to)
+                          : (from - to > stickStepCounts ? from - stickStepCounts : to);
+@@ -118,14 +141,14 @@
+         stickSetY = y;
+         stickMovedAt = now;
+     }
+-    uint64_t now{0};
++    uint64_t now{0}, hostNow{0};
+     bool releasePending{true}, liftPending{true};
+     std::array<bool, controls> pressed{};
+-    std::array<uint64_t, controls> pressedAt{};
++    std::array<uint64_t, controls> pressedAt{}, pressedHostAt{}, releaseOwed{};
+     int jammed{-1};
+     uint64_t jamUntil{0};
+     bool penIsDown{false};
+-    uint64_t penDownAt{0};
++    uint64_t penDownAt{0}, penDownHostAt{0}, penOwed{0};
+     int penX{0}, penY{0};
+     int stickX{0}, stickY{0}, stickSetX{0}, stickSetY{0};
+     bool stickSet{false};

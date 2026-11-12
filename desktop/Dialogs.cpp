@@ -86,6 +86,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     layout->addLayout(form);
     if (initialSettings) {
         machineSettings = new MachineSettings(*initialSettings, automaticScale, this);
+        machineSettings->setNewMachine();
         auto update = [this] {
             auto selected = frondFirmware::deviceFromId(device->currentData().toString());
             if (selected == Device::automatic) selected = frondFirmware::detectDevice(nor->text());
@@ -313,6 +314,11 @@ frondSessions::Preferences MachineSettings::values() const {
     }
     return prefs;
 }
+void MachineSettings::setNewMachine() {
+    automaticEngine = true;
+    connect(engine, &QComboBox::activated, this, [this] { automaticEngine = false; });
+    setDevice(device);
+}
 void MachineSettings::showPeripherals(bool shown) {
     peripheralsShown = shown;
     setDevice(device);
@@ -360,6 +366,10 @@ void MachineSettings::setDevice(Device device) {
     speed->setVisible(true);
     engineLabel->setVisible(engineShown);
     engine->setVisible(engineShown);
+    if (automaticEngine && device != Device::automatic) {
+        const QSignalBlocker blocked(engine);
+        engine->setCurrentIndex(frondFirmware::fastByDefault(device) ? 1 : 0);
+    }
     speedGroup->setVisible(true);
     const bool soundSupported = device != Device::automatic && frondFirmware::capabilities(device).sound;
     audio->setEnabled(soundSupported);

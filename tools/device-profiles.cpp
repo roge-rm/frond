@@ -13,6 +13,7 @@ static const char* cohortName(DeviceCohort5 cohort) {
         case DeviceCohort5::tg50Nor: return "tg50-nor";
         case DeviceCohort5::reserved: return "reserved";
         case DeviceCohort5::ez68k: return "ez68k-rom";
+        case DeviceCohort5::zodiacNor: return "zodiac-nor";
         case DeviceCohort5::vz68k: return "vz68k-rom";
     }
     return "unknown";

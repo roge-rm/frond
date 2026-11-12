@@ -126,3 +126,41 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_push(JNIEnv*, jc
     event.key.keysym.sym = keycode;
     SDL_PushEvent(&event);
 }
+
+// The Zodiac's game controllers from FrondActivity (ZodiacPad.kt), on the Android UI thread. They go
+// into SDL's queue as game controller events for SdlEventHandler, which maps them as the desktop does.
+// which is the Android input device id.
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushButton(JNIEnv*, jclass, jint which, jint button, jboolean down) {
+    SDL_Event event{};
+    event.type = down ? SDL_CONTROLLERBUTTONDOWN : SDL_CONTROLLERBUTTONUP;
+    event.cbutton.timestamp = SDL_GetTicks();
+    event.cbutton.which = which;
+    event.cbutton.button = Uint8(button);
+    event.cbutton.state = down ? SDL_PRESSED : SDL_RELEASED;
+    SDL_PushEvent(&event);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, jclass, jint which, jint axis, jint value) {
+    SDL_Event event{};
+    event.type = SDL_CONTROLLERAXISMOTION;
+    event.caxis.timestamp = SDL_GetTicks();
+    event.caxis.which = which;
+    event.caxis.axis = Uint8(axis);
+    event.caxis.value = Sint16(value);
+    SDL_PushEvent(&event);
+}
+
+// The core's guest thread, when the guest OS turns its screen (the Zodiac): tells FrondActivity, which
+// turns the app to match when its Orientation is Follow the program. orientation is SysGetOrientation's
+// number (1 portrait, 2 landscape, 3 reverse portrait, 4 reverse landscape).
+void frondGuestOrientationChanged(int orientation) {
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(type, "onGuestOrientation", "(I)V");
+    if (method) env->CallVoidMethod(activity, method, jint(orientation));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
+}

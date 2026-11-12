@@ -43,6 +43,8 @@ Hardware that exists on the real device but isn't done yet stays in the profile 
 
 For a shared board, audit checks for the existing device type and name in the core, frontends and tools. Share hardware selection through the board model, and use capabilities for supported host interfaces. Keep ROM signatures, firmware-specific patches and qualified audio hooks separate. Test the existing device too when changing a shared path.
 
+The [Zodiac 2 bring-up notes](zodiac2-bringup.md) track the staged i.MX1 model and remaining boot work.
+
 ## Profile fields
 
 A `DeviceProfile5` has these fields. The name is what sessions, settings, the control socket, `--device` and the logs use. `DeviceType5` is internal and never saved. Don't change a name or a saved display ID once it's out.
@@ -234,12 +236,14 @@ The bar should be a recognisable approximation of the real one, not a close copy
 - Hit testing and drawing share the same geometry. App keys hit their whole rounded rectangle. The five-way hits the select pill first, then the ring split along its diagonals (`deviceNavigatorAt`). Moving a shape moves its hit area.
 - The strip is centred under the screen (`deviceButtonRect`), so a narrower screen needs its own width. The TG50 scales its bar across the whole body and can hide its keyboard and side panel (`DeviceControlView`).
 - The jog dial on the TG50 is the `keyIdJogUp`, `keyIdJogPress`, `keyIdJogDown` and `keyIdBack` keys on the side panel. `JogPlacement` puts it hidden, left of the LCD or left of the keyboard.
+- The Zodiac (`zodiac` art) has two arrangements in `DeviceControlView::arrangement`: `below`, a 480x200 strip under the screen scaled to the shown screen's width, and `around`, a 150-unit panel either side of it as on the real device, with nothing under it. Each key is listed once per arrangement, in the `below` or `around` section. `around` keys are authored in a 320-tall panel; right panel keys are authored from x 150 and move past the screen (`deviceAroundOffset`). At 90 and 270 the panels are 480 tall: the triggers stay at the top and the rest are centred. A fitted window puts the controls around when it's landscape or square and below when it's portrait (`deviceControlViewForWindow`); a fixed window stays around.
+- Zodiac keys: the Action diamond is `keyIdHard1` to `keyIdHard4` (bottom, right, left, top), with tooltips by position, as which Action key is which isn't known yet. Also `keyIdHome`, `keyIdFunction`, the two triggers and `keyIdStickPress`. The analogue stick is a `stick` entry carrying `keyIdStickPress`. A finger or the pointer on its well holds it until let go, sending `SoC::AnalogStick` with each axis from -1 to 1, and the arrow keys stand in for it. A tap on the knob that doesn't move sends the press down and up; holding it in needs F10. F7 to F10 are Function, the left and right triggers and stick press, on devices that have them.
 
 ### Drawing (DeviceControls.cpp)
 
 - Everything is drawn into a `Canvas` with signed distance functions (`box`, `ellipse`, `ring`, `segment`, `polygon`, `arc`), then shaded and anti-aliased at the real window scale, so it stays crisp at every display scale.
 - Each style has its own painter (`paintTxControls`, `paintE2Controls` and so on). A new style adds a `DeviceControlStyle` value and a painter. `paintNavigator` and `iconDistance` (the glyphs) are shared.
-- `drawDeviceControls` takes the pressed keys as a bit mask, so every key needs a visible pressed state. Keep a key's pressed state and release it on focus loss, hiding, closing and rotation.
+- `drawDeviceControls` takes the pressed keys as a bit mask (128 bits) and the stick position, so every key needs a visible pressed state and the stick's knob follows the finger. Keep a key's pressed state and release it on focus loss, hiding, closing and rotation.
 
 ### Silkscreen
 

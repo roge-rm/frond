@@ -1,0 +1,2389 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+index 44381f8..2a5b799 100644
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include "CPU.h"
++#include "arm920_state.h"
+ #include "cpu_diagnostics.h"
+ #ifdef FROND_DYNARMIC
+ #include "jit_dynarmic.h"
+@@ -5302,6 +5303,88 @@ Arm920DataGuard cpuArm920DataGuard(ArmCpu* cpu) {
+     return cpu->model == ArmCpuModel::arm920t ? cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard : Arm920DataGuard{};
+ }
+ 
++static bool cpuPrvArm920StateIdle(const ArmCpu* cpu) {
++    if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
++    if (cpu->modePace || cpu->sleeping || cpu->earlyAudioHook) return false;
++#ifndef __EMSCRIPTEN__
++    if (cpu->nativePc[0] || cpu->nativePc[1] || cpu->nativeCallDepth || cpu->nativeSessionActive) return false;
++#endif
++    return true;
++}
++
++bool cpuArm920CaptureState(const ArmCpu* cpu, Arm920SavedState& s) {
++    if (!cpuPrvArm920StateIdle(cpu)) return false;
++    s.exceptionSequence = cpu->exceptionSequence;
++    memcpy(s.regs, cpu->regs, sizeof(s.regs));
++    memcpy(s.extraRegs, cpu->extra_regs, sizeof(s.extraRegs));
++    const ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
++                                    &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
++    for (unsigned n = 0; n < 6; ++n) {
++        s.banks[n][0] = banks[n]->R13; s.banks[n][1] = banks[n]->R14; s.banks[n][2] = banks[n]->SPSR;
++    }
++    s.spsr = cpu->SPSR;
++    s.flags = cpu->flags;
++    s.curInstrPC = cpu->curInstrPC;
++    s.vectorBase = cpu->vectorBase;
++    s.pid = cpu->pid;
++    s.slowPath = cpu->slowPath;
++    s.waitingIrqs = cpu->waitingIrqs;
++    s.waitingFiqs = cpu->waitingFiqs;
++    s.cpar = cpu->CPAR;
++    s.mode = cpu->M;
++    s.q = cpu->Q; s.t = cpu->T; s.i = cpu->I; s.f = cpu->F;
++    s.privileged = cpu->privileged;
++    s.waiting = cpu->arm920Waiting;
++    s.waitEnabled = cpu->arm920WaitEnabled;
++    cp15MMUArm920Capture(cpu->cp15.cp15mmu, s);
++    mmuArm920Capture(cpu->memorySystem.mmu, s);
++    icacheArm920Capture(cpu->ic, s);
++    return true;
++}
++
++bool cpuArm920StateFits(const ArmCpu* cpu, const Arm920SavedState& s) {
++    return cpuPrvArm920StateIdle(cpu) && s.cpar == cpu->CPAR && s.waitEnabled == cpu->arm920WaitEnabled &&
++           (!s.waiting || s.waitEnabled);
++}
++
++void cpuArm920ApplyState(ArmCpu* cpu, const Arm920SavedState& s) {
++    cpu->exceptionSequence = s.exceptionSequence;
++    memcpy(cpu->regs, s.regs, sizeof(s.regs));
++    memcpy(cpu->extra_regs, s.extraRegs, sizeof(s.extraRegs));
++    ArmBankedRegs* banks[] = {&cpu->bank_usr, &cpu->bank_svc, &cpu->bank_abt,
++                              &cpu->bank_und, &cpu->bank_irq, &cpu->bank_fiq};
++    for (unsigned n = 0; n < 6; ++n) {
++        banks[n]->R13 = s.banks[n][0]; banks[n]->R14 = s.banks[n][1]; banks[n]->SPSR = s.banks[n][2];
++    }
++    cpu->SPSR = s.spsr;
++    cpu->flags = s.flags;
++    cpu->curInstrPC = s.curInstrPC;
++    cpu->vectorBase = s.vectorBase;
++    cpu->pid = s.pid;
++    cpu->slowPath = s.slowPath;
++    cpu->waitingIrqs = s.waitingIrqs;
++    cpu->waitingFiqs = s.waitingFiqs;
++    cpu->waitingEventsTotal = s.waitingIrqs + s.waitingFiqs;
++    cpu->M = s.mode;
++    cpu->Q = s.q; cpu->T = s.t; cpu->I = s.i; cpu->F = s.f;
++    cpu->privileged = s.privileged;
++    cpu->arm920Waiting = s.waiting;
++    cp15MMUArm920Apply(cpu->cp15.cp15mmu, s);
++    mmuArm920Apply(cpu->memorySystem.mmu, s);
++    icacheArm920Apply(cpu->ic, s);
++}
++
++bool cpuJitSetExecutionCounts(ArmCpu* cpu, uint64_t blocks, uint64_t instructions) {
++#ifdef FROND_DYNARMIC
++    if (cpu->jit) {
++        jitSetExecutionCounts(cpu->jit, blocks, instructions);
++        return true;
++    }
++#endif
++    (void)cpu; (void)blocks; (void)instructions;
++    return false;
++}
++
+ void cpuEmitArm920Diagnostic(const ArmCpu* cpu, const ArmDiagnosticSink& sink) {
+     if (cpu->model != ArmCpuModel::arm920t || cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return;
+     sink.emit("registers", cpu->regs, 16);
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+index b0e55d7..3261dc9 100644
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -262,5 +262,14 @@ void cpuFinishInjectedCall(struct ArmCpu *cpu, T &loader);
+ void cpuArm920SetIcacheIndexCompatibility(ArmCpu*, bool);
+ void cpuArm920SetMemoryCheck(ArmCpu*, Arm920MemoryCheck, void*);
+ Arm920DataGuard cpuArm920DataGuard(ArmCpu*);
++// Machine state between two run calls. Capture fails outside ARM920T, in PACE, asleep or
++// inside a native call. Apply takes a state that cpuArm920StateFits accepted, and leaves
++// translated code alone: drop it with cpuDropTranslatedCode.
++struct Arm920SavedState;
++bool cpuArm920CaptureState(const ArmCpu*, Arm920SavedState&);
++bool cpuArm920StateFits(const ArmCpu*, const Arm920SavedState&);
++void cpuArm920ApplyState(ArmCpu*, const Arm920SavedState&);
++// Sets the Fast engine's counters. False without a JIT.
++bool cpuJitSetExecutionCounts(ArmCpu*, uint64_t blocks, uint64_t instructions);
+ 
+ #endif
+diff --git a/src/uarm/uarm/MMU.cpp b/src/uarm/uarm/MMU.cpp
+index 89dd8a8..f52e5f8 100644
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "MMU.h"
+ #include "MMU_internal.h"
++#include "arm920_state.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -509,6 +510,46 @@ template void mmuSave<Savestate<ChunkType>>(ArmMmu *mmu, Savestate<ChunkType> &s
+ template void mmuSave<SavestateProbe<ChunkType>>(ArmMmu *mmu, SavestateProbe<ChunkType> &savestate);
+ template void mmuLoad<SavestateLoader<ChunkType>>(ArmMmu *mmu, SavestateLoader<ChunkType> &loader);
+ 
++void mmuArm920Capture(const ArmMmu* mmu, Arm920SavedState& s) {
++    s.transTablPA = mmu->transTablPA;
++    s.domainCfg = mmu->domainCfg;
++    s.mmuS = mmu->S;
++    s.mmuR = mmu->R;
++    s.tlbRevision = mmu->revision;
++    s.tlbFlushes = mmu->flushes;
++    s.tlb.clear();
++    for (uint32_t i = 0; i < TLB_SIZE; ++i) {
++        const auto& e = mmu->tlb[i];
++        if (e.revision != mmu->revision) continue;
++        s.tlb.push_back(i);
++        s.tlb.push_back(uint32_t(e.pa) | uint32_t(e.ap) << 20 | uint32_t(e.domain) << 22 |
++                        uint32_t(e.c) << 26 | uint32_t(e.section) << 27 | uint32_t(e.b) << 28);
++    }
++}
++
++void mmuArm920Apply(ArmMmu* mmu, const Arm920SavedState& s) {
++    mmu->transTablPA = s.transTablPA;
++    mmu->domainCfg = s.domainCfg;
++    mmu->S = s.mmuS;
++    mmu->R = s.mmuR;
++    // Revision 0 is never current, so every other entry is dead.
++    memset(mmu->tlb, 0, sizeof(mmu->tlb));
++    mmu->revision = s.tlbRevision;
++    mmu->flushes = s.tlbFlushes;
++    for (size_t n = 0; n + 1 < s.tlb.size(); n += 2) {
++        const uint32_t packed = s.tlb[n + 1];
++        auto& e = mmu->tlb[s.tlb[n] & (TLB_SIZE - 1)];
++        e.pa = packed & 0xfffff;
++        e.ap = (packed >> 20) & 3;
++        e.domain = (packed >> 22) & 15;
++        e.c = (packed >> 26) & 1;
++        e.section = (packed >> 27) & 1;
++        e.b = (packed >> 28) & 1;
++        e.revision = s.tlbRevision;
++    }
++    mmuPrvPermChanged(mmu);
++}
++
+ void mmuEmitDiagnostic(const ArmMmu* mmu, const ArmDiagnosticSink& sink) {
+     const uint32_t state[] = {mmu->transTablPA,mmu->domainCfg,mmu->S,mmu->R,mmu->revision,mmu->flushes};
+     sink.emit("mmu",state,6);
+diff --git a/src/uarm/uarm/MMU.h b/src/uarm/uarm/MMU.h
+index 6be3410..3476ab5 100644
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -75,4 +75,8 @@ template <typename T>
+ void mmuLoad(struct ArmMmu *mmu, T &loader);
+ 
+ void mmuEmitDiagnostic(const ArmMmu*, const ArmDiagnosticSink&);
++// Registers and the live TLB entries. Apply keeps the saved revision and flush count.
++struct Arm920SavedState;
++void mmuArm920Capture(const ArmMmu*, Arm920SavedState&);
++void mmuArm920Apply(ArmMmu*, const Arm920SavedState&);
+ #endif
+diff --git a/src/uarm/uarm/arm920_state.h b/src/uarm/uarm/arm920_state.h
+new file mode 100644
+index 0000000..f02f8da
+--- /dev/null
++++ b/src/uarm/uarm/arm920_state.h
+@@ -0,0 +1,99 @@
++#ifndef FROND_ARM920_STATE_H
++#define FROND_ARM920_STATE_H
++
++#include <cstdint>
++#include <vector>
++
++// Guest-visible ARM920T state between two run calls: registers, CP15, the TLB and both caches.
++// cpuArm920CaptureState fills it and cpuArm920ApplyState puts it back; translated code and
++// decoded lines are host caches and are dropped instead.
++struct Arm920SavedState {
++    static constexpr uint32_t stateVersion = 1;
++
++    uint64_t exceptionSequence = 0;
++    uint32_t regs[16]{}, extraRegs[5]{};
++    // usr, svc, abt, und, irq, fiq: R13, R14, SPSR.
++    uint32_t banks[6][3]{};
++    uint32_t spsr = 0, flags = 0, curInstrPC = 0, vectorBase = 0, pid = 0;
++    // Kept as it is: a set bit sends the next Fast step to the interpreter.
++    uint32_t slowPath = 0;
++    uint16_t waitingIrqs = 0, waitingFiqs = 0, cpar = 0;
++    uint8_t mode = 0;
++    bool q = false, t = false, i = false, f = false, privileged = false, waiting = false;
++    // From the options at create.
++    bool waitEnabled = false, icacheIndexCompatibility = false;
++
++    uint32_t control = 0, ttb = 0, fsr = 0, far = 0, mmuSwitchCy = 0;
++
++    uint32_t transTablPA = 0, domainCfg = 0;
++    uint8_t mmuS = 0, mmuR = 0;
++    // Host counters, kept so diagnostics read the same after a load.
++    uint16_t tlbRevision = 1;
++    uint32_t tlbFlushes = 0;
++    // Live TLB entries in rising page order, two words each: the virtual page, then
++    // pa | ap << 20 | domain << 22 | c << 26 | section << 27 | b << 28.
++    std::vector<uint32_t> tlb;
++
++    bool icacheEnabled = false, icacheRoundRobin = false;
++    uint32_t continuationPc = 0, continuation[2]{};
++    uint8_t continuationFault[2]{}, continuationCount = 0;
++    uint32_t icacheRandom = 0;
++    uint8_t icacheVictim[8]{};
++    struct InstructionLine {
++        uint32_t base, words[8];
++        bool valid;
++    } instructionLines[8][64]{};
++
++    struct DataLine {
++        uint32_t va, pa, words[8];
++        uint8_t dirty;
++        bool valid, bufferable;
++    } dataLines[8][64]{};
++    uint8_t dcacheVictim[8]{};
++    uint32_t dcacheRandom = 0;
++    uint32_t guardAddress = 0, guardSize = 0;
++    bool guardWrite = false, guardActive = false;
++
++    template <class A> void stateCpu(A& a) {
++        a.Do64(exceptionSequence).DoBuffer32(regs, 16).DoBuffer32(extraRegs, 5);
++        for (auto& bank : banks) a.DoBuffer32(bank, 3);
++        a.Do32(spsr).Do32(flags).Do32(curInstrPC).Do32(vectorBase).Do32(pid).Do32(slowPath);
++        a.Do16(waitingIrqs).Do16(waitingFiqs).Fixed16(cpar).Do8(mode);
++        a.DoBool(q).DoBool(t).DoBool(i).DoBool(f).DoBool(privileged).DoBool(waiting);
++        a.FixedBool(waitEnabled).FixedBool(icacheIndexCompatibility);
++        a.Do32(control).Do32(ttb).Do32(fsr).Do32(far).Do32(mmuSwitchCy);
++        a.Do32(transTablPA).Do32(domainCfg).Do8(mmuS).Do8(mmuR);
++        a.Require(!(flags & 0x0fffffff) && mmuS <= 1 && mmuR <= 1 && waitingIrqs <= 1 && waitingFiqs <= 1, "cpu flags");
++        a.Require(mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 || mode == 0x17 ||
++                  mode == 0x1b || mode == 0x1f, "cpu mode");
++        a.Require(privileged == (mode != 0x10), "cpu privilege");
++    }
++    template <class A> void stateTlb(A& a) {
++        a.Do16(tlbRevision).Do32(tlbFlushes).DoVector(tlb, uint64_t(2) << 20);
++        a.Require(tlbRevision >= 1 && tlbRevision <= 15 && !(tlb.size() & 1), "tlb revision");
++        if (!A::loading) return;
++        for (size_t n = 0; n + 1 < tlb.size(); n += 2)
++            a.Require(tlb[n] < (1u << 20) && !(tlb[n + 1] >> 29) && (!n || tlb[n - 2] < tlb[n]), "tlb entry");
++    }
++    template <class A> void stateIcache(A& a) {
++        a.DoBool(icacheEnabled).DoBool(icacheRoundRobin).Do32(continuationPc).DoBuffer32(continuation, 2);
++        a.DoBuffer(continuationFault, 2).Do8(continuationCount).Do32(icacheRandom).DoBuffer(icacheVictim, 8);
++        a.Require(continuationCount <= 2, "icache continuation");
++        for (auto& segment : instructionLines)
++            for (auto& line : segment) a.Do32(line.base).DoBuffer32(line.words, 8).DoBool(line.valid);
++    }
++    template <class A> void stateDcache(A& a) {
++        for (auto& segment : dataLines)
++            for (auto& line : segment) {
++                a.Do32(line.va).Do32(line.pa).DoBuffer32(line.words, 8).Do8(line.dirty);
++                a.DoBool(line.valid).DoBool(line.bufferable).Require(line.dirty <= 3, "dcache dirty");
++            }
++        a.DoBuffer(dcacheVictim, 8).Do32(dcacheRandom).Do32(guardAddress).Do32(guardSize);
++        a.DoBool(guardWrite).DoBool(guardActive);
++    }
++};
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Arm920SavedState) == 43328, "update the state lists and stateVersion");
++#endif
++
++#endif
+diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+index 56181e4..65dc515 100644
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "CPU.h"
+ #include "MMU.h"
++#include "arm920_state.h"
+ #include "cputil.h"
+ #include "icache.h"
+ #include "savestate/savestateAll.h"
+@@ -541,6 +542,56 @@ template void cp15MMUSave<SavestateProbe<ChunkType>>(ArmCP15MMU* cp15,
+ template void cp15MMULoad<SavestateLoader<ChunkType>>(ArmCP15MMU* cp15,
+                                                       SavestateLoader<ChunkType>& loader);
+ 
++void cp15MMUArm920Capture(const ArmCP15MMU* cp, Arm920SavedState& s) {
++    s.control = cp->control;
++    s.ttb = cp->ttb;
++    s.fsr = cp->FSR;
++    s.far = cp->FAR;
++    s.mmuSwitchCy = cp->mmuSwitchCy;
++    s.icacheIndexCompatibility = cp->arm920IcacheIndexCompatibility;
++    const auto& dc = cp->dataCache;
++    for (unsigned segment = 0; segment < 8; ++segment)
++        for (unsigned index = 0; index < 64; ++index) {
++            const auto& from = dc.lines[segment][index];
++            auto& to = s.dataLines[segment][index];
++            to.va = from.va;
++            to.pa = from.pa;
++            memcpy(to.words, from.words, sizeof(to.words));
++            to.dirty = from.dirty;
++            to.valid = from.valid;
++            to.bufferable = from.bufferable;
++        }
++    memcpy(s.dcacheVictim, dc.victim, sizeof(s.dcacheVictim));
++    s.dcacheRandom = dc.random;
++    s.guardAddress = dc.guard.address;
++    s.guardSize = dc.guard.size;
++    s.guardWrite = dc.guard.write;
++    s.guardActive = dc.guard.active;
++}
++
++void cp15MMUArm920Apply(ArmCP15MMU* cp, const Arm920SavedState& s) {
++    cp->control = s.control;
++    cp->ttb = s.ttb;
++    cp->FSR = s.fsr;
++    cp->FAR = s.far;
++    cp->mmuSwitchCy = s.mmuSwitchCy;
++    auto& dc = cp->dataCache;
++    for (unsigned segment = 0; segment < 8; ++segment)
++        for (unsigned index = 0; index < 64; ++index) {
++            const auto& from = s.dataLines[segment][index];
++            auto& to = dc.lines[segment][index];
++            to.va = from.va;
++            to.pa = from.pa;
++            memcpy(to.words, from.words, sizeof(to.words));
++            to.dirty = from.dirty;
++            to.valid = from.valid;
++            to.bufferable = from.bufferable;
++        }
++    memcpy(dc.victim, s.dcacheVictim, sizeof(dc.victim));
++    dc.random = s.dcacheRandom;
++    dc.guard = {s.guardAddress, s.guardSize, s.guardWrite, s.guardActive};
++}
++
+ void cp15MMUEmitArm920Diagnostic(const ArmCP15MMU* cp, const ArmDiagnosticSink& sink) {
+     const uint32_t state[] = {cp->control,cp->ttb,cp->FSR,cp->FAR,cp->mmuSwitchCy,
+         uint32_t(cp->arm920Bootstrap),uint32_t(cp->arm920IcacheIndexCompatibility)};
+diff --git a/src/uarm/uarm/cp15mmu.h b/src/uarm/uarm/cp15mmu.h
+index 1b193a0..922ef53 100644
+--- a/src/uarm/uarm/cp15mmu.h
++++ b/src/uarm/uarm/cp15mmu.h
+@@ -31,4 +31,7 @@ template <typename T>
+ void cp15MMULoad(struct ArmCP15MMU* cp15, T& loader);
+ 
+ void cp15MMUEmitArm920Diagnostic(const ArmCP15MMU*, const ArmDiagnosticSink&);
++struct Arm920SavedState;
++void cp15MMUArm920Capture(const ArmCP15MMU*, Arm920SavedState&);
++void cp15MMUArm920Apply(ArmCP15MMU*, const Arm920SavedState&);
+ #endif  // _CP15_MMU_H_
+diff --git a/src/uarm/uarm/icache.cpp b/src/uarm/uarm/icache.cpp
+index 7a23994..2f8dbb4 100644
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -7,6 +7,7 @@
+ #include <initializer_list>
+ 
+ #include "CPU.h"
++#include "arm920_state.h"
+ #include "cputil.h"
+ 
+ void icacheConfigureArm920(struct icache* ic) {
+@@ -126,6 +127,45 @@ bool icacheArm920ContinuationPending(const struct icache* ic) {
+ 
+ void icacheArm920Branch(struct icache* ic) { ic->arm920ContinuationCount = 0; }
+ 
++void icacheArm920Capture(const struct icache* ic, Arm920SavedState& s) {
++    s.icacheEnabled = ic->arm920Enabled;
++    s.icacheRoundRobin = ic->arm920RoundRobin;
++    s.continuationPc = ic->arm920ContinuationPc;
++    std::memcpy(s.continuation, ic->arm920Continuation, sizeof(s.continuation));
++    std::memcpy(s.continuationFault, ic->arm920ContinuationFault, sizeof(s.continuationFault));
++    s.continuationCount = ic->arm920ContinuationCount;
++    s.icacheRandom = ic->arm920Random;
++    std::memcpy(s.icacheVictim, ic->arm920Victim, sizeof(s.icacheVictim));
++    for (unsigned segment = 0; segment < 8; ++segment)
++        for (unsigned index = 0; index < 64; ++index) {
++            const auto& from = ic->arm920Lines[segment][index];
++            auto& to = s.instructionLines[segment][index];
++            to.base = from.base;
++            std::memcpy(to.words, from.words, sizeof(to.words));
++            to.valid = from.valid;
++        }
++}
++
++void icacheArm920Apply(struct icache* ic, const Arm920SavedState& s) {
++    ic->arm920Enabled = s.icacheEnabled;
++    ic->arm920RoundRobin = s.icacheRoundRobin;
++    ic->arm920ContinuationPc = s.continuationPc;
++    std::memcpy(ic->arm920Continuation, s.continuation, sizeof(s.continuation));
++    std::memcpy(ic->arm920ContinuationFault, s.continuationFault, sizeof(s.continuationFault));
++    ic->arm920ContinuationCount = s.continuationCount;
++    ic->arm920Random = s.icacheRandom;
++    std::memcpy(ic->arm920Victim, s.icacheVictim, sizeof(s.icacheVictim));
++    for (unsigned segment = 0; segment < 8; ++segment)
++        for (unsigned index = 0; index < 64; ++index) {
++            const auto& from = s.instructionLines[segment][index];
++            auto& to = ic->arm920Lines[segment][index];
++            to.base = from.base;
++            std::memcpy(to.words, from.words, sizeof(to.words));
++            to.valid = from.valid;
++        }
++    ic->epoch++;
++}
++
+ void icacheSetXscale(struct icache* ic, bool xscale) { ic->xscale = xscale; }
+ 
+ void icacheGetFetchState(struct icache* ic, uint32_t* state) {
+diff --git a/src/uarm/uarm/icache.h b/src/uarm/uarm/icache.h
+index 0c40864..98f7be7 100644
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -29,6 +29,11 @@ bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
+ void icacheArm920PrepareMmuSwitch(struct icache*, uint32_t nextPc, bool privileged);
+ bool icacheArm920ContinuationPending(const struct icache*);
+ void icacheArm920Branch(struct icache*);
++// The ARM920 lines, replacement state and MMU-switch continuation, set without the side
++// effects of a control write or an invalidation.
++struct Arm920SavedState;
++void icacheArm920Capture(const struct icache*, Arm920SavedState&);
++void icacheArm920Apply(struct icache*, const Arm920SavedState&);
+ void icacheSetXscale(struct icache* ic, bool xscale);
+ void icacheGetFetchState(struct icache* ic, uint32_t* state);
+ bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
+diff --git a/src/uarm/uarm/imx1_aitc.h b/src/uarm/uarm/imx1_aitc.h
+index 0613608..9fe4d43 100644
+--- a/src/uarm/uarm/imx1_aitc.h
++++ b/src/uarm/uarm/imx1_aitc.h
+@@ -24,6 +24,11 @@ class Imx1Aitc {
+     Imx1AitcPending pendingState() const {
+         return {pending(false), pending(true), unknown(false), unknown(true)};
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(control).Do32(mask).Do64(enabled).Do64(type).Do64(force).Do64(inputs).Do64(knownInputs);
++        a.DoBuffer32(priority, 8);
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+@@ -39,5 +44,8 @@ class Imx1Aitc {
+     uint32_t vector(bool fast) const;
+     unsigned level(unsigned source) const { return (priority[source / 8] >> ((source % 8) * 4)) & 15; }
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Aitc) == 80, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_asp.h b/src/uarm/uarm/imx1_asp.h
+index 1549058..565e02d 100644
+--- a/src/uarm/uarm/imx1_asp.h
++++ b/src/uarm/uarm/imx1_asp.h
+@@ -51,6 +51,19 @@ class Imx1Asp {
+         return requests;
+     }
+     unsigned clockDivider() const { return (control & (1u << 25)) && divider ? divider + 1 : 0; }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.FixedBool(px1HighFromReset).FixedBool(uSampleKnown).Fixed16(uSample);
++        a.DoBuffer16(fifo.data(), fifo.size()).Do32(readPointer).Do32(writePointer).Do32(count);
++        a.DoBool(penInputs.contactKnown).DoBool(penInputs.contactDown);
++        a.DoBool(penInputs.normalKnown).DoBool(penInputs.referenceKnown);
++        a.DoBuffer16(penInputs.normal.data(), 4).DoBuffer16(penInputs.reference.data(), 3);
++        a.DoBool(overflow).DoBool(armed).DoBool(pen).DoBool(penUp).DoBool(idle).DoBool(capturedUp);
++        a.Do32(slot).Do16(captured).Do32(remaining).Do32(phase);
++        a.Do32(control).Do32(sampleRate).Do32(compare).Do32(interrupts).Do32(divider);
++        a.Require(readPointer < fifo.size() && writePointer < fifo.size() && count <= fifo.size(), "asp fifo");
++        a.Require(slot < (calibration() ? 3u : 4u), "asp slot");
++    }
+ 
+    private:
+     // Software reset preserves external inputs.
+@@ -95,5 +108,8 @@ class Imx1Asp {
+         return (nextControl & (1u << 25)) && nextDivider && (nextControl & 2) && (nextControl & 0x3000);
+     }
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Asp) == 100, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+index 65ec422..979a505 100644
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1,15 +1,20 @@
+ #include "imx1_boot_probe.h"
+ #include "imx1_cs5_bus.h"
+ 
++#include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <string>
+ #include "imx1_graphics_frame.h"
+ #include "imx1_graphics_commands.h"
+ #include <array>
+ #include <vector>
+ 
+ #include "CPU.h"
++#include "arm920_state.h"
+ #include "cpu_diagnostics.h"
++#include "machine_state_archive.h"
++#include "md5.h"
+ #include "patch_dispatch.h"
+ #include "system_state.h"
+ 
+@@ -25,12 +30,19 @@ struct Probe {
+             peripherals.replaceAspPenInputs(config.aspPenInputs);
+         peripherals.setLcdcContrastOnly(config.lcdcContrastOnly);
+         peripherals.setMmcsdEmptySlot(config.mmcsdEmptySlot);
+-        cs5Configuration.setAcquisitionMode2Route(config.graphicsMode2Route);
+-        if (config.graphicsRawAuxKnown) cs5Configuration.setAcquisitionAuxInput(config.graphicsRawAux);
+-        if (config.graphicsRawMode1Known) cs5Configuration.setAcquisitionMode1Input(config.graphicsRawMode1);
+-        if (config.graphicsRawAxesKnown) cs5Configuration.setAcquisitionInput(config.graphicsRawFirst, config.graphicsRawSecond);
++        configureAcquisition(cs5Configuration, config);
++    }
++    // The acquisition route and raw inputs from the options. A state load starts its copy the same way.
++    static void configureAcquisition(Imx1Cs5Configuration& graphics, const Imx1ProbeOptions& config) {
++        graphics.setAcquisitionMode2Route(config.graphicsMode2Route);
++        if (config.graphicsRawAuxKnown) graphics.setAcquisitionAuxInput(config.graphicsRawAux);
++        if (config.graphicsRawMode1Known) graphics.setAcquisitionMode1Input(config.graphicsRawMode1);
++        if (config.graphicsRawAxesKnown) graphics.setAcquisitionInput(config.graphicsRawFirst, config.graphicsRawSecond);
+     }
+     std::vector<uint8_t> rom;
++    // MD5 of rom for the state identity, worked out when first needed.
++    mutable bool romDigestKnown = false;
++    mutable uint8_t romDigest[16]{};
+     uint32_t alias;
+     Imx1ProbeResult result{};
+     struct Recent { uint64_t step; uint32_t pc, instruction, cpsr, sp, lr, r0, r1, r2, r3; };
+@@ -564,6 +576,17 @@ bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
+     if ((i & 0xf800) == 0xe000 || (i & 0xf800) == 0xf000) return true; // B, BL prefix.
+     return (i & 0xf800) == 0xf800 && blPrefix; // BL suffix needs its preceding halfword.
+ }
++// Board settings that come from the options and never change afterwards. A state load builds
++// its board the same way and holds the saved copies of these to it.
++void configureBoard(Imx1Bootstrap& board, const Imx1ProbeOptions& options) {
++    board.setLcdcContrastOnly(options.lcdcContrastOnly);
++    board.setMmcsdEmptySlot(options.mmcsdEmptySlot);
++    if (options.bootstrapPeripherals) board.connectCpuInterrupts();
++    board.setI2cScenario(options.assumeI2cSingleMaster);
++    board.setMcuRetuneScenario(options.virtualMpllRetune);
++    board.setSystemPllScenario(options.assumeSpllSettled);
++    board.setRamMiB(options.ramMiB);
++}
+ }  // namespace
+ 
+ struct Imx1Machine { Probe* probe; };
+@@ -636,13 +659,9 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+     }
+     if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
+     if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
+-    if (p->options.bootstrapPeripherals) p->peripherals.connectCpuInterrupts();
+-    p->peripherals.setI2cScenario(p->options.assumeI2cSingleMaster);
++    configureBoard(p->peripherals, p->options);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
+-    p->peripherals.setMcuRetuneScenario(p->options.virtualMpllRetune);
+-    p->peripherals.setSystemPllScenario(p->options.assumeSpllSettled);
+-    p->peripherals.setRamMiB(p->options.ramMiB);
+     if (rom && size) p->rom.assign(rom, rom + size);
+     p->alias = entry == Imx1ProbeEntry::resetAlias ? 0 :
+                entry == Imx1ProbeEntry::linkedAlias ? 0x20000000 : 0x10000000;
+@@ -1102,3 +1121,582 @@ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
+     }
+     return "unknown";
+ }
++
++// Machine state. The format is in machine_state_archive.h, the content lists are the state()
++// members of the models, Arm920SavedState and ProbeState below.
++namespace {
++constexpr uint32_t stateFlagFast = 1, stateFlagRing = 2, stateFlagTerminal = 4;
++constexpr uint32_t stateIdentityVersion = 1, stateMemoryVersion = 1, stateRingVersion = 1, stateJitVersion = 1;
++constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1;
++constexpr uint32_t stateRingEntries = 4096;
++constexpr uint32_t stateMaxNoteBytes = 4096;
++
++// What the run loop keeps in Probe between two calls, and the part of the result that Inspect
++// doesn't work out again. bounds, sliceWorkStart and boundedYield are only set inside a call.
++// The WFI loop's wake and settled flags are worked out again on every entry, and idleAdvances
++// is a host count that differs between the skip and the stepped loop.
++struct ProbeState {
++    static constexpr uint32_t stateVersion = 1;
++    uint64_t retired = 0, work = 0;
++    bool blPrefix = false;
++    uint32_t blNextPc = 0;
++    std::array<Probe::InterruptedPrefix, 256> interruptedPrefixes{};
++    uint32_t interruptedPrefixCount = 0;
++    bool prefixCapacityExceeded = false, terminal = false, failed = false;
++    uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
++    uint64_t i2cIssueStep = 0;
++    uint32_t i2cIssuePc = 0;
++    bool irqRaised = false, fiqRaised = false;
++    Imx1BootstrapAccess graphicsWireStatus = Imx1BootstrapAccess::ok;
++    Imx1ProbeResult result{};
++
++    void capture(const Probe& p) {
++        retired = p.retired; work = p.work;
++        blPrefix = p.blPrefix; blNextPc = p.blNextPc;
++        interruptedPrefixes = p.interruptedPrefixes;
++        interruptedPrefixCount = uint32_t(p.interruptedPrefixCount);
++        prefixCapacityExceeded = p.prefixCapacityExceeded; terminal = p.terminal; failed = p.failed;
++        graphicsSampledPin = p.graphicsSampledPin; graphicsSampleOffset = p.graphicsSampleOffset;
++        i2cIssueStep = p.i2cIssueStep; i2cIssuePc = p.i2cIssuePc;
++        irqRaised = p.irqRaised; fiqRaised = p.fiqRaised;
++        graphicsWireStatus = p.graphicsWireStatus;
++        result = p.result;
++    }
++    void apply(Probe& p) const {
++        p.retired = retired; p.work = work;
++        p.blPrefix = blPrefix; p.blNextPc = blNextPc;
++        p.interruptedPrefixes = interruptedPrefixes;
++        p.interruptedPrefixCount = interruptedPrefixCount;
++        p.prefixCapacityExceeded = prefixCapacityExceeded; p.terminal = terminal; p.failed = failed;
++        p.graphicsSampledPin = graphicsSampledPin; p.graphicsSampleOffset = graphicsSampleOffset;
++        p.i2cIssueStep = i2cIssueStep; p.i2cIssuePc = i2cIssuePc;
++        p.irqRaised = irqRaised; p.fiqRaised = fiqRaised;
++        p.graphicsWireStatus = graphicsWireStatus;
++        p.result = result;
++    }
++    template <class A> void state(A& a) {
++        a.Do64(retired).Do64(work).DoBool(blPrefix).Do32(blNextPc).Do32(interruptedPrefixCount);
++        a.Require(interruptedPrefixCount <= interruptedPrefixes.size(), "interrupted prefix count");
++        // Slots past the count are never read.
++        for (uint32_t n = 0; a.ok() && n < interruptedPrefixCount; ++n) {
++            auto& s = interruptedPrefixes[n];
++            a.Do32(s.pc).Do32(s.cpsr).Do32(s.mode).Do32(s.lr).Do32(s.sp);
++        }
++        a.DoBool(prefixCapacityExceeded).DoBool(terminal).DoBool(failed);
++        a.Do32(graphicsSampledPin).Do32(graphicsSampleOffset).Do64(i2cIssueStep).Do32(i2cIssuePc);
++        a.DoBool(irqRaised).DoBool(fiqRaised).DoEnum(graphicsWireStatus, 12);
++        // registers, cpsr, spsr, the frame fields, pcm and the JIT counters come from Inspect.
++        auto& r = result;
++        a.DoEnum(r.stop, 11).Do64(r.trace.step).Do32(r.trace.pc).Do32(r.trace.instruction).Do32(r.trace.cpsr);
++        a.Do32(r.trace.operand).Do32(r.trace.instructionSize).Do32(r.address).Do32(r.value).Do32(r.size);
++        a.Do64(r.busAccesses).Do64(r.cs5WaitClocks).Do64(r.idleHclk).Do64(r.irqEntries).Do64(r.fiqEntries);
++        a.DoEnum(r.peripheralStatus, 12);
++        auto& e = r.i2cEvent;
++        a.Do64(e.step).Do32(e.pc).Do64(e.issueStep).Do32(e.issuePc);
++        a.DoEnum(e.transfer.phase, 6).Do8(e.transfer.address).Do8(e.transfer.byte);
++        a.DoBool(e.transfer.read).DoBool(e.transfer.acknowledge).DoEnum(e.response, 4);
++        a.Do32(e.control).Do32(e.status).Do32(e.divider);
++        a.DoBool(r.gpioEventApplied).DoBool(r.elapsedInterruptBoundary).DoBool(r.possibleWatchdogTimeoutBoundary);
++        a.Do64(r.interruptPending.normal).Do64(r.interruptPending.fast);
++        a.Do64(r.interruptPending.unknownNormal).Do64(r.interruptPending.unknownFast);
++        const bool resumable = r.stop == Imx1ProbeStop::budget || r.stop == Imx1ProbeStop::idleBudget ||
++                               r.stop == Imx1ProbeStop::idleNoWake;
++        a.Require(terminal == !resumable, "terminal stop");
++    }
++};
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Probe) == 25488, "update ProbeState and its stateVersion");
++static_assert(sizeof(Imx1ProbeResult) == 352, "update ProbeState and its stateVersion");
++static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields and stateIdentityVersion");
++#endif
++
++constexpr uint64_t stateLayoutFingerprint() {
++    const uint64_t words[] = {
++        stateFourcc("IDNT"), stateIdentityVersion, sizeof(Imx1ProbeOptions),
++        stateFourcc("PROB"), ProbeState::stateVersion, sizeof(Probe), sizeof(Imx1ProbeResult),
++        stateFourcc("CPU "), Arm920SavedState::stateVersion, sizeof(Arm920SavedState),
++        stateFourcc("BOOT"), Imx1Bootstrap::stateVersion, sizeof(Imx1Bootstrap),
++        Imx1Aitc::stateVersion, sizeof(Imx1Aitc), Imx1Cgm::stateVersion, sizeof(Imx1Cgm),
++        Imx1Gpio::stateVersion, sizeof(Imx1Gpio), Imx1Eim::stateVersion, sizeof(Imx1Eim),
++        Imx1Timer::stateVersion, sizeof(Imx1Timer), Imx1Sysctrl::stateVersion, sizeof(Imx1Sysctrl),
++        Imx1Mmcsd::stateVersion, sizeof(Imx1Mmcsd), Imx1I2c::stateVersion, sizeof(Imx1I2c),
++        Imx1Asp::stateVersion, sizeof(Imx1Asp), Imx1Pwm::stateVersion, sizeof(Imx1Pwm),
++        Imx1Watchdog::stateVersion, sizeof(Imx1Watchdog), Imx1Rtc::stateVersion, sizeof(Imx1Rtc),
++        stateFourcc("CS4 "), Imx1Cs4Capture::stateVersion, sizeof(Imx1Cs4Capture),
++        stateFourcc("CS5R"), Imx1Cs5Reset::stateVersion, sizeof(Imx1Cs5Reset),
++        stateFourcc("CS5C"), Imx1Cs5Configuration::stateVersion, sizeof(Imx1Cs5Configuration),
++        Imx1GraphicsGpio::stateVersion, sizeof(Imx1GraphicsGpio),
++        Imx1GraphicsWindows::stateVersion, sizeof(Imx1GraphicsWindows),
++        Imx1GraphicsLookup::stateVersion, sizeof(Imx1GraphicsLookup),
++        Imx1GraphicsController::stateVersion, sizeof(Imx1GraphicsController),
++        Imx1GraphicsEngine::stateVersion, sizeof(Imx1GraphicsEngine),
++        Imx1GraphicsDisplay::stateVersion, sizeof(Imx1GraphicsDisplay),
++        Imx1GraphicsInterrupts::stateVersion, sizeof(Imx1GraphicsInterrupts),
++        Imx1GraphicsAcquisition::stateVersion, sizeof(Imx1GraphicsAcquisition),
++        Imx1GraphicsSd::stateVersion, sizeof(Imx1GraphicsSd),
++        Imx1GraphicsClocks::stateVersion, sizeof(Imx1GraphicsClocks),
++        stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion, sizeof(Imx1GraphicsCommands),
++        stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion, sizeof(Imx1GraphicsMemory), stateGraphicsMemoryVersion,
++        stateFourcc("FRAM"), Imx1GraphicsFrame::stateVersion, sizeof(Imx1GraphicsFrame),
++        stateFourcc("I2CB"), stateBusVersion,
++        stateMemoryVersion, stateRingVersion, stateJitVersion};
++    uint64_t hash = 1469598103934665603ull;
++    for (const auto word : words) hash = stateLayoutMix(hash, word);
++    return hash;
++}
++
++// Every option that shapes the machine, by name, so a mismatch can say which one.
++// Left out: observers and contexts, the diagnostic and frame sinks, the I2C bus (it has its own
++// identity), idleHclkBudget (a run limit) and idleStepped (both loops give the same state).
++struct StateOptionField { const char* name; uint64_t value; };
++std::vector<StateOptionField> stateOptionFields(const Imx1ProbeOptions& o, uint32_t alias) {
++    uint64_t indexed = 1469598103934665603ull;
++    for (int bank = 0; bank < 2; ++bank)
++        for (int index = 0; index < 256; ++index)
++            indexed = stateLayoutMix(indexed, uint64_t(int64_t(o.cs4IndexedInputs.sample(bank, index))));
++    const auto& pen = o.aspPenInputs;
++    return {
++        {"entry", alias},
++        {"graphicsProfile", uint64_t(o.graphicsProfile)},
++        {"cs5ResetStatusInputKnown", o.cs5ResetStatusInputKnown}, {"cs5ResetStatusInput", o.cs5ResetStatusInput},
++        {"rtcInitialTimeKnown", o.rtcInitialTimeKnown}, {"rtcInitialTime.day", o.rtcInitialTime.day},
++        {"rtcInitialTime.hour", o.rtcInitialTime.hour}, {"rtcInitialTime.minute", o.rtcInitialTime.minute},
++        {"rtcInitialTime.second", o.rtcInitialTime.second},
++        {"cs4Port0InputKnown", o.cs4Port0InputKnown}, {"cs4Port0Input", o.cs4Port0Input},
++        {"cs4IndexedInputs", indexed},
++        {"aspPx1HighFromReset", o.aspPx1HighFromReset},
++        {"aspPenInputs.contactKnown", pen.contactKnown}, {"aspPenInputs.contactDown", pen.contactDown},
++        {"aspPenInputs.normalKnown", pen.normalKnown}, {"aspPenInputs.referenceKnown", pen.referenceKnown},
++        {"aspPenInputs.normal[0]", pen.normal[0]}, {"aspPenInputs.normal[1]", pen.normal[1]},
++        {"aspPenInputs.normal[2]", pen.normal[2]}, {"aspPenInputs.normal[3]", pen.normal[3]},
++        {"aspPenInputs.reference[0]", pen.reference[0]}, {"aspPenInputs.reference[1]", pen.reference[1]},
++        {"aspPenInputs.reference[2]", pen.reference[2]},
++        {"aspUSampleKnown", o.aspUSampleKnown}, {"aspUSample", o.aspUSample},
++        {"assumeI2cSingleMaster", o.assumeI2cSingleMaster},
++        {"bootstrapPeripherals", o.bootstrapPeripherals},
++        {"arm920IcacheIndexCompatibility", o.arm920IcacheIndexCompatibility},
++        {"lcdcContrastOnly", o.lcdcContrastOnly}, {"mmcsdEmptySlot", o.mmcsdEmptySlot},
++        {"assumeMpllSettled", o.assumeMpllSettled}, {"virtualMpllRetune", o.virtualMpllRetune},
++        {"assumeSpllSettled", o.assumeSpllSettled}, {"graphicsIrqA13", o.graphicsIrqA13},
++        {"graphicsVirtualA4SourceOver", o.graphicsVirtualA4SourceOver},
++        {"graphicsVirtualPackedMono", o.graphicsVirtualPackedMono},
++        {"graphicsMode2Route", uint64_t(o.graphicsMode2Route)},
++        {"graphicsRawAuxKnown", o.graphicsRawAuxKnown}, {"graphicsRawAux", o.graphicsRawAux},
++        {"graphicsRawMode1Known", o.graphicsRawMode1Known}, {"graphicsRawMode1", o.graphicsRawMode1},
++        {"graphicsRawAxesKnown", o.graphicsRawAxesKnown}, {"graphicsRawFirst", o.graphicsRawFirst},
++        {"graphicsRawSecond", o.graphicsRawSecond},
++        {"gpioEventAfterInstructions", o.gpioEventAfterInstructions},
++        {"gpioEventValues[0]", o.gpioEventValues[0]}, {"gpioEventValues[1]", o.gpioEventValues[1]},
++        {"gpioEventValues[2]", o.gpioEventValues[2]}, {"gpioEventValues[3]", o.gpioEventValues[3]},
++        {"gpioEventMasks[0]", o.gpioEventMasks[0]}, {"gpioEventMasks[1]", o.gpioEventMasks[1]},
++        {"gpioEventMasks[2]", o.gpioEventMasks[2]}, {"gpioEventMasks[3]", o.gpioEventMasks[3]},
++        {"gpioAInputMaskedKnown", o.gpioAInputMaskedKnown}, {"gpioAInputMask", o.gpioAInputMask},
++        {"gpioAInputKnown", o.gpioAInputKnown}, {"gpioAInput", o.gpioAInput},
++        {"gpioBInputKnown", o.gpioBInputKnown}, {"gpioBInput", o.gpioBInput},
++        {"gpioDInputKnown", o.gpioDInputKnown}, {"gpioDInput", o.gpioDInput},
++        {"ramMiB", o.ramMiB},
++    };
++}
++
++const uint8_t* stateRomDigest(const Probe& p) {
++    if (!p.romDigestKnown) {
++        MD5Context md5;
++        md5Init(&md5);
++        if (!p.rom.empty()) md5Update(&md5, const_cast<uint8_t*>(p.rom.data()), p.rom.size());
++        md5Finalize(&md5);
++        std::memcpy(p.romDigest, md5.digest, 16);
++        p.romDigestKnown = true;
++    }
++    return p.romDigest;
++}
++
++// 0 without a bus. An attached bus that has no identity can't be saved.
++uint32_t stateBusIdentity(const Probe& p) { return p.options.i2cBus ? p.options.i2cBus->stateIdentity() : 0; }
++bool stateConfigurationSupported(const Probe& p) { return !p.options.i2cBus || stateBusIdentity(p); }
++
++template <class A> void stateRecent(A& a, std::vector<Probe::Recent>& recent, uint32_t& next, uint32_t& count) {
++    a.Do32(next).Do32(count);
++    a.Require(count <= stateRingEntries && next < stateRingEntries && (count == stateRingEntries || next == count),
++              "recent ring");
++    if (!a.ok()) return;
++    if (recent.size() < stateRingEntries) recent.resize(stateRingEntries);
++    // Filled from slot 0, so the first count slots are the used ones.
++    for (uint32_t n = 0; a.ok() && n < count; ++n) {
++        auto& r = recent[n];
++        a.Do64(r.step).Do32(r.pc).Do32(r.instruction).Do32(r.cpsr).Do32(r.sp).Do32(r.lr);
++        a.Do32(r.r0).Do32(r.r1).Do32(r.r2).Do32(r.r3);
++    }
++}
++
++void stateText(StateWriter& a, const char* text) {
++    uint32_t length = text ? uint32_t(std::min<size_t>(std::strlen(text), stateMaxNoteBytes)) : 0;
++    a.Do32(length);
++    if (length) a.DoBuffer(const_cast<char*>(text), length);
++}
++bool stateText(StateReader& a, std::string& text, uint32_t limit) {
++    uint32_t length = 0;
++    a.Do32(length).Require(length <= limit, "text length");
++    if (!a.ok()) return false;
++    text.resize(length);
++    if (length) a.DoBuffer(text.data(), length);
++    return a.ok();
++}
++
++void setSection(Imx1StateInfo& info, uint32_t fourcc) {
++    for (unsigned n = 0; n < 4; ++n) info.section[n] = char(fourcc >> (n * 8));
++    info.section[4] = 0;
++}
++
++// Everything a load decodes before it touches the machine.
++struct StagedState {
++    std::unique_ptr<Arm920SavedState> cpu;
++    std::unique_ptr<Imx1Bootstrap> board;
++    std::unique_ptr<Imx1Cs4Capture> cs4;
++    std::unique_ptr<Imx1Cs5Reset> cs5Reset;
++    std::unique_ptr<Imx1Cs5Configuration> graphics;
++    std::unique_ptr<Imx1GraphicsCommands> commands;
++    std::unique_ptr<Imx1GraphicsMemory> graphicsMemory;
++    std::unique_ptr<Imx1GraphicsFrame> frame;
++    ProbeState probe;
++    // The bus section, checked against the bus and still inside the caller's bytes.
++    const uint8_t* bus = nullptr;
++    size_t busBytes = 0;
++    bool ring = false, jit = false;
++    std::vector<Probe::Recent> recent;
++    uint32_t recentNext = 0, recentCount = 0;
++    uint64_t jitBlocks = 0, jitInstructions = 0;
++};
++
++Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint32_t flags,
++                          const char* buildNote, StagedState& staged) {
++    using S = Imx1StateStatus;
++    Imx1StateInfo info;
++    const auto fail = [&](S status, uint32_t fourcc, const char* detail) {
++        info.status = status;
++        if (fourcc) setSection(info, fourcc);
++        info.detail = detail;
++        return info;
++    };
++    if (p.stopped || p.bounds) return fail(S::notAtBoundary, 0, nullptr);
++    if (!stateConfigurationSupported(p)) return fail(S::unsupportedConfiguration, 0, nullptr);
++    // A load replaces the pixels a caller still holds.
++    if (p.graphicsFrame.frameAcquired()) return fail(S::notAtBoundary, 0, "frame acquired");
++    if (!data) return fail(S::truncated, 0, nullptr);
++    StateContainerReader file;
++    const auto opened = file.open(data, size);
++    info.formatVersion = file.formatVersion;
++    info.coreRevision = file.coreRevision;
++    switch (opened) {
++        case StateContainerError::ok: break;
++        case StateContainerError::truncated: return fail(S::truncated, 0, nullptr);
++        case StateContainerError::badMagic: return fail(S::badMagic, 0, nullptr);
++        case StateContainerError::badFormatVersion: return fail(S::badFormatVersion, 0, nullptr);
++        case StateContainerError::corruptHeader: return fail(S::corruptSection, stateFourcc("HEAD"), "header or table");
++        case StateContainerError::corruptSection: return fail(S::corruptSection, file.corrupt()->fourcc, "crc");
++    }
++    if (file.coreRevision != imx1MachineStateCoreRevision) {
++        if (!(flags & imx1StateAllowCoreRevision)) return fail(S::coreRevisionMismatch, 0, nullptr);
++        info.coreRevisionDiffers = true;
++    }
++    if (file.layoutFingerprint != stateLayoutFingerprint()) return fail(S::layoutMismatch, 0, "layout fingerprint");
++    if (file.flags & ~(stateFlagFast | stateFlagRing | stateFlagTerminal)) return fail(S::invalidValue, 0, "flags");
++
++    const StateSection* section = nullptr;
++    const auto open = [&](const char (&name)[5], uint32_t version, bool required, StateReader& reader) {
++        section = file.find(stateFourcc(name));
++        if (!section) {
++            if (required) fail(S::missingSection, stateFourcc(name), nullptr);
++            return false;
++        }
++        if (section->version != version) { fail(S::layoutMismatch, section->fourcc, "section version"); return false; }
++        reader = file.reader(*section);
++        return true;
++    };
++    // A decode failure is a fixed field that differs from this machine's, or a bad value.
++    const auto finish = [&](const StateReader& reader) {
++        if (reader.complete()) return true;
++        fail(reader.fixedMismatch() ? S::optionsMismatch : S::invalidValue, section->fourcc,
++             reader.ok() ? "trailing bytes" : reader.detail());
++        return false;
++    };
++    StateReader a(nullptr, 0);
++
++    if (!open("IDNT", stateIdentityVersion, true, a)) return info;
++    {
++        uint64_t romBytes = 0;
++        uint8_t digest[16]{};
++        uint32_t fieldCount = 0, busIdentity = 0;
++        a.Do64(romBytes).DoBuffer(digest, 16);
++        if (a.ok() && (romBytes != p.rom.size() || std::memcmp(digest, stateRomDigest(p), 16)))
++            return fail(S::romMismatch, section->fourcc, "rom");
++        const auto fields = stateOptionFields(p.options, p.alias);
++        a.Do32(fieldCount);
++        if (a.ok() && fieldCount != fields.size()) return fail(S::optionsMismatch, section->fourcc, "option count");
++        for (const auto& field : fields) {
++            std::string name;
++            uint64_t value = 0;
++            if (!stateText(a, name, 64)) break;
++            a.Do64(value);
++            if (a.ok() && (name != field.name || value != field.value))
++                return fail(S::optionsMismatch, section->fourcc, field.name);
++        }
++        a.Do32(busIdentity);
++        if (a.ok() && busIdentity != stateBusIdentity(p)) return fail(S::busMismatch, section->fourcc, "bus identity");
++        std::string note;
++        stateText(a, note, stateMaxNoteBytes);
++        if (!finish(a)) return info;
++        info.buildNoteDiffers = note != (buildNote ? buildNote : "");
++    }
++
++    if (!open("PROB", ProbeState::stateVersion, true, a)) return info;
++    staged.probe.state(a);
++    if (!finish(a)) return info;
++    info.retired = staged.probe.retired;
++    if (staged.probe.terminal != bool(file.flags & stateFlagTerminal))
++        return fail(S::invalidValue, section->fourcc, "terminal flag");
++
++    // The live state supplies the fixed fields the saved ones are held to.
++    staged.cpu = std::make_unique<Arm920SavedState>();
++    if (!cpuArm920CaptureState(p.cpu, *staged.cpu)) return fail(S::unsupportedConfiguration, 0, "cpu");
++    if (!open("CPU ", Arm920SavedState::stateVersion, true, a)) return info;
++    staged.cpu->stateCpu(a);
++    if (!finish(a)) return info;
++    if (!cpuArm920StateFits(p.cpu, *staged.cpu) || (staged.cpu->waitingIrqs != 0) != staged.probe.irqRaised ||
++        (staged.cpu->waitingFiqs != 0) != staged.probe.fiqRaised)
++        return fail(S::invalidValue, section->fourcc, "interrupt lines");
++    if (!open("ICAC", Arm920SavedState::stateVersion, true, a)) return info;
++    staged.cpu->stateIcache(a);
++    if (!finish(a)) return info;
++    if (!open("DCAC", Arm920SavedState::stateVersion, true, a)) return info;
++    staged.cpu->stateDcache(a);
++    if (!finish(a)) return info;
++    if (!open("TLB ", Arm920SavedState::stateVersion, true, a)) return info;
++    staged.cpu->stateTlb(a);
++    if (!finish(a)) return info;
++
++    staged.board = std::make_unique<Imx1Bootstrap>(p.options.aspPx1HighFromReset, p.options.aspUSampleKnown,
++                                                   p.options.aspUSample);
++    configureBoard(*staged.board, p.options);
++    if (!open("BOOT", Imx1Bootstrap::stateVersion, true, a)) return info;
++    staged.board->state(a);
++    if (!finish(a)) return info;
++    if (!open("SRAM", stateMemoryVersion, true, a)) return info;
++    staged.board->stateSram(a);
++    if (!finish(a)) return info;
++    for (unsigned bank = 0; bank < 2; ++bank) {
++        if (!open(bank ? "SDR1" : "SDR0", stateMemoryVersion, true, a)) return info;
++        staged.board->stateSdram(a, bank);
++        if (!finish(a)) return info;
++    }
++
++    // Graphics, built from the options the way Probe builds its own.
++    staged.cs4 = std::make_unique<Imx1Cs4Capture>(p.options.cs4Port0Input, p.options.cs4IndexedInputs);
++    if (!open("CS4 ", Imx1Cs4Capture::stateVersion, true, a)) return info;
++    staged.cs4->state(a);
++    if (!finish(a)) return info;
++    staged.cs5Reset = std::make_unique<Imx1Cs5Reset>(
++        p.options.graphicsProfile == Imx1GraphicsProfile::strict ? p.options.cs5ResetStatusInput : 0);
++    if (!open("CS5R", Imx1Cs5Reset::stateVersion, true, a)) return info;
++    staged.cs5Reset->state(a);
++    if (!finish(a)) return info;
++    staged.graphics = std::make_unique<Imx1Cs5Configuration>(p.options.graphicsProfile, p.options.graphicsVirtualA4SourceOver,
++                                                             p.options.graphicsVirtualPackedMono);
++    Probe::configureAcquisition(*staged.graphics, p.options);
++    if (!open("CS5C", Imx1Cs5Configuration::stateVersion, true, a)) return info;
++    staged.graphics->state(a);
++    if (!finish(a)) return info;
++    staged.commands = std::make_unique<Imx1GraphicsCommands>();
++    if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
++    staged.commands->state(a);
++    if (!finish(a)) return info;
++    if (p.graphicsMemory) {
++        staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
++        if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
++        staged.graphicsMemory->state(a);
++        if (!finish(a)) return info;
++        for (unsigned bank = 0; bank < 2; ++bank) {
++            if (!open(bank ? "GEXT" : "GINT", stateGraphicsMemoryVersion, true, a)) return info;
++            staged.graphicsMemory->stateBytes(a, bank);
++            if (!finish(a)) return info;
++        }
++    }
++    staged.frame = std::make_unique<Imx1GraphicsFrame>();
++    if (!open("FRAM", Imx1GraphicsFrame::stateVersion, true, a)) return info;
++    staged.frame->state(a);
++    if (!finish(a)) return info;
++    if (p.options.i2cBus) {
++        if (!open("I2CB", stateBusVersion, true, a)) return info;
++        if (!p.options.i2cBus->loadState(a, false))
++            return fail(S::invalidValue, section->fourcc, a.detail() ? a.detail() : "bus state");
++        staged.bus = data + section->offset;
++        staged.busBytes = size_t(section->size);
++    } else if (file.find(stateFourcc("I2CB"))) {
++        return fail(S::invalidValue, stateFourcc("I2CB"), "no bus");
++    }
++
++    // The ring and the JIT counters are restored where this machine has them.
++    info.status = S::ok;
++    if (open("RECN", stateRingVersion, false, a)) {
++        if (!(file.flags & stateFlagRing)) return fail(S::invalidValue, section->fourcc, "ring flag");
++        stateRecent(a, staged.recent, staged.recentNext, staged.recentCount);
++        if (!finish(a)) return info;
++        staged.ring = true;
++    } else if (info.status != S::ok) return info;
++    else if (file.flags & stateFlagRing) return fail(S::missingSection, stateFourcc("RECN"), nullptr);
++    if (open("JITC", stateJitVersion, false, a)) {
++        if (!(file.flags & stateFlagFast)) return fail(S::invalidValue, section->fourcc, "engine flag");
++        a.Do64(staged.jitBlocks).Do64(staged.jitInstructions);
++        if (!finish(a)) return info;
++        staged.jit = true;
++    } else if (info.status != S::ok) return info;
++    else if (file.flags & stateFlagFast) return fail(S::missingSection, stateFourcc("JITC"), nullptr);
++    uint64_t blocks = 0, instructions = 0;
++    info.engineChanged = cpuJitExecutionCounts(p.cpu, &blocks, &instructions) != staged.jit;
++    return info;
++}
++}  // namespace
++
++Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>& out, const char* buildNote) {
++    using S = Imx1StateStatus;
++    out.clear();
++    if (!machine) return S::notAtBoundary;
++    auto* p = machine->probe;
++    if (p->stopped || p->bounds) return S::notAtBoundary;
++    if (!stateConfigurationSupported(*p)) return S::unsupportedConfiguration;
++    // The caller still holds this frame's pixels. It acknowledges first.
++    if (p->graphicsFrame.frameAcquired()) return S::notAtBoundary;
++    auto cpu = std::make_unique<Arm920SavedState>();
++    if (!cpuArm920CaptureState(p->cpu, *cpu)) return S::unsupportedConfiguration;
++    // The loaded machine starts without translated code, so this one carries on without it too.
++    cpuDropTranslatedCode(p->cpu);
++    uint64_t jitBlocks = 0, jitInstructions = 0;
++    const bool jit = cpuJitExecutionCounts(p->cpu, &jitBlocks, &jitInstructions);
++    const bool ring = !p->recent.empty();
++    // A load ends with Inspect, which reads the pending lines again. A bounded run doesn't, so do it here.
++    if (p->options.bootstrapPeripherals) p->result.interruptPending = p->peripherals.interruptPending();
++    ProbeState probe;
++    probe.capture(*p);
++
++    StateContainerWriter file(out, imx1MachineStateCoreRevision, stateLayoutFingerprint(),
++                              (jit ? stateFlagFast : 0) | (ring ? stateFlagRing : 0) | (p->terminal ? stateFlagTerminal : 0));
++    {
++        auto a = file.begin(stateFourcc("IDNT"), stateIdentityVersion);
++        uint64_t romBytes = p->rom.size();
++        a.Do64(romBytes).DoBuffer(const_cast<uint8_t*>(stateRomDigest(*p)), 16);
++        const auto fields = stateOptionFields(p->options, p->alias);
++        uint32_t fieldCount = uint32_t(fields.size()), busIdentity = stateBusIdentity(*p);
++        a.Do32(fieldCount);
++        for (const auto& field : fields) {
++            uint64_t value = field.value;
++            stateText(a, field.name);
++            a.Do64(value);
++        }
++        a.Do32(busIdentity);
++        stateText(a, buildNote);
++        file.end();
++    }
++    { auto a = file.begin(stateFourcc("PROB"), ProbeState::stateVersion); probe.state(a); file.end(); }
++    { auto a = file.begin(stateFourcc("CPU "), Arm920SavedState::stateVersion); cpu->stateCpu(a); file.end(); }
++    { auto a = file.begin(stateFourcc("ICAC"), Arm920SavedState::stateVersion); cpu->stateIcache(a); file.end(); }
++    { auto a = file.begin(stateFourcc("DCAC"), Arm920SavedState::stateVersion); cpu->stateDcache(a); file.end(); }
++    { auto a = file.begin(stateFourcc("TLB "), Arm920SavedState::stateVersion); cpu->stateTlb(a); file.end(); }
++    { auto a = file.begin(stateFourcc("BOOT"), Imx1Bootstrap::stateVersion); p->peripherals.state(a); file.end(); }
++    { auto a = file.begin(stateFourcc("SRAM"), stateMemoryVersion); p->peripherals.stateSram(a); file.end(); }
++    for (unsigned bank = 0; bank < 2; ++bank) {
++        auto a = file.begin(stateFourcc(bank ? "SDR1" : "SDR0"), stateMemoryVersion);
++        p->peripherals.stateSdram(a, bank);
++        file.end();
++    }
++    { auto a = file.begin(stateFourcc("CS4 "), Imx1Cs4Capture::stateVersion); p->cs4Capture.state(a); file.end(); }
++    { auto a = file.begin(stateFourcc("CS5R"), Imx1Cs5Reset::stateVersion); p->cs5Reset.state(a); file.end(); }
++    { auto a = file.begin(stateFourcc("CS5C"), Imx1Cs5Configuration::stateVersion); p->cs5Configuration.state(a); file.end(); }
++    { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
++    if (p->graphicsMemory) {
++        { auto a = file.begin(stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion); p->graphicsMemory->state(a); file.end(); }
++        for (unsigned bank = 0; bank < 2; ++bank) {
++            auto a = file.begin(stateFourcc(bank ? "GEXT" : "GINT"), stateGraphicsMemoryVersion);
++            p->graphicsMemory->stateBytes(a, bank);
++            file.end();
++        }
++    }
++    { auto a = file.begin(stateFourcc("FRAM"), Imx1GraphicsFrame::stateVersion); p->graphicsFrame.state(a); file.end(); }
++    if (p->options.i2cBus) {
++        auto a = file.begin(stateFourcc("I2CB"), stateBusVersion);
++        p->options.i2cBus->saveState(a);
++        file.end();
++    }
++    if (ring) {
++        auto a = file.begin(stateFourcc("RECN"), stateRingVersion);
++        stateRecent(a, p->recent, p->recentNext, p->recentCount);
++        file.end();
++    }
++    if (jit) {
++        auto a = file.begin(stateFourcc("JITC"), stateJitVersion);
++        a.Do64(jitBlocks).Do64(jitInstructions);
++        file.end();
++    }
++    file.finish();
++    return S::ok;
++}
++
++Imx1StateInfo imx1MachineCheckState(const Imx1Machine* machine, const uint8_t* data, size_t size,
++                                    uint32_t flags, const char* buildNote) {
++    if (!machine) { Imx1StateInfo info; info.status = Imx1StateStatus::notAtBoundary; return info; }
++    StagedState staged;
++    return decodeState(*machine->probe, data, size, flags, buildNote, staged);
++}
++
++Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, size_t size,
++                                   uint32_t flags, const char* buildNote) {
++    if (!machine) { Imx1StateInfo info; info.status = Imx1StateStatus::notAtBoundary; return info; }
++    auto* p = machine->probe;
++    StagedState staged;
++    const auto info = decodeState(*p, data, size, flags, buildNote, staged);
++    if (info.status != Imx1StateStatus::ok) return info;
++    // Nothing from here on can fail. No cpuIrq call, so the restored lines make no new edge.
++    cpuArm920ApplyState(p->cpu, *staged.cpu);
++    p->peripherals = std::move(*staged.board);
++    p->peripherals.setI2cBus(p->options.i2cBus);
++    p->peripherals.setI2cObserver(Probe::i2cEvent, p);
++    p->cs4Capture = *staged.cs4;
++    p->cs5Reset = *staged.cs5Reset;
++    p->cs5Configuration = std::move(*staged.graphics);
++    p->graphicsCommands = std::move(*staged.commands);
++    if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
++    p->graphicsFrame.replace(*staged.frame);
++    if (p->options.i2cBus) {
++        // Checked in decodeState, so this takes it.
++        StateReader bus(staged.bus, staged.busBytes);
++        p->options.i2cBus->loadState(bus, true);
++    }
++    staged.probe.apply(*p);
++    if (!p->recent.empty()) {
++        if (staged.ring) { p->recent.swap(staged.recent); p->recentNext = staged.recentNext; p->recentCount = staged.recentCount; }
++        else p->recentNext = p->recentCount = 0;
++    }
++    // After the CPU state, so the JIT takes its mapping and permission context from it.
++    cpuDropTranslatedCode(p->cpu);
++    cpuJitSetExecutionCounts(p->cpu, staged.jit ? staged.jitBlocks : 0, staged.jit ? staged.jitInstructions : 0);
++    imx1MachineInspect(machine);
++    return info;
++}
++
++const char* imx1StateStatusName(Imx1StateStatus status) {
++    switch (status) {
++        case Imx1StateStatus::ok: return "ok";
++        case Imx1StateStatus::notAtBoundary: return "not-at-boundary";
++        case Imx1StateStatus::unsupportedConfiguration: return "unsupported-configuration";
++        case Imx1StateStatus::truncated: return "truncated";
++        case Imx1StateStatus::badMagic: return "bad-magic";
++        case Imx1StateStatus::badFormatVersion: return "bad-format-version";
++        case Imx1StateStatus::coreRevisionMismatch: return "core-revision-mismatch";
++        case Imx1StateStatus::layoutMismatch: return "layout-mismatch";
++        case Imx1StateStatus::corruptSection: return "corrupt-section";
++        case Imx1StateStatus::missingSection: return "missing-section";
++        case Imx1StateStatus::romMismatch: return "rom-mismatch";
++        case Imx1StateStatus::optionsMismatch: return "options-mismatch";
++        case Imx1StateStatus::busMismatch: return "bus-mismatch";
++        case Imx1StateStatus::invalidValue: return "invalid-value";
++    }
++    return "unknown";
++}
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+index f3ed13e..57e193b 100644
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -2,7 +2,9 @@
+ #define FROND_IMX1_BOOT_PROBE_H
+ 
+ #include "arm_diagnostic.h"
++#include <cstddef>
+ #include <cstdint>
++#include <vector>
+ #include "imx1_bootstrap.h"
+ #include "imx1_cs4_capture.h"
+ #include "imx1_cs5_reset.h"
+@@ -223,6 +225,42 @@ struct Imx1MachineDiagnosticSink {
+     void* context = nullptr;
+ };
+ void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
++
++// Machine state, private to this build family. Save and load only between run calls.
++// A state loads into a machine made from the same ROM, entry and options, fresh or already run,
++// and that machine then continues the way the saved one did. Observers, contexts, the idle
++// budget and idleStepped may differ. A failed check or load leaves the machine as it was.
++// Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
++// Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
++inline constexpr uint32_t imx1MachineStateCoreRevision = 380;
++enum class Imx1StateStatus {
++    ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
++    layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
++};
++// Load a state from another core revision anyway; the result says coreRevisionDiffers.
++inline constexpr uint32_t imx1StateAllowCoreRevision = 1;
++struct Imx1StateInfo {
++    Imx1StateStatus status = Imx1StateStatus::ok;
++    uint32_t formatVersion = 0, coreRevision = 0;
++    uint64_t retired = 0;
++    // The section and the field or check a failure names, when there is one.
++    char section[5]{};
++    const char* detail = nullptr;
++    // Saved by the other engine: the JIT counters start from zero.
++    bool engineChanged = false;
++    bool coreRevisionDiffers = false, buildNoteDiffers = false;
++};
++// An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
++// returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is
++// acknowledged first, or save and load return notAtBoundary. A load ends the pixels PeekFrame lent.
++// buildNote is free text kept in the state.
++Imx1StateStatus imx1MachineSaveState(Imx1Machine*, std::vector<uint8_t>& out, const char* buildNote = nullptr);
++// Checks everything a load checks, without changing the machine.
++Imx1StateInfo imx1MachineCheckState(const Imx1Machine*, const uint8_t* data, size_t size,
++                                    uint32_t flags = 0, const char* buildNote = nullptr);
++Imx1StateInfo imx1MachineLoadState(Imx1Machine*, const uint8_t* data, size_t size,
++                                   uint32_t flags = 0, const char* buildNote = nullptr);
++const char* imx1StateStatusName(Imx1StateStatus status);
+ void imx1MachineStop(Imx1Machine*);
+ // One process-owned CPU with optional bootstrap registers/RAM and qualified interrupt inputs.
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+index 63db4b0..d738adc 100644
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -152,6 +152,39 @@ class Imx1Bootstrap {
+         return (address >= 0x00300000 && address < 0x00400000) ||
+                (address >= 0x08000000 && address < 0x10000000);
+     }
++    // Registers, clocks and every model, without the memories below.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do64(elapsedReference.ticks).Do64(elapsedReference.numerator).Do64(elapsedReference.denominator);
++        a.Require(elapsedReference.valid(), "reference time");
++        a.DoBool(referenceOverflow).FixedBool(cpuInterruptsConnected);
++        rtc.state(a); i2c.state(a); asp.state(a); pwm.state(a); watchdog.state(a);
++        a.Do32(bclkPhase);
++        aitc.state(a); cgm.state(a); gpio.state(a); eim.state(a); timer1.state(a); timer2.state(a);
++        sysctrl.state(a); mmcsd.state(a);
++        a.Do32(perclk1Phase).Do64(systemPllPhase).DoBool(asynchronousUsed).FixedBool(mcuRetuneScenario);
++        a.Do32(rmcr).Do32(pwmr).FixedBool(lcdcContrastOnly).Do32(contrastPhase).Do32(perclk2Phase);
++        a.DoBuffer32(uartControl1, 2);
++        a.DoBuffer32(ssi1Words, 7).DoBuffer16(ssi1TxFifo, 8).Do32(ssi1TxCount).Do32(ssi1Phase).Do32(ssi1Slot);
++        a.Do16(ssi1ShiftWord).Do16(ssi1LastTransmitted).Do64(ssi1Transmitted);
++        a.DoBool(ssi1Shifting).DoBool(ssi1Underrun).DoBool(ssi1StatusRead);
++        a.Require(ssi1TxCount <= 8, "ssi fifo");
++        a.Do32(dmaControl).Do32(dmaMask).Do32(dmaBurstTimeout).Do32(dmaResetClocks);
++        for (auto& channel : dmaChannels) a.DoBuffer32(channel, 7);
++        a.Do32(dmaStatus).Do32(dmaPcmCount).Do32(dmaPcmSource).Do32(dmaPcmBurst).Do32(dmaPcmPhase).Do32(dmaPcmPacked);
++        a.DoBool(dmaPcmActive);
++        for (auto& s : sdram)
++            a.Do32(s.control).Fixed32(s.bytes).DoBool(s.controlKnown).DoBool(s.precharged).DoBool(s.modeSet).Do32(s.refreshes);
++    }
++    template <class A> void stateSram(A& a) {
++        const size_t bytes = sram.size();
++        a.DoVector(sram, bytes).Require(sram.size() == bytes, "sram size");
++    }
++    // An SDRAM bank is empty until its first write.
++    template <class A> void stateSdram(A& a, unsigned bank) {
++        auto& s = sdram[bank];
++        a.DoVector(s.ram, s.bytes).Require(s.ram.empty() || s.ram.size() == s.bytes, "sdram size");
++    }
+ 
+    private:
+     bool referenceRatioSupported(uint64_t denominator) const {
+@@ -226,6 +259,10 @@ class Imx1Bootstrap {
+     Imx1BootstrapAccess sdramAccess(unsigned bank, uint32_t offset, uint32_t size, bool write, uint32_t& value);
+ };
+ 
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Bootstrap) == 1784, "update state() and stateVersion");
++#endif
++
+ const char* imx1BootstrapAccessName(Imx1BootstrapAccess access);
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
+index 053a5c1..3c353b0 100644
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -53,6 +53,16 @@ class Imx1Cgm {
+     uint32_t perclk2Divider() const { return ((pcdr >> 4) & 15) + 1; }
+     uint32_t perclk3Divider() const { return ((pcdr >> 16) & 127) + 1; }
+     uint32_t perclk1Divider() const { return (pcdr & 15) + 1; }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(cscr).Do32(pcdr).Do32(mpctl0).Do32(mpctl1).Do32(spctl0).Do32(spctl1);
++        a.Do32(mcuRestartCycles).Do32(mcuWakeRemaining).Do64(mcuWakePhase).Do64(mcuWakeDenominator);
++        a.Do32(activeSpctl0).Do32(systemWriteDelay).Do64(systemWritePhase).Do64(systemRestartUnits);
++        a.FixedBool(nominalSystemPll).FixedBool(nominalMcuRetune).DoBool(mcuOutputQualified).DoBool(mcuContinuous);
++        a.Do32(mcuWriteDelay).Do32(mcuReferenceRemaining).Do64(mcuReferencePhase).Do64(mcuReferenceDenominator);
++        a.Do64(mcuWritePhase).Do64(mcuWriteDenominator).DoBool(mcuTimingUnknown).DoBool(mcuRestartComplete);
++        a.Require(mcuWakeDenominator && mcuReferenceDenominator && mcuWriteDenominator, "cgm denominator");
++    }
+ 
+    private:
+     uint32_t cscr = 0x0f00ac03, pcdr = 0x000b00bb;
+@@ -73,5 +83,8 @@ class Imx1Cgm {
+     bool mcuTimingUnknown = false;
+     bool mcuRestartComplete = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Cgm) == 128, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_cs4_capture.h b/src/uarm/uarm/imx1_cs4_capture.h
+index 810fbf1..577ab2a 100644
+--- a/src/uarm/uarm/imx1_cs4_capture.h
++++ b/src/uarm/uarm/imx1_cs4_capture.h
+@@ -18,6 +18,10 @@ class Imx1Cs4IndexedInputs {
+         return bank < 0 || bank > 1 || index < 0 || index > 255 ? -1 : values[bank * 256 + index];
+     }
+     bool empty() const { return !supplied; }
++    template <class A> void state(A& a) {
++        for (auto& value : values) a.Fixed16(reinterpret_cast<uint16_t&>(value));
++        a.Fixed32(supplied);
++    }
+    private:
+     std::array<int16_t,512> values{};
+     unsigned supplied = 0;
+@@ -54,12 +58,23 @@ class Imx1Cs4Capture {
+         }
+         return Imx1BootstrapAccess::ok;
+     }
++    // The inputs come from the options.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Fixed8(input);
++        indexedInputs.state(a);
++        a.Do32(reinterpret_cast<uint32_t&>(index)).Do32(reinterpret_cast<uint32_t&>(bank));
++        a.Require(index >= -1 && index <= 255 && bank >= -1 && bank <= 1, "cs4 index");
++    }
+ 
+    private:
+     uint8_t input;
+     Imx1Cs4IndexedInputs indexedInputs;
+     int index = -1, bank = -1;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Cs4Capture) == 1040, "update state() and stateVersion");
++#endif
+ 
+ struct Imx1ProbeCs4Event {
+     uint64_t step;
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+index be93050..dcdcdeb 100644
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -48,6 +48,18 @@ class Imx1Cs5Configuration {
+         timeFraction = {};
+         waitCpuFraction = {};
+     }
++    // The profile and its two policies come from the options.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        uint32_t fixedProfile = uint32_t(profile);
++        a.Fixed32(fixedProfile).FixedBool(virtualA4SourceOver).FixedBool(virtualPackedMono);
++        gpio.state(a); windows.state(a); lookup.state(a); controller.state(a); engine.state(a);
++        display.state(a); interrupts.state(a); acquisition.state(a); sd.state(a); clocks.state(a);
++        timeFraction.state(a);
++        waitCpuFraction.state(a);
++        a.Do32(busArbitration).Do32(interfaceControl).Do32(interfaceIo).Do32(readControl).Do32(writeControl);
++        a.Do32(busTiming).Do32(memoryIo).DoBool(selected).DoBool(programmed).Do8(defaults).Do8(interfaceMode);
++    }
+     bool referencePeriodSupported(Imx1PllRatio period) const {
+         return !clocks.programmed() || timeFraction.supports(uint64_t(period.denominator) * 64);
+     }
+@@ -372,6 +384,9 @@ class Imx1Cs5Configuration {
+     bool selected = false, programmed = false;
+     uint8_t defaults = 0, interfaceMode = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Cs5Configuration) == 5136, "update state() and stateVersion");
++#endif
+ 
+ struct Imx1ProbeCs5ConfigurationEvent {
+     uint64_t step;
+diff --git a/src/uarm/uarm/imx1_cs5_reset.h b/src/uarm/uarm/imx1_cs5_reset.h
+index edf1968..8a5d3b6 100644
+--- a/src/uarm/uarm/imx1_cs5_reset.h
++++ b/src/uarm/uarm/imx1_cs5_reset.h
+@@ -28,12 +28,19 @@ class Imx1Cs5Reset {
+         phase = (phase + 1) % 5;
+         return Imx1BootstrapAccess::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Fixed8(input).DoBool(reset).Do32(phase).Require(phase < 5, "cs5 reset phase");
++    }
+ 
+    private:
+     uint8_t input;
+     bool reset = false;
+     unsigned phase = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Cs5Reset) == 8, "update state() and stateVersion");
++#endif
+ 
+ struct Imx1ProbeCs5ResetEvent {
+     uint64_t step;
+diff --git a/src/uarm/uarm/imx1_eim.h b/src/uarm/uarm/imx1_eim.h
+index a3803f5..77de421 100644
+--- a/src/uarm/uarm/imx1_eim.h
++++ b/src/uarm/uarm/imx1_eim.h
+@@ -33,6 +33,10 @@ class Imx1Eim {
+         if ((upper[5] & 0x3f00) == 0x3f00 && size > bytes) return Imx1EimAccess::width;
+         return Imx1EimAccess::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(upper, 6).DoBuffer32(lower, 6).DoBool(bootWidthKnown).Do32(configuration);
++    }
+ 
+    private:
+     uint32_t upper[6] = {0x3e00, 0, 0, 0, 0, 0};
+@@ -40,5 +44,8 @@ class Imx1Eim {
+     bool bootWidthKnown = false;
+     uint32_t configuration = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Eim) == 56, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_gpio.h b/src/uarm/uarm/imx1_gpio.h
+index 7512f4f..d74e5af 100644
+--- a/src/uarm/uarm/imx1_gpio.h
++++ b/src/uarm/uarm/imx1_gpio.h
+@@ -46,6 +46,13 @@ class Imx1Gpio {
+             if ((outputs & (1u << pin)) && ((r[pin < 16 ? 1 : 2] >> ((pin % 16) * 2)) & 3) != 3) return false;
+         return true;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        for (auto& p : ports) {
++            a.DoBuffer32(p.registers, 17).Do32(p.sample).DoBool(p.sampleKnown).Do32(p.fixedMask).Do32(p.drivenMask);
++            a.DoBool(p.accessed).DoBool(p.boardInput).Do32(p.inputKnown).Do32(p.statusKnown).Do32(p.pad).Do32(p.padKnown);
++        }
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+@@ -64,5 +71,8 @@ class Imx1Gpio {
+     static void resolvePad(Port& port);
+     static Imx1GpioAccess updateInterrupts(Port& next, const Port& old, unsigned index, bool sampleEvent);
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Gpio) == 416, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_acquisition.h b/src/uarm/uarm/imx1_graphics_acquisition.h
+index d963098..eefa978 100644
+--- a/src/uarm/uarm/imx1_graphics_acquisition.h
++++ b/src/uarm/uarm/imx1_graphics_acquisition.h
+@@ -50,6 +50,15 @@ class Imx1GraphicsAcquisition {
+         fifo = capturedRecords;
+     }
+     uint32_t queued() const { return count; }
++    // The route and the raw inputs start from the options.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(control).Do32(trigger).Do32(configuration).Do32(retained).DoEnum(mode2Route, 3);
++        a.DoBool(inputKnown).DoBool(mode1InputKnown).DoBool(auxInputKnown).Do32(auxInput).Do32(mode1Input);
++        a.DoBuffer32(input.data(), 2).DoBuffer32(capturedRecords.data(), 2).DoBuffer32(fifo.data(), 2);
++        a.Do32(count).Do32(head).Do32(capturedCount).Do32(selectedSource).Do64(remaining);
++        a.Require(count <= 2 && head <= 2 - count && capturedCount <= 2 && selectedSource <= 3, "acquisition fifo");
++    }
+     uint64_t deadlineRemaining() const { return remaining; }
+     Imx1BootstrapAccess access(uint32_t, uint32_t a, uint32_t size, bool write, uint32_t& v) {
+         using A = Imx1BootstrapAccess;
+@@ -127,4 +136,7 @@ class Imx1GraphicsAcquisition {
+     uint32_t count = 0, head = 0, capturedCount = 0, selectedSource = 3;
+     uint64_t remaining = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_clocks.h b/src/uarm/uarm/imx1_graphics_clocks.h
+index 6bf40fa..a351c07 100644
+--- a/src/uarm/uarm/imx1_graphics_clocks.h
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -22,6 +22,9 @@ struct Imx1GraphicsFraction {
+         denominator = common;
+         return n / d + fraction / common;
+     }
++    template <class A> void state(A& a) {
++        a.Do64(phase).Do64(denominator).Require(denominator && phase < denominator, "graphics fraction");
++    }
+ };
+ 
+ // Nominal virtual analogue policy. Frequencies and deadlines use guest time only.
+@@ -32,6 +35,13 @@ class Imx1GraphicsClocks {
+     static constexpr uint32_t testPrescaler = 4;
+     static bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
+     void reset() { *this = {}; }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(words.data(), words.size());
++        countFraction.state(a);
++        a.Do64(lockRemaining).Do64(countRemaining).Do64(automaticRemaining).Do16(counter);
++        a.DoBool(started).DoBool(gpuBusy).DoBool(normal);
++    }
+     bool programmed() const { return started; }
+     uint32_t word(uint32_t offset) const { return words[(offset - 0x80) / 4]; }
+     uint16_t count() const { return counter; }
+@@ -249,4 +259,7 @@ class Imx1GraphicsClocks {
+     uint16_t counter = 0;
+     bool started = false, gpuBusy = false, normal = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsClocks) == 104, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_commands.h b/src/uarm/uarm/imx1_graphics_commands.h
+index f1e7cf3..aa20a77 100644
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -13,6 +13,31 @@ class Imx1GraphicsCommands {
+    public:
+     void reset() { *this = {}; }
+     uint64_t duration() const { return ticks; }
++    // Register values and every queued batch with its fills and inline pixels.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(values.data(), values.size());
++        for (auto& k : known) a.DoBool(k);
++        uint64_t count = batches.size();
++        a.Do64(count).Require(count <= 16384, "command batches");
++        if (!a.ok()) return;
++        batches.resize(size_t(count));
++        for (auto& batch : batches) {
++            a.Do32(batch.end).Do32(batch.words).Do32(batch.option);
++            uint64_t fills = batch.fills.size();
++            a.Do64(fills).Require(fills <= 16384, "command fills");
++            if (!a.ok()) return;
++            batch.fills.resize(size_t(fills));
++            for (auto& f : batch.fills) {
++                a.Do32(f.base).Do32(f.pitch).Do32(f.width).Do32(f.height).Do32(f.colour).Do32(f.sourceX).Do32(f.sourceY);
++                a.Do32(f.sourceBase).Do32(f.sourcePitch).DoBool(f.keyed).DoBool(f.plain).DoBool(f.a4);
++                a.DoVector(f.pixels, 1 << 20);
++                a.Require(f.pixels.empty() || f.pixels.size() >= uint64_t(f.width) * f.height, "command pixels");
++                if (!a.ok()) return;
++            }
++        }
++        a.Do32(queuedWords).Do64(ticks);
++    }
+     Imx1BootstrapAccess prepare(const Imx1Cs5Configuration& configuration,
+                                 const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+         // Candidate decoding owns its inline pixels and publishes nothing on rejection.
+@@ -342,4 +367,7 @@ class Imx1GraphicsCommands {
+     uint32_t queuedWords = 0;
+     uint64_t ticks = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsCommands) == 10336, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_controller.h b/src/uarm/uarm/imx1_graphics_controller.h
+index e712878..0880132 100644
+--- a/src/uarm/uarm/imx1_graphics_controller.h
++++ b/src/uarm/uarm/imx1_graphics_controller.h
+@@ -18,6 +18,10 @@ class Imx1GraphicsController {
+     bool externalInitialised() const { return initialised && delay == 0; }
+     bool configured() const { return stage >= 2; }
+     bool ready() const { return stage == 3 && externalInitialised(); }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(words.data(), words.size()).Do32(stage).Do32(externalStep).Do32(delay).DoBool(initialised);
++    }
+     Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
+         if (size != 4) return Imx1BootstrapAccess::width;
+         if (address == 0x16010194 && pc == 0x200c5f20 && write) {
+@@ -114,4 +118,7 @@ class Imx1GraphicsController {
+     uint32_t stage = 0, externalStep = 0, delay = 0;
+     bool initialised = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsController) == 32, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+index 0f6d47d..1353be3 100644
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -25,6 +25,28 @@ class Imx1GraphicsDisplay {
+         return false;
+     }
+     void reset() { *this = {}; }
++    template <class A> static void stateSurface(A& a, Surface& s) {
++        a.Do32(s.base).Do32(s.pitch).Do32(s.width).Do32(s.height);
++        a.Do32(reinterpret_cast<uint32_t&>(s.xStride)).Do32(reinterpret_cast<uint32_t&>(s.yStride));
++        a.Do32(s.rangeBase).Do32(s.rangeBytes).Do32(s.bank).Do32(s.bankOffset);
++        a.Require(s.width <= 1024 && s.height <= 1024 && s.bank <= 1, "display surface");
++    }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(staged.data(), wordCount).DoBuffer32(active.data(), wordCount).DoBuffer32(submitted.data(), wordCount);
++        for (auto& k : knownWords) a.DoBool(k);
++        stateSurface(a, activeSurface);
++        stateSurface(a, submittedSurface);
++        a.Do64(latchDelay).Do64(phase).Do64(framePeriod).Do64(submittedPeriod);
++        a.Do64(activeRevision).Do64(frames).Do64(blankEvents);
++        a.Do32(updateControl).Do32(clockDelay).Do32(clockControl);
++        a.DoBool(editing).DoBool(pending).DoBool(submittedEnabled).DoBool(enabled);
++        a.DoBool(activeTimingKnown).DoBool(submittedTimingKnown);
++        pixelFraction.state(a);
++        a.Do64(rateNumerator).Do64(rateDenominator).Require(rateDenominator != 0, "display rate");
++        a.DoBool(pixelSource).DoBool(systemSource).DoBool(activeRequested).DoBool(latchAtFrame);
++        a.DoBool(pclk).DoBool(sclk);
++    }
+     uint32_t stagedWord(uint32_t offset) const { return offset >= 0x410 && offset <= 0x59c && !(offset & 3) ? staged[index(offset)] : 0; }
+     uint32_t activeWord(uint32_t offset) const { return offset >= 0x410 && offset <= 0x59c && !(offset & 3) ? active[index(offset)] : 0; }
+     bool latchPending() const { return pending; }
+@@ -362,4 +384,7 @@ class Imx1GraphicsDisplay {
+     bool pixelSource = true, systemSource = true, activeRequested = false, latchAtFrame = false;
+     bool pclk = false, sclk = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsDisplay) == 1504, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_engine.h b/src/uarm/uarm/imx1_graphics_engine.h
+index 1386506..7706e60 100644
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -51,6 +51,21 @@ class Imx1GraphicsEngine {
+         optionRead = false;
+     }
+     uint32_t nativeOptionWord() const { return nativeOption; }
++    // Queued batches included. No more of them than ring words.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(stage).Do32(control).Do32(arbitration).Do32(crcControl).Do32(clipRight).Do32(clipBottom);
++        a.Do32(ringStage).Do32(ringBase).Do32(ringBaseTag).Do32(ringExponent);
++        a.Do32(readPointer).Do32(writePointer).Do32(scratch);
++        a.DoBool(ringEnabled).DoBool(hostData).DoBool(keyedCopy).DoBool(a4).DoBool(copyHelper).Do32(previousProducer);
++        a.Require(ringExponent <= 13, "engine ring size");
++        uint64_t count = pending.size();
++        a.Do64(count).Require(count <= 16384, "engine batches");
++        if (!a.ok()) return;
++        pending.resize(size_t(count));
++        for (auto& batch : pending) a.Do32(batch.end).Do64(batch.remaining);
++        a.Do32(nativeOption).DoBool(optionRead);
++    }
+     Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,
+                                uint32_t size, bool write, uint32_t& value) {
+         using A = Imx1BootstrapAccess;
+@@ -174,4 +189,7 @@ class Imx1GraphicsEngine {
+     uint32_t nativeOption = 0;
+     bool optionRead = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsEngine) == 96, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_frame.h b/src/uarm/uarm/imx1_graphics_frame.h
+index df5ef4e..29996e2 100644
+--- a/src/uarm/uarm/imx1_graphics_frame.h
++++ b/src/uarm/uarm/imx1_graphics_frame.h
+@@ -17,6 +17,28 @@ class Imx1GraphicsFrame {
+         ++generation;
+     }
+     bool lcdEnabled() const { return enabled; }
++    // A frame handed out by getPendingFrame and not acknowledged yet.
++    bool frameAcquired() const { return acquired; }
++    // row is scratch for one advance.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoVector(pixels, 1024 * 1024);
++        Imx1GraphicsDisplay::stateSurface(a, surface);
++        a.Do64(lastRevision).Do64(lastFrame).Do64(generation).Do64(acquiredGeneration);
++        a.Do32(firstRow).Do32(lastRow).DoBool(enabled).DoBool(valid).DoBool(pending).DoBool(acquired);
++        a.Require(!acquired, "frame acquired");
++        a.Require(!valid || pixels.size() == size_t(surface.width) * surface.height, "frame size");
++        a.Require(!pending || (firstRow <= lastRow && lastRow < surface.height), "frame rows");
++    }
++    // Takes everything from a frame a load has decoded. Borrowed pixels end here.
++    void replace(Imx1GraphicsFrame& other) {
++        pixels.swap(other.pixels);
++        surface = other.surface;
++        lastRevision = other.lastRevision; lastFrame = other.lastFrame;
++        generation = other.generation; acquiredGeneration = other.acquiredGeneration;
++        firstRow = other.firstRow; lastRow = other.lastRow;
++        enabled = other.enabled; valid = other.valid; pending = other.pending; acquired = other.acquired;
++    }
+     uint32_t width() const { return valid ? surface.width : 0; }
+     uint32_t height() const { return valid ? surface.height : 0; }
+     const uint32_t* peekFrame() const { return valid && enabled ? pixels.data() : nullptr; }
+@@ -97,4 +119,7 @@ class Imx1GraphicsFrame {
+     uint32_t firstRow = 0, lastRow = 0;
+     bool enabled = false, valid = false, pending = false, acquired = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsFrame) == 136, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_gpio.h b/src/uarm/uarm/imx1_graphics_gpio.h
+index 01e482e..b0305a0 100644
+--- a/src/uarm/uarm/imx1_graphics_gpio.h
++++ b/src/uarm/uarm/imx1_graphics_gpio.h
+@@ -92,6 +92,12 @@ class Imx1GraphicsGpio {
+         }
+         return Imx1BootstrapAccess::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        for (auto& b : banks) a.Do32(b.control).Do32(b.data).DoBool(b.controlKnown).DoBool(b.dataKnown);
++        a.DoBool(dataRead[0]).DoBool(dataRead[1]).DoBool(controlRead[0]).DoBool(controlRead[1]);
++        a.DoBool(slotRead).Do32(slotData);
++    }
+ 
+    private:
+     // Under admitted selector ffff, direction 1 drives the latch at an ideal pad.
+@@ -100,5 +106,8 @@ class Imx1GraphicsGpio {
+     bool slotRead = false;
+     uint32_t slotData = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsGpio) == 36, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_interrupts.h b/src/uarm/uarm/imx1_graphics_interrupts.h
+index 8a21779..c012e01 100644
+--- a/src/uarm/uarm/imx1_graphics_interrupts.h
++++ b/src/uarm/uarm/imx1_graphics_interrupts.h
+@@ -65,9 +65,14 @@ class Imx1GraphicsInterrupts {
+         }
+         return A::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) { a.Do32(enabled).Do32(pending).Do32(known); }
+    private:
+     // Virtual cold reset clears latches. Unadmitted engine producers cannot submit work.
+     uint32_t enabled = 0, pending = 0, known = 0xffffffff;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsInterrupts) == 12, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_lookup.h b/src/uarm/uarm/imx1_graphics_lookup.h
+index 6083540..dd01552 100644
+--- a/src/uarm/uarm/imx1_graphics_lookup.h
++++ b/src/uarm/uarm/imx1_graphics_lookup.h
+@@ -53,9 +53,18 @@ class Imx1GraphicsLookup {
+         }
+         return Imx1BootstrapAccess::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        for (auto& e : entries) a.Do32(e.first).Do32(e.second).DoBool(e.firstKnown).DoBool(e.secondKnown);
++        a.Do32(index).DoBool(selected).DoBool(indexed).DoBool(secondPending);
++        a.Require(index <= entries.size(), "lookup index");
++    }
+    private:
+     std::array<Entry, 256> entries{};
+     unsigned index = 0;
+     bool selected = false, indexed = false, secondPending = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsLookup) == 3080, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_memory.h b/src/uarm/uarm/imx1_graphics_memory.h
+index c6f17a2..26708c8 100644
+--- a/src/uarm/uarm/imx1_graphics_memory.h
++++ b/src/uarm/uarm/imx1_graphics_memory.h
+@@ -38,6 +38,17 @@ class Imx1GraphicsMemory {
+             if (change.generation == generation) change = {};
+         }
+     }
++    // Dirty ranges and the write count.
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        for (auto& consumer : changes)
++            for (auto& d : consumer) a.Do32(d.first).Do32(d.end).DoBool(d.pending).Do64(d.generation);
++        a.Do64(generation);
++    }
++    template <class A> void stateBytes(A& a, unsigned bank) {
++        const size_t size = bytes[bank].size();
++        a.DoVector(bytes[bank], size).Require(bytes[bank].size() == size, "graphics memory size");
++    }
+     void clearDirty(unsigned bank) { acknowledgeDirty(bank, Consumer::legacy, dirty(bank).generation); }
+     bool contains(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                   uint32_t address, uint64_t length, unsigned* bank = nullptr, uint32_t* offset = nullptr) const {
+@@ -138,4 +149,7 @@ class Imx1GraphicsMemory {
+     std::array<std::array<Dirty, 2>, unsigned(Consumer::count)> changes{};
+     uint64_t generation = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsMemory) == 248, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_sd.h b/src/uarm/uarm/imx1_graphics_sd.h
+index e0c9c0a..67d5ae4 100644
+--- a/src/uarm/uarm/imx1_graphics_sd.h
++++ b/src/uarm/uarm/imx1_graphics_sd.h
+@@ -12,6 +12,13 @@ class Imx1GraphicsSd {
+                (address >= 0x16202000 && address < 0x16202200);
+     }
+     void reset() { *this = {}; }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(control).Do32(interface).Do32(clock).Do32(status1).Do32(status2);
++        a.Do32(command).Do32(argumentLow).Do32(argumentHigh).Do32(interruptMask).Do32(option).Do32(port);
++        a.Do64(clockRemaining).Do64(commandRemaining).Do64(resetElapsed);
++        a.DoBool(commandPending).DoBool(resetHeld).DoBool(released);
++    }
+     void advance(uint64_t ticks) {
+         if (resetHeld) resetElapsed = std::min<uint64_t>(32, resetElapsed + std::min<uint64_t>(ticks,32));
+         if (clockRemaining) {
+@@ -139,4 +146,7 @@ class Imx1GraphicsSd {
+     uint64_t clockRemaining = 0, commandRemaining = 0, resetElapsed = 0;
+     bool commandPending = false, resetHeld = false, released = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsSd) == 80, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_windows.h b/src/uarm/uarm/imx1_graphics_windows.h
+index b130c2e..9d622c2 100644
+--- a/src/uarm/uarm/imx1_graphics_windows.h
++++ b/src/uarm/uarm/imx1_graphics_windows.h
+@@ -42,6 +42,11 @@ class Imx1GraphicsWindows {
+         }
+         return Imx1BootstrapAccess::unmapped;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBuffer32(words.data(), words.size());
++        for (auto& k : known) a.DoBool(k);
++    }
+    private:
+     Range range(unsigned index) const {
+         return {(words[index] & 0xffff) << 8, ((words[index] >> 16) + 1) * 256 - 1, known[index]};
+@@ -53,4 +58,7 @@ class Imx1GraphicsWindows {
+     std::array<uint32_t, 6> words{};
+     std::array<bool, 6> known{};
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1GraphicsWindows) == 32, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_i2c.h b/src/uarm/uarm/imx1_i2c.h
+index bc2e394..ef281ba 100644
+--- a/src/uarm/uarm/imx1_i2c.h
++++ b/src/uarm/uarm/imx1_i2c.h
+@@ -17,12 +17,20 @@ struct Imx1I2cReply {
+ };
+ // Single master, initially idle, no clock stretching. Missing slaves have unknown responses.
+ // A bus implementation supplies a measured/modelled response, including an explicit NACK.
++class StateWriter;
++class StateReader;
+ class Imx1I2cBus {
+    public:
+     virtual ~Imx1I2cBus() = default;
+     virtual void signal(const Imx1I2cTransfer&) {}
+     // Receive ACK means data available; transfer.acknowledge is the master's wire response.
+     virtual Imx1I2cReply transfer(const Imx1I2cTransfer&) = 0;
++    // For a machine state. The identity names the device and its fixed contents, and a state only
++    // loads onto a bus with the same one. 0 means the bus can't be saved.
++    virtual uint32_t stateIdentity() const { return 0; }
++    virtual void saveState(StateWriter&) const {}
++    // Checks the whole state and, with commit, takes it. A refused state leaves the bus as it was.
++    virtual bool loadState(StateReader&, bool commit) { (void)commit; return true; }
+ };
+ using Imx1I2cObserver = void (*)(void*, const Imx1I2cTransfer&, Imx1I2cResponse);
+ 
+@@ -46,6 +54,15 @@ class Imx1I2c {
+     uint32_t statusValue() const { return status; }
+     uint32_t dividerValue() const { return frequency; }
+     const Imx1I2cTransfer& pendingTransfer() const { return pending; }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        // The bus and the observer belong to the machine and are bound again after a load.
++        a.Do8(ownAddress).Do8(frequency).Do8(control).Do8(status).Do8(data);
++        a.FixedBool(singleMaster).DoBool(awaitingAddress).DoBool(addressed).DoBool(readDirection);
++        a.DoBool(inFlight).DoBool(receivedNack).Do64(remaining);
++        a.DoEnum(pending.phase, 6).Do8(pending.address).Do8(pending.byte).DoBool(pending.read).DoBool(pending.acknowledge);
++        a.DoEnum(failure, 6);
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+@@ -61,6 +78,9 @@ class Imx1I2c {
+     void notify(const Imx1I2cTransfer&, Imx1I2cResponse) const;
+     void launch(Imx1I2cTransfer transfer);
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1I2c) == 64, "update state() and stateVersion");
++#endif
+ const char* imx1I2cPhaseName(Imx1I2cPhase);
+ const char* imx1I2cResponseName(Imx1I2cResponse);
+ 
+diff --git a/src/uarm/uarm/imx1_i2c_read_window.h b/src/uarm/uarm/imx1_i2c_read_window.h
+index b04f08c..3d8465c 100644
+--- a/src/uarm/uarm/imx1_i2c_read_window.h
++++ b/src/uarm/uarm/imx1_i2c_read_window.h
+@@ -4,6 +4,7 @@
+ #include <array>
+ 
+ #include "imx1_i2c.h"
++#include "machine_state_archive.h"
+ 
+ // Explicit diagnostic read window, without a physical part or capacity claim.
+ class Imx1I2cReadWindow : public Imx1I2cBus {
+@@ -42,6 +43,27 @@ class Imx1I2cReadWindow : public Imx1I2cBus {
+         return unknown();
+     }
+ 
++    // FNV-1a of the image, so a state made with other bytes is refused.
++    uint32_t stateIdentity() const override {
++        uint32_t hash = 2166136261u;
++        for (const uint8_t byte : bytes) hash = (hash ^ byte) * 16777619u;
++        return hash ? hash : 1;
++    }
++    void saveState(StateWriter& a) const override {
++        uint32_t position = cursor;
++        State protocol = state;
++        a.Do32(position).DoEnum(protocol, 8);
++    }
++    bool loadState(StateReader& a, bool commit) override {
++        uint32_t position = 0;
++        State protocol = State::idle;
++        // The cursor stops one past the last byte.
++        a.Do32(position).DoEnum(protocol, 8).Require(position <= bytes.size(), "cursor");
++        if (!a.complete()) return false;
++        if (commit) { cursor = position; state = protocol; }
++        return true;
++    }
++
+    private:
+     enum class State { idle, writeAddress, offset, offsetSet, readAddress, reading, ended, blocked };
+     const Image bytes;
+diff --git a/src/uarm/uarm/imx1_mmcsd.h b/src/uarm/uarm/imx1_mmcsd.h
+index 5ff5dea..4c9757f 100644
+--- a/src/uarm/uarm/imx1_mmcsd.h
++++ b/src/uarm/uarm/imx1_mmcsd.h
+@@ -134,6 +134,14 @@ class Imx1Mmcsd {
+         if (index >= 10) staged |= 1u << (index - 10);
+         return A::ok;
+     }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(psr0).Do32(psr1).DoBuffer32(registers, 13).Do32(control).Do32(recovery);
++        a.Do32(status).Do32(remaining).Do32(stopRemaining).Do32(staged).Do32(phase);
++        a.DoBool(running).DoBool(interrupt).DoBool(responseExpected);
++        a.FixedBool(emptySlot).DoBool(resetAsserted).DoBool(ready);
++        a.Require(registers[2] < 64, "mmcsd clock rate");
++    }
+    private:
+     void resetRegisters() {
+         control = 0; recovery = 0; ready = false;
+@@ -149,5 +157,8 @@ class Imx1Mmcsd {
+     bool running = false, interrupt = false, responseExpected = false;
+     bool emptySlot = false, resetAsserted = false, ready = false;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Mmcsd) == 96, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_pwm.h b/src/uarm/uarm/imx1_pwm.h
+index 136b6c6..a12c1ef 100644
+--- a/src/uarm/uarm/imx1_pwm.h
++++ b/src/uarm/uarm/imx1_pwm.h
+@@ -34,6 +34,14 @@ class Imx1Pwm {
+     }
+     // -1 means the active sample has not been supplied.
+     int output() const;
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(resetRemaining).Do32(control).Do32(period).Do32(counter).Do32(sourcePhase);
++        a.Do16(sample).Do16(activeSample).DoBool(sampleKnown).DoBool(activeKnown).DoBool(irq);
++        a.DoBuffer16(fifo.data(), fifo.size()).Do32(head).Do32(count).Do32(repeatsRemaining);
++        a.Do64(referencePhase).Do64(referenceDenominator);
++        a.Require(head < fifo.size() && count <= fifo.size() && referenceDenominator, "pwm fifo");
++    }
+ 
+    private:
+     uint32_t resetRemaining = 0;
+@@ -49,5 +57,8 @@ class Imx1Pwm {
+     void newPeriod();
+     void freeze();
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Pwm) == 64, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_rtc.h b/src/uarm/uarm/imx1_rtc.h
+index 6b1578f..b2d09f0 100644
+--- a/src/uarm/uarm/imx1_rtc.h
++++ b/src/uarm/uarm/imx1_rtc.h
+@@ -29,6 +29,12 @@ class Imx1Rtc {
+     // The normal watchdog input is absent or at most CLK32 / 16384 in this subset.
+     bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
+     bool preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const;
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.DoBool(known).DoBool(used).DoBool(elapsed).Do32(tod).Do32(alarm).Do32(control).Do32(status).Do32(enable);
++        a.Do32(prescaler).Do32(samplingPhase).Do64(referencePhase).Do64(referenceDenominator);
++        a.Require(referenceDenominator != 0, "rtc denominator");
++    }
+ 
+    private:
+     bool known = false, used = false, elapsed = false;
+@@ -38,4 +44,7 @@ class Imx1Rtc {
+     uint32_t divisor() const { return ((control >> 5) & 3) == 1 ? 32000 : 32768; }
+     void advanceTicks(uint64_t ticks);
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Rtc) == 48, "update state() and stateVersion");
++#endif
+ #endif
+diff --git a/src/uarm/uarm/imx1_sysctrl.h b/src/uarm/uarm/imx1_sysctrl.h
+index 6ecda00..6affd4b 100644
+--- a/src/uarm/uarm/imx1_sysctrl.h
++++ b/src/uarm/uarm/imx1_sysctrl.h
+@@ -11,11 +11,18 @@ class Imx1Sysctrl {
+     bool dmaClockEnabled() const { return gccr & 8; }
+     Imx1SysctrlAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(gccr).Do32(fmcr).Do32(gpcr);
++    }
+ 
+    private:
+     uint32_t gccr = 0x2f;
+     uint32_t fmcr = 3;
+     uint32_t gpcr = 0x3fb;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Sysctrl) == 12, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_timer.h b/src/uarm/uarm/imx1_timer.h
+index ad63fe0..f7164eb 100644
+--- a/src/uarm/uarm/imx1_timer.h
++++ b/src/uarm/uarm/imx1_timer.h
+@@ -17,6 +17,10 @@ class Imx1Timer {
+     bool enabled() const { return control & 1; }
+     bool outputIsolationRequired() const { return enabled() && (control & 0x20); }
+     bool interruptOutput() const { return (control & 0x10) && (status & 1); }
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(control).Do32(prescaler).Do32(compare).Do32(counter).Do32(status).Do32(statusRead).Do32(phase);
++    }
+     static const char* registerName(uint32_t address);
+ 
+    private:
+@@ -24,5 +28,8 @@ class Imx1Timer {
+     uint32_t counter = 0, status = 0, statusRead = 0;
+     uint32_t phase = 0;
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Timer) == 28, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/imx1_watchdog.h b/src/uarm/uarm/imx1_watchdog.h
+index d09299a..75aa189 100644
+--- a/src/uarm/uarm/imx1_watchdog.h
++++ b/src/uarm/uarm/imx1_watchdog.h
+@@ -21,6 +21,12 @@ class Imx1Watchdog {
+     }
+     static const char* registerName(uint32_t address);
+     static constexpr uint64_t interruptSource = uint64_t(1) << 63;
++    static constexpr uint32_t stateVersion = 1;
++    template <class A> void state(A& a) {
++        a.Do32(control).Do32(service).DoBool(enableWritten).DoBool(serviceArmed).DoBool(serviceRepeated).DoBool(uncertain);
++        a.Do64(remainingTicks).Do64(referencePhase).Do64(referenceDenominator);
++        a.Require(referenceDenominator != 0, "watchdog denominator");
++    }
+ 
+    private:
+     uint32_t control = 0, service = 0;
+@@ -28,5 +34,8 @@ class Imx1Watchdog {
+     uint64_t remainingTicks = 0, referencePhase = 0, referenceDenominator = 1;
+     void reloadBound();
+ };
++#if defined(__GLIBCXX__) && defined(__x86_64__)
++static_assert(sizeof(Imx1Watchdog) == 40, "update state() and stateVersion");
++#endif
+ 
+ #endif
+diff --git a/src/uarm/uarm/jit_dynarmic.cpp b/src/uarm/uarm/jit_dynarmic.cpp
+index 6dde8a0..976b1bc 100644
+--- a/src/uarm/uarm/jit_dynarmic.cpp
++++ b/src/uarm/uarm/jit_dynarmic.cpp
+@@ -1244,6 +1244,13 @@ void jitExecutionCounts(const FrondJit *j, uint64_t *blocks, uint64_t *instructi
+     }
+ }
+ 
++// The counts go to the privileged level, the user level's start again.
++void jitSetExecutionCounts(FrondJit *j, uint64_t blocks, uint64_t instructions) {
++    jitPrvEach(j, [](Env &e) { e.blocks = e.instructions = 0; });
++    j->level[1]->env.blocks = blocks;
++    j->level[1]->env.instructions = instructions;
++}
++
+ void jitCompileCounts(const FrondJit *j, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed) {
+     *stale = *aheadCompiled = *aheadUsed = 0;
+     for (const auto &l : j->level) {
+diff --git a/src/uarm/uarm/jit_dynarmic.h b/src/uarm/uarm/jit_dynarmic.h
+index 2887257..4c3368c 100644
+--- a/src/uarm/uarm/jit_dynarmic.h
++++ b/src/uarm/uarm/jit_dynarmic.h
+@@ -38,6 +38,7 @@ FrondJit *jitCreate(ArmCpu *cpu, bool singleStep);
+ // does the same). Without it, blocks compile in the background and runs don't repeat.
+ void jitSetSync(bool sync);
+ void jitExecutionCounts(const FrondJit* jit, uint64_t* blocks, uint64_t* instructions);
++void jitSetExecutionCounts(FrondJit* jit, uint64_t blocks, uint64_t instructions);
+ void jitDestroy(FrondJit *jit);
+ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
+ // Runs up to about cycles instructions. Returns how many ran, at most
+diff --git a/src/uarm/uarm/machine_state_archive.h b/src/uarm/uarm/machine_state_archive.h
+new file mode 100644
+index 0000000..84fac2b
+--- /dev/null
++++ b/src/uarm/uarm/machine_state_archive.h
+@@ -0,0 +1,249 @@
++#ifndef FROND_MACHINE_STATE_ARCHIVE_H
++#define FROND_MACHINE_STATE_ARCHIVE_H
++
++#include <cstddef>
++#include <cstdint>
++#include <cstring>
++#include <vector>
++
++#include "CPCrc.h"
++
++// Field-by-field visitors for a private machine state. A model lists its fields once in
++//     template <class A> void state(A& a);
++// and the writer and the reader both run that list. Values are little endian, as the hosts are.
++// Fixed fields come from the options at create and never change: the writer stores them and
++// the reader compares them with the value already in the object, without replacing it.
++#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
++#error "machine state archives are little endian"
++#endif
++
++class StateWriter {
++   public:
++    static constexpr bool loading = false;
++    explicit StateWriter(std::vector<uint8_t>& out) : out(out) {}
++    StateWriter& Do8(uint8_t& v) { return raw(&v, 1); }
++    StateWriter& Do16(uint16_t& v) { return raw(&v, 2); }
++    StateWriter& Do32(uint32_t& v) { return raw(&v, 4); }
++    StateWriter& Do64(uint64_t& v) { return raw(&v, 8); }
++    StateWriter& DoBool(bool& v) { out.push_back(v ? 1 : 0); return *this; }
++    template <class E> StateWriter& DoEnum(E& v, uint32_t) { uint32_t n = uint32_t(v); return raw(&n, 4); }
++    StateWriter& DoBuffer(void* data, size_t bytes) { return raw(data, bytes); }
++    StateWriter& DoBuffer16(uint16_t* data, size_t count) { return raw(data, count * 2); }
++    StateWriter& DoBuffer32(uint32_t* data, size_t count) { return raw(data, count * 4); }
++    // Elements are 1, 2, 4 or 8 byte integers.
++    template <class T> StateWriter& DoVector(std::vector<T>& v, uint64_t) {
++        uint64_t count = v.size();
++        raw(&count, 8);
++        return raw(v.data(), v.size() * sizeof(T));
++    }
++    StateWriter& Fixed8(uint8_t& v) { return Do8(v); }
++    StateWriter& Fixed16(uint16_t& v) { return Do16(v); }
++    StateWriter& Fixed32(uint32_t& v) { return Do32(v); }
++    StateWriter& FixedBool(bool& v) { return DoBool(v); }
++    // A range the reader holds a decoded value to.
++    StateWriter& Require(bool, const char*) { return *this; }
++    bool ok() const { return true; }
++
++   private:
++    StateWriter& raw(const void* data, size_t bytes) {
++        const auto* p = static_cast<const uint8_t*>(data);
++        out.insert(out.end(), p, p + bytes);
++        return *this;
++    }
++    std::vector<uint8_t>& out;
++};
++
++// The first failure sticks: later reads leave their targets alone and the detail stays.
++class StateReader {
++   public:
++    static constexpr bool loading = true;
++    StateReader(const uint8_t* data, size_t size) : data(data), size(size) {}
++    StateReader& Do8(uint8_t& v) { return raw(&v, 1); }
++    StateReader& Do16(uint16_t& v) { return raw(&v, 2); }
++    StateReader& Do32(uint32_t& v) { return raw(&v, 4); }
++    StateReader& Do64(uint64_t& v) { return raw(&v, 8); }
++    StateReader& DoBool(bool& v) {
++        uint8_t n = 0;
++        raw(&n, 1);
++        if (n > 1) fail("bool"); else if (!failure) v = n;
++        return *this;
++    }
++    template <class E> StateReader& DoEnum(E& v, uint32_t count) {
++        uint32_t n = 0;
++        raw(&n, 4);
++        if (n >= count) fail("enum"); else if (!failure) v = E(n);
++        return *this;
++    }
++    StateReader& DoBuffer(void* target, size_t bytes) { return raw(target, bytes); }
++    StateReader& DoBuffer16(uint16_t* target, size_t count) { return raw(target, count * 2); }
++    StateReader& DoBuffer32(uint32_t* target, size_t count) { return raw(target, count * 4); }
++    template <class T> StateReader& DoVector(std::vector<T>& v, uint64_t maxCount) {
++        uint64_t count = 0;
++        raw(&count, 8);
++        if (failure) return *this;
++        if (count > maxCount || count > (size - position) / sizeof(T)) return fail("vector length");
++        v.resize(size_t(count));
++        return raw(v.data(), size_t(count) * sizeof(T));
++    }
++    StateReader& Fixed8(uint8_t& v) { uint8_t n = 0; raw(&n, 1); return fixed(n == v); }
++    StateReader& Fixed16(uint16_t& v) { uint16_t n = 0; raw(&n, 2); return fixed(n == v); }
++    StateReader& Fixed32(uint32_t& v) { uint32_t n = 0; raw(&n, 4); return fixed(n == v); }
++    StateReader& FixedBool(bool& v) { uint8_t n = 0; raw(&n, 1); return fixed(n == uint8_t(v)); }
++    StateReader& Require(bool condition, const char* what) {
++        if (!failure && !condition) fail(what);
++        return *this;
++    }
++    StateReader& fail(const char* what) {
++        if (!failure) failure = what;
++        return *this;
++    }
++    bool ok() const { return !failure; }
++    // Everything was read and nothing is left over.
++    bool complete() const { return !failure && position == size; }
++    const char* detail() const { return failure; }
++    // The failure was a fixed field that differs from the machine's.
++    bool fixedMismatch() const { return mismatch; }
++
++   private:
++    StateReader& raw(void* target, size_t bytes) {
++        if (failure) return *this;
++        if (bytes > size - position) return fail("section too short");
++        if (bytes) std::memcpy(target, data + position, bytes);
++        position += bytes;
++        return *this;
++    }
++    StateReader& fixed(bool equal) {
++        if (!failure && !equal) { mismatch = true; fail("fixed field"); }
++        return *this;
++    }
++    const uint8_t* data;
++    size_t size, position = 0;
++    const char* failure = nullptr;
++    bool mismatch = false;
++};
++
++// Container: header, sections, then the section table.
++//   header  magic[8] formatVersion coreRevision layoutFingerprint(64) flags sectionCount
++//           tableOffset(64) totalSize(64) tableCrc headerCrc
++//   table   per section: fourcc version offset(64) size(64) crc
++inline constexpr char stateContainerMagic[8] = {'F', 'R', 'Z', '2', 'S', 'A', 'V', 'E'};
++inline constexpr uint32_t stateContainerFormatVersion = 1;
++inline constexpr size_t stateContainerHeaderBytes = 56;
++inline constexpr size_t stateContainerEntryBytes = 28;
++inline constexpr uint32_t stateContainerMaxSections = 64;
++constexpr uint32_t stateFourcc(const char (&name)[5]) {
++    return uint32_t(uint8_t(name[0])) | uint32_t(uint8_t(name[1])) << 8 |
++           uint32_t(uint8_t(name[2])) << 16 | uint32_t(uint8_t(name[3])) << 24;
++}
++struct StateSection {
++    uint32_t fourcc = 0, version = 0;
++    uint64_t offset = 0, size = 0;
++    uint32_t crc = 0;
++};
++
++class StateContainerWriter {
++   public:
++    StateContainerWriter(std::vector<uint8_t>& out, uint32_t coreRevision, uint64_t layoutFingerprint, uint32_t flags)
++        : out(out), coreRevision(coreRevision), layoutFingerprint(layoutFingerprint), flags(flags) {
++        out.assign(stateContainerHeaderBytes, 0);
++    }
++    // Write the section's fields through writer(), then end it.
++    StateWriter begin(uint32_t fourcc, uint32_t version) {
++        sections.push_back({fourcc, version, out.size(), 0, 0});
++        return StateWriter(out);
++    }
++    void end() {
++        auto& s = sections.back();
++        s.size = out.size() - s.offset;
++        s.crc = crc::CRC32(out.data() + s.offset, size_t(s.size));
++    }
++    void finish() {
++        const uint64_t tableOffset = out.size();
++        StateWriter table(out);
++        for (auto& s : sections) table.Do32(s.fourcc).Do32(s.version).Do64(s.offset).Do64(s.size).Do32(s.crc);
++        uint32_t tableCrc = crc::CRC32(out.data() + tableOffset, out.size() - size_t(tableOffset));
++        std::vector<uint8_t> header;
++        StateWriter h(header);
++        uint32_t format = stateContainerFormatVersion, count = uint32_t(sections.size());
++        uint64_t table64 = tableOffset, total = out.size();
++        h.DoBuffer(const_cast<char*>(stateContainerMagic), 8).Do32(format).Do32(coreRevision).Do64(layoutFingerprint)
++            .Do32(flags).Do32(count).Do64(table64).Do64(total).Do32(tableCrc);
++        uint32_t headerCrc = crc::CRC32(header.data(), header.size());
++        h.Do32(headerCrc);
++        std::memcpy(out.data(), header.data(), stateContainerHeaderBytes);
++    }
++
++   private:
++    std::vector<uint8_t>& out;
++    uint32_t coreRevision;
++    uint64_t layoutFingerprint;
++    uint32_t flags;
++    std::vector<StateSection> sections;
++};
++
++enum class StateContainerError { ok, truncated, badMagic, badFormatVersion, corruptHeader, corruptSection };
++
++// Checks the header, the table and every section's bounds and CRC. Borrows the bytes.
++class StateContainerReader {
++   public:
++    StateContainerError open(const uint8_t* bytes, size_t length) {
++        data = bytes;
++        sections.clear();
++        failed = nullptr;
++        if (length < 8) return StateContainerError::truncated;
++        if (std::memcmp(bytes, stateContainerMagic, 8)) return StateContainerError::badMagic;
++        if (length < stateContainerHeaderBytes) return StateContainerError::truncated;
++        StateReader h(bytes + 8, stateContainerHeaderBytes - 8);
++        uint32_t format = 0, count = 0, tableCrc = 0, headerCrc = 0;
++        uint64_t tableOffset = 0, total = 0;
++        h.Do32(format).Do32(coreRevision).Do64(layoutFingerprint).Do32(flags).Do32(count).Do64(tableOffset)
++            .Do64(total).Do32(tableCrc).Do32(headerCrc);
++        if (crc::CRC32(bytes, stateContainerHeaderBytes - 4) != headerCrc) return StateContainerError::corruptHeader;
++        formatVersion = format;
++        if (format != stateContainerFormatVersion) return StateContainerError::badFormatVersion;
++        if (total > length) return StateContainerError::truncated;
++        if (total != length || count > stateContainerMaxSections || tableOffset < stateContainerHeaderBytes ||
++            tableOffset > total || total - tableOffset != uint64_t(count) * stateContainerEntryBytes)
++            return StateContainerError::corruptHeader;
++        if (crc::CRC32(bytes + tableOffset, size_t(total - tableOffset)) != tableCrc)
++            return StateContainerError::corruptHeader;
++        StateReader table(bytes + tableOffset, size_t(total - tableOffset));
++        for (uint32_t i = 0; i < count; ++i) {
++            StateSection s;
++            table.Do32(s.fourcc).Do32(s.version).Do64(s.offset).Do64(s.size).Do32(s.crc);
++            if (s.offset < stateContainerHeaderBytes || s.offset > tableOffset || s.size > tableOffset - s.offset)
++                return StateContainerError::corruptHeader;
++            for (const auto& other : sections)
++                if (other.fourcc == s.fourcc) return StateContainerError::corruptHeader;
++            sections.push_back(s);
++        }
++        for (const auto& s : sections)
++            if (crc::CRC32(bytes + s.offset, size_t(s.size)) != s.crc) {
++                failed = &s;
++                return StateContainerError::corruptSection;
++            }
++        return StateContainerError::ok;
++    }
++    const StateSection* find(uint32_t fourcc) const {
++        for (const auto& s : sections) if (s.fourcc == fourcc) return &s;
++        return nullptr;
++    }
++    StateReader reader(const StateSection& s) const { return StateReader(data + s.offset, size_t(s.size)); }
++    // The section whose CRC failed.
++    const StateSection* corrupt() const { return failed; }
++    uint32_t formatVersion = 0, coreRevision = 0, flags = 0;
++    uint64_t layoutFingerprint = 0;
++
++   private:
++    const uint8_t* data = nullptr;
++    std::vector<StateSection> sections;
++    const StateSection* failed = nullptr;
++};
++
++// FNV-1a over the words that pin a layout: section, state version and object size per model.
++constexpr uint64_t stateLayoutMix(uint64_t hash, uint64_t word) {
++    for (unsigned i = 0; i < 8; ++i) hash = (hash ^ ((word >> (i * 8)) & 0xff)) * 1099511628211ull;
++    return hash;
++}
++
++#endif

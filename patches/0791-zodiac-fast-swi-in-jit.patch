@@ -1,0 +1,46 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -5455,17 +5455,21 @@
+                 if ((((pc + 2) & 2) ? next >> 16 : next & 0xffff) < 0xf800) return false;
+             }
+         }
+-        // Fast blocks: what the lean path leaves to the step stays out too (CP15, SWI, exception returns, S-bit
++        // Fast blocks: what the lean path leaves to the step stays out too (CP15, exception returns, S-bit
+         // LDM/STM, unpredictable forms), except MSR of the CPSR control field, which the JIT runs through
+-        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), and the two exception returns below.
++        // cpuJitSetCpsr (a pending interrupt it unmasks ends the run), the two exception returns below and SWI,
++        // which cpuJitSwi takes as the step would (the run ends at the vector).
+         if (cpu->jitBlocks) {
+             if (!thumb) {
+                 const bool msrCpsr = (word & 0x0ff0fff0) == 0x0120f000 || (word & 0x0ff0f000) == 0x0320f000;
+                 // MOVS PC, LR and SUBS PC, LR, #4 return through cpuJitExceptionReturn.
+                 const bool exceptionReturn = (word & 0x0fffffff) == 0x01b0f00e || (word & 0x0fffffff) == 0x025ef004;
+-                if (!msrCpsr && !exceptionReturn && !dacr && cpuPrvLeanClassArm(word) == LeanClass::exit) return false;
+-            } else if (cpuPrvLeanClassThumb((pc & 2) ? word >> 16 : word & 0xffff) == LeanClass::exit) {
+-                return false;
++                const bool swi = (word & 0x0f000000) == 0x0f000000 && (word >> 28) != 15;
++                if (!msrCpsr && !exceptionReturn && !dacr && !swi && cpuPrvLeanClassArm(word) == LeanClass::exit)
++                    return false;
++            } else {
++                const uint16_t h = (pc & 2) ? word >> 16 : word & 0xffff;
++                if ((h & 0xff00) != 0xdf00 && cpuPrvLeanClassThumb(h) == LeanClass::exit) return false;
+             }
+         }
+     }
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -1508,7 +1508,13 @@
+                         if (ran) continue;
+                         break;
+                     }
+-                    if (stop == arm920JitHalt) break;
++                    // A halt (an ARM/Thumb switch, a board write's reschedule, a pending interrupt) ends the run at a
++                    // block end. After a run that did something, the JIT and the lean path try again: both refuse with
++                    // anything but a switch or a reschedule pending, which then goes to the step.
++                    if (stop == arm920JitHalt) {
++                        if (ran) continue;
++                        break;
++                    }
+                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
+                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
+                     leanCount = stop == arm920JitCold || ran < 4 ? 32 : 1;

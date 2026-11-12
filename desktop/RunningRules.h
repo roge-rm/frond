@@ -16,7 +16,7 @@ namespace runningRules {
 // isn't done yet.
 struct Traits {
     bool runs68k{false}, holdPresent{false}, holdSupported{false}, keyboard{false}, microphone{false},
-        network{false}, sound{false}, powerKey{false}, cardSlot{false};
+        network{false}, sound{false}, powerKey{false}, cardSlot{false}, guestServices{true};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -30,6 +30,7 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.microphone = caps.microphone;
     t.network = caps.network;
     t.sound = caps.sound;
+    t.guestServices = frondFirmware::guestServices(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     return t;
@@ -89,7 +90,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::Reset, QObject::tr("Reset…"), std::nullopt, {}, ready, false, 3});
-    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready, true, 3});
+    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.guestServices, true, 3});
     out.push_back({Id::SaveStop, QObject::tr("Save and Stop"), std::nullopt, {}, s.running && ready, false, 4});
     return out;
 }
@@ -226,6 +227,24 @@ inline Buttons buttons(const Traits& t, const State& s) {
     b.powerEnabled = s.ready && t.powerKey;
     b.cardEnabled = s.ready;
     return b;
+}
+
+// The panel's Hard reset button: off whenever the other running controls are, and on a device
+// without guest calls.
+inline bool hardResetEnabled(bool controlsEnabled, const Traits& t) { return controlsEnabled && t.guestServices; }
+
+// The core's reason when a machine stopped by itself, as the failure's main text. The core's last
+// line like "Tapwave Zodiac 2: the machine stopped: REASON" gives "The Tapwave Zodiac 2 stopped:
+// REASON."; empty when the log has no such line.
+inline QString machineStopText(const QString& log) {
+    static const QString marker = QStringLiteral(": the machine stopped: ");
+    const auto lines = log.split('\n');
+    for (auto i = lines.size() - 1; i >= 0; --i) {
+        const auto at = lines[i].indexOf(marker);
+        const auto reason = at > 0 ? lines[i].mid(at + marker.size()).trimmed() : QString();
+        if (!reason.isEmpty()) return QObject::tr("The %1 stopped: %2.").arg(lines[i].left(at).trimmed(), reason);
+    }
+    return {};
 }
 
 // The line under the machine's name: the engine on ARM devices, else the device.

@@ -1,0 +1,23 @@
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -400,10 +400,17 @@
+         // Aligned ARM linkage stubs and jump tables, without flags.
+         if ((i & 0x0ffffff0) == 0x008ff000) return (i & 15) != 15 && !(registers[i & 15] & 3);
+         if ((i & 0x0ffffff0) == 0x008ff100) return (i & 15) != 15;
+-        if ((i & 0x0ff00000) != 0x03a00000) return false;
+         const unsigned shift = ((i >> 8) & 15) * 2;
+         const uint32_t imm = i & 255;
+-        return !((shift ? (imm >> shift) | (imm << (32 - shift)) : imm) & 3);
++        const uint32_t operand = shift ? (imm >> shift) | (imm << (32 - shift)) : imm;
++        // Immediate ADD/SUB linkage preserves flags and the current ARM state.
++        if ((i & 0x0ff00000) == 0x02800000 || (i & 0x0ff00000) == 0x02400000) {
++            const unsigned source = (i >> 16) & 15;
++            const uint32_t base = registers[source] + (source == 15 ? 8u : 0u);
++            const uint32_t target = (i & 0x00400000) ? base - operand : base + operand;
++            return !(target & 3);
++        }
++        return (i & 0x0ff00000) == 0x03a00000 && !(operand & 3);
+     }
+     const unsigned opcode = (i >> 21) & 15;
+     if (opcode >= 8 && opcode <= 11 && !(i & 0x00100000)) return false;

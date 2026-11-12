@@ -697,7 +697,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         auto lines = log->toPlainText().split('\n');
         while (!lines.isEmpty() && lines.last().trimmed().isEmpty()) lines.removeLast();
         const auto details = lines.mid(qMax(0, int(lines.size()) - 40)).join('\n');
-        auto refused = frondSessions::refusal(details);
+        auto refused = runningRules::machineStopText(details);
+        if (refused.isEmpty()) refused = frondSessions::refusal(details);
         if (refused.isEmpty()) refused = frondSessions::romRefusal(details);
         failure(refused.isEmpty() ? message : refused, details);
     });
@@ -1204,7 +1205,11 @@ void MainWindow::refresh() {
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
     panels->setTitle(1, tr("Storage"));
     internalButton->setEnabled(enabled && !internalFiles);
-    appsPanel->setEnabled(enabled);
+    const bool guest = frondFirmware::guestServices(currentDevice());
+    appsPanel->setEnabled(enabled && guest);
+    appsPanel->setToolTip(guest ? QString() : reason);
+    hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
+    hardResetButton->setToolTip(guest ? QString() : reason);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -1534,7 +1539,7 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::Save: if (idle) barChosen(runningRules::Id::Save); break;
         case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
         case Shortcut::SaveStop: stopButton->click(); break;
-        case Shortcut::Install: if (idle) emit appsPanel->installRequested(); break;
+        case Shortcut::Install: if (idle && frondFirmware::guestServices(currentDevice())) emit appsPanel->installRequested(); break;
         case Shortcut::Applications: togglePanel(0); break;
         case Shortcut::Card: togglePanel(1); break;
         case Shortcut::Display: togglePanel(2); break;
@@ -2639,7 +2644,7 @@ bool MainWindow::confirmReplace(const QString& dest) {
 }
 // Asks the core for the RAM databases when the Applications panel is open and the core is free.
 void MainWindow::listApps() {
-    if (!appsStale || panels->current() != 0 || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
+    if (!appsStale || panels->current() != 0 || !frondFirmware::guestServices(currentDevice()) || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
     appsStale = false;
     if (client.request("db-list")) { busy = true; refresh(); }
 }

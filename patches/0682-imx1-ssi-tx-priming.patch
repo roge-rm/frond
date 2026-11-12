@@ -1,0 +1,83 @@
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -133,8 +133,10 @@
+     bool lcdcContrastOnly = false;
+     uint32_t contrastPhase = 0, perclk2Phase = 0;
+     uint32_t uartControl1[2] = {4, 4};
+-    // SSI1 transport stays disabled; the FIFOs and shift registers remain empty.
++    // SSI1 can hold primed words while serial transfers stay guarded.
+     uint32_t ssi1Words[7] = {0, 0, 0, 0, 0, 0x81, 0};
++    uint16_t ssi1TxFifo[8] = {};
++    uint32_t ssi1TxCount = 0;
+     uint32_t dmaControl = 0, dmaMask = 0x7ff, dmaBurstTimeout = 0;
+     uint32_t dmaResetClocks = 0;
+     uint32_t dmaChannels[11][7] = {};
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -92,7 +92,7 @@
+     }
+     // Disabled channel configuration cannot produce a completion or error.
+     known |= (uint64_t(1) << 60) | (uint64_t(1) << 61);
+-    // SSI1 interrupt and DMA enables are guarded while no words can be transferred.
++    // SSI1 interrupt and DMA enables remain guarded during FIFO priming.
+     known |= uint64_t(0xf) << 42;
+     controller.setInputs(asserted, known);
+ }
+@@ -225,6 +225,7 @@
+         case 0x00209014: return "DMA.DSESR";
+         case 0x00209018: return "DMA.DBOSR";
+         case 0x0020901c: return "DMA.DBTOCR";
++        case 0x00218000: return "SSI1.STX";
+         case 0x00218008: return "SSI1.SCSR";
+         case 0x0021800c: return "SSI1.STCR";
+         case 0x00218010: return "SSI1.SRCR";
+@@ -243,6 +244,17 @@
+ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode) {
+     if (address >= 0x00218000 && address < 0x0021802c) {
+         if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
++        if (address == 0x00218000) {
++            // Readback of the write-side port is not qualified by this subset.
++            if (!write) return Imx1BootstrapAccess::sideEffect;
++            if (value & ~0xffffu) return Imx1BootstrapAccess::reservedBits;
++            if (!(ssi1Words[0] & 0x100) || (ssi1Words[6] & 0x10))
++                return Imx1BootstrapAccess::sequence;
++            const uint32_t capacity = (ssi1Words[1] & 0x80) ? 8 : 1;
++            // MC9328MX1RM 30.3.1: writes to a full FIFO are ignored.
++            if (ssi1TxCount < capacity) ssi1TxFifo[ssi1TxCount++] = uint16_t(value);
++            return Imx1BootstrapAccess::ok;
++        }
+         constexpr uint32_t offsets[] = {8, 0xc, 0x10, 0x14, 0x18, 0x20, 0x28};
+         unsigned index = 0;
+         while (index < 7 && offsets[index] != address - 0x00218000) ++index;
+@@ -257,6 +269,8 @@
+                 next &= 0xff00;
+             } else if (index == 1 || index == 2) {
+                 if (value & 0x300) return Imx1BootstrapAccess::sideEffect;
++                if (index == 1 && ssi1TxCount && ((value ^ ssi1Words[1]) & 0x80))
++                    return Imx1BootstrapAccess::sideEffect;
+                 if (index == 2 && (value & 0x80) && !(ssi1Words[5] & 0xf0))
+                     return Imx1BootstrapAccess::sideEffect;
+             } else if (index == 5) {
+@@ -266,11 +280,18 @@
+                 if (!rx && (ssi1Words[2] & 0x80)) return Imx1BootstrapAccess::sideEffect;
+                 next &= 0xff;
+             }
++            if ((index == 0 && !(next & 0x100)) || (index == 6 && (next & 0x10))) {
++                std::fill(std::begin(ssi1TxFifo), std::end(ssi1TxFifo), 0);
++                ssi1TxCount = 0;
++            }
+             ssi1Words[index] = next;
+         } else {
+             value = ssi1Words[index];
+-            // No accepted operation can put data in either FIFO or shift register.
+-            if (index == 0) value |= 0x41;
++            if (index == 0) {
++                if (!ssi1TxCount) value |= 0x40;
++                if (!(value & 0x100) || 8 - ssi1TxCount >= (ssi1Words[5] & 15)) value |= 1;
++            }
++            if (index == 5) value |= ssi1TxCount << 8;
+         }
+         return Imx1BootstrapAccess::ok;
+     }

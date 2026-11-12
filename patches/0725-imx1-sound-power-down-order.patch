@@ -1,0 +1,42 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -249,7 +249,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 723;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 725;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -530,7 +530,9 @@
+             if ((value & 0x600) == 0x600) return Imx1BootstrapAccess::reservedBits;
+             // Only the LCD-clock contrast source is independent of unmodelled panel timing.
+             if ((value & 0x100) && (value & 0x600) != 0x400) return Imx1BootstrapAccess::sideEffect;
+-            if ((rmcr & 2) && value != pwmr) return Imx1BootstrapAccess::sequence;
++            // With the LCDC on only CC_EN may go off, the way the ROM's sound power-down does it
++            // (2009f978). The manual puts no condition on the bit, and the counter stops with it.
++            if ((rmcr & 2) && value != pwmr && value != (pwmr & ~0x100u)) return Imx1BootstrapAccess::sequence;
+             pwmr = value;
+         } else value = pwmr;
+         return Imx1BootstrapAccess::ok;
+@@ -681,11 +683,13 @@
+                  !asynchronousRatioSupported(next, next.systemPllTargetRatio())))
+                 return Imx1BootstrapAccess::sideEffect;
+             const bool busChanged = next.busDivider() != cgm.busDivider();
+-            // DMA beats use HCLK; the independent SSI serial clock uses PERCLK3.
+-            if (busChanged && (dmaPcmActive || dmaPcmBurst))
++            // DMA beats use HCLK; the independent SSI serial clock uses PERCLK3. Channel 10 only
++            // takes beats on SSI1's request, so with SSI_EN clear it can stay set up (ROM 20084608).
++            if (busChanged && (dmaPcmActive || dmaPcmBurst) && (ssi1Words[0] & 0x100))
+                 return Imx1BootstrapAccess::sideEffect;
+-            if (next.perclk3Divider() != cgm.perclk3Divider() &&
+-                (dmaPcmActive || dmaPcmBurst || ssi1Shifting || (ssi1Words[0] & 0x100)))
++            // Only the SSI1 bit clock uses PERCLK3. With SSI_EN clear nothing shifts and no DMA beat
++            // is taken, so the divider can change with channel 10 still set up (ROM 2009f9f0).
++            if (next.perclk3Divider() != cgm.perclk3Divider() && (ssi1Shifting || (ssi1Words[0] & 0x100)))
+                 return Imx1BootstrapAccess::sideEffect;
+             const bool perclk2Changed = next.perclk2Divider() != cgm.perclk2Divider();
+             if (perclk2Changed && mmcsd.clockRunning())

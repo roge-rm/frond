@@ -1,0 +1,141 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -210,6 +210,9 @@
+     // accesses this lean run made that the step would count as bus accesses.
+     uint64_t* leanCode;
+     uint64_t leanBus, leanCodeDrops;
++    // Instructions this lean run has finished, and the probe's answer for reads of pages that aren't plain.
++    uint32_t leanDone;
++    Arm920LeanRead leanRead;
+ #ifdef FROND_DYNARMIC
+     struct FrondJit *jit;
+     // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
+@@ -860,6 +863,14 @@
+                         ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)
+                         : nullptr;
+     if (!page) {
++        if constexpr (!write) {
++            uint32_t value;
++            if (size == 4 && MMU_TRANSLATE_RESULT_OK(r) && cpu->leanRead &&
++                cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, cpu->leanDone, &value)) {
++                memcpy(buf, &value, size);
++                return true;
++            }
++        }
+         cpu->leanExit = true;
+         return false;
+     }
+@@ -4763,7 +4774,9 @@
+ template <int size>
+ static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu, uint32_t budget) {
+     uint32_t done = 0;
++    const uint32_t before = cpu->leanDone;
+     while (done < budget) {
++        cpu->leanDone = before + done;
+         const uint32_t pc = cpu->regs[REG_NO_PC];
+         uint32_t instr, decoded;
+         cpu->curInstrPC = pc;
+@@ -4777,6 +4790,7 @@
+         ++done;
+         if (cpu->slowPath) break;
+     }
++    cpu->leanDone = before + done;
+     return done;
+ }
+ 
+@@ -4793,6 +4807,7 @@
+     cpu->leanExit = false;
+     cpu->leanBlNext = ~0u;
+     cpu->leanBus = 0;
++    cpu->leanDone = 0;
+     uint32_t done = 0;
+     for (;;) {
+         done += cpu->T ? cpuPrvLeanLoop<2>(cpu, budget - done) : cpuPrvLeanLoop<4>(cpu, budget - done);
+@@ -4835,6 +4850,8 @@
+ 
+ void cpuArm920LeanFlush(ArmCpu *cpu) { hostTlbFlush(&cpu->mem->hostTlb); }
+ 
++void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = read; }
++
+ // Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
+ void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
+     if (!cpu->leanCode) return;
+@@ -4858,6 +4875,7 @@
+ void cpuArm920LeanReset(ArmCpu *) {}
+ void cpuArm920LeanFlush(ArmCpu *) {}
+ void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
++void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
+ uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
+ uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
+ #endif
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -269,6 +269,10 @@
+ using Arm920LeanPage = uint8_t* (*)(void* context, uint32_t pa, bool write, bool* counted);
+ using Arm920LeanGuard = bool (*)(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
+ void cpuArm920SetLean(ArmCpu*, Arm920LeanPage page, Arm920LeanGuard guard, void* context);
++// read(context, pa, size, ran, value) may answer a word read of a page that isn't plain without the step,
++// ran being the instructions the lean run finished before this one. False sends it to the step.
++using Arm920LeanRead = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t ran, uint32_t* value);
++void cpuArm920SetLeanRead(ArmCpu*, Arm920LeanRead read);
+ // Cleans dirty D-cache lines to memory, empties both caches and drops the lean TLB and decoded code. For
+ // entering Fast and after a load into it.
+ void cpuArm920LeanReset(ArmCpu*);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -393,6 +393,16 @@
+         *counted = page != nullptr;
+         return page;
+     }
++    // A timer count read on the lean path, answered as access answers it inside the quiet cycles: the
++    // instructions the run finished are cycles still to charge, and no charge is needed.
++    static bool leanRead(void* context, uint32_t pa, uint32_t size, uint32_t ran, uint32_t* value) {
++        auto& p = *static_cast<Probe*>(context);
++        if (!Imx1Bootstrap::timerCountAddress(pa) || quietCycles <= ran || p.failed ||
++            p.graphicsWireStatus != Imx1BootstrapAccess::ok ||
++            !p.peripherals.timerCountAfter(pa, size, deferredCycles + ran, quietMode, *value)) return false;
++        ++p.result.busAccesses;
++        return true;
++    }
+     static bool cacheMemoryCheck(void* context, uint32_t address, uint32_t size, bool write) {
+         auto& p = *static_cast<Probe*>(context);
+         if (!write && p.resolve(address, size)) return true;
+@@ -401,7 +411,7 @@
+     static bool access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
+         auto& p = *static_cast<Probe*>(context);
+         // A register write can change which pages are plain (SDRAM modes, the PCM DMA buffer).
+-        if (fastEngine && write && !Imx1Bootstrap::isRamAddress(address)) cpuArm920LeanFlush(p.cpu);
++        if (fastEngine && write && Imx1Bootstrap::plainPagesWrite(address)) cpuArm920LeanFlush(p.cpu);
+         // ROM and RAM hold no time. Everything else sees the board at this instruction's own time, and so
+         // does the PCM DMA when its buffer is written.
+         // A timer count read inside the quiet cycles is worked out without charging them.
+@@ -1175,6 +1185,7 @@
+     if (p->bounds || p->stopped) return false;
+     fastEngine = fast;
+     cpuArm920SetLean(p->cpu, fast ? Probe::leanPage : nullptr, fast ? bootstrapInstruction : nullptr, p);
++    cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
+     // Fast keeps no cache contents: dirty data goes to memory first.
+     if (fast) cpuArm920LeanReset(p->cpu);
+     return true;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -89,6 +89,7 @@
+     // nothing charged. Only for cycles in which no timer reaches its compare value. False for any other
+     // access, or when the sum is too big to work out in one piece.
+     bool timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value) const;
++    static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
+     Imx1BootstrapAccess clockStatus() const;
+     const Imx1ReferenceTime& referenceTime() const { return elapsedReference; }
+     bool referenceChargeSupported(uint64_t n, uint64_t d) const {
+@@ -226,6 +227,11 @@
+     void emitDiagnosticMemory(const ArmDiagnosticSink&) const;
+     bool instructionWord(uint32_t address, uint32_t& value) const;
+     static const char* registerName(uint32_t address);
++    // Writes that can change what plainPage gives: the DMA controller (the PCM DMA buffer) and the SDRAM
++    // controller (bank modes).
++    static bool plainPagesWrite(uint32_t address) {
++        return (address & 0xfffff000) == 0x00209000 || (address & 0xfffff000) == 0x00221000;
++    }
+     static bool isRamAddress(uint32_t address) {
+         return (address >= 0x00300000 && address < 0x00400000) ||
+                (address >= 0x08000000 && address < 0x10000000);

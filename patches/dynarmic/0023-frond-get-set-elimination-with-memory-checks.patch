@@ -1,0 +1,121 @@
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -212,8 +212,8 @@
+ 
+     Optimization::PolyfillPass(ir_block, {});
+     Optimization::NamingPass(ir_block);
+-    if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+-        Optimization::A32GetSetElimination(ir_block, {.convert_nzc_to_nz = true});
++    if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
++        Optimization::A32GetSetElimination(ir_block, {.convert_nzc_to_nz = true, .memory_barriers = conf.check_halt_on_memory_access});
+         Optimization::DeadCodeElimination(ir_block);
+     }
+     if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+--- a/src/dynarmic/backend/x64/a32_interface.cpp
++++ b/src/dynarmic/backend/x64/a32_interface.cpp
+@@ -412,8 +412,8 @@
+         IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets});
+         Optimization::PolyfillPass(ir_block, polyfill_options);
+         Optimization::NamingPass(ir_block);
+-        if (conf.HasOptimization(OptimizationFlag::GetSetElimination) && !conf.check_halt_on_memory_access) {
+-            Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true});
++        if (conf.HasOptimization(OptimizationFlag::GetSetElimination)) {
++            Optimization::A32GetSetElimination(ir_block, {.convert_nz_to_nzc = true, .memory_barriers = conf.check_halt_on_memory_access});
+             Optimization::DeadCodeElimination(ir_block);
+         }
+         if (conf.HasOptimization(OptimizationFlag::ConstProp)) {
+--- a/src/dynarmic/ir/opt/a32_get_set_elimination_pass.cpp
++++ b/src/dynarmic/ir/opt/a32_get_set_elimination_pass.cpp
+@@ -21,7 +21,30 @@
+ 
+ namespace {
+ 
+-void FlagsPass(IR::Block& block) {
++// Frond: for memory_barriers, ops other than memory accesses and plain register and flag
++// moves that may hand the guest state to host code. Nothing is known across them.
++bool HostSeesState(const IR::Inst& inst) {
++    switch (inst.GetOpcode()) {
++    case IR::Opcode::A32GetRegister:
++    case IR::Opcode::A32SetRegister:
++    case IR::Opcode::A32SetCpsrNZCV:
++    case IR::Opcode::A32SetCpsrNZCVRaw:
++    case IR::Opcode::A32SetCpsrNZCVQ:
++    case IR::Opcode::A32SetCpsrNZ:
++    case IR::Opcode::A32SetCpsrNZC:
++    case IR::Opcode::A32GetCFlag:
++    case IR::Opcode::A32OrQFlag:
++    case IR::Opcode::A32GetGEFlags:
++    case IR::Opcode::A32SetGEFlags:
++    case IR::Opcode::A32SetGEFlagsCompressed:
++    case IR::Opcode::PushRSB:
++        return false;
++    default:
++        return !inst.IsMemoryReadOrWrite() && (inst.MayHaveSideEffects() || inst.ReadsFromCPSR());
++    }
++}
++
++void FlagsPass(IR::Block& block, bool memory_barriers) {
+     using Iterator = std::reverse_iterator<IR::Block::iterator>;
+ 
+     struct FlagInfo {
+@@ -167,7 +190,8 @@
+             break;
+         }
+         default: {
+-            if (inst->ReadsFromCPSR() || inst->WritesToCPSR()) {
++            if (inst->ReadsFromCPSR() || inst->WritesToCPSR() ||
++                (memory_barriers && (inst->IsMemoryReadOrWrite() || HostSeesState(*inst)))) {
+                 nzcvq = {};
+                 nzcv = {};
+                 nz = {};
+@@ -180,7 +204,7 @@
+     }
+ }
+ 
+-void RegisterPass(IR::Block& block) {
++void RegisterPass(IR::Block& block, bool memory_barriers) {
+     using Iterator = IR::Block::iterator;
+ 
+     struct RegInfo {
+@@ -357,9 +381,14 @@
+             break;
+         }
+         default: {
+-            if (inst->ReadsFromCoreRegister() || inst->WritesToCoreRegister()) {
++            if (inst->ReadsFromCoreRegister() || inst->WritesToCoreRegister() ||
++                (memory_barriers && HostSeesState(*inst))) {
+                 reg_info = {};
+                 ext_reg_info = {};
++            } else if (memory_barriers && inst->IsMemoryReadOrWrite()) {
++                // The values stay known; the sets so far are kept for a run that ends here.
++                for (auto& info : reg_info) info.last_set_instruction.reset();
++                for (auto& info : ext_reg_info) info.last_set_instruction.reset();
+             }
+             break;
+         }
+@@ -369,9 +398,9 @@
+ 
+ }  // namespace
+ 
+-void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions) {
+-    FlagsPass(block);
+-    RegisterPass(block);
++void A32GetSetElimination(IR::Block& block, A32GetSetEliminationOptions opt) {
++    FlagsPass(block, opt.memory_barriers);
++    RegisterPass(block, opt.memory_barriers);
+ }
+ 
+ }  // namespace Dynarmic::Optimization
+--- a/src/dynarmic/ir/opt/passes.h
++++ b/src/dynarmic/ir/opt/passes.h
+@@ -30,6 +30,10 @@
+ struct A32GetSetEliminationOptions {
+     bool convert_nzc_to_nz = false;
+     bool convert_nz_to_nzc = false;
++    // Frond: with check_halt_on_memory_access a memory access can end the run, so a set
++    // before one is never dropped for a later one, and anything else that may hand the
++    // registers to host code (coprocessors, exceptions, host calls) ends what is known.
++    bool memory_barriers = false;
+ };
+ 
+ void PolyfillPass(IR::Block& block, const PolyfillOptions& opt);

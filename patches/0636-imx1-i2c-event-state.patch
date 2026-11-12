@@ -1,0 +1,50 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -58,11 +58,16 @@
+         if (p.failed) return false;
+         uint32_t value = 0;
+         if (write && size <= 4) std::memcpy(&value, data, size);
++        const auto previousIssueStep = p.i2cIssueStep, previousIssuePc = p.i2cIssuePc;
++        if (address == 0x00217010 || (write && address == 0x00217008)) {
++            p.i2cIssueStep = p.result.trace.step;
++            p.i2cIssuePc = p.result.trace.pc;
++        }
+         const auto status = p.options.bootstrapPeripherals ?
+             p.peripherals.access(address, size, write, value, cpuArm920ClockMode(p.cpu)) : Imx1BootstrapAccess::unmapped;
+-        if (status == Imx1BootstrapAccess::ok && write && address == 0x00217010) {
+-            p.i2cIssueStep = p.result.trace.step;
+-            p.i2cIssuePc = p.result.trace.pc;
++        if (status != Imx1BootstrapAccess::ok) {
++            p.i2cIssueStep = previousIssueStep;
++            p.i2cIssuePc = previousIssuePc;
+         }
+         ++p.result.busAccesses;
+         if (p.options.busObserver)
+--- a/src/uarm/uarm/imx1_i2c.cpp
++++ b/src/uarm/uarm/imx1_i2c.cpp
+@@ -35,15 +35,16 @@
+     auto completed = pending;
+     if (pending.phase == Imx1I2cPhase::receive && reply.response == Imx1I2cResponse::ack)
+         completed.byte = reply.byte;
+-    notify(completed, reply.response);
+     if (reply.response == Imx1I2cResponse::unknown) {
+         failure = Imx1I2cAccess::externalInput;
++        notify(completed, reply.response);
+         return;
+     }
+     // Electrical arbitration and stretching need a qualified multi-master bus.
+     if (reply.response == Imx1I2cResponse::arbitrationLost ||
+         (pending.phase == Imx1I2cPhase::receive && reply.response != Imx1I2cResponse::ack)) {
+         failure = Imx1I2cAccess::sideEffect;
++        notify(completed, reply.response);
+         return;
+     }
+     inFlight = false;
+@@ -59,6 +60,7 @@
+             readDirection = pending.read;
+         }
+     }
++    notify(completed, reply.response);
+ }
+ 
+ Imx1I2cAccess Imx1I2c::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {

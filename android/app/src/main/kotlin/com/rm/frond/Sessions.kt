@@ -223,7 +223,7 @@ object Sessions {
         return "$base $n"
     }
 
-    fun create(context: Context, device: Device, name: String = freeName(context, device.label), settings: MachineSettings = MachineSettings()): Session {
+    fun create(context: Context, device: Device, name: String = freeName(context, device.label), settings: MachineSettings = MachineSettings.defaults(device)): Session {
         val id = UUID.randomUUID().toString()
         val now = System.currentTimeMillis()
         return Session(id, name, device, now, 0L, machine(context, id), settings = settings).also { write(context, it) }

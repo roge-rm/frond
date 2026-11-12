@@ -1,0 +1,382 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -478,7 +478,8 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
+         addr |= cpu->pid;
+ #endif
+ 
+-    if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
++    if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
++        !(instrFetch && cpu->model == ArmCpuModel::arm920t)) {
+         cp15MMUSetFaultStatus(cpu->cp15.cp15mmu, addr, fsr);
+     }
+ 
+@@ -964,6 +965,11 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
+ #endif
+ }
+ 
++bool cpuFetchInstruction(ArmCpu *cpu, uint32_t va, uint32_t* word, uint_fast8_t* fsr) {
++    if (cpu->model != ArmCpuModel::arm920t || (va & 3)) return false;
++    return icacheArm920Word(cpu->ic, va, cpu->privileged, fsr, word);
++}
++
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu) { icacheInval(cpu->ic); }
+ 
+ void cpuDropTranslatedCode(struct ArmCpu *cpu) {
+@@ -4101,7 +4107,7 @@ static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const stru
+                                              uint32_t& instr, uint32_t& decoded) {
+     // lineVa is line aligned, so this also requires va to be aligned to size.
+     if ((va & ~uint32_t((1u << CACHE_LINE_WIDTH_BITS) - size)) != lineVa) return false;
+-    if (ic->epoch != lineEpoch) return false;
++    if (ic->arm920 || ic->epoch != lineEpoch) return false;
+     const unsigned offset = calculateLineIndex(va);
+     const uint32_t cached = line->decoded[offset >> 1];
+     constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
+@@ -4118,7 +4124,7 @@ static FORCE_INLINE void cpuPrvRememberLine(const struct icache* ic, uint32_t pc
+                                             const struct icacheline*& line, uint32_t& lineVa,
+                                             uint32_t& lineEpoch) {
+     line = ic->cache + calculateIndex(pc);
+-    lineVa = line->revision == ic->revision && line->tag == calculateTag(pc) && line->fetchKey == key
++    lineVa = !ic->arm920 && line->revision == ic->revision && line->tag == calculateTag(pc) && line->fetchKey == key
+                  ? maskLine(pc)
+                  : 0xffffffff;
+     lineEpoch = ic->epoch;
+@@ -4149,7 +4155,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+         const struct icacheline *line = ic->cache + calculateIndex(pc);
+         uint32_t offset = calculateLineIndex(pc);
+         uint32_t cached = line->decoded[offset >> 1];
+-        if (unlikely((pc & (size - 1)) || line->revision != ic->revision ||
++        if (unlikely(ic->arm920 || (pc & (size - 1)) || line->revision != ic->revision ||
+                      line->tag != calculateTag(pc) || (cached & DECODED_BITS) != kind ||
+                      line->fetchKey != icacheFetchKey(ic, cpu->privileged))) {
+             uint32_t instr = 0, decoded = 0;
+@@ -4428,6 +4434,10 @@ static uint8_t *cpuPrvJitHostCodePage(ArmCpu *cpu, uint32_t va) {
+ 
+ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
+     va &= ~3u;
++    if (cpu->model == ArmCpuModel::arm920t) {
++        uint_fast8_t fsr;
++        return icacheArm920Word(cpu->ic, va, cpu->privileged, &fsr, word);
++    }
+     if (const uint8_t *page = cpuPrvJitHostCodePage(cpu, va)) {
+         memcpy(word, page + (va & 0xfffu), 4);
+         return true;
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -121,6 +121,7 @@ void cpuFinishInjectedSyscall68k(struct ArmCpu *cpu);
+ void cpuReset(struct ArmCpu *cpu, uint32_t pc);
+ 
+ // Host code patches must discard decoded instructions as well as guest cache lines.
++bool cpuFetchInstruction(ArmCpu*, uint32_t va, uint32_t* word, uint_fast8_t* fsr);
+ void cpuInvalidateCodeCache(struct ArmCpu *cpu);
+ // Drops the JIT's translated code only, when something it was translated with changes.
+ void cpuDropTranslatedCode(struct ArmCpu *cpu);
+diff --git a/src/uarm/uarm/MMU.cpp b/src/uarm/uarm/MMU.cpp
+--- a/src/uarm/uarm/MMU.cpp
++++ b/src/uarm/uarm/MMU.cpp
+@@ -360,6 +360,13 @@ uint32_t mmuStaleTranslate(struct ArmMmu *mmu, uint32_t va) {
+     }
+ }
+ 
++void mmuSetTTPArm920(struct ArmMmu *mmu, uint32_t ttp) {
++    if (mmu->transTablPA == ttp) return;
++    mmu->transTablPA = ttp;
++    mmu->flushes++;
++    mmuPrvPermChanged(mmu);
++}
++
+ void mmuSetS(struct ArmMmu *mmu, bool on) {
+     if (mmu->S == on) return;
+     mmu->S = on;
+diff --git a/src/uarm/uarm/MMU.h b/src/uarm/uarm/MMU.h
+--- a/src/uarm/uarm/MMU.h
++++ b/src/uarm/uarm/MMU.h
+@@ -57,6 +57,8 @@ bool mmuStaleDcacheOpen(const struct ArmMmu *mmu);
+ // The PA a data access to va gets inside the window: va itself unless the old page tables
+ // map it cacheable. Never faults.
+ uint32_t mmuStaleTranslate(struct ArmMmu *mmu, uint32_t va);
++// ARM920 TTBR and M changes preserve guest TLB entries until guest maintenance.
++void mmuSetTTPArm920(struct ArmMmu *mmu, uint32_t ttp);
+ 
+ void mmuSetS(struct ArmMmu *mmu, bool on);
+ void mmuSetR(struct ArmMmu *mmu, bool on);
+diff --git a/src/uarm/uarm/cp15mmu.cpp b/src/uarm/uarm/cp15mmu.cpp
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -67,26 +67,67 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
+     if (op1 != 0 || two) goto fail;  // CP15 only accessed with MCR/MRC with op1 == 0
+ 
+     if (cp15->arm920Bootstrap) {
+-        // ARM DDI0151C tables 2-10, 2-16 and 2-17. No enabled cache or MMU yet.
+-        if (CRn == 1 && CRm == 0 && op2 == 0 && Rx != 15) {
++        // DDI0151C 2.3: reject unmodelled forms before they can change CPU state.
++        if (Rx == 15) return false;
++        if (CRn == 0 && CRm == 0 && op2 == 1 && read) {
++            cpuSetReg(cpu, Rx, 0x0d172172);  // Table 2-6, two 16KiB, 64-way caches.
++            return true;
++        }
++        if (CRn == 1 && CRm == 0 && op2 == 0) {
+             if (read) {
+                 cpuSetReg(cpu, Rx, cp15->control);
+                 return true;
+             }
+-            if ((val & 0x78) != 0x78 || ((val ^ cp15->control) & ~0x2302u)) return false;
++            // Data caching, big endian and the reserved clock mode remain unsupported.
++            if ((val & 0x78) != 0x78 || (val & ~0xc000737bu) ||
++                (val & 0xc0000000) == 0x80000000) return false;
+             cp15->control = val;
+             cpuSetVectorAddr(cpu, val & 0x2000 ? 0xffff0000 : 0);
+             mmuSetS(cp15->mmu, (val & 0x100) != 0);
+             mmuSetR(cp15->mmu, (val & 0x200) != 0);
++            icacheArm920Control(cp15->ic, (val & 0x1000) != 0, (val & 0x4000) != 0);
++            mmuSetTTPArm920(cp15->mmu, val & 1 ? cp15->ttb : MMU_DISABLED_TTP);
+             return true;
+         }
+-        if (read || Rx == 15) return false;
+-        if (CRn == 7 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7) && val == 0) {
++        if (CRm == 0 && op2 == 0) {
++            if (CRn == 2) {
++                if (read) cpuSetReg(cpu, Rx, cp15->ttb);
++                else {
++                    if (val & 0x3fff) return false;
++                    cp15->ttb = val;
++                    if (cp15->control & 1) mmuSetTTPArm920(cp15->mmu, val);
++                }
++                return true;
++            }
++            if (CRn == 3) {
++                if (read) cpuSetReg(cpu, Rx, mmuGetDomainCfg(cp15->mmu));
++                else mmuSetDomainCfg(cp15->mmu, val);
++                return true;
++            }
++            if (CRn == 5 || CRn == 6) {
++                auto& reg = CRn == 5 ? cp15->FSR : cp15->FAR;
++                if (read) cpuSetReg(cpu, Rx, reg);
++                else reg = val;
++                return true;
++            }
++            if (CRn == 13) {
++                if (read) cpuSetReg(cpu, Rx, cpuGetPid(cpu));
++                else if (val == 0) cpuSetPid(cpu, 0);
++                else return false;  // Nonzero FCSE needs both instruction and data paths.
++                return true;
++            }
++        }
++        if (read) return false;
++        if (CRn == 7 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
+             if (CRm != 6) icacheInvalGuest(cp15->ic);
+             return true;
+         }
+-        if (CRn == 7 && CRm == 10 && op2 == 4 && val == 0) return true;
+-        if (CRn == 8 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7) && val == 0) {
++        if (CRn == 7 && CRm == 5 && op2 == 1) {
++            icacheInvalAddr(cp15->ic, val);
++            return true;
++        }
++        if (CRn == 7 && CRm == 10 && op2 == 4) return true;
++        if (CRn == 8 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
+             mmuTlbFlush(cp15->mmu);
+             return true;
+         }
+@@ -401,6 +442,10 @@ void cp15MMUConfigureArm920Bootstrap(struct ArmCP15MMU* cp15) {
+     cp15->arm920Bootstrap = true;
+     cp15->control = 0x78;  // DDI0151C table 2-10, assuming VINITHI low.
+     cp15->mmuSwitchCy = 0;
++    cp15->ttb = 0;
++    cp15->FSR = cp15->FAR = 0;
++    cpuClearSlowPath(cp15->cpu, SLOW_PATH_REASON_CP15);
++    icacheConfigureArm920(cp15->ic);
+     cpuSetVectorAddr(cp15->cpu, 0);
+     cpuSetPid(cp15->cpu, 0);
+     mmuSetS(cp15->mmu, false);
+@@ -440,6 +485,9 @@ void cp15MMULoad(struct ArmCP15MMU* cp15, T& loader) {
+         return;
+     }
+ 
++    if (cp15->arm920Bootstrap)
++        icacheArm920Control(cp15->ic, (cp15->control & 0x1000) != 0, (cp15->control & 0x4000) != 0);
++
+     if (cp15->mmuSwitchCy > 0)
+         cpuSetSlowPath(cp15->cpu, SLOW_PATH_REASON_CP15);
+     else
+diff --git a/src/uarm/uarm/icache.cpp b/src/uarm/uarm/icache.cpp
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -9,6 +9,73 @@
+ #include "CPU.h"
+ #include "cputil.h"
+ 
++void icacheConfigureArm920(struct icache* ic) {
++    ic->arm920 = true;
++    ic->arm920Enabled = false;
++    ic->arm920RoundRobin = false;
++    ic->arm920Random = 1;
++    std::memset(ic->arm920Victim, 0, sizeof(ic->arm920Victim));
++}
++
++void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin) {
++    if (ic->arm920Enabled != enabled) {
++        ic->epoch++;
++#ifdef FROND_DYNARMIC
++        if (ic->invalHook) ic->invalHook(ic->invalHookCtx, 0, 0, false);
++#endif
++    }
++    ic->arm920Enabled = enabled;
++    ic->arm920RoundRobin = roundRobin;
++}
++
++bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
++                      uint_fast8_t* fsr, uint32_t* word) {
++    const auto r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
++    if (!MMU_TRANSLATE_RESULT_OK(r)) {
++        *fsr = MMU_TRANSLATE_RESULT_FSR(r);
++        return false;
++    }
++    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
++    const bool cached = ic->arm920Enabled &&
++                        (!mmuIsOn(ic->memorySystem.mmu) || MMU_TRANSLATE_RESULT_CACHEABLE(r));
++    if (!cached) {
++        if (memInstructionFetch<4>(ic->mem, pa, word)) return true;
++        *fsr = 8;  // External abort on an instruction access.
++        return false;
++    }
++    const unsigned segment = (va >> 5) & 7;
++    for (auto& line : ic->arm920Lines[segment]) {
++        if (line.valid && line.base == maskLine(va)) {
++            *word = line.words[(va & 31) / 4];
++            return true;
++        }
++    }
++    uint32_t words[8];
++    for (unsigned i = 0; i < 8; ++i) {
++        if (!memInstructionFetch<4>(ic->mem, maskLine(pa) + i * 4, words + i)) {
++            *fsr = 8;
++            return false;
++        }
++    }
++    unsigned victim;
++    if (ic->arm920RoundRobin) victim = ic->arm920Victim[segment]++ & 63;
++    else {
++        // A repeatable pseudo-random victim, without a claim about hardware cycle timing.
++        ic->arm920Random = ic->arm920Random * 1664525u + 1013904223u;
++        victim = (ic->arm920Random >> 24) & 63;
++    }
++    auto& line = ic->arm920Lines[segment][victim];
++#ifdef FROND_DYNARMIC
++    if (line.valid && ic->invalHook) ic->invalHook(ic->invalHookCtx, line.base, 32, true);
++#endif
++    line.base = maskLine(va);
++    std::memcpy(line.words, words, sizeof(words));
++    line.valid = true;
++    ic->epoch++;
++    *word = words[(va & 31) / 4];
++    return true;
++}
++
+ void icacheSetXscale(struct icache* ic, bool xscale) { ic->xscale = xscale; }
+ 
+ void icacheGetFetchState(struct icache* ic, uint32_t* state) {
+@@ -128,6 +195,8 @@ static void icacheInvalWhole(struct icache* ic, bool guest) {
+ #else
+     (void)guest;
+ #endif
++    for (auto& segment : ic->arm920Lines)
++        for (auto& line : segment) line.valid = false;
+     ic->nextFetchBuffer = 0;
+     for (auto& buffer : ic->fetchBuffers) {
+         buffer.base = 0xffffffff;
+@@ -200,6 +269,12 @@ void icacheInvalAddr(struct icache* ic, uint32_t va) {
+             buffer.host = nullptr;
+ #endif
+         }
++    if (ic->arm920) {
++        for (auto& line : ic->arm920Lines[(va >> 5) & 7])
++            if (line.valid && line.base == maskLine(va)) line.valid = false;
++        ic->epoch++;
++        return;
++    }
+     struct icacheline* line = ic->cache + calculateIndex(va);
+ 
+     if (line->revision != ic->revision || line->tag != calculateTag(va)) return;
+@@ -242,6 +317,12 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t*
+         return false;
+     }
+ 
++    if (ic->arm920) {
++        uint32_t word;
++        if (!icacheArm920Word(ic, va & ~3u, privileged, fsrP, &word)) return false;
++        icacheDecodeFetch<msys, sz>(word, va, instr, decoded);
++        return true;
++    }
+     const uint32_t key = icacheFetchKey(ic, privileged);
+ 
+     // A buffer hit precedes translation. Enabling the MMU does not discard
+diff --git a/src/uarm/uarm/icache.h b/src/uarm/uarm/icache.h
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -19,6 +19,10 @@ struct icache* icacheInit(struct ArmMem* mem, struct ArmMpu* mpu);
+ 
+ // XScale has two 32-byte fetch buffers even when instruction caching is disabled.
+ constexpr unsigned ICACHE_FETCH_STATE_WORDS = 19;
++void icacheConfigureArm920(struct icache* ic);
++void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin);
++bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
++                      uint_fast8_t* fsr, uint32_t* word);
+ void icacheSetXscale(struct icache* ic, bool xscale);
+ void icacheGetFetchState(struct icache* ic, uint32_t* state);
+ bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
+diff --git a/src/uarm/uarm/icache_internal.h b/src/uarm/uarm/icache_internal.h
+--- a/src/uarm/uarm/icache_internal.h
++++ b/src/uarm/uarm/icache_internal.h
+@@ -65,6 +65,14 @@ struct icache {
+     // Moves on when the MMU's TLB, domains, S or R change (mmuSetPermHook). Never 0.
+     uint32_t permGen;
+     bool xscale;
++    bool arm920, arm920Enabled, arm920RoundRobin;
++    uint32_t arm920Random;
++    uint8_t arm920Victim[8];
++    struct {
++        uint32_t base;
++        uint32_t words[8];
++        bool valid;
++    } arm920Lines[8][64];
+     uint32_t nextFetchBuffer;
+     struct {
+         uint32_t base;
+@@ -100,7 +108,7 @@ static inline uint32_t icacheFetchKey(const struct icache* ic, bool privileged)
+ template <int size>
+ static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint32_t key,
+                                            uint32_t& instr, uint32_t& decoded) {
+-    if (va & (size - 1)) return false;
++    if (ic->arm920 || (va & (size - 1))) return false;
+     const auto* line = ic->cache + calculateIndex(va);
+     if (line->revision != ic->revision || line->tag != calculateTag(va) || line->fetchKey != key)
+         return false;
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -135,15 +135,16 @@ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
+         auto& t = p->result.trace;
+         t = {step, cpuGetRegisters(p->cpu)[15], 0,
+              cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0};
+-        const auto* bytes = p->resolve(t.pc, 4);
+-        if (!bytes) {
+-            p->result.stop = Imx1ProbeStop::unsupportedRead;
+-            p->result.address = t.pc;
+-            p->result.size = 4;
++        uint_fast8_t fsr = 0;
++        if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
++            if (!p->failed) {
++                p->result.stop = Imx1ProbeStop::exception;
++                p->result.address = t.pc;
++                p->result.value = fsr;
++                p->result.size = 4;
++            }
+             break;
+         }
+-        t.instruction = uint32_t(bytes[0]) | uint32_t(bytes[1]) << 8 |
+-                        uint32_t(bytes[2]) << 16 | uint32_t(bytes[3]) << 24;
+         if ((t.instruction & 0x0f100f10) == 0x0e000f10) {
+             const unsigned source = (t.instruction >> 12) & 15;
+             t.operand = source == 15 ? t.pc + 8 : cpuGetRegisters(p->cpu)[source];

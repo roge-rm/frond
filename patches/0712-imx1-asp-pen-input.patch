@@ -1,0 +1,320 @@
+--- a/src/uarm/uarm/imx1_asp.cpp
++++ b/src/uarm/uarm/imx1_asp.cpp
+@@ -30,9 +30,14 @@
+         case 0x00215014: reg = &sampleRate; mask = 0x7fff; break;
+         case 0x00215018: reg = &interrupts; mask = 0x473; break;
+         case 0x0021501c:
+-            // W1C PUIS/PEN remain clear in the fixed inactive detector scenario.
+-            if (write) { if (value & 0x80) overflow = false; }
+-            else value = (overflow ? 0x80u : 0) | (count == 12 ? 2u : 0) | (count ? 1u : 0);
++            // Asserted level contact re-latches PEN in this functional policy.
++            if (write) {
++                if (value & 0x80) overflow = false;
++                if (value & 0x40) pen = false;
++                if (value & 0x400) penUp = false;
++                refreshPen();
++            }
++            else value = (pen ? 0x40u : 0) | (penUp ? 0x400u : 0) | (overflow ? 0x80u : 0) | (count == 12 ? 2u : 0) | (count ? 1u : 0);
+             return Imx1AspAccess::ok;
+         case 0x0021502c: reg = &divider; mask = 0x1f; break;
+         case 0x00215030: reg = &compare; mask = 0xfffff; break;
+@@ -46,64 +51,114 @@
+     if (address == 0x00215010) {
+         if (written & (1u << 23)) {
+             // Table 15-7 specifies complete reset and self-clear, without a cycle count.
++            const auto inputs = penInputs;
+             *this = Imx1Asp(px1HighFromReset, uSampleKnown, uSample);
++            penInputs = inputs;
+             return Imx1AspAccess::ok;
+         }
+         // PADE must be set after the other control fields (table 15-7).
+         if (!(control & 2) && (written & 2) && ((control ^ written) & ~2u))
+             return Imx1AspAccess::sideEffect;
+-        if (samplingRequested(written, divider) && !qualifiedU(written, sampleRate))
++        if (samplingRequested(written, divider) && !qualifiedSampling(written, sampleRate))
+             return Imx1AspAccess::externalInput;
+-        // An admitted manual conversion retains its input and configuration until completion.
++        // Active conversions retain their configuration; only CLKEN can pause them.
+         if ((control & 2) && (written & 2) && ((written ^ control) & ~(1u << 25)) &&
+             (remaining || (written & 0x3000)))
+             return Imx1AspAccess::sideEffect;
+     }
+     if (address == 0x00215014 && remaining && written != sampleRate) return Imx1AspAccess::sideEffect;
+     if (address == 0x0021502c) {
+-        if (samplingRequested(control, written) && !qualifiedU(control, sampleRate))
++        if (samplingRequested(control, written) && !qualifiedSampling(control, sampleRate))
+             return Imx1AspAccess::externalInput;
+         if (remaining && written != divider) return Imx1AspAccess::sideEffect;
+     }
+-    // Only held-high, active-low level detection proves no pending event.
+-    // Edge seeding and asserted-level timing are outside this subset.
+-    if (address == 0x00215018 && (written & 0x10) && !inactivePenDetection(written))
++    // Edge and active-high detection remain unqualified.
++    if (address == 0x00215018 && (written & 0x10) && !qualifiedPenDetection(written))
+         return Imx1AspAccess::externalInput;
+     if (address == 0x00215010) {
+         if (!(written & 2)) {
+             remaining = phase = count = readPointer = writePointer = 0;
+-            armed = false;
++            armed = idle = false;
++            slot = 0;
+         } else if (!(control & 2)) armed = true;
+     }
+     // INT is W1C; rewriting comparison settings does not clear a latched event.
+     *reg = address == 0x00215030 ? (written & ~0x80000u) | ((compare & ~written) & 0x80000u) : written;
+     if (armed && samplingRequested(control, divider)) {
+-        // One conversion uses DSCNT setup periods plus DMCNT+1 filter periods (15.4.2).
+-        remaining = 1260u * ((sampleRate & 15) + ((sampleRate >> 12) & 7) + 1);
+-        phase = 0;
+-        armed = false;
++        phase = slot = 0;
++        idle = armed = false;
++        startSlot();
+     }
++    refreshPen();
+     return Imx1AspAccess::ok;
++}
++
++Imx1AspAccess Imx1Asp::replacePenInputs(const Imx1AspPenInputs& inputs) {
++    auto next = *this;
++    next.penInputs = inputs;
++    if ((next.interrupts & 0x10) && !next.qualifiedPenDetection(next.interrupts))
++        return Imx1AspAccess::externalInput;
++    if ((next.remaining || next.armed) && next.automatic() &&
++        !next.qualifiedAuto(next.control, next.sampleRate)) return Imx1AspAccess::externalInput;
++    next.refreshPen();
++    *this = next;
++    return Imx1AspAccess::ok;
++}
++
++uint64_t Imx1Asp::futureInterrupts() const {
++    if (!remaining || !clockDivider()) return 0;
++    uint64_t sources = 0;
++    if (interrupts & 3) sources |= uint64_t(1) << 33;
++    const auto selected = (compare >> 16) & 3;
++    if (selected && (automatic() ? (selected < 3 || !calibration()) : selected == 3))
++        sources |= uint64_t(1) << 9;
++    if (automatic() && !calibration() && (interrupts & 0x400)) sources |= uint64_t(1) << 5;
++    return sources;
++}
++
++void Imx1Asp::startSlot() {
++    remaining = 1260u * ((sampleRate & 15) + ((sampleRate >> 12) & 7) + 1);
++    captured = automatic() ? (calibration() ? penInputs.reference[slot] : penInputs.normal[slot]) : uSample;
++    capturedUp = automatic() && !calibration() && slot == 3 && !contactDown();
+ }
+ 
+ void Imx1Asp::advance(uint64_t hclkCycles) {
+     const auto divide = clockDivider();
+     if (!remaining || !divide) return;
+-    const uint64_t clocks = hclkCycles / divide + (hclkCycles % divide + phase) / divide;
++    uint64_t clocks = hclkCycles / divide + (hclkCycles % divide + phase) / divide;
+     phase = (hclkCycles % divide + phase) % divide;
+-    if (clocks < remaining) { remaining -= clocks; return; }
+-    remaining = phase = 0;
+-    complete();
++    while (remaining && clocks >= remaining) {
++        clocks -= remaining;
++        remaining = 0;
++        if (idle) {
++            idle = false;
++            startSlot();
++        } else {
++            complete();
++            if (automatic()) {
++                if (++slot == (calibration() ? 3u : 4u)) {
++                    slot = 0;
++                    idle = true;
++                    remaining = 1260u * ((sampleRate >> 4) & 63);
++                    if (!remaining) { idle = false; startSlot(); }
++                } else startSlot();
++            }
++        }
++    }
++    if (remaining) remaining -= clocks;
++    else phase = 0;
+ }
+ 
+ void Imx1Asp::complete() {
+     if (count == fifo.size()) {
+         overflow = true;
+-        readPointer = (readPointer + 1) % fifo.size();
++        // Independent physical ring pointers are a virtual overrun policy.
+     } else ++count;
+-    fifo[writePointer] = uSample;
++    fifo[writePointer] = captured;
++    if (capturedUp) penUp = true;
+     writePointer = (writePointer + 1) % fifo.size();
+     const auto threshold = compare & 0xffff;
+-    if ((compare & 0x30000) == 0x30000 &&
+-        ((compare & 0x40000) ? uSample > threshold : uSample < threshold)) compare |= 0x80000;
++    const auto channel = automatic() ? slot : 3u;
++    if (channel && ((compare >> 16) & 3) == channel &&
++        ((compare & 0x40000) ? captured > threshold : captured < threshold)) compare |= 0x80000;
+ }
+--- a/src/uarm/uarm/imx1_asp.h
++++ b/src/uarm/uarm/imx1_asp.h
+@@ -6,25 +6,40 @@
+ 
+ enum class Imx1AspAccess { ok, unmapped, width, reservedBits, sideEffect, externalInput };
+ 
+-// MC9328MX1RM chapter 15. Fixed PX1 and explicit post-filter manual U stimulus.
++// Explicit post-filter words, with no assigned voltage or calibration coefficients.
++struct Imx1AspPenInputs {
++    bool contactKnown = false, contactDown = false;
++    bool normalKnown = false, referenceKnown = false;
++    std::array<uint16_t, 4> normal{};  // Z, X, Y, U
++    std::array<uint16_t, 3> reference{};  // ACAL Z, X, Y
++};
++
++// MC9328MX1RM chapter 15. Qualified manual U and native pen sampling modes.
+ class Imx1Asp {
+    public:
+     explicit Imx1Asp(bool px1HighFromReset = false, bool uSampleKnown = false, uint16_t uSample = 0)
+-        : px1HighFromReset(px1HighFromReset), uSampleKnown(uSampleKnown), uSample(uSample) {}
++        : px1HighFromReset(px1HighFromReset), uSampleKnown(uSampleKnown), uSample(uSample) {
++        penInputs.contactKnown = px1HighFromReset;
++    }
++    // Execution-thread transaction. In-flight slots keep their captured input.
++    Imx1AspAccess replacePenInputs(const Imx1AspPenInputs& inputs);
+     void advance(uint64_t hclkCycles);
++    uint64_t futureInterrupts() const;
+     bool converting() const { return remaining != 0; }
+     Imx1AspAccess access(uint32_t address, uint32_t size, bool write, uint32_t& value);
+     static const char* registerName(uint32_t address);
+     static constexpr uint64_t interruptSources = (uint64_t(1) << 5) | (uint64_t(1) << 9) |
+                                                 (uint64_t(1) << 33) | (uint64_t(1) << 46);
+-    // Admitted pen detection has held-high PX1 and active-low level polarity.
++    // Only known active-low level contact detection is admitted.
+     uint64_t inactiveInterrupts() const {
+         uint64_t known = interruptSources & ~(uint64_t(1) << 46);
+-        if (!(interrupts & 0x10) || inactivePenDetection(interrupts)) known |= uint64_t(1) << 46;
++        if (!(interrupts & 0x10) || qualifiedPenDetection(interrupts)) known |= uint64_t(1) << 46;
+         return known & ~assertedInterrupts();
+     }
+     uint64_t assertedInterrupts() const {
+         uint64_t requests = 0;
++        if ((interrupts & 0x10) && pen) requests |= uint64_t(1) << 46;
++        if ((interrupts & 0x400) && penUp) requests |= uint64_t(1) << 5;
+         if ((compare & 0x30000) && (compare & 0x80000)) requests |= uint64_t(1) << 9;
+         if ((count && (interrupts & 1)) || (count == 12 && (interrupts & 2))) requests |= uint64_t(1) << 33;
+         return requests;
+@@ -32,22 +47,43 @@
+     unsigned clockDivider() const { return (control & (1u << 25)) && divider ? divider + 1 : 0; }
+ 
+    private:
+-    // Fixed before reset; software reset does not change the external input.
++    // Software reset preserves external inputs.
+     bool px1HighFromReset, uSampleKnown;
+     uint16_t uSample;
+     std::array<uint16_t, 12> fifo{};
+     unsigned readPointer = 0, writePointer = 0, count = 0;
+-    bool overflow = false, armed = false;
++    Imx1AspPenInputs penInputs{};
++    bool overflow = false, armed = false, pen = false, penUp = false;
++    bool idle = false, capturedUp = false;
++    unsigned slot = 0;
++    uint16_t captured = 0;
+     uint32_t remaining = 0;
+     unsigned phase = 0;
+     bool qualifiedU(uint32_t nextControl, uint32_t nextRate) const {
+         return uSampleKnown && (nextControl & 0x3001) == 0x3001 &&
+                !(nextControl & ((1u << 21) | (1u << 14))) && (nextRate & 0xc00) == 0x800;
+     }
++    bool qualifiedAuto(uint32_t nextControl, uint32_t nextRate) const {
++        const auto mode = nextControl & ~((1u << 25) | 2u);
++        return nextRate == 0x3814 &&
++            ((mode == 0x0400d201 && penInputs.referenceKnown) ||
++             (mode == 0x0000e001 && penInputs.normalKnown && contactKnown()));
++    }
++    bool qualifiedSampling(uint32_t nextControl, uint32_t nextRate) const {
++        return qualifiedU(nextControl, nextRate) || qualifiedAuto(nextControl, nextRate);
++    }
++    bool automatic() const { return control & 0x4000; }
++    bool calibration() const { return control & (1u << 26); }
++    bool contactKnown() const { return penInputs.contactKnown; }
++    bool contactDown() const { return penInputs.contactKnown && penInputs.contactDown; }
++    bool qualifiedPenDetection(uint32_t nextInterrupts) const {
++        return contactKnown() && !(nextInterrupts & 0x60);
++    }
++    void refreshPen() {
++        if ((interrupts & 0x10) && qualifiedPenDetection(interrupts) && contactDown()) pen = true;
++    }
++    void startSlot();
+     void complete();
+-    bool inactivePenDetection(uint32_t nextInterrupts) const {
+-        return px1HighFromReset && !(nextInterrupts & 0x60);
+-    }
+     uint32_t control = 0x02000000, sampleRate = 0, compare = 0, interrupts = 0, divider = 0;
+     bool samplingRequested(uint32_t nextControl, uint32_t nextDivider) const {
+         return (nextControl & (1u << 25)) && nextDivider && (nextControl & 2) && (nextControl & 0x3000);
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -21,6 +21,8 @@
+           cs5Configuration(config.graphicsProfile, config.graphicsVirtualA4SourceOver),
+           graphicsMemory(config.graphicsProfile == Imx1GraphicsProfile::virtual5744Compatible8MiB ?
+                          new Imx1GraphicsMemory() : nullptr) {
++        if (config.aspPenInputs.contactKnown || config.aspPenInputs.normalKnown || config.aspPenInputs.referenceKnown)
++            peripherals.replaceAspPenInputs(config.aspPenInputs);
+         peripherals.setLcdcContrastOnly(config.lcdcContrastOnly);
+         peripherals.setMmcsdEmptySlot(config.mmcsdEmptySlot);
+         if (config.graphicsRawMode1Known) cs5Configuration.setAcquisitionMode1Input(config.graphicsRawMode1);
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -68,6 +68,7 @@
+     Imx1ProbeCs4Observer cs4Observer = nullptr;
+     void* cs4Context = nullptr;
+     bool aspPx1HighFromReset = false;
++    Imx1AspPenInputs aspPenInputs{};
+     bool aspUSampleKnown = false;
+     uint16_t aspUSample = 0;
+     bool assumeI2cSingleMaster = false;
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -218,6 +218,25 @@
+     gpio = next;
+     return Imx1BootstrapAccess::ok;
+ }
++Imx1BootstrapAccess Imx1Bootstrap::replaceAspPenInputs(const Imx1AspPenInputs& inputs, bool commit) {
++    auto next = asp;
++    if (next.replacePenInputs(inputs) != Imx1AspAccess::ok) return Imx1BootstrapAccess::externalInput;
++    auto controller = aitc;
++    setInterruptInputs(controller, i2c, rtc, timer1, timer2, next, pwm, gpio);
++    const auto gate = interruptGate(controller);
++    if (gate != Imx1BootstrapAccess::ok) return gate;
++    if (commit) asp = next;
++    return Imx1BootstrapAccess::ok;
++}
++
++bool Imx1Bootstrap::aspPenWakePossible(const Imx1AspPenInputs& inputs) const {
++    auto next = asp;
++    if (next.replacePenInputs(inputs) != Imx1AspAccess::ok) return false;
++    auto controller = aitc;
++    setInterruptInputs(controller, i2c, rtc, timer1, timer2, next, pwm, gpio);
++    return controller.irq() == Imx1AitcLine::asserted || controller.fiq() == Imx1AitcLine::asserted;
++}
++
+ Imx1BootstrapAccess Imx1Bootstrap::transitionGpioInputs(const uint32_t (&values)[4], const uint32_t (&masks)[4]) {
+     auto next = gpio;
+     for (unsigned port = 0; port < 4; ++port) {
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -32,6 +32,9 @@
+    public:
+     explicit Imx1Bootstrap(bool aspPx1HighFromReset = false, bool aspUSampleKnown = false, uint16_t aspUSample = 0)
+         : asp(aspPx1HighFromReset, aspUSampleKnown, aspUSample) {}
++    // Atomic execution-thread contact/sample replacement, with AITC preview.
++    Imx1BootstrapAccess replaceAspPenInputs(const Imx1AspPenInputs& inputs, bool commit = true);
++    bool aspPenWakePossible(const Imx1AspPenInputs& inputs) const;
+     void setMmcsdEmptySlot(bool enabled) { mmcsd.setEmptySlot(enabled); }
+     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
+     uint32_t lcdcContrastPhase() const { return contrastPhase; }
+@@ -78,7 +81,7 @@
+     }
+     bool idleWakePossible() const {
+         auto candidate = aitc;
+-        uint64_t sources = rtc.futureInterrupts() |
++        uint64_t sources = rtc.futureInterrupts() | asp.futureInterrupts() |
+             (mmcsd.canInterrupt() ? uint64_t(1) << 35 : 0) |
+             (timer1.canInterrupt() ? uint64_t(1) << 59 : 0) |
+             (timer2.canInterrupt() ? uint64_t(1) << 58 : 0);

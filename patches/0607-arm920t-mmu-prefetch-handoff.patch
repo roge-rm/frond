@@ -1,0 +1,143 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -250,6 +250,7 @@
+ 
+ static FORCE_INLINE void cpuPrvSetPC(struct ArmCpu *cpu, uint32_t pc)  // with interworking
+ {
++    if (cpu->model == ArmCpuModel::arm920t) icacheArm920Branch(cpu->ic);
+     const bool wasT = cpu->T;
+ 
+     cpu->regs[REG_NO_PC] = pc & ~1UL;
+@@ -430,6 +431,7 @@
+ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
+                             uint_fast8_t newLowBits)  // enters arm mode
+ {
++    if (cpu->model == ArmCpuModel::arm920t) icacheArm920Branch(cpu->ic);
+ #ifndef __EMSCRIPTEN__
+     if (cpu->nativeCallDepth && ((newLowBits & 0x1f) == ARM_SR_MODE_ABT ||
+                                   (newLowBits & 0x1f) == ARM_SR_MODE_UND))
+@@ -1989,6 +1991,7 @@
+     else if (destPc) {  // copy SPSR to CPSR. we allow in user
+                         // mode too - allowed and faster
+ 
++        if (cpu->model == ArmCpuModel::arm920t) icacheArm920Branch(cpu->ic);
+         sr = cpu->SPSR;
+         cpuPrvSetPSRlo8(cpu, sr);
+         cpuPrvSetPSRhi8(cpu, sr);
+@@ -2213,6 +2216,7 @@
+ 
+     if (mode & ARM_MODE_4_WBK) cpuPrvSetRegNotPC(cpu, reg, ea);
+     if (copySPSR) {
++        if (cpu->model == ArmCpuModel::arm920t) icacheArm920Branch(cpu->ic);
+         sr = cpu->SPSR;
+         cpuPrvSetPSRlo8(cpu, sr);
+         cpuPrvSetPSRhi8(cpu, sr);
+@@ -4669,6 +4673,11 @@
+     static bool faultReported = false;
+ 
+     while (acc < cycles) {
++        if (cpu->model == ArmCpuModel::arm920t && icacheArm920ContinuationPending(cpu->ic)) {
++            cpuPrvJitInterpretOne<ARM_MEMORY_SYSTEM_MMU>(cpu, acc);
++            if (cpu->slowPath) break;
++            continue;
++        }
+         uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
+         int stop;
+         acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
+--- a/src/uarm/uarm/cp15mmu.cpp
++++ b/src/uarm/uarm/cp15mmu.cpp
+@@ -81,6 +81,9 @@
+             // Data caching, big endian and the reserved clock mode remain unsupported.
+             if ((val & 0x78) != 0x78 || (val & ~0xc000737bu) ||
+                 (val & 0xc0000000) == 0x80000000) return false;
++            if ((val ^ cp15->control) & 1)
++                icacheArm920PrepareMmuSwitch(cp15->ic, cpuGetRegisters(cpu)[15],
++                    (cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) & ARM_SR_M) != ARM_SR_MODE_USR);
+             cp15->control = val;
+             cpuSetVectorAddr(cpu, val & 0x2000 ? 0xffff0000 : 0);
+             mmuSetS(cp15->mmu, (val & 0x100) != 0);
+--- a/src/uarm/uarm/icache.h
++++ b/src/uarm/uarm/icache.h
+@@ -23,6 +23,10 @@
+ void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin);
+ bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
+                       uint_fast8_t* fsr, uint32_t* word);
++// DDI0151C 3.9: two prefetched ARM instructions can retain the old MMU mapping.
++void icacheArm920PrepareMmuSwitch(struct icache*, uint32_t nextPc, bool privileged);
++bool icacheArm920ContinuationPending(const struct icache*);
++void icacheArm920Branch(struct icache*);
+ void icacheSetXscale(struct icache* ic, bool xscale);
+ void icacheGetFetchState(struct icache* ic, uint32_t* state);
+ bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
+--- a/src/uarm/uarm/icache.cpp
++++ b/src/uarm/uarm/icache.cpp
+@@ -14,6 +14,7 @@
+     ic->arm920Enabled = false;
+     ic->arm920RoundRobin = false;
+     ic->arm920Random = 1;
++    ic->arm920ContinuationCount = 0;
+     std::memset(ic->arm920Victim, 0, sizeof(ic->arm920Victim));
+ }
+ 
+@@ -30,6 +31,10 @@
+ 
+ bool icacheArm920Word(struct icache* ic, uint32_t va, bool privileged,
+                       uint_fast8_t* fsr, uint32_t* word) {
++    if (ic->arm920ContinuationCount && va == ic->arm920ContinuationPc) {
++        *word = ic->arm920Continuation[0];
++        return true;
++    }
+     const auto r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
+     if (!MMU_TRANSLATE_RESULT_OK(r)) {
+         *fsr = MMU_TRANSLATE_RESULT_FSR(r);
+@@ -75,6 +80,23 @@
+     *word = words[(va & 31) / 4];
+     return true;
+ }
++
++void icacheArm920PrepareMmuSwitch(struct icache* ic, uint32_t nextPc, bool privileged) {
++    uint32_t words[2];
++    uint_fast8_t fsr = 0;
++    unsigned count = 0;
++    for (; count < 2; ++count)
++        if (!icacheArm920Word(ic, nextPc + count * 4, privileged, &fsr, words + count)) break;
++    ic->arm920ContinuationPc = nextPc;
++    std::memcpy(ic->arm920Continuation, words, count * sizeof(uint32_t));
++    ic->arm920ContinuationCount = count;
++}
++
++bool icacheArm920ContinuationPending(const struct icache* ic) {
++    return ic->arm920 && ic->arm920ContinuationCount;
++}
++
++void icacheArm920Branch(struct icache* ic) { ic->arm920ContinuationCount = 0; }
+ 
+ void icacheSetXscale(struct icache* ic, bool xscale) { ic->xscale = xscale; }
+ 
+@@ -319,7 +341,15 @@
+ 
+     if (ic->arm920) {
+         uint32_t word;
++        if (ic->arm920ContinuationCount && (va & ~3u) != ic->arm920ContinuationPc)
++            icacheArm920Branch(ic);
+         if (!icacheArm920Word(ic, va & ~3u, privileged, fsrP, &word)) return false;
++        if (ic->arm920ContinuationCount) {
++            --ic->arm920ContinuationCount;
++            if (ic->arm920ContinuationCount)
++                ic->arm920Continuation[0] = ic->arm920Continuation[1];
++            ic->arm920ContinuationPc += 4;
++        }
+         icacheDecodeFetch<msys, sz>(word, va, instr, decoded);
+         return true;
+     }
+--- a/src/uarm/uarm/icache_internal.h
++++ b/src/uarm/uarm/icache_internal.h
+@@ -66,6 +66,8 @@
+     uint32_t permGen;
+     bool xscale;
+     bool arm920, arm920Enabled, arm920RoundRobin;
++    uint32_t arm920ContinuationPc, arm920Continuation[2];
++    uint8_t arm920ContinuationCount;
+     uint32_t arm920Random;
+     uint8_t arm920Victim[8];
+     struct {

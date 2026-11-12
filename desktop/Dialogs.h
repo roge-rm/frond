@@ -41,6 +41,8 @@ class MachineSettings : public QWidget {
     QComboBox* bluetooth;
     QLineEdit* bluetoothSocket;
     void showPeripherals(bool shown);
+    // A new machine: the Engine follows the chosen device's default until it is changed by hand.
+    void setNewMachine();
  private:
     QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel, *bluetoothLabel;
     QGroupBox* peripherals;
@@ -48,6 +50,7 @@ class MachineSettings : public QWidget {
     frondFirmware::Device device{frondFirmware::Device::automatic};
     QWidget* speedGroup;
     bool automaticScale;
+    bool automaticEngine{false};
     frondSessions::Preferences originalPreferences;
 };
 

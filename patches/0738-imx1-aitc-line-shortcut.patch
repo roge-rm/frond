@@ -1,0 +1,39 @@
+--- a/src/uarm/uarm/imx1_aitc.cpp
++++ b/src/uarm/uarm/imx1_aitc.cpp
+@@ -14,6 +14,8 @@
+ }
+ 
+ uint64_t Imx1Aitc::normalEligible() const {
++    // NIMASK 31 masks nothing.
++    if (mask == 31) return ~uint64_t(0);
+     uint64_t result = 0;
+     for (unsigned source = 0; source < 64; ++source)
+         if (mask == 31 || level(source) > mask) result |= uint64_t(1) << source;
+@@ -29,7 +31,12 @@
+ }
+ 
+ Imx1AitcLine Imx1Aitc::irq() const {
+-    const auto eligible = normalEligible();
++    // Only the pending and unknown sources can move the line, so the mask is worked out for those alone.
++    uint64_t eligible = 0;
++    for (uint64_t left = pending(false) | unknown(false); left; left &= left - 1) {
++        const unsigned source = __builtin_ctzll(left);
++        if (mask == 31 || level(source) > mask) eligible |= uint64_t(1) << source;
++    }
+     return pending(false) & eligible ? Imx1AitcLine::asserted :
+            unknown(false) & eligible ? Imx1AitcLine::unknown : Imx1AitcLine::clear;
+ }
+--- a/src/uarm/uarm/imx1_aitc.h
++++ b/src/uarm/uarm/imx1_aitc.h
+@@ -18,7 +18,10 @@
+         inputs = asserted & known & ~unusedInputs;
+         knownInputs = known | unusedInputs;
+     }
+-    bool interruptInputsKnown() const { return !(unknown(false) & normalEligible()) && !unknown(true); }
++    bool interruptInputsKnown() const {
++        const uint64_t normal = unknown(false);
++        return !(normal && (normal & normalEligible())) && !unknown(true);
++    }
+     Imx1AitcLine irq() const;
+     Imx1AitcLine fiq() const;
+     Imx1AitcPending pendingState() const {

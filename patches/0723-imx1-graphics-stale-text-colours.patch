@@ -1,0 +1,52 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -232,7 +232,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 722;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 723;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -100,11 +100,9 @@
+                     if (control != 0x01000005 || sourceKey > 0xffff || destinationKey) return A::sideEffect;
+                 }
+                 if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
+-                // The keyed producer sends 48f with every copy and never 490, which the 1bpp text
+-                // producer leaves at its own foreground. A colour source copy doesn't read it.
+-                if (left || !known[0x48f] || values[0x48f] != 0xffffffff ||
+-                    (plain && values[0x490] != 0xffffffff))
+-                    return A::sideEffect;
++                // Both copy producers send 48f with every copy and never 490 or 491, which the 1bpp
++                // text producer leaves at its own colours. A colour source copy reads neither.
++                if (left || !known[0x48f] || values[0x48f] != 0xffffffff) return A::sideEffect;
+                 Fill fill{};
+                 const auto status = rectangle(configuration, eim, memory, first, second, fill, false, true, false, plain);
+                 if (status != A::ok) return status;
+@@ -314,7 +312,7 @@
+         if (copy && (gmc != (plain ? 0x5598b4dfu : 0x4598b4dfu) || values[0x4b2] != 0x00cc0a00 ||
+                      values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f ||
+                      values[0x471] != 0x1fff1fff)) return A::sideEffect;
+-        if (plain && (values[0x491] || values[0x4b3] != 0xffffffff || values[0x41d] ||
++        if (plain && (values[0x4b3] != 0xffffffff || values[0x41d] ||
+                       values[0x41e] || values[0x30f] != 0x20)) return A::sideEffect;
+         // Only native solid PATCOPY in RGB565, without transforms or blending.
+         if (!host && !copy && (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
+@@ -322,11 +320,12 @@
+             !(gmc & (1u << 30)) || !(gmc & (1u << 15)) || (gmc & 0x80000000u) || values[0x488] != 4 ||
+             (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0])) return A::sideEffect;
+         if (values[0x488] != (a4 ? 0x00080004u : 4u) || values[0x4a1] || values[0x4a0]) return A::sideEffect;
++        // The A4 producer never sends 490 or 491, which the 1bpp text producer leaves at its own
++        // foreground and background. The policy composes source2 through the mask and reads neither.
+         if (a4 && (gmc != 0xd798d4df || values[0x4b2] != 0x01cc1300 ||
+             values[0x4b1] != 0x40057d04 || values[0x472] != 0x3f || values[0x471] != 0x1fff1fff ||
+             values[0x484] != 0x000f0f0f || !known[0x48f] || values[0x48f] != 0xffffffff ||
+-            values[0x490] != 0xffffffff || values[0x491] || values[0x4b3] != 0xffffffff ||
+-            values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
++            values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
+         const auto datatype = values[0x4b1], mix = values[0x4b2], direction = values[0x472];
+         if (!host && !copy && ((datatype & 15) != 4 || ((datatype >> 8) & 15) != 13 || !(datatype & (1u << 30)) ||
+             (datatype & ~0x4007ff0fu) || ((mix >> 16) & 255) != 0xf0 || (mix & ~0x00ff3f00u) ||

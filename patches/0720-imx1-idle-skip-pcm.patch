@@ -1,0 +1,57 @@
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -60,12 +60,7 @@
+     quiet = std::min(quiet, i2c.idleQuietHclk());
+     quiet = std::min(quiet, asp.idleQuietHclk());
+     if (sysctrl.dmaClockEnabled() && dmaResetClocks) quiet = std::min<uint64_t>(quiet, dmaResetClocks);
+-    // PCM transport steps one clock at a time, except a serial clock that only keeps its phase.
+-    const bool serial = (ssi1Words[0] & 0x100) && (ssi1Words[1] & 0x60) == 0x60 && ssi1Words[3] == 0x6100;
+-    const bool dma = sysctrl.dmaClockEnabled() && !dmaResetClocks && (dmaControl & 1) && dmaPcmActive &&
+-                     dmaChannels[10][4] == 16 && (ssi1Words[0] & 0x100) && !(ssi1Words[6] & 0x10) &&
+-                     (ssi1Words[1] & 0x200);
+-    if (dma || (serial && ((ssi1Words[0] & 0x200) || ssi1Shifting))) return 1;
++    quiet = std::min(quiet, pcmIdleQuietHclk());
+     if (const auto cycles = mmcsd.idleQuietPerclk2())
+         quiet = std::min(quiet, imx1StepsUntilDivided(cycles, cgm.perclk2Divider(), perclk2Phase, bus));
+     for (const auto* timer : {&timer1, &timer2})
+@@ -74,6 +69,30 @@
+     return quiet ? quiet : 1;
+ }
+ 
++// HCLK periods up to and including the one where the PCM DMA can reach the end of its buffer,
++// the only thing the PCM transport does that a waiting CPU can see. advancePcm gives the same
++// state for one call as for the same clocks in single steps, so the words and beats before that
++// need no stop. The count is a lower bound: a beat takes two HCLK, and the eight word FIFO only
++// takes the last one after the serial side has sent the words that don't fit.
++uint64_t Imx1Bootstrap::pcmIdleQuietHclk() const {
++    const bool dma = sysctrl.dmaClockEnabled() && !dmaResetClocks && (dmaControl & 1) && dmaPcmActive &&
++                     dmaChannels[10][4] == 16 && (ssi1Words[0] & 0x100) && !(ssi1Words[6] & 0x10) &&
++                     (ssi1Words[1] & 0x200);
++    if (!dma) return UINT64_MAX;
++    const uint32_t length = dmaChannels[10][2];
++    if (dmaPcmCount >= length || ssi1TxCount > 8) return 1;
++    const uint64_t beats = (uint64_t(length) - dmaPcmCount + 1) / 2;
++    const uint64_t beatPeriod = cgm.busDivider() * 2;
++    uint64_t clocks = (beats - 1) * beatPeriod + beatPeriod - dmaPcmPhase % beatPeriod;
++    const bool serial = (ssi1Words[0] & 0x100) && (ssi1Words[1] & 0x60) == 0x60 && ssi1Words[3] == 0x6100;
++    const uint64_t room = 8 - ssi1TxCount;
++    if (serial && (ssi1Words[0] & 0x200) && beats > room) {
++        const uint64_t wordPeriod = uint64_t(cgm.perclk3Divider()) * 64;
++        clocks = std::max(clocks, (beats - room - 1) * wordPeriod + wordPeriod - ssi1Phase % wordPeriod);
++    }
++    return (clocks + cgm.busDivider() - 1) / cgm.busDivider();
++}
++
+ uint64_t Imx1Bootstrap::finishSystemPllBusStall() {
+     const auto pending = cgm.systemRestartRemaining();
+     if (pending) {
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -233,6 +233,7 @@
+     bool pcmDmaSourceValid(uint32_t address, uint32_t bytes) const;
+     bool pcmDmaConfigurationValid(const uint32_t* channel) const;
+     void pcmDmaBeat();
++    uint64_t pcmIdleQuietHclk() const;
+     void pcmWordBoundary();
+     // Qualified synchronous network transport, without an attached DAC.
+     uint32_t ssi1Words[7] = {0, 0, 0, 0, 0, 0x81, 0};

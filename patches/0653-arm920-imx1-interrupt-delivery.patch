@@ -1,0 +1,261 @@
+diff --git a/src/uarm/uarm/CPU.cpp b/src/uarm/uarm/CPU.cpp
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -329,7 +329,7 @@
+ }
+ 
+ static void cpuUpdateSlowPath(struct ArmCpu *cpu) {
+-    if (cpu->waitingEventsTotal && !cpu->F) {
++    if ((cpu->waitingFiqs && !cpu->F) || (cpu->waitingIrqs && !cpu->I)) {
+         cpuSetSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
+     } else {
+         cpuClearSlowPath(cpu, SLOW_PATH_REASON_EVENTS);
+@@ -4770,16 +4770,23 @@
+ }
+ #endif
+ 
++bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
++    if (cpu->waitingFiqs && !cpu->F) {
++        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
++                        ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
++        return true;
++    }
++    if (cpu->waitingIrqs && !cpu->I) {
++        cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_IRQ, cpu->regs[REG_NO_PC] + 4,
++                        ARM_SR_MODE_IRQ | ARM_SR_I);
++        return true;
++    }
++    return false;
++}
++
+ template <int memorySystemKind, bool injected>
+ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
+-    if (cpu->waitingEventsTotal) {
+-        if (cpu->waitingFiqs && !cpu->F)
+-            cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_FIQ, cpu->regs[REG_NO_PC] + 4,
+-                            ARM_SR_MODE_FIQ | ARM_SR_I | ARM_SR_F);
+-        else if (unlikely(cpu->waitingIrqs && !cpu->I))
+-            cpuPrvException(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_IRQ, cpu->regs[REG_NO_PC] + 4,
+-                            ARM_SR_MODE_IRQ | ARM_SR_I);
+-    }
++    cpuProcessPendingInterrupts(cpu);
+ 
+     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+         cp15MMUCycle(cpu->cp15.cp15mmu);
+diff --git a/src/uarm/uarm/CPU.h b/src/uarm/uarm/CPU.h
+--- a/src/uarm/uarm/CPU.h
++++ b/src/uarm/uarm/CPU.h
+@@ -154,6 +154,8 @@
+ uint32_t cpuCyclesInProgress(const ArmCpu* cpu);
+ #endif
+ 
++// Take one unmasked interrupt at this boundary, without fetching or executing an instruction.
++bool cpuProcessPendingInterrupts(struct ArmCpu* cpu);
+ void cpuIrq(struct ArmCpu *cpu, bool fiq, bool raise);  // unraise when acknowledged
+ 
+ uint32_t cpuGetRegExternal(struct ArmCpu *cpu, uint_fast8_t reg);
+diff --git a/src/uarm/uarm/imx1_aitc.h b/src/uarm/uarm/imx1_aitc.h
+--- a/src/uarm/uarm/imx1_aitc.h
++++ b/src/uarm/uarm/imx1_aitc.h
+@@ -18,6 +18,7 @@
+         inputs = asserted & known & ~unusedInputs;
+         knownInputs = known | unusedInputs;
+     }
++    bool interruptInputsKnown() const { return !(unknown(false) & normalEligible()) && !unknown(true); }
+     Imx1AitcLine irq() const;
+     Imx1AitcLine fiq() const;
+     Imx1AitcPending pendingState() const {
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -24,6 +24,14 @@
+     Imx1Cs4Capture cs4Capture;
+     Imx1Cs5Reset cs5Reset;
+     uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
++    bool irqRaised = false, fiqRaised = false;
++    void updateInterrupts() {
++        const auto lines = peripherals.interruptLines();
++        const bool irq = lines.irq == Imx1AitcLine::asserted;
++        const bool fiq = lines.fiq == Imx1AitcLine::asserted;
++        if (irq != irqRaised) { cpuIrq(cpu, false, irq); irqRaised = irq; }
++        if (fiq != fiqRaised) { cpuIrq(cpu, true, fiq); fiqRaised = fiq; }
++    }
+     static void i2cEvent(void* context, const Imx1I2cTransfer& transfer, Imx1I2cResponse response) {
+         auto& p = *static_cast<Probe*>(context);
+         const auto& state = p.peripherals.i2cState();
+@@ -213,6 +221,11 @@
+             return armMode(cpsr & 31) && (cpsr & 31) != 0x10 && (cpsr & 31) != 0x1f &&
+                    armMode(spsr & 31) && !(spsr & ~0xf00000ffu) &&
+                    !(registers[i & 15] & ((spsr & ARM_SR_T) ? 1u : 3u));
++        // DDI0100I A2.6.8/9: IRQ/FIQ return subtracts four from the banked link.
++        if ((i & 0x0fffffff) == 0x025ef004)
++            return armMode(cpsr & 31) && (cpsr & 31) != 0x10 && (cpsr & 31) != 0x1f &&
++                   armMode(spsr & 31) && !(spsr & ~0xf00000ffu) &&
++                   !((registers[14] - 4) & ((spsr & ARM_SR_T) ? 1u : 3u));
+         if ((i & 0x0fff0ff0) == 0x01a00000) return true; // MOV pc, Rm
+         // Aligned ARM linkage stubs and jump tables, without flags.
+         if ((i & 0x0ffffff0) == 0x008ff000) return (i & 15) != 15 && !(registers[i & 15] & 3);
+@@ -289,6 +302,7 @@
+     if (p->options.gpioAInputKnown) p->peripherals.setGpioInput(0, p->options.gpioAInput);
+     if (p->options.gpioBInputKnown) p->peripherals.setGpioInput(1, p->options.gpioBInput);
+     if (p->options.gpioDInputKnown) p->peripherals.setGpioDInput(p->options.gpioDInput);
++    if (p->options.bootstrapPeripherals) p->peripherals.connectCpuInterrupts();
+     p->peripherals.setI2cScenario(p->options.assumeI2cSingleMaster);
+     p->peripherals.setI2cBus(p->options.i2cBus);
+     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
+@@ -309,12 +323,29 @@
+     p->result.stop = Imx1ProbeStop::budget;
+     bool blPrefix = false;
+     uint32_t blNextPc = 0;
++    struct InterruptedContext { uint32_t pc, cpsr, mode; bool prefix; uint32_t nextPc; };
++    std::vector<InterruptedContext> interruptedContexts;
+     for (uint32_t step = 0; step < steps; ++step) {
+         // Conservative bus stall: jump to the reference event without retiring instructions.
+         if (p->options.bootstrapPeripherals) {
+             p->peripherals.finishSystemPllBusStall();
+             if (p->clockBoundary()) break;
+         }
++        if (p->options.bootstrapPeripherals) {
++            p->updateInterrupts();
++            const auto pc = cpuGetRegisters(p->cpu)[15];
++            const auto cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
++            if (cpuProcessPendingInterrupts(p->cpu)) {
++                const auto vector = cpuGetRegisters(p->cpu)[15];
++                const auto mode = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) & 31;
++                interruptedContexts.push_back({pc, cpsr, mode, blPrefix, blNextPc});
++                blPrefix = false;
++                const bool fiq = mode == ARM_SR_MODE_FIQ;
++                if (fiq) ++p->result.fiqEntries; else ++p->result.irqEntries;
++                if (p->options.interruptObserver) p->options.interruptObserver(p->options.interruptContext,
++                    {step, pc, cpsr, vector, cpuGetRegisters(p->cpu)[14], fiq, p->peripherals.interruptPending()});
++            }
++        }
+         auto& t = p->result.trace;
+         t = {step, cpuGetRegisters(p->cpu)[15], 0,
+              cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
+@@ -374,11 +405,25 @@
+         }
+         blPrefix = thumb && (t.instruction & 0xf800) == 0xf000;
+         blNextPc = t.pc + 2;
++        const bool contextReturn = !thumb && condition(t.instruction, t.cpsr) &&
++            (((t.instruction & 0x0ffffff0) == 0x01b0f000) ||
++             ((t.instruction & 0x0fffffff) == 0x025ef004));
++        if (contextReturn && !interruptedContexts.empty() &&
++            (t.cpsr & 31) == interruptedContexts.back().mode) {
++            const auto saved = interruptedContexts.back();
++            interruptedContexts.pop_back();
++            if (cpuGetRegisters(p->cpu)[15] == saved.pc &&
++                cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) == saved.cpsr) {
++                blPrefix = saved.prefix;
++                blNextPc = saved.nextPc;
++            }
++        }
+         if (p->options.bootstrapPeripherals) {
+             p->peripherals.advanceCpuCycles(cycles, cpuArm920ClockMode(p->cpu), p->options.assumeMpllSettled);
+             if (p->clockBoundary()) break;
+         }
+     }
++    if (p->options.bootstrapPeripherals) p->result.interruptPending = p->peripherals.interruptPending();
+     std::memcpy(p->result.registers, cpuGetRegisters(p->cpu), sizeof(p->result.registers));
+     p->result.cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+     p->result.spsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR);
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -31,7 +31,15 @@
+     uint32_t control, status, divider;
+ };
+ using Imx1ProbeI2cObserver = void (*)(void*, const Imx1ProbeI2cEvent&);
++struct Imx1ProbeInterrupt {
++    uint32_t step, interruptedPc, cpsr, vector, link;
++    bool fiq;
++    Imx1AitcPending pending;
++};
++using Imx1ProbeInterruptObserver = void (*)(void*, const Imx1ProbeInterrupt&);
+ struct Imx1ProbeOptions {
++    Imx1ProbeInterruptObserver interruptObserver = nullptr;
++    void* interruptContext = nullptr;
+     bool cs5ResetStatusInputKnown = false;
+     uint8_t cs5ResetStatusInput = 0;
+     Imx1ProbeCs5ResetObserver cs5ResetObserver = nullptr;
+@@ -68,6 +76,7 @@
+     uint32_t registers[16], cpsr, spsr;
+     uint64_t jitBlocks, jitInstructions;
+     uint64_t busAccesses;
++    uint64_t irqEntries = 0, fiqEntries = 0;
+     Imx1BootstrapAccess peripheralStatus;
+     Imx1ProbeI2cEvent i2cEvent{};
+     bool elapsedInterruptBoundary = false;
+@@ -75,7 +84,7 @@
+     Imx1AitcPending interruptPending{};
+ };
+ using Imx1ProbeObserver = void (*)(void*, const Imx1ProbeTrace&);
+-// One process-owned CPU, optional bootstrap registers/RAM, no interrupts or session state.
++// One process-owned CPU with optional bootstrap registers/RAM and qualified interrupt inputs.
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+                             uint32_t steps, Imx1ProbeObserver observer = nullptr, void* context = nullptr,
+                             bool fast = false, const Imx1ProbeOptions* options = nullptr);
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -81,12 +81,21 @@
+                                         const Imx1Timer& first, const Imx1Timer& second) const {
+     auto next = aitc;
+     setInterruptInputs(next, state, clock, first, second);
+-    if (next.irq() == Imx1AitcLine::asserted || next.fiq() == Imx1AitcLine::asserted)
++    return interruptGate(next);
++}
++Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1Aitc& controller) const {
++    if (!cpuInterruptsConnected &&
++        (controller.irq() == Imx1AitcLine::asserted || controller.fiq() == Imx1AitcLine::asserted))
+         return Imx1BootstrapAccess::sideEffect;
+-    if (next.irq() == Imx1AitcLine::unknown || next.fiq() == Imx1AitcLine::unknown)
+-        return Imx1BootstrapAccess::externalInput;
++    if (!controller.interruptInputsKnown()) return Imx1BootstrapAccess::externalInput;
+     return Imx1BootstrapAccess::ok;
+ }
++Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
++    auto current = aitc;
++    setInterruptInputs(current, i2c, rtc, timer1, timer2);
++    return {current.irq(), current.fiq()};
++}
++
+ Imx1BootstrapAccess Imx1Bootstrap::clockStatus() const {
+     if (i2c.clockStatus() == Imx1I2cAccess::externalInput) return Imx1BootstrapAccess::externalInput;
+     if (i2c.clockStatus() != Imx1I2cAccess::ok) return Imx1BootstrapAccess::sideEffect;
+@@ -194,11 +203,8 @@
+             case Imx1AitcAccess::ok: break;
+         }
+         if (write) {
+-            // CPU interrupt delivery is not connected in this probe.
+-            if (next.irq() == Imx1AitcLine::asserted || next.fiq() == Imx1AitcLine::asserted)
+-                return Imx1BootstrapAccess::sideEffect;
+-            if (next.irq() == Imx1AitcLine::unknown || next.fiq() == Imx1AitcLine::unknown)
+-                return Imx1BootstrapAccess::externalInput;
++            const auto gate = interruptGate(next);
++            if (gate != Imx1BootstrapAccess::ok) return gate;
+             aitc = next;
+         }
+         return Imx1BootstrapAccess::ok;
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -30,6 +30,9 @@
+     const Imx1Eim& eimState() const { return eim; }
+     Imx1BootstrapAccess clockStatus() const;
+     Imx1AitcPending interruptPending() const;
++    struct InterruptLines { Imx1AitcLine irq, fiq; };
++    InterruptLines interruptLines() const;
++    void connectCpuInterrupts() { cpuInterruptsConnected = true; }
+     void setSystemPllScenario(bool enabled) { cgm.setSystemPllScenario(enabled); }
+     bool setGpioInput(unsigned port, uint32_t value) { return gpio.setInput(port, value); }
+     bool setGpioDInput(uint32_t value) { return setGpioInput(3, value); }
+@@ -80,6 +83,8 @@
+                             const Imx1Timer& first, const Imx1Timer& second) const;
+     Imx1BootstrapAccess interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                             const Imx1Timer& first, const Imx1Timer& second) const;
++    Imx1BootstrapAccess interruptGate(const Imx1Aitc& controller) const;
++    bool cpuInterruptsConnected = false;
+     Imx1Rtc rtc;
+     Imx1I2c i2c;
+     Imx1Asp asp;

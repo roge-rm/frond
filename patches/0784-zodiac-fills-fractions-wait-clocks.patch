@@ -1,0 +1,170 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -482,23 +482,35 @@
+             !peripherals.referenceChargeSupported(uint64_t(Imx1Cs5Bus::timeoutClocks) * busPeriod.numerator,
+                                                   busPeriod.denominator))
+             return false;
++        const auto rate = cs5Configuration.clockState().systemRate();
++        // The count below depends only on the mode, the bus period and the system rate; the last one is kept.
++        static thread_local struct { Imx1Cs5Mode mode; Imx1PllRatio bus; uint64_t numerator, denominator; uint32_t clocks; bool ok, known; } last{};
++        if (last.known && last.mode == mode && last.bus.numerator == busPeriod.numerator &&
++            last.bus.denominator == busPeriod.denominator && last.numerator == rate.numerator &&
++            last.denominator == rate.denominator) {
++            clocks = last.clocks;
++            return last.ok;
++        }
++        last = {mode, busPeriod, rate.numerator, rate.denominator, 0, false, false};
+         Imx1Cs5Bus transaction(mode);
+         Imx1GraphicsFraction service;
+         bool ready = mode == Imx1Cs5Mode::fixed;
+         auto state = transaction.sample(0, true, mode == Imx1Cs5Mode::dtack ? !ready : ready);
+-        const auto rate = cs5Configuration.clockState().systemRate();
+         clocks = 0;
+         while (state == Imx1Cs5Bus::State::waiting) {
+             if (!ready && rate.numerator) {
+                 const uint64_t numerator = busPeriod.numerator * rate.numerator;
+                 const uint64_t denominator = uint64_t(busPeriod.denominator) * 32768 * rate.denominator;
+-                if (!service.supports(denominator)) return false;
++                if (!service.supports(denominator)) { last.known = true; return false; }
+                 ready = service.add(numerator, denominator) != 0;
+             }
+             ++clocks;
+             state = transaction.sample(clocks, true, mode == Imx1Cs5Mode::dtack ? !ready : ready);
+         }
+-        return state == Imx1Cs5Bus::State::complete && clocks;
++        last.clocks = clocks;
++        last.ok = state == Imx1Cs5Bus::State::complete && clocks;
++        last.known = true;
++        return last.ok;
+     }
+     // Whether this lean run can answer CS5 accesses, worked out at its first one, with the wait clocks and the cost
+     // of each. The span has to hold the instructions and the wait clocks together, counted in CPU cycles rounded up
+--- a/src/uarm/uarm/imx1_graphics_clocks.h
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -11,11 +11,19 @@
+ // Proper fractions retain elapsed time across charges and source changes.
+ struct Imx1GraphicsFraction {
+     uint64_t phase = 0, denominator = 1;
++    // A d that divides the denominator, as nearly every charge's does, skips the gcd: the common denominator
++    // stays the same.
+     bool supports(uint64_t d) const {
++        if (d && denominator % d == 0) return denominator <= std::numeric_limits<uint64_t>::max() / 2;
+         return d && d / std::gcd(d, denominator) <= (std::numeric_limits<uint64_t>::max() / 2) / denominator;
+     }
+     uint64_t add(uint64_t n, uint64_t d) {
+         assert(supports(d));
++        if (denominator % d == 0) {
++            const auto fraction = phase + (n % d) * (denominator / d);
++            phase = fraction % denominator;
++            return n / d + fraction / denominator;
++        }
+         const auto common = denominator * (d / std::gcd(d, denominator));
+         const auto fraction = phase * (common / denominator) + (n % d) * (common / d);
+         phase = fraction % common;
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -299,6 +299,10 @@
+         return A::ok;
+     }
+    public:
++    // Tests: directFills off makes complete take every fill through accessGpu; directFillCount counts the fills
++    // fastFill took.
++    static inline bool directFills = true;
++    static inline uint64_t directFillCount = 0;
+     Imx1BootstrapAccess complete(Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                  Imx1GraphicsMemory& memory) {
+         using A = Imx1BootstrapAccess;
+@@ -315,6 +319,7 @@
+                     ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, fill.sourceBase, sourceLength)))) return A::sequence;
+             }
+             for (const auto& fill : batch.fills) {
++                if (fastFill(configuration, eim, memory, fill)) continue;
+                 for (uint32_t y = 0; y < fill.height; ++y)
+                     for (uint32_t x = 0; x < fill.width; ++x) {
+                         uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
+@@ -354,6 +359,55 @@
+         return A::ok;
+     }
+    private:
++    struct Fill;
++    static uint32_t read16(const uint8_t* at) { return uint32_t(at[0]) | uint32_t(at[1]) << 8; }
++    // A fill complete runs straight on the bank storage, with the same reads and writes in the same order as the
++    // accessGpu loop. Only for fills where every one of those accesses is aligned and inside the ranges the batch
++    // checked, so none can fail; false, with nothing done, for the rest.
++    static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
++                         const Fill& fill) {
++        if (!directFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
++            (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
++        const bool source = fill.keyed || fill.plain || fill.a4;
++        if (source && ((fill.sourceBase | fill.sourcePitch) & 1)) return false;
++        unsigned bank = 0, sourceBank = 0;
++        uint32_t offset = 0, sourceOffset = 0;
++        uint8_t* destination = memory.gpuSpan(configuration, eim, fill.base,
++                                              uint64_t(fill.height - 1) * fill.pitch + fill.width * 2, bank, offset);
++        if (!destination) return false;
++        const uint8_t* from = nullptr;
++        if (source) {
++            // The source range the batch check worked out.
++            const uint64_t length = !fill.doubled ? uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2 :
++                uint64_t((fill.sourceY + fill.height - 1) >> 1) * fill.sourcePitch + (((fill.sourceX + fill.width - 1) >> 1) + 1) * 2;
++            from = memory.gpuSpan(configuration, eim, fill.sourceBase, length, sourceBank, sourceOffset);
++            if (!from) return false;
++        }
++        uint64_t writes = 0;
++        uint32_t first = UINT32_MAX, end = 0;
++        for (uint32_t y = 0; y < fill.height; ++y)
++            for (uint32_t x = 0; x < fill.width; ++x) {
++                uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
++                const uint32_t at = y * fill.pitch + x * 2;
++                if (fill.keyed || fill.plain) {
++                    colour = read16(from + (fill.doubled ?
++                        ((fill.sourceY + y) >> 1) * fill.sourcePitch + ((fill.sourceX + x) >> 1) * 2 :
++                        y * fill.sourcePitch + x * 2));
++                    if (fill.keyed && (colour == fill.colour) != fill.keyEqual) continue;
++                    if (fill.painted) colour = fill.paint;
++                }
++                if (fill.invert) colour = (read16(destination + at) ^ colour) & 0xffff;
++                if (fill.a4) colour = virtualA4Blend(read16(destination + at), read16(from + y * fill.sourcePitch + x * 2), colour);
++                destination[at] = uint8_t(colour);
++                destination[at + 1] = uint8_t(colour >> 8);
++                ++writes;
++                first = std::min(first, offset + at);
++                end = std::max(end, offset + at + 2);
++            }
++        memory.noteWrites(bank, first, end, writes);
++        ++directFillCount;
++        return true;
++    }
+     struct Fill {
+         uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
+         uint32_t sourceBase = 0, sourcePitch = 0;
+--- a/src/uarm/uarm/imx1_graphics_memory.h
++++ b/src/uarm/uarm/imx1_graphics_memory.h
+@@ -63,6 +63,27 @@
+         if (offset) *offset = address - range.first;
+         return true;
+     }
++    // Bank storage from the start of a range contains() accepts, for loops that have checked their whole range.
++    // Writes made through it are recorded with noteWrites.
++    uint8_t* gpuSpan(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, uint32_t address, uint64_t length,
++                     unsigned& bank, uint32_t& offset) {
++        if (!contains(configuration, eim, address, length, &bank, &offset)) return nullptr;
++        return bytes[bank].data() + offset;
++    }
++    // count writes into bank, between offsets first and end, recorded as accessGpu records them one at a time.
++    void noteWrites(unsigned bank, uint32_t first, uint32_t end, uint64_t count) {
++        if (!count) return;
++        generation += count;
++        for (auto& consumer : changes) {
++            auto& change = consumer[bank];
++            if (!change.pending) change = {first, end, true, generation};
++            else {
++                if (first < change.first) change.first = first;
++                if (end > change.end) change.end = end;
++                change.generation = generation;
++            }
++        }
++    }
+     bool copyGpuRange(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                       uint32_t address, uint32_t length, uint8_t* destination) const {
+         unsigned bank = 0;

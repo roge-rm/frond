@@ -48,6 +48,15 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 // controls for anything else are hidden rather than greyed.
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
 
+// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
+inline bool guestServices(Device device) {
+    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
+}
+// New machines of these devices start on the Fast engine: the Zodiac, where only Fast reaches its real speed.
+inline bool fastByDefault(Device device) {
+    return device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac;
+}
+
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
 inline bool serialAbsent(Device device) { return device == Device::zire72; }
 // The connector or cradle has a separate HotSync button on these boards.
@@ -112,6 +121,9 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
     if (!QFileInfo(norPath).isFile() || !nor.open(QIODevice::ReadOnly))
         return QStringLiteral("Choose a readable NOR firmware file.");
     const auto header = norHeader(nor);
+    const auto detected = inspectNor(nor).profile;
+    if (detected && !detected->frontend.available)
+        return QStringLiteral("The %1 isn't supported yet.").arg(QString::fromUtf8(detected->displayName));
     Device device = chosen;
     if (device == Device::automatic) {
         device = detectDevice(norPath);

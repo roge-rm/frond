@@ -1,0 +1,124 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -4,6 +4,7 @@
+ #include <cstdint>
+ #include "imx1_bootstrap.h"
+ #include "imx1_cs4_capture.h"
++#include "imx1_cs5_reset.h"
+ 
+ // The physical flash mapping is observed in the updater. Aliases are explicit experiments.
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+@@ -20,6 +21,7 @@
+     bool write;
+     Imx1BootstrapAccess status;
+     bool diagnosticCs4 = false;
++    bool diagnosticCs5Reset = false;
+ };
+ using Imx1ProbeBusObserver = void (*)(void*, const Imx1ProbeAccess&);
+ struct Imx1ProbeI2cEvent {
+@@ -30,6 +32,10 @@
+ };
+ using Imx1ProbeI2cObserver = void (*)(void*, const Imx1ProbeI2cEvent&);
+ struct Imx1ProbeOptions {
++    bool cs5ResetStatusInputKnown = false;
++    uint8_t cs5ResetStatusInput = 0;
++    Imx1ProbeCs5ResetObserver cs5ResetObserver = nullptr;
++    void* cs5ResetContext = nullptr;
+     bool rtcInitialTimeKnown = false;
+     Imx1RtcTime rtcInitialTime{};
+     bool cs4Port0InputKnown = false;
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -11,7 +11,8 @@
+ namespace {
+ struct Probe {
+     explicit Probe(const Imx1ProbeOptions& config)
+-        : options(config), peripherals(config.aspPx1HighFromReset), cs4Capture(config.cs4Port0Input) {}
++        : options(config), peripherals(config.aspPx1HighFromReset), cs4Capture(config.cs4Port0Input),
++          cs5Reset(config.cs5ResetStatusInput) {}
+     std::vector<uint8_t> rom;
+     uint32_t alias;
+     Imx1ProbeResult result{};
+@@ -21,6 +22,7 @@
+     Imx1ProbeOptions options{};
+     Imx1Bootstrap peripherals;
+     Imx1Cs4Capture cs4Capture;
++    Imx1Cs5Reset cs5Reset;
+     uint32_t i2cIssueStep = 0, i2cIssuePc = 0;
+     static void i2cEvent(void* context, const Imx1I2cTransfer& transfer, Imx1I2cResponse response) {
+         auto& p = *static_cast<Probe*>(context);
+@@ -92,9 +94,15 @@
+         }
+         const bool diagnosticCs4 = p.options.bootstrapPeripherals && p.options.cs4Port0InputKnown &&
+                                    address >= 0x15000000 && address < 0x16000000;
+-        const auto status = diagnosticCs4 ? p.cs4Capture.access(p.peripherals.eimState(), address, size, write, value) :
++        const bool diagnosticCs5Reset = p.options.bootstrapPeripherals && p.options.cs5ResetStatusInputKnown &&
++                                        address >= 0x16000000 && address < 0x17000000;
++        const auto status = diagnosticCs5Reset ? p.cs5Reset.access(p.peripherals.eimState(),
++            p.result.trace.pc, address, size, write, value) : diagnosticCs4 ? p.cs4Capture.access(p.peripherals.eimState(), address, size, write, value) :
+             p.options.bootstrapPeripherals ?
+             p.peripherals.access(address, size, write, value, cpuArm920ClockMode(p.cpu)) : Imx1BootstrapAccess::unmapped;
++        if (diagnosticCs5Reset && p.options.cs5ResetObserver)
++            p.options.cs5ResetObserver(p.options.cs5ResetContext, {p.result.trace.step, p.result.trace.pc,
++                address, uint32_t(size), value, write, p.cs5Reset.phaseValue(), status});
+         if (diagnosticCs4 && p.options.cs4Observer)
+             p.options.cs4Observer(p.options.cs4Context, {p.result.trace.step, p.result.trace.pc,
+                 address, uint32_t(size), value, write, p.cs4Capture.selectedIndex(), p.cs4Capture.observedBank(), status});
+@@ -105,7 +113,7 @@
+         ++p.result.busAccesses;
+         if (p.options.busObserver)
+             p.options.busObserver(p.options.busContext, {p.result.trace.step, p.result.trace.pc,
+-                                   address, uint32_t(size), value, write, status, diagnosticCs4});
++                                   address, uint32_t(size), value, write, status, diagnosticCs4, diagnosticCs5Reset});
+         if (status == Imx1BootstrapAccess::ok || status == Imx1BootstrapAccess::command) {
+             // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
+             if (write && status == Imx1BootstrapAccess::ok &&
+--- /dev/null
++++ b/src/uarm/uarm/imx1_cs5_reset.h
+@@ -0,0 +1,46 @@
++#ifndef FROND_IMX1_CS5_RESET_H
++#define FROND_IMX1_CS5_RESET_H
++
++#include "imx1_bootstrap.h"
++
++// Diagnostic echo for the ROM reset helper, with an explicit opaque status sample.
++class Imx1Cs5Reset {
++   public:
++    explicit Imx1Cs5Reset(uint8_t statusInput) : input(statusInput), reset(statusInput & 8) {}
++    uint8_t statusValue() const { return (input & 0xf7) | (reset ? 8 : 0); }
++    unsigned phaseValue() const { return phase; }
++    Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
++                              uint32_t size, bool write, uint32_t& value) {
++        if (address != 0x16000018) return Imx1BootstrapAccess::unmapped;
++        if (size != 1) return Imx1BootstrapAccess::width;
++        if (!eim.configurationMatches(5, 0x3e00, 0x11111e01)) return Imx1BootstrapAccess::sequence;
++        // Other callers may consume status fields or rely on read side effects.
++        const uint32_t pcs[] = {0x200bac84, 0x200bac9c, 0x200baca4, 0x200bace8, 0x200bacf0};
++        if (pc != pcs[phase] || write != (phase == 1 || phase == 3))
++            return Imx1BootstrapAccess::externalInput;
++        if (write) {
++            const uint32_t expected = (input & 0xf7) | (phase == 1 ? 8 : 0);
++            if (value != expected) return Imx1BootstrapAccess::sideEffect;
++            reset = phase == 1;
++        } else {
++            value = statusValue();
++        }
++        phase = (phase + 1) % 5;
++        return Imx1BootstrapAccess::ok;
++    }
++
++   private:
++    uint8_t input;
++    bool reset = false;
++    unsigned phase = 0;
++};
++
++struct Imx1ProbeCs5ResetEvent {
++    uint32_t step, pc, address, size, value;
++    bool write;
++    unsigned phase;
++    Imx1BootstrapAccess status;
++};
++using Imx1ProbeCs5ResetObserver = void (*)(void*, const Imx1ProbeCs5ResetEvent&);
++
++#endif

@@ -1,0 +1,152 @@
+--- a/src/uarm/uarm/imx1_aitc.h
++++ b/src/uarm/uarm/imx1_aitc.h
+@@ -22,6 +22,12 @@
+         const uint64_t normal = unknown(false);
+         return !(normal && (normal & normalEligible())) && !unknown(true);
+     }
++    // What interruptInputsKnown gives after setInputs with these known inputs, whatever is asserted.
++    bool interruptInputsKnownWith(uint64_t known) const {
++        const uint64_t unknownInputs = ~(known | unusedInputs) & ~force & enabled;
++        const uint64_t normal = unknownInputs & ~type;
++        return !(normal && (normal & normalEligible())) && !(unknownInputs & type);
++    }
+     Imx1AitcLine irq() const;
+     Imx1AitcLine fiq() const;
+     Imx1AitcPending pendingState() const {
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -197,18 +197,11 @@
+ 
+ void Imx1Bootstrap::sourceInputs(const Imx1I2c& state, const Imx1Rtc& clock, const Imx1Timer& first, const Imx1Timer& second,
+                                  const Imx1Asp& analog, const Imx1Pwm& wave, uint64_t& asserted, uint64_t& known) const {
+-    known = (uint64_t(1) << 39) | (analog.inactiveInterrupts() | analog.assertedInterrupts()) | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources | Imx1Watchdog::interruptSource |
+-            (uint64_t(1) << 59) | (uint64_t(1) << 58);
++    known = sourceKnown(analog);
+     asserted = (wave.interruptOutput() ? Imx1Pwm::interruptSource : 0) | analog.assertedInterrupts() | (state.interruptOutput() ? uint64_t(1) << 39 : 0) | clock.assertedInterrupts() |
+                (first.interruptOutput() ? uint64_t(1) << 59 : 0) |
+                (second.interruptOutput() ? uint64_t(1) << 58 : 0);
+-    // Only the qualified SSI TX channel can complete; error producers remain disabled.
+-    known |= (uint64_t(1) << 60) | (uint64_t(1) << 61);
+     if (dmaControl && (dmaStatus & ~dmaMask)) asserted |= uint64_t(1) << 61;
+-    // SSI interrupt enables remain guarded; DMA requests go directly to the DMAC.
+-    known |= uint64_t(0xf) << 42;
+-    known |= Imx1Bta::interruptSources;
+-    if (mmcsd.interruptKnown()) known |= uint64_t(1) << 35;
+     if (mmcsd.interruptOutput()) asserted |= uint64_t(1) << 35;
+     // 6.2: PFERR, RTS, DTR, UARTC, TX and RX from 19 for UART2 and from 25 for UART1, which has no DTR.
+     static constexpr unsigned outputs[]{Imx1Uart::errorOutput, Imx1Uart::rtsOutput, Imx1Uart::dtrOutput,
+@@ -218,10 +211,22 @@
+         const uint32_t lines = (unit ? uart2 : uart1).interruptOutputs();
+         for (unsigned line = 0; line < 6; ++line) {
+             if (!unit && line == 2) continue;
+-            known |= uint64_t(1) << (first + line);
+             if (lines & outputs[line]) asserted |= uint64_t(1) << (first + line);
+         }
+     }
++}
++
++uint64_t Imx1Bootstrap::sourceKnown(const Imx1Asp& analog) const {
++    uint64_t known = (uint64_t(1) << 39) | (analog.inactiveInterrupts() | analog.assertedInterrupts()) | Imx1Pwm::interruptSource | Imx1Rtc::interruptSources | Imx1Watchdog::interruptSource |
++            (uint64_t(1) << 59) | (uint64_t(1) << 58);
++    // Only the qualified SSI TX channel can complete; error producers remain disabled.
++    known |= (uint64_t(1) << 60) | (uint64_t(1) << 61);
++    // SSI interrupt enables remain guarded; DMA requests go directly to the DMAC.
++    known |= uint64_t(0xf) << 42;
++    known |= Imx1Bta::interruptSources;
++    if (mmcsd.interruptKnown()) known |= uint64_t(1) << 35;
++    // UART2's six lines from 19, UART1's from 25 without DTR (27), as sourceInputs sets them.
++    known |= (uint64_t(0x3f) << 19) | (uint64_t(0x3b) << 25);
+     // Modules with no model here, so no register of theirs was ever written (an access stops the machine)
+     // and each still has its reset state, which the manual gives with every interrupt disabled or masked:
+     // SSI2 36 to 38: STCR and SRCR reset to 0000, TIE and RIE clear (30.3.8, 30.3.9, tables 30-11 and 30-13).
+@@ -231,6 +236,20 @@
+     // UART3 0 to 4 and 54: UCR1 to UCR4 reset with every interrupt enable clear (27.7.3 to 27.7.6,
+     // tables 27-16, 27-17, 27-19 and 27-20, which cover UART 1, 2 and 3).
+     known |= resetStateSourcesLow;
++    return known;
++}
++
++uint64_t Imx1Bootstrap::gpioKnown(const Imx1Gpio& pins) {
++    constexpr unsigned sources[] = {11, 12, 13, 62};
++    uint64_t known = 0;
++    for (unsigned port = 0; port < 4; ++port)
++        if (pins.interruptOutput(port) != Imx1GpioLine::unknown) known |= uint64_t(1) << sources[port];
++    return known;
++}
++
++Imx1BootstrapAccess Imx1Bootstrap::connectedGate(const Imx1Gpio& pins) const {
++    return aitc.interruptInputsKnownWith(sourceKnown(asp) | gpioKnown(pins)) ? Imx1BootstrapAccess::ok :
++                                                                             Imx1BootstrapAccess::externalInput;
+ }
+ 
+ bool Imx1Bootstrap::pcmDmaSourceValid(uint32_t address, uint32_t bytes) const {
+@@ -325,6 +344,7 @@
+ }
+ Imx1BootstrapAccess Imx1Bootstrap::interruptGate(const Imx1I2c& state, const Imx1Rtc& clock,
+                                         const Imx1Timer& first, const Imx1Timer& second) const {
++    if (cpuInterruptsConnected) return connectedGate(gpio);
+     auto next = aitc;
+     setInterruptInputs(next, state, clock, first, second, asp, pwm, gpio);
+     return interruptGate(next);
+@@ -394,6 +414,7 @@
+     // The same levels again give the same pins, so only the gate is left to look at.
+     const auto& c = runCache;
+     if (!baseline && c.driveSettled && port == c.drivePort && value == c.driveValue && known == c.driveKnown) {
++        if (cpuInterruptsConnected) return connectedGate(gpio);
+         auto controller = aitc;
+         setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+         return interruptGate(controller);
+@@ -402,9 +423,14 @@
+     const auto status = next.driveInput(port, value, known, baseline);
+     if (status == Imx1GpioAccess::unmapped) return Imx1BootstrapAccess::unmapped;
+     if (status != Imx1GpioAccess::ok) return Imx1BootstrapAccess::sideEffect;
+-    auto controller = aitc;
+-    setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, next);
+-    const auto gate = interruptGate(controller);
++    Imx1BootstrapAccess gate;
++    if (cpuInterruptsConnected) {
++        gate = connectedGate(next);
++    } else {
++        auto controller = aitc;
++        setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, next);
++        gate = interruptGate(controller);
++    }
+     if (gate != Imx1BootstrapAccess::ok) return gate;
+     if (commit) {
+         gpio = next;
+@@ -420,9 +446,7 @@
+     const auto& c = runCache;
+     if (!cpuInterruptsConnected || !c.driveSettled || port != c.drivePort || value != c.driveValue ||
+         known != c.driveKnown) return false;
+-    auto controller = aitc;
+-    setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+-    return interruptGate(controller) == Imx1BootstrapAccess::ok;
++    return connectedGate(gpio) == Imx1BootstrapAccess::ok;
+ }
+ bool Imx1Bootstrap::gpioDriveBothAccepted(unsigned port, uint32_t known) const {
+     auto& c = runCache;
+@@ -438,9 +462,7 @@
+     }
+     if (!c.otherAccepted) return false;
+     // The other sources' inputs are the same at both levels, so this gate covers both.
+-    auto controller = aitc;
+-    setInterruptInputs(controller, i2c, rtc, timer1, timer2, asp, pwm, gpio);
+-    return interruptGate(controller) == Imx1BootstrapAccess::ok;
++    return connectedGate(gpio) == Imx1BootstrapAccess::ok;
+ }
+ Imx1Bootstrap::InterruptLines Imx1Bootstrap::interruptLines() const {
+     auto current = aitc;
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -177,6 +177,11 @@
+     // True when a drive of the single pin in known is accepted at both levels: the last committed drive was on
+     // that pin and is accepted again now, and the other level would leave every GPIO interrupt output as known.
+     bool gpioDriveBothAccepted(unsigned port, uint32_t known) const;
++    // The known part of sourceInputs, and of the GPIO ports' AITC inputs.
++    uint64_t sourceKnown(const Imx1Asp& analog) const;
++    static uint64_t gpioKnown(const Imx1Gpio& pins);
++    // interruptGate with the CPU's lines connected, where only which inputs are known matters.
++    Imx1BootstrapAccess connectedGate(const Imx1Gpio& pins) const;
+     // True when the last committed drive was this one, so driving it again changes nothing.
+     bool gpioDriveSettled(unsigned port, uint32_t value, uint32_t known) const {
+         const auto& c = runCache;

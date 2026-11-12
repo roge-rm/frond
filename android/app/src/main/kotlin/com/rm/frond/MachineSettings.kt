@@ -119,8 +119,15 @@ data class MachineSettings(
         if (m68k) append(" contrast=$contrast")
     }
 
+    // The same settings for another device: an engine left at the old device's default takes the new one's.
+    fun forDevice(from: Device, to: Device): MachineSettings =
+        if (engine == from.defaultEngine) copy(engine = to.defaultEngine) else this
+
     companion object {
         const val DEFAULT_CONTRAST = 50
+
+        // A new machine's settings for a device.
+        fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
         // The --mips an ARM device gets when Uncapped; the core runs at what the host manages.
         const val UNCAPPED_MIPS = 1000
 

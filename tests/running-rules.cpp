@@ -159,6 +159,34 @@ class RunningRulesTest : public QObject {
         QCOMPARE(subtitle(traitsFor(named("palm-tx")), false, "Palm TX"), QString("Exact"));
         QCOMPARE(subtitle(traitsFor(named("palm-tx")), true, "Palm TX"), QString("Fast"));
         QCOMPARE(subtitle(traitsFor(named("palm-iiix")), true, "Palm IIIx"), QString("Palm IIIx"));
+        QCOMPARE(subtitle(traitsFor(named("tapwave-zodiac-2")), true, "Tapwave Zodiac 2"), QString("Fast"));
+        QCOMPARE(subtitle(traitsFor(named("tapwave-zodiac-2")), false, "Tapwave Zodiac 2"), QString("Exact"));
+    }
+    // The Zodiac's unfinished hardware is listed and greyed, and it has no hard reset yet.
+    void zodiacRows() {
+        const auto t = traitsFor(named("tapwave-zodiac-2"));
+        State s; s.ready = true; s.network = "off";
+        QVERIFY(!t.runs68k && !t.guestServices && !t.cardSlot && t.powerKey);
+        for (Id id : {Id::Keyboard, Id::Microphone, Id::Network, Id::HardReset}) QVERIFY(!row(t, s, id).enabled);
+        for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot}) QVERIFY(row(t, s, id).enabled);
+        QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);
+    }
+    // The panel's Hard reset button goes off with the other running controls, on every device.
+    void hardResetButtonFollowsTheControls() {
+        for (auto* id : devices()) {
+            const auto t = traitsFor(named(id));
+            QVERIFY2(!hardResetEnabled(false, t), id);
+            QCOMPARE(hardResetEnabled(true, t), t.guestServices);
+        }
+        QVERIFY(hardResetEnabled(true, traitsFor(named("palm-tx"))));
+        QVERIFY(!hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));
+    }
+    void machineStopIsTheFailureText() {
+        QCOMPARE(machineStopText("device: tapwave-zodiac-2\nzodiac: the machine stopped: x, after 5 instructions\n"
+                                 "Tapwave Zodiac 2: the machine stopped: unsupported-peripheral (side-effect) at pc 200885fc\n"),
+                 QString("The Tapwave Zodiac 2 stopped: unsupported-peripheral (side-effect) at pc 200885fc."));
+        QVERIFY(machineStopText("device: palm-tx\nsave: the device state snapshot failed\n").isEmpty());
+        QVERIFY(machineStopText(": the machine stopped: \n").isEmpty());
     }
     void screenshotNamesAreFileSafe() {
         QCOMPARE(screenshotName("Palm TX", "20261107-133000"), QString("Frond Palm TX 20261107-133000.png"));

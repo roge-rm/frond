@@ -1,0 +1,17 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -664,11 +664,12 @@
+             (w[2] & 0xffff0f00u) != (0xe3500000u | (t << 16)) || w[3] != 0x3afffffbu) return;
+         uint32_t timer;
+         if (!cpuArm920PeekWord(cpu, r[b] + 16, nullptr, &timer) || !Imx1Bootstrap::timerCountAddress(timer) ||
+-            deferredHclk || failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return;
++            failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return;
+         const uint32_t base = r[sreg], wait = w[2] & 0xff;
+         auto done = [&](uint64_t cycles, bool& known) {
+             uint32_t count;
+-            known = peripherals.timerCountAfter(timer, 4, deferredCycles + cycles, quietMode, count);
++            // Wait clocks still deferred count after the cycles, as chargeDeferred charges them.
++            known = peripherals.timerCountAfter(timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
+             return known && count - base >= wait;
+         };
+         bool known;

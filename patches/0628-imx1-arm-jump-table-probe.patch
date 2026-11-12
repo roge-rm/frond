@@ -1,0 +1,11 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -136,6 +136,8 @@
+     }
+     if (((i >> 12) & 15) == 15) {
+         if ((i & 0x0fff0ff0) == 0x01a00000) return true; // MOV pc, Rm
++        // Aligned ARM jump tables: ADD pc,pc,Rm,LSL #2 without flags.
++        if ((i & 0x0ffffff0) == 0x008ff100) return (i & 15) != 15;
+         if ((i & 0x0ff00000) != 0x03a00000) return false;
+         const unsigned shift = ((i >> 8) & 15) * 2;
+         const uint32_t imm = i & 255;

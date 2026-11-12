@@ -1,0 +1,30 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -854,10 +854,11 @@
+ // MMU TLB holds now, keyed by privilege; mem->hostTlb.gen moves on every TLB, domain, S, R, TTB and
+ // control change. Anything else sets leanExit, so the guarded step runs the instruction again.
+ // The lean loop's current instruction has a single data access, a store: ARM STR, STRB, STRH, Thumb STR,
+-// STRB, STRH in all their forms.
++// STRB, STRH in all their forms. In Thumb, leanInstr holds the table_thumb2arm translation where there is one
++// (always above 0xffff, as its condition is AL) and the Thumb halfword where there isn't.
+ static bool cpuPrvLeanSingleStore(const struct ArmCpu *cpu) {
+     const uint32_t i = cpu->leanInstr;
+-    if (cpu->T) {
++    if (cpu->T && i <= 0xffff) {
+         const uint32_t top = i & 0xf800;
+         return top == 0x6000 || top == 0x7000 || top == 0x8000 || top == 0x9000 ||
+                (i & 0xfe00) == 0x5000 || (i & 0xfe00) == 0x5200 || (i & 0xfe00) == 0x5400;
+@@ -865,10 +866,11 @@
+     return (i & 0x0c100000) == 0x04000000 || (i & 0x0e1000f0) == 0x000000b0;
+ }
+ 
+-// The lean loop's current instruction has a single data access, a word load: ARM LDR, Thumb LDR in all its forms.
++// The lean loop's current instruction has a single data access, a word load: ARM LDR, Thumb LDR in all its forms,
++// translated or not.
+ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
+     const uint32_t i = cpu->leanInstr;
+-    if (cpu->T) {
++    if (cpu->T && i <= 0xffff) {
+         const uint32_t top = i & 0xf800;
+         return top == 0x6800 || top == 0x4800 || top == 0x9800 || (i & 0xfe00) == 0x5800;
+     }

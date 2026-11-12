@@ -1,3 +1,4 @@
+#include <QRegularExpression>
 #include <QtTest>
 #include <QApplication>
 #include <QCryptographicHash>
@@ -1922,6 +1923,163 @@ for line in s.makefile('rb'):
         QDir(firmwareRoot + "/palm-iiix").removeRecursively();
         QSettings().clear();
     }
+    // Opt-in run with a real Zodiac ROM, not in ctest: FROND_ZODIAC_ROM, and FROND_ZODIAC_SHOTS for
+    // screenshots. FROND_ZODIAC_STATE (a bring-up state file, read by the developer build of the core,
+    // out/frond-zodiac-developer) starts it at the launcher, which the pen, stick, stop and reset steps
+    // need; a cold boot takes too long for them. Uses xdotool.
+    void zodiacRealRom() {
+        const auto rom = qEnvironmentVariable("FROND_ZODIAC_ROM");
+        if (rom.isEmpty()) QSKIP("Set FROND_ZODIAC_ROM");
+        const auto shots = qEnvironmentVariable("FROND_ZODIAC_SHOTS");
+        const bool launcher = !qEnvironmentVariableIsEmpty("FROND_ZODIAC_STATE");
+        // Only the developer build of the core takes FROND_ZODIAC_STATE (make out/frond-zodiac-developer).
+        const auto core = launcher && qEnvironmentVariableIsEmpty("FROND_TEST_CORE")
+            ? QDir::cleanPath(QCoreApplication::applicationDirPath() + "/../../out/frond-zodiac-developer") : cardsCore();
+        // The Palm's own window, wherever it is, and a view position in it as xdotool arguments. The
+        // screen is as tall as the window, with the controls at its sides.
+        QString palm;
+        const auto at = [&](int viewX, int viewY, QString& x, QString& y) {
+            QProcess find; find.start("xdotool", {"search", "--onlyvisible", "--class", "^frond(-zodiac-developer)?$"});
+            QVERIFY(find.waitForFinished());
+            palm = qEnvironmentVariable("FROND_ZODIAC_WINDOW", QString::fromLatin1(find.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts).value(0));
+            QVERIFY(!palm.isEmpty());
+            QProcess size; size.start("xdotool", {"getwindowgeometry", "--shell", palm});
+            QVERIFY(size.waitForFinished());
+            const auto geometry = QString::fromLatin1(size.readAllStandardOutput());
+            const int width = QRegularExpression("WIDTH=(\\d+)").match(geometry).captured(1).toInt();
+            const int height = QRegularExpression("HEIGHT=(\\d+)").match(geometry).captured(1).toInt();
+            QVERIFY(width > 0 && height > 0);
+            x = QString::number((width - 480 * height / 320) / 2 + viewX * height / 320); y = QString::number(viewY * height / 320);
+        };
+        const auto shot = [&](QWidget& window, const QString& name) {
+            if (shots.isEmpty()) return;
+            QVERIFY(window.grab().save(shots + "/desktop-" + name));
+            QCOMPARE(QProcess::execute("import", {"-window", "root", shots + "/screen-" + name}), 0);
+        };
+        const auto logText = [](QWidget& window) { return window.findChild<QPlainTextEdit*>()->toPlainText(); };
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QStringList errors;
+        bool confirm = false;
+        const auto session = managedSession("Tapwave Zodiac 2");
+        const auto answer = [&](MainWindow& window) {
+            auto* box = window.findChild<QMessageBox*>();
+            if (!box || !box->isVisible()) return;
+            if (confirm && box->button(QMessageBox::Yes)) { confirm = false; box->button(QMessageBox::Yes)->click(); }
+            else { errors << box->text(); box->accept(); }
+        };
+        {
+            MainWindow window(core); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                answer(window);
+                auto* firmware = window.findChild<FirmwareDialog*>();
+                if (!firmware || !firmware->isVisible()) return;
+                firmware->findChild<QLineEdit*>("nor")->setText(rom);
+                // A new Zodiac starts on Fast.
+                if (firmware->findChild<QPushButton*>("import")->isEnabled())
+                    QVERIFY(firmware->findChild<QComboBox*>("engine")->currentData().toBool());
+                firmware->findChild<QPushButton*>("import")->click();
+            });
+            poll.start();
+            window.findChild<QPushButton*>("addDevice")->click();
+            auto* reset = window.findChild<QPushButton*>("reset");
+            QTRY_VERIFY_WITH_TIMEOUT(reset->isEnabled() && logText(window).contains("device: tapwave-zodiac-2"), 60000);
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            // What isn't done yet is there and greyed.
+            for (const char* name : {"networkMode", "keyboardAttached", "serialMode", "usbMode", "irdaMode", "bluetoothMode", "sound", "microphone", "hardReset"}) {
+                auto* w = window.findChild<QWidget*>(name);
+                QVERIFY2(w, name);
+                QVERIFY2(!w->isEnabled(), name);
+            }
+            QVERIFY(!window.findChild<QWidget*>("appsPanel")->isEnabled());
+            QVERIFY(!window.findChild<QWidget*>("hotsync")->isVisibleTo(&window));
+            QTest::qWait(8000);
+            shot(window, "1-running.png");
+            if (launcher) {
+                // A tap on Prefs in the launcher's list, then the stick held down with the Down key.
+                QString x, y;
+                at(350, 77, x, y);
+                if (QTest::currentTestFailed()) return;
+                QCOMPARE(QProcess::execute("xdotool", {"mousemove", "--window", palm, x, y, "mousedown", "1", "sleep", "0.4", "mouseup", "1"}), 0);
+                QTest::qWait(25000);
+                shot(window, "2-pen-prefs.png");
+                // The launcher shows the stick and Function only while they are held.
+                QCOMPARE(QProcess::execute("xdotool", {"keydown", "Down"}), 0);
+                QTest::qWait(20000);
+                shot(window, "3-stick-down.png");
+                QCOMPARE(QProcess::execute("xdotool", {"keyup", "Down"}), 0);
+                QTest::qWait(10000);
+                QCOMPARE(QProcess::execute("xdotool", {"keydown", "F7"}), 0);
+                QTest::qWait(20000);
+                shot(window, "4-function-held.png");
+                QCOMPARE(QProcess::execute("xdotool", {"keyup", "F7"}), 0);
+                QTest::qWait(10000);
+            }
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/first-run-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        const auto saved = frondSessions::describe(session);
+        QVERIFY(saved.saved && !saved.old); QCOMPARE(saved.device, QString("tapwave-zodiac-2"));
+        if (launcher) {
+            // The pen held down across the ROM's battery polls (one every 5 s of guest time) doesn't stop
+            // the machine, and the session saves again afterwards.
+            QSettings().setValue("resume", true);
+            MainWindow window(core); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] { answer(window); });
+            poll.start();
+            auto* reset = window.findChild<QPushButton*>("reset");
+            QTRY_VERIFY_WITH_TIMEOUT(reset->isEnabled() && logText(window).contains("device: tapwave-zodiac-2"), 60000);
+            QTest::qWait(8000);
+            QString x, y;
+            at(240, 300, x, y);
+            if (QTest::currentTestFailed()) return;
+            QCOMPARE(QProcess::execute("xdotool", {"mousemove", "--window", palm, x, y, "mousedown", "1"}), 0);
+            QTest::qWait(90000);
+            QCOMPARE(QProcess::execute("xdotool", {"mouseup", "1"}), 0);
+            QTest::qWait(5000);
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            QVERIFY(reset->isEnabled());
+            shot(window, "5-pen-held.png");
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            const auto held = frondSessions::describe(session);
+            QVERIFY(held.saved && !held.old); QCOMPARE(held.device, QString("tapwave-zodiac-2"));
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/pen-held-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        {
+            // The saved session runs again where it left off, then a reset starts the boot over.
+            QSettings().setValue("resume", true);
+            MainWindow window(core); window.show();
+            QTimer poll; poll.setInterval(50);
+            connect(&poll, &QTimer::timeout, &window, [&] { answer(window); });
+            poll.start();
+            auto* reset = window.findChild<QPushButton*>("reset");
+            QTRY_VERIFY_WITH_TIMEOUT(reset->isEnabled() && logText(window).contains("device: tapwave-zodiac-2"), 60000);
+            QTest::qWait(8000);
+            shot(window, "6-resumed.png");
+            confirm = true;
+            reset->click();
+            QTest::qWait(15000);
+            shot(window, "7-after-reset.png");
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 120000);
+            poll.stop();
+            QVERIFY2(errors.isEmpty(), qPrintable(errors.join('\n')));
+            if (!shots.isEmpty()) {
+                QFile log(shots + "/resumed-log.txt"); QVERIFY(log.open(QIODevice::WriteOnly)); log.write(logText(window).toUtf8());
+            }
+        }
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
     // Opt-in run with a real ROM and frond-68k, not in ctest: FROND_IIIX_ROM and FROND_IIIX_CORE, and
     // FROND_IIIX_SHOTS for screenshots (the Palm window is taken from DISPLAY with ImageMagick's import).
     void iiixRealRom() {
@@ -1999,6 +2157,38 @@ for line in s.makefile('rb'):
         }
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
+    }
+    // A new Zodiac starts on Fast and other new machines on Exact, until the Engine is changed by hand; an
+    // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
+    void zodiacEngineDefault() {
+        const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
+        QVERIFY(frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::tx));
+        const frondSessions::Preferences fresh;
+        QTemporaryDir root;
+        {
+            FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic, nullptr, &fresh);
+            auto* device = dialog.findChild<QComboBox*>("device");
+            auto* engine = dialog.machineSettings->engine;
+            const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
+            pick("tapwave-zodiac-2");
+            QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
+            pick("palm-tx");
+            QVERIFY(!engine->currentData().toBool());
+            pick("tapwave-zodiac-2");
+            QVERIFY(engine->currentData().toBool());
+            // Exact chosen by hand stays when the device changes.
+            engine->setCurrentIndex(engine->findData(false));
+            emit engine->activated(engine->currentIndex());
+            pick("palm-tx"); pick("tapwave-zodiac-2");
+            QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
+        }
+        {
+            MachineSettingsDialog dialog(zodiac, fresh);
+            QVERIFY(dialog.controls->engine->isEnabled() && !dialog.controls->values().fastEngine);
+            auto fast = fresh; fast.fastEngine = true;
+            MachineSettingsDialog fastDialog(zodiac, fast);
+            QVERIFY(fastDialog.controls->values().fastEngine);
+        }
     }
     // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
     // the speed too, no contrast, and the Engine.

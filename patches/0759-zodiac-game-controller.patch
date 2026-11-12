@@ -1,0 +1,202 @@
+--- /dev/null
++++ b/src/uarm/native/Gamepad.h
+@@ -0,0 +1,53 @@
++#ifndef FROND_GAMEPAD_H
++#define FROND_GAMEPAD_H
++
++#include <algorithm>
++#include <cmath>
++#include <cstdint>
++
++#include "DeviceControls.h"
++
++// A host game controller as SDL reports it: the left stick's axes (-32768 to 32767, right and down
++// positive) and the buttons a device uses.
++struct GamepadState {
++    int16_t leftX{0}, leftY{0};
++    bool a{false}, b{false}, x{false}, y{false};
++    bool leftShoulder{false}, rightShoulder{false}, leftStick{false};
++    bool back{false}, start{false}, guide{false};
++};
++
++// What a controller holds on the device: keys and the analogue stick.
++struct GamepadInput {
++    DeviceKeyMask keys{0};
++    DeviceStick stick{};
++};
++
++// POLICY, host input only: a controller's stick within this much of its centre is at rest, as worn
++// sticks don't come back to zero. Past it the travel starts from nothing, so small pushes still count.
++constexpr float gamepadStickRest = 0.12f;
++
++// The Zodiac from a controller. The left stick is the analogue stick over its whole range and its
++// click the stick's press. A, B, X and Y are the Action keys by place (bottom, right, left, top), the
++// shoulders are the triggers, Start and Guide are Home and Back is Function.
++inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
++    GamepadInput input;
++    auto hold = [&](bool down, KeyId key) { if (down) input.keys |= deviceKeyBit(key); };
++    hold(pad.a, keyIdHard1);
++    hold(pad.b, keyIdHard2);
++    hold(pad.x, keyIdHard3);
++    hold(pad.y, keyIdHard4);
++    hold(pad.leftShoulder, keyIdTriggerLeft);
++    hold(pad.rightShoulder, keyIdTriggerRight);
++    hold(pad.leftStick, keyIdStickPress);
++    hold(pad.start || pad.guide, keyIdHome);
++    hold(pad.back, keyIdFunction);
++    const float x = std::max(pad.leftX / 32767.0f, -1.0f), y = std::max(pad.leftY / 32767.0f, -1.0f);
++    const float length = std::hypot(x, y);
++    if (length > gamepadStickRest) {
++        const float scale = (length - gamepadStickRest) / (1 - gamepadStickRest) / length;
++        input.stick = {std::clamp(x * scale, -1.0f, 1.0f), std::clamp(y * scale, -1.0f, 1.0f), true};
++    }
++    return input;
++}
++
++#endif
+--- a/src/uarm/native/main.cpp
++++ b/src/uarm/native/main.cpp
+@@ -155,6 +155,11 @@
+             cerr << "could not initialize SDL: " << SDL_GetError() << endl;
+             return nullptr;
+         }
++        // Game controllers are for the desktop, and it runs without them if SDL can't start them.
++        // On Android the app maps them to keys itself.
++#ifndef __ANDROID__
++        if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) cerr << "no game controllers: " << SDL_GetError() << endl;
++#endif
+ 
+         IMG_Init(IMG_INIT_PNG);
+ 
+--- a/src/uarm/native/SdlEventHandler.cpp
++++ b/src/uarm/native/SdlEventHandler.cpp
+@@ -266,6 +266,44 @@
+                 break;
+             }
+ 
++            // A game controller, for the Zodiac only. It is opened so SDL reports its buttons and axes.
++            case SDL_CONTROLLERDEVICEADDED:
++                if (controls.style == DeviceControlStyle::zodiac) SDL_GameControllerOpen(event.cdevice.which);
++                break;
++
++            case SDL_CONTROLLERDEVICEREMOVED:
++                if (auto* controller = SDL_GameControllerFromInstanceID(event.cdevice.which)) SDL_GameControllerClose(controller);
++                pad = {};
++                UpdateGamepad();
++                break;
++
++            case SDL_CONTROLLERAXISMOTION:
++                if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTX) pad.leftX = event.caxis.value;
++                else if (event.caxis.axis == SDL_CONTROLLER_AXIS_LEFTY) pad.leftY = event.caxis.value;
++                else break;
++                UpdateGamepad();
++                break;
++
++            case SDL_CONTROLLERBUTTONDOWN:
++            case SDL_CONTROLLERBUTTONUP: {
++                const bool down = event.type == SDL_CONTROLLERBUTTONDOWN;
++                switch (event.cbutton.button) {
++                    case SDL_CONTROLLER_BUTTON_A: pad.a = down; break;
++                    case SDL_CONTROLLER_BUTTON_B: pad.b = down; break;
++                    case SDL_CONTROLLER_BUTTON_X: pad.x = down; break;
++                    case SDL_CONTROLLER_BUTTON_Y: pad.y = down; break;
++                    case SDL_CONTROLLER_BUTTON_LEFTSHOULDER: pad.leftShoulder = down; break;
++                    case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER: pad.rightShoulder = down; break;
++                    case SDL_CONTROLLER_BUTTON_LEFTSTICK: pad.leftStick = down; break;
++                    case SDL_CONTROLLER_BUTTON_BACK: pad.back = down; break;
++                    case SDL_CONTROLLER_BUTTON_START: pad.start = down; break;
++                    case SDL_CONTROLLER_BUTTON_GUIDE: pad.guide = down; break;
++                    default: break;
++                }
++                UpdateGamepad();
++                break;
++            }
++
+             case SDL_APP_WILLENTERBACKGROUND:
+                 ReleaseInputs();
+                 break;
+@@ -439,6 +477,10 @@
+     ReleasePointer();
+     soc->ReleaseKeyboard();
+     stickKeys = 0;
++    // The controller's keys are let go with the built-in holds below.
++    pad = {};
++    padKeys = 0;
++    padStick = {};
+     UpdateStick();
+     hostKeys.fill(false); codeHolds.fill(0);
+     for (unsigned key=1;key<hardKeys.size();++key) {
+@@ -474,6 +516,7 @@
+     for (const auto& finger : fingers) if (finger.active && finger.stick) held = &finger;
+     if (held) now = held->position;
+     else if (pointerStick) now = pointerPosition;
++    else if (padStick.held) now = padStick;
+     else if (stickKeys) {
+         float x = float((stickKeys & 8) != 0) - float((stickKeys & 4) != 0);
+         float y = float((stickKeys & 2) != 0) - float((stickKeys & 1) != 0);
+@@ -486,6 +529,26 @@
+     soc->AnalogStick(stick.x, stick.y);
+     redrawRequested = true;
+ }
++// A key the controller holds counts with the built-in holds, so a key held some other way too goes
++// down once and comes up when the last of them lets go.
++void SdlEventHandler::UpdateGamepad() {
++    if (controls.style != DeviceControlStyle::zodiac) return;
++    const GamepadInput input = zodiacGamepadInput(pad);
++    for (unsigned key = 1; key < keyIdCount; ++key) {
++        const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
++        if ((input.keys & bit) == (padKeys & bit)) continue;
++        const bool heldElsewhere = hardKeys[key] || pointerKey == KeyId(key);
++        if (input.keys & bit) {
++            if (++builtInHolds[key] == 1 && !heldElsewhere) soc->KeyDown(KeyId(key));
++        } else if (--builtInHolds[key] == 0 && !heldElsewhere) {
++            soc->KeyUp(KeyId(key));
++        }
++        redrawRequested = true;
++    }
++    padKeys = input.keys;
++    padStick = input.stick;
++    UpdateStick();
++}
+ DeviceKeyMask SdlEventHandler::PressedButtons() const {
+     DeviceKeyMask pressed=pointerKey ? deviceKeyBit(pointerKey) : 0;
+     for (unsigned key=1;key<hardKeys.size();++key) if(hardKeys[key] || builtInHolds[key])pressed|=deviceKeyBit(KeyId(key));
+--- a/src/uarm/native/SdlEventHandler.h
++++ b/src/uarm/native/SdlEventHandler.h
+@@ -8,6 +8,7 @@
+ #include <functional>
+ #include <string>
+ #include "DeviceControls.h"
++#include "Gamepad.h"
+ #include "Rotation.h"
+ #include "WindowLayout.h"
+ #include "SoC.h"
+@@ -71,7 +72,7 @@
+     // The stick well in window pixels, w 0 for none.
+     SDL_Rect StickWell() const;
+     // Sends the stick's position to the SoC when it changed: a finger or the pointer on it wins
+-    // over the arrow keys.
++    // over a game controller's stick, and that over the arrow keys.
+     void UpdateStick();
+     DeviceStick TouchStick(int x, int y) const;
+     // A finger or the pointer put down on the knob holds the stick still until it moves past
+@@ -79,6 +80,8 @@
+     // while that tap is still possible.
+     bool HoldStill(bool& pending, float downX, float downY, int x, int y) const;
+     void TapStickPress();
++    // Sends what the game controller holds now: its keys that changed and the stick.
++    void UpdateGamepad();
+ 
+    private:
+     SoC* soc;
+@@ -108,6 +111,10 @@
+     bool pointerPressPending{false};
+     float pointerDownX{0}, pointerDownY{0};
+     uint8_t stickKeys{0};
++    // The game controller as last reported, and the keys and stick it holds on the device.
++    GamepadState pad{};
++    DeviceKeyMask padKeys{0};
++    DeviceStick padStick{};
+     DeviceStick stick{};
+     bool penDown{false};
+     float scale{1};

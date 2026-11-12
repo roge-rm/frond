@@ -1,0 +1,623 @@
+diff --git a/src/uarm/uarm/imx1_cs5_configuration.h b/src/uarm/uarm/imx1_cs5_configuration.h
+--- a/src/uarm/uarm/imx1_cs5_configuration.h
++++ b/src/uarm/uarm/imx1_cs5_configuration.h
+@@ -34,8 +34,34 @@
+         controller.reset();
+         engine.reset();
+         display.reset();
+-    }
+-    void advanceCpuCycles(uint32_t cycles) { controller.advanceCpuCycles(cycles); display.advanceCpuCycles(cycles); }
++        clocks.reset();
++        timeFraction = {};
++    }
++    bool referencePeriodSupported(Imx1PllRatio period) const {
++        return !clocks.programmed() || timeFraction.supports(uint64_t(period.denominator) * 64);
++    }
++    bool advanceCpuCycles(uint32_t cycles, Imx1PllRatio period = {64, 390625}) {
++        if (!referencePeriodSupported(period)) return false;
++        controller.advanceCpuCycles(cycles);
++        if (!clocks.programmed()) { display.advanceCpuCycles(cycles); return true; }
++        while (cycles) {
++            const uint32_t chunk = std::min(cycles, 1000000u);
++            advanceGraphicsTicks(timeFraction.add(uint64_t(chunk) * period.numerator * 390625,
++                                                  uint64_t(period.denominator) * 64));
++            cycles -= chunk;
++        }
++        return true;
++    }
++    void advanceReference(uint64_t numerator, uint64_t denominator) {
++        if (!clocks.programmed()) return;
++        assert(timeFraction.supports(denominator * 64));
++        while (numerator) {
++            const uint64_t chunk = std::min<uint64_t>(numerator, 1000000);
++            advanceGraphicsTicks(timeFraction.add(chunk * 390625, denominator * 64));
++            numerator -= chunk;
++        }
++    }
++    const Imx1GraphicsClocks& clockState() const { return clocks; }
+     Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
+     bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && interfaceControl == 0x0c000000; }
+     bool memoryReady(const Imx1Eim& eim) const {
+@@ -52,6 +78,17 @@
+     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
+                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
+         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
++        if (virtualProfile() && Imx1GraphicsClocks::owns(address)) {
++            if (size != 4) return Imx1BootstrapAccess::width;
++            if (!memoryReady(eim) || !engine.emptyRing()) return Imx1BootstrapAccess::sequence;
++            auto candidate=clocks;
++            const auto status = candidate.access(pc, address, size, write, value);
++            if (status != Imx1BootstrapAccess::ok || !write) return status;
++            if (!display.clockSourcesSupported(candidate.pixelConfiguredRate())) return Imx1BootstrapAccess::sideEffect;
++            clocks=candidate;
++            display.setClockSources(clocks.pixelRate(), clocks.systemRate());
++            return status;
++        }
+         if (virtualProfile() && Imx1GraphicsDisplay::owns(address)) {
+             if (size != 4) return Imx1BootstrapAccess::width;
+             if (!memoryReady(eim) || !engine.emptyRing()) return Imx1BootstrapAccess::sequence;
+@@ -116,6 +153,12 @@
+             return Imx1BootstrapAccess::unmapped;
+         if (size != (address >= 0x16010000 ? 4u : 1u)) return Imx1BootstrapAccess::width;
+         if (!eim.configurationMatches(5, 0x3e00, 0x11111e01)) return Imx1BootstrapAccess::sequence;
++        if (virtualProfile() && address == 0x16000010 && pc == (write ? 0x200c111cu : 0x200c1118u)) {
++            if (!programmed) return Imx1BootstrapAccess::sequence;
++            if (write && value != 1) return Imx1BootstrapAccess::sideEffect;
++            value = 1;
++            return Imx1BootstrapAccess::ok;
++        }
+         if (address == 0x16000010) {
+             if (write || (pc != 0x200bab4c && pc != 0x200bab80))
+                 return Imx1BootstrapAccess::externalInput;
+@@ -145,6 +188,17 @@
+     }
+ 
+    private:
++    void advanceGraphicsTicks(uint64_t ticks) {
++        clocks.setGpuBusy(!engine.emptyRing());
++        while (ticks) {
++            uint64_t step = std::min<uint64_t>(ticks, 1000000);
++            if (clocks.nextEvent()) step = std::min(step, clocks.nextEvent());
++            display.advanceCpuCycles(step);
++            clocks.advance(step);
++            ticks -= step;
++            display.setClockSources(clocks.pixelRate(), clocks.systemRate());
++        }
++    }
+     Imx1BootstrapAccess interfaceAccess(const Imx1Eim& eim, uint32_t pc, uint32_t address,
+                                        uint32_t size, bool write, uint32_t& value) {
+         if (size != 4) return Imx1BootstrapAccess::width;
+@@ -198,6 +252,8 @@
+     Imx1GraphicsController controller;
+     Imx1GraphicsEngine engine;
+     Imx1GraphicsDisplay display;
++    Imx1GraphicsClocks clocks;
++    Imx1GraphicsFraction timeFraction;
+     // These interface configuration words reset to zero in the virtual profile.
+     uint32_t interfaceControl = 0, interfaceIo = 0, readControl = 0, writeControl = 0, busTiming = 0, memoryIo = 0;
+     bool selected = false, programmed = false;
+diff --git a/src/uarm/uarm/imx1_graphics_display.h b/src/uarm/uarm/imx1_graphics_display.h
+--- a/src/uarm/uarm/imx1_graphics_display.h
++++ b/src/uarm/uarm/imx1_graphics_display.h
+@@ -3,9 +3,10 @@
+ 
+ #include <array>
+ #include "imx1_graphics_windows.h"
++#include "imx1_graphics_clocks.h"
+ 
+-// The virtual profile uses one display pixel per 16 charged CPU cycles.
+-// Configuration latches use 32 cycles while stopped, otherwise the next frame boundary.
++// Phase uses 16 units per pixel. Before clock programming, one unit is one CPU cycle.
++// Programmed clocks advance phase from nominal guest time without resetting scan position.
+ class Imx1GraphicsDisplay {
+    public:
+     struct Surface {
+@@ -36,36 +37,65 @@
+     uint32_t clockAcknowledgements() const {
+         return (pclk ? 0x2000000u : 0) | (sclk ? 0x4000000u : 0);
+     }
+-    void advanceCpuCycles(uint32_t cycles) {
++    uint64_t scanPhase() const { return phase; }
++    bool clockSourcesSupported(Imx1GraphicsClocks::Rate pixel) const {
++        const auto n=pixel.numerator*pixelCycles,d=Imx1GraphicsClocks::timeHz*pixel.denominator;
++        return pixelFraction.supports(d/std::gcd(n,d));
++    }
++    void setClockSources(Imx1GraphicsClocks::Rate pixel, Imx1GraphicsClocks::Rate system) {
++        pixelSource = pixel.numerator != 0;
++        systemSource = system.numerator != 0;
++        rateNumerator = pixel.numerator * pixelCycles;
++        rateDenominator = Imx1GraphicsClocks::timeHz * pixel.denominator;
++        const auto divisor = std::gcd(rateNumerator, rateDenominator);
++        rateNumerator /= divisor;
++        rateDenominator /= divisor;
++        if (!clockDelay) updateClocks();
++        else {
++            if (!pixelSource) pclk = false;
++            if (!systemSource) sclk = false;
++        }
++        enabled = activeRequested && pclk && sclk;
++    }
++    void advanceCpuCycles(uint64_t cycles) {
+         uint64_t remaining = cycles;
+         while (remaining) {
+-            uint64_t step = remaining;
++            uint64_t step = std::min<uint64_t>(remaining, 1000000);
+             if (clockDelay && clockDelay < step) step = clockDelay;
+-            if (pending && latchDelay < step) step = latchDelay;
++            if (pending && !latchAtFrame && latchDelay < step) step = latchDelay;
++            if (pending && latchAtFrame && enabled && rateNumerator) {
++                const uint64_t units = framePeriod - phase;
++                const uint64_t whole = units * rateDenominator;
++                uint64_t ticks = whole / rateNumerator + (whole % rateNumerator != 0);
++                // Fractional phase can move the event one tick earlier.
++                if (ticks > 1) --ticks;
++                step = std::min(step, ticks);
++            }
+             bool frameBoundary = false;
+             if (enabled && framePeriod) {
+-                const uint64_t elapsed = phase + step;
++                const uint64_t elapsed = phase + pixelFraction.add(step * rateNumerator, rateDenominator);
+                 const uint64_t crossed = elapsed / framePeriod;
+                 frames += crossed;
+                 phase = elapsed % framePeriod;
+-                frameBoundary = crossed && phase == 0;
++                frameBoundary = crossed != 0;
+             }
+             remaining -= step;
+             const bool clocksDue = clockDelay && step >= clockDelay;
+             if (clockDelay) clockDelay -= step;
+-            if (pending) latchDelay -= step;
++            if (pending && !latchAtFrame) latchDelay -= step;
+             if (clocksDue) updateClocks();
+-            if (pending && latchDelay == 0) {
++            if (pending && (latchAtFrame ? frameBoundary : latchDelay == 0)) {
+                 active = submitted;
+                 activeSurface = submittedSurface;
+                 activeTimingKnown = submittedTimingKnown;
++                activeRequested = submittedEnabled;
+                 clockControl = activeWord(0x414) & 0x1800000;
+                 clockDelay = 0;
+                 updateClocks();
+-                enabled = submittedEnabled && pclk && sclk;
++                enabled = activeRequested && pclk && sclk;
+                 framePeriod = submittedPeriod;
+                 pending = false;
+-                phase = 0;
++                if (!frameBoundary) { phase = 0; pixelFraction = {}; }
+                 ++activeRevision;
+                 if (enabled && !frameBoundary) ++frames;
+             }
+@@ -114,7 +144,8 @@
+             submittedTimingKnown = timingKnown;
+             submittedPeriod = period;
+             pending = true;
+-            latchDelay = enabled && framePeriod ? framePeriod - phase : latchCycles;
++            latchAtFrame = enabled && framePeriod;
++            latchDelay = latchCycles;
+             editing = false;
+             updateControl = 0x79;
+             return A::ok;
+@@ -220,9 +251,9 @@
+     void updateClocks() {
+         uint64_t period = 0;
+         const bool configured = activeTimingKnown && timing(active, period);
+-        pclk = configured && (clockControl & 0x800000);
+-        sclk = configured && (clockControl & 0x1000000);
+-        if (!pclk || !sclk) enabled = false;
++        pclk = configured && pixelSource && (clockControl & 0x800000);
++        sclk = configured && systemSource && (clockControl & 0x1000000);
++        enabled = activeRequested && pclk && sclk;
+     }
+     bool decode(const Imx1GraphicsWindows& windows, Surface& value, uint64_t& period) const {
+         for (auto offset : {0x420u,0x424u,0x428u}) if (!knownWords[index(offset)]) return false;
+@@ -260,6 +291,9 @@
+     uint32_t updateControl = 0, clockDelay = 0, clockControl = 0;
+     bool editing = false, pending = false, submittedEnabled = false, enabled = false;
+     bool activeTimingKnown = false, submittedTimingKnown = false;
++    Imx1GraphicsFraction pixelFraction;
++    uint64_t rateNumerator = 1, rateDenominator = 1;
++    bool pixelSource = true, systemSource = true, activeRequested = false, latchAtFrame = false;
+     bool pclk = false, sclk = false;
+ };
+ #endif
+diff --git a/src/uarm/uarm/imx1_graphics_controller.h b/src/uarm/uarm/imx1_graphics_controller.h
+--- a/src/uarm/uarm/imx1_graphics_controller.h
++++ b/src/uarm/uarm/imx1_graphics_controller.h
+@@ -9,13 +9,23 @@
+    public:
+     static bool owns(uint32_t address) { return address == 0x160101a4 || address == 0x16010180 || address == 0x1601018c ||
+             address == 0x16010194 || address == 0x16010198 || address == 0x160101b0 || address == 0x160101b8; }
+-    void reset() { stage = externalStep = delay = 0; words = {}; }
+-    void advanceCpuCycles(uint32_t cycles) { delay = cycles >= delay ? 0 : delay - cycles; }
+-    bool externalInitialised() const { return externalStep == operations.size() && delay == 0; }
++    void reset() { stage = externalStep = delay = 0; words = {}; initialised = false; }
++    void advanceCpuCycles(uint32_t cycles) {
++        if (!delay) return;
++        if (cycles >= delay) { delay = 0; initialised = true; }
++        else delay -= cycles;
++    }
++    bool externalInitialised() const { return initialised && delay == 0; }
+     bool configured() const { return stage >= 2; }
+     bool ready() const { return stage == 3 && externalInitialised(); }
+     Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
+         if (size != 4) return Imx1BootstrapAccess::width;
++        if (address == 0x16010194 && pc == 0x200c5f20 && write) {
++            if (!ready()) return Imx1BootstrapAccess::sequence;
++            if (value != 0x1545) return Imx1BootstrapAccess::sideEffect;
++            word(0x194) = value;
++            return Imx1BootstrapAccess::ok;
++        }
+         if (address == 0x160101a4 && pc == 0x200acb8c && write) {
+             if (!ready()) return Imx1BootstrapAccess::sequence;
+             if (value != 0x7800) return Imx1BootstrapAccess::sideEffect;
+@@ -75,6 +85,7 @@
+             value = word(0x198);
+             return Imx1BootstrapAccess::ok;
+         }
++        if (!write && address == 0x160101b0 && pc == 0x200c41c4 && ready() && externalStep == operations.size()) externalStep = 11;
+         unsigned index = 0;
+         for (; index < operations.size(); ++index)
+             if (pc == operations[index].pc && address == 0x16010000 + operations[index].offset &&
+@@ -93,12 +104,14 @@
+             if (pc == 0x200c4334 && (word(0x18c) & 0xc) == 0xc) expected |= 0x1000000;
+             if (value != expected) return Imx1BootstrapAccess::sideEffect;
+             word(op.offset) = value;
+-            if (pc == 0x200c4364) delay = 32;
++            if (pc == 0x200c4220) initialised = false;
++            if (pc == 0x200c4364) { initialised = false; delay = 32; }
+         } else value = op.offset == 0x1b8 ? 0 : word(op.offset);
+         ++externalStep;
+         return Imx1BootstrapAccess::ok;
+     }
+     std::array<uint32_t, 4> words{};
+     uint32_t stage = 0, externalStep = 0, delay = 0;
++    bool initialised = false;
+ };
+ #endif
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -49,8 +49,15 @@
+         if (p.options.i2cObserver) p.options.i2cObserver(p.options.i2cContext, p.result.i2cEvent);
+     }
+ 
++    void finishGraphicsBusStall() {
++        const auto period = peripherals.cpuReferencePeriod(3);
++        const auto units = peripherals.finishSystemPllBusStall();
++        cs5Configuration.advanceReference(units, period.denominator);
++    }
++
+     bool clockBoundary() {
+-        const auto status = peripherals.clockStatus();
++        const auto status = cs5Configuration.referencePeriodSupported(peripherals.cpuReferencePeriod(cpuArm920ClockMode(cpu))) ?
++            peripherals.clockStatus() : Imx1BootstrapAccess::sideEffect;
+         if (status == Imx1BootstrapAccess::ok) return false;
+         result.stop = Imx1ProbeStop::unsupportedPeripheral;
+         result.peripheralStatus = status;
+@@ -86,7 +93,7 @@
+         auto& p = *static_cast<Probe*>(context);
+         // Further data accesses within one instruction also wait for the nominal bus clock.
+         if (!p.failed && p.options.bootstrapPeripherals && !memIsInstructionFetch(p.mem))
+-            p.peripherals.finishSystemPllBusStall();
++            p.finishGraphicsBusStall();
+         if (!write) {
+             if (const auto* source = p.resolve(address, size)) {
+                 std::memcpy(data, source, size);
+@@ -318,6 +325,12 @@
+ Imx1ProbeResult imx1BootProbe(const uint8_t* rom, uint32_t size, Imx1ProbeEntry entry,
+                             uint32_t steps, Imx1ProbeObserver observer, void* context, bool fast,
+                             const Imx1ProbeOptions* options) {
++    if (!steps || steps > imx1ProbeMaximumSteps) {
++        Imx1ProbeResult result{};
++        result.stop = Imx1ProbeStop::unsupportedPeripheral;
++        result.peripheralStatus = Imx1BootstrapAccess::sequence;
++        return result;
++    }
+     if (options && (!imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (options->graphicsProfile != Imx1GraphicsProfile::strict &&
+          (!options->bootstrapPeripherals || options->cs5ResetStatusInputKnown)))) {
+@@ -367,7 +380,7 @@
+     for (uint32_t step = 0; step < steps; ++step) {
+         // Conservative bus stall: jump to the reference event without retiring instructions.
+         if (p->options.bootstrapPeripherals) {
+-            p->peripherals.finishSystemPllBusStall();
++            p->finishGraphicsBusStall();
+             if (p->clockBoundary()) break;
+         }
+         if (p->options.bootstrapPeripherals) {
+@@ -470,7 +483,11 @@
+             }
+         }
+         if (p->options.bootstrapPeripherals) {
+-            p->cs5Configuration.advanceCpuCycles(cycles);
++            if (!p->cs5Configuration.advanceCpuCycles(cycles, p->peripherals.cpuReferencePeriod(cpuArm920ClockMode(p->cpu)))) {
++                p->result.stop = Imx1ProbeStop::unsupportedPeripheral;
++                p->result.peripheralStatus = Imx1BootstrapAccess::sideEffect;
++                break;
++            }
+             if (p->graphicsMemory) p->graphicsFrame.advance(p->cs5Configuration, *p->graphicsMemory, p->peripherals.eimState());
+             p->peripherals.advanceCpuCycles(cycles, cpuArm920ClockMode(p->cpu), p->options.assumeMpllSettled);
+             if (p->clockBoundary()) break;
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -55,6 +55,11 @@
+         // DDI0151C 5.4 requires asynchronous FCLK strictly greater than BCLK.
+         return pll.numerator * system.denominator * clocks.busDivider() >
+                system.numerator * pll.denominator * clocks.mcuPrescaler();
++    }
++    Imx1PllRatio cpuReferencePeriod(uint32_t mode) const {
++        const auto rate = mode == 3 ? cgm.mcuPllTargetRatio() : cgm.systemPllActiveRatio();
++        return {uint64_t(rate.denominator) * (mode == 3 ? cgm.mcuPrescaler() : cgm.busDivider()),
++                uint32_t(rate.numerator)};
+     }
+     // Finish a held-high System PLL interval before the next architectural bus access.
+     // Returns elapsed independent reference units, without retiring CPU instructions.
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -6,6 +6,8 @@
+ #include "imx1_cs4_capture.h"
+ #include "imx1_cs5_reset.h"
+ #include "imx1_cs5_configuration.h"
++
++inline constexpr uint32_t imx1ProbeMaximumSteps = 50000000;
+ 
+ // The physical flash mapping is observed in the updater. Aliases are explicit experiments.
+ enum class Imx1ProbeEntry { physicalFlash, resetAlias, linkedAlias };
+diff --git a/src/uarm/uarm/imx1_graphics_clocks.h b/src/uarm/uarm/imx1_graphics_clocks.h
+new file mode 100644
+--- /dev/null
++++ b/src/uarm/uarm/imx1_graphics_clocks.h
+@@ -0,0 +1,251 @@
++#ifndef FROND_IMX1_GRAPHICS_CLOCKS_H
++#define FROND_IMX1_GRAPHICS_CLOCKS_H
++
++#include <array>
++#include <algorithm>
++#include <cassert>
++#include <numeric>
++#include <limits>
++#include "imx1_bootstrap.h"
++
++// Proper fractions retain elapsed time across charges and source changes.
++struct Imx1GraphicsFraction {
++    uint64_t phase = 0, denominator = 1;
++    bool supports(uint64_t d) const {
++        return d && d / std::gcd(d, denominator) <= (std::numeric_limits<uint64_t>::max() / 2) / denominator;
++    }
++    uint64_t add(uint64_t n, uint64_t d) {
++        assert(supports(d));
++        const auto common = denominator * (d / std::gcd(d, denominator));
++        const auto fraction = phase * (common / denominator) + (n % d) * (common / d);
++        phase = fraction % common;
++        denominator = common;
++        return n / d + fraction / common;
++    }
++};
++
++// Nominal virtual analogue policy. Frequencies and deadlines use guest time only.
++class Imx1GraphicsClocks {
++   public:
++    struct Rate { uint64_t numerator = 0, denominator = 1; };
++    static constexpr uint64_t timeHz = 200000000, referenceHz = 16000000;
++    static constexpr uint32_t testPrescaler = 4;
++    static bool owns(uint32_t address) { return address >= 0x16010080 && address <= 0x160100b0 && !(address & 3); }
++    void reset() { *this = {}; }
++    bool programmed() const { return started; }
++    uint32_t word(uint32_t offset) const { return words[(offset - 0x80) / 4]; }
++    uint16_t count() const { return counter; }
++    uint64_t nextEvent() const {
++        uint64_t next=0;
++        for (auto event : {lockRemaining,countRemaining,automaticRemaining})
++            if (event && (!next || event<next)) next=event;
++        return next;
++    }
++    bool automaticNormal() const { return automaticRouted() && normal; }
++    void setGpuBusy(bool value) {
++        if (gpuBusy==value) return;
++        gpuBusy=value;
++        scheduleAutomatic();
++    }
++    uint64_t measurementTicks() const {
++        return (uint64_t((word(0x84) >> 24) + 1) * testPrescaler * timeHz + referenceHz - 1) / referenceHz;
++    }
++    Rate pllRate() const {
++        const auto c = word(0x88), div = word(0x84);
++        if (!started || !(word(0x80) & 1) || (c & 0x80000003)) return {};
++        const uint32_t dac = (c >> 20) & 15;
++        if (dac) {
++            const uint32_t voltage = dac <= 5 ? 0 : dac - 5;
++            return {vcoBase() + voltage * 3200000u, vcoDivisor()};
++        }
++        if ((c & 0x40) || lockRemaining) return {};
++        const Rate target{referenceHz * (((div >> 8) & 63) * 8 + 8 + ((div >> 16) & 7)),
++                          uint64_t((div & 15) + 1) * 8};
++        if (target.numerator * vcoDivisor() < vcoBase() * target.denominator ||
++            target.numerator * vcoDivisor() > (vcoBase() + 32000000u) * target.denominator) return {};
++        return target;
++    }
++    Rate pixelConfiguredRate() const {
++        const auto control=word(0x90), div=word(0x84);
++        const uint64_t post=((control>>4)&15)+1;
++        if (!(control&15)) return {referenceHz,post};
++        const auto dac=(word(0x88)>>20)&15;
++        if (dac) return {vcoBase()+(dac<=5?0:dac-5)*3200000u,vcoDivisor()*post};
++        return {referenceHz * (((div>>8)&63)*8+8+((div>>16)&7)), ((div&15)+1)*8*post};
++    }
++    Rate systemRate() const {
++        if ((word(0x98) & 12) == 12) return {};
++        const auto control = word(0x8c);
++        if (automaticRouted() && normal)
++            return {(word(0x80)&1)?referenceHz:0,((control>>11)&15)+1};
++        auto r = output(control);
++        if (!automaticRouted() && (word(0x98) & 12) == 4) {
++            r.denominator /= ((control >> 4) & 15) + 1;
++            r.denominator *= ((control >> 11) & 15) + 1;
++        }
++        return r;
++    }
++    Rate pixelRate() const { return (word(0x98) & 12) == 12 ? Rate{} : output(word(0x90)); }
++    void advance(uint64_t ticks) {
++        assert(!nextEvent() || ticks <= nextEvent());
++        if ((word(0x94) & 0x300) == 0x100 && countRemaining) {
++            const auto rate = testRate(word(0x94) & 31);
++            // Callers bound each charge, so the frequency product fits uint64_t.
++            const auto d = timeHz * rate.denominator * testPrescaler;
++            const auto common = std::gcd(rate.numerator,d);
++            counter = uint16_t(counter + countFraction.add(ticks * (rate.numerator/common),d/common));
++        }
++        if (countRemaining) countRemaining -= ticks;
++        if (lockRemaining) lockRemaining -= ticks;
++        if (automaticRemaining) {
++            automaticRemaining-=ticks;
++            if (!automaticRemaining) normal=!normal;
++        }
++    }
++    Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value) {
++        using A = Imx1BootstrapAccess;
++        if (size != 4) return A::width;
++        const uint32_t offset = address - 0x16010000;
++        bool known = false;
++        for (const auto& op : operations)
++            if (op.pc == pc && op.offset == offset && op.write == write) { known = true; break; }
++        if (!known) return A::externalInput;
++        if (!write) { value = word(offset) | (offset == 0x94 ? uint32_t(counter) << 16 : 0); return A::ok; }
++        if (offset == 0x94) {
++            if ((value & 0xfce0) || (value & 31) > 3) return A::sideEffect;
++            const uint32_t next = value & 0x31f;
++            if (!(next & 0x200) && !fractionalSourcesSupported()) return A::sideEffect;
++            if (next & 0x200) { counter = 0; countFraction = {}; countRemaining = 0; }
++            else if ((next & 0x100) && !(word(0x94) & 0x100)) countRemaining = measurementTicks();
++            if (!(next & 0x100)) countRemaining = 0;
++            words[(offset - 0x80) / 4] = next;
++            return A::ok;
++        }
++        if (offset >= 0xa4) {
++            uint32_t expected = 0;
++            if (pc == 0x200c4e24 || pc == 0x200c639c) expected = (word(0xa4) & 0xfff00) | 0x1100020;
++            else if (pc == 0x200c4f9c || pc == 0x200c6374) expected = (word(0xa8) & 0x30cc000) | 0x4b000200;
++            else if (pc == 0x200c501c || pc == 0x200c6348) expected = (word(0xac) & 0xfffcfe00) | 2;
++            else if (pc == 0x200c5060) expected = 0x7f;
++            else return A::externalInput;
++            if (value != expected) return A::sideEffect;
++        }
++        if ((pc == 0x200c14e4 && value != (word(0x80) | 0x80u)) ||
++            (pc == 0x200c165c && value != (word(0x80) & 0x7fffffu)) ||
++            (pc == 0x200c16ac && value != (word(0x88) & ~3u)) ||
++            (pc == 0x200c1550 && ((value ^ word(0x98)) & ~0xf1u)) ||
++            (pc == 0x200c11c4 && value != (word(0x98) | 0xc0u)) ||
++            (pc == 0x200c15c0 && value != ((word(0x80) & 0x7fffffu) | 0xa000000u)) ||
++            (pc == 0x200c15f0 && value != ((word(0x8c) & ~0xfu) | 1))) return A::sideEffect;
++        if ((pc == 0x200c1148 && value != (word(0x9c) & ~0x80u)) ||
++            (pc == 0x200c1174 && value != (word(0x88) & ~4u))) return A::sideEffect;
++        if ((pc == 0x200c54c0 && ((value ^ word(0x90)) & ~0xfu)) ||
++            (pc == 0x200c54e0 && ((value ^ word(0x90)) & ~0xf0u))) return A::sideEffect;
++        if (offset == 0x98) {
++            if ((value & 0x32) || (value & 12) == 8) return A::sideEffect;
++            // Only the native condition pair is qualified for automatic activity.
++            if ((pc == 0x200c4c00 || (value & 0xc0)) && (value & 0xff00) != 0x4000) return A::sideEffect;
++            if (pc != 0x200c4c00 && ((value ^ word(0x98)) & 0xff00)) return A::sideEffect;
++        }
++        // Pump current and auxiliary PLL controls retain the native nominal settings.
++        if (offset == 0x88 && (value & ~0x80f0fc43u) != 0x4b000200u) return A::sideEffect;
++        if (offset == 0x9c && pc == 0x200c4cac && value != 0x6e) return A::sideEffect;
++        if (offset == 0xa0 && value != 0xffff0000u) return A::sideEffect;
++        if ((offset == 0x8c || offset == 0x90) && (value & 15) > 1) return A::sideEffect;
++        if ((offset == 0x80 && (value & ~0x0a0000bfu)) ||
++            (offset == 0x84 && (value & 0x0008c0f0u)) ||
++            (offset == 0x8c && (value & ~0x7fffu)) ||
++            (offset == 0x90 && (value & ~0xffu))) return A::sideEffect;
++        auto candidate=*this;
++        candidate.words[(offset - 0x80) / 4]=value;
++        if (!candidate.fractionalSourcesSupported()) return A::sideEffect;
++        const uint32_t previous = word(offset);
++        words[(offset - 0x80) / 4] = value;
++        started = true;
++        if ((offset == 0x80 && ((previous ^ value) & 0xa000000u)) ||
++            (offset == 0x98 && ((previous ^ value) & 0xcdu))) {
++            normal=(word(0x98)&12)==4;
++            scheduleAutomatic();
++        } else if (offset == 0x98 && previous != value) scheduleAutomatic();
++        if (offset == 0x84 || (offset == 0x88 && ((previous ^ value) & 0x80f0fc43))) {
++            const auto c = word(0x88);
++            lockRemaining = (c & 0x80000043) || (c & 0xf00000) ? 0 :
++                ((uint64_t((word(0x84) >> 24) + 1) * 16 + ((word(0x84) >> 20) & 15) + 1) * timeHz + referenceHz - 1) / referenceHz;
++        }
++        return A::ok;
++    }
++   private:
++    struct Operation { uint32_t pc, offset; bool write; };
++    inline static constexpr Operation operations[] = {
++        {0x200c45e4,0x80,true},{0x200c47b0,0x8c,true},{0x200c4920,0x90,true},
++        {0x200c49ac,0x84,true},{0x200c4b38,0x88,true},{0x200c4c00,0x98,true},
++        {0x200c4cac,0x9c,true},{0x200c4cdc,0xa0,true},
++        {0x200c4da4,0xa4,false},{0x200c4e24,0xa4,true},{0x200c4e2c,0xa8,false},
++        {0x200c4f9c,0xa8,true},{0x200c501c,0xac,true},{0x200c5060,0xb0,true},
++        {0x200c56c0,0x8c,true},{0x200c56f8,0x80,true},{0x200c573c,0x98,true},{0x200c57a8,0x88,true},
++        {0x200c632c,0xac,false},{0x200c6348,0xac,true},
++        {0x200c6350,0xa8,false},{0x200c6374,0xa8,true},
++        {0x200c637c,0xa4,false},{0x200c639c,0xa4,true},
++        {0x200c11c4,0x98,true},{0x200c15c0,0x80,true},{0x200c15f0,0x8c,true},
++        {0x200c14e4,0x80,true},{0x200c1550,0x98,true},{0x200c165c,0x80,true},{0x200c16ac,0x88,true},
++        {0x200c1148,0x9c,true},{0x200c1174,0x88,true},
++        {0x200c54a8,0x90,false},{0x200c54c0,0x90,true},
++        {0x200c54c8,0x90,false},{0x200c54e0,0x90,true},
++        {0x200c55c0,0x8c,true},{0x200c5f50,0x8c,true},
++        {0x200c5d58,0x98,true},{0x200c5e0c,0x84,true},{0x200c5e38,0x98,true},{0x200c5e9c,0x98,true},
++        {0x200c5f18,0x88,true},{0x200c6068,0x88,true},
++        {0x200c5be4,0x88,true},{0x200c5c48,0x88,true},{0x200c5c7c,0x88,true},{0x200c5ca8,0x88,true},
++        {0x200c5930,0x88,true},{0x200c5978,0x88,true},{0x200c59d8,0x88,true},{0x200c5af8,0x88,true},
++        {0x200c5824,0x94,true},{0x200c5850,0x94,true},{0x200c587c,0x94,true},
++        {0x200c588c,0x94,false},{0x200c58c4,0x94,true}
++    };
++    bool automaticRouted() const {
++        return (word(0x98)&1) && (word(0x98)&0xc0) && (word(0x98)&12)!=12 && (word(0x80)&0xa000000u)==0xa000000u;
++    }
++    void scheduleAutomatic() {
++        automaticRemaining=0;
++        if (!automaticRouted()) return;
++        if ((!gpuBusy && !normal && (word(0x98)&0x40)) ||
++            (gpuBusy && normal && (word(0x98)&0x80))) {
++            const auto timer=(word(0x98)>>(gpuBusy?24:16))&255;
++            automaticRemaining=((uint64_t(timer)+1)*16*timeHz+referenceHz-1)/referenceHz;
++        }
++    }
++    bool fractionalSourcesSupported() const {
++        const auto div=word(0x84),dac=(word(0x88)>>20)&15;
++        for (uint64_t post : {uint64_t(1),uint64_t(((word(0x8c)>>4)&15)+1),
++                              uint64_t(((word(0x8c)>>11)&15)+1),uint64_t(((word(0x90)>>4)&15)+1)}) {
++            const uint64_t n=referenceHz * (((div>>8)&63)*8+8+((div>>16)&7));
++            const uint64_t d=timeHz*((div&15)+1)*8*post*testPrescaler;
++            const uint64_t referenceD=timeHz*post*testPrescaler;
++            const uint64_t forcedN=vcoBase()+(dac<=5?0:dac-5)*3200000u;
++            const uint64_t forcedD=timeHz*vcoDivisor()*post*testPrescaler;
++            if (!countFraction.supports(d/std::gcd(n,d)) ||
++                !countFraction.supports(referenceD/std::gcd(referenceHz,referenceD)) ||
++                !countFraction.supports(forcedD/std::gcd(forcedN,forcedD))) return false;
++        }
++        return true;
++    }
++    uint64_t vcoBase() const {
++        const auto c = word(0x88);
++        return 8000000u + ((c >> 10) & 7) * 16000000u + ((c >> 14) & 3) * 4000000u;
++    }
++    uint64_t vcoDivisor() const { return (word(0x88) & 0x2000) ? 4 : 1; }
++    Rate output(uint32_t control) const {
++        Rate r = (control & 15) == 1 ? pllRate() : Rate{(word(0x80) & 1) ? referenceHz : 0,1};
++        r.denominator *= ((control >> 4) & 15) + 1;
++        return r;
++    }
++    Rate testRate(uint32_t selector) const {
++        if (selector == 1) return pllRate();
++        if (selector == 2) return systemRate();
++        if (selector == 3) return pixelRate();
++        return {};
++    }
++    std::array<uint32_t,13> words{};
++    Imx1GraphicsFraction countFraction;
++    uint64_t lockRemaining = 0, countRemaining = 0, automaticRemaining = 0;
++    uint16_t counter = 0;
++    bool started = false, gpuBusy = false, normal = false;
++};
++#endif

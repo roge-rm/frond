@@ -1,0 +1,26 @@
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -259,7 +259,7 @@
+ // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
+ // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
+ // Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+-inline constexpr uint32_t imx1MachineStateCoreRevision = 756;
++inline constexpr uint32_t imx1MachineStateCoreRevision = 757;
+ enum class Imx1StateStatus {
+     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
+     layoutMismatch, corruptSection, missingSection, romMismatch, optionsMismatch, busMismatch, invalidValue
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -440,8 +440,11 @@
+             (a4 || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)) && !known[reg]) return A::sequence;
+         const auto gmc = values[0x41b];
+         // Host SRCCOPY is limited to the observed native RGB565 control words.
++        // ASSUMPTION "host upload takes its source type from 41b": the ROM sends RGB565 rows with 4b1 source
++        // type 0 left by the stretch restore (200b0b48 on), so 4b1 may hold type 3 or 0 here.
+         if (host && !a4 && !mono && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
+-                     values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f)) return A::sideEffect;
++                     (values[0x4b1] != 0x40030d04 && values[0x4b1] != 0x40000d04) || values[0x472] != 0x3f))
++            return refuse("host-upload-state", values[0x4b1]);
+         // Admitted GMC and shadow words are those of the 9 November 2026 empty-card run.
+         // The producer changes its datatype shadow without emitting it, so that field is not compared.
+         if (mono && (gmc != 0x579804df || values[0x4b2] != 0x00cc0b00 ||

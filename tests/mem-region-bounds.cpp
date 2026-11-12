@@ -73,8 +73,30 @@ static bool device(void*, uint32_t, uint_fast8_t, bool, void*) {
     return true;
 }
 
+struct FetchProbe {
+    ArmMem* mem;
+    bool observed = false;
+    bool result = true;
+};
+static bool fetchProbe(void* context, uint32_t, uint_fast8_t, bool, void*) {
+    auto& probe = *static_cast<FetchProbe*>(context);
+    probe.observed = memIsInstructionFetch(probe.mem);
+    return probe.result;
+}
+
 int main() {
     uint8_t data[64] = {};
+    expect("device fetch context and restoration", true, [&] {
+        auto* bus = memInit();
+        FetchProbe probe{bus};
+        if (!memRegionAdd(bus, 0x40000000, 0x1000, fetchProbe, &probe)) return false;
+        if (!memInstructionFetch<4>(bus, 0x40000000, data) || !probe.observed ||
+            memIsInstructionFetch(bus)) return false;
+        if (!memAccess<4, false>(bus, 0x40000000, data) || probe.observed) return false;
+        probe.result = false;
+        return !memInstructionFetch<4>(bus, 0x40000000, data) && probe.observed &&
+               !memIsInstructionFetch(bus);
+    });
 
     // Primary RAM at the TX base: wrapped accesses must not reach the RAM branch.
     ArmMem* mem = memInit();

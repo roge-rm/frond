@@ -349,6 +349,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `pen-down X Y`, `pen-move X Y` | Touch at unscaled guest pixels. The range is the device surface, TX 0..319 by 0..479, E2 320 by 440 with its silkscreen. |
 | `pen-up` | Lift the pen. |
 | `key-down KEY`, `key-up KEY` | A key by name or by number (1 up to the highest key id). |
+| `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
@@ -779,6 +780,12 @@ The IIIx works as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
+| `FROND_ZODIAC_GPU` | Zodiac in Fast: `on` (or `1`) draws the graphics engine's fills on the host GPU, `diff` draws them on both and checks each GPU fill against the CPU's, reporting mismatches to stderr. Off by default. |
+| `FROND_ZODIAC_GPU_DEVICE` | The EGL device's DRM node to draw on, e.g. `/dev/dri/renderD128`, or `surfaceless` for Mesa's surfaceless platform. Default: the first hardware device. |
+| `FROND_ZODIAC_GPU_QUIET` | Leave out the GPU's fill and transfer counts when it stops. |
+| `FROND_ZODIAC_GPU_CHECK` | Check for a GL error after every fill and patch, as well as after each batch. |
+| `FROND_ZODIAC_GPU_MIN_PIXELS` | Fills under this many pixels stay on the CPU when the GPU hasn't drawn their bytes. Default 0, every fill the GPU can take. |
+| `FROND_ZODIAC_GPU_READ_RGBA` | Read GPU pages back as RGBA integers, the GLES path every driver has. |
 | `FROND_PACE_FAULT_DIAGNOSTICS` | Log guest permission faults seen from PACE. |
 | `FROND_TG50_ORIGINAL_PACE_DIAGNOSTIC` | TG50 PACE entry diagnostics. |
 | `FROND_TG50_AUDIO_TRACE` | Trace the TG50 audio codec to stderr. |
@@ -877,6 +884,7 @@ All in `tools/`. Most take `--help`.
 | `generate-device-data.py` | Writes the device profile data for Python and Android. `--check` fails if it's stale. |
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
+| `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form; see [MMU](zodiac2-mmu.md). Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap; see [RTC](zodiac2-rtc.md). Optional `--cs4-port0-input=BYTE` enables the private [CS4 diagnostic recorder](zodiac2-cs4.md), requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private [W4200 reset echo](zodiac2-cs5.md) with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See [Zodiac bring-up](zodiac2-bringup.md) and [input scenarios](zodiac2-inputs.md). |
 | `dynarmic-source.py` | Exports the pinned Dynarmic source and applies its patches. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`). |
@@ -930,13 +938,69 @@ All in `tools/`. Most take `--help`.
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `device-session-probe` | Build the device session probe. |
+| `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. See [JIT boundary](zodiac2-jit.md). |
+| `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
+| `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. See [MMU and cache](zodiac2-mmu.md). Outside `make test`. |
+| `test-zodiac-dcache` | ARM920 data cache, writeback, aliases, maintenance and instruction/JIT coherence in Exact and Fast. See [data cache](zodiac2-dcache.md). Outside `make test`. |
+| `test-imx1-aitc` | i.MX1 AITC reset, enable/type/force, priority/mask/vector, masked GPIO A/B/C/D requests and transactional bootstrap rejection checks. Outside `make test`. |
+| `test-imx1-clocks-gpio` | Static i.MX1 clock/GPIO reset and configuration, access rejection and explicit clock/pin limits. Outside `make test`. |
+| `test-imx1-gpio-idle` | Held GPIO level interrupts, masked history and transactional AITC guards. Outside `make test`. |
+| `test-imx1-gpio-active` | GPIO edge/level pending bits, W1C, masked events, knownness, separate board samples and transactional AITC requests. Outside `make test`. |
+| `test-imx1-gpio-pad` | Logical pad history, inactive edge baselines, SSR feedback and guarded AITC source 11. Outside `make test`. |
+| `test-imx1-spll` | Explicit nominal System PLL staging/restart, LF/output hold, spacing, FCLK/BCLK guards, phase and portable maximum charges. See [clocks](zodiac2-clocks.md). Outside `make test`. |
+| `test-imx1-mpll` | MCU PLL fields, restart readiness, nominal asynchronous ratios, fractional handoff and chunk invariance. See [clocks](zodiac2-clocks.md). Outside `make test`. |
+| `test-imx1-timer`, `test-imx1-timer2`, `test-zodiac-timer-probe` | Both timer instances, elapsed PERCLK1 progression, independent phases, compare requests, transactional AITC guards and elapsed-interrupt diagnostics in Exact/Fast. See [timers](zodiac2-timers.md). Outside `make test`. |
+| `test-zodiac-gpio-input` | Synthetic CLI scenarios for independent GPIO-A/B/D samples, idle level interrupt/ISR guards, both explicit PLL settling assumptions, headers, unknown defaults and invalid values. Outside `make test`. |
+| `test-zodiac-thumb-probe` | Exact/Fast Thumb fetch and page/end boundaries, retained cache, BL halfword state, mixed ARM/Thumb execution and conservative probe guards. Outside `make test`. |
+| `test-zodiac-thumb-add-pc` | ARM920T Thumb high ADD PC operands, flags, halfword targets, fetch aborts and probe guards, requiring generated Fast execution for each directed instruction. Outside `make test`. |
+| `test-imx1-live-clocks` | Asynchronous PRESC/BCLK divider changes, retained timer/reference phases, active/staged ratio guards and unchanged FastBus limits. Outside `make test`. |
+| `test-zodiac-user-bank` | Privileged User-bank transfers, bank visibility, saved-context MOVS returns and guarded forms. Outside `make test`. |
+| `test-zodiac-ldm-return` | LDM exception-return bank ordering, base writeback, partial faults, target policy, cache/MMU continuation and explicit Fast interpreter fallback. Outside `make test`. |
+| `test-zodiac-arm-add-pc` | Aligned ARM ADD PC linkage, flags, wraparound, retained fetch state and generated Exact/Fast parity. Outside `make test`. |
+| `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. See [AITC](zodiac2-aitc.md#cpu-delivery). Outside `make test`. |
+| `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |
+| `test-zodiac-multiply` | ARMv4T scalar multiply flags and C/V policy, operands, accumulation, rejected forms and Exact/Fast parity, including ordinary generated blocks and ARMv5TE regression vectors. Outside `make test`. |
+| `test-zodiac-lcdc-contrast` | Explicit LCD-clock contrast policy, native transaction, counter/clock, strict and panel/DMA guards in Exact/Fast. Outside `make test`. |
+| `test-zodiac-ssi-startup` | SSI1 mux/idle configuration, empty readback, guarded effects and Exact/Fast startup. Outside `make test`. |
+| `test-zodiac-uart-startup` | Disabled UART1/2 control, reset/readback, guarded effects and Exact/Fast startup. Outside `make test`. |
+| `test-zodiac-dma-channel` | Disabled DMA channel allocation/configuration, reset and Exact/Fast execution. Outside `make test`. |
+| `test-zodiac-dma-startup` | Idle DMA global reset/control, guarded channel effects and Exact/Fast startup. Outside `make test`. |
+| `test-zodiac-store-pc` | ARM920T word STR/STM PC+12, address modes, writeback, conditions, aborts and Exact/Fast interpreter fallback. Outside `make test`. |
+| `test-zodiac-armv4-probe` | Exact halfword/signed-byte and block transfers, scalar multiply and conservative probe guards. See [input scenarios](zodiac2-inputs.md). Outside `make test`. |
+| `test-imx1-asp` | ASP configuration/reset, fixed PX1, explicit manual U stimulus, guest-clock conversion, FIFO, compare, IRQ and transactional guards. See [ASP](zodiac2-asp.md). Outside `make test`. |
+| `test-imx1-rtc` | Retained RTC input, binary fields, elapsed reference clocks, sampling/alarm events, fractional phases, rollover, System PLL stall and IRQ guards. See [RTC](zodiac2-rtc.md). Outside `make test`. |
+| `test-zodiac-rtc-input` | Explicit RTC seed parsing, default unknown time and propagation through a synthetic ROM. Outside `make test`. |
+| `test-imx1-watchdog` | Watchdog cold reset, bounded active interval, service sequences, write-once WDE, sticky possible-timeout boundary, reset-request guards and inactive source 63. See [watchdog](zodiac2-watchdog.md). Outside `make test`. |
+| `test-imx1-pwm` | PWM reset, unknown initial duty, CLK32/PERCLK1 counter, FIFO/repeats, clock/access guards and read-clear source 34. See [PWM](zodiac2-pwm.md). Outside `make test`. |
+| `test-imx1-i2c` | I2C register/reset guards, HCLK divider timing, unknown/ACK/NACK responses, receive priming, START/STOP and source 39. See [I2C](zodiac2-i2c.md). Outside `make test`. |
+| `test-imx1-i2c-read-window` | Explicit 256-byte I2C read window, controller transactions, offsets, bounds, master NACK/STOP and unknown protocols. Outside `make test`. |
+| `test-zodiac-asp-input` | Fixed PX1 and manual U stimulus parsing, reset retention, timed polling and FIFO consumption with a synthetic ROM. Outside `make test`. |
+| `test-zodiac-cs4-capture` | Explicit opaque port-0 byte parsing, raw indexed command recording, optional bank/index/byte samples, EIM/width/sequence guards and unknown unsupplied reads. See [CS4 diagnostic recorder](zodiac2-cs4.md). Outside `make test`. |
+| `test-zodiac-cs5-reset` | Explicit opaque W4200 reset-status input, all 256 samples, native reset-helper PC/EIM/width/phase guards, configured aperture/defaults and the full identity guard. See [CS5 reset diagnostic](zodiac2-cs5.md). Outside `make test`. |
+| `test-zodiac-cs5-configuration` | Configured virtual aperture, native defaults transaction, rejected access state preservation and unknown full identity/revision. See [CS5 interface](zodiac2-cs5.md). Outside `make test`. |
+| `test-zodiac-virtual-graphics` | Explicit virtual 5744 identity/revision, reset and interface configuration state, strict guards, invalid profile options and synthetic Exact/Fast setup. See [virtual graphics profile](zodiac2-cs5.md#explicit-virtual-graphics-profile). Outside `make test`. |
+| `test-zodiac-graphics-memory` | Native window programming/readback, bounded CPU/GPU memory views, byte lanes, dirty spans, reset retention and paired lookup state. Synthetic probe bus access runs with `test-zodiac-virtual-graphics` in Exact/Fast. See [virtual memory](zodiac2-cs5.md#virtual-memory-and-lookup-state). Outside `make test`. |
+| `test-zodiac-graphics-controller` | Native BIST/memory setup, external-memory RMW and mode commands, state-derived polling, guest-cycle completion and VRAM gating. Width, caller, value and sequence rejection plus reset retention. See [virtual controller](zodiac2-cs5.md#virtual-memory-controller). Outside `make test`. |
+| `test-zodiac-graphics-engine` | Native engine/scissor setup, bounded empty-ring configuration, address/tag fields and stored option RMW. Rejected transactions, EIM changes, reset and opening the following display transaction. See [engine and ring](zodiac2-cs5.md#virtual-engine-and-empty-ring). Outside `make test`. |
+| `test-zodiac-graphics-commands` | Bounded native context packets, guest-timed solid RGB565 paint, busy/consumer readback, rejection atomicity, clipping and byte order. See [ring transport](zodiac2-cs5.md#virtual-ring-transport-and-solid-paint). Outside `make test`. |
+| `test-zodiac-graphics-gpu` | The host GPU path against the CPU model: every fill kind the GPU takes, sources in either bank, fills left to the CPU, CPU reads and writes of every width on pages the GPU holds (masked writes and their patches), the differential mode and recovery from an injected GL error. `--bench FRAMES [SIZE [a4]]` times a fill-heavy frame loop with and without the GPU. Exits 77 (skipped) with no usable GPU. Outside `make test`. |
+| `test-zodiac-graphics-display` | Staged/active display words, guest latch and scan deadlines, clock requests, RGB565 conversion, stride/bounds, independent dirty generations and reset. Synthetic bus/frame Exact/Fast runs with `test-zodiac-virtual-graphics`. See [display](zodiac2-cs5.md#virtual-display-and-headless-frame). Outside `make test`. |
+| `test-zodiac-cs5-bus` | Fixed/DTACK/WAIT handshakes, guest HCLK stalls and timeout, narrow ports, GPIO mux, unknown-data guards, retained VRAM, asynchronous clock partitions and full synthetic Exact/Fast timer IRQ boundary. See [EIM](zodiac2-eim.md#virtual-cs5-handshake). Outside `make test`. |
+| `test-zodiac-graphics-clocks` | Register-driven virtual PLL and counter, DAC/gain/offset/range, lock and measurement deadlines, normal/fast dividers and multiple calibrated targets. See [graphics clocks](zodiac2-cs5.md#virtual-graphics-clocks-and-calibration). Outside `make test`. |
+| `test-zodiac-graphics-interrupts` | GPU masked pending, enables, W1C and knownness; explicit A13 ownership, timed status/acknowledgement and scan events during CS5 waits with Exact/Fast IRQ/FIQ parity. Outside `make test`. |
+| `test-zodiac-graphics-acquisition` | Explicit virtual raw axes and mode-1 input, native bounded polling, guest-time conversion, reset/cancellation, retained tagged FIFO, read-only counts, GPIO source patterns and real timed helper readback/identity on Exact/Fast. Outside `make test`. |
+| `test-zodiac-graphics-gpio` | Virtual two-bank GPIO, direction/latch/pull-down state, logical output pads, stored readback, unknown inputs and strict/reset/access guards. See [virtual GPIO](zodiac2-cs5.md#virtual-gpio-banks). Outside `make test`. |
+| `test-zodiac-i2c-image` | Private I2C image parsing, exact length and explicit endpoint attachment with a synthetic ROM. Outside `make test`. |
+| `test-imx1-sysctrl` | SCM GCCR/FMCR configuration, guarded boot and memory mux changes, fetch isolation and Timer 1 phase. See [System Control](zodiac2-sysctrl.md). Outside `make test`. |
+| `test-imx1-eim` | EIM chip-select register state and strict bootstrap limits. See [EIM](zodiac2-eim.md). Outside `make test`. |
+| `test-zodiac-mmio` | Bootstrap register/RAM state and Exact/Fast probe checks. Optional `build/test-zodiac-mmio-probe ROM` compares private scenarios. Outside `make test`. |
 | `bluetooth-opp-peer` | Build the OPP test peer and Bluetooth phone. |
 
 Tests in `make test`, by area:
 
 | Area | Targets |
 | --- | --- |
-| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread` |
+| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |

@@ -33,6 +33,29 @@ class DeviceDataTest(unittest.TestCase):
         kotlin = next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt')
         self.assertNotIn('test-fixture', kotlin)
 
+    def test_zodiac_inventory(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        profile = next(p for p in inventory['profiles'] if p['name'] == 'tapwave-zodiac-2')
+        self.assertEqual(profile['status'], 'experimental-desktop')
+        self.assertEqual(profile['cohort'], 'zodiac-nor')
+        self.assertEqual(profile['nor_bytes'], 8192000)
+        self.assertEqual((profile['company_id'], profile['hal_id']), (0x54707776, 0x4d583161))
+        self.assertEqual((profile['width'], profile['height']), (480, 320))
+        self.assertEqual(profile['default_display_mode'], 10)
+        self.assertTrue(profile['available'] and profile['runner_eligible'])
+        # Done so far: the screen, pen, buttons, stick and an SD card in slot 1, up to 2 GB.
+        for key in ('runs_68k', 'sound', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone'):
+            self.assertFalse(profile[key], key)
+        self.assertTrue(profile['sd_slot'])
+        self.assertEqual((profile['sd_min_bytes'], profile['sd_max_bytes']), (32 << 20, 2048 << 20))
+        # The Android app lists the Zodiac.
+        self.assertNotIn('tapwave-zodiac-2', generator.DESKTOP_ONLY)
+        for kotlin in (next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt'),
+                       (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()):
+            self.assertIn('id = "tapwave-zodiac-2"', kotlin)
+            self.assertIn('id = "sony-clie-tg50"', kotlin)
+        self.assertEqual(profile['setup'], '')
+
     def test_dana_independent_native_card_inventory(self):
         profiles = json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']
         dana = next(p for p in profiles if p['name'] == 'alphasmart-dana')
@@ -166,9 +189,10 @@ class DeviceDataTest(unittest.TestCase):
         self.assertIn('msSizes = listOf(4, 8, 16, 32, 64, 128)', kotlin)
 
     def test_available_profiles_have_measured_recipes(self):
-        self.assertEqual(list(palm_boot.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm', 'palm-zire-72', 'sony-clie-tg50'])
+        self.assertEqual(list(palm_boot.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'repalm', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2'])
         for name, p in palm_boot.DEVICES.items():
-            if not p['available']:
+            # The Zodiac runs with nothing injected, so it has no setup recipe.
+            if not p['available'] or name == 'tapwave-zodiac-2':
                 continue
             self.assertIn(p['setup'], palm_boot.SETUP_RECIPES, name)
             self.assertIn(p['launcher'], palm_boot.LAUNCHER_CHECKS, name)
@@ -183,7 +207,7 @@ class DeviceDataTest(unittest.TestCase):
         spec.loader.exec_module(runner)
         self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
-        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K])
+        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name != 'tapwave-zodiac-2'])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
         self.assertNotIn('palm-iiix', runner.DEVICES)
         for name in ('repalm',):

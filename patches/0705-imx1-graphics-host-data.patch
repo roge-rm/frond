@@ -1,0 +1,200 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -248,7 +248,8 @@
+             candidate.selectAcquisitionSource(first ? 0 : second ? 1 : 2);
+             const auto status = candidate.access(p.peripherals.eimState(),p.result.trace.pc,address,size,write,datum,sampledPin);
+             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
+-                (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200) && p.graphicsMemory) {
++                (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
++                 p.result.trace.pc == 0x200ac300) && p.graphicsMemory) {
+                 auto commands = p.graphicsCommands;
+                 const auto prepared = commands.prepare(candidate,p.peripherals.eimState(),*p.graphicsMemory);
+                 if (prepared != Imx1BootstrapAccess::ok) return prepared;
+--- a/src/uarm/uarm/imx1_graphics_commands.h
++++ b/src/uarm/uarm/imx1_graphics_commands.h
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <vector>
++#include <utility>
+ #include "imx1_graphics_memory.h"
+ 
+ // Validated ring batches retain their register snapshot until guest-time completion.
+@@ -13,6 +14,15 @@
+     uint64_t duration() const { return ticks; }
+     Imx1BootstrapAccess prepare(const Imx1Cs5Configuration& configuration,
+                                 const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
++        // Candidate decoding owns its inline pixels and publishes nothing on rejection.
++        auto candidate = *this;
++        const auto status = candidate.decode(configuration, eim, memory);
++        if (status == Imx1BootstrapAccess::ok) *this = std::move(candidate);
++        return status;
++    }
++   private:
++    Imx1BootstrapAccess decode(const Imx1Cs5Configuration& configuration,
++                               const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+         using A = Imx1BootstrapAccess;
+         const auto& engine = configuration.engineState();
+         const uint32_t words = engine.ringBytes() / 4;
+@@ -27,7 +37,7 @@
+             --left;
+             return true;
+         };
+-        uint32_t header;
++        uint32_t header, hostPackets = 0;
+         while (left) {
+             if (!take(header)) return A::sequence;
+             uint32_t first, second;
+@@ -37,16 +47,43 @@
+                 if (header & 0x3fc00000u || !take(first) || !take(second) ||
+                     !store(header & 0x7ff, first) || !store((header >> 11) & 0x7ff, second)) return A::sideEffect;
+             } else if (header == 0xc0011a00) {
++                if (engine.hostDataSubmission()) return A::sideEffect;
+                 if (!take(first) || !take(second)) return A::sequence;
+                 Fill fill{};
+-                const auto status = rectangle(configuration, eim, memory, first, second, fill);
++                const auto status = rectangle(configuration, eim, memory, first, second, fill, false);
+                 if (status != A::ok) return status;
+                 ticks += uint64_t(fill.width) * fill.height;
+-                fills.push_back(fill);
++                fills.push_back(std::move(fill));
++            } else if ((header & 0xc000ffffu) == 0xc0001900u) {
++                if (!engine.hostDataSubmission() || ++hostPackets != 1) return A::sideEffect;
++                if (!take(first) || !take(second)) return A::sequence;
++                const uint32_t width = second & 0xffff, height = second >> 16;
++                // The native writer emits width/2 words on each padded, even-width row.
++                const uint64_t payload = uint64_t(width / 2) * height;
++                if (!width || (width & 1) || !height || payload + 1 != ((header >> 16) & 0x3fff))
++                    return A::sideEffect;
++                if (payload > left) return A::sequence;
++                if (payload != left) return A::sideEffect;
++                Fill fill{};
++                const auto status = rectangle(configuration, eim, memory, first, second, fill, true);
++                if (status != A::ok) return status;
++                fill.pixels.reserve(size_t(fill.width) * fill.height);
++                for (uint32_t y = 0; y < height; ++y)
++                    for (uint32_t x = 0; x < width; x += 2) {
++                        uint32_t pixels;
++                        if (!take(pixels)) return A::sequence;
++                        for (uint32_t half = 0; half < 2; ++half)
++                            if (y >= fill.sourceY && y - fill.sourceY < fill.height &&
++                                x + half >= fill.sourceX && x + half - fill.sourceX < fill.width)
++                                fill.pixels.push_back(uint16_t(pixels >> (half * 16)));
++                    }
++                ticks += uint64_t(fill.width) * fill.height;
++                fills.push_back(std::move(fill));
+             } else return A::sideEffect;
+         }
+-        return A::ok;
++        return engine.hostDataSubmission() && hostPackets != 1 ? A::sideEffect : A::ok;
+     }
++   public:
+     Imx1BootstrapAccess complete(Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                  Imx1GraphicsMemory& memory) {
+         using A = Imx1BootstrapAccess;
+@@ -58,7 +95,7 @@
+         for (const auto& fill : fills) {
+             for (uint32_t y = 0; y < fill.height; ++y)
+                 for (uint32_t x = 0; x < fill.width; ++x) {
+-                    uint32_t colour = fill.colour;
++                    uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
+                     const auto status = memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x * 2,
+                                                           2, true, colour);
+                     if (status != A::ok) return status;
+@@ -69,7 +106,10 @@
+         return A::ok;
+     }
+    private:
+-    struct Fill { uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0; };
++    struct Fill {
++        uint32_t base = 0, pitch = 0, width = 0, height = 0, colour = 0, sourceX = 0, sourceY = 0;
++        std::vector<uint16_t> pixels;
++    };
+     static constexpr std::array<uint32_t,29> registers{{0x4a1,0x41b,0x41f,0x472,0x4b2,0x4b1,
+         0x490,0x491,0x46f,0x470,0x401,0x402,0x46b,0x46c,0x41e,0x488,0x484,0x471,
+         0x423,0x41d,0x4b3,0x30f,0x42e,0x42f,0x430,0x431,0x432,0x433,0x4a0}};
+@@ -80,26 +120,34 @@
+         return true;
+     }
+     Imx1BootstrapAccess rectangle(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+-                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill) const {
++                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host) const {
+         using A = Imx1BootstrapAccess;
+         for (auto reg : registers) if (!known[reg]) return A::sequence;
+         const auto gmc = values[0x41b];
++        // Host SRCCOPY is limited to the observed native RGB565 control words.
++        if (host && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
++                     values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f)) return A::sideEffect;
+         // Only native solid PATCOPY in RGB565, without transforms or blending.
+-        if (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
++        if (!host && (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
+             ((gmc >> 17) & 255) != 0xf0 || !(gmc & (1u << 28)) ||
+             !(gmc & (1u << 30)) || !(gmc & (1u << 15)) || (gmc & 0x80000000u) || values[0x488] != 4 ||
+-            (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0]) return A::sideEffect;
++            (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0])) return A::sideEffect;
++        if (values[0x488] != 4 || values[0x4a1] || values[0x4a0]) return A::sideEffect;
+         const auto datatype = values[0x4b1], mix = values[0x4b2], direction = values[0x472];
+-        if ((datatype & 15) != 4 || ((datatype >> 8) & 15) != 13 || !(datatype & (1u << 30)) ||
++        if (!host && ((datatype & 15) != 4 || ((datatype >> 8) & 15) != 13 || !(datatype & (1u << 30)) ||
+             (datatype & ~0x4007ff0fu) || ((mix >> 16) & 255) != 0xf0 || (mix & ~0x00ff3f00u) ||
+-            (direction & 3) != 3 || (direction & ~0x3fu)) return A::sideEffect;
++            (direction & 3) != 3 || (direction & ~0x3fu))) return A::sideEffect;
+         for (auto reg : {0x42e,0x42f,0x430,0x431,0x432,0x433}) if (values[reg]) return A::sideEffect;
+         if ((values[0x46f] | values[0x470]) & ~0x1fff1fffu) return A::sideEffect;
+-        const uint32_t x = xy >> 16, y = xy & 0xffff;
+-        const uint32_t width = wh >> 16, height = wh & 0xffff;
++        const uint32_t x = host ? xy & 0xffff : xy >> 16, y = host ? xy >> 16 : xy & 0xffff;
++        const uint32_t width = host ? wh & 0xffff : wh >> 16, height = host ? wh >> 16 : wh & 0xffff;
+         const uint32_t pitch = values[0x402];
+         if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
+             !configuration.engineState().clipContains(x + width - 1, y + height - 1)) return A::sideEffect;
++        // The captured host rectangle does not establish the scissor upper-edge convention.
++        if (host && (((values[0x470] & 0x1fff) >= x && (values[0x470] & 0x1fff) < x + width) ||
++            (((values[0x470] >> 16) & 0x1fff) >= y && ((values[0x470] >> 16) & 0x1fff) < y + height)))
++            return A::sideEffect;
+         uint32_t left = x, top = y, right = x + width, bottom = y + height;
+         if (gmc & 8) {
+             left = std::max(left, values[0x46f] & 0x1fff);
+@@ -107,6 +155,8 @@
+             right = std::min(right, (values[0x470] & 0x1fff) + 1);
+             bottom = std::min(bottom, ((values[0x470] >> 16) & 0x1fff) + 1);
+         }
++        fill.sourceX = left - x;
++        fill.sourceY = top - y;
+         fill.colour = values[0x41f] & 0xffff;
+         fill.pitch = pitch * 2;
+         if (left >= right || top >= bottom) return A::ok;
+--- a/src/uarm/uarm/imx1_graphics_engine.h
++++ b/src/uarm/uarm/imx1_graphics_engine.h
+@@ -24,6 +24,7 @@
+     bool emptyRing() const { return ringEnabled && readPointer == writePointer; }
+     uint32_t consumer() const { return readPointer; }
+     uint32_t producer() const { return writePointer; }
++    bool hostDataSubmission() const { return hostData; }
+     void start(uint64_t ticks) { remaining = ticks; }
+     void advance(uint64_t ticks) { remaining -= std::min(remaining, ticks); }
+     bool completed() const { return ringEnabled && !emptyRing() && !remaining; }
+@@ -46,11 +47,12 @@
+             return A::ok;
+         }
+         if (address == 0x16010220 && pc != 0x200b8e88) {
+-            if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200) : pc != 0x200b8c70) return A::externalInput;
++            if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200 && pc != 0x200ac300) : pc != 0x200b8c70) return A::externalInput;
+             if (!ringEnabled) return A::sequence;
+             if (write) {
+                 if (!emptyRing()) return A::sequence;
+-                if (value >= ringBytes() / 4) return A::sideEffect;
++                if (value >= ringBytes() / 4 || (pc == 0x200ac300 && value == readPointer)) return A::sideEffect;
++                hostData = pc == 0x200ac300;
+                 writePointer = value;
+             } else value = writePointer;
+             return A::ok;
+@@ -135,7 +137,7 @@
+     uint32_t clipRight = 0, clipBottom = 0;
+     uint32_t ringStage = 0, ringBase = 0, ringBaseTag = 0, ringExponent = 0;
+     uint32_t readPointer = 0, writePointer = 0, scratch = 0;
+-    bool ringEnabled = false;
++    bool ringEnabled = false, hostData = false;
+     uint32_t nativeOption = 0;
+     bool optionRead = false;
+     uint64_t remaining = 0;

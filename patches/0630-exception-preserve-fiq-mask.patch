@@ -1,0 +1,12 @@
+--- a/src/uarm/uarm/CPU.cpp
++++ b/src/uarm/uarm/CPU.cpp
+@@ -465,7 +465,8 @@
+ 
+     uint32_t spsr = cpuPrvMaterializeCPSR(cpu);
+ 
+-    cpuPrvSetPSRlo8(cpu, newLowBits);
++    // ARM DDI0100I A2.6: only Reset and FIQ force F; other exceptions preserve it.
++    cpuPrvSetPSRlo8(cpu, newLowBits | (spsr & ARM_SR_F));
+     cpu->SPSR = spsr;
+     cpu->regs[REG_NO_LR] = lr;
+     cpu->regs[REG_NO_PC] = vector_pc;

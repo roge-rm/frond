@@ -12,7 +12,7 @@ Command details (options, console and socket commands, the runner) are in [devel
 | Smoke | `make smoke` | firmware, ready sessions |
 | Release only | the real-firmware and real-app checks below | firmware, SDK, apps |
 
-Quick checks after a change: the focused `make test-NAME` target for what you touched, `make check-reconstruction` if you changed `patches/`, and `make smoke` after shared core changes. Run the full set only before a release.
+Quick checks after a change: the focused `make test-NAME` target for what you touched, `make check-reconstruction` if you changed `patches/`, and the build or compile. Put wider checks, smoke and device checks on the project's before-release list and run that list once before release.
 
 The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=0` skips it, and the Fast engine tests with it.
 
@@ -24,6 +24,15 @@ The first `make` fetches Dynarmic (needs network, Ninja and Boost). `FROND_FAST=
 - `make test-build-tools` tests staging safety and package policy with synthetic data. It does not package Frond.
 - `make check-reconstruction` prepares the core twice in separate temporary directories from the pinned upstream and `patches/`, compares file hashes and modes, and checks them against `build/source`. A matching prepare stamp alone doesn't show that `build/source` is unmodified, so run it before judging a build. Core changes go in a new patch after the last one, then run this.
 - `make test-jit-overshoot` and `make test-jit-differential` run with `make test` when the Fast engine is built. The differential test runs random ARM and Thumb blocks on both engines and compares them, plus directed cases: seeds 1 to 30000, then two further ranges of 10000. For a long run use `make test-jit-differential JIT_DIFF_ARGS="--seeds 1: --duration 3600"`, or `--seed N` for one case.
+- `make test-zodiac-lcdc-contrast` checks the explicit contrast-only LCDC policy, native MMIO sequence, PERCLK2 counter and guarded panel/DMA in Exact and Fast.
+- `make test-zodiac-ssi-startup` checks SSI1 pin mux and idle configuration, empty-state readback, guarded transfers and Exact/Fast startup.
+- `make test-zodiac-uart-startup` checks disabled UART1/2 control, independent reset/readback, guarded effects and Exact/Fast startup.
+- `make test-zodiac-dma-channel` checks disabled channel allocation/configuration, independent state, reset, guarded transfers and Exact/Fast execution.
+- `make test-zodiac-dma-startup` checks idle DMA global state, reset pulse timing, guarded transfers and Exact/Fast startup.
+- `make test-zodiac-normal-runtime` checks the Zodiac's quarter turn of the panel, pen samples, stick offsets and the EEPROM identity read from a made-up ROM. No firmware.
+- `make test-zodiac-graphics-commands` checks bounded native ring packets, delayed solid RGB565 paint, pointer and busy state, rejected-batch atomicity, clipping and byte order.
+- `make test-zodiac-graphics-gpu` checks the Zodiac's host GPU fills (`FROND_ZODIAC_GPU`) against the CPU model, with CPU accesses between them, the differential mode and recovery from a GL error. It's skipped where there's no usable GPU.
+- `make test-zodiac-graphics-acquisition` checks independent virtual raw-axis and mode-1 inputs, guest-time acquisition, reset/cancellation, tagged FIFO, GPIO source selection and real timed helper readback/identity transfers on Exact and Fast.
 - `make check-device-data` checks the generated per-device data against the profiles.
 - `make test-compatibility` runs synthetic 68k and ARM/Thumb programs through the core: mixed-width memory, branches, returns, traps, faults and an ARM to Thumb to ARM call chain. These are bounded checks, not ISA conformance tests.
 
@@ -99,6 +108,9 @@ The IIIx tests, with the ROMs from `FROND_DEVICE_IMAGES` (`Palm/IIIx/` and `Palm
 - Desktop: `make test-desktop` has the IIIx import, settings and launch cases; `iiixRealRom` is opt-in (`FROND_IIIX_ROM`, `FROND_IIIX_CORE`, optional `FROND_IIIX_SHOTS`).
 
 Tests that cover every device (profiles, controls, sessions, lifecycle, SD, networking) run in `make test` and need no row.
+
+`make test-zodiac-store-pc` checks the ARM920T stored PC value, word/block address
+modes, writeback, aborts and focused Exact/Fast probe admission.
 
 `make test-68k-frame-bounds` checks VZ frame row, destination and guest-address bounds without firmware.
 

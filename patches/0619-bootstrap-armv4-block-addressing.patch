@@ -1,0 +1,15 @@
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -99,10 +99,8 @@
+     if ((i & 0x0e000000) == 0x08000000) {
+         const unsigned base = (i >> 16) & 15;
+         const bool load = i & 0x00100000;
+-        const uint32_t addressing = i & 0x01800000;
+-        // Ordinary transfers and full-descending stack pushes, without user-bank effects.
+-        return (addressing == 0x00800000 || (!load && addressing == 0x01000000)) &&
+-               !(i & 0x00400000) && (load || !(i & 0x8000)) && (i & 0xffff) &&
++        // Ordinary block transfers in all four address modes, without user-bank effects.
++        return !(i & 0x00400000) && (load || !(i & 0x8000)) && (i & 0xffff) &&
+                base != 15 && (!(i & 0x00200000) || !(i & (1u << base)));
+     }
+     if ((i & 0x0c000000) == 0x04000000) {

@@ -1,0 +1,42 @@
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -619,8 +619,8 @@
+             case Imx1RtcAccess::ok: break;
+         }
+         if (write) {
+-            // RTC writes have no qualified CLK2HZ phase behaviour while the watchdog runs.
+-            if (watchdog.enabled()) return Imx1BootstrapAccess::sideEffect;
++            if (watchdog.enabled() && !rtc.preservesWatchdogClock(next, address))
++                return Imx1BootstrapAccess::sideEffect;
+             const auto gate = interruptGate(i2c, next, timer1, timer2);
+             if (gate != Imx1BootstrapAccess::ok) return gate;
+         }
+--- a/src/uarm/uarm/imx1_rtc.cpp
++++ b/src/uarm/uarm/imx1_rtc.cpp
+@@ -70,6 +70,16 @@
+     return ((status & enable & 0x003f) ? uint64_t(1) << 17 : 0) |
+            ((status & enable & 0xff00) ? uint64_t(1) << 18 : 0);
+ }
++bool Imx1Rtc::preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const {
++    // Alarm, status and interrupt masks are separate from the prescaler (figure 23-1).
++    // Counter writes, changed control and the exceptional 2HZ gate retain their guards.
++    if (address != base + 8 && address != base + 12 && address != base + 16 && address != base + 20 &&
++        address != base + 24 && address != base + 36) return false;
++    return next.watchdogClockBoundSupported() && control == next.control &&
++        ((enable ^ next.enable) & 0x80) == 0 && prescaler == next.prescaler &&
++        samplingPhase == next.samplingPhase && referencePhase == next.referencePhase &&
++        referenceDenominator == next.referenceDenominator;
++}
+ Imx1RtcAccess Imx1Rtc::access(uint32_t address, uint32_t size, bool write, uint32_t& value) {
+     if (!registerName(address)) return Imx1RtcAccess::unmapped;
+     if (size != 4 || (address & 3)) return Imx1RtcAccess::width;
+--- a/src/uarm/uarm/imx1_rtc.h
++++ b/src/uarm/uarm/imx1_rtc.h
+@@ -20,6 +20,7 @@
+     uint64_t assertedInterrupts() const;
+     // The normal watchdog input is absent or at most CLK32 / 16384 in this subset.
+     bool watchdogClockBoundSupported() const { return (control & 0x80) && divisor() == 32768 && !(enable & 0x80); }
++    bool preservesWatchdogClock(const Imx1Rtc& next, uint32_t address) const;
+ 
+    private:
+     bool known = false, used = false, elapsed = false;

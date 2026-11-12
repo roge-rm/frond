@@ -1,0 +1,26 @@
+--- a/src/uarm/uarm/imx1_cgm.cpp
++++ b/src/uarm/uarm/imx1_cgm.cpp
+@@ -5,7 +5,23 @@
+ #include <cassert>
+ #include <limits>
+ 
++static Imx1PllRatio pllRatioOf(uint32_t control);
++
++// The last two control words and their ratios, as the MCU and System PLL words are asked for in turn.
++// The ratio depends on the word alone.
+ static Imx1PllRatio pllRatio(uint32_t control) {
++    struct Entry { uint32_t control; bool known; Imx1PllRatio ratio; };
++    static thread_local Entry entries[2]{};
++    for (auto& entry : entries)
++        if (entry.known && entry.control == control) return entry.ratio;
++    static thread_local unsigned next = 0;
++    auto& entry = entries[next];
++    next ^= 1;
++    entry = {control, true, pllRatioOf(control)};
++    return entry.ratio;
++}
++
++static Imx1PllRatio pllRatioOf(uint32_t control) {
+     // Equation 12-1 and table 12-9: internal reference = 512 * CLK32, MFN unsigned.
+     const uint32_t pd = ((control >> 26) & 15) + 1;
+     const uint32_t mfd = ((control >> 16) & 1023) + 1;

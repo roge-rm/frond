@@ -1,0 +1,124 @@
+diff --git a/src/uarm/uarm/imx1_bootstrap.cpp b/src/uarm/uarm/imx1_bootstrap.cpp
+--- a/src/uarm/uarm/imx1_bootstrap.cpp
++++ b/src/uarm/uarm/imx1_bootstrap.cpp
+@@ -64,6 +64,10 @@
+     if (sysctrl.dmaClockEnabled())
+         dmaResetClocks -= uint32_t(std::min<uint64_t>(dmaResetClocks, busClocks / cgm.busDivider()));
+     bclkPhase = busClocks % cgm.busDivider();
++    const uint64_t contrastClocks = systemClocks + perclk2Phase;
++    if (lcdcContrastOnly && (rmcr & 2) && (pwmr & 0x100))
++        contrastPhase = (contrastPhase + contrastClocks / cgm.perclk2Divider()) & 255;
++    perclk2Phase = contrastClocks % cgm.perclk2Divider();
+     const uint64_t clocks = systemClocks + perclk1Phase;
+     const uint32_t divider = cgm.perclk1Divider();
+     timer1.advance(clocks / divider);
+@@ -211,6 +215,7 @@
+     if (const auto* name = Imx1Timer::registerName(address)) return name;
+     if (const auto* name = Imx1Sysctrl::registerName(address)) return name;
+     switch (address & ~3u) {
++        case 0x0020502c: return "LCDC.PWMR";
+         case 0x00205034: return "LCDC.RMCR";
+         case 0x00209000: return "DMA.DCR";
+         case 0x00209004: return "DMA.DISR";
+@@ -269,6 +274,19 @@
+         }
+         return Imx1BootstrapAccess::ok;
+     }
++    if ((address & ~3u) == 0x0020502c) {
++        if (!lcdcContrastOnly) return Imx1BootstrapAccess::unmapped;
++        if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
++        if (write) {
++            if (value & ~0x01ff87ffu) return Imx1BootstrapAccess::reservedBits;
++            if ((value & 0x600) == 0x600) return Imx1BootstrapAccess::reservedBits;
++            // Only the LCD-clock contrast source is independent of unmodelled panel timing.
++            if ((value & 0x100) && (value & 0x600) != 0x400) return Imx1BootstrapAccess::sideEffect;
++            if ((rmcr & 2) && value != pwmr) return Imx1BootstrapAccess::sequence;
++            pwmr = value;
++        } else value = pwmr;
++        return Imx1BootstrapAccess::ok;
++    }
+     if (address >= 0x00209000 && address < 0x00209020) {
+         if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
+         const auto offset = address - 0x00209000;
+@@ -583,10 +601,13 @@
+     uint32_t* reg = nullptr;
+     uint32_t mask = 0xffffffff;
+     switch (address) {
+-        // MC9328MX1RM rev.6.1, table 19-22. Enabling refresh requires the LCD/DMA model.
++        // Contrast-only mode retains enable state without attaching an internal panel or DMA client.
+         case 0x00205034:
+             reg = &rmcr; mask = 3;
+-            if (write && (value & mask)) return Imx1BootstrapAccess::sideEffect;
++            if (write && (value & mask)) {
++                if (!lcdcContrastOnly || (value & 1)) return Imx1BootstrapAccess::sideEffect;
++                if ((pwmr & 0x700) != 0x500) return Imx1BootstrapAccess::sequence;
++            }
+             break;
+         case 0x00221000: return sdramControl(0, write, value);
+         case 0x00221004: return sdramControl(1, write, value);
+diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
+--- a/src/uarm/uarm/imx1_bootstrap.h
++++ b/src/uarm/uarm/imx1_bootstrap.h
+@@ -23,6 +23,8 @@
+    public:
+     explicit Imx1Bootstrap(bool aspPx1HighFromReset = false, bool aspUSampleKnown = false, uint16_t aspUSample = 0)
+         : asp(aspPx1HighFromReset, aspUSampleKnown, aspUSample) {}
++    void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
++    uint32_t lcdcContrastPhase() const { return contrastPhase; }
+     bool setRtcInitialTime(Imx1RtcTime time) { return rtc.initialise(time); }
+     void setI2cScenario(bool enabled) { i2c.setSingleMasterScenario(enabled); }
+     void setI2cBus(Imx1I2cBus* bus) { i2c.setBus(bus); }
+@@ -127,7 +129,9 @@
+     void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
+     bool asynchronousUsed = false;
+     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
+-    uint32_t rmcr = 0;
++    uint32_t rmcr = 0, pwmr = 0;
++    bool lcdcContrastOnly = false;
++    uint32_t contrastPhase = 0, perclk2Phase = 0;
+     uint32_t uartControl1[2] = {4, 4};
+     // SSI1 transport stays disabled; the FIFOs and shift registers remain empty.
+     uint32_t ssi1Words[7] = {0, 0, 0, 0, 0, 0x81, 0};
+diff --git a/src/uarm/uarm/imx1_boot_probe.cpp b/src/uarm/uarm/imx1_boot_probe.cpp
+--- a/src/uarm/uarm/imx1_boot_probe.cpp
++++ b/src/uarm/uarm/imx1_boot_probe.cpp
+@@ -20,6 +20,7 @@
+           cs5Configuration(config.graphicsProfile),
+           graphicsMemory(config.graphicsProfile == Imx1GraphicsProfile::virtual5744Compatible8MiB ?
+                          new Imx1GraphicsMemory() : nullptr) {
++        peripherals.setLcdcContrastOnly(config.lcdcContrastOnly);
+         if (config.graphicsRawAxesKnown) cs5Configuration.setAcquisitionInput(config.graphicsRawFirst, config.graphicsRawSecond);
+     }
+     std::vector<uint8_t> rom;
+@@ -470,7 +471,8 @@
+         result.peripheralStatus = Imx1BootstrapAccess::sequence;
+         return result;
+     }
+-    if (options && (!imx1GraphicsProfileValid(options->graphicsProfile) ||
++    if (options && ((options->lcdcContrastOnly && !options->bootstrapPeripherals) ||
++        !imx1GraphicsProfileValid(options->graphicsProfile) ||
+         (options->graphicsRawAxesKnown && (!options->bootstrapPeripherals ||
+          options->graphicsProfile != Imx1GraphicsProfile::virtual5744Compatible8MiB ||
+          options->graphicsRawFirst > 1023 || options->graphicsRawSecond > 1023)) ||
+diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
+--- a/src/uarm/uarm/imx1_boot_probe.h
++++ b/src/uarm/uarm/imx1_boot_probe.h
+@@ -71,6 +71,7 @@
+     void* i2cContext = nullptr;
+     bool bootstrapPeripherals = false;
+     bool arm920IcacheIndexCompatibility = false;
++    bool lcdcContrastOnly = false;
+     bool assumeMpllSettled = false;
+     bool assumeSpllSettled = false;
+     bool graphicsIrqA13 = false;
+diff --git a/src/uarm/uarm/imx1_cgm.h b/src/uarm/uarm/imx1_cgm.h
+--- a/src/uarm/uarm/imx1_cgm.h
++++ b/src/uarm/uarm/imx1_cgm.h
+@@ -31,6 +31,7 @@
+     }
+     uint32_t mcuPrescaler() const { return (cscr & 0x8000) ? 2 : 1; }
+     uint32_t busDivider() const { return ((cscr >> 10) & 15) + 1; }
++    uint32_t perclk2Divider() const { return ((pcdr >> 4) & 15) + 1; }
+     uint32_t perclk1Divider() const { return (pcdr & 15) + 1; }
+ 
+    private:
