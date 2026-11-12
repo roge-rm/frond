@@ -1164,6 +1164,68 @@ int main() {
         assert(!overlap.BacklogSize());
     }
     {
+        // A modifier held over a waiting press stays down across it: shift+a typed fast while the
+        // press waits still gives shift with a, and a release after a's own release doesn't jump it.
+        auto shift=*DanaScan5::Named("lshift"); auto b=*DanaScan5::Named("b");
+        PacedSt chord; assert(chord.Byte(0)==0xaa); chord.SetWord(0xfffff302,0);
+        auto request=[&]() { return (chord.GetWord(0xfffff310)&1)!=0; };
+        auto report=[&]() {
+            std::vector<uint8> got; unsigned n=chord.Byte(0)&15;
+            for(unsigned i=0;i<n;i++) got.push_back(uint8(chord.Byte(0)));
+            std::sort(got.begin(),got.end()); return got;
+        };
+        auto sorted=[](std::vector<uint8> v) { std::sort(v.begin(),v.end()); return v; };
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        chord.now=100; assert(chord.DispatchDanaInput({{shift,true},{scan,true},{scan,false},{shift,false}}));
+        assert(chord.BacklogSize()==3);
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(report()==std::vector<uint8>{shift.Code()});
+        for(uint64 t=110;t<=300;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) assert(report()==std::vector<uint8>{shift.Code()});
+        }
+        assert(chord.BacklogSize()==3);
+        chord.keyQueueRoom=~0u;
+        std::vector<std::vector<uint8>> seen;
+        for(uint64 t=310;t<=400;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) { auto r=report(); if(seen.empty() || r!=seen.back()) seen.push_back(r); }
+        }
+        assert((seen==std::vector<std::vector<uint8>>{sorted({shift.Code(),scan.Code()}),{shift.Code()},{}}));
+        // shift down, b down waiting, shift up: shift's release waits behind b.
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry;
+        // Past the regap after shift's last release.
+        chord.now=1000; assert(chord.DispatchDanaInput({{shift,true}})); assert(chord.DispatchDanaInput({{b,true}}));
+        assert(chord.DispatchDanaInput({{shift,false}})); assert(chord.BacklogSize()==2);
+        chord.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        assert(report()==std::vector<uint8>{shift.Code()});
+        chord.now=1010; chord.ReportHeldKeys(); assert(chord.BacklogSize()==2);
+        if(request()) assert(report()==std::vector<uint8>{shift.Code()});
+        chord.keyQueueRoom=~0u; seen.clear();
+        for(uint64 t=1020;t<=1100;t+=10) {
+            chord.now=t; chord.ReportHeldKeys();
+            if(request()) { auto r=report(); if(seen.empty() || r!=seen.back()) seen.push_back(r); }
+        }
+        assert((seen==std::vector<std::vector<uint8>>{sorted({shift.Code(),b.Code()}),{b.Code()}}));
+    }
+    {
+        // A backlog already waiting when the ST halts: PullWakingKey still takes the waking press
+        // with the key queue full, and the waiting press stays.
+        const uint8 halt[]={ '1','2','3',' ','H','a','l','t',0,0x80 };
+        auto power=*DanaScan5::Named("power");
+        PacedSt late; assert(late.Byte(0)==0xaa);
+        late.keyQueueRoom=EmRegsVZDana::kKeyQueueReserve;
+        late.now=100; assert(late.DispatchDanaInput({{scan,true},{scan,false}})); assert(late.BacklogSize()==2);
+        for(auto byte:halt) assert(late.Byte(byte)==0);
+        assert(late.DispatchDanaInput({{power,true},{power,false}})); assert(late.BacklogSize()==4);
+        late.keyQueueRoom=0;
+        late.now=110; late.ReportHeldKeys();
+        assert(!(late.GetPortInternalValue('D')&0x10));
+        assert(late.Byte(0)==0x41); assert(late.Byte(0)==power.Code());
+        late.now=120; late.ReportHeldKeys(); assert(late.Byte(0)==0x40);
+        assert(late.BacklogSize()==2);
+    }
+    {
         // A press that wakes the halted ST goes in even with the key queue full; the next waits.
         const uint8 halt[]={ '1','2','3',' ','H','a','l','t',0,0x80 };
         auto power=*DanaScan5::Named("power");
@@ -1196,6 +1258,8 @@ int main() {
         put32(0x100+10,0xfffff300); assert(room(0x100)==~0u);
         put32(0x100+10,0xff0); assert(room(0x100)==~0u);
         put32(0x100+10,0x200); put16(0x204,4); assert(room(0x100)==~0u);
+        put16(0x200,0); put16(0x202,0); put16(0x204,EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry); assert(room(0x100)==~0u);
+        put16(0x204,EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry+2); assert(room(0x100)==EmRegsVZDana::kKeyQueueReserve+EmRegsVZDana::kKeyQueueEntry+2);
         put16(0x204,56); put16(0x200,56); assert(room(0x100)==~0u);
     }
     {

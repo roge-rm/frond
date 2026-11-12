@@ -1,4 +1,4 @@
-A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys of 7 bytes) could overflow, counting the presses already in the FIFO, so a fast burst into a slow app (the memo key's editor) isn't dropped. A release of a key that is down goes ahead of a waiting press, a press that wakes the ST always goes in, and the queue is only read from RAM. Unblocking is seen when the backlog is next fed (a report read or CycleSlowly); an app that never reads keys lets presses build up to the 8192 backlog instead of being dropped.
+A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys of 7 bytes) could overflow, counting the presses already in the FIFO, so a fast burst into a slow app (the memo key's editor) isn't dropped. A release of a key that is down goes ahead of a waiting press (not a modifier, and not past the release of a key pressed in the backlog, so chords keep their order), a press that wakes the ST always goes in, and the queue is only read from RAM. Unblocking is seen when the backlog is next fed (a report read or CycleSlowly); an app that never reads keys lets presses build up to the 8192 backlog instead of being dropped.
 
 --- a/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
 +++ b/src/cloudpilot/emulator/hardware/EmRegsVZDana.h
@@ -27,7 +27,7 @@ A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys o
      bool DispatchDanaInput(const std::vector<DanaTransition5>&) override;
      void ReleaseDanaInput(bool cancel=true) override;
      void DispatchButtonEvent(ButtonEvent) override;
-@@ -130,6 +134,21 @@
+@@ -130,6 +134,22 @@
      // invalid code, a ninth held key or a full backlog; a full FIFO makes the change wait.
      bool DispatchScanCode(uint8 code, bool down);
      static constexpr size_t kBacklogLimit=8192;
@@ -43,7 +43,8 @@ A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys o
 +        emuptr queue=read32(globals+10);
 +        if(!queue || !inRam(queue,6)) return ~0u;
 +        uint32 start=read16(queue),end=read16(queue+2),size=read16(queue+4);
-+        if(size<8 || size>0x4000 || start>=size || end>=size || !inRam(queue,6+size)) return ~0u;
++        // A queue too small to hold one key past the reserve isn't gated, or it would block for ever.
++        if(size<=kKeyQueueReserve+kKeyQueueEntry || size>0x4000 || start>=size || end>=size || !inRam(queue,6+size)) return ~0u;
 +        return size-(end>=start ? end-start : size-start+end);
 +    }
      // 150 ms also passes on the guest; 200 leaves room for slow guest reads.
@@ -72,7 +73,7 @@ A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys o
          backlog.pop_front(); noWakeValid=false;
          ApplyScanCode(code,down); fed=true;
      }
-@@ -568,6 +575,47 @@
+@@ -568,6 +575,52 @@
      }
      return false;
  }
@@ -96,13 +97,18 @@ A host key press waits in the Dana's backlog while Palm OS's key queue (8 keys o
 +    return room!=~0u && room<=kKeyQueueReserve+presses*kKeyQueueEntry;
 +}
 +// While a press waits, a release of a key that is down goes ahead of it, so a key held across
-+// the next press (a down, b down, a up) isn't left down. Each key's own order stays.
++// the next press (a down, b down, a up) isn't left down. Only up to the first release of a key
++// pressed in the backlog, so a chord's order stays (shift up after a down and a up), and never a
++// modifier (caps, shifts, ctrl, function, command), whose release changes what the press types.
 +bool EmRegsVZDana::PullRelease() {
 +    if(queueCount>=32) return false;
-+    bool seen[128]{};
++    bool seen[128]{},pressed[128]{};
 +    for(size_t i=0;i<backlog.size();i++) {
 +        uint8 code=backlog[i]&0x7f;
-+        if(!(backlog[i]&0x80) && !seen[code] && std::find(heldScan,heldScan+heldCount,code)!=heldScan+heldCount) {
++        if(backlog[i]&0x80) { pressed[code]=seen[code]=true; continue; }
++        if(pressed[code]) return false;
++        bool modifier=code==0x0c || code==0x09 || code==0x69 || code==0x7b || code==0x46 || code==0x13;
++        if(!seen[code] && !modifier && std::find(heldScan,heldScan+heldCount,code)!=heldScan+heldCount) {
 +            backlog.erase(backlog.begin()+i); noWakeValid=false;
 +            ApplyScanCode(code,false);
 +            return true;
