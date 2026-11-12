@@ -1729,7 +1729,7 @@ test-zodiac-pcm-transport: build/zodiac-boot-probe
 	./build/test-zodiac-pcm-transport
 
 # The Zodiac's PCM sound out: words Exact and Fast alike, frame rate, a state saved mid-stream, PWM volume, D25
-# amplifier and the host stage.
+# amplifier, the host stage and its gain ramp, and the sink SocIMX1 uses, Exact and Fast host frames alike.
 .PHONY: test-zodiac-sound
 test-zodiac-sound: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

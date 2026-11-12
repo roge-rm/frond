@@ -55,10 +55,10 @@ index 1cfa812..434a387 100644
      p->peripherals.setI2cBus(p->options.i2cBus);
      p->peripherals.setI2cObserver(Probe::i2cEvent, p);
 diff --git a/src/uarm/uarm/imx1_boot_probe.h b/src/uarm/uarm/imx1_boot_probe.h
-index f7e4fce..f96044b 100644
+index f7e4fce..0139127 100644
 --- a/src/uarm/uarm/imx1_boot_probe.h
 +++ b/src/uarm/uarm/imx1_boot_probe.h
-@@ -246,6 +246,18 @@ uint64_t imx1MachineMemoryHash(const Imx1Machine*);
+@@ -246,6 +246,19 @@ uint64_t imx1MachineMemoryHash(const Imx1Machine*);
  uint64_t imx1MachineLeanCodeDrops(const Imx1Machine*);
  // The last PCM sample SSI1 shifted out, for tests.
  uint16_t imx1MachinePcmLastTransmitted(const Imx1Machine*);
@@ -66,7 +66,8 @@ index f7e4fce..f96044b 100644
 +// the machine, in guest time order. Kept through state loads; null stops it.
 +void imx1MachineSetPcmOutput(Imx1Machine*, void (*hook)(void*, uint16_t word, unsigned slot), void* context);
 +// What the board's audio output looks like just now: SSI1's frame rate (frames a second as a fraction, zero
-+// while it isn't sending), the PWM's duty and port D's direction, use, data and OCR2 registers.
++// while it isn't sending), the PWM duty last written and port D's direction, use, data and OCR2 registers.
++// Safe to call from the PCM output hook; apart from the System PLL's ratio these change only at CPU writes.
 +struct Imx1MachineAudio {
 +    uint64_t rateNumerator = 0, rateDenominator = 0;
 +    bool pwmKnown = false;
@@ -107,7 +108,7 @@ index 9fd5d83..3742136 100644
      // Internal continuous clocks keep their phase with TE clear; SSI_EN resets the phase.
      const uint32_t wordPeriod = cgm.perclk3Divider() * 64;
 diff --git a/src/uarm/uarm/imx1_bootstrap.h b/src/uarm/uarm/imx1_bootstrap.h
-index 1f3a86d..e5bdabe 100644
+index 1f3a86d..752be55 100644
 --- a/src/uarm/uarm/imx1_bootstrap.h
 +++ b/src/uarm/uarm/imx1_bootstrap.h
 @@ -90,6 +90,18 @@ class Imx1Bootstrap {
@@ -122,8 +123,8 @@ index 1f3a86d..e5bdabe 100644
 +    // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
 +    // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.
 +    void pcmFrameRate(uint64_t& numerator, uint64_t& denominator) const;
-+    // The PWM output's duty as high clocks of a period, false while it is off or its sample unknown.
-+    bool pwmDuty(uint32_t& high, uint32_t& period) const { return pwm.duty(high, period); }
++    // The PWM duty last written as high clocks of a period, false while it is off or no sample was written.
++    bool pwmDuty(uint32_t& high, uint32_t& period) const { return pwm.writtenDuty(high, period); }
 +    // A GPIO port's register by index (0 DDIR, 1 OCR1, 7 DR, 8 GIUS, 9 SSR, 14 GPR, ...).
 +    uint32_t gpioRegister(unsigned port, unsigned index) const { return gpio.registerValue(port, index); }
      void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
@@ -168,80 +169,49 @@ index d74e5af..e568ff4 100644
          constexpr uint32_t pins = (1u << 15) | (1u << 16);
          return !((ports[0].registers[8] | ports[0].registers[14] | ports[0].registers[0]) & pins);
 diff --git a/src/uarm/uarm/imx1_pwm.h b/src/uarm/uarm/imx1_pwm.h
-index a12c1ef..fef2874 100644
+index a12c1ef..c393fd0 100644
 --- a/src/uarm/uarm/imx1_pwm.h
 +++ b/src/uarm/uarm/imx1_pwm.h
-@@ -22,6 +22,13 @@ class Imx1Pwm {
+@@ -22,6 +22,16 @@ class Imx1Pwm {
      bool usesPerclk1() const { return enabled() && !(control & 0x8000); }
      bool interruptOutput() const { return irq && (control & 0x40); }
      bool usesReference() const { return enabled() && (control & 0x8000); }
-+    // The output's high clocks per period and the period, false while off or with no known sample yet.
-+    bool duty(uint32_t& high, uint32_t& length) const {
-+        if (!enabled() || resetting() || !activeKnown) return false;
++    // The duty the CPU last wrote: the last sample's high clocks per period and the period, false while off
++    // or with no sample written. The output takes the sample up at a later period boundary; this follows the
++    // writes only, so it changes at the same guest time however far the board is advanced at once.
++    bool writtenDuty(uint32_t& high, uint32_t& length) const {
++        if (!enabled() || !sampleKnown) return false;
 +        length = periodLength();
-+        high = activeSample < length ? activeSample : length;
++        const uint32_t s = (control & 0x20000) ? uint16_t((sample >> 8) | (sample << 8)) : sample;
++        high = s < length ? s : length;
 +        return true;
 +    }
      // Source clocks until the current period ends, 0 when disabled.
      uint64_t idleQuietCycles() const {
          if (!enabled()) return 0;
 diff --git a/src/uarm/uarm/soc_IMX1.cpp b/src/uarm/uarm/soc_IMX1.cpp
-index 7a1c949..c6285d7 100644
+index 7a1c949..5a36a0c 100644
 --- a/src/uarm/uarm/soc_IMX1.cpp
 +++ b/src/uarm/uarm/soc_IMX1.cpp
-@@ -9,6 +9,7 @@
- #include <cstdio>
- #include <iostream>
- 
-+#include "audio_queue.h"
- #include "device_configuration.h"
- #include "imx1_bootstrap.h"
- #include "sdcard.h"
-@@ -105,6 +106,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
+@@ -105,6 +105,8 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
          error = "the i.MX1 machine's power-on state could not be kept";
          return nullptr;
      }
-+    imx1MachineSetPcmOutput(soc->machine, PcmWord, soc.get());
++    soc->pcm.machine = soc->machine;
++    imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
      soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
      soc->ramSize = 128u << 20;
      soc->StateChanged();
-@@ -148,7 +150,26 @@ void SocIMX1::SyncCard() {
-     cardSync = false;
+@@ -149,6 +151,7 @@ void SocIMX1::SyncCard() {
  }
  
-+void SocIMX1::PcmWord(void* context, uint16_t word, unsigned slot) {
-+    auto* soc = static_cast<SocIMX1*>(context);
-+    soc->sound.word(word, slot, PushFrame, soc);
-+}
-+
-+void SocIMX1::PushFrame(void* context, uint32_t frame) {
-+    auto* soc = static_cast<SocIMX1*>(context);
-+    if (soc->hostQueue && soc->pcmEnabled && !soc->pcmSuspended) audioQueuePush(soc->hostQueue, frame);
-+}
-+
-+void SocIMX1::UpdateSound() {
-+    const auto audio = imx1MachineAudio(machine);
-+    sound.setRate(audio.rateNumerator, audio.rateDenominator);
-+    sound.setGain(zodiacAudioGain(audio));
-+}
-+
  void SocIMX1::StateChanged() {
-+    // The stream starts again at the new state's next frame.
-+    sound.restart();
-+    if (hostQueue) audioQueueClear(hostQueue);
++    pcm.restart();
      const auto status = imx1MachineGetStatus(machine);
      halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
      framePending = false;
-@@ -333,6 +354,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
-     const auto started = std::chrono::steady_clock::now();
-     bool waiting = false;
-     for (;;) {
-+        UpdateSound();
-         const auto run = imx1MachineRunBounded(machine, bounds);
-         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
-             run.reason == Imx1MachineYield::invalidBounds) {
 diff --git a/src/uarm/uarm/soc_IMX1.h b/src/uarm/uarm/soc_IMX1.h
-index e66624e..6ce6170 100644
+index e66624e..6ba6abb 100644
 --- a/src/uarm/uarm/soc_IMX1.h
 +++ b/src/uarm/uarm/soc_IMX1.h
 @@ -10,6 +10,7 @@
@@ -252,44 +222,44 @@ index e66624e..6ce6170 100644
  #include "zodiac_input.h"
  #include "zodiac_panel.h"
  
-@@ -72,7 +73,7 @@ class SocIMX1 : public SoC {
+@@ -63,6 +64,8 @@ class SocIMX1 : public SoC {
+     bool Halted() const { return halted; }
+     // Whether a redraw of the frame the machine already has is still owed.
+     bool RedrawPending() const { return redraw; }
++    // The sound path, for tests.
++    ZodiacPcmSink& PcmSink() { return pcm; }
+     // Whether the machine has the pen down just now.
+     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
+     // Why a halted machine stopped, in one line. Empty while it runs.
+@@ -72,9 +75,9 @@ class SocIMX1 : public SoC {
      void OnSetFramebufferDirty() override { redraw = true; }
      bool OnSleep() override { return false; }
      void OnWakeup() override {}
 -    void OnSetAudioQueue(struct AudioQueue*) override {}
-+    void OnSetAudioQueue(struct AudioQueue* queue) override { hostQueue = queue; }
-     void OnSetPcmOutputEnabled() override {}
-     void OnSetPcmSuspended() override {}
+-    void OnSetPcmOutputEnabled() override {}
+-    void OnSetPcmSuspended() override {}
++    void OnSetAudioQueue(struct AudioQueue* queue) override { pcm.queue = queue; }
++    void OnSetPcmOutputEnabled() override { pcm.enabled = pcmEnabled; }
++    void OnSetPcmSuspended() override { pcm.suspended = pcmSuspended; }
      void OnSdInsert() override;
-@@ -83,6 +84,11 @@ class SocIMX1 : public SoC {
-     SocIMX1() = default;
-     void PumpInput();
-     void StateChanged();
-+    // SSI1's words from the machine, made into host frames; and the rate and volume they get, read before
-+    // each slice.
-+    static void PcmWord(void* context, uint16_t word, unsigned slot);
-+    static void PushFrame(void* context, uint32_t frame);
-+    void UpdateSound();
-     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
-     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
-     // machine refuses just now is tried again on the next Run.
-@@ -104,6 +110,10 @@ class SocIMX1 : public SoC {
+     void OnSdRemount() override;
+     void OnSdEject() override;
+@@ -104,6 +107,9 @@ class SocIMX1 : public SoC {
  
      ZodiacInput input;
  
-+    // The sound out, pushed to hostQueue while PCM output is on and not suspended.
-+    ZodiacAudioOutput sound;
-+    struct AudioQueue* hostQueue{nullptr};
++    // The sound out, pushed to the host's queue while PCM output is on and not suspended.
++    ZodiacPcmSink pcm;
 +
      // The SD card in slot 1 over the shared card store. The ROM speaks SD 1.x only, so cards stay at 2 GB.
      struct VSD* vsd{nullptr};
      bool cardIn{false}, cardSync{false};
 diff --git a/src/uarm/uarm/zodiac_audio.h b/src/uarm/uarm/zodiac_audio.h
 new file mode 100644
-index 0000000..7f4be97
+index 0000000..0d7bb6c
 --- /dev/null
 +++ b/src/uarm/uarm/zodiac_audio.h
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,151 @@
 +#ifndef FROND_ZODIAC_AUDIO_H
 +#define FROND_ZODIAC_AUDIO_H
 +
@@ -297,11 +267,13 @@ index 0000000..7f4be97
 +#include <cstdint>
 +#include <numeric>
 +
++#include "audio_queue.h"
 +#include "imx1_boot_probe.h"
 +
 +// The Zodiac's sound on its way to the host. SSI1 sends two 16-bit signed slots a frame; slot 0 (the frame
 +// sync slot) is taken as left (ASSUMPTION "SSI1 slot 0 is left"). Frames are averaged down or up to the
-+// host's 44100 Hz (a box filter, as the AK4534 path does) and scaled by the board's volume.
++// host's 44100 Hz (a box filter, as the AK4534 path does) and scaled by the board's volume. Everything is
++// counted in frames, so the same words give the same host frames in Exact and Fast.
 +
 +// The volume as a 16.16 gain from the board's lines:
 +// - the amplifier, GPIO D25. The ROM's audio module (20097dee) drives it high while nothing asks for
@@ -321,11 +293,17 @@ index 0000000..7f4be97
 +class ZodiacAudioOutput {
 +   public:
 +    static constexpr uint32_t hostRate = 44100;
++    // A gain change takes this many input frames to reach its target, so volume steps and the amplifier
++    // switching don't click: 1061 frames as the AK4534 path's full-range attenuation, about 24 ms.
++    static constexpr uint32_t rampFrames = 1061;
 +    using Push = void (*)(void*, uint32_t);
 +
-+    // Frames a second coming in, numerator / denominator. A change starts the averaging afresh; zero holds
++    // Frames a second coming in, numerator / denominator. A change starts the stream afresh; zero holds
 +    // output back until a rate is known.
 +    void setRate(uint64_t numerator, uint64_t denominator) {
++        if (numerator == rawNumerator && denominator == rawDenominator) return;
++        rawNumerator = numerator;
++        rawDenominator = denominator;
 +        if (numerator && denominator) {
 +            const uint64_t common = std::gcd(numerator, denominator);
 +            numerator /= common;
@@ -338,12 +316,19 @@ index 0000000..7f4be97
 +        inDenominator = denominator;
 +        restart();
 +    }
-+    void setGain(uint32_t gain16) { gain = gain16; }
-+    // Drops a half-made frame and the average, as after a state load.
++    // The 16.16 gain to ramp to.
++    void setGain(uint32_t gain16) {
++        if (gain16 == target) return;
++        target = gain16;
++        ramp = rampFrames;
++    }
++    // Drops a half-made frame and the average and fades in from silence, as after a state load.
 +    void restart() {
 +        held = -1;
 +        phase = 0;
 +        sum[0] = sum[1] = 0;
++        gain = 0;
++        ramp = target ? rampFrames : 0;
 +    }
 +    // One SSI1 word. A slot 1 word with no slot 0 before it (the stream starting mid-frame) is dropped.
 +    void word(uint16_t value, unsigned slot, Push push, void* context) {
@@ -355,16 +340,23 @@ index 0000000..7f4be97
 +        frame(int16_t(uint16_t(held)), int16_t(value), push, context);
 +        held = -1;
 +    }
++    uint32_t currentGain() const { return gain; }
 +
 +   private:
 +    void frame(int32_t left, int32_t right, Push push, void* context) {
 +        if (!inNumerator) return;
++        if (ramp) {
++            const int64_t delta = int64_t(target) - int64_t(gain);
++            gain = uint32_t(int64_t(gain) + delta / ramp);
++            if (!--ramp) gain = target;
++        }
++        const int64_t scaled[2] = {int64_t(left) * gain / 65536, int64_t(right) * gain / 65536};
 +        // Time in 1 / (inNumerator * 44100) s: an input frame is 44100 * inDenominator, an output one inNumerator.
 +        uint64_t remain = hostRate * inDenominator;
 +        while (remain) {
 +            const uint64_t portion = std::min(remain, inNumerator - phase);
-+            sum[0] += int64_t(left) * int64_t(portion);
-+            sum[1] += int64_t(right) * int64_t(portion);
++            sum[0] += scaled[0] * int64_t(portion);
++            sum[1] += scaled[1] * int64_t(portion);
 +            phase += portion;
 +            remain -= portion;
 +            if (phase == inNumerator) {
@@ -376,15 +368,46 @@ index 0000000..7f4be97
 +        }
 +    }
 +    uint32_t scale(int64_t total) const {
-+        int64_t v = (total / int64_t(inNumerator)) * int64_t(gain) / 65536;
++        int64_t v = total / int64_t(inNumerator);
 +        v = v < -32768 ? -32768 : v > 32767 ? 32767 : v;
 +        return uint16_t(int16_t(v));
 +    }
 +
++    uint64_t rawNumerator = 0, rawDenominator = 0;
 +    uint64_t inNumerator = 0, inDenominator = 0, phase = 0;
 +    int64_t sum[2] = {0, 0};
 +    int32_t held = -1;
-+    uint32_t gain = 0;
++    uint32_t gain = 0, target = 0, ramp = 0;
++};
++
++// SSI1's words from the machine to the host's audio queue, the part SocIMX1 hands imx1MachineSetPcmOutput.
++// At each slot 0 word it reads the rate and volume from the machine, in guest time order, so they change at
++// the same word in Exact and Fast. Frames are made while PCM output is off or suspended too, and only the
++// push to the queue is skipped, so the stream is the same either way. All on the machine's thread.
++struct ZodiacPcmSink {
++    const Imx1Machine* machine = nullptr;
++    struct AudioQueue* queue = nullptr;
++    bool enabled = false, suspended = false;
++    ZodiacAudioOutput sound;
++
++    static void word(void* context, uint16_t value, unsigned slot) {
++        auto& s = *static_cast<ZodiacPcmSink*>(context);
++        if (slot == 0 && s.machine) {
++            const auto audio = imx1MachineAudio(s.machine);
++            s.sound.setRate(audio.rateNumerator, audio.rateDenominator);
++            s.sound.setGain(zodiacAudioGain(audio));
++        }
++        s.sound.word(value, slot, push, &s);
++    }
++    static void push(void* context, uint32_t frame) {
++        auto& s = *static_cast<ZodiacPcmSink*>(context);
++        if (s.queue && s.enabled && !s.suspended) audioQueuePush(s.queue, frame);
++    }
++    // After a state load or reset: the stream starts again at the new state's next frame.
++    void restart() {
++        sound.restart();
++        if (queue) audioQueueClear(queue);
++    }
 +};
 +
 +#endif

@@ -1,6 +1,6 @@
 // The Zodiac's view, pen, stick and EEPROM identity as the normal runtime works them out, its input
-// holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, a
-// stopped machine.
+// holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, the sound
+// queue emptied on a load and a reset, a stopped machine.
 #include <chrono>
 #include <thread>
 #include <array>
@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include "audio_queue.h"
 #include "soc_IMX1.h"
 #include "zodiac_input.h"
 #include "zodiac_panel.h"
@@ -389,7 +390,37 @@ void machine() {
     assert(onExact > onFast && soc->SetFastEngine(true) && soc->FastEngine());
     run(*soc, 1);
     assert(soc->Status().retired > onExact && !soc->Halted());
-    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag and the engine");
+    // The sound path: a load and a reset empty the queue and start the stream again.
+    auto* queue = audioQueueCreate(64);
+    soc->SetAudioQueue(queue);
+    soc->SetPcmOutputEnabled(true);
+    // The host's settings reach the sound path, and frames made on it reach the queue.
+    auto& sink = soc->PcmSink();
+    assert(sink.queue == queue && sink.enabled && !sink.suspended);
+    soc->SetPcmSuspended(true);
+    assert(sink.suspended);
+    soc->SetPcmSuspended(false);
+    auto play = [&] {
+        sink.sound.setRate(44100, 1);
+        sink.sound.setGain(65536);
+        for (uint32_t i = 0; i < 2 * ZodiacAudioOutput::rampFrames; ++i) {
+            sink.sound.word(1000, 0, ZodiacPcmSink::push, &sink);
+            sink.sound.word(1000, 1, ZodiacPcmSink::push, &sink);
+        }
+        assert(sink.sound.currentGain() == 65536 && audioQueuePendingSamples(queue) == 64);
+    };
+    play();
+    assert(soc->Save());
+    const auto soundSaved = soc->GetSavestate();
+    std::vector<uint8_t> soundState(static_cast<const uint8_t*>(soundSaved.data),
+                                    static_cast<const uint8_t*>(soundSaved.data) + soundSaved.size);
+    // The stream starts again: the queue empty and the gain back to silence, to fade in.
+    assert(soc->Load(soundState.size(), soundState.data()));
+    assert(audioQueuePendingSamples(queue) == 0 && sink.sound.currentGain() == 0);
+    play();
+    soc->Reset();
+    assert(audioQueuePendingSamples(queue) == 0 && sink.sound.currentGain() == 0);
+    std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag, the engine and the sound queue");
 }
 }  // namespace
 
