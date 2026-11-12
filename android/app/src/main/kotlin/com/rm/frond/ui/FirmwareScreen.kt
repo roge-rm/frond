@@ -126,7 +126,7 @@ fun FirmwareScreen(model: HomeModel) {
                                 error = if (nor != null && detected == null) Firmware.NOT_DETECTED else null
                             })
                             for (d in Device.shown.sortedBy { it.label.lowercase() }) {
-                                DropdownMenuItem(text = { Text(if (d.experimental) "${d.label} · Experimental" else d.label) }, onClick = {
+                                DropdownMenuItem(text = { Text(d.listLabel) }, onClick = {
                                     choosing = false
                                     chosen = d
                                     error = null

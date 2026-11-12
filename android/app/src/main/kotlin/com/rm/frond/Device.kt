@@ -92,6 +92,9 @@ data class Device internal constructor(
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {
+    // The name in the Add device and Import firmware lists.
+    val listLabel: String get() = if (experimental) "$label · Experimental" else label
+
     // The real Zire 72 has no serial port, so it's left out of the list rather than greyed.
     val serialAbsent: Boolean get() = id == "palm-zire-72"
     val infraredKeyboard: Boolean get() = keyboard && !isDana()
