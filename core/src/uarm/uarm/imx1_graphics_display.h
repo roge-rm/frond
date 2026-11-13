@@ -21,6 +21,9 @@ class Imx1GraphicsDisplay {
         if (address < 0x16010000) return false;
         const uint32_t offset = address - 0x16010000;
         if (offset == 0x4d8 || offset == 0x54c || offset == 0x4f0) return true;
+        // The video overlay words (VIDEO_CTRL 434 to VIDEO_V_POS 458, the Y/U/V offsets at 55c-570) aren't
+        // modelled; owning them makes every access but the boot's VIDEO_CTRL clear an unsupported-peripheral stop.
+        if ((offset >= 0x434 && offset <= 0x458) || (offset >= 0x55c && offset <= 0x570)) return !(offset & 3);
         for (const auto& op : operations) if (op.offset == offset) return true;
         return false;
     }
