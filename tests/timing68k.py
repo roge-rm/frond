@@ -208,16 +208,6 @@ def main():
             if found:
                 cl, cpm, page, high, low = map(int, found.groups())
                 sdram = {'cl': cl, 'cpm': cpm, 'page': page, 'high': high, 'low': low}
-        timing = core.send('bus-timing', ('bus timing:', 'unknown')).strip()
-        print(timing)
-        lcd = refresh = 0.0
-        closes = 0.0
-        if timing.startswith('bus timing:'):
-            numbers = [int(x) for x in re.findall(r'\d+', timing)]
-            lcd = numbers[1] / numbers[0] if numbers[0] else 0.0
-            refresh = numbers[3] / numbers[2] if numbers[2] else 0.0
-            # SDRAM rows closed per clock: every refresh, and every LCD line read from SDRAM.
-            closes = sum(1 / n for n in (numbers[0], numbers[2]) if n)
         if args.frondbench:
             print(run_frondbench(core, args))
             core.frame(args.output / 'frondbench.png')
@@ -236,11 +226,23 @@ def main():
                 break
         core.frame(args.output / 'result.png')
         print(core.send('speed-state', 'speed:').strip())
+        # Read once the loops are done, as the guest sets the LCD up differently in the launcher
+        # (on the T415 lines of 1480 clocks with 122 of DMA, in the probe 740 and 16).
+        timing = core.send('bus-timing', ('bus timing:', 'unknown')).strip()
+        print(timing)
     finally:
         core.close()
     if not result or not result[0]:
         raise SystemExit('the probe did not finish')
     _, per_second, rows = result
+    lcd = refresh = 0.0
+    closes = 0.0
+    if timing.startswith('bus timing:'):
+        numbers = [int(x) for x in re.findall(r'\d+', timing)]
+        lcd = numbers[1] / numbers[0] if numbers[0] else 0.0
+        refresh = numbers[3] / numbers[2] if numbers[2] else 0.0
+        # SDRAM rows closed per clock: every refresh, and every LCD line read from SDRAM.
+        closes = sum(1 / n for n in (numbers[0], numbers[2]) if n)
     if sdram and len(rows[0]) < 5:
         raise SystemExit('SDRAM needs the version 4 probe, with its loop addresses')
     if sdram and not sdram['cpm']:

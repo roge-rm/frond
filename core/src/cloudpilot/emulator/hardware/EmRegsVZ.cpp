@@ -27,6 +27,7 @@
 #include "EmSPISlave.h"  // DoExchange
 #include "EmBankROM.h"
 #include "EmBusTiming.h"
+#include "EmCPU68K.h"
 #include "EmSession.h"   // gSession
 #include "EmSystemState.h"
 #include "Frame.h"
@@ -1750,7 +1751,10 @@ void EmRegsVZ::UpdateBusTiming(void) {
                                dram,
                                sdram,
                                uint32(GetSystemClockFrequency())};
-    EmBusTiming::Set(EmVzBusSteal(bus), gSession ? gSession->GetSystemCycles() : 0);
+    // A register write lands mid-slice, so now is the CPU's own count; the session's lags it by
+    // the slice so far and would put the next LCD line in the past.
+    const uint64 now = !gSession ? 0 : gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles();
+    EmBusTiming::Set(EmVzBusSteal(bus), now);
 }
 
 void EmRegsVZ::ApplySdctl() {

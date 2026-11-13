@@ -7,6 +7,7 @@
 
 #include <algorithm>
 
+#include "EmCPU68K.h"
 #include "EmSession.h"
 #include "EmTransportSerial.h"
 #include "HostLink.h"
@@ -48,6 +49,7 @@ class HostTransport68k : public EmTransportSerial {
         open = true;
         link.DropReceived();
         credit.Restart();
+        idleUntil = 0;
         return true;
     }
     bool Close() override {
@@ -57,17 +59,26 @@ class HostTransport68k : public EmTransportSerial {
     bool IsOpen() const { return open; }
 
     bool Read(long& count, void* data) override {
-        count = long(link.Take(static_cast<uint8_t*>(data), size_t(std::max(0L, std::min(count, Credit())))));
+        const long allowed = Allowed();
+        count = long(link.Take(static_cast<uint8_t*>(data), size_t(std::max(0L, std::min(count, allowed)))));
         credit -= count;
+        if (FrameGapOn() && count > 0 && static_cast<uint8_t*>(data)[count - 1] == kIrdaEof)
+            idleUntil = Now() + FrameGapCycles();
         return true;
     }
     bool Write(long& count, const void* data) override {
         if (open && count > 0) link.Send(static_cast<const uint8_t*>(data), size_t(count));
         return true;
     }
-    bool CanRead() override { return open && link.Available() && Credit() > 0; }
+    bool CanRead() override { return open && link.Available() && Allowed() > 0; }
     bool CanWrite() override { return open; }
-    size_t BytesPending() override { return open ? std::min<size_t>(link.Available(), size_t(Credit())) : 0; }
+    size_t BytesPending() override { return open ? std::min<size_t>(link.Available(), size_t(Allowed())) : 0; }
+
+    // On the IR side, with the guest UART in IrDA mode, SIR frames (BOF ... EOF) from the host
+    // reach the guest with the line idle between them for at least FrameGapCycles. A Palm's IrDA
+    // stack leaves milliseconds between frames, which the host link loses when the guest receiving
+    // runs behind the sender.
+    void SetFrameGap(bool on) { frameGap = on; }
 
     void SetRTS(RTSControl) override {}
     void SetDTR(bool) override {}
@@ -84,6 +95,25 @@ class HostTransport68k : public EmTransportSerial {
 
    private:
     long Credit() { return credit.Take(config.fBaud); }
+    // Credit, held at zero during a frame gap and stopping after the frame's EOF.
+    long Allowed() {
+        const long c = Credit();
+        if (!FrameGapOn()) return c;
+        const uint64_t now = Now();
+        // A gap reaching past a full one from now was set before a load moved the clock back.
+        if (idleUntil > now + FrameGapCycles()) idleUntil = 0;
+        if (now < idleUntil) return 0;
+        return std::min<long>(c, long(link.CountThrough(kIrdaEof)));
+    }
+    // 5 ms: the T415 drops an SNRM that follows a XID frame much closer than that, and the
+    // Palm stacks seen leave 10 ms or more there.
+    uint64_t FrameGapCycles() const { return uint64_t(gSession->GetClocksPerSecond() * 0.005); }
+    bool FrameGapOn() const { return frameGap && config.fIrda; }
+    // The CPU's own cycle count, which moves mid-slice; the system count only moves between slices.
+    static uint64_t Now() { return gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(); }
+    static constexpr uint8_t kIrdaEof = 0xc1;
+    bool frameGap{false};
+    uint64_t idleUntil{0};
 
     HostLink68k& link;
     bool open{false};

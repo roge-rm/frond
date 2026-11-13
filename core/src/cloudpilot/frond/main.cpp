@@ -950,6 +950,7 @@ class Runner {
         // The session owns the transports; they live as long as the process.
         serialTransport = new ModemTransport68k(serialLink, modemSyncLink);
         irTransport = new IrPhoneTransport68k(irLink);
+        irTransport->Host().SetFrameGap(true);
         gSession->SetTransportSerial(kUARTSerial, serialTransport);
         gSession->SetTransportSerial(kUARTIR, irTransport);
         // A session saved mid-call: the call is gone by the time modem or phone mode comes on.

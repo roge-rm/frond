@@ -46,8 +46,13 @@ class HostLink68k {
 
     size_t Available() const { return rx.size(); }
     size_t Take(uint8_t* out, size_t max);
+    // Received bytes up to and including the first byte equal to value, else all of them.
+    size_t CountThrough(uint8_t value) const;
     void Send(const uint8_t* data, size_t size);
-    void DropReceived() { rx.clear(); }
+    void DropReceived() {
+        rx.clear();
+        scanned = 0;
+    }
 
     uint64_t Received() const { return received; }
     uint64_t Sent() const { return sent; }
@@ -66,6 +71,9 @@ class HostLink68k {
     bool asleep{false};
     std::string endpoint;
     std::deque<uint8_t> rx, tx;
+    // Leading bytes of rx that CountThrough has already found free of scanValue.
+    mutable size_t scanned{0};
+    mutable uint8_t scanValue{0};
     uint64_t received{0}, sent{0};
 };
 

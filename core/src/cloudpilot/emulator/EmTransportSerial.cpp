@@ -11,6 +11,7 @@ EmTransportSerial::Config& EmTransportSerial::Config::operator=(
     fStopBits = from.fStopBits;
     fDataBits = from.fDataBits;
     fHwrHandshake = from.fHwrHandshake;
+    fIrda = from.fIrda;
 
     return *this;
 }
