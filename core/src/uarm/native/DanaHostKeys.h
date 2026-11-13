@@ -34,7 +34,9 @@ public:
             return false;
         }
         const auto it = downAt.find(scancode);
-        return it != downAt.end() && nowMs - it->second < kRepeatMs;
+        if (it == downAt.end() || nowMs - it->second >= kRepeatMs) return false;
+        it->second = nowMs;
+        return true;
     }
     void Clear() { downAt.clear(); }
 
