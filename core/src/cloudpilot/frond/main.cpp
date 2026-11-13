@@ -2852,6 +2852,11 @@ class Runner {
     int DeviceWidth() const { return deviceControlsWidth(deviceControls(profile->art), lcd.Width(), view); }
     int StripHeight() const { return deviceControlsHeight(deviceControls(profile->art), lcd.Width(), view); }
     int DeviceHeight() const { return InputHeight() + StripHeight(); }
+    // Rows from the input area's bottom to the strip's top: negative beside the buttons, where the
+    // strip starts under the shrunken silkscreen.
+    int StripTop() const {
+        return DeviceControlTransform(deviceControls(profile->art), lcd.Width(), view).top;
+    }
     bool BesideButtons() const { return deviceSideTabBesideButtons(deviceControls(profile->art), view); }
     SDL_Rect SilkscreenRect() const {
         const auto& silkscreen = deviceSilkscreen(profile->art);
@@ -2923,7 +2928,7 @@ class Runner {
         controlsTexture = nullptr;
         if (fit != WindowFit::none && StripHeight() > 0) {
             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
-                                                int(DeviceWidth() * artScale), int(StripHeight() * artScale));
+                                                int(DeviceWidth() * artScale), int((StripHeight() - StripTop()) * artScale));
             if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
         }
         controlsDirty = true;
@@ -2976,7 +2981,7 @@ class Runner {
                 SDL_RenderGetViewport(renderer, &viewport);
                 if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
                     SDL_RenderSetScale(renderer, 1, 1);
-                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed, view);
+                    drawDeviceControls(renderer, controls, lcd.Width(), -StripTop(), artScale, pressed, view);
                     SDL_SetRenderTarget(renderer, nullptr);
                     SDL_RenderSetScale(renderer, 1, 1);
                     SDL_RenderSetViewport(renderer, &viewport);
@@ -2985,7 +2990,7 @@ class Runner {
                     shownPressed = pressed;
                 }
             }
-            const SDL_Rect dest{0, InputHeight(), DeviceWidth(), StripHeight()};
+            const SDL_Rect dest{0, InputHeight() + StripTop(), DeviceWidth(), StripHeight() - StripTop()};
             SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
         } else {
             drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view);

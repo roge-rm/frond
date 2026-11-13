@@ -81,6 +81,11 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
         require(operation in listOf("eject", "insert", "take-out"))
         request(slot, operation)
     }
+    // A stick's write protection changes only while it is ejected.
+    fun protect(slot: StorageSlot, on: Boolean) {
+        require(slot.stick)
+        request(slot, "protect", if (on) "on" else "off")
+    }
     fun attach(slot: StorageSlot, entry: Entry, writeProtected: Boolean) {
         val family = device.familiesOf(slot).firstOrNull { it.family == entry.family } ?: throw IOException("This slot doesn't take that card family.")
         request(slot, "attach", DanaCardProtocol.attach(entry.path.absolutePath, entry.id, writeProtected, family))

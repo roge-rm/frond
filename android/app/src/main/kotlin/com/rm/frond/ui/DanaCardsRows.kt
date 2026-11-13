@@ -10,6 +10,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -18,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.rm.frond.CardFamily
 import com.rm.frond.RunningModel
@@ -69,6 +72,14 @@ fun DanaCardsRows(model: RunningModel) {
                 }
                 if (!state.known) TextButton(enabled = model.busy == null, onClick = { model.danaJob() }) { Text("Try again") }
             }
+            if (slot.stick && card != null) ListItem(
+                headlineContent = { Text("Write protected") },
+                trailingContent = {
+                    Switch(checked = card.writeProtected, enabled = state.known && model.busy == null && !card.inserted && !card.failed,
+                        onCheckedChange = { value -> model.danaJob { it.protect(slot, value) } })
+                },
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            )
         }
     }
     selected?.let { slot ->
