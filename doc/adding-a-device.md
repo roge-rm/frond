@@ -2,7 +2,7 @@
 
 How a device is described to Frond and what to build to make a new one run. The table of devices is `deviceProfiles5` in `src/common/device_profile5.h` of the core (`core/`). Everything else reads from it: the core, the desktop app, the Android app and the Python tools. See [developer-reference.md](developer-reference.md) for the command line and socket, [testing.md](testing.md) for the test targets and [performance.md](performance.md) for the engines.
 
-A 68k device (the Palm IIIx is the example) runs on a different runner, `frond-68k`, so some steps below differ. See [68k devices](#68k-devices).
+A 68k device (the Palm IIIx is the example, the other 68k Palms in the README's Devices table are the same) runs on a different runner, `frond-68k`, so some steps below differ. See [68k devices](#68k-devices).
 
 Core changes are ordinary edits to `core/`. Keep the upstream licence headers and credit.
 
@@ -182,7 +182,7 @@ Signatures are checked before anything is patched. A missing or ambiguous match 
 
 ## 68k devices
 
-The Palm IIIx (DragonBall EZ, 68k) runs in `frond-68k`, built from the vendored CloudpilotEmu core (UAE 68000 plus the DragonBall register models) and Frond's runner in `src/cloudpilot/frond/`. The two runners share the art, the window layout, the control socket framing (`src/common/DesktopChannel.h`) and the session container, and have separate main loops and command handling. Patches 0211 to 0229 add it.
+The 68k Palms (DragonBall EZ and VZ, see the README's Devices table) run in `frond-68k`, built from the vendored CloudpilotEmu core (UAE 68000 plus the DragonBall register models) and Frond's runner in `src/cloudpilot/frond/`. The two runners share the art, the window layout, the control socket framing (`src/common/DesktopChannel.h`) and the session container, and have separate main loops and command handling. Patches 0211 to 0229 add it.
 
 - Profile: `board` is `ez328`, `detect` is `romHeader68k`, and `runs68k` is true. `deviceProfileRunnerEligible5` means the ARM runner and is false for it, `deviceProfileRuns68k5` tells the frontends to start `frond-68k`. `deviceProfileInspect68kRom5` reads the big-endian card header (`PalmCard`, `0xfeedbeef`, header version 3 to 5, EZ flag, reset vector in the ROM) and, on version 5, company `palm` and HAL `sumo`. The core then checks the ROM with `EmROMReader` and `EmDevice::SupportsROM`, so a Palm V 3.x or m100 ROM passes the header check and is refused by the core.
 - ROMs: OS 3.1 retail and debug, generic OS 3.5 EZ retail and debug, IIIx/V OS 4.1. The ROM goes in the session's NOR slot, with the RAM and the Cloudpilot savestate. Frond stores its own clock marker next to the savestate (a session without `clock 1` has its cycle counters doubled on load).
@@ -191,7 +191,7 @@ The Palm IIIx (DragonBall EZ, 68k) runs in `frond-68k`, built from the vendored 
 - Networking is PPP over the serial port to a host PPP server. Frond never turns on the NetLib redirect for a 68k device.
 - Android: `libmain68k.so` runs the same `frond/main.cpp` in `Frond68kActivity`, in its own `:emulator68k` process, so the two UAE copies never share a process. `DeviceInventory.kt` lists 68k devices with `runs68k`.
 - Another EZ or 68328/VZ Palm needs a profile, art and a setup recipe, and Cloudpilot already has the device model. A VZ board's bus timing is only unit-tested so far.
-- Checks: `make test-frond-68k`, `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `make test-core-control`, see [testing.md](testing.md#per-device-tests). The IIIx has no `SMOKE` entry yet.
+- Checks: `make test-frond-68k`, `tests/device-rom.py --device palm-iiix --rom FILE --launcher --resets`, `make test-core-control`, see [testing.md](testing.md#per-device-tests). Check `SMOKE` for which 68k devices have an entry.
 
 Dana uses the staged `vz328` backend in `frond-68k`, with `runs68k` true and
 `frontend.available` false. Normal ROM/session dispatch, native ROM pen input

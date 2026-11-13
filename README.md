@@ -109,7 +109,7 @@ The Tapwave Zodiac plays sound and takes an SD card. Its other peripherals aren'
 
 Each Palm you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
 
-Hard reset erases the Palm. Save first saves it before you do. The T|X, E2 and IIIx ask first (press up to erase). The Zire erases straight away.
+Hard reset erases the Palm. Save first saves it before you do. The T|X, E2 and the 68k Palms ask first (press up to erase). The Zire erases straight away.
 
 ## Screen
 

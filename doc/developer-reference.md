@@ -4,7 +4,7 @@ Everything here is for running the core and the tools without the desktop or And
 
 The core is `out/frond` (built by `make out/frond`). The desktop app runs it as a child and talks to it over the control socket.
 
-The 68k Palms (the Palm IIIx to the m520, the IBM WorkPad c500 and the Dana) have their own runner, `out/frond-68k` (`make out/frond-68k`, installed as `/usr/lib/frond/frond-68k-core`). It takes the same desktop arguments and speaks the same control socket, but has its own options and console, see [68k Palms (frond-68k)](#68k-palms-frond-68k). Everything outside that section is about `out/frond`.
+The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devices table) have their own runner, `out/frond-68k` (`make out/frond-68k`, installed as `/usr/lib/frond/frond-68k-core`). It takes the same desktop arguments and speaks the same control socket, but has its own options and console, see [68k Palms (frond-68k)](#68k-palms-frond-68k). Everything outside that section is about `out/frond`.
 
 ## Command line
 

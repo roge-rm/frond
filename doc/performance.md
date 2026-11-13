@@ -24,7 +24,7 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 
 ## 68k timing
 
-`frond-68k` runs the Palm IIIx's 68000 with the clocks the MC68000 manual gives (section 8) instead of a flat cost per instruction. Each opcode has a clock count and a count of program reads. Data-dependent parts are worked out as the code runs: taken or not taken branches, shift counts, MOVEM register counts, MULU, MULS, DIVU and DIVS operands, and exceptions with their frame writes.
+`frond-68k` runs a 68k Palm's CPU (the IIIx is the one timed) with the clocks the MC68000 manual gives (section 8) instead of a flat cost per instruction. Each opcode has a clock count and a count of program reads. Data-dependent parts are worked out as the code runs: taken or not taken branches, shift counts, MOVEM register counts, MULU, MULS, DIVU and DIVS operands, and exceptions with their frame writes.
 
 - Wait states: each address bank has byte and word waits, set from the DragonBall EZ chip selects (CSA for ROM, CSD or DRAMC for RAM) when the guest writes them. Operand accesses add the wait, instruction fetches add the program reads times the wait. `bus-wait` shows them.
 - Bus time: LCD DMA and DRAM refresh take bus cycles from the CPU, worked out from the registers the guest programmed (line length from LRRA, LXMAX, PCD and the PLL dividers, burst length, refresh period). `bus-timing` shows the figures and the LCD frame rate.
