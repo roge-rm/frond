@@ -22,6 +22,7 @@ static void danaInventory();
 static void danaWirelessInventory();
 static void ezProfiles();
 static void vzProfiles();
+static void t415();
 // The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
 static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
 static void originalMips();
@@ -33,7 +34,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"sony-clie-t415", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
+    const std::vector<std::string> reserved{"hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -53,7 +54,7 @@ int main() {
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
                 p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
-                p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328));
+                p.deviceType == deviceTypeFrankenE2 || (p.board == DeviceBoard5::vz328 && p.deviceType != deviceTypeT415)));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -111,7 +112,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 23 && names.size() == 28 && types.size() == 24);
+    assert(desktopCount == 23 && names.size() == 28 && types.size() == 25);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -119,7 +120,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 24, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 25, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -361,9 +362,10 @@ int main() {
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZire72));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.backgroundPanel == (p.deviceType == deviceTypeTG50));
-    for (const auto& p : deviceProfiles5) // The snap-on modem: the III series and the V series connectors; the m100 series has none.
+    // The snap-on modem: the III series and the V series connectors; the m100 series and the T415 (USB cradle) have none.
+    for (const auto& p : deviceProfiles5)
         assert(p.capabilities.modem == ((p.board == DeviceBoard5::ez328 && p.art != DeviceArt::m100 && p.art != DeviceArt::m105) ||
-                                        vzPalm(p)));
+                                        (vzPalm(p) && p.deviceType != deviceTypeT415)));
     for (const auto& p : deviceProfiles5)
         assert(p.capabilities.irPhone == (p.board == DeviceBoard5::ez328 || vzPalm(p) || p.deviceType == deviceTypeTX ||
                                           p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeE2 ||
@@ -437,6 +439,7 @@ int main() {
     palmIIIx();
     ezProfiles();
     vzProfiles();
+    t415();
     danaInventory();
     danaWirelessInventory();
     originalMips();
@@ -980,6 +983,59 @@ static void vzProfiles() {
     // The c500 is never detected; the m500's HAL ID gives the m500.
     unsigned detecting = 0;
     for (const auto& p : deviceProfiles5) detecting += p.detect == DeviceDetect5::romHeader68k && vzPalm(p);
-    assert(detecting == 6);
+    assert(detecting == 7);
     std::cout << "PASS: VZ Palm profiles, ROM header detection, pairing and card slots\n";
+}
+
+// Sony CLIE T415: the VZ board with Sony's IDs, staged (frond-68k runs it, the frontends don't list it yet),
+// a 320x320 grey panel with the silkscreen below it, IrDA and USB HotSync pending.
+static void t415() {
+    constexpr uint32_t sony = 0x736f6e79, vnce = 0x766e6365, palm = 0x70616c6d, vstu = 0x76737475, sumo = 0x73756d6f;
+    constexpr uint32_t base = 0x10000000, vz = 0x0040, ez = 0x0020;
+    const auto* p = deviceProfileNamed5("sony-clie-t415");
+    assert(p && p->deviceType == deviceTypeT415 && int(deviceTypeT415) == 24 && deviceProfile5(24) == p);
+    assert(deviceTypeNamed5("sony-clie-t415") == deviceTypeT415 && p->art == DeviceArt::t415 && vzPalm(*p));
+    assert(p->cohort == DeviceCohort5::vz68k && p->support == DeviceSupport5::staged && !p->frontend.available);
+    assert(!deviceProfileSupportsDesktop5(p->deviceType));
+    assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(p->detect == DeviceDetect5::romHeader68k && p->companyId == sony && p->halId == vnce);
+    assert(p->minRam == 8u << 20 && p->maxRam == p->minRam && p->cpuHz == 33161216 && !p->norSize);
+    assert(p->defaultDisplay == DisplayMode::mode_320x320 && p->displayModes == (1u << 5));
+    assert(!deviceProfileColourLcd5(p->deviceType));
+    assert(p->frontend.width == 320 && p->frontend.height == 320 && p->frontend.silkscreenHeight == 128 &&
+           p->frontend.stripHeight == 104 && p->frontend.sideTabWidth == 38);
+    const auto& caps = p->capabilities;
+    assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
+           !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
+    assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == "USB HotSync");
+    assert(deviceProfileCardSlotCount5(*p) == 0 && !deviceProfileLinkedCards5(*p));
+    // The T415 ROM's shape: 3.125 MiB, a small card at 0 and a big card at 32 KiB, both Sony's.
+    auto rom = rom68k(0x320000, 5, vz, sony, vnce, base + 0x2a2, 0x8000);
+    const auto big = rom68k(0x100, 5, vz, sony, vnce, base + 0x8000 + 0x1234, 0x318000);
+    std::copy(big.begin(), big.end(), rom.begin() + 0x8000);
+    rom[0x68] = 0x10, rom[0x69] = 0x00, rom[0x6a] = 0x80, rom[0x6b] = 0;
+    const auto info = inspect68k(rom);
+    assert(info.profile == p && info.companyId == sony && info.halId == vnce);
+    assert(deviceProfileTakes68kRom5(*p, info));
+    // No other device takes it, and the T415 takes no one else's.
+    for (const auto& other : deviceProfiles5)
+        if (&other != p && other.deviceType != deviceTypeInvalid) assert(!deviceProfileTakes68kRom5(other, info));
+    const auto m125info = inspect68k(rom68k(0x300000, 5, vz, palm, vstu, base + 0x2a2, 0x5c12));
+    assert(m125info.profile == deviceProfileNamed5("palm-m125") && !deviceProfileTakes68kRom5(*p, m125info));
+    for (const char* name : {"palm-iiix", "alphasmart-dana", "palm-m520"})
+        assert(!deviceProfileTakes68kRom5(*p, Device68kRomInfo5{deviceProfileNamed5(name), true}));
+    // Header checks: the VZ board's base and size, Sony's IDs on both halves, the VZ flag.
+    assert(inspect68k(rom68k(0x400000, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile == p);
+    assert(!inspect68k(rom68k(0x401000, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320800, 5, vz, sony, vnce, base + 0x2a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320000, 5, vz, sony, vnce, 0x10c002a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320000, 5, vz, sony, vnce, base + 0x320000, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320000, 5, vz, palm, vnce, base + 0x2a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320000, 5, vz, sony, sumo, base + 0x2a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x320000, 5, vz | 1, sony, vnce, base + 0x2a2, 0x8000)).profile);
+    // Sony's IDs on an EZ header or at the EZ base name nothing; the IIIx's on a VZ header name nothing either.
+    assert(!inspect68k(rom68k(0x200000, 5, ez, sony, vnce, 0x10c002a2, 0x8000)).profile);
+    assert(!inspect68k(rom68k(0x200000, 5, vz, palm, sumo, base + 0x2a2, 0x8000)).profile);
+    assert(inspect68k(rom68k(0x200000, 5, ez, palm, sumo, 0x10c002a2, 0x8000)).profile == deviceProfileNamed5("palm-iiix"));
+    std::cout << "PASS: Sony CLIE T415 profile and ROM header detection\n";
 }

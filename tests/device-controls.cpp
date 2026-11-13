@@ -1159,13 +1159,15 @@ static void tg50Art() {
 }
 
 static void t415BesideButtons();
-// Sony CLIE T415: no board yet. Four oval keys on a tray round an hourglass rocker under the
+// Sony CLIE T415: the VZ board, staged, with its silkscreen and bar sizes in the profile. Four oval keys on a tray round an hourglass rocker under the
 // 320x320 LCD and its silkscreen, and the TG50's Jog Dial and Back on a side tab left of the LCD.
 static void t415Art() {
     const auto& p=deviceControls(DeviceArt::t415);
     const int width=320,height=448;
     const auto* profile=deviceProfileNamed5("sony-clie-t415");
-    assert(profile && profile->support==DeviceSupport5::reserved && profile->board==DeviceBoard5::none);
+    assert(profile && profile->support==DeviceSupport5::staged && profile->board==DeviceBoard5::vz328);
+    assert(profile->frontend.silkscreenHeight==deviceSilkscreen(DeviceArt::t415).height &&
+           profile->frontend.stripHeight==p.height && profile->frontend.sideTabWidth==p.sideTabWidth);
     assert(profile->art==DeviceArt::t415 && profile->defaultDisplay==DisplayMode::mode_320x320);
     assert(deviceArt("sony-clie-t415")==DeviceArt::t415);
     assert(p.width==320 && p.height==104 && p.unit==1 && p.style==DeviceControlStyle::t415 && p.navigator.w==0);

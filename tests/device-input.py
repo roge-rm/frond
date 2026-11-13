@@ -132,7 +132,8 @@ class DeviceInputTest(unittest.TestCase):
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][24:]))
+        self.assertEqual(data['profiles'][24]['status'], 'staged')
+        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][25:]))
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 
@@ -243,12 +244,12 @@ class DeviceInputTest(unittest.TestCase):
                           'invalid replay event')
 
     def test_unknown_and_mismatched_session_names(self):
-        for device in ('palm-tx2', 'tungsten-e2', 'sony-clie-t415'):
+        for device in ('palm-tx2', 'tungsten-e2', 'hp-ipaq-210'):
             with self.subTest(device=device):
                 path = session(self.root / 'unknown', device)
                 self.rejected([path], f"this session is for {device}, which Frond can't run")
-        # IIIx and m515 sessions go to frond-68k.
-        for device in ('palm-iiix', 'palm-m515'):
+        # IIIx, m515 and T415 sessions go to frond-68k.
+        for device in ('palm-iiix', 'palm-m515', 'sony-clie-t415'):
             self.rejected([session(self.root / 'unknown', device)], f'this session is for {device}, which runs in frond-68k')
         for device in ('', 'Palm TX', 'palm_tx', 'x' * 32):
             with self.subTest(device=device):

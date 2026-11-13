@@ -199,7 +199,7 @@ Bool EmRegsVzPegVenice::GetVibrateOn(void) {
 }
 
 bool EmRegsVzPegVenice::CopyLCDFrame(Frame& frame, bool fullRefresh) {
-    if (!VZ::CopyLCDFrame(frame, false)) {
+    if (!VZ::CopyLCDFrame(frame, fullRefresh)) {
         return false;
     }
 

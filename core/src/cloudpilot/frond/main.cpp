@@ -251,6 +251,7 @@ const char* cloudpilotDevice(const DeviceProfile5& profile) {
         case deviceTypeM515: return "PalmM515";
         case deviceTypeM130: return "PalmM130";
         case deviceTypeM520: return "PalmM520";
+        case deviceTypeT415: return "PEG-T400";
         case deviceTypeDana: return "AlphaSmartDana";
         case deviceTypeDanaWireless: return "DanaWireless";
         default: return nullptr;
@@ -874,7 +875,8 @@ class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
         : options(options), profile(&profile), metadata(metadata),
-          lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType)) {
+          lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
+              profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
