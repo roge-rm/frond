@@ -36,9 +36,13 @@ extern uae_u16 gCpuTiming[65536];
 extern uae_u32 gUaeAccessWait;
 extern uae_u32 gUaeTimingExtra;
 extern uae_u32 gUaeBusCount;
+/* Words a kTimingReadFirst instruction wrote to SDRAM; only cleared and read for those. */
+extern uae_u32 gUaeSdramWriteWords;
 
 /* Wait clocks of a CPU access to SDRAM (EmBusTiming.h). */
 uae_u32 EmSdramAccess(uae_u32 address, int write, int words);
+/* Wait clocks of the read and write of a read-before-write to SDRAM, from the write's wait. */
+uae_u32 EmSdramReadFirst(uae_u32 writeWait, int words);
 
 /* Builds gCpuTiming from table68k; call after read_table68k and do_merges. */
 void BuildCpuTiming(void);

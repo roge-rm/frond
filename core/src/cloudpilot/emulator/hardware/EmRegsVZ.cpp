@@ -1733,6 +1733,7 @@ void EmRegsVZ::UpdateBusTiming(void) {
 
     // The screen is in RAM (the DRAM chip select) when it sits below the ROM.
     const emuptr screen = READ_REGISTER(lcdStartAddr);
+    EmSdram::SetLcdAddress(sdram && screen < EmBankROM::GetMemoryStart() ? uint32(screen) : ~0u);
     const EmVzBusRegisters bus{READ_REGISTER(pllControl),
                                READ_REGISTER(lcdScreenWidth),
                                READ_REGISTER(lcdScreenHeight),

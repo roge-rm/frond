@@ -24,9 +24,10 @@
 STATIC_INLINE void uae_count_access(emuptr a, int words, int write, int byte) {
     const EmAddressBank* bank = &EmMemGetBank(a);
     gUaeBusCount += words * bank->busTag;
-    if (__builtin_expect(bank->sdram, 0))
+    if (__builtin_expect(bank->sdram, 0)) {
         gUaeAccessWait += EmSdramAccess(a, write, words);
-    else
+        if (write) gUaeSdramWriteWords += words;
+    } else
         gUaeAccessWait += byte ? bank->waitByte : words * bank->waitWord;
 }
 

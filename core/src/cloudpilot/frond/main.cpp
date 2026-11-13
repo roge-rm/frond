@@ -1878,7 +1878,16 @@ class Runner {
             const EmAddressBank& rom = EmMemGetBank(EmBankROM::GetMemoryStart());
             const EmAddressBank& ram = EmMemGetBank(0);
             cout << "bus wait: rom " << int(rom.waitByte) << "/" << int(rom.waitWord) << ", ram "
-                 << int(ram.waitByte) << "/" << int(ram.waitWord) << endl;
+                 << int(ram.waitByte) << "/" << int(ram.waitWord);
+            // SDRAM waits by page instead (EmBusTiming.h): CAS latency, continuous page mode,
+            // the address bits within a row and the bank address bits (255 for none).
+            if (ram.sdram) {
+                const EmSdramTiming& sdram = EmSdram::Get();
+                cout << ", sdram cl " << (sdram.casLatency2 ? 2 : 1) << " cpm " << int(sdram.continuousPage)
+                     << " page " << int(sdram.pageShift) << " bank " << int(sdram.bankHigh) << "/"
+                     << int(sdram.bankLow);
+            }
+            cout << endl;
         } else if (command == "bus-timing") {
             // LCD DMA and DRAM refresh as the guest programmed them, in system clocks.
             const EmBusSteal& steal = EmBusTiming::Get();
@@ -1904,6 +1913,13 @@ class Runner {
                      vz ? EmMemGet16(0xfffffa28) : EmMemGet8(0xfffffa29), EmMemGet16(0xfffffa08),
                      EmMemGet16(0xfffffa0a));
             cout << regs << endl;
+            if (vz) {
+                // VZ only: SDRAM control, LCD DMA control, chip select A and CSCTRL1.
+                snprintf(regs, sizeof(regs), "bus registers vz: sdctrl %04x dmacr %02x csa %04x csctrl1 %04x",
+                         EmMemGet16(0xfffffc04), EmMemGet8(0xfffffa39), EmMemGet16(0xfffff110),
+                         EmMemGet16(0xfffff10a));
+                cout << regs << endl;
+            }
         } else if (command == "speed") {
             string value;
             words >> value;

@@ -83,6 +83,12 @@ namespace {
 
     EmSdramTiming gSdram;
     uint32_t gOpenRow[4] = {~0u, ~0u, ~0u, ~0u};
+    uint32_t gLcdBank = ~0u;
+
+    uint32_t SdramBank(uint32_t address) {
+        return (gSdram.bankHigh == 0xff ? 0 : ((address >> gSdram.bankHigh) & 1) << 1) |
+               (gSdram.bankLow == 0xff ? 0 : (address >> gSdram.bankLow) & 1);
+    }
 }  // namespace
 
 uint32_t EmDragonballClockDivider(uint32_t select) {
@@ -186,19 +192,33 @@ namespace EmSdram {
         const uint32_t hit = write ? 0 : 1 + gSdram.casLatency2;
         const uint32_t miss = write ? 1 : 3 + gSdram.casLatency2;
         if (!gSdram.continuousPage) return words * miss;
-        const uint32_t bank = (gSdram.bankHigh == 0xff ? 0 : ((address >> gSdram.bankHigh) & 1) << 1) |
-                              (gSdram.bankLow == 0xff ? 0 : (address >> gSdram.bankLow) & 1);
+        const uint32_t bank = SdramBank(address);
         const uint32_t row = address >> gSdram.pageShift;
         const uint32_t first = gOpenRow[bank] == row ? hit : miss;
         gOpenRow[bank] = row;
         return first + (words - 1) * hit;
     }
 
+    const EmSdramTiming& Get() { return gSdram; }
+
+    uint32_t ReadFirst(uint32_t writeWait, uint32_t words) {
+        const uint32_t hit = 1 + gSdram.casLatency2, miss = 3 + gSdram.casLatency2;
+        // Without continuous page mode every access is a miss, a write one clock.
+        if (!gSdram.continuousPage) return words * (miss + 1);
+        return (writeWait ? miss : hit) + (words - 1) * hit;
+    }
+
+    void SetLcdAddress(uint32_t address) { gLcdBank = address == ~0u ? ~0u : SdramBank(address); }
+
     void PrechargeAll() { std::fill(std::begin(gOpenRow), std::end(gOpenRow), ~0u); }
 }  // namespace EmSdram
 
 extern "C" uint32_t EmSdramAccess(uint32_t address, int write, int words) {
     return EmSdram::Access(address, write, words);
+}
+
+extern "C" uint32_t EmSdramReadFirst(uint32_t writeWait, int words) {
+    return EmSdram::ReadFirst(writeWait, words);
 }
 
 namespace EmBusTiming {
@@ -286,6 +306,7 @@ namespace EmBusTiming {
 
     void Clear() {
         gSdram = {};
+        gLcdBank = ~0u;
         gSteal = {};
         Reset(0);
     }
@@ -296,9 +317,11 @@ namespace EmBusTiming {
         const uint32_t busShare = uint32_t((uint64_t(std::min(busClocks, cycles)) << 16) / cycles);
         const uint32_t dramShare = uint32_t((uint64_t(std::min(dramClocks, cycles)) << 16) / cycles);
         uint64_t extra = 0;
-        if (gNextLcd != ~uint64_t(0))
+        if (gNextLcd != ~uint64_t(0) && gNextLcd <= end) {
             extra += Due(gNextLcd, gSteal.lcdLineClocks, gSteal.lcdDmaClocks, start, end,
                          busShare, gLcdFraction);
+            if (gLcdBank != ~0u && gSdram.continuousPage) gOpenRow[gLcdBank] = ~0u;
+        }
         if (gNextRefresh != ~uint64_t(0) && gNextRefresh <= end) {
             extra += Due(gNextRefresh, gSteal.refreshPeriod, gSteal.refreshClocks, start, end,
                          dramShare, gRefreshFraction);
