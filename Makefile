@@ -1386,8 +1386,8 @@ frond-jit: out/frond
 .PHONY: test-tg50-serial-board
 test: test-tg50-serial-board
 test-tg50-serial-board: out/frond
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @build/tg50-serial-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-serial-board
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-board-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @build/tg50-serial-board-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-serial-board
 	./build/test-tg50-serial-board
 
 test: test-pxa255-udc-dma test-pxa255-udc-dma-state
@@ -2369,8 +2369,9 @@ test-zodiac-mmcsd-empty: build/zodiac-boot-probe
 .PHONY: test-zodiac-asp-pen
 test-zodiac-asp-pen: build/zodiac-asp-pen-probe
 	python3 tests/zodiac-asp-pen.py
+# Links with the list build/zodiac-boot-probe wrote; writing it again here would empty it under
+# a parallel link that reads it.
 build/zodiac-asp-pen-probe: build/zodiac-boot-probe tests/zodiac-asp-pen-probe.cpp
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-asp-pen-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
