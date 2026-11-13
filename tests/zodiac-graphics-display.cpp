@@ -71,7 +71,7 @@ static void checkDisplay() {
     configureGraphicsInterface(state,eim);
     configureGraphicsController(state,eim);
     engine(state,eim);
-    assert(state.access(eim,0x20000000,0x160104d8,4,true,value) == A::externalInput);
+    assert(state.access(eim,0,0x160104d8,4,true,value) == A::externalInput);
     assert(state.access(eim,0x200aeb68,0x160104d8,2,true,value) == A::width);
     value = 0x7b;
     assert(state.access(eim,0x200aeb68,0x160104d8,4,true,value) == A::sequence);

@@ -62,7 +62,7 @@ class Imx1GraphicsFrame {
     bool scanDue(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim) const {
         const auto& display = configuration.displayState();
         if (!display.lcdEnabled() || !configuration.memoryReady(eim)) return false;
-        return !valid || !enabled || display.revision() != lastRevision || display.frameNumber() != lastFrame;
+        return !valid || !enabled || display.revision() != (lastRevision & ~overlaidBit) || display.frameNumber() != lastFrame;
     }
     bool advance(const Imx1Cs5Configuration& configuration, Imx1GraphicsMemory& memory, const Imx1Eim& eim) {
         const auto& display = configuration.displayState();
@@ -72,8 +72,11 @@ class Imx1GraphicsFrame {
         }
         Imx1GraphicsDisplay::Overlay overlay;
         const bool overlaid = display.overlay(configuration.memoryWindows(), overlay);
-        // The overlay's planes aren't dirty tracked, so a frame with it shown is read whole.
-        const bool full = !valid || !enabled || display.revision() != lastRevision || overlaid;
+        // The overlay's planes aren't dirty tracked, so each new frame with it shown is read whole, and so is the
+        // first one after it goes, which may leave rows the graphic plane never dirties.
+        const bool wasOverlaid = lastRevision & overlaidBit;
+        const bool full = !valid || !enabled || display.revision() != (lastRevision & ~overlaidBit) ||
+                          (overlaid && display.frameNumber() != lastFrame) || (wasOverlaid && !overlaid);
         if (!full && display.frameNumber() == lastFrame) return true;
         Imx1GraphicsDisplay::Surface candidate;
         if (!display.surface(candidate)) return false;
@@ -147,7 +150,7 @@ class Imx1GraphicsFrame {
         }
         memory.acknowledgeDirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout, dirty.generation);
         surface = candidate;
-        lastRevision = display.revision();
+        lastRevision = display.revision() | (overlaid ? overlaidBit : 0);
         lastFrame = display.frameNumber();
         valid = true;
         return true;
@@ -179,6 +182,9 @@ class Imx1GraphicsFrame {
         }
     }
    private:
+    // The top bit of lastRevision says the last frame read had the overlay shown, so the saved layout stays as it
+    // was. The display's revision count never reaches it.
+    static constexpr uint64_t overlaidBit = 1ull << 63;
     std::vector<uint32_t> pixels;
     std::vector<uint8_t> row;
     Imx1GraphicsDisplay::Surface surface{};

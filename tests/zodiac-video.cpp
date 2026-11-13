@@ -111,6 +111,13 @@ int main() {
         }
     }
 
+    // Only code in the RAM the OS maps at 40000000 is a player: not the vectors, the ROM or a null jump.
+    for (uint32_t pc : {0u, 0x18u, 0x10000000u, 0x20000000u, 0x30000000u, 0x47400000u}) {
+        value = 0xdeadbeef;
+        assert(state.access(eim, pc, 0x160104d8, 4, false, value) != A::ok && value == 0xdeadbeef);
+        ++refused;
+    }
+
     // What ati4200.c reads first: the ring set-up and pointers, the busy bit and the active area.
     assert(load(state, eim, 0x210) == 0x0800000d && load(state, eim, 0x214) == 0x10150000);
     assert(load(state, eim, 0x21c) == 0 && load(state, eim, 0x220) == 0 && load(state, eim, 0x140) == 0);
@@ -166,6 +173,8 @@ int main() {
     assert(put(state, eim, 0x4d8, 0x78) == A::ok && put(state, eim, 0x434, load(state, eim, 0x434) | 0x14) == A::ok);
     assert(put(state, eim, 0x4d8, 0x7b) == A::ok);
     check({red, white, black, white, black, white});
+    // Within the same frame the shown overlay isn't read again.
+    assert(frame.advance(state, memory, eim) && !frame.getPendingFrame(first, last));
 
     auto edit = [&](std::initializer_list<std::array<uint32_t,2>> words) {
         assert(put(state, eim, 0x4d8, 0x78) == A::ok);
@@ -194,8 +203,14 @@ int main() {
     assert(put(state, eim, 0x4d4, load(state, eim, 0x4d4) & ~0x1f0u) == A::ok);
     assert(put(state, eim, 0x4d8, 0x7b) == A::ok);
     check({red, white, black, white, black, white});
-    // Hide clears the enables and the graphic plane shows again.
+    // Hide clears the enables and the graphic plane shows again, also when it clears only one of them.
     assert(edit({{0x434, control}}) == A::ok);
+    check({red, green, blue, white, black, grey});
+    assert(edit({{0x434, control | 0x14}}) == A::ok);
+    check({red, white, black, white, black, white});
+    assert(edit({{0x434, control | 0x10}}) == A::ok);
+    check({red, green, blue, white, black, grey});
+    assert(edit({{0x434, control | 0x4}}) == A::ok);
     check({red, green, blue, white, black, grey});
 
     // The ROM's own transactions carry the overlay words on: a mode write keeps the overlay shown.

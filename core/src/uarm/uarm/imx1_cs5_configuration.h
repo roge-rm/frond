@@ -213,6 +213,9 @@ class Imx1Cs5Configuration {
     bool defaultsKnown() const { return programmed; }
     uint8_t defaultsValue() const { return defaults; }
     bool apertureSelected() const { return selected; }
+    // The OS maps SDRAM at 40000000-473fffff for applications and their data. The ROM runs at 20000000 and the
+    // exception vectors at 0, so only code in that RAM drives the chip as a player.
+    static bool playerPc(uint32_t pc) { return pc >= 0x40000000 && pc < 0x47400000; }
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
@@ -237,8 +240,8 @@ class Imx1Cs5Configuration {
             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
             return boardAccess(pc,address,size,write,value);
         }
-        // Code outside the ROM image (20000000-207fffff), such as TCPMP driving the chip from its own RAM code.
-        if (virtualProfile() && (pc < 0x20000000 || pc >= 0x20800000)) {
+        // Player code in RAM, such as TCPMP driving the chip itself (its code runs at 40xxxxxx).
+        if (virtualProfile() && playerPc(pc)) {
             if (Imx1GraphicsDisplay::playerWord(address) || Imx1GraphicsEngine::playerWord(address) ||
                 address == 0x16010098) {
                 if (size != 4) return Imx1BootstrapAccess::width;

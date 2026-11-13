@@ -300,10 +300,12 @@ class Imx1GraphicsDisplay {
             if (!knownWords[index(offset)]) return false;
         return !(stagedWord(0x434) & 2) || knownWords[index(0x438)];
     }
+    // The overlay shows with both enables (434 bits 2 and 4) set; a player hiding it may clear one at a time.
+    static bool shown(uint32_t control) { return (control & 0x14) == 0x14; }
     bool overlay(const Imx1GraphicsWindows& windows, Overlay& value) const {
-        return enabled && (activeWord(0x434) & 0x14) && decodeOverlay(windows, active, value);
+        return enabled && shown(activeWord(0x434)) && decodeOverlay(windows, active, value);
     }
-    // Code outside the ROM (a player such as TCPMP, through its own mapping of the chip) reaches the overlay
+    // Player code in RAM (such as TCPMP, through its own mapping of the chip) reaches the overlay
     // and the words it needs around it: the transaction word 4d8, VIDEO_CTRL 434, the colour key 438, the
     // offsets, pitches and window 43c-458, the overlay format bits of DISP_DEBUG (4d4, bits 4-8) and
     // DISP_DEBUG2 bit 30, and reads of the active area (424, 428). Words never written read as a stop.
@@ -357,7 +359,7 @@ class Imx1GraphicsDisplay {
         }
         if (!editing) return A::sequence;
         Overlay overlayCandidate;
-        if ((stagedWord(0x434) & 0x14) && (!knownOverlay() || !decodeOverlay(windows, staged, overlayCandidate)))
+        if (shown(stagedWord(0x434)) && (!knownOverlay() || !decodeOverlay(windows, staged, overlayCandidate)))
             return A::sideEffect;
         Surface candidate;
         const bool requested = (stagedWord(0x414) & 0x1c00) == 0x1c00;
