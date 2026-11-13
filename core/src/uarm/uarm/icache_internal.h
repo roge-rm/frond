@@ -118,10 +118,11 @@ static inline uint32_t icacheFetchKey(const struct icache* ic, bool privileged) 
 
 #ifndef __EMSCRIPTEN__
 // Misses, invalidations, alignment faults, new decodes and stale fetch keys use icacheFetch.
+// Not for the ARM920T, which fetches every instruction through icacheFetch.
 template <int size>
 static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint32_t key,
                                            uint32_t& instr, uint32_t& decoded) {
-    if (ic->arm920 || (va & (size - 1))) return false;
+    if (va & (size - 1)) return false;
     const auto* line = ic->cache + calculateIndex(va);
     if (line->revision != ic->revision || line->tag != calculateTag(va) || line->fetchKey != key)
         return false;

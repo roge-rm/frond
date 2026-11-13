@@ -49,7 +49,7 @@ struct Machine {
         word(8, 0xe59ff018); word(0x28, handler);
         word(handler, 0xe1b0f00e); // MOVS pc,lr
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
     void at(uint32_t pc) { cpuSetReg(cpu, 15, pc); step(); }
     uint32_t psr() { return cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR); }
     uint32_t spsr() { return cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR); }
@@ -219,7 +219,7 @@ void normalBlocks() {
         unsigned batches = 0;
         while (cpuGetRegisters(fast.cpu)[15] != code + (thumb ? 4 : 8)) {
             assert(++batches <= 4);
-            const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, 5);
+            const auto cycles = cpuCycleAnyKind(fast.cpu, 5);
             assert(cycles && cycles <= 6);
         }
         same(exact, fast);

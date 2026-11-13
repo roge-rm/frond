@@ -38,7 +38,7 @@ struct Machine {
     uint32_t reg(unsigned r) const { return cpuGetRegisters(cpu)[r]; }
     uint32_t psr() const { return cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR); }
     uint32_t spsr() const { return cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR); }
-    void advance() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void advance() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
     void at(uint32_t pc) { cpuSetReg(cpu, 15, pc); advance(); }
     void reset(uint32_t status = 0xd3) {
         std::fill(bytes.begin(), bytes.end(), 0); cpuReset(cpu, code);

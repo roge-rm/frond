@@ -54,7 +54,7 @@ struct Machine {
         cpuSetReg(cpu, 0, value); cpuSetReg(cpu, 15, 0x1000);
         step();
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void same(const Machine& a, const Machine& b) {
     assert(!std::memcmp(cpuGetRegisters(a.cpu), cpuGetRegisters(b.cpu), 16 * sizeof(uint32_t)));

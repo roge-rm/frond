@@ -50,7 +50,7 @@ struct Machine {
         for (size_t n = 0; n < program.size(); ++n) word(code + 4 * n, program[n]);
         word(data, 0x11223344); word(data + 4, 0x55667788);
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void same(const Machine& a, const Machine& b) {
     assert(!std::memcmp(cpuGetRegisters(a.cpu), cpuGetRegisters(b.cpu), 16 * sizeof(uint32_t)));
@@ -116,7 +116,7 @@ void blocks() {
     // steps as many.
     uint32_t retired = 0;
     for (unsigned runs = 0; runs < 16 && retired < 8; ++runs)
-        retired += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, 8 - retired);
+        retired += cpuCycleAnyKind(fast.cpu, 8 - retired);
     assert(retired >= 8 && retired < 16);
     for (unsigned i = 0; i < retired; ++i) exact.step();
     same(exact, fast);

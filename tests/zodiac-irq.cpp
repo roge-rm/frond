@@ -59,7 +59,7 @@ struct Machine {
         word(code, 0xe1a00000); half(code + 8, 0x46c0);
     }
     uint32_t psr() const { return cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR); }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void same(const Machine& a, const Machine& b) {
     assert(!std::memcmp(cpuGetRegisters(a.cpu), cpuGetRegisters(b.cpu), 16 * sizeof(uint32_t)));
@@ -163,7 +163,7 @@ void batchedRequests() {
                 m->raiseOnStore = true; m->storeFiq = fiq;
                 uint64_t blocks = 0, before = 0, after = 0;
                 if (m == &fast) assert(cpuJitExecutionCounts(m->cpu, &blocks, &before));
-                const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m->cpu, 8);
+                const auto cycles = cpuCycleAnyKind(m->cpu, 8);
                 const bool blockLatency = m == &fast && !single && stops;
                 const uint32_t expectedCycles = stops ? (blockLatency ? 3 : 1) : 8;
                 if (m == &fast) {

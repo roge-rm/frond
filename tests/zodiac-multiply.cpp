@@ -44,7 +44,7 @@ struct Machine {
         cpuSetReg(cpu, 15, code | (thumb ? 1 : 0));
         word(code, instruction);
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 std::array<uint32_t, 15> initial() {
     std::array<uint32_t, 15> r{};
@@ -174,7 +174,7 @@ void guards() {
 // closing B . there, past the budget by no more than the JIT's overshoot bound. Exact then steps
 // as many instructions as Fast ran.
 uint32_t fastRun(Machine& fast, uint32_t count) {
-    const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(fast.cpu, count);
+    const uint32_t ran = cpuCycleAnyKind(fast.cpu, count);
     assert(ran >= count && ran - count <= cpuMaxOvershootCycles(fast.cpu));
     return ran;
 }

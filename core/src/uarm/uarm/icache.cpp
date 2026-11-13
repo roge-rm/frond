@@ -412,7 +412,7 @@ void icacheInvalRange(struct icache* ic, uint32_t addr, uint32_t size) {
 // translation and permissions for this mode, as a refill would.
 template <int msys>
 static bool icachePrvCheckFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* fsrP) {
-    if constexpr (msys == ARM_MEMORY_SYSTEM_MMU) {
+    if constexpr (armMemorySystemOf(msys) == ARM_MEMORY_SYSTEM_MMU) {
         const MMUTranslateResult r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
         if (!MMU_TRANSLATE_RESULT_OK(r)) {
             *fsrP = MMU_TRANSLATE_RESULT_FSR(r);
@@ -436,7 +436,9 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
         return false;
     }
 
-    if (ic->arm920) {
+    // msys is the interpreter kind: only the ARM920T's has an ARM920T I-cache, and only the others have
+    // the XScale fetch buffers.
+    if constexpr (armKindIsArm920(msys)) {
         uint32_t word;
         if (ic->arm920ContinuationCount && (va & ~3u) != ic->arm920ContinuationPc)
             icacheArm920Branch(ic);
@@ -464,7 +466,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 if (buffer.fetchKey != key) {
                     uint_fast8_t fsr = 0;
                     if (!icachePrvCheckFetch<msys>(ic, va, privileged, &fsr) &&
-                        msys == ARM_MEMORY_SYSTEM_MMU && (fsr & 0x09) == 0x09) {
+                        armMemorySystemOf(msys) == ARM_MEMORY_SYSTEM_MMU && (fsr & 0x09) == 0x09) {
                         *fsrP = fsr;
                         return false;
                     }
@@ -488,7 +490,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
         bool cacheable;
         uint32_t pa = va;
 
-        if constexpr (msys == ARM_MEMORY_SYSTEM_MMU) {
+        if constexpr (armMemorySystemOf(msys) == ARM_MEMORY_SYSTEM_MMU) {
             cacheable = mmuIsOn(ic->memorySystem.mmu);
 
             if (cacheable) {
@@ -643,3 +645,4 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
 
 DEFINE_FETCH_MSYS(ARM_MEMORY_SYSTEM_MMU);
 DEFINE_FETCH_MSYS(ARM_MEMORY_SYSTEM_MPU);
+DEFINE_FETCH_MSYS(ARM_MEMORY_SYSTEM_ARM920T);

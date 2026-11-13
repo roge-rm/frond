@@ -50,7 +50,7 @@ struct Machine {
     }
     void step(uint32_t pc) {
         cpuSetReg(cpu, 15, pc);
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1));
+        assert((cpuCycleAnyKind(cpu, 1) == 1));
     }
     void cp(uint32_t pc, uint32_t value) { cpuSetReg(cpu, 0, value); step(pc); }
     void setup(uint32_t ctl) { cp(ttb, table); cp(domain, 1); cp(control, ctl); }
@@ -263,7 +263,7 @@ int main() {
         unsigned count = 0;
         while (cpuGetRegisters(m.cpu)[15] != code + sizeof(program)) {
             assert(++count < 3000);
-            assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1) == 1));
+            assert((cpuCycleAnyKind(m.cpu, 1) == 1));
             assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_SVC);
         }
         assert(count == 2586 && cpuGetRegisters(m.cpu)[5] == 0x55);
@@ -276,9 +276,9 @@ int main() {
         m.word(code + 0x20, 0xe3a03077);
         cpuSetReg(m.cpu, 0, 0x79); cpuSetReg(m.cpu, 1, 0x101020);
         m.step(code);
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1) == 1));
+        assert((cpuCycleAnyKind(m.cpu, 1) == 1));
         assert(cpuGetRegisters(m.cpu)[15] == 0x101020);
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1) == 1));
+        assert((cpuCycleAnyKind(m.cpu, 1) == 1));
         assert(cpuGetRegisters(m.cpu)[3] == 0x77);
     });
     run([](Machine& m) {
@@ -288,9 +288,9 @@ int main() {
         m.word(code + 4, 0xe3a03001); m.word(code + 8, 0xe2833002);
         cpuSetReg(m.cpu, 0, 0x79); m.step(code);
         for (unsigned i = 0; i < 2; ++i)
-            assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1) == 1));
+            assert((cpuCycleAnyKind(m.cpu, 1) == 1));
         assert(cpuGetRegisters(m.cpu)[3] == 3);
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+        cpuCycleAnyKind(m.cpu, 1);
         assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_ABT);
         assert(cpuGetRegisters(m.cpu)[15] == 0x0c);
     });
@@ -301,8 +301,8 @@ int main() {
         m.word(code + 4, 0xeaffffff); // B code+8 must discard its prefetched word.
         m.word(code + 8, 0xe3a03055);
         cpuSetReg(m.cpu, 0, 0x79); m.step(code);
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+        cpuCycleAnyKind(m.cpu, 1);
+        cpuCycleAnyKind(m.cpu, 1);
         assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_ABT);
         assert(cpuGetRegisters(m.cpu)[3] == 0);
     });
@@ -314,9 +314,9 @@ int main() {
         m.word(bytes - 8, 0xee010f10);
         m.word(bytes - 4, 0xe3a03001);
         cpuSetReg(m.cpu, 0, 0x79); m.step(bytes - 8);
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+        cpuCycleAnyKind(m.cpu, 1);
         assert(cpuGetRegisters(m.cpu)[3] == 1);
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+        cpuCycleAnyKind(m.cpu, 1);
         assert((cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_ABT);
         assert(cpuGetRegisters(m.cpu)[15] == 0x0c && cpuGetRegisters(m.cpu)[3] == 1);
     });
