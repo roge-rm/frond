@@ -1330,12 +1330,15 @@ class Imx1GraphicsCommands {
         // picture size is known, has source pitch 0: every row reads the same one.
         const uint32_t sourceWidth = width ? stretchStep(width - 1, ratioX) + 2 : 0;
         const uint32_t sourceHeight = height ? stretchStep(height - 1, ratioY) + 2 : 0;
-        if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
-            !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
-            sourcePitch > 8192 || sx + sourceWidth > (sourcePitch ? sourcePitch : 8192) || sy + sourceHeight > 8191)
-            return refuse("plane-stretch-geometry", values[0x466]);
+        // The scissor (46f, 470 exclusive) trims the destination before the pitch and clip checks: TCPMP's
+        // full screen stretches one column and row past the plane (161 wide at pitch 160) and scissors them off.
         const uint32_t left = std::max(x, values[0x46f] & 0x1fff), top = std::max(y, (values[0x46f] >> 16) & 0x1fff);
         const uint32_t right = std::min(x + width, values[0x470] & 0x1fff), bottom = std::min(y + height, (values[0x470] >> 16) & 0x1fff);
+        const bool drawn = left < right && top < bottom;
+        if (!width || !height || !pitch || pitch > 8192 || x + width > 8192 || y + height > 8192 ||
+            (drawn && (right > pitch || !configuration.engineState().clipContains(right - 1, bottom - 1))) ||
+            sourcePitch > 8192 || sx + sourceWidth > (sourcePitch ? sourcePitch : 8192) || sy + sourceHeight > 8191)
+            return refuse("plane-stretch-geometry", values[0x466]);
         const uint64_t source = uint64_t(values[0x46b]) + uint64_t(sy) * sourcePitch + sx;
         const uint64_t sourceLength = uint64_t(sourceHeight - 1) * sourcePitch + sourceWidth;
         if (source > 0xffffffffu || !memory.contains(configuration, eim, uint32_t(source), sourceLength)) return A::sequence;
@@ -1346,7 +1349,7 @@ class Imx1GraphicsCommands {
         fill.sourcePitch = sourcePitch;
         fill.sourceBase = uint32_t(source);
         fill.paint = values[0x412];
-        if (left >= right || top >= bottom) return A::ok;
+        if (!drawn) return A::ok;
         const uint64_t address = uint64_t(values[0x401]) + uint64_t(top) * pitch + left;
         if (address > 0xffffffffu) return refuse("plane-stretch-geometry", values[0x465]);
         fill.base = uint32_t(address);

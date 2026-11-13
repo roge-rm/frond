@@ -142,6 +142,14 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
         assert(peek(0x900100 + x) == x * 8);
         assert(peek(0x900110 + x) == (x * 8 + 128 + 1) / 2);
     }
+    // TCPMP's full screen: one column past the pitch, trimmed by the scissor (470, exclusive), draws the 16
+    // columns and leaves the byte after them alone. A scissor past the pitch is still refused.
+    poke(0x900110, 1, 0xee);
+    assert(submit(stretch(0, 17, 1, 0x00800040)) == A::ok);
+    assert(peek(0x900100) == 0 && peek(0x90010f) == 60 && peek(0x900110) == 0xee);
+    auto wide = stretch(0, 17, 1, 0x00800040);
+    for (size_t n = 0; n + 1 < wide.size(); n += 2) if (wide[n] == 0x470) wide[n + 1] = 0x00100011;
+    assert(submit(wide) == A::sideEffect);
     // Ratios outside 10-1ff, a source past its pitch and the ROM's own 16 bit datatype are refused.
     assert(submit(stretch(0, 6, 2, 0x00800008)) == A::sideEffect);
     assert(submit(stretch(5, 6, 2, 0x00800080)) == A::sideEffect);
