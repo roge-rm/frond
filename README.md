@@ -4,7 +4,7 @@ Frond is a Palm OS emulator for Linux and Android, for running and writing Palm 
 
 Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
-Tapwave Zodiac support is _very_ experimental and in progress, right now you can boot and tap around but not much else works. Updates on that are coming.
+Tapwave Zodiac support is experimental and in progress.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
@@ -95,7 +95,7 @@ The Tungsten E3 is the modified E2 ROM with a 320×480 screen. Its ROM has no Bl
 
 The T|X plays videos in Media. On a slower computer use the Fast engine for it.
 
-The 68k Palms run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
+The 68k Palms run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [68k Palm serial and PPP](doc/using-frond.md#68k-palm-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [68k Palms](doc/developer-reference.md#68k-palms-frond-68k).
 
 The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
 
@@ -235,10 +235,11 @@ It needs FUSE, which most desktops have. If it won't start, install `fuse3`, or 
 | Zire 72 | 14,942,208 bytes | none |
 | Sony CLIÉ TG50 | 13,041,664 bytes | none |
 | Tapwave Zodiac | the 8,192,000 byte ROM, or Tapwave's Zodiac 1.1 update (the zip or the PRC in it) | none |
-| Palm IIIx | one ROM file, 1.2 to 1.7 MB | none |
+| Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
+| Palm m125, m130, m500, m505, m515, m520 and IBM WorkPad c500 | one ROM file, 2.4 to 4.2 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
 
-The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
+The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes). The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes). The m100 and m105 take the OS 3.5.1 ROM (2 MiB), and Frond offers the m100 when it sees one, so choose the m105 yourself. The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself. The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
 
 Frond works out the device from the NOR and never changes your files. On Linux use File → Firmware… or Add device, on Android import them when you add a device. Go through Palm OS setup the first time, and if taps land in the wrong spot, calibrate the screen in Prefs.
