@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "CardBacking.h"
+#include "CardSave.h"
 #include "FileCardBacking.h"
 #include "memory_buffer.h"
 #include "nand.h"
@@ -306,6 +307,66 @@ void heldAfterCrash(const fs::path& dir) {
     for (const auto& e : fs::directory_iterator(dir)) fs::remove(e.path());
 }
 
+// The payload of a saved card file, past its header.
+std::vector<uint8_t> savedPayload(const fs::path& path) {
+    auto bytes = fileBytes(path);
+    if (bytes.size() < frondSdFile::headerBytes + kCard) return {};
+    return std::vector<uint8_t>(bytes.begin() + frondSdFile::headerBytes, bytes.begin() + frondSdFile::headerBytes + kCard);
+}
+
+// A first save under deferJournals leaves the whole card for the worker: a card in RAM copied, a
+// file-backed card pinned. Writes made before writeFull don't reach the file.
+void deferredFullCopy(const fs::path& dir) {
+    const auto saveDir = dir / "saved";
+    fs::create_directories(saveDir);
+    frondNative::deferJournals() = true;
+    std::vector<uint8_t> base(kCard);
+    for (size_t i = 0; i < base.size(); i++) base[i] = uint8_t(i * 3);
+    sdCardInitializeWithBytes(std::vector<uint8_t>(base), "ramcard");
+    frondMachine::Media media;
+    frondNative::SdSave save;
+    check(frondNative::publishSd(saveDir, media, true, save), "step 1 of a RAM card");
+    check(save.fullPending && !save.fullPin && save.fullBytes.size() == kCard, "a RAM card is copied for the worker");
+    std::vector<uint8_t> later(512, 0x5a);
+    check(sdCardWriteBytes(9 * 512, 512, later.data()), "write after step 1");
+    check(frondNative::writeFull(saveDir, save), "write the RAM card's copy");
+    check(savedPayload(save.full) == base, "the copy holds the card as of step 1");
+    frondNative::abandonSdSave(save);
+    sdCardReset();
+
+    // A file-backed card on another folder's file.
+    const auto other = dir / "other";
+    fs::create_directories(other);
+    const auto sidecar = other / "sd.frondsd";
+    std::array<uint8_t, frondMachine::identityBytes> id{};
+    std::memcpy(id.data(), "filecard", 8);
+    check(frondSession::writeSdFromReader(sidecar, kCard,
+                                          [&](uint64_t off, uint64_t n, void* dest) {
+                                              std::memcpy(dest, base.data() + off, size_t(n));
+                                              return true;
+                                          },
+                                          id),
+          "write a card file");
+    check(sdCardInitializeFromFile(sidecar.c_str(), kCard, frondSdFile::headerBytes, "filecard"), "open the card file");
+    check(sdCardWriteBytes(2 * 512, 512, later.data()), "write before step 1");
+    auto snapshot = cardBytes(0, kCard);
+    check(frondNative::publishSd(saveDir, media, true, save), "step 1 of a file-backed card");
+    check(save.fullPending && save.fullPin && save.fullBytes.empty() && sdCardPinned(), "a file-backed card is pinned");
+    std::vector<uint8_t> after(512, 0xa5);
+    check(sdCardWriteBytes(2 * 512, 512, after.data()) && sdCardWriteBytes(700 * 512, 512, after.data()),
+          "write after step 1");
+    check(frondNative::writeFull(saveDir, save), "write the pinned card's copy");
+    check(savedPayload(save.full) == snapshot, "the copy holds the card as of step 1");
+    save.fullPin.reset();
+    check(!sdCardPinned(), "the pin goes with the save");
+    check(cardBytes(2 * 512, 512) == after, "the card keeps its later writes");
+    frondNative::abandonSdSave(save);
+    sdCardReset();
+    frondNative::deferJournals() = false;
+    fs::remove_all(saveDir);
+    fs::remove_all(other);
+}
+
 }  // namespace
 
 int main() {
@@ -317,6 +378,7 @@ int main() {
     failedMoveKeepsGenerations(dir);
     collidingGenerations(dir);
     heldAfterCrash(dir);
+    deferredFullCopy(dir);
     fs::remove_all(dir);
     if (failures) return 1;
     std::printf("save-replay: ok\n");

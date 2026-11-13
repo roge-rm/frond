@@ -166,7 +166,8 @@ inline bool beginMsSave(const std::filesystem::path& folder, MemoryStickControll
 }
 
 // A save in three parts. beginMachineSave runs on the emulation thread: it copies everything the
-// .frond holds as of one instant and writes any card or NAND journal or copy (step 1).
+// .frond holds as of one instant, with each card or NAND journal's pages, and pins or copies any
+// store saved whole (step 1).
 // writeMachineSave compresses and publishes the .frond; it reads only this struct, so it can run on
 // another thread while the guest goes on. finishMachineSave, back on the emulation thread, finishes
 // the card and NAND files (step 3).
@@ -212,7 +213,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         abandonSdSave(nand);
         return false;
     };
-    // Journals are copied here and written by writeMachineSave.
+    // Journals and full copies are taken here and written by writeMachineSave.
     deferJournals() = true;
     struct Restore {
         ~Restore() { deferJournals() = false; }
@@ -260,6 +261,10 @@ inline void writeMachineSave(MachineSave& save) {
     save.published = false;
     save.saved = false;
     for (auto* store : {&save.nand, &save.sd}) {
+        if (store->fullPending && !writeFull(save.folder, *store)) {
+            std::cerr << "save: a card or NAND copy could not be written in " << save.folder << std::endl;
+            return;
+        }
         if (store->journalPending && !writeJournal(save.folder, *store)) {
             std::cerr << "save: a card or NAND journal could not be written in " << save.folder << std::endl;
             return;
@@ -285,6 +290,9 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
             if (chip) nandTrackWrites(chip, false);
         }
     } stop{soc.GetNand()};
+    // The full copies are written; their pins go here, before the stores move.
+    save.sd.fullPin.reset();
+    save.nand.fullPin.reset();
     if (!save.published) {
         abandonSdSave(save.sd);
         abandonSdSave(save.nand);
