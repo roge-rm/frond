@@ -28,19 +28,23 @@ namespace {
     char cardId[SD_CARD_ID_MAX_LEN + 1];
     uint64_t epoch = 0;
 
-    // Sectors written while a background save writes; see sdCardTrackWrites.
+    // Sectors written while a background save writes (sdCardTrackWrites), one bit each, so the
+    // note never outgrows the card.
     bool trackWrites = false;
-    std::vector<uint32_t> writtenSectors;
+    std::vector<bool> writtenSectors;
 
-    // The tracked sectors' bytes from the card as it runs now, read before a move drops its files.
+    void noteWritten(uint64_t sector) {
+        if (trackWrites && sector < writtenSectors.size()) writtenSectors[size_t(sector)] = true;
+    }
+
+    // The noted sectors' bytes from the card as it runs now, read before a move drops its files.
     bool takeTracked(std::vector<std::pair<uint32_t, std::vector<uint8_t>>>& out) {
         out.clear();
-        std::sort(writtenSectors.begin(), writtenSectors.end());
-        writtenSectors.erase(std::unique(writtenSectors.begin(), writtenSectors.end()), writtenSectors.end());
-        for (const auto sector : writtenSectors) {
+        for (size_t sector = 0; sector < writtenSectors.size(); ++sector) {
+            if (!writtenSectors[sector]) continue;
             std::vector<uint8_t> bytes(SD_SECTOR_SIZE);
             if (!backing->Read(uint64_t(sector) * SD_SECTOR_SIZE, SD_SECTOR_SIZE, bytes.data())) return false;
-            out.emplace_back(sector, std::move(bytes));
+            out.emplace_back(uint32_t(sector), std::move(bytes));
         }
         return true;
     }
@@ -161,7 +165,7 @@ bool sdCardWriteBytes(uint64_t offset, uint64_t length, const void* data) {
     if (!backing || !backing->Write(offset, length, data)) return false;
     if (length)
         for (uint64_t sector = offset / SD_SECTOR_SIZE; sector <= (offset + length - 1) / SD_SECTOR_SIZE; ++sector) {
-            if (trackWrites) writtenSectors.push_back(uint32_t(sector));
+            noteWritten(sector);
             markDirty(uint32_t(sector));
         }
     return true;
@@ -186,9 +190,14 @@ bool sdCardAdoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t p
     if (!sidecarChunks(path, payloadBytes, payloadOffset, options.chunkCrcs)) return false;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> tracked;
     if (!takeTracked(tracked)) return false;
-    FileCardBacking::DiscardGenerations(path);
+    auto held = FileCardBacking::HoldGenerations(path);
     auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
-    if (!fresh || !replayTracked(*fresh, tracked)) return false;
+    if (!fresh || !replayTracked(*fresh, tracked)) {
+        fresh.reset();
+        held.Return();
+        return false;
+    }
+    held.Drop();
     backing = std::move(fresh);
     backingStale = false;
     dataViewValid = false;
@@ -198,7 +207,7 @@ bool sdCardAdoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t p
 bool sdCardWrite(uint32_t sector, const void* buf) {
     if (!backing || sector >= sectorsTotal) return false;
     if (!backing->Write(uint64_t(sector) * SD_SECTOR_SIZE, SD_SECTOR_SIZE, buf)) return false;
-    if (trackWrites) writtenSectors.push_back(sector);
+    noteWritten(sector);
     markDirty(sector);
     return true;
 }
@@ -262,10 +271,16 @@ bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadO
     // Sectors written after a background save's snapshot, which the sidecar doesn't hold.
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> tracked;
     if (!takeTracked(tracked)) return false;
-    // The sidecar now holds the live bytes, so generations beside it are never needed again.
-    FileCardBacking::DiscardGenerations(path);
+    // The sidecar now holds the live bytes, so generations beside it are never needed again; they
+    // go once the card is on its new backing, and come back if it can't move.
+    auto held = FileCardBacking::HoldGenerations(path);
     auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
-    if (!fresh || !replayTracked(*fresh, tracked)) return false;
+    if (!fresh || !replayTracked(*fresh, tracked)) {
+        fresh.reset();
+        held.Return();
+        return false;
+    }
+    held.Drop();
     backing = std::move(fresh);
     backingStale = false;
     dataViewValid = false;
@@ -322,7 +337,7 @@ const char* sdCardGetId() { return sdCardInitialized() ? cardId : ""; }
 
 void sdCardTrackWrites(bool on) {
     trackWrites = on;
-    writtenSectors.clear();
+    writtenSectors.assign(on ? sectorsTotal : 0, false);
 }
 
 std::shared_ptr<const CardSnapshot> sdCardSnapshot() {

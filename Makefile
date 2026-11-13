@@ -1071,6 +1071,17 @@ test-nand-store-fail: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-nand-store-fail
 	./build/test-nand-store-fail
 
+# Writes made during a background save, replayed when a NAND or card moves onto its saved file.
+.PHONY: test-save-replay
+test: test-save-replay
+test-save-replay: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/save-replay-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/save-replay.cpp @build/save-replay-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-save-replay
+	./build/test-save-replay
+
 test-native-database: prepare core/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/native \
 		-Icore/src/uarm -Icore/src/uarm/uarm -Icore/src/common -Icore/src/common/zip \

@@ -126,6 +126,44 @@ class FileCardBacking : public CardBacking {
         return false;
     }
 
+    // Generations moved aside under ".held-" names (which no load or discard looks at), for a move
+    // onto `durable` that may still fail. Open descriptors on them stay valid across the renames.
+    struct HeldGenerations {
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;  // original, held
+        // The move failed: they go back under their own names.
+        void Return() {
+            std::error_code ec;
+            for (const auto& [original, held] : moved) std::filesystem::rename(held, original, ec);
+            moved.clear();
+        }
+        // The move worked: they go.
+        void Drop() {
+            std::error_code ec;
+            for (const auto& entry : moved) std::filesystem::remove(entry.second, ec);
+            moved.clear();
+        }
+    };
+    // As DiscardGenerations, but moved aside, to Return or Drop.
+    static HeldGenerations HoldGenerations(const std::filesystem::path& durable) {
+        auto dir = durable.parent_path();
+        if (dir.empty()) dir = ".";
+        std::error_code ec;
+        HeldGenerations held;
+        std::vector<std::filesystem::path> found;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (GeneratedName(durable.filename().string(), name) && !NeighbourName(durable, name))
+                found.push_back(it->path());
+        }
+        for (const auto& path : found) {
+            const auto aside = dir / (".held-" + path.filename().string());
+            std::error_code renamed;
+            std::filesystem::rename(path, aside, renamed);
+            if (!renamed) held.moved.emplace_back(path, aside);
+        }
+        return held;
+    }
+
     // Removes recognised, unambiguous namespace entries of a closed backing.
     static void DiscardGenerations(const std::filesystem::path& durable) {
         auto dir = durable.parent_path();

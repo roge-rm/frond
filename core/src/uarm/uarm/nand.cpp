@@ -76,7 +76,7 @@ struct NAND {
 
     // Pages written while a background save writes (nandTrackWrites).
     bool trackWrites{};
-    std::vector<uint32_t> writtenPages;
+    std::vector<bool> writtenPages;  // one bit per page while trackWrites, so it never outgrows the chip
 
     size_t dirtyPagesSize;
     uint32_t *dirtyPages;
@@ -171,7 +171,7 @@ static bool nandPrvReadPage(struct NAND *nand, uint32_t page, uint8_t *dest) {
 
 static bool nandPrvWritePage(struct NAND *nand, uint32_t page, const uint8_t *src) {
     nand->rawViewValid = false;
-    if (nand->trackWrites) nand->writtenPages.push_back(page);
+    if (nand->trackWrites && page < nand->writtenPages.size()) nand->writtenPages[page] = true;
     if (nand->backing)
         return nand->backing->Write(uint64_t(page) * nand->mainBytes, nand->mainBytes, src) &&
                nand->backing->Write(nand->sideOffset + uint64_t(page) * nand->spareBytes, nand->spareBytes,
@@ -185,7 +185,8 @@ static bool nandPrvEraseBlock(struct NAND *nand, uint32_t firstPage) {
     const uint32_t pages = 1u << nand->pagesPerBlockLg2;
     nand->rawViewValid = false;
     if (nand->trackWrites)
-        for (uint32_t i = 0; i < pages; ++i) nand->writtenPages.push_back(firstPage + i);
+        for (uint32_t i = 0; i < pages && firstPage + i < nand->writtenPages.size(); ++i)
+            nand->writtenPages[firstPage + i] = true;
     if (nand->backing) {
         std::vector<uint8_t> ones(size_t(pages) * nand->mainBytes, 0xff);
         return nand->backing->Write(uint64_t(firstPage) * nand->mainBytes, uint64_t(pages) * nand->mainBytes,
@@ -578,15 +579,13 @@ bool nandWriteRawPage(struct NAND *nand, uint32_t page, const uint8_t *src) {
 
 void nandTrackWrites(struct NAND *nand, bool on) {
     nand->trackWrites = on;
-    nand->writtenPages.clear();
+    nand->writtenPages.assign(on ? nandPrvPageCount(nand) : 0, false);
 }
 
 bool nandTakeTracked(struct NAND *nand, NandPages &out) {
     out.clear();
-    auto &pages = nand->writtenPages;
-    std::sort(pages.begin(), pages.end());
-    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
-    for (const auto page : pages) {
+    for (uint32_t page = 0; page < nand->writtenPages.size(); ++page) {
+        if (!nand->writtenPages[page]) continue;
         std::vector<uint8_t> bytes(nand->bytesPerPage);
         if (!nandPrvReadPage(nand, page, bytes.data())) return false;
         out.emplace_back(page, std::move(bytes));

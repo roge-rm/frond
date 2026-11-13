@@ -136,13 +136,17 @@ inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondN
         std::fprintf(stderr, "frond: the NAND couldn't move onto the saved file; the next save copies it\n");
         return true;
     }
-    FileCardBacking::DiscardGenerations(sidecar);
+    // Generations go once the NAND is on its new backing, and come back if it can't move.
+    auto held = FileCardBacking::HoldGenerations(sidecar);
     auto fresh = openFile(sidecar, nandRawBytes(nand));
     if (!fresh || !nandAdoptBacking(nand, std::move(fresh), sideOffset(nandRawBytes(nand)), &tracked)) {
+        fresh.reset();
+        held.Return();
         stale() = true;
         std::fprintf(stderr, "frond: the NAND couldn't move onto the saved file; the next save copies it\n");
         return true;
     }
+    held.Drop();
     stale() = false;
     return true;
 }
