@@ -1231,6 +1231,21 @@ bool SocPXA::PrepareM68kSupport() {
 }
 
 
+// Read from the RAM window itself, since the patch record is cleared on load and on an OS reload
+// while the hooks may still be there. One pass over 16 MiB, at save only.
+bool SocPXA::PaceHooksInRam() {
+    constexpr uint32_t physicalOffset = 0x00200000;
+    constexpr uint32_t imageSize = 0x01000000;
+    if (GetDeviceType() != DeviceType5::deviceTypeTX || ramSize < physicalOffset + imageSize) return false;
+    const uint8_t* image = bufferMemory.buffer + physicalOffset;
+    for (uint32_t offset = 0; offset < imageSize; offset += 4) {
+        uint32_t word;
+        memcpy(&word, image + offset, sizeof(word));
+        if (word == INSTR_PACE_DISPATCH) return true;
+    }
+    return false;
+}
+
 bool SocPXA::EnableFastAudio() {
     const auto type=GetDeviceType();
     if ((type != DeviceType5::deviceTypeTX && type != DeviceType5::deviceTypeE2 &&

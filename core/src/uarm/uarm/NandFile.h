@@ -94,7 +94,8 @@ inline bool beginSave(const std::filesystem::path& folder, NAND* nand, frondMach
                                      [&](uint64_t off, uint64_t n, void* dest) {
                                          return pin ? pin->Read(off, n, dest)
                                                     : nandReadStored(nand, off, n, static_cast<uint8_t*>(dest), side);
-                                     });
+                                     },
+                                     pin);
 }
 
 // Step 3, after the .frond is published: the journal applied in place or the full copy renamed onto

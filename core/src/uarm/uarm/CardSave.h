@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
+#include <new>
 
 // The SD card's part of a machine-folder save, apart from the SoC. On the TG50 the same card
 // store holds a Memory Stick Pro, saved the same way as ms.frondmsp (kind 3), or a classic stick
@@ -89,6 +91,13 @@ struct SdSave {
     std::vector<uint32_t> table;
     uint64_t fromGeneration{}, storedBytes{};
     bool journalPending{};
+    // A full copy step 1 left for writeFull (deferJournals): the store as of the snapshot, as a pin
+    // on its file backing or its bytes copied. The pin is dropped on the emulation thread.
+    std::shared_ptr<const CardSnapshot> fullPin;
+    std::vector<uint8_t> fullBytes;
+    frondSession::StoredShape fullShape;
+    StoreIdentity fullIdentity{};
+    bool fullPending{};
 };
 
 // Set while a background save takes its snapshot: journalStore copies the changed pages and leaves
@@ -98,14 +107,51 @@ inline bool& deferJournals() {
     return defer;
 }
 
+// Set with deferJournals when the save writes on a worker while the guest runs: a store saved
+// whole is then pinned or copied for writeFull. Otherwise it's written in step 1, with no copy.
+inline bool& deferFullCopies() {
+    static bool defer = false;
+    return defer;
+}
+
 // Writes a whole medium of `stored` bytes, read through `read`, to its full copy at the next
-// generation in `shape`, then fsyncs the folder. `media` is filled in already.
+// generation in `shape`, then fsyncs the folder. `media` is filled in already. Under
+// deferFullCopies the file is left to writeFull on the save's worker: `pin`, a snapshot of a file
+// backing, is kept for it to read, or with no pin the bytes are copied here. A medium with no
+// identity yet is written here, since its identity is the MD5 the write makes.
 template <typename ReadFn>
 inline bool publishStore(const std::filesystem::path& folder, frondMachine::Media& media, SdSave& save,
-                         uint64_t stored, const frondSession::StoredShape& shape, ReadFn read) {
+                         uint64_t stored, const frondSession::StoredShape& shape, ReadFn read,
+                         std::shared_ptr<const CardSnapshot> pin = {}) {
     media.contentGeneration = nextSdGeneration(folder, save.kind);
     if (!stored || shape.stored() != stored) return false;
     const auto full = frondSession::sdFullPath(folder, media.contentGeneration, save.kind);
+    if (deferJournals() && deferFullCopies() && !frondSession::identityEmpty(media.identity) && stored <= SIZE_MAX) {
+        bool held = false;
+        if (pin) {
+            save.fullPin = FileCardBacking::ShareWithReader(std::move(pin));
+            held = true;
+        } else {
+            try {
+                save.fullBytes.resize(size_t(stored));
+                held = read(0, stored, save.fullBytes.data());
+            } catch (const std::bad_alloc&) {
+            }
+            if (!held) {
+                save.fullBytes.clear();
+                save.fullBytes.shrink_to_fit();
+            }
+        }
+        if (held) {
+            save.full = full;
+            save.fullShape = shape;
+            save.fullIdentity = media.identity;
+            save.generation = media.contentGeneration;
+            save.payloadBytes = stored;
+            save.fullPending = true;
+            return true;
+        }
+    }
     if (!frondSession::writeSdFromReader(full, stored, read, media.identity, media.contentGeneration, shape))
         return false;
     save.full = full;
@@ -126,8 +172,32 @@ inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& 
     const uint64_t stored = frondMachine::storeBytes(media);
     const auto shape = save.kind == frondMachine::kindMs ? frondSession::msShape(stored) : frondSession::sdShape(stored);
     if (pin->Size() != stored) return false;
+    // A file-backed card's pin may be read on the save's worker; a card in RAM is copied.
     return publishStore(folder, media, save, stored, shape,
-                        [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); });
+                        [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
+                        sdCardFileBacked() ? pin : nullptr);
+}
+
+// Writes the full copy publishStore left under deferJournals, then fsyncs the folder. Reads only
+// `save`, so it may run on another thread; the pin stays in `save`.
+inline bool writeFull(const std::filesystem::path& folder, SdSave& save) {
+    save.fullPending = false;
+    const CardSnapshot* pin = save.fullPin.get();
+    const uint8_t* bytes = save.fullBytes.data();
+    const uint64_t have = save.fullBytes.size();
+    auto identity = save.fullIdentity;
+    const bool ok = frondSession::writeSdFromReader(
+        save.full, save.payloadBytes,
+        [&](uint64_t off, uint64_t n, void* dest) {
+            if (pin) return pin->Read(off, n, dest);
+            if (off > have || n > have - off) return false;
+            std::memcpy(dest, bytes + off, size_t(n));
+            return true;
+        },
+        identity, save.generation, save.fullShape);
+    save.fullBytes.clear();
+    save.fullBytes.shrink_to_fit();
+    return ok && frondSession::syncDir(folder);
 }
 
 using StoreChangeFn = std::function<bool(uint64_t offset, uint64_t length, const uint8_t* data)>;

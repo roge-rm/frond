@@ -78,8 +78,9 @@ uint32_t paceGetStatePtr();
 
 enum paceStatus paceExecute();
 
+// `hooksInState`: the saved guest RAM holds the PACE dispatch hooks (SoC::PaceHooksInRam).
 template <typename T>
-void paceSave(T& savestate);
+void paceSave(T& savestate, bool hooksInState = false);
 
 template <typename T>
 void paceLoad(T& loader);
