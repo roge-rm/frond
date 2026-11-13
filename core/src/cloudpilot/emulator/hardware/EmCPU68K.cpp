@@ -459,6 +459,9 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
                 case kTimingBitImm:
                     if ((EmMemGet16(instructionPC + 2) & 31) >= 16) clocks += 2;
                     break;
+                case kTimingReadFirst:
+                    gUaeSdramWriteWords = 0;
+                    break;
             }
 
             gUaeAccessWait = 0;
@@ -495,7 +498,11 @@ uint32 EmCPU68K::Execute(uint32 maxCycles) {
             }
 
             if (kind == kTimingReadFirst) {
-                gUaeAccessWait *= 2;
+                // The one operand access is the write. SDRAM reads wait longer than writes, so
+                // there the read is worked out from whether the write found its page open.
+                gUaeAccessWait = gUaeSdramWriteWords
+                                     ? EmSdramReadFirst(gUaeAccessWait, gUaeSdramWriteWords)
+                                     : gUaeAccessWait * 2;
                 gUaeBusCount *= 2;
             }
 

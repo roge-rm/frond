@@ -232,6 +232,22 @@ namespace {
             Expect(wait == a.wait, "wait clocks", wait, a.wait, a.text);
         }
 
+        // CLR and Scc read before they write: the read waits as a read would (3 on a miss, 1 on
+        // a hit, one more each with CAS latency 2) and the write then hits.
+        const struct {
+            unsigned sdramControl, writeWait, words, wait;
+            const char* text;
+        } readFirst[] = {
+            {0xd03c, 1, 1, 3, "read first miss"},  {0xd03c, 0, 1, 1, "read first hit"},
+            {0xd03c, 1, 2, 4, "read first long"},  {0xd03e, 1, 1, 4, "read first miss cl2"},
+            {0xd03e, 0, 2, 4, "read first long hit cl2"}, {0x903c, 2, 2, 8, "read first no cpm"},
+        };
+        for (const auto& r : readFirst) {
+            EmSdram::Set(EmVzSdramTiming(r.sdramControl, 0x0100));
+            const unsigned wait = EmSdram::ReadFirst(r.writeWait, r.words);
+            Expect(wait == r.wait, "wait clocks", wait, r.wait, r.text);
+        }
+
         // Charge: a 10-clock DMA due inside an instruction that spent all its time on the bus
         // costs 10; one that spent half of it costs 5; events before the instruction cost nothing.
         steal = EmBusSteal{};
@@ -246,6 +262,19 @@ namespace {
         const unsigned stopped = EmBusTiming::Charge(9500, 9510, 10, 10, 0);
         Expect(stopped == 0, "after a stop", stopped, 0, "charge");
         Expect(EmBusTiming::next == 10000, "caught up", unsigned(EmBusTiming::next), 10000, "charge");
+
+        // A line's LCD DMA from SDRAM opens its own row in the screen's bank, so the CPU's next
+        // access there misses; other banks keep their rows.
+        EmSdram::Set(EmVzSdramTiming(0xd000, 0x0100));  // banks on PA20 and PA19
+        EmSdram::SetLcdAddress(0x0);
+        EmSdram::Access(0x1000, false, 1);
+        EmSdram::Access(0x81000, false, 1);
+        EmBusTiming::Charge(9990, 10002, 12, 12, 12);
+        unsigned wait = EmSdram::Access(0x1000, false, 1);
+        Expect(wait == 3, "wait clocks", wait, 3, "lcd closes its bank");
+        wait = EmSdram::Access(0x81000, false, 1);
+        Expect(wait == 1, "wait clocks", wait, 1, "lcd keeps other banks");
+        EmSdram::SetLcdAddress(~0u);
         EmBusTiming::Set(EmBusSteal{}, 0);
     }
 }  // namespace
