@@ -84,6 +84,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     uint64_t PowerWakes() const { return powerWakes; }
     void Wakeup(uint8_t wakeupSource) override;
     bool PrepareM68kSupport() override;
+    bool PaceHooksInRam() override;
 
     // Current-session host source, never armed by loading portable state.
     AudioInputDemand MicrophoneDemand();

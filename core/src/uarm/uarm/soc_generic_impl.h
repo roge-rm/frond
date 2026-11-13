@@ -189,6 +189,7 @@ void SocGeneric<T>::Load(SavestateLoader<ChunkType>& loader) {
 template <class T>
 template <typename U>
 void SocGeneric<T>::Save(U& savestate) {
+    pacePatch->hooksInRam = PaceHooksInRam();
     cpuSave(cpu, savestate);
     scheduler->Save(savestate);
     systemStateSave(systemState, savestate);

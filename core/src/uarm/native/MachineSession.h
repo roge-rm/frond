@@ -182,9 +182,10 @@ struct MachineSave {
     bool sdFinished{}, sdFinishOk{};
 };
 
+// `background`: writeMachineSave runs on a worker while the guest goes on.
 inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, MachineSave& out,
                              const std::filesystem::path& loadedFrom = {},
-                             const std::filesystem::path& loadedFolder = {}) {
+                             const std::filesystem::path& loadedFolder = {}, bool background = true) {
     out = {};
     const auto started = std::chrono::steady_clock::now();
     if (!soc.Save()) {
@@ -215,8 +216,12 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
     };
     // Journals and full copies are taken here and written by writeMachineSave.
     deferJournals() = true;
+    deferFullCopies() = background;
     struct Restore {
-        ~Restore() { deferJournals() = false; }
+        ~Restore() {
+            deferJournals() = false;
+            deferFullCopies() = false;
+        }
     } restore;
     // Internal NAND first, in the same three steps as a card.
     if (auto* chip = soc.GetNand(); chip && nandRawBytes(chip)) {
@@ -320,7 +325,7 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
 inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::filesystem::path& loadedFrom = {},
                         const std::filesystem::path& loadedFolder = {}) {
     MachineSave save;
-    if (!beginMachineSave(path, soc, save, loadedFrom, loadedFolder)) return false;
+    if (!beginMachineSave(path, soc, save, loadedFrom, loadedFolder, false)) return false;
     writeMachineSave(save);
     return finishMachineSave(save, soc);
 }

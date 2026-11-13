@@ -40,10 +40,26 @@ struct FileCardOptions {
     bool keepHeld = false;
 };
 
+// An atomic counter that tests can still copy and reset.
+template <typename T>
+struct FileCardIoCounter {
+    std::atomic<T> value{0};
+    FileCardIoCounter(T v = 0) : value(v) {}
+    FileCardIoCounter(const FileCardIoCounter& o) : value(o.value.load()) {}
+    FileCardIoCounter& operator=(const FileCardIoCounter& o) {
+        value.store(o.value.load());
+        return *this;
+    }
+    operator T() const { return value.load(); }
+    T operator++() { return ++value; }
+    T operator+=(T n) { return value += n; }
+};
+
+// Counters are atomic: a save's worker reads a pin while the emulation thread writes.
 struct FileCardIoHooks {
-    uint64_t bytesRead = 0;
-    uint64_t bytesWritten = 0;
-    int reads = 0, writes = 0, flushes = 0, closes = 0, renames = 0;
+    FileCardIoCounter<uint64_t> bytesRead{0};
+    FileCardIoCounter<uint64_t> bytesWritten{0};
+    FileCardIoCounter<int> reads{0}, writes{0}, flushes{0}, closes{0}, renames{0};
     bool failCompact = false;
     int failReadAfter = -1, failWriteAfter = -1, failFlushAfter = -1, failCloseAfter = -1,
         failRenameAfter = -1;
@@ -238,7 +254,22 @@ class FileCardBacking : public CardBacking {
         return std::make_shared<Pin>(impl_, impl_->working);
     }
 
+    // `pin` for another thread to read. While it's held, Commit, Compact and Restore are refused,
+    // since they change generations the reader walks. Any other pin comes back as it is.
+    static std::shared_ptr<const CardSnapshot> ShareWithReader(std::shared_ptr<const CardSnapshot> pin) {
+        const auto* own = dynamic_cast<const Pin*>(pin.get());
+        if (!own) return pin;
+        auto impl = own->impl;
+        impl->readerPins.fetch_add(1);
+        const CardSnapshot* raw = pin.get();
+        return std::shared_ptr<const CardSnapshot>(raw, [pin, impl](const CardSnapshot*) {
+            impl->readerPins.fetch_sub(1);
+        });
+    }
+    bool ReaderHeld() const { return impl_->readerPins.load() > 0; }
+
     bool Commit() override {
+        if (ReaderHeld()) return false;
         if (!impl_->flushWorking()) return false;
         if (impl_->working != impl_->root && !impl_->freeze(impl_->working.get())) return false;
         // Compaction must succeed before publishing a chain the loader cannot open.
@@ -257,13 +288,13 @@ class FileCardBacking : public CardBacking {
 
     bool Restore(const CardSnapshot& snapshot) override {
         const auto* pin = dynamic_cast<const Pin*>(&snapshot);
-        if (!pin || pin->impl != impl_ || !pin->gen) return false;
+        if (!pin || pin->impl != impl_ || !pin->gen || ReaderHeld()) return false;
         impl_->dropCache();
         impl_->working = pin->gen;
         return true;
     }
 
-    bool Compact() override { return impl_->compact(); }
+    bool Compact() override { return !ReaderHeld() && impl_->compact(); }
 
     bool ForEachOverlay(const OverlayFn& fn) const override {
         return impl_->forEachOverlay(impl_->working.get(), fn);
@@ -385,6 +416,8 @@ class FileCardBacking : public CardBacking {
         size_t cacheUsed{};
         std::vector<uint32_t> chunkCrcs;
         uint32_t chunkBytes{1u << 20};
+        // Pins from ShareWithReader still held.
+        std::atomic<int> readerPins{0};
         // 1 once a chunk has matched its CRC. Pins may read from another thread.
         std::unique_ptr<std::atomic<uint8_t>[]> chunkOk;
 

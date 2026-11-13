@@ -137,6 +137,8 @@ class SoC {
 
     bool IsPacePatched();
     virtual bool PrepareM68kSupport() { return IsPacePatched(); }
+    // Guest RAM, which sessions save, holds PACE dispatch hooks (the T|X's PACE runs from RAM).
+    virtual bool PaceHooksInRam() { return false; }
     virtual uint64_t GetTime() = 0;
 
     // Actual SoC needs to implement those, the other virtuals are taken

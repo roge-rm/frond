@@ -320,6 +320,7 @@ void deferredFullCopy(const fs::path& dir) {
     const auto saveDir = dir / "saved";
     fs::create_directories(saveDir);
     frondNative::deferJournals() = true;
+    frondNative::deferFullCopies() = true;
     std::vector<uint8_t> base(kCard);
     for (size_t i = 0; i < base.size(); i++) base[i] = uint8_t(i * 3);
     sdCardInitializeWithBytes(std::vector<uint8_t>(base), "ramcard");
@@ -362,7 +363,32 @@ void deferredFullCopy(const fs::path& dir) {
     check(cardBytes(2 * 512, 512) == after, "the card keeps its later writes");
     frondNative::abandonSdSave(save);
     sdCardReset();
+
+    // A pin shared with a reader holds off Commit, Compact and Restore until it goes.
+    {
+        auto backing = FileCardBacking::Open(sidecar, kCard, frondSdFile::headerBytes);
+        check(backing != nullptr, "open the card file as a backing");
+        if (backing) {
+            auto plain = backing->Snapshot();
+            auto shared = FileCardBacking::ShareWithReader(backing->Snapshot());
+            check(backing->Write(0, 512, after.data()), "write while a reader holds a pin");
+            check(!backing->Commit() && !backing->Compact() && !backing->Restore(*plain),
+                  "no Commit, Compact or Restore while a reader holds a pin");
+            shared.reset();
+            check(backing->Restore(*plain), "Restore once the reader's pin goes");
+        }
+    }
+
+    // A save on this thread writes the whole card in step 1, with no copy.
+    frondNative::deferFullCopies() = false;
+    sdCardInitializeWithBytes(std::vector<uint8_t>(base), "ramcard");
+    check(frondNative::publishSd(saveDir, media, true, save), "step 1 of a RAM card, not in the background");
+    check(!save.fullPending && save.fullBytes.empty() && savedPayload(save.full) == base,
+          "written in step 1 when the save isn't in the background");
+    frondNative::abandonSdSave(save);
+    sdCardReset();
     frondNative::deferJournals() = false;
+    frondNative::deferFullCopies() = false;
     fs::remove_all(saveDir);
     fs::remove_all(other);
 }

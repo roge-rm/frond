@@ -107,9 +107,16 @@ inline bool& deferJournals() {
     return defer;
 }
 
+// Set with deferJournals when the save writes on a worker while the guest runs: a store saved
+// whole is then pinned or copied for writeFull. Otherwise it's written in step 1, with no copy.
+inline bool& deferFullCopies() {
+    static bool defer = false;
+    return defer;
+}
+
 // Writes a whole medium of `stored` bytes, read through `read`, to its full copy at the next
 // generation in `shape`, then fsyncs the folder. `media` is filled in already. Under
-// deferJournals the file is left to writeFull on the save's worker: `pin`, a snapshot of a file
+// deferFullCopies the file is left to writeFull on the save's worker: `pin`, a snapshot of a file
 // backing, is kept for it to read, or with no pin the bytes are copied here. A medium with no
 // identity yet is written here, since its identity is the MD5 the write makes.
 template <typename ReadFn>
@@ -119,10 +126,10 @@ inline bool publishStore(const std::filesystem::path& folder, frondMachine::Medi
     media.contentGeneration = nextSdGeneration(folder, save.kind);
     if (!stored || shape.stored() != stored) return false;
     const auto full = frondSession::sdFullPath(folder, media.contentGeneration, save.kind);
-    if (deferJournals() && !frondSession::identityEmpty(media.identity) && stored <= SIZE_MAX) {
+    if (deferJournals() && deferFullCopies() && !frondSession::identityEmpty(media.identity) && stored <= SIZE_MAX) {
         bool held = false;
         if (pin) {
-            save.fullPin = std::move(pin);
+            save.fullPin = FileCardBacking::ShareWithReader(std::move(pin));
             held = true;
         } else {
             try {
