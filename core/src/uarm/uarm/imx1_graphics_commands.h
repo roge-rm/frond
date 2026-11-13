@@ -37,6 +37,9 @@ class Imx1GraphicsCommands {
                 a.Do32(f.paint).DoBool(f.doubled).DoBool(f.keyEqual).DoBool(f.painted);
                 a.DoVector(f.pixels, 1 << 20);
                 a.Require(f.pixels.empty() || f.pixels.size() >= uint64_t(f.width) * f.height, "command pixels");
+                // Inter IDCT fills carry invert as their layout mark; one saved before it read its references
+                // differently and can't continue.
+                a.Require(!idctFill(f) || (f.sourceX & 64) || f.invert, "IDCT fill layout");
                 if (!a.ok()) return;
             }
         }
@@ -372,9 +375,10 @@ class Imx1GraphicsCommands {
                     bool inside = memory.contains(configuration, eim, fill.base, 7 * fill.pitch + 8);
                     for (unsigned reference = 0; reference < ((fill.sourceX & 16) ? 2u : 1u) && !(fill.sourceX & 64); ++reference) {
                         const uint32_t pitch = (fill.sourcePitch >> (reference * 16)) & 0xffff;
-                        const uint32_t halfX = (fill.sourceX >> (reference * 2)) & 1, halfY = (fill.sourceX >> (reference * 2 + 1)) & 1;
-                        inside = inside && memory.contains(configuration, eim, reference ? fill.colour : fill.sourceBase,
-                                                           uint64_t(7 + halfY) * pitch + 8 + halfX);
+                        const int32_t lastX = idctLast(fill, reference ? fill.paint : fill.sourceY, false);
+                        const int32_t lastY = idctLast(fill, reference ? fill.paint : fill.sourceY, true);
+                        inside = inside && pitch && memory.contains(configuration, eim, reference ? fill.colour : fill.sourceBase,
+                                                                    uint64_t(lastY) * pitch + uint64_t(lastX) + 1);
                     }
                     if (!inside) return A::sequence;
                     continue;
@@ -1174,6 +1178,10 @@ class Imx1GraphicsCommands {
     // ASSUMPTION "IDCT prediction": half pixel sources average as MPEG does ((a + b + 1) / 2, (a + b + c + d + 2)
     // / 4, one less before the divide with the rounding control set), two references average rounding up, and
     // the residual adds with saturation. Quarter pixel sources are refused.
+    // ASSUMPTION "IDCT reference edges": source positions are signed (x high, y low, quarter pixels) and each
+    // sample clamps to the reference: to 0 and to the source scissor's far edge (471). ati4200.c sets 471 to the
+    // picture's last chroma column and row before its macroblocks, and MPEG-4 vectors may point past the
+    // picture (TCPMP sends -2 at the top edge).
     Imx1BootstrapAccess macroblock(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                    const Imx1GraphicsMemory& memory, const std::vector<uint32_t>& words,
                                    std::vector<Fill>& fills) {
@@ -1227,6 +1235,7 @@ class Imx1GraphicsCommands {
         if ((mode & ~0x800000ffu) != 0x200 || (!intra && (kind < 0xb || kind > 0xe))) return refuse("idct-mode", mode);
         if (count != (both ? 6u : 5u) || blocks != (intra || kind == 0xd || kind == 0xe)) return refuse("idct-mode", count);
         if (!known[0x402] || !values[0x402] || values[0x402] > 4096) return refuse("idct-pitch", values[0x402]);
+        if (!intra && !known[0x471]) return refuse("idct-scissor", 0x471);
         uint32_t planes[3] = {}, entries[6][3] = {};
         const uint32_t perBlock = intra ? 2 : both ? 3 : 2;
         if (!next(planes[0])) return refuse("idct-packet", 7);
@@ -1252,27 +1261,35 @@ class Imx1GraphicsCommands {
             fill.base = (planes[plane] & 0x00fffff8u) + y * fill.pitch + x;
             if (x + 8 > fill.pitch || !memory.contains(configuration, eim, fill.base, 7 * fill.pitch + 8))
                 return refuse("idct-destination", position);
+            // SRC_SC_BOTTOM_RIGHT (471) holds the last chroma column (low) and row (high); luma's are twice that
+            // plus one. Kept to 12 bits in the fill, more than any picture the chip can hold.
+            const uint32_t chromaX = std::min<uint32_t>(values[0x471] & 0x1fff, 0xfff);
+            const uint32_t chromaY = std::min<uint32_t>((values[0x471] >> 16) & 0x1fff, 0xfff);
+            const int32_t limitX = plane ? chromaX : chromaX * 2 + 1, limitY = plane ? chromaY : chromaY * 2 + 1;
             if (intra) {
                 if (entries[block][1] != position * 4) return refuse("idct-source", entries[block][1]);
                 fill.sourceX = 1 << 6;
             } else {
                 for (unsigned reference = 0; reference < (both ? 2u : 1u); ++reference) {
                     const uint32_t index = reference ? planes[plane] >> 26 & 7 : planes[plane] & 7;
-                    const uint32_t source = entries[block][1 + reference], qx = source >> 16, qy = source & 0xffff;
+                    const uint32_t source = entries[block][1 + reference];
                     if (!known[0x42e + index]) return A::sequence;
                     const uint32_t ref = values[0x42e + index], pitch = (ref >> 20) * 2, base = (ref & 0xfffff) << 4;
-                    if ((qx | qy) & 1) return refuse("idct-quarter-pel", source);
-                    const uint32_t halfX = (qx >> 1) & 1, halfY = (qy >> 1) & 1;
-                    const uint64_t address = uint64_t(base) + uint64_t(qy >> 2) * pitch + (qx >> 2);
-                    // A source past the row's end reads on into the next row.
-                    if (!pitch || address > 0xffffffffu ||
-                        !memory.contains(configuration, eim, uint32_t(address), uint64_t(7 + halfY) * pitch + 8 + halfX))
+                    if (source & 0x00010001) return refuse("idct-quarter-pel", source);
+                    // Samples clamp to the source scissor (see completeIdctFill).
+                    const int32_t sx = int16_t(source >> 16) >> 2, halfX = (source >> 17) & 1;
+                    const int32_t sy = int16_t(source) >> 2, halfY = (source >> 1) & 1;
+                    const int64_t lastX = std::min<int64_t>(std::max(sx + 7 + halfX, 0), limitX);
+                    const int64_t lastY = std::min<int64_t>(std::max(sy + 7 + halfY, 0), limitY);
+                    if (!pitch || !memory.contains(configuration, eim, base, uint64_t(lastY) * pitch + uint64_t(lastX) + 1))
                         return refuse("idct-source", source);
-                    (reference ? fill.colour : fill.sourceBase) = uint32_t(address);
+                    (reference ? fill.colour : fill.sourceBase) = base;
+                    (reference ? fill.paint : fill.sourceY) = source;
                     fill.sourcePitch |= pitch << (reference * 16);
-                    fill.sourceX |= (halfX | halfY << 1) << (reference * 2);
                 }
                 if (both) fill.sourceX |= 1 << 4;
+                fill.sourceX |= uint32_t(!plane) << 7 | chromaX << 8 | chromaY << 20;
+                fill.invert = true;
             }
             if (rounding) fill.sourceX |= 1 << 5;
             if (coded[block]) fill.pixels.assign(residual[block], residual[block] + 64);
@@ -1363,10 +1380,19 @@ class Imx1GraphicsCommands {
         return Imx1BootstrapAccess::ok;
     }
     // An IDCT block (macroblock): 8 by 8 bytes at base, pitch apart, from the residual in pixels (none for no
-    // coefficients) and the sources: sourceBase and colour the two references' first bytes, sourcePitch their
-    // pitches (first low, second high), sourceX bits 0-1 and 2-3 their half pixel steps (x, y), bit 4 both
-    // references, bit 5 the rounding control, bit 6 intra.
+    // coefficients) and the references: sourceBase and colour their first bytes, sourcePitch their pitches
+    // (first low, second high), sourceY and paint the block's source in each (x << 16 | y, quarter pixels,
+    // signed). sourceX: bit 4 both references, bit 5 the rounding control, bit 6 intra, bit 7 luma, bits 8-19
+    // and 20-31 the source scissor's last chroma column and row. invert marks an inter fill in this layout.
     static bool idctFill(const Fill& fill) { return fill.keyed && fill.plain && !fill.doubled && !fill.a4; }
+    // The last column (or row) an inter IDCT fill reads from a reference at source, clamped as completeIdctFill does.
+    static int32_t idctLast(const Fill& fill, uint32_t source, bool row) {
+        const int32_t chroma = row ? int32_t(fill.sourceX >> 20) : int32_t((fill.sourceX >> 8) & 0xfff);
+        const int32_t limit = (fill.sourceX & 128) ? chroma * 2 + 1 : chroma;
+        const int32_t start = row ? int16_t(source) >> 2 : int16_t(source >> 16) >> 2;
+        const int32_t half = row ? (source >> 1) & 1 : (source >> 17) & 1;
+        return std::min(std::max(start + 7 + half, 0), limit);
+    }
     static Imx1BootstrapAccess completeIdctFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                                 Imx1GraphicsMemory& memory, const Fill& fill) {
         using A = Imx1BootstrapAccess;
@@ -1374,10 +1400,23 @@ class Imx1GraphicsCommands {
         const bool intra = fill.sourceX & 64, rounding = fill.sourceX & 32;
         for (unsigned reference = 0; !intra && reference < ((fill.sourceX & 16) ? 2u : 1u); ++reference) {
             const uint32_t base = reference ? fill.colour : fill.sourceBase, pitch = (fill.sourcePitch >> (reference * 16)) & 0xffff;
-            const uint32_t halfX = (fill.sourceX >> (reference * 2)) & 1, halfY = (fill.sourceX >> (reference * 2 + 1)) & 1;
-            uint8_t rows[9][9] = {};
-            for (uint32_t y = 0; y < 8 + halfY; ++y)
-                if (!memory.copyGpuRange(configuration, eim, base + y * pitch, 8 + halfX, rows[y])) return A::sequence;
+            const uint32_t source = reference ? fill.paint : fill.sourceY;
+            const int32_t sx = int16_t(source >> 16) >> 2, sy = int16_t(source) >> 2;
+            const uint32_t halfX = (source >> 17) & 1, halfY = (source >> 1) & 1;
+            // The 9 by 9 samples the block reads, each clamped as "IDCT reference edges" says.
+            const bool luma = fill.sourceX & 128;
+            const int32_t chromaX = (fill.sourceX >> 8) & 0xfff, chromaY = fill.sourceX >> 20;
+            const int32_t limitX = luma ? chromaX * 2 + 1 : chromaX, limitY = luma ? chromaY * 2 + 1 : chromaY;
+            const int32_t left = std::min(std::max(sx, 0), limitX);
+            const int32_t right = std::min(std::max(sx + 7 + int32_t(halfX), 0), limitX);
+            uint8_t rows[9][9] = {}, line[9] = {};
+            for (uint32_t y = 0; y < 8 + halfY; ++y) {
+                const uint32_t row = uint32_t(std::min(std::max(sy + int32_t(y), 0), limitY));
+                if (!memory.copyGpuRange(configuration, eim, base + row * pitch + left, uint32_t(right - left + 1), line))
+                    return A::sequence;
+                for (uint32_t x = 0; x < 8 + halfX; ++x)
+                    rows[y][x] = line[std::min(std::max(sx + int32_t(x), left), right) - left];
+            }
             for (uint32_t y = 0; y < 8; ++y)
                 for (uint32_t x = 0; x < 8; ++x) {
                     const int32_t a = rows[y][x], b = rows[y][x + halfX], c = rows[y + halfY][x], d = rows[y + halfY][x + halfX];

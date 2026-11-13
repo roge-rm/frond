@@ -202,6 +202,82 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
         assert(peek(0xa00800 + y * 16 + 8) == 101u + 2 * (y >= 8));
     }
     assert(peek(0xa00900) == 50 && peek(0xa00a00) == 60);
+    // Sources past the reference's edges (MPEG-4 vectors may point outside the picture): samples clamp to 0 and
+    // to the source scissor 471 (last chroma column low, row high; luma twice plus one). A 16 by 16 Y reference
+    // at a01000 (10y + x) with U at a01100 and V at a01140 (7y + x, 8 by 8), predicted into a02000, a02100 and
+    // a02200.
+    for (uint32_t y = 0; y < 16; ++y)
+        for (uint32_t x = 0; x < 16; ++x) poke(0xa01000 + y * 16 + x, 1, 10 * y + x);
+    for (uint32_t y = 0; y < 8; ++y)
+        for (uint32_t x = 0; x < 8; ++x) poke(0xa01100 + y * 8 + x, 1, 7 * y + x), poke(0xa01140 + y * 8 + x, 1, 7 * y + x + 100);
+    assert(submit(join({reg(0x42e, 16 << 19 | 0xa0100), reg(0x42f, 8 << 19 | 0xa0110), reg(0x430, 8 << 19 | 0xa0114)})) == A::ok);
+    const uint32_t edges[6] = {0xfffefffa, 40 << 16 | 2, 38, 32 << 16 | 32, 0xfffcfffc, 6 << 16 | 6};
+    const auto edgeBlock = std::vector<uint32_t>{5, 0x20b, 0x2da02000, 0, edges[0], 8 << 16, edges[1], 8, edges[2],
+        8 << 16 | 8, edges[3], 0, edges[4], 0x30a02101, 0, edges[5], 0x34a02202};
+    auto predicted = [&](uint32_t base, uint32_t pitch, uint32_t source, int32_t x, int32_t y, int32_t lastX, int32_t lastY) {
+        const int32_t sx = int16_t(source >> 16) >> 2, sy = int16_t(source) >> 2;
+        const int32_t hx = (source >> 17) & 1, hy = (source >> 1) & 1;
+        auto at = [&](int32_t c, int32_t r) {
+            return int32_t(peek(base + uint32_t(std::min(std::max(r, 0), lastY)) * pitch + uint32_t(std::min(std::max(c, 0), lastX))));
+        };
+        const int32_t a = at(sx + x, sy + y), b = at(sx + x + hx, sy + y), c = at(sx + x, sy + y + hy), d = at(sx + x + hx, sy + y + hy);
+        return uint32_t(hx && hy ? (a + b + c + d + 2) >> 2 : hx || hy ? (a + d + 1) >> 1 : a);
+    };
+    auto checkEdges = [&](int32_t chroma) {
+        for (uint32_t block = 0; block < 6; ++block)
+            for (int32_t y = 0; y < 8; ++y)
+                for (int32_t x = 0; x < 8; ++x) {
+                    const uint32_t bx = block < 4 ? (block & 1) * 8 : 0, by = block < 4 ? (block >> 1) * 8 : 0;
+                    const uint32_t pitch = block < 4 ? 16 : 8;
+                    const int32_t last = block < 4 ? chroma * 2 + 1 : chroma;
+                    const uint32_t reference = block < 4 ? 0xa01000 : block == 4 ? 0xa01100 : 0xa01140;
+                    const uint32_t to = (block < 4 ? 0xa02000 : block == 4 ? 0xa02100 : 0xa02200) + (by + y) * pitch + bx + x;
+                    assert(peek(to) == predicted(reference, pitch, edges[block], x, y, last, last));
+                }
+    };
+    assert(submit(join({reg(0x471, 7 << 16 | 7), macroblock(edgeBlock)})) == A::ok);
+    checkEdges(7);
+    // Spot checks: the top left corner repeats row and column 0, column 15 and row 15 repeat past the picture,
+    // V's last column repeats.
+    assert(peek(0xa02000) == 0 && peek(0xa02000 + 7 * 16 + 1) == (50 + 51 + 60 + 61 + 2) / 4);
+    assert(peek(0xa02000 + 15) == (15 + 25 + 1) / 2 && peek(0xa02000 + 15 * 16) == 150);
+    assert(peek(0xa02100) == 0 && peek(0xa02200) == (108 + 109 + 115 + 116 + 2) / 4 && peek(0xa02200 + 7) == (114 * 2 + 121 * 2 + 2) / 4);
+    // Two references (mode c): REF4-6 the same pictures, the second source the first mirrored past the far
+    // edges; the two predictions average rounding up.
+    assert(submit(join({reg(0x431, 16 << 19 | 0xa0100), reg(0x432, 8 << 19 | 0xa0110), reg(0x433, 8 << 19 | 0xa0114)})) == A::ok);
+    const uint32_t seconds[6] = {64 << 16 | 62, 0xfffe0026, 0xfff00000, 2 << 16 | 0xfffe, 36 << 16 | 2, 0xfff6fffa};
+    std::vector<uint32_t> bothBlock = {6, 0x20c, 0x2da03000};
+    const uint32_t positions[6] = {0, 8 << 16, 8, 8 << 16 | 8, 0, 0};
+    for (uint32_t block = 0; block < 6; ++block) {
+        bothBlock.insert(bothBlock.end(), {positions[block], edges[block], seconds[block]});
+        if (block == 4) bothBlock.push_back(0x30a03101);
+        if (block == 5) bothBlock.push_back(0x34a03202);
+    }
+    assert(submit(macroblock(bothBlock)) == A::ok);
+    for (uint32_t block = 0; block < 6; ++block)
+        for (int32_t y = 0; y < 8; ++y)
+            for (int32_t x = 0; x < 8; ++x) {
+                const uint32_t bx = (positions[block] >> 16) & 0xffff, by = positions[block] & 0xffff;
+                const uint32_t pitch = block < 4 ? 16 : 8;
+                const int32_t last = block < 4 ? 15 : 7;
+                const uint32_t reference = block < 4 ? 0xa01000 : block == 4 ? 0xa01100 : 0xa01140;
+                const uint32_t to = (block < 4 ? 0xa03000 : block == 4 ? 0xa03100 : 0xa03200) + (by + y) * pitch + bx + x;
+                const uint32_t first = predicted(reference, pitch, edges[block], x, y, last, last);
+                const uint32_t second = predicted(reference, pitch, seconds[block], x, y, last, last);
+                assert(peek(to) == (first + second + 1) / 2);
+            }
+    // With the scissor past the picture, rows past it read on: row 16 is U's first two rows.
+    assert(submit(join({reg(0x471, 0x1fff1fff), macroblock(edgeBlock)})) == A::ok);
+    checkEdges(0xfff);
+    assert(peek(0xa02000 + 15 * 16) == (peek(0xa01100) + peek(0xa01110) + 1) / 2);
+    // Without the scissor set the macroblock is refused.
+    {
+        Imx1GraphicsCommands fresh;
+        std::swap(fresh, commands);
+        assert(submit(join({reg(0x402, 8), reg(0x42e, 16 << 19 | 0xa0100), reg(0x42f, 8 << 19 | 0xa0110),
+                            reg(0x430, 8 << 19 | 0xa0114), macroblock(edgeBlock)})) == A::sideEffect);
+        std::swap(fresh, commands);
+    }
     // Quarter pixel sources, an unknown mode and a plane word for the wrong plane are refused.
     assert(submit(macroblock(inter(1 << 16))) == A::sideEffect);
     auto badMode = inter(0);
@@ -219,7 +295,7 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
     assert(state.advanceCpuCycles(uint32_t(commands.duration())) && commands.complete(state, eim, memory) == A::sequence);
     for (uint32_t x = 0; x < 6; ++x) assert(peek(0x900100 + x) == 0xee);
     std::printf("PASS: player ring NOPs, register writes and saved word reads, plane stretch, ring overlay flip, "
-                "intra and half pixel inter IDCT macroblocks, refusals\n");
+                "intra and half pixel inter IDCT macroblocks, sources past the reference edges, refusals\n");
 }
 
 int main() {
