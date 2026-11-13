@@ -237,6 +237,23 @@ class Imx1Cs5Configuration {
             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
             return boardAccess(pc,address,size,write,value);
         }
+        // Code outside the ROM image (20000000-207fffff), such as TCPMP driving the chip from its own RAM code.
+        if (virtualProfile() && (pc < 0x20000000 || pc >= 0x20800000)) {
+            if (Imx1GraphicsDisplay::playerWord(address) || Imx1GraphicsEngine::playerWord(address) ||
+                address == 0x16010098) {
+                if (size != 4) return Imx1BootstrapAccess::width;
+                if (!memoryReady(eim)) return Imx1BootstrapAccess::sequence;
+            }
+            if (Imx1GraphicsDisplay::playerWord(address)) return display.playerAccess(windows, address, write, value);
+            if (Imx1GraphicsEngine::playerWord(address)) return engine.playerAccess(address, write, value);
+            if (address == 0x16010098) {
+                if (!engine.emptyRing()) return Imx1BootstrapAccess::sequence;
+                const auto status = clocks.playerAccess(address, write, value);
+                if (status == Imx1BootstrapAccess::ok && write)
+                    display.setClockSources(clocks.pixelRate(), clocks.systemRate());
+                return status;
+            }
+        }
         if (virtualProfile() && Imx1GraphicsClocks::owns(address)) {
             if (size != 4) return Imx1BootstrapAccess::width;
             if (!memoryReady(eim) || !engine.emptyRing()) return Imx1BootstrapAccess::sequence;

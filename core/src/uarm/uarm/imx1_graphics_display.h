@@ -21,8 +21,9 @@ class Imx1GraphicsDisplay {
         if (address < 0x16010000) return false;
         const uint32_t offset = address - 0x16010000;
         if (offset == 0x4d8 || offset == 0x54c || offset == 0x4f0) return true;
-        // The video overlay words (VIDEO_CTRL 434 to VIDEO_V_POS 458, the Y/U/V offsets at 55c-570) aren't
-        // modelled; owning them makes every access but the boot's VIDEO_CTRL clear an unsupported-peripheral stop.
+        // The video overlay words (VIDEO_CTRL 434 to VIDEO_V_POS 458, the Y/U/V offset sets at 55c-570). Player
+        // code drives 434-458 through playerAccess; the ROM's own overlay driver isn't modelled, so its accesses
+        // (all but the boot's VIDEO_CTRL clear) and the 55c-570 sets stop as an unsupported peripheral.
         if ((offset >= 0x434 && offset <= 0x458) || (offset >= 0x55c && offset <= 0x570)) return !(offset & 3);
         for (const auto& op : operations) if (op.offset == offset) return true;
         return false;
@@ -218,34 +219,7 @@ class Imx1GraphicsDisplay {
                 return A::ok;
             }
             if (pc != 0x200aeb68) return A::externalInput;
-            if (value != 0x78 && value != 0x7b) return A::sideEffect;
-            if (value == 0x78) {
-                // Opening a new transaction discards an unlatched request.
-                editing = true;
-                pending = false;
-                latchDelay = 0;
-                updateControl = 0x78;
-                return A::ok;
-            }
-            if (!editing) return A::sequence;
-            Surface candidate;
-            const bool requested = (stagedWord(0x414) & 0x1c00) == 0x1c00;
-            uint64_t period = 0;
-            const bool timingKnown = knownWords[index(0x420)] && knownWords[index(0x424)] && knownWords[index(0x428)];
-            uint64_t clockPeriod = 0;
-            if ((stagedWord(0x414) & 0x1800000) && (!timingKnown || !timing(staged, clockPeriod))) return A::sideEffect;
-            if (requested && !decode(windows, candidate, period)) return A::sideEffect;
-            submitted = staged;
-            submittedSurface = candidate;
-            submittedEnabled = requested;
-            submittedTimingKnown = timingKnown;
-            submittedPeriod = period;
-            pending = true;
-            latchAtFrame = enabled && framePeriod;
-            latchDelay = latchCycles;
-            editing = false;
-            updateControl = 0x79;
-            return A::ok;
+            return transaction(windows, value);
         }
         if (!write) {
             if (offset == 0x414 && (pc == 0x200ad80c || pc == 0x200ad838 || pc == 0x200adaa4 || pc == 0x200adad0)) {
@@ -313,6 +287,97 @@ class Imx1GraphicsDisplay {
         }
         return A::ok;
     }
+    // The video overlay as the latched words set it, in panel pixels (the active area's top left is 0, 0).
+    // Planes are Y, U and V; U and V are 4:2:0, a sample for each 2 by 2 pixels. Mirrored planes start at
+    // their last column or row and go backwards.
+    struct Overlay {
+        uint32_t x = 0, y = 0, width = 0, height = 0, key = 0;
+        bool keyed = false, mirrorX = false, mirrorY = false;
+        struct Plane { uint32_t base = 0, pitch = 0, rangeBase = 0, rangeBytes = 0; } planes[3];
+    };
+    bool knownOverlay() const {
+        for (auto offset : {0x424u,0x428u,0x434u,0x43cu,0x440u,0x444u,0x448u,0x44cu,0x450u,0x454u,0x458u,0x4d4u})
+            if (!knownWords[index(offset)]) return false;
+        return !(stagedWord(0x434) & 2) || knownWords[index(0x438)];
+    }
+    bool overlay(const Imx1GraphicsWindows& windows, Overlay& value) const {
+        return enabled && (activeWord(0x434) & 0x14) && decodeOverlay(windows, active, value);
+    }
+    // Code outside the ROM (a player such as TCPMP, through its own mapping of the chip) reaches the overlay
+    // and the words it needs around it: the transaction word 4d8, VIDEO_CTRL 434, the colour key 438, the
+    // offsets, pitches and window 43c-458, the overlay format bits of DISP_DEBUG (4d4, bits 4-8) and
+    // DISP_DEBUG2 bit 30, and reads of the active area (424, 428). Words never written read as a stop.
+    static bool playerWord(uint32_t address) {
+        if (address < 0x16010424 || address > 0x16010538 || (address & 3)) return false;
+        const uint32_t offset = address - 0x16010000;
+        return offset <= 0x458 || offset == 0x4d4 || offset == 0x4d8 || offset == 0x538;
+    }
+    Imx1BootstrapAccess playerAccess(const Imx1GraphicsWindows& windows, uint32_t address, bool write, uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        const uint32_t offset = address - 0x16010000;
+        if (offset == 0x4d8) {
+            if (!write) { value = updateControl | (pending ? 2u : 0u); return A::ok; }
+            return transaction(windows, value);
+        }
+        if (!write) {
+            if (offset != 0x424 && offset != 0x428 && offset < 0x434) return A::externalInput;
+            if (!knownWords[index(offset)]) return A::externalInput;
+            value = stagedWord(offset);
+            return A::ok;
+        }
+        if (offset < 0x434) return A::externalInput;
+        if (!editing) return A::sequence;
+        const uint32_t previous = stagedWord(offset);
+        // Bits 0-4 (4:2:0, keyer, the two enables), 9-18 (the memory request count, not modelled), 22-23 (YUV to
+        // RGB and its option) and 24-25 (mirror). The expansions (5-8) and the rest aren't modelled.
+        if (offset == 0x434 && (value & ~0x03c7fe1fu)) return A::sideEffect;
+        if (offset == 0x438 && value > 0xffff) return A::sideEffect;
+        if ((offset == 0x43c || offset == 0x444 || offset == 0x44c) && value > 0xffffff) return A::sideEffect;
+        if ((offset == 0x440 || offset == 0x448 || offset == 0x450) && (!value || value > 4096)) return A::sideEffect;
+        if ((offset == 0x454 || offset == 0x458) && (value & 0xf800f800)) return A::sideEffect;
+        if ((offset == 0x4d4 || offset == 0x538) && !knownWords[index(offset)]) return A::sequence;
+        if (offset == 0x4d4 && ((value ^ previous) & ~0x1f0u)) return A::sideEffect;
+        if (offset == 0x538 && ((value ^ previous) & ~0x40000000u)) return A::sideEffect;
+        staged[index(offset)] = value;
+        knownWords[index(offset)] = true;
+        return A::ok;
+    }
+    // A display transaction: 78 opens one, 7b submits the staged words to latch at the next frame (or after
+    // latchCycles with the display off).
+    Imx1BootstrapAccess transaction(const Imx1GraphicsWindows& windows, uint32_t value) {
+        using A = Imx1BootstrapAccess;
+        if (value != 0x78 && value != 0x7b) return A::sideEffect;
+        if (value == 0x78) {
+            // Opening a new transaction discards an unlatched request.
+            editing = true;
+            pending = false;
+            latchDelay = 0;
+            updateControl = 0x78;
+            return A::ok;
+        }
+        if (!editing) return A::sequence;
+        Overlay overlayCandidate;
+        if ((stagedWord(0x434) & 0x14) && (!knownOverlay() || !decodeOverlay(windows, staged, overlayCandidate)))
+            return A::sideEffect;
+        Surface candidate;
+        const bool requested = (stagedWord(0x414) & 0x1c00) == 0x1c00;
+        uint64_t period = 0;
+        const bool timingKnown = knownWords[index(0x420)] && knownWords[index(0x424)] && knownWords[index(0x428)];
+        uint64_t clockPeriod = 0;
+        if ((stagedWord(0x414) & 0x1800000) && (!timingKnown || !timing(staged, clockPeriod))) return A::sideEffect;
+        if (requested && !decode(windows, candidate, period)) return A::sideEffect;
+        submitted = staged;
+        submittedSurface = candidate;
+        submittedEnabled = requested;
+        submittedTimingKnown = timingKnown;
+        submittedPeriod = period;
+        pending = true;
+        latchAtFrame = enabled && framePeriod;
+        latchDelay = latchCycles;
+        editing = false;
+        updateControl = 0x79;
+        return A::ok;
+    }
    private:
     static constexpr unsigned wordCount = (0x59c - 0x410) / 4 + 1;
     using Words = std::array<uint32_t, wordCount>;
@@ -337,6 +402,47 @@ class Imx1GraphicsDisplay {
         {0x200ad9d0,0x4e4},{0x200ada1c,0x414},{0x200ada54,0x4cc},{0x200ada68,0x4d0},
         {0x200ada80,0x4c8},{0x200ada9c,0x414},{0x200adac8,0x414}
     };
+    // ASSUMPTION "video overlay": an overlay shows with both enables (bits 2 and 4) set, as TCPMP's Show and the
+    // DAL driver set them, and covers the graphic plane inside its window, or with the keyer (bit 1) only where
+    // the graphic pixel equals the key (438). Only YUV 4:2:0 with the conversion on (bits 0, 22 and 23, as both
+    // writers set them) is modelled; the RGB formats of 4d4 are refused.
+    static bool decodeOverlay(const Imx1GraphicsWindows& windows, const Words& words, Overlay& value) {
+        const auto word = [&](uint32_t offset) { return words[index(offset)]; };
+        const uint32_t control = word(0x434);
+        if ((control & 0x14) != 0x14 || (control & 0xc00001) != 0xc00001 || (word(0x4d4) & 0x1f0)) return false;
+        const uint32_t h = word(0x454), v = word(0x458), activeH = word(0x424), activeV = word(0x428);
+        const uint32_t x0 = h & 0x7ff, x1 = h >> 16, y0 = v & 0x7ff, y1 = v >> 16;
+        if (x0 >= x1 || y0 >= y1 || x0 < (activeH & 0x7ff) || x1 > (activeH >> 16) ||
+            y0 < (activeV & 0x3ff) || y1 > (activeV >> 16)) return false;
+        value.x = x0 - (activeH & 0x7ff);
+        value.y = y0 - (activeV & 0x3ff);
+        value.width = x1 - x0;
+        value.height = y1 - y0;
+        value.keyed = control & 2;
+        value.key = word(0x438);
+        value.mirrorX = control & 0x1000000;
+        value.mirrorY = control & 0x2000000;
+        for (unsigned plane = 0; plane < 3; ++plane) {
+            auto& p = value.planes[plane];
+            p.base = word(0x43c + plane * 8);
+            p.pitch = word(0x440 + plane * 8);
+            const uint32_t columns = plane ? (value.width + 1) / 2 : value.width;
+            const uint32_t rows = plane ? (value.height + 1) / 2 : value.height;
+            if (!p.pitch || p.pitch < columns) return false;
+            const int64_t lastRow = int64_t(rows - 1) * p.pitch * (value.mirrorY ? -1 : 1);
+            const int64_t lastColumn = int64_t(columns - 1) * (value.mirrorX ? -1 : 1);
+            const int64_t first = int64_t(p.base) + std::min<int64_t>(0, lastRow) + std::min<int64_t>(0, lastColumn);
+            const int64_t end = int64_t(p.base) + std::max<int64_t>(0, lastRow) + std::max<int64_t>(0, lastColumn) + 1;
+            if (first < 0) return false;
+            p.rangeBase = uint32_t(first);
+            p.rangeBytes = uint32_t(end - first);
+            bool inside = false;
+            for (auto range : {windows.internal(), windows.external()})
+                inside |= range.known && p.rangeBase >= range.first && uint64_t(end) <= uint64_t(range.last) + 1;
+            if (!inside) return false;
+        }
+        return true;
+    }
     static bool timing(const Words& words, uint64_t& period) {
         const uint32_t total = words[index(0x420)], h = words[index(0x424)], v = words[index(0x428)];
         const uint32_t ht = total & 0x7ff, vt = (total >> 16) & 0x7ff;

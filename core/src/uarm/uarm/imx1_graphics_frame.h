@@ -70,10 +70,24 @@ class Imx1GraphicsFrame {
             enabled = valid = pending = acquired = false;
             return true;
         }
-        const bool full = !valid || !enabled || display.revision() != lastRevision;
+        Imx1GraphicsDisplay::Overlay overlay;
+        const bool overlaid = display.overlay(configuration.memoryWindows(), overlay);
+        // The overlay's planes aren't dirty tracked, so a frame with it shown is read whole.
+        const bool full = !valid || !enabled || display.revision() != lastRevision || overlaid;
         if (!full && display.frameNumber() == lastFrame) return true;
         Imx1GraphicsDisplay::Surface candidate;
         if (!display.surface(candidate)) return false;
+        const uint8_t* planes[3] = {};
+        if (overlaid) {
+            if (overlay.x + overlay.width > candidate.width || overlay.y + overlay.height > candidate.height) return false;
+            for (unsigned plane = 0; plane < 3; ++plane) {
+                unsigned bank = 0;
+                uint32_t offset = 0;
+                planes[plane] = memory.gpuSpan(configuration, eim, overlay.planes[plane].rangeBase,
+                                               overlay.planes[plane].rangeBytes, bank, offset);
+                if (!planes[plane]) return false;
+            }
+        }
         unsigned rangeBank = 0;
         uint32_t rangeOffset = 0;
         const uint8_t* range = memory.gpuSpan(configuration, eim, candidate.rangeBase, candidate.rangeBytes, rangeBank,
@@ -123,6 +137,8 @@ class Imx1GraphicsFrame {
                     out[x] = 0xff000000u |
                         ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
                 }
+                if (overlaid && y >= overlay.y && y < overlay.y + overlay.height)
+                    composite(overlay, planes, y - overlay.y, source + overlay.x * 2, out + overlay.x);
             }
             if (pending) { firstRow = std::min(firstRow, first); lastRow = std::max(lastRow, last); }
             else { firstRow = first; lastRow = last; }
@@ -135,6 +151,32 @@ class Imx1GraphicsFrame {
         lastFrame = display.frameNumber();
         valid = true;
         return true;
+    }
+    // YUV to the panel's RGB565 and on to the frame's pixel format.
+    // ASSUMPTION "overlay colour": the chip converts BT.601 studio range (Y 16-235), as TCPMP hands it the
+    // decoder's planes unchanged, and the result reaches the panel at the graphic plane's 565 depth.
+    static uint32_t overlayPixel(int y, int u, int v) {
+        const int c = 298 * (y - 16) + 128, d = u - 128, e = v - 128;
+        const auto clamp = [](int value) { return uint32_t(std::min(255, std::max(0, value >> 8))); };
+        const uint32_t red = clamp(c + 409 * e) >> 3, green = clamp(c - 100 * d - 208 * e) >> 2, blue = clamp(c + 516 * d) >> 3;
+        return 0xff000000u |
+            ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
+    }
+    // One row of the overlay over the graphic row it covers. graphic holds that row's 565 pixels for the keyer.
+    static void composite(const Imx1GraphicsDisplay::Overlay& overlay, const uint8_t* const planes[3], uint32_t row,
+                          const uint8_t* graphic, uint32_t* out) {
+        const uint8_t* lines[3];
+        for (unsigned plane = 0; plane < 3; ++plane) {
+            const auto& p = overlay.planes[plane];
+            const int64_t step = int64_t(plane ? row / 2 : row) * p.pitch;
+            lines[plane] = planes[plane] + (p.base - p.rangeBase) + (overlay.mirrorY ? -step : step);
+        }
+        for (uint32_t x = 0; x < overlay.width; ++x) {
+            if (overlay.keyed && (uint32_t(graphic[x * 2]) | uint32_t(graphic[x * 2 + 1]) << 8) != overlay.key) continue;
+            const int64_t luma = overlay.mirrorX ? -int64_t(x) : int64_t(x);
+            const int64_t chroma = overlay.mirrorX ? -int64_t(x / 2) : int64_t(x / 2);
+            out[x] = overlayPixel(lines[0][luma], lines[1][chroma], lines[2][chroma]);
+        }
     }
    private:
     std::vector<uint32_t> pixels;

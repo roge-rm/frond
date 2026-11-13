@@ -2226,7 +2226,7 @@ test-zodiac-graphics-display: build/zodiac-boot-probe
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-graphics-display
 	./build/test-zodiac-graphics-display
 
-# The W4200 video overlay and IDCT, refused until they are modelled.
+# The W4200 video overlay as player code drives it; the ROM driver and the IDCT still refused.
 .PHONY: test-zodiac-video
 test-zodiac-video: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \

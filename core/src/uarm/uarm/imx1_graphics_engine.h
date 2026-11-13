@@ -87,6 +87,21 @@ class Imx1GraphicsEngine {
         else return false;
         return true;
     }
+    // Reads from code outside the ROM (TCPMP's ati4200.c): the ring set-up (210, 214), its pointers (21c, 220) and the
+    // busy bit (140). ASSUMPTION "ring set-up reads": 210 and 214 read back what the ROM wrote, tag bit included.
+    static bool playerWord(uint32_t address) {
+        return address == 0x16010210 || address == 0x16010214 || address == 0x1601021c || address == 0x16010220 ||
+               address == 0x16010140;
+    }
+    Imx1BootstrapAccess playerAccess(uint32_t address, bool write, uint32_t& value) const {
+        using A = Imx1BootstrapAccess;
+        if (write) return A::externalInput;
+        if (!ringEnabled) return A::sequence;
+        value = address == 0x16010210 ? 0x08000000 | ringExponent : address == 0x16010214 ? ringBaseWord() :
+                address == 0x1601021c ? readPointer : address == 0x16010220 ? writePointer :
+                emptyRing() ? 0 : 0x80000000;
+        return A::ok;
+    }
     Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,
                                uint32_t size, bool write, uint32_t& value) {
         using A = Imx1BootstrapAccess;

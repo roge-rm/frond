@@ -127,7 +127,7 @@ int main() {
     assert(state.access(eim, 0x200b8e88, 0x16010220, 4, true, value) == A::sequence);
     assert(state.engineState().emptyRing());
     assert(state.access(eim, 0, 0x16010218, 4, true, value) == A::unmapped);
-    assert(state.access(eim, 0, 0x16010140, 4, false, value) == A::externalInput);
+    assert(state.access(eim, 0x20000000, 0x16010140, 4, false, value) == A::externalInput);
     value = 0x3e01;
     assert(eim.access(0x00220028, 4, true, value) == Imx1EimAccess::ok);
     value = 0xdeadbeef;

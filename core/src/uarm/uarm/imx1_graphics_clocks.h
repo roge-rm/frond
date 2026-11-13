@@ -214,6 +214,22 @@ class Imx1GraphicsClocks {
         }
         return A::ok;
     }
+    // PWRMGT_CNTL (98) from code outside the ROM: TCPMP sets bit 0 (automatic power management) as it hides its
+    // overlay and clears it as it shows it, read-modify-write. Any other change stays a stop.
+    Imx1BootstrapAccess playerAccess(uint32_t address, bool write, uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        if (address != 0x16010098) return A::externalInput;
+        if (!started) return A::sequence;
+        if (!write) { value = word(0x98); return A::ok; }
+        if ((value ^ word(0x98)) & ~1u) return A::sideEffect;
+        const uint32_t previous = word(0x98);
+        words[(0x98 - 0x80) / 4] = value;
+        if (previous != value) {
+            normal = (word(0x98) & 12) == 4;
+            scheduleAutomatic();
+        }
+        return A::ok;
+    }
    private:
     struct Operation { uint32_t pc, offset; bool write; };
     inline static constexpr Operation operations[] = {
