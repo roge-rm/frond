@@ -67,8 +67,22 @@ class FrondMsBackend : public MemoryStickBackend {
     }
     bool Present() const override { return card.media.Present(); }
     void Reset() override { ResetCard(); }
-    bool TpcRead(uint8_t tpc, uint8_t* out, size_t size) override { return card.TpcRead(tpc, out, size); }
-    bool TpcWrite(uint8_t tpc, const uint8_t* in, size_t size) override { return card.TpcWrite(tpc, in, size); }
+    bool TpcRead(uint8_t tpc, uint8_t* out, size_t size) override {
+        if (!card.TpcRead(tpc, out, size)) return false;
+        // The TG50 driver wants a disabled-block size of 2 in the boot block, the T415 driver
+        // counts the table's entries against it and the table is empty, so it sees 0.
+        if (tpc == 2 && size == 512 && card.Block() < 2 && card.state.reg[21] == 0 && out[0x178] == 1 &&
+            !out[0x174] && !out[0x175] && !out[0x176] && out[0x177] == 2)
+            out[0x177] = 0;
+        return true;
+    }
+    bool TpcWrite(uint8_t tpc, const uint8_t* in, size_t size) override {
+        // A command's page writes reach the card file in one commit.
+        if (!image) return card.TpcWrite(tpc, in, size);
+        image->BeginBatch(false);
+        const bool ok = card.TpcWrite(tpc, in, size);
+        return image->EndBatch() && ok;
+    }
     void FinishRead(uint8_t tpc) override { card.FinishRead(tpc); }
     uint8_t Interrupt() const override { return card.Interrupt(); }
     void SetInterrupt(uint8_t value) override { card.Interrupt(value); }

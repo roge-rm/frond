@@ -20,6 +20,10 @@ class CardImage {
               uint32_t serial, Protocol protocol = Protocol::sd);
     uint32_t Serial() const { return serial; }
     bool IsReadOnly() const { return readOnly; }
+    // Byte-range writes between Begin and EndBatch commit once, at EndBatch.
+    // `rollback` takes a snapshot to restore if the batch fails; without it a failed write stays.
+    void BeginBatch(bool rollback = true);
+    bool EndBatch();
 
     size_t Read(uint8_t* dest, size_t index, size_t count = 1);
     size_t Write(const uint8_t* source, size_t index, size_t count = 1);
@@ -41,6 +45,8 @@ class CardImage {
     const Protocol protocol;
     std::shared_ptr<CardBacking> backing;
     std::function<bool()> flush;
+    bool batching = false, pendingFlush = false, batchFailed = false;
+    std::shared_ptr<const CardSnapshot> batchPrior;
     uint32_t serial{0x00004aec};
 };
 

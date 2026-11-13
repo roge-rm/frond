@@ -52,12 +52,41 @@ size_t CardImage::Write(const uint8_t* source, size_t index, size_t count) {
 
 size_t CardImage::BlocksTotal() const { return blocksTotal; }
 
+void CardImage::BeginBatch(bool rollback) {
+    batching = true;
+    batchFailed = false;
+    pendingFlush = false;
+    batchPrior = backing && rollback ? backing->Snapshot() : nullptr;
+    if (backing && rollback && !batchPrior) batchFailed = true;
+}
+
+// One commit for the batch, or the card goes back to how it was at BeginBatch.
+bool CardImage::EndBatch() {
+    batching = false;
+    const bool pending = pendingFlush;
+    pendingFlush = false;
+    auto prior = std::move(batchPrior);
+    if (batchFailed || (pending && (!flush || !flush()))) {
+        if (backing && prior) backing->Restore(*prior);
+        batchFailed = false;
+        return false;
+    }
+    return true;
+}
+
 bool CardImage::WriteByteRange(const uint8_t* source, size_t offset, size_t count) {
     if (readOnly) return false;
     if (offset > blocksTotal * BLOCK_SIZE || count > blocksTotal * BLOCK_SIZE - offset) return false;
     if (count == 0) return true;
 
     if (backing) {
+        if (batching) {
+            if (batchFailed) return false;
+            if (!backing->Write(offset, count, source)) { batchFailed = true; return false; }
+            pendingFlush = true;
+            MarkRangeDirty(offset, count);
+            return true;
+        }
         auto prior = backing->Snapshot();
         if (!prior) return false;
         if (!backing->Write(offset, count, source) || !flush || !flush()) {

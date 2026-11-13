@@ -68,6 +68,7 @@ EmRegsVzPegVenice::EmRegsVzPegVenice(EmRegsMB86189& mb86189)
     : VZ(mb86189), mb86189(mb86189), fSPISlaveADC(new EmSPISlaveADS784x(kChannelSet2)) {
     mb86189.SetGpioReadHandler(
         []() { return gExternalStorage.IsMounted(EmHAL::Slot::memorystick) ? 0x01 : 0x00; });
+    mb86189.irqChange.AddHandler([=](bool newState) { UpdateIRQ3(newState ? 0x40 : 0x00); });
     framebufferTmp = make_unique<uint32[]>(320 * 160 / 2 / 4);
 }
 

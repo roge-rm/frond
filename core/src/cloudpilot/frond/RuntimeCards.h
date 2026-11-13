@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include "ExternalStorage.h"
 #include "device_profile5.h"
 #include "MsBackend.h"
@@ -20,6 +21,19 @@ class RuntimeCards {
         bool protectedCard{}, failed{};
         std::shared_ptr<FileCardBacking> backing;
         std::shared_ptr<CardImage> image;
+        // A stick commits its generation when a save, a protect change or exit needs it, and at
+        // least every two seconds, not on every page write.
+        bool pending{};
+        std::chrono::steady_clock::time_point lastCommit{};
+        bool Settle() {
+            if (failed) return false;
+            if (pending) {
+                if (!backing->Commit()) { failed = true; return false; }
+                pending = false;
+            }
+            lastCommit = std::chrono::steady_clock::now();
+            return true;
+        }
         ~Card() { if (fd >= 0) ::close(fd); }
     };
     std::shared_ptr<Card> cards[2];
@@ -31,10 +45,15 @@ class RuntimeCards {
             protocol == "mmc" ? DeviceCardFamily5::legacyMmc : DeviceCardFamily5::sdsc, bytes);
     }
     static EmHAL::Slot slot(unsigned n) { return n ? EmHAL::Slot::sdcard2 : EmHAL::Slot::sdcard; }
-    static void BindImage(const std::shared_ptr<Card>& next) {
+    static void BindImage(const std::shared_ptr<Card>& next, bool deferred = false) {
         auto* live = next.get();
-        next->image = std::make_shared<CardImage>(next->backing, next->protectedCard, [live] {
+        next->image = std::make_shared<CardImage>(next->backing, next->protectedCard, [live, deferred] {
             if (live->failed) return false;
+            if (deferred) {
+                live->pending = true;
+                if (std::chrono::steady_clock::now() - live->lastCommit < std::chrono::seconds(2)) return true;
+                return live->Settle();
+            }
             if (!live->backing->Commit()) { live->failed = true; return false; }
             return true;
         }, next->serial, next->protocol);
@@ -101,7 +120,7 @@ class RuntimeCards {
         options.rejectInvalidRoot = true; options.identity = key; options.chunkCrcs = table;
         next->backing = FileCardBacking::Open(path, info.stored(), frondSdFile::headerBytes, options);
         if (!next->backing) return fail("error: cannot open card backing");
-        BindImage(next);
+        BindImage(next, true);
         if (!FrondMsBackend::Valid(*next->image)) return fail("error: the stick's boot blocks or pages are not valid");
         return next;
     }
@@ -141,6 +160,7 @@ class RuntimeCards {
         return p;
     }
     bool CanSave() const {
+        if (stick && !stick->Settle()) return false;
         size_t count=0;
         for(const auto& c:{cards[0],cards[1],stick}) if(c) {
             struct stat st{};
@@ -153,6 +173,7 @@ class RuntimeCards {
     }
     bool HasCards() const { return bool(cards[0]) || bool(cards[1]) || bool(stick); }
     std::string Manifest() const {
+        if (stick) stick->Settle();
         std::ostringstream out; out << "frond-linked-sd 3\n";
         for(unsigned n=0;n<2;++n) if(cards[n]) {
             const auto& c=*cards[n];
@@ -290,6 +311,7 @@ class RuntimeCards {
         return gExternalStorage.GetImageKeyInSlot(EmHAL::Slot::memorystick) == (p.stick && p.stickInserted?p.stick->key:"");
     }
     ~RuntimeCards() {
+        if (stick) stick->Settle();
         for (auto& card : cards) if (card) gExternalStorage.RemoveImage(card->key);
         if (stick) gExternalStorage.RemoveImage(stick->key);
     }
@@ -343,8 +365,9 @@ class RuntimeCards {
             if (gExternalStorage.IsMounted(msSlot)) return "error: eject first";
             const auto key = stick->key;
             gExternalStorage.RemoveImage(key);
+            if (!stick->Settle()) return "error: stick I/O failed";
             stick->protectedCard = argument == "on";
-            BindImage(stick);
+            BindImage(stick, true);
             gExternalStorage.AddImage(key, stick->image);
             return argument == "on" ? "protected" : "writable";
         }

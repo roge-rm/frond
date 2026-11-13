@@ -2432,6 +2432,11 @@ test-68k-sd: prepare
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
 		-f $(CURDIR)/tests/68k-sd.mk FROND_TEST_ROOT=$(CURDIR) sd-test
 
+.PHONY: test-68k-ms
+test-68k-ms: prepare
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
+		-f $(CURDIR)/tests/68k-ms.mk FROND_TEST_ROOT=$(CURDIR) ms-test
+
 .PHONY: test-68k-card-provider
 test-68k-card-provider: prepare
 	$(MAKE) -C core/src/common bin
