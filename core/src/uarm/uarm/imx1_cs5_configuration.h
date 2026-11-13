@@ -207,12 +207,19 @@ class Imx1Cs5Configuration {
     const Imx1GraphicsEngine& engineState() const { return engine; }
     void startEngine(uint64_t ticks) { engine.start(ticks); }
     void completeEngine(uint32_t option) { engine.complete(option); }
+    // An overlay word (4d8, 43c-450) a player's ring packet sets, when the engine reaches it.
+    Imx1BootstrapAccess ringDisplayWord(uint32_t offset, uint32_t value) {
+        return display.playerAccess(windows, 0x16010000 + offset, true, value);
+    }
     const Imx1GraphicsDisplay& displayState() const { return display; }
     const Imx1GraphicsInterrupts& interruptState() const { return interrupts; }
     Imx1GraphicsGpio::Bank gpioBank(unsigned index) const { return gpio.bank(index); }
     bool defaultsKnown() const { return programmed; }
     uint8_t defaultsValue() const { return defaults; }
     bool apertureSelected() const { return selected; }
+    // The OS maps SDRAM at 40000000-473fffff for applications and their data. The ROM runs at 20000000 and the
+    // exception vectors at 0, so only code in that RAM drives the chip as a player.
+    static bool playerPc(uint32_t pc) { return pc >= 0x40000000 && pc < 0x47400000; }
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
@@ -236,6 +243,23 @@ class Imx1Cs5Configuration {
         if (virtualProfile() && ((pc >= 0x20086952 && pc <= 0x20086a60 && !Imx1GraphicsDisplay::owns(address)) || address == 0x16010184 || wakeInterface)) {
             if (!deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
             return boardAccess(pc,address,size,write,value);
+        }
+        // Player code in RAM, such as TCPMP driving the chip itself (its code runs at 40xxxxxx).
+        if (virtualProfile() && playerPc(pc)) {
+            if (Imx1GraphicsDisplay::playerWord(address) || Imx1GraphicsEngine::playerWord(address) ||
+                address == 0x16010098) {
+                if (size != 4) return Imx1BootstrapAccess::width;
+                if (!memoryReady(eim)) return Imx1BootstrapAccess::sequence;
+            }
+            if (Imx1GraphicsDisplay::playerWord(address)) return display.playerAccess(windows, address, write, value);
+            if (Imx1GraphicsEngine::playerWord(address)) return engine.playerAccess(address, write, value);
+            if (address == 0x16010098) {
+                if (!engine.emptyRing()) return Imx1BootstrapAccess::sequence;
+                const auto status = clocks.playerAccess(address, write, value);
+                if (status == Imx1BootstrapAccess::ok && write)
+                    display.setClockSources(clocks.pixelRate(), clocks.systemRate());
+                return status;
+            }
         }
         if (virtualProfile() && Imx1GraphicsClocks::owns(address)) {
             if (size != 4) return Imx1BootstrapAccess::width;

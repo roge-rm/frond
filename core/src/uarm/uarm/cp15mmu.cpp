@@ -74,6 +74,10 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
         if (Rx == 15) return false;
         // Control, TTB, domain and TLB writes can change any translation the Fast engine holds.
         if (!read && (CRn == 1 || CRn == 2 || CRn == 3 || CRn == 8)) cpuArm920LeanFlush(cpu);
+        if (CRn == 0 && CRm == 0 && op2 == 0 && read) {
+            cpuSetReg(cpu, Rx, 0x41129200);  // Table 2-5, the ARM920T main ID. TCPMP reads it to pick its CPU code.
+            return true;
+        }
         if (CRn == 0 && CRm == 0 && op2 == 1 && read) {
             cpuSetReg(cpu, Rx, 0x0d172172);  // Table 2-6, two 16KiB, 64-way caches.
             return true;

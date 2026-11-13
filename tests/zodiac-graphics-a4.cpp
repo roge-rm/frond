@@ -207,13 +207,15 @@ int main() {
         for (unsigned i = 0; i < 16; ++i)
             assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x1000+(1+i/8)*0x100+3+i%8,i));
     }
-    // Any other pair in 490 and 491 is refused.
+    // Any other pair in 490 and 491 draws the same, as the blend reads neither.
     for (auto colours : {std::pair<uint32_t,uint32_t>{0,0}, {0xffffffff,0xffff}, {0x1234,0xffff}}) {
         Fixture f;
         planes(f,8,2,20,24,0x92cb,0x2d95);
         auto p = packet(8,2);
         replace(p,0x490,colours.first); replace(p,0x491,colours.second);
-        assert(f.append(p) == A::sideEffect);
+        assert(f.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 16; ++i) assert(f.read(destination+((i/8)*20+i%8)*2) == expected(0x92cb,0x2d95,i));
     }
     // An odd height: 6x3 is 18 samples, so the third word is a quarter used and its other samples are dropped.
     {

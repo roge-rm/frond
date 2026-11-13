@@ -33,8 +33,8 @@ class Imx1GraphicsEngine {
     bool stretchCopySubmission() const { return stretchCopy; }
     // The driver's other submit sites the decoder knows: the chip's stretch blit (200b0644), the two
     // brush uploads of 200aedd0, the line routine (200afd00), the constant alpha blend (200a9414) and the
-    // rotate and mirror blit (200aa564).
-    enum Other : uint8_t { none, stretchBlit, monoBrush, colourBrush, line, blend, transform };
+    // rotate and mirror blit (200aa564). player is a write of 220 from player code (TCPMP's RingFlush).
+    enum Other : uint8_t { none, stretchBlit, monoBrush, colourBrush, line, blend, transform, player };
     Other otherSubmission() const { return other; }
     static Other otherProducer(uint32_t pc) {
         return pc == 0x200b0b14 ? stretchBlit : pc == 0x200af1fc ? monoBrush : pc == 0x200af448 ? colourBrush :
@@ -86,6 +86,36 @@ class Imx1GraphicsEngine {
         else if (address == 0x16010140 && pc == 0x200b8cb0) value = emptyRing() ? 0 : 0x80000000;
         else return false;
         return true;
+    }
+    // Player code (TCPMP's ati4200.c) reads the ring set-up (210, 214), its pointers (21c, 220) and the busy bit
+    // (140), and writes 220. ASSUMPTION "ring set-up reads": 210 reads back what the ROM wrote and 214 its address
+    // without the tag (bit 28), as ati4200.c adds 214 to the chip's base to find the ring.
+    static bool playerWord(uint32_t address) {
+        return address == 0x16010210 || address == 0x16010214 || address == 0x1601021c || address == 0x16010220 ||
+               address == 0x16010140;
+    }
+    // A player submits its own packets by writing 220, sharing the ring with the ROM's driver.
+    Imx1BootstrapAccess playerAccess(uint32_t address, bool write, uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        if (write && address != 0x16010220) return A::externalInput;
+        if (!ringEnabled) return A::sequence;
+        if (write) {
+            const uint32_t mask = ringBytes() / 4 - 1;
+            if (value > mask) return A::sideEffect;
+            const uint32_t added = (value - writePointer) & mask;
+            const uint32_t occupied = (writePointer - readPointer) & mask;
+            if (added > mask - occupied) return A::sideEffect;
+            // The same pointer again submits nothing.
+            previousProducer = writePointer;
+            hostData = keyedCopy = a4 = copyHelper = fill = stretchCopy = false;
+            other = player;
+            writePointer = value;
+            return A::ok;
+        }
+        value = address == 0x16010210 ? 0x08000000 | ringExponent : address == 0x16010214 ? ringBase :
+                address == 0x1601021c ? readPointer : address == 0x16010220 ? writePointer :
+                emptyRing() ? 0 : 0x80000000;
+        return A::ok;
     }
     Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,
                                uint32_t size, bool write, uint32_t& value) {

@@ -19,6 +19,7 @@ class Imx1GraphicsCommands {
     template <class A> void state(A& a) {
         a.DoBuffer32(values.data(), values.size());
         for (auto& k : known) a.DoBool(k);
+        a.Require(!known[idctScanSlot] || values[idctScanSlot] <= 2, "idct scan");
         uint64_t count = batches.size();
         a.Do64(count).Require(count <= 16384, "command batches");
         if (!a.ok()) return;
@@ -97,6 +98,20 @@ class Imx1GraphicsCommands {
                                                              (reg >= 0x464 && reg <= 0x466))) return false;
             return store(reg, value, packedMono);
         };
+        if (other == Imx1GraphicsEngine::player) {
+            const auto status = decodePlayer(configuration, eim, memory, take, left, packedMono, fills);
+            if (status != A::ok) return status;
+            // The batch's overlay words go to a copy of the display after the queued batches' own, so a word the
+            // display would refuse refuses the whole batch now.
+            auto display = configuration.displayState();
+            for (const auto& queued : batches) displayWords(configuration, display, queued);
+            uint32_t failed = 0;
+            if (displayWords(configuration, display, batch, &failed) != A::ok) return refuse("player-display", failed);
+            batch.option = values[0x4a0];
+            queuedWords += batch.words;
+            batches.push_back(std::move(batch));
+            return A::ok;
+        }
         while (left) {
             if (!take(header)) return A::sequence;
             uint32_t first, second;
@@ -225,8 +240,9 @@ class Imx1GraphicsCommands {
                 for (uint32_t copy = 0; copy < copyWords; copy += 3) {
                     if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
                     // Both copy producers send 48f with every copy and never 490 or 491. A colour source
-                    // copy reads neither.
-                    if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
+                    // copy reads neither, so any colours a 1bpp text draw left there are allowed.
+                    if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff ||
+                        !known[0x490] || !known[0x491]) return A::sideEffect;
                     // The software stretch sends a run of no width or height where a shrink drops a column or
                     // row (seen in Outpost). It doesn't filter them, so on the chip they draw nothing.
                     if (stretch && (!(second >> 16) || !(second & 0xffff))) continue;
@@ -351,13 +367,39 @@ class Imx1GraphicsCommands {
             const auto& batch = batches.front();
             // Validate both surfaces before writing this batch, including after reset.
             for (const auto& fill : batch.fills) {
+                if (displayFill(fill)) continue;
+                if (idctFill(fill)) {
+                    bool inside = memory.contains(configuration, eim, fill.base, 7 * fill.pitch + 8);
+                    for (unsigned reference = 0; reference < ((fill.sourceX & 16) ? 2u : 1u) && !(fill.sourceX & 64); ++reference) {
+                        const uint32_t pitch = (fill.sourcePitch >> (reference * 16)) & 0xffff;
+                        const uint32_t halfX = (fill.sourceX >> (reference * 2)) & 1, halfY = (fill.sourceX >> (reference * 2 + 1)) & 1;
+                        inside = inside && memory.contains(configuration, eim, reference ? fill.colour : fill.sourceBase,
+                                                           uint64_t(7 + halfY) * pitch + 8 + halfX);
+                    }
+                    if (!inside) return A::sequence;
+                    continue;
+                }
+                if (planeFill(fill)) {
+                    const uint32_t ratioX = fill.paint & 0xffff, ratioY = fill.paint >> 16;
+                    if (fill.height && (!memory.contains(configuration, eim, fill.base, uint64_t(fill.height - 1) * fill.pitch + fill.width) ||
+                        !memory.contains(configuration, eim, fill.sourceBase, uint64_t(stretchStep(fill.sourceY + fill.height - 1, ratioY) + 1) *
+                                         fill.sourcePitch + stretchStep(fill.sourceX + fill.width - 1, ratioX) + 2))) return A::sequence;
+                    continue;
+                }
                 const uint64_t destinationLength = fill.height ? uint64_t(fill.height - 1) * fill.pitch + fill.width * 2 : 0;
                 const uint64_t sourceLength = !fill.height ? 0 : sourceBytes(fill);
                 if (destinationLength && ((fill.base & 1) || !memory.contains(configuration, eim, fill.base, destinationLength) ||
                     ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, sourceStart(fill), sourceLength)))) return A::sequence;
             }
+            // The overlay words go to a copy first, so a refused one leaves none of the batch written.
+            {
+                auto display = configuration.displayState();
+                const auto status = displayWords(configuration, display, batch);
+                if (status != A::ok) return status;
+            }
             for (const auto& fill : batch.fills) {
-                const auto status = completeFill(configuration, eim, memory, fill);
+                const auto status = displayFill(fill) ? configuration.ringDisplayWord(fill.base, fill.colour) :
+                                                        completeFill(configuration, eim, memory, fill);
                 if (status != A::ok) return status;
             }
             configuration.completeEngine(batch.option);
@@ -404,7 +446,7 @@ class Imx1GraphicsCommands {
     // (the CPU loop reads and writes pixel by pixel, the GPU reads the source as it was before the fill).
     static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
                         const Fill& fill, Imx1GpuFill& out) {
-        if (!gpuFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
+        if (!gpuFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             (fill.a4 && fill.pixels.empty()) || transformed(fill) ||
             (fill.doubled && (ratioX(fill) != 0x80 || ratioY(fill) != 0x80)) ||
             (fill.height > 1 && fill.pitch < fill.width * 2) ||
@@ -442,6 +484,8 @@ class Imx1GraphicsCommands {
     static Imx1BootstrapAccess completeFillCpu(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                                Imx1GraphicsMemory& memory, const Fill& fill) {
         using A = Imx1BootstrapAccess;
+        if (planeFill(fill)) return completePlaneFill(configuration, eim, memory, fill);
+        if (idctFill(fill)) return completeIdctFill(configuration, eim, memory, fill);
         if (fastFill(configuration, eim, memory, fill)) return A::ok;
         for (uint32_t y = 0; y < fill.height; ++y)
             for (uint32_t x = 0; x < fill.width; ++x) {
@@ -539,7 +583,7 @@ class Imx1GraphicsCommands {
     // checked, so none can fail; false, with nothing done, for the rest.
     static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                          const Fill& fill) {
-        if (!directFills || !fill.width || !fill.height || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
+        if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             transformed(fill) ||
             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
         const bool source = fill.keyed || fill.plain || fill.a4;
@@ -769,7 +813,7 @@ class Imx1GraphicsCommands {
         // The A4 producer never sends 490 or 491. The policy composes source2 through the mask and reads neither.
         // With 488 bit 19 the mask is the alpha and 484 isn't read: MaskBlendBlt (2009af14) never sets 484, so it
         // holds whatever the last BlendBlt (2009c1a0) left there.
-        if (a4 && (!staleTextColours() || gmc != 0xd798d4df || values[0x4b2] != 0x01cc1300 ||
+        if (a4 && (gmc != 0xd798d4df || values[0x4b2] != 0x01cc1300 ||
             values[0x4b1] != 0x40057d04 || values[0x472] != 0x3f || values[0x471] != 0x1fff1fff ||
             !known[0x48f] || values[0x48f] != 0xffffffff ||
             values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
@@ -1011,6 +1055,390 @@ class Imx1GraphicsCommands {
         const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
         return from.overlaps(to) ? refuse("stretch-overlap", values[0x465]) : A::ok;
     }
+    // A player's own packets (TCPMP's ati4200.c). ASSUMPTION "player nops": its NOP2 (0, one word after it)
+    // and NOP3 (40000800, two words after it) write registers 0 and 1, which the engine ignores; the words they
+    // skip are left over from earlier packets. Single register writes go to the 2D and IDCT words it saves and
+    // restores around its work (BackupRegs, 30e and the scissors), the plane stretch (StretchPlane, started by
+    // 466) and the overlay words its flip sends (4d8 and 43c-450, at registers 136 and 10f-114).
+    template <class Take> Imx1BootstrapAccess decodePlayer(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                                           const Imx1GraphicsMemory& memory, Take& take,
+                                                           const uint32_t& left, bool packedMono, std::vector<Fill>& fills) {
+        using A = Imx1BootstrapAccess;
+        uint32_t header, value;
+        while (left) {
+            if (!take(header)) return A::sequence;
+            if (header == 0x40000800u || header == 0) {
+                for (uint32_t skip = header ? 2 : 1; skip; --skip) if (!take(value)) return A::sequence;
+                continue;
+            }
+            // Type 3 packets: 10 is the NOP, 32 a macroblock for the IDCT. The count is the words after it less one.
+            if ((header & 0xc000ffffu) == 0xc0001000u || (header & 0xc000ffffu) == 0xc0003200u) {
+                const uint32_t count = ((header >> 16) & 0x3fff) + 1;
+                if (count > left) return A::sequence;
+                std::vector<uint32_t> words(count);
+                for (auto& word : words) if (!take(word)) return A::sequence;
+                if ((header & 0xff00) == 0x1000) continue;
+                const auto status = macroblock(configuration, eim, memory, words, fills);
+                if (status != A::ok) return status;
+                ticks += 6 * 64;
+                continue;
+            }
+            if ((header >> 16) || (header & 0xf800u)) return refuse("player-packet", header);
+            const uint32_t reg = header & 0x7ff;
+            if (!take(value)) return A::sequence;
+            // ati4200.c writes 4a1 = 0 before a macroblock of another kind than the last.
+            if (reg == 0x4a1) {
+                if (value || !store(reg, value, packedMono)) return refuse("player-register", reg);
+                continue;
+            }
+            if (reg == 0x136 || (reg >= 0x10f && reg <= 0x114)) {
+                Fill fill{};
+                fill.keyed = fill.plain = fill.a4 = true;
+                fill.base = reg * 4;
+                fill.colour = value;
+                fills.push_back(std::move(fill));
+                continue;
+            }
+            const bool stretchWord = (reg >= 0x410 && reg <= 0x412) || reg == 0x416 || reg == 0x418 || reg == 0x419 ||
+                                     (reg >= 0x420 && reg <= 0x422) || (reg >= 0x464 && reg <= 0x466);
+            if (stretchWord) {
+                if (!store(reg, value, packedMono)) return refuse("player-register", reg);
+                if (reg == 0x466) {
+                    Fill fill{};
+                    const auto status = planeStretch(configuration, eim, memory, fill);
+                    if (status != A::ok) return status;
+                    ticks += uint64_t(fill.width) * fill.height;
+                    fills.push_back(std::move(fill));
+                }
+                continue;
+            }
+            if (!playerRegister(reg)) return refuse("player-register", reg);
+            // 30e is outside the 2D words the ROM's packets need known; ati4200.c's IDCT set-up sends it 0.
+            if (reg == 0x30e) {
+                if (value) return refuse("player-register", reg);
+                values[reg] = value;
+                known[reg] = true;
+            } else if (!store(reg, value, packedMono)) return refuse("player-register", reg);
+        }
+        return A::ok;
+    }
+    // Not a chip register: the IDCT's scan order as the last 7 word in a macroblock chose it (0 to 2), saved with
+    // the rest of values.
+    static constexpr uint32_t idctScanSlot = 0x7ff;
+    // The IDCT's scan orders, coefficient k going to position scan[k] of the block (rows of 8). ati4200.c sends
+    // its coefficients in these orders, 7 then 0 for the first, 800 for the second and 10 for the third.
+    static constexpr uint8_t idctScans[3][64] = {
+        {0,1,8,16,9,2,3,10,17,24,32,25,18,11,4,5,12,19,26,33,40,48,41,34,27,20,13,6,7,14,21,28,
+         35,42,49,56,57,50,43,36,29,22,15,23,30,37,44,51,58,59,52,45,38,31,39,46,53,60,61,54,47,55,62,63},
+        {0,1,2,3,8,9,16,17,10,11,4,5,6,7,15,14,13,12,19,18,24,25,32,33,26,27,20,21,22,23,28,29,
+         30,31,34,35,40,41,48,49,42,43,36,37,38,39,44,45,46,47,50,51,56,57,58,59,52,53,54,55,60,61,62,63},
+        {0,8,16,24,1,9,2,10,17,25,32,40,48,56,57,49,41,33,26,18,3,11,4,12,19,27,34,42,50,58,35,43,
+         51,59,20,28,5,13,6,14,21,29,36,44,52,60,37,45,53,61,22,30,7,15,23,31,38,46,54,62,39,47,55,63}};
+    // The 8 point inverse DCT basis, C(u) / 2 * cos((2x + 1) u pi / 16) times 16384, rounded.
+    static constexpr int32_t idctBasis[8][8] = {
+        {5793,5793,5793,5793,5793,5793,5793,5793}, {8035,6811,4551,1598,-1598,-4551,-6811,-8035},
+        {7568,3135,-3135,-7568,-7568,-3135,3135,7568}, {6811,-1598,-8035,-4551,4551,8035,1598,-6811},
+        {5793,-5793,-5793,5793,5793,-5793,-5793,5793}, {4551,-8035,1598,6811,-6811,-1598,8035,-4551},
+        {3135,-7568,7568,-3135,-3135,7568,-7568,3135}, {1598,-4551,6811,-8035,8035,-6811,4551,-1598}};
+    // ASSUMPTION "IDCT arithmetic": a separable inverse DCT in integers (rows, then columns), rounded to nearest
+    // at the end, as close to the IEEE 1180 reference as 14 bit coefficients get. The chip's own rounding isn't
+    // known.
+    static void inverseDct(const int32_t* in, int16_t* out) {
+        int64_t rows[64];
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 8; ++x) {
+                int64_t sum = 0;
+                for (unsigned u = 0; u < 8; ++u) sum += int64_t(in[y * 8 + u]) * idctBasis[u][x];
+                rows[y * 8 + x] = sum;
+            }
+        for (unsigned x = 0; x < 8; ++x)
+            for (unsigned y = 0; y < 8; ++y) {
+                int64_t sum = 0;
+                for (unsigned v = 0; v < 8; ++v) sum += rows[v * 8 + x] * idctBasis[v][y];
+                const int64_t value = (sum + (int64_t(1) << 27)) >> 28;
+                out[y * 8 + x] = int16_t(std::min<int64_t>(2047, std::max<int64_t>(-2048, value)));
+            }
+    }
+    // One macroblock for the IDCT (ati4200.c's IDCTIntraEnd and IDCTInterEnd). Six blocks first, each 0 (no
+    // coefficients), or 7 and a scan word, or 2, then the number of word triples and the triples: run lengths
+    // in the first word (top byte first, ff ends the block), coefficients in the other two (high half first).
+    // A block whose last triple is full has a 0 word after it. Inter macroblocks without coefficients have no
+    // block words. Then 5 (6 with two references), the mode (f intra, d inter, e both ways, b and c the same
+    // without coefficients; 200 set, bit 31 the rounding control) and the destinations: the Y plane word, the
+    // four luma blocks, the U block, the U plane word, the V block and the V plane word. A plane word holds the
+    // plane's offset (bits 0-23), bit 24 for luma (its pitch is twice 402's), the first reference in bits 0-2
+    // and the second in bits 26-28 (REF1-6, 42e-433: pitch << 19 | offset >> 4, the pitch even so the offset
+    // has bits 0-19). Each block gives its position
+    // (x << 16 | y) and for intra the same in quarter pixels, for inter its source in quarter pixels in each
+    // reference used.
+    // ASSUMPTION "IDCT prediction": half pixel sources average as MPEG does ((a + b + 1) / 2, (a + b + c + d + 2)
+    // / 4, one less before the divide with the rounding control set), two references average rounding up, and
+    // the residual adds with saturation. Quarter pixel sources are refused.
+    Imx1BootstrapAccess macroblock(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                   const Imx1GraphicsMemory& memory, const std::vector<uint32_t>& words,
+                                   std::vector<Fill>& fills) {
+        using A = Imx1BootstrapAccess;
+        size_t at = 0;
+        auto next = [&](uint32_t& word) {
+            if (at >= words.size()) return false;
+            word = words[at++];
+            return true;
+        };
+        int16_t residual[6][64] = {};
+        bool coded[6] = {};
+        uint32_t word = 0;
+        const bool blocks = words[0] != 5 && words[0] != 6;
+        for (unsigned block = 0; blocks && block < 6; ++block) {
+            if (!next(word)) return refuse("idct-packet", block);
+            if (!word) continue;
+            if (word == 7) {
+                if (!next(word) || (word && word != 0x800 && word != 0x10)) return refuse("idct-scan", word);
+                values[idctScanSlot] = word == 0x800 ? 1 : word == 0x10 ? 2 : 0;
+                known[idctScanSlot] = true;
+            } else if (word != 2) return refuse("idct-block", word);
+            if (!known[idctScanSlot]) return refuse("idct-scan", word);
+            const uint8_t* scan = idctScans[values[idctScanSlot]];
+            uint32_t length = 0;
+            if (!next(length) || !length || length > 16) return refuse("idct-length", length);
+            int32_t coefficients[64] = {};
+            uint32_t k = 0;
+            bool ended = false;
+            for (uint32_t triple = 0; triple < length; ++triple) {
+                uint32_t runs, first, second;
+                if (!next(runs) || !next(first) || !next(second)) return refuse("idct-packet", block);
+                if (ended) return refuse("idct-run", runs);
+                const int16_t data[4] = {int16_t(first >> 16), int16_t(first), int16_t(second >> 16), int16_t(second)};
+                for (unsigned n = 0; n < 4; ++n) {
+                    const uint32_t run = (runs >> (24 - 8 * n)) & 255;
+                    if (run == 255) { ended = true; break; }
+                    k += run;
+                    if (k >= 64) return refuse("idct-run", runs);
+                    coefficients[scan[k++]] = data[n];
+                }
+            }
+            if (!ended && (!next(word) || word)) return refuse("idct-end", word);
+            coded[block] = true;
+            inverseDct(coefficients, residual[block]);
+        }
+        uint32_t count = 0, mode = 0;
+        if (!next(count) || !next(mode)) return refuse("idct-packet", 6);
+        const uint32_t kind = mode & 0xff;
+        const bool intra = kind == 0xf, both = kind == 0xe || kind == 0xc, rounding = mode >> 31;
+        if ((mode & ~0x800000ffu) != 0x200 || (!intra && (kind < 0xb || kind > 0xe))) return refuse("idct-mode", mode);
+        if (count != (both ? 6u : 5u) || blocks != (intra || kind == 0xd || kind == 0xe)) return refuse("idct-mode", count);
+        if (!known[0x402] || !values[0x402] || values[0x402] > 4096) return refuse("idct-pitch", values[0x402]);
+        uint32_t planes[3] = {}, entries[6][3] = {};
+        const uint32_t perBlock = intra ? 2 : both ? 3 : 2;
+        if (!next(planes[0])) return refuse("idct-packet", 7);
+        for (unsigned block = 0; block < 6; ++block) {
+            for (uint32_t n = 0; n < perBlock; ++n) if (!next(entries[block][n])) return refuse("idct-packet", 8);
+            if (block >= 4 && !next(planes[block - 3])) return refuse("idct-packet", 9);
+        }
+        if (at != words.size()) return refuse("idct-packet", uint32_t(words.size()));
+        for (unsigned plane = 0; plane < 3; ++plane) {
+            const uint32_t top = planes[plane] >> 24, first = planes[plane] & 7, second = (planes[plane] >> 26) & 7;
+            const uint32_t expected = intra ? (plane ? 0x2c : 0x2d) : plane == 0 ? 0x2d : plane == 1 ? 0x30 : 0x34;
+            if (top != expected || (intra ? first != 3 : both ? first != plane || second != plane + 3 :
+                                                       first != plane && first != plane + 3))
+                return refuse("idct-plane", planes[plane]);
+        }
+        for (unsigned block = 0; block < 6; ++block) {
+            const unsigned plane = block < 4 ? 0 : block - 3;
+            const uint32_t position = entries[block][0], x = position >> 16, y = position & 0xffff;
+            Fill fill{};
+            fill.keyed = fill.plain = true;
+            fill.width = fill.height = 8;
+            fill.pitch = values[0x402] * (plane ? 1 : 2);
+            fill.base = (planes[plane] & 0x00fffff8u) + y * fill.pitch + x;
+            if (x + 8 > fill.pitch || !memory.contains(configuration, eim, fill.base, 7 * fill.pitch + 8))
+                return refuse("idct-destination", position);
+            if (intra) {
+                if (entries[block][1] != position * 4) return refuse("idct-source", entries[block][1]);
+                fill.sourceX = 1 << 6;
+            } else {
+                for (unsigned reference = 0; reference < (both ? 2u : 1u); ++reference) {
+                    const uint32_t index = reference ? planes[plane] >> 26 & 7 : planes[plane] & 7;
+                    const uint32_t source = entries[block][1 + reference], qx = source >> 16, qy = source & 0xffff;
+                    if (!known[0x42e + index]) return A::sequence;
+                    const uint32_t ref = values[0x42e + index], pitch = (ref >> 20) * 2, base = (ref & 0xfffff) << 4;
+                    if ((qx | qy) & 1) return refuse("idct-quarter-pel", source);
+                    const uint32_t halfX = (qx >> 1) & 1, halfY = (qy >> 1) & 1;
+                    const uint64_t address = uint64_t(base) + uint64_t(qy >> 2) * pitch + (qx >> 2);
+                    // A source past the row's end reads on into the next row.
+                    if (!pitch || address > 0xffffffffu ||
+                        !memory.contains(configuration, eim, uint32_t(address), uint64_t(7 + halfY) * pitch + 8 + halfX))
+                        return refuse("idct-source", source);
+                    (reference ? fill.colour : fill.sourceBase) = uint32_t(address);
+                    fill.sourcePitch |= pitch << (reference * 16);
+                    fill.sourceX |= (halfX | halfY << 1) << (reference * 2);
+                }
+                if (both) fill.sourceX |= 1 << 4;
+            }
+            if (rounding) fill.sourceX |= 1 << 5;
+            if (coded[block]) fill.pixels.assign(residual[block], residual[block] + 64);
+            fills.push_back(std::move(fill));
+        }
+        return A::ok;
+    }
+    // ati4200.c's StretchPlane: one 8 bit plane of a YUV 4:2:0 picture scaled into another with the smooth filter.
+    // Its words: GMC d598b2df, DP_DATATYPE 40037d02 (8 bit), DP_MIX 01cc1200, 488 02020008 (smooth), the
+    // scissor 46f/470, destination 401/402 (pitch in bytes) at 465 (y low, x high) for 466 (height low, width
+    // high), source 46b/46c from 464 in quarter pixels (y low, x high), 412 the 8.8 ratios (source pixels per
+    // destination pixel, x low), and source 2 (416-422) the same one row down.
+    // ASSUMPTION "plane stretch filter": destination pixel i reads source position i * ratio from the unclipped
+    // origin, as the ROM's stretch steps, and blends it bilinearly with the pixel to its right and the two below
+    // (source 2), weights from the position's low 8 bits, rounded to nearest. ati4200.c shrinks its source by
+    // 2 pixels each way so the filter stays inside it.
+    Imx1BootstrapAccess planeStretch(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                     const Imx1GraphicsMemory& memory, Fill& fill) const {
+        using A = Imx1BootstrapAccess;
+        for (auto reg : {0x41b,0x472,0x4b2,0x4b1,0x488,0x46f,0x470,0x401,0x402,0x46b,0x46c,0x410,0x411,0x412,
+                         0x416,0x418,0x419,0x420,0x421,0x422,0x464,0x465,0x466}) if (!known[reg]) return A::sequence;
+        for (auto item : {std::pair<uint32_t,uint32_t>{0x41b,0xd598b2df}, {0x472,0x3f}, {0x4b2,0x01cc1200},
+                 {0x4b1,0x40037d02}, {0x488,0x02020008}})
+            if (values[item.first] != item.second) return refuse("plane-stretch-state", item.first);
+        if (values[0x416] != ((values[0x464] & 0xffff0000u) | ((values[0x464] + 4) & 0xffff)) ||
+            values[0x418] != values[0x46b] || values[0x419] != values[0x46c] || values[0x420] != values[0x410] ||
+            values[0x421] != values[0x411] || values[0x422] != values[0x412] ||
+            values[0x410] != (values[0x466] >> 16) + 1 || values[0x411] != (values[0x466] & 0xffff) ||
+            (values[0x464] & 0x00030003) || ((values[0x46f] | values[0x470]) & ~0x1fff1fffu))
+            return refuse("plane-stretch-words", values[0x464]);
+        const uint32_t ratioX = values[0x412] & 0xffff, ratioY = values[0x412] >> 16;
+        if (ratioX < 0x10 || ratioX > 0x1ff || ratioY < 0x10 || ratioY > 0x1ff) return refuse("plane-stretch-ratio", values[0x412]);
+        const uint32_t sx = values[0x464] >> 18, sy = (values[0x464] & 0xffff) >> 2;
+        const uint32_t x = values[0x465] >> 16, y = values[0x465] & 0xffff;
+        const uint32_t width = values[0x466] >> 16, height = values[0x466] & 0xffff;
+        const uint32_t pitch = values[0x402], sourcePitch = values[0x46c];
+        // The filter reads one more column and row than the steps reach. ati4200.c's first stretch, before the
+        // picture size is known, has source pitch 0: every row reads the same one.
+        const uint32_t sourceWidth = width ? stretchStep(width - 1, ratioX) + 2 : 0;
+        const uint32_t sourceHeight = height ? stretchStep(height - 1, ratioY) + 2 : 0;
+        if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
+            !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
+            sourcePitch > 8192 || sx + sourceWidth > (sourcePitch ? sourcePitch : 8192) || sy + sourceHeight > 8191)
+            return refuse("plane-stretch-geometry", values[0x466]);
+        const uint32_t left = std::max(x, values[0x46f] & 0x1fff), top = std::max(y, (values[0x46f] >> 16) & 0x1fff);
+        const uint32_t right = std::min(x + width, values[0x470] & 0x1fff), bottom = std::min(y + height, (values[0x470] >> 16) & 0x1fff);
+        const uint64_t source = uint64_t(values[0x46b]) + uint64_t(sy) * sourcePitch + sx;
+        const uint64_t sourceLength = uint64_t(sourceHeight - 1) * sourcePitch + sourceWidth;
+        if (source > 0xffffffffu || !memory.contains(configuration, eim, uint32_t(source), sourceLength)) return A::sequence;
+        fill.keyed = fill.plain = fill.doubled = true;
+        fill.sourceX = left - x;
+        fill.sourceY = top - y;
+        fill.pitch = pitch;
+        fill.sourcePitch = sourcePitch;
+        fill.sourceBase = uint32_t(source);
+        fill.paint = values[0x412];
+        if (left >= right || top >= bottom) return A::ok;
+        const uint64_t address = uint64_t(values[0x401]) + uint64_t(top) * pitch + left;
+        if (address > 0xffffffffu) return refuse("plane-stretch-geometry", values[0x465]);
+        fill.base = uint32_t(address);
+        fill.width = right - left;
+        fill.height = bottom - top;
+        if (!memory.contains(configuration, eim, fill.base, uint64_t(fill.height - 1) * fill.pitch + fill.width))
+            return A::sequence;
+        const Area from{source, sourcePitch, sourceWidth, sourcePitch ? sourceHeight : 1};
+        const Area to{fill.base, fill.pitch, fill.width, fill.height};
+        return from.overlaps(to) ? refuse("plane-stretch-overlap", values[0x465]) : A::ok;
+    }
+   public:
+    // A player's fills are keyed and plain at once, which no other fill is: a plane stretch (8 bit pixels,
+    // planeStretch, doubled), an IDCT block (neither doubled nor a4) and a display word its packet sets (a4,
+    // base the offset, colour the value).
+    static bool planeFill(const Fill& fill) { return fill.keyed && fill.plain && fill.doubled && !fill.a4; }
+    static bool displayFill(const Fill& fill) { return fill.keyed && fill.plain && fill.a4; }
+    // A batch's overlay words (4d8, 43c-450) given to display in order, stopping at the first refused, whose
+    // offset goes in failed.
+    static Imx1BootstrapAccess displayWords(const Imx1Cs5Configuration& configuration, Imx1GraphicsDisplay& display,
+                                            const Batch& batch, uint32_t* failed = nullptr) {
+        for (const auto& fill : batch.fills) {
+            if (!displayFill(fill)) continue;
+            uint32_t value = fill.colour;
+            const auto status = display.playerAccess(configuration.memoryWindows(), 0x16010000 + fill.base, true, value);
+            if (status != Imx1BootstrapAccess::ok) {
+                if (failed) *failed = fill.base;
+                return status;
+            }
+        }
+        return Imx1BootstrapAccess::ok;
+    }
+    // An IDCT block (macroblock): 8 by 8 bytes at base, pitch apart, from the residual in pixels (none for no
+    // coefficients) and the sources: sourceBase and colour the two references' first bytes, sourcePitch their
+    // pitches (first low, second high), sourceX bits 0-1 and 2-3 their half pixel steps (x, y), bit 4 both
+    // references, bit 5 the rounding control, bit 6 intra.
+    static bool idctFill(const Fill& fill) { return fill.keyed && fill.plain && !fill.doubled && !fill.a4; }
+    static Imx1BootstrapAccess completeIdctFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                                Imx1GraphicsMemory& memory, const Fill& fill) {
+        using A = Imx1BootstrapAccess;
+        int32_t prediction[64] = {};
+        const bool intra = fill.sourceX & 64, rounding = fill.sourceX & 32;
+        for (unsigned reference = 0; !intra && reference < ((fill.sourceX & 16) ? 2u : 1u); ++reference) {
+            const uint32_t base = reference ? fill.colour : fill.sourceBase, pitch = (fill.sourcePitch >> (reference * 16)) & 0xffff;
+            const uint32_t halfX = (fill.sourceX >> (reference * 2)) & 1, halfY = (fill.sourceX >> (reference * 2 + 1)) & 1;
+            uint8_t rows[9][9] = {};
+            for (uint32_t y = 0; y < 8 + halfY; ++y)
+                if (!memory.copyGpuRange(configuration, eim, base + y * pitch, 8 + halfX, rows[y])) return A::sequence;
+            for (uint32_t y = 0; y < 8; ++y)
+                for (uint32_t x = 0; x < 8; ++x) {
+                    const int32_t a = rows[y][x], b = rows[y][x + halfX], c = rows[y + halfY][x], d = rows[y + halfY][x + halfX];
+                    const int32_t value = halfX && halfY ? (a + b + c + d + 2 - rounding) >> 2 :
+                                          halfX || halfY ? (a + d + 1 - rounding) >> 1 : a;
+                    prediction[y * 8 + x] = reference ? (prediction[y * 8 + x] + value + 1) >> 1 : value;
+                }
+        }
+        for (uint32_t y = 0; y < 8; ++y)
+            for (uint32_t x = 0; x < 8; ++x) {
+                const int32_t sum = prediction[y * 8 + x] + (fill.pixels.empty() ? 0 : int16_t(fill.pixels[y * 8 + x]));
+                uint32_t value = uint32_t(std::min(255, std::max(0, sum)));
+                const auto status = memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x, 1, true, value);
+                if (status != A::ok) return status;
+            }
+        return A::ok;
+    }
+    static Imx1BootstrapAccess completePlaneFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                                 Imx1GraphicsMemory& memory, const Fill& fill) {
+        using A = Imx1BootstrapAccess;
+        const uint32_t ratioX = fill.paint & 0xffff, ratioY = fill.paint >> 16;
+        std::vector<uint8_t> above, below;
+        for (uint32_t y = 0; y < fill.height; ++y) {
+            const uint32_t position = (fill.sourceY + y) * ratioY, row = position >> 8, wy = position & 255;
+            const uint32_t first = (fill.sourceX * ratioX) >> 8, last = ((fill.sourceX + fill.width - 1) * ratioX >> 8) + 1;
+            above.resize(last - first + 1);
+            below.resize(last - first + 1);
+            const uint32_t at = fill.sourceBase + row * fill.sourcePitch + first;
+            if (!memory.copyGpuRange(configuration, eim, at, uint32_t(above.size()), above.data()) ||
+                !memory.copyGpuRange(configuration, eim, at + fill.sourcePitch, uint32_t(below.size()), below.data()))
+                return A::sequence;
+            for (uint32_t x = 0; x < fill.width; ++x) {
+                const uint32_t across = (fill.sourceX + x) * ratioX, column = (across >> 8) - first, wx = across & 255;
+                const uint32_t top = above[column] * (256 - wx) + above[column + 1] * wx;
+                const uint32_t bottom = below[column] * (256 - wx) + below[column + 1] * wx;
+                uint32_t value = (top * (256 - wy) + bottom * wy + 32768) >> 16;
+                const auto status = memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x, 1, true, value);
+                if (status != A::ok) return status;
+            }
+        }
+        return A::ok;
+    }
+    // The words a player may write through the ring and read back with the engine idle.
+    static bool playerRegister(uint32_t reg) {
+        for (uint32_t known : {0x41bu, 0x472u, 0x4b2u, 0x4b1u, 0x401u, 0x402u, 0x46bu, 0x46cu, 0x488u, 0x30eu, 0x30fu,
+                               0x42eu, 0x42fu, 0x430u, 0x431u, 0x432u, 0x433u, 0x46fu, 0x470u, 0x471u})
+            if (reg == known) return true;
+        return false;
+    }
+    // A player's read of an engine word (16011000-16011fff and the IDCT words at 16010c38, c3c), with the ring
+    // empty, gives what the last packet left in it.
+    Imx1BootstrapAccess playerRead(uint32_t address, uint32_t& value) const {
+        using A = Imx1BootstrapAccess;
+        const uint32_t reg = (address - 0x16010000) / 4;
+        if ((address & 3) || !playerRegister(reg) || reg == 0x30e || reg == 0x46f || reg == 0x470 || reg == 0x471)
+            return A::externalInput;
+        if (!batches.empty() || !known[reg]) return A::sequence;
+        value = values[reg];
+        return A::ok;
+    }
+   private:
     std::array<uint32_t,0x800> values{};
     std::array<bool,0x800> known{};
     std::deque<Batch> batches;
