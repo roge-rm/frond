@@ -40,6 +40,8 @@ class EmTransportSerial {
         StopBits fStopBits;
         DataBits fDataBits;
         HwrHandshake fHwrHandshake;
+        // The UART is in IrDA (SIR) mode.
+        bool fIrda{false};
 
         Config() = default;
         Config(const Config&);

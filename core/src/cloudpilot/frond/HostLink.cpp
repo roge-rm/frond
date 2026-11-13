@@ -122,7 +122,7 @@ void HostLink68k::Close() {
     socketInode = 0;
     kind = Kind::off;
     endpoint.clear();
-    rx.clear();
+    DropReceived();
     tx.clear();
     hung = false;
     asleep = false;
@@ -194,7 +194,7 @@ void HostLink68k::Poll() {
                 setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
             }
             client = accepted;
-            rx.clear();
+            DropReceived();
         }
         if (client >= 0 && !Pump(client)) Disconnect();
         return;
@@ -215,12 +215,18 @@ size_t HostLink68k::Take(uint8_t* out, size_t max) {
     const size_t count = std::min(max, rx.size());
     std::copy(rx.begin(), rx.begin() + count, out);
     rx.erase(rx.begin(), rx.begin() + count);
+    scanned -= std::min(scanned, count);
     return count;
 }
 
 size_t HostLink68k::CountThrough(uint8_t value) const {
-    const auto at = std::find(rx.begin(), rx.end(), value);
-    return at == rx.end() ? rx.size() : size_t(at - rx.begin()) + 1;
+    if (value != scanValue) {
+        scanValue = value;
+        scanned = 0;
+    }
+    const auto at = std::find(rx.begin() + std::min(scanned, rx.size()), rx.end(), value);
+    scanned = size_t(at - rx.begin());
+    return at == rx.end() ? rx.size() : scanned + 1;
 }
 
 void HostLink68k::Send(const uint8_t* data, size_t size) {

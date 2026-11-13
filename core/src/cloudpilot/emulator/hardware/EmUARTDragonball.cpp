@@ -281,6 +281,8 @@ void EmUARTDragonball::StateChanged(State& newState, Bool sendTxData) {
         // Nothing to do here.
     }
 
+    config.fIrda = newState.IRDA_ENABLE;
+
     // Establish the new settings.  Do this only when the UART is
     // enabled, to help reduce the thrashing on the host serial port,
     // and to help prevent the installation of invalid settings (which
