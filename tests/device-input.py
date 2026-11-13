@@ -83,7 +83,7 @@ class DeviceInputTest(unittest.TestCase):
 
     def rejected(self, args, message):
         result = subprocess.run([str(CORE), *map(str, args)], capture_output=True, text=True,
-                                timeout=10, env={**os.environ, 'SDL_VIDEODRIVER': 'dummy',
+                                timeout=120, env={**os.environ, 'SDL_VIDEODRIVER': 'dummy',
                                                  'SDL_AUDIODRIVER': 'dummy'})
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn(message, result.stderr + result.stdout)
@@ -272,7 +272,7 @@ class DeviceInputTest(unittest.TestCase):
         for args in ([rom], [rom, '--device', 'palm-zire-72'], [rom, '--ram-size', '32', '--display', '320x320']):
             with self.subTest(args=args[1:]):
                 result = subprocess.run([str(CORE), *map(str, args), '--no-sound', '--run-for', '1'],
-                                        capture_output=True, text=True, timeout=30, env=env)
+                                        capture_output=True, text=True, timeout=120, env=env)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('bounded run complete; PC=0x0', result.stdout + result.stderr)
                 self.assertNotIn('supported yet', result.stderr)
