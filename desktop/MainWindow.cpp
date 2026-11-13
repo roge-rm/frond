@@ -211,6 +211,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
     cardLayout->addWidget(danaCards);
     connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,runningDevice,this); dialog.exec(); });
+    stickFiles = button(tr("Files…"), "stickFiles", true);
+    cardLayout->addWidget(stickFiles);
+    connect(stickFiles, &QPushButton::clicked, this, &MainWindow::openStickFiles);
     printerPanel = new PrinterPanel(root);
     connectionsLayout->addWidget(printerPanel);
     connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
@@ -1167,6 +1170,9 @@ void MainWindow::refresh() {
     printerPanel->setEnabled(running && !stopping);
     irPrint.panel->setEnabled(running && !stopping);
     danaCards->setEnabled(linkedCards && client.available() && !busy && !stopping);
+    const bool linkedStick = linkedCards && deviceProfileLinkedStick5(frondFirmware::profile(currentDevice()));
+    stickFiles->setVisible(linkedStick);
+    stickFiles->setEnabled(linkedStick && client.available() && !busy && !stopping && !stickDialog);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
     note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
@@ -3022,7 +3028,8 @@ void MainWindow::stop(bool closeApp) {
     if (!client.running()) { if (closeApp) { allowClose = true; close(); } return; }
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
-    if (exchangeDialog) exchangeDialog->reject();
+    if (stickDialog) stickDialog->reject();
+    else if (exchangeDialog) exchangeDialog->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else notify(tr("Waiting to save the session…"));
 }
@@ -3164,6 +3171,86 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         endExchange();
         notify(tr("Card put back in, ejected."));
     }
+}
+void MainWindow::openStickFiles() {
+    if (!client.available() || busy || stopping || stickDialog || sessionPath.isEmpty()) return;
+    auto request = [this](const QString& command, const QString& argument = {}) {
+        return DanaCardsDialog::requestWithClient(client, command, argument);
+    };
+    const auto reply = request("ms-state");
+    const auto state = reply.ok ? frondDanaCards::state(reply.message) : frondDanaCards::State{};
+    if (!state.known) return failure(reply.ok ? tr("Couldn't read the Memory Stick slot.") : reply.message);
+    if (!state.present) return failure(tr("There's no Memory Stick in the slot."));
+    if (state.failed) return failure(tr("The Memory Stick has an I/O error."));
+    const auto file = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/dana-cards/" + state.identity + ".frondms";
+    if (!QFileInfo(file).isFile()) return failure(tr("Couldn't find the Memory Stick's file."));
+    if (state.inserted && QMessageBox::question(this, tr("Open the stick's files?"),
+            tr("Close any files open on the Palm first. The stick is ejected while Files is open and goes back in when you close it."),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    if (!client.available() || busy || stopping || stickDialog) return;
+    busy = true; refresh();
+    stickIdentity = state.identity; stickProtected = state.protectedCard; stickWasInserted = state.inserted;
+    auto fail = [this](const QString& message) { busy = false; refresh(); failure(message); };
+    if (state.inserted) {
+        if (const auto r = request("ms-eject"); !r.ok) return fail(frondDanaCards::message(r.message));
+    }
+    if (const auto r = request("ms-take-out"); !r.ok) {
+        if (state.inserted) request("ms-insert");
+        return fail(frondDanaCards::message(r.message));
+    }
+    // Saved without the stick: a machine that dies from here on starts with the slot empty and the
+    // stick free in Memory Stick….
+    QString error;
+    if (const auto r = request("save", sessionPath); !r.ok) error = tr("Couldn't save the machine, so the stick wasn't opened. %1").arg(r.message);
+    else {
+        settings.setValue("lastSession", sessionPath); settings.sync();
+        QFile::remove(frondSessions::markerPath(sessionPath));
+        QFile::remove(frondSessions::workPath(sessionPath));
+    }
+    std::unique_ptr<frondCardFile::CardFile> card;
+    if (error.isEmpty()) {
+        try {
+            card = frondCardFile::CardFile::open(file, !stickProtected);
+            frondCardFile::FatImage check(*card);
+        } catch (const frondCardFile::Error& e) {
+            error = e.message;
+            card.reset();
+        }
+    }
+    busy = false;
+    if (!error.isEmpty()) {
+        // The stick goes back in as it was.
+        failure(error);
+        stickFilesClosed();
+        return;
+    }
+    auto* dialog = new CardFilesWindow(std::move(card), tr("Memory Stick"), this);
+    dialog->deleteOnClose = true;
+    dialog->setWindowModality(Qt::WindowModal);
+    stickDialog = dialog;
+    connect(dialog, &QDialog::finished, this, &MainWindow::stickFilesClosed);
+    refresh();
+    dialog->QDialog::open();
+}
+// Files closed: the stick's file is closed and goes back in the Palm.
+void MainWindow::stickFilesClosed() {
+    if (stickDialog) { stickDialog->closeCard(); stickDialog->disconnect(this); }
+    stickDialog = nullptr;
+    if (stickIdentity.isEmpty()) return;
+    const auto identity = stickIdentity;
+    stickIdentity.clear();
+    if (!client.available()) {
+        failure(tr("The emulator stopped. The Memory Stick is kept in Memory Stick…, under Attach saved."));
+        return;
+    }
+    busy = true; refresh();
+    const auto put = DanaCardsDialog::requestWithClient(client, "ms-put-in", identity + (stickProtected ? " protected" : " writable"));
+    if (put.ok && !stickWasInserted) DanaCardsDialog::requestWithClient(client, "ms-eject");
+    busy = false; refresh();
+    if (!put.ok)
+        failure(tr("Couldn't put the Memory Stick back in. It's kept in Memory Stick…, under Attach saved. %1").arg(put.message));
+    else notify(stickWasInserted ? tr("Memory Stick put back in.") : tr("Memory Stick put back in, ejected."));
+    if (stopping && client.available()) save();
 }
 // The card is out of the core in the machine folder's card file (sd.frondsd, ms.frondms or
 // ms.frondmsp): opens it in Files.

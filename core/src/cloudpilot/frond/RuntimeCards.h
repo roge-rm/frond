@@ -6,6 +6,7 @@
 #include "../../uarm/uarm/SessionIo.h"
 #include <sys/file.h>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 // Linked sessions retain live external backings. Completed writes never rewind with machine state.
@@ -38,6 +39,9 @@ class RuntimeCards {
     };
     std::shared_ptr<Card> cards[2];
     std::shared_ptr<Card> stick;
+    // The stick the last ms-take-out released, for ms-put-in.
+    struct TakenOut { std::string path, key; bool protectedCard{}; };
+    std::optional<TakenOut> takenOut;
     int32_t deviceType{deviceTypeDana};
     static bool ValidGeometry(int32_t deviceType, unsigned id, const std::string& protocol, uint64_t bytes) {
         if (protocol != "sd" && protocol != "mmc") return false;
@@ -324,10 +328,28 @@ class RuntimeCards {
         for (auto& card : cards) if (card) gExternalStorage.RemoveImage(card->key);
         if (stick) gExternalStorage.RemoveImage(stick->key);
     }
-    // The Memory Stick's commands (ms-state, ms-attach, ms-eject, ms-insert, ms-protect, ms-export, ms-take-out).
+    // The Memory Stick's commands (ms-state, ms-attach, ms-eject, ms-insert, ms-protect, ms-export,
+    // ms-take-out, ms-put-in). Files on the stick is take-out, the frontend editing the settled file,
+    // then put-in, as on the TG50.
     std::string StickCommand(const std::string& op, const std::string& argument) {
         constexpr auto msSlot = EmHAL::Slot::memorystick;
         if (!StickSlot()) return "error: unsupported device";
+        // "IDENTITY [protected|writable]": the stick the last take-out released goes back in, inserted.
+        if (op == "put-in") {
+            if (stick) return "error: take out the current stick first";
+            if (!takenOut) return "error: no stick was taken out";
+            std::istringstream words(argument);
+            std::string key, policy, extra;
+            if (!(words >> key) || key != takenOut->key || ((words >> policy) && (words >> extra)) ||
+                (!policy.empty() && policy != "protected" && policy != "writable"))
+                return "error: use the taken-out stick's identity, then protected or writable";
+            const bool protect = policy.empty() ? takenOut->protectedCard : policy == "protected";
+            std::ostringstream attach;
+            attach << std::quoted(takenOut->path) << " " << key << " " << (protect ? "protected" : "writable");
+            const auto reply = StickCommand("attach", attach.str());
+            if (reply == "inserted") takenOut.reset();
+            return reply;
+        }
         if (op == "state" && argument.empty())
             return !stick ? "none" : (gExternalStorage.IsMounted(msSlot) ? "inserted " : "ejected ") +
                 stick->key + (stick->protectedCard ? " protected" : " writable") + (stick->failed ? " io-error" : "");
@@ -373,8 +395,9 @@ class RuntimeCards {
             if (argument != "on" && argument != "off") return "error: use on or off";
             if (gExternalStorage.IsMounted(msSlot)) return "error: eject first";
             const auto key = stick->key;
-            gExternalStorage.RemoveImage(key);
+            // Settled before the image leaves, so a failure leaves the stick as it was.
             if (!stick->Settle()) return "error: stick I/O failed";
+            gExternalStorage.RemoveImage(key);
             stick->protectedCard = argument == "on";
             BindImage(stick, true);
             gExternalStorage.AddImage(key, stick->image);
@@ -400,6 +423,7 @@ class RuntimeCards {
             gExternalStorage.RemoveImage(stick->key);
             const auto path = stick->path;
             const bool protect = stick->protectedCard;
+            takenOut = TakenOut{path, stick->key, protect};
             stick.reset();
             if (!protect) FileCardBacking::DiscardGenerations(path);
             return "taken-out";

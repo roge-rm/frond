@@ -145,6 +145,7 @@ class RunningModel(
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            danaCards?.let { cards -> withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} } }
             slotShown = slot
             state = s
             writeProtected = protection

@@ -259,6 +259,8 @@ SD cards and Memory Sticks: Files opens the card in a file manager and changes i
 - Each change is written as you make it, and only what it touches. If Frond is stopped part way, the card is fixed the next time it's opened, with the change done or not.
 - A write protected card can be browsed and exported only. While a card is open in Files it can't be moved, taken out or deleted. Files reads and writes FAT12 and FAT16, and refuses a FAT32 card.
 
+On the T415, Files is beside Memory Stick… in the Storage panel and on the Memory Stick row on Android. It ejects the stick, takes it out of the machine and saves the session, so if Frond stops while Files is open the stick is still under Attach saved. Closing Files puts it back in, ejected again if it was out before.
+
 A classic Memory Stick opens in Files only when its last write is finished; if not, put it in the TG50 once. A blank stick, new or put in a TG50 but never formatted, is formatted the way the TG50 does it the first time Files opens it.
 
 Internal lists the databases in the Palm's RAM by file name, with their type and creator, while the machine runs. Add files installs PRC and PDB files (on Linux a dropped folder installs the files in it), Export… writes the selected databases to a folder as PRC and PDB files, and Delete removes them. There are no folders, so Add folder, Cut, Copy, Paste, Rename and New folder aren't there. As in Applications, the Palm refuses a database that is open or in ROM.

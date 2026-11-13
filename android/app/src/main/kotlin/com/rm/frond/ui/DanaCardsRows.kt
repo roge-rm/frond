@@ -34,6 +34,7 @@ fun DanaCardsRows(model: RunningModel) {
     var writeProtected by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf<StorageSlot?>(null) }
     var ejecting by remember { mutableStateOf<StorageSlot?>(null) }
+    var openingFiles by remember { mutableStateOf(false) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val slot = selected
         val type = family
@@ -68,6 +69,10 @@ fun DanaCardsRows(model: RunningModel) {
                         Text(if (card.inserted) "Eject" else "Insert")
                     }
                     if (!card.inserted) TextButton(enabled = usable && !card.failed, onClick = { model.danaJob { it.command(slot, "take-out") } }) { Text("Remove") }
+                    // A stick's files open as the TG50's do: take-out, Files on its file, put-in.
+                    if (slot.stick) TextButton(enabled = usable && !card.failed, onClick = {
+                        if (card.inserted) openingFiles = true else model.openFiles()
+                    }) { Text("Files…") }
                     TextButton(enabled = usable && !card.failed, onClick = { exporting = slot; export.launch("${cards.device.label} ${if (slot.stick) "stick.frondms" else "card ${slot.label}.frondsd"}") }) { Text("Export") }
                 }
                 if (!state.known) TextButton(enabled = model.busy == null, onClick = { model.danaJob() }) { Text("Try again") }
@@ -102,6 +107,10 @@ fun DanaCardsRows(model: RunningModel) {
             }
         }, confirmButton = { TextButton(onClick = { selected = null }) { Text("Close") } })
     }
+    if (openingFiles) AlertDialog(onDismissRequest = { openingFiles = false }, title = { Text("Open the stick's files?") },
+        text = { Text("Close files open on the Palm first. The stick is ejected while Files is open and goes back in when you close it.") },
+        confirmButton = { TextButton(onClick = { model.openFiles(); openingFiles = false }) { Text("Open") } },
+        dismissButton = { TextButton(onClick = { openingFiles = false }) { Text("Cancel") } })
     ejecting?.let { slot ->
         AlertDialog(onDismissRequest = { ejecting = null }, title = { Text("Eject ${slot.title.lowercase()}?") },
             text = { Text("Close files open on the Palm first.") },

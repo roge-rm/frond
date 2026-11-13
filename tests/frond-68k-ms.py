@@ -4,7 +4,9 @@
   tests/frond-68k-ms.py --session SESSION.frond --probe FrondMSProbe.prc --evidence DIR [--tg50-stick FILE]
 
 A blank stick is made, attached, formatted by the guest (the probe's format step), written and read
-back, ejected and inserted, write protected, saved with the stick and loaded again. --tg50-stick is
+back, ejected and inserted, write protected, saved with the stick and loaded again, then taken out
+for Files: the frontends' Files edits the freed file host-side (--storage-tool, build/test-storage-ms
+from make test-storage-ms, stands in for it) and put-in links it again. --tg50-stick is
 a formatted stick a TG50 wrote: the T415 has to mount it. Build the probe with
 tools/build-palm-probe.py ms. The core runs at original speed, so it takes a few minutes.
 """
@@ -20,6 +22,7 @@ p.add_argument('--probe', type=Path, required=True)
 p.add_argument('--evidence', type=Path, required=True)
 p.add_argument('--core', type=Path, default=ROOT / 'out/frond-68k')
 p.add_argument('--card-tool', type=Path, default=ROOT / 'out/frond')
+p.add_argument('--storage-tool', type=Path, default=ROOT / 'build/test-storage-ms')
 p.add_argument('--tg50-stick', type=Path)
 p.add_argument('--size', type=int, default=8)
 a = p.parse_args()
@@ -165,6 +168,31 @@ try:
     card(c, 'ms-state', f'inserted {KEY} writable')
     rows = probe_run(c, 'reloaded')
     mounts(rows)
+
+    # Files: only an ejected stick comes out, and put-in takes back only the stick taken out.
+    card(c, 'ms-take-out', 'eject first')
+    card(c, 'ms-eject', 'ejected'); time.sleep(2)
+    card(c, f'ms-put-in {KEY}', 'take out the current stick first')
+    card(c, 'ms-take-out', 'taken-out')
+    card(c, 'ms-state', 'none')
+    tool = str(a.storage_tool.resolve())
+    listing = subprocess.run([tool, 'ls', str(stick)], capture_output=True, text=True)
+    print(listing.stdout, listing.stderr, flush=True)
+    assert listing.returncode == 0 and 'GUEST.TXT' in listing.stdout.upper(), listing
+    added = subprocess.run([tool, 'put', str(stick), 'HOST.TXT', 'from the host'], capture_output=True, text=True)
+    assert added.returncode == 0, added
+    card(c, f'ms-put-in {"2" * 32} writable', 'identity')
+    card(c, f'ms-put-in {KEY} writable', 'inserted')
+    card(c, 'ms-state', f'inserted {KEY} writable')
+    time.sleep(8)
+    rows = probe_run(c, 'after-files')
+    mounts(rows)
+    card(c, 'ms-eject', 'ejected'); time.sleep(2)
+    card(c, 'ms-take-out', 'taken-out')
+    listing = subprocess.run([tool, 'ls', str(stick)], capture_output=True, text=True)
+    print(listing.stdout, listing.stderr, flush=True)
+    assert listing.returncode == 0 and 'HOST.TXT 13' in listing.stdout and 'GUEST.TXT' in listing.stdout.upper(), listing
+    card(c, f'ms-put-in {KEY}', 'inserted')
 finally:
     stop(c)
 

@@ -310,6 +310,14 @@ class MainWindow : public QMainWindow {
     bool holdKnown{false}, holdOn{false};
     QLabel *sdStatus, *storageHeading;
     QPushButton* danaCards;
+    // Files… on a 68k device's linked Memory Stick (the T415): eject, take it out of the core, save,
+    // edit its dana-cards/ file in place, then put it back in (ejected again if it was out).
+    QPushButton* stickFiles;
+    QPointer<CardFilesWindow> stickDialog;
+    QString stickIdentity;
+    bool stickProtected{false}, stickWasInserted{false};
+    void openStickFiles();
+    void stickFilesClosed();
     // Files… on the running machine's SD card: eject, save, take the card out into the machine
     // folder's sd.frondsd, edit it there in place, then put it back in (ejected again if it was out).
     enum class ExchangeStage { None, Eject, Save, TakeOut, Open, PutIn, EjectAgain };
