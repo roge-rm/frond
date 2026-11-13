@@ -44,7 +44,9 @@ inline void fillMedia(frondMachine::Media& media, uint64_t rawBytes) {
 }
 
 // Opens `path` (a checked nand.frondnand) as a backing with its chunk CRCs.
-inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& path, uint64_t rawBytes) {
+// `keepHeld`: opened inside HoldGenerations, see FileCardOptions.
+inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& path, uint64_t rawBytes,
+                                                 bool keepHeld = false) {
     frondSdFile::Info info;
     std::vector<uint32_t> table;
     if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok || !info.nand ||
@@ -54,6 +56,7 @@ inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& pa
     FileCardOptions options;
     // Saves adopt the file without Commit, like the uARM SD card, so leftover generations are resumed.
     options.recoverRootlessBase = true;
+    options.keepHeld = keepHeld;
     options.identity = identity;
     options.chunkCrcs = std::move(table);
     return FileCardBacking::Open(path, info.stored(), frondSdFile::headerBytes, options);
@@ -138,7 +141,7 @@ inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondN
     }
     // Generations go once the NAND is on its new backing, and come back if it can't move.
     auto held = FileCardBacking::HoldGenerations(sidecar);
-    auto fresh = openFile(sidecar, nandRawBytes(nand));
+    auto fresh = openFile(sidecar, nandRawBytes(nand), true);
     if (!fresh || !nandAdoptBacking(nand, std::move(fresh), sideOffset(nandRawBytes(nand)), &tracked)) {
         fresh.reset();
         held.Return();

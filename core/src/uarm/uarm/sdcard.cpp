@@ -28,6 +28,9 @@ namespace {
     char cardId[SD_CARD_ID_MAX_LEN + 1];
     uint64_t epoch = 0;
 
+    // Test hooks for the Open a move onto a saved file makes.
+    FileCardIoHooks* adoptHooks = nullptr;
+
     // Sectors written while a background save writes (sdCardTrackWrites), one bit each, so the
     // note never outgrows the card.
     bool trackWrites = false;
@@ -190,8 +193,9 @@ bool sdCardAdoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t p
     if (!sidecarChunks(path, payloadBytes, payloadOffset, options.chunkCrcs)) return false;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> tracked;
     if (!takeTracked(tracked)) return false;
+    options.keepHeld = true;
     auto held = FileCardBacking::HoldGenerations(path);
-    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
+    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options, adoptHooks);
     if (!fresh || !replayTracked(*fresh, tracked)) {
         fresh.reset();
         held.Return();
@@ -273,8 +277,9 @@ bool sdCardAdoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadO
     if (!takeTracked(tracked)) return false;
     // The sidecar now holds the live bytes, so generations beside it are never needed again; they
     // go once the card is on its new backing, and come back if it can't move.
+    options.keepHeld = true;
     auto held = FileCardBacking::HoldGenerations(path);
-    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options);
+    auto fresh = FileCardBacking::Open(path, payloadBytes, payloadOffset, options, adoptHooks);
     if (!fresh || !replayTracked(*fresh, tracked)) {
         fresh.reset();
         held.Return();
@@ -334,6 +339,8 @@ bool sdCardIsDirty() { return sdCardDirty; }
 void sdCardSetDirty(bool isDirty) { sdCardDirty = isDirty; }
 
 const char* sdCardGetId() { return sdCardInitialized() ? cardId : ""; }
+
+void sdCardSetAdoptHooks(FileCardIoHooks* hooks) { adoptHooks = hooks; }
 
 void sdCardTrackWrites(bool on) {
     trackWrites = on;

@@ -36,6 +36,8 @@ struct FileCardOptions {
     // it is read from the durable file; a mismatch fails the read. Empty means no check.
     std::vector<uint32_t> chunkCrcs;
     uint32_t chunkBytes = 1u << 20;
+    // An Open between HoldGenerations and Return or Drop: leaves the .held- files alone.
+    bool keepHeld = false;
 };
 
 struct FileCardIoHooks {
@@ -130,10 +132,16 @@ class FileCardBacking : public CardBacking {
     // onto `durable` that may still fail. Open descriptors on them stay valid across the renames.
     struct HeldGenerations {
         std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;  // original, held
-        // The move failed: they go back under their own names.
+        // The move failed: they go back under their own names, the root last, so a crash part way
+        // never leaves a root whose generations are still held.
         void Return() {
             std::error_code ec;
-            for (const auto& [original, held] : moved) std::filesystem::rename(held, original, ec);
+            for (int rootPass = 0; rootPass < 2; ++rootPass)
+                for (const auto& [original, held] : moved) {
+                    const auto name = original.filename().string();
+                    const bool root = name.size() > 5 && name.compare(name.size() - 5, 5, "-root") == 0;
+                    if (root == bool(rootPass)) std::filesystem::rename(held, original, ec);
+                }
             moved.clear();
         }
         // The move worked: they go.
@@ -335,9 +343,10 @@ class FileCardBacking : public CardBacking {
             }
         }
 
-        // True when `path` names the file open on `fd`, or when there's no descriptor to compare.
+        // True when `path` names the file open on `fd`. Without a descriptor it can't tell, so the
+        // name is left alone.
         static bool sameFile(int fd, const std::filesystem::path& path) {
-            if (fd < 0) return true;
+            if (fd < 0) return false;
             struct stat open {}, named {};
             if (fstat(fd, &open) != 0 || stat(path.c_str(), &named) != 0) return false;
             return open.st_dev == named.st_dev && open.st_ino == named.st_ino;
@@ -579,7 +588,7 @@ class FileCardBacking : public CardBacking {
             if (dir.empty()) dir = ".";
             tag = durable.filename().string();
             if (tag.empty()) return false;
-            SettleHeld(durable);
+            if (!options.keepHeld) SettleHeld(durable);
             payloadOffset = off;
             payloadSize = size;
             pageSize = options.pageSize;

@@ -181,6 +181,13 @@ void memoryStickReplay(const fs::path& dir) {
     const auto live = cardBytes(0, kCard);
     writeFile(path, snapshot);
 
+    FileCardIoHooks full;
+    full.failWriteAfter = 0;
+    sdCardSetAdoptHooks(&full);
+    check(!sdCardAdoptSavedFromRam(path.c_str(), kCard, 0), "a Memory Stick move whose replay fails fails");
+    sdCardSetAdoptHooks(nullptr);
+    check(!sdCardFileBacked() && cardBytes(0, kCard) == live, "the Memory Stick stays in RAM with every write");
+    check(countPrefix(dir, ".held-") == 0 && countPrefix(dir, ".gen-") == 0, "no files left by the failed move");
     check(sdCardAdoptSavedFromRam(path.c_str(), kCard, 0), "adopt the saved file from RAM");
     sdCardTrackWrites(false);
     check(sdCardFileBacked(), "the card runs on the file");
@@ -200,9 +207,25 @@ void failedMoveKeepsGenerations(const fs::path& dir) {
     const auto live = cardBytes(0, kCard);
     check(countPrefix(dir, ".gen-") > 0, "the running card has generation files");
 
-    // A save published a file the card can't open (too short): the move fails, nothing is lost.
+    // A save published a good file but the replay onto it fails (disk full): the move fails and
+    // the card keeps running on its generations, which are all back.
     sdCardTrackWrites(true);
     check(sdCardWrite(10, sector.data()), "write sector 10 after the snapshot");
+    {
+        const auto liveNow = cardBytes(0, kCard);
+        writeFile(path, live);
+        const auto before = namesWith(dir, ".gen-");
+        FileCardIoHooks full;
+        full.failWriteAfter = 0;
+        sdCardSetAdoptHooks(&full);
+        check(!sdCardAdoptSaved(path.c_str(), kCard, 0), "a move whose replay fails fails");
+        sdCardSetAdoptHooks(nullptr);
+        check(full.writes > 0, "the replay reached the new backing");
+        check(namesWith(dir, ".gen-") == before, "after a failed replay its generations are all back");
+        check(countPrefix(dir, ".held-") == 0, "nothing left held after a failed replay");
+        check(cardBytes(0, kCard) == liveNow, "the card still reads every write after a failed replay");
+    }
+    // A save published a file the card can't open (too short): the move fails, nothing is lost.
     writeFile(path, std::vector<uint8_t>(4096));
     const auto gens = countPrefix(dir, ".gen-");
     check(!sdCardAdoptSaved(path.c_str(), kCard, 0), "a move onto a bad file fails");
