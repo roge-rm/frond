@@ -207,6 +207,10 @@ class Imx1Cs5Configuration {
     const Imx1GraphicsEngine& engineState() const { return engine; }
     void startEngine(uint64_t ticks) { engine.start(ticks); }
     void completeEngine(uint32_t option) { engine.complete(option); }
+    // An overlay word (4d8, 43c-450) a player's ring packet sets, when the engine reaches it.
+    Imx1BootstrapAccess ringDisplayWord(uint32_t offset, uint32_t value) {
+        return display.playerAccess(windows, 0x16010000 + offset, true, value);
+    }
     const Imx1GraphicsDisplay& displayState() const { return display; }
     const Imx1GraphicsInterrupts& interruptState() const { return interrupts; }
     Imx1GraphicsGpio::Bank gpioBank(unsigned index) const { return gpio.bank(index); }

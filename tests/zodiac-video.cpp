@@ -2,14 +2,17 @@
 // pointer reads, a display transaction (4d8) around VIDEO_CTRL 434, the window (454, 458), the Y/U/V offsets
 // and pitches (43c-450), the overlay format bits of 4d4 and DISP_DEBUG2 bit 30. The frame shows the YUV 4:2:0
 // planes over the graphic plane inside the window, mirrored or keyed when asked. The ROM's own overlay driver
-// (DAL 200ad8cc-200ad9fc and 200ae09c-200ae7a8), the second and third offset sets (55c-570) and the IDCT block
-// (c00-c3c) aren't modelled and still stop; the boot's VIDEO_CTRL clear works.
+// (DAL 200ad8cc-200ad9fc and 200ae09c-200ae7a8), the second and third offset sets (55c-570) and CPU access to the
+// IDCT block (c00-c3c) aren't modelled and still stop; the boot's VIDEO_CTRL clear works. playerEngine covers
+// the player's own ring packets.
 #include <array>
 #include <cassert>
 #include <cstdio>
 #include <initializer_list>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_frame.h"
+#include "imx1_graphics_commands.h"
+#include <vector>
 
 using A = Imx1BootstrapAccess;
 
@@ -62,6 +65,147 @@ static void display(Imx1Cs5Configuration& state, const Imx1Eim& eim) {
     transaction(state, eim, false);
     state.advanceCpuCycles(32);
     assert(state.displayState().lcdEnabled());
+}
+
+// A player's own ring packets (ati4200.c): NOPs and register writes, the reads of the words it saves, the plane
+// stretch, the overlay words its flip sends and IDCT macroblocks.
+static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+    Imx1GraphicsCommands commands;
+    auto poke = [&](uint32_t address, uint32_t bytes, uint32_t data) {
+        assert(memory.accessGpu(state, eim, address, bytes, true, data) == A::ok);
+    };
+    auto peek = [&](uint32_t address) {
+        uint32_t data = 0;
+        assert(memory.accessGpu(state, eim, address, 1, false, data) == A::ok);
+        return data;
+    };
+    // Writes the words at the producer and submits them as the player; the engine then runs them to the end.
+    auto submit = [&](const std::vector<uint32_t>& words, bool run = true) {
+        uint32_t at = state.engineState().producer();
+        for (uint32_t word : words) {
+            poke(0x150000 + at * 4, 4, word);
+            at = (at + 1) & 16383;
+        }
+        auto candidate = state;
+        auto work = commands;
+        A status = candidate.access(eim, player, 0x16010220, 4, true, at);
+        if (status == A::ok) status = work.prepare(candidate, eim, memory);
+        if (status != A::ok) return status;
+        candidate.startEngine(work.duration());
+        state = candidate;
+        commands = std::move(work);
+        if (!run) return A::ok;
+        assert(state.advanceCpuCycles(uint32_t(commands.duration())));
+        return commands.complete(state, eim, memory);
+    };
+    auto reg = [](uint32_t index, uint32_t value) { return std::vector<uint32_t>{index, value}; };
+    auto join = [](std::initializer_list<std::vector<uint32_t>> parts) {
+        std::vector<uint32_t> all;
+        for (const auto& part : parts) all.insert(all.end(), part.begin(), part.end());
+        return all;
+    };
+    uint32_t value = 0;
+    // Saved words read nothing before a packet sets them, and only from 16011000 on and c3c.
+    assert(commands.playerRead(0x1601106c, value) == A::sequence);
+    // NOP2, NOP3, the type 3 NOP, then the backup words as RingEnd restores them.
+    const uint32_t saved[][2] = {{0x41b, 0x5798b4df}, {0x472, 0x3f}, {0x4b2, 0x00cc0b00}, {0x4b1, 0x40030d04},
+        {0x401, 0x800000}, {0x402, 8}, {0x46b, 0x800000}, {0x46c, 8}, {0x488, 4}, {0x30f, 0}, {0x42e, 0},
+        {0x42f, 0}, {0x430, 0}, {0x431, 0}, {0x432, 0}, {0x433, 0}};
+    std::vector<uint32_t> restore = {0, 0xdead, 0x40000800, 1, 2, 0xc0011000, 3, 4, 0x30e, 0, 0x46f, 0,
+                                      0x470, 0x1fff1fff, 0x471, 0x1fff1fff};
+    for (auto& pair : saved) { restore.push_back(pair[0]); restore.push_back(pair[1]); }
+    assert(submit(restore, false) == A::ok);
+    assert(commands.playerRead(0x1601106c, value) == A::sequence);
+    assert(state.advanceCpuCycles(uint32_t(commands.duration())) && commands.complete(state, eim, memory) == A::ok);
+    for (auto& pair : saved) {
+        value = 0xdeadbeef;
+        assert(commands.playerRead(0x16010000 + pair[0] * 4, value) == A::ok && value == pair[1]);
+    }
+    assert(commands.playerRead(0x16011284, value) == A::externalInput);
+    // Words outside the player's set, a type 3 packet other than NOP and IDCT, 30e other than 0: refused.
+    assert(submit(reg(0x423, 0)) == A::sideEffect && submit(reg(0x30e, 1)) == A::sideEffect);
+    assert(submit({0xc0001500, 0, 0}) == A::sideEffect);
+
+    // The plane stretch: a 4 by 2 source at 900000 (pitch 8) doubled into 900100 (pitch 16), smooth.
+    for (uint32_t n = 0; n < 24; ++n) poke(0x900000 + n, 1, n < 8 ? n * 16 : n < 16 ? 128 : 0);
+    auto stretch = [&](uint32_t sx, uint32_t width, uint32_t height, uint32_t ratio) {
+        return join({reg(0x41b, 0xd598b2df), reg(0x472, 0x3f), reg(0x4b2, 0x01cc1200), reg(0x4b1, 0x40037d02),
+                     reg(0x488, 0x02020008), reg(0x46f, 0), reg(0x470, 0x00100010), reg(0x401, 0x900100),
+                     reg(0x402, 16), reg(0x46b, 0x900000), reg(0x46c, 8), reg(0x418, 0x900000), reg(0x419, 8),
+                     reg(0x410, width + 1), reg(0x411, height), reg(0x412, ratio), reg(0x420, width + 1),
+                     reg(0x421, height), reg(0x422, ratio), reg(0x464, sx << 18), reg(0x416, sx << 18 | 4),
+                     reg(0x465, 0), reg(0x466, width << 16 | height)});
+    };
+    assert(submit(stretch(0, 6, 2, 0x00800080)) == A::ok);
+    // Row 0: 0, 8, 16, 24, ... halfway steps across; row 1 halfway to the 128 row below.
+    for (uint32_t x = 0; x < 6; ++x) {
+        assert(peek(0x900100 + x) == x * 8);
+        assert(peek(0x900110 + x) == (x * 8 + 128 + 1) / 2);
+    }
+    // Ratios outside 10-1ff, a source past its pitch and the ROM's own 16 bit datatype are refused.
+    assert(submit(stretch(0, 6, 2, 0x00800008)) == A::sideEffect);
+    assert(submit(stretch(5, 6, 2, 0x00800080)) == A::sideEffect);
+    assert(submit(join({stretch(0, 6, 2, 0x00800080), reg(0x4b1, 0x40037d04), reg(0x466, 6 << 16 | 2)})) == A::sideEffect);
+
+    // The flip: 4d8 = 78, the Y offset, 4d8 = 7b through the ring, set when the engine gets there.
+    assert(submit(join({reg(0x136, 0x78), reg(0x10f, 0x900040), reg(0x136, 0x7b)}), false) == A::ok);
+    assert(load(state, eim, 0x43c) != 0x900040);
+    assert(state.advanceCpuCycles(uint32_t(commands.duration())) && commands.complete(state, eim, memory) == A::ok);
+    assert(load(state, eim, 0x43c) == 0x900040);
+
+    // An intra macroblock with only DC coefficients: luma blocks 100 to 103, U 50, V 60. Y at a00000 pitch 16,
+    // U at a00100 and V at a00200 pitch 8.
+    auto block = [](bool first, int dc) {
+        std::vector<uint32_t> words = first ? std::vector<uint32_t>{7, 0} : std::vector<uint32_t>{2};
+        words.insert(words.end(), {1, 0x00ffffff, uint32_t(dc * 8) << 16, 0});
+        return words;
+    };
+    auto macroblock = [](const std::vector<uint32_t>& body) {
+        std::vector<uint32_t> words = {0x4a1, 0, 0xc0003200 | uint32_t(body.size() - 1) << 16};
+        words.insert(words.end(), body.begin(), body.end());
+        return words;
+    };
+    assert(submit(reg(0x402, 8)) == A::ok);
+    const auto intra = join({block(true, 100), block(false, 101), block(false, 102), block(false, 103),
+        block(false, 50), block(false, 60), {5, 0x20f, 0x2da00003, 0, 0, 8 << 16, 32 << 16, 8, 32, 8 << 16 | 8,
+        32 << 16 | 32, 0, 0, 0x2ca00103, 0, 0, 0x2ca00203}});
+    assert(submit(macroblock(intra)) == A::ok);
+    for (uint32_t y = 0; y < 16; ++y)
+        for (uint32_t x = 0; x < 16; ++x) assert(peek(0xa00000 + y * 16 + x) == 100u + (x >= 8) + 2 * (y >= 8));
+    for (uint32_t y = 0; y < 8; ++y)
+        for (uint32_t x = 0; x < 8; ++x) assert(peek(0xa00100 + y * 8 + x) == 50 && peek(0xa00200 + y * 8 + x) == 60);
+    // An AC coefficient: one horizontal cosine cycle over the block on a DC of 80.
+    const auto wave = join({{7, 0, 1, 0x0000ffff, uint32_t(80 * 8) << 16 | uint32_t(uint16_t(-40)), 0}, block(false, 0),
+        block(false, 0), block(false, 0), block(false, 0), block(false, 0), {5, 0x20f, 0x2da00403, 0, 0, 8 << 16,
+        32 << 16, 8, 32, 8 << 16 | 8, 32 << 16 | 32, 0, 0, 0x2ca00503, 0, 0, 0x2ca00603}});
+    assert(submit(macroblock(wave)) == A::ok);
+    const uint32_t row[8] = {73, 74, 76, 79, 81, 84, 86, 87};
+    for (uint32_t x = 0; x < 8; ++x) assert(peek(0xa00400 + x) == row[x] && peek(0xa00470 + x) == row[x]);
+
+    // A copy from the intra picture (REF1-3) half a pixel to the right: mode b, no coefficients.
+    assert(submit(join({reg(0x42e, 16 << 19 | 0xa0000), reg(0x42f, 8 << 19 | 0xa0010), reg(0x430, 8 << 19 | 0xa0020)})) == A::ok);
+    auto inter = [](uint32_t mv) {
+        return std::vector<uint32_t>{5, 0x20b, 0x2da00800, 0, mv, 8 << 16, (32 << 16) + mv, 8, 32 + mv, 8 << 16 | 8,
+                                     (32 << 16 | 32) + mv, 0, mv, 0x30a00901, 0, mv, 0x34a00a02};
+    };
+    assert(submit(macroblock(inter(2 << 16))) == A::ok);
+    for (uint32_t y = 0; y < 16; ++y) {
+        // Column 7 averages 100 or 102 with the block to its right, rounding up; column 15 with the 0 past it.
+        assert(peek(0xa00800 + y * 16 + 6) == 100u + 2 * (y >= 8));
+        assert(peek(0xa00800 + y * 16 + 7) == 101u + 2 * (y >= 8));
+        assert(peek(0xa00800 + y * 16 + 8) == 101u + 2 * (y >= 8));
+    }
+    assert(peek(0xa00900) == 50 && peek(0xa00a00) == 60);
+    // Quarter pixel sources, an unknown mode and a plane word for the wrong plane are refused.
+    assert(submit(macroblock(inter(1 << 16))) == A::sideEffect);
+    auto badMode = inter(0);
+    badMode[1] = 0x20a;
+    assert(submit(macroblock(badMode)) == A::sideEffect);
+    auto badPlane = inter(0);
+    badPlane[13] = 0x34a00901;
+    assert(submit(macroblock(badPlane)) == A::sideEffect);
+    std::printf("PASS: player ring NOPs, register writes and saved word reads, plane stretch, ring overlay flip, "
+                "intra and half pixel inter IDCT macroblocks, refusals\n");
 }
 
 int main() {
@@ -119,10 +263,10 @@ int main() {
     }
 
     // What ati4200.c reads first: the ring set-up and pointers, the busy bit and the active area.
-    assert(load(state, eim, 0x210) == 0x0800000d && load(state, eim, 0x214) == 0x10150000);
+    assert(load(state, eim, 0x210) == 0x0800000d && load(state, eim, 0x214) == 0x150000);
     assert(load(state, eim, 0x21c) == 0 && load(state, eim, 0x220) == 0 && load(state, eim, 0x140) == 0);
     assert(load(state, eim, 0x424) == 0x40001 && load(state, eim, 0x428) == 0x30001);
-    assert(put(state, eim, 0x220, 0) != A::ok && put(state, eim, 0x424, 0) != A::ok);
+    assert(put(state, eim, 0x220, 0x4000) != A::ok && put(state, eim, 0x214, 0) != A::ok && put(state, eim, 0x424, 0) != A::ok);
     // Outside a transaction the overlay words don't take writes, and words never written don't read.
     assert(put(state, eim, 0x434, 0) == A::sequence);
     value = 0xdeadbeef;
@@ -224,4 +368,5 @@ int main() {
     assert(d.lcdEnabled() && d.activeWord(0x434) == (control | 0x14) && d.activeWord(0x538) == 0x40800000);
     std::printf("PASS: %u ROM overlay driver, offset set and IDCT accesses refused; player overlay shown, "
                 "mirrored, keyed and hidden over the graphic plane\n", refused);
+    playerEngine(state, eim, memory);
 }
