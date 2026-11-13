@@ -315,7 +315,7 @@ class MainWindow : public QMainWindow {
     QPushButton* stickFiles;
     QPointer<CardFilesWindow> stickDialog;
     QString stickIdentity;
-    bool stickProtected{false}, stickWasInserted{false};
+    bool stickProtected{false}, stickWasInserted{false}, stickFlow{false};
     void openStickFiles();
     void stickFilesClosed();
     // Files… on the running machine's SD card: eject, save, take the card out into the machine

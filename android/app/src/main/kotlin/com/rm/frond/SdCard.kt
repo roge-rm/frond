@@ -200,12 +200,20 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         if (!file.isFile) throw Failed("Couldn't find the Memory Stick's file.")
         wasInserted = stick.inserted
         protectedCard = stick.writeProtected
-        try {
-            if (stick.inserted) eject()
-            run(command("take-out"))
-        } catch (e: Exception) {
-            if (stick.inserted) try { reinsert() } catch (_: Exception) { }
-            throw e
+        if (stick.inserted) eject()
+        val out = link.request(command("take-out"), timeoutSeconds = 240, cancelRequested = { jobCancelled })
+        if (!out.ok) {
+            // A cancel or a timeout can leave the core finishing the take-out: go by the slot.
+            val now = link.request(command("state"), timeoutSeconds = 30)
+            val why = out.message
+            if (now.ok && now.message == "none") {
+                identity = stick.identity
+                putBack()
+            } else if (stick.inserted) {
+                val back = link.request(command("insert"), timeoutSeconds = 30)
+                if (!back.ok) throw Failed("$why The Memory Stick is still ejected: ${back.message}", out.code)
+            }
+            throw Failed(if (jobCancelled) "File transfer cancelled." else why, if (jobCancelled) "cancelled" else out.code)
         }
         identity = stick.identity
         try {

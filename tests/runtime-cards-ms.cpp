@@ -11,6 +11,7 @@
 #include "EmHAL.h"
 #include "ExternalStorage.h"
 #include "RuntimeCards.h"
+#include "storage/FatImage.h"
 
 // Stick writes the guest made reach the file when the machine quits without a save.
 static std::string ManifestFor(const std::string& path, const std::string& key, uint64_t stored) {
@@ -124,14 +125,57 @@ int main() {
         assert(cards.StickCommand("take-out", "") == "taken-out");
         assert(cards.StickCommand("put-in", key + " protected") == "inserted");
         assert(cards.StickCommand("state", "") == "inserted " + key + " protected");
-        // Only the last take-out goes back in.
+        // Put-in keeps the protection the take-out saw unless told otherwise.
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key) == "inserted");
+        assert(cards.StickCommand("state", "") == "inserted " + key + " protected");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key + " writable") == "inserted");
         assert(cards.StickCommand("eject", "") == "ejected");
         assert(cards.StickCommand("take-out", "") == "taken-out");
         assert(cards.StickCommand("put-in", key) == "inserted");
         assert(cards.StickCommand("eject", "") == "ejected");
         assert(cards.StickCommand("take-out", "") == "taken-out");
-        assert(cards.StickCommand("put-in", key) == "inserted");
         cards.Install(RuntimeCards::Pair{});
+    }
+    // A Files change cut off by a kill: the frontends settle the file before the stick attaches.
+    {
+        struct CutOff {};
+        {
+            frondStorage::CardFile c(path, true);
+            // The earlier writes leave it neither blank nor formatted: format it, then cut off a change.
+            frondStorage::FatImage::format(c);
+            c.crashHook = [&](const char* at) {
+                if (!strcmp(at, "partly")) {
+                    c.dead = true;
+                    throw CutOff();
+                }
+            };
+            bool cut = false;
+            try {
+                frondStorage::FatImage fat(c);
+                fat.makeFolder("/", "PALM");
+            } catch (const CutOff&) {
+                cut = true;
+            }
+            assert(cut);
+        }
+        assert(frondStorage::unsettled(path));
+        assert(frondStorage::settleCard(path));
+        assert(!frondStorage::unsettled(path));
+        RuntimeCards cards;
+        cards.SetDevice(deviceTypeT415);
+        std::ostringstream attach;
+        attach << std::quoted(path) << " " << key << " writable";
+        const auto reply = cards.StickCommand("attach", attach.str());
+        if (reply != "inserted") { std::cerr << reply << std::endl; return 1; }
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        frondStorage::CardFile c(path, false);
+        frondStorage::FatImage fat(c);
+        assert(fat.find("/MEMSTICK.IND"));
     }
     std::filesystem::remove_all(dir);
     puts("runtime-cards-ms ok");

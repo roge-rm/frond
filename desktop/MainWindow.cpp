@@ -3029,6 +3029,7 @@ void MainWindow::stop(bool closeApp) {
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
     if (stickDialog) stickDialog->reject();
+    else if (stickFlow) notify(tr("Waiting to save the session…"));
     else if (exchangeDialog) exchangeDialog->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else notify(tr("Waiting to save the session…"));
@@ -3188,16 +3189,45 @@ void MainWindow::openStickFiles() {
             tr("Close any files open on the Palm first. The stick is ejected while Files is open and goes back in when you close it."),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
     if (!client.available() || busy || stopping || stickDialog) return;
-    busy = true; refresh();
-    stickIdentity = state.identity; stickProtected = state.protectedCard; stickWasInserted = state.inserted;
-    auto fail = [this](const QString& message) { busy = false; refresh(); failure(message); };
+    // Each request runs a nested event loop, so the window can start stopping meanwhile; stop()
+    // leaves the save to this flow while stickFlow is set.
+    stickFlow = true; busy = true; refresh();
+    stickProtected = state.protectedCard; stickWasInserted = state.inserted;
+    // Ends the flow with the stick where it started, saving if the window is stopping.
+    auto finish = [this](const QString& message) {
+        stickFlow = false; busy = false; refresh();
+        if (!message.isEmpty()) failure(message);
+        if (stopping && client.available()) save();
+    };
+    // From take-out on: the stick goes back in through stickFilesClosed, which saves if stopping.
+    auto putBack = [this](const QString& message) {
+        stickFlow = false; busy = false;
+        if (!message.isEmpty()) failure(message);
+        stickFilesClosed();
+    };
     if (state.inserted) {
-        if (const auto r = request("ms-eject"); !r.ok) return fail(frondDanaCards::message(r.message));
+        if (const auto r = request("ms-eject"); !r.ok) return finish(frondDanaCards::message(r.message));
+    }
+    if (stopping || !client.available()) {
+        if (state.inserted) request("ms-insert");
+        return finish({});
     }
     if (const auto r = request("ms-take-out"); !r.ok) {
-        if (state.inserted) request("ms-insert");
-        return fail(frondDanaCards::message(r.message));
+        // A timeout can leave the core finishing the take-out: go by the slot.
+        const auto now = request("ms-state");
+        if (now.ok && now.message == "none") {
+            stickIdentity = state.identity;
+            return putBack(frondDanaCards::message(r.message));
+        }
+        auto message = frondDanaCards::message(r.message);
+        if (state.inserted) {
+            if (const auto back = request("ms-insert"); !back.ok)
+                message += ' ' + tr("The Memory Stick is still ejected: %1").arg(back.message);
+        }
+        return finish(message);
     }
+    stickIdentity = state.identity;
+    if (stopping || !client.available()) return putBack({});
     // Saved without the stick: a machine that dies from here on starts with the slot empty and the
     // stick free in Memory Stick….
     QString error;
@@ -3217,13 +3247,12 @@ void MainWindow::openStickFiles() {
             card.reset();
         }
     }
-    busy = false;
-    if (!error.isEmpty()) {
+    if (!error.isEmpty() || stopping || !client.available()) {
         // The stick goes back in as it was.
-        failure(error);
-        stickFilesClosed();
-        return;
+        card.reset();
+        return putBack(error);
     }
+    stickFlow = false; busy = false;
     auto* dialog = new CardFilesWindow(std::move(card), tr("Memory Stick"), this);
     dialog->deleteOnClose = true;
     dialog->setWindowModality(Qt::WindowModal);
