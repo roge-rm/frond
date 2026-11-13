@@ -1,4 +1,5 @@
 #include <cassert>
+#include <array>
 #include <cstdio>
 #include <initializer_list>
 #include "imx1_cs5_configuration.h"
@@ -77,6 +78,51 @@ int main() {
         assert(chip.access(wired, 0x200c5348, 0x16010b30, 2, false, value) == Access::width);
         value = 0x76543210;
         assert(chip.access(wired, 0x200c5348, 0x16010b30, 4, false, value) == Access::ok && value == 0);
+    }
+    {
+        // PWRMGT (98) from player code with the command ring busy: the read and bit 0 go through, another bit
+        // is refused, and the ROM's own clock writes still wait for an empty ring.
+        Imx1Eim wired;
+        uint32_t upper = 0x3e00, lower = 0x11111e01;
+        assert(wired.access(0x00220028, 4, true, upper) == Imx1EimAccess::ok);
+        assert(wired.access(0x0022002c, 4, true, lower) == Imx1EimAccess::ok);
+        Imx1Cs5Configuration chip(Imx1GraphicsProfile::virtual5744Compatible8MiB);
+        uint32_t value = 0x76543210;
+        configureGraphicsInterface(chip, wired);
+        configureGraphicsController(chip, wired);
+        constexpr uint32_t player = 0x4053a32c, pwrmgt = 0x16010098;
+        assert(chip.access(wired, 0x200acb98, 0x160113e8, 4, false, value) == Access::ok);
+        for (auto op : {std::array<uint32_t, 3>{0x200acba8, 0x13e8, 0x400}, {0x200acbb4, 0x144, 0x2440},
+                        {0x200acbc4, 0x10a8, 0x1fff1fff}, {0x200acbd0, 0x4dc, 0xc0000},
+                        {0x200b8e80, 0x214, 0x10150000}, {0x200b8e88, 0x220, 0},
+                        {0x200b8f04, 8, 0x04150000}, {0x200b8f10, 0x230, 0x80000000}, {0x200b8f20, 0x210, 0x0800000d}}) {
+            value = op[2];
+            assert(chip.access(wired, op[0], 0x16010000 + op[1], 4, true, value) == Access::ok);
+        }
+        value = 0;
+        assert(chip.access(wired, 0x200c573c, 0x16010098, 4, true, value) == Access::ok);
+        value = 0;
+        assert(chip.access(wired, player, pwrmgt, 4, false, value) == Access::ok);
+        const uint32_t idle = value;
+        value = 4;
+        assert(chip.access(wired, player, 0x16010220, 4, true, value) == Access::ok);
+        assert(!chip.engineState().emptyRing());
+        value = 0;
+        assert(chip.access(wired, player, 0x16010140, 4, false, value) == Access::ok && value == 0x80000000);
+        value = 0;
+        assert(chip.access(wired, player, pwrmgt, 4, false, value) == Access::ok && value == idle);
+        value = idle ^ 1;
+        assert(chip.access(wired, player, pwrmgt, 4, true, value) == Access::ok);
+        value = 0;
+        assert(chip.access(wired, player, pwrmgt, 4, false, value) == Access::ok && value == (idle ^ 1));
+        for (uint32_t bit : {2u, 4u, 0x100u, 0x80000000u}) {
+            value = (idle ^ 1) ^ bit;
+            assert(chip.access(wired, player, pwrmgt, 4, true, value) == Access::sideEffect);
+            assert(value == ((idle ^ 1) ^ bit));
+        }
+        value = 0;
+        assert(chip.access(wired, player, pwrmgt, 4, false, value) == Access::ok && value == (idle ^ 1));
+        assert(chip.access(wired, 0x200c4c00, pwrmgt, 4, true, value) == Access::sequence);
     }
     std::puts("PASS: both native aperture paths, exact defaults transaction, unknown full identity/revision and transactional EIM/width/PC/value guards, b30 reads and takes 0");
 }

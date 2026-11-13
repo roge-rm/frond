@@ -254,7 +254,8 @@ class Imx1Cs5Configuration {
             if (Imx1GraphicsDisplay::playerWord(address)) return display.playerAccess(windows, address, write, value);
             if (Imx1GraphicsEngine::playerWord(address)) return engine.playerAccess(address, write, value);
             if (address == 0x16010098) {
-                if (!engine.emptyRing()) return Imx1BootstrapAccess::sequence;
+                // The ring may be busy: TCPMP's reversed full screen flips bit 0 before its plane stretch
+                // finishes. The clocks already change mid-batch for automatic power management (advanceGraphicsTicks).
                 const auto status = clocks.playerAccess(address, write, value);
                 if (status == Imx1BootstrapAccess::ok && write)
                     display.setClockSources(clocks.pixelRate(), clocks.systemRate());
