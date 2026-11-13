@@ -476,6 +476,11 @@ open class FrondActivity : SDLActivity() {
         requestedOrientation = orientationRequest()
     }
 
+    // Only SDLSurface reads this: it holds back the core's start while the window's shape doesn't
+    // match a fixed request. Android 16 and later ignore fixed requests on large screens (sw600dp and
+    // up, target SDK 36+), so that shape never comes and the core never starts. The core takes any shape.
+    override fun getRequestedOrientation(): Int = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+
     // Every device follows the setting; the core shows the Zodiac's panel upright in portrait. With
     // Follow the program the Zodiac turns with its OS, landscape until the core has said.
     private fun orientationRequest() =
