@@ -3618,7 +3618,7 @@ int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
 #endif
     MemoryStickBackend::factory = [] { return make_unique<FrondMsBackend>(); };
-    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.15.0" << endl, 0;
+    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.16.0" << endl, 0;
     Options options;
     if (!parseOptions(argc, argv, options)) {
         if (options.refused.empty()) return usage(), 2;

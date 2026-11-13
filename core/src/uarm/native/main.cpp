@@ -1496,7 +1496,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--card")
         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));
 
-    argparse::ArgumentParser program("frond-core", "0.15.0");
+    argparse::ArgumentParser program("frond-core", "0.16.0");
 
     program.add_description("Frond Palm OS emulator");
 
