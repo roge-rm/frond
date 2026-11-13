@@ -498,7 +498,7 @@ namespace {
             return;
         }
         ctx->replay = std::move(replacement);
-        ctx->replayStartedAt = timestampUsec();
+        ctx->replayStartedAt = replayClockUsec(*ctx);
         cout << "input replay loaded" << endl;
     }
 

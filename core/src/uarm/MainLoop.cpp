@@ -73,7 +73,8 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     lastDeltaUsec = deltaUsec;
     realTimeUsec = now;
 
-    double cyclesPerSecond = CalculateCyclesPerSecond(
+    // With emulated time the lag handling above only paces the loop; the guest always gets the limit.
+    double cyclesPerSecond = emulatedTime ? double(cyclesPerSecondLimit) : CalculateCyclesPerSecond(
         deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
 #ifdef __EMSCRIPTEN__
     const double runUsec = deltaUsec;
