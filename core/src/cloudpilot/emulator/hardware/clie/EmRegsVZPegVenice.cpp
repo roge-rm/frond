@@ -219,6 +219,11 @@ uint16 EmRegsVzPegVenice::ButtonToBits(ButtonEvent::Button btn) {
 //		� EmRegsVzPegVenice::GetSPISlave
 // ---------------------------------------------------------------------------
 
+void EmRegsVzPegVenice::SetUsbCradle(bool docked) {
+    // HwrDockStatus reports the USB cradle (0x10) for readings of 197-220 in the top 8 bits.
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetDockLevel(docked ? 208 << 4 : 0);
+}
+
 EmSPISlave* EmRegsVzPegVenice::GetSPI2Slave(void) {
     if ((READ_REGISTER(portGData) & hwrVZVenicePortGADC_CS) == 0) {
         return fSPISlaveADC;

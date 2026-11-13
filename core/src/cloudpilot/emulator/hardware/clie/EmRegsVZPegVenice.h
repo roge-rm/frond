@@ -35,6 +35,9 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     // Jog Dial turns: one IRQ2 edge (PD5) per detent, PG1 high for up.
     void DispatchButtonEvent(ButtonEvent evt) override;
 
+    // In the USB cradle: HwrDockStatus reads the cradle's ID resistor on ADC input 6.
+    void SetUsbCradle(bool docked);
+
    protected:
     virtual EmSPISlave* GetSPI2Slave(void);
     // Jog Dial push and Back as matrix keys.

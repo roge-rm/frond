@@ -55,6 +55,10 @@ class EmSPISlaveADS784x : public EmSPISlave {
     virtual uint16 DoExchange(uint16 control, uint16 data);
     virtual void Reset(void);
 
+    // 12-bit reading of the kChannelDockSerial ID input; 0 (undocked) unless the device sets it.
+    // Not saved: whoever owns the cradle sets it again after a load.
+    void SetDockLevel(uint16 level) { fDockLevel = level; }
+
    protected:
     virtual uint16 ReadVirtualInput(unsigned channel) const { return 0; }
     void ProcessCommand(uint8);
@@ -68,6 +72,7 @@ class EmSPISlaveADS784x : public EmSPISlave {
 
    private:
     EmADSChannelType fChannelUse[8];
+    uint16 fDockLevel{0};
 
     uint32 fBitBufferIn;
     uint16 fBitBufferOut;
