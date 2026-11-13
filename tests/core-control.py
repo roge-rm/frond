@@ -797,7 +797,7 @@ def check_68k(core, rom, root):
         unsupported = [('usb-mode', 'pty'), ('bluetooth-state', ''), ('bluetooth-mode', 'off'), ('hold', 'on'),
                        ('keyboard-attach', 'on'), ('keyboard-key', '1e d'), ('microphone-mode', 'on'),
                        ('network-mode', 'internet'), ('network-mode', 'wireless'), ('usb-port', 'wifi'),
-                       ('usb-port', 'printer'), ('sd-create', '32'), ('sd-eject', ''), ('ms-state', ''),
+                       ('usb-port', 'printer'), ('sd-create', '32'), ('sd-eject', ''),
                        ('guest-orientation', ''), ('rotate', ''), ('replay-snapshots', '')]
         assert c.ok('hold-state') == 'unavailable'
         # The USB host port is the Dana's; the other 68k devices answer it as absent.
@@ -806,6 +806,8 @@ def check_68k(core, rom, root):
         assert c.ok('network-state', code='network') == 'disabled'
         saved = work / 'saved.frond'
         common(c, work, 'palm-iiix', unsupported, saved)
+        # No Memory Stick on this device: the state is well-formed and empty.
+        assert c.ok('ms-state', code='card') == 'none'
         # The snap-on modem takes the serial port's place, and a link takes it back.
         c.events.clear()
         assert c.ok('serial-mode', 'modem', code='serial') == 'modem idle'

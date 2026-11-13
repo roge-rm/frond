@@ -860,9 +860,11 @@ def iiix_reset(core, root, hard):
     if hard:
         # The erase prompt is plain text with no title tab; Up confirms.
         core.wait_frame(root / 'reset-erase.png', lambda rows: rows is not None and not iiix_title(rows) and
-                        sum(iiix_dark(rows, x, y) for x in range(160) for y in range(160)) > 300, 60)
+                        sum(iiix_dark(rows, x, y) for x in range(160) for y in range(160)) > 200, 60)
         core.key(root, 'up', hold_ms=300)
-        core.wait_frame(root / 'reset-setup.png', iiix_title, 120)
+        # Some ROMs (m105, m125, m130, m515) go straight to the digitizer screen; iiix_setup handles both.
+        core.wait_frame(root / 'reset-setup.png',
+                        lambda rows: iiix_title(rows) or iiix_target(rows, 10, 10), 120)
         iiix_setup(core, root)
     else:
         # 4.1 opens Preferences at Date & Time after a soft reset; Applications leaves it.

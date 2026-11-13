@@ -298,6 +298,8 @@ def suite(args):
 
         @unittest.skipUnless(args.launcher and args.device in DEVICES_68K, 'pass --launcher for a 68k device')
         def test_saved_contrast_68k(self):
+            if next(p for p in PROFILES if p['name'] == args.device)['colour_lcd']:
+                self.skipTest('colour panels ignore contrast')
             # Contrast changes the LCD live and stays with the saved session.
             root = self.root / 'contrast'
             root.mkdir()
