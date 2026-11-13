@@ -2929,7 +2929,10 @@ class Runner {
         if (fit != WindowFit::none && StripHeight() > 0) {
             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
                                                 int(DeviceWidth() * artScale), int((StripHeight() - StripTop()) * artScale));
-            if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
+            if (controlsTexture) {
+                SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
+                SDL_SetTextureBlendMode(controlsTexture, SDL_BLENDMODE_BLEND);
+            }
         }
         controlsDirty = true;
     }
@@ -2967,8 +2970,6 @@ class Runner {
             const SDL_Rect dest{int(rect.x * s), int(rect.y * s), int(rect.w * s), int(rect.h * s)};
             SDL_RenderCopy(renderer, silkscreenTexture, nullptr, &dest);
         }
-        // A jog panel beside the screen or the buttons is drawn straight on the window.
-        if (controls.sideTabWidth > 0) drawDeviceSidebar(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
         if (StripHeight() <= 0) {
         } else if (!fitted) {
             drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
@@ -2981,6 +2982,9 @@ class Runner {
                 SDL_RenderGetViewport(renderer, &viewport);
                 if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
                     SDL_RenderSetScale(renderer, 1, 1);
+                    // Transparent where the strip leaves room for the jog panel beside the buttons.
+                    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+                    SDL_RenderClear(renderer);
                     drawDeviceControls(renderer, controls, lcd.Width(), -StripTop(), artScale, pressed, view);
                     SDL_SetRenderTarget(renderer, nullptr);
                     SDL_RenderSetScale(renderer, 1, 1);
@@ -2995,6 +2999,9 @@ class Runner {
         } else {
             drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view);
         }
+        // A jog panel beside the screen or the buttons is drawn straight on the window, after the strip
+        // so the strip's texture can't cover the part beside the buttons.
+        if (controls.sideTabWidth > 0) drawDeviceSidebar(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
         if (present) SDL_RenderPresent(renderer);
     }
 
