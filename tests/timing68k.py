@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Runs the 68k timing probe on a IIIx and checks each loop against the 68000 manual's clocks.
+"""Runs the 68k timing probe on a IIIx (or another 68k device) and checks each loop against the 68000 manual's clocks.
 
 Build the probe first: python3 tools/build-palm-probe.py --probe timing68k --sdk PALM-OS-SDK/sdk-3.5
-Run: python3 tests/timing68k.py --rom PRIVATE.rom --output build/timing68k-run [--speed original]
+Run: python3 tests/timing68k.py --rom PRIVATE.rom --output build/timing68k-run [--speed original] [--device palm-iiix]
 The probe's RAM witness is read from a saved session. Each loop's expected clocks per pass are
 the manual's count plus the wait states the guest set (frond-68k's bus-wait) on each bus cycle,
 stretched by the bus time LCD DMA and DRAM refresh take (bus-timing): the loop's share of time on
@@ -20,7 +20,6 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import palm_boot  # noqa: E402
 
-CLOCK = 16580608
 RESULTS = re.compile(rb'FrondBench 1\.0\n[^\0]{0,380}?Checksum [0-9A-Fa-f]+\n')
 MAGIC = struct.pack('>4I', 0x46723638, 0x54494d45, 0x5749544e, 0x45535331)
 
@@ -110,6 +109,7 @@ def run_frondbench(core, args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, required=True)
+    parser.add_argument('--device', default='palm-iiix', help='a 68k profile; its cpu_hz is the clock')
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--probe', type=Path, default=Path('build/timing68k-probe/FrondTiming68k.prc'))
     parser.add_argument('--speed', default='original', choices=['original', 'uncapped'])
@@ -120,9 +120,13 @@ def main():
     if args.core:
         palm_boot.CORE_68K = args.core.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
-    core = palm_boot.Core(['--device', 'palm-iiix', args.rom], args.output / 'guest.log', '--speed', args.speed)
+    clock = palm_boot.rom_device(args.device)['cpu_hz']
+    core = palm_boot.Core(['--device', args.device, args.rom], args.output / 'guest.log', '--speed', args.speed)
     try:
-        palm_boot.iiix_setup(core, args.output)
+        palm_boot.setup_device(args.device, core, args.output)
+        if palm_boot.rom_device(args.device)['setup'] == 'iiix-hires':
+            # Low-res apps are doubled on a 320x320 LCD, so taps are too.
+            core = palm_boot.HalfCore(core)
         bus = core.send('bus-wait', ('bus wait:', 'unknown')).strip()
         print(bus)
         rom_wait = ram_wait = 0
@@ -167,7 +171,7 @@ def main():
         bus = 4 * (program + ram + rom) + ram_wait * (program + ram) + rom_wait * rom
         dram = (4 + ram_wait) * (program + ram)
         expected = waited / (1 - lcd * bus / waited - refresh * dram / waited)
-        measured = ticks / per_second * CLOCK / count
+        measured = ticks / per_second * clock / count
         diff = 100 * (measured / expected - 1)
         # The tick count can be one off either way, so the check allows one tick.
         tick = 100 / ticks
