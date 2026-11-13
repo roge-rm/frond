@@ -25,7 +25,7 @@ class MainLoop {
     void SetMaxLoad(uint32_t maxLoad);
     void SetCyclesPerSecondLimit(uint32_t cyclesPerSecondLimit);
     // Runs every guest second at the full cycles per second limit, whatever the host manages, so
-    // a slow host runs slower in wall time with the same guest result.
+    // a slow host runs slower in wall time instead of giving the guest fewer cycles.
     void SetEmulatedTime(bool emulatedTime) { this->emulatedTime = emulatedTime; }
 
    private:

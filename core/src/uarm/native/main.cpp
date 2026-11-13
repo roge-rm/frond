@@ -874,6 +874,7 @@ bool gFastEngineMissing = false;
             .replay = replay, .replayStartedAt = replayStartedAt, .emulatedTime = options.emulatedTime,
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+        commandContext.replayClockLast = replayStartedAt;
         commandContext.sessionFolder = sessionFolder;
         commandContext.sessionPath = sessionPath;
 
@@ -1260,7 +1261,8 @@ bool gFastEngineMissing = false;
                 }
                 if (!headless) {
                     sdlEventHandler.ClearRedrawRequested();
-                    replay.Dispatch((commands::replayClockUsec(commandContext) - replayStartedAt) / 1000, *soc, snapshot);
+                    const uint64_t replayNow = commands::replayClockUsec(commandContext);
+                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot);
                 }
 
                 if (now - lastSpeedDump > 1000000) {
