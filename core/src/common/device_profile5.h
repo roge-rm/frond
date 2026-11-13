@@ -333,8 +333,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {false, false, false, false, false, true, false, true, false, false, false, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
-     {false, "", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",
-      "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "", DeviceStorageSlot5::none, 0,
+     {false, "iiix-hires", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",
+      "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix-hires", DeviceStorageSlot5::none, 0,
       false, false, 38},
      0, 0, 33161216},
     // Windows Mobile iPAQs: button bar art only, no Windows CE core yet.

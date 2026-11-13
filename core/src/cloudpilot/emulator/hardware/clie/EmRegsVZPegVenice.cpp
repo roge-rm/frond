@@ -165,6 +165,19 @@ void EmRegsVzPegVenice::GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, B
         (portKDir & hwrVZVenicePortKKbdRow2) != 0 && (portKData & hwrVZVenicePortKKbdRow2) == 0;
 }
 
+uint16 EmRegsVzPegVenice::ButtonToBits(ButtonEvent::Button btn) {
+    switch (btn) {
+        case ButtonEvent::Button::wheelUp:
+            return keyBitPageUp;
+        case ButtonEvent::Button::wheelDown:
+            return keyBitPageDown;
+        case ButtonEvent::Button::back:
+            return keyBitJogBack;
+        default:
+            return VZ::ButtonToBits(btn);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetSPISlave
 // ---------------------------------------------------------------------------

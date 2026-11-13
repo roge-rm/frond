@@ -1004,6 +1004,8 @@ static void t415() {
     assert(!deviceProfileColourLcd5(p->deviceType));
     assert(p->frontend.width == 320 && p->frontend.height == 320 && p->frontend.silkscreenHeight == 128 &&
            p->frontend.stripHeight == 104 && p->frontend.sideTabWidth == 38);
+    // The 4.1 setup and launcher at 160x160, pixel-doubled, as on the m520.
+    assert(std::string(p->frontend.setup) == "iiix-hires" && std::string(p->frontend.launcher) == "iiix-hires");
     const auto& caps = p->capabilities;
     assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
            !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);

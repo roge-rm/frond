@@ -27,6 +27,8 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
 
    protected:
     virtual EmSPISlave* GetSPI2Slave(void);
+    // Jog Dial turns as the page keys, Back as its own matrix key.
+    uint16 ButtonToBits(ButtonEvent::Button btn) override;
 
    private:
     EmSPISlave* fSPISlaveADC;
