@@ -553,9 +553,9 @@ static bool pxaLcdPrvOverlayPlane(struct PxaLcd *lcd, unsigned ch, uint32_t byte
 
 static inline uint8_t pxaLcdPrvClamp8(int32_t v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-// CCIR 601-2 studio range as in the PXA27x manual 7.4.9.2 (Equation 7-1): K1-K5 / 256 in
-// 16.16 fixed point, saturated to 0-255. Full-range input, like the Zire 72 camera's, comes out
-// with more contrast, as on the hardware.
+// CCIR 601-2 studio range as in the PXA27x manual 7.4.9.2 (Equation 7-1), saturated to 0-255.
+// The constants are the coefficients (K1-K5 / 256) times 65536. Full-range input, like the
+// Zire 72 camera's, comes out with more contrast, as on the hardware.
 static inline uint32_t pxaLcdPrvYCbCr(int32_t y, int32_t cb, int32_t cr) {
     y = (y - 16) * 76309;
     cb -= 128;

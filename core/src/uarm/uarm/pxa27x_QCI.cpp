@@ -124,10 +124,8 @@ static bool pxaQciPrvSensorClocked(const PxaQci *q) {
     return ov9640Running(q->sensor) && pxaQciPrvMclk(q);
 }
 
-// RGB24 to YCbCr, full range BT.601 as in JFIF, in 16.16 fixed point. The Zire 72's CameraDriver
-// never writes OV9640 COM15, so the sensor keeps its power-on full output range (00-FF), and the
-// Camera's JPEG encoder stores these bytes as they are. The LCD overlay decodes them as studio
-// range, so the viewfinder shows them with more contrast, as the hardware does.
+// RGB24 to YCbCr, full range BT.601 as in JFIF, in 16.16 fixed point: the Zire 72 ROM leaves
+// OV9640 COM15 at its power-on 00-FF range.
 static void pxaQciPrvYcc(const uint8_t *p, int &y, int &cb, int &cr) {
     const int r = p[0], g = p[1], b = p[2];
     y = (19595 * r + 38470 * g + 7471 * b + 32768) >> 16;
