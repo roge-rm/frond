@@ -9,6 +9,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -142,13 +143,13 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(tonalElevation = 2.dp) {
-                Row(
+                Column(
                     Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.End,
                 ) {
                     val pad = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                    Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (selecting) {
                             OutlinedButton(onClick = { deleting = picked }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Delete", maxLines = 1, softWrap = false, color = MaterialTheme.colorScheme.error)

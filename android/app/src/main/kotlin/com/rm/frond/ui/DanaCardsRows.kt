@@ -112,7 +112,7 @@ fun DanaCardsRows(model: RunningModel) {
         confirmButton = { TextButton(onClick = { model.openFiles(); openingFiles = false }) { Text("Open") } },
         dismissButton = { TextButton(onClick = { openingFiles = false }) { Text("Cancel") } })
     ejecting?.let { slot ->
-        AlertDialog(onDismissRequest = { ejecting = null }, title = { Text("Eject ${slot.title.lowercase()}?") },
+        AlertDialog(onDismissRequest = { ejecting = null }, title = { Text("Eject ${if (slot.stick) slot.title else slot.title.lowercase()}?") },
             text = { Text("Close files open on the Palm first.") },
             confirmButton = { TextButton(onClick = { model.danaJob { it.command(slot, "eject") }; ejecting = null }) { Text("Eject") } },
             dismissButton = { TextButton(onClick = { ejecting = null }) { Text("Cancel") } })
