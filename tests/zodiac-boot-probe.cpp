@@ -161,10 +161,12 @@ int main() {
     assert(r.stop == Imx1ProbeStop::unsupportedRead && r.address == 0x0021b000 && r.size == 4);
     r = run({0xee110f10, 0xe3800004, 0xee010f10});
     assert(r.stop == Imx1ProbeStop::unsupportedCp15 && r.trace.operand == 0x7c);
-    for (uint32_t instruction : {0xee100f10u, 0xee170f16u, 0xee070f56u, 0xee080f37u}) {
-        r = run({instruction});  // IDs, read of write-only cache register, unsupported cache/TLB form.
+    for (uint32_t instruction : {0xee100f50u, 0xee170f16u, 0xee070f56u, 0xee080f37u}) {
+        r = run({instruction});  // Unknown ID register, read of write-only cache register, unsupported cache/TLB form.
         assert(r.stop == Imx1ProbeStop::unsupportedCp15);
     }
+    r = run({0xee100f10, 0xeafffffe}, 3);  // The ARM920T main ID reads.
+    assert(r.stop == Imx1ProbeStop::budget && r.registers[0] == 0x41129200);
     for (uint32_t instruction : {0xe16f1f10u, 0xe12fff30u, 0xfa000000u, 0xe5d0f000u}) {
         r = run({instruction});  // CLZ, BLX register/immediate and unqualified byte load to PC.
         assert(r.stop == Imx1ProbeStop::unsupportedInstruction && r.trace.pc == 0x10000000);
@@ -179,7 +181,7 @@ int main() {
     assert(r.stop == Imx1ProbeStop::budget && r.trace.step == 4);
     for (bool fast : {false, true}) {
         if (fast && !cpuSetFastEngine(true)) continue;
-        r = run({0xe3a000d7, 0xe121f000, 0xe3a0da01, 0xe3a000d3, 0xe121f000, 0xee100f10}, 20, fast);
+        r = run({0xe3a000d7, 0xe121f000, 0xe3a0da01, 0xe3a000d3, 0xe121f000, 0xee100f50}, 20, fast);
         assert(r.stop == Imx1ProbeStop::unsupportedCp15 && r.trace.step == 5);
         assert((r.cpsr & ARM_SR_M) == ARM_SR_MODE_UND && r.spsr == 0xd3);
     }
