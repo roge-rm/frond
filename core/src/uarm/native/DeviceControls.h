@@ -64,6 +64,20 @@ struct DeviceControlProfile {
     // can put the tab beside the silkscreen and strip, which are then drawn narrower.
     int silkscreenHeight{0};
 };
+// The CLIÉ Jog Dial and Back, the same on every Sony device: a side tab clieJogWidth units wide
+// with the jog up, press and down keys and Back at fixed places from its top. A device gives only
+// the tab's top (where it sits) and height; new CLIÉs use these as they are.
+constexpr int clieJogWidth=38;
+constexpr SDL_Rect clieJogTab(int top,int height) {return {-clieJogWidth,top,clieJogWidth,height};}
+// Key i of the tab (0 jog up, 1 press, 2 jog down, 3 Back) for a tab whose top is at tabTop.
+constexpr DeviceButton clieJogKey(int i,int tabTop) {
+    const KeyId keys[]={keyIdJogUp,keyIdJogPress,keyIdJogDown,keyIdBack};
+    const char* const labels[]={"Jog up","Jog press","Jog down","Back"};
+    const DeviceControlIcon icons[]={DeviceControlIcon::up,DeviceControlIcon::select,DeviceControlIcon::down,
+                                     DeviceControlIcon::back};
+    const int y[]={6,38,108,150},h[]={26,64,26,26};
+    return {keys[i],{-34,tabTop+y[i],30,h[i]},labels[i],icons[i],6,DeviceControlSection::sideTab};
+}
 // Where a device with two arrangements puts its controls: in a strip under the screen, or in panels
 // either side of it as on the real landscape Zodiac.
 enum class DeviceControlArrangement { below, around };
@@ -260,7 +274,6 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     // To Do, Memo Pad), then the QWERTY keyboard. The Jog Dial and Back sit beside
     // the middle of the LCD on the left side of the body.
     constexpr auto kb=DeviceControlSection::keyboard;
-    constexpr auto tab=DeviceControlSection::sideTab;
     static const DeviceButton tg50[] = {
         {keyIdHome, {6,18,24,24}, "Home", DeviceControlIcon::home, 12},
         {keyIdHard1, {42,22,44,16}, "Date Book", DeviceControlIcon::calendar, 8},
@@ -316,13 +329,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         {tg50Key(7,4), {240,188,27,24}, "Right", DeviceControlIcon::legend, 0, kb},
         {tg50Key(2,0), {271,188,27,24}, "Caps lock", DeviceControlIcon::legend, 0, kb},
         // Side tab: the Jog Dial rolls up and down either side of its press, then Back.
-        {keyIdJogUp, {-34,-230,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
-        {keyIdJogPress, {-34,-198,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
-        {keyIdJogDown, {-34,-128,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
-        {keyIdBack, {-34,-86,30,26}, "Back", DeviceControlIcon::back, 6, tab},
+        clieJogKey(0,-236),clieJogKey(1,-236),clieJogKey(2,-236),clieJogKey(3,-236),
     };
     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
-                                                  DeviceControlStyle::tg50,0.3f,1,0,176,{-38,-236,38,208},38};
+                                                  DeviceControlStyle::tg50,0.3f,1,0,176,clieJogTab(-236,208),clieJogWidth};
     // Tapwave Zodiac: power, the analogue stick, Function and Home on the left and four silver
     // Action keys in a round recess on the right, the shoulder triggers above them and the small
     // round Bluetooth button. Action keys are named by place; which of hard1-4 each one sends
@@ -466,13 +476,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         {keyIdHard4, {250,40,66,38}, "Memo Pad", DeviceControlIcon::memo, 3},
         {keyIdUp, {143,40,34,19}, "Up", DeviceControlIcon::up, 3, DeviceControlSection::main, {143,40,34,38}},
         {keyIdDown, {143,59,34,19}, "Down", DeviceControlIcon::down, 3, DeviceControlSection::main, {143,40,34,38}},
-        {keyIdJogUp, {-34,-418,30,26}, "Jog up", DeviceControlIcon::up, 6, tab},
-        {keyIdJogPress, {-34,-386,30,64}, "Jog press", DeviceControlIcon::select, 6, tab},
-        {keyIdJogDown, {-34,-316,30,26}, "Jog down", DeviceControlIcon::down, 6, tab},
-        {keyIdBack, {-34,-274,30,26}, "Back", DeviceControlIcon::back, 6, tab},
+        clieJogKey(0,-424),clieJogKey(1,-424),clieJogKey(2,-424),clieJogKey(3,-424),
     };
     static const DeviceControlProfile t415Profile{320,104,t415,std::size(t415),{0,0,0,0},0,{0,0,0,0},
-                                                  DeviceControlStyle::t415,0.5f,1,0,0,{-38,-424,38,208},38,0,0,128};
+                                                  DeviceControlStyle::t415,0.5f,1,0,0,clieJogTab(-424,208),clieJogWidth,0,0,128};
     static const DeviceControlProfile empty{0,0,nullptr,0,{0,0,0,0},0,{0,0,0,0}};
     switch(art) {
         case DeviceArt::tx: return txProfile;
