@@ -218,6 +218,11 @@ size_t HostLink68k::Take(uint8_t* out, size_t max) {
     return count;
 }
 
+size_t HostLink68k::CountThrough(uint8_t value) const {
+    const auto at = std::find(rx.begin(), rx.end(), value);
+    return at == rx.end() ? rx.size() : size_t(at - rx.begin()) + 1;
+}
+
 void HostLink68k::Send(const uint8_t* data, size_t size) {
     if (!Connected()) return;
     const size_t room = kQueueBytes - std::min(kQueueBytes, tx.size());

@@ -46,6 +46,8 @@ class HostLink68k {
 
     size_t Available() const { return rx.size(); }
     size_t Take(uint8_t* out, size_t max);
+    // Received bytes up to and including the first byte equal to value, else all of them.
+    size_t CountThrough(uint8_t value) const;
     void Send(const uint8_t* data, size_t size);
     void DropReceived() { rx.clear(); }
 
