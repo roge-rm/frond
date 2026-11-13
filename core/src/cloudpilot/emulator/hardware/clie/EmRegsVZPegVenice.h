@@ -25,14 +25,19 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
 
     virtual bool CopyLCDFrame(Frame& frame, bool fullRefresh);
 
+    // Jog Dial turns: one IRQ2 edge (PD5) per detent, PG1 high for up.
+    void DispatchButtonEvent(ButtonEvent evt) override;
+
    protected:
     virtual EmSPISlave* GetSPI2Slave(void);
-    // Jog Dial turns as the page keys, Back as its own matrix key.
+    // Jog Dial push and Back as matrix keys.
     uint16 ButtonToBits(ButtonEvent::Button btn) override;
 
    private:
     EmSPISlave* fSPISlaveADC;
     unique_ptr<uint32[]> framebufferTmp;
+    // PG1 as JogSys reads it in its IRQ2 handler, right after the edge; not saved.
+    bool jogUp{false};
 };
 
 #endif  // _EM_REGS_VZ_PEG_VENICE_H_

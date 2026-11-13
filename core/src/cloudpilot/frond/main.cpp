@@ -648,7 +648,7 @@ class Console {
     deque<string> lines;
 };
 
-// Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns and Back (push isn't modelled).
+// Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns, push and Back.
 optional<ButtonEvent::Button> buttonForKey(KeyId key) {
     switch (key) {
         case keyIdHard1: return ButtonEvent::Button::app1;
@@ -660,6 +660,7 @@ optional<ButtonEvent::Button> buttonForKey(KeyId key) {
         case keyIdPower: return ButtonEvent::Button::power;
         case keyIdJogUp: return ButtonEvent::Button::wheelUp;
         case keyIdJogDown: return ButtonEvent::Button::wheelDown;
+        case keyIdJogPress: return ButtonEvent::Button::wheelPush;
         case keyIdBack: return ButtonEvent::Button::back;
         default: return nullopt;
     }
@@ -669,7 +670,8 @@ optional<KeyId> keyNamed(const string& name) {
     static const pair<const char*, KeyId> names[] = {
         {"hard1", keyIdHard1}, {"hard2", keyIdHard2}, {"hard3", keyIdHard3}, {"hard4", keyIdHard4},
         {"up", keyIdUp},       {"down", keyIdDown},   {"power", keyIdPower},
-        {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"back", keyIdBack}};
+        {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress},
+        {"back", keyIdBack}};
     for (const auto& [text, key] : names)
         if (name == text) return key;
     return nullopt;
