@@ -20,7 +20,8 @@ class ButtonEvent {
         wheelPush = 13,
         rockerLeft = 14,
         rockerRight = 15,
-        rockerEnter = 16
+        rockerEnter = 16,
+        back = 17
     };
 
     enum class Type { press, release };

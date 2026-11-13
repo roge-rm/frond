@@ -9,7 +9,8 @@ struct UsbHostBridge::Impl {
     Config config;
     HostByteLink link;
     std::unique_ptr<UsbBusHost> host;
-    bool replaced{false}, plugPending{false}, lastEnabled{false};
+    bool replaced{false}, plugPending{false}, lastEnabled{false}, linkKept{false};
+    void StopBridge(bool keepLink);
     uint64_t plugAt{0};
     std::vector<std::string> messages;
     UsbBusHost::Phase lastPhase{UsbBusHost::Phase::detached};
@@ -63,7 +64,10 @@ UsbHostBridge::UsbHostBridge() : impl(std::make_unique<Impl>()) {}
 UsbHostBridge::~UsbHostBridge() { Stop(); }
 
 bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error) {
-    Stop();
+    const bool reuse = impl->linkKept && impl->link.IsOpen() && config.kind != HostSerial::Kind::off &&
+                       HostSerial::Format(impl->link.GetConfig()) == HostSerial::Format(config);
+    impl->StopBridge(reuse);
+    impl->linkKept = false;
     if (!soc.port || !soc.port()) {
         if (config.kind == HostSerial::Kind::off) return true;
         error = "This device has no USB port.";
@@ -81,7 +85,8 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         off();
         return true;
     }
-    if (!impl->link.Open(config, error)) {
+    if (reuse) impl->link.Clear();
+    if (!reuse && !impl->link.Open(config, error)) {
         off();
         return false;
     }
@@ -107,15 +112,23 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
     return true;
 }
 
-void UsbHostBridge::Stop() {
-    if (!impl->soc.port) return;
+void UsbHostBridge::Stop() { impl->StopBridge(false); }
+void UsbHostBridge::Suspend() { impl->StopBridge(impl->link.IsOpen()); }
+
+void UsbHostBridge::Impl::StopBridge(bool keepLink) {
+    auto* impl = this;
+    if (!keepLink) linkKept = false;
+    if (!impl->soc.port) {
+        if (!keepLink && impl->link.IsOpen()) impl->link.Close();
+        return;
+    }
     impl->soc.hooks(nullptr);
     if (impl->soc.port()) impl->soc.port().SetNotify(nullptr, nullptr);
     // Restore the board default with no host on the bus.
     if (impl->host) impl->host->Detach();
     impl->soc.cable(impl->soc.defaultCable());
     impl->host.reset();
-    impl->link.Close();
+    if (keepLink) linkKept = true; else impl->link.Close();
     impl->soc = {};
     impl->config = {};
     impl->replaced = impl->plugPending = false;

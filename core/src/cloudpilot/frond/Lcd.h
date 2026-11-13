@@ -2,9 +2,10 @@
 #define FROND_68K_LCD_H
 
 // The 68k LCD in RGBA: Cloudpilot's 1, 2 or 4 bpp frame as grey levels, coloured like the
-// real panel and adjusted by the contrast setting, with the green glow of the EL backlight when
-// the guest turns it on. A colour panel's 24-bit frame (the IIIc's SED1375, the m505's SED1376,
-// the m130's MediaQ) is shown as it is, and its panel is dark when the LCD is off.
+// real panel and adjusted by the contrast setting, lit like its backlight when the guest turns it on.
+// A frame at half the panel's size is pixel-doubled. A colour panel's 24-bit frame (the IIIc's
+// SED1375, the m505's SED1376, the m130's MediaQ) is shown as it is, and its panel is dark when
+// the LCD is off.
 
 #include <algorithm>
 #include <cstdint>
@@ -22,8 +23,20 @@ class Lcd68k {
     static constexpr int kWidth = 160, kHeight = 160;
     static constexpr int kDefaultContrast = 50;
 
-    Lcd68k(int width = kWidth, int height = kHeight, bool colour = false)
-        : width(width), height(height), colour(colour) {
+    struct Rgb {
+        uint8_t r, g, b;
+    };
+    // A grey panel's colours unlit and lit: its background (level 0) and full ink (level 15).
+    struct Panel {
+        Rgb panel, ink, litPanel, litInk;
+    };
+    // The IIIx family: a green-grey panel with the green glow of the EL backlight.
+    static constexpr Panel kElPanel{{0xc2, 0xcb, 0xb0}, {0x16, 0x1c, 0x1c}, {0x7e, 0xd8, 0x9a}, {0x0e, 0x24, 0x18}};
+    // The CLIE T415: a cooler grey-green panel with a light blue-green backlight (from photos, a guess).
+    static constexpr Panel kT415Panel{{0xb6, 0xbf, 0xb4}, {0x14, 0x1a, 0x1e}, {0x9a, 0xd6, 0xd0}, {0x0e, 0x22, 0x26}};
+
+    Lcd68k(int width = kWidth, int height = kHeight, bool colour = false, const Panel& panel = kElPanel)
+        : width(width), height(height), colour(colour), panel(panel) {
         if (width <= 0 || width > 1024 || height <= 0 || height > 1024)
             throw std::invalid_argument("invalid 68k LCD dimensions");
         pixels.resize(size_t(width) * height * 4);
@@ -36,8 +49,8 @@ class Lcd68k {
     void SetContrast(int value) {
         contrast = std::clamp(value, 0, 100);
         for (int level = 0; level < 16; ++level) {
-            palette[0][level] = Colour(level, contrast, kPanel, kInk);
-            palette[1][level] = Colour(level, contrast, kLitPanel, kLitInk);
+            palette[0][level] = Colour(level, contrast, panel.panel, panel.ink);
+            palette[1][level] = Colour(level, contrast, panel.litPanel, panel.litInk);
         }
     }
     int Contrast() const { return contrast; }
@@ -46,12 +59,12 @@ class Lcd68k {
     // then show the unlit panel.
     bool Update() {
         on = gSession->IsPowerOn() && EmHAL::CopyLCDFrame(frame, true) &&
+             (frame.scaleX == 1 || frame.scaleX == 2) && (frame.scaleY == 1 || frame.scaleY == 2) &&
              frame.lineWidth * frame.scaleX == width && frame.lines * frame.scaleY == height &&
-             frame.scaleX == 1 && frame.scaleY == 1 &&
              (frame.bpp == 1 || frame.bpp == 2 || frame.bpp == 4 || frame.bpp == 24) &&
-             (uint64_t(frame.margin) + width) * (frame.bpp == 24 ? 32 : frame.bpp) <=
+             (uint64_t(frame.margin) + frame.lineWidth) * (frame.bpp == 24 ? 32 : frame.bpp) <=
                  uint64_t(frame.bytesPerLine) * 8 &&
-             uint64_t(frame.bytesPerLine) * height <= frame.GetBufferSize();
+             uint64_t(frame.bytesPerLine) * frame.lines <= frame.GetBufferSize();
         lit = on && EmHAL::GetLCDBacklightOn();
         const Rgb* palette = this->palette[lit ? 1 : 0];
         if (!on) {
@@ -60,27 +73,35 @@ class Lcd68k {
         }
         const uint8_t* buffer = frame.GetBuffer();
         const uint16_t mapping = EmHAL::GetLCD2bitMapping();
+        // A frame at half the panel's size (the T415's 160x160 mode) is pixel-doubled.
+        const int sx = frame.scaleX, sy = frame.scaleY, lineWidth = frame.lineWidth;
         for (int y = 0; y < height; ++y) {
-            const uint8_t* row = buffer + y * frame.bytesPerLine;
             uint8_t* out = pixels.data() + y * width * 4;
+            if (y % sy) {
+                std::memcpy(out, out - width * 4, size_t(width) * 4);
+                continue;
+            }
+            const uint8_t* row = buffer + (y / sy) * frame.bytesPerLine;
+            auto put = [&](const Rgb& c) {
+                for (int i = 0; i < sx; ++i, out += 4) Copy(out, c);
+            };
             switch (frame.bpp) {
                 case 1: {
                     Nibbler<1> nibbler;
                     nibbler.reset(row, frame.margin);
-                    for (int x = 0; x < width; ++x, out += 4) Copy(out, palette[nibbler.nibble() ? 15 : 0]);
+                    for (int x = 0; x < lineWidth; ++x) put(palette[nibbler.nibble() ? 15 : 0]);
                     break;
                 }
                 case 2: {
                     Nibbler<2> nibbler;
                     nibbler.reset(row, frame.margin);
-                    for (int x = 0; x < width; ++x, out += 4)
-                        Copy(out, palette[(mapping >> (4 * nibbler.nibble())) & 0x0f]);
+                    for (int x = 0; x < lineWidth; ++x) put(palette[(mapping >> (4 * nibbler.nibble())) & 0x0f]);
                     break;
                 }
                 case 4: {
                     Nibbler<4> nibbler;
                     nibbler.reset(row, frame.margin);
-                    for (int x = 0; x < width; ++x, out += 4) Copy(out, palette[nibbler.nibble()]);
+                    for (int x = 0; x < lineWidth; ++x) put(palette[nibbler.nibble()]);
                     break;
                 }
                 case 24: {
@@ -88,10 +109,9 @@ class Lcd68k {
                     // little-endian host. A grey panel never gives a 24-bit frame; one is shown as grey levels.
                     const uint8_t* in = row + 4 * frame.margin;
                     if (colour)
-                        for (int x = 0; x < width; ++x, out += 4, in += 4) Copy(out, Rgb{in[0], in[1], in[2]});
+                        for (int x = 0; x < lineWidth; ++x, in += 4) put(Rgb{in[0], in[1], in[2]});
                     else
-                        for (int x = 0; x < width; ++x, out += 4, in += 4)
-                            Copy(out, palette[15 - (in[0] + in[1] + in[2]) / 48]);
+                        for (int x = 0; x < lineWidth; ++x, in += 4) put(palette[15 - (in[0] + in[1] + in[2]) / 48]);
                     break;
                 }
             }
@@ -107,14 +127,6 @@ class Lcd68k {
     const uint8_t* Pixels() const { return pixels.data(); }
 
    private:
-    struct Rgb {
-        uint8_t r, g, b;
-    };
-
-    // Unlit panel and full ink.
-    static constexpr Rgb kPanel{0xc2, 0xcb, 0xb0}, kInk{0x16, 0x1c, 0x1c};
-    // Lit by the backlight: the panel glows green, the ink stays dark.
-    static constexpr Rgb kLitPanel{0x7e, 0xd8, 0x9a}, kLitInk{0x0e, 0x24, 0x18};
     // A colour panel with the LCD off.
     static constexpr Rgb kColourOff{0x1c, 0x1e, 0x20};
 
@@ -140,6 +152,7 @@ class Lcd68k {
     Rgb palette[2][16]{};
     int width, height;
     bool colour;
+    Panel panel;
     std::vector<uint8_t> pixels;
     int contrast{kDefaultContrast};
     bool on{false};

@@ -287,8 +287,8 @@ int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControl
             height = display.height + int(std::lround(display.silkscreenHeight * scale)) + int(std::ceil(display.stripHeight * scale));
         }
     }
-    // A 160x160 68k device is drawn at twice its size at 1x, the same width as a 320-pixel ARM screen.
-    if (frondFirmware::runs68k(device)) width *= 2, height *= 2;
+    // A 160x160 68k device is drawn at twice its size at 1x, the same width as a 320-pixel ARM screen; a 320-wide one is not.
+    if (frondFirmware::runs68k(device) && display.width == 160) width *= 2, height *= 2;
     const auto* screen = QGuiApplication::primaryScreen();
     const auto available = screen ? screen->availableGeometry().size() : QSize();
     return int(4 * fittingWindowScale(width, height, available.width(), available.height()));

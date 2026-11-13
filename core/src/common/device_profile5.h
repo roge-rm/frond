@@ -326,10 +326,18 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
      {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
 
-    // Sony CLIE T415: art only, 320x320 with the silkscreen below it.
-    {deviceTypeInvalid, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::reserved, DeviceSupport5::reserved,
-     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::t415, {},
-     0, 0, 0, 0, DisplayMode::mode_320x320, 0, false},
+    // Sony CLIE T415: DragonBall VZ with 8 MiB of RAM, a 320x320 16-grey panel and the silkscreen below it,
+    // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA and a USB cradle (a PDIUSBD12). Sony's sampled sound is not
+    // emulated: the T415 has the piezo beeper.
+    {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::experimentalDesktop,
+     DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
+     {false, false, false, true, false, true, false, true, false, false, false, true},
+     0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
+     DeviceNorLayout5::any, 0, 0, false, 0, 0,
+     {true, "iiix-hires", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",
+      "up|down|app1|app2|app3|app4|jog-up|jog-down|jog-press|back", -1, -1, -1, -1, false, false, false, "", "iiix-hires",
+      DeviceStorageSlot5::memoryStick, 0, false, false, 38, true},
+     4 | 8 | 16 | 32 | 64 | 128, 0, 33161216},
     // Windows Mobile iPAQs: button bar art only, no Windows CE core yet.
     {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaq210, {},
@@ -418,10 +426,11 @@ inline bool deviceProfileHasHotSyncButton5(int32_t deviceType) {
 }
 
 // A connector the device has that Frond doesn't run yet, named as the frontends grey it out; empty for none.
-// The Dana's USB computer port and the VZ Palms' USB HotSync wait on their USB device controllers.
+// The Dana's USB computer port and the VZ Palms' USB HotSync wait on their USB device controllers,
+// unless the profile already has usb (the T415).
 inline const char* deviceProfilePendingUsb5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
-    if (!profile || profile->board != DeviceBoard5::vz328) return "";
+    if (!profile || profile->board != DeviceBoard5::vz328 || profile->capabilities.usb) return "";
     return deviceTypeIsDana5(deviceType) ? "USB computer" : "USB HotSync";
 }
 
@@ -702,6 +711,10 @@ inline constexpr uint64_t vzPalmGuestCardSizes5[] = {32ull<<20};
 // 68k devices whose slots take cards in frond-68k's linked card files: Cloudpilot's SPI SD/MMC card on the VZ.
 inline bool deviceProfileLinkedCards5(const DeviceProfile5& p) {
     return p.board == DeviceBoard5::vz328 && deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd;
+}
+// 68k devices whose Memory Stick is a linked card file (the T415).
+inline bool deviceProfileLinkedStick5(const DeviceProfile5& p) {
+    return p.board == DeviceBoard5::vz328 && deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick;
 }
 inline bool deviceProfileCardRule5(const DeviceProfile5& p, DeviceCardSlot5 slot,
                                   DeviceCardFamily5 family, DeviceCardRule5& rule) {

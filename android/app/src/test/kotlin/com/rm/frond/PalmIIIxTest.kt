@@ -21,6 +21,7 @@ class PalmIIIxTest {
     private val ezIds = listOf("palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100", "palm-m105")
     private val vzIds = listOf("palm-m125", "palm-m500", "ibm-workpad-c500")
     private val colourIds = listOf("palm-iiic", "palm-m505", "palm-m515", "palm-m130", "palm-m520")
+    private val greyVzIds = listOf("sony-clie-t415")
 
     // A 68k ROM with a big-endian card header, like tests/firmware-input.cpp's rom68k.
     private fun rom(size: Long, version: Int, flags: Int = 0x0020, company: Long = 0, hal: Long = 0,
@@ -98,7 +99,7 @@ class PalmIIIxTest {
         assertFalse(d.cardSupported || d.holdPresent)
         assertEquals(listOf("--device", "palm-iiix"), d.coreFlags)
         // The Danas run on the 68k core too; every other device is ARM.
-        for (arm in Device.entries.filter { it != d && !it.isDana() && it.id !in ezIds && it.id !in vzIds && it.id !in colourIds }) assertFalse(arm.id, arm.runs68k)
+        for (arm in Device.entries.filter { it != d && !it.isDana() && it.id !in ezIds && it.id !in vzIds && it.id !in colourIds && it.id !in greyVzIds }) assertFalse(arm.id, arm.runs68k)
     }
 
     @Test fun otherEzDevicesAreInTheInventory() {

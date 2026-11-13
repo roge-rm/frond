@@ -27,7 +27,8 @@ data class CardFamily(
     val family: String, val minBytes: Long, val maxBytes: Long, val sizeRule: String,
     val runtimeSizes: List<Long> = emptyList(), val guestQualifiedSizes: List<Long> = emptyList(),
 ) {
-    val label: String get() = if (family == "legacy-mmc-spi") "MMC" else "SD"
+    val label: String get() = when (family) { "legacy-mmc-spi" -> "MMC"; "memory-stick" -> "Memory Stick"; else -> "SD" }
+    val isStick: Boolean get() = family == "memory-stick"
     val protocol: String get() = if (family == "legacy-mmc-spi") "mmc" else "sd"
     fun accepts(bytes: Long): Boolean {
         if (bytes <= 0 || bytes % 512 != 0L || bytes !in minBytes..maxBytes ||
@@ -37,12 +38,13 @@ data class CardFamily(
         val mult = (0..7).firstOrNull { (blocks shr (it + 2)) < 0x1000 } ?: return false
         return blocks >= 4 && ((blocks shr (mult + 2)) shl (mult + 2)) == blocks
     }
-    val sizes: List<Int> get() = Device.SD_SIZES.filter { accepts(it.toLong() shl 20) }
+    val sizes: List<Int> get() = if (isStick) runtimeSizes.map { (it shr 20).toInt() } else Device.SD_SIZES.filter { accepts(it.toLong() shl 20) }
 }
 
 data class StorageSlot(val id: Int, val label: Int, val kind: String, val families: List<CardFamily> = emptyList()) {
-    val title: String get() = "Card $label"
+    val title: String get() = if (stick) "Memory Stick" else "Card $label"
     val commandPrefix: String get() = when (id) { 0 -> "sd-"; 2 -> "sd2-"; else -> "ms-" }
+    val stick: Boolean get() = kind == "memory-stick"
 }
 
 // Generated inventory values come from deviceProfiles5. IDs are saved in sessions and settings.
@@ -112,6 +114,10 @@ data class Device internal constructor(
     val linkedCards: Boolean get() = runs68k && storageSlots.isNotEmpty()
     // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
     val lcdContrast: Boolean get() = runs68k && !colourLcd
+    // A 68k device's Memory Stick takes the classic sizes its driver does, as one card family.
+    val stickFamily: CardFamily get() = CardFamily("memory-stick", (msSizes.minOrNull() ?: 0).toLong() shl 20,
+        (msSizes.maxOrNull() ?: 0).toLong() shl 20, "ms", msSizes.map { it.toLong() shl 20 })
+    fun familiesOf(slot: StorageSlot): List<CardFamily> = if (slot.stick) listOf(stickFamily) else slot.families
     val cardSupported: Boolean get() = sdSlot || memoryStick
     val cardLabel: String get() = if (storageSlot == "memory-stick") "Memory Stick" else "SD card"
     val hasNand: Boolean get() = nandSize > 0

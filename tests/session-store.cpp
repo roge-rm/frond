@@ -244,7 +244,7 @@ class SessionStoreTest : public QObject {
         write(folder() + "/Clie.frond", header(6, "sony-clie-tg50"));
         write(folder() + "/E3.frond", header(6, "palm-e2-franken"));
         write(folder() + "/IIIx.frond", header(8, "palm-iiix"));
-        write(folder() + "/Reserved.frond", header(6, "sony-clie-t415"));
+        write(folder() + "/Reserved.frond", header(6, "hp-ipaq-210"));
         for (const auto& info : list(folder())) {
             if (info.name == "Zire") QVERIFY(info.saved && !info.old && info.device == "palm-zire-72");
             if (info.name == "E3") QVERIFY(info.saved && !info.old && info.device == "palm-e2-franken");

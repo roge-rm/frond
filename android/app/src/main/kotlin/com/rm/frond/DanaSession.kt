@@ -65,7 +65,9 @@ internal object DanaSession {
             val words = Regex("\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s]+").findAll(line).map { it.value }.toList()
             if (words.size != if (portable) 10 else 13) return false
             val id = words[0]
-            if (id !in listOf("0", "2") || !ids.add(id) || words[1] != "sd") return false
+            val stick = id == "1" && words[1] == "ms"
+            if (!(id in listOf("0", "2") && words[1] == "sd") && !stick || !ids.add(id)) return false
+            if (stick && portable) return false
             if (portable && words[2] != if (id == "0") "sd0.frondsd" else "sd2.frondsd") return false
             if (!portable && (!words[2].startsWith("\"/") || !words[2].endsWith('"'))) return false
             val key = words[3]
@@ -73,6 +75,12 @@ internal object DanaSession {
             if (words[4].toLongOrNull() != key.take(8).toLong(16) || words[6] !in listOf("0", "1") || words[7] !in listOf("0", "1")) return false
             val protocol = words[if (portable) 9 else 11]
             if (protocol !in listOf("sd", "mmc")) return false
+            // The core checks a stick's size and header on load.
+            if (stick) {
+                if ((words[5].toLongOrNull() ?: return false) <= 0) return false
+                for (index in listOf(8, 9, 10, 12)) if (words[index].toULongOrNull() == null) return false
+                continue
+            }
             val rule = CardFamily(if (protocol == "mmc") "legacy-mmc-spi" else "sdsc", 32L shl 20,
                 2048L shl 20, "legacy-csd-fixed-512", if (protocol == "mmc") listOf(32L,64L,128L,256L).map { it shl 20 } else emptyList())
             if (!rule.accepts(words[5].toLongOrNull() ?: return false)) return false

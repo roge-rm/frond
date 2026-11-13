@@ -7,12 +7,12 @@ import subprocess
 
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--sdk', type=Path, default=Path('../palm-os-sdk/sdk-5r3'))
-p.add_argument('--probe', choices=['sd', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k', 'pen68k', 'dana-sound', 'dana-irda-fifo', 'dana-card'], default='sd')
+p.add_argument('--probe', choices=['sd', 'ms', 'network', 'keyboard', 'host-network', 'compatibility', 'serial', 'serial-host', 'idle', 'debugger', 'audio', 'irda', 'irda-db', 'bluetooth', 'timing68k', 'tone68k', 'alarm68k', 'ppp68k', 'busy68k', 'sync68k', 'pen68k', 'dana-sound', 'dana-irda-fifo', 'dana-card'], default='sd')
 p.add_argument('--output', type=Path)
 a = p.parse_args()
 sdk, output = a.sdk.resolve(), (a.output or Path('build/' + a.probe + '-probe')).resolve()
 source = 'tests/palm/' + a.probe + '-probe'
-name = {'sd':'FrondSDProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
+name = {'sd':'FrondSDProbe','ms':'FrondMSProbe','network':'FrondNetProbe','keyboard':'FrondKeyboardProbe',
         'host-network':'FrondHostProbe', 'compatibility':'FrondCompatProbe', 'serial':'FrondSerialProbe', 'serial-host':'FrondSerialHostProbe',
         'idle':'FrondIdleProbe', 'debugger':'FrondDebugProbe', 'audio':'FrondAudioProbe', 'irda':'FrondIRProbe', 'irda-db':'FrondDBBeam', 'bluetooth':'FrondBluetoothProbe',
         'timing68k':'FrondTiming68k', 'tone68k':'FrondTone68k', 'alarm68k':'FrondAlarm68k', 'ppp68k':'FrondPPP68k', 'busy68k':'FrondBusy68k', 'sync68k':'FrondSync68k', 'pen68k':'FrondPen68k', 'dana-sound':'FrondDanaSound', 'dana-irda-fifo':'FrondDanaIRFifo', 'dana-card':'FrondDanaCards'}[a.probe]

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""frond-68k ROM checks. Synthetic files only, unless --rom names private ROMs to accept."""
+"""frond-68k ROM checks. Synthetic files only, unless --rom names private ROMs to accept.
+
+With --run DIR, each given ROM also runs headless for 10 guest seconds and its last frame goes to
+DIR/<rom name>.png."""
 import argparse
 import hashlib
 import random
@@ -12,13 +15,14 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / 'out/frond-68k'
-# Private IIIx ROMs the profile takes: SHA-256, bytes and card header version.
+# Private ROMs frond-68k takes: SHA-256, bytes, card header version and the device it names.
 KNOWN = {
-    '6c49768abc2aeeb1926ce2efd48998464d0db7d17e83f447afa76e9c1ebeca80': (1212416, 3),  # Palm-IIIx-3.1-en
-    '9ad306533815a814d683bd937269a5b76f1be49df8e0e68aa0d50c39d148e423': (1212416, 3),  # Palm-IIIx-3.1-dbg
-    '6f5ea152a22e43e4c7b83c271bf7c91c557794aa0d1011be7898b91be65d1dde': (1540096, 4),  # Palm-OS-3.5-en-ez
-    '29c696f48f50b6e2fcb37023aca24447d01c903c1b1bc8327a7debd7016d9fb1': (1540096, 4),  # Palm-OS-3.5-en-ez-dbg
-    '78298aaf48f2247c013e54d1d05820edd41ca057a948ac8492939967c879d9a8': (1736704, 5),  # Palm-IIIx-V-4.1-en
+    '6c49768abc2aeeb1926ce2efd48998464d0db7d17e83f447afa76e9c1ebeca80': (1212416, 3, 'palm-iiix'),  # Palm-IIIx-3.1-en
+    '9ad306533815a814d683bd937269a5b76f1be49df8e0e68aa0d50c39d148e423': (1212416, 3, 'palm-iiix'),  # Palm-IIIx-3.1-dbg
+    '6f5ea152a22e43e4c7b83c271bf7c91c557794aa0d1011be7898b91be65d1dde': (1540096, 4, 'palm-iiix'),  # Palm-OS-3.5-en-ez
+    '29c696f48f50b6e2fcb37023aca24447d01c903c1b1bc8327a7debd7016d9fb1': (1540096, 4, 'palm-iiix'),  # Palm-OS-3.5-en-ez-dbg
+    '78298aaf48f2247c013e54d1d05820edd41ca057a948ac8492939967c879d9a8': (1736704, 5, 'palm-iiix'),  # Palm-IIIx-V-4.1-en
+    '541447fa871823e2b5e538fae375c127055cdfd7bab52bfffb3e2071848177a8': (3276800, 5, 'sony-clie-t415'),  # Sony-Clie-T400
 }
 
 
@@ -38,6 +42,7 @@ def run(path, *args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, action='append', default=[], help='private ROM that must be accepted')
+    parser.add_argument('--run', type=Path, metavar='DIR', help='run each ROM for 10 guest seconds, last frame to DIR')
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix='frond-68k-') as work:
         arm = bytearray(0x128000)
@@ -108,12 +113,20 @@ def main():
         digest = hashlib.sha256(data).hexdigest()
         if digest not in KNOWN:
             sys.exit(f'{rom.name}: unknown ROM {digest}')
-        size, version = KNOWN[digest]
+        size, version, device = KNOWN[digest]
         result = run(rom, '--check-rom')
-        expected = [f'device palm-iiix', f'card version {version}', f'rom bytes {size}']
+        expected = [f'device {device}', f'card version {version}', f'rom bytes {size}']
         if result.returncode or any(line not in result.stdout.splitlines() for line in expected):
             sys.exit(f'{rom.name}: refused: {result.stdout}{result.stderr}')
-        print(f'{rom.name}: accepted, card version {version}')
+        print(f'{rom.name}: accepted as {device}, card version {version}')
+        if args.run:
+            args.run.mkdir(parents=True, exist_ok=True)
+            frame = args.run / f'{rom.stem}.png'
+            frame.unlink(missing_ok=True)
+            result = run(rom, '--run-for', '10', '--framebuffer-output', str(frame))
+            if result.returncode or not frame.is_file():
+                sys.exit(f'{rom.name}: 10 s run failed: {result.returncode}: {result.stdout}{result.stderr}')
+            print(f'{rom.name}: ran 10 guest seconds, frame {frame}')
     print('PASS: frond-68k refuses synthetic non-IIIx ROMs' + (' and accepts the given ROMs' if args.rom else ''))
 
 

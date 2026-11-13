@@ -49,13 +49,14 @@ class Display : public EmHALHandler {
     Bool GetLCDBacklightOn() override { return false; }
     uint16 GetLCD2bitMapping() override { return 0xfa50; }
     bool CopyLCDFrame(Frame& f, bool) override {
-        f.lineWidth = width; f.lines = 160; f.scaleX = f.scaleY = 1;
+        f.lineWidth = width; f.lines = 160; f.scaleX = f.scaleY = scale;
         f.bpp = depth; f.margin = margin; f.bytesPerLine = stride;
         memset(f.GetBuffer(), 0, f.GetBufferSize());
         f.GetBuffer()[159 * 71 + 70] = 0x02;
+        if (scale == 2) f.GetBuffer()[0] = 0x0f;  // 4 bpp: pixel 1 of row 0 at full ink
         return true;
     }
-    unsigned width = 560, depth = 1, margin = 7, stride = 71;
+    unsigned width = 560, depth = 1, margin = 7, stride = 71, scale = 1;
 };
 
 static void CheckDisplay() {
@@ -74,6 +75,17 @@ static void CheckDisplay() {
     Lcd68k classic;
     assert(classic.Update());
     assert(!wide.Update());
+    // The T415's 160x160 mode is pixel-doubled on its 320x320 panel; other scales are refused.
+    display.depth = 4; display.stride = 80; display.scale = 2;
+    Lcd68k t415(320, 320, false, Lcd68k::kT415Panel);
+    assert(t415.Update() && !classic.Update());
+    const auto* q = t415.Pixels();
+    auto px = [&](int x, int y) { return q + (y * 320 + x) * 4; };
+    assert(memcmp(px(0, 0), px(1, 1), 4) == 0 && memcmp(px(2, 0), px(3, 1), 4) == 0);
+    assert(memcmp(px(1, 0), px(2, 0), 4) != 0 && memcmp(px(2, 2), px(4, 4), 4) == 0);
+    assert(px(2, 0)[0] < px(0, 0)[0]);
+    display.scale = 3;
+    assert(!t415.Update());
 }
 
 static void CheckAdcState() {

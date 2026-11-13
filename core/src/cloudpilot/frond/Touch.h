@@ -30,6 +30,8 @@ class TouchSink68k {
     // Only touch screens count; a touchpad's fingers are not taps on the device.
     virtual bool DirectTouch(int64_t touch) = 0;
     virtual KeyId KeyAt(int x, int y) = 0;
+    // A key sits at this point inside the pen area, like a jog panel left of the LCD.
+    virtual bool KeyBeforePen(int, int) { return false; }
     virtual void PenDown(int x, int y) = 0;
     virtual void PenUp() = 0;
     virtual void KeyDown(KeyId key) = 0;
@@ -49,7 +51,7 @@ class Touch68k {
         if (Find(touch, id) || !inside || !sink.DirectTouch(touch)) return;
         Finger* finger = std::find_if(fingers.begin(), fingers.end(), [](const Finger& f) { return !f.active; });
         if (finger == fingers.end()) return;
-        if (y < penHeight) {
+        if (y < penHeight && !sink.KeyBeforePen(x, y)) {
             if (penBusy || PenActive()) return;
             *finger = {true, true, touch, id, keyInvalid};
             sink.PenDown(std::clamp(x, 0, width - 1), y);

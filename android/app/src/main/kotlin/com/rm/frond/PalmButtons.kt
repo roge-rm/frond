@@ -68,6 +68,11 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.VOICE -> scancodeKey(62) // F5
             PalmButton.HOME -> device?.homeKey ?: 0
             PalmButton.MENU -> 0
+            // Page Up, Page Down, End and Home, which frond-68k turns into the Jog Dial and Back.
+            PalmButton.JOG_UP -> scancodeKey(75)
+            PalmButton.JOG_DOWN -> scancodeKey(78)
+            PalmButton.JOG_PRESS -> scancodeKey(77)
+            PalmButton.BACK -> scancodeKey(74)
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below

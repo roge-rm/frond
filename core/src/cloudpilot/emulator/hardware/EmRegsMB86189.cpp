@@ -12,7 +12,13 @@
                baseAddress + offset, size)
 
 namespace {
-    constexpr uint32 SAVESTATE_VERSION = 1;
+    constexpr uint32 SAVESTATE_VERSION = 2;
+    constexpr uint32 SAVESTATE_VERSION_BACKEND = 2;
+
+    constexpr uint8 TPC_READ_LONG_DATA = 0x02;
+    constexpr uint8 TPC_WRITE_LONG_DATA = 0x0d;
+    constexpr uint8 TPC_SET_CMD = 0x0e;
+    constexpr uint8 STICK_ERR = 0x40;
 
     constexpr uint32 REGISTER_FILE_SIZE = 0x14;
 
@@ -37,8 +43,11 @@ namespace {
     constexpr uint16 DATA_SIZE_MASK = 0x03ff;
 }  // namespace
 
+std::function<std::unique_ptr<MemoryStickBackend>()> MemoryStickBackend::factory;
+
 EmRegsMB86189::EmRegsMB86189(emuptr baseAddress) : baseAddress(baseAddress) {
     memoryStick.irq.AddHandler([=]() { RaiseIrq(IRQ_SIF); });
+    if (MemoryStickBackend::factory) backend = MemoryStickBackend::factory();
 }
 
 void EmRegsMB86189::Initialize() {
@@ -50,7 +59,7 @@ void EmRegsMB86189::Reset(Bool hardwareReset) {
     reg.msics = 0x00;
 
     ResetHostController();
-    memoryStick.Reset();
+    if (!backend) memoryStick.Reset();
 }
 
 void EmRegsMB86189::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
@@ -58,13 +67,13 @@ void EmRegsMB86189::Save(Savestate<ChunkType>& savestate) { DoSave(savestate); }
 void EmRegsMB86189::Save(SavestateProbe<ChunkType>& savestateProbe) { DoSave(savestateProbe); }
 
 void EmRegsMB86189::Load(SavestateLoader<ChunkType>& loader) {
-    memoryStick.Load(loader);
+    if (!backend) memoryStick.Load(loader);
 
     Chunk* chunk = loader.GetChunk(ChunkType::regsMB86189);
     if (!chunk) return;
 
     const uint32 version = chunk->Get32();
-    if (version > SAVESTATE_VERSION) {
+    if (version > SAVESTATE_VERSION || (version >= SAVESTATE_VERSION_BACKEND && !backend)) {
         logPrintf("unable to restore RegsMB86189: unsupported savestate version\n");
         loader.NotifyError();
 
@@ -72,26 +81,46 @@ void EmRegsMB86189::Load(SavestateLoader<ChunkType>& loader) {
     }
 
     LoadChunkHelper helper(*chunk);
-    DoSaveLoad(helper);
+    DoSaveLoad(helper, version);
+
+    // An older save has no stick state; the stick starts reset.
+    if (backend && version < SAVESTATE_VERSION_BACKEND) backend->Reset();
+
+    if (backend && version >= SAVESTATE_VERSION_BACKEND) {
+        uint8 stickState[MemoryStickBackend::STATE_BYTES];
+        helper.DoBuffer(stickState, sizeof(stickState));
+        if (readBufferIndex > 512 || writeBufferSize > 512 || backendReadSize > 512 ||
+            !backend->LoadState(stickState)) {
+            logPrintf("unable to restore RegsMB86189: bad stick state\n");
+            loader.NotifyError();
+        }
+    }
 }
 
 void EmRegsMB86189::SetGpioReadHandler(function<uint8()> handler) { gpioReadHandler = handler; }
 
 template <typename T>
 void EmRegsMB86189::DoSave(T& savestate) {
-    memoryStick.Save(savestate);
+    if (!backend) memoryStick.Save(savestate);
 
     typename T::chunkT* chunk = savestate.GetChunk(ChunkType::regsMB86189);
     if (!chunk) return;
 
-    chunk->Put32(SAVESTATE_VERSION);
+    const uint32 version = backend ? SAVESTATE_VERSION_BACKEND : 1;
+    chunk->Put32(version);
 
     SaveChunkHelper helper(*chunk);
-    DoSaveLoad(helper);
+    DoSaveLoad(helper, version);
+
+    if (backend) {
+        uint8 stickState[MemoryStickBackend::STATE_BYTES];
+        backend->SaveState(stickState);
+        helper.DoBuffer(stickState, sizeof(stickState));
+    }
 }
 
 template <typename T>
-void EmRegsMB86189::DoSaveLoad(T& helper) {
+void EmRegsMB86189::DoSaveLoad(T& helper, uint32 version) {
     uint8 stateByte = static_cast<uint8>(state);
 
     helper.Do(typename T::Pack16() << reg.mscmd << reg.mscs)
@@ -100,6 +129,8 @@ void EmRegsMB86189::DoSaveLoad(T& helper) {
         .Do32(writeBufferSize)
         .Do32(readBufferIndex)
         .DoBuffer(writeBuffer, sizeof(writeBuffer));
+
+    if (backend && version >= SAVESTATE_VERSION_BACKEND) helper.Do32(backendReadSize).DoBuffer(backendReadBuffer, sizeof(backendReadBuffer));
 
     fifo.DoSaveLoad(helper);
 
@@ -127,6 +158,7 @@ void EmRegsMB86189::SetSubBankHandlers(void) {
 }
 
 bool EmRegsMB86189::SupportsImageInSlot(EmHAL::Slot slot, uint32 blocksTotal) {
+    if (backend) return slot == EmHAL::Slot::memorystick && backend->SupportsImage(blocksTotal);
     return slot == EmHAL::Slot::memorystick && MemoryStick::IsSizeRepresentable(blocksTotal);
 }
 
@@ -134,20 +166,29 @@ void EmRegsMB86189::Mount(EmHAL::Slot slot, CardImage& cardImage) {
     if (this->GetNextHandler()) this->GetNextHandler()->Mount(slot, cardImage);
     if (slot != EmHAL::Slot::memorystick) return;
 
-    memoryStick.Mount(&cardImage);
+    if (backend)
+        backend->Mount(cardImage);
+    else
+        memoryStick.Mount(&cardImage);
 }
 
 void EmRegsMB86189::Unmount(EmHAL::Slot slot) {
     if (this->GetNextHandler()) this->GetNextHandler()->Unmount(slot);
     if (slot != EmHAL::Slot::memorystick) return;
 
-    memoryStick.Unmount();
+    if (backend)
+        backend->Unmount();
+    else
+        memoryStick.Unmount();
 }
 
 void EmRegsMB86189::Remount(EmHAL::Slot slot, CardImage& cardImage) {
     if (slot != EmHAL::Slot::memorystick) return;
 
-    memoryStick.Remount(&cardImage);
+    if (backend)
+        backend->Remount(cardImage);
+    else
+        memoryStick.Remount(&cardImage);
 }
 
 bool EmRegsMB86189::GetIrq() { return (reg.mscs & MSCS_INT) != 0; }
@@ -163,7 +204,11 @@ void EmRegsMB86189::ResetHostController() {
     state = State::idle;
 
     irqStat = 0;
-    memoryStick.Reset();
+    if (backend)
+        backend->Reset();
+    else
+        memoryStick.Reset();
+    backendReadSize = 0;
 
     fifo.Clear();
 
@@ -216,7 +261,7 @@ void EmRegsMB86189::BeginTpc() {
 
     writeBufferSize = 0;
     readBufferIndex = 0;
-    if (state == State::tpcRead) memoryStick.ExecuteTpc(tpcId);
+    if (state == State::tpcRead) RunReadTpc(tpcId);
 
     if (state == State::tpcWrite) {
         if (GetTransferSize() == 0)
@@ -227,10 +272,19 @@ void EmRegsMB86189::BeginTpc() {
 }
 
 void EmRegsMB86189::FinishTpc() {
-    if (state == State::tpcWrite)
-        memoryStick.ExecuteTpc(reg.mscmd >> 12, GetTransferSize(), writeBuffer);
-    else
+    if (state == State::tpcWrite) {
+        if (backend)
+            RunWriteTpc(reg.mscmd >> 12);
+        else
+            memoryStick.ExecuteTpc(reg.mscmd >> 12, GetTransferSize(), writeBuffer);
+    } else if (backend) {
+        const uint8 tpcId = reg.mscmd >> 12;
+        backendReadSize = 0;
+        backend->FinishRead(tpcId);
+        if (tpcId == TPC_READ_LONG_DATA && backend->Interrupt()) RaiseIrq(IRQ_SIF);
+    } else {
         memoryStick.FinishReadTpc();
+    }
 
     fifo.Clear();
 
@@ -254,6 +308,45 @@ void EmRegsMB86189::FifoWrite(uint16 data) {
     }
 
     fifo.Push(data);
+}
+
+uint8* EmRegsMB86189::GetDataOut() {
+    return backend ? (backendReadSize ? backendReadBuffer : nullptr) : memoryStick.GetDataOut();
+}
+
+uint32 EmRegsMB86189::GetDataOutSize() {
+    return backend ? backendReadSize : memoryStick.GetDataOutSize();
+}
+
+// A read TPC runs when the command is written and the guest then takes the bytes.
+void EmRegsMB86189::RunReadTpc(uint8 tpcId) {
+    if (!backend) return memoryStick.ExecuteTpc(tpcId);
+
+    backendReadSize = 0;
+    if (!backend->Present()) return;
+
+    const uint32 size = GetTransferSize();
+    if (size > sizeof(backendReadBuffer) || !backend->TpcRead(tpcId, backendReadBuffer, size)) {
+        backend->SetInterrupt(STICK_ERR);
+        RaiseIrq(IRQ_SIF);
+        return;
+    }
+
+    backendReadSize = size;
+}
+
+// A write TPC runs once its data is in.
+void EmRegsMB86189::RunWriteTpc(uint8 tpcId) {
+    if (!backend->Present()) return;
+
+    if (!backend->TpcWrite(tpcId, writeBuffer, GetTransferSize())) {
+        backend->SetInterrupt(STICK_ERR);
+        RaiseIrq(IRQ_SIF);
+        return;
+    }
+
+    if ((tpcId == TPC_SET_CMD || tpcId == TPC_WRITE_LONG_DATA) && backend->Interrupt())
+        RaiseIrq(IRQ_SIF);
 }
 
 uint32 EmRegsMB86189::GetTransferSize() {
@@ -285,9 +378,9 @@ uint32 EmRegsMB86189::mscsRead(emuptr address, int size) {
     uint32 value = reg.mscs;
     value &= 0xf0ff;
 
-    if (state == State::tpcRead && memoryStick.GetDataOutSize() - readBufferIndex >= 4)
+    if (state == State::tpcRead && GetDataOutSize() - readBufferIndex >= 4)
         value |= MSCS_RBF;
-    if (state != State::tpcRead || memoryStick.GetDataOutSize() - readBufferIndex == 0)
+    if (state != State::tpcRead || GetDataOutSize() - readBufferIndex == 0)
         value |= MSCS_RBE;
     if (state != State::idle) value |= MSCS_DRQ;
 
@@ -311,8 +404,8 @@ uint32 EmRegsMB86189::msdataRead(emuptr address, int size) {
     uint32 value = 0;
 
     if (state == State::tpcRead) {
-        uint8* buffer = memoryStick.GetDataOut();
-        uint32 bufferSize = memoryStick.GetDataOutSize();
+        uint8* buffer = GetDataOut();
+        uint32 bufferSize = GetDataOutSize();
 
         if (!buffer) {
             readBufferIndex += 2;

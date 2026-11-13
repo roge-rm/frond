@@ -1923,6 +1923,95 @@ for line in s.makefile('rb'):
         QDir(firmwareRoot + "/palm-iiix").removeRecursively();
         QSettings().clear();
     }
+    // A Sony CLIE T415 ROM imports as a T415 and runs in frond-68k with a Memory Stick slot and a jog dial.
+    void t415NewSession() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        QTemporaryDir files;
+        const auto romPath = files.filePath("t415.rom");
+        {
+            // Sparse synthetic ROM: the version 5 card header only.
+            QFile rom(romPath); QVERIFY(rom.open(QIODevice::WriteOnly)); QVERIFY(rom.resize(0x320000));
+            auto be = [&](qint64 at, quint32 value, int bytes) {
+                char out[4];
+                for (int i = 0; i < bytes; ++i) out[i] = char(value >> (8 * (bytes - 1 - i)));
+                rom.seek(at); rom.write(out, bytes);
+            };
+            be(0, 0x3000, 4); be(4, 0x100002a2, 4); be(8, 0xfeedbeef, 4); be(0x0c, 5, 2); be(0x0e, 0x0040, 2);
+            rom.seek(0x10); rom.write("PalmCard", 9); be(0x6c, 0x320000, 4);
+            be(0x7e, 0x736f6e79, 4); be(0x82, 0x766e6365, 4);
+        }
+        QFile arm(files.filePath("core")); QVERIFY(arm.open(QIODevice::WriteOnly));
+        arm.write("#!/bin/sh\ntouch \"$0.started\"\n"); arm.close();
+        QVERIFY(arm.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QFile core(files.filePath("core-68k")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[0]+'.args').write_text('\n'.join(sys.argv[1:]))
+trace=pathlib.Path(sys.argv[0]+'.commands')
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    a=bytes.fromhex(arg.decode())
+    with trace.open('ab') as t: t.write(cmd+b' '+a+b'\n')
+    status,code=b'ok',b'result'
+    message={b'device-state':b'sony-clie-t415',b'keyboard-state':b'detached',b'network-state':b'disabled',
+             b'usb-state':b'off',b'sd-state':b'none',b'ms-state':b'none'}.get(cmd,b'done')
+    if cmd==b'display': message=b'contrast '+a.split(b'=')[1]+b', smooth off'
+    if cmd in (b'rotate',b'hold',b'hold-state',b'microphone-mode',b'keyboard-key') or cmd.split(b'-')[0] in (b'bluetooth',):
+        status,code,message=b'error',b'unsupported',b'unsupported'
+    s.sendall(i+b'\t'+status+b'\t'+code+b'\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto read = [&](const QString& suffix) {
+            QFile file(core.fileName() + suffix);
+            return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+        };
+        const auto firmwareRoot = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + "/frond/firmware";
+        QDir(firmwareRoot + "/sony-clie-t415").removeRecursively();
+        QStringList errors;
+        {
+            MainWindow window(arm.fileName()); window.show();
+            QTimer poll; poll.setInterval(30);
+            int dialogs = 0;
+            connect(&poll, &QTimer::timeout, &window, [&] {
+                if (auto* box = window.findChild<QMessageBox*>(); box && box->isVisible()) { errors << box->text(); box->accept(); }
+                auto* firmware = window.findChild<FirmwareDialog*>();
+                if (!firmware || !firmware->isVisible()) return;
+                ++dialogs;
+                firmware->findChild<QLineEdit*>("nor")->setText(romPath);
+                auto* settings = firmware->machineSettings;
+                QVERIFY(settings->contrast->isVisibleTo(firmware) && settings->speed->isVisibleTo(firmware));
+                QVERIFY(!settings->engine->isVisibleTo(firmware) && !settings->fastAudio->isVisibleTo(firmware));
+                firmware->findChild<QPushButton*>("import")->click();
+            });
+            poll.start();
+            window.findChild<QPushButton*>("addDevice")->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QCOMPARE(dialogs, 1);
+            QVERIFY(QFileInfo::exists(firmwareRoot + "/sony-clie-t415/nor.bin"));
+            QCOMPARE(digest(firmwareRoot + "/sony-clie-t415/nor.bin"), digest(romPath));
+            QCOMPARE(window.windowTitle(), QString("Sony CLIÉ T415"));
+            const auto args = read(".args").split('\n');
+            QCOMPARE(args.mid(0, 3), QStringList({"--device", "sony-clie-t415", firmwareRoot + "/sony-clie-t415/nor.bin"}));
+            for (const char* option : {"--nand", "--work-folder", "--bluetooth", "--engine", "--fast-audio", "--no-sound"})
+                QVERIFY2(!args.contains(option), option);
+            QVERIFY(!QFileInfo::exists(arm.fileName() + ".started"));
+            QTRY_VERIFY_WITH_TIMEOUT(read(".commands").contains("network-state"), 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            poll.stop();
+        }
+        QCOMPARE(errors, QStringList());
+        const auto commands = read(".commands");
+        for (const char* command : {"rotate", "sd-", "bluetooth-"})
+            QVERIFY2(!commands.contains(QString("\n") + command) && !commands.startsWith(command), command);
+        qunsetenv("FROND_ENGINE_SETTING");
+        QDir(managedFolder()).removeRecursively();
+        QDir(firmwareRoot + "/sony-clie-t415").removeRecursively();
+        QSettings().clear();
+    }
     // Opt-in run with a real Zodiac ROM, not in ctest: FROND_ZODIAC_ROM, and FROND_ZODIAC_SHOTS for
     // screenshots. FROND_ZODIAC_STATE (a bring-up state file, read by the developer build of the core,
     // out/frond-zodiac-developer) starts it at the launcher, which the pen, stick, stop and reset steps

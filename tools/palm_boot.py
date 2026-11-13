@@ -617,7 +617,7 @@ def halve(rows):
 
 
 class HalfCore:
-    """A 320x320 Palm (the m520) seen as a 160x160 one: frames halved, taps doubled."""
+    """A 320x320 Palm (the m520, the CLIE T415) seen as a 160x160 one: frames halved, taps doubled."""
 
     def __init__(self, core):
         self.core = core
@@ -1010,8 +1010,13 @@ def e2_denvfs_reset(core, root, hard):
          'final_screen': 'de-NVFS launcher', 'marked_session': marked_hash}, indent=2) + '\n')
 
 
-RESET_RECIPES = {'dana': dana_reset, 'tg50': tg50_reset, 'iiix': iiix_reset, 'e3': e3_reset,
-                 'e2-denvfs': e2_denvfs_reset}
+def iiix_hires_reset(core, root, hard):
+    """The IIIx resets on a 320x320 LCD."""
+    return iiix_reset(HalfCore(core), root, hard)
+
+
+RESET_RECIPES = {'dana': dana_reset, 'tg50': tg50_reset, 'iiix': iiix_reset, 'iiix-hires': iiix_hires_reset,
+                 'e3': e3_reset, 'e2-denvfs': e2_denvfs_reset}
 
 
 def reset_recipe(device, variant=None):

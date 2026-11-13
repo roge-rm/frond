@@ -33,6 +33,7 @@ using VZ = EmSonyXzWithSlot<EmRegsVZ>;
 #define hwrVZVenicePortFLCDPowered 0x40  // PF6 / LCD�d������M��
 
 // Port G Bit settings for Venice
+#define hwrVZVenicePortGJogDirection 0x02  // PG1 / Jog Dial direction, high turning up
 #define hwrVZVenicePortGADC_CS 0x08       // PG3 / ADC chip select
 #define hwrVZVenicePortGRS232Enable 0x10  // PG4 / Enable the RS232 Transceiver
 
@@ -48,13 +49,15 @@ using VZ = EmSonyXzWithSlot<EmRegsVZ>;
 #define hwrVZVenicePortJLCDEnableOn 0x08  // PJ3 :(H) LCD Enable
 
 #define keyBitJogBack (0x0800)  // JogDial: Back key
+// JogDial push: row 1 (PK6), column 2 (PD2), from the key tables of the ROM's PrvKeyScan users.
+#define keyBitJogPush (0x0400)
 
 const int kNumButtonRows = 3;
 const int kNumButtonCols = 3;
 
 const uint16 kButtonMap[kNumButtonRows][kNumButtonCols] = {
     {keyBitHard1, keyBitHard2, keyBitHard3},
-    {keyBitPageUp, keyBitPageDown, 0},
+    {keyBitPageUp, keyBitPageDown, keyBitJogPush},
     {keyBitPower, keyBitHard4, keyBitJogBack}};
 
 // ---------------------------------------------------------------------------
@@ -62,7 +65,9 @@ const uint16 kButtonMap[kNumButtonRows][kNumButtonCols] = {
 // ---------------------------------------------------------------------------
 
 EmRegsVzPegVenice::EmRegsVzPegVenice(EmRegsMB86189& mb86189)
-    : VZ(mb86189), fSPISlaveADC(new EmSPISlaveADS784x(kChannelSet2)) {
+    : VZ(mb86189), mb86189(mb86189), fSPISlaveADC(new EmSPISlaveADS784x(kChannelSet2)) {
+    mb86189.SetGpioReadHandler(
+        []() { return gExternalStorage.IsMounted(EmHAL::Slot::memorystick) ? 0x01 : 0x00; });
     framebufferTmp = make_unique<uint32[]>(320 * 160 / 2 / 4);
 }
 
@@ -71,6 +76,16 @@ EmRegsVzPegVenice::EmRegsVzPegVenice(EmRegsMB86189& mb86189)
 // ---------------------------------------------------------------------------
 
 EmRegsVzPegVenice::~EmRegsVzPegVenice(void) { delete fSPISlaveADC; }
+
+void EmRegsVzPegVenice::Mount(EmHAL::Slot slot, CardImage& cardImage) {
+    VZ::Mount(slot, cardImage);
+    if (slot == EmHAL::Slot::memorystick) mb86189.NotifyGpioChanged();
+}
+
+void EmRegsVzPegVenice::Unmount(EmHAL::Slot slot) {
+    VZ::Unmount(slot);
+    if (slot == EmHAL::Slot::memorystick) mb86189.NotifyGpioChanged();
+}
 
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetLCDScreenOn
@@ -97,6 +112,13 @@ Bool EmRegsVzPegVenice::GetSerialPortOn(int /*uartNum*/) {
     return (READ_REGISTER(portGData) & hwrVZVenicePortGRS232Enable) != 0;
 }
 
+// The ROM gates nothing on a port bit for IR, so the transceiver counts as always powered.
+Bool EmRegsVzPegVenice::GetLineDriverState(EmUARTDeviceType type) { return type == kUARTIR; }
+
+EmUARTDeviceType EmRegsVzPegVenice::GetUARTDevice(int uartNum) {
+    return uartNum == 0 ? kUARTIR : kUARTNone;
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetPortInputValue
 // ---------------------------------------------------------------------------
@@ -115,6 +137,10 @@ uint8 EmRegsVzPegVenice::GetPortInputValue(int port) {
     if (port == 'F') {
         // Make sure this is always set, or HwrDisplayWake will hang
         result |= hwrVZVenicePortFLCDPowered;
+    }
+
+    if (port == 'G') {
+        result = jogUp ? result | hwrVZVenicePortGJogDirection : result & ~hwrVZVenicePortGJogDirection;
     }
     return result;
 }
@@ -165,9 +191,38 @@ void EmRegsVzPegVenice::GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, B
         (portKDir & hwrVZVenicePortKKbdRow2) != 0 && (portKData & hwrVZVenicePortKKbdRow2) == 0;
 }
 
+// The Jog Dial's encoder isn't in the key matrix: JogSys takes an IRQ2 edge per detent, reads
+// the direction from PG1 and queues vchrJogUp or vchrJogDown. The front rocker is PageUp/PageDown.
+void EmRegsVzPegVenice::DispatchButtonEvent(ButtonEvent event) {
+    const auto button = event.GetButton();
+    if (button != ButtonEvent::Button::wheelUp && button != ButtonEvent::Button::wheelDown)
+        return VZ::DispatchButtonEvent(event);
+    if (event.GetType() != ButtonEvent::Type::press) return;
+
+    jogUp = button == ButtonEvent::Button::wheelUp;
+    WRITE_REGISTER(intPendingHi, READ_REGISTER(intPendingHi) | hwrVZ328IntHiIRQ2);
+    UpdateInterrupts();
+}
+
+uint16 EmRegsVzPegVenice::ButtonToBits(ButtonEvent::Button btn) {
+    switch (btn) {
+        case ButtonEvent::Button::wheelPush:
+            return keyBitJogPush;
+        case ButtonEvent::Button::back:
+            return keyBitJogBack;
+        default:
+            return VZ::ButtonToBits(btn);
+    }
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetSPISlave
 // ---------------------------------------------------------------------------
+
+void EmRegsVzPegVenice::SetUsbCradle(bool docked) {
+    // HwrDockStatus reports the USB cradle (0x10) for readings of 197-220 in the top 8 bits.
+    static_cast<EmSPISlaveADS784x*>(fSPISlaveADC)->SetDockLevel(docked ? 208 << 4 : 0);
+}
 
 EmSPISlave* EmRegsVzPegVenice::GetSPI2Slave(void) {
     if ((READ_REGISTER(portGData) & hwrVZVenicePortGADC_CS) == 0) {
@@ -199,7 +254,7 @@ Bool EmRegsVzPegVenice::GetVibrateOn(void) {
 }
 
 bool EmRegsVzPegVenice::CopyLCDFrame(Frame& frame, bool fullRefresh) {
-    if (!VZ::CopyLCDFrame(frame, false)) {
+    if (!VZ::CopyLCDFrame(frame, fullRefresh)) {
         return false;
     }
 

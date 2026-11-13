@@ -31,21 +31,26 @@ object DanaCardProtocol {
     }
     // Whether a .frondsd header's payload size, a little-endian uint64 at byte 16, is one the family takes.
     fun frondsdFits(head: ByteArray, family: CardFamily): Boolean {
-        if (head.size < 24 || !head.copyOf(8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII))) return false
+        val magic = if (family.isStick) "FRONDMS\u0000" else "FRONDSD\u0000"
+        if (head.size < 24 || !head.copyOf(8).contentEquals(magic.toByteArray(Charsets.US_ASCII))) return false
+        // The core checks a stick's size when it attaches it.
+        if (family.isStick) return true
         var payload = 0L
         for (n in 7 downTo 0) payload = (payload shl 8) or (head[16 + n].toLong() and 0xff)
         return family.accepts(payload)
     }
     fun attach(path: String, identity: String, writeProtected: Boolean, family: CardFamily): String {
         require(identity.matches(Regex("[0-9a-f]{32}")))
-        require(family.family in listOf("sdsc", "legacy-mmc-spi"))
-        return "${quote(path)} $identity ${if (writeProtected) "protected" else "writable"} ${family.protocol}"
+        require(family.family in listOf("sdsc", "legacy-mmc-spi", "memory-stick"))
+        val policy = "${quote(path)} $identity ${if (writeProtected) "protected" else "writable"}"
+        return if (family.isStick) policy else "$policy ${family.protocol}"
     }
 }
 
 class DanaCards(private val context: Context, private val link: ControlLink, val device: Device) {
     data class SlotState(val slot: StorageSlot, val known: Boolean = false, val card: DanaCardProtocol.State? = null)
     data class Entry(val id: String, val name: String, val family: String, val path: File)
+    private fun fileFor(id: String, stick: Boolean) = File(root, if (stick) "$id.frondms" else "$id.frondsd")
     var states by mutableStateOf(device.storageSlots.map { SlotState(it) })
         private set
     var entries by mutableStateOf(emptyList<Entry>())
@@ -62,8 +67,8 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
                 val meta = JSONObject(file.readText())
                 val id = file.nameWithoutExtension
                 if (!id.matches(Regex("[0-9a-f]{32}"))) null else {
-                    val path = File(root, "$id.frondsd")
-                    if (!path.isFile) null else Entry(id, meta.getString("name"), meta.getString("family"), path)
+                    val path = listOf(File(root, "$id.frondsd"), File(root, "$id.frondms")).firstOrNull { it.isFile }
+                    if (path == null) null else Entry(id, meta.getString("name"), meta.getString("family"), path)
                 }
             } catch (_: Exception) { null }
         }.sortedBy { it.name.lowercase() }
@@ -77,14 +82,14 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
         request(slot, operation)
     }
     fun attach(slot: StorageSlot, entry: Entry, writeProtected: Boolean) {
-        val family = slot.families.firstOrNull { it.family == entry.family } ?: throw IOException("This slot doesn't take that card family.")
+        val family = device.familiesOf(slot).firstOrNull { it.family == entry.family } ?: throw IOException("This slot doesn't take that card family.")
         request(slot, "attach", DanaCardProtocol.attach(entry.path.absolutePath, entry.id, writeProtected, family))
     }
     fun make(slot: StorageSlot, family: CardFamily, size: Int, name: String, writeProtected: Boolean) {
-        require(family in slot.families && family.accepts(size.toLong() shl 20))
+        require(family in device.familiesOf(slot) && family.accepts(size.toLong() shl 20))
         val id = UUID.randomUUID().toString().replace("-", "")
-        val path = File(root, "$id.frondsd")
-        val reply = CardTool.run(arrayOf("make", "sd", size.toString(), path.path), null, null)
+        val path = fileFor(id, family.isStick)
+        val reply = CardTool.run(arrayOf("make", if (family.isStick) "ms" else "sd", size.toString(), path.path), null, null)
         val meta = File(root, "$id.json")
         try {
             if (!reply.startsWith("ok ")) throw IOException(reply)
@@ -96,17 +101,20 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
         }
     }
     fun import(slot: StorageSlot, family: CardFamily, uri: Uri, writeProtected: Boolean) {
-        require(family in slot.families)
+        require(family in device.familiesOf(slot))
         val id = UUID.randomUUID().toString().replace("-", "")
-        val path = File(root, "$id.frondsd")
+        val path = fileFor(id, family.isStick)
         val raw = File(root, "$id.input")
         val meta = File(root, "$id.json")
         try {
             val input = context.contentResolver.openInputStream(uri) ?: throw IOException("Couldn't read the card.")
-            input.use { if (!BoundedCardImage.copy(it, raw, family.maxBytes + (1L shl 20))) throw IOException("That image is too large.") }
+            input.use { if (!BoundedCardImage.copy(it, raw, if (family.isStick) family.maxBytes / 512 * 521 + (1L shl 20) else family.maxBytes + (1L shl 20))) throw IOException("That image is too large.") }
             val head = ByteArray(24)
             raw.inputStream().use { it.read(head) }
-            if (head.copyOf(8).contentEquals("FRONDSD\u0000".toByteArray(Charsets.US_ASCII))) {
+            // A classic stick has no raw image: only a .frondms file imports.
+            val framed = head.copyOf(8).contentEquals((if (family.isStick) "FRONDMS\u0000" else "FRONDSD\u0000").toByteArray(Charsets.US_ASCII))
+            if (family.isStick && !framed) throw IOException("A Memory Stick imports from a .frondms file.")
+            if (framed) {
                 if (!DanaCardProtocol.frondsdFits(head, family)) throw IOException("That size isn't supported by this card family.")
                 if (!raw.renameTo(path)) throw IOException("Couldn't keep the card.")
             } else {
@@ -124,7 +132,7 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
         } finally { raw.delete() }
     }
     fun export(slot: StorageSlot, uri: Uri) {
-        val copy = File(context.cacheDir, "dana-card-${UUID.randomUUID()}.frondsd")
+        val copy = File(context.cacheDir, "dana-card-${UUID.randomUUID()}.${if (slot.stick) "frondms" else "frondsd"}")
         try {
             request(slot, "export", DanaCardProtocol.quote(copy.absolutePath))
             val output = context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("Couldn't write the card.")

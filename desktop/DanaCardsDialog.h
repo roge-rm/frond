@@ -70,8 +70,9 @@ class DanaCardsDialog : public QDialog {
  public:
     DanaCardsDialog(DesktopClient& client, const QString& tool, frondFirmware::Device device, QWidget* parent=nullptr)
         : QDialog(parent), client(client), tool(tool), profile(frondFirmware::profile(device)),
-          slotCount(int(deviceProfileCardSlotCount5(frondFirmware::profile(device)))) {
-        setWindowTitle(slotCount>1 ? tr("Dana cards") : tr("Card"));
+          slotCount(int(deviceProfileCardSlotCount5(frondFirmware::profile(device)))),
+          stick(deviceProfileLinkedStick5(frondFirmware::profile(device))) {
+        setWindowTitle(stick ? tr("Memory Stick") : slotCount>1 ? tr("Dana cards") : tr("Card"));
         auto* layout=new QVBoxLayout(this);
         for (int n=0;n<slotCount;++n) {
             status[n]=new QLabel(this); layout->addWidget(status[n]);
@@ -81,9 +82,11 @@ class DanaCardsDialog : public QDialog {
                 connect(button,&QPushButton::clicked,this,[this,n,operation] {
                     if (operation=="Choose card") choose(n);
                     else if (operation=="Export") {
-                        const auto name=slotCount>1 ? QString("Dana card %1.frondsd").arg(n+1) :
+                        const auto name=stick ? QString("%1 stick.frondms").arg(QString::fromUtf8(profile.displayName)) :
+                            slotCount>1 ? QString("Dana card %1.frondsd").arg(n+1) :
                             QString("%1 card.frondsd").arg(QString::fromUtf8(profile.displayName));
-                        const auto path=QFileDialog::getSaveFileName(this,tr("Export card"),name,tr("Frond SD cards (*.frondsd)"));
+                        const auto path=QFileDialog::getSaveFileName(this,stick ? tr("Export Memory Stick") : tr("Export card"),name,
+                            stick ? tr("Frond Memory Sticks (*.frondms)") : tr("Frond SD cards (*.frondsd)"));
                         if (!path.isEmpty()) {
                             if (const auto problem=frondDanaCards::exportProblem(path); !problem.isEmpty()) QMessageBox::warning(this,tr("Card"),problem);
                             else perform(n,"export",frondDanaCards::quote(path));
@@ -97,6 +100,7 @@ class DanaCardsDialog : public QDialog {
             }
         }
         auto* portable=new QPushButton(tr("Export portable session folder"),this); layout->addWidget(portable);
+        portable->setVisible(!stick);
         connect(portable,&QPushButton::clicked,this,[this] {
             const auto path=QFileDialog::getSaveFileName(this,tr("New portable folder"),QString(),tr("Portable folder (*)"),nullptr,QFileDialog::DontConfirmOverwrite);
             if (!path.isEmpty()) {
@@ -115,6 +119,7 @@ class DanaCardsDialog : public QDialog {
     QString tool;
     const DeviceProfile5& profile;
     int slotCount;
+    bool stick;
     QLabel* status[2]{};
     QList<QPushButton*> buttons[2];
     frondDanaCards::State states[2];
@@ -144,19 +149,19 @@ class DanaCardsDialog : public QDialog {
  private:
     Reply request(const QString& command,const QString& argument={}) { return requestWithClient(client,command,argument); }
     bool perform(int n,const QString& operation,const QString& argument={}) {
-        const auto result=request(n?"sd2-"+operation:"sd-"+operation,argument);
+        const auto result=request(stick?"ms-"+operation:n?"sd2-"+operation:"sd-"+operation,argument);
         if (!result.ok) QMessageBox::warning(this,tr("Card"),frondDanaCards::message(result.message));
         return result.ok;
     }
     void refresh() {
         for (int n=slotCount-1;n>=0;--n) {
-            const auto reply=request(n?"sd2-state":"sd-state");
+            const auto reply=request(stick?"ms-state":n?"sd2-state":"sd-state");
             states[n]=reply.ok?frondDanaCards::state(reply.message):frondDanaCards::State{};
             const auto& state=states[n];
             const auto label=!state.known?tr("Not known"):!state.present?tr("No card"):
-                QString("%1 · %2%3%4").arg(state.protocol=="mmc"?"MMC":"SD",state.inserted?tr("Inserted"):tr("Ejected"),
+                QString("%1 · %2%3%4").arg(stick?tr("Memory Stick"):state.protocol=="mmc"?"MMC":"SD",state.inserted?tr("Inserted"):tr("Ejected"),
                     state.protectedCard?tr(" · Write protected"):QString(),state.failed?tr(" · I/O error"):QString());
-            status[n]->setText(slotCount>1 ? tr("Card %1: %2").arg(n+1).arg(label) : tr("Card: %1").arg(label));
+            status[n]->setText(stick ? label : slotCount>1 ? tr("Card %1: %2").arg(n+1).arg(label) : tr("Card: %1").arg(label));
             buttons[n][0]->setEnabled(state.known && !state.present);
             buttons[n][1]->setEnabled(state.present && state.inserted);
             buttons[n][2]->setEnabled(state.present && !state.inserted);
@@ -165,19 +170,22 @@ class DanaCardsDialog : public QDialog {
         }
     }
     void choose(int n) {
-        QDialog dialog(this); dialog.setWindowTitle(slotCount>1 ? tr("Card %1").arg(n+1) : tr("Card"));
+        QDialog dialog(this); dialog.setWindowTitle(stick ? tr("Memory Stick") : slotCount>1 ? tr("Card %1").arg(n+1) : tr("Card"));
         auto* layout=new QFormLayout(&dialog);
         QComboBox family,size,existing; QCheckBox protect(tr("Write protected"));
-        family.addItem("SD","sd"); family.addItem("MMC","mmc");
-        layout->addRow(tr("Family"),&family); layout->addRow(tr("Size"),&size); layout->addRow(tr("Saved card"),&existing); layout->addRow(&protect);
+        if (stick) family.addItem("Memory Stick","ms");
+        else { family.addItem("SD","sd"); family.addItem("MMC","mmc"); }
+        if (!stick) layout->addRow(tr("Family"),&family); layout->addRow(tr("Size"),&size); layout->addRow(tr("Saved card"),&existing); layout->addRow(&protect);
         auto update=[&] {
             size.clear(); existing.clear();
-            for (auto bytes : frondDanaCards::sizes(profile,DeviceCardSlot5(n?2:0),
+            if (stick) {
+                for (int mb : {4,8,16,32,64,128}) if (deviceProfileMsSizeValid5(profile.deviceType,uint64_t(mb))) size.addItem(QString::number(mb)+" MB",mb);
+            } else for (auto bytes : frondDanaCards::sizes(profile,DeviceCardSlot5(n?2:0),
                     family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc)) size.addItem(QString::number(bytes)+" MB",bytes);
             for (const auto& file : QDir(root()).entryInfoList({"*.json"},QDir::Files)) {
                 QFile meta(file.absoluteFilePath()); if (!meta.open(QIODevice::ReadOnly)) continue;
                 const auto object=QJsonDocument::fromJson(meta.readAll()).object();
-                if (object["protocol"].toString()==family.currentData().toString() && QFileInfo::exists(root()+'/'+file.completeBaseName()+".frondsd"))
+                if (object["protocol"].toString()==family.currentData().toString() && QFileInfo::exists(root()+'/'+file.completeBaseName()+(stick?".frondms":".frondsd")))
                     existing.addItem(object["name"].toString(),file.completeBaseName());
             }
         };
@@ -189,7 +197,7 @@ class DanaCardsDialog : public QDialog {
         actions->addButton(QDialogButtonBox::Cancel); connect(actions,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         auto use=[&](QString id) {
             if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch()) return false;
-            if (!perform(n,"attach",frondDanaCards::quote(root()+'/'+id+".frondsd")+' '+id+' '+(protect.isChecked()?"protected":"writable")+' '+family.currentData().toString())) return false;
+            if (!perform(n,"attach",frondDanaCards::quote(root()+'/'+id+(stick?".frondms":".frondsd"))+' '+id+' '+(protect.isChecked()?"protected":"writable")+(stick?QString():' '+family.currentData().toString()))) return false;
             dialog.accept();
             return true;
         };
@@ -198,11 +206,14 @@ class DanaCardsDialog : public QDialog {
             QString source;
             if (importing) { source=QFileDialog::getOpenFileName(&dialog,tr("Import card image")); if (source.isEmpty()) return; }
             const auto id=QUuid::createUuid().toString(QUuid::Id128);
-            const auto path=root()+'/'+id+".frondsd";
+            const auto path=root()+'/'+id+(stick?".frondms":".frondsd");
             frondCards::ToolResult result;
             QFile input(source); QByteArray head;
             if (importing && input.open(QIODevice::ReadOnly)) head=input.read(8);
-            if (head==QByteArray("FRONDSD\0",8)) {
+            if (stick && importing && head!=QByteArray("FRONDMS\0",8)) {
+                QMessageBox::warning(&dialog,tr("Memory Stick"),tr("A Memory Stick imports from a .frondms file.")); return;
+            }
+            if (head==QByteArray(stick?"FRONDMS\0":"FRONDSD\0",8)) {
                 const int fd=::open(QFile::encodeName(source).constData(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
                 bool standalone=fd>=0 && ::flock(fd,LOCK_EX|LOCK_NB)==0;
                 const QFileInfo info(source);
@@ -211,9 +222,9 @@ class DanaCardsDialog : public QDialog {
                 result={standalone && QFile::copy(source,path),{},tr("Export this card from its running machine before importing it.")};
                 if (fd>=0) ::close(fd);
             }
-            else result=frondCards::runCardTool(frondCards::cardTool(tool),importing?QStringList{"import",source,"sd",path}:QStringList{"make","sd",size.currentData().toString(),path});
+            else result=frondCards::runCardTool(frondCards::cardTool(tool),importing?QStringList{"import",source,"sd",path}:QStringList{"make",stick?"ms":"sd",size.currentData().toString(),path});
             if (!result.ok) { QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),result.message); return; }
-            if (!frondDanaCards::fits(path,DeviceCardSlot5(n?2:0),family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc,profile.deviceType)) {
+            if (!stick && !frondDanaCards::fits(path,DeviceCardSlot5(n?2:0),family.currentData()=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc,profile.deviceType)) {
                 QFile::remove(path); QMessageBox::warning(&dialog,tr("Card"),tr("That size isn't supported by this card family.")); return;
             }
             QFile meta(root()+'/'+id+".json");

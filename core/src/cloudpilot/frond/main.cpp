@@ -2,6 +2,7 @@
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
 #include "UsbDanaPort.h"
+#include "EmRegsUsbD12.h"
 #include "UsbPrinterRuntime.h"
 #include "UsbWifiRuntime.h"
 #include "dana_wireless5.h"
@@ -161,9 +162,12 @@ struct Options {
     bool toneLog{false};
     string serial{"off"};
     string irda{"off"};
+    // The USB cradle's host side (T415): where pilot-link reaches the HotSync port.
+    string usb{"off"};
     // The modem's HotSync link: where a call to the HotSync number goes.
     string modemSync{"off"};
     string sdAttach[2];
+    string msAttach;
     uint16_t gdbPort{0};
     bool smooth{false};
     optional<string> desktopSocket;
@@ -173,13 +177,15 @@ struct Options {
     WindowFit fit{WindowFit::none};
     uint32_t windowBackground{0};
     int audioPeriod{512};
+    // Where a jog side panel goes (T415): hidden, left of the LCD, or beside the silkscreen and buttons.
+    optional<JogPlacement> jog;
 };
 
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
-            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem]\n"
+            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
@@ -252,6 +258,7 @@ const char* cloudpilotDevice(const DeviceProfile5& profile) {
         case deviceTypeM515: return "PalmM515";
         case deviceTypeM130: return "PalmM130";
         case deviceTypeM520: return "PalmM520";
+        case deviceTypeT415: return "PEG-T400";
         case deviceTypeDana: return "AlphaSmartDana";
         case deviceTypeDanaWireless: return "DanaWireless";
         default: return nullptr;
@@ -530,7 +537,7 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
     if (session.file.GetDisplayMode() != int32_t(named->defaultDisplay)) return "unsupported display mode";
     if (session.file.GetRamSize() != named->minRam) return "unsupported RAM size";
     if (!session.file.GetMemorySize() || !session.file.GetSavestateSize()) return "session has no machine state";
-    if (!session.manifest.empty() && !deviceProfileLinkedCards5(*named)) return "this device has no card slot";
+    if (!session.manifest.empty() && !RuntimeCards::LinkedDevice(*named)) return "this device has no card slot";
     if (isPortable(data)) {
         string linked;
         const auto error=RuntimeCards::ResolvePortable(named->deviceType,session.manifest,folder,linked);
@@ -589,15 +596,19 @@ PortablePublication savePortable(const string& path,const DeviceProfile5& profil
 struct CardStateCheck {
     const RuntimeCards::Pair& pair;
     unsigned slots;
+    // The device has SD slots (the Dana, the VZ Palms) rather than a Memory Stick.
+    bool sd;
     void Load(SavestateLoader<ChunkType>& loader) {
         EmSPISlaveSD first(EmHAL::Slot::sdcard),second(EmHAL::Slot::sdcard2);
-        first.Load(loader); second.Load(loader);
-        if ((pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
+        if(sd) { first.Load(loader); second.Load(loader); }
+        if (sd && (pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
             (pair.card[1] && (!second.IsBlockInRange(pair.card[1]->backing->Size()/512) || !second.IsProtocol(pair.card[1]->protocol))))
             loader.NotifyError();
         // One SPI card per slot: 0x1d0 for the first, 0x201 for the Dana's second.
-        if(!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201))!=(slots>1) ||
-           (slots<2 && pair.card[1]))
+        if(sd ? (!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201))!=(slots>1) ||
+                 (slots<2 && pair.card[1]) || pair.stick)
+              : (loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201)) ||
+                 pair.card[0] || pair.card[1]))
             loader.NotifyError();
         auto* chunk=loader.GetChunk(ChunkType::externalStorage);
         if(!chunk) { loader.NotifyError(); return; }
@@ -611,9 +622,10 @@ struct CardStateCheck {
             if(!end) { loader.NotifyError(); return; }
             keys[n].assign(bytes,end-bytes);
         }
-        if(!chunk->IsAtEnd() || !keys[1].empty()) loader.NotifyError();
+        if(!chunk->IsAtEnd() || (sd && !keys[1].empty())) loader.NotifyError();
         for(unsigned n=0;n<2;++n)
             if(keys[n?2:0] != (pair.card[n] && pair.inserted[n]?pair.card[n]->key:"")) loader.NotifyError();
+        if(!sd && keys[1] != (pair.stick && pair.stickInserted?pair.stick->key:"")) loader.NotifyError();
     }
 };
 string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pair) {
@@ -633,7 +645,8 @@ string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pa
         ids.push_back(id); offset+=size_t(length)*4;
     }
     if(offset!=bytes.size()) return "trailing machine chunk data";
-    CardStateCheck target{pair,session.profile?deviceProfileCardSlotCount5(*session.profile):0u}; SavestateLoader<ChunkType> loader;
+    CardStateCheck target{pair,session.profile?deviceProfileCardSlotCount5(*session.profile):0u,
+                          session.profile && deviceProfileLinkedCards5(*session.profile)}; SavestateLoader<ChunkType> loader;
     return loader.Load(bytes.data(),bytes.size(),target)?"":"invalid card protocol or insertion state";
 }
 
@@ -682,7 +695,7 @@ class Console {
     deque<string> lines;
 };
 
-// Hard keys by replay name, for the buttons a IIIx has.
+// Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns, push and Back.
 optional<ButtonEvent::Button> buttonForKey(KeyId key) {
     switch (key) {
         case keyIdHard1: return ButtonEvent::Button::app1;
@@ -692,6 +705,10 @@ optional<ButtonEvent::Button> buttonForKey(KeyId key) {
         case keyIdUp: return ButtonEvent::Button::rockerUp;
         case keyIdDown: return ButtonEvent::Button::rockerDown;
         case keyIdPower: return ButtonEvent::Button::power;
+        case keyIdJogUp: return ButtonEvent::Button::wheelUp;
+        case keyIdJogDown: return ButtonEvent::Button::wheelDown;
+        case keyIdJogPress: return ButtonEvent::Button::wheelPush;
+        case keyIdBack: return ButtonEvent::Button::back;
         default: return nullopt;
     }
 }
@@ -699,7 +716,9 @@ optional<ButtonEvent::Button> buttonForKey(KeyId key) {
 optional<KeyId> keyNamed(const string& name) {
     static const pair<const char*, KeyId> names[] = {
         {"hard1", keyIdHard1}, {"hard2", keyIdHard2}, {"hard3", keyIdHard3}, {"hard4", keyIdHard4},
-        {"up", keyIdUp},       {"down", keyIdDown},   {"power", keyIdPower}};
+        {"up", keyIdUp},       {"down", keyIdDown},   {"power", keyIdPower},
+        {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress},
+        {"back", keyIdBack}};
     for (const auto& [text, key] : names)
         if (name == text) return key;
     return nullopt;
@@ -909,7 +928,8 @@ class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
         : options(options), profile(&profile), metadata(metadata),
-          lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType)) {
+          lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
+              profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
@@ -917,6 +937,8 @@ class Runner {
         soundOn = options.sound && profile.capabilities.sound;
         smooth = options.smooth;
         fit = options.fit;
+        if (deviceControls(profile.art).sideTabWidth > 0)
+            view = deviceControlView(false, options.jog.value_or(JogPlacement::screen));
         if(deviceTypeIsDana5(profile.deviceType)) {
 #ifndef __ANDROID__
             danaView.keyboard="hidden";danaView.physical=true;
@@ -971,6 +993,11 @@ class Runner {
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
         }
+        if (!options.msAttach.empty()) {
+            const auto reply=runtimeCards.StickCommand("attach",options.msAttach);
+            cout << "card: " << reply << endl;
+            if (reply.rfind("error:",0)==0) return 1;
+        }
         if (options.inputReplay && !LoadReplay(*options.inputReplay)) return 1;
         if (!OpenWav() || !OpenLinks()) return 1;
         while (guestSeconds < options.runFor) {
@@ -985,6 +1012,11 @@ class Runner {
     int RunWindow() {
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
+            cout << "card: " << reply << endl;
+            if (reply.rfind("error:",0)==0) return 1;
+        }
+        if (!options.msAttach.empty()) {
+            const auto reply=runtimeCards.StickCommand("attach",options.msAttach);
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
         }
@@ -1125,6 +1157,7 @@ class Runner {
 
     // Runs up to cycles and moves guest time on.
     bool Step(uint32_t cycles) {
+        runtimeCards.Service();
         ServiceLinks();
         ServiceUsb();
         if(usbBridge.Host()) cycles=std::min(cycles,std::max(1u,uint32_t(gSession->GetClocksPerSecond()/100000)));
@@ -1175,6 +1208,18 @@ class Runner {
             if (link == &serialLink && serialTransport->ModemMode()) cout << name << ": " << serialTransport->Describe() << endl;
             else if (link == &irLink && (irTransport->PhoneMode() || irTransport->PrinterMode())) cout << name << ": " << irTransport->Describe() << endl;
             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
+        }
+        if (options.usb != "off") {
+            string error;
+            if (!UsbCradle()) {
+                cout << "frond-68k: ignoring --usb" << endl;
+            } else if (!StartUsbCradle(options.usb, error)) {
+                cerr << "usb: " << error << endl;
+                if (!desktopMode) return false;
+                usbError = error;
+            } else {
+                cout << "usb: " << usbBridge.Describe() << endl;
+            }
         }
         if (options.modemSync != "off") {
             string error;
@@ -1349,15 +1394,24 @@ class Runner {
     UsbHostHooks usbHooks;
     bool usbCable=false;
     string usbDebugMode="off";
+    // The T415 cradle's host endpoint, kept across loads and resets.
+    string usbCradleMode="off", usbError;
     // The bank owner calls this before disposing even the first register bank.
-    int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(); });
-    void StopUsb() {
-        usbBridge.Stop();
+    int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(usbCradleMode!="off"); });
+    // keepLink leaves the cradle's host endpoint open so a load restarts it on the same PTY path.
+    void StopUsb(bool keepLink=false) {
+        if(keepLink) usbBridge.Suspend(); else usbBridge.Stop();
         usbHooks={};
         usbDana.reset();
         usbCable=false;
     }
     void RestoreUsb() {
+        if(UsbCradle()) {
+            // A load or a failed load disposed the chip: the bridge starts again on the new one.
+            string error;
+            if(!StartUsbCradle(usbCradleMode,error)) cerr << "usb: error " << error << endl;
+            return;
+        }
         if(!deviceTypeIsDana5(profile->deviceType)) return;
         if(usbPort!="off") { string result; UsbPortControl(usbPort,result,true); }
         if(moduleOn) { string result; ModuleControl(true,result,true); }
@@ -1462,6 +1516,38 @@ class Runner {
     }
     void UsbReplaced() {
         if(usbHooks.replaced) usbHooks.replaced(usbHooks.context);
+    }
+    // The T415's PDIUSBD12, if this machine has a USB cradle.
+    EmRegsUsbD12* UsbCradle() const {
+        if(!profile->capabilities.usb) return nullptr;
+        return dynamic_cast<EmRegsUsbD12*>(EmBankRegs::GetSubBank(0x10900000,4));
+    }
+    // usb-mode: the cradle cable to a host PTY, TCP or Unix socket for pilot-link; off unplugs it.
+    bool StartUsbCradle(const string& mode,string& error) {
+        auto* d12=UsbCradle();
+        if(!d12) { error="This device has no USB cradle.";return false; }
+        UsbHostBridge::Config config;
+        if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT or unix:PATH.";return false; }
+        StopUsb(config.kind!=HostSerial::Kind::off && HostSerial::Format(config)==usbCradleMode);
+        usbCradleMode="off";
+        usbError.clear();
+        if(!usbBridge.Start(UsbHostBridge::Backend{
+            [this] { auto* d=UsbCradle(); return d ? d->Port() : UsbDevicePort{}; },
+            [this](bool attached) { usbCable=attached; if(auto* d=UsbCradle()) d->SetCable(attached); },
+            [this] { return usbCable; }, [] { return false; },
+            [] { return gDebugger.IsStopped(); }, [this] { return UsbTime(); },
+            [] {}, [this](const UsbHostHooks* hooks) { usbHooks=hooks?*hooks:UsbHostHooks{}; }
+        },config,error)) {
+            StopUsb();
+            usbError=error;
+            return false;
+        }
+        usbCradleMode=HostSerial::Format(usbBridge.GetConfig());
+        return true;
+    }
+    string UsbDescription() const {
+        const string state=usbBridge.Describe();
+        return state=="off" && !usbError.empty() ? "off "+usbError : state;
     }
     bool StartUsbDebug(const string& mode,string& error) {
         if(!deviceTypeIsDana5(profile->deviceType)) { error="USB debug role requires Dana.";return false; }
@@ -1752,6 +1838,11 @@ class Runner {
             const auto begin=args.find_first_not_of(" ");
             args=begin==string::npos ? "" : args.substr(begin);
             cout << "card: " << runtimeCards.Command(second,command.substr(second?4:3),args) << endl;
+        } else if (command.rfind("ms-",0)==0 && runtimeCards.StickSlot()) {
+            string args; getline(words,args);
+            const auto begin=args.find_first_not_of(" ");
+            args=begin==string::npos ? "" : args.substr(begin);
+            cout << "card: " << runtimeCards.StickCommand(command.substr(3),args) << endl;
         } else if(command=="dana-view"||command=="dana-view-state") {
             if(!deviceTypeIsDana5(profile->deviceType))return void(cout<<"unsupported: Dana view"<<endl);
             if(command=="dana-view") {
@@ -1850,6 +1941,13 @@ class Runner {
             if(choice!="on" && choice!="off") { cout << "wifi-module: error Use on or off." << endl; return; }
             bool ok=ModuleControl(choice=="on",result);
             cout << "wifi-module: " << (ok?"":"error ") << result << endl;
+        } else if (command == "usb-mode") {
+            string mode,error;
+            if(!(words >> mode)) return void(cout << "usage: usb-mode off|pty|tcp:PORT|unix:PATH" << endl);
+            if(!StartUsbCradle(mode,error)) cout << "usb: error " << error << endl;
+            else cout << "usb: " << usbBridge.Describe() << endl;
+        } else if (command == "usb-state") {
+            cout << "usb: " << (UsbCradle() ? UsbDescription() : string("off")) << endl;
         } else if (command == "usb-debug-mode") {
             string mode,error;words >> mode;
             if(!StartUsbDebug(mode,error)) cout << "usb-debug: error " << error << endl;
@@ -2030,6 +2128,7 @@ class Runner {
     // events. After quit, the core leaves once the reply is sent.
     void PollDesktop() {
         StateChanged("serial", lastSerial, SerialDescription());
+        if (UsbCradle()) StateChanged("usb", lastUsb, UsbDescription());
         StateChanged("infrared", lastInfrared, InfraredDescription());
         // A save writing in the background answers when it's done; requests after it wait.
         if (pendingSave) {
@@ -2231,6 +2330,10 @@ class Runner {
             if(command=="dana-view"&&!SetDanaView(argument,error))return {false,"argument",error};
             return {true,"dana-view",DanaViewDescription()};
         }
+        if (command.rfind("ms-",0)==0 && runtimeCards.StickSlot()) {
+            auto reply=runtimeCards.StickCommand(command.substr(3),argument);
+            return {reply.rfind("error:",0)!=0,"card",reply};
+        }
         if ((command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) && runtimeCards.Slots()) {
             const bool second=command.rfind("sd2-",0)==0;
             auto reply=runtimeCards.Command(second,command.substr(second?4:3),argument);
@@ -2369,6 +2472,14 @@ class Runner {
             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
             return {true, "hotsync", "HotSync button pressed."};
         }
+        if (command == "usb-state") return {true, "usb", UsbCradle() ? UsbDescription() : string("off")};
+        if (command == "usb-mode") {
+            if (!UsbCradle()) return {false, "unsupported", "USB is not supported on this device."};
+            string error;
+            // A new endpoint unplugs the cable first; queued bytes are dropped.
+            if (!StartUsbCradle(argument, error)) return {false, "usb", error};
+            return {true, "usb", UsbDescription()};
+        }
         if (command == "serial-state") return {true, "serial", SerialDescription()};
         if (command == "irda-state") return {true, "infrared", InfraredDescription()};
         if (command == "serial-mode" || command == "irda-mode") {
@@ -2500,7 +2611,7 @@ class Runner {
         if (command == "usb-state") return {true, "usb", "off"};
         if (command == "microphone-state") return {true, "microphone", "off"};
         if (command == "microphone-epoch") return {true, "microphone", "0"};
-        if (command == "sd-state") return {true, "card", "none"};
+        if (command == "sd-state" || command == "ms-state") return {true, "card", "none"};
         if (command == "wifi-module-state") return {true, "wifi-module", ModuleState()};
         if (command == "network-mode") {
             // On the Dana Wireless, wireless and disabled turn the built-in module's radio on and off.
@@ -2544,13 +2655,14 @@ class Runner {
         return {false, "command", "Unknown desktop command."};
     }
 
-    // contrast=0..100 and smooth=on|off; fit, keyboard and jog are for ARM devices.
+    // contrast=0..100, smooth=on|off, fit= and jog=hidden|screen|keyboard for a device with a jog panel.
     bool DesktopDisplay(const string& text, string& error) {
         istringstream words(text);
         string word;
         optional<int> contrast;
         optional<bool> smoothing;
         optional<WindowFit> fitting;
+        optional<JogPlacement> jogging;
         while (words >> word) {
             const auto equals = word.find('=');
             const string name = word.substr(0, equals), value = equals == string::npos ? "" : word.substr(equals + 1);
@@ -2562,6 +2674,13 @@ class Runner {
                 smoothing = value == "on";
             } else if (WindowFit parsed; name == "fit" && parseWindowFit(value, parsed)) {
                 fitting = parsed;
+            } else if (equals != string::npos && name == "jog" && deviceControls(profile->art).sideTabWidth > 0) {
+                JogPlacement placement;
+                if (!parseJogPlacement(value, placement)) {
+                    error = "Invalid display setting: " + word;
+                    return false;
+                }
+                jogging = placement;
             } else if (equals != string::npos && (name == "keyboard" || name == "jog")) {
                 error = "This device has no " + name + " controls.";
                 return false;
@@ -2570,8 +2689,8 @@ class Runner {
                 return false;
             }
         }
-        if (!contrast && !smoothing && !fitting) {
-            error = "Use contrast=, smooth= or fit=.";
+        if (!contrast && !smoothing && !fitting && !jogging) {
+            error = "Use contrast=, smooth=, fit= or jog=.";
             return false;
         }
         if (contrast) {
@@ -2581,6 +2700,13 @@ class Runner {
         if (smoothing) {
             smooth = *smoothing;
             if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        }
+        if (jogging) {
+            view = deviceControlView(false, *jogging);
+            // A fixed-scale window takes the new device size; a fitted one keeps its size.
+            if (window && fit == WindowFit::none)
+                SDL_SetWindowSize(window, int(DeviceWidth() * options.windowScale), int(DeviceHeight() * options.windowScale));
+            Layout();
         }
         // Only a window opened fitted can change how it fits; a fixed-scale window stays as it is.
         if (fitting && fit != WindowFit::none && *fitting != fit) {
@@ -2679,11 +2805,10 @@ class Runner {
 
     // Opens the window at the fixed scale, or resizable and fitted with fit set.
     void OpenWindow() {
-        const auto& controls = deviceControls(profile->art);
         const float s = options.windowScale;
-        const int width = int(lcd.Width() * s);
+        const int width = int(DeviceWidth() * s);
         const int height = deviceTypeIsDana5(profile->deviceType) ? int(160*s+252) :
-            int((InputHeight() + deviceControlsHeight(controls, lcd.Width())) * s);
+            int(DeviceHeight() * s);
         window = SDL_CreateWindow(profile->displayName, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
                                   fit == WindowFit::none && !deviceTypeIsDana5(profile->deviceType) ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
         if (!window) {
@@ -2722,7 +2847,46 @@ class Runner {
 
     int InputHeight() const { return lcd.Height() + profile->frontend.silkscreenHeight; }
 
-    int DeviceHeight() const { return InputHeight() + deviceControlsHeight(deviceControls(profile->art), lcd.Width()); }
+    // The window's width and the LCD's left edge, which a jog panel left of the LCD moves.
+    int ScreenLeft() const { return deviceScreenLeft(deviceControls(profile->art), view); }
+    int DeviceWidth() const { return deviceControlsWidth(deviceControls(profile->art), lcd.Width(), view); }
+    int StripHeight() const { return deviceControlsHeight(deviceControls(profile->art), lcd.Width(), view); }
+    int DeviceHeight() const { return InputHeight() + StripHeight(); }
+    bool BesideButtons() const { return deviceSideTabBesideButtons(deviceControls(profile->art), view); }
+    SDL_Rect SilkscreenRect() const {
+        const auto& silkscreen = deviceSilkscreen(profile->art);
+        if (BesideButtons()) return deviceSilkscreenRect(deviceControls(profile->art), silkscreen, lcd.Width(), InputHeight(), view);
+        return {ScreenLeft(), lcd.Height(), lcd.Width(), InputHeight() - lcd.Height()};
+    }
+
+    // What a window point (device pixels) is: a key, or the pen at a point in the LCD's and silkscreen's pixels.
+    // inside false clamps a dragged pen onto the pen area.
+    struct Hit { KeyId key{keyInvalid}; bool pen{false}; int x{0}, y{0}; };
+    Hit HitAt(int x, int y, bool dragging = false) const {
+        Hit hit;
+        const auto& controls = deviceControls(profile->art);
+        if (!dragging && (y >= InputHeight() || controls.sideTabWidth > 0)) {
+            hit.key = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y, view);
+            if (hit.key != keyInvalid) return hit;
+        }
+        if (y >= InputHeight() && !dragging) return hit;
+        const int left = ScreenLeft();
+        if (BesideButtons() && y >= lcd.Height()) {
+            const auto rect = SilkscreenRect();
+            if (!dragging && (x < rect.x || x >= rect.x + rect.w)) return hit;
+            const auto point = deviceSilkscreenPoint(rect, deviceSilkscreen(profile->art),
+                clamp(x, rect.x, rect.x + rect.w - 1), clamp(y, rect.y, rect.y + rect.h - 1));
+            hit.pen = true;
+            hit.x = clamp(point.x, 0, lcd.Width() - 1);
+            hit.y = lcd.Height() + clamp(point.y, 0, InputHeight() - lcd.Height() - 1);
+            return hit;
+        }
+        if (!dragging && (x < left || x >= left + lcd.Width())) return hit;
+        hit.pen = true;
+        hit.x = clamp(x - left, 0, lcd.Width() - 1);
+        hit.y = clamp(y, 0, InputHeight() - 1);
+        return hit;
+    }
 
     // Where the device goes in the window and the scale the art is drawn at. Fixed: the window
     // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels through the
@@ -2744,10 +2908,10 @@ class Runner {
         }
         const float s = options.windowScale;
         if (fit == WindowFit::none) {
-            layout = WindowLayout{s, s, 0, 0, int(lcd.Width() * s), int(DeviceHeight() * s)};
+            layout = WindowLayout{s, s, 0, 0, int(DeviceWidth() * s), int(DeviceHeight() * s)};
             artScale = s;
         } else {
-            layout = fitWindowLayout(fit, lcd.Width(), DeviceHeight(), windowWidth, windowHeight);
+            layout = fitWindowLayout(fit, DeviceWidth(), DeviceHeight(), windowWidth, windowHeight);
             artScale = max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
         }
         if (silkscreenTexture) SDL_DestroyTexture(silkscreenTexture);
@@ -2757,11 +2921,9 @@ class Runner {
         if (silkscreenTexture && fit != WindowFit::none) SDL_SetTextureScaleMode(silkscreenTexture, SDL_ScaleModeLinear);
         if (controlsTexture) SDL_DestroyTexture(controlsTexture);
         controlsTexture = nullptr;
-        if (fit != WindowFit::none) {
-            const auto& controls = deviceControls(profile->art);
+        if (fit != WindowFit::none && StripHeight() > 0) {
             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
-                                                int(lcd.Width() * artScale),
-                                                int(deviceControlsHeight(controls, lcd.Width()) * artScale));
+                                                int(DeviceWidth() * artScale), int(StripHeight() * artScale));
             if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
         }
         controlsDirty = true;
@@ -2792,16 +2954,19 @@ class Runner {
         }
         if (lcdTexture) {
             SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), lcd.Width() * 4);
-            const SDL_Rect dest{0, 0, int(lcd.Width() * s), int(lcd.Height() * s)};
+            const SDL_Rect dest{int(ScreenLeft() * s), 0, int(lcd.Width() * s), int(lcd.Height() * s)};
             SDL_RenderCopy(renderer, lcdTexture, nullptr, &dest);
         }
         if (silkscreenTexture) {
-            const SDL_Rect dest{0, int(lcd.Height() * s), int(lcd.Width() * s),
-                                int((InputHeight() - lcd.Height()) * s)};
+            const auto rect = SilkscreenRect();
+            const SDL_Rect dest{int(rect.x * s), int(rect.y * s), int(rect.w * s), int(rect.h * s)};
             SDL_RenderCopy(renderer, silkscreenTexture, nullptr, &dest);
         }
-        if (!fitted) {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed);
+        // A jog panel beside the screen or the buttons is drawn straight on the window.
+        if (controls.sideTabWidth > 0) drawDeviceSidebar(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
+        if (StripHeight() <= 0) {
+        } else if (!fitted) {
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
         } else if (controlsTexture) {
             // Drawn once into a texture at the output's pixel size, again when a key changes.
             if (controlsDirty || pressed != shownPressed) {
@@ -2811,7 +2976,7 @@ class Runner {
                 SDL_RenderGetViewport(renderer, &viewport);
                 if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
                     SDL_RenderSetScale(renderer, 1, 1);
-                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed);
+                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed, view);
                     SDL_SetRenderTarget(renderer, nullptr);
                     SDL_RenderSetScale(renderer, 1, 1);
                     SDL_RenderSetViewport(renderer, &viewport);
@@ -2820,10 +2985,10 @@ class Runner {
                     shownPressed = pressed;
                 }
             }
-            const SDL_Rect dest{0, InputHeight(), lcd.Width(), deviceControlsHeight(controls, lcd.Width())};
+            const SDL_Rect dest{0, InputHeight(), DeviceWidth(), StripHeight()};
             SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
         } else {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed);
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view);
         }
         if (present) SDL_RenderPresent(renderer);
     }
@@ -3030,7 +3195,7 @@ class Runner {
         const float fx = (windowX - layout.x) / layout.scaleX, fy = (windowY - layout.y) / layout.scaleY;
         x = int(floor(fx));
         y = int(floor(fy));
-        return fx >= 0 && fy >= 0 && x < lcd.Width() && y < DeviceHeight();
+        return fx >= 0 && fy >= 0 && x < DeviceWidth() && y < DeviceHeight();
     }
 
     // The IR printer has a job coming in or a link up (frondIr::IrPrinter::NeedsGuest).
@@ -3051,7 +3216,8 @@ class Runner {
         mouseKey = keyInvalid;
         touch.ReleaseAll();
         keyHolds.Clear();
-        for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower})
+        for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower,
+                          keyIdJogUp, keyIdJogDown, keyIdJogPress, keyIdBack})
             if (pressed & deviceKeyBit(key)) SetKey(key, false);
     }
 
@@ -3125,7 +3291,6 @@ class Runner {
                     const int my = event.type == SDL_MOUSEMOTION ? event.motion.y : event.button.y;
                     int x = 0, y = 0;
                     const bool inside = DevicePoint(mx, my, x, y);
-                    x = clamp(x, 0, lcd.Width() - 1);
                     if (event.type == SDL_MOUSEBUTTONUP) {
                         if (penDown) gSession->QueuePenEvent(PenEvent::up());
                         if (mouseKey != keyInvalid) Key(mouseKey, false);
@@ -3133,16 +3298,18 @@ class Runner {
                         mouseKey = keyInvalid;
                     } else if (down) {
                         if (!inside) break;
-                        if (y < InputHeight()) {
+                        const auto hit = HitAt(x, y);
+                        if (hit.pen) {
                             if (touch.PenActive()) break;
                             penDown = true;
-                            gSession->QueuePenEvent(PenEvent::down(x, y));
-                        } else {
-                            mouseKey = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y);
-                            if (mouseKey != keyInvalid) Key(mouseKey, true);
+                            gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
+                        } else if (hit.key != keyInvalid) {
+                            mouseKey = hit.key;
+                            Key(mouseKey, true);
                         }
                     } else if (penDown) {
-                        gSession->QueuePenEvent(PenEvent::down(x, clamp(y, 0, InputHeight() - 1)));
+                        const auto hit = HitAt(x, y, true);
+                        gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
                     }
                     break;
                 }
@@ -3196,6 +3363,16 @@ class Runner {
                         case SDLK_ESCAPE: key = keyIdPower; break;
                         default: break;
                     }
+                    // The Jog Dial: Page Up and Page Down turn it, End presses it and Home is Back.
+                    if (controls.sideTabWidth > 0) {
+                        switch (event.key.keysym.sym) {
+                            case SDLK_PAGEUP: key = keyIdJogUp; break;
+                            case SDLK_PAGEDOWN: key = keyIdJogDown; break;
+                            case SDLK_END: key = keyIdJogPress; break;
+                            case SDLK_HOME: key = keyIdBack; break;
+                            default: break;
+                        }
+                    }
                     if (key != keyInvalid) {
                         if (!event.key.repeat) Key(key, keyDown);
                         break;
@@ -3235,6 +3412,8 @@ class Runner {
     SDL_Texture* silkscreenTexture{nullptr};
     SDL_Texture* controlsTexture{nullptr};
     WindowFit fit{WindowFit::none};
+    // The jog panel's placement, which sets the window's width and where the LCD sits.
+    DeviceControlView view{};
     WindowLayout layout;
     float pixelsX{1}, pixelsY{1}, artScale{1};
     bool controlsDirty{true};
@@ -3261,16 +3440,18 @@ class Runner {
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}
         bool DirectTouch(int64_t touch) override { return SDL_GetTouchDeviceType(touch) == SDL_TOUCH_DEVICE_DIRECT; }
-        KeyId KeyAt(int x, int y) override {
-            return deviceControlAt(deviceControls(runner.profile->art), runner.lcd.Width(), runner.InputHeight(), x, y);
+        KeyId KeyAt(int x, int y) override { return runner.HitAt(x, y).key; }
+        bool KeyBeforePen(int x, int y) override { return runner.HitAt(x, y).key != keyInvalid; }
+        void PenDown(int x, int y) override {
+            const auto hit = runner.HitAt(x, y, true);
+            gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
         }
-        void PenDown(int x, int y) override { gSession->QueuePenEvent(PenEvent::down(x, y)); }
         void PenUp() override { gSession->QueuePenEvent(PenEvent::up()); }
         void KeyDown(KeyId key) override { runner.Key(key, true); }
         void KeyUp(KeyId key) override { runner.Key(key, false); }
         Runner& runner;
     } touchHost{*this};
-    Touch68k touch{touchHost, lcd.Width(), InputHeight()};
+    Touch68k touch{touchHost, 1 << 20, InputHeight()};
     Piezo68k piezo;
     WavWriter68k wav;
     bool wavOpen{false};
@@ -3295,7 +3476,7 @@ class Runner {
     unique_ptr<PendingSave> pendingSave;
     BackgroundJob saveJob;
     bool desktopMode{false};
-    string lastSerial, lastInfrared, serialError, infraredError;
+    string lastSerial, lastInfrared, lastUsb, serialError, infraredError;
     HostLink68k serialLink, irLink, modemSyncLink;
     ModemTransport68k* serialTransport{nullptr};
     IrPhoneTransport68k* irTransport{nullptr};
@@ -3393,19 +3574,33 @@ bool parseOptions(int argc, char** argv, Options& options) {
             const char* v = value();
             if (!v || v[0] != '/') return false;
             options.saveOnDisconnect = v;
-        } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" || arg == "--jog-controls" ||
-                   arg == "--usb" || arg == "--bluetooth") {
+        } else if (arg == "--usb") {
+            // A device without a USB cradle takes it and ignores it, as the desktop passes it to all.
+            const char* v = value();
+            if (!v) return false;
+            options.usb = v;
+        } else if (arg == "--jog-controls") {
+            const char* v = value();
+            JogPlacement placement;
+            if (!v || !parseJogPlacement(v, placement)) return false;
+            options.jog = placement;
+        } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" ||
+                   arg == "--bluetooth") {
             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
             if (!value()) return false;
             cout << "frond-68k: ignoring " << arg << endl;
         } else if (arg == "--sd-attach" || arg == "--sd2-attach") {
             const char* v=value(); if (!v) return false;
             options.sdAttach[arg=="--sd2-attach"] = v;
+        } else if (arg == "--ms-attach") {
+            const char* v=value(); if (!v) return false;
+            options.msAttach = v;
         } else if (arg == "--card-swap" || arg == "--card-identity" || arg == "--card-protected") {
             options.refused = arg;
             return false;
-        } else if (arg == "--fast-audio" || arg == "--hide-keyboard" ||
-                   arg == "--hide-jog-controls") {
+        } else if (arg == "--hide-jog-controls") {
+            options.jog = JogPlacement::hidden;
+        } else if (arg == "--fast-audio" || arg == "--hide-keyboard") {
             cout << "frond-68k: ignoring " << arg << endl;
         } else if (!arg.empty() && arg[0] != '-' && options.image.empty()) {
             options.image = arg;
@@ -3422,6 +3617,7 @@ int main(int argc, char** argv) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+    MemoryStickBackend::factory = [] { return make_unique<FrondMsBackend>(); };
     if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.15.0" << endl, 0;
     Options options;
     if (!parseOptions(argc, argv, options)) {
