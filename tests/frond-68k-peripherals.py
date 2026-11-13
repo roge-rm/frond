@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
+CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
           'modemsync']
 # Reach example.com over the internet, so they only run when asked for with --only.
 OPT_IN = {'ppp', 'modem', 'irphone', 'modemsync'}
@@ -414,6 +414,44 @@ def check_serial(rom, session, root, probes):
         shutil.rmtree(folder, ignore_errors=True)
     return (f'{backed} databases backed up; {state.split(", ", 1)[1]}; tcp {tcp.split(", ", 1)[1]}; '
             f'unix {unix.split(", ", 1)[1]}')
+
+
+def check_usb(rom, session, root, probes):
+    """pilot-link over the USB cradle (PDIUSBD12) and a host PTY: install Hello.prc, fetch MemoDB
+    and back up, each started by the cradle's HotSync button, then list in a fresh process loaded
+    from the synced session (the cable comes out and goes back in on load)."""
+    if not palm_boot.rom_device(DEVICE).get('usb'):
+        raise Skip(f'{DEVICE} has no USB cradle')
+    if not shutil.which('pilot-xfer'):
+        raise Skip('no pilot-xfer')
+    if not HELLO.is_file():
+        raise Skip(f'no {HELLO}')
+    with Machine(session, root, 'usb-pty', '--usb', 'pty') as m:
+        port = m.send('usb-state', 'usb:').split()[2]
+        hotsync(m, port, '-i', HELLO)
+        hotsync(m, port, '-f', 'MemoDB')
+        if not (m.root / 'MemoDB.pdb').is_file():
+            raise AssertionError('MemoDB not fetched')
+        out = hotsync(m, port, '-b', m.root / 'backup')
+        if not (m.root / 'backup/Hello.prc').is_file() or '0 files failed' not in out:
+            raise AssertionError('backup without Hello.prc: ' + out.strip()[-200:])
+        backed = len(list((m.root / 'backup').iterdir()))
+        enumerated = m.wait_line('usb: enumerated', 5).strip()
+        m.send(f'save-session "{m.root / "synced.frond"}"', 'wrote session')
+    with Machine(m.root / 'synced.frond', root, 'usb-reload', '--usb', 'pty') as r:
+        port = r.send('usb-state', 'usb:').split()[2]
+        out = hotsync(r, port, '-l')
+        if 'Hello' not in out:
+            raise AssertionError('Hello not listed after reload')
+        r.send(f'load-session "{m.root / "synced.frond"}"', 'loaded')
+        # The load takes the cable out and plugs it back in; the chip is only on the bus while
+        # HotSync runs, so the next sync enumerates it again.
+        mark = len(r.core.lines)
+        out = hotsync(r, port, '-l')
+        if 'Hello' not in out:
+            raise AssertionError('Hello not listed after load-session')
+        r.wait_line('usb: enumerated', 5, mark)
+    return f'{backed} databases backed up; {enumerated}; list after reload and after load-session'
 
 
 def unix_client(path):
@@ -801,10 +839,10 @@ def build_probes(root, sdk):
     return out
 
 
-NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'contrast': [], 'beam': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
+NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'contrast': [], 'beam': [], 'serial': [], 'usb': [], 'unix': [], 'card-flags': [], 'databases': [],
          'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
 RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_contrast, 'sleep': check_sleep, 'beam': check_beam,
-       'serial': check_serial,
+       'serial': check_serial, 'usb': check_usb,
        'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
        'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync}
 

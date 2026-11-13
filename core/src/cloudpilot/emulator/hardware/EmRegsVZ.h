@@ -33,6 +33,9 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     virtual void Reset(Bool hardwareReset);
     virtual void Dispose(void);
 
+    // A level source on IRQ1 beside the HotSync button (see fIrq1Line).
+    void SetIrq1Line(bool asserted);
+
     virtual void Save(Savestate<ChunkType>&);
     virtual void Save(SavestateProbe<ChunkType>&);
     virtual void Load(SavestateLoader<ChunkType>&);
@@ -180,6 +183,9 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
    protected:
     HwrM68VZ328Type f68VZ328Regs;
     bool fHotSyncButtonDown;
+    // A board's own level source on IRQ1 beside the HotSync button (the T400's USB chip). Not saved:
+    // its owner sets it again after a load.
+    bool fIrq1Line{false};
     uint16 fKeyBits;
     uint16 fLastTmr1Status;
     uint16 fLastTmr2Status;

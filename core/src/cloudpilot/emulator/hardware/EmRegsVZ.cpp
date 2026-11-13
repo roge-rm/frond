@@ -1931,7 +1931,7 @@ void EmRegsVZ::intStatusHiWrite(emuptr address, int size, uint32 value) {
     // other buttons, too?  It doesn't seem to be needed right now, but doing
     // that may more closely mirror the hardware.)
 
-    if (fHotSyncButtonDown) {
+    if (fHotSyncButtonDown || fIrq1Line) {
         intPendingHi |= hwrVZ328IntHiIRQ1;
     } else {
         intPendingHi &= ~hwrVZ328IntHiIRQ1;
@@ -2333,9 +2333,29 @@ void EmRegsVZ::HotSyncEvent(Bool buttonIsDown) {
         intPendingHi |= hwrVZ328IntHiIRQ1;
         fHotSyncButtonDown = true;
     } else {
-        intPendingHi &= ~hwrVZ328IntHiIRQ1;
+        if (!fIrq1Line) intPendingHi &= ~hwrVZ328IntHiIRQ1;
         fHotSyncButtonDown = false;
     }
+
+    WRITE_REGISTER(intPendingHi, intPendingHi);
+
+    EmRegsVZ::UpdateInterrupts();
+}
+
+// ---------------------------------------------------------------------------
+//		EmRegsVZ::SetIrq1Line
+// ---------------------------------------------------------------------------
+// A level source wired to IRQ1 with the HotSync button: pending while either is asserted.
+
+void EmRegsVZ::SetIrq1Line(bool asserted) {
+    fIrq1Line = asserted;
+
+    uint16 intPendingHi = READ_REGISTER(intPendingHi);
+
+    if (asserted || fHotSyncButtonDown)
+        intPendingHi |= hwrVZ328IntHiIRQ1;
+    else
+        intPendingHi &= ~hwrVZ328IntHiIRQ1;
 
     WRITE_REGISTER(intPendingHi, intPendingHi);
 

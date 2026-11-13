@@ -1007,9 +1007,9 @@ static void t415() {
     // The 4.1 setup and launcher at 160x160, pixel-doubled, as on the m520.
     assert(std::string(p->frontend.setup) == "iiix-hires" && std::string(p->frontend.launcher) == "iiix-hires");
     const auto& caps = p->capabilities;
-    assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
+    assert(!caps.network && !caps.keyboard && !caps.serial && caps.usb && caps.infrared && caps.irPhone &&
            !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
-    assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == "USB HotSync");
+    assert(!*deviceProfilePendingUsb5(p->deviceType));
     assert(deviceProfileCardSlotCount5(*p) == 1 && !deviceProfileLinkedCards5(*p) &&
            deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
     // The T415 ROM's shape: 3.125 MiB, a small card at 0 and a big card at 32 KiB, both Sony's.

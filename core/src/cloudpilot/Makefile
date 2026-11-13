@@ -107,6 +107,7 @@ SOURCE_CXX = \
 	emulator/hardware/EmRegsMB86189.cpp \
 	emulator/hardware/MemoryStick.cpp \
 	emulator/hardware/clie/EmRegsUsbCLIE.cpp \
+	emulator/hardware/clie/EmRegsUsbD12.cpp \
 	emulator/hardware/clie/EmRegsFMSound.cpp \
 	emulator/hardware/clie/EmRegsEzPegS300.cpp \
 	emulator/hardware/clie/EmRegsEzPegS500C.cpp \

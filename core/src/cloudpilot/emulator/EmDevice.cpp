@@ -87,6 +87,7 @@
 #include "EmRegsSonyDSP.h"
 #include "EmRegsUSBPhilipsPDIUSBD12.h"
 #include "EmRegsUsbCLIE.h"
+#include "EmRegsUsbD12.h"
 #include "EmRegsVZAcerS1x.h"
 #include "EmRegsVZAtlantiC.h"
 #include "EmRegsVZHandEra330.h"
@@ -1296,9 +1297,15 @@ void EmDevice::CreateRegs(void) const {
         case kDevicePEGT400: {
             EmRegsMB86189* mb86189 = new EmRegsMB86189(0x10800000);
 
-            EmBankRegs::AddSubBank(new EmRegsVzPegVenice(*mb86189));
+            EmRegsVzPegVenice* venice = new EmRegsVzPegVenice(*mb86189);
+            // The PDIUSBD12's INT_N shares IRQ1 with the cradle's HotSync button.
+            EmRegsUsbD12* usb = new EmRegsUsbD12(0x10900000);
+            usb->onInterrupt = [venice](bool asserted) { venice->SetIrq1Line(asserted); };
+            usb->onCable = [venice](bool docked) { venice->SetUsbCradle(docked); };
+
+            EmBankRegs::AddSubBank(venice);
             EmBankRegs::AddSubBank(mb86189);
-            EmBankRegs::AddSubBank(new EmRegsUsbCLIE(0x10900000L, 0));
+            EmBankRegs::AddSubBank(usb);
             EmBankRegs::AddSubBank(new EmRegsFMSound(FMSound_BaseAddress));
             break;
         }

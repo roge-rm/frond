@@ -1,6 +1,7 @@
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
 #include "UsbDanaPort.h"
+#include "EmRegsUsbD12.h"
 #include "UsbPrinterRuntime.h"
 #include "UsbWifiRuntime.h"
 #include "dana_wireless5.h"
@@ -160,6 +161,8 @@ struct Options {
     bool toneLog{false};
     string serial{"off"};
     string irda{"off"};
+    // The USB cradle's host side (T415): where pilot-link reaches the HotSync port.
+    string usb{"off"};
     // The modem's HotSync link: where a call to the HotSync number goes.
     string modemSync{"off"};
     string sdAttach[2];
@@ -179,7 +182,7 @@ void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
             "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
-            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem]\n"
+            "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
@@ -1166,6 +1169,18 @@ class Runner {
             else if (link == &irLink && (irTransport->PhoneMode() || irTransport->PrinterMode())) cout << name << ": " << irTransport->Describe() << endl;
             else if (link->GetKind() != HostLink68k::Kind::off) cout << name << ": " << link->Describe() << endl;
         }
+        if (options.usb != "off") {
+            string error;
+            if (!UsbCradle()) {
+                cout << "frond-68k: ignoring --usb" << endl;
+            } else if (!StartUsbCradle(options.usb, error)) {
+                cerr << "usb: " << error << endl;
+                if (!desktopMode) return false;
+                usbError = error;
+            } else {
+                cout << "usb: " << usbBridge.Describe() << endl;
+            }
+        }
         if (options.modemSync != "off") {
             string error;
             if (!SetModemSync(options.modemSync, error)) {
@@ -1339,6 +1354,8 @@ class Runner {
     UsbHostHooks usbHooks;
     bool usbCable=false;
     string usbDebugMode="off";
+    // The T415 cradle's host endpoint, kept across loads and resets.
+    string usbCradleMode="off", usbError;
     // The bank owner calls this before disposing even the first register bank.
     int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(); });
     void StopUsb() {
@@ -1348,6 +1365,12 @@ class Runner {
         usbCable=false;
     }
     void RestoreUsb() {
+        if(UsbCradle()) {
+            // A load or a failed load disposed the chip: the bridge starts again on the new one.
+            string error;
+            if(!StartUsbCradle(usbCradleMode,error)) cerr << "usb: error " << error << endl;
+            return;
+        }
         if(!deviceTypeIsDana5(profile->deviceType)) return;
         if(usbPort!="off") { string result; UsbPortControl(usbPort,result,true); }
         if(moduleOn) { string result; ModuleControl(true,result,true); }
@@ -1452,6 +1475,38 @@ class Runner {
     }
     void UsbReplaced() {
         if(usbHooks.replaced) usbHooks.replaced(usbHooks.context);
+    }
+    // The T415's PDIUSBD12, if this machine has a USB cradle.
+    EmRegsUsbD12* UsbCradle() const {
+        if(!profile->capabilities.usb) return nullptr;
+        return dynamic_cast<EmRegsUsbD12*>(EmBankRegs::GetSubBank(0x10900000,4));
+    }
+    // usb-mode: the cradle cable to a host PTY, TCP or Unix socket for pilot-link; off unplugs it.
+    bool StartUsbCradle(const string& mode,string& error) {
+        auto* d12=UsbCradle();
+        if(!d12) { error="This device has no USB cradle.";return false; }
+        UsbHostBridge::Config config;
+        if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT or unix:PATH.";return false; }
+        StopUsb();
+        usbCradleMode="off";
+        usbError.clear();
+        if(!usbBridge.Start(UsbHostBridge::Backend{
+            [this] { auto* d=UsbCradle(); return d ? d->Port() : UsbDevicePort{}; },
+            [this](bool attached) { usbCable=attached; if(auto* d=UsbCradle()) d->SetCable(attached); },
+            [this] { return usbCable; }, [] { return false; },
+            [] { return gDebugger.IsStopped(); }, [this] { return UsbTime(); },
+            [] {}, [this](const UsbHostHooks* hooks) { usbHooks=hooks?*hooks:UsbHostHooks{}; }
+        },config,error)) {
+            StopUsb();
+            usbError=error;
+            return false;
+        }
+        usbCradleMode=HostSerial::Format(usbBridge.GetConfig());
+        return true;
+    }
+    string UsbDescription() const {
+        const string state=usbBridge.Describe();
+        return state=="off" && !usbError.empty() ? "off "+usbError : state;
     }
     bool StartUsbDebug(const string& mode,string& error) {
         if(!deviceTypeIsDana5(profile->deviceType)) { error="USB debug role requires Dana.";return false; }
@@ -1843,6 +1898,13 @@ class Runner {
             if(choice!="on" && choice!="off") { cout << "wifi-module: error Use on or off." << endl; return; }
             bool ok=ModuleControl(choice=="on",result);
             cout << "wifi-module: " << (ok?"":"error ") << result << endl;
+        } else if (command == "usb-mode") {
+            string mode,error;
+            if(!(words >> mode)) return void(cout << "usage: usb-mode off|pty|tcp:PORT|unix:PATH" << endl);
+            if(!StartUsbCradle(mode,error)) cout << "usb: error " << error << endl;
+            else cout << "usb: " << usbBridge.Describe() << endl;
+        } else if (command == "usb-state") {
+            cout << "usb: " << UsbDescription() << endl;
         } else if (command == "usb-debug-mode") {
             string mode,error;words >> mode;
             if(!StartUsbDebug(mode,error)) cout << "usb-debug: error " << error << endl;
@@ -2007,6 +2069,7 @@ class Runner {
     // events. After quit, the core leaves once the reply is sent.
     void PollDesktop() {
         StateChanged("serial", lastSerial, SerialDescription());
+        if (UsbCradle()) StateChanged("usb", lastUsb, UsbDescription());
         StateChanged("infrared", lastInfrared, InfraredDescription());
         DesktopChannel::Request request;
         // One request at a time: the next waits while one waits for the guest's event loop.
@@ -2284,6 +2347,14 @@ class Runner {
             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::press));
             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
             return {true, "hotsync", "HotSync button pressed."};
+        }
+        if (command == "usb-state") return {true, "usb", UsbDescription()};
+        if (command == "usb-mode") {
+            if (!UsbCradle()) return {false, "unsupported", "USB is not supported on this device."};
+            string error;
+            // A new endpoint unplugs the cable first; queued bytes are dropped.
+            if (!StartUsbCradle(argument, error)) return {false, "usb", error};
+            return {true, "usb", UsbDescription()};
         }
         if (command == "serial-state") return {true, "serial", SerialDescription()};
         if (command == "irda-state") return {true, "infrared", InfraredDescription()};
@@ -3194,7 +3265,7 @@ class Runner {
     // The save when the desktop went away failed; the core exits 1.
     bool saveFailed{false};
     bool desktopMode{false};
-    string lastSerial, lastInfrared, serialError, infraredError;
+    string lastSerial, lastInfrared, lastUsb, serialError, infraredError;
     HostLink68k serialLink, irLink, modemSyncLink;
     ModemTransport68k* serialTransport{nullptr};
     IrPhoneTransport68k* irTransport{nullptr};
@@ -3292,8 +3363,13 @@ bool parseOptions(int argc, char** argv, Options& options) {
             const char* v = value();
             if (!v || v[0] != '/') return false;
             options.saveOnDisconnect = v;
+        } else if (arg == "--usb") {
+            // A device without a USB cradle takes it and ignores it, as the desktop passes it to all.
+            const char* v = value();
+            if (!v) return false;
+            options.usb = v;
         } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" || arg == "--jog-controls" ||
-                   arg == "--usb" || arg == "--bluetooth") {
+                   arg == "--bluetooth") {
             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
             if (!value()) return false;
             cout << "frond-68k: ignoring " << arg << endl;

@@ -398,9 +398,7 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
         }
 
         case kChannelDockSerial: {
-            // Say that we're undocked.
-
-            result = 0x0000;
+            result = fDockLevel;
             break;
         }
 
