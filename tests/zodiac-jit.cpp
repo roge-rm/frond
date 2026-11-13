@@ -47,7 +47,7 @@ struct Machine {
         word(data, target | 1);
         word(target, 0xeafffffe);
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void same(Machine& exact, Machine& fast) {
     for (unsigned i = 0; i < 16; ++i) {
@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
     }
     for (unsigned i = 0; i < 1000 && cpuGetRegisters(normalExact.cpu)[15] != code + 12; ++i) normalExact.step();
     for (unsigned i = 0; i < 1000 && cpuGetRegisters(normal.cpu)[15] != code + 12; ++i)
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(normal.cpu, 8);
+        cpuCycleAnyKind(normal.cpu, 8);
     same(normalExact, normal);
     assert(cpuGetRegisters(normal.cpu)[2] == 0);
     for (Machine* m : {&normalExact, &normal}) {
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
     }
     for (unsigned i = 0; i < 16; ++i) normalExact.step();
     for (unsigned i = 0; i < 1000 && cpuGetRegisters(normal.cpu)[15] != code + 64; ++i)
-        cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(normal.cpu, 8);
+        cpuCycleAnyKind(normal.cpu, 8);
     same(normalExact, normal);
     assert(cpuGetRegisters(normal.cpu)[2] == 15);
     // Misaligned word loads retain the interpreter's rotation.

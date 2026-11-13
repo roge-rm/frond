@@ -66,7 +66,7 @@ struct Machine {
         mode(current);
         cpuSetReg(cpu, 15, code);
     }
-    void advance() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void advance() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
     void step(uint32_t pc = code) { cpuSetReg(cpu, 15, pc); advance(); }
     void cp(uint32_t pc, uint32_t instruction, uint32_t operand) {
         word(pc, instruction); cpuSetReg(cpu, 0, operand); step(pc);

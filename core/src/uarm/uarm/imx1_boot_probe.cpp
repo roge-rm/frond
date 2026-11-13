@@ -1542,7 +1542,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         const auto* r=cpuGetRegisters(p->cpu);
         recent={t.step,t.pc,t.instruction,t.cpsr,r[13],r[14],r[0],r[1],r[2],r[3]};
     }
-    const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
+    const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(p->cpu, 1);
     if (p->failed) return false;
     const auto dataGuard = cpuArm920DataGuard(p->cpu);
     if (dataGuard.active) {

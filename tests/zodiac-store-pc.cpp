@@ -42,7 +42,7 @@ struct Machine {
         for (unsigned r = 0; r < 15; ++r) cpuSetReg(cpu, r, 0x12340000 + r);
         cpuSetReg(cpu, 0, data); cpuSetReg(cpu, 13, data); word(code, instruction);
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void same(Machine& exact, Machine& fast) {
     assert(exact.bytes == fast.bytes && exact.writes == fast.writes && exact.status() == fast.status());
