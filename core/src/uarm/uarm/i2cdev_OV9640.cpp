@@ -50,6 +50,7 @@ static void ov9640PrvDefaults(Ov9640 *ov) {
     ov->regs[0x25] = 0x68;  // AEB
     ov->regs[0x26] = 0xd4;  // VPT
     ov->regs[regTslb] = 0x0c;
+    ov->regs[regCom15] = 0xc0;  // output range 00-FF
 }
 
 static bool ov9640PrvPin(const Ov9640 *ov, uint8_t pin) {

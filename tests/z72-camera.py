@@ -66,6 +66,19 @@ def picture_pixel(w, h, x, y, invert=False):
     return tuple(c * (6 - row) // 6 for c in bar)
 
 
+def overlay_view(rgb):
+    """What the viewfinder shows for a picture colour: the QCI's full-range (JFIF) YCbCr, as the
+    OV9640 gives it, decoded by the LCD overlay as studio range (pxa27x_QCI.cpp, pxa_LCD.cpp)."""
+    r, g, b = rgb
+    y = (19595 * r + 38470 * g + 7471 * b + 32768) >> 16
+    cb = min(255, max(0, ((-11059 * r - 21709 * g + 32768 * b + 32768) >> 16) + 128)) - 128
+    cr = min(255, max(0, ((32768 * r - 27439 * g - 5329 * b + 32768) >> 16) + 128)) - 128
+    y = (y - 16) * 76309
+    return tuple(min(255, max(0, v)) for v in ((y + 104597 * cr + 32768) >> 16,
+                                                 (y - 25675 * cb - 53279 * cr + 32768) >> 16,
+                                                 (y + 132201 * cb + 32768) >> 16))
+
+
 def picture_rgb(w, h, invert=False):
     return b''.join(bytes(picture_pixel(w, h, x, y, invert)) for y in range(h) for x in range(w))
 
@@ -89,13 +102,15 @@ def write_frame(path, w, h, rgb):
         struct.pack_into('<I', m, 16, (seq | 1) + 1)
 
 
-def compare_picture(w, h, rgb, x0=0, y0=0, stride=None, edge=4, invert=False):
+def compare_picture(w, h, rgb, x0=0, y0=0, stride=None, edge=4, invert=False, view=False):
     """As compare, against the host-source picture."""
     stride = stride or w
     total = far = count = strict = worst = 0
     for y in range(h):
         for x in range(w):
             want = picture_pixel(w, h, x, y, invert)
+            if view:
+                want = overlay_view(want)
             at = ((y0 + y) * stride + x0 + x) * 3
             d = max(abs(rgb[at + i] - want[i]) for i in range(3))
             total += d
@@ -139,15 +154,18 @@ def read_frame(w, h, rgb, x0=0, y0=0, stride=None):
     return frame
 
 
-def compare(w, h, rgb, frame, x0=0, y0=0, stride=None, edge=4):
+def compare(w, h, rgb, frame, x0=0, y0=0, stride=None, edge=4, view=False):
     """Per-channel differences against the pattern. Pixels within edge of a colour change are
-    left out of the strict count, since JPEG and chroma subsampling blur them."""
+    left out of the strict count, since JPEG and chroma subsampling blur them. With view set
+    it's against what the viewfinder shows (overlay_view)."""
     stride = stride or w
     total = far = count = strict = 0
     worst = 0
     for y in range(h):
         for x in range(w):
             want = pattern_pixel(w, h, frame, x, y)
+            if view:
+                want = overlay_view(want)
             at = ((y0 + y) * stride + x0 + x) * 3
             d = max(abs(rgb[at + i] - want[i]) for i in range(3))
             total += d
@@ -221,7 +239,7 @@ def check_viewfinder(work, name, invert=None):
     for i in range(3):
         w, h, rgb = decode(work / f'{name}-{i}.png')
         if invert is not None:
-            result = dict(compare_picture(320, 240, rgb, stride=w, edge=2, invert=invert), shot=i)
+            result = dict(compare_picture(320, 240, rgb, stride=w, edge=2, invert=invert, view=True), shot=i)
             if result['strict_over_24'] == 0:
                 break
             continue
@@ -230,7 +248,7 @@ def check_viewfinder(work, name, invert=None):
         except AssertionError as e:
             result = {'error': str(e), 'shot': i}
             continue
-        result = compare(320, 240, rgb, frame, stride=w, edge=2)
+        result = compare(320, 240, rgb, frame, stride=w, edge=2, view=True)
         result.update(frame=frame, shot=i)
         if result['strict_over_24'] == 0:
             break
