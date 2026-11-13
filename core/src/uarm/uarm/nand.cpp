@@ -2,6 +2,7 @@
 
 #include "nand.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -72,6 +73,10 @@ struct NAND {
     uint64_t sideOffset;
     std::vector<uint8_t> rawView;  // nandGetData's copy of a backed NAND, made when asked for
     bool rawViewValid;
+
+    // Pages written while a background save writes (nandTrackWrites).
+    bool trackWrites{};
+    std::vector<bool> writtenPages;  // one bit per page while trackWrites, so it never outgrows the chip
 
     size_t dirtyPagesSize;
     uint32_t *dirtyPages;
@@ -166,6 +171,7 @@ static bool nandPrvReadPage(struct NAND *nand, uint32_t page, uint8_t *dest) {
 
 static bool nandPrvWritePage(struct NAND *nand, uint32_t page, const uint8_t *src) {
     nand->rawViewValid = false;
+    if (nand->trackWrites && page < nand->writtenPages.size()) nand->writtenPages[page] = true;
     if (nand->backing)
         return nand->backing->Write(uint64_t(page) * nand->mainBytes, nand->mainBytes, src) &&
                nand->backing->Write(nand->sideOffset + uint64_t(page) * nand->spareBytes, nand->spareBytes,
@@ -178,6 +184,9 @@ static bool nandPrvWritePage(struct NAND *nand, uint32_t page, const uint8_t *sr
 static bool nandPrvEraseBlock(struct NAND *nand, uint32_t firstPage) {
     const uint32_t pages = 1u << nand->pagesPerBlockLg2;
     nand->rawViewValid = false;
+    if (nand->trackWrites)
+        for (uint32_t i = 0; i < pages && firstPage + i < nand->writtenPages.size(); ++i)
+            nand->writtenPages[firstPage + i] = true;
     if (nand->backing) {
         std::vector<uint8_t> ones(size_t(pages) * nand->mainBytes, 0xff);
         return nand->backing->Write(uint64_t(firstPage) * nand->mainBytes, uint64_t(pages) * nand->mainBytes,
@@ -564,10 +573,39 @@ bool nandReadStored(struct NAND *nand, uint64_t offset, uint64_t length, uint8_t
     return true;
 }
 
-bool nandAdoptBacking(struct NAND *nand, std::unique_ptr<CardBacking> backing, uint64_t sideOffset) {
+bool nandWriteRawPage(struct NAND *nand, uint32_t page, const uint8_t *src) {
+    return page < nandPrvPageCount(nand) && nandPrvWritePage(nand, page, src);
+}
+
+void nandTrackWrites(struct NAND *nand, bool on) {
+    nand->trackWrites = on;
+    nand->writtenPages.assign(on ? nandPrvPageCount(nand) : 0, false);
+}
+
+bool nandTakeTracked(struct NAND *nand, NandPages &out) {
+    out.clear();
+    for (uint32_t page = 0; page < nand->writtenPages.size(); ++page) {
+        if (!nand->writtenPages[page]) continue;
+        std::vector<uint8_t> bytes(nand->bytesPerPage);
+        if (!nandPrvReadPage(nand, page, bytes.data())) return false;
+        out.emplace_back(page, std::move(bytes));
+    }
+    return true;
+}
+
+bool nandAdoptBacking(struct NAND *nand, std::unique_ptr<CardBacking> backing, uint64_t sideOffset,
+                      const NandPages *replay) {
     const uint64_t pages = nandPrvPageCount(nand);
     if (!backing || sideOffset < pages * nand->mainBytes || backing->Size() != sideOffset + pages * nand->spareBytes)
         return false;
+    // Pages written after the snapshot the file holds go onto the new backing before it takes over.
+    if (replay)
+        for (const auto &[page, bytes] : *replay)
+            if (page >= pages || bytes.size() != nand->bytesPerPage ||
+                !backing->Write(uint64_t(page) * nand->mainBytes, nand->mainBytes, bytes.data()) ||
+                !backing->Write(sideOffset + uint64_t(page) * nand->spareBytes, nand->spareBytes,
+                                bytes.data() + nand->mainBytes))
+                return false;
     nand->backing = std::move(backing);
     nand->sideOffset = sideOffset;
     if (nand->data && nand->releaseData) nand->releaseData(nand->data);

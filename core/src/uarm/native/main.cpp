@@ -1320,6 +1320,8 @@ bool gFastEngineMissing = false;
             } catch (...) {
                 guestError = current_exception();
             }
+            // A save still writing finishes here, on this thread, before the core stops.
+            if (desktop) desktop->finishPendingSave(commandContext);
             link.Finish();
         });
 

@@ -14,6 +14,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "BackgroundJob.h"
 #include "Commands.h"
 #include "DesktopChannel.h"
 #include "device_profile5.h"
@@ -100,6 +101,14 @@ class DesktopControl {
     // The save when the launcher went away failed; the core exits non-zero.
     bool SaveFailed() const { return saveFailed; }
     bool poll(commands::Context& ctx) {
+        // No request is taken while a save writes in the background: it answers when it's done,
+        // and everything after it, a quit or a card change too, waits behind it.
+        if (pendingSave) {
+            if (!saveJob.Finished()) return !channel.Flush() && lost(ctx);
+            finishSave(ctx);
+            // Step 3's file work paused the guest; don't catch up that wall time.
+            ctx.mainLoop.PauseAt(timestampUsec());
+        }
         DesktopChannel::Request request;
         switch (channel.Receive(request)) {
             case DesktopChannel::Poll::closed: return lost(ctx);
@@ -115,8 +124,12 @@ class DesktopControl {
                 }
                 if (command == "save" && ctx.camera) ctx.camera->Disarm();
                 Reply result;
+                bool deferred = false;
                 try {
-                    result = dispatch(ctx, command, request.argument, request.id);
+                    if (command == "save")
+                        deferred = startSave(ctx, request.argument, request.id, result);
+                    else
+                        result = dispatch(ctx, command, request.argument, request.id);
                 } catch (const GuestFiles::Cancelled& error) {
                     result = {false, "cancelled", error.what()};
                 } catch (const InjectedCallError& error) {
@@ -129,7 +142,7 @@ class DesktopControl {
                     if (sound) ctx.audioDriver.Start();
                     ctx.mainLoop.PauseAt(timestampUsec());
                 }
-                channel.Reply(request.id, result.ok, result.code, result.message);
+                if (!deferred) channel.Reply(request.id, result.ok, result.code, result.message);
                 break;
             }
         }
@@ -137,10 +150,16 @@ class DesktopControl {
         return quit && channel.OutputEmpty();
     }
 
+    // Waits for a save still writing and finishes it, for a core about to stop.
+    void finishPendingSave(commands::Context& ctx) {
+        if (pendingSave) finishSave(ctx);
+    }
+
  private:
     // The socket closed. When the launcher went away without asking to quit, the session is saved
     // where its close would have saved it, here on the emulation thread like a save request.
     bool lost(commands::Context& ctx) {
+        finishPendingSave(ctx);
         if (saveOnLoss.empty() || quit || !channel.Lost() || channel.QuitPending()) return true;
         if (ctx.microphone) ctx.microphone->Disarm();
         ctx.audioDriver.Pause();
@@ -152,6 +171,7 @@ class DesktopControl {
         return true;
     }
     bool flush() { return channel.Flush(); }
+
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
@@ -193,6 +213,81 @@ class DesktopControl {
         return state == "off" && !ctx.serialError.empty() ? "off " + ctx.serialError : state;
     }
     struct Reply { bool ok{false}; std::string code{"failed"}, message; };
+    // A save request: the snapshot and any card or NAND journal here on the emulation thread, then
+    // the .frond compressed and written on saveJob while the guest runs. True when the reply waits
+    // for that write; false with `result` set when the save failed before it.
+    bool startSave(commands::Context& ctx, const std::string& path, const std::string& id, Reply& result) {
+        if (path.empty() || path.front() != '/') {
+            result = {false, "argument", "An absolute file path is required."};
+            return false;
+        }
+        // Tests: the whole save on this thread to FROND_SAVE_REFERENCE first, at the same instant,
+        // to compare with what the background write gives. Not for sessions with a card or NAND.
+        if (const char* reference = std::getenv("FROND_SAVE_REFERENCE")) {
+            const auto synchronous = std::chrono::steady_clock::now();
+            const bool ok = frondNative::saveMachine(reference, *ctx.soc);
+            std::cerr << "save timing: synchronous reference " << (ok ? "" : "failed ") << saveTimingMs(synchronous)
+                      << " ms" << std::endl;
+        }
+        const auto started = std::chrono::steady_clock::now();
+        auto save = std::make_unique<frondNative::MachineSave>();
+        if (!frondNative::beginMachineSave(path, *ctx.soc, *save, ctx.sessionPath, ctx.sessionFolder)) {
+            result = {false, "save", "Could not save device state."};
+            return false;
+        }
+        pendingSave = std::move(save);
+        pendingSaveId = id;
+        saveStarted = started;
+        saveGuestTime = ctx.soc->GetTime();
+        // The job reads only *pendingSave, which nothing else touches until it finishes.
+        auto* job = pendingSave.get();
+        saveJob.Start([job] { frondNative::writeMachineSave(*job); });
+        saveBlockedMs = saveTimingMs(started);
+        if (std::getenv("FROND_SAVE_TEST_WRITES")) testWrites(ctx);
+        return true;
+    }
+    // Tests: while the background write runs, writes "FROND-BG-MARK-n" (n counts saves) to the last
+    // NAND page and the last SD sector, as the guest might. Only for test copies of sessions.
+    void testWrites(commands::Context& ctx) {
+        const std::string mark = "FROND-BG-MARK-" + std::to_string(++testMarks) + ".";
+        if (auto* chip = ctx.soc->GetNand(); chip && nandRawBytes(chip)) {
+            std::vector<uint8_t> page(nandPageBytes(chip), 0xff);
+            std::memcpy(page.data(), mark.data(), mark.size());
+            const bool ok = nandWriteRawPage(chip, uint32_t(nandRawBytes(chip) / page.size() - 1), page.data());
+            std::cerr << "save test: NAND " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
+        if (sdCardInitialized() && sdCardSectorCount()) {
+            std::vector<uint8_t> sector(SD_SECTOR_SIZE, 0);
+            std::memcpy(sector.data(), mark.data(), mark.size());
+            const bool ok = sdCardWrite(uint32_t(sdCardSectorCount() - 1), sector.data());
+            std::cerr << "save test: SD " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
+    }
+    unsigned testMarks{};
+    // Emulation thread: waits for saveJob, finishes the card and NAND files and answers.
+    void finishSave(commands::Context& ctx) {
+        const auto waited = std::chrono::steady_clock::now();
+        saveJob.Wait();
+        const auto finishing = std::chrono::steady_clock::now();
+        const bool ok = frondNative::finishMachineSave(*pendingSave, *ctx.soc);
+        if (saveTimingWanted())
+            std::cerr << "save timing: emulation thread " << saveBlockedMs + saveTimingMs(waited) << " ms (snapshot "
+                      << saveBlockedMs << " ms, waited " << std::chrono::duration<double, std::milli>(finishing - waited).count()
+                      << " ms, finish " << saveTimingMs(finishing) << " ms), whole save " << saveTimingMs(saveStarted)
+                      << " ms, guest time " << saveGuestTime << " at snapshot, " << ctx.soc->GetTime() << " when written"
+                      << std::endl;
+        pendingSave.reset();
+        if (ok) channel.Reply(pendingSaveId, true, "saved", "Session saved.");
+        else channel.Reply(pendingSaveId, false, "save", "Could not save device state.");
+        pendingSaveId.clear();
+    }
+    // Declared before saveJob, so saveJob joins first when this goes.
+    std::unique_ptr<frondNative::MachineSave> pendingSave;
+    BackgroundJob saveJob;
+    std::string pendingSaveId;
+    std::chrono::steady_clock::time_point saveStarted;
+    double saveBlockedMs{};
+    uint64_t saveGuestTime{};
     static std::string encode(const std::string& value) { return DesktopChannel::Encode(value); }
     static bool decode(const std::string& value, std::string& out) { return DesktopChannel::Decode(value, out); }
     bool cancelFiles(const std::string& job) {

@@ -16,6 +16,7 @@
 
 class CardBacking;
 class CardSnapshot;
+struct FileCardIoHooks;
 
 void sdCardInitialize(size_t sectors, const char* id);
 void sdCardInitializeWithData(size_t sectors, void* buf, const char* id);
@@ -76,6 +77,12 @@ void sdCardSetDirty(bool isDirty);
 const char* sdCardGetId();
 
 std::shared_ptr<const CardSnapshot> sdCardSnapshot();
+// From a background save's snapshot until it finishes, sectors the guest writes are noted, and
+// sdCardAdoptSaved and sdCardAdoptSavedFromRam copy them from the running card into the saved
+// file's backing, which holds the snapshot. Turning it on or off forgets the list.
+void sdCardTrackWrites(bool on);
+// Tests only: I/O hooks for the backing sdCardAdoptSaved and sdCardAdoptSavedFromRam open.
+void sdCardSetAdoptHooks(FileCardIoHooks* hooks);
 bool sdCardRestore(const std::shared_ptr<const CardSnapshot>& snapshot);
 
 #endif  // _SD_CARD_H_

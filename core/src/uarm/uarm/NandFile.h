@@ -44,7 +44,9 @@ inline void fillMedia(frondMachine::Media& media, uint64_t rawBytes) {
 }
 
 // Opens `path` (a checked nand.frondnand) as a backing with its chunk CRCs.
-inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& path, uint64_t rawBytes) {
+// `keepHeld`: opened inside HoldGenerations, see FileCardOptions.
+inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& path, uint64_t rawBytes,
+                                                 bool keepHeld = false) {
     frondSdFile::Info info;
     std::vector<uint32_t> table;
     if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok || !info.nand ||
@@ -54,6 +56,7 @@ inline std::unique_ptr<FileCardBacking> openFile(const std::filesystem::path& pa
     FileCardOptions options;
     // Saves adopt the file without Commit, like the uARM SD card, so leftover generations are resumed.
     options.recoverRootlessBase = true;
+    options.keepHeld = keepHeld;
     options.identity = identity;
     options.chunkCrcs = std::move(table);
     return FileCardBacking::Open(path, info.stored(), frondSdFile::headerBytes, options);
@@ -96,7 +99,9 @@ inline bool beginSave(const std::filesystem::path& folder, NAND* nand, frondMach
 
 // Step 3, after the .frond is published: the journal applied in place or the full copy renamed onto
 // nand.frondnand, then the NAND runs on that file, unless it runs on another folder's. If the file
-// can't be finished, the journal or copy stays for the next load to finish.
+// can't be finished, the journal or copy stays for the next load to finish. Pages the guest wrote
+// after a background save's snapshot (nandTrackWrites) go from the running NAND onto the file's
+// backing, so none are lost.
 inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondNative::SdSave& save) {
     const auto sidecar = folder / frondMachine::nandSibling;
     auto* file = fileBacking(nand);
@@ -128,13 +133,23 @@ inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondN
         stale() = true;
         return true;
     }
-    FileCardBacking::DiscardGenerations(sidecar);
-    auto fresh = openFile(sidecar, nandRawBytes(nand));
-    if (!fresh || !nandAdoptBacking(nand, std::move(fresh), sideOffset(nandRawBytes(nand)))) {
+    NandPages tracked;
+    if (!nandTakeTracked(nand, tracked)) {
         stale() = true;
         std::fprintf(stderr, "frond: the NAND couldn't move onto the saved file; the next save copies it\n");
         return true;
     }
+    // Generations go once the NAND is on its new backing, and come back if it can't move.
+    auto held = FileCardBacking::HoldGenerations(sidecar);
+    auto fresh = openFile(sidecar, nandRawBytes(nand), true);
+    if (!fresh || !nandAdoptBacking(nand, std::move(fresh), sideOffset(nandRawBytes(nand)), &tracked)) {
+        fresh.reset();
+        held.Return();
+        stale() = true;
+        std::fprintf(stderr, "frond: the NAND couldn't move onto the saved file; the next save copies it\n");
+        return true;
+    }
+    held.Drop();
     stale() = false;
     return true;
 }
