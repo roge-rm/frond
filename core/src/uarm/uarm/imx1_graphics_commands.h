@@ -225,8 +225,9 @@ class Imx1GraphicsCommands {
                 for (uint32_t copy = 0; copy < copyWords; copy += 3) {
                     if (!take(sourceXY) || !take(first) || !take(second)) return A::sequence;
                     // Both copy producers send 48f with every copy and never 490 or 491. A colour source
-                    // copy reads neither.
-                    if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff || !staleTextColours()) return A::sideEffect;
+                    // copy reads neither, so any colours a 1bpp text draw left there are allowed.
+                    if ((copy + 3 == copyWords && left) || !known[0x48f] || values[0x48f] != 0xffffffff ||
+                        !known[0x490] || !known[0x491]) return A::sideEffect;
                     // The software stretch sends a run of no width or height where a shrink drops a column or
                     // row (seen in Outpost). It doesn't filter them, so on the chip they draw nothing.
                     if (stretch && (!(second >> 16) || !(second & 0xffff))) continue;
