@@ -143,7 +143,9 @@ def analyse_clip(clip, work):
             'sound': check_audio(clip, work)}
 
 
-def start(args, name, source, card=True):
+def start(args, name, source, replay=None):
+    """Starts the core on a copy of source. A replay given here runs from the core's first guest
+    time, so none of it waits on the host."""
     work = args.output / name
     machine = work / 'machine'
     machine.mkdir(parents=True)
@@ -154,8 +156,14 @@ def start(args, name, source, card=True):
         shutil.copy(card, machine / card.name)
     # Emulated time runs the Zire at its full 150 MIPS of guest time, slower than real time on most
     # hosts, so the waits get longer.
-    core = Core(args.core, machine, LEVEL, work / 'core.log', ['--emulated-time'], patience=10)
-    core.wait_ready()
+    extra = ['--emulated-time']
+    if replay:
+        (work / 'start.replay').write_text(replay.replace('S/', str(work) + '/'))
+        extra += ['--input-replay', str(work / 'start.replay')]
+    core = Core(args.core, machine, LEVEL, work / 'core.log', extra, patience=10)
+    # guest-ready can call into the guest, so it waits until a start replay is done.
+    if not replay:
+        core.wait_ready()
     return core, work
 
 
@@ -247,10 +255,16 @@ def main():
     results['save-during']['faults'] = faults(work)
 
     # The saved session in a new process: still recording; stop it there and save the clip.
-    core, work = start(args, 'load-saved', args.output / 'save-during' / 'during' / 'during.frond')
+    # The stop tap 2 s after the load, in the replay the core starts with.
+    stop = '1500 pen-up\n1501 snapshot "S/loaded.png"\n' + \
+        ''.join(f'{1500 + int(t)} {e}\n' for t, e in (l.split(' ', 1) for l in SHUTTER.splitlines())) + \
+        '4500 pen-up\n4501 snapshot "S/stopped.png"\n'
+    core, work = start(args, 'load-saved', args.output / 'save-during' / 'during' / 'during.frond', stop)
     try:
-        camera.run_replay(core, work, 'loaded', '1500 pen-up\n1501 snapshot "S/loaded.png"\n')
-        camera.run_replay(core, work, 'stop', SHUTTER + '3000 pen-up\n3001 snapshot "S/stopped.png"\n')
+        deadline = time.monotonic() + 600
+        while core.request('replay-state')[1] != 'finished':
+            assert time.monotonic() < deadline, 'replay never finished'
+            time.sleep(.2)
         camera.run_replay(core, work, 'save', SAVE)
         camera.run_replay(core, work, 'home', HOME)
         clips = export_clips(core, work)
