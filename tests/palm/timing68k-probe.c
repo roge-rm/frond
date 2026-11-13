@@ -128,7 +128,15 @@ static UInt32 timed(int which, UInt32 n) {
         case 8: loopShift(n); break;
         case 9: loopMovem(n); break;
         /* A long in the ROM, and the system control register. */
-        case 10: loopRead(n, rom); break;
+        case 10:
+            /* A patched TimGetTicks in RAM would time RAM instead: skip the loop, 0 ticks. */
+            if ((UInt32)rom < 0x10000000UL) {
+                witness.code[which] = 0;
+                witness.data[which] = (UInt32)rom;
+                return 0;
+            }
+            loopRead(n, rom);
+            break;
         case 11: loopReadByte(n, (volatile void *)0xfffff000); break;
         case 12: loopClear(n, &cell); break;
         default: loopSet(n, &cell); break;

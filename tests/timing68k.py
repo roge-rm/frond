@@ -63,7 +63,8 @@ SDRAM_PASSES = [
     [(0, 1, []), (2, 1, [])] + _TAIL(4),
     [(0, 2, [])] + [(4, 2, [])] * 99 + [(4, 3, [])] + _TAIL(8),
     [(0, 1, [])] + _TAIL(2),
-    [(0, 2, [('stack', -24 + 4 * k, 2, True) for k in range(6)]),
+    # movem.l to -(sp) writes from sp-4 down, as frond-68k does; (sp)+ reads back up.
+    [(0, 2, [('stack', -4 - 4 * k, 2, True) for k in range(6)]),
      (4, 3, [('stack', -24 + 4 * k, 2, False) for k in range(6)])] + _TAIL(8),
     [(at, 1, [('off', 0, 2, False)]) for at in range(0, 8, 2)] + _TAIL(8),
     [(at, 1, [('off', 0, 1, False)]) for at in range(0, 8, 2)] + _TAIL(8),
@@ -248,6 +249,12 @@ def main():
     print(f'{"loop":8} {"count":>7} {"ticks":>5} {"manual":>7} {"+wait":>7} {"+dma":>7} {"measured":>9} {"diff":>7}')
     for index, ((name, program, ram, rom, _), row) in enumerate(zip(LOOPS, rows)):
         count, ticks, clocks = row[:3]
+        if not ticks:
+            # The probe skips the ROM loop when TimGetTicks isn't in the ROM (a patch in RAM).
+            print(f'{name:8} {count:7} not run' + (f', address {row[4]:08x} is not in the ROM' if len(row) > 4 else '')
+                  + '  FAIL')
+            failures += 1
+            continue
         if sdram:
             dram_wait, dram_cycles = sdram_pass(sdram, SDRAM_PASSES[index], row[3], row[4])
             waited = clocks + dram_wait + rom_wait * rom
