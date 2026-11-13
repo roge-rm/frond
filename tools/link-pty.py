@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Put a PTY in front of a TCP endpoint, for programs that only open serial devices.
+"""Put a PTY in front of a TCP or Unix socket endpoint, for programs that only open serial devices.
 
 pilot-link and terminal programs take the printed /dev/pts/N (or --link PATH) as their port. The
-endpoint is PORT (a local Frond's --serial or --usb tcp:PORT), HOST:PORT (connect, such as an Android
-Frond waiting for a peer) or listen:PORT (wait on all interfaces for one peer, such as an Android
-Frond connecting here). Bytes pass both ways unchanged. The PTY stays open between programs, so
-pilot-link can run again and again; each program finds it raw and empty, and TCP bytes that come while no
-program has it open are dropped. The run ends when the TCP side closes."""
+endpoint is PORT (a local Frond's --serial or --usb tcp:PORT), unix:PATH (a local Frond's unix:PATH),
+HOST:PORT (connect, such as an Android Frond waiting for a peer) or listen:PORT (wait on all interfaces
+for one peer, such as an Android Frond connecting here). Bytes pass both ways unchanged. The PTY stays open between programs, so
+pilot-link can run again and again; each program finds it raw and empty. TCP bytes that come while no
+program has it open are kept for the next program for up to 30 s, so pilot-link can start after HotSync
+on the Palm; bytes in the first second after a program closes are the end of its run and are dropped.
+The run ends when the TCP side closes."""
 import argparse
 import importlib.util
 import json
@@ -25,10 +27,19 @@ CHUNK = 4096
 # TCP bytes waiting for the program on the PTY. When it's full, TCP is read no further until the program
 # catches up.
 PENDING_MAX = 64 * 1024
+# Bytes kept with no program on the PTY are given to the next one only if it opens within KEEP_SECONDS of
+# the first of them, and not from the first SETTLE_SECONDS after a program closes.
+KEEP_SECONDS = 30
+SETTLE_SECONDS = 1
 
 
 def connect(end, seconds):
     kind, host, port = end
+    if kind == 'unix':
+        peer = socket.socket(socket.AF_UNIX)
+        peer.settimeout(10 if seconds is None else max(.01, min(10, seconds)))
+        peer.connect(host)
+        return peer
     if kind != 'listen':
         return socket.create_connection((host, port), timeout=10 if seconds is None else max(.01, min(10, seconds)))
     dual = socket.has_dualstack_ipv6()
@@ -85,14 +96,26 @@ def relay(end, link=None, seconds=None):
             return {'reason': reason, 'from_tcp': 0, 'to_tcp': 0, 'dropped': 0}
         peer.setblocking(True)
         peer.settimeout(None)
-        peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        print(f'Linked {name} and {link_irda.name(end)}.', flush=True)
+        if end[0] != 'unix':
+            peer.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        print(f'Linked {name} and {"unix:" + end[1] if end[0] == "unix" else link_irda.name(end)}.', flush=True)
         hung = True
+        kept_at, settle_until = None, 0.0
+
+        def opened():
+            # A program opened the PTY: it gets the kept bytes unless they are too old.
+            nonlocal kept_at, dropped
+            if kept_at is not None and time.monotonic() - kept_at > KEEP_SECONDS:
+                dropped += len(pending)
+                pending.clear()
+            kept_at = None
+
         poller = select.poll()
         while seconds is None or time.monotonic() - started < seconds:
             if hung and not hung_up(master):
                 hung = False
-            poller.register(peer, select.POLLRDHUP | (select.POLLIN if len(pending) < PENDING_MAX else 0))
+                opened()
+            poller.register(peer, select.POLLRDHUP | (select.POLLIN if hung or len(pending) < PENDING_MAX else 0))
             if hung:
                 try:
                     poller.unregister(master)
@@ -118,6 +141,7 @@ def relay(end, link=None, seconds=None):
                     hung = True
                     dropped += len(pending)
                     pending.clear()
+                    kept_at, settle_until = None, time.monotonic() + SETTLE_SECONDS
                     try:
                         reset_slave(name)
                     except OSError:
@@ -139,15 +163,28 @@ def relay(end, link=None, seconds=None):
                     reason = 'peer disconnected'
                     break
                 if hung and hung_up(master):
-                    dropped += len(data)
+                    now = time.monotonic()
+                    if now < settle_until:
+                        dropped += len(data)
+                    else:
+                        if kept_at is None:
+                            kept_at = now
+                        pending += data
+                        if len(pending) > PENDING_MAX:
+                            dropped += len(pending) - PENDING_MAX
+                            del pending[:len(pending) - PENDING_MAX]
                 else:
                     # A program may have opened the PTY during the poll.
-                    hung = False
+                    if hung:
+                        hung = False
+                        opened()
                     pending += data
             elif event & select.POLLRDHUP:
                 # Closed with bytes still unread while the program isn't keeping up: those are lost.
                 reason = 'peer disconnected'
                 break
+        if hung:
+            dropped += len(pending)
         return {'reason': reason, 'from_tcp': received, 'to_tcp': sent, 'dropped': dropped}
     finally:
         if peer:
@@ -159,14 +196,16 @@ def relay(end, link=None, seconds=None):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('endpoint', help='PORT, HOST:PORT or listen:PORT')
+    p.add_argument('endpoint', help='PORT, unix:PATH, HOST:PORT or listen:PORT')
     p.add_argument('--link', help='also make this symlink to the PTY')
     p.add_argument('--seconds', type=float, help='optional bounded run')
     a = p.parse_args()
     try:
-        end = link_irda.endpoint(a.endpoint)
+        end = ('unix', a.endpoint[5:], 0) if a.endpoint.startswith('unix:') else link_irda.endpoint(a.endpoint)
     except ValueError as e:
-        p.error(f'{e}: use PORT, HOST:PORT or listen:PORT with a port 1..65535')
+        p.error(f'{e}: use PORT, unix:PATH, HOST:PORT or listen:PORT with a port 1..65535')
+    if end[0] == 'unix' and not end[1]:
+        p.error('unix: needs a socket path')
     if a.seconds is not None and not 0 < a.seconds <= 86400:
         p.error('seconds must be positive and at most 86400')
     if a.link and os.path.lexists(a.link) and not os.path.islink(a.link):

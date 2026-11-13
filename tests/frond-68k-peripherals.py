@@ -451,7 +451,38 @@ def check_usb(rom, session, root, probes):
         if 'Hello' not in out:
             raise AssertionError('Hello not listed after load-session')
         r.wait_line('usb: enumerated', 5, mark)
-    return f'{backed} databases backed up; {enumerated}; list after reload and after load-session'
+    # TCP and a Unix socket, each with tools/link-pty.py in front for pilot-link.
+    folder = Path(tempfile.mkdtemp(prefix='fu-'))
+    try:
+        for mode in ('tcp', 'unix'):
+            if mode == 'tcp':
+                with socket.socket() as s:
+                    s.bind(('127.0.0.1', 0))
+                    endpoint = str(s.getsockname()[1])
+                usb = f'tcp:{endpoint}'
+            else:
+                endpoint = f'unix:{folder}/usb.sock'
+                usb = endpoint
+            with Machine(m.root / 'synced.frond', root, f'usb-{mode}', '--usb', usb) as e:
+                e.send('usb-state', 'usb:')
+                tty = e.root / f'{mode}-tty'
+                link = subprocess.Popen([sys.executable, ROOT / 'tools/link-pty.py', endpoint, '--link', tty],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                try:
+                    for line in link.stdout:
+                        if line.startswith('Linked'):
+                            break
+                    else:
+                        raise AssertionError(f'link-pty.py never linked {usb}')
+                    out = hotsync(e, str(tty), '-l')
+                finally:
+                    link.kill()
+                    link.wait()
+                if 'Hello' not in out:
+                    raise AssertionError(f'Hello not listed over {mode}')
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    return f'{backed} databases backed up; {enumerated}; list after reload, after load-session, over tcp and unix'
 
 
 def unix_client(path):

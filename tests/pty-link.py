@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """tools/link-pty.py: bytes both ways between a PTY and TCP, the PTY reopened between programs, and EOF;
-TCP bytes with no program on the PTY dropped, and each program finding the PTY raw."""
+TCP bytes with no program on the PTY kept for the next one or dropped, and each program finding the PTY raw."""
 import json
 import os
 from pathlib import Path
@@ -107,6 +107,21 @@ class Tests(unittest.TestCase):
             result = json.loads(out.splitlines()[-1])
             # to_tcp has the first program's echo of stale.
             self.assertEqual(result, {'reason': 'peer disconnected', 'from_tcp': 11, 'to_tcp': 7, 'dropped': 4})
+
+    def test_kept_for_a_program_that_opens_later(self):
+        # The Palm starts HotSync before pilot-link opens the PTY.
+        with tempfile.TemporaryDirectory() as temp, Linked(temp) as (process, peer, link):
+            peer.sendall(b'wakeup')
+            time.sleep(.5)
+            fd = os.open(link, os.O_RDWR | os.O_NOCTTY)
+            try:
+                self.assertEqual(read_exactly(fd, 6), b'wakeup')
+            finally:
+                os.close(fd)
+            peer.close()
+            out, err = process.communicate(timeout=3)
+            result = json.loads(out.splitlines()[-1])
+            self.assertEqual(result, {'reason': 'peer disconnected', 'from_tcp': 6, 'to_tcp': 0, 'dropped': 0})
 
     def test_duplex_reopen_and_disconnect(self):
         with tempfile.TemporaryDirectory() as temp, socket.socket() as listener:
