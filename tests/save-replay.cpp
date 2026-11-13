@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -141,6 +142,13 @@ void writeFile(const fs::path& path, const std::vector<uint8_t>& bytes) {
     fs::rename(tmp, path);
 }
 
+std::set<std::string> namesWith(const fs::path& dir, const std::string& prefix) {
+    std::set<std::string> names;
+    for (const auto& e : fs::directory_iterator(dir))
+        if (e.path().filename().string().rfind(prefix, 0) == 0) names.insert(e.path().filename().string());
+    return names;
+}
+
 int countPrefix(const fs::path& dir, const std::string& prefix) {
     int n = 0;
     for (const auto& e : fs::directory_iterator(dir))
@@ -217,6 +225,64 @@ void failedMoveKeepsGenerations(const fs::path& dir) {
     for (const auto& e : fs::directory_iterator(dir)) fs::remove(e.path());
 }
 
+// The old backing's uncommitted generation and the new backing's replay generation get the same
+// name; dropping the old backing must leave the new one's file alone.
+void collidingGenerations(const fs::path& dir) {
+    const auto path = dir / "card.frondsd";
+    writeFile(path, std::vector<uint8_t>(kCard, 0x33));
+    check(sdCardInitializeFromFile(path.c_str(), kCard, 0, "sd"), "open the card");
+    std::vector<uint8_t> sector(512, 0x8d);
+    check(sdCardWrite(2, sector.data()), "write sector 2, uncommitted");
+    const auto snapshot = cardBytes(0, kCard);
+    sdCardTrackWrites(true);
+    check(sdCardWrite(3, sector.data()), "write sector 3 after the snapshot");
+    const auto live = cardBytes(0, kCard);
+    const auto oldNames = namesWith(dir, ".gen-");
+    writeFile(path, snapshot);
+    check(sdCardAdoptSaved(path.c_str(), kCard, 0), "move onto the saved file");
+    sdCardTrackWrites(false);
+    bool collide = false;
+    for (const auto& name : namesWith(dir, ".gen-")) collide = collide || oldNames.count(name);
+    check(collide, "the new backing reuses a generation name the old one had");
+    check(cardBytes(0, kCard) == live, "the moved card has every write");
+    check(sdCardCommit(), "commit the moved card");
+    sdCardReset();
+    check(sdCardInitializeFromFile(path.c_str(), kCard, 0, "sd"), "reopen the moved card");
+    check(cardBytes(0, kCard) == live, "the old backing left the new one's generation alone");
+    sdCardReset();
+    for (const auto& e : fs::directory_iterator(dir)) fs::remove(e.path());
+}
+
+// A crash between holding generations and dropping or returning them leaves .held- files.
+void heldAfterCrash(const fs::path& dir) {
+    const auto path = dir / "card.frondsd";
+    std::vector<uint8_t> sector(512, 0x7c);
+
+    // Still bound to the file there: they come back and the card keeps its writes.
+    writeFile(path, std::vector<uint8_t>(kCard, 0x11));
+    check(sdCardInitializeFromFile(path.c_str(), kCard, 0, "sd"), "open the card");
+    check(sdCardWrite(4, sector.data()) && sdCardCommit(), "write and commit sector 4");
+    const auto live = cardBytes(0, kCard);
+    auto held = FileCardBacking::HoldGenerations(path);
+    check(!held.moved.empty() && countPrefix(dir, ".gen-") == 0, "generations are held");
+    sdCardReset();
+    check(countPrefix(dir, ".held-") > 0, "the crash leaves them held");
+    check(sdCardInitializeFromFile(path.c_str(), kCard, 0, "sd"), "reopen with held generations");
+    check(cardBytes(0, kCard) == live, "held generations bound to the file come back");
+    check(countPrefix(dir, ".held-") == 0, "none left held after the load");
+
+    // A save replaced the file before the crash: they're for the old file and go.
+    held = FileCardBacking::HoldGenerations(path);
+    sdCardReset();
+    std::vector<uint8_t> saved(kCard, 0x22);
+    writeFile(path, saved);
+    check(sdCardInitializeFromFile(path.c_str(), kCard, 0, "sd"), "open the saved file with held generations");
+    check(cardBytes(0, kCard) == saved, "the saved file wins over the held generations");
+    check(countPrefix(dir, ".held-") == 0, "held generations of the old file are gone");
+    sdCardReset();
+    for (const auto& e : fs::directory_iterator(dir)) fs::remove(e.path());
+}
+
 }  // namespace
 
 int main() {
@@ -226,6 +292,8 @@ int main() {
     const fs::path dir = fs::absolute(tmpl);
     memoryStickReplay(dir);
     failedMoveKeepsGenerations(dir);
+    collidingGenerations(dir);
+    heldAfterCrash(dir);
     fs::remove_all(dir);
     if (failures) return 1;
     std::printf("save-replay: ok\n");
