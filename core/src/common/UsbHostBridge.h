@@ -41,6 +41,9 @@ class UsbHostBridge {
 
     bool Start(SocPXA* soc, const Config& config, std::string& error);
     void Stop();  // unplugs the cable and closes the endpoint
+    // Like Stop, but the host endpoint (a PTY's path, a TCP port) stays open for a Start with
+    // the same transport.
+    void Suspend();
     void Service();  // between emulation slices
 
     Config GetConfig() const;

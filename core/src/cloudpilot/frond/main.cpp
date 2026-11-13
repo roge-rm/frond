@@ -1157,6 +1157,7 @@ class Runner {
 
     // Runs up to cycles and moves guest time on.
     bool Step(uint32_t cycles) {
+        runtimeCards.Service();
         ServiceLinks();
         ServiceUsb();
         if(usbBridge.Host()) cycles=std::min(cycles,std::max(1u,uint32_t(gSession->GetClocksPerSecond()/100000)));
@@ -1396,9 +1397,10 @@ class Runner {
     // The T415 cradle's host endpoint, kept across loads and resets.
     string usbCradleMode="off", usbError;
     // The bank owner calls this before disposing even the first register bank.
-    int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(); });
-    void StopUsb() {
-        usbBridge.Stop();
+    int usbDisposeHandler=EmBankRegs::onBeforeDispose.AddHandler([this] { StopUsb(usbCradleMode!="off"); });
+    // keepLink leaves the cradle's host endpoint open so a load restarts it on the same PTY path.
+    void StopUsb(bool keepLink=false) {
+        if(keepLink) usbBridge.Suspend(); else usbBridge.Stop();
         usbHooks={};
         usbDana.reset();
         usbCable=false;
@@ -1526,7 +1528,7 @@ class Runner {
         if(!d12) { error="This device has no USB cradle.";return false; }
         UsbHostBridge::Config config;
         if(!HostSerial::Parse(mode,config)) { error="Use off, pty, tcp:PORT or unix:PATH.";return false; }
-        StopUsb();
+        StopUsb(config.kind!=HostSerial::Kind::off && HostSerial::Format(config)==usbCradleMode);
         usbCradleMode="off";
         usbError.clear();
         if(!usbBridge.Start(UsbHostBridge::Backend{
@@ -1945,7 +1947,7 @@ class Runner {
             if(!StartUsbCradle(mode,error)) cout << "usb: error " << error << endl;
             else cout << "usb: " << usbBridge.Describe() << endl;
         } else if (command == "usb-state") {
-            cout << "usb: " << UsbDescription() << endl;
+            cout << "usb: " << (UsbCradle() ? UsbDescription() : string("off")) << endl;
         } else if (command == "usb-debug-mode") {
             string mode,error;words >> mode;
             if(!StartUsbDebug(mode,error)) cout << "usb-debug: error " << error << endl;
@@ -2470,7 +2472,7 @@ class Runner {
             gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::cradle, ButtonEvent::Type::release));
             return {true, "hotsync", "HotSync button pressed."};
         }
-        if (command == "usb-state") return {true, "usb", UsbDescription()};
+        if (command == "usb-state") return {true, "usb", UsbCradle() ? UsbDescription() : string("off")};
         if (command == "usb-mode") {
             if (!UsbCradle()) return {false, "unsupported", "USB is not supported on this device."};
             string error;

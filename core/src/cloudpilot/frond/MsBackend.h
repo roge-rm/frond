@@ -76,7 +76,24 @@ class FrondMsBackend : public MemoryStickBackend {
             out[0x177] = 0;
         return true;
     }
+    // A boot page the guest writes back with the 0 TpcRead showed keeps the size the file stores.
+    void KeepDisabledSize(uint8_t* page) {
+        if (card.Block() >= 2 || card.state.reg[21] != 0 || page[0x178] != 1 || page[0x174] || page[0x175] ||
+            page[0x176] || page[0x177] != 0)
+            return;
+        MemoryStickMedia::Page stored;
+        if (card.media.Read(card.Block(), 0, stored) == MemoryStickMedia::Result::ok && stored[0x177] == 2 &&
+            stored[0x178] == 1)
+            page[0x177] = 2;
+    }
     bool TpcWrite(uint8_t tpc, const uint8_t* in, size_t size) override {
+        uint8_t copy[512];
+        if (tpc == 0xd && size == 512) {
+            std::memcpy(copy, in, 512);
+            KeepDisabledSize(copy);
+            in = copy;
+        } else if (tpc == 0xe && size == 1 && *in == 0x55 && (card.state.bufferFlags & 2u))
+            KeepDisabledSize(card.state.page.data());
         // A command's page writes reach the card file in one commit.
         if (!image) return card.TpcWrite(tpc, in, size);
         image->BeginBatch(false);

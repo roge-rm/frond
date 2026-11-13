@@ -24,7 +24,7 @@ class RuntimeCards {
         // A stick commits its generation when a save, a protect change or exit needs it, and at
         // least every two seconds, not on every page write.
         bool pending{};
-        std::chrono::steady_clock::time_point lastCommit{};
+        std::chrono::steady_clock::time_point lastCommit{}, lastWrite{};
         bool Settle() {
             if (failed) return false;
             if (pending) {
@@ -51,6 +51,7 @@ class RuntimeCards {
             if (live->failed) return false;
             if (deferred) {
                 live->pending = true;
+                live->lastWrite = std::chrono::steady_clock::now();
                 if (std::chrono::steady_clock::now() - live->lastCommit < std::chrono::seconds(2)) return true;
                 return live->Settle();
             }
@@ -274,7 +275,9 @@ class RuntimeCards {
                     copy->protocol=(*c)->protocol; copy->key=key; copy->path=path; copy->serial=(*c)->serial;
                     copy->baseDev=(*c)->baseDev; copy->baseIno=(*c)->baseIno; copy->baseMtime=(*c)->baseMtime;
                     copy->protectedCard=protect; copy->failed=(*c)->failed; copy->backing=(*c)->backing;
-                    BindImage(copy); held=std::move(copy);
+                    if(ms && !(*c)->Settle()) return "stick I/O failed";
+                    copy->lastCommit=(*c)->lastCommit;
+                    BindImage(copy, ms); held=std::move(copy);
                 }
             }
             FileCardOptions preflight; preflight.rejectInvalidRoot=true; preflight.requireRoot=true;
@@ -295,7 +298,14 @@ class RuntimeCards {
         }
         return "";
     }
+    // Commits a stick's writes once the guest has left it alone for two seconds. Called from the run loop.
+    void Service() {
+        if (stick && stick->pending && !stick->failed &&
+            std::chrono::steady_clock::now() - stick->lastWrite >= std::chrono::seconds(2))
+            stick->Settle();
+    }
     void Install(const Pair& p) {
+        if (stick) stick->Settle();
         for(auto* c:{&cards[0],&cards[1],&stick}) if(*c) gExternalStorage.RemoveImage((*c)->key);
         for(unsigned n=0;n<2;++n) {
             cards[n]=p.card[n];
@@ -371,7 +381,11 @@ class RuntimeCards {
             return argument == "on" ? "protected" : "writable";
         }
         if (!argument.empty()) return "error: this command takes no argument";
-        if (op == "eject") return gExternalStorage.Unmount(msSlot) ? "ejected" : "error: already ejected";
+        if (op == "eject") {
+            if (!gExternalStorage.Unmount(msSlot)) return "error: already ejected";
+            stick->Settle();
+            return "ejected";
+        }
         if (op == "insert") return gExternalStorage.Mount(stick->key, msSlot) ? "inserted" : "error: already inserted";
         if (op == "take-out") {
             if (gExternalStorage.IsMounted(msSlot)) return "error: eject first";
