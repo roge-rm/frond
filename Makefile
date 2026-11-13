@@ -166,9 +166,7 @@ test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results
 	python3 tests/audio-metrics.py
 	python3 tests/audio-timing.py
 	python3 tests/tx-baseline.py
-	python3 tests/input-latency.py
 	python3 tests/menu-response.py
-	python3 tests/guest-latency.py
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/wm9712-irq.cpp core/src/uarm/uarm/ac97dev_WM9712L.cpp \

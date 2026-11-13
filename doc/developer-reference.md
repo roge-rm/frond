@@ -906,7 +906,7 @@ All in `tools/`. Most take `--help`.
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
 | `host-profile.h` | Host timing used by the benchmarks. |
 | `analyze-pcm.py` | Signal levels and silent gaps in 16-bit little-endian PCM. |
-| `analyze-audio-buffers.py`, `analyze-audio-timing.py`, `analyze-gameplay.py`, `analyze-guest-latency.py`, `analyze-input-latency.py`, `analyze-menu-response.py` | Read the traces from the optional debug patches (two in `tools/debug/`, the rest in git history, see performance.md). |
+| `analyze-audio-buffers.py`, `analyze-audio-timing.py`, `analyze-gameplay.py`, `analyze-menu-response.py` | Read the traces from the optional debug patches (two in `tools/debug/`, the rest in git history, see performance.md). |
 | `check-native-audio.py` | Captures a native audio stream and measures its PCM and load. |
 | `check-audio-probe.py`, `check-bluetooth-probe.py`, `check-irda-probe.py` | Check the logs of the Palm probe apps. |
 | `check-compatibility.py`, `compatibility-results.py`, `app-compatibility.py` | App and system compatibility runs and their result decoding. |
