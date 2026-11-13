@@ -2,7 +2,7 @@
 
 Frond is a Palm OS emulator for Linux and Android, for running and writing Palm apps and games.
 
-Currently it runs the Palm T|X, Tungsten E2, Tungsten E3 and Zire 72, the Palm IIIx, the Sony CLIÉ TG50 and the AlphaSmart Dana and Dana Wireless, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. Some peripherals are still in progress and more devices are on the way - check the peripheral table below to see what is currently supported. 
+Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
 Tapwave Zodiac support is _very_ experimental and in progress, right now you can boot and tap around but not much else works. Updates on that are coming.
 
@@ -30,7 +30,7 @@ Dan
     <td align="center"><img src="doc/images/android-iiix.png" height="390" alt="The Palm IIIx launcher with its silkscreen and buttons" /><br>Palm IIIx</td>
     <td align="center"><img src="doc/images/desktop-e3.png" height="390" alt="The Tungsten E3 launcher on Linux" /><br>Tungsten E3, on Linux</td>
     <td align="center"><img src="doc/images/desktop-tx.png" height="390" alt="The Palm T|X on Linux at 2x, with the running bar" /><br>Palm T|X, on Linux</td>
-    <td align="center"><img src="doc/images/android-home.png" height="390" alt="The Frond home screen listing all seven devices" /><br>Devices</td>
+    <td align="center"><img src="doc/images/android-home.png" height="390" alt="The Frond home screen with a list of machines" /><br>Devices</td>
   </tr>
   <tr>
     <td align="center" colspan="2"><img src="doc/images/android-dana.png" height="180" alt="An AlphaWord document on the AlphaSmart Dana, in landscape" /><br>AlphaSmart Dana, on Android</td>
@@ -44,7 +44,6 @@ Dan
 - [Settings](#settings)
 - [Buttons](#buttons)
 - [Apps and cards](#apps-and-cards)
-- [Peripherals](#peripherals)
 - [Connections](#connections)
 - [Modem and phones](#modem-and-phones)
 - [Printing](#printing)
@@ -60,25 +59,53 @@ Dan
 
 ## Devices
 
-| Device | CPU | Card | Engine |
-|---|---|---|---|
-| Palm T\|X | ARM, 312 MHz | SD | Exact or Fast |
-| Tungsten E2 | ARM, 200 MHz | SD | Exact or Fast |
-| Tungsten E3 | ARM, 200 MHz (the E2 board) | SD | Exact or Fast |
-| Zire 72 | ARM, 312 MHz | SD | Exact or Fast |
-| Sony CLIÉ TG50 | ARM, 200 MHz | Memory Stick, Memory Stick Pro | Exact or Fast |
-| Tapwave Zodiac | ARM920T, 200 MHz | SD | Exact or Fast |
-| Palm IIIx | 68k DragonBall EZ, 16.58 MHz | none | Exact |
-| AlphaSmart Dana | 68k DragonBall VZ | two SD or MMC | Exact |
-| AlphaSmart Dana Wireless | 68k DragonBall VZ | two SD or MMC | Exact |
+| Device | OS | Screen | Card | [Sound](doc/using-frond.md#settings) | [IR](doc/using-frond.md#infrared) | [Bluetooth](doc/using-frond.md#bluetooth) | [Net](doc/using-frond.md#network) | [HotSync](doc/using-frond.md#serial-port) |
+|---|---|---|---|---|---|---|---|---|
+| **Palm OS 5, ARM** | | | | | | | | |
+| Palm T\|X | 5.4 | 320×480 colour | SD | yes | yes | yes | virtual Wi-Fi | USB, serial |
+| Tungsten E2 | 5.4 | 320×320 colour | SD | yes | yes | yes | | USB, serial |
+| Tungsten E3 | 5.4 | 320×480 colour | SD | yes | yes | | | USB, serial |
+| Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | | USB |
+| Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
+| **Palm OS 3 and 4, 68k** | | | | | | | | |
+| Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm IIIxe | 3.5 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm V | 3.1, 3.3 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm Vx | 3.3 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm IIIc | 4.1 | 160×160 colour | | piezo | yes | | PPP | serial |
+| Palm m100, m105 | 3.5 | 160×160 grey | | piezo | yes | | PPP | serial |
+| Palm m125 | 4.0 | 160×160 grey | SD or MMC | piezo | yes | | PPP | serial |
+| Palm m130 | 4.0 | 160×160 colour | SD or MMC | piezo | yes | | PPP | serial |
+| Palm m500 | 4.1 | 160×160 grey | SD or MMC | piezo | yes | | PPP | serial |
+| IBM WorkPad c500 | 4.0 | 160×160 grey | SD or MMC | piezo | yes | | PPP | serial |
+| Palm m505, m515 | 4.1 | 160×160 colour | SD or MMC | piezo | yes | | PPP | serial |
+| Palm m520 | 4.1 | 320×320 colour | SD or MMC | piezo | yes | | PPP | serial |
+| Sony CLIÉ T415 | 4.1 | 320×320 grey | Memory Stick | yes | yes | | PPP | USB |
+| **Other** | | | | | | | | |
+| AlphaSmart Dana | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | USB Wi-Fi adapter | |
+| AlphaSmart Dana Wireless | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | built in | |
+| Tapwave Zodiac | 5.2 | 480×320 colour | SD | yes | | | | |
+
+The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3 and Zire 72 also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
+
+Printing over infrared works on every device with infrared. The T|X, E2, Zire 72 and TG50 have an infrared keyboard, a mobile phone over infrared and a mobile phone over Bluetooth, and the 68k Palms have the phone over infrared (on Palm OS 3.5 and 4.1). Every 68k Palm except the m100 and m105 has the dial-up modem and HotSync by modem, tested on the IIIx. The Dana and Dana Wireless print to a USB printer. Mobile phone over Bluetooth and HotSync by modem are Linux only for now. The E2 and the Zire don't have their networking yet. The Zire 72 and TG50 have a microphone, and the Zire 72 has its camera.
 
 The Tungsten E3 is the modified E2 ROM with a 320×480 screen. Its ROM has no Bluetooth stack, so it has no Bluetooth, mobile phone or dial-up.
 
 The T|X plays videos in Media. On a slower computer use the Fast engine for it.
 
+The 68k Palms run in their own runner, `frond-68k`, from the Palm IIIx to the m520, the Dana and the CLIÉ T415. They have a backlight, serial with the HotSync button, infrared and, on the grey ones, the screen contrast. The m125, m500, c500, m505, m515, m130 and m520 have an SD or MMC slot. Networking is PPP over the serial port or the dial-up modem. See [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has them too, and the debugger works with prc-tools' gdb. See [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
+
+The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
+
+The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
+
+The Tapwave Zodiac plays sound and takes an SD card. Its other peripherals aren't done.
+
 ## Sessions
 
-<img src="doc/images/android-home.png" width="200" alt="The Frond home screen listing all seven devices">
+<img src="doc/images/android-home.png" width="200" alt="The Frond home screen with a list of machines">
 
 Each Palm you run is a session on the home screen. You can rename one, duplicate it, export it, import one or delete it. There's no autosave, so a crash loses anything since the last save. On Linux, closing the window saves. Save and Stop goes back to the list. Save a copy… keeps a separate snapshot. A session has your firmware and your data in it, so keep it to yourself.
 
@@ -99,7 +126,7 @@ While a machine runs, the bar along the top has Applications, Storage, Sound, Po
 Each machine has its own display, sound, speed and connection settings. Set them when you add it, or with Edit settings while it's stopped. On Android most of them are in the Display sheet while it runs too.
 
 - Speed is Original or Uncapped. Original runs the machine at its real speed, and Uncapped lets your computer or phone run it as fast as it can.
-- Engine is Exact or Fast. Fast is the JIT, and the 68k machines (IIIx and both Danas) only have Exact.
+- Engine is Exact or Fast. Fast is the JIT, and the 68k machines only have Exact.
 
 See [Settings](doc/using-frond.md#settings).
 
@@ -120,33 +147,6 @@ Install PRC and PDB files with Install…, from the Applications panel on Linux 
 Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the Palm before you eject. Files also opens the Palm's own databases, under Internal.
 
 The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it. Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).
-
-## Peripherals
-
-| | T\|X | E2 | E3 | Zire 72 | TG50 | IIIx | Dana | Dana Wireless |
-|---|---|---|---|---|---|---|---|---|
-| Sound | yes | yes | yes | yes | yes | piezo | yes | yes |
-| Microphone | | | | yes | yes | | | |
-| Wi-Fi, onto the internet through your computer or phone | virtual | | | | | | USB adapter | built in |
-| Cradle serial port, to a PTY or TCP port for terminal programs and [HotSync](doc/using-frond.md#serial-port) | yes | yes | yes | | yes | yes | | |
-| HotSync button, like the cradle's | yes | yes | yes | | | yes | | |
-| USB HotSync over a PTY or TCP port | yes | yes | yes | yes | yes | | | |
-| USB printer | | | | | | | yes | yes |
-| [Infrared beaming](doc/using-frond.md#infrared) between Frond machines | yes | yes | yes | yes | yes | yes | yes | yes |
-| [Printing over infrared](doc/using-frond.md#printing-over-infrared) | yes | yes | yes | yes | yes | yes | yes | yes |
-| Infrared keyboard | yes | yes | yes | yes | yes | | | |
-| [Virtual Bluetooth](doc/using-frond.md#bluetooth), with a local provider you start yourself | yes | yes | | yes | yes | | | |
-| [Dial-up modem](doc/using-frond.md#dial-up-modem) and [HotSync by modem](doc/using-frond.md#hotsync-by-modem) | | | | | | yes | | |
-| [Mobile phone over infrared](doc/using-frond.md#mobile-phone-over-infrared) | yes | yes | | yes | yes | yes | | |
-| [Mobile phone over Bluetooth](doc/using-frond.md#mobile-phone-over-bluetooth) | yes | yes | | yes | yes | | | |
-
-Anything still grey isn't done. The E2 and the Zire don't have their networking yet, and the Zire doesn't have its camera. The Zire 72 has no serial port, same as the real one. Mobile phone over Bluetooth and HotSync by modem are Linux only for now.
-
-The Palm IIIx runs in its own runner, `frond-68k`. Palm OS 3.1 on a 68k DragonBall EZ. It has sound, a backlight, serial with the HotSync button, infrared and the screen contrast. No SD, USB, Bluetooth or Wi-Fi, same as the real one. Networking is PPP over the serial port or the dial-up modem. See [Palm IIIx serial and PPP](doc/using-frond.md#palm-iiix-serial-and-ppp). Android has it too, and the debugger works with prc-tools' gdb. See [Palm IIIx](doc/developer-reference.md#palm-iiix-frond-68k).
-
-The infrared keyboard and beaming share the port. Take the keyboard off before you turn beaming on. On Android, infrared, Bluetooth, serial, USB HotSync and the gdb server go over the network, to another Frond or to `tools/link-irda.py`, `tools/link-bluetooth.py` and `tools/link-pty.py` (for pilot-link) on a computer.
-
-The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
 
 ## Connections
 
