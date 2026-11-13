@@ -30,14 +30,15 @@ When a change touches a shared path, run the focused tests for the devices that 
 First check the existing profiles, board dispatch and ROM detection. A device may already have an inherited model with no frontend. Keep its fixed name and extend that model. If it shares a board with a supported device, start from that board's working paths and list the differences in firmware, display, controls and peripherals.
 
 1. Reserve the fixed name and write the profile (below). Leave `frontend.available` false.
-2. Add detection and rejection, and check wrong files are refused before a machine is made.
-3. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
-4. Add the PACE and API bridge, so install, launch and export work.
-5. Check the Fast engine runs the device (Fast engine requirements).
-6. Add each peripheral and set its capability flag when it works.
-7. Add the button bar and silkscreen art.
-8. Fill in the frontend fields, run `make generate-device-data` and set `available`.
-9. Add a smoke entry and a setup recipe.
+2. Survey the ROM for hardware (ROM hardware survey, below) and list every peripheral in the profile.
+3. Add detection and rejection, and check wrong files are refused before a machine is made.
+4. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
+5. Add the PACE and API bridge, so install, launch and export work.
+6. Check the Fast engine runs the device (Fast engine requirements).
+7. Add each peripheral and set its capability flag when it works.
+8. Add the button bar and silkscreen art.
+9. Fill in the frontend fields, run `make generate-device-data` and set `available`.
+10. Add a smoke entry and a setup recipe.
 
 Hardware that exists on the real device but isn't done yet stays in the profile and is greyed out in the frontends. Whether a peripheral is present and whether Frond supports it are separate fields, so don't work out one from the other.
 
@@ -227,6 +228,16 @@ List every control and port the real device has: keyboard, jog controls, storage
 - Add a presence field to the frontend part when a peripheral needs one (the camera and SD slot have one).
 
 When a peripheral needs its own guest procedure, add a scenario behind `tests/device-rom.py` and reuse the shared console, frame, setup and probe helpers in `tools/`.
+
+### ROM hardware survey
+
+Before the board work, and again when a device is finished, read the ROM for every piece of hardware its drivers use, so nothing the real device has is missed.
+
+- List every address range, chip select, GPIO or port bit and SoC peripheral that the boot code, the HAL or DAL and the vendor libraries touch. On 68k ROMs look at the Hwr traps and the vendor libraries; on ARM ROMs at the HAL calls (HALAttnGetVibrateAttributes and the like) and the device driver databases.
+- Check what the HAL reports for optional parts: vibrate, the alarm LED, the backlight, the battery and charging, the cradle and headphone detection, the IR remote.
+- Compare the list with what Frond answers. Anything that reads 0, isn't mapped or only accepts writes is missing hardware: say what it probably is, which driver uses it and what the user gets from it.
+- Note accessories that plug into the connector (serial cables, audio adapters, keyboards) even when their driver isn't in the ROM.
+- REA, `m68k-palmos-objdump` and `arm-palmos-objdump` cover most of it. Keep the survey with the device plan, not in the repo.
 
 ## Storage
 
