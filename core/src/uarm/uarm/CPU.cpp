@@ -6168,7 +6168,7 @@ uint32_t cpuGetCurInstrPC(struct ArmCpu *cpu) { return cpu->curInstrPC; }
 
 template <typename T>
 void cpuSave(ArmCpu *cpu, T &savestate) {
-    paceSave(savestate);
+    paceSave(savestate, cpu->pacePatch && cpu->pacePatch->romDispatchHooked && cpu->pacePatch->hooksInRam);
 
     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         mmuSave(cpu->memorySystem.mmu, savestate);

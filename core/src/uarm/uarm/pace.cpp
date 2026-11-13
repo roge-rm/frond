@@ -16,7 +16,9 @@
     #include <emscripten.h>
 #endif
 
-#define SAVESTATE_VERSION 1
+// 2 has the layout of 1. It marks a state whose guest RAM holds the PACE dispatch hooks
+// (INSTR_PACE_DISPATCH, the T|X), which 0.15.0 and earlier can't run, so they refuse it.
+#define SAVESTATE_VERSION 2
 
 #ifdef __BIG_ENDIAN__
     #define HI_WORD(x) ((uint16_t*)(x))
@@ -684,14 +686,15 @@ bool paceRestoreFaultedInstruction() {
 uint32_t paceGetStatePtr() { return statePtr; }
 
 template <typename T>
-void paceSave(T& savestate) {
-    auto chunk = savestate.GetChunk(ChunkType::pace, SAVESTATE_VERSION);
+void paceSave(T& savestate, bool hooksInState) {
+    const uint32_t version = hooksInState ? SAVESTATE_VERSION : 1;
+    auto chunk = savestate.GetChunk(ChunkType::pace, version);
     if (!chunk) ERR("unable to allocate chunk");
 
     MakeSR();
 
     SaveChunkHelper helper(*chunk);
-    paceDoSaveLoad(helper, SAVESTATE_VERSION);
+    paceDoSaveLoad(helper, version);
 }
 
 template <typename T>
@@ -717,6 +720,6 @@ void paceDoSaveLoad(T& chunkHelper, uint32_t version) {
     if (version > 0) chunkHelper.Do32(regs.lastOpcode);
 }
 
-template void paceSave<Savestate<ChunkType>>(Savestate<ChunkType>& savestate);
-template void paceSave<SavestateProbe<ChunkType>>(SavestateProbe<ChunkType>& savestate);
+template void paceSave<Savestate<ChunkType>>(Savestate<ChunkType>& savestate, bool hooksInState);
+template void paceSave<SavestateProbe<ChunkType>>(SavestateProbe<ChunkType>& savestate, bool hooksInState);
 template void paceLoad<SavestateLoader<ChunkType>>(SavestateLoader<ChunkType>& loader);

@@ -32,6 +32,8 @@ struct PacePatch {
     // The ROM PACE's dispatch sites carry INSTR_PACE_DISPATCH. Its opcode table (16 words at
     // enterPace + 0x68) is left alone and still readable as data.
     bool romDispatchHooked;
+    // The patched PACE is in guest RAM, which sessions save (the T|X), so its hooks go with them.
+    bool hooksInRam;
 };
 
 struct PacePatch* createPacePatch();

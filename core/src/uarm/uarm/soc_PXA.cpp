@@ -1224,6 +1224,7 @@ bool SocPXA::PrepareM68kSupport() {
 
     pacePatchInit(pacePatch, virtualBase, bufferMemory.buffer + physicalOffset, imageSize);
     if (!IsPacePatched()) return false;
+    pacePatch->hooksInRam = true;
 
     memoryBufferMarkRangeDirty(&bufferMemory, physicalOffset, imageSize);
     cpuInvalidateCodeCache(cpu);
