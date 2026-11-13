@@ -4,11 +4,14 @@
 #include <filesystem>
 #include <iostream>
 #include <thread>
+#include <sys/file.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include "EmHAL.h"
 #include "ExternalStorage.h"
 #include "RuntimeCards.h"
+#include "storage/FatImage.h"
 
 // Stick writes the guest made reach the file when the machine quits without a save.
 static std::string ManifestFor(const std::string& path, const std::string& key, uint64_t stored) {
@@ -26,8 +29,8 @@ struct StickSlotHal : EmHALHandler {
 };
 
 int main() {
+    // The handler registers itself; adding it again links it to itself and Mount never returns.
     StickSlotHal hal;
-    EmHAL::AddHandler(&hal);
     const auto dir = std::filesystem::temp_directory_path() / ("runtime-cards-ms-" + std::to_string(getpid()));
     std::filesystem::create_directories(dir);
     const std::string path = (dir / "stick.frondms").string();
@@ -84,6 +87,95 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(2100));
         cards.Service();
         cards.Install(RuntimeCards::Pair{});
+    }
+    // Files on the stick: take-out releases the settled file, put-in takes it back, inserted.
+    {
+        RuntimeCards cards;
+        cards.SetDevice(deviceTypeT415);
+        RuntimeCards::Pair pair;
+        struct stat st{};
+        assert(!stat(path.c_str(), &st));
+        auto error = cards.Stage(ManifestFor(path, key, stored), pair);
+        if (!error.empty()) { std::cerr << error << std::endl; return 1; }
+        cards.Install(pair);
+        assert(cards.StickCommand("put-in", key) == "error: take out the current stick first");
+        assert(cards.StickCommand("insert", "") == "inserted");
+        assert(cards.StickCommand("take-out", "") == "error: eject first");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        // Write protection settles first, so the stick still inserts after it.
+        assert(cards.StickCommand("protect", "on") == "protected");
+        assert(cards.StickCommand("protect", "off") == "writable");
+        assert(cards.StickCommand("insert", "") == "inserted");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("state", "") == "none");
+        assert(!gExternalStorage.GetImage(key));
+        // The file is free for Files now: nothing holds its lock.
+        {
+            const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+            assert(fd >= 0 && !flock(fd, LOCK_EX | LOCK_NB));
+            ::close(fd);
+        }
+        assert(cards.StickCommand("put-in", std::string(32, 'f')).rfind("error:", 0) == 0);
+        assert(cards.StickCommand("put-in", key + " sideways").rfind("error:", 0) == 0);
+        assert(cards.StickCommand("put-in", key) == "inserted");
+        assert(cards.StickCommand("state", "") == "inserted " + key + " writable");
+        assert(cards.StickCommand("put-in", key) == "error: take out the current stick first");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key + " protected") == "inserted");
+        assert(cards.StickCommand("state", "") == "inserted " + key + " protected");
+        // Put-in keeps the protection the take-out saw unless told otherwise.
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key) == "inserted");
+        assert(cards.StickCommand("state", "") == "inserted " + key + " protected");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key + " writable") == "inserted");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        assert(cards.StickCommand("put-in", key) == "inserted");
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        cards.Install(RuntimeCards::Pair{});
+    }
+    // A Files change cut off by a kill: the frontends settle the file before the stick attaches.
+    {
+        struct CutOff {};
+        {
+            frondStorage::CardFile c(path, true);
+            // The earlier writes leave it neither blank nor formatted: format it, then cut off a change.
+            frondStorage::FatImage::format(c);
+            c.crashHook = [&](const char* at) {
+                if (!strcmp(at, "partly")) {
+                    c.dead = true;
+                    throw CutOff();
+                }
+            };
+            bool cut = false;
+            try {
+                frondStorage::FatImage fat(c);
+                fat.makeFolder("/", "PALM");
+            } catch (const CutOff&) {
+                cut = true;
+            }
+            assert(cut);
+        }
+        assert(frondStorage::unsettled(path));
+        assert(frondStorage::settleCard(path));
+        assert(!frondStorage::unsettled(path));
+        RuntimeCards cards;
+        cards.SetDevice(deviceTypeT415);
+        std::ostringstream attach;
+        attach << std::quoted(path) << " " << key << " writable";
+        const auto reply = cards.StickCommand("attach", attach.str());
+        if (reply != "inserted") { std::cerr << reply << std::endl; return 1; }
+        assert(cards.StickCommand("eject", "") == "ejected");
+        assert(cards.StickCommand("take-out", "") == "taken-out");
+        frondStorage::CardFile c(path, false);
+        frondStorage::FatImage fat(c);
+        assert(fat.find("/MEMSTICK.IND"));
     }
     std::filesystem::remove_all(dir);
     puts("runtime-cards-ms ok");

@@ -1207,6 +1207,11 @@ Socket commands use the same names and argument strings. `sd-export` and
 `sd2-export` write the live card to a new absolute destination path. Eject before taking
 out; taking out settles writable media into a portable card file.
 
+The T415's stick takes the same commands with `ms-`, plus `ms-protect on|off` while ejected
+and `ms-put-in IDENTITY [protected|writable]`, which attaches and inserts the stick the last
+`ms-take-out` released (default: its protection then). Files on the stick is eject,
+`ms-take-out`, a save, Files on the freed `.frondms`, then `ms-put-in`, as on the TG50.
+
 The runner takes an exclusive nonblocking file lock, rejects duplicate keys
 and CID serials. Its fixed-512-byte SDSC encoder accepts representable capacities
 from 32 MiB up to 1 GiB minus 256 KiB. The legacy scalar inventory range still

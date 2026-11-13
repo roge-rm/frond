@@ -5,6 +5,9 @@
 //   selftest       writer, refusals, format layout, crashes
 //   make OUT MB    formats a blank OUT.frondms of MB, fills it, writes OUT (its logical image) and
 //                  OUT.expect
+//   ls STICK       lists the root of a stick a machine took out: "NAME SIZE" per file, "NAME/" per folder
+//   put STICK NAME TEXT  adds a root file NAME holding TEXT, and reads it back
+// (ls and put are for tests/frond-68k-ms.py.)
 #include "storage/FatImage.h"
 
 #include "MemoryStickImage.h"
@@ -581,8 +584,24 @@ int main(int argc, char** argv) {
             fs::remove_all(dir);
         } else if (command == "make" && argc == 4) {
             make(argv[2], unsigned(std::stoul(argv[3])));
+        } else if (command == "ls" && argc == 3) {
+            CardFile c(argv[2], false);
+            FatImage fat(c);
+            for (const auto& e : fat.list("/"))
+                std::printf("%s%s\n", e.name.c_str(), e.directory ? "/" : (" " + std::to_string(e.size)).c_str());
+        } else if (command == "put" && argc == 5) {
+            const std::string text = argv[4];
+            {
+                CardFile c(argv[2], true);
+                FatImage fat(c);
+                put(fat, "/", argv[3], std::vector<uint8_t>(text.begin(), text.end()));
+            }
+            CardFile c(argv[2], false);
+            FatImage fat(c);
+            CHECK(contents(fat, std::string("/") + argv[3]) == std::vector<uint8_t>(text.begin(), text.end()));
+            checkSound(fat);
         } else {
-            std::fprintf(stderr, "usage: %s selftest | make OUT MB\n", argv[0]);
+            std::fprintf(stderr, "usage: %s selftest | make OUT MB | ls STICK | put STICK NAME TEXT\n", argv[0]);
             return 2;
         }
     } catch (const Error& e) {

@@ -48,6 +48,11 @@ object DanaCardProtocol {
 }
 
 class DanaCards(private val context: Context, private val link: ControlLink, val device: Device) {
+    companion object {
+        // Finishes or drops a Files change cut off on a stick file nobody has open. False when it
+        // couldn't be settled (in use, or unwritable).
+        fun settleStick(file: File): Boolean = !file.isFile || CardFile.settle(file)
+    }
     data class SlotState(val slot: StorageSlot, val known: Boolean = false, val card: DanaCardProtocol.State? = null)
     data class Entry(val id: String, val name: String, val family: String, val path: File)
     private fun fileFor(id: String, stick: Boolean) = File(root, if (stick) "$id.frondms" else "$id.frondsd")
@@ -88,6 +93,9 @@ class DanaCards(private val context: Context, private val link: ControlLink, val
     }
     fun attach(slot: StorageSlot, entry: Entry, writeProtected: Boolean) {
         val family = device.familiesOf(slot).firstOrNull { it.family == entry.family } ?: throw IOException("This slot doesn't take that card family.")
+        // A stick whose file view was cut off by a kill keeps the change it was making beside its
+        // file; settle it so the core takes it.
+        if (slot.stick) settleStick(entry.path)
         request(slot, "attach", DanaCardProtocol.attach(entry.path.absolutePath, entry.id, writeProtected, family))
     }
     fun make(slot: StorageSlot, family: CardFamily, size: Int, name: String, writeProtected: Boolean) {

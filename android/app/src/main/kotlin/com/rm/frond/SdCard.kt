@@ -13,6 +13,9 @@ import java.security.MessageDigest
 class SdCard(private val context: Context, private val link: ControlLink, private val session: String? = null,
              private val device: Device = Device.TX) {
     private val memoryStick = device.storageSlot == "memory-stick"
+    // A 68k stick (the T415) is a linked card file in dana-cards/: take-out frees that file for the
+    // file view and put-in links it again.
+    private val linkedStick = device.linkedCards && memoryStick
     private fun command(operation: String) = (if (memoryStick) "ms-" else "sd-") + operation
     enum class State { NONE, INSERTED, EJECTED, UNKNOWN }
 
@@ -67,6 +70,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun state(): State {
         val reply = link.request(command("state"), timeoutSeconds = 30)
         if (!reply.ok) return State.UNKNOWN
+        if (linkedStick && reply.message != "none") {
+            val linked = DanaCardProtocol.state(reply.message) ?: return State.UNKNOWN
+            return if (linked.inserted) State.INSERTED else State.EJECTED
+        }
         return when (reply.message) {
             "inserted" -> State.INSERTED
             "ejected" -> State.EJECTED
@@ -108,6 +115,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun protection(): Boolean? {
         if (!memoryStick) return null
         if (cardFile != null) return protectedCard
+        if (linkedStick) {
+            val reply = link.request(command("state"), timeoutSeconds = 30)
+            return if (reply.ok) DanaCardProtocol.state(reply.message)?.writeProtected else null
+        }
         if (state() == State.NONE) return null
         val reply = link.request("ms-protection", timeoutSeconds = 30)
         return if (!reply.ok) null else when (reply.message) {
@@ -138,6 +149,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // and takes the card out into the folder's card file, then opens that file. A kill from here on
     // loads the machine with --card-swap and the card as the file holds it.
     fun beginEdit() {
+        if (linkedStick) return beginLinkedEdit()
         folder.mkdirs()
         if (pendingFor(context, session) != null && !restorePending(context, link, session)) {
             throw Failed("The last edit of this card wasn't put back in the Palm. Close the emulator and open it again.")
@@ -175,13 +187,57 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         changed = false
     }
 
+    // The linked stick: ejects it if needed, takes it out of the core, saves the session without it
+    // (a kill from here on loads the machine with an empty slot and the stick free in dana-cards/),
+    // then opens its file.
+    private fun beginLinkedEdit() {
+        discard()
+        val path = session ?: throw Failed("Save the machine before opening its card.")
+        val reply = link.request(command("state"), timeoutSeconds = 30)
+        val stick = (if (reply.ok) DanaCardProtocol.state(reply.message) else null) ?: throw Failed("There's no Memory Stick in the slot.")
+        if (stick.failed) throw Failed("The Memory Stick has an I/O error.")
+        val file = File(File(context.filesDir, "dana-cards"), "${stick.identity}.frondms")
+        if (!file.isFile) throw Failed("Couldn't find the Memory Stick's file.")
+        wasInserted = stick.inserted
+        protectedCard = stick.writeProtected
+        if (stick.inserted) eject()
+        val out = link.request(command("take-out"), timeoutSeconds = 240, cancelRequested = { jobCancelled })
+        if (!out.ok) {
+            // A cancel or a timeout can leave the core finishing the take-out: go by the slot.
+            val now = link.request(command("state"), timeoutSeconds = 30)
+            val why = out.message
+            if (now.ok && now.message == "none") {
+                identity = stick.identity
+                putBack()
+            } else if (stick.inserted) {
+                val back = link.request(command("insert"), timeoutSeconds = 30)
+                if (!back.ok) throw Failed("$why The Memory Stick is still ejected: ${back.message}", out.code)
+            }
+            throw Failed(if (jobCancelled) "File transfer cancelled." else why, if (jobCancelled) "cancelled" else out.code)
+        }
+        identity = stick.identity
+        try {
+            val saved = link.request("save", path, timeoutSeconds = 120)
+            if (!saved.ok) throw Failed("Couldn't save the machine, so the card wasn't opened. ${saved.message}")
+            cardFile = CardFile.open(file, !protectedCard)
+            FatImage.over(cardFile!!).use { }
+        } catch (e: Exception) {
+            cardFile?.close()
+            cardFile = null
+            putBack()
+            throw Failed(message(e))
+        }
+        changed = false
+    }
+
     // Puts the card file back in the slot, ejected again if it was out when the view opened.
     private fun putBack() {
         val id = identity ?: throw Failed("Couldn't put the card back in.")
         try {
             putIn(id, protectedCard)
         } catch (e: Failed) {
-            throw Failed("Couldn't put the card back in. It's kept in the machine and goes in at the next start. ${e.message}", e.code)
+            throw Failed(if (linkedStick) "Couldn't put the Memory Stick back in. Choose it again from the Memory Stick row. ${e.message}"
+                else "Couldn't put the card back in. It's kept in the machine and goes in at the next start. ${e.message}", e.code)
         }
         identity = null
         editing = null

@@ -197,6 +197,9 @@ class DanaCardsDialog : public QDialog {
         actions->addButton(QDialogButtonBox::Cancel); connect(actions,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         auto use=[&](QString id) {
             if (!QRegularExpression("^[0-9a-f]{32}$").match(id).hasMatch()) return false;
+            // A stick whose Files visit was cut off keeps that change beside its file; settle it so
+            // the core takes it.
+            if (stick) frondCardFile::settle(root()+'/'+id+".frondms");
             if (!perform(n,"attach",frondDanaCards::quote(root()+'/'+id+(stick?".frondms":".frondsd"))+' '+id+' '+(protect.isChecked()?"protected":"writable")+(stick?QString():' '+family.currentData().toString()))) return false;
             dialog.accept();
             return true;
