@@ -1585,10 +1585,17 @@ const Rgb tg50Blue{38,78,178},tg50Red{196,44,40};
 // Colours of a Jog Dial wheel: dark at its sides, light across its crown, and its outline.
 struct JogWheelLook { Rgb side, crown, edge; };
 
-// Side tab Jog Dial and Back key in strip units, ox to the left: silver up and down keys with
-// chevrons either side of a ridged wheel that presses in, then a silver Back key.
-void paintJogKeys(Canvas& canvas, const DeviceControlProfile& profile, int ox, DeviceKeyMask pressed,
-                  const SilverKeyLook& keys, Rgb ink, Rgb glow, const JogWheelLook& look) {
+// The CLIÉ Jog Dial and Back on the side tab (clieJogKey), in strip units with ox to the left and
+// clipped to the tab: silver up and down keys with chevrons either side of a ridged wheel that
+// presses in, then a silver Back key. Every CLIÉ draws it with this look.
+const SilverKeyLook clieJogLook{Rgb{92,90,88},Rgb{240,239,236},Rgb{196,194,190},Rgb{14,14,14},Rgb{226,223,216},
+                                Rgb{60,60,66},Rgb{50,50,56},1.1f,0.74f};
+void paintClieJog(Canvas& canvas, const DeviceControlProfile& profile, int ox, DeviceKeyMask pressed) {
+    const SilverKeyLook& keys=clieJogLook;
+    const Rgb ink{62,62,68},glow{226,146,44};
+    const JogWheelLook look{Rgb{54,62,52},Rgb{170,179,159},Rgb{55,59,51}};
+    canvas.clipLeft=profile.sideTab.x;
+    canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
     auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
     auto shifted=[&](SDL_Rect r) {r.x+=ox;return r;};
     const DeviceButton* jog[3]={nullptr,nullptr,nullptr};const DeviceButton* back=nullptr;
@@ -1875,9 +1882,7 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
     // The side controls use the same body paint and texture coordinates as the keyboard.
     // Clipped to the tab. Each key's groove and lip reach 2.3 units out, inside its 4 unit margins.
     if(sidebar && view.sideTab && profile.sideTabWidth>0) {
-        canvas.clipLeft=profile.sideTab.x;
-        canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
-        paintJogKeys(canvas,profile,ox,pressed,keys,ink,glow,{Rgb{54,62,52},Rgb{170,179,159},Rgb{55,59,51}});
+        paintClieJog(canvas,profile,ox,pressed);
     }
 }
 
@@ -1886,8 +1891,6 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
 // edge round a narrow rocker split across its middle. The side tab canvas (sidebar) is the same
 // metal beside the LCD, with the Jog Dial and Back.
 const Rgb t415Body{186,188,191};
-const SilverKeyLook t415Keys{Rgb{78,80,86},Rgb{238,239,240},Rgb{184,186,190},Rgb{14,14,15},Rgb{246,246,246},
-                             Rgb{70,72,78},Rgb{44,45,50},1.3f,0.7f};
 
 // Brightness down a T415 chrome slat, t 0 at its top to 1 at its bottom: a shaded top edge, a
 // bright upper ridge, a darker step, a bright lower ridge and a dark foot.
@@ -1917,10 +1920,7 @@ void paintT415Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
         canvas.paint(right-3,top,right,bottom,[&](float x,float) {return canvas.edge(std::fabs(x-right+1)-0.8f)*0.7f;},
                      [](float,float,Rgb) {return Rgb{58,60,64};});
         if(profile.sideTabWidth>0) {
-            canvas.clipLeft=profile.sideTab.x;
-            canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
-            paintJogKeys(canvas,profile,ox,pressed,t415Keys,Rgb{64,66,72},Rgb{226,146,44},
-                         {Rgb{62,64,68},Rgb{184,188,194},Rgb{60,62,66}});
+            paintClieJog(canvas,profile,ox,pressed);
         }
         return;
     }
@@ -2050,10 +2050,7 @@ void paintT415BesideTab(Canvas& canvas, const DeviceControlProfile& profile, Dev
     canvas.paint(left,top+k,right,top+3.5f*k,[&](float,float y) {return canvas.edge(std::fabs(y-top-2.2f*k)-0.5f*k)*0.8f;},
                  [](float,float,Rgb) {return Rgb{86,88,94};});
     if(profile.sideTabWidth>0) {
-        canvas.clipLeft=profile.sideTab.x;
-        canvas.clipRight=profile.sideTab.x+profile.sideTab.w;
-        paintJogKeys(canvas,profile,0,pressed,t415Keys,Rgb{64,66,72},Rgb{226,146,44},
-                     {Rgb{62,64,68},Rgb{184,188,194},Rgb{60,62,66}});
+        paintClieJog(canvas,profile,0,pressed);
     }
 }
 
