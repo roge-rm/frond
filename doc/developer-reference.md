@@ -799,6 +799,9 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_TG50_AUDIO_TRACE` | Trace the TG50 audio codec to stderr. |
 | `FROND_MS_TRACE` | File to write a Memory Stick register trace to. |
 | `FROND_MS_SUMMARY` | With `FROND_MS_TRACE`, write failures only. |
+| `FROND_SAVE_TIMING` | Print a line to stderr for each background save with its timings. |
+| `FROND_SAVE_REFERENCE` | For tests: before each socket save, also do the whole save on the emulation thread to this file, at the same instant, to compare the background save with. |
+| `FROND_SAVE_TEST_WRITES` | For tests: during each background write, write a numbered mark to the last NAND page and SD sector, standing in for the guest. |
 | `FROND_VFS_TRACE` | Trace guest file calls for Memory Stick file access to stderr. |
 | `FROND_TRACE_WAKE` | Log `native: host wake` to stderr each time the core wakes an idle UI task for a host call (T|X and Zire 72), for `tests/host-call-wake.py`. |
 | `FROND_WIFI_TRACE` | Trace the virtual Wi-Fi card. |
@@ -1043,6 +1046,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-state-fingerprint` | The state layout fingerprint is the desktop's, so states move between hosts. Skipped without an NDK. Outside `make test`. |
 | `test-zodiac-stop-mode` | Stop mode: both PLLs off, CLK32 only, wake on the GPIO lines and the RTC. Outside `make test`. |
 | `test-zodiac-trace-window` | The trace window through the probe. Outside `make test`. |
+| `test-zodiac-video` | The W4200 video overlay as player code drives it: ring, window, YUV planes and format bits. Outside `make test`. |
 | `bluetooth-opp-peer` | Build the OPP test peer and Bluetooth phone. |
 
 Tests in `make test`, by area:
@@ -1075,6 +1079,7 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-boot-save` | IIIx ROM. A session saved over the GDB stub mid-boot after a soft reset keeps its databases on reload. |
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
 | `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
+| `test-68k-ms` | Memory Stick controller (MB86189) on the 68k core, and runtime card changes for it. |
 | `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
 | `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
@@ -1082,6 +1087,8 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-session-folder-card` | Nothing, plus the T\|X smoke session as above for its last case. A session folder that doesn't load is refused with one line, not a crash, and names the card file when one is there. |
 | `test-core-control` | ARM smoke session (`FROND_ARM_SESSION`) and IIIx ROM. The control socket on both runners, and the save when it closes without a quit. |
 | `test-printer-control` | ARM smoke session (`FROND_ARM_SESSION`) and the Dana ROM (`FROND_DEVICE_IMAGES`). `irprinter` and `printer` with their arguments through both runners' control sockets. |
+| `test-background-save` | ARM smoke session (`FROND_ARM_SESSION`, else the Zire 72 one) and IIIx ROM; a side without its input is skipped. Desktop saves written in the background on both runners match the synchronous save byte for byte, the guest runs on meanwhile, and the saved session loads again. Also the NAND and SD writes made during a save, using `FROND_SAVE_TEST_WRITES`. |
+| `test-save-replay` | Writes made while a background save writes its files are noted, read back from the running store and replayed onto the saved file when the store moves onto it. In `make test`. |
 | `test-tg50-usb-hotsync` | TG50 session (`make smoke-sessions`) and pilot-link. |
 | `test-tg50-audio-lifecycle`, `test-tg50-audio-queue` | Nothing. TG50 audio unit tests. |
 | `test-host-microphone`, `test-host-microphone-state` | Nothing. Host microphone unit tests. |
