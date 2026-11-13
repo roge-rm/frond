@@ -276,7 +276,8 @@ class DesktopControl {
             return {true, "guest-ready", "Palm OS can accept application commands."};
         }
         if (command == "replay-state")
-            return {true, ctx.replay.Finished() ? "finished" : "running", std::to_string(ctx.replay.LastEventMs())};
+            return {true, ctx.replay.Paused() ? "paused" : ctx.replay.Finished() ? "finished" : "running",
+                    std::to_string(ctx.replay.LastEventMs())};
         if (command == "replay-snapshots") {
             std::string results;
             for (const auto& result : ctx.replay.SnapshotResults()) results += (results.empty() ? "" : ",") + result;
@@ -285,8 +286,14 @@ class DesktopControl {
         if (command == "input-replay") {
             InputReplay replacement; std::string error;
             if (!replacement.Load(path, ctx.screenWidth, ctx.screenHeight, error)) return {false, "replay", error};
-            ctx.replay = std::move(replacement); ctx.replayStartedAt = timestampUsec();
+            ctx.replay = std::move(replacement); ctx.replayStartedAt = commands::replayClockUsec(ctx);
             return {true, "loaded", "Input replay loaded."};
+        }
+        if (command == "replay-continue") {
+            if (!ctx.replay.Paused()) return {false, "not-paused", "The input replay isn't paused."};
+            // Picks up at the pause's own time, however long it was held.
+            ctx.replayStartedAt = commands::replayClockUsec(ctx) - ctx.replay.Continue() * 1000;
+            return {true, "continued", "Input replay continued."};
         }
         if (command == "launch-app") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};

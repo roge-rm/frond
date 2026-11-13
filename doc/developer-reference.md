@@ -27,6 +27,7 @@ The 68k Palms (the Palm IIIx to the m520, the IBM WorkPad c500 and the Dana) hav
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
+| `--emulated-time` | Every guest second gets the full `--mips`, however slow the host, and input replay times are guest time. A slow host runs slower in wall time with the same guest result. For tests. |
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
@@ -278,7 +279,8 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `export-db` | ZIP file, newline, database name | `exported`: that database |
 | `db-list` | | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name |
 | `input-replay` | file | `loaded`; error `replay` with the line |
-| `replay-state` | | `running` or `finished`, message is the last event time in ms |
+| `replay-state` | | `running`, `paused` or `finished`, message is the last event time in ms |
+| `replay-continue` | | `continued`: a paused replay goes on; error `not-paused` |
 | `replay-snapshots` | | `snapshots`: comma list of `ok`, `no-frame`, `lcd-off` or `failed`, one per snapshot so far |
 | `reset`, `hard-reset`, `rotate`, `audio-on`, `audio-off`, `quit` | | `done` |
 
@@ -347,7 +349,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 
 ## Input replay
 
-`--input-replay FILE` and the `input-replay` command send events through the same queues as the SDL window. Each line is `MS COMMAND ARGS`, with MS the milliseconds since the replay started (since the main loop started for `--input-replay`), in nondecreasing order. Empty lines and `#` comments are allowed. Replay uses host time, so it isn't deterministic in guest instructions.
+`--input-replay FILE` and the `input-replay` command send events through the same queues as the SDL window. Each line is `MS COMMAND ARGS`, with MS the milliseconds since the replay started (since the main loop started for `--input-replay`), in nondecreasing order. Empty lines and `#` comments are allowed. Replay uses host time, so it isn't deterministic in guest instructions, unless the core runs with `--emulated-time`, where it uses guest time.
 
 | Command | Meaning |
 | --- | --- |
@@ -357,6 +359,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
+| `pause` | Hold the guest and the replay until the `replay-continue` command, which picks up at the pause's time. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
 
 ```text

@@ -16,6 +16,7 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
     events.clear();
     snapshots.clear();
     next = 0;
+    paused = false;
     std::ifstream file(path);
     if (!file) { error = "cannot open input replay: " + path; return false; }
     const std::unordered_map<std::string, KeyId> keys = {
@@ -78,6 +79,8 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
             event.kind = Kind::stick;
             if (!(tokens >> event.x >> event.y) || event.x < -100 || event.x > 100 || event.y < -100 || event.y > 100)
                 return fail();
+        } else if (command == "pause") {
+            event.kind = Kind::pause;
         } else if (command == "snapshot") {
             event.kind = Kind::snapshot;
             if (!(tokens >> std::quoted(event.path)) || event.path.empty()) return fail();
@@ -94,7 +97,7 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, SdlRenderer& renderer) 
 }
 
 void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<bool(const char*, bool&)>& save) {
-    while (next < events.size() && events[next].at <= elapsedMs) {
+    while (!paused && next < events.size() && events[next].at <= elapsedMs) {
         const auto& event = events[next++];
         switch (event.kind) {
             case Kind::penDown: soc.PenDown(event.x, event.y); break;
@@ -105,6 +108,7 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<boo
             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
             case Kind::keyboardAttach: soc.AttachKeyboard(event.x); break;
             case Kind::stick: soc.AnalogStick(event.x / 100.0f, event.y / 100.0f); break;
+            case Kind::pause: paused = true; pausedAtMs = event.at; break;
             case Kind::snapshot: {
                 // A failed snapshot is reported but never ends the run.
                 bool blank = false;

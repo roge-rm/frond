@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "DisplayChange.h"
+#include "cputil.h"
 #include "MainLoop.h"
 #include "InputReplay.h"
 #include "Rotation.h"
@@ -27,7 +28,10 @@ namespace commands {
         SdlAudioDriver& audioDriver;
         Rotation rotation;
         InputReplay& replay;
+        // When the input replay started, in replayClockUsec's time.
         uint64_t& replayStartedAt;
+        // --emulated-time: input replay times are guest time.
+        bool emulatedTime{false};
         int screenWidth;
         int screenHeight;
         HostInfrared* infrared{nullptr};
@@ -54,6 +58,11 @@ namespace commands {
         uint64_t speedIps{0};
         std::string speedDetail{};
     };
+
+    // The input replay's clock in us: guest time under --emulated-time, else host time.
+    inline uint64_t replayClockUsec(const Context& ctx) {
+        return ctx.emulatedTime ? ctx.soc->GetTime() / 1000 : timestampUsec();
+    }
 
     void Register();
 }  // namespace commands
