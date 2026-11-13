@@ -16,10 +16,10 @@ inline quint32 hash(const QByteArray& bytes, quint32 value=2166136261u) {
     return value;
 }
 // Display metadata only. Loading still goes through the core's media and history checks.
-// Devices whose slots take linked card files: the Dana and the VZ Palms.
+// Devices whose slots take linked card files: the Dana, the VZ Palms and the T415's stick.
 inline bool linkedCards(const QByteArray& name) {
     const auto* p=deviceProfileNamed5(name.constData());
-    return p && p->deviceType!=deviceTypeInvalid && deviceProfileLinkedCards5(*p);
+    return p && p->deviceType!=deviceTypeInvalid && (deviceProfileLinkedCards5(*p) || deviceProfileLinkedStick5(*p));
 }
 inline Header inspect(const QString& path) {
     QFile file(path);
@@ -46,7 +46,8 @@ inline Header inspect(const QString& path) {
         while (match.hasNext()) fields.append(match.next().captured());
         if (fields.size()!=(out.portable?10:13)) return out;
         const auto id=fields[0]; const auto key=fields[3];
-        if ((id!="0" && id!="2") || seenSlots.contains(id) || fields[1]!="sd" ||
+        const bool stick=id=="1" && fields[1]=="ms" && !out.portable;
+        if ((id!="0" && id!="2" && !stick) || seenSlots.contains(id) || (!stick && fields[1]!="sd") ||
             !QRegularExpression("^[0-9a-f]{32}$").match(key).hasMatch() || keys.contains(key) || serials.contains(key.left(8))) return out;
         seenSlots.insert(id); keys.insert(key); serials.insert(key.left(8));
         if (out.portable) { if (fields[2]!=(id=="0"?"sd0.frondsd":"sd2.frondsd")) return out; }
@@ -57,9 +58,10 @@ inline Header inspect(const QString& path) {
             (fields[6]!="0" && fields[6]!="1") || (fields[7]!="0" && fields[7]!="1")) return out;
         const auto protocol=fields[out.portable?9:11];
         const auto bytes=fields[5].toULongLong(&ok);
-        if (!ok || (protocol!="sd" && protocol!="mmc") ||
-            !deviceProfileCardSizeValid5(deviceTypeDana,DeviceCardSlot5(id=="0"?0:2),
-                protocol=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc,bytes)) return out;
+        // The core checks a stick's size and header when it loads.
+        if (!ok || (protocol!="sd" && protocol!="mmc") || (stick && !bytes) ||
+            (!stick && !deviceProfileCardSizeValid5(deviceTypeDana,DeviceCardSlot5(id=="0"?0:2),
+                protocol=="mmc"?DeviceCardFamily5::legacyMmc:DeviceCardFamily5::sdsc,bytes))) return out;
         for (int n : out.portable?QList<int>{8}:QList<int>{8,9,10,12}) {
             fields[n].toULongLong(&ok); if (!ok || fields[n].startsWith('-')) return out;
         }

@@ -132,7 +132,7 @@ class DeviceInputTest(unittest.TestCase):
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
-        self.assertEqual(data['profiles'][24]['status'], 'staged')
+        self.assertEqual(data['profiles'][24]['status'], 'experimental-desktop')
         self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][25:]))
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})

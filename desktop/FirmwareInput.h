@@ -49,7 +49,9 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
 // A 68k device whose slots take linked card files through frond-68k's sd- and sd2- commands (DanaCardsDialog):
 // the Dana's two slots and a VZ Palm's one.
-inline bool linkedCards(Device device) { return runs68k(device) && deviceProfileLinkedCards5(profile(device)); }
+inline bool linkedCards(Device device) {
+    return runs68k(device) && (deviceProfileLinkedCards5(profile(device)) || deviceProfileLinkedStick5(profile(device)));
+}
 // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
 inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 

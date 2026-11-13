@@ -177,6 +177,8 @@ struct Options {
     WindowFit fit{WindowFit::none};
     uint32_t windowBackground{0};
     int audioPeriod{512};
+    // Where a jog side panel goes (T415): hidden, left of the LCD, or beside the silkscreen and buttons.
+    optional<JogPlacement> jog;
 };
 
 void usage() {
@@ -935,6 +937,8 @@ class Runner {
         soundOn = options.sound && profile.capabilities.sound;
         smooth = options.smooth;
         fit = options.fit;
+        if (deviceControls(profile.art).sideTabWidth > 0)
+            view = deviceControlView(false, options.jog.value_or(JogPlacement::screen));
         if(deviceTypeIsDana5(profile.deviceType)) {
 #ifndef __ANDROID__
             danaView.keyboard="hidden";danaView.physical=true;
@@ -2649,13 +2653,14 @@ class Runner {
         return {false, "command", "Unknown desktop command."};
     }
 
-    // contrast=0..100 and smooth=on|off; fit, keyboard and jog are for ARM devices.
+    // contrast=0..100, smooth=on|off, fit= and jog=hidden|screen|keyboard for a device with a jog panel.
     bool DesktopDisplay(const string& text, string& error) {
         istringstream words(text);
         string word;
         optional<int> contrast;
         optional<bool> smoothing;
         optional<WindowFit> fitting;
+        optional<JogPlacement> jogging;
         while (words >> word) {
             const auto equals = word.find('=');
             const string name = word.substr(0, equals), value = equals == string::npos ? "" : word.substr(equals + 1);
@@ -2667,6 +2672,13 @@ class Runner {
                 smoothing = value == "on";
             } else if (WindowFit parsed; name == "fit" && parseWindowFit(value, parsed)) {
                 fitting = parsed;
+            } else if (equals != string::npos && name == "jog" && deviceControls(profile->art).sideTabWidth > 0) {
+                JogPlacement placement;
+                if (!parseJogPlacement(value, placement)) {
+                    error = "Invalid display setting: " + word;
+                    return false;
+                }
+                jogging = placement;
             } else if (equals != string::npos && (name == "keyboard" || name == "jog")) {
                 error = "This device has no " + name + " controls.";
                 return false;
@@ -2675,8 +2687,8 @@ class Runner {
                 return false;
             }
         }
-        if (!contrast && !smoothing && !fitting) {
-            error = "Use contrast=, smooth= or fit=.";
+        if (!contrast && !smoothing && !fitting && !jogging) {
+            error = "Use contrast=, smooth=, fit= or jog=.";
             return false;
         }
         if (contrast) {
@@ -2686,6 +2698,13 @@ class Runner {
         if (smoothing) {
             smooth = *smoothing;
             if (lcdTexture) SDL_SetTextureScaleMode(lcdTexture, smooth ? SDL_ScaleModeLinear : SDL_ScaleModeNearest);
+        }
+        if (jogging) {
+            view = deviceControlView(false, *jogging);
+            // A fixed-scale window takes the new device size; a fitted one keeps its size.
+            if (window && fit == WindowFit::none)
+                SDL_SetWindowSize(window, int(DeviceWidth() * options.windowScale), int(DeviceHeight() * options.windowScale));
+            Layout();
         }
         // Only a window opened fitted can change how it fits; a fixed-scale window stays as it is.
         if (fitting && fit != WindowFit::none && *fitting != fit) {
@@ -2784,11 +2803,10 @@ class Runner {
 
     // Opens the window at the fixed scale, or resizable and fitted with fit set.
     void OpenWindow() {
-        const auto& controls = deviceControls(profile->art);
         const float s = options.windowScale;
-        const int width = int(lcd.Width() * s);
+        const int width = int(DeviceWidth() * s);
         const int height = deviceTypeIsDana5(profile->deviceType) ? int(160*s+252) :
-            int((InputHeight() + deviceControlsHeight(controls, lcd.Width())) * s);
+            int(DeviceHeight() * s);
         window = SDL_CreateWindow(profile->displayName, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width, height,
                                   fit == WindowFit::none && !deviceTypeIsDana5(profile->deviceType) ? 0 : SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
         if (!window) {
@@ -2827,7 +2845,46 @@ class Runner {
 
     int InputHeight() const { return lcd.Height() + profile->frontend.silkscreenHeight; }
 
-    int DeviceHeight() const { return InputHeight() + deviceControlsHeight(deviceControls(profile->art), lcd.Width()); }
+    // The window's width and the LCD's left edge, which a jog panel left of the LCD moves.
+    int ScreenLeft() const { return deviceScreenLeft(deviceControls(profile->art), view); }
+    int DeviceWidth() const { return deviceControlsWidth(deviceControls(profile->art), lcd.Width(), view); }
+    int StripHeight() const { return deviceControlsHeight(deviceControls(profile->art), lcd.Width(), view); }
+    int DeviceHeight() const { return InputHeight() + StripHeight(); }
+    bool BesideButtons() const { return deviceSideTabBesideButtons(deviceControls(profile->art), view); }
+    SDL_Rect SilkscreenRect() const {
+        const auto& silkscreen = deviceSilkscreen(profile->art);
+        if (BesideButtons()) return deviceSilkscreenRect(deviceControls(profile->art), silkscreen, lcd.Width(), InputHeight(), view);
+        return {ScreenLeft(), lcd.Height(), lcd.Width(), InputHeight() - lcd.Height()};
+    }
+
+    // What a window point (device pixels) is: a key, or the pen at a point in the LCD's and silkscreen's pixels.
+    // inside false clamps a dragged pen onto the pen area.
+    struct Hit { KeyId key{keyInvalid}; bool pen{false}; int x{0}, y{0}; };
+    Hit HitAt(int x, int y, bool dragging = false) const {
+        Hit hit;
+        const auto& controls = deviceControls(profile->art);
+        if (!dragging && (y >= InputHeight() || controls.sideTabWidth > 0)) {
+            hit.key = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y, view);
+            if (hit.key != keyInvalid) return hit;
+        }
+        if (y >= InputHeight() && !dragging) return hit;
+        const int left = ScreenLeft();
+        if (BesideButtons() && y >= lcd.Height()) {
+            const auto rect = SilkscreenRect();
+            if (!dragging && (x < rect.x || x >= rect.x + rect.w)) return hit;
+            const auto point = deviceSilkscreenPoint(rect, deviceSilkscreen(profile->art),
+                clamp(x, rect.x, rect.x + rect.w - 1), clamp(y, rect.y, rect.y + rect.h - 1));
+            hit.pen = true;
+            hit.x = clamp(point.x, 0, lcd.Width() - 1);
+            hit.y = lcd.Height() + clamp(point.y, 0, InputHeight() - lcd.Height() - 1);
+            return hit;
+        }
+        if (!dragging && (x < left || x >= left + lcd.Width())) return hit;
+        hit.pen = true;
+        hit.x = clamp(x - left, 0, lcd.Width() - 1);
+        hit.y = clamp(y, 0, InputHeight() - 1);
+        return hit;
+    }
 
     // Where the device goes in the window and the scale the art is drawn at. Fixed: the window
     // scale from the top left. Fitted: WindowLayout's place, drawn in device pixels through the
@@ -2849,10 +2906,10 @@ class Runner {
         }
         const float s = options.windowScale;
         if (fit == WindowFit::none) {
-            layout = WindowLayout{s, s, 0, 0, int(lcd.Width() * s), int(DeviceHeight() * s)};
+            layout = WindowLayout{s, s, 0, 0, int(DeviceWidth() * s), int(DeviceHeight() * s)};
             artScale = s;
         } else {
-            layout = fitWindowLayout(fit, lcd.Width(), DeviceHeight(), windowWidth, windowHeight);
+            layout = fitWindowLayout(fit, DeviceWidth(), DeviceHeight(), windowWidth, windowHeight);
             artScale = max(layout.scaleX * pixelsX, layout.scaleY * pixelsY);
         }
         if (silkscreenTexture) SDL_DestroyTexture(silkscreenTexture);
@@ -2862,11 +2919,9 @@ class Runner {
         if (silkscreenTexture && fit != WindowFit::none) SDL_SetTextureScaleMode(silkscreenTexture, SDL_ScaleModeLinear);
         if (controlsTexture) SDL_DestroyTexture(controlsTexture);
         controlsTexture = nullptr;
-        if (fit != WindowFit::none) {
-            const auto& controls = deviceControls(profile->art);
+        if (fit != WindowFit::none && StripHeight() > 0) {
             controlsTexture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ABGR8888, SDL_TEXTUREACCESS_TARGET,
-                                                int(lcd.Width() * artScale),
-                                                int(deviceControlsHeight(controls, lcd.Width()) * artScale));
+                                                int(DeviceWidth() * artScale), int(StripHeight() * artScale));
             if (controlsTexture) SDL_SetTextureScaleMode(controlsTexture, SDL_ScaleModeLinear);
         }
         controlsDirty = true;
@@ -2897,16 +2952,19 @@ class Runner {
         }
         if (lcdTexture) {
             SDL_UpdateTexture(lcdTexture, nullptr, lcd.Pixels(), lcd.Width() * 4);
-            const SDL_Rect dest{0, 0, int(lcd.Width() * s), int(lcd.Height() * s)};
+            const SDL_Rect dest{int(ScreenLeft() * s), 0, int(lcd.Width() * s), int(lcd.Height() * s)};
             SDL_RenderCopy(renderer, lcdTexture, nullptr, &dest);
         }
         if (silkscreenTexture) {
-            const SDL_Rect dest{0, int(lcd.Height() * s), int(lcd.Width() * s),
-                                int((InputHeight() - lcd.Height()) * s)};
+            const auto rect = SilkscreenRect();
+            const SDL_Rect dest{int(rect.x * s), int(rect.y * s), int(rect.w * s), int(rect.h * s)};
             SDL_RenderCopy(renderer, silkscreenTexture, nullptr, &dest);
         }
-        if (!fitted) {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed);
+        // A jog panel beside the screen or the buttons is drawn straight on the window.
+        if (controls.sideTabWidth > 0) drawDeviceSidebar(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
+        if (StripHeight() <= 0) {
+        } else if (!fitted) {
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), s, pressed, view);
         } else if (controlsTexture) {
             // Drawn once into a texture at the output's pixel size, again when a key changes.
             if (controlsDirty || pressed != shownPressed) {
@@ -2916,7 +2974,7 @@ class Runner {
                 SDL_RenderGetViewport(renderer, &viewport);
                 if (SDL_SetRenderTarget(renderer, controlsTexture) == 0) {
                     SDL_RenderSetScale(renderer, 1, 1);
-                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed);
+                    drawDeviceControls(renderer, controls, lcd.Width(), 0, artScale, pressed, view);
                     SDL_SetRenderTarget(renderer, nullptr);
                     SDL_RenderSetScale(renderer, 1, 1);
                     SDL_RenderSetViewport(renderer, &viewport);
@@ -2925,10 +2983,10 @@ class Runner {
                     shownPressed = pressed;
                 }
             }
-            const SDL_Rect dest{0, InputHeight(), lcd.Width(), deviceControlsHeight(controls, lcd.Width())};
+            const SDL_Rect dest{0, InputHeight(), DeviceWidth(), StripHeight()};
             SDL_RenderCopy(renderer, controlsTexture, nullptr, &dest);
         } else {
-            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed);
+            drawDeviceControls(renderer, controls, lcd.Width(), InputHeight(), 1, pressed, view);
         }
         if (present) SDL_RenderPresent(renderer);
     }
@@ -3135,7 +3193,7 @@ class Runner {
         const float fx = (windowX - layout.x) / layout.scaleX, fy = (windowY - layout.y) / layout.scaleY;
         x = int(floor(fx));
         y = int(floor(fy));
-        return fx >= 0 && fy >= 0 && x < lcd.Width() && y < DeviceHeight();
+        return fx >= 0 && fy >= 0 && x < DeviceWidth() && y < DeviceHeight();
     }
 
     // The IR printer has a job coming in or a link up (frondIr::IrPrinter::NeedsGuest).
@@ -3156,7 +3214,8 @@ class Runner {
         mouseKey = keyInvalid;
         touch.ReleaseAll();
         keyHolds.Clear();
-        for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower})
+        for (KeyId key : {keyIdHard1, keyIdHard2, keyIdHard3, keyIdHard4, keyIdUp, keyIdDown, keyIdPower,
+                          keyIdJogUp, keyIdJogDown, keyIdJogPress, keyIdBack})
             if (pressed & deviceKeyBit(key)) SetKey(key, false);
     }
 
@@ -3230,7 +3289,6 @@ class Runner {
                     const int my = event.type == SDL_MOUSEMOTION ? event.motion.y : event.button.y;
                     int x = 0, y = 0;
                     const bool inside = DevicePoint(mx, my, x, y);
-                    x = clamp(x, 0, lcd.Width() - 1);
                     if (event.type == SDL_MOUSEBUTTONUP) {
                         if (penDown) gSession->QueuePenEvent(PenEvent::up());
                         if (mouseKey != keyInvalid) Key(mouseKey, false);
@@ -3238,16 +3296,18 @@ class Runner {
                         mouseKey = keyInvalid;
                     } else if (down) {
                         if (!inside) break;
-                        if (y < InputHeight()) {
+                        const auto hit = HitAt(x, y);
+                        if (hit.pen) {
                             if (touch.PenActive()) break;
                             penDown = true;
-                            gSession->QueuePenEvent(PenEvent::down(x, y));
-                        } else {
-                            mouseKey = deviceControlAt(controls, lcd.Width(), InputHeight(), x, y);
-                            if (mouseKey != keyInvalid) Key(mouseKey, true);
+                            gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
+                        } else if (hit.key != keyInvalid) {
+                            mouseKey = hit.key;
+                            Key(mouseKey, true);
                         }
                     } else if (penDown) {
-                        gSession->QueuePenEvent(PenEvent::down(x, clamp(y, 0, InputHeight() - 1)));
+                        const auto hit = HitAt(x, y, true);
+                        gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
                     }
                     break;
                 }
@@ -3301,6 +3361,16 @@ class Runner {
                         case SDLK_ESCAPE: key = keyIdPower; break;
                         default: break;
                     }
+                    // The Jog Dial: Page Up and Page Down turn it, End presses it and Home is Back.
+                    if (controls.sideTabWidth > 0) {
+                        switch (event.key.keysym.sym) {
+                            case SDLK_PAGEUP: key = keyIdJogUp; break;
+                            case SDLK_PAGEDOWN: key = keyIdJogDown; break;
+                            case SDLK_END: key = keyIdJogPress; break;
+                            case SDLK_HOME: key = keyIdBack; break;
+                            default: break;
+                        }
+                    }
                     if (key != keyInvalid) {
                         if (!event.key.repeat) Key(key, keyDown);
                         break;
@@ -3340,6 +3410,8 @@ class Runner {
     SDL_Texture* silkscreenTexture{nullptr};
     SDL_Texture* controlsTexture{nullptr};
     WindowFit fit{WindowFit::none};
+    // The jog panel's placement, which sets the window's width and where the LCD sits.
+    DeviceControlView view{};
     WindowLayout layout;
     float pixelsX{1}, pixelsY{1}, artScale{1};
     bool controlsDirty{true};
@@ -3366,16 +3438,18 @@ class Runner {
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}
         bool DirectTouch(int64_t touch) override { return SDL_GetTouchDeviceType(touch) == SDL_TOUCH_DEVICE_DIRECT; }
-        KeyId KeyAt(int x, int y) override {
-            return deviceControlAt(deviceControls(runner.profile->art), runner.lcd.Width(), runner.InputHeight(), x, y);
+        KeyId KeyAt(int x, int y) override { return runner.HitAt(x, y).key; }
+        bool KeyBeforePen(int x, int y) override { return runner.HitAt(x, y).key != keyInvalid; }
+        void PenDown(int x, int y) override {
+            const auto hit = runner.HitAt(x, y, true);
+            gSession->QueuePenEvent(PenEvent::down(hit.x, hit.y));
         }
-        void PenDown(int x, int y) override { gSession->QueuePenEvent(PenEvent::down(x, y)); }
         void PenUp() override { gSession->QueuePenEvent(PenEvent::up()); }
         void KeyDown(KeyId key) override { runner.Key(key, true); }
         void KeyUp(KeyId key) override { runner.Key(key, false); }
         Runner& runner;
     } touchHost{*this};
-    Touch68k touch{touchHost, lcd.Width(), InputHeight()};
+    Touch68k touch{touchHost, 1 << 20, InputHeight()};
     Piezo68k piezo;
     WavWriter68k wav;
     bool wavOpen{false};
@@ -3503,7 +3577,12 @@ bool parseOptions(int argc, char** argv, Options& options) {
             const char* v = value();
             if (!v) return false;
             options.usb = v;
-        } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" || arg == "--jog-controls" ||
+        } else if (arg == "--jog-controls") {
+            const char* v = value();
+            JogPlacement placement;
+            if (!v || !parseJogPlacement(v, placement)) return false;
+            options.jog = placement;
+        } else if (arg == "--work-folder" || arg == "--nand" || arg == "--engine" ||
                    arg == "--bluetooth") {
             // The desktop's options for ARM devices and their cards; a IIIx has none of these.
             if (!value()) return false;
@@ -3517,8 +3596,9 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--card-swap" || arg == "--card-identity" || arg == "--card-protected") {
             options.refused = arg;
             return false;
-        } else if (arg == "--fast-audio" || arg == "--hide-keyboard" ||
-                   arg == "--hide-jog-controls") {
+        } else if (arg == "--hide-jog-controls") {
+            options.jog = JogPlacement::hidden;
+        } else if (arg == "--fast-audio" || arg == "--hide-keyboard") {
             cout << "frond-68k: ignoring " << arg << endl;
         } else if (!arg.empty() && arg[0] != '-' && options.image.empty()) {
             options.image = arg;

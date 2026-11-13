@@ -1165,7 +1165,7 @@ static void t415Art() {
     const auto& p=deviceControls(DeviceArt::t415);
     const int width=320,height=448;
     const auto* profile=deviceProfileNamed5("sony-clie-t415");
-    assert(profile && profile->support==DeviceSupport5::staged && profile->board==DeviceBoard5::vz328);
+    assert(profile && profile->support==DeviceSupport5::experimentalDesktop && profile->board==DeviceBoard5::vz328);
     assert(profile->frontend.silkscreenHeight==deviceSilkscreen(DeviceArt::t415).height &&
            profile->frontend.stripHeight==p.height && profile->frontend.sideTabWidth==p.sideTabWidth);
     assert(profile->art==DeviceArt::t415 && profile->defaultDisplay==DisplayMode::mode_320x320);

@@ -140,8 +140,7 @@ class RuntimeCards {
     }
     // The device takes manifests of linked cards.
     static bool LinkedDevice(const DeviceProfile5& p) {
-        return deviceProfileLinkedCards5(p) ||
-               (p.board == DeviceBoard5::vz328 && deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick);
+        return deviceProfileLinkedCards5(p) || deviceProfileLinkedStick5(p);
     }
     unsigned Slots() const {
         const auto* p = deviceProfile5(deviceType);

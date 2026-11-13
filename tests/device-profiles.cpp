@@ -54,7 +54,7 @@ int main() {
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
                 p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
-                p.deviceType == deviceTypeFrankenE2 || (p.board == DeviceBoard5::vz328 && p.deviceType != deviceTypeT415)));
+                p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -112,7 +112,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 23 && names.size() == 28 && types.size() == 25);
+    assert(desktopCount == 24 && names.size() == 28 && types.size() == 25);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -995,8 +995,8 @@ static void t415() {
     const auto* p = deviceProfileNamed5("sony-clie-t415");
     assert(p && p->deviceType == deviceTypeT415 && int(deviceTypeT415) == 24 && deviceProfile5(24) == p);
     assert(deviceTypeNamed5("sony-clie-t415") == deviceTypeT415 && p->art == DeviceArt::t415 && vzPalm(*p));
-    assert(p->cohort == DeviceCohort5::vz68k && p->support == DeviceSupport5::staged && !p->frontend.available);
-    assert(!deviceProfileSupportsDesktop5(p->deviceType));
+    assert(p->cohort == DeviceCohort5::vz68k && p->support == DeviceSupport5::experimentalDesktop && p->frontend.available);
+    assert(deviceProfileSupportsDesktop5(p->deviceType));
     assert(deviceProfileRuns68k5(p->deviceType) && !deviceProfileRunnerEligible5(p->deviceType));
     assert(p->detect == DeviceDetect5::romHeader68k && p->companyId == sony && p->halId == vnce);
     assert(p->minRam == 8u << 20 && p->maxRam == p->minRam && p->cpuHz == 33161216 && !p->norSize);
@@ -1010,6 +1010,7 @@ static void t415() {
     assert(!caps.network && !caps.keyboard && !caps.serial && caps.usb && caps.infrared && caps.irPhone &&
            !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
     assert(!*deviceProfilePendingUsb5(p->deviceType));
+    assert(deviceProfileLinkedStick5(*p) && !deviceProfileLinkedStick5(*deviceProfile5(deviceTypeNamed5("palm-m125"))));
     assert(deviceProfileCardSlotCount5(*p) == 1 && !deviceProfileLinkedCards5(*p) &&
            deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
     // The T415 ROM's shape: 3.125 MiB, a small card at 0 and a big card at 32 KiB, both Sony's.

@@ -49,14 +49,14 @@ fun DanaCardsRows(model: RunningModel) {
             val label = when {
                 !state.known -> "Not known"
                 card == null -> "No card"
-                else -> "${if (card.protocol == "mmc") "MMC" else "SD"} · ${if (card.inserted) "Inserted" else "Ejected"}" +
+                else -> "${if (slot.stick) "Memory Stick" else if (card.protocol == "mmc") "MMC" else "SD"} · ${if (card.inserted) "Inserted" else "Ejected"}" +
                     if (card.failed) " · I/O error" else if (card.writeProtected) " · Write protected" else ""
             }
-            ListItem(headlineContent = { Text(if (cards.states.size == 1) "Card" else slot.title) }, supportingContent = { Text(label) })
+            ListItem(headlineContent = { Text(if (cards.states.size == 1 && !slot.stick) "Card" else slot.title) }, supportingContent = { Text(label) })
             Row {
                 val usable = state.known && model.busy == null
                 if (card == null) TextButton(enabled = usable, onClick = {
-                    selected = slot; family = slot.families.firstOrNull()
+                    selected = slot; family = cards.device.familiesOf(slot).firstOrNull()
                 }) { Text("Choose card") }
                 else {
                     TextButton(enabled = usable, onClick = {
@@ -65,7 +65,7 @@ fun DanaCardsRows(model: RunningModel) {
                         Text(if (card.inserted) "Eject" else "Insert")
                     }
                     if (!card.inserted) TextButton(enabled = usable && !card.failed, onClick = { model.danaJob { it.command(slot, "take-out") } }) { Text("Remove") }
-                    TextButton(enabled = usable && !card.failed, onClick = { exporting = slot; export.launch("${cards.device.label} card ${slot.label}.frondsd") }) { Text("Export") }
+                    TextButton(enabled = usable && !card.failed, onClick = { exporting = slot; export.launch("${cards.device.label} ${if (slot.stick) "stick.frondms" else "card ${slot.label}.frondsd"}") }) { Text("Export") }
                 }
                 if (!state.known) TextButton(enabled = model.busy == null, onClick = { model.danaJob() }) { Text("Try again") }
             }
@@ -74,7 +74,7 @@ fun DanaCardsRows(model: RunningModel) {
     selected?.let { slot ->
         AlertDialog(onDismissRequest = { selected = null }, title = { Text(slot.title) }, text = {
             Column(Modifier.heightIn(max = 400.dp).verticalScroll(rememberScrollState())) {
-                Row { for (type in slot.families) TextButton(onClick = { family = type }) {
+                Row { for (type in cards.device.familiesOf(slot)) TextButton(onClick = { family = type }) {
                     Text(type.label + if (family == type) " ✓" else "")
                 } }
                 Row { Checkbox(writeProtected, { writeProtected = it }); Text("Write protected") }

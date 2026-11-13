@@ -15,7 +15,9 @@ enum class PalmButton(val id: String) {
     MENU("menu"),
     POWER("power"),
     // The Zire 72's side voice button.
-    VOICE("voice");
+    VOICE("voice"),
+    // The CLIE T415's Jog Dial: turned up and down, pressed in, and its Back button.
+    JOG_UP("jog-up"), JOG_DOWN("jog-down"), JOG_PRESS("jog-press"), BACK("back");
 
     fun label(device: Device): String = when (this) {
         UP -> "Up"
@@ -28,6 +30,10 @@ enum class PalmButton(val id: String) {
         MENU -> "Menu"
         POWER -> "Power"
         VOICE -> "Voice"
+        JOG_UP -> "Jog up"
+        JOG_DOWN -> "Jog down"
+        JOG_PRESS -> "Jog press"
+        BACK -> "Back"
     }
 
     companion object {
@@ -76,6 +82,11 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
                 KeyEvent.KEYCODE_BUTTON_R1 to PalmButton.APP4,
                 KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.MENU,
             )
+            // The T415's Jog Dial.
+            keys[KeyEvent.KEYCODE_BUTTON_L2] = PalmButton.JOG_UP
+            keys[KeyEvent.KEYCODE_BUTTON_R2] = PalmButton.JOG_DOWN
+            keys[KeyEvent.KEYCODE_BUTTON_THUMBR] = PalmButton.JOG_PRESS
+            keys[KeyEvent.KEYCODE_BUTTON_THUMBL] = PalmButton.BACK
             // The TX's Home is a hardware button, its first app button.
             keys[KeyEvent.KEYCODE_BUTTON_START] = if ("home" in device.buttons) PalmButton.HOME else PalmButton.APP1
             val allowed = PalmButton.on(device)

@@ -688,6 +688,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                "On the Tungsten E2 and E3, F1 to F4 are Calendar, Contacts, Tasks and Note Pad.\n"
                "On the Zire 72, F1 to F4 are Calendar, Contacts, Music and Camera, and F5 is the side voice button.\n"
                "On the Sony CLIÉ TG50, F1 to F4 are Date Book, Address, To Do and Memo Pad, F5 is the voice button, F6 is Home, and left and right Alt are Blue and Red.\n"
+               "On the Sony CLIÉ T415, F1 to F4 are Date Book, Address, To Do and Memo Pad, Page Up and Page Down turn the Jog Dial, End presses it, and Home is the Jog Dial's Back.\n"
                "Escape: Power, on devices with a power key in the button bar, except the de-NVFS E2\n\n"
                "Shortcuts, in the Palm window and in this one:\n"
                "Ctrl+S: Save. Ctrl+Shift+S: Save a copy. Ctrl+W: Save and Stop. Ctrl+I: Install.\n"
@@ -1154,7 +1155,8 @@ void MainWindow::refresh() {
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
     const bool linkedCards = frondFirmware::linkedCards(currentDevice());
     danaCards->setVisible(linkedCards);
-    danaCards->setText(deviceProfileCardSlotCount5(frondFirmware::profile(currentDevice())) > 1 ? tr("Cards 1 and 2…") : tr("Card…"));
+    danaCards->setText(deviceProfileLinkedStick5(frondFirmware::profile(currentDevice())) ? tr("Memory Stick…") :
+                       deviceProfileCardSlotCount5(frondFirmware::profile(currentDevice())) > 1 ? tr("Cards 1 and 2…") : tr("Card…"));
     // A connector the device has that isn't emulated yet, greyed out.
     const QString pendingUsb = QString::fromLatin1(deviceProfilePendingUsb5(int(currentDevice())));
     auto* pending = findChild<QLabel*>("danaPendingPeripherals");
@@ -2693,14 +2695,16 @@ void MainWindow::saveCopyTo(const QString& path) {
     if (!client.available()) return;
     if (frondFirmware::linkedCards(runningDevice)) {
         const bool two = deviceProfileCardSlotCount5(frondFirmware::profile(runningDevice)) > 1;
-        for (const auto* slot : {"sd-state", "sd2-state"}) {
+        const bool stick = deviceProfileLinkedStick5(frondFirmware::profile(runningDevice));
+        for (const auto* slot : {stick ? "ms-state" : "sd-state", "sd2-state"}) {
             if (!two && QLatin1String(slot) == QLatin1String("sd2-state")) break;
             const auto result=DanaCardsDialog::requestWithClient(client,slot);
             if (!result.ok) return failure(result.message);
             const auto state=frondDanaCards::state(result.message);
             if (!state.known) return failure(two ? tr("Couldn't read both card slots.") : tr("Couldn't read the card slot."));
             if (state.present) return failure(two ? tr("Use Cards 1 and 2 to export a portable session folder with both cards.") :
-                                                    tr("Use Card to export a portable session folder with its card."));
+                                              stick ? tr("Export the Memory Stick from Memory Stick… and take it out, then save a copy.") :
+                                                      tr("Use Card to export a portable session folder with its card."));
         }
     }
     const auto dest = frondSessions::exportDestDir(path);
