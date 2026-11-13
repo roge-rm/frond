@@ -20,6 +20,24 @@ endif
 
 all: out/frond desktop
 
+# Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
+# which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
+# Change the limit for one target with `test-foo: TEST_TIMEOUT = 900`, or for a run with
+# `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
+TEST_TIMEOUT ?= 300
+TEST_KILL_GRACE ?= 10
+export TEST_KILL_GRACE
+test: SHELL = $(CURDIR)/tests/timed-shell.sh
+test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
+test: export TEST_TIMEOUT
+test-%: export TEST_TIMEOUT
+test: export TEST_NAME = $@
+test-%: export TEST_NAME = $@
+prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
+out/% build/% core/% vendor/%: SHELL = /bin/sh
+test-desktop: TEST_TIMEOUT = 3600
+
+
 .PHONY: test-memory-stick-media
 test: test-memory-stick-controller test-memory-stick-media
 test-memory-stick-media: prepare
