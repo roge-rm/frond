@@ -1386,8 +1386,8 @@ frond-jit: out/frond
 .PHONY: test-tg50-serial-board
 test: test-tg50-serial-board
 test-tg50-serial-board: out/frond
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-core.rsp
-	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @build/tg50-serial-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-serial-board
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/tg50-serial-board-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common tests/tg50-serial-board.cpp @build/tg50-serial-board-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-tg50-serial-board
 	./build/test-tg50-serial-board
 
 test: test-pxa255-udc-dma test-pxa255-udc-dma-state
