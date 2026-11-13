@@ -257,9 +257,12 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
     const auto& controls=deviceControls(deviceType);
     if(controls.count) {
-        drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
         // Controls all beside the screen leave nothing to draw under it.
-        if(!deviceControlsUnits(controls,controlView)) {SDL_RenderPresent(renderer);return;}
+        if(!deviceControlsUnits(controls,controlView)) {
+            drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
+            SDL_RenderPresent(renderer);
+            return;
+        }
         if(!controlsTexture)
             controlsTexture=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_ABGR8888,
                 SDL_TEXTUREACCESS_TARGET,int(deviceControlsWidth(controls,screenWidth,controlView)*artworkScale),int(deviceControlsHeight(controls,screenWidth,controlView)*artworkScale));
@@ -268,6 +271,9 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
             float sx,sy;SDL_RenderGetScale(renderer,&sx,&sy);
             if(SDL_SetRenderTarget(renderer,controlsTexture)==0) {
                 SDL_RenderSetScale(renderer,1,1);
+                // Transparent where the strip leaves room for the jog panel beside the buttons.
+                SDL_SetRenderDrawColor(renderer,0,0,0,0);
+                SDL_RenderClear(renderer);
                 drawDeviceControls(renderer,controls,screenWidth,0,artworkScale,buttons,controlView,stick);
                 SDL_SetRenderTarget(renderer,nullptr);
                 SDL_RenderSetScale(renderer,sx,sy);
@@ -278,6 +284,9 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
             SDL_Rect dest{0,int(screenHeight*scale),int(deviceControlsWidth(controls,screenWidth,controlView)*scale),int(deviceControlsHeight(controls,screenWidth,controlView)*scale)};
             SDL_RenderCopy(renderer,controlsTexture,nullptr,&dest);
         } else drawDeviceControls(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
+        // A jog panel beside the screen or the buttons is drawn straight on the window, after the strip
+        // so the strip's texture can't cover the part beside the buttons.
+        if(controls.sideTabWidth>0) drawDeviceSidebar(renderer,controls,screenWidth,screenHeight,scale,buttons,controlView,stick);
     }
     SDL_RenderPresent(renderer);
 }
