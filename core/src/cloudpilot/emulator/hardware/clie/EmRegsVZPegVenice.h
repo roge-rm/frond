@@ -11,6 +11,10 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     EmRegsVzPegVenice(EmRegsMB86189& mb86189);
     virtual ~EmRegsVzPegVenice(void);
 
+    // The slot's card-detect line on the MB86189's port pins changes with the stick.
+    void Mount(EmHAL::Slot slot, CardImage& cardImage) override;
+    void Unmount(EmHAL::Slot slot) override;
+
    public:
     virtual Bool GetLCDScreenOn(void);
     virtual Bool GetLCDBacklightOn(void);
@@ -37,6 +41,7 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     uint16 ButtonToBits(ButtonEvent::Button btn) override;
 
    private:
+    EmRegsMB86189& mb86189;
     EmSPISlave* fSPISlaveADC;
     unique_ptr<uint32[]> framebufferTmp;
     // PG1 as JogSys reads it in its IRQ2 handler, right after the edge; not saved.

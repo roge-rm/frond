@@ -1010,7 +1010,8 @@ static void t415() {
     assert(!caps.network && !caps.keyboard && !caps.serial && !caps.usb && caps.infrared && caps.irPhone &&
            !caps.modem && caps.sound && !caps.bluetooth && !caps.usbPrinter && !caps.usbWifi && !caps.builtInWifi);
     assert(std::string(deviceProfilePendingUsb5(p->deviceType)) == "USB HotSync");
-    assert(deviceProfileCardSlotCount5(*p) == 0 && !deviceProfileLinkedCards5(*p));
+    assert(deviceProfileCardSlotCount5(*p) == 1 && !deviceProfileLinkedCards5(*p) &&
+           deviceProfileStorageSlot5(*p) == DeviceStorageSlot5::memoryStick);
     // The T415 ROM's shape: 3.125 MiB, a small card at 0 and a big card at 32 KiB, both Sony's.
     auto rom = rom68k(0x320000, 5, vz, sony, vnce, base + 0x2a2, 0x8000);
     const auto big = rom68k(0x100, 5, vz, sony, vnce, base + 0x8000 + 0x1234, 0x318000);

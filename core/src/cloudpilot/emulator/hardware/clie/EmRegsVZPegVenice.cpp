@@ -65,7 +65,9 @@ const uint16 kButtonMap[kNumButtonRows][kNumButtonCols] = {
 // ---------------------------------------------------------------------------
 
 EmRegsVzPegVenice::EmRegsVzPegVenice(EmRegsMB86189& mb86189)
-    : VZ(mb86189), fSPISlaveADC(new EmSPISlaveADS784x(kChannelSet2)) {
+    : VZ(mb86189), mb86189(mb86189), fSPISlaveADC(new EmSPISlaveADS784x(kChannelSet2)) {
+    mb86189.SetGpioReadHandler(
+        []() { return gExternalStorage.IsMounted(EmHAL::Slot::memorystick) ? 0x01 : 0x00; });
     framebufferTmp = make_unique<uint32[]>(320 * 160 / 2 / 4);
 }
 
@@ -74,6 +76,16 @@ EmRegsVzPegVenice::EmRegsVzPegVenice(EmRegsMB86189& mb86189)
 // ---------------------------------------------------------------------------
 
 EmRegsVzPegVenice::~EmRegsVzPegVenice(void) { delete fSPISlaveADC; }
+
+void EmRegsVzPegVenice::Mount(EmHAL::Slot slot, CardImage& cardImage) {
+    VZ::Mount(slot, cardImage);
+    if (slot == EmHAL::Slot::memorystick) mb86189.NotifyGpioChanged();
+}
+
+void EmRegsVzPegVenice::Unmount(EmHAL::Slot slot) {
+    VZ::Unmount(slot);
+    if (slot == EmHAL::Slot::memorystick) mb86189.NotifyGpioChanged();
+}
 
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetLCDScreenOn

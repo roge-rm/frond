@@ -163,6 +163,7 @@ struct Options {
     // The modem's HotSync link: where a call to the HotSync number goes.
     string modemSync{"off"};
     string sdAttach[2];
+    string msAttach;
     uint16_t gdbPort{0};
     bool smooth{false};
     optional<string> desktopSocket;
@@ -496,7 +497,7 @@ string checkSession(const vector<uint8_t>& data, const string& deviceName, Check
     if (session.file.GetDisplayMode() != int32_t(named->defaultDisplay)) return "unsupported display mode";
     if (session.file.GetRamSize() != named->minRam) return "unsupported RAM size";
     if (!session.file.GetMemorySize() || !session.file.GetSavestateSize()) return "session has no machine state";
-    if (!session.manifest.empty() && !deviceProfileLinkedCards5(*named)) return "this device has no card slot";
+    if (!session.manifest.empty() && !RuntimeCards::LinkedDevice(*named)) return "this device has no card slot";
     if (isPortable(data)) {
         string linked;
         const auto error=RuntimeCards::ResolvePortable(named->deviceType,session.manifest,folder,linked);
@@ -555,15 +556,19 @@ PortablePublication savePortable(const string& path,const DeviceProfile5& profil
 struct CardStateCheck {
     const RuntimeCards::Pair& pair;
     unsigned slots;
+    // The device has SD slots (the Dana, the VZ Palms) rather than a Memory Stick.
+    bool sd;
     void Load(SavestateLoader<ChunkType>& loader) {
         EmSPISlaveSD first(EmHAL::Slot::sdcard),second(EmHAL::Slot::sdcard2);
-        first.Load(loader); second.Load(loader);
-        if ((pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
+        if(sd) { first.Load(loader); second.Load(loader); }
+        if (sd && (pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
             (pair.card[1] && (!second.IsBlockInRange(pair.card[1]->backing->Size()/512) || !second.IsProtocol(pair.card[1]->protocol))))
             loader.NotifyError();
         // One SPI card per slot: 0x1d0 for the first, 0x201 for the Dana's second.
-        if(!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201))!=(slots>1) ||
-           (slots<2 && pair.card[1]))
+        if(sd ? (!loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201))!=(slots>1) ||
+                 (slots<2 && pair.card[1]) || pair.stick)
+              : (loader.HasChunk(static_cast<ChunkType>(0x1d0)) || loader.HasChunk(static_cast<ChunkType>(0x201)) ||
+                 pair.card[0] || pair.card[1]))
             loader.NotifyError();
         auto* chunk=loader.GetChunk(ChunkType::externalStorage);
         if(!chunk) { loader.NotifyError(); return; }
@@ -577,9 +582,10 @@ struct CardStateCheck {
             if(!end) { loader.NotifyError(); return; }
             keys[n].assign(bytes,end-bytes);
         }
-        if(!chunk->IsAtEnd() || !keys[1].empty()) loader.NotifyError();
+        if(!chunk->IsAtEnd() || (sd && !keys[1].empty())) loader.NotifyError();
         for(unsigned n=0;n<2;++n)
             if(keys[n?2:0] != (pair.card[n] && pair.inserted[n]?pair.card[n]->key:"")) loader.NotifyError();
+        if(!sd && keys[1] != (pair.stick && pair.stickInserted?pair.stick->key:"")) loader.NotifyError();
     }
 };
 string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pair) {
@@ -599,7 +605,8 @@ string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pa
         ids.push_back(id); offset+=size_t(length)*4;
     }
     if(offset!=bytes.size()) return "trailing machine chunk data";
-    CardStateCheck target{pair,session.profile?deviceProfileCardSlotCount5(*session.profile):0u}; SavestateLoader<ChunkType> loader;
+    CardStateCheck target{pair,session.profile?deviceProfileCardSlotCount5(*session.profile):0u,
+                          session.profile && deviceProfileLinkedCards5(*session.profile)}; SavestateLoader<ChunkType> loader;
     return loader.Load(bytes.data(),bytes.size(),target)?"":"invalid card protocol or insertion state";
 }
 
@@ -944,6 +951,11 @@ class Runner {
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
         }
+        if (!options.msAttach.empty()) {
+            const auto reply=runtimeCards.StickCommand("attach",options.msAttach);
+            cout << "card: " << reply << endl;
+            if (reply.rfind("error:",0)==0) return 1;
+        }
         if (options.inputReplay && !LoadReplay(*options.inputReplay)) return 1;
         if (!OpenWav() || !OpenLinks()) return 1;
         while (guestSeconds < options.runFor) {
@@ -958,6 +970,11 @@ class Runner {
     int RunWindow() {
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
+            cout << "card: " << reply << endl;
+            if (reply.rfind("error:",0)==0) return 1;
+        }
+        if (!options.msAttach.empty()) {
+            const auto reply=runtimeCards.StickCommand("attach",options.msAttach);
             cout << "card: " << reply << endl;
             if (reply.rfind("error:",0)==0) return 1;
         }
@@ -1723,6 +1740,11 @@ class Runner {
             const auto begin=args.find_first_not_of(" ");
             args=begin==string::npos ? "" : args.substr(begin);
             cout << "card: " << runtimeCards.Command(second,command.substr(second?4:3),args) << endl;
+        } else if (command.rfind("ms-",0)==0 && runtimeCards.StickSlot()) {
+            string args; getline(words,args);
+            const auto begin=args.find_first_not_of(" ");
+            args=begin==string::npos ? "" : args.substr(begin);
+            cout << "card: " << runtimeCards.StickCommand(command.substr(3),args) << endl;
         } else if(command=="dana-view"||command=="dana-view-state") {
             if(!deviceTypeIsDana5(profile->deviceType))return void(cout<<"unsupported: Dana view"<<endl);
             if(command=="dana-view") {
@@ -2121,6 +2143,10 @@ class Runner {
             if(command=="dana-view"&&!SetDanaView(argument,error))return {false,"argument",error};
             return {true,"dana-view",DanaViewDescription()};
         }
+        if (command.rfind("ms-",0)==0 && runtimeCards.StickSlot()) {
+            auto reply=runtimeCards.StickCommand(command.substr(3),argument);
+            return {reply.rfind("error:",0)!=0,"card",reply};
+        }
         if ((command.rfind("sd-",0)==0 || command.rfind("sd2-",0)==0) && runtimeCards.Slots()) {
             const bool second=command.rfind("sd2-",0)==0;
             auto reply=runtimeCards.Command(second,command.substr(second?4:3),argument);
@@ -2390,7 +2416,7 @@ class Runner {
         if (command == "usb-state") return {true, "usb", "off"};
         if (command == "microphone-state") return {true, "microphone", "off"};
         if (command == "microphone-epoch") return {true, "microphone", "0"};
-        if (command == "sd-state") return {true, "card", "none"};
+        if (command == "sd-state" || command == "ms-state") return {true, "card", "none"};
         if (command == "wifi-module-state") return {true, "wifi-module", ModuleState()};
         if (command == "network-mode") {
             // On the Dana Wireless, wireless and disabled turn the built-in module's radio on and off.
@@ -3274,6 +3300,9 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--sd-attach" || arg == "--sd2-attach") {
             const char* v=value(); if (!v) return false;
             options.sdAttach[arg=="--sd2-attach"] = v;
+        } else if (arg == "--ms-attach") {
+            const char* v=value(); if (!v) return false;
+            options.msAttach = v;
         } else if (arg == "--card-swap" || arg == "--card-identity" || arg == "--card-protected") {
             options.refused = arg;
             return false;
@@ -3295,6 +3324,7 @@ int main(int argc, char** argv) {
 #ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
 #endif
+    MemoryStickBackend::factory = [] { return make_unique<FrondMsBackend>(); };
     if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.15.0" << endl, 0;
     Options options;
     if (!parseOptions(argc, argv, options)) {

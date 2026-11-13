@@ -9,6 +9,7 @@
 #include "EmRegs.h"
 #include "Fifo.h"
 #include "MemoryStick.h"
+#include "MemoryStickBackend.h"
 
 class EmRegsMB86189 : public EmRegs, public EmHALHandler {
    public:
@@ -51,7 +52,7 @@ class EmRegsMB86189 : public EmRegs, public EmHALHandler {
     void DoSave(T& savestate);
 
     template <typename T>
-    void DoSaveLoad(T& helper);
+    void DoSaveLoad(T& helper, uint32 version);
 
     void ResetHostController();
 
@@ -69,6 +70,11 @@ class EmRegsMB86189 : public EmRegs, public EmHALHandler {
     void FifoWrite(uint16 data);
 
     uint32 GetTransferSize();
+
+    uint8* GetDataOut();
+    uint32 GetDataOutSize();
+    void RunReadTpc(uint8 tpcId);
+    void RunWriteTpc(uint8 tpcId);
 
     uint32 mscmdRead(emuptr address, int size);
     uint32 mscsRead(emuptr address, int size);
@@ -98,6 +104,10 @@ class EmRegsMB86189 : public EmRegs, public EmHALHandler {
 
     uint8 irqStat{0};
     MemoryStick memoryStick;
+    // Set when Frond supplies the stick; the logical MemoryStick is unused then.
+    unique_ptr<MemoryStickBackend> backend;
+    uint8 backendReadBuffer[512];
+    uint32 backendReadSize{0};
 
     State state{State::idle};
 

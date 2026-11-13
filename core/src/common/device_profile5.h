@@ -327,16 +327,16 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},
 
     // Sony CLIE T415: DragonBall VZ with 8 MiB of RAM, a 320x320 16-grey panel and the silkscreen below it,
-    // IrDA and a USB cradle (USB isn't emulated yet). Staged: not in the frontends yet.
+    // a classic Memory Stick slot (4 to 128 MB, no Pro), IrDA and a USB cradle (USB isn't emulated yet). Staged: not in the frontends yet.
     {deviceTypeT415, "sony-clie-t415", "Sony CLIÉ T415", DeviceCohort5::vz68k, DeviceSupport5::staged,
      DeviceDetect5::romHeader68k, 0x736f6e79 /* sony */, 0x766e6365 /* vnce */, DeviceBoard5::vz328, DeviceArt::t415,
      {false, false, false, false, false, true, false, true, false, false, false, true},
      0, 0, 8u << 20, 8u << 20, DisplayMode::mode_320x320, 1u << 5, false,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
      {false, "iiix-hires", 320, 320, 128, 104, "Date Book|Address|To Do|Memo Pad",
-      "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix-hires", DeviceStorageSlot5::none, 0,
-      false, false, 38},
-     0, 0, 33161216},
+      "up|down|app1|app2|app3|app4", -1, -1, -1, -1, false, false, false, "", "iiix-hires",
+      DeviceStorageSlot5::memoryStick, 0, false, false, 38, true},
+     4 | 8 | 16 | 32 | 64 | 128, 0, 33161216},
     // Windows Mobile iPAQs: button bar art only, no Windows CE core yet.
     {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaq210, {},
