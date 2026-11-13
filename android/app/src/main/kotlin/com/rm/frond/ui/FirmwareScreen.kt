@@ -49,6 +49,8 @@ fun FirmwareScreen(model: HomeModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var nor by remember { mutableStateOf<Uri?>(null) }
+    // The file picked, kept so a device change can check it again.
+    var norUri by remember { mutableStateOf<Uri?>(null) }
     var nand by remember { mutableStateOf<Uri?>(null) }
     // The device picked from the menu, or null to detect it from the NOR.
     var chosen by remember { mutableStateOf(model.startAfterImport) }
@@ -60,15 +62,16 @@ fun FirmwareScreen(model: HomeModel) {
 
     DisposableEffect(Unit) { onDispose { Firmware.picked(context).delete() } }
 
-    val pickNor = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    // Copies the NOR for `forDevice` (the Zodiac update is unpacked only for the Zodiac or when detecting), so
+    // it runs again on the chosen file when the device changes.
+    fun loadNor(uri: Uri, forDevice: Device?) {
         nor = null
         detected = null
         error = null
         busy = true
         scope.launch {
             val (failed, found) = withContext(Dispatchers.IO) {
-                val e = Firmware.pick(context, uri, chosen)
+                val e = Firmware.pick(context, uri, forDevice)
                 e to if (e == null) Firmware.detect(Firmware.picked(context)) else null
             }
             busy = false
@@ -78,8 +81,16 @@ fun FirmwareScreen(model: HomeModel) {
             }
             nor = uri
             detected = found
-            if (found == null && chosen == null) error = Firmware.NOT_DETECTED
+            if (found == null && forDevice == null) error = Firmware.NOT_DETECTED
         }
+    }
+    val pickNor = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) { norUri = uri; loadNor(uri, chosen) }
+    }
+    fun changeDevice(d: Device?) {
+        chosen = d
+        val uri = norUri
+        if (uri != null) loadNor(uri, d) else error = null
     }
     val pickNand = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) { nand = uri; error = null }
@@ -122,14 +133,12 @@ fun FirmwareScreen(model: HomeModel) {
                         DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
                             DropdownMenuItem(text = { Text("Detect from the firmware") }, onClick = {
                                 choosing = false
-                                chosen = null
-                                error = if (nor != null && detected == null) Firmware.NOT_DETECTED else null
+                                changeDevice(null)
                             })
                             for (d in Device.shown.sortedBy { it.label.lowercase() }) {
                                 DropdownMenuItem(text = { Text(d.listLabel) }, onClick = {
                                     choosing = false
-                                    chosen = d
-                                    error = null
+                                    changeDevice(d)
                                 })
                             }
                         }
