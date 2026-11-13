@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """The T415's Memory Stick in frond-68k, driven over the console with the VFS probe.
 
-  tests/frond-68k-ms.py --session SESSION.frond --probe FrondMSProbe.prc --evidence DIR [--tg50-stick FILE]
+  tests/frond-68k-ms.py --session SESSION.frond --probe FrondMSProbe.prc --evidence DIR [--tg50-stick FILE] [--tg50 [SESSION]]
 
 A blank stick is made, attached, formatted by the guest (the probe's format step), written and read
-back, ejected and inserted, write protected, saved with the stick and loaded again. --tg50-stick is
-a formatted stick a TG50 wrote: the T415 has to mount it. Build the probe with
-tools/build-palm-probe.py ms. The core runs at original speed, so it takes a few minutes.
+back, ejected and inserted, write protected, saved with the stick and loaded again, then taken out,
+which settles its writes into stick.frondms. --tg50-stick is a formatted stick a TG50 wrote: the
+T415 has to mount it. --tg50 puts the T415's stick in a TG50 session (out/frond; the smoke one
+from `tests/smoke.py sessions` by default): it must mount without asking to format and give back
+the probe's GUEST.TXT. Build the probe with tools/build-palm-probe.py ms. The core runs at original
+speed, so it takes a few minutes.
 """
 import argparse, os, signal, struct, subprocess, sys, time
 from pathlib import Path
@@ -21,6 +24,7 @@ p.add_argument('--evidence', type=Path, required=True)
 p.add_argument('--core', type=Path, default=ROOT / 'out/frond-68k')
 p.add_argument('--card-tool', type=Path, default=ROOT / 'out/frond')
 p.add_argument('--tg50-stick', type=Path)
+p.add_argument('--tg50', nargs='?', const='', metavar='SESSION', help="read the T415's stick on the TG50 (its smoke session unless SESSION)")
 p.add_argument('--size', type=int, default=8)
 a = p.parse_args()
 r = a.evidence.resolve()
@@ -165,6 +169,10 @@ try:
     card(c, 'ms-state', f'inserted {KEY} writable')
     rows = probe_run(c, 'reloaded')
     mounts(rows)
+    # A linked stick keeps its writes in .gen- files beside it until it is taken out; only then
+    # does stick.frondms alone hold them, as another machine reads it.
+    card(c, 'ms-eject', 'ejected')
+    card(c, 'ms-take-out', 'taken-out')
 finally:
     stop(c)
 
@@ -174,10 +182,50 @@ if a.tg50_stick:
     c = start(a.session.resolve())
     try:
         time.sleep(8)
+        c.send(f'install "{a.probe.resolve()}"', 'install')
+        time.sleep(3)
         card(c, f'ms-attach "{foreign}" {"2" * 32} writable', 'inserted')
         time.sleep(10)
         rows = probe_run(c, 'tg50-stick')
         ok(rows, 'volume-enumerate'); ok(rows, 'volume-size')
     finally:
         stop(c)
+
+if a.tg50 is not None:
+    # The T415's stick in a TG50: no Unrecognized Format prompt, and the file the probe wrote.
+    sys.path.insert(0, str(ROOT / 'tests'))
+    import importlib.util
+    import smoke  # noqa: E402
+    spec = importlib.util.spec_from_file_location('ms_classic_rom', ROOT / 'tests/ms-classic-rom.py')
+    classic = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(classic)
+    work = r / 'tg50'
+    work.mkdir()
+    (work / 'machine').mkdir()
+    copy = work / 't415.frondms'
+    copy.write_bytes(stick.read_bytes())
+    run = smoke.Run('sony-clie-tg50', work, a.tg50 or smoke.session_path('sony-clie-tg50'), extra=['--work-folder', work / 'machine'])
+    run.control.command_timeout = 600
+    try:
+        run.ready()
+        classic.datebook(run, work, 'datebook')
+        if run.require('ms-state')['message'] == 'inserted':
+            run.require('ms-eject')
+            time.sleep(2)
+        run.require('ms-insert', str(copy))
+        end = time.monotonic() + 60
+        while time.monotonic() < end:
+            assert not classic.format_prompt(run.frame(work / 'inserted.png')), 'the TG50 asked to format the T415 stick'
+            time.sleep(3)
+        # Inserting a stick opens the launcher; host calls wait for an app's event loop, so back
+        # to Date Book first.
+        classic.datebook(run, work, 'datebook-inserted', ready=600)
+        listing = run.control.retry_ready('ms-files', '/', 600)['message']
+        print('tg50', listing.replace('\n', ' | '), flush=True)
+        assert '\t' + 'GUEST.TXT'.encode().hex() in listing.lower(), listing
+        got = work / 'guest.txt'
+        run.control.retry_ready('ms-get', str(got).encode().hex() + '\n' + '/GUEST.TXT'.encode().hex(), 240)
+        assert got.stat().st_size == 21, got.stat().st_size
+    finally:
+        run.close()
 print('frond-68k-ms: ok')
