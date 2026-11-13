@@ -79,7 +79,24 @@ struct SdSave {
     uint64_t generation{};
     uint64_t payloadBytes{};
     std::vector<uint64_t> chunks;
+    // A journal step 1 left for writeJournal (deferJournals): the changed pages as of the snapshot,
+    // copied, and the sidecar's chunk table they apply to.
+    struct Page {
+        uint64_t offset;
+        std::vector<uint8_t> data;
+    };
+    std::vector<Page> pages;
+    std::vector<uint32_t> table;
+    uint64_t fromGeneration{}, storedBytes{};
+    bool journalPending{};
 };
+
+// Set while a background save takes its snapshot: journalStore copies the changed pages and leaves
+// the journal file to writeJournal on the save's worker. Emulation thread only.
+inline bool& deferJournals() {
+    static bool defer = false;
+    return defer;
+}
 
 // Writes a whole medium of `stored` bytes, read through `read`, to its full copy at the next
 // generation in `shape`, then fsyncs the folder. `media` is filled in already.
@@ -115,9 +132,51 @@ inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& 
 
 using StoreChangeFn = std::function<bool(uint64_t offset, uint64_t length, const uint8_t* data)>;
 
-// Writes the pages `changes` gives (those that differ from the sidecar), and the new chunk table,
-// to a journal and fsyncs it. Only for a medium running on this folder's v2 sidecar with no other
-// snapshot held.
+// Writes `save.pages` (those that differ from the sidecar), and the new chunk table, to a journal at
+// save.generation and fsyncs it. Reads only the sidecar and `save`, so it may run on another
+// thread, as long as nothing writes the sidecar meanwhile.
+inline bool writeJournal(const std::filesystem::path& folder, SdSave& save) {
+    const auto sidecar = folder / frondMachine::fileCardSibling(save.kind);
+    auto table = std::move(save.table);
+    // A journal left to the same generation is replaced by the rename, never removed first.
+    frondSession::SdJournalWriter writer;
+    if (!writer.open(folder, save.storedBytes, save.fromGeneration, save.generation, save.kind)) return false;
+    const int fd = ::open(sidecar.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    // CRC32 is affine, so for equal lengths crc(new) = crc(old) ^ crc(zeros) ^ crc(diff), with the
+    // diff zero outside the changed page. Only the old page is read, never the whole chunk.
+    std::vector<uint8_t> old;
+    bool pages = true;
+    for (const auto& page : save.pages) {
+        const uint64_t off = page.offset, n = page.data.size();
+        const uint8_t* data = page.data.data();
+        const uint64_t c = off / frondSdFile::chunkBytes, start = c * frondSdFile::chunkBytes;
+        const uint64_t len = std::min<uint64_t>(frondSdFile::chunkBytes, save.storedBytes - start);
+        if (off + n > start + len || c >= table.size()) { pages = false; break; }
+        old.resize(size_t(n));
+        if (!frondSession::readAllAt(fd, old.data(), old.size(), frondSdFile::headerBytes + off)) { pages = false; break; }
+        for (size_t i = 0; i < old.size(); ++i) old[i] ^= data[i];
+        const uint64_t at = off - start;
+        const uint32_t diff = frondSdCandidate::crcZeros(
+            uint32_t(mz_crc32(frondSdCandidate::crcZeros(0, at), old.data(), old.size())), len - at - n);
+        table[size_t(c)] ^= frondSdCandidate::crcZeros(0, len) ^ diff;
+        if (save.chunks.empty() || save.chunks.back() != c) save.chunks.push_back(c);
+        if (!writer.add(off, uint32_t(n), data)) { pages = false; break; }
+    }
+    ::close(fd);
+    save.pages.clear();
+    save.pages.shrink_to_fit();
+    save.journalPending = false;
+    if (!pages) {
+        writer.abandon();
+        return false;
+    }
+    return writer.finish(table, save.journal);
+}
+
+// Step 1 as a journal: the pages `changes` gives (those that differ from the sidecar) copied, the
+// new generation chosen, then writeJournal, here or, under deferJournals, on the save's worker.
+// Only for a medium running on this folder's v2 sidecar with no other snapshot held.
 inline bool journalStore(const std::filesystem::path& folder, frondMachine::Media& media, SdSave& save,
                          const std::function<bool(const StoreChangeFn&)>& changes) {
     const auto sidecar = folder / frondMachine::fileCardSibling(save.kind);
@@ -127,38 +186,27 @@ inline bool journalStore(const std::filesystem::path& folder, frondMachine::Medi
         info.version != frondSdFile::versionV2 || info.classic != (save.kind == frondMachine::kindMs) ||
         info.nand != (save.kind == frondMachine::kindNand) || info.stored() != frondMachine::storeBytes(media))
         return false;
-    // A journal left to the same generation is replaced by the rename, never removed first.
-    frondSession::SdJournalWriter writer;
     const uint64_t to = info.generation + 1;
     // A full copy left at this generation by a save that failed before publishing.
     frondSession::removePath(frondSession::sdFullPath(folder, to, save.kind));
-    if (!writer.open(folder, info.stored(), info.generation, to, save.kind)) return false;
-    const int fd = ::open(sidecar.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return false;
-    // CRC32 is affine, so for equal lengths crc(new) = crc(old) ^ crc(zeros) ^ crc(diff), with the
-    // diff zero outside the changed page. Only the old page is read, never the whole chunk.
-    std::vector<uint8_t> old;
-    const bool pages = changes([&](uint64_t off, uint64_t n, const uint8_t* data) {
-        const uint64_t c = off / frondSdFile::chunkBytes, start = c * frondSdFile::chunkBytes;
-        const uint64_t len = std::min<uint64_t>(frondSdFile::chunkBytes, info.stored() - start);
-        if (off + n > start + len) return false;
-        old.resize(size_t(n));
-        if (!frondSession::readAllAt(fd, old.data(), old.size(), frondSdFile::headerBytes + off)) return false;
-        for (size_t i = 0; i < old.size(); ++i) old[i] ^= data[i];
-        const uint64_t at = off - start;
-        const uint32_t diff = frondSdCandidate::crcZeros(
-            uint32_t(mz_crc32(frondSdCandidate::crcZeros(0, at), old.data(), old.size())), len - at - n);
-        table[size_t(c)] ^= frondSdCandidate::crcZeros(0, len) ^ diff;
-        if (save.chunks.empty() || save.chunks.back() != c) save.chunks.push_back(c);
-        return writer.add(off, uint32_t(n), data);
+    save.pages.clear();
+    const bool copied = changes([&](uint64_t off, uint64_t n, const uint8_t* data) {
+        save.pages.push_back({off, std::vector<uint8_t>(data, data + n)});
+        return true;
     });
-    ::close(fd);
-    if (!pages) return false;
-    if (!writer.finish(table, save.journal)) return false;
-    media.contentGeneration = to;
+    if (!copied) {
+        save.pages.clear();
+        return false;
+    }
+    save.table = std::move(table);
+    save.fromGeneration = info.generation;
+    save.storedBytes = info.stored();
     save.generation = to;
     save.payloadBytes = info.stored();
-    return true;
+    media.contentGeneration = to;
+    save.journalPending = true;
+    if (deferJournals()) return true;
+    return writeJournal(folder, save);
 }
 
 // The card store's journal: its changes from a snapshot taken now.
@@ -247,7 +295,12 @@ inline bool& sdAdoptFailForTest() {
 // After a published save. A live card file-backed on this folder's sidecar, or on a candidate in
 // this folder, moves onto the new file; otherwise generations left beside the sidecar belong to a
 // card it replaced. An adopted candidate goes.
-inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = frondMachine::kindSd) {
+// `changedSince`: the guest wrote the card after the snapshot step 1 took (a background save), so
+// the saved file is behind the live card and the card stays where it runs. After a journal applied
+// in place (`journalled`) its overlay still holds every page since and the next save journals
+// again; after a full copy renamed in, the next save copies it.
+inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = frondMachine::kindSd,
+                           bool changedSince = false, bool journalled = false) {
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(sidecar, ec)) return;
@@ -255,6 +308,10 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
     // Opened from sd.frondsd: a journal applied in place, or a full copy renamed over it. If the
     // card can't move onto the file now there, the next save copies it whole.
     if (sdCardRunsOn(sidecar.c_str())) {
+        if (changedSince) {
+            if (!journalled) sdCardMarkStale();
+            return;
+        }
         if (!sdAdoptFailForTest() && sdCardAdoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes)) return;
         sdCardMarkStale();
         std::fprintf(stderr, "frond: the card couldn't move onto the saved file; the next save copies it\n");
@@ -263,6 +320,7 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
     FileCardBacking::DiscardGenerations(sidecar);
     // A classic stick read from a v1 file, or made in this session, runs in RAM until its first
     // save, then on the v2 file that save wrote, so later saves are journals.
+    if (changedSince) return;
     if (kind == frondMachine::kindMs && !sdCardFileBacked()) {
         if (!sdCardAdoptSavedFromRam(sidecar.c_str(), bytes, frondSdFile::headerBytes))
             std::fprintf(stderr, "frond: the Memory Stick couldn't move onto the saved file; the next save copies it\n");
@@ -280,9 +338,9 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
 // true. Chunks a failed
 // apply touched are no longer checked, since they are part old, part new on disk and the overlay
 // holds the new pages.
-inline bool completeSdSave(const std::filesystem::path& folder, SdSave& save) {
+inline bool completeSdSave(const std::filesystem::path& folder, SdSave& save, bool changedSince = false) {
     if (finishSdSave(folder, save)) {
-        afterSdPublish(folder, save.kind);
+        afterSdPublish(folder, save.kind, changedSince, !save.journal.empty());
         return true;
     }
     if (!save.journal.empty()) sdCardTrustChunks(save.chunks);

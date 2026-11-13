@@ -97,10 +97,14 @@ inline bool beginSave(const std::filesystem::path& folder, NAND* nand, frondMach
 // Step 3, after the .frond is published: the journal applied in place or the full copy renamed onto
 // nand.frondnand, then the NAND runs on that file, unless it runs on another folder's. If the file
 // can't be finished, the journal or copy stays for the next load to finish.
-inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondNative::SdSave& save) {
+// `changedSince`: the guest wrote the NAND after the snapshot step 1 took (a background save). The
+// file then holds the snapshot, not the live bytes, so the NAND stays on its backing.
+inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondNative::SdSave& save,
+                         bool changedSince = false) {
     const auto sidecar = folder / frondMachine::nandSibling;
     auto* file = fileBacking(nand);
     const bool onThisFolder = file && file->DurableIs(sidecar);
+    std::vector<uint32_t> table;
     bool finished = frondSession::syncDir(folder);
     if (finished && !save.full.empty()) {
         finished = rename(save.full.c_str(), sidecar.c_str()) == 0;
@@ -109,7 +113,7 @@ inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondN
             save.full.clear();
         }
     } else if (finished && !save.journal.empty()) {
-        finished = frondSession::applySdJournal(folder, save.journal, nullptr, frondSession::JournalStep::all,
+        finished = frondSession::applySdJournal(folder, save.journal, &table, frondSession::JournalStep::all,
                                                 frondMachine::kindNand);
     }
     if (!finished) {
@@ -121,6 +125,14 @@ inline bool completeSave(const std::filesystem::path& folder, NAND* nand, frondN
     frondSession::removeSdJournals(folder, {}, frondMachine::kindNand);
     if (file && !onThisFolder) {
         FileCardBacking::DiscardGenerations(sidecar);
+        return true;
+    }
+    if (file && changedSince) {
+        // A journal applied in place: the file holds the snapshot and the overlay still holds every
+        // page since, so the NAND carries on over it with the new chunk CRCs and the next save
+        // journals again. A full copy renamed in leaves the backing on the old file; copy again.
+        if (!table.empty()) file->SetChunkCrcs(std::move(table));
+        else stale() = true;
         return true;
     }
     // The file now holds the live bytes, so the overlay and generations beside it go.

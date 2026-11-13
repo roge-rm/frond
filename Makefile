@@ -801,6 +801,13 @@ test-session-folder-card: out/frond
 test-core-control: out/frond out/frond-68k
 	python3 tests/core-control.py
 
+# Desktop saves written in the background on both runners: byte for byte against the synchronous
+# save at the same instant, the guest running on meanwhile, and the stall each way. Needs the Zire 72
+# smoke session and IIIx ROM, else that side is skipped.
+.PHONY: test-background-save
+test-background-save: out/frond out/frond-68k
+	python3 tests/background-save.py
+
 # The printer commands (irprinter and the Dana's printer) through both runners' control sockets; needs
 # a private ARM smoke session and the Dana ROM, else that side is skipped.
 .PHONY: test-printer-control

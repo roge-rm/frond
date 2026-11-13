@@ -286,6 +286,11 @@ void sdCardSetDirty(bool isDirty) { sdCardDirty = isDirty; }
 
 const char* sdCardGetId() { return sdCardInitialized() ? cardId : ""; }
 
+std::pair<uint64_t, uint64_t> sdCardChangeMark() {
+    if (!backing) return {0, 0};
+    return {backing->Serial(), backing->Changes()};
+}
+
 std::shared_ptr<const CardSnapshot> sdCardSnapshot() {
     if (!backing) return nullptr;
     return backing->Snapshot();
