@@ -4816,13 +4816,9 @@ for line in s.makefile('rb'):
             QCOMPARE(mode->currentData().toString(), QString("radio"));
             QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 30000);
             QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 30000);
-            const auto askOff = [mode] {
-                mode->setCurrentIndex(mode->findData("off"));
-                QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
-            };
-            // The window drops a mode change while the core is still answering the one before, so ask
-            // again until Off shows.
-            QTRY_VERIFY_WITH_TIMEOUT(state->text().isEmpty() || (askOff(), false), 30000);
+            mode->setCurrentIndex(mode->findData("off"));
+            QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 30000);
             QCOMPARE(machineSetting("bluetooth", frondSessions::preferencesPath(machine)), QString("off"));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 30000);
         }

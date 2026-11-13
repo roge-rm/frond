@@ -1035,6 +1035,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             showBluetooth(message);
         }
         refresh();
+        // A mode picked while the core was answering the one before is sent now, unless the core already has it.
+        if (command == "bluetooth-mode" && !stopping && client.running()) {
+            if (bluetoothViaHub()) applyBluetoothLink();
+            else if (const auto argument = bluetoothArgument(); argument != bluetoothCore && client.available() && send("bluetooth-mode", argument)) bluetoothSent = argument;
+        }
         if (command == "network-state" && !stopping && !frondFirmware::isDana(runningDevice)) { send("keyboard-state"); return; }
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
