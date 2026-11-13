@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""frond-68k peripheral and workflow checks on private IIIx ROMs: piezo tones, backlight, sleep
-and wake, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
+"""frond-68k peripheral and workflow checks on private IIIx and CLIE T415 ROMs: piezo tones, backlight, sleep
+and wake, beaming a memo both ways with a IIIx, serial HotSync with pilot-link over a PTY, TCP and a Unix socket, the unix: endpoints, the ARM card swap flags refused, and installing, launching, listing
 and exporting databases. Each ROM boots to the launcher once; every check starts from that
 session. --only ppp also dials out over serial PPP to slirp and fetches example.com, --only
 modem does the same through the snap-on modem (--serial modem) and --only irphone through the
@@ -8,7 +8,8 @@ infrared phone (--irda phone). --only modemsync HotSyncs over the modem both way
 HotSync number through --modem-sync pty, then Network HotSync over PPP to pilot-xfer on net:.
 
 ROMs come from --rom, else the IIIx 3.1 ROM in the private firmware folder; with none the checks
-are skipped. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
+are skipped. A ROM whose name has T400 runs as the CLIE T415, which has no serial port (USB cradle), so its
+serial checks are skipped and the others run at 320x320 through palm_boot.HalfCore. The probe PRCs are built with tools/build-palm-probe.py when m68k-palmos-gcc and the
 Palm OS 3.5 SDK are there (--sdk), else the checks that need them are skipped."""
 import argparse
 import os
@@ -30,10 +31,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
 
-CHECKS = ['tones', 'backlight', 'sleep', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
+CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
           'modemsync']
 # Reach example.com over the internet, so they only run when asked for with --only.
 OPT_IN = {'ppp', 'modem', 'irphone', 'modemsync'}
+T415_ROM = 'Sony/CLIE-T400/Sony-Clie-T400.rom'
+# The device under test; main() sets it from each ROM's name.
+DEVICE = 'palm-iiix'
 HELLO = Path.home() / 'Projects/palm/hello/Hello.prc'
 FRONDBENCH = ROOT / 'build/frondbench/FrondBench.prc'
 PROBES = {'tone68k': 'FrondTone68k', 'alarm68k': 'FrondAlarm68k', 'ppp68k': 'FrondPPP68k'}
@@ -63,10 +67,15 @@ def tones(path, gap_ms=20):
 class Machine:
     """One frond-68k process on a session, with helpers for the checks."""
 
-    def __init__(self, image, root, name, *args):
+    def __init__(self, image, root, name, *args, device=None):
         self.root = root / name
         self.root.mkdir(parents=True, exist_ok=True)
-        self.core = palm_boot.Core([image, '--device', 'palm-iiix'], self.root / 'log.txt', *args)
+        self.device = device or DEVICE
+        self.core = palm_boot.Core([image, '--device', self.device], self.root / 'log.txt', *args)
+        self.launcher = palm_boot.launcher_check(self.device)
+        # 320x320 devices run the IIIx's coordinates and checks at half size.
+        if palm_boot.rom_device(self.device)['setup'] == 'iiix-hires':
+            self.core = palm_boot.HalfCore(self.core)
 
     def __enter__(self):
         return self
@@ -143,8 +152,12 @@ def check_backlight(rom, session, root, probes):
         if 'on' not in m.send('backlight-state', 'backlight:'):
             raise AssertionError('backlight not on after holding power')
         lit = panel(m.frame('lit.png'))
-        if not (lit[1] > lit[0] + 40 and lit[1] > lit[2] + 40) or lit == unlit:
-            raise AssertionError(f'lit panel {lit} not green (unlit {unlit})')
+        # The IIIx's backlight is green; the T415's is a lighter blue-green, so it only has to change the panel.
+        if m.device == 'palm-iiix':
+            if not (lit[1] > lit[0] + 40 and lit[1] > lit[2] + 40) or lit == unlit:
+                raise AssertionError(f'lit panel {lit} not green (unlit {unlit})')
+        elif not (lit[1] > lit[0] + 30 and lit[2] > lit[0] + 30):
+            raise AssertionError(f'lit panel {lit} not blue-green (unlit {unlit})')
         m.send(f'save-session "{r / "lit.frond"}"', 'wrote session')
         m.core.key(r, 'power', 2500)
         time.sleep(1)
@@ -155,6 +168,27 @@ def check_backlight(rom, session, root, probes):
         if 'on' not in m.send('backlight-state', 'backlight:') or panel(m.frame('reloaded.png')) != lit:
             raise AssertionError('backlight not on after reload')
     return f'panel {unlit} lit {lit}'
+
+
+def check_contrast(rom, session, root, probes):
+    """The Contrast setting (display contrast=) changes the panel, is kept in a saved session and
+    comes back after a reload."""
+    with Machine(session, root, 'contrast') as m:
+        r = m.root
+        frames = {}
+        for value in (0, 50, 100):
+            if f'contrast {value}' not in m.send(f'display contrast={value}', 'display:'):
+                raise AssertionError(f'contrast {value} not taken')
+            time.sleep(1)
+            frames[value] = m.frame(f'contrast-{value}.png')
+        if len({tuple(map(bytes, f)) for f in frames.values()}) != 3:
+            raise AssertionError('contrast 0, 50 and 100 do not all look different')
+        m.send(f'save-session "{r / "contrast.frond"}"', 'wrote session')
+    with Machine(r / 'contrast.frond', root, 'contrast-reload') as m:
+        time.sleep(1)
+        if m.frame('reloaded.png') != frames[100]:
+            raise AssertionError('contrast 100 not back after reload')
+    return 'contrast 0, 50 and 100 differ, 100 kept through save and reload'
 
 
 def check_sleep(rom, session, root, probes):
@@ -173,7 +207,7 @@ def check_sleep(rom, session, root, probes):
         m.core.key(r, 'power', 150)
         time.sleep(2)
         rows = m.frame('awake.png')
-        if rows is None or not palm_boot.iiix_launcher(rows):
+        if rows is None or not m.launcher(rows):
             raise AssertionError('power did not wake to the launcher')
     with Machine(r / 'asleep.frond', root, 'sleep-power-reload') as m:
         time.sleep(1)
@@ -182,7 +216,7 @@ def check_sleep(rom, session, root, probes):
         m.core.key(m.root, 'power', 150)
         time.sleep(2)
         rows = m.frame('awake.png')
-        if rows is None or not palm_boot.iiix_launcher(rows):
+        if rows is None or not m.launcher(rows):
             raise AssertionError('power did not wake the reloaded session')
 
     with Machine(session, root, 'sleep-alarm', '--tone-log') as m:
@@ -208,6 +242,88 @@ def check_sleep(rom, session, root, probes):
         if rows is None:
             raise AssertionError('alarm did not turn the LCD on')
     return f'alarm woke the reloaded machine {woke:.1f} s after launch'
+
+
+DIGITS = {'1': (61, 80), '2': (80, 80), '3': (100, 80), '4': (61, 96), '5': (80, 96), '6': (100, 96),
+          '7': (61, 112), '8': (80, 112), '9': (100, 112), '0': (80, 128)}
+# Beam Memo in Memo Pad's Record menu, in IIIx (160x160) coordinates: IIIx, T415.
+BEAM_MEMO = {'palm-iiix': (30, 42), 'sony-clie-t415': (30, 47)}
+# The receiving side's Yes button.
+ACCEPT = (28, 146)
+# The IIIx session a T415 beams with, set by main(); the IIIx uses its own.
+PEER = {}
+
+
+def make_memo(m, digits):
+    """A new memo with digits typed on the 123 keyboard, then Done in the keyboard."""
+    m.core.launch('Memo Pad')
+    for x, y in [(20, 150), (128 if m.device == 'palm-iiix' else 131, 213 if m.device == 'palm-iiix' else 218)] + \
+            [DIGITS[d] for d in digits] + [(22, 146)]:
+        m.core.tap(m.root, x, y)
+        time.sleep(0.7)
+
+
+def memo_text(m, name):
+    """The MemoDB as exported from the running machine."""
+    path = m.root / name
+    path.unlink(missing_ok=True)
+    try:
+        reply = m.core.send(f'db-export-db MemoDB "{path.absolute()}"', 'export', 20).strip()
+    except AssertionError:
+        # A dialog waiting for a tap holds the host call back.
+        return b''
+    return path.read_bytes() if 'written' in reply and path.is_file() else b''
+
+
+def beam_memo(root, name, sender, send_session, receiver, recv_session, digits):
+    """One memo from sender to receiver: the receiver accepts it, MemoDB has it, and a fresh process
+    loaded from the receiver's saved session still has it."""
+    with Machine(send_session, root, f'{name}-send', '--irda', 'tcp:0', device=sender) as a, \
+            Machine(recv_session, root, f'{name}-recv', '--irda', 'tcp:0', device=receiver) as b:
+        # Each core waits for a free emulator slot first.
+        for m in (a, b):
+            m.wait_line('from session', 900)
+        ports = [re.search(r':(\d+)', m.core.until('irda-state', 'infrared:', 'waiting', 90)).group(1) for m in (a, b)]
+        link = subprocess.Popen([sys.executable, str(ROOT / 'tools/link-irda.py'), *ports],
+                                stdout=(a.root / 'link.txt').open('w'), stderr=subprocess.STDOUT)
+        try:
+            make_memo(a, digits)
+            a.core.tap(a.root, 8, 202)
+            time.sleep(1.5)
+            a.core.tap(a.root, *BEAM_MEMO[sender])
+            # The beam takes about 5 s. Export waits for Palm OS to be free of dialogs, so Yes is
+            # tapped first, twice in case the dialog came late.
+            time.sleep(7)
+            b.frame('dialog.png')
+            for _ in range(2):
+                b.core.tap(b.root, *ACCEPT)
+                time.sleep(4)
+            if digits.encode() not in memo_text(b, 'received.pdb'):
+                a.frame('sender.png')
+                b.frame('receiver.png')
+                raise AssertionError(f'{sender} to {receiver}: memo {digits} never arrived')
+            b.frame('received.png')
+            b.send(f'save-session "{b.root / "received.frond"}"', 'wrote session')
+        finally:
+            link.kill()
+            link.wait()
+    with Machine(b.root / 'received.frond', root, f'{name}-reload', device=receiver) as r:
+        time.sleep(1)
+        if digits.encode() not in memo_text(r, 'reloaded.pdb'):
+            raise AssertionError(f'{sender} to {receiver}: memo {digits} gone after reload')
+
+
+def check_beam(rom, session, root, probes):
+    """Beam a memo from the device under test to a IIIx and back through tools/link-irda.py (the
+    guests' own IrLAP and OBEX), the receiver accepting and saving. Each direction is checked in the receiver's MemoDB and again
+    after a save and reload."""
+    # Two copies of one session share an IrLAP address, so a IIIx has nothing to beam with here.
+    peer = PEER.get('palm-iiix') if DEVICE != 'palm-iiix' else None
+    if peer is None:
+        raise Skip('beams a T415 with a IIIx')
+    beam_memo(root, 'beam-out', DEVICE, session, 'palm-iiix', peer, '3551')
+    beam_memo(root, 'beam-in', 'palm-iiix', peer, DEVICE, session, '7424')
+    return f'memo beamed {DEVICE} to a IIIx and back, each kept after save and reload'
 
 
 def hotsync(m, port, *args, rate='57600'):
@@ -256,6 +372,8 @@ class Endpoint:
 def check_serial(rom, session, root, probes):
     """pilot-link over the cradle serial port: install Hello.prc, fetch MemoDB and back up over a
     PTY at 57600, then list over TCP at 115200 in a fresh process loaded from the synced session."""
+    if not palm_boot.rom_device(DEVICE)['serial']:
+        raise Skip(f'{DEVICE} has no serial port (USB cradle)')
     if not shutil.which('pilot-xfer') or not shutil.which('socat'):
         raise Skip('no pilot-xfer or socat')
     if not HELLO.is_file():
@@ -312,10 +430,13 @@ def check_unix(rom, session, root, probes):
     folder = Path(tempfile.mkdtemp(prefix='fu-'))
     try:
         serial_path, ir_path = f'{folder}/serial.sock', f'{folder}/ir.sock'
-        with Machine(session, root, 'unix', '--serial', f'unix:{serial_path}', '--irda', f'unix:{ir_path}') as m:
-            for name, path, state_command, prefix, mode_command in (
-                    ('serial', serial_path, 'serial-state', 'serial:', 'serial-mode'),
-                    ('irda', ir_path, 'irda-state', 'infrared:', 'irda-mode')):
+        serial = palm_boot.rom_device(DEVICE)['serial']
+        ports = [('irda', ir_path, 'irda-state', 'infrared:', 'irda-mode')]
+        if serial:
+            ports.insert(0, ('serial', serial_path, 'serial-state', 'serial:', 'serial-mode'))
+        with Machine(session, root, 'unix', *(['--serial', f'unix:{serial_path}'] if serial else []),
+                     '--irda', f'unix:{ir_path}') as m:
+            for name, path, state_command, prefix, mode_command in ports:
                 def state():
                     return m.send(state_command, prefix)
 
@@ -386,7 +507,7 @@ def check_unix(rom, session, root, probes):
             left = sorted(p.name for p in folder.iterdir())
             if left:
                 raise AssertionError(f'files left after quit: {left}')
-        return 'serial and infrared: connect, one client, reconnect, live modes, refusals, files removed on quit'
+        return ('serial and infrared' if serial else 'infrared') + ': connect, one client, reconnect, live modes, refusals, files removed on quit'
     finally:
         shutil.rmtree(folder, ignore_errors=True)
 
@@ -407,6 +528,8 @@ def check_ppp(rom, session, root, probes):
     """PPP over the serial PTY to slirp (tools/palm-pppd.sh): set the Network panel's service to
     Direct Serial, then the PPP probe dials with the guest's own NetLib, looks up example.com and
     fetches it. slirp's counts show the DNS datagram and the TCP connection. OS 3.5 and later."""
+    if not palm_boot.rom_device(DEVICE)['serial']:
+        raise Skip(f'{DEVICE} has no serial port')
     if not shutil.which('slirp') or not shutil.which('cc'):
         raise Skip('no slirp or cc')
     if '3.1' in rom.name:
@@ -455,8 +578,8 @@ def check_modem(rom, session, root, probes):
     phone number on the numeric keyboard, then the PPP probe dials with the guest's own NetLib
     and Modem Manager, through the core's modem and PPP server to slirp, and fetches example.com.
     Passes on the probe's FrondPPPLog showing HTTP 200 and the modem having been online. OS 3.5."""
-    if '3.5' not in rom.name:
-        raise Skip('the Network panel taps are for OS 3.5')
+    if '3.5' not in rom.name or not palm_boot.rom_device(DEVICE)['modem']:
+        raise Skip('the Network panel taps are for the IIIx on OS 3.5')
     with Machine(session, root, 'modem', '--serial', 'modem') as m:
         if m.send('serial-state', 'serial:') != 'serial: modem idle':
             raise AssertionError('modem not idle at the start')
@@ -636,7 +759,7 @@ def check_databases(rom, session, root, probes):
             m.install(FRONDBENCH)
         m.core.launch('Hello')
         rows = m.frame('hello.png')
-        if rows is None or palm_boot.iiix_launcher(rows):
+        if rows is None or m.launcher(rows):
             raise AssertionError('Hello did not start')
         mark = len(m.core.lines)
         m.send('db-list', 'db-list:')
@@ -660,7 +783,7 @@ def check_databases(rom, session, root, probes):
         if bench:
             m.core.launch('FrondBench')
             rows = m.frame('frondbench.png')
-            if rows is None or palm_boot.iiix_launcher(rows):
+            if rows is None or m.launcher(rows):
                 raise AssertionError('FrondBench did not start')
             started = ', FrondBench started'
     return f'{len(listed)} RAM databases, ram.zip {len(ram)}, all.zip {len(everything)}{started}'
@@ -678,23 +801,46 @@ def build_probes(root, sdk):
     return out
 
 
-NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
+NEEDS = {'tones': ['tone68k'], 'sleep': ['alarm68k'], 'backlight': [], 'contrast': [], 'beam': [], 'serial': [], 'unix': [], 'card-flags': [], 'databases': [],
          'ppp': ['ppp68k'], 'modem': ['ppp68k'], 'irphone': ['ppp68k'], 'modemsync': []}
-RUN = {'tones': check_tones, 'backlight': check_backlight, 'sleep': check_sleep, 'serial': check_serial,
+RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_contrast, 'sleep': check_sleep, 'beam': check_beam,
+       'serial': check_serial,
        'unix': check_unix, 'card-flags': check_card_flags, 'databases': check_databases, 'ppp': check_ppp,
        'modem': check_modem, 'irphone': check_irphone, 'modemsync': check_modemsync}
+
+
+def launcher_session(device, rom, root):
+    """Boots rom through the device's setup recipe and saves the launcher as a session."""
+    root.mkdir(parents=True, exist_ok=True)
+    session = root / 'launcher.frond'
+    core = palm_boot.Core(['--rom', rom, '--device', device], root / 'boot.txt')
+    try:
+        # The core may wait for a free emulator slot first.
+        end = time.monotonic() + 900
+        while time.monotonic() < end and not any(line.startswith('frond-68k:') for line in core.lines):
+            time.sleep(1)
+        palm_boot.setup_device(device, core, root)
+        core.send(f'save-session "{session}"', 'wrote session')
+    finally:
+        core.close()
+    return session
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rom', type=Path, action='append', default=[])
+    parser.add_argument('--device', choices=['palm-iiix', 'sony-clie-t415'],
+                        help='for ROMs without T400 in their name; default palm-iiix')
     parser.add_argument('--only', action='append', choices=CHECKS)
     parser.add_argument('--sdk', type=Path, default=ROOT.parent / 'palm-os-sdk/sdk-3.5')
     parser.add_argument('--evidence', type=Path, help='keep logs and frames here')
     args = parser.parse_args()
-    roms = args.rom or [p for p in [palm_boot.palm_images() / 'Palm/IIIx/Palm-IIIx-3.1-en.rom'] if p.is_file()]
+    global DEVICE
+    images = palm_boot.palm_images()
+    default = images / (T415_ROM if args.device == 'sony-clie-t415' else 'Palm/IIIx/Palm-IIIx-3.1-en.rom')
+    roms = args.rom or [p for p in [default] if p.is_file()]
     if not roms:
-        print('frond-68k peripherals: skipped, no IIIx ROM')
+        print('frond-68k peripherals: skipped, no ROM')
         return 0
     probes = build_probes(ROOT, args.sdk.expanduser())
     failed = 0
@@ -703,14 +849,13 @@ def main():
         for rom in roms:
             root = base / rom.stem
             root.mkdir(parents=True, exist_ok=True)
-            session = root / 'launcher.frond'
-            core = palm_boot.Core(['--rom', rom, '--device', 'palm-iiix'], root / 'boot.txt')
-            try:
-                palm_boot.iiix_setup(core, root)
-                core.send(f'save-session "{session}"', 'wrote session')
-            finally:
-                core.close()
-            for check in args.only or [c for c in CHECKS if c not in OPT_IN]:
+            DEVICE = 'sony-clie-t415' if 'T400' in rom.name else args.device or 'palm-iiix'
+            session = launcher_session(DEVICE, rom, root)
+            checks = args.only or [c for c in CHECKS if c not in OPT_IN and (DEVICE == 'palm-iiix' or c != 'tones')]
+            iiix_rom = images / 'Palm/IIIx/Palm-IIIx-3.1-en.rom'
+            if 'beam' in checks and DEVICE != 'palm-iiix' and iiix_rom.is_file():
+                PEER['palm-iiix'] = launcher_session('palm-iiix', iiix_rom, root / 'peer-iiix')
+            for check in checks:
                 try:
                     missing = [p for p in NEEDS[check] if p not in probes]
                     if missing:

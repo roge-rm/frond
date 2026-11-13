@@ -100,6 +100,13 @@ Bool EmRegsVzPegVenice::GetSerialPortOn(int /*uartNum*/) {
     return (READ_REGISTER(portGData) & hwrVZVenicePortGRS232Enable) != 0;
 }
 
+// The ROM gates nothing on a port bit for IR, so the transceiver counts as always powered.
+Bool EmRegsVzPegVenice::GetLineDriverState(EmUARTDeviceType type) { return type == kUARTIR; }
+
+EmUARTDeviceType EmRegsVzPegVenice::GetUARTDevice(int uartNum) {
+    return uartNum == 0 ? kUARTIR : kUARTNone;
+}
+
 // ---------------------------------------------------------------------------
 //		� EmRegsVzPegVenice::GetPortInputValue
 // ---------------------------------------------------------------------------

@@ -17,6 +17,9 @@ class EmRegsVzPegVenice : public EmSonyXzWithSlot<EmRegsVZ> {
     virtual uint16 GetLEDState(void);
 
     virtual Bool GetSerialPortOn(int uartNum);
+    // IrDA is UART1. The cradle is USB, so there is no serial line.
+    virtual Bool GetLineDriverState(EmUARTDeviceType type);
+    virtual EmUARTDeviceType GetUARTDevice(int uartNum);
     virtual Bool GetVibrateOn(void);
 
     virtual uint8 GetPortInputValue(int);
