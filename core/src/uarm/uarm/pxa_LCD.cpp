@@ -40,6 +40,7 @@ struct PxaLcd {
     uint16_t lcsr;  // yes, 16-bit :)
     // PXA27x overlays 1 and 2, and LCSR1 with their per-channel SOF, EOF and branch bits.
     uint32_t ovl1c1, ovl1c2, ovl2c1, ovl2c2, ccr, lcsr1;
+    bool pxa270;  // overlays, channels 2-6 and LCSR1 exist only on the PXA27x
 
     // for our use
     uint16_t intMask;
@@ -213,7 +214,9 @@ static bool pxaLcdPrvMemAccessF(void *userData, uint32_t pa, uint_fast8_t size, 
             case 28:
                 // Turning overlay 2 on in planar 4:2:0 underruns its input FIFO (LCSR1 IU2);
                 // Palm OS waits for that, up to 1 s, before reloading FDADR2-4 (0x2009bce4).
-                if ((val & ~lcd->ovl2c1 & 0x80000000UL) && ((lcd->ovl2c2 >> 20) & 7) == 4) {
+                // The FIFO only underruns while the controller is running.
+                if (lcd->pxa270 && (lcd->lccr0 & 1) && (val & ~lcd->ovl2c1 & 0x80000000UL) &&
+                    ((lcd->ovl2c2 >> 20) & 7) == 4) {
                     lcd->lcsr1 |= 1UL << 25;
                     pxaLcdPrvUpdateInts(lcd);
                 }
@@ -519,13 +522,19 @@ static void pxaLcdPrvOverlayFrame(struct PxaLcd *lcd) {
     }
     // An overlay is turned off by clearing OEN, loading FBRx with a branch and waiting for
     // LCSR1 BSx, so a stopped channel still takes a branch (the Zire 72 Camera waits up to 1 s
-    // for it at 0x2009bdac). It moves no data, so only BSx is set.
+    // for it at 0x2009bdac). It loads the branch's descriptor as a running channel does, so
+    // FDADRx reads back that descriptor's next address, but moves no data and sets only BSx.
+    if (!lcd->pxa270) return;
     for (unsigned ch = 1; ch <= 4; ch++) {
         const uint32_t c1 = ch == 1 ? lcd->ovl1c1 : lcd->ovl2c1;
         if ((c1 & 0x80000000UL) || !(lcd->fbr[ch] & 1)) continue;
         lcd->fbr[ch] &= ~1UL;
         if (lcd->fbr[ch] & 2) lcd->lcsr1 |= 1UL << (16 + ch - 1);
-        lcd->fdadr[ch] = lcd->fbr[ch] & ~0xFUL;
+        const uint32_t descrAddr = lcd->fbr[ch] & ~0xFUL;
+        lcd->fdadr[ch] = pxaLcdPrvGetWord(lcd, descrAddr + 0);
+        lcd->fsadr[ch] = pxaLcdPrvGetWord(lcd, descrAddr + 4);
+        lcd->fidr[ch] = pxaLcdPrvGetWord(lcd, descrAddr + 8);
+        lcd->ldcmd[ch] = pxaLcdPrvGetWord(lcd, descrAddr + 12);
     }
 }
 
@@ -844,7 +853,7 @@ void pxaLcdSetFramebufferDirty(struct PxaLcd *lcd) { lcd->framebufferDirty = tru
 bool pxaLcdIsEnabled(struct PxaLcd *lcd) { return lcd->lccr0 & 0x0001; }
 
 struct PxaLcd *pxaLcdInit(struct ArmMem *physMem, class SoC *soc, struct PxaIc *ic,
-                          struct MemoryBuffer *buffer, uint16_t width, uint16_t height) {
+                          struct MemoryBuffer *buffer, uint16_t width, uint16_t height, bool pxa270) {
     struct PxaLcd *lcd = (struct PxaLcd *)malloc(sizeof(*lcd));
 
     if (!lcd) ERR("cannot alloc LCD");
@@ -856,6 +865,7 @@ struct PxaLcd *pxaLcdInit(struct ArmMem *physMem, class SoC *soc, struct PxaIc *
     lcd->width = width;
     lcd->height = height;
     lcd->soc = soc;
+    lcd->pxa270 = pxa270;
 
     lcd->front_buffer = (uint32_t *)malloc(width * height * 4);
     lcd->back_buffer = (uint32_t *)malloc(width * height * 4);

@@ -1,3 +1,4 @@
+#include "BackgroundJob.h"
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
 #include "UsbDanaPort.h"
@@ -432,8 +433,19 @@ uint32_t linkedHash(const uint8_t* p,size_t size) {
     return hash;
 }
 
-// The current machine as a session file.
-bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& metadata, vector<uint8_t>& out) {
+// The machine as of one instant, copied out of the live session so another thread can encode
+// it while the guest goes on.
+struct SessionSnapshot {
+    string deviceName;
+    int32_t displayMode{};
+    uint32_t ramSize{};
+    vector<uint8_t> rom, memory, savestate;
+    string metadata, manifest;
+    bool linked{};
+};
+
+// Emulation thread.
+bool snapshotSession(const DeviceProfile5& profile, const SessionMetadata& metadata, SessionSnapshot& out) {
     if(!runtimeCards.CanSave()) {
         cerr << "session save refused: unmanaged or failed external media" << endl;
         return false;
@@ -441,20 +453,37 @@ bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& meta
     if (!gSession->Save()) return false;
     auto& savestate = gSession->GetSavestate();
     const auto rom = gSession->GetRomImage();
-    const string text = metadataText(metadata);
+    auto copy = [](const void* p, size_t n) {
+        const auto* b = static_cast<const uint8_t*>(p);
+        return n && b ? vector<uint8_t>(b, b + n) : vector<uint8_t>{};
+    };
+    out.deviceName = profile.name;
+    out.displayMode = int32_t(profile.defaultDisplay);
+    out.ramSize = profile.minRam;
+    out.rom = copy(rom.second, rom.first);
+    out.memory = copy(gSession->GetMemoryPtr(), gSession->GetMemorySize());
+    out.savestate = copy(savestate.GetBuffer(), savestate.GetSize());
+    out.metadata = metadataText(metadata);
+    out.linked = runtimeCards.HasCards();
+    if (out.linked) out.manifest = runtimeCards.Manifest();
+    return true;
+}
+
+// Any thread; reads only `snapshot`.
+bool encodeSession(const SessionSnapshot& snapshot, vector<uint8_t>& out) {
     SessionFile5 session;
-    session.SetDeviceName(profile.name)
-        .SetDisplayMode(int32_t(profile.defaultDisplay))
-        .SetRamSize(profile.minRam)
-        .SetNor(rom.first, rom.second)
-        .SetMemory(gSession->GetMemorySize(), gSession->GetMemoryPtr())
-        .SetSavestate(savestate.GetSize(), savestate.GetBuffer())
-        .SetMetadata(text.size(), text.data());
+    session.SetDeviceName(snapshot.deviceName)
+        .SetDisplayMode(snapshot.displayMode)
+        .SetRamSize(snapshot.ramSize)
+        .SetNor(snapshot.rom.size(), snapshot.rom.data())
+        .SetMemory(snapshot.memory.size(), snapshot.memory.data())
+        .SetSavestate(snapshot.savestate.size(), snapshot.savestate.data())
+        .SetMetadata(snapshot.metadata.size(), snapshot.metadata.data());
     if (!session.Serialize()) return false;
     const auto* bytes = static_cast<const uint8_t*>(session.GetSerializedSession());
     out.assign(bytes, bytes + session.GetSerializedSessionSize());
-    if(runtimeCards.HasCards()) {
-        const string manifest=runtimeCards.Manifest();
+    if(snapshot.linked) {
+        const string& manifest=snapshot.manifest;
         if(manifest.size()>8192) return false;
         vector<uint8_t> linked(linkedMagic,linkedMagic+sizeof(linkedMagic)-1);
         auto put=[&](uint32_t x) { for(unsigned i=0;i<4;++i) linked.push_back(x>>(8*i)); };
@@ -466,6 +495,12 @@ bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& meta
         out.swap(linked);
     }
     return true;
+}
+
+// The current machine as a session file.
+bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& metadata, vector<uint8_t>& out) {
+    SessionSnapshot snapshot;
+    return snapshotSession(profile, metadata, snapshot) && encodeSession(snapshot, out);
 }
 
 // A session file checked as far as possible without touching the running machine.
@@ -1761,6 +1796,8 @@ class Runner {
     }
 
     int Finish() {
+        // A save still writing finishes before the core stops.
+        if (pendingSave) FinishSave();
         if (wavOpen && !wav.Close()) {
             cerr << "failed to write audio output" << endl;
             return 1;
@@ -1970,7 +2007,16 @@ class Runner {
             const EmAddressBank& rom = EmMemGetBank(EmBankROM::GetMemoryStart());
             const EmAddressBank& ram = EmMemGetBank(0);
             cout << "bus wait: rom " << int(rom.waitByte) << "/" << int(rom.waitWord) << ", ram "
-                 << int(ram.waitByte) << "/" << int(ram.waitWord) << endl;
+                 << int(ram.waitByte) << "/" << int(ram.waitWord);
+            // SDRAM waits by page instead (EmBusTiming.h): CAS latency, continuous page mode,
+            // the address bits within a row and the bank address bits (255 for none).
+            if (ram.sdram) {
+                const EmSdramTiming& sdram = EmSdram::Get();
+                cout << ", sdram cl " << (sdram.casLatency2 ? 2 : 1) << " cpm " << int(sdram.continuousPage)
+                     << " page " << int(sdram.pageShift) << " bank " << int(sdram.bankHigh) << "/"
+                     << int(sdram.bankLow);
+            }
+            cout << endl;
         } else if (command == "bus-timing") {
             // LCD DMA and DRAM refresh as the guest programmed them, in system clocks.
             const EmBusSteal& steal = EmBusTiming::Get();
@@ -1996,6 +2042,13 @@ class Runner {
                      vz ? EmMemGet16(0xfffffa28) : EmMemGet8(0xfffffa29), EmMemGet16(0xfffffa08),
                      EmMemGet16(0xfffffa0a));
             cout << regs << endl;
+            if (vz) {
+                // VZ only: SDRAM control, LCD DMA control, chip select A and CSCTRL1.
+                snprintf(regs, sizeof(regs), "bus registers vz: sdctrl %04x dmacr %02x csa %04x csctrl1 %04x",
+                         EmMemGet16(0xfffffc04), EmMemGet8(0xfffffa39), EmMemGet16(0xfffff110),
+                         EmMemGet16(0xfffff10a));
+                cout << regs << endl;
+            }
         } else if (command == "speed") {
             string value;
             words >> value;
@@ -2071,6 +2124,14 @@ class Runner {
         StateChanged("serial", lastSerial, SerialDescription());
         if (UsbCradle()) StateChanged("usb", lastUsb, UsbDescription());
         StateChanged("infrared", lastInfrared, InfraredDescription());
+        // A save writing in the background answers when it's done; requests after it wait.
+        if (pendingSave) {
+            if (!saveJob.Finished()) {
+                if (!desktop->Flush()) DesktopLost();
+                return;
+            }
+            FinishSave();
+        }
         DesktopChannel::Request request;
         // One request at a time: the next waits while one waits for the guest's event loop.
         switch (guestCall || deferredDelete ? DesktopChannel::Poll::idle : desktop->Receive(request)) {
@@ -2081,6 +2142,13 @@ class Runner {
                 // Window events queued before the request go first, so a focus loss lifts the pen
                 // before a save.
                 if (window) PollWindow();
+                if (request.command == "save") {
+                    if (request.argument.empty() || request.argument.front() != '/')
+                        desktop->Reply(request.id, false, "argument", "An absolute file path is required.");
+                    else if (!StartSave(request.argument, request.id))
+                        desktop->Reply(request.id, false, "save", "Could not save device state.");
+                    break;
+                }
                 // Before the UI is up the command itself answers not-ready.
                 if (GuestCommand(request.command) && gSystemState.IsUIInitialized()) {
                     Guest([this, request] {
@@ -2120,6 +2188,7 @@ class Runner {
     // call still waiting for the event loop is dropped.
     void DesktopLost() {
         quit = true;
+        if (pendingSave) FinishSave();
         if (!options.saveOnDisconnect || desktopQuit || !desktop->Lost() || desktop->QuitPending()) return;
         vector<uint8_t> data;
         saveFailed = !serializeSession(*profile, Saving(), data) ||
@@ -2156,6 +2225,55 @@ class Runner {
         bool ok{false};
         string code{"failed"}, message;
     };
+
+    // A save request: the snapshot here, then the session encoded and written on saveJob while the
+    // guest runs. False when the snapshot failed and nothing was started.
+    bool StartSave(const string& path, const string& id) {
+        // Tests: the whole save on this thread to FROND_SAVE_REFERENCE first, at the same instant,
+        // to compare with what the background write gives.
+        if (const char* reference = getenv("FROND_SAVE_REFERENCE")) {
+            const auto synchronous = chrono::steady_clock::now();
+            vector<uint8_t> data;
+            const bool ok = serializeSession(*profile, Saving(), data) && writeFile(reference, data.data(), data.size());
+            cerr << "save timing: synchronous reference " << (ok ? "" : "failed ") << saveTimingMs(synchronous) << " ms" << endl;
+        }
+        const auto started = chrono::steady_clock::now();
+        auto save = make_unique<PendingSave>();
+        if (!snapshotSession(*profile, Saving(), save->snapshot)) return false;
+        save->path = path;
+        save->id = id;
+        save->started = started;
+        save->guestCycles = gSession->GetSystemCycles();
+        save->snapshotLinked = save->snapshot.linked;
+        pendingSave = std::move(save);
+        // The job reads and writes only *pendingSave, which nothing else touches until it finishes.
+        auto* job = pendingSave.get();
+        saveJob.Start([job] {
+            const auto encoding = chrono::steady_clock::now();
+            vector<uint8_t> data;
+            job->ok = encodeSession(job->snapshot, data);
+            job->snapshot = {};
+            const auto writing = chrono::steady_clock::now();
+            job->ok = job->ok && writeFile(job->path, data.data(), data.size());
+            job->encodeMs = chrono::duration<double, milli>(writing - encoding).count();
+            job->writeMs = saveTimingMs(writing);
+        });
+        pendingSave->blockedMs = saveTimingMs(started);
+        return true;
+    }
+    // Waits for saveJob and answers.
+    void FinishSave() {
+        const auto waited = chrono::steady_clock::now();
+        saveJob.Wait();
+        const auto save = std::move(pendingSave);
+        if (saveTimingWanted())
+            cerr << "save timing: compress " << save->encodeMs << " ms, write " << save->writeMs << " ms; emulation thread "
+                 << save->blockedMs + saveTimingMs(waited) << " ms (snapshot " << save->blockedMs << " ms, waited "
+                 << saveTimingMs(waited) << " ms), whole save " << saveTimingMs(save->started) << " ms, guest cycles "
+                 << save->guestCycles << " at snapshot, " << gSession->GetSystemCycles() << " when written" << endl;
+        if (!save->ok) desktop->Reply(save->id, false, "save", "Could not save device state.");
+        else desktop->Reply(save->id, true, "saved", save->snapshotLinked ? "Linked session saved. Keep both external SD backings and their generation files." : "Session saved.");
+    }
 
     // The desktop commands that call into Palm OS, so run at the guest's event loop.
     static bool GuestCommand(const string& command) {
@@ -3031,7 +3149,7 @@ class Runner {
         if (!keepReplay) replay=Replay();
         if(deviceTypeIsDana5(profile->deviceType)) {
             CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
-            danaInput.Clear();danaHostKeys.Clear();EmHAL::ReleaseDanaInput(cancel);
+            danaInput.Clear();danaHostKeys.Clear();danaRepeats.Clear();EmHAL::ReleaseDanaInput(cancel);
         }
         if (penDown) gSession->QueuePenEvent(PenEvent::up());
         penDown = false;
@@ -3150,7 +3268,11 @@ class Runner {
                         }
                     }
                     if(deviceTypeIsDana5(profile->deviceType)) {
-                        if(event.key.repeat) break;
+                        // SDL on X11 can drop a quick key's release and report its next press as a repeat
+                        // when a burst shares a timestamp. A repeat sooner than any real auto-repeat
+                        // delay is that press, so it goes in as a release and a press.
+                        const bool retap=keyDown && danaRepeats.Retap(event.key.keysym.scancode,event.key.repeat!=0,SDL_GetTicks());
+                        if(event.key.repeat && !retap) break;
                         string name=SDL_GetScancodeName(event.key.keysym.scancode);
                         for(char& c:name) c=char(std::tolower(static_cast<unsigned char>(c)));
                         switch(event.key.keysym.scancode) {
@@ -3164,6 +3286,7 @@ class Runner {
                             case SDL_SCANCODE_APPLICATION: name="apps"; break;
                             default: break;
                         }
+                        if(retap) ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,false,name));
                         ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,keyDown,name));
                         break;
                     }
@@ -3238,6 +3361,7 @@ class Runner {
     map<pair<int64_t,int64_t>,DanaPointer> danaPointers;
     map<pair<int,uint8_t>,DanaScan5> danaReleases;
     DanaHostKeys danaHostKeys;
+    DanaRepeats danaRepeats;
     // Fingers: held buttons and the pen, besides the mouse.
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}
@@ -3264,6 +3388,17 @@ class Runner {
     bool desktopQuit{false};
     // The save when the desktop went away failed; the core exits 1.
     bool saveFailed{false};
+    // A desktop save writing on saveJob; at most one.
+    struct PendingSave {
+        SessionSnapshot snapshot;
+        string path, id;
+        chrono::steady_clock::time_point started;
+        double blockedMs{}, encodeMs{}, writeMs{};
+        uint64_t guestCycles{};
+        bool snapshotLinked{}, ok{};
+    };
+    unique_ptr<PendingSave> pendingSave;
+    BackgroundJob saveJob;
     bool desktopMode{false};
     string lastSerial, lastInfrared, lastUsb, serialError, infraredError;
     HostLink68k serialLink, irLink, modemSyncLink;

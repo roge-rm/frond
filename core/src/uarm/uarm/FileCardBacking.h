@@ -36,6 +36,8 @@ struct FileCardOptions {
     // it is read from the durable file; a mismatch fails the read. Empty means no check.
     std::vector<uint32_t> chunkCrcs;
     uint32_t chunkBytes = 1u << 20;
+    // An Open between HoldGenerations and Return or Drop: leaves the .held- files alone.
+    bool keepHeld = false;
 };
 
 struct FileCardIoHooks {
@@ -126,8 +128,99 @@ class FileCardBacking : public CardBacking {
         return false;
     }
 
+    // Generations moved aside under ".held-" names (which no load or discard looks at), for a move
+    // onto `durable` that may still fail. Open descriptors on them stay valid across the renames.
+    struct HeldGenerations {
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moved;  // original, held
+        // The move failed: they go back under their own names, the root last, so a crash part way
+        // never leaves a root whose generations are still held.
+        void Return() {
+            std::error_code ec;
+            for (int rootPass = 0; rootPass < 2; ++rootPass)
+                for (const auto& [original, held] : moved) {
+                    const auto name = original.filename().string();
+                    const bool root = name.size() > 5 && name.compare(name.size() - 5, 5, "-root") == 0;
+                    if (root == bool(rootPass)) std::filesystem::rename(held, original, ec);
+                }
+            moved.clear();
+        }
+        // The move worked: they go.
+        void Drop() {
+            std::error_code ec;
+            for (const auto& entry : moved) std::filesystem::remove(entry.second, ec);
+            moved.clear();
+        }
+    };
+    // As DiscardGenerations, but moved aside, to Return or Drop.
+    static HeldGenerations HoldGenerations(const std::filesystem::path& durable) {
+        SettleHeld(durable);
+        auto dir = durable.parent_path();
+        if (dir.empty()) dir = ".";
+        std::error_code ec;
+        HeldGenerations held;
+        std::vector<std::filesystem::path> found;
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (GeneratedName(durable.filename().string(), name) && !NeighbourName(durable, name))
+                found.push_back(it->path());
+        }
+        for (const auto& path : found) {
+            const auto aside = dir / (".held-" + path.filename().string());
+            std::error_code renamed;
+            std::filesystem::rename(path, aside, renamed);
+            if (!renamed) held.moved.emplace_back(path, aside);
+        }
+        return held;
+    }
+
+    // Held generations a crash left behind (between HoldGenerations and Return or Drop). They come
+    // back under their names when their root binds the durable file there now and no live root
+    // does; otherwise the durable file has replaced them and they go.
+    static void SettleHeld(const std::filesystem::path& durable) {
+        auto dir = durable.parent_path();
+        if (dir.empty()) dir = ".";
+        const auto tag = durable.filename().string();
+        std::error_code ec;
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> found;  // held, original
+        for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().string();
+            if (name.compare(0, 6, ".held-")) continue;
+            const auto original = name.substr(6);
+            if (GeneratedName(tag, original) && !NeighbourName(durable, original))
+                found.emplace_back(it->path(), dir / original);
+        }
+        if (found.empty()) return;
+        const auto rootName = ".gen-" + tag + "-root";
+        const bool restore = !std::filesystem::exists(dir / rootName, ec) && !ec &&
+                             RootBinds(dir / (".held-" + rootName), durable);
+        for (const auto& [held, original] : found) {
+            std::error_code done;
+            if (restore && !std::filesystem::exists(original, done) && !done)
+                std::filesystem::rename(held, original, done);
+            else
+                std::filesystem::remove(held, done);
+        }
+    }
+
+    // True when the v2 root at `rootPath` was written for the durable file now at `durable`.
+    static bool RootBinds(const std::filesystem::path& rootPath, const std::filesystem::path& durable) {
+        uint8_t buf[kRootBytes]{};
+        const int fd = ::open(rootPath.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return false;
+        const bool read = ::pread(fd, buf, kRootBytes, 0) == ssize_t(kRootBytes);
+        ::close(fd);
+        struct stat st {};
+        if (!read || std::memcmp(buf, "FRONDRT\0", 8) != 0 || frondSdFile::get32(buf + 8) != 2 ||
+            stat(durable.c_str(), &st) != 0)
+            return false;
+        const uint64_t mtime = uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+        return frondSdFile::get64(buf + 28) == uint64_t(st.st_dev) &&
+               frondSdFile::get64(buf + 36) == uint64_t(st.st_ino) && frondSdFile::get64(buf + 44) == mtime;
+    }
+
     // Removes recognised, unambiguous namespace entries of a closed backing.
     static void DiscardGenerations(const std::filesystem::path& durable) {
+        SettleHeld(durable);
         auto dir = durable.parent_path();
         if (dir.empty()) dir = ".";
         std::error_code ec;
@@ -236,14 +329,27 @@ class FileCardBacking : public CardBacking {
         Impl* owner{};
 
         ~Gen() {
+            // A name is only removed while it still points at the file this generation has open: after
+            // a move, a new backing on the same durable file can own a generation of the same name.
+            const bool fileSame = sameFile(fd, file);
+            const bool idxSame = idxFd == fd ? fileSame : sameFile(idxFd, idxFile);
             if (owner && !durable) owner->closeGen(*this);
             fd = -1;
             idxFd = -1;
             if (ownedFile && !durable && !file.empty()) {
                 std::error_code ec;
-                std::filesystem::remove(file, ec);
-                if (ownedIndex && !idxFile.empty()) std::filesystem::remove(idxFile, ec);
+                if (fileSame) std::filesystem::remove(file, ec);
+                if (ownedIndex && !idxFile.empty() && idxSame) std::filesystem::remove(idxFile, ec);
             }
+        }
+
+        // True when `path` names the file open on `fd`. Without a descriptor it can't tell, so the
+        // name is left alone.
+        static bool sameFile(int fd, const std::filesystem::path& path) {
+            if (fd < 0) return false;
+            struct stat open {}, named {};
+            if (fstat(fd, &open) != 0 || stat(path.c_str(), &named) != 0) return false;
+            return open.st_dev == named.st_dev && open.st_ino == named.st_ino;
         }
     };
 
@@ -482,6 +588,7 @@ class FileCardBacking : public CardBacking {
             if (dir.empty()) dir = ".";
             tag = durable.filename().string();
             if (tag.empty()) return false;
+            if (!options.keepHeld) SettleHeld(durable);
             payloadOffset = off;
             payloadSize = size;
             pageSize = options.pageSize;

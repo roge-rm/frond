@@ -9,7 +9,8 @@ run --core CORE --session SESSION --output DIR
     rate, and the audio track has to carry the 1 kHz tone at the level the ROM's gain gives. Then
     saves a session in the middle of a second recording, checks that clip, loads the saved session
     in a new process, stops the recording there and checks that clip too. CORE is the core built
-    with the fake microphone (test-z72-voice-memo's frond-test-mic). SESSION is a Zire 72 session
+    with the fake microphone (test-z72-voice-memo's frond-test-mic), run with --emulated-time so
+    replay times and the guest's speed are the same on any host. SESSION is a Zire 72 session
     at the launcher with the setup Reminder up (the smoke session); private, so it's never copied
     anywhere else.
 
@@ -56,6 +57,8 @@ SHUTTER = '500 pen-down 255 282\n600 pen-up\n'
 # Shutter starts the recording, a second tap 5.5 s later stops it.
 RECORD = (SHUTTER + '3000 snapshot "S/recording.png"\n6000 pen-down 255 282\n6100 pen-up\n'
           '9000 pen-up\n9001 snapshot "S/stopped.png"\n')
+# The same, holding the guest 2.5 s into the recording for a save.
+RECORD_SAVE = RECORD.replace('"S/recording.png"\n', '"S/recording.png"\n3000 pause\n')
 SAVE = '500 pen-down 235 268\n600 pen-up\n5000 pen-up\n5001 snapshot "S/saved.png"\n'
 HOME = camera.HOME
 # Media from the launcher, then its first thumbnail, which plays the clip at once.
@@ -140,7 +143,9 @@ def analyse_clip(clip, work):
             'sound': check_audio(clip, work)}
 
 
-def start(args, name, source, card=True):
+def start(args, name, source, replay=None):
+    """Starts the core on a copy of source. A replay given here runs from the core's first guest
+    time, so none of it waits on the host."""
     work = args.output / name
     machine = work / 'machine'
     machine.mkdir(parents=True)
@@ -149,8 +154,16 @@ def start(args, name, source, card=True):
     # A saved session keeps its card in sd.frondsd beside it.
     for card in source.parent.glob('*.frondsd'):
         shutil.copy(card, machine / card.name)
-    core = Core(args.core, machine, LEVEL, work / 'core.log')
-    core.wait_ready()
+    # Emulated time runs the Zire at its full 150 MIPS of guest time, slower than real time on most
+    # hosts, so the waits get longer.
+    extra = ['--emulated-time']
+    if replay:
+        (work / 'start.replay').write_text(replay.replace('S/', str(work) + '/'))
+        extra += ['--input-replay', str(work / 'start.replay')]
+    core = Core(args.core, machine, LEVEL, work / 'core.log', extra, patience=10)
+    # guest-ready can call into the guest, so it waits until a start replay is done.
+    if not replay:
+        core.wait_ready()
     return core, work
 
 
@@ -218,13 +231,19 @@ def main():
     try:
         open_video(core, work)
         replay = work / 'record.replay'
-        replay.write_text(RECORD.replace('S/', str(work) + '/'))
+        replay.write_text(RECORD_SAVE.replace('S/', str(work) + '/'))
         ok, code, message = core.request('input-replay', str(replay))
         assert ok, (code, message)
-        time.sleep(3)
+        deadline = time.monotonic() + 600
+        while core.request('replay-state')[1] != 'paused':
+            assert time.monotonic() < deadline, 'replay never paused'
+            time.sleep(.2)
         ok, code, message = core.request('save', str(work / 'during.frond'))
         assert ok, (code, message)
+        ok, code, message = core.request('replay-continue')
+        assert ok, (code, message)
         while core.request('replay-state')[1] != 'finished':
+            assert time.monotonic() < deadline, 'replay never finished'
             time.sleep(.2)
         camera.run_replay(core, work, 'save', SAVE)
         camera.run_replay(core, work, 'home', HOME)
@@ -236,10 +255,16 @@ def main():
     results['save-during']['faults'] = faults(work)
 
     # The saved session in a new process: still recording; stop it there and save the clip.
-    core, work = start(args, 'load-saved', args.output / 'save-during' / 'during' / 'during.frond')
+    # The stop tap 2 s after the load, in the replay the core starts with.
+    stop = '1500 pen-up\n1501 snapshot "S/loaded.png"\n' + \
+        ''.join(f'{1500 + int(t)} {e}\n' for t, e in (l.split(' ', 1) for l in SHUTTER.splitlines())) + \
+        '4500 pen-up\n4501 snapshot "S/stopped.png"\n'
+    core, work = start(args, 'load-saved', args.output / 'save-during' / 'during' / 'during.frond', stop)
     try:
-        camera.run_replay(core, work, 'loaded', '1500 pen-up\n1501 snapshot "S/loaded.png"\n')
-        camera.run_replay(core, work, 'stop', SHUTTER + '3000 pen-up\n3001 snapshot "S/stopped.png"\n')
+        deadline = time.monotonic() + 600
+        while core.request('replay-state')[1] != 'finished':
+            assert time.monotonic() < deadline, 'replay never finished'
+            time.sleep(.2)
         camera.run_replay(core, work, 'save', SAVE)
         camera.run_replay(core, work, 'home', HOME)
         clips = export_clips(core, work)
@@ -293,9 +318,8 @@ def main():
     play = results['record']['playback']
     check(all(isinstance(p, int) for p in play) and all(b > a for a, b in zip(play, play[1:])),
           'Media plays the clip, its counter going up')
-    # Input replay times are host time and run on while the save holds the guest, so this clip
-    # stops earlier.
-    check_clip('save-during', results['save-during'], 3)
+    # The replay holds the guest for the save, so this clip is as long as the first.
+    check_clip('save-during', results['save-during'], 5)
     loaded = results['load-saved']
     check(len(loaded['clips']) == 1 and 'frames' in loaded, 'the loaded session saves its recording')
     if 'frames' in loaded:

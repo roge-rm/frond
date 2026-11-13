@@ -261,7 +261,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
         deviceConfigurationDisplayConfigForDevice(deviceType, deviceConfigurationDefaultDisplayMode(deviceType));
 
     lcd = pxaLcdInit(mem, this, ic, &bufferLcd, displayConfiguration.width,
-                     displayConfiguration.height);
+                     displayConfiguration.height, socRev == 2);
 
     kp = keypadInit(gpio, true);
 

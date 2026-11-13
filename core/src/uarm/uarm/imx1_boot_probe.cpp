@@ -946,12 +946,22 @@ struct Probe {
             const bool first = p.peripherals.gpioOutputPattern(1,0x05000000,0x08000000,0x02000000);
             const bool second = p.peripherals.gpioOutputPattern(1,0x0a000000,0x04000000,0x01000000);
             candidate.selectAcquisitionSource(aux ? 2 : stick && first ? 0 : stick && second ? 1 : 3);
+            const bool player = candidate.virtualProfile() && Imx1Cs5Configuration::playerPc(p.result.trace.pc);
+            // A player's reads of the engine words it saves (ati4200.c's RingBegin).
+            if (player && !write && ((address >= 0x16011000 && address < 0x16012000) ||
+                                     address == 0x16010c38 || address == 0x16010c3c)) {
+                if (size != 4) return Imx1BootstrapAccess::width;
+                if (!candidate.memoryReady(p.peripherals.eimState()) || !candidate.engineState().emptyRing())
+                    return Imx1BootstrapAccess::sequence;
+                return p.graphicsCommands.playerRead(address, datum);
+            }
             const auto status = candidate.access(p.peripherals.eimState(),p.result.trace.pc,address,size,write,datum,sampledPin);
             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
                  p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
-                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc)) && p.graphicsMemory) {
+                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
+                p.graphicsMemory) {
                 auto commands = p.graphicsCommands;
                 const auto prepared = commands.prepareCopy(candidate,p.peripherals.eimState(),*p.graphicsMemory);
                 if (prepared != Imx1BootstrapAccess::ok) {
@@ -1542,7 +1552,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         const auto* r=cpuGetRegisters(p->cpu);
         recent={t.step,t.pc,t.instruction,t.cpsr,r[13],r[14],r[0],r[1],r[2],r[3]};
     }
-    const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(p->cpu, 1);
+    const auto cycles = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(p->cpu, 1);
     if (p->failed) return false;
     const auto dataGuard = cpuArm920DataGuard(p->cpu);
     if (dataGuard.active) {

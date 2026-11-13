@@ -4,7 +4,7 @@ Everything here is for running the core and the tools without the desktop or And
 
 The core is `out/frond` (built by `make out/frond`). The desktop app runs it as a child and talks to it over the control socket.
 
-The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, installed as `/usr/lib/frond/frond-68k-core`). It takes the same desktop arguments and speaks the same control socket, but has its own options and console, see [Palm IIIx (frond-68k)](#palm-iiix-frond-68k). Everything outside that section is about `out/frond`.
+The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devices table) have their own runner, `out/frond-68k` (`make out/frond-68k`, installed as `/usr/lib/frond/frond-68k-core`). It takes the same desktop arguments and speaks the same control socket, but has its own options and console, see [68k Palms (frond-68k)](#68k-palms-frond-68k). Everything outside that section is about `out/frond`.
 
 ## Command line
 
@@ -27,6 +27,7 @@ The Palm IIIx has its own runner, `out/frond-68k` (`make out/frond-68k`, install
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
 | `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
+| `--emulated-time` | Every guest second gets the full `--mips`, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
@@ -67,7 +68,7 @@ SIZE is in MiB for an SD card or a Memory Stick Pro and in MB for a classic stic
 
 The card files, journals, settle rules and session media are in [Storage formats](#storage-formats).
 
-The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx, default `frond-68k` beside the ARM core), `-h` and `-v`.
+The desktop launcher `frond-desktop [session]` takes `--core PATH` (the emulator to run, found beside it or in `/usr/lib/frond` by default), `--core-68k PATH` (the same for 68k devices like the Palm IIIx or m515, default `frond-68k` beside the ARM core), `-h` and `-v`.
 
 ## Storage formats
 
@@ -278,7 +279,8 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `export-db` | ZIP file, newline, database name | `exported`: that database |
 | `db-list` | | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name |
 | `input-replay` | file | `loaded`; error `replay` with the line |
-| `replay-state` | | `running` or `finished`, message is the last event time in ms |
+| `replay-state` | | `running`, `paused` or `finished`, message is the last event time in ms |
+| `replay-continue` | | `continued`: a paused replay goes on; error `not-paused` |
 | `replay-snapshots` | | `snapshots`: comma list of `ok`, `no-frame`, `lcd-off` or `failed`, one per snapshot so far |
 | `reset`, `hard-reset`, `rotate`, `audio-on`, `audio-off`, `quit` | | `done` |
 
@@ -347,7 +349,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 
 ## Input replay
 
-`--input-replay FILE` and the `input-replay` command send events through the same queues as the SDL window. Each line is `MS COMMAND ARGS`, with MS the milliseconds since the replay started (since the main loop started for `--input-replay`), in nondecreasing order. Empty lines and `#` comments are allowed. Replay uses host time, so it isn't deterministic in guest instructions.
+`--input-replay FILE` and the `input-replay` command send events through the same queues as the SDL window. Each line is `MS COMMAND ARGS`, with MS the milliseconds since the replay started (since the main loop started for `--input-replay`), in nondecreasing order. Empty lines and `#` comments are allowed. Replay uses host time, so it isn't deterministic in guest instructions. With `--emulated-time` it uses guest time, and each event lands within one main loop slice (about 16 ms) of its time. A reset during a replay doesn't move its events.
 
 | Command | Meaning |
 | --- | --- |
@@ -357,6 +359,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
+| `pause` | Hold the main loop's guest time and the replay until the `replay-continue` command, which picks up at the pause's time. Commands that run the guest themselves (`guest-ready`, `install`, `launch-app`, the database and card commands) still run it. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
 
 ```text
@@ -445,7 +448,7 @@ The per-machine settings file `<name>.frond.settings.json` has `infrared`, `seri
 | `infrared`, `serial` | `off`, `pty`, `tcp:PORT`, `link:local` (This computer, desktop), `link:ID` |
 | `infrared` | also `phone` on a device with the `irPhone` capability: the desktop passes `--irda phone`, Android sends `irda-mode phone` once the core answers and opens no link |
 | `infrared` | also `printer` on any device with infrared: the desktop passes `--irda printer`, Android sends `irda-mode printer` once the core answers and opens no link. Both poll `irprinter status` every second while it is the choice |
-| `serial` | also `modem` on a device with the `modem` capability (the IIIx): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
+| `serial` | also `modem` on a device with the `modem` capability (the 68k Palms except the m100 and m105): the desktop passes `--serial modem`, Android sends `serial-mode modem` once the core answers and opens no link |
 | `usb` | `off`, `pty`, `tcp:PORT` |
 | `usbPort` | Dana: `off`, `printer` or `wifi`, the USB port choice. The desktop sends `printer attach on` or `usb-port wifi` once the core answers, Android does the same on connect. Older settings with `usbPrinter` true count as `printer`; the file still writes `usbPrinter` when the choice is the printer |
 | `wifiModule` | Dana Wireless: `false` when the built-in Wi-Fi is off, left out when on. Sent as `network-mode disabled` or `wireless` at every start, before the USB port choice |
@@ -530,9 +533,9 @@ Breakpoints and snapshots aren't saved in sessions. On Android, Settings > Debug
 
 `tools/pace-report.py` combines a `monitor pace` object with the PRC you ran and prints a private report with resource offsets and, given the matching executable, symbols (`--context`, `--program`, `--executable`, `--runtime-map`, `--tool-prefix`).
 
-## Palm IIIx (frond-68k)
+## 68k Palms (frond-68k)
 
-`frond-68k` runs the Palm IIIx (DragonBall EZ, Palm OS 3.1 to 4.1) on the CloudpilotEmu 68k core. It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
+`frond-68k` runs the 68k Palms on the CloudpilotEmu 68k core: the DragonBall EZ ones (Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100, m105, Palm OS 3.1 to 4.1) and the DragonBall VZ ones (m125, m130, m500, c500, m505, m515, m520, Dana, Palm OS 4.0 and 4.1). It is a separate program from `frond`, built by `make out/frond-68k` (the cloudpilot sources with `FROND_68K=1`, no network proxy, readline or Fast engine) and shipped in the Debian package as `/usr/lib/frond/frond-68k-core` beside `frond-core`. The desktop and Android apps start it for 68k devices. Run it by hand like this:
 
 ```sh
 out/frond-68k --rom palm-os-3.5-ez.rom --run-for 10 --framebuffer-output out.png
@@ -546,13 +549,13 @@ out/frond-68k iiix.frond --serial pty
 | Option | Meaning |
 | --- | --- |
 | `--rom FILE` | The ROM or session. A plain positional file works the same. |
-| `--device NAME` | Expect this device, `palm-iiix`. |
+| `--device NAME` | Expect this device, for example `palm-iiix` or `palm-m515`. |
 | `--check-rom` | Check the ROM (header, then Cloudpilot's own check) and print what it found, without starting. Not with a session. |
 | `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. Not with `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the LCD as a PNG at the end of `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, the same format as in [Input replay](#input-replay). |
-| `--speed original\|uncapped` | Original runs at the real 16.58 MHz, Uncapped at 8 times that with timers on real time. Default original. |
-| `--contrast N` | Screen contrast 0 to 100. Default 50, or the session's. |
+| `--speed original\|uncapped` | Original runs at the device's real clock (16.58 MHz on the IIIx, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the VZ Palms), Uncapped at 8 times that with timers on real time. Default original. |
+| `--contrast N` | Screen contrast 0 to 100. Default 50, or the session's. Not on the colour devices. |
 | `--window-scale N` | Screen pixels per Palm pixel, 1 to 4. Default 2. The desktop passes twice its own scale. |
 | `--window-fit MODE`, `--window-background RRGGBB` | Fit the device to a resizable window (`fit`, `whole` or `fill`) and the colour around it, as for `frond`. |
 | `--smooth-lcd` | Smooth pixels instead of nearest-neighbour. |
@@ -566,7 +569,7 @@ out/frond-68k iiix.frond --serial pty
 | `--desktop-socket PATH` | Connect to the desktop's control socket, see [Control socket](#control-socket). The console is off then. |
 | `--save-on-disconnect FILE` | As on the ARM core. |
 
-`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core. `--card-swap`, `--card-identity` and `--card-protected` are refused with a one-line message and exit 2, as a IIIx has no card slot.
+`--work-folder`, `--nand`, `--engine`, `--jog-controls`, `--usb`, `--bluetooth`, `--fast-audio`, `--hide-keyboard` and `--hide-jog-controls` are taken and ignored, as the desktop passes them to every core. `--card-swap`, `--card-identity` and `--card-protected` are refused with a one-line message and exit 2 on every 68k device; cards go in with `--sd-attach` and `--sd2-attach`.
 
 In the window F1 to F4 are the app buttons, the up and down arrows the rocker and Escape power. Typed text goes into the Palm.
 
@@ -616,9 +619,9 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 
 ### Control socket
 
-The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `keyboard-grab` (`on` or `off`), `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the IIIx's own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
+The framing, the replies and the events are the same as for `frond`. `frond-68k` answers these: `keyboard-grab` (`on` or `off`), `device-state`, `guest-ready`, `replay-state`, `input-replay`, `save`, `install`, `export`, `export-db`, `db-list`, `launch-app`, `reset`, `hard-reset`, `quit`, `serial-state`, `serial-mode`, `irda-state`, `irda-mode`, `irda-stats`, `serial-stats`, `modem-sync`, `speed-state`, `display` (`contrast=` and `smooth=`), `sound-state`, `sound-mode`, `audio-on`, `audio-off`, and the 68k Palms' own `hotsync`, `speed` (`original` or `uncapped`), `backlight-state` and `gdb-start`, `gdb-stop`, `gdb-state`. `guest-ready` and the commands that need Palm OS answer `not-ready` until the UI is up. `install`, `export`, `export-db`, `db-list` and `launch-app` wait for the app's event loop as on the console, holding back later requests, and answer `not-ready` with the reason if it doesn't come. `window-id` is answered as on `frond`. Events are `ready`, `close`, `shortcut`, `serial` and `infrared`.
 
-What a IIIx doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
+What a 68k Palm doesn't have answers as absent to the state queries the desktop asks every device (`network-state` `disabled`, `hold-state` `unavailable`, `keyboard-state` `detached`, `usb-state` `off`, `sd-state` `none`, `microphone-state` and `microphone-epoch` `off` and `0`; `sd-state` is `none` on the ones without a card slot) and with `unsupported` to the rest: `usb-mode`, `bluetooth-state`, `bluetooth-mode`, `hold`, `keyboard-attach`, `keyboard-key`, `microphone-mode`, `network-mode` (other than `disabled`), `guest-orientation`, `rotate`, `replay-snapshots`, `sd-*` and `ms-*`. `make test-core-control` runs the same requests against both cores.
 
 ### Debugging 68k apps with GDB
 
@@ -646,11 +649,11 @@ The debugger costs almost nothing while no gdb is connected. `make test-frond-68
 
 ### Serial PPP
 
-`tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [Palm IIIx serial and PPP](using-frond.md#palm-iiix-serial-and-ppp).
+`tools/palm-pppd.sh` connects the serial port to slirp or pppd, see [68k Palm serial and PPP](using-frond.md#68k-palm-serial-and-ppp).
 
 ### Modem and mobile phone
 
-The snap-on modem (`modem` capability, IIIx) and the infrared phone (`irPhone` capability: IIIx, T|X, TG50, E2, E3, Zire 72) are the core's own, with no link or socket. Both run one engine from `src/common` on guest time: `HayesModem`, `PppServer` and slirp (`SlirpIp`), and for the phone IrLAP, IrLMP, IAS, Tiny TP and IrCOMM (`src/common/ir`). A call isn't saved, only that one was up: the session keeps the modem's settings and S registers in a `modem-call` or `phone-call` metadata line, and on load the modem is back in command mode with them and says NO CARRIER. The phone says it once the guest's IrLAP has timed out and IrCOMM opens again, with a CD drop in the first DCE lines. Palm PPP doesn't notice either (the EZ serial port has no DCD, PPP ignores the text and sends no LCP echo), so the guest needs Disconnect and Connect in Network.
+The snap-on modem (`modem` capability, every 68k Palm except the m100 and m105) and the infrared phone (`irPhone` capability: the 68k Palms, T|X, TG50, E2, E3, Zire 72) are the core's own, with no link or socket. Both run one engine from `src/common` on guest time: `HayesModem`, `PppServer` and slirp (`SlirpIp`), and for the phone IrLAP, IrLMP, IAS, Tiny TP and IrCOMM (`src/common/ir`). A call isn't saved, only that one was up: the session keeps the modem's settings and S registers in a `modem-call` or `phone-call` metadata line, and on load the modem is back in command mode with them and says NO CARRIER. The phone says it once the guest's IrLAP has timed out and IrCOMM opens again, with a CD drop in the first DCE lines. Palm PPP doesn't notice either (the EZ serial port has no DCD, PPP ignores the text and sends no LCP echo), so the guest needs Disconnect and Connect in Network.
 
 | What | Value |
 |---|---|
@@ -700,7 +703,7 @@ Frond has no IDE plugin. An IDE runs your build, then the [developer runner](#de
 What each device gives you:
 
 - T|X, E2, Zire 72 and TG50: `tools/frond-run.py` for runs, and the ARM GDB stub with the PACE monitor. A 68k app on these is debugged at addresses with `monitor pace-break`, not at source lines.
-- IIIx: no runner, use `frond-68k` and its console. Source-level debugging works with prc-tools' `m68k-palmos-gdb` (gdb 5.3), which is too old for the GDB front ends of VS Code and Eclipse, so run it in the IDE's terminal. `gdb-multiarch` works in the IDE at addresses, see [Debugging 68k apps with GDB](#debugging-68k-apps-with-gdb).
+- The 68k Palms: no runner, use `frond-68k` and its console. Source-level debugging works with prc-tools' `m68k-palmos-gdb` (gdb 5.3), which is too old for the GDB front ends of VS Code and Eclipse, so run it in the IDE's terminal. `gdb-multiarch` works in the IDE at addresses, see [Debugging 68k apps with GDB](#debugging-68k-apps-with-gdb).
 
 The examples below use a TX session in `sessions/tx/`, an app `MyApp.prc` named `My App`, and Frond built in `~/frond`. Change the paths to yours.
 
@@ -760,7 +763,7 @@ The examples below use a TX session in `sessions/tx/`, an app `MyApp.prc` named 
 
 Start "Frond with GDB", then "Attach to Frond". Type monitor commands in the debug console, for example `monitor pace-break 1234`. `tools/pace-report.py` turns a stop into resource offsets and symbols.
 
-For the IIIx, start `frond-68k` in a terminal (`~/frond/out/frond-68k iiix.frond --gdb 2159`), then type `install MyApp.prc`, `gdb-app build/MyApp 'My App'` and `launch My App` at its console, and run `m68k-palmos-gdb` in a second terminal as shown above.
+For a 68k Palm, start `frond-68k` in a terminal (`~/frond/out/frond-68k iiix.frond --gdb 2159`), then type `install MyApp.prc`, `gdb-app build/MyApp 'My App'` and `launch My App` at its console, and run `m68k-palmos-gdb` in a second terminal as shown above.
 
 ### Eclipse
 
@@ -770,7 +773,7 @@ With CDT and its GDB Hardware Debugging feature:
 - Run > Debug Configurations > GDB Hardware Debugging, a new configuration. On Debugger set the GDB command to `gdb-multiarch` and the remote target to localhost, port 3333. On Startup clear "Reset and Delay", "Halt" and "Load image", and add `set architecture arm` to the initialisation commands. A C/C++ Application is needed but only gives symbols, so any build output works.
 - Start the second external tool, then the debug configuration. Monitor commands go in the Debugger Console as `monitor pace-break 1234`.
 
-The IIIx works as in VS Code, in Eclipse's Terminal view.
+The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 
 ## Environment variables
 
@@ -913,7 +916,7 @@ All in `tools/`. Most take `--help`.
 | `build-palm-probe.py` | Builds a Palm probe app from `tests/palm/` with a local SDK (`--probe NAME`, `--sdk PATH`). |
 | `build-bluetooth-provider.py`, `build-bluetooth-opp-peer.py` | Build the BlueZ H4 provider (`btvirt`, also installed by `make deb` as `/usr/lib/frond/btvirt`) and the virtual peer (OPP and SPP test peer, and the Bluetooth phone, installed as `/usr/lib/frond/bluetooth-phone`). |
 | `bluetooth-opp-peer.c`, `bluetooth-dun.cpp`, `bluez-bdaddr.patch`, `bluez-bthost-config.patch` | Sources and patches for those. |
-| `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on the IIIx's serial PTY or `tcp:PORT`, see Palm IIIx. `slirp-select-fix.c` is the shim it preloads. |
+| `palm-pppd.sh DEVICE` | Runs slirp (or pppd with `--pppd`) on a 68k Palm's serial PTY or `tcp:PORT`, see 68k Palm serial and PPP. `slirp-select-fix.c` is the shim it preloads. |
 | `link-pty.py ENDPOINT` | Puts a PTY in front of a TCP endpoint (`PORT`, `HOST:PORT` or `listen:PORT`) for programs that only open serial devices. `--link PATH`, `--seconds N`. |
 | `link-irda.py FIRST SECOND` | Joins two infrared endpoints. `--seconds N`. |
 | `link-bluetooth.py serve\|join A B` | Carries Bluetooth controller connections over TCP. `--seconds N`. |
@@ -934,7 +937,7 @@ All in `tools/`. Most take `--help`.
 | `all` | Core and desktop app. |
 | `prepare` | Does nothing, kept so older command lines work. |
 | `out/frond` | The core only. |
-| `out/frond-68k` | The Palm IIIx runner. |
+| `out/frond-68k` | The 68k Palm runner. |
 | `frond-jit` | Copy of `out/frond` for runs that name the JIT. |
 | `desktop` | The Qt app, `out/frond-desktop`. |
 | `deb`, `deb-arm64` | Debian packages. The arm64 one is built in Docker. |

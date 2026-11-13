@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "CPU.h"
@@ -62,11 +63,21 @@ uint32_t nandGetWriteCnt(struct NAND *nand);
 uint64_t nandRawBytes(struct NAND *nand);
 uint32_t nandPageBytes(struct NAND *nand);
 bool nandReadRawPage(struct NAND *nand, uint32_t page, uint8_t *dest);
+// Programs one raw page (main then spare) directly, as a test standing in for the guest.
+bool nandWriteRawPage(struct NAND *nand, uint32_t page, const uint8_t *src);
 // Reads nand.frondnand's stored bytes (main bytes of each page, zeros to sideOffset, then spare
 // bytes of each page), whether the NAND is in RAM or on a backing laid out that way.
 bool nandReadStored(struct NAND *nand, uint64_t offset, uint64_t length, uint8_t *dest, uint64_t sideOffset);
 // Moves the NAND onto `backing` in that layout. RAM content goes, freed by the release function if set.
-bool nandAdoptBacking(struct NAND *nand, std::unique_ptr<CardBacking> backing, uint64_t sideOffset);
+// `replay`: raw pages (nandTakeTracked) written onto the backing first.
+using NandPages = std::vector<std::pair<uint32_t, std::vector<uint8_t>>>;
+bool nandAdoptBacking(struct NAND *nand, std::unique_ptr<CardBacking> backing, uint64_t sideOffset,
+                      const NandPages *replay = nullptr);
+// From a background save's snapshot until it finishes, pages the guest programs or erases are
+// noted; turning it on or off forgets the list.
+void nandTrackWrites(struct NAND *nand, bool on);
+// The noted pages' raw bytes as the NAND holds them now, read before a move drops its files.
+bool nandTakeTracked(struct NAND *nand, NandPages &out);
 CardBacking *nandBacking(struct NAND *nand);
 void nandSetDataRelease(struct NAND *nand, void (*release)(void *));
 

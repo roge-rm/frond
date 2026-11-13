@@ -13,6 +13,7 @@ uae_u16 gCpuTiming[65536];
 uae_u32 gUaeAccessWait;
 uae_u32 gUaeTimingExtra;
 uae_u32 gUaeBusCount;
+uae_u32 gUaeSdramWriteWords;
 }
 
 namespace {

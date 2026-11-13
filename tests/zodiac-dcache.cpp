@@ -83,7 +83,7 @@ struct Machine {
     }
     void step(uint32_t pc) {
         cpuSetReg(cpu, 15, pc);
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1));
+        assert((cpuCycleAnyKind(cpu, 1) == 1));
     }
     void cp(uint32_t pc, uint32_t value) { cpuSetReg(cpu, 0, value); step(pc); }
     void enable(uint32_t value = 0x407d) { cp(ctl, value); accesses.clear(); }

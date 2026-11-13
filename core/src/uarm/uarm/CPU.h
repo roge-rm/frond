@@ -64,6 +64,13 @@ void cpuSetEarlyAudioHook(ArmCpu*, EarlyAudioHook, void*, uint32_t readySite, ui
 
 #define ARM_MEMORY_SYSTEM_MMU 0
 #define ARM_MEMORY_SYSTEM_MPU 1
+// The interpreter is compiled once per kind, the template argument of cpuCycle and the decoders: the
+// MMU and MPU kinds for the ARMv5TE cores and one for the ARM920T (with its MMU), so no copy checks the
+// CPU model as it runs. Callers pick the kind once, from the CPU they made (cpuInterpreterKind).
+#define ARM_MEMORY_SYSTEM_ARM920T 2
+// The memory system an interpreter kind uses.
+constexpr int armMemorySystemOf(int kind) { return kind == ARM_MEMORY_SYSTEM_ARM920T ? ARM_MEMORY_SYSTEM_MMU : kind; }
+constexpr bool armKindIsArm920(int kind) { return kind == ARM_MEMORY_SYSTEM_ARM920T; }
 
 typedef bool (*ArmCoprocRegXferF)(struct ArmCpu *cpu, void *userData, bool two /* MCR2/MRC2 ? */,
                                   bool MRC, uint8_t op1, uint8_t Rx, uint8_t CRn, uint8_t CRm,
@@ -208,6 +215,8 @@ struct ArmMpu *cpuGetMPU(struct ArmCpu *cpu);
 struct ArmMem *cpuGetMem(struct ArmCpu *cpu);
 
 uint32_t cpuGetMemorySystemKind(struct ArmCpu *cpu);
+// The interpreter kind for this CPU: its memory system, or ARM_MEMORY_SYSTEM_ARM920T.
+int cpuInterpreterKind(const struct ArmCpu *cpu);
 
 template <int memorySystemKind>
 uint32_t cpuDecodeArm(uint32_t instr);
@@ -217,6 +226,8 @@ uint32_t cpuDecodeThumb(uint16_t instr, uint32_t &translatedInstr);
 
 template <int memorySystemKind, bool monitorPC>
 uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles);
+// cpuCycle (not injected) in the copy cpuInterpreterKind picks, for tests and tools that switch models.
+uint32_t cpuCycleAnyKind(struct ArmCpu *cpu, uint32_t cycles);
 
 uint32_t cpuCyclePure(struct ArmCpu *cpu);
 #ifndef __EMSCRIPTEN__

@@ -78,7 +78,9 @@ def make_source(main, out):
 
 
 class Core:
-    def __init__(self, core, machine, level, log):
+    def __init__(self, core, machine, level, log, extra=(), patience=1):
+        # patience scales the waits, for a core that runs slower than real time (--emulated-time).
+        self.patience = patience
         self.sock = Path(machine).parent / 'control.sock'
         if self.sock.exists():
             self.sock.unlink()
@@ -89,7 +91,7 @@ class Core:
         env = dict(os.environ, SDL_VIDEODRIVER='dummy', SDL_AUDIODRIVER='dummy', FROND_TEST_MIC_LEVEL=str(level))
         self.log = open(log, 'w')
         self.process = subprocess.Popen([core, str(machine), '--device', 'palm-zire-72', '--desktop-socket',
-                                         str(self.sock), '--no-sound'], env=env, stdout=self.log, stderr=self.log)
+                                         str(self.sock), '--no-sound', *extra], env=env, stdout=self.log, stderr=self.log)
         self.connection, _ = self.server.accept()
         self.connection.settimeout(60)
         self.reader = self.connection.makefile('rb')
@@ -104,7 +106,7 @@ class Core:
                 return fields[1] == 'ok', fields[2], bytes.fromhex(fields[3]).decode(errors='replace') if len(fields) > 3 else ''
 
     def wait_ready(self):
-        deadline = time.monotonic() + 60
+        deadline = time.monotonic() + 60 * self.patience
         while not self.request('guest-ready')[0]:
             assert time.monotonic() < deadline, 'guest never ready'
             time.sleep(.2)
@@ -112,7 +114,7 @@ class Core:
     def replay(self, path):
         ok, code, message = self.request('input-replay', str(path))
         assert ok, (code, message)
-        deadline = time.monotonic() + 120
+        deadline = time.monotonic() + 120 * self.patience
         while self.request('replay-state')[1] != 'finished':
             assert time.monotonic() < deadline, 'replay never finished'
             time.sleep(.2)

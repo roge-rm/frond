@@ -82,8 +82,15 @@ EmSdramTiming EmVzSdramTiming(uint16_t sdramControl, uint16_t dramControl);
 
 namespace EmSdram {
     void Set(const EmSdramTiming& timing);
+    const EmSdramTiming& Get();
     // Wait clocks for a CPU access of words 16-bit words from address.
     uint32_t Access(uint32_t address, bool write, uint32_t words);
+    // Wait clocks for a read then write of the same words (CLR, Scc), given the wait Access
+    // charged the write: the read meets the page as the write did and the write then hits.
+    uint32_t ReadFirst(uint32_t writeWait, uint32_t words);
+    // The SDRAM bank the LCD DMA reads the screen from, or ~0u when it isn't in SDRAM. Each
+    // line's DMA opens its own row there (VZ manual figure 19-24), closing the CPU's.
+    void SetLcdAddress(uint32_t address);
     // A refresh closes every page.
     void PrechargeAll();
 }  // namespace EmSdram

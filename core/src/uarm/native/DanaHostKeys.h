@@ -22,6 +22,28 @@ struct DanaHostChange {
     bool down;
 };
 
+// SDL on X11 can drop the release of a key typed in a burst that shares one timestamp, and then
+// reports the key's next press as a repeat. A repeat sooner than a real auto-repeat delay after
+// the key's own press is that next press, so Retap says it should go in as a release and a press.
+class DanaRepeats {
+public:
+    static constexpr uint32_t kRepeatMs = 150;
+    bool Retap(SDL_Scancode scancode, bool repeat, uint32_t nowMs) {
+        if (!repeat) {
+            downAt[scancode] = nowMs;
+            return false;
+        }
+        const auto it = downAt.find(scancode);
+        if (it == downAt.end() || nowMs - it->second >= kRepeatMs) return false;
+        it->second = nowMs;
+        return true;
+    }
+    void Clear() { downAt.clear(); }
+
+private:
+    std::map<SDL_Scancode, uint32_t> downAt;
+};
+
 class DanaHostKeys {
 public:
     // name is the Dana key the host key has on its own. Returns the changes to apply in order.

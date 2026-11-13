@@ -1,5 +1,6 @@
 // The Dana's host keyboard chords (DanaHostKeys.h).
 #include <cstdio>
+#include <map>
 #include <string>
 
 #include "DanaHostKeys.h"
@@ -153,6 +154,17 @@ int main() {
         expect("screen input flushes ctrl", k.Flush(), "+ctrl");
         expect("only once", k.Flush(), "");
         expect("ctrl up", k.Event(L, false, "ctrl"), "-ctrl");
+    }
+    {
+        // A zero-gap burst as SDL on X11 can hand it over: the first space's release is dropped and
+        // its next press arrives as a repeat. That press goes in again, a held key's later repeats don't.
+        DanaRepeats r;
+        const auto space = SDL_SCANCODE_SPACE, q = SDL_SCANCODE_Q;
+        if (r.Retap(space, false, 1000) || r.Retap(q, false, 1000)) { std::printf("FAIL first press is a retap\n"); ++failures; }
+        if (!r.Retap(space, true, 1003)) { std::printf("FAIL quick repeat not a retap\n"); ++failures; }
+        if (r.Retap(q, false, 1003)) { std::printf("FAIL q press is a retap\n"); ++failures; }
+        r.Retap(space, false, 2000);
+        if (r.Retap(space, true, 2400) || r.Retap(space, true, 2430)) { std::printf("FAIL held repeat is a retap\n"); ++failures; }
     }
     std::printf(failures ? "dana-host-keys: FAIL\n" : "dana-host-keys: ok\n");
     return failures ? 1 : 0;

@@ -134,10 +134,10 @@ void geometry() {
     // The text producer's foreground and background in 490 and 491 don't change the result.
     planes(f); p = packet(); change(p,0x46f,0); change(p,0x490,0); change(p,0x491,0xffff);
     assert(f.append(p) == A::ok); f.finish(); check(f);
-    // Any other pair in 490 and 491 is refused.
-    for (auto colours : {std::pair<uint32_t,uint32_t>{0,0}, {0xffffffff,0xffff}, {0x1234,0xffff}}) {
+    // Nor does any other pair, such as the ffff and 3013 TCPMP's coloured text leaves.
+    for (auto colours : {std::pair<uint32_t,uint32_t>{0,0}, {0xffffffff,0xffff}, {0x1234,0xffff}, {0xffff,0x3013}}) {
         planes(f); p = packet(); change(p,0x46f,0); change(p,0x490,colours.first); change(p,0x491,colours.second);
-        assert(f.append(p) == A::sideEffect);
+        assert(f.append(p) == A::ok); f.finish(); check(f);
     }
 }
 void guards() {

@@ -62,7 +62,7 @@ class Imx1GraphicsFrame {
     bool scanDue(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim) const {
         const auto& display = configuration.displayState();
         if (!display.lcdEnabled() || !configuration.memoryReady(eim)) return false;
-        return !valid || !enabled || display.revision() != lastRevision || display.frameNumber() != lastFrame;
+        return !valid || !enabled || display.revision() != (lastRevision & ~overlaidBit) || display.frameNumber() != lastFrame;
     }
     bool advance(const Imx1Cs5Configuration& configuration, Imx1GraphicsMemory& memory, const Imx1Eim& eim) {
         const auto& display = configuration.displayState();
@@ -70,10 +70,28 @@ class Imx1GraphicsFrame {
             enabled = valid = pending = acquired = false;
             return true;
         }
-        const bool full = !valid || !enabled || display.revision() != lastRevision;
-        if (!full && display.frameNumber() == lastFrame) return true;
         Imx1GraphicsDisplay::Surface candidate;
         if (!display.surface(candidate)) return false;
+        Imx1GraphicsDisplay::Overlay overlay;
+        bool overlaid = display.overlay(configuration.memoryWindows(), overlay);
+        const uint8_t* planes[3] = {};
+        // An overlay that doesn't fit the graphic plane or whose planes can't be read is left out, and the
+        // graphic plane still shows.
+        if (overlaid && (overlay.x + overlay.width > candidate.width || overlay.y + overlay.height > candidate.height))
+            overlaid = false;
+        for (unsigned plane = 0; overlaid && plane < 3; ++plane) {
+            unsigned bank = 0;
+            uint32_t offset = 0;
+            planes[plane] = memory.gpuSpan(configuration, eim, overlay.planes[plane].rangeBase,
+                                           overlay.planes[plane].rangeBytes, bank, offset);
+            if (!planes[plane]) overlaid = false;
+        }
+        // The overlay's planes aren't dirty tracked, so each new frame with it shown is read whole, and so is the
+        // first one after it goes, which may leave rows the graphic plane never dirties.
+        const bool wasOverlaid = lastRevision & overlaidBit;
+        const bool full = !valid || !enabled || display.revision() != (lastRevision & ~overlaidBit) ||
+                          (overlaid && display.frameNumber() != lastFrame) || (wasOverlaid && !overlaid);
+        if (!full && display.frameNumber() == lastFrame) return true;
         unsigned rangeBank = 0;
         uint32_t rangeOffset = 0;
         const uint8_t* range = memory.gpuSpan(configuration, eim, candidate.rangeBase, candidate.rangeBytes, rangeBank,
@@ -123,6 +141,8 @@ class Imx1GraphicsFrame {
                     out[x] = 0xff000000u |
                         ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
                 }
+                if (overlaid && y >= overlay.y && y < overlay.y + overlay.height)
+                    composite(overlay, planes, y - overlay.y, source + overlay.x * 2, out + overlay.x);
             }
             if (pending) { firstRow = std::min(firstRow, first); lastRow = std::max(lastRow, last); }
             else { firstRow = first; lastRow = last; }
@@ -131,12 +151,41 @@ class Imx1GraphicsFrame {
         }
         memory.acknowledgeDirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout, dirty.generation);
         surface = candidate;
-        lastRevision = display.revision();
+        lastRevision = display.revision() | (overlaid ? overlaidBit : 0);
         lastFrame = display.frameNumber();
         valid = true;
         return true;
     }
+    // YUV to the panel's RGB565 and on to the frame's pixel format.
+    // ASSUMPTION "overlay colour": the chip converts BT.601 studio range (Y 16-235), as TCPMP hands it the
+    // decoder's planes unchanged, and the result reaches the panel at the graphic plane's 565 depth.
+    static uint32_t overlayPixel(int y, int u, int v) {
+        const int c = 298 * (y - 16) + 128, d = u - 128, e = v - 128;
+        const auto clamp = [](int value) { return uint32_t(std::min(255, std::max(0, value >> 8))); };
+        const uint32_t red = clamp(c + 409 * e) >> 3, green = clamp(c - 100 * d - 208 * e) >> 2, blue = clamp(c + 516 * d) >> 3;
+        return 0xff000000u |
+            ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
+    }
+    // One row of the overlay over the graphic row it covers. graphic holds that row's 565 pixels for the keyer.
+    static void composite(const Imx1GraphicsDisplay::Overlay& overlay, const uint8_t* const planes[3], uint32_t row,
+                          const uint8_t* graphic, uint32_t* out) {
+        const uint8_t* lines[3];
+        for (unsigned plane = 0; plane < 3; ++plane) {
+            const auto& p = overlay.planes[plane];
+            const int64_t step = int64_t(plane ? row / 2 : row) * p.pitch;
+            lines[plane] = planes[plane] + (p.base - p.rangeBase) + (overlay.mirrorY ? -step : step);
+        }
+        for (uint32_t x = 0; x < overlay.width; ++x) {
+            if (overlay.keyed && (uint32_t(graphic[x * 2]) | uint32_t(graphic[x * 2 + 1]) << 8) != overlay.key) continue;
+            const int64_t luma = overlay.mirrorX ? -int64_t(x) : int64_t(x);
+            const int64_t chroma = overlay.mirrorX ? -int64_t(x / 2) : int64_t(x / 2);
+            out[x] = overlayPixel(lines[0][luma], lines[1][chroma], lines[2][chroma]);
+        }
+    }
    private:
+    // The top bit of lastRevision says the last frame read had the overlay shown, so the saved layout stays as it
+    // was. The display's revision count never reaches it.
+    static constexpr uint64_t overlaidBit = 1ull << 63;
     std::vector<uint32_t> pixels;
     std::vector<uint8_t> row;
     Imx1GraphicsDisplay::Surface surface{};

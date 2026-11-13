@@ -1,6 +1,7 @@
 #ifndef FROND_SESSION_IO_H
 #define FROND_SESSION_IO_H
 
+#include "BackgroundJob.h"
 #include "FileCardBacking.h"
 #include "MachineFolder.h"
 #include "md5.h"
@@ -196,8 +197,15 @@ inline bool saveV7(const std::filesystem::path& dest, const Contents& contents) 
         .SetMemory(contents.memory.size(), contents.memory.data())
         .SetSavestate(contents.savestate.size(), contents.savestate.data())
         .SetMedia(media.size(), media.data());
+    const auto started = std::chrono::steady_clock::now();
     if (!session.SerializeAs(contents.nand.empty() ? SessionFile5::kVersionV9 : SessionFile5::kVersionV8)) return false;
-    return writeAtomicFrond(dest, session.GetSerializedSession(), session.GetSerializedSessionSize());
+    const auto compressed = std::chrono::steady_clock::now();
+    const bool written = writeAtomicFrond(dest, session.GetSerializedSession(), session.GetSerializedSessionSize());
+    if (saveTimingWanted())
+        std::cerr << "save timing: compress " << std::chrono::duration<double, std::milli>(compressed - started).count()
+                  << " ms, write " << saveTimingMs(compressed) << " ms, " << session.GetSerializedSessionSize()
+                  << " bytes" << std::endl;
+    return written;
 }
 
 using frondStorage::readAllAt;

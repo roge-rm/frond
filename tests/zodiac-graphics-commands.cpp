@@ -26,6 +26,28 @@ static std::vector<uint64_t> commandsRecord(const Imx1GraphicsCommands& commands
     copy.state(record);
     return record.v;
 }
+// A load whose saved IDCT scan order (value 7ff) is past the three orders: state() refuses it.
+struct ScanLoad {
+    std::string failed;
+    ScanLoad& Do32(uint32_t&) { return *this; }
+    ScanLoad& Do64(uint64_t& x) { x = 0; return *this; }
+    ScanLoad& DoBool(bool& x) { x = true; return *this; }
+    ScanLoad& DoBuffer32(uint32_t* x, size_t n) { assert(n > 0x7ff); x[0x7ff] = scan; return *this; }
+    template <class T> ScanLoad& DoVector(std::vector<T>&, size_t) { return *this; }
+    ScanLoad& Require(bool condition, const char* what) { if (!condition && failed.empty()) failed = what; return *this; }
+    bool ok() const { return failed.empty(); }
+    uint32_t scan = 0;
+};
+static void checkScanLoad() {
+    for (uint32_t scan : {0u, 2u, 3u, 0xffffffffu}) {
+        Imx1GraphicsCommands commands;
+        ScanLoad load;
+        load.scan = scan;
+        commands.state(load);
+        assert(scan <= 2 ? load.ok() : load.failed == "idct scan");
+    }
+    std::printf("PASS: a saved IDCT scan order past 2 is refused on load\n");
+}
 static unsigned preparedCopies = 0;
 static Imx1BootstrapAccess checkedPrepare(Imx1GraphicsCommands& commands, const Imx1Cs5Configuration& configuration,
                                           const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
@@ -377,6 +399,7 @@ static void checkFillKinds() {
 }
 
 int main() {
+    checkScanLoad();
     checkFillKinds();
     checkCommands(false);
     checkCommands(true);

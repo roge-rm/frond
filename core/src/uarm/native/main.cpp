@@ -99,6 +99,7 @@ struct Options {
     optional<unsigned int> runFor;
     optional<string> framebufferOutput;
     optional<string> inputReplay;
+    bool emulatedTime;  // --emulated-time
     optional<string> desktopSocket;
     optional<string> saveOnDisconnect;
     optional<string> workFolder;
@@ -794,6 +795,7 @@ bool gFastEngineMissing = false;
         MainLoop mainLoop(soc);
         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
         mainLoop.SetCyclesPerSecondLimit(uint64_t(options.mips.value_or(deviceProfileOriginalMips5(deviceType))) * 1000000);
+        mainLoop.SetEmulatedTime(options.emulatedTime);
 
         Rotation rotation = Rotation::portrait_0;
         // The view turns with the guest OS's orientation (the Zodiac, unless --view-turn window). The
@@ -866,12 +868,13 @@ bool gFastEngineMissing = false;
         const Imx1MachineCheapStatus zodiacStart = zodiac ? zodiac->Status() : Imx1MachineCheapStatus{};
         // The Zodiac's speed figures over 5 s windows, made here on the SDL thread.
         std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000) : nullptr;
-        uint64_t replayStartedAt = startedAt;
+        uint64_t replayStartedAt = options.emulatedTime ? soc->GetTime() / 1000 : startedAt;
         commands::Context commandContext{
             .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation,
-            .replay = replay, .replayStartedAt = replayStartedAt,
+            .replay = replay, .replayStartedAt = replayStartedAt, .emulatedTime = options.emulatedTime,
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
+        commandContext.replayClockLast = replayStartedAt;
         commandContext.sessionFolder = sessionFolder;
         commandContext.sessionPath = sessionPath;
 
@@ -1164,6 +1167,8 @@ bool gFastEngineMissing = false;
                 // Backpressure must stop all guest clocks together. Suspending just
                 // the codec lets DMA and the guest stream deadlines run ahead.
                 const bool waitForAudio = !headless && soc->PcmOutputEnabled() && audioDriver.GetAudioBackpressure();
+                // A paused input replay holds every guest clock until replay-continue.
+                const bool replayPaused = replay.Paused();
 
                 reportAudioUnderruns();
                 // SIR peers need character-sized handoffs. A full display slice can
@@ -1192,10 +1197,10 @@ bool gFastEngineMissing = false;
                 infrared.Service();
                 if (zodiacSpeed) {
                     const uint64_t cycleStart = timestampUsec();
-                    mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+                    mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
                     zodiacSpeed->Emulated(timestampUsec() - cycleStart);
                 } else {
-                    mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio);
+                    mainLoop.Cycle(now, waitForAudio || waitForPreviewAudio || replayPaused);
                 }
                 // The insert half of a swapped slot. A card taken out meanwhile isn't there to insert.
                 if (sdInsertPending || msInsertPending) {
@@ -1256,7 +1261,8 @@ bool gFastEngineMissing = false;
                 }
                 if (!headless) {
                     sdlEventHandler.ClearRedrawRequested();
-                    replay.Dispatch((timestampUsec() - replayStartedAt) / 1000, *soc, snapshot);
+                    const uint64_t replayNow = commands::replayClockUsec(commandContext);
+                    replay.Dispatch((replayNow - replayStartedAt) / 1000, *soc, snapshot);
                 }
 
                 if (now - lastSpeedDump > 1000000) {
@@ -1314,6 +1320,8 @@ bool gFastEngineMissing = false;
             } catch (...) {
                 guestError = current_exception();
             }
+            // A save still writing finishes here, on this thread, before the core stops.
+            if (desktop) desktop->finishPendingSave(commandContext);
             link.Finish();
         });
 
@@ -1537,6 +1545,10 @@ int main(int argc, char** argv) {
     program.add_argument("--input-replay")
         .help("replay timestamped pen/key events and snapshots from a text file");
 
+    program.add_argument("--emulated-time")
+        .help("give every guest second the full --mips, however slow the host, and time input replays in guest time")
+        .default_value(false).implicit_value(true);
+
     program.add_argument("--sd", "-s").help("SD card file").metavar("<SD card file>");
 
     program.add_argument("--ram-size")
@@ -1709,6 +1721,7 @@ int main(int argc, char** argv) {
                        .runFor = program.present<unsigned int>("--run-for"),
                        .framebufferOutput = program.present("--framebuffer-output"),
                        .inputReplay = program.present("--input-replay"),
+                       .emulatedTime = program.get<bool>("--emulated-time"),
                        .desktopSocket = program.present("--desktop-socket"),
                        .saveOnDisconnect = program.present("--save-on-disconnect"),
                        .workFolder = program.present("--work-folder"),

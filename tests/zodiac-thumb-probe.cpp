@@ -103,7 +103,7 @@ struct Machine {
     void half(uint32_t at, uint16_t value) { std::memcpy(bytes.data() + at, &value, 2); }
     void cp(uint32_t instruction, uint32_t value) {
         word(0x1000, instruction); cpuSetReg(cpu, 0, value); cpuSetReg(cpu, 15, 0x1000);
-        assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1));
+        assert((cpuCycleAnyKind(cpu, 1) == 1));
         assert(cpuGetRegisters(cpu)[15] == 0x1004);
     }
     void thumb(uint32_t pc) { cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xf3); cpuSetReg(cpu, 15, pc); }
@@ -113,7 +113,7 @@ struct Machine {
         assert(!memIsInstructionFetch(mem));
         return value;
     }
-    void step() { assert((cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(cpu, 1) == 1)); }
+    void step() { assert((cpuCycleAnyKind(cpu, 1) == 1)); }
 };
 void fetchBoundaries() {
     for (bool fast : {false, true}) for (bool translated : {false, true}) {
