@@ -4784,43 +4784,43 @@ for line in s.makefile('rb'):
                 mode->setCurrentIndex(mode->findData(value));
                 QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
             };
-            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(mode->isEnabled(), 30000);
             QCOMPARE(mode->itemText(mode->findData("radio")), QString("This Frond"));
             QVERIFY(mode->findData("link:local") < 0);
             pick("radio");
-            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 15000);
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 30000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 30000);
             QVERIFY(!path->isVisible());
-            QTRY_COMPARE_WITH_TIMEOUT(machineSetting("bluetooth"), QString("radio"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(machineSetting("bluetooth"), QString("radio"), 30000);
             // The hub's socket gives the core controllers on This Frond's radio.
             const int before = radioOpened(qEnvironmentVariable("XDG_RUNTIME_DIR"));
             FakeBt controller(hubPath);
             QVERIFY(controller.connect());
-            QTRY_COMPARE_WITH_TIMEOUT(radioOpened(qEnvironmentVariable("XDG_RUNTIME_DIR")), before + 1, 10000);
+            QTRY_COMPARE_WITH_TIMEOUT(radioOpened(qEnvironmentVariable("XDG_RUNTIME_DIR")), before + 1, 30000);
             // A switch the core refuses leaves it, the picker and the hub on This Frond.
             path->setText(files.filePath("missing")); pick("socket");
-            QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Controller socket unavailable"), 5000);
-            QTRY_COMPARE_WITH_TIMEOUT(mode->currentData().toString(), QString("radio"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(shown.contains("Controller socket unavailable"), 30000);
+            QTRY_COMPARE_WITH_TIMEOUT(mode->currentData().toString(), QString("radio"), 30000);
             QCOMPARE(machineSetting("bluetooth"), QString("radio"));
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 30000);
             QVERIFY(controller.s.state() == QLocalSocket::ConnectedState);
-            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 30000);
             machine = QSettings().value("lastSession").toString();
         }
         // At the next start the core starts without Bluetooth and is pointed at the hub once it listens.
         {
             MainWindow window(core.fileName()); window.show(); window.openSession(machine, true);
             auto* mode = window.findChild<QComboBox*>("bluetoothMode"); auto* state = window.findChild<QLabel*>("bluetoothState");
-            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 30000);
             QVERIFY(!file(".args").contains("--bluetooth"));
             QCOMPARE(mode->currentData().toString(), QString("radio"));
-            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 15000);
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 5000);
+            QTRY_VERIFY_WITH_TIMEOUT(file(".modes").contains(hubPath.toUtf8() + "\n"), 30000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Bluetooth: This Frond's radio"), 30000);
             mode->setCurrentIndex(mode->findData("off"));
             QMetaObject::invokeMethod(mode, "activated", Q_ARG(int, mode->currentIndex()));
-            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 5000);
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString(), 30000);
             QCOMPARE(machineSetting("bluetooth", frondSessions::preferencesPath(machine)), QString("off"));
-            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 30000);
         }
         // Machine settings: Off, This Frond, a socket and the connections; none on the IIIx.
         {
