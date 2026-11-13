@@ -1,7 +1,6 @@
 #ifndef FROND_CARD_BACKING_H
 #define FROND_CARD_BACKING_H
 
-#include <atomic>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -81,15 +80,8 @@ class CardBacking {
         if (!cardRangeOk(Size(), offset, length, &n)) return false;
         if (n == 0) return true;
         if (!src) return false;
-        ++changes_;
         return WriteBytes(static_cast<size_t>(offset), n, src);
     }
-
-    // Counts writes, so a background save can tell whether the guest wrote this store after its
-    // snapshot. Emulation thread only.
-    uint64_t Changes() const { return changes_; }
-    // Unique per backing made in this process, so a replaced store never matches the old one.
-    uint64_t Serial() const { return serial_; }
 
     // Pin the current visible state. Does not clone the payload.
     virtual std::shared_ptr<const CardSnapshot> Snapshot() = 0;
@@ -107,14 +99,6 @@ class CardBacking {
    protected:
     virtual bool ReadBytes(size_t offset, size_t length, void* dest) const = 0;
     virtual bool WriteBytes(size_t offset, size_t length, const void* src) = 0;
-
-   private:
-    static uint64_t NextSerial() {
-        static std::atomic<uint64_t> next{0};
-        return ++next;
-    }
-    uint64_t changes_{};
-    uint64_t serial_{NextSerial()};
 };
 
 // RAM backing with copy-on-write generations. Overlay is per dirty page; the

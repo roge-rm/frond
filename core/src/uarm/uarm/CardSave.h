@@ -295,12 +295,7 @@ inline bool& sdAdoptFailForTest() {
 // After a published save. A live card file-backed on this folder's sidecar, or on a candidate in
 // this folder, moves onto the new file; otherwise generations left beside the sidecar belong to a
 // card it replaced. An adopted candidate goes.
-// `changedSince`: the guest wrote the card after the snapshot step 1 took (a background save), so
-// the saved file is behind the live card and the card stays where it runs. After a journal applied
-// in place (`journalled`) its overlay still holds every page since and the next save journals
-// again; after a full copy renamed in, the next save copies it.
-inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = frondMachine::kindSd,
-                           bool changedSince = false, bool journalled = false) {
+inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = frondMachine::kindSd) {
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(sidecar, ec)) return;
@@ -308,10 +303,6 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
     // Opened from sd.frondsd: a journal applied in place, or a full copy renamed over it. If the
     // card can't move onto the file now there, the next save copies it whole.
     if (sdCardRunsOn(sidecar.c_str())) {
-        if (changedSince) {
-            if (!journalled) sdCardMarkStale();
-            return;
-        }
         if (!sdAdoptFailForTest() && sdCardAdoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes)) return;
         sdCardMarkStale();
         std::fprintf(stderr, "frond: the card couldn't move onto the saved file; the next save copies it\n");
@@ -320,7 +311,6 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
     FileCardBacking::DiscardGenerations(sidecar);
     // A classic stick read from a v1 file, or made in this session, runs in RAM until its first
     // save, then on the v2 file that save wrote, so later saves are journals.
-    if (changedSince) return;
     if (kind == frondMachine::kindMs && !sdCardFileBacked()) {
         if (!sdCardAdoptSavedFromRam(sidecar.c_str(), bytes, frondSdFile::headerBytes))
             std::fprintf(stderr, "frond: the Memory Stick couldn't move onto the saved file; the next save copies it\n");
@@ -338,9 +328,9 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
 // true. Chunks a failed
 // apply touched are no longer checked, since they are part old, part new on disk and the overlay
 // holds the new pages.
-inline bool completeSdSave(const std::filesystem::path& folder, SdSave& save, bool changedSince = false) {
+inline bool completeSdSave(const std::filesystem::path& folder, SdSave& save) {
     if (finishSdSave(folder, save)) {
-        afterSdPublish(folder, save.kind, changedSince, !save.journal.empty());
+        afterSdPublish(folder, save.kind);
         return true;
     }
     if (!save.journal.empty()) sdCardTrustChunks(save.chunks);

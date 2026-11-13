@@ -106,6 +106,8 @@ class DesktopControl {
         if (pendingSave) {
             if (!saveJob.Finished()) return !channel.Flush() && lost(ctx);
             finishSave(ctx);
+            // Step 3's file work paused the guest; don't catch up that wall time.
+            ctx.mainLoop.PauseAt(timestampUsec());
         }
         DesktopChannel::Request request;
         switch (channel.Receive(request)) {
@@ -241,8 +243,27 @@ class DesktopControl {
         auto* job = pendingSave.get();
         saveJob.Start([job] { frondNative::writeMachineSave(*job); });
         saveBlockedMs = saveTimingMs(started);
+        if (std::getenv("FROND_SAVE_TEST_WRITES")) testWrites(ctx);
         return true;
     }
+    // Tests: while the background write runs, writes "FROND-BG-MARK-n" (n counts saves) to the last
+    // NAND page and the last SD sector, as the guest might. Only for test copies of sessions.
+    void testWrites(commands::Context& ctx) {
+        const std::string mark = "FROND-BG-MARK-" + std::to_string(++testMarks) + ".";
+        if (auto* chip = ctx.soc->GetNand(); chip && nandRawBytes(chip)) {
+            std::vector<uint8_t> page(nandPageBytes(chip), 0xff);
+            std::memcpy(page.data(), mark.data(), mark.size());
+            const bool ok = nandWriteRawPage(chip, uint32_t(nandRawBytes(chip) / page.size() - 1), page.data());
+            std::cerr << "save test: NAND " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
+        if (sdCardInitialized() && sdCardSectorCount()) {
+            std::vector<uint8_t> sector(SD_SECTOR_SIZE, 0);
+            std::memcpy(sector.data(), mark.data(), mark.size());
+            const bool ok = sdCardWrite(uint32_t(sdCardSectorCount() - 1), sector.data());
+            std::cerr << "save test: SD " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
+    }
+    unsigned testMarks{};
     // Emulation thread: waits for saveJob, finishes the card and NAND files and answers.
     void finishSave(commands::Context& ctx) {
         const auto waited = std::chrono::steady_clock::now();

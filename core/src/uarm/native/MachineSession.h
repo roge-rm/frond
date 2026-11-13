@@ -176,17 +176,10 @@ struct MachineSave {
     std::vector<std::filesystem::path> temps;
     std::vector<std::string> keep;
     SdSave sd, nand;
-    // Store serial and write count at the snapshot (CardBacking::Serial, Changes).
-    std::pair<uint64_t, uint64_t> sdMark, nandMark;
     bool saved{}, published{};
     // With no card journal or copy, finishSdSave is only folder work and runs on the worker.
     bool sdFinished{}, sdFinishOk{};
 };
-
-inline std::pair<uint64_t, uint64_t> nandChangeMark(NAND* chip) {
-    const auto* backing = chip ? nandBacking(chip) : nullptr;
-    return backing ? std::make_pair(backing->Serial(), backing->Changes()) : std::make_pair(uint64_t(0), uint64_t(0));
-}
 
 inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, MachineSave& out,
                              const std::filesystem::path& loadedFrom = {},
@@ -256,8 +249,9 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         std::cerr << "save timing: machine state " << stateMs << " ms, card and NAND step 1 "
                   << saveTimingMs(started) - stateMs << " ms" << std::endl;
     out.keep = slotCards().takenOut;
-    out.sdMark = sdCardChangeMark();
-    out.nandMark = nandChangeMark(soc.GetNand());
+    // From here the guest's card and NAND writes are noted, for step 3 to carry onto the saved files.
+    sdCardTrackWrites(true);
+    if (auto* chip = soc.GetNand()) nandTrackWrites(chip, true);
     return true;
 }
 
@@ -283,6 +277,14 @@ inline void writeMachineSave(MachineSave& save) {
 // from a card step after it. A store the guest wrote since the snapshot stays on its backing.
 inline bool finishMachineSave(MachineSave& save, SoC& soc) {
     const auto& folder = save.folder;
+    // Noting writes ends with this save, whichever way it goes.
+    struct StopTracking {
+        NAND* chip;
+        ~StopTracking() {
+            sdCardTrackWrites(false);
+            if (chip) nandTrackWrites(chip, false);
+        }
+    } stop{soc.GetNand()};
     if (!save.published) {
         abandonSdSave(save.sd);
         abandonSdSave(save.nand);
@@ -291,13 +293,12 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
     }
     const auto finishing = std::chrono::steady_clock::now();
     if (soc.GetNand() && nandRawBytes(soc.GetNand()))
-        frondNand::completeSave(folder, soc.GetNand(), save.nand, nandChangeMark(soc.GetNand()) != save.nandMark);
-    const bool changed = sdCardChangeMark() != save.sdMark;
+        frondNand::completeSave(folder, soc.GetNand(), save.nand);
     bool finished = true;
     if (!save.sdFinished)
-        finished = completeSdSave(folder, save.sd, changed);
+        finished = completeSdSave(folder, save.sd);
     else if (save.sdFinishOk)
-        afterSdPublish(folder, save.sd.kind, changed);
+        afterSdPublish(folder, save.sd.kind);
     else
         std::fprintf(stderr, "frond: saved, but the card file is still to be finished\n");
     if (saveTimingWanted()) std::cerr << "save timing: card and NAND step 3 " << saveTimingMs(finishing) << " ms" << std::endl;

@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <utility>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -77,8 +76,10 @@ void sdCardSetDirty(bool isDirty);
 const char* sdCardGetId();
 
 std::shared_ptr<const CardSnapshot> sdCardSnapshot();
-// The card store's serial and write count (CardBacking), {0, 0} without a card.
-std::pair<uint64_t, uint64_t> sdCardChangeMark();
+// From a background save's snapshot until it finishes, sectors the guest writes are noted, and
+// sdCardAdoptSaved and sdCardAdoptSavedFromRam copy them from the running card into the saved
+// file's backing, which holds the snapshot. Turning it on or off forgets the list.
+void sdCardTrackWrites(bool on);
 bool sdCardRestore(const std::shared_ptr<const CardSnapshot>& snapshot);
 
 #endif  // _SD_CARD_H_
