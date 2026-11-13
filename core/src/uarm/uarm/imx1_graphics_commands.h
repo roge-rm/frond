@@ -19,6 +19,7 @@ class Imx1GraphicsCommands {
     template <class A> void state(A& a) {
         a.DoBuffer32(values.data(), values.size());
         for (auto& k : known) a.DoBool(k);
+        a.Require(!known[idctScanSlot] || values[idctScanSlot] <= 2, "idct scan");
         uint64_t count = batches.size();
         a.Do64(count).Require(count <= 16384, "command batches");
         if (!a.ok()) return;
@@ -100,6 +101,12 @@ class Imx1GraphicsCommands {
         if (other == Imx1GraphicsEngine::player) {
             const auto status = decodePlayer(configuration, eim, memory, take, left, packedMono, fills);
             if (status != A::ok) return status;
+            // The batch's overlay words go to a copy of the display after the queued batches' own, so a word the
+            // display would refuse refuses the whole batch now.
+            auto display = configuration.displayState();
+            for (const auto& queued : batches) displayWords(configuration, display, queued);
+            uint32_t failed = 0;
+            if (displayWords(configuration, display, batch, &failed) != A::ok) return refuse("player-display", failed);
             batch.option = values[0x4a0];
             queuedWords += batch.words;
             batches.push_back(std::move(batch));
@@ -383,6 +390,12 @@ class Imx1GraphicsCommands {
                 const uint64_t sourceLength = !fill.height ? 0 : sourceBytes(fill);
                 if (destinationLength && ((fill.base & 1) || !memory.contains(configuration, eim, fill.base, destinationLength) ||
                     ((fill.keyed || fill.plain || fill.a4) && !memory.contains(configuration, eim, sourceStart(fill), sourceLength)))) return A::sequence;
+            }
+            // The overlay words go to a copy first, so a refused one leaves none of the batch written.
+            {
+                auto display = configuration.displayState();
+                const auto status = displayWords(configuration, display, batch);
+                if (status != A::ok) return status;
             }
             for (const auto& fill : batch.fills) {
                 const auto status = displayFill(fill) ? configuration.ringDisplayWord(fill.base, fill.colour) :
@@ -800,7 +813,7 @@ class Imx1GraphicsCommands {
         // The A4 producer never sends 490 or 491. The policy composes source2 through the mask and reads neither.
         // With 488 bit 19 the mask is the alpha and 484 isn't read: MaskBlendBlt (2009af14) never sets 484, so it
         // holds whatever the last BlendBlt (2009c1a0) left there.
-        if (a4 && (!staleTextColours() || gmc != 0xd798d4df || values[0x4b2] != 0x01cc1300 ||
+        if (a4 && (gmc != 0xd798d4df || values[0x4b2] != 0x01cc1300 ||
             values[0x4b1] != 0x40057d04 || values[0x472] != 0x3f || values[0x471] != 0x1fff1fff ||
             !known[0x48f] || values[0x48f] != 0xffffffff ||
             values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
@@ -1334,6 +1347,21 @@ class Imx1GraphicsCommands {
     // base the offset, colour the value).
     static bool planeFill(const Fill& fill) { return fill.keyed && fill.plain && fill.doubled && !fill.a4; }
     static bool displayFill(const Fill& fill) { return fill.keyed && fill.plain && fill.a4; }
+    // A batch's overlay words (4d8, 43c-450) given to display in order, stopping at the first refused, whose
+    // offset goes in failed.
+    static Imx1BootstrapAccess displayWords(const Imx1Cs5Configuration& configuration, Imx1GraphicsDisplay& display,
+                                            const Batch& batch, uint32_t* failed = nullptr) {
+        for (const auto& fill : batch.fills) {
+            if (!displayFill(fill)) continue;
+            uint32_t value = fill.colour;
+            const auto status = display.playerAccess(configuration.memoryWindows(), 0x16010000 + fill.base, true, value);
+            if (status != Imx1BootstrapAccess::ok) {
+                if (failed) *failed = fill.base;
+                return status;
+            }
+        }
+        return Imx1BootstrapAccess::ok;
+    }
     // An IDCT block (macroblock): 8 by 8 bytes at base, pitch apart, from the residual in pixels (none for no
     // coefficients) and the sources: sourceBase and colour the two references' first bytes, sourcePitch their
     // pitches (first low, second high), sourceX bits 0-1 and 2-3 their half pixel steps (x, y), bit 4 both

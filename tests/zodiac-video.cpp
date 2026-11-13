@@ -152,6 +152,12 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
     assert(load(state, eim, 0x43c) != 0x900040);
     assert(state.advanceCpuCycles(uint32_t(commands.duration())) && commands.complete(state, eim, memory) == A::ok);
     assert(load(state, eim, 0x43c) == 0x900040);
+    // A display word the display refuses (a Y offset past 24 bits) refuses the whole batch at the 220 write,
+    // and the plane stretch before it in the batch writes nothing.
+    for (uint32_t x = 0; x < 6; ++x) poke(0x900100 + x, 1, 0xee);
+    assert(submit(join({stretch(0, 6, 2, 0x00800080), reg(0x136, 0x78), reg(0x10f, 0x1000000), reg(0x136, 0x7b)}),
+                  false) == A::sideEffect);
+    for (uint32_t x = 0; x < 6; ++x) assert(peek(0x900100 + x) == 0xee);
 
     // An intra macroblock with only DC coefficients: luma blocks 100 to 103, U 50, V 60. Y at a00000 pitch 16,
     // U at a00100 and V at a00200 pitch 8.
@@ -204,6 +210,14 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
     auto badPlane = inter(0);
     badPlane[13] = 0x34a00901;
     assert(submit(macroblock(badPlane)) == A::sideEffect);
+    // A display word the display took at the 220 write but refuses when the engine reaches it (the player's
+    // own transaction closed in between) leaves the batch unwritten, the plane stretch before it as well.
+    for (uint32_t x = 0; x < 6; ++x) poke(0x900100 + x, 1, 0xee);
+    assert(put(state, eim, 0x4d8, 0x78) == A::ok);
+    assert(submit(join({stretch(0, 6, 2, 0x00800080), reg(0x10f, 0x900040)}), false) == A::ok);
+    assert(put(state, eim, 0x4d8, 0x7b) == A::ok);
+    assert(state.advanceCpuCycles(uint32_t(commands.duration())) && commands.complete(state, eim, memory) == A::sequence);
+    for (uint32_t x = 0; x < 6; ++x) assert(peek(0x900100 + x) == 0xee);
     std::printf("PASS: player ring NOPs, register writes and saved word reads, plane stretch, ring overlay flip, "
                 "intra and half pixel inter IDCT macroblocks, refusals\n");
 }

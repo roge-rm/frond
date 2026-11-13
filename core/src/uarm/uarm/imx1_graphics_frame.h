@@ -70,27 +70,28 @@ class Imx1GraphicsFrame {
             enabled = valid = pending = acquired = false;
             return true;
         }
+        Imx1GraphicsDisplay::Surface candidate;
+        if (!display.surface(candidate)) return false;
         Imx1GraphicsDisplay::Overlay overlay;
-        const bool overlaid = display.overlay(configuration.memoryWindows(), overlay);
+        bool overlaid = display.overlay(configuration.memoryWindows(), overlay);
+        const uint8_t* planes[3] = {};
+        // An overlay that doesn't fit the graphic plane or whose planes can't be read is left out, and the
+        // graphic plane still shows.
+        if (overlaid && (overlay.x + overlay.width > candidate.width || overlay.y + overlay.height > candidate.height))
+            overlaid = false;
+        for (unsigned plane = 0; overlaid && plane < 3; ++plane) {
+            unsigned bank = 0;
+            uint32_t offset = 0;
+            planes[plane] = memory.gpuSpan(configuration, eim, overlay.planes[plane].rangeBase,
+                                           overlay.planes[plane].rangeBytes, bank, offset);
+            if (!planes[plane]) overlaid = false;
+        }
         // The overlay's planes aren't dirty tracked, so each new frame with it shown is read whole, and so is the
         // first one after it goes, which may leave rows the graphic plane never dirties.
         const bool wasOverlaid = lastRevision & overlaidBit;
         const bool full = !valid || !enabled || display.revision() != (lastRevision & ~overlaidBit) ||
                           (overlaid && display.frameNumber() != lastFrame) || (wasOverlaid && !overlaid);
         if (!full && display.frameNumber() == lastFrame) return true;
-        Imx1GraphicsDisplay::Surface candidate;
-        if (!display.surface(candidate)) return false;
-        const uint8_t* planes[3] = {};
-        if (overlaid) {
-            if (overlay.x + overlay.width > candidate.width || overlay.y + overlay.height > candidate.height) return false;
-            for (unsigned plane = 0; plane < 3; ++plane) {
-                unsigned bank = 0;
-                uint32_t offset = 0;
-                planes[plane] = memory.gpuSpan(configuration, eim, overlay.planes[plane].rangeBase,
-                                               overlay.planes[plane].rangeBytes, bank, offset);
-                if (!planes[plane]) return false;
-            }
-        }
         unsigned rangeBank = 0;
         uint32_t rangeOffset = 0;
         const uint8_t* range = memory.gpuSpan(configuration, eim, candidate.rangeBase, candidate.rangeBytes, rangeBank,

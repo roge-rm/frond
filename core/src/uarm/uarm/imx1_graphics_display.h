@@ -368,6 +368,10 @@ class Imx1GraphicsDisplay {
         uint64_t clockPeriod = 0;
         if ((stagedWord(0x414) & 0x1800000) && (!timingKnown || !timing(staged, clockPeriod))) return A::sideEffect;
         if (requested && !decode(windows, candidate, period)) return A::sideEffect;
+        // A shown overlay has to fit inside the graphic plane it's composited onto.
+        if (requested && shown(stagedWord(0x434)) &&
+            (overlayCandidate.x + overlayCandidate.width > candidate.width ||
+             overlayCandidate.y + overlayCandidate.height > candidate.height)) return A::sideEffect;
         submitted = staged;
         submittedSurface = candidate;
         submittedEnabled = requested;
