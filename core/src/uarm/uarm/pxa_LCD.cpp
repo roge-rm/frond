@@ -553,15 +553,16 @@ static bool pxaLcdPrvOverlayPlane(struct PxaLcd *lcd, unsigned ch, uint32_t byte
 
 static inline uint8_t pxaLcdPrvClamp8(int32_t v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 
-// Full-range BT.601 as in JFIF, the mapping the Zire 72's camera (pxa27x_QCI) encodes with,
-// in 16.16 fixed point.
+// CCIR 601-2 studio range as in the PXA27x manual 7.4.9.2 (Equation 7-1): K1-K5 / 256 in
+// 16.16 fixed point, saturated to 0-255. Full-range input, like the Zire 72 camera's, comes out
+// with more contrast, as on the hardware.
 static inline uint32_t pxaLcdPrvYCbCr(int32_t y, int32_t cb, int32_t cr) {
-    y <<= 16;
+    y = (y - 16) * 76309;
     cb -= 128;
     cr -= 128;
-    const uint8_t r = pxaLcdPrvClamp8((y + 91881 * cr + 32768) >> 16);
-    const uint8_t g = pxaLcdPrvClamp8((y - 22554 * cb - 46802 * cr + 32768) >> 16);
-    const uint8_t b = pxaLcdPrvClamp8((y + 116130 * cb + 32768) >> 16);
+    const uint8_t r = pxaLcdPrvClamp8((y + 104597 * cr + 32768) >> 16);
+    const uint8_t g = pxaLcdPrvClamp8((y - 25675 * cb - 53279 * cr + 32768) >> 16);
+    const uint8_t b = pxaLcdPrvClamp8((y + 132201 * cb + 32768) >> 16);
     return 0xff000000 | (b << 16) | (g << 8) | r;
 }
 
