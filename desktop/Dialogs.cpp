@@ -41,11 +41,11 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     std::stable_sort(sorted.begin(), sorted.end(), [](Device a, Device b) {
         return QString::localeAwareCompare(frondFirmware::deviceName(a), frondFirmware::deviceName(b)) < 0;
     });
-    // The Zodiac is tagged Experimental; the item's data stays the plain id.
+    // The Zodiac is tagged Work in progress; the item's data stays the plain id.
     for (auto d : sorted) {
         const auto id = frondFirmware::deviceId(d);
         const auto name = frondFirmware::deviceName(d);
-        device->addItem(id == QLatin1String("tapwave-zodiac-2") ? tr("%1 · Experimental").arg(name) : name, id);
+        device->addItem(id == QLatin1String("tapwave-zodiac-2") ? tr("%1 · Work in progress").arg(name) : name, id);
     }
     device->setCurrentIndex(std::max(0, device->findData(frondFirmware::deviceId(preselect))));
     form->addRow(tr("Device"), device);

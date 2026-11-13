@@ -16,13 +16,13 @@ class DeviceTest {
     }
 
     @Test
-    fun onlyTheZodiacIsTaggedExperimental() {
+    fun onlyTheZodiacIsTaggedWorkInProgress() {
         for (device in Device.entries) {
             val tagged = device.id == Device.ZODIAC_ID
             assertEquals(device.id, tagged, device.experimental)
-            assertEquals(device.id, if (tagged) "${device.label} · Experimental" else device.label, device.listLabel)
+            assertEquals(device.id, if (tagged) "${device.label} · Work in progress" else device.label, device.listLabel)
         }
-        assertEquals("Tapwave Zodiac 2 · Experimental", Device.byId(Device.ZODIAC_ID)!!.listLabel)
+        assertEquals("Tapwave Zodiac 2 · Work in progress", Device.byId(Device.ZODIAC_ID)!!.listLabel)
     }
 
     @Test

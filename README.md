@@ -4,7 +4,7 @@ Frond is a Palm OS emulator for Linux and Android, for running and writing Palm 
 
 Frond runs Palm OS devices from the Palm IIIx to the T|X, the Sony CLIÉs, the AlphaSmart Dana and the Tapwave Zodiac, with sound, memory cards, infrared, Bluetooth, HotSync, printing, networking and saved sessions. The table below shows what each one has. Some peripherals are still in progress and more devices are on the way.
 
-Tapwave Zodiac support is experimental and in progress.
+Tapwave Zodiac support is a work in progress and will keep improving.
 
 It's built on [CloudpilotEmu](https://github.com/cloudpilot-emu/cloudpilot-emu) and [uARM](https://github.com/uARM-Palm/uARM). You need your own firmware for each device, none is included.
 
