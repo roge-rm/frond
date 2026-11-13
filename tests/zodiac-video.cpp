@@ -242,6 +242,30 @@ static void playerEngine(Imx1Cs5Configuration& state, const Imx1Eim& eim, Imx1Gr
     assert(peek(0xa02000) == 0 && peek(0xa02000 + 7 * 16 + 1) == (50 + 51 + 60 + 61 + 2) / 4);
     assert(peek(0xa02000 + 15) == (15 + 25 + 1) / 2 && peek(0xa02000 + 15 * 16) == 150);
     assert(peek(0xa02100) == 0 && peek(0xa02200) == (108 + 109 + 115 + 116 + 2) / 4 && peek(0xa02200 + 7) == (114 * 2 + 121 * 2 + 2) / 4);
+    // Two references (mode c): REF4-6 the same pictures, the second source the first mirrored past the far
+    // edges; the two predictions average rounding up.
+    assert(submit(join({reg(0x431, 16 << 19 | 0xa0100), reg(0x432, 8 << 19 | 0xa0110), reg(0x433, 8 << 19 | 0xa0114)})) == A::ok);
+    const uint32_t seconds[6] = {64 << 16 | 62, 0xfffe0026, 0xfff00000, 2 << 16 | 0xfffe, 36 << 16 | 2, 0xfff6fffa};
+    std::vector<uint32_t> bothBlock = {6, 0x20c, 0x2da03000};
+    const uint32_t positions[6] = {0, 8 << 16, 8, 8 << 16 | 8, 0, 0};
+    for (uint32_t block = 0; block < 6; ++block) {
+        bothBlock.insert(bothBlock.end(), {positions[block], edges[block], seconds[block]});
+        if (block == 4) bothBlock.push_back(0x30a03101);
+        if (block == 5) bothBlock.push_back(0x34a03202);
+    }
+    assert(submit(macroblock(bothBlock)) == A::ok);
+    for (uint32_t block = 0; block < 6; ++block)
+        for (int32_t y = 0; y < 8; ++y)
+            for (int32_t x = 0; x < 8; ++x) {
+                const uint32_t bx = (positions[block] >> 16) & 0xffff, by = positions[block] & 0xffff;
+                const uint32_t pitch = block < 4 ? 16 : 8;
+                const int32_t last = block < 4 ? 15 : 7;
+                const uint32_t reference = block < 4 ? 0xa01000 : block == 4 ? 0xa01100 : 0xa01140;
+                const uint32_t to = (block < 4 ? 0xa03000 : block == 4 ? 0xa03100 : 0xa03200) + (by + y) * pitch + bx + x;
+                const uint32_t first = predicted(reference, pitch, edges[block], x, y, last, last);
+                const uint32_t second = predicted(reference, pitch, seconds[block], x, y, last, last);
+                assert(peek(to) == (first + second + 1) / 2);
+            }
     // With the scissor past the picture, rows past it read on: row 16 is U's first two rows.
     assert(submit(join({reg(0x471, 0x1fff1fff), macroblock(edgeBlock)})) == A::ok);
     checkEdges(0xfff);

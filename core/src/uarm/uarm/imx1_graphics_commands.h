@@ -37,6 +37,9 @@ class Imx1GraphicsCommands {
                 a.Do32(f.paint).DoBool(f.doubled).DoBool(f.keyEqual).DoBool(f.painted);
                 a.DoVector(f.pixels, 1 << 20);
                 a.Require(f.pixels.empty() || f.pixels.size() >= uint64_t(f.width) * f.height, "command pixels");
+                // Inter IDCT fills carry invert as their layout mark; one saved before it read its references
+                // differently and can't continue.
+                a.Require(!idctFill(f) || (f.sourceX & 64) || f.invert, "IDCT fill layout");
                 if (!a.ok()) return;
             }
         }
@@ -372,9 +375,10 @@ class Imx1GraphicsCommands {
                     bool inside = memory.contains(configuration, eim, fill.base, 7 * fill.pitch + 8);
                     for (unsigned reference = 0; reference < ((fill.sourceX & 16) ? 2u : 1u) && !(fill.sourceX & 64); ++reference) {
                         const uint32_t pitch = (fill.sourcePitch >> (reference * 16)) & 0xffff;
-                        const uint32_t halfX = (fill.sourceX >> (reference * 2)) & 1, halfY = (fill.sourceX >> (reference * 2 + 1)) & 1;
-                        inside = inside && memory.contains(configuration, eim, reference ? fill.colour : fill.sourceBase,
-                                                           uint64_t(7 + halfY) * pitch + 8 + halfX);
+                        const int32_t lastX = idctLast(fill, reference ? fill.paint : fill.sourceY, false);
+                        const int32_t lastY = idctLast(fill, reference ? fill.paint : fill.sourceY, true);
+                        inside = inside && pitch && memory.contains(configuration, eim, reference ? fill.colour : fill.sourceBase,
+                                                                    uint64_t(lastY) * pitch + uint64_t(lastX) + 1);
                     }
                     if (!inside) return A::sequence;
                     continue;
@@ -1231,7 +1235,7 @@ class Imx1GraphicsCommands {
         if ((mode & ~0x800000ffu) != 0x200 || (!intra && (kind < 0xb || kind > 0xe))) return refuse("idct-mode", mode);
         if (count != (both ? 6u : 5u) || blocks != (intra || kind == 0xd || kind == 0xe)) return refuse("idct-mode", count);
         if (!known[0x402] || !values[0x402] || values[0x402] > 4096) return refuse("idct-pitch", values[0x402]);
-        if (!known[0x471]) return refuse("idct-scissor", 0x471);
+        if (!intra && !known[0x471]) return refuse("idct-scissor", 0x471);
         uint32_t planes[3] = {}, entries[6][3] = {};
         const uint32_t perBlock = intra ? 2 : both ? 3 : 2;
         if (!next(planes[0])) return refuse("idct-packet", 7);
@@ -1285,6 +1289,7 @@ class Imx1GraphicsCommands {
                 }
                 if (both) fill.sourceX |= 1 << 4;
                 fill.sourceX |= uint32_t(!plane) << 7 | chromaX << 8 | chromaY << 20;
+                fill.invert = true;
             }
             if (rounding) fill.sourceX |= 1 << 5;
             if (coded[block]) fill.pixels.assign(residual[block], residual[block] + 64);
@@ -1378,8 +1383,16 @@ class Imx1GraphicsCommands {
     // coefficients) and the references: sourceBase and colour their first bytes, sourcePitch their pitches
     // (first low, second high), sourceY and paint the block's source in each (x << 16 | y, quarter pixels,
     // signed). sourceX: bit 4 both references, bit 5 the rounding control, bit 6 intra, bit 7 luma, bits 8-19
-    // and 20-31 the source scissor's last chroma column and row.
+    // and 20-31 the source scissor's last chroma column and row. invert marks an inter fill in this layout.
     static bool idctFill(const Fill& fill) { return fill.keyed && fill.plain && !fill.doubled && !fill.a4; }
+    // The last column (or row) an inter IDCT fill reads from a reference at source, clamped as completeIdctFill does.
+    static int32_t idctLast(const Fill& fill, uint32_t source, bool row) {
+        const int32_t chroma = row ? int32_t(fill.sourceX >> 20) : int32_t((fill.sourceX >> 8) & 0xfff);
+        const int32_t limit = (fill.sourceX & 128) ? chroma * 2 + 1 : chroma;
+        const int32_t start = row ? int16_t(source) >> 2 : int16_t(source >> 16) >> 2;
+        const int32_t half = row ? (source >> 1) & 1 : (source >> 17) & 1;
+        return std::min(std::max(start + 7 + half, 0), limit);
+    }
     static Imx1BootstrapAccess completeIdctFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                                 Imx1GraphicsMemory& memory, const Fill& fill) {
         using A = Imx1BootstrapAccess;
