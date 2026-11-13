@@ -2926,7 +2926,7 @@ class Runner {
         if (!keepReplay) replay=Replay();
         if(deviceTypeIsDana5(profile->deviceType)) {
             CancelDanaPointers();danaScreen.Clear();danaReleases.clear();
-            danaInput.Clear();danaHostKeys.Clear();EmHAL::ReleaseDanaInput(cancel);
+            danaInput.Clear();danaHostKeys.Clear();danaRepeats.Clear();EmHAL::ReleaseDanaInput(cancel);
         }
         if (penDown) gSession->QueuePenEvent(PenEvent::up());
         penDown = false;
@@ -3045,7 +3045,11 @@ class Runner {
                         }
                     }
                     if(deviceTypeIsDana5(profile->deviceType)) {
-                        if(event.key.repeat) break;
+                        // SDL on X11 can drop a quick key's release and report its next press as a repeat
+                        // when a burst shares a timestamp. A repeat sooner than any real auto-repeat
+                        // delay is that press, so it goes in as a release and a press.
+                        const bool retap=keyDown && danaRepeats.Retap(event.key.keysym.scancode,event.key.repeat!=0,SDL_GetTicks());
+                        if(event.key.repeat && !retap) break;
                         string name=SDL_GetScancodeName(event.key.keysym.scancode);
                         for(char& c:name) c=char(std::tolower(static_cast<unsigned char>(c)));
                         switch(event.key.keysym.scancode) {
@@ -3059,6 +3063,7 @@ class Runner {
                             case SDL_SCANCODE_APPLICATION: name="apps"; break;
                             default: break;
                         }
+                        if(retap) ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,false,name));
                         ApplyDanaHost(danaHostKeys.Event(event.key.keysym.scancode,keyDown,name));
                         break;
                     }
@@ -3133,6 +3138,7 @@ class Runner {
     map<pair<int64_t,int64_t>,DanaPointer> danaPointers;
     map<pair<int,uint8_t>,DanaScan5> danaReleases;
     DanaHostKeys danaHostKeys;
+    DanaRepeats danaRepeats;
     // Fingers: held buttons and the pen, besides the mouse.
     struct TouchHost : TouchSink68k {
         explicit TouchHost(Runner& runner) : runner(runner) {}
