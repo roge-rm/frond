@@ -39,11 +39,11 @@ The Fast engine builds Dynarmic from `vendor/dynarmic` (needs Ninja and Boost). 
 
 ## Rerunning only what changed
 
-Every `make test-NAME` records its result in `build/check-passes.tsv` (name, commit, time, pass or fail, tree state, seconds). `make recheck-list` shows the checks that need running and why: never passed, failed last time, or a file they cover changed since the commit they passed at. `make recheck` runs those one by one and records them. Run it as `heavy build make recheck`, and limit it with `CHECKS="test-zodiac-* test-cpu"`.
+Every `make test-NAME` records its result in `build/check-passes.tsv` (name, commit, time, pass, fail or skip, tree state, seconds). `make recheck-list` shows the checks that need running and why: never passed, failed or skipped last time, or a file they cover changed since the commit they passed at. `make recheck` runs those one by one and records them. Run it as `heavy build make recheck`, and limit it with `CHECKS="test-zodiac-* test-cpu"`.
 
 - Uncommitted and untracked files count as changed. A pass on a dirty tree only counts while the tree stays exactly as it was, so commit before checking if you want the pass to last.
 - `tests/check-paths.tsv` maps checks to the paths they cover: the first rule that fits a check gives its paths, `*` rules and `tests/NAME*` are added to all. A check with no rule reruns every time. The Makefile, `core/src/common/` and the test helpers are in every check's paths. When you add a device or a shared folder, add it there.
-- A skipped check (no firmware) records a pass. `make test`'s own lines after its target list (audio-metrics, audio-timing, tx-baseline, menu-response and the small compiled tests) aren't recorded or rechecked.
+- A check that prints SKIP or SKIPPED (no firmware, no session, no tool) records skip and reruns like one that never passed. A target counts as passed when all its recipe lines passed and make wasn't interrupted with Ctrl-C.
 
 ## Real-firmware checks
 

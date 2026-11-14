@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Record which checks passed and rerun only the ones whose source paths changed.
 
-  check-record.py record NAME STATUS SECONDS   (called by tests/timed-shell.sh)
+  check-record.py record NAME STATUS SECONDS   (STATUS is pass, fail or skip)
+  check-record.py line MAKEPID NAME STATUS SECONDS
+                                               (called by tests/timed-shell.sh for each recipe line;
+                                               a watcher records the target when make exits)
   check-record.py list [GLOB...]               what `make recheck` would run, and why
   check-record.py recheck [GLOB...]            run those, one `make NAME` each, and record
 
 The record is build/check-passes.tsv, one line per run: name, commit, unix time, status
-(pass or fail), tree (clean, or the hash of the uncommitted changes), seconds. The last line for
+(pass, fail or skip), tree (clean, or the hash of the uncommitted changes), seconds. The last line for
 a check counts. The path map is tests/check-paths.tsv. A check that isn't in the map reruns every
 time. Uncommitted and untracked files count as changed.
 """
@@ -14,8 +17,10 @@ import fnmatch
 import hashlib
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -61,6 +66,62 @@ def record(name, status, seconds):
     line = "\t".join([name, head(), str(int(time.time())), status, tree_state(), str(int(float(seconds)))]) + "\n"
     with open(RECORD, "a") as f:
         f.write(line)
+
+
+STATE = os.path.join(ROOT, "build", "check-state")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def line_result(makepid, name, status, seconds):
+    """One recipe line finished. The first line of a target starts the watcher."""
+    os.makedirs(STATE, exist_ok=True)
+    path = os.path.join(STATE, "%s.%s" % (makepid, name))
+    watcher = 0
+    try:
+        with open(path) as f:
+            watcher = int(f.readline().split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    if not (watcher and alive(watcher)):
+        with open(path, "w") as f:
+            f.write("0\n")
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "watch", str(makepid), name, path],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(path, "w") as f:
+            f.write("%d\n" % p.pid)
+    with open(path, "a") as f:
+        f.write("%s %s\n" % (status, int(float(seconds))))
+
+
+def watch(makepid, name, path):
+    """Waits for make to exit, then records the target unless a line failed (already recorded) or
+    Ctrl-C or a kill reached this process too (it shares make's process group)."""
+    stopped = []
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *a: stopped.append(1))
+    while alive(makepid):
+        time.sleep(0.2)
+    time.sleep(0.2)
+    lines = []
+    try:
+        with open(path) as f:
+            lines = [l.split() for l in f.read().splitlines()[1:]]
+        os.unlink(path)
+    except OSError:
+        pass
+    results = [l[0] for l in lines if len(l) == 2]
+    if stopped or not results or "fail" in results:
+        return
+    record(name, "skip" if "skip" in results else "pass", sum(int(l[1]) for l in lines if len(l) == 2))
 
 
 def last_records():
@@ -156,6 +217,8 @@ def plan(patterns):
         rec = last.get(name)
         if rec is None:
             todo.append((name, "never passed"))
+        elif rec[3] == "skip":
+            todo.append((name, "skipped last time"))
         elif rec[3] != "pass":
             todo.append((name, "failed last time"))
         elif rec[4] != "clean":
@@ -180,6 +243,12 @@ def main(argv):
     if len(argv) >= 5 and argv[1] == "record":
         record(argv[2], argv[3], argv[4])
         return 0
+    if len(argv) >= 6 and argv[1] == "line":
+        line_result(int(argv[2]), argv[3], argv[4], argv[5])
+        return 0
+    if len(argv) >= 5 and argv[1] == "watch":
+        watch(int(argv[2]), argv[3], argv[4])
+        return 0
     if len(argv) >= 2 and argv[1] in ("list", "recheck"):
         todo = plan(argv[2:])
         for name, why in todo:
@@ -190,8 +259,13 @@ def main(argv):
         failed = []
         for name, _ in todo:
             start = time.time()
-            rc = subprocess.run(["make", "-C", ROOT, name]).returncode
-            record(name, "pass" if rc == 0 else "fail", time.time() - start)
+            fd, skipfile = tempfile.mkstemp(prefix="check-skip-")
+            os.close(fd)
+            env = dict(os.environ, FROND_NO_RECORD="1", FROND_SKIP_FILE=skipfile)
+            rc = subprocess.run(["make", "-C", ROOT, name], env=env).returncode
+            skipped = os.path.getsize(skipfile) > 0
+            os.unlink(skipfile)
+            record(name, "fail" if rc else "skip" if skipped else "pass", time.time() - start)
             if rc:
                 failed.append(name)
         print("recheck: %d run, %d failed%s" % (len(todo), len(failed), ": " + " ".join(failed) if failed else ""))
