@@ -9,7 +9,8 @@ session isn't given is skipped.
   BIKE_REPLAY, FRONDBENCH_REPLAY    another replay for a workload, like frondbench-run.replay for a
                                     core before patch 0414 (T|X touch on the ROM's default calibration)
   SPEED_MIPS                        MIPS cap, default 100
-  SPEED_BENCH                       another benchmark-replay binary
+  SPEED_BENCH                       another benchmark-replay binary (default: the clean-tree commit build
+                                    from tools/commit-build.sh when it exists, else build/benchmark-replay)
   SPEED_HOST                        an ssh destination (user@host) to run on instead of here, in ~/frond-speed/
   SPEED_SSH_KEY                     optional ssh key for SPEED_HOST
   SPEED_REAL_MS                     optional FrondBench times from a real device, like Integer=1000,Memory=500,
@@ -47,7 +48,24 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BENCH = Path(os.environ.get('SPEED_BENCH') or ROOT / 'build/benchmark-replay').absolute()
+
+
+def commit_build():
+    """The shared build folder for HEAD (tools/commit-build.sh) when the tree is clean and it exists."""
+    try:
+        git = lambda *a: subprocess.run(['git', '-C', str(ROOT), *a], capture_output=True, text=True, check=True).stdout.strip()
+        if git('status', '--porcelain'):
+            return None
+        common = Path(git('rev-parse', '--git-common-dir'))
+        common = common if common.is_absolute() else ROOT / common
+        folder = common.resolve().parent / 'build' / ('out-' + git('rev-parse', '--short=10', 'HEAD'))
+        return folder if (folder / 'COMMIT').exists() else None
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+COMMIT_BUILD = commit_build()
+BENCH = Path(os.environ.get('SPEED_BENCH') or (COMMIT_BUILD / 'benchmark-replay' if COMMIT_BUILD else ROOT / 'build/benchmark-replay')).absolute()
 FIXTURES = ROOT / 'tests/fixtures'
 HOST = os.environ.get('SPEED_HOST', '')
 KEY = os.environ.get('SPEED_SSH_KEY', '')
@@ -278,7 +296,7 @@ class Lock:
             self.file.close()
 
 
-CORE_68K = ROOT / 'out/frond-68k'
+CORE_68K = COMMIT_BUILD / 'frond-68k' if COMMIT_BUILD else ROOT / 'out/frond-68k'
 
 
 def run_68k(r, path, out, exclusive):

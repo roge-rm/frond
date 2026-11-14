@@ -45,6 +45,14 @@ Every `make test-NAME` records its result in `build/check-passes.tsv` (name, com
 - `tests/check-paths.tsv` maps checks to the paths they cover: the first rule that fits a check gives its paths, `*` rules and `tests/NAME*` are added to all. A check with no rule reruns every time. The Makefile, `core/src/common/` and the test helpers are in every check's paths. When you add a device or a shared folder, add it there.
 - A check that prints SKIP or SKIPPED (no firmware, no session, no tool) records skip and reruns like one that never passed. A target counts as passed when all its recipe lines passed and make wasn't interrupted with Ctrl-C.
 
+## Binaries per commit
+
+`tools/commit-build.sh` builds `frond`, `frond-68k` and `benchmark-replay` once for the commit you're on and keeps them in `build/out-<10 hex of the commit>/` of the main checkout, so every worktree and agent testing that commit uses the same folder. It prints the folder; a second call finds it and builds nothing. Two callers for one commit take a lock, and the folder is renamed into place when it's whole. A tree with uncommitted changes is built in the normal places, with a message, and shares nothing.
+
+- `tools/commit-build.sh tinydeck` copies the folder to `/var/lib/lab/frond-speed/out-<hash>/` once (after checking the SSD is mounted) and prints that path; a second call does nothing.
+- `tools/commit-build.sh list` shows the folders on both sides, and `prune N [--tinydeck] [--dry-run]` keeps the newest N plus the current commit's and skips any folder a process has open. Nothing is deleted without it.
+- `tools/speed-check.py` uses the folder for the current commit when the tree is clean and it exists.
+
 ## Real-firmware checks
 
 All of these use your own firmware and a ready session, and say what they skipped. Palm OS SDK, `pilrc` and the m68k and ARM toolchains are needed to build the probe apps (`python3 tools/build-palm-probe.py --probe NAME --sdk DIR`, probes are listed in its `--help`). Probe apps and sessions stay under `build/` and are never committed.
