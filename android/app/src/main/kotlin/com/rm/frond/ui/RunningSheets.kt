@@ -21,7 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -215,7 +217,7 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
                 },
                 supportingContent = if (model.state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
                 leadingContent = {
-                    Icon(painterResource(cardIconRes(RunningSheets.cardIcon(model.state, shown.linked != null))), contentDescription = null)
+                    Marker(if (model.state == SdCard.State.INSERTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
                 },
                 colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                 modifier = if (usable) Modifier.clickableRow { model.openPicker() } else Modifier,
@@ -225,19 +227,20 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
             headlineContent = { Text(if (shown.linkedHolder == null) "${shown.linked} is free" else "${shown.linked} is in ${shown.linkedHolder}") },
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
-        CardRow.INSERT_LINKED -> SheetAction("Insert") { model.insertLinked() }
-        CardRow.FILES -> SheetAction("Files…") { if (model.state == SdCard.State.INSERTED) confirmFiles = true else model.openFiles() }
-        CardRow.EJECT -> SheetAction("Eject") { confirmEject = true }
-        CardRow.INSERT -> SheetAction("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
-        CardRow.EXPORT_IMAGE -> SheetAction("Export image") {
+        CardRow.INSERT_LINKED -> SheetAction("Insert", R.drawable.ic_card_in) { model.insertLinked() }
+        CardRow.FILES -> SheetAction("Files…", R.drawable.ic_folder) { if (model.state == SdCard.State.INSERTED) confirmFiles = true else model.openFiles() }
+        CardRow.EJECT -> SheetAction("Eject", R.drawable.ic_card_ejected) { confirmEject = true }
+        CardRow.INSERT -> SheetAction("Insert", R.drawable.ic_card_in) { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
+        CardRow.EXPORT_IMAGE -> SheetAction("Export image", R.drawable.ic_export) {
             saveImage.launch(if (model.memoryStickPro) "Memory Stick Pro.img" else if (device.memoryStick) "Memory Stick.frondms" else "SD card.img")
         }
-        CardRow.TRY_AGAIN -> SheetAction("Try again") { model.refresh() }
+        CardRow.TRY_AGAIN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
         CardRow.WRITE_PROTECT -> {
             val on = model.writeProtected
             val usable = on != null && model.busy == null && model.state == SdCard.State.EJECTED
             ListItem(
                 headlineContent = { Text("Write protected") },
+                leadingContent = { Icon(Icons.Default.Lock, contentDescription = null) },
                 trailingContent = {
                     Switch(checked = on == true, enabled = usable, onCheckedChange = { value ->
                         model.job("Changing protection", "Couldn't change write protection") { it.protect(value) }
@@ -248,7 +251,7 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
         }
     }
     Header("Internal", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
-    SheetAction("Files…") { model.openInternal() }
+    SheetAction("Files…", R.drawable.ic_folder) { model.openInternal() }
     if (confirmEject || confirmFiles) CardEjectDialog(model, confirmFiles) { confirmEject = false; confirmFiles = false }
 }
 
@@ -315,9 +318,14 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
 }
 
 @Composable
-private fun SheetAction(label: String, onClick: () -> Unit) {
+private fun SheetAction(label: String, iconRes: Int? = null, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(label) },
+        leadingContent = when {
+            iconRes != null -> ({ Icon(painterResource(iconRes), contentDescription = null) })
+            icon != null -> ({ Icon(icon, contentDescription = null) })
+            else -> null
+        },
         colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickableRow(onClick = onClick),
     )
