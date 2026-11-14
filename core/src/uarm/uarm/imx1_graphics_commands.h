@@ -278,7 +278,21 @@ class Imx1GraphicsCommands {
                     // side by side on one surface share no byte and are drawn.
                     const Area from{address, uint64_t(pitch) * 2, uint64_t(width) * 2, height};
                     const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
-                    if (from.overlaps(to)) return refuse("copy-overlap", copy / 3);
+                    // A plain copy reads only the source pixels under the clipped destination.
+                    const Area read = stretch ? from : Area{fill.sourceBase, fill.sourcePitch, uint64_t(fill.width) * 2, fill.height};
+                    if (read.overlaps(to)) {
+                        // ASSUMPTION "overlapping copy": a single plain copy onto itself on one surface gives what
+                        // reading the whole source first would (memmove), in any direction. The ROM's copy helper
+                        // sends DP_CNTL 3f (top to bottom, left to right) whichever way it moves, and the Network
+                        // panel moves 122 rows of the screen 18 rows down with it. Done as pieces that share no pixel.
+                        const size_t before = fills.size();
+                        if (!plain || copyWords != 3 || stretch || !splitOverlap(fill, values[0x401], fills)) {
+                            fills.resize(before);
+                            return refuse("copy-overlap", copy / 3);
+                        }
+                        ticks += uint64_t(fill.width) * fill.height;
+                        continue;
+                    }
                     if (copyWords != 3) {
                         // The stretch never sends two runs to the same place (its tables partition the
                         // destination), and what the chip does with an overlap is not known. Refused.
@@ -613,6 +627,42 @@ class Imx1GraphicsCommands {
         ++directFillCount;
         return true;
     }
+    // A plain copy whose source and destination share pixels, as pieces that don't, in an order where no piece
+    // reads what an earlier one wrote. A move with a row part goes in pieces of that many whole rows, last rows
+    // first when moving down; one along a row goes in pieces of that many columns, last columns first when moving
+    // right. A move that isn't whole rows needs both rectangles inside the rows of the surface at surface.
+    static bool splitOverlap(const Fill& fill, uint32_t surface, std::vector<Fill>& out) {
+        const int64_t pitch = fill.pitch, width = fill.width, height = fill.height;
+        const int64_t move = int64_t(fill.base) - int64_t(fill.sourceBase);
+        if (!width || !height || pitch != int64_t(fill.sourcePitch) || width * 2 > pitch || (move & 1)) return false;
+        int64_t rowMove = move / pitch, columnMove = 0;
+        if (move % pitch) {
+            auto inRow = [&](uint32_t at) { return at >= surface && (at - surface) % pitch + width * 2 <= pitch; };
+            if (!inRow(fill.base) || !inRow(fill.sourceBase)) return false;
+            const int64_t to = int64_t(fill.base) - surface, from = int64_t(fill.sourceBase) - surface;
+            rowMove = to / pitch - from / pitch;
+            columnMove = (to % pitch - from % pitch) / 2;
+        }
+        const bool rows = rowMove != 0;
+        const int64_t step = std::abs(rows ? rowMove : columnMove);
+        if (!step) return false;
+        if (rows ? step >= height : step >= width) {
+            out.push_back(fill);
+            return true;
+        }
+        const int64_t length = rows ? height : width;
+        for (int64_t i = 0; i < length; i += step) {
+            const int64_t size = std::min(step, length - i);
+            const int64_t start = move > 0 ? length - i - size : i;
+            Fill piece = fill;
+            const uint32_t offset = uint32_t(rows ? start * pitch : start * 2);
+            piece.base += offset;
+            piece.sourceBase += offset;
+            (rows ? piece.height : piece.width) = uint32_t(size);
+            out.push_back(std::move(piece));
+        }
+        return true;
+    }
     // The software stretch takes at most 400 hex pixels each way (200b0c10).
     static constexpr uint32_t stretchLimit = 0x400;
     // A rectangle in memory: rows of bytes from base, pitch apart.
@@ -794,8 +844,10 @@ class Imx1GraphicsCommands {
         // The bitmap routine's invert and paint inverse copies (ROP 99 and 33, 2008a7b8) are not drawn.
         if (copy && plain && gmc != 0x5598b4df) return refuse("plain-copy-41b", gmc);
         if (copy && !keyedPaint && values[0x4b2] != 0x00cc0a00) return A::sideEffect;
+        // A copy may also find 4b1 with source type 0, left by the stretch restore as for the host upload above
+        // (seen keyed, in Date Book's Delete Event dialog). The copy GMCs checked above carry source type 3.
         if (copy && (
-                     values[0x4b1] != 0x40030d04 || values[0x472] != 0x3f ||
+                     (values[0x4b1] != 0x40030d04 && values[0x4b1] != 0x40000d04) || values[0x472] != 0x3f ||
                      values[0x471] != 0x1fff1fff)) return A::sideEffect;
         if (plain && (values[0x4b3] != 0xffffffff || values[0x41d] ||
                       values[0x41e] || values[0x30f] != 0x20)) return A::sideEffect;
