@@ -47,7 +47,7 @@ class EInvalidCommand {};
 
 namespace {
     // Holds one unescaped packet plus its terminating 0; replies are built in the same buffer.
-    constexpr size_t PKT_BUF_SIZE = 1024;
+    constexpr size_t PKT_BUF_SIZE = 4096;
     // An m reply is two hex characters per byte.
     constexpr size_t MAX_MEMORY_READ_SIZE = (PKT_BUF_SIZE - 1) / 2;
 
