@@ -210,11 +210,18 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     StateChanged();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
     // a card section puts the card store's card back in when it's the saved card (a session saved with
-    // its card in). Any other card stays out, as a swap: the section is dropped and the card goes in
-    // later as a new one. A state without a card id takes the store's card as the saved one.
+    // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the
+    // saved card taken out, and the card goes in later as a new one. A state without a card id takes
+    // the store's card as the saved one.
     cardSync = true;
     cardSwapped = false;
-    if (cardIn) {
+    if (cardIn && info.cardSection && info.cardIdKnown &&
+        std::strncmp(info.cardId, sdCardGetId(), SD_CARD_ID_MAX_LEN) != 0) {
+        // The card in isn't the saved one, though it took on its card section: out as a swap, and
+        // in again later as a new card.
+        SdEject();
+        cardSwapped = sdCardInitialized();
+    } else if (cardIn) {
         if (!info.cardResumed) vsdReset(vsd, uint32_t(sdCardSectorCount()));
         SyncCard();
     } else {

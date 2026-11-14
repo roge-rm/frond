@@ -25,6 +25,14 @@ class Imx1Mmcsd {
         const bool resuming = resume.valid;
         resume.valid = false;
         if (!resuming && card == slot.card) return true;
+        // A card taken out, or a loaded card section no card takes on.
+        if (!card && (slot.card || resuming)) {
+            slot.card = nullptr;
+            resume.card.clear();
+            pullCard();
+            return false;
+        }
+        resume.pulled = false;
         slot.card = card;
         // Through pointers, so only the code that attaches a card links vSD.
         slot.command = vsdCommand;
@@ -167,7 +175,9 @@ class Imx1Mmcsd {
                 if (!emptySlot) return A::externalInput;
                 if (value != 6) return A::sideEffect;
                 if (!enable || !ready || running || staged != 15) return A::sequence;
-                if (slot.card) return launchCardCommand();
+                // After a card is taken out any command goes out and times out, as to a card that
+                // doesn't answer.
+                if (slot.card || resume.pulled) return launchCardCommand();
                 const uint32_t command = registers[10], format = registers[3];
                 const bool resetCommand = command == 0 && format == 0x80;
                 const bool responseCommand = (command == 55 && format == 1) ||
@@ -202,6 +212,12 @@ class Imx1Mmcsd {
             // RES_FIFO: the response, a halfword a read, first bits first.
             if (write || slot.responseRead >= slot.responseCount) return A::sideEffect;
             value = slot.response[slot.responseRead++];
+            return A::ok;
+        }
+        if (index == 13 && resume.pulled && !write) {
+            // After a card is taken out: a response that came in before still reads.
+            // ASSUMPTION "empty response FIFO reads 0": the manual doesn't give the value; 0, nothing changed.
+            value = slot.responseRead < slot.responseCount ? slot.response[slot.responseRead++] : 0;
             return A::ok;
         }
         if (index == 8 || index >= 13) return A::externalInput;
@@ -242,7 +258,30 @@ class Imx1Mmcsd {
                   (slot.data || (!slot.dataPhase && !slot.dataWaiting && !slot.dataBytes)), "card transfer");
         if (A::loading && a.ok()) { resume.card = std::move(card); resume.valid = true; }
     }
+    // The card was taken out with the slot in use; saved in a section of its own while set.
+    bool cardPulled() const { return resume.pulled; }
+    void setCardPulled(bool pulled) { resume.pulled = pulled; }
+
    private:
+    // The card leaves the slot. A command still on the wire gets no response and ends with
+    // TIME_OUT_RESP, as with no card (20.6). A response already in stays in the FIFO.
+    // ASSUMPTION "data cut short": a data phase under way ends with DATA_TRANS_DONE and TIME_OUT_READ
+    // for a read, WRITE_CRC_ERROR for a write (no CRC status comes back), as a failed card access does.
+    void pullCard() {
+        resume.pulled = true;
+        if (slot.dataPhase || slot.dataWaiting) {
+            remaining = 0;
+            status |= 0x800 | (slot.dataWrite ? 4 : 1);
+            if (!(registers[9] & dataMask())) interrupt = true;
+            endData();
+            return;
+        }
+        if (running && remaining && !stopRemaining) {
+            responseExpected = (registers[3] & 7) != 0;
+            slot.responseCount = slot.responseRead = 0;
+        }
+        endData();
+    }
     // INT_MASK bits of the data phase's end: DATA_TRAN, and WRITE_OP_DONE for a write.
     uint32_t dataMask() const { return slot.dataWrite ? 3 : 1; }
     void endData() {
@@ -268,7 +307,8 @@ class Imx1Mmcsd {
         if (response && !registers[4]) return A::sideEffect;
         if (data && (!registers[6] || registers[6] > 512 || !registers[7])) return A::sideEffect;
         uint8_t reply[17]{};
-        const auto kind = slot.command(slot.card, uint8_t(command), (registers[11] << 16) | registers[12], reply);
+        const auto kind = slot.card ? slot.command(slot.card, uint8_t(command), (registers[11] << 16) | registers[12], reply)
+                                    : SdReplyNone;
         const bool longReply = kind == SdReply136bits;
         const bool answered = kind != SdReplyNone && response && longReply == (response == 2);
         unsigned bits = 48 + ((format & 0x80) ? 80 : 0);
@@ -333,8 +373,9 @@ class Imx1Mmcsd {
     static_assert(sizeof(Slot) == 592, "update stateCard and cardStateVersion");
 #endif
     // A loaded card section's card state, for the next attachCard.
+    // pulled: see cardPulled.
     struct Resume {
-        bool valid = false;
+        bool valid = false, pulled = false;
         std::vector<uint8_t> card;
     } resume;
 

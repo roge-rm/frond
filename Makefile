@@ -900,6 +900,7 @@ test-zodiac-normal-runtime: out/frond
 	./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_CARD=1 ./build/test-zodiac-normal-runtime
+	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.

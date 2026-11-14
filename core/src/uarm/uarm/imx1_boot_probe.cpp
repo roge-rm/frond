@@ -2105,7 +2105,7 @@ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
 namespace {
 constexpr uint32_t stateFlagFast = 1, stateFlagRing = 2, stateFlagTerminal = 4;
 constexpr uint32_t stateIdentityVersion = 1, stateMemoryVersion = 1, stateRingVersion = 1, stateJitVersion = 1;
-constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1, stateCardIdVersion = 1;
+constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1, stateCardIdVersion = 1, stateCardPulledVersion = 1;
 constexpr uint32_t stateRingEntries = 4096;
 constexpr uint32_t stateMaxNoteBytes = 4096;
 
@@ -2509,6 +2509,13 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
         if (!finish(a)) return info;
         info.cardSection = true;
     } else if (info.status != S::ok) return info;
+    // In states saved after a card was taken out of the slot in use.
+    if (open("SDPL", stateCardPulledVersion, false, a)) {
+        uint32_t pulled = 0;
+        a.Do32(pulled).Require(pulled == 1, "card pulled");
+        if (!finish(a)) return info;
+        staged.board->setMmcsdCardPulled(true);
+    } else if (info.status != S::ok) return info;
     // The card's id, in states saved with a known card in.
     if (open("SDID", stateCardIdVersion, false, a)) {
         std::string id;
@@ -2659,6 +2666,12 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
             stateText(id, p->mmcsdCardId.c_str());
             file.end();
         }
+    }
+    if (p->peripherals.mmcsdCardPulled()) {
+        auto a = file.begin(stateFourcc("SDPL"), stateCardPulledVersion);
+        uint32_t pulled = 1;
+        a.Do32(pulled);
+        file.end();
     }
     if (p->peripherals.memoryDmaBusy()) {
         auto a = file.begin(stateFourcc("MDMA"), Imx1Bootstrap::memoryDmaStateVersion);
