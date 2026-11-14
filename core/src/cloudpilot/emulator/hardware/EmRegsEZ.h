@@ -102,6 +102,7 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
     void portDIntReqEnWrite(emuptr address, int size, uint32 value);
     void tmr1StatusWrite(emuptr address, int size, uint32 value);
     void spiMasterControlWrite(emuptr address, int size, uint32 value);
+    void UpdateSpimInterrupt();
     void uartWrite(emuptr address, int size, uint32 value);
     void lcdRegisterWrite(emuptr address, int size, uint32 value);
     void pllRegisterWrite(emuptr address, int size, uint32 value);
