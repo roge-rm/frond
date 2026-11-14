@@ -58,7 +58,7 @@ def commit_build():
             return None
         common = Path(git('rev-parse', '--git-common-dir'))
         common = common if common.is_absolute() else ROOT / common
-        folder = common.resolve().parent / 'build' / ('out-' + git('rev-parse', '--short=10', 'HEAD'))
+        folder = common.resolve().parent / 'build' / ('out-' + git('rev-parse', 'HEAD')[:10])
         return folder if (folder / 'COMMIT').exists() else None
     except (OSError, subprocess.CalledProcessError):
         return None
