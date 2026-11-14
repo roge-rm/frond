@@ -288,9 +288,9 @@ test-sdl-audio: out/frond
 test: test-dana-keyboard-art
 DANA_ART_SOURCE ?= core
 DANA_ART_BUILD ?= build
-# Any other source folder is a copy of core/ made first.
+# Any other source folder is a copy of core/ made first. The : keeps the line count fixed for check-record.py.
 test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
-	$(if $(filter-out core,$(DANA_ART_SOURCE)),python3 tools/copy-core.py $(DANA_ART_SOURCE))
+	$(if $(filter-out core,$(DANA_ART_SOURCE)),python3 tools/copy-core.py $(DANA_ART_SOURCE),:)
 	mkdir -p $(DANA_ART_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_ART_SOURCE)/src/uarm/native -I$(DANA_ART_SOURCE)/src/uarm/uarm \
@@ -303,9 +303,9 @@ test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
 test: test-dana-view
 DANA_VIEW_SOURCE ?= core
 DANA_VIEW_BUILD ?= build
-# Any other source folder is a copy of core/ made first.
+# Any other source folder is a copy of core/ made first. The : keeps the line count fixed for check-record.py.
 test-dana-view: $(if $(filter core,$(DANA_VIEW_SOURCE)),prepare)
-	$(if $(filter-out core,$(DANA_VIEW_SOURCE)),python3 tools/copy-core.py $(DANA_VIEW_SOURCE))
+	$(if $(filter-out core,$(DANA_VIEW_SOURCE)),python3 tools/copy-core.py $(DANA_VIEW_SOURCE),:)
 	mkdir -p $(DANA_VIEW_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_VIEW_SOURCE)/src/uarm/native -I$(DANA_VIEW_SOURCE)/src/uarm/uarm \
