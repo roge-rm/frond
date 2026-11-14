@@ -280,9 +280,9 @@ class Imx1GraphicsCommands {
                     const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
                     if (from.overlaps(to)) {
                         // ASSUMPTION "overlapping copy": a single plain copy onto itself on one surface gives what
-                        // reading the whole source first would (memmove). The ROM's copy helper sends DP_CNTL 3f
-                        // (top to bottom, left to right) whichever way it moves, and the Network panel moves
-                        // 122 rows of the screen 18 rows down with it. Done as pieces that share no pixel.
+                        // reading the whole source first would (memmove), in any direction. The ROM's copy helper
+                        // sends DP_CNTL 3f (top to bottom, left to right) whichever way it moves, and the Network
+                        // panel moves 122 rows of the screen 18 rows down with it. Done as pieces that share no pixel.
                         const size_t before = fills.size();
                         if (!plain || copyWords != 3 || stretch || !splitOverlap(fill, values[0x401], fills)) {
                             fills.resize(before);
@@ -626,21 +626,26 @@ class Imx1GraphicsCommands {
         return true;
     }
     // A plain copy whose source and destination share pixels, as pieces that don't, in an order where no piece
-    // reads what an earlier one wrote. Only straight moves: whole rows up or down (pieces of that many rows), or
-    // along a row of the surface at surface by less than the width (pieces of that many columns). False for the rest.
+    // reads what an earlier one wrote. A move with a row part goes in pieces of that many whole rows, last rows
+    // first when moving down; one along a row goes in pieces of that many columns, last columns first when moving
+    // right. A move that isn't whole rows needs both rectangles inside the rows of the surface at surface.
     static bool splitOverlap(const Fill& fill, uint32_t surface, std::vector<Fill>& out) {
         const int64_t pitch = fill.pitch, width = fill.width, height = fill.height;
         const int64_t move = int64_t(fill.base) - int64_t(fill.sourceBase);
         if (!width || !height || pitch != int64_t(fill.sourcePitch) || width * 2 > pitch || (move & 1)) return false;
-        const bool rows = move % pitch == 0;
-        const int64_t step = rows ? std::abs(move / pitch) : std::abs(move / 2);
+        int64_t rowMove = move / pitch, columnMove = 0;
+        if (move % pitch) {
+            auto inRow = [&](uint32_t at) { return at >= surface && (at - surface) % pitch + width * 2 <= pitch; };
+            if (!inRow(fill.base) || !inRow(fill.sourceBase)) return false;
+            const int64_t to = int64_t(fill.base) - surface, from = int64_t(fill.sourceBase) - surface;
+            rowMove = to / pitch - from / pitch;
+            columnMove = (to % pitch - from % pitch) / 2;
+        }
+        const bool rows = rowMove != 0;
+        const int64_t step = std::abs(rows ? rowMove : columnMove);
         if (!step || (rows ? step >= height : step >= width)) return false;
-        // Along a row: both rectangles must lie inside the surface's rows, so the move stays on each row.
-        auto inRow = [&](uint32_t at) { return at >= surface && (at - surface) % pitch + width * 2 <= pitch; };
-        if (!rows && (!inRow(fill.base) || !inRow(fill.sourceBase))) return false;
         const int64_t length = rows ? height : width;
         for (int64_t i = 0; i < length; i += step) {
-            // Moving down or right, the last piece goes first.
             const int64_t size = std::min(step, length - i);
             const int64_t start = move > 0 ? length - i - size : i;
             Fill piece = fill;

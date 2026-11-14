@@ -523,8 +523,11 @@ void sideBySide() {
     assert(f.append(p) == A::ok); f.finish();
     assert(f.read(pixel(3,0)) == 0x1111 && f.read(pixel(4,0)) == 0x2222);
     assert(f.read(pixel(3,1)) == 0x3333 && f.read(pixel(4,1)) == 0x4444 && f.read(pixel(5,0)) == 0xa55a);
+    // One onto itself, a pixel down and right, reads the source as it was.
     p[22] = 0x00010001;
-    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
+    assert(f.append(p) == A::ok); f.finish();
+    assert(f.read(pixel(1,1)) == 0x1111 && f.read(pixel(2,1)) == 0x2222);
+    assert(f.read(pixel(1,2)) == 0x3333 && f.read(pixel(2,2)) == 0x4444 && f.read(pixel(0,0)) == 0x1111);
     // Two stretch runs, (0,0) to (2,3) and (3,3) to (5,3), with the sources' span over the first destination.
     p.resize(20);
     auto runs = p;
@@ -541,15 +544,16 @@ void sideBySide() {
         for (unsigned x = 2; x < 20; ++x) assert(f.read(screen+(y*480+x)*2) == (bitmapBit((x-2)/2,(y-296)/2) ? 0u : 0xffffu));
     blit = dateBookStretch(); blit[19] = blit[28] = screen+(296*480+10)*2; blit[21] = blit[27] = 480;
     assert(f.append(blit,0x200b0b14) == A::sideEffect && refused(f,"stretch-overlap",0x00020128));
-    std::puts("PASS: copies, stretch runs and the stretch blit side by side on one surface, shared pixels refused");
+    std::puts("PASS: copies, stretch runs and the stretch blit side by side on one surface, shared stretch pixels refused");
 }
-// A plain copy onto itself that moves straight up, down, left or right gives what reading the whole source
-// first would (the Network panel moves 122 screen rows 18 down). Diagonal moves and unequal pitches stop.
+// A plain copy onto itself gives what reading the whole source first would, moving any way (the Network panel
+// moves 122 screen rows 18 down). Unequal pitches stop.
 void overlapMoves() {
     auto pixel = [](unsigned x, unsigned y) { return destination + (y * 13 + x) * 2; };
     struct Move { unsigned sx, sy, dx, dy, w, h; };
     for (const Move m : {Move{2,1,2,2,4,5}, Move{2,3,2,1,4,5}, Move{1,1,2,1,5,3}, Move{4,2,1,2,6,3},
-                         Move{3,0,3,1,2,7}, Move{0,0,5,0,8,4}}) {
+                         Move{3,0,3,1,2,7}, Move{0,0,5,0,8,4}, Move{1,1,2,2,3,3}, Move{3,3,1,2,4,4},
+                         Move{1,3,3,1,4,3}, Move{4,1,2,3,5,4}, Move{0,0,1,6,9,2}}) {
         Fixture f; planes(f);
         uint32_t model[13*8];
         for (unsigned i = 0; i < 13*8; ++i) { model[i] = 0x100 + i; f.write(destination+i*2,model[i]); }
@@ -564,14 +568,11 @@ void overlapMoves() {
             for (unsigned x = 0; x < 13; ++x) assert(f.read(pixel(x,y)) == copied[y*13+x]);
     }
     Fixture f; planes(f);
-    auto p = packet(); p[13] = destination; p[15] = 13;
-    p[21] = 0x00010001; p[22] = 0x00020002; p[23] = 0x00030003;
-    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
     // The same rows read with another pitch.
-    p = packet(); p[13] = destination; p[15] = 12;
+    auto p = packet(); p[13] = destination; p[15] = 12;
     p[21] = 0x00010001; p[22] = 0x00010002; p[23] = 0x00030003;
     assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
-    std::puts("PASS: plain copies moved straight onto themselves, diagonal moves and other pitches refused");
+    std::puts("PASS: plain copies moved onto themselves any way, other pitches refused");
 }
 // The vertical wait reads the scan status with any batch in the ring.
 void scanStatus() {
