@@ -231,6 +231,10 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 // instructions are the machine's retired count and jit_instructions those its Fast engine ran in
 // Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
 // they repeat. A --sd card runs from memory, so the file is never written.
+// BENCH_ZODIAC_SAVE=MS:FILE saves the machine at the first slice boundary at or after MS into FILE (the
+// guest ns since the start, then the state) and stops there. BENCH_ZODIAC_LOAD=FILE starts from such a file
+// instead of the cold boot, with the same replay; events before the saved time are skipped and summary
+// counts are from the load. Either engine can load a state the other saved.
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
                const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {
@@ -266,12 +270,32 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     }
     auto queue=audioQueueCreate(8192);
     soc->SetAudioQueue(queue); soc->SetPcmOutputEnabled(sound); soc->SetPcmSuspended(false);
+    size_t next=0;
+    uint64_t saveAt=UINT64_MAX;
+    std::string savePath;
+    if (const char* save=std::getenv("BENCH_ZODIAC_SAVE")) {
+        const std::string text=save;
+        const auto colon=text.find(':');
+        if (colon==std::string::npos || colon+1==text.size()) throw std::runtime_error("BENCH_ZODIAC_SAVE needs MS:FILE");
+        saveAt=number(text.substr(0,colon).c_str(),UINT32_MAX)*1000000; savePath=text.substr(colon+1);
+    }
+    if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
+        auto state=readFile(load);
+        uint64_t savedNs=0;
+        if (state.size()<=sizeof(savedNs)) throw std::runtime_error("BENCH_ZODIAC_LOAD: not a saved state");
+        std::memcpy(&savedNs,state.data(),sizeof(savedNs));
+        if (!soc->Load(state.size()-sizeof(savedNs),state.data()+sizeof(savedNs))) throw std::runtime_error("BENCH_ZODIAC_LOAD: refused");
+        clockStart=soc->GetTime()-savedNs;
+        // The run that saved took these before saving.
+        while (next<events.size() && events[next].ms*1000000<=savedNs) ++next;
+        std::fprintf(stderr,"loaded at %.3f s\n",savedNs/1e9);
+    }
+    const uint64_t resumedNs=soc->GetTime()-clockStart;
     const uint64_t retiredStart=soc->Status().retired, jitStart=soc->JitRetired();
     const size_t pixels=size_t(zodiacPanelWidth)*zodiacPanelHeight;
     std::vector<uint32_t> frame(pixels);
     uint64_t lastHash=hashInit, frameSequence=hashInit, pcmHash=hashInit, frameCount=0, changed=0, pcmFrames=0, cycles=0;
     unsigned snapshots=0;
-    size_t next=0;
     bool haveFrame=false;
     const auto start=std::chrono::steady_clock::now();
     for (;;) {
@@ -302,6 +326,16 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
                 if (!savePng(path,frame,zodiacPanelWidth,zodiacPanelHeight)) throw std::runtime_error("snapshot failed");
             }
         }
+        if (elapsed>=saveAt) {
+            if (!soc->Save()) throw std::runtime_error("BENCH_ZODIAC_SAVE: save failed");
+            const auto buffer=soc->GetSavestate();
+            std::ofstream out(savePath,std::ios::binary);
+            out.write(reinterpret_cast<const char*>(&elapsed),sizeof(elapsed));
+            out.write(static_cast<const char*>(buffer.data),std::streamsize(buffer.size));
+            out.flush(); if (!out) throw std::runtime_error("BENCH_ZODIAC_SAVE: write failed");
+            std::fprintf(stderr,"saved at %.3f s\n",elapsed/1e9);
+            break;
+        }
         if (elapsed>=duration*1000000) break;
         cycles+=soc->Run(mips*1000,mips*1000000);
         uint32_t pcm[8192];
@@ -309,7 +343,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         pcmHash=hashBytes(pcmHash,pcm,n*sizeof(uint32_t)); pcmFrames+=n;
     }
     const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-    const uint64_t guestNs=soc->GetTime()-clockStart, instructions=soc->Status().retired-retiredStart;
+    const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
     std::ofstream result(output/"summary.json");
