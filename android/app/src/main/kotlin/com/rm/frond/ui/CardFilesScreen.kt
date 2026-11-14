@@ -143,13 +143,14 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
         snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             Surface(tonalElevation = 2.dp) {
-                Column(
+                // The actions scroll sideways when they don't fit; Done/Insert stays pinned at the end.
+                Row(
                     Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                    horizontalAlignment = Alignment.End,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     val pad = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (selecting) {
                             OutlinedButton(onClick = { deleting = picked }, enabled = writable, shape = MaterialTheme.shapes.small, contentPadding = pad) {
                                 Text("Delete", maxLines = 1, softWrap = false, color = MaterialTheme.colorScheme.error)
