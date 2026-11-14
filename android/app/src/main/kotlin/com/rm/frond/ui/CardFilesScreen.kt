@@ -31,6 +31,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.ui.res.painterResource
+import com.rm.frond.R
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -80,6 +82,7 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
     var deleting by remember { mutableStateOf<List<FatImage.Entry>>(emptyList()) }
     var renaming by remember { mutableStateOf<FatImage.Entry?>(null) }
     var sorting by remember { mutableStateOf(false) }
+    var going by remember { mutableStateOf(false) }
     var sort by rememberSaveable { mutableStateOf(FileList.Sort.NAME) }
     var selected by remember(path) { mutableStateOf(emptySet<String>()) }
     var clip by remember { mutableStateOf<Clip?>(null) }
@@ -127,13 +130,21 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                 actions = {
                     if (shown.isNotEmpty()) TextButton(onClick = { selected = shown.map { it.name }.toSet() }) { Text("Select all") }
                     Box {
-                        IconButton(onClick = { sorting = true }) { Icon(Icons.Default.MoreVert, contentDescription = "Sort") }
+                        IconButton(onClick = { sorting = true }) { Icon(painterResource(R.drawable.ic_sort), contentDescription = "Sort") }
                         DropdownMenu(expanded = sorting, onDismissRequest = { sorting = false }) {
                             for (s in FileList.Sort.entries) {
                                 DropdownMenuItem(
                                     text = { Text((if (s == sort) "✓ " else "") + "Sort by ${s.label.lowercase()}") },
                                     onClick = { sorting = false; sort = s },
                                 )
+                            }
+                        }
+                    }
+                    if (model.shortcuts.isNotEmpty()) Box {
+                        IconButton(onClick = { going = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = going, onDismissRequest = { going = false }) {
+                            for (s in model.shortcuts) {
+                                DropdownMenuItem(text = { Text("Go to $s") }, enabled = ready, onClick = { going = false; model.open(s) })
                             }
                         }
                     }
@@ -198,11 +209,6 @@ fun CardFilesScreen(model: FilesModel, snackbar: SnackbarHostState) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
-            }
-            if (model.shortcuts.isNotEmpty()) item {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp)) {
-                    for (s in model.shortcuts) TextButton(onClick = { model.open(s) }, enabled = ready) { Text(s, maxLines = 1, softWrap = false) }
-                }
             }
             if (shown.isEmpty() && (model.folders || model.busy == null)) item { EmptyNote(if (model.folders) "Empty folder" else "No databases") }
             items(shown, key = { it.shortName }) { e ->
