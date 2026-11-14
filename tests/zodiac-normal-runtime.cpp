@@ -482,6 +482,21 @@ void machine() {
     assert(onExact > onFast && soc->SetFastEngine(true) && soc->FastEngine());
     run(*soc, 1);
     assert(soc->Status().retired > onExact && !soc->Halted());
+    // In this loop Run stops only where the retired or work count is a whole multiple of the engine's
+    // slice size or the time a whole sliceTicks, and gives at least the guest time asked for, however
+    // little. A long ask can end early on host time.
+    for (const bool fast : {false, true}) {
+        assert(soc->SetFastEngine(fast));
+        const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+        for (const uint64_t asked : {1, 7, 4000, 1000000}) {
+            const auto from = soc->Status();
+            const uint64_t credit = soc->Run(asked, 100000000);
+            const auto to = soc->Status();
+            const uint64_t ticks = std::max<uint64_t>(1, asked * 32768 / 100000000);
+            assert(to.retired % sliceRetired == 0 || to.work % sliceWork == 0 || (to.time.ticks % 32 == 0 && !to.time.numerator));
+            assert((asked == 1000000 || to.time.ticks - from.time.ticks >= ticks) && credit > 0 && !soc->Halted());
+        }
+    }
     // The sound path: a load and a reset empty the queue and start the stream again.
     auto* queue = audioQueueCreate(64);
     soc->SetAudioQueue(queue);
@@ -554,10 +569,100 @@ void cardPulledMidCommand() {
     std::puts("PASS: a Zodiac card taken out mid-command times out its response and the machine runs on");
 }
 
+// A guest that waits on Timer2 with WFI, arms the power key (A10) as a low level interrupt and goes into
+// stop mode. Run's slices: ended by work in the wait, at most sliceTicks of guest time in stop mode, the
+// credit always the guest time that passed, and the wake from a power press prompt and the same in guest
+// time however the calls are cut, in Exact and Fast.
+void sleepAndWake() {
+    std::vector<uint32_t> v;
+    auto lit = [&](unsigned reg, uint32_t value) { v.insert(v.end(), {0xe59f0000 | reg << 12, 0xea000000, value}); };
+    lit(0, 0x21b000);  // the clock module: MCU PLL programmed and restarted, then the CPU on FCLK
+    lit(1, 0x57000003); v.push_back(0xe5801000);
+    lit(1, 0x03e717bf); v.push_back(0xe5801004);
+    lit(1, 0x57200003); v.push_back(0xe5801000);
+    v.insert(v.end(), {0xe5902000, 0xe3120602, 0x1afffffc});
+    lit(1, 0xc0000078); v.push_back(0xee011f10);
+    for (int i = 0; i < 60; ++i) v.push_back(0xe1a03003);
+    lit(2, 0x223000); lit(1, 0x04000000); v.push_back(0xe5821010);  // Timer2's interrupt enabled
+    lit(2, 0x203000); lit(1, 200000); v.push_back(0xe5821008); lit(1, 0x113); v.push_back(0xe5821000);
+    const uint32_t wfi = 4 * uint32_t(v.size());
+    v.push_back(0xee070f90);
+    v.insert(v.end(), {0xe3a01000, 0xe5821000, 0xe5821014});  // Timer2 off and acknowledged
+    lit(4, 0x21c000);  // A10 in use, low level, unmasked; port A's interrupt enabled
+    v.insert(v.end(), {0xe5941020, 0xe3811b01, 0xe5841020, 0xe5941028, 0xe3811603, 0xe5841028, 0xe3a01b01, 0xe5841030});
+    lit(2, 0x223008); v.insert(v.end(), {0xe3a0100b, 0xe5821000});
+    lit(1, 0x57003c03); v.push_back(0xe5801000);
+    lit(1, 0x57003c00); v.push_back(0xe5801000);  // stop
+    const uint32_t woken = 4 * uint32_t(v.size());
+    v.insert(v.end(), {0xe3a05055, 0xeafffffe});
+    constexpr uint32_t romBase = 0x10000000;
+    constexpr uint64_t cps = 32768, sliceTicks = 32;
+    auto image = rom();
+    for (size_t i = 0; i < v.size(); ++i) put32le(image, 4 * i, v[i]);
+    std::string error;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
+    assert(soc && error.empty());
+    // One call: the credit, at 32768 cycles a second, is the ticks that passed. A long ask can end
+    // early on host time.
+    auto step = [&](uint64_t asked) {
+        const auto from = soc->Status();
+        const uint64_t credit = soc->Run(asked, cps);
+        const auto to = soc->Status();
+        assert(!soc->Halted() && credit == to.time.ticks - from.time.ticks);
+        return to;
+    };
+    for (int i = 0; i < 100000 && soc->Status().pc != romBase + wfi + 4; ++i) step(1);
+    assert(soc->Status().pc == romBase + wfi + 4);
+    unsigned byWork = 0;
+    for (int i = 0; i < 100000 && soc->Status().pc == romBase + wfi + 4; ++i) {
+        const auto to = step(1);
+        byWork += to.work % 20000 == 0 && (to.time.ticks % sliceTicks || to.time.numerator);
+    }
+    assert(byWork > 0);
+    for (int i = 0; i < 100000 && soc->Status().pc != romBase + woken; ++i) step(1);
+    assert(soc->Status().pc == romBase + woken);
+    // Asleep, a slice is at most sliceTicks. The state is saved on Exact.
+    assert(!soc->FastEngine());
+    for (int i = 0; i < 20; ++i) {
+        const uint64_t from = soc->Status().time.ticks;
+        assert(step(1).time.ticks - from <= sliceTicks && soc->Status().pc == romBase + woken);
+    }
+    assert(soc->Save());
+    const auto saved = soc->GetSavestate();
+    std::vector<uint8_t> asleep(static_cast<const uint8_t*>(saved.data), static_cast<const uint8_t*>(saved.data) + saved.size);
+    for (const bool fast : {false, true}) {
+        assert(soc->SetFastEngine(fast));
+        std::vector<uint8_t> first;
+        for (const uint64_t asked : {1, 1000}) {
+            // A load keeps the machine's own engine, on Fast too with the state saved on Exact.
+            assert(soc->Load(asleep.size(), asleep.data()) && soc->FastEngine() == fast);
+            const uint64_t pressed = soc->Status().time.ticks, end = pressed + 1000;
+            soc->KeyDown(keyIdPower);
+            uint64_t awake = 0;
+            while (soc->Status().time.ticks < end) {
+                step(std::min(asked, end - soc->Status().time.ticks));
+                if (!awake && soc->Status().pc != romBase + woken) awake = soc->Status().time.ticks;
+            }
+            // The press is seen within a slice, and the MCU PLL locks in nine CLK32 periods.
+            if (asked == 1) assert(awake && awake - pressed <= sliceTicks + 12);
+            assert(soc->Status().pc == romBase + woken + 4 && soc->Save());
+            const auto state = soc->GetSavestate();
+            std::vector<uint8_t> bytes(static_cast<const uint8_t*>(state.data), static_cast<const uint8_t*>(state.data) + state.size);
+            if (first.empty()) first = bytes;
+            else assert(bytes == first);
+        }
+    }
+    std::puts("PASS: Zodiac slices end by work in a wait and within a millisecond asleep, the credit is the guest time, and a power press wakes the same however the runs are cut");
+}
+
 int main() {
     // One machine a process: each card guest is a run of its own.
     if (std::getenv("ZODIAC_TEST_CARD")) {
         cardCommandThroughLoad();
+        return 0;
+    }
+    if (std::getenv("ZODIAC_TEST_SLEEP")) {
+        sleepAndWake();
         return 0;
     }
     if (std::getenv("ZODIAC_TEST_PULL")) {

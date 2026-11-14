@@ -17,7 +17,10 @@
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
-    // Host time one Run call may take, so input and frames are served while the guest is busy.
+    // The longest slice in guest time, CLK32 ticks (about 1 ms).
+    constexpr uint64_t sliceTicks = 32;
+    // Host time one Run call may take, so input and frames are served while the guest is busy. Run
+    // stops for it only at a slice end, where stopping changes nothing in the machine.
     constexpr auto runHostLimit = std::chrono::milliseconds(12);
     // Every button pin, ports A and D. They read high while released.
     constexpr uint32_t buttonPinsA = 0x780, buttonPinsD = 0x7780;
@@ -341,8 +344,14 @@ std::string SocIMX1::StopText() const {
     return text;
 }
 
-// Runs the guest up to maxCycles / cyclesPerSecond of its own time, or for a short stretch of host time
-// when it can't keep up, and returns the guest time that passed in the same cycle units.
+// Runs the guest for at least maxCycles / cyclesPerSecond of its own time, or for a short stretch of host
+// time when it can't keep up, and returns the guest time that passed in the same cycle units.
+// Each slice's bounds come from the machine's own counts where it starts: retired and work up to their next
+// whole multiple of the slice size, and the time up to the next whole sliceTicks. A slice starts where the
+// last one ended, so every slice end, and the board charge it makes, is set by the guest alone. An instruction,
+// a CS5 wait, a PLL stall or a delay skip can carry a slice a little past its bound. Run only stops at a slice
+// end, so where the calls are cut and how busy the host is change nothing in the machine. A run can pass the
+// time asked for by up to sliceTicks (about 1 ms) and that carry; the time returned counts it.
 uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (halted || !cyclesPerSecond) {
         keyEventQueue->Clear();
@@ -353,15 +362,20 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     SyncCard();
     PumpInput();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
-    Imx1MachineBounds bounds;
-    // Fast runs longer slices: each slice end charges the whole board, and the deadline still ends the call on time.
+    const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};
+    // Fast runs longer slices: each slice end charges the whole board.
     const bool fast = imx1MachineFastEngine(machine);
-    bounds.retired = fast ? 8000 : 4000;
-    bounds.work = fast ? 40000 : 20000;
-    bounds.deadline = {before.time.ticks + wanted, 0, 1};
+    const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+    Imx1MachineBounds bounds;
     const auto started = std::chrono::steady_clock::now();
     bool waiting = false;
+    auto now = before;
     for (;;) {
+        bounds.retired = uint32_t(sliceRetired - now.retired % sliceRetired);
+        bounds.work = sliceWork - now.work % sliceWork;
+        // The time asked for is checked between slices. The time bound keeps slices short in stop mode,
+        // where each idle period is a CLK32 tick, so input reaches a sleeping guest promptly.
+        bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
         const auto run = imx1MachineRunBounded(machine, bounds);
         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
             run.reason == Imx1MachineYield::invalidBounds) {
@@ -371,7 +385,8 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
             break;
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
-        if (run.reason == Imx1MachineYield::deadline) break;
+        now = run.total;
+        if (now.time.compare(until) >= 0) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
     const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;

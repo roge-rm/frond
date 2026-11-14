@@ -853,6 +853,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_ZODIAC_HOSTDATA_PACKET`, `FROND_ZODIAC_HOSTDATA_SOURCE` | Private packet and source files for the host-data and keyed-copy Zodiac graphics tests. |
 | `ZODIAC_TEST_CARD` | `1` makes `test-zodiac-normal-runtime` run only the SD card command carried through a save and load. |
 | `ZODIAC_TEST_PULL` | `1` makes `test-zodiac-normal-runtime` run only the card taken out mid-command. |
+| `ZODIAC_TEST_SLEEP` | `1` makes `test-zodiac-normal-runtime` run only the timed wait, stop mode and power-key wake through Run. |
 | `ZODIAC_TEST_STOP` | `1` makes `test-zodiac-normal-runtime` also check the stop path. |
 | `ZODIAC_NDK` | Android NDK for `test-zodiac-state-fingerprint`. Default the newest in `$ANDROID_HOME/ndk`. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
