@@ -148,6 +148,8 @@ struct Probe {
     ArmMem* mem = nullptr;
     Imx1ProbeOptions options{};
     Imx1Bootstrap peripherals;
+    // The id of the card in the slot, saved with the card section.
+    std::string mmcsdCardId;
     Imx1Cs4Capture cs4Capture;
     Imx1Cs5Reset cs5Reset;
     Imx1Cs5Configuration cs5Configuration;
@@ -182,8 +184,9 @@ struct Probe {
         }
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
-    // graphicsGpu and graphicsDma, left out of the saved layout's size.
-    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma);
+    // graphicsGpu and graphicsDma, left out of the saved layout's size, and mmcsdCardId, saved in a
+    // section of its own.
+    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -1949,6 +1952,9 @@ Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine* machine, VSD* card, boo
     p->peripherals.attachMmcsdCard(card);
     return p->peripherals.transitionGpioInputs(values, masks, true);
 }
+void imx1MachineSetMmcsdCardId(Imx1Machine* machine, const char* id) {
+    if (machine) machine->probe->mmcsdCardId.assign(id ? id : "", id ? strnlen(id, imx1CardIdBytes) : 0);
+}
 VSD* imx1MachineMmcsdCard(const Imx1Machine* machine) {
     return machine ? machine->probe->peripherals.mmcsdCard() : nullptr;
 }
@@ -2099,7 +2105,7 @@ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
 namespace {
 constexpr uint32_t stateFlagFast = 1, stateFlagRing = 2, stateFlagTerminal = 4;
 constexpr uint32_t stateIdentityVersion = 1, stateMemoryVersion = 1, stateRingVersion = 1, stateJitVersion = 1;
-constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1;
+constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1, stateCardIdVersion = 1, stateCardPulledVersion = 1;
 constexpr uint32_t stateRingEntries = 4096;
 constexpr uint32_t stateMaxNoteBytes = 4096;
 
@@ -2501,6 +2507,22 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (open("SDCD", Imx1Bootstrap::cardStateVersion, false, a)) {
         staged.board->stateCard(a);
         if (!finish(a)) return info;
+        info.cardSection = true;
+    } else if (info.status != S::ok) return info;
+    // In states saved after a card was taken out of the slot in use.
+    if (open("SDPL", stateCardPulledVersion, false, a)) {
+        uint32_t pulled = 0;
+        a.Do32(pulled).Require(pulled >= Imx1Mmcsd::pulledIdle && pulled <= Imx1Mmcsd::pulledWrite, "card pulled");
+        if (!finish(a)) return info;
+        staged.board->setMmcsdCardPulled(pulled);
+    } else if (info.status != S::ok) return info;
+    // The card's id, in states saved with a known card in.
+    if (open("SDID", stateCardIdVersion, false, a)) {
+        std::string id;
+        if (!info.cardSection || !stateText(a, id, imx1CardIdBytes) || !finish(a))
+            return fail(S::invalidValue, stateFourcc("SDID"), "card id");
+        std::memcpy(info.cardId, id.data(), id.size());
+        info.cardIdKnown = true;
     } else if (info.status != S::ok) return info;
     // The memory DMA section, only in states saved with a memory-to-memory transfer under way.
     if (open("MDMA", Imx1Bootstrap::memoryDmaStateVersion, false, a)) {
@@ -2638,6 +2660,17 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     if (p->peripherals.mmcsdCard()) {
         auto a = file.begin(stateFourcc("SDCD"), Imx1Bootstrap::cardStateVersion);
         p->peripherals.stateCard(a);
+        file.end();
+        if (!p->mmcsdCardId.empty()) {
+            auto id = file.begin(stateFourcc("SDID"), stateCardIdVersion);
+            stateText(id, p->mmcsdCardId.c_str());
+            file.end();
+        }
+    }
+    if (p->peripherals.mmcsdCardPulled()) {
+        auto a = file.begin(stateFourcc("SDPL"), stateCardPulledVersion);
+        uint32_t pulled = p->peripherals.mmcsdCardPulled();
+        a.Do32(pulled);
         file.end();
     }
     if (p->peripherals.memoryDmaBusy()) {

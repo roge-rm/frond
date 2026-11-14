@@ -295,6 +295,10 @@ Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&
 inline constexpr uint32_t imx1MmcsdCardDetectPin = 1u << 20;
 Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine*, VSD* card, bool commit = true);
 VSD* imx1MachineMmcsdCard(const Imx1Machine*);
+// The id of the card in the slot, saved with its card section so a load can tell it's the same card.
+// Null or empty for none.
+constexpr size_t imx1CardIdBytes = 32;
+void imx1MachineSetMmcsdCardId(Imx1Machine*, const char* id);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
@@ -366,6 +370,11 @@ struct Imx1StateInfo {
     // another size, the slot starts again with no transfer and the caller resets the card. With no card
     // in, the section waits for the next imx1MachineSetMmcsdCard.
     bool cardResumed = false;
+    // The state has a card section: it was saved with a card in the slot.
+    bool cardSection = false;
+    // The saved card's id, when the state has it.
+    bool cardIdKnown = false;
+    char cardId[imx1CardIdBytes + 1]{};
 };
 // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
 // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is
