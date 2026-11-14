@@ -781,6 +781,9 @@ bool gFastEngineMissing = false;
             }
         } else if (sdCardInitialized() && !embeddedCard) {
             soc->SdInsert();
+        } else if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); zodiac && zodiac->CardSwappedOnLoad()) {
+            // Another card than the saved one: in later, as a new card.
+            sdInsertPending = true;
         }
         const uint64_t ejectedAt = soc->GetTime();
         std::optional<uint64_t> awakeAt;

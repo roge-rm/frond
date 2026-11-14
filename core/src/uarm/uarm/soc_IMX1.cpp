@@ -149,6 +149,7 @@ void SocIMX1::SyncCard() {
     VSD* const card = cardIn ? vsd : nullptr;
     if (imx1MachineSetMmcsdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
         imx1MachineSetMmcsdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
+    imx1MachineSetMmcsdCardId(machine, card ? sdCardGetId() : nullptr);
     cardSync = false;
 }
 
@@ -208,18 +209,27 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
-    // a card section puts the card store's card back in (a session saved with its card in), or waits
-    // for OnSdInsert when the store has none.
+    // a card section puts the card store's card back in when it's the saved card (a session saved with
+    // its card in). Any other card stays out, as a swap: the section is dropped and the card goes in
+    // later as a new one. A state without a card id takes the store's card as the saved one.
     cardSync = true;
+    cardSwapped = false;
     if (cardIn) {
         if (!info.cardResumed) vsdReset(vsd, uint32_t(sdCardSectorCount()));
         SyncCard();
-    } else if (info.cardSection && !cardInserted && sdCardInitialized()) {
-        // It takes on the card section, a command or transfer under way included. The id keeps it in
-        // through the session start's SdRemount.
-        std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
-        cardId[sizeof(cardId) - 1] = '\0';
-        SdInsert();
+    } else {
+        const bool stored = info.cardSection && !cardInserted && sdCardInitialized();
+        if (stored && (!info.cardIdKnown || std::strncmp(info.cardId, sdCardGetId(), SD_CARD_ID_MAX_LEN) == 0)) {
+            // It takes on the card section, a command or transfer under way included. The id keeps it
+            // in through the session start's SdRemount.
+            std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
+            cardId[sizeof(cardId) - 1] = '\0';
+            SdInsert();
+        } else {
+            cardSwapped = stored;
+            // The slot stays empty, which drops a card section no card took.
+            SyncCard();
+        }
     }
     return true;
 }

@@ -66,6 +66,9 @@ class SocIMX1 : public SoC {
     bool RedrawPending() const { return redraw; }
     // The sound path, for tests.
     ZodiacPcmSink& PcmSink() { return pcm; }
+    // The last load found another card in the card store than the one saved in the slot, and left
+    // it out. The session start puts it in as a new card.
+    bool CardSwappedOnLoad() const { return cardSwapped; }
     // Whether slot 1 has the card attached, for tests.
     bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
     // Whether the machine has the pen down just now.
@@ -114,7 +117,7 @@ class SocIMX1 : public SoC {
 
     // The SD card in slot 1 over the shared card store. The ROM speaks SD 1.x only, so cards stay at 2 GB.
     struct VSD* vsd{nullptr};
-    bool cardIn{false}, cardSync{false};
+    bool cardIn{false}, cardSync{false}, cardSwapped{false};
 };
 
 #endif

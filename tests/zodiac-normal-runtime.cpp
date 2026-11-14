@@ -1,6 +1,7 @@
 // The Zodiac's view, pen, stick and EEPROM identity as the normal runtime works them out, its input
 // holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, the sound
-// queue emptied on a load and a reset, a stopped machine, the card back in after a load.
+// queue emptied on a load and a reset, a stopped machine, the card back in after a load
+// and a card response read after one.
 #include <chrono>
 #include <thread>
 #include <array>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <vector>
 
 #include <string>
@@ -331,8 +333,60 @@ void cardThroughLoad(SocIMX1& soc) {
     run(soc, 1);
     assert(soc.Load(withoutCard.size(), withoutCard.data()));
     run(soc, 1);
-    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted());
-    std::puts("PASS: a Zodiac state saved with its card in loads with the card in, one saved without it with the card out");
+    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted() && !soc.CardSwappedOnLoad());
+    // Another card in the store is a swap: it stays out, for the session start to put in as new.
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-other-card");
+    assert(soc.Load(withCard.size(), withCard.data()));
+    assert(!soc.SdInserted() && !soc.CardAttached() && soc.CardSwappedOnLoad());
+    soc.SdInsert();
+    run(soc, 1);
+    assert(soc.SdInserted() && soc.CardAttached() && !soc.Halted());
+    soc.SdEject();
+    // No card in the store: the slot stays empty.
+    sdCardReset();
+    assert(soc.Load(withCard.size(), withCard.data()));
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted() && !soc.CardSwappedOnLoad());
+    std::puts("PASS: a Zodiac state saved with its card in loads with the card in, one saved without it or with "
+              "another card in the store with the card out");
+}
+
+// The guest sends CMD55 and the session is saved before it reads the response. Loaded as a session
+// start finds it (the card in the store, not in the SoC), the guest reads the response from the card
+// section: 0x3700 first, APP_CMD in the last halfword. A wrong word runs an undefined instruction.
+void cardCommandThroughLoad() {
+    static constexpr uint32_t program[]{
+        0xe3a00821, 0xe3a01b31, 0xe5801000, 0xe59f107c,  // AIPI2 PSR0 and PSR1: MMCSD on a 32-bit bus
+        0xe5801004, 0xe3a00985, 0xe3a01008, 0xe5801000,  // MMCSD reset
+        0xe3a0100d, 0xe5801000, 0xe3a01005, 0xe3a02008,
+        0xe5801000, 0xe2522001, 0x1afffffc, 0xe3a01037,  // 8 recovery writes, CMD 55
+        0xe5801028, 0xe3a01000, 0xe580102c, 0xe5801030,  // ARGH, ARGL 0
+        0xe3a01001, 0xe580100c, 0xe3a01006, 0xe5801000,  // R1, start
+        0xe3a02902, 0xe2522001, 0x1afffffd, 0xe5903034,  // 0x64: wait 32768 turns, then RES_FIFO three times
+        0xe5904034, 0xe5905034, 0xe3530c37, 0x1a000002,
+        0xe3150a02, 0x0a000000, 0xeafffffe, 0xe7f000f0,  // 0x88: done, 0x8c: wrong word
+        0x0000fbff};
+    // The ROM runs at its CS0 address.
+    constexpr uint32_t romBase = 0x10000000;
+    auto image = rom();
+    for (size_t i = 0; i < std::size(program); ++i) put32le(image, 4 * i, program[i]);
+    std::string error;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
+    assert(soc && error.empty());
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-card-test");
+    soc->SdInsert();
+    soc->Run(200000, 100000000);
+    assert(!soc->Halted() && soc->CardAttached() && soc->Status().pc >= romBase + 0x64 && soc->Status().pc < romBase + 0x6c);
+    assert(soc->Save());
+    const auto saved = soc->GetSavestate();
+    std::vector<uint8_t> state(static_cast<const uint8_t*>(saved.data), static_cast<const uint8_t*>(saved.data) + saved.size);
+    soc->SdEject();
+    assert(soc->Load(state.size(), state.data()));
+    const bool remounted = soc->SdRemount();
+    for (int i = 0; i < 2000 && !soc->Halted() && soc->Status().pc != romBase + 0x88; ++i) soc->Run(1000000, 100000000);
+    assert(!soc->Halted() && soc->Status().pc == romBase + 0x88);
+    assert(remounted && soc->CardAttached());
+    std::puts("PASS: a Zodiac session saved before the guest read a card response loads with the response there");
 }
 
 void machine() {
@@ -460,6 +514,11 @@ void machine() {
 }  // namespace
 
 int main() {
+    // One machine a process: the card command guest is a run of its own.
+    if (std::getenv("ZODIAC_TEST_CARD")) {
+        cardCommandThroughLoad();
+        return 0;
+    }
     rotation();
     pen();
     stick();
