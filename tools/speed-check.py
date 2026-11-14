@@ -26,6 +26,7 @@ Exits 1 when a count moved or a run failed.
                  [--timing] [--async-rounds] [--update] [--baseline FILE]
 
   FROND_DEVICE_IMAGES   firmware folder (deviceimages/palm) for the cold-boot recipes
+  ZODIAC_CARDS          folder of Zodiac game cards for the recipes with a card (s1/, s2/)
   BIKE_SESSION, ...     session files for the session recipes, named by each recipe's "session"
   SPEED_LOCK            a lock file (tinydeck: /var/lib/lab/frond-speed/.speed-lock): count runs
                         hold it shared, wall-clock rounds exclusive
@@ -225,10 +226,19 @@ def images_path(name):
     return Path(os.environ.get('FROND_DEVICE_IMAGES', '')) / name
 
 
+def card_path(name):
+    """A Zodiac card under ZODIAC_CARDS."""
+    return Path(os.environ.get('ZODIAC_CARDS', '')) / name
+
+
 def recipe_key(r, path):
-    """Digest of everything a recipe starts from: its ROM or session, and its NAND image."""
+    """Digest of everything a recipe starts from: its ROM or session, its NAND image and its card."""
     key = digest(path)
-    return key if 'nand' not in r else hashlib.sha256((key + digest(images_path(r['nand']))).encode()).hexdigest()[:16]
+    if 'nand' in r:
+        key = hashlib.sha256((key + digest(images_path(r['nand']))).encode()).hexdigest()[:16]
+    if 'card' in r:
+        key = hashlib.sha256((key + digest(card_path(r['card']))).encode()).hexdigest()[:16]
+    return key
 
 
 def recipe_input(r):
@@ -245,6 +255,11 @@ def recipe_input(r):
         path = Path(value)
     if 'nand' in r and not images_path(r['nand']).exists():
         return None, f"{images_path(r['nand'])} is missing"
+    if 'card' in r:
+        if not os.environ.get('ZODIAC_CARDS'):
+            return None, 'set ZODIAC_CARDS'
+        if not card_path(r['card']).exists():
+            return None, f"{card_path(r['card'])} is missing"
     return (path, None) if path.exists() else (None, f'{path} is missing')
 
 
@@ -296,7 +311,8 @@ def replay_run(bench, r, path, engine, out, exclusive, asynchronous=False):
         env['BENCH_JIT_ASYNC'] = '1'
     replay = r.get('replay', '-')
     cmd = [str(bench), *(['--device', r['device']] if 'rom' in r else []),
-           *(['--nand', str(images_path(r['nand']))] if 'nand' in r else []), str(path),
+           *(['--nand', str(images_path(r['nand']))] if 'nand' in r else []),
+           *(['--sd', str(card_path(r['card']))] if 'card' in r else []), str(path),
            replay if replay == '-' else str(FIXTURES / replay), str(r['ms']), str(r['mips']),
            r.get('sound', 'on'), str(out)]
     with Lock(exclusive):

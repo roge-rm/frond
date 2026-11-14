@@ -1,0 +1,54 @@
+# Zodiac cold boot through the setup wizard (taps in landscape view coordinates, Function held 3 s,
+# stick calibration), then the card goes in at 91.5 s. Run with benchmark-replay --sd CARD.
+# Card: Doom II with PopAccess (zodiac-z1/cards/s2/doom2.img). PopAccess, back to the card view, Doom II;
+# its menu with FM music shows from about 114 s.
+40000 pen-down 240 160
+40100 pen-up
+41600 pen-down 355 240
+41700 pen-up
+43200 pen-down 20 20
+43300 pen-up
+44800 pen-down 459 298
+44900 pen-up
+46400 pen-down 240 120
+46500 pen-up
+48000 pen-down 440 305
+48100 pen-up
+49600 key-down function
+52600 key-up function
+54100 stick 0 -511
+56100 stick 0 0
+57600 stick 0 511
+59600 stick 0 0
+61100 stick -511 0
+63100 stick 0 0
+64600 stick 511 0
+66600 stick 0 0
+68100 stick 0 -511
+69100 stick 361 -361
+70100 stick 511 0
+71100 stick 361 361
+72100 stick 0 511
+73100 stick -361 361
+74100 stick -511 0
+75100 stick -361 -361
+76100 stick 0 -511
+77100 stick 0 0
+78600 pen-down 440 305
+78700 pen-up
+80200 pen-down 410 305
+80300 pen-up
+81800 pen-down 410 305
+81900 pen-up
+83400 pen-down 410 305
+83500 pen-up
+91000 snapshot "s.png"
+91500 card-insert
+95500 pen-down 143 272
+95700 pen-up
+98700 pen-down 370 80
+98900 pen-up
+100900 pen-down 144 75
+101100 pen-up
+114000 snapshot "s.png"
+123900 snapshot "s.png"

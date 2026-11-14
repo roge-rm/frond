@@ -44,3 +44,11 @@ non-zero 512-byte blocks ("FRONDSP1", the length, then offset and bytes, little 
 the `.files-intent` and `.files-commit` it left, and `*.expect` lists what it holds once settled.
 `CardFileTest` (Android) and `tests/card-file.cpp` (desktop) settle both sides'. Run either with
 `FROND_FIXTURE_OUT=<dir>` to write that side's again. They hold only generated test data.
+
+# Count-check replays
+
+`e2-busy.replay` (hard keys and scrolls, also used on the Zire 72), `tg50-busy.replay` and
+`tx-media.replay` (the T|X Media demo clip) drive the busy recipes of `make count-check` from
+each device's smoke session. `zodiac-doom2.replay` and `zodiac-zuma.replay` take a Zodiac from
+a cold boot through the setup wizard, put the card in and start the game (`benchmark-replay
+--sd CARD`). They hold only input events.

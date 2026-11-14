@@ -89,6 +89,9 @@ class SoC {
     void KeyUp(enum KeyId key);
     void PenDown(int x, int y);
     void PenUp();
+    // The clock key and pen events are stamped with, in milliseconds; null is the host's steady clock.
+    // A headless replay passes guest time so the holds the Zodiac times from it repeat.
+    static void SetEventClock(uint64_t (*clock)());
     // Analogue stick from the frontend, on the thread that owns the SoC: each axis -1 to 1 with
     // right and down positive, and 0,0 when let go. A board with a stick maps it to its own
     // hardware; others ignore it.
