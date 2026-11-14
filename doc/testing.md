@@ -37,6 +37,14 @@ The Fast engine builds Dynarmic from `vendor/dynarmic` (needs Ninja and Boost). 
 - `make check-device-data` checks the generated per-device data against the profiles.
 - `make test-compatibility` runs synthetic 68k and ARM/Thumb programs through the core: mixed-width memory, branches, returns, traps, faults and an ARM to Thumb to ARM call chain. These are bounded checks, not ISA conformance tests.
 
+## Rerunning only what changed
+
+Every `make test-NAME` records its result in `build/check-passes.tsv` (name, commit, time, pass or fail, tree state, seconds). `make recheck-list` shows the checks that need running and why: never passed, failed last time, or a file they cover changed since the commit they passed at. `make recheck` runs those one by one and records them. Run it as `heavy build make recheck`, and limit it with `CHECKS="test-zodiac-* test-cpu"`.
+
+- Uncommitted and untracked files count as changed. A pass on a dirty tree only counts while the tree stays exactly as it was, so commit before checking if you want the pass to last.
+- `tests/check-paths.tsv` maps checks to the paths they cover: the first rule that fits a check gives its paths, `*` rules and `tests/NAME*` are added to all. A check with no rule reruns every time. The Makefile, `core/src/common/` and the test helpers are in every check's paths. When you add a device or a shared folder, add it there.
+- A skipped check (no firmware) records a pass. `make test`'s own lines after its target list (audio-metrics, audio-timing, tx-baseline, menu-response and the small compiled tests) aren't recorded or rechecked.
+
 ## Real-firmware checks
 
 All of these use your own firmware and a ready session, and say what they skipped. Palm OS SDK, `pilrc` and the m68k and ARM toolchains are needed to build the probe apps (`python3 tools/build-palm-probe.py --probe NAME --sdk DIR`, probes are listed in its `--help`). Probe apps and sessions stay under `build/` and are never committed.
