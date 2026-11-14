@@ -161,6 +161,11 @@ struct ArmCpu {
 
     uint32_t pid;  // for fcse
 
+    // Undefined instruction exceptions taken, and the last one's pc and instruction, for machines that
+    // stop on them (cpuUndefinedTaken).
+    uint64_t undefinedCount;
+    uint32_t undefinedPc, undefinedInstr;
+
     uint8_t memorySystemKind;
     union {
         struct ArmMmu *mmu;
@@ -1416,9 +1421,11 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
 template <int memorySystemKind, bool wasT>
 static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr);
 
+// On the ARM920T the NV condition forms are undefined, except PLD, which never executes there: the HP
+// iPAQ rx1950's bootloader has PLD in its copy loops and runs on the real ARM920T.
 template <int memorySystemKind, bool wasT>
 static void execFn_noop(struct ArmCpu *cpu, uint32_t instr) {
-    if (armKindIsArm920(memorySystemKind) && (instr >> 28) == 15)
+    if (armKindIsArm920(memorySystemKind) && (instr >> 28) == 15 && (instr & 0x0D70F000UL) != 0x0550F000UL)
         execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 }
 
@@ -1603,6 +1610,9 @@ static void execFn_peephole_ADC_memcpy(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT>
 static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
+    ++cpu->undefinedCount;
+    cpu->undefinedPc = cpu->curInstrPC;
+    cpu->undefinedInstr = instr;
     fprintf(stderr, "Invalid instr 0x%08lx seen at 0x%08lx with CPSR 0x%08lx\n",
             (unsigned long)instr, (unsigned long)cpu->curInstrPC,
             (unsigned long)cpuPrvMaterializeCPSR(cpu));
@@ -6091,6 +6101,12 @@ void cpuWakeup(struct ArmCpu *cpu) {
 void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) { cpu->pid = pid; }
 
 uint32_t cpuGetPid(struct ArmCpu *cpu) { return cpu->pid; }
+
+uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *instr) {
+    if (pc) *pc = cpu->undefinedPc;
+    if (instr) *instr = cpu->undefinedInstr;
+    return cpu->undefinedCount;
+}
 
 void cpuSetSlowPath(struct ArmCpu *cpu, uint32_t reason) { cpu->slowPath |= reason; }
 

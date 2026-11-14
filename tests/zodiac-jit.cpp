@@ -119,11 +119,15 @@ int main(int argc, char** argv) {
     // ARMv5-only instructions take undefined without executing their operation.
     for (uint32_t i : {0xe12fff31u, 0xfa000000u, 0xe16f1f10u, 0xe1200070u,
                        0xe1000051u, 0xe1600281u, 0xe1c020d0u, 0xe1c020f0u,
-                       0xf5d0f000u, 0xfe000f10u, 0xec410f02u}) {
+                       0xfe000f10u, 0xec410f02u}) {
         check(i);
         assert((cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_UND);
         assert(cpuGetRegisters(fast.cpu)[15] == 4);
     }
+    // PLD never executes on the ARM920T (the rx1950's bootloader has it).
+    check(0xf5d0f000u);
+    assert((cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) & 31) != ARM_SR_MODE_UND);
+    assert(cpuGetRegisters(fast.cpu)[15] == code + 4);
     for (uint32_t i : {0x00004780u, 0x0000e800u, 0x0000be00u}) {
         check(i, true);
         assert((cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_UND);
@@ -179,8 +183,23 @@ int main(int argc, char** argv) {
     // CP15 bootstrap reset control and rejected cache enable use the same interpreter path.
     check(0xee112f10);
     assert(cpuGetRegisters(fast.cpu)[2] == 0x78);
-    check(0xee010f10);
+    auto control = [&](uint32_t value) {
+        for (Machine* m : {&exact, &fast}) {
+            m->reset(0xee012f10, false);
+            cpuSetReg(m->cpu, 2, value);
+        }
+        exact.step(); fast.step(); same(exact, fast);
+    };
+    control(0x7c);  // C without M
     assert((cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) & 31) == ARM_SR_MODE_UND);
+    // Bits 6:3 should be one and are kept set; the rx1950's bootloader writes 0x70.
+    control(0x70);
+    assert((cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR) & 31) != ARM_SR_MODE_UND);
+    for (Machine* m : {&exact, &fast}) {
+        m->word(code + 4, 0xee113f10);  // MRC p15, 0, r3, c1, c0, 0
+        m->step();
+        assert(cpuGetRegisters(m->cpu)[3] == 0x78);
+    }
     if (argc == 2) compareRom(argv[1]);
     uint64_t blocks = 0, instructions = 0;
     assert(cpuJitExecutionCounts(fast.cpu, &blocks, &instructions));

@@ -87,8 +87,11 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
                 cpuSetReg(cpu, Rx, cp15->control);
                 return true;
             }
-            // C requires translation-table memory attributes. Big endian remains unsupported.
-            if ((val & 0x78) != 0x78 || (val & ~0xc000737fu) ||
+            // Bits 6:3 should be one and read as one: the HP iPAQ rx1950's eboot writes 0x70 to turn the
+            // MMU off before it enters the OS. C requires translation-table memory attributes. Big endian
+            // remains unsupported.
+            val |= 0x78;
+            if ((val & ~0xc000737fu) ||
                 (val & 0xc0000000) == 0x80000000 || ((val & 4) && !(val & 1))) return false;
             if ((val ^ cp15->control) & 1)
                 icacheArm920PrepareMmuSwitch(cp15->ic, cpuGetRegisters(cpu)[15],

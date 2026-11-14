@@ -194,6 +194,8 @@ void cpuCoprocessorRegister(struct ArmCpu *cpu, uint8_t cpNum, struct ArmCoproce
 void cpuSetVectorAddr(struct ArmCpu *cpu, uint32_t adr);
 void cpuSetPid(struct ArmCpu *cpu, uint32_t pid);
 uint32_t cpuGetPid(struct ArmCpu *cpu);
+// How many undefined instruction exceptions the CPU has taken, with the last one's pc and instruction.
+uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *instr);
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu);
 void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar);
