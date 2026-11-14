@@ -123,6 +123,58 @@ struct ArmBankedRegs {
 
 using M68kTrapHandlerMap = std::unordered_map<uint32_t, M68kTrapHandler>;
 
+// ARM920T Fast: the RAM pages code was decoded or translated from (a bit per 4 KiB page over the 4 GiB
+// physical map), and in each page the 64-byte lines it came from. A store drops code only when it lands
+// on a marked line, so data sharing a page with code leaves the code alone. A marked page has no write
+// entries in the host TLB, so every store to it comes through cpuPrvArm920Stored. Line masks are kept per
+// group of 64 pages and allocated when a group is first used.
+struct Arm920CodeMap {
+    static constexpr uint32_t kGroups = 1u << 14;
+    uint64_t pages[kGroups] = {};
+    uint64_t *lines[kGroups] = {};
+    std::vector<uint16_t> groups;  // groups with page bits set since the last clear, each once
+    uint64_t listed[kGroups / 64] = {};
+
+    ~Arm920CodeMap() {
+        for (uint64_t *l : lines) delete[] l;
+    }
+    bool page(uint32_t pa) const { return (pages[pa >> 18] >> ((pa >> 12) & 63)) & 1; }
+    // Marks the line holding pa in a marked page.
+    void noteLine(uint32_t pa) { lines[pa >> 18][(pa >> 12) & 63] |= uint64_t(1) << ((pa >> 6) & 63); }
+    // Marks the line holding pa, or only its page; true if the page wasn't marked before.
+    bool note(uint32_t pa, bool line = true) {
+        const uint32_t g = pa >> 18;
+        const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
+        if (!lines[g]) lines[g] = new uint64_t[64]();
+        if (line) noteLine(pa);
+        if (pages[g] & bit) return false;
+        pages[g] |= bit;
+        if (!(listed[g >> 6] & (uint64_t(1) << (g & 63)))) {
+            listed[g >> 6] |= uint64_t(1) << (g & 63);
+            groups.push_back(uint16_t(g));
+        }
+        return true;
+    }
+    // Whether [pa, pa + size), inside one page, touches a marked line. The page must be marked.
+    bool hit(uint32_t pa, uint32_t size) const {
+        const uint32_t first = (pa >> 6) & 63, last = ((pa + size - 1) >> 6) & 63;
+        const uint64_t upTo = last == 63 ? ~uint64_t(0) : (uint64_t(1) << (last + 1)) - 1;
+        return lines[pa >> 18][(pa >> 12) & 63] & upTo & ~((uint64_t(1) << first) - 1);
+    }
+    void clearPage(uint32_t pa) {
+        pages[pa >> 18] &= ~(uint64_t(1) << ((pa >> 12) & 63));
+        lines[pa >> 18][(pa >> 12) & 63] = 0;
+    }
+    void clear() {
+        for (uint16_t g : groups) {
+            pages[g] = 0;
+            std::memset(lines[g], 0, 64 * sizeof(uint64_t));
+            listed[g >> 6] &= ~(uint64_t(1) << (g & 63));
+        }
+        groups.clear();
+    }
+};
+
 struct ArmCpu {
     uint64_t exceptionSequence;
     ArmCpuModel model;
@@ -210,9 +262,9 @@ struct ArmCpu {
     Arm920LeanPage leanPage;
     Arm920LeanGuard leanGuard;
     void* leanContext;
-    // One bit per 4 KiB RAM page the decode cache holds code from (a 4 GiB physical map), and the data
-    // accesses this lean run made that the step would count as bus accesses.
-    uint64_t* leanCode;
+    // The RAM pages and lines the decode cache holds code from, and the data accesses this lean run made
+    // that the step would count as bus accesses.
+    Arm920CodeMap* leanCode;
     uint64_t leanBus, leanCodeDrops;
     // Instructions this lean run has finished, and the probe's answer for reads of pages that aren't plain.
     uint32_t leanDone;
@@ -235,10 +287,10 @@ struct ArmCpu {
     // cpuJitMemoryOnly: code fetches outside RAM and ROM fail, and are noted.
     bool jitMemoryOnly, jitRefused;
     // ARM920T Fast blocks (cpuArm920SetJit): the JIT is run only by cpuArm920RunJit, never by cpuCycle
-    // (jitLoopOnly), and while jitBlocks is on it reads code and data from the lean pages. jitCode has one
-    // bit per 4 KiB RAM page it has translated code from, as leanCode.
+    // (jitLoopOnly), and while jitBlocks is on it reads code and data from the lean pages. jitCode has the
+    // RAM pages and lines it has translated code from, as leanCode.
     bool jitLoopOnly, jitBlocks;
-    uint64_t *jitCode;
+    Arm920CodeMap *jitCode;
 #endif
 
     template <typename T>
@@ -964,6 +1016,30 @@ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
     return (i & 0x0c100000) == 0x04100000 || ((i & 0x0e100090) == 0x00100090 && (i & 0x60));
 }
 
+// A store to [pa, pa + size), inside one page. Translated code is dropped by page: the virtual pages it was
+// translated from at pa. Decoded code isn't tied to the physical pages it came from, so a store to any of
+// its lines drops it all. A store to other lines of those pages drops nothing.
+static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size) {
+#ifdef FROND_DYNARMIC
+    if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hit(pa, size)) {
+        cpu->jitCode->clearPage(pa);
+        jitCodeWrittenPa(cpu->jit, pa);
+    }
+#endif
+    if (!cpu->leanCode || likely(!cpu->leanCode->page(pa)) || !cpu->leanCode->hit(pa, size)) return;
+    cpu->leanCode->clear();
+    icacheArm920DropDecoded(cpu->ic);
+    ++cpu->leanCodeDrops;
+}
+
+// Whether a store to the page at pa has to come through cpuPrvArm920Stored (it holds code).
+static bool cpuPrvArm920CodePage(const ArmCpu *cpu, uint32_t pa) {
+#ifdef FROND_DYNARMIC
+    if (cpu->jitCode && cpu->jitCode->page(pa)) return true;
+#endif
+    return cpu->leanCode && cpu->leanCode->page(pa);
+}
+
 template <int size, bool write>
 static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
                                                          bool privileged) {
@@ -1019,13 +1095,18 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
         cpu->leanExit = true;
         return false;
     }
-    if constexpr (write) cpuArm920LeanStored(cpu, MMU_TRANSLATE_RESULT_PA(r));
+    // A page holding code keeps no write entry, so each store to it is checked against the code's lines.
+    bool codePage = false;
+    if constexpr (write) {
+        cpuPrvArm920Stored(cpu, MMU_TRANSLATE_RESULT_PA(r), size);
+        codePage = cpuPrvArm920CodePage(cpu, MMU_TRANSLATE_RESULT_PA(r));
+    }
     uint8_t *host = page + (MMU_TRANSLATE_RESULT_PA(r) & 0xfffu);
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
     // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
     if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[va >> 12].revision == mmu->revision) &&
-        !(uintptr_t(page) & 1)) {
+        !(uintptr_t(page) & 1) && !codePage) {
         struct HostTlb &t = cpu->mem->hostTlb;
         struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
         e.key = hostTlbKey(t.gen, va, privileged);
@@ -4981,14 +5062,11 @@ static FORCE_INLINE void cpuPrvLeanDecodeSlot(struct icacheline *line, unsigned 
     }
 }
 
-// Notes that the decode cache holds code from the RAM page at pa. A newly noted page loses its lean TLB
-// write entries, so every later store to it takes the slow path, which drops the decoded code first.
+// Notes that the decode cache holds code from the RAM line at pa. A newly noted page loses its lean TLB
+// write entries, so every later store to it takes the slow path, which drops the decoded code when the
+// store lands on a noted line.
 static void cpuPrvLeanNoteCode(struct ArmCpu *cpu, uint32_t pa) {
-    uint64_t &bits = cpu->leanCode[pa >> 18];
-    const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
-    if (bits & bit) return;
-    bits |= bit;
-    hostTlbFlush(&cpu->mem->hostTlb);
+    if (cpu->leanCode->note(pa)) hostTlbFlush(&cpu->mem->hostTlb);
 }
 
 // Fills the decode cache line for va from the host page at pa, as the ARM920T I-cache would fill its line.
@@ -5171,8 +5249,7 @@ void cpuArm920SetLean(ArmCpu *cpu, Arm920LeanPage page, Arm920LeanGuard guard, v
     cpu->leanContext = context;
     cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->lean = page != nullptr;
     if (page && !cpu->leanCode) {
-        cpu->leanCode = (uint64_t *)calloc(1u << 14, sizeof(uint64_t));
-        if (!cpu->leanCode) ERR("cannot alloc the Fast code page map");
+        cpu->leanCode = new Arm920CodeMap;
     }
     icacheArm920SetLeanWord(cpu->ic, page ? cpuPrvLeanStepWord : nullptr, cpu);
     hostTlbFlush(&cpu->mem->hostTlb);
@@ -5186,7 +5263,7 @@ void cpuArm920LeanReset(ArmCpu *cpu) {
         for (auto &line : segment) dc->clean(line);
     dc->invalidate();
     icacheInval(cpu->ic);
-    if (cpu->leanCode) memset(cpu->leanCode, 0, (1u << 14) * sizeof(uint64_t));
+    if (cpu->leanCode) cpu->leanCode->clear();
     hostTlbFlush(&cpu->mem->hostTlb);
 }
 
@@ -5196,25 +5273,17 @@ void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = re
 
 void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
 
-// Decoded code isn't tied to the physical pages it came from, so a store to any of them drops it all.
-void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) {
-#ifdef FROND_DYNARMIC
-    // Translated code is dropped by page: the virtual pages it was translated from at pa.
-    if (cpu->jitCode) {
-        uint64_t &bits = cpu->jitCode[pa >> 18];
-        const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
-        if (unlikely(bits & bit)) {
-            bits &= ~bit;
-            jitCodeWrittenPa(cpu->jit, pa);
-        }
+// A DMA or other write over the whole page at pa.
+void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) { cpuPrvArm920Stored(cpu, pa & ~0xfffu, 0x1000); }
+
+void cpuArm920LeanStoredBytes(ArmCpu *cpu, uint32_t pa, uint32_t size) {
+    if (!size) size = 1;
+    while (size) {
+        const uint32_t room = 0x1000 - (pa & 0xfffu), part = size < room ? size : room;
+        cpuPrvArm920Stored(cpu, pa, part);
+        pa += part;
+        size -= part;
     }
-#endif
-    if (!cpu->leanCode) return;
-    uint64_t &bits = cpu->leanCode[pa >> 18];
-    if (likely(!(bits & (uint64_t(1) << ((pa >> 12) & 63))))) return;
-    memset(cpu->leanCode, 0, (1u << 14) * sizeof(uint64_t));
-    icacheArm920DropDecoded(cpu->ic);
-    ++cpu->leanCodeDrops;
 }
 
 uint32_t cpuArm920LeanGeneration(const ArmCpu *cpu) { return cpu->mem->hostTlb.gen; }
@@ -5255,6 +5324,7 @@ void cpuArm920SetLean(ArmCpu *, Arm920LeanPage, Arm920LeanGuard, void *) {}
 void cpuArm920LeanReset(ArmCpu *) {}
 void cpuArm920LeanFlush(ArmCpu *) {}
 void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
+void cpuArm920LeanStoredBytes(ArmCpu *, uint32_t, uint32_t) {}
 void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
 void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
 uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
@@ -5336,7 +5406,8 @@ bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_
 
 // ARM920T Fast blocks: the lean TLB's page for va, live only for plain pages the MMU allows now in this mode.
 // Its write entries are dropped whenever a page gets translated code (cpuPrvJitNoteArm920Code), and the slow
-// path that fills one again drops the code first (cpuArm920LeanStored), so a writable page holds no code.
+// path that fills one again only does so once the page holds no code (cpuPrvArm920Stored), so a writable
+// page holds no code.
 static uint8_t *cpuPrvJitArm920Page(ArmCpu *cpu, uint32_t va, bool write) {
     if (!cpu->jitBlocks) return nullptr;
     const struct HostTlb &t = cpu->mem->hostTlb;
@@ -5463,19 +5534,13 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
     *lines = nullptr;
     if (cpu->model == ArmCpuModel::arm920t && cpu->jitBlocks) {
         // ARM920T Fast blocks: a RAM page gets its jitCode bit, and a newly marked one loses its lean TLB
-        // entries (so the JIT's page table empties too), so every later store to it drops its code.
+        // entries (so the JIT's page table empties too), so every later store to it is checked against the
+        // lines translation read (cpuJitNoteArm920Code).
         // The single-step JIT (no blocks) watches RAM lines like the other cores.
         if (!cpu->leanPage) return nullptr;
         bool ram = false;
         uint8_t *page = cpu->leanPage(cpu->leanContext, pa & ~0xfffu, false, &ram);
-        if (page && ram) {
-            uint64_t &bits = cpu->jitCode[pa >> 18];
-            const uint64_t bit = uint64_t(1) << ((pa >> 12) & 63);
-            if (!(bits & bit)) {
-                bits |= bit;
-                hostTlbFlush(&cpu->mem->hostTlb);
-            }
-        }
+        if (page && ram && cpu->jitCode->note(pa, false)) hostTlbFlush(&cpu->mem->hostTlb);
         return page;
     }
     if (uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, lines)) return page;
@@ -5487,8 +5552,12 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
     return (uint8_t *)romGetPeepholeBuffer(rom) + (data - (uint8_t *)romGetData(rom));
 }
 
+void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
+    if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteLine(pa);
+}
+
 void cpuJitForgetCode(ArmCpu *cpu) {
-    if (cpu->jitCode) memset(cpu->jitCode, 0, (1u << 14) * sizeof(uint64_t));
+    if (cpu->jitCode) cpu->jitCode->clear();
     memForgetRamCode(cpu->mem);
     icacheWatchFetchBuffers(cpu->ic);
 }
@@ -5886,8 +5955,7 @@ bool cpuArm920SetJit(ArmCpu *cpu, bool on) {
     }
     if (!cpu->leanPage) return false;
     if (!cpu->jit) {
-        cpu->jitCode = (uint64_t *)calloc(1u << 14, sizeof(uint64_t));
-        if (!cpu->jitCode) ERR("cannot alloc the JIT code page map");
+        cpu->jitCode = new Arm920CodeMap;
         cpu->jitLoopOnly = true;
         cpu->jitBlocks = true;
         cpu->jit = jitCreate(cpu, false);
@@ -5908,7 +5976,7 @@ void cpuArm920DropJit(ArmCpu *cpu) {
     jitDestroy(cpu->jit);
     cpu->jit = nullptr;
     cpu->jitBlocks = cpu->jitLoopOnly = false;
-    free(cpu->jitCode);
+    delete cpu->jitCode;
     cpu->jitCode = nullptr;
 }
 

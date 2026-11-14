@@ -1053,9 +1053,9 @@ struct Probe {
             // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
             if (write && status == Imx1BootstrapAccess::ok &&
                 Imx1Bootstrap::isRamAddress(address)) {
-                // Fast blocks drop only the code translated from this page (cpuArm920LeanStored).
+                // Fast drops code only when the store lands on one of its lines (cpuArm920LeanStoredBytes).
                 if (!p.fastJit) cpuDropTranslatedCode(p.cpu);
-                if (p.fastEngine) cpuArm920LeanStored(p.cpu, address);
+                if (p.fastEngine) cpuArm920LeanStoredBytes(p.cpu, address, size);
             }
             if (!write) std::memcpy(data, &value, size);
             return true;

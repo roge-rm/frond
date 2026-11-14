@@ -2,7 +2,7 @@
 // table change only shows after a CP15 TLB flush, a domain change and an SDRAM mode change take the lean path's
 // host pages away, a cacheable load of unbacked memory stops both engines at the same pc, and states saved under
 // either engine carry on under Fast as an uninterrupted Exact run does. Code rewritten in place drops what Fast
-// decoded from it. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
+// decoded from it, and stores to other lines of its page don't. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
 // mapping stops both engines at the same read, and a DMA controller write that starts the PCM DMA takes its buffer
 // page off the lean path while the DMA sends what both paths wrote. An IRQ raised by an MMIO write and an FIQ that
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
@@ -52,7 +52,7 @@ void thumbLoop(std::vector<uint32_t>& words) {
     for (size_t i = 0; i < std::size(h); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
 }
 
-enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode, freshCode };
+enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode, freshCode, lineCode };
 
 // The graphics guest's setup with programmed clocks gives the step quiet spans, which the lean path runs.
 // The test code follows it, running from the linked alias at 0x20000000.
@@ -279,6 +279,24 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         sumLoop(words, 8);
         load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
         sumLoop(words, 11);
+        words.push_back(0xe1a0e00f);                      // mov lr, pc
+        words.push_back(0xe12fff10);                      // bx r0
+        stopPc = pc();
+        break;
+    case Tail::lineCode:
+        // Data next to code: 64 rounds of a store to another 64-byte line of the function's page and a call
+        // (r10 = 64), then the function's own line rewritten as mov r9, #2 with no invalidate, and a call.
+        load(words, 0, 0x00310000);
+        words.push_back(0xe3a0a000);                      // mov r10, #0
+        load(words, 3, 64);
+        for (uint32_t w : {0xe5800100u,                   // loop: str r0, [r0, #0x100]
+                           0xe1a0e00fu, 0xe12fff10u,      // mov lr, pc; bx r0: r9 = 1
+                           0xe08aa009u,                   // add r10, r10, r9
+                           0xe2533001u,                   // subs r3, r3, #1
+                           0x1afffff9u})                  // bne loop
+            words.push_back(w);
+        sumLoop(words, 8);
+        load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
         words.push_back(0xe1a0e00f);                      // mov lr, pc
         words.push_back(0xe12fff10);                      // bx r0
         stopPc = pc();
@@ -996,6 +1014,13 @@ void blocks() {
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
     }
     {
+        // Stores to another line of the function's page keep its translation; the rewrite of its own line drops it.
+        const auto [exact, fast] = both(Tail::lineCode, "line code");
+        assert(fast.run.result.registers[10] == 64 && fast.run.result.registers[9] == 2);
+        assert(exact.run.result.registers[10] == 64 && exact.run.result.registers[9] == 1);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
+    }
+    {
         // Compiled in place mid-run, so the new page's code is translated with no lean step in between: its
         // marking has to take away the JIT's writable page and the host TLB's write entry for the rewrite.
         setenv("FROND_JIT_THREAD", "0", 1);
@@ -1025,12 +1050,13 @@ void blocks() {
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
     uint64_t shipped = 0;
-    for (Tail tail : {Tail::tlb, Tail::domain, Tail::user, Tail::code, Tail::hotCode, Tail::freshCode, Tail::dmaOther}) {
+    for (Tail tail : {Tail::tlb, Tail::domain, Tail::user, Tail::code, Tail::hotCode, Tail::freshCode, Tail::lineCode,
+                      Tail::dmaOther}) {
         const auto words = guest(tail, stopPc, savePc);
         const auto exact = runGuest(words, false), fast = runGuest(words, true), lean = runLean(words);
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
-        if (tail != Tail::code && tail != Tail::hotCode) sameResult(exact, fast);
-        else assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2);
+        if (tail != Tail::code && tail != Tail::hotCode && tail != Tail::lineCode) sameResult(exact, fast);
+        else assert(fast.run.result.registers[10] == (tail == Tail::lineCode ? 64u : 1u) && fast.run.result.registers[9] == 2);
         sameMemory(exact, lean, fast);
         shipped += fast.jit;
     }
@@ -1995,6 +2021,17 @@ int main() {
         print("code exact", exact); print("code fast", fast);
         assert(exact.run.result.registers[10] == 1 && exact.run.result.registers[9] == 1);
         assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2 && fast.drops > 0);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.cheap.retired == exact.cheap.retired);
+    }
+    {
+        // Stores to another line of a code page keep what Fast decoded; only the rewrite of the code's own line
+        // drops it.
+        const auto words = guest(Tail::lineCode, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        print("line code exact", exact); print("line code fast", fast);
+        assert(exact.run.result.registers[10] == 64 && exact.run.result.registers[9] == 1);
+        assert(fast.run.result.registers[10] == 64 && fast.run.result.registers[9] == 2);
+        assert(fast.drops >= 1 && fast.drops <= 2);
         assert(fast.run.result.stop == exact.run.result.stop && fast.cheap.retired == exact.cheap.retired);
     }
     {
