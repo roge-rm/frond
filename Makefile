@@ -36,6 +36,12 @@ test-%: export TEST_NAME = $@
 prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
 out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: TEST_TIMEOUT = 3600
+# The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
+# 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
+test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
+    test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
+    test-frond-arm-install test-device-profiles: TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
 .PHONY: test-memory-stick-media

@@ -89,7 +89,7 @@ def fixture(name, core, inputs, build, tag='', sources=()):
             print(f'boot fixture: {stem} does not match its manifest, rebuilding', file=sys.stderr, flush=True)
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        prune(name, parts['core'], tag, stem)
+        prune(name, parts['core'], parts['inputs'], stem)
         start = time.monotonic()
         work = Path(tempfile.mkdtemp(prefix=f'.{stem}-', dir=FIXTURES))
         try:
@@ -107,18 +107,27 @@ def fixture(name, core, inputs, build, tag='', sources=()):
         return Fixture(session, logs, True)
 
 
-def prune(name, core, tag, keep):
-    """Deletes fixtures for name made by another core build or older inputs or scripts, and whatever is left of keep."""
+def prune(name, core, inputs, keep):
+    """Deletes fixtures for name made by another core build from the same firmware, and whatever is left of keep.
+
+    Fixtures for other firmware or tags are kept. One whose lock is held is being built or used and is left.
+    """
     for manifest in FIXTURES.glob(f'{name}-*.json'):
         stem = manifest.name[:-len('.json')]
-        if '-' in stem[len(name) + 1:]:
+        if '-' in stem[len(name) + 1:] or stem == keep:
             continue  # Another fixture whose name starts with this one.
         try:
             saved = json.loads(manifest.read_text())
-            stale = saved['core'] != core or saved['tag'] == tag
+            stale = saved['inputs'] == inputs and saved['core'] != core
         except (OSError, ValueError, KeyError, TypeError):
             stale = True
-        if stale:
+        if not stale:
+            continue
+        with (FIXTURES / f'.{stem}.lock').open('w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
             manifest.unlink(missing_ok=True)
             shutil.rmtree(FIXTURES / stem, ignore_errors=True)
     (FIXTURES / f'{keep}.json').unlink(missing_ok=True)

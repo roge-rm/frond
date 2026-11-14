@@ -681,7 +681,16 @@ class Console {
                 lock_guard<mutex> lock(guard);
                 lines.push_back(line);
             }
+            // A piped stdin (a test or script driving the core) closing means nobody is left to
+            // send quit; a terminal's EOF (Ctrl-D) keeps the window running.
+            if (!isatty(STDIN_FILENO)) closed = true;
         }).detach();
+    }
+    // True once stdin has closed and every line it sent has been handled.
+    bool Finished() {
+        if (!closed) return false;
+        lock_guard<mutex> lock(guard);
+        return lines.empty();
     }
     bool Next(string& line) {
         lock_guard<mutex> lock(guard);
@@ -694,6 +703,7 @@ class Console {
    private:
     mutex guard;
     deque<string> lines;
+    atomic<bool> closed{false};
 };
 
 // Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns, push and Back.
@@ -1043,6 +1053,7 @@ class Runner {
         speedMark = {wallMs(), double(gSession->GetSystemCycles())};
         while (!quit) {
             string line;
+            if (!desktop && !guestCall && console.Finished()) break;
             // A command waiting for the guest's event loop holds back the ones after it.
             while (!quit && !desktop && !guestCall && console.Next(line)) Command(line);
             if (window) PollWindow();

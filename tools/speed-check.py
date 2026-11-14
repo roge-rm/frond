@@ -274,7 +274,7 @@ def run_68k(r, path, out, exclusive):
            '--framebuffer-output', str(out / 'frame.png'), '--audio-output', str(out / 'audio.wav')]
     with Lock(exclusive):
         start = time.monotonic()
-        res = subprocess.run(cmd, capture_output=True, text=True, cwd=out)
+        res = subprocess.run(cmd, capture_output=True, text=True)
         wall = time.monotonic() - start
     (out.parent / (out.name + '.log')).write_text(res.stdout + res.stderr)
     m = re.search(r'^ran (\d+) cycles, ([0-9.]+) guest seconds', res.stdout, re.M)
@@ -342,6 +342,7 @@ def counts_main(args):
     base = ROOT / 'build/speed-check' / f'counts-{stamp}'
     base.mkdir(parents=True, mode=0o700)
     report, moved, failed, lines = {}, [], [], []
+    compared, skipped, missing = 0, 0, 0
     # Count runs don't need a quiet machine, so they run side by side.
     jobs, keys = [], {}
     for name in names:
@@ -357,6 +358,7 @@ def counts_main(args):
     for name, engine, path in jobs:
         if engine is None:
             lines.append(f'{name}: skipped, {path}')
+            skipped += 1
             continue
         r, label = recipes[name], f'{name} {engine}'
         try:
@@ -376,10 +378,13 @@ def counts_main(args):
             r.setdefault('results', {})[engine] = got
             lines.append(f'{label}: baseline set, {summary}')
         elif not want:
+            missing += 1
             lines.append(f'{label}: no baseline (run with --update), {summary}')
         elif want.get('input') != got['input']:
+            skipped += 1
             lines.append(f"{label}: skipped, input {got['input']} isn't the baseline's {want.get('input')}")
         else:
+            compared += 1
             diffs = [k for k in COUNTS if got.get(k) != want.get(k)]
             if not diffs:
                 lines.append(f'{label}: same, {summary}')
@@ -387,7 +392,10 @@ def counts_main(args):
                 moved.append((name, engine, path))
                 lines.append(f'{label}: MOVED')
                 for k in diffs:
-                    old, new = want.get(k), got[k]
+                    old, new = want.get(k), got.get(k)
+                    if k not in got:
+                        lines.append(f'  {k} {old} -> missing from this run')
+                        continue
                     pct = f' ({(new - old) / old * 100:+.3f} %)' if isinstance(old, int) and old else ''
                     lines.append(f'  {k} {old} -> {new}{pct}')
     if args.update:
@@ -420,7 +428,13 @@ def counts_main(args):
     if not report and not failed:
         print('nothing ran: every recipe was skipped')
         return 1
-    return 1 if (moved and not args.update) or failed else 0
+    if not args.update:
+        print(f'{compared} compared, {skipped} skipped, {missing} without a baseline, {len(moved)} moved, {len(failed)} failed')
+        if missing:
+            print('no baseline for some recipes: run with --update')
+        if not compared:
+            print('nothing was compared against a baseline')
+    return 1 if (not args.update and (moved or missing or not compared)) or failed else 0
 
 
 def parse():
