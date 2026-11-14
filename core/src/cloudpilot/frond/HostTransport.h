@@ -112,7 +112,10 @@ class HostTransport68k : public EmTransportSerial {
     // wakeup after its own frame is sent, so a reply that's all in before then is never read.
     void TrackArrival() {
         const bool any = link.Available() > 0;
-        if (any && !waiting) credit.Reset(Now());
+        if (any && !waiting) {
+            waitingSince = Now();
+            credit.Reset(waitingSince);
+        }
         waiting = any;
     }
     long Credit() {
@@ -130,7 +133,9 @@ class HostTransport68k : public EmTransportSerial {
                 TrackArrival();
                 return 0;
             }
-            credit.Reset(idleUntil);
+            // From the gap's end, or from when the bytes came if that was later.
+            TrackArrival();
+            if (waiting) credit.Reset(std::max(idleUntil, waitingSince));
             idleUntil = 0;
         }
         const long c = Credit();
@@ -149,6 +154,7 @@ class HostTransport68k : public EmTransportSerial {
     bool frameGap{false};
     uint64_t idleUntil{0};
     bool waiting{false};
+    uint64_t waitingSince{0};
 
     HostLink68k& link;
     bool open{false};

@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <csignal>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
@@ -16,6 +17,13 @@
 #include "HostTransport.h"
 
 static uint64 gNow = 0;
+
+// The socket folder, removed on a failed assert too.
+static std::string gDir, gPath;
+static void RemoveFolder(int) {
+    unlink(gPath.c_str());
+    rmdir(gDir.c_str());
+}
 
 class Board : public EmRegsEZ {
    public:
@@ -100,6 +108,13 @@ int main(int, char** argv) {
     std::string dir = std::string(argv[0]) + "-XXXXXX";
     assert(mkdtemp(dir.data()));
     const std::string path = dir + "/s";
+    gDir = dir;
+    gPath = path;
+    std::signal(SIGABRT, [](int sig) {
+        RemoveFolder(sig);
+        std::signal(SIGABRT, SIG_DFL);
+        std::raise(SIGABRT);
+    });
 
     {
         // A 45-byte frame after a second of quiet comes in over about 45 byte times.
@@ -132,9 +147,17 @@ int main(int, char** argv) {
         printf("second frame at 115200: gap %.1f byte times, frame %.1f byte times\n", gap, span);
         assert(gap >= 0.005 * 115200 / 10 - 1);
         assert(span >= 28 && span <= 31);
+
+        // A third frame that comes well after the gap has ended starts from when it came, not
+        // from the gap's end.
+        gNow += 200 * rig.byteTime;
+        rig.Send(Frame(30));
+        const auto third = rig.Receive(30);
+        const double span3 = Span(rig, third, 0, 30);
+        printf("frame long after the gap: %.1f byte times\n", span3);
+        assert(span3 >= 28 && span3 <= 31);
     }
-    unlink(path.c_str());
-    rmdir(dir.c_str());
+    RemoveFolder(0);
     board.Dispose();
     EmHAL::onSystemClockChange.RemoveHandler(clock);
     printf("host transport pacing: ok\n");
