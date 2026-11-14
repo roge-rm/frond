@@ -66,6 +66,8 @@ class SocIMX1 : public SoC {
     bool RedrawPending() const { return redraw; }
     // The sound path, for tests.
     ZodiacPcmSink& PcmSink() { return pcm; }
+    // Whether slot 1 has the card attached, for tests.
+    bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
     // Whether the machine has the pen down just now.
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.

@@ -365,6 +365,8 @@ struct Imx1StateInfo {
     // another size, the slot starts again with no transfer and the caller resets the card. With no card
     // in, the section waits for the next imx1MachineSetMmcsdCard.
     bool cardResumed = false;
+    // The state has a card section: it was saved with a card in the slot.
+    bool cardSection = false;
 };
 // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
 // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is

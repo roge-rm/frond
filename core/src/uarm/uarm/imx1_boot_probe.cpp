@@ -2501,6 +2501,7 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (open("SDCD", Imx1Bootstrap::cardStateVersion, false, a)) {
         staged.board->stateCard(a);
         if (!finish(a)) return info;
+        info.cardSection = true;
     } else if (info.status != S::ok) return info;
     // The memory DMA section, only in states saved with a memory-to-memory transfer under way.
     if (open("MDMA", Imx1Bootstrap::memoryDmaStateVersion, false, a)) {

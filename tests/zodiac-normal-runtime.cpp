@@ -1,6 +1,6 @@
 // The Zodiac's view, pen, stick and EEPROM identity as the normal runtime works them out, its input
 // holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, the sound
-// queue emptied on a load and a reset, a stopped machine.
+// queue emptied on a load and a reset, a stopped machine, the card back in after a load.
 #include <chrono>
 #include <thread>
 #include <array>
@@ -13,6 +13,7 @@
 #include <string>
 
 #include "audio_queue.h"
+#include "sdcard.h"
 #include "soc_IMX1.h"
 #include "zodiac_input.h"
 #include "zodiac_panel.h"
@@ -301,6 +302,39 @@ void buttonsFromReset() {
     for (const auto& pin : imx1ZodiacControlPins) assert((pin.port == 0 ? o.gpioAInput : o.gpioDInput) >> pin.pin & 1);
 }
 
+// A session saved with its card in loads with the card back in the slot, taking on the state's card
+// section, as the session start finds it: the card in the card store and not yet in the SoC. A state
+// saved with the slot empty still loads with the card out.
+void cardThroughLoad(SocIMX1& soc) {
+    auto save = [&] {
+        assert(soc.Save());
+        const auto saved = soc.GetSavestate();
+        return std::vector<uint8_t>(static_cast<const uint8_t*>(saved.data),
+                                    static_cast<const uint8_t*>(saved.data) + saved.size);
+    };
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-card-test");
+    soc.SdInsert();
+    run(soc, 1);
+    assert(soc.SdInserted() && soc.CardAttached() && !soc.Halted());
+    auto withCard = save();
+    soc.SdEject();
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached());
+    auto withoutCard = save();
+    assert(soc.Load(withCard.size(), withCard.data()));
+    assert(soc.SdInserted() && soc.CardAttached());
+    // The session start's remount keeps it in.
+    assert(soc.SdRemount() && soc.CardAttached());
+    run(soc, 1);
+    assert(soc.CardAttached() && !soc.Halted());
+    soc.SdEject();
+    run(soc, 1);
+    assert(soc.Load(withoutCard.size(), withoutCard.data()));
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted());
+    std::puts("PASS: a Zodiac state saved with its card in loads with the card in, one saved without it with the card out");
+}
+
 void machine() {
     std::string error;
     // A process has one machine, so the stop case is a second run of this test. Its ROM starts with
@@ -421,6 +455,7 @@ void machine() {
     soc->Reset();
     assert(audioQueuePendingSamples(queue) == 0 && sink.sound.currentGain() == 0);
     std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag, the engine and the sound queue");
+    cardThroughLoad(*soc);
 }
 }  // namespace
 

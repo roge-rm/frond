@@ -7,6 +7,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 
 #include "device_configuration.h"
@@ -206,12 +207,19 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
-    // A card in carries on from the state's card section, or starts idle without one. With no card in, a
-    // card section waits for OnSdInsert, which a session start calls next; the next Run takes the card out.
+    // A card in carries on from the state's card section, or starts idle without one. With no card in,
+    // a card section puts the card store's card back in (a session saved with its card in), or waits
+    // for OnSdInsert when the store has none.
     cardSync = true;
     if (cardIn) {
         if (!info.cardResumed) vsdReset(vsd, uint32_t(sdCardSectorCount()));
         SyncCard();
+    } else if (info.cardSection && !cardInserted && sdCardInitialized()) {
+        // It takes on the card section, a command or transfer under way included. The id keeps it in
+        // through the session start's SdRemount.
+        std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
+        cardId[sizeof(cardId) - 1] = '\0';
+        SdInsert();
     }
     return true;
 }
