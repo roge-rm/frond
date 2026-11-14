@@ -3886,7 +3886,7 @@ static void initStatic() {
 }
 
 #ifdef FROND_DYNARMIC
-static bool cpuPrvJitWanted();
+static bool cpuPrvJitWanted(ArmCpuModel model);
 static void cpuPrvJitInval(void *ctx, uint32_t va, uint32_t size, bool guest);
 static const uint8_t *cpuPrvJitWatchFetch(void *ctx, uint32_t pa);
 #endif
@@ -3948,7 +3948,7 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
     cpuReset(cpu, pc);
 
 #ifdef FROND_DYNARMIC
-    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpuPrvJitWanted()) {
+    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpuPrvJitWanted(model)) {
         cpu->jit = jitCreate(cpu, jitSingleStep);
         icacheSetInvalHook(cpu->ic, cpuPrvJitInval, cpu);
         icacheSetFetchWatch(cpu->ic, cpuPrvJitWatchFetch, cpu);
@@ -5712,7 +5712,11 @@ static void cpuPrvJitInval(void *ctx, uint32_t va, uint32_t size, bool guest) {
         jitClear(cpu->jit);
 }
 
-static bool cpuPrvJitWanted() {
+// FROND_JIT overrides the engine for the PXA and OMAP cores. The ARM920T's per-instruction JIT is its
+// machine's own choice (imx1MachineCreate's fast): with FROND_JIT=1 the Zodiac's Fast engine would find
+// it in place and run without its Fast blocks (cpuArm920SetJit).
+static bool cpuPrvJitWanted(ArmCpuModel model) {
+    if (model == ArmCpuModel::arm920t) return cpuPrvFastEngine;
     const char *v = getenv("FROND_JIT");
     if (v && *v) return strcmp(v, "0") != 0;
     return cpuPrvFastEngine;
