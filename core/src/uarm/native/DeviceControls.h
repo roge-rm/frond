@@ -335,8 +335,8 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
                                                   DeviceControlStyle::tg50,0.3f,1,0,176,clieJogTab(-236,208),clieJogWidth};
     // Tapwave Zodiac: power, the analogue stick, Function and Home on the left and four silver
     // Action keys in a round recess on the right, the shoulder triggers above them and the small
-    // round Bluetooth button. Action keys are named by place; which of hard1-4 each one sends
-    // isn't known yet. Each Action key's shape is the cluster's recess; it hits in its own quarter
+    // round Bluetooth button. Action keys are named by place and send hard1-4 as bottom, right, left,
+    // top. Each Action key's shape is the cluster's recess; it hits in its own quarter
     // of it (deviceClusterKeyAt). The stick entries place its well and carry its press.
     // Below: one strip under the screen, scaled to the screen's width. Around: a panel either side
     // of the screen, each 150 wide and authored 320 tall; the right panel's keys are authored

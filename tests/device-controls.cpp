@@ -2413,6 +2413,11 @@ static void zodiacControls() {
         assert(at(32767,-32768).x==1 && at(32767,-32768).y==-1);
         const auto half=at(16384,0),small=at(4200,0);
         assert(half.x>0.4f && half.x<0.5f && half.y==0 && small.held && small.x>0 && small.x<0.02f);
+        // The d-pad is full travel on its axis and wins over the left stick there.
+        auto dpad=[](bool GamepadState::*m,int x=0,int y=0) {GamepadState g;g.*m=true;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        assert(dpad(&GamepadState::dpadLeft).held && dpad(&GamepadState::dpadLeft).x==-1 && dpad(&GamepadState::dpadLeft).y==0);
+        assert(dpad(&GamepadState::dpadRight).x==1 && dpad(&GamepadState::dpadUp).y==-1 && dpad(&GamepadState::dpadDown).y==1);
+        assert(dpad(&GamepadState::dpadLeft,32767,32767).x==-1 && dpad(&GamepadState::dpadLeft,32767,32767).y==1);
         // A full push reaches the machine's whole travel.
         assert(zodiacStickOffset(at(32767,0).x)==511 && zodiacStickOffset(at(0,-32768).y)==-511);
     }
@@ -2430,8 +2435,12 @@ static void zodiacControls() {
         padButton(button,true);guest.expect({{key,true}});assert(input.PressedButtons()==deviceKeyBit(key));
         padButton(button,false);guest.expect({{key,false}});assert(!input.PressedButtons());
     }
-    // Buttons with no place on the Zodiac and the other axes do nothing.
-    padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,true);padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);
+    // The d-pad drives the stick to full travel and lets go again.
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,true);st=guest.lastStick();assert(st.x==0 && st.y==-1);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,true);st=guest.lastStick();assert(st.x==-1 && st.y==-1);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,false);
+    st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);guest.expect({});
+    // The other axes do nothing.
     padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
     // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.
     padButton(SDL_CONTROLLER_BUTTON_START,true);padButton(SDL_CONTROLLER_BUTTON_GUIDE,true);guest.expect({{keyIdHome,true}});

@@ -303,6 +303,10 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     case SDL_CONTROLLER_BUTTON_BACK: pad.back = down; break;
                     case SDL_CONTROLLER_BUTTON_START: pad.start = down; break;
                     case SDL_CONTROLLER_BUTTON_GUIDE: pad.guide = down; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: pad.dpadLeft = down; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: pad.dpadRight = down; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_UP: pad.dpadUp = down; break;
+                    case SDL_CONTROLLER_BUTTON_DPAD_DOWN: pad.dpadDown = down; break;
                     default: break;
                 }
                 UpdateGamepad();
@@ -554,6 +558,7 @@ GamepadState SdlEventHandler::CombinedPads() const {
         all.a |= one.a; all.b |= one.b; all.x |= one.x; all.y |= one.y;
         all.leftShoulder |= one.leftShoulder; all.rightShoulder |= one.rightShoulder; all.leftStick |= one.leftStick;
         all.back |= one.back; all.start |= one.start; all.guide |= one.guide;
+        all.dpadLeft |= one.dpadLeft; all.dpadRight |= one.dpadRight; all.dpadUp |= one.dpadUp; all.dpadDown |= one.dpadDown;
         if (!stickPad && (one.leftX || one.leftY)) stickPad = &one;
     }
     if (stickPad) { all.leftX = stickPad->leftX; all.leftY = stickPad->leftY; }
