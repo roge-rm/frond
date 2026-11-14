@@ -33,6 +33,14 @@ test: export TEST_TIMEOUT
 test-%: export TEST_TIMEOUT
 test: export TEST_NAME = $@
 test-%: export TEST_NAME = $@
+# make recheck-list shows which checks need running (changed paths, failed, never passed),
+# make recheck runs them one by one; both read tests/check-paths.tsv and build/check-passes.tsv.
+# CHECKS="test-zodiac-* test-cpu" limits them. Run it as `heavy build make recheck`.
+.PHONY: recheck recheck-list
+recheck-list:
+	@python3 tools/check-record.py list $(CHECKS)
+recheck:
+	@python3 tools/check-record.py recheck $(CHECKS)
 prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
 out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: TEST_TIMEOUT = 3600

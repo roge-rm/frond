@@ -1,0 +1,15 @@
+# Which source paths each check covers, for `make recheck` (tools/check-record.py).
+# Columns: check name globs (space separated), a tab, then path patterns. A pattern ending in /
+# is a folder prefix, otherwise a glob on the whole path. A leading ! excludes. @name is a list
+# defined below. For each check the first rule that fits gives its paths. Rules marked * are
+# added to every check, and tests/<name>* is always added. A check no rule fits reruns every time.
+# Keep it broad: a needless rerun costs time, a missed one hides a break.
+
+@arm-shared	core/src/uarm/native/ core/src/uarm/MainLoop.* core/src/uarm/cputil.* core/src/uarm/uarm/CPU.* core/src/uarm/uarm/arm920* core/src/uarm/uarm/cp15* core/src/uarm/uarm/MMU* core/src/uarm/uarm/MPU* core/src/uarm/uarm/RAM* core/src/uarm/uarm/ROM* core/src/uarm/uarm/SoC.* core/src/uarm/uarm/icache* core/src/uarm/uarm/savestate/ core/src/uarm/uarm/scheduler.h core/src/uarm/uarm/queue.h core/src/uarm/uarm/reschedule.h core/src/uarm/uarm/peephole.* core/src/uarm/uarm/nand* core/src/uarm/uarm/sdcard.* core/src/uarm/uarm/vSD.* core/src/uarm/uarm/timeutil.* vendor/dynarmic/
+
+*	Makefile core/src/Makefile.common core/src/common/ core/src/uarm/Makefile core/src/cloudpilot/Makefile tests/timed-shell.sh tests/check-paths.tsv tools/check-record.py tools/palm_boot.py tools/guest_process.py tests/boot_fixture.py tests/wait_for.py tests/fixtures/ tests/palm/
+
+test-zodiac-* test-imx1-*	@arm-shared core/src/uarm/uarm/imx1_* core/src/uarm/uarm/soc_IMX1.* core/src/uarm/uarm/zodiac_* core/src/uarm/uarm/ymfm/ zodiac-rom/
+test-68k-* test-frond-68k* test-dana-* test-memory-stick-* test-ms-*	core/src/cloudpilot/ tools/frond-run.py
+test-pxa-* test-pxa2* test-tg50-* test-tx-* test-e2-* test-z72-* test-iwmmxt-* test-xscale-* test-frond-arm-*	core/src/uarm/ !core/src/uarm/uarm/imx1_* !core/src/uarm/uarm/soc_IMX1.* !core/src/uarm/uarm/zodiac_*
+test-*	core/ vendor/ desktop/ link/ print/ tools/ zodiac-rom/ packaging/
