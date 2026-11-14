@@ -892,6 +892,45 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
                                                           uintptr_t(host) - vpage};
     }
 }
+
+#ifdef FROND_DYNARMIC
+// The Fast engine's fill after an access through the MMU: RAM and ROM pages go to the host
+// TLB as above, and a page of a device region to the device page table, under the same
+// rules (the MMU TLB holds the page now, keyed by gen and privilege), with the region the
+// access went to. Regions don't overlap, so an address inside it reaches that handler.
+template <bool write>
+static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
+                                                   bool privileged) {
+    const struct ArmMmu *mmu = cpu->memorySystem.mmu;
+    if (mmu->transTablPA != MMU_DISABLED_TTP) {
+        if (mmu->tlb[va >> 12].revision != mmu->revision) return;
+    } else if (mmu->staleOn) {
+        return;
+    }
+    struct ArmMem *mem = cpu->mem;
+    const uint32_t ppage = pa & ~0xfffu;
+    const auto meets = [&](const struct ArmMemRegion &r) {
+        return r.ub && r.pa < uint64_t(ppage) + 0x1000 && ppage < r.ub;
+    };
+    if (meets(mem->regions[REGION_RAM]) || meets(mem->regions[REGION_ROM])) {
+        cpuPrvHostTlbFill<write>(cpu, va, pa, privileged);
+        return;
+    }
+    for (unsigned i = REGION_BASE; i < NUM_MEM_REGIONS; i++) {
+        const struct ArmMemRegion &r = mem->regions[i];
+        if (!r.ub || r.pa > pa || r.ub <= pa) continue;
+        struct HostTlb &t = mem->hostTlb;
+        struct HostTlbIoEntry &e = (write ? t.ioWrite : t.ioRead)[hostTlbIoIndex(va)];
+        e.key = hostTlbKey(t.gen, va, privileged);
+        e.delta = pa - va;
+        e.pa = r.pa;
+        e.ub = r.ub;
+        e.aF = r.aF;
+        e.uD = r.uD;
+        return;
+    }
+}
+#endif
 #endif
 
 #ifndef __EMSCRIPTEN__
@@ -1009,8 +1048,9 @@ static FORCE_INLINE bool cpuPrvLeanMemOp(struct ArmCpu *cpu, void *buf, uint32_t
 }
 #endif
 
-// arm920 is the interpreter kind's model, from cpuPrvMemOpEx.
-template <int memorySystemKind, int size, bool write, bool arm920>
+// arm920 is the interpreter kind's model, from cpuPrvMemOpEx. jit: the Fast engine's callbacks,
+// which also note device pages (cpuPrvJitFill).
+template <int memorySystemKind, int size, bool write, bool arm920, bool jit = false>
 static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
                                             bool priviledged, uint_fast8_t *fsrP) {
 #ifndef __EMSCRIPTEN__
@@ -1111,19 +1151,26 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
     }
 
 #ifndef __EMSCRIPTEN__
-    if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8 && !arm920)
+    if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8 && !arm920) {
+#ifdef FROND_DYNARMIC
+        if constexpr (jit) {
+            cpuPrvJitFill<write>(cpu, vaddr, pa, priviledged);
+            return true;
+        }
+#endif
         cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged);
+    }
 #endif
 
     return true;
 }
 
 // The ARM920T's lean run, data cache model and missing host TLB are only in its own kind's copy.
-template <int memorySystemKind, int size, bool write>
+template <int memorySystemKind, int size, bool write, bool jit = false>
 static FORCE_INLINE bool cpuPrvMemOpEx(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
                                        bool priviledged, uint_fast8_t *fsrP) {
-    return cpuPrvMemOpExModel<armMemorySystemOf(memorySystemKind), size, write, armKindIsArm920(memorySystemKind)>(
-        cpu, buf, vaddr, priviledged, fsrP);
+    return cpuPrvMemOpExModel<armMemorySystemOf(memorySystemKind), size, write, armKindIsArm920(memorySystemKind),
+                              jit>(cpu, buf, vaddr, priviledged, fsrP);
 }
 
 template <int size, bool write>
@@ -5223,7 +5270,39 @@ template <int size, bool write>
 static FORCE_INLINE bool cpuPrvJitMemOp(ArmCpu *cpu, void *buf, uint32_t va, uint_fast8_t *fsr) {
     if (cpu->model == ArmCpuModel::arm920t)
         return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_ARM920T, size, write>(cpu, buf, va, cpu->privileged, fsr);
-    return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, size, write>(cpu, buf, va, cpu->privileged, fsr);
+    return cpuPrvMemOpEx<ARM_MEMORY_SYSTEM_MMU, size, write, true>(cpu, buf, va, cpu->privileged, fsr);
+}
+
+// A device page from cpuPrvJitFill: the access goes straight to its region's handler, with the
+// handler's result in *ok. 0 if it didn't (anything else, for cpuJitRead or cpuJitWrite), 1 if it
+// did, 2 if it did and the page generation (cpuJitPageGen) is no longer gen.
+static inline uint64_t cpuPrvJitPageGen(const ArmCpu *cpu) {
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    return (uint64_t(t.epoch) << 32) | uint32_t(t.gen + t.gains);
+}
+
+// The io tables are keyed by the raw va, so they assume no FCSE PID remap.
+#ifndef NO_SUPPORT_FCSE
+#error "cpuPrvJitIo keys on the raw va; add the FCSE PID before the lookup"
+#endif
+template <bool write>
+static FORCE_INLINE int cpuPrvJitIo(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen) {
+    if ((va & (size - 1)) || cpu->nativeCallDepth || cpu->model == ArmCpuModel::arm920t) return 0;
+    const struct HostTlb &t = cpu->mem->hostTlb;
+    const struct HostTlbIoEntry &e = (write ? t.ioWrite : t.ioRead)[hostTlbIoIndex(va)];
+    if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return 0;
+    const uint32_t pa = va + e.delta;
+    if (pa < e.pa || uint64_t(pa) + size > e.ub) return 0;
+    *ok = e.aF(e.uD, pa, size, write, buf);
+    return cpuPrvJitPageGen(cpu) == gen ? 1 : 2;
+}
+
+int cpuJitIoRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen) {
+    return cpuPrvJitIo<false>(cpu, va, size, buf, ok, gen);
+}
+
+int cpuJitIoWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, bool *ok, uint64_t gen) {
+    return cpuPrvJitIo<true>(cpu, va, size, const_cast<void *>(buf), ok, gen);
 }
 
 bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr) {
@@ -5418,10 +5497,7 @@ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu)
 
 // The host TLB's keys hold the privilege, so its generation alone covers both levels. A
 // domain change that only adds rights keeps the host TLB, so gains are counted in too.
-uint64_t cpuJitPageGen(ArmCpu *cpu) {
-    const struct HostTlb &t = cpu->mem->hostTlb;
-    return (uint64_t(t.epoch) << 32) | uint32_t(t.gen + t.gains);
-}
+uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpuPrvJitPageGen(cpu); }
 
 int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
     return mmuPageClientAccess(cpu->memorySystem.mmu, va, privileged);

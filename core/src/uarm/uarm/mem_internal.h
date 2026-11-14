@@ -32,6 +32,23 @@ struct HostTlbEntry {
     uintptr_t addend;  // reads: host address - va; writes: pa - va
 };
 
+// The Fast engine's device pages: a virtual page the MMU TLB maps to a device region, with
+// that region's bounds and handler, so a JIT callback to it skips the translation, the
+// region search and the host TLB fill. Keyed and dropped like the host TLB entries, and
+// emptied whenever a region is added, removed or replaced.
+#define HOST_TLB_IO_BITS 7
+#define HOST_TLB_IO_SIZE (1u << HOST_TLB_IO_BITS)
+
+struct HostTlbIoEntry {
+    uint64_t key;    // as HostTlbEntry's
+    uint32_t delta;  // pa - va
+    uint32_t pa, ub;  // the region's bounds
+    ArmMemAccessF aF;
+    void *uD;
+};
+
+static inline uint32_t hostTlbIoIndex(uint32_t va) { return ((va >> 12) * 0x9e3779b1u) >> (32 - HOST_TLB_IO_BITS); }
+
 struct HostTlb {
     uint32_t gen;
     // Moves on with every flush but a domain change, so the JIT can tell a domain change
@@ -42,7 +59,14 @@ struct HostTlb {
     struct ArmRam *ram;  // primary RAM when the write entries were filled
     struct HostTlbEntry read[HOST_TLB_SIZE];
     struct HostTlbEntry write[HOST_TLB_SIZE];
+    struct HostTlbIoEntry ioRead[HOST_TLB_IO_SIZE];
+    struct HostTlbIoEntry ioWrite[HOST_TLB_IO_SIZE];
 };
+
+static inline void hostTlbForgetIo(struct HostTlb *tlb) {
+    for (auto &e : tlb->ioRead) e = {};
+    for (auto &e : tlb->ioWrite) e = {};
+}
 
 static inline uint64_t hostTlbKey(uint32_t gen, uint32_t va, bool privileged) {
     return (uint64_t(gen) << 32) | ((va >> 12) << 1) | (privileged ? 1 : 0);
@@ -52,6 +76,7 @@ static inline void hostTlbFlushDomains(struct HostTlb *tlb) {
     if (++tlb->gen == 0) {
         for (auto &e : tlb->read) e = {};
         for (auto &e : tlb->write) e = {};
+        hostTlbForgetIo(tlb);
         tlb->gen = 1;
         tlb->epoch++;
     }

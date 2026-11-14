@@ -63,6 +63,11 @@ struct Stats {
     std::unordered_map<uint32_t, uint32_t> interpWord;
     std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> invalAllPc;
     std::unordered_map<uint32_t, uint64_t> writtenPage;  // virtual page dropped for a write
+    // Callback reads and writes by virtual page (bit 31 of the key set for writes).
+    std::unordered_map<uint32_t, uint64_t> callbackPage;
+    void NoteCallback(uint32_t va, bool write) {
+        if (on) callbackPage[(va >> 12) | (write ? 0x80000000u : 0)]++;
+    }
     const bool on = [] {
         const char *v = getenv("FROND_JIT_STATS");
         return v && *v && strcmp(v, "0");
@@ -146,6 +151,12 @@ struct Stats {
         std::sort(top.rbegin(), top.rend());
         for (size_t i = 0; i < top.size() && i < 8; i++)
             fprintf(stderr, "jit: written page %08x %llu\n", top[i].second << 12, (unsigned long long)top[i].first);
+        top.clear();
+        for (auto &[key, n] : callbackPage) top.push_back({n, key});
+        std::sort(top.rbegin(), top.rend());
+        for (size_t i = 0; i < top.size() && i < 16; i++)
+            fprintf(stderr, "jit: callback %s page %08x %llu\n", top[i].second >> 31 ? "write" : "read",
+                    top[i].second << 12, (unsigned long long)top[i].first);
     }
 } stats;
 
@@ -623,6 +634,18 @@ struct Env final : public A32::UserCallbacks {
     T Read(A32::VAddr va) {
         T v{};
         stats.reads++;
+        stats.NoteCallback(va, false);
+        // A device page: no page to fill.
+        bool ok;
+        if (const int io = cpuJitIoRead(cpu, va, sizeof(T), &v, &ok, gen)) {
+            if (!ok) {
+                AccessFailed(va, sizeof(T), false, 10);
+                return 0;
+            }
+            if (io == 2) GenChanged(cpuJitPageGen(cpu));
+            AfterIo();
+            return v;
+        }
         uint_fast8_t fsr;
         if (!cpuJitRead(cpu, va, sizeof(T), &v, &fsr)) {
             AccessFailed(va, sizeof(T), false, fsr);
@@ -647,6 +670,17 @@ struct Env final : public A32::UserCallbacks {
     template <typename T>
     void Write(A32::VAddr va, T v) {
         stats.writes++;
+        stats.NoteCallback(va, true);
+        bool ok;
+        if (const int io = cpuJitIoWrite(cpu, va, sizeof(T), &v, &ok, gen)) {
+            if (!ok) {
+                AccessFailed(va, sizeof(T), true, 10);
+                return;
+            }
+            if (io == 2) GenChanged(cpuJitPageGen(cpu));
+            AfterIo();
+            return;
+        }
         uint_fast8_t fsr;
         if (!cpuJitWrite(cpu, va, sizeof(T), &v, &fsr)) {
             AccessFailed(va, sizeof(T), true, fsr);
