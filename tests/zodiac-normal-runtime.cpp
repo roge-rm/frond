@@ -482,6 +482,20 @@ void machine() {
     assert(onExact > onFast && soc->SetFastEngine(true) && soc->FastEngine());
     run(*soc, 1);
     assert(soc->Status().retired > onExact && !soc->Halted());
+    // Run stops only where the retired or work count is a whole multiple of the engine's slice size,
+    // and gives at least the guest time asked for, however little. A long ask can end early on host time.
+    for (const bool fast : {false, true}) {
+        assert(soc->SetFastEngine(fast));
+        const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+        for (const uint64_t asked : {1, 7, 4000, 1000000}) {
+            const auto from = soc->Status();
+            const uint64_t credit = soc->Run(asked, 100000000);
+            const auto to = soc->Status();
+            const uint64_t ticks = std::max<uint64_t>(1, asked * 32768 / 100000000);
+            assert(to.retired % sliceRetired == 0 || to.work % sliceWork == 0);
+            assert((asked == 1000000 || to.time.ticks - from.time.ticks >= ticks) && credit > 0 && !soc->Halted());
+        }
+    }
     // The sound path: a load and a reset empty the queue and start the stream again.
     auto* queue = audioQueueCreate(64);
     soc->SetAudioQueue(queue);
