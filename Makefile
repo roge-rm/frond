@@ -2585,3 +2585,30 @@ test-print-text:
 	mkdir -p build/print-text
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/print-text.cpp -o build/print-text/test-print-text
 	build/print-text/test-print-text
+
+# The S3C2442 machine (the HP iPAQ rx1950), not in the runner yet: its blocks, its NAND image and the
+# boot tool, which runs the bootloader and keeps the UART output.
+S3C2442_SOURCES = core/src/uarm/uarm/s3c2442_intc.cpp core/src/uarm/uarm/s3c2442_clock.cpp \
+	core/src/uarm/uarm/s3c2442_timer.cpp core/src/uarm/uarm/s3c2442_rtc.cpp core/src/uarm/uarm/s3c2442_gpio.cpp \
+	core/src/uarm/uarm/s3c2442_uart.cpp core/src/uarm/uarm/s3c2442_lcd.cpp core/src/uarm/uarm/s3c2442_nand.cpp
+S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442_nand.h \
+	core/src/uarm/uarm/s3c2442_machine.h core/src/uarm/uarm/rx1950_nand_image.h
+.PHONY: rx1950-boot test-s3c2442 test-rx1950-boot
+rx1950-boot: build/rx1950-boot
+build/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) \
+		core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/rx1950-core.rsp
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tools/rx1950-boot.cpp core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp \
+		$(S3C2442_SOURCES) @build/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
+
+# Each block's registers, timer ticks, interrupt priority and sub-source masking, UART output.
+test: test-s3c2442
+test-s3c2442: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm \
+		tests/s3c2442-blocks.cpp $(S3C2442_SOURCES) core/src/uarm/uarm/rx1950_nand_image.cpp -o build/test-s3c2442
+	./build/test-s3c2442
+
+# The rx1950's bootloader and OS to the kernel's first serial lines, when the firmware is here.
+test-rx1950-boot: build/rx1950-boot
+	python3 tests/rx1950-boot.py build/rx1950-boot
