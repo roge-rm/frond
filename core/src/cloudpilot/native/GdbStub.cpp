@@ -46,8 +46,10 @@
 class EInvalidCommand {};
 
 namespace {
-    constexpr size_t PKT_BUF_SIZE = 1024;
-    constexpr size_t MAX_MEMORY_READ_SIZE = 500;
+    // Holds one unescaped packet plus its terminating 0; replies are built in the same buffer.
+    constexpr size_t PKT_BUF_SIZE = 4096;
+    // An m reply is two hex characters per byte.
+    constexpr size_t MAX_MEMORY_READ_SIZE = (PKT_BUF_SIZE - 1) / 2;
 
     const char* GDB_SIG0 = "S00";
     const char* GDB_SIGINT = "S02";
@@ -380,7 +382,8 @@ bool GdbStub::HandlePacket() {
     try {
         if (in == strstr(in, "qSupported")) {
             fullRegisters = true;
-            strcpy(out, "PacketSize=1024");
+            // gdb reads PacketSize as hex, counting the packet data without framing.
+            snprintf(out, PKT_BUF_SIZE, "PacketSize=%zx", PKT_BUF_SIZE - 1);
         }
 
         else if (in == strstr(in, "qAttached"))

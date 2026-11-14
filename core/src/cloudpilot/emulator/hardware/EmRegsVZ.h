@@ -146,6 +146,7 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     void tmr2StatusWrite(emuptr address, int size, uint32 value);
     void tmrRegisterWrite(emuptr address, int size, uint32 value);
     void spiMasterControlWrite(emuptr address, int size, uint32 value);
+    void UpdateSpimInterrupt();
     void uart1Write(emuptr address, int size, uint32 value);
     void uart2Write(emuptr address, int size, uint32 value);
     void lcdRegisterWrite(emuptr address, int size, uint32 value);

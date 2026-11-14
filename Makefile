@@ -2496,6 +2496,12 @@ test-68k-vz-registers: prepare out/frond-68k
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
 
+.PHONY: test-68k-ez-uart-spi
+test: test-68k-ez-uart-spi
+test-68k-ez-uart-spi: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-ez-uart-spi.mk FROND_TEST_ROOT=$(CURDIR) ez-uart-spi-test
+
 .PHONY: test-68k-dana
 test: test-68k-dana
 test-68k-dana: prepare out/frond-68k

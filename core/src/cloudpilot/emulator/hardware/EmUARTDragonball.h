@@ -136,12 +136,16 @@ class EmUARTDragonball {
     void UpdateState(State&, Bool refreshRxData);
 
     void TransmitTxFIFO(EmTransportSerial*);
-    void ReceiveRxFIFO(EmTransportSerial*);
+    void ReceiveRxFIFO(EmTransportSerial*, bool receiverOn);
+    void DropWhileOff(EmTransportSerial*);
 
     EmTransportSerial* GetTransport(void);
 
     void SetModeSync(bool sync);
     bool GetModeSync() const;
+
+    // Guest cycles for unit tests that run without a CPU; null otherwise.
+    static uint64 (*testClock)();
 
    private:
     int PrvFIFOSize(Bool forRX);
@@ -159,6 +163,11 @@ class EmUARTDragonball {
 
     bool receiveInProgress{false};
     bool sync{false};
+
+    // While the receiver is off: guest cycle up to which pending bytes have been dropped, set
+    // when bytes are first seen pending.
+    uint64 dropMark{0};
+    bool dropMarkSet{false};
 
     TransactionState transactionState{TransactionState::idle};
     uint64 transactionTimeoutCycles{0};
