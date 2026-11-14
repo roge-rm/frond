@@ -140,7 +140,7 @@
       "results": {
         "exact": {
           "guest_ns": 13003200000,
-          "cycles": 431200672,
+          "cycles": 431200668,
           "frame_sequence_hash": "f702a2f185d840d9",
           "pcm_hash": "fad0f80296068f9d",
           "input": "47bb591f77390eae"

@@ -62,6 +62,7 @@
 #include "DebugSupport.h"
 #include "Debugger.h"
 #include "EmCommon.h"
+#include "Platform.h"
 #include "EmCPU68K.h"
 #include "EmDevice.h"
 #include "EmHAL.h"
@@ -924,6 +925,12 @@ string exportDatabaseZip(const string& name, vector<uint8_t>& out) {
     return "missing";
 }
 
+// Headless runs read the guest clock instead of the host's, so they repeat: 2026-10-26 00:00:00
+// UTC (as in benchmark-replay) plus the guest seconds run so far.
+constexpr int64_t kHeadlessEpoch = 1792972800;
+const double* headlessGuestSeconds = nullptr;
+int64 HeadlessClock() { return kHeadlessEpoch + (headlessGuestSeconds ? int64_t(*headlessGuestSeconds) : 0); }
+
 class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
@@ -989,6 +996,7 @@ class Runner {
 
     // Headless: runs for options.runFor guest seconds as fast as the host can.
     int RunHeadless() {
+        headlessGuestSeconds = &guestSeconds;
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
             cout << "card: " << reply << endl;
@@ -3642,6 +3650,7 @@ int main(int argc, char** argv) {
         cerr << "--desktop-socket cannot be combined with --run-for or --check-rom" << endl;
         return 2;
     }
+    if (options.runFor > 0) Platform::SetClock(HeadlessClock);
     if (options.saveOnDisconnect && !options.desktopSocket) {
         cerr << "--save-on-disconnect needs --desktop-socket" << endl;
         return 2;
@@ -3730,6 +3739,7 @@ int main(int argc, char** argv) {
             cerr << error.what() << endl;
             status = 1;
         }
+        headlessGuestSeconds = nullptr;
     }
     runtimeCards.Install(RuntimeCards::Pair{});
     cout.flush();

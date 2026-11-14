@@ -551,7 +551,7 @@ out/frond-68k iiix.frond --serial pty
 | `--rom FILE` | The ROM or session. A plain positional file works the same. |
 | `--device NAME` | Expect this device, for example `palm-iiix` or `palm-m515`. |
 | `--check-rom` | Check the ROM (header, then Cloudpilot's own check) and print what it found, without starting. Not with a session. |
-| `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. Not with `--desktop-socket`. |
+| `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. The guest clock starts at 2026-10-26 00:00:00 and follows guest time, so runs repeat. Not with `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the LCD as a PNG at the end of `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, the same format as in [Input replay](#input-replay). |
 | `--speed original\|uncapped` | Original runs at the device's real clock (16.58 MHz on the IIIx, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the VZ Palms), Uncapped at 8 times that with timers on real time. Default original. |
