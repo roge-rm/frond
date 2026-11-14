@@ -754,6 +754,13 @@ struct Probe {
         if (done(0, known) || !known) return;
         // The last cycle of the span stays for the loop to see; a wait past the span passes all the rest of it.
         uint64_t low = 0, high = quietCycles - 1;
+        // The skip counts as work, so it stops short of the slice's work bound, like the lean path.
+        if (bounds) {
+            const uint64_t used = work - sliceWorkStart;
+            if (used + 1 >= bounds->work) return;
+            high = std::min(high, bounds->work - used - 1);
+        }
+        if (!high) return;
         const bool reached = done(high, known);
         if (!known) return;
         while (reached && high - low > 1) {

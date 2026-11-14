@@ -17,6 +17,8 @@
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
+    // The longest slice in guest time, CLK32 ticks (about 1 ms).
+    constexpr uint64_t sliceTicks = 32;
     // Host time one Run call may take, so input and frames are served while the guest is busy. Run
     // stops for it only at a slice end, where stopping changes nothing in the machine.
     constexpr auto runHostLimit = std::chrono::milliseconds(12);
@@ -344,10 +346,12 @@ std::string SocIMX1::StopText() const {
 
 // Runs the guest for at least maxCycles / cyclesPerSecond of its own time, or for a short stretch of host
 // time when it can't keep up, and returns the guest time that passed in the same cycle units.
-// Every slice ends where the machine's retired or work count reaches a whole multiple of the slice size,
-// and Run only stops at a slice end, so slice ends and the board charges they make fall at the same guest
-// points however the calls are cut and however busy the host is. A run can pass the time asked for by up
-// to one slice; the time returned counts it.
+// Each slice's bounds come from the machine's own counts where it starts: retired and work up to their next
+// whole multiple of the slice size, and the time up to the next whole sliceTicks. A slice starts where the
+// last one ended, so every slice end, and the board charge it makes, is set by the guest alone. An instruction,
+// a CS5 wait, a PLL stall or a delay skip can carry a slice a little past its bound. Run only stops at a slice
+// end, so where the calls are cut and how busy the host is change nothing in the machine. A run can pass the
+// time asked for by up to sliceTicks (about 1 ms) and that carry; the time returned counts it.
 uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (halted || !cyclesPerSecond) {
         keyEventQueue->Clear();
@@ -369,9 +373,9 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     for (;;) {
         bounds.retired = uint32_t(sliceRetired - now.retired % sliceRetired);
         bounds.work = sliceWork - now.work % sliceWork;
-        // The slice sizes end a slice and the time asked for is checked between slices. The deadline,
-        // 32 to 64 s of guest time on, is on a fixed grid too and never comes first.
-        bounds.deadline = {((now.time.ticks >> 20) + 2) << 20, 0, 1};
+        // The time asked for is checked between slices. The time bound keeps slices short in stop mode,
+        // where each idle period is a CLK32 tick, so input reaches a sleeping guest promptly.
+        bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
         const auto run = imx1MachineRunBounded(machine, bounds);
         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
             run.reason == Imx1MachineYield::invalidBounds) {
