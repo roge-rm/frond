@@ -2414,10 +2414,10 @@ static void zodiacControls() {
         const auto half=at(16384,0),small=at(4200,0);
         assert(half.x>0.4f && half.x<0.5f && half.y==0 && small.held && small.x>0 && small.x<0.02f);
         // The d-pad is full travel on its axis and wins over the left stick there.
-        auto dpad=[](bool GamepadState::*m,int x=0,int y=0) {GamepadState g;g.*m=true;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
-        assert(dpad(&GamepadState::dpadLeft).held && dpad(&GamepadState::dpadLeft).x==-1 && dpad(&GamepadState::dpadLeft).y==0);
-        assert(dpad(&GamepadState::dpadRight).x==1 && dpad(&GamepadState::dpadUp).y==-1 && dpad(&GamepadState::dpadDown).y==1);
-        assert(dpad(&GamepadState::dpadLeft,32767,32767).x==-1 && dpad(&GamepadState::dpadLeft,32767,32767).y==1);
+        auto dpad=[](int dx,int dy,int x=0,int y=0) {GamepadState g;g.dpadX=dx;g.dpadY=dy;g.leftX=int16_t(x);g.leftY=int16_t(y);return zodiacGamepadInput(g).stick;};
+        assert(dpad(-1,0).held && dpad(-1,0).x==-1 && dpad(-1,0).y==0);
+        assert(dpad(1,0).x==1 && dpad(0,-1).y==-1 && dpad(0,1).y==1);
+        assert(dpad(-1,0,32767,32767).x==-1 && dpad(-1,0,32767,32767).y==1);
         // A full push reaches the machine's whole travel.
         assert(zodiacStickOffset(at(32767,0).x)==511 && zodiacStickOffset(at(0,-32768).y)==-511);
     }
@@ -2440,6 +2440,18 @@ static void zodiacControls() {
     padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,true);st=guest.lastStick();assert(st.x==-1 && st.y==-1);
     padButton(SDL_CONTROLLER_BUTTON_DPAD_UP,false);padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,false);
     st=guest.lastStick();assert(st.x==0 && st.y==0 && !input.Stick().held);guest.expect({});
+    // The last direction pressed on an axis wins, and letting go of the other doesn't change it.
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,true);padButton(SDL_CONTROLLER_BUTTON_DPAD_RIGHT,true);
+    st=guest.lastStick();assert(st.x==1 && st.y==0);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,false);assert(input.Stick().x==1);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_RIGHT,false);st=guest.lastStick();assert(st.x==0 && st.y==0);
+    // Two controllers: either one's d-pad counts. A d-pad let go while the left stick is pushed gives the stick back.
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_DOWN,true,1);st=guest.lastStick();assert(st.x==0 && st.y==1);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,true,2);st=guest.lastStick();assert(st.x==-1 && st.y==1);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,32767,2);guest.noStick();
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_LEFT,false,2);st=guest.lastStick();assert(st.x==1 && st.y==1);
+    padButton(SDL_CONTROLLER_BUTTON_DPAD_DOWN,false,1);st=guest.lastStick();assert(st.x==1 && st.y==0);
+    padAxis(SDL_CONTROLLER_AXIS_LEFTX,0,2);st=guest.lastStick();assert(st.x==0 && st.y==0);guest.expect({});
     // The other axes do nothing.
     padAxis(SDL_CONTROLLER_AXIS_RIGHTX,32767);padAxis(SDL_CONTROLLER_AXIS_TRIGGERLEFT,32767);guest.expect({});guest.noStick();
     // Start and Guide together hold Home once, and a key held on the keyboard too stays down until both let go.

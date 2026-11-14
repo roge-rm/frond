@@ -14,7 +14,7 @@ struct GamepadState {
     bool a{false}, b{false}, x{false}, y{false};
     bool leftShoulder{false}, rightShoulder{false}, leftStick{false};
     bool back{false}, start{false}, guide{false};
-    bool dpadLeft{false}, dpadRight{false}, dpadUp{false}, dpadDown{false};
+    int dpadX{0}, dpadY{0}; // -1, 0 or 1; the last direction pressed on an axis wins
 };
 
 // What a controller holds on the device: keys and the analogue stick.
@@ -51,9 +51,8 @@ inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
         sx = std::clamp(x * scale, -1.0f, 1.0f);
         sy = std::clamp(y * scale, -1.0f, 1.0f);
     }
-    const int dx = int(pad.dpadRight) - int(pad.dpadLeft), dy = int(pad.dpadDown) - int(pad.dpadUp);
-    if (dx) sx = float(dx);
-    if (dy) sy = float(dy);
+    if (pad.dpadX) sx = float(pad.dpadX);
+    if (pad.dpadY) sy = float(pad.dpadY);
     if (sx != 0 || sy != 0) input.stick = {sx, sy, true};
     return input;
 }
