@@ -1,28 +1,44 @@
-// EZ UART receive with the receiver off, and the SPIM interrupt following its control bits.
+// EZ and VZ UART receive with the receiver off, and the SPIM interrupt following its control bits.
 #include <cassert>
 #include <cstdio>
 #include <deque>
 
 #include "EmHAL.h"
 #include "EmRegsEZ.h"
+#include "EmRegsVZ.h"
 #include "EmSession.h"
 #include "EmTransportSerial.h"
+#include "EmUARTDragonball.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
 
-class Board : public EmRegsEZ {
+static uint64 gNow = 0;
+
+template <typename Regs>
+class Board : public Regs {
    public:
-    Board() { SetSubBankHandlers(); }
+    Board() { this->SetSubBankHandlers(); }
     Bool GetLCDScreenOn() override { return true; }
     Bool GetLCDBacklightOn() override { return false; }
     void GetKeyInfo(int* r, int* c, uint16*, Bool*) override { *r = *c = 0; }
-    EmUARTDeviceType GetUARTDevice(int) override { return kUARTIR; }
+    EmUARTDeviceType GetUARTDevice(int uart) override { return uart == 0 ? kUARTIR : kUARTNone; }
     // Writes go through the register handlers, as from the CPU.
     void Put(emuptr addr, int size, uint32 value) {
-        if (size == 4) SetLong(addr, value);
-        else SetWord(addr, value);
+        if (size == 4) this->SetLong(addr, value);
+        else this->SetWord(addr, value);
     }
+};
+
+class EzBoard : public Board<EmRegsEZ> {
+   public:
     void SetPending(uint16 lo) { f68EZ328Regs.intPendingLo = lo; }
+};
+
+class VzBoard : public Board<EmRegsVZ> {
+   public:
+    VzBoard() { fPortDDataCount = 0xffffffff; }
+    void ApplySdctl() override {}
+    void SetPending(uint16 lo) { f68VZ328Regs.intPendingLo = lo; }
 };
 
 class Line : public EmTransportSerial {
@@ -54,47 +70,109 @@ class Line : public EmTransportSerial {
     std::deque<uint8> bytes;
 };
 
-constexpr emuptr USTCNT = 0xfffff900, URX = 0xfffff904, SPIMCONT = 0xfffff802,
+constexpr emuptr USTCNT = 0xfffff900, UBAUD = 0xfffff902, URX = 0xfffff904, SPIMCONT = 0xfffff802,
                  UMISC = 0xfffff908, IPR_LO = 0xfffff312, ISR_LO = 0xfffff30e, IMR = 0xfffff304;
 constexpr uint16 UEN = 0x8000, RXEN = 0x4000, TXEN = 0x2000, DATA_READY = 0x2000;
 constexpr uint16 SPIM_IRQ = 0x0080, SPIM_IRQEN = 0x0040, SPIM_XCH = 0x0100,
                  SPIM_EN = 0x0200, SPIM_PENDING = 0x0001;
 
-static void CheckUart(Board& board, Line& line) {
-    board.Put(UMISC, 2, 0x00a0);  // IrDA, RTS from the FIFO
-    // The line runs while the receiver is off, as when Palm OS IR turns RX off to transmit.
-    board.Put(USTCNT, 2, UEN | TXEN | 0x0100);
-    line.Send(40, 0x10);
-    for (int i = 0; i < 4; ++i) assert(!(board.GetWord(URX) & DATA_READY));
-    assert(line.bytes.empty());
-
-    // The UART itself off drops bytes too.
-    board.Put(USTCNT, 2, 0);
-    line.Send(5, 0x60);
-    assert(!(board.GetWord(URX) & DATA_READY));
-    assert(line.bytes.empty());
-
-    // Once the receiver is on, only what arrives after that is read.
-    board.Put(USTCNT, 2, UEN | RXEN | TXEN | 0x0100);
-    assert(!(board.GetWord(URX) & DATA_READY));
-    line.Send(3, 0x41);
-    for (uint8 want = 0x41; want < 0x44; ++want) {
-        const uint16 urx = board.GetWord(URX);
-        assert(urx & DATA_READY);
-        assert((urx & 0xff) == want);
-    }
-    assert(!(board.GetWord(URX) & DATA_READY));
-    puts("EZ UART drops bytes while the receiver is off");
+// Guest cycles for one byte (10 bits) at the line's baud rate.
+static uint64 ByteTime(Line& line) {
+    return uint64(gSession->GetClocksPerSecond()) * 10 / line.GetConfig().fBaud;
 }
 
-static void CheckSpim(Board& board) {
+template <typename B>
+static void ReadBytes(B& board, uint8 first, int n) {
+    for (int i = 0; i < n; ++i) {
+        const uint16 urx = board.GetWord(URX);
+        assert(urx & DATA_READY);
+        assert((urx & 0xff) == uint8(first + i));
+    }
+    assert(!(board.GetWord(URX) & DATA_READY));
+}
+
+template <typename B>
+static void CheckUart(B& board, Line& line, const char* name) {
+    const uint16 rxOff = UEN | TXEN | 0x0100, rxOn = UEN | RXEN | TXEN | 0x0100;
+    board.Put(UMISC, 2, 0x00a0);  // IrDA, RTS from the FIFO
+    board.Put(UBAUD, 2, 0x003f);  // prescaler 2, divide by 1
+    board.Put(USTCNT, 2, rxOn);
+    const uint64 byte = ByteTime(line);
+    assert(byte > 0);
+
+    // The receiver off, as when Palm OS IR turns RX off to transmit. Bytes count from when
+    // they're first seen and go one byte time each, through CycleSlowly with no register access.
+    board.Put(USTCNT, 2, rxOff);
+    line.Send(40, 0x10);
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 40);
+    gNow += 10 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.size() == 30);
+    gNow += 40 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    assert(!(board.GetWord(URX) & DATA_READY));
+
+    // A reply due while RX is off is dropped, and one due just after it comes back on is read.
+    line.Send(5, 0x20);
+    board.CycleSlowly(false);
+    gNow += 5 * byte;
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    gNow += 3 * byte;
+    line.Send(3, 0x41);
+    board.CycleSlowly(false);
+    gNow += byte / 2;
+    board.Put(USTCNT, 2, rxOn);
+    ReadBytes(board, 0x41, 3);
+
+    // The UART off drops bytes the same way.
+    board.Put(USTCNT, 2, 0);
+    line.Send(5, 0x60);
+    board.CycleSlowly(false);
+    gNow += 5 * byte;
+    assert(!(board.GetWord(URX) & DATA_READY));
+    assert(line.bytes.empty());
+    board.Put(USTCNT, 2, rxOn);
+    assert(!(board.GetWord(URX) & DATA_READY));
+
+    // RX off with bytes in the FIFO flushes it and clears DATA_READY; the next byte read after
+    // RX is back on is a new one.
+    line.Send(3, 0x70);
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    assert((board.GetWord(URX) & (DATA_READY | 0xff)) == (DATA_READY | 0x70));
+    board.Put(USTCNT, 2, rxOff);
+    assert(!(board.GetWord(URX) & DATA_READY));
+    board.Put(USTCNT, 2, rxOn);
+    assert(!(board.GetWord(URX) & DATA_READY));
+    line.Send(1, 0x80);
+    ReadBytes(board, 0x80, 1);
+
+    // UART_ENABLE low with RX_ENABLE still high flushes it too.
+    line.Send(3, 0x90);
+    board.CycleSlowly(false);
+    assert(line.bytes.empty());
+    assert((board.GetWord(URX) & (DATA_READY | 0xff)) == (DATA_READY | 0x90));
+    board.Put(USTCNT, 2, RXEN | TXEN | 0x0100);
+    assert(!(board.GetWord(URX) & DATA_READY));
+    board.Put(USTCNT, 2, rxOn);
+    assert(!(board.GetWord(URX) & DATA_READY));
+    line.Send(1, 0xa0);
+    ReadBytes(board, 0xa0, 1);
+    printf("%s UART drops bytes while the receiver is off\n", name);
+}
+
+template <typename B>
+static void CheckSpim(B& board, const char* name) {
     board.Put(IMR, 4, 0);  // nothing masked
     // An exchange with IRQEN set raises the interrupt.
     board.Put(SPIMCONT, 2, SPIM_EN | SPIM_XCH | SPIM_IRQEN | 7);
     assert(board.GetWord(SPIMCONT) == (SPIM_EN | SPIM_IRQ | SPIM_IRQEN | 7));
     assert(board.GetWord(IPR_LO) & SPIM_PENDING);
     assert(board.GetWord(ISR_LO) & SPIM_PENDING);
-    assert(board.GetInterruptLevel() == 4);
+    assert(board.GetInterruptLevel() > 0);
 
     // Clearing the status bit drops it.
     board.Put(SPIMCONT, 2, SPIM_EN | SPIM_IRQEN | 7);
@@ -110,6 +188,17 @@ static void CheckSpim(Board& board) {
     board.Put(SPIMCONT, 2, SPIM_EN | SPIM_IRQ | SPIM_IRQEN | 7);
     assert(board.GetWord(IPR_LO) & SPIM_PENDING);
 
+    // A session saved with IRQ and IRQEN set loads with the pending bit.
+    Savestate<ChunkType> live;
+    assert(live.Save(board));
+    board.SetPending(0);
+    {
+        SavestateLoader<ChunkType> loader;
+        assert(loader.Load(live.GetBuffer(), live.GetSize(), board));
+    }
+    assert(board.GetWord(IPR_LO) & SPIM_PENDING);
+    assert(board.GetWord(ISR_LO) & SPIM_PENDING);
+
     // Without IRQEN an exchange sets only the status bit.
     board.Put(SPIMCONT, 2, 0);
     board.Put(SPIMCONT, 2, SPIM_EN | SPIM_XCH | 7);
@@ -122,22 +211,31 @@ static void CheckSpim(Board& board) {
     Savestate<ChunkType> stale;
     assert(stale.Save(board));
     board.SetPending(0);
-    SavestateLoader<ChunkType> loader;
-    assert(loader.Load(stale.GetBuffer(), stale.GetSize(), board));
+    {
+        SavestateLoader<ChunkType> loader;
+        assert(loader.Load(stale.GetBuffer(), stale.GetSize(), board));
+    }
     assert(!(board.GetWord(IPR_LO) & SPIM_PENDING));
     assert(!(board.GetWord(ISR_LO) & SPIM_PENDING));
-    puts("EZ SPIM interrupt follows IRQ and IRQEN, also after a load");
+    printf("%s SPIM interrupt follows IRQ and IRQEN, also after a load\n", name);
 }
 
-int main() {
-    Board board;  // registers itself as the HAL root
+template <typename B>
+static void Check(const char* name) {
+    B board;  // registers itself as the HAL root
     auto clock = EmHAL::onSystemClockChange.AddHandler([] { gSession->SetClockFactor(1); });
     gSession->SetClockFactor(1);
     board.Initialize();
-    Line* line = new Line;
+    Line* line = new Line;  // owned by the session
     gSession->SetTransportSerial(kUARTIR, line);
-    CheckUart(board, *line);
-    CheckSpim(board);
+    CheckUart(board, *line, name);
+    CheckSpim(board, name);
     board.Dispose();
     EmHAL::onSystemClockChange.RemoveHandler(clock);
+}
+
+int main() {
+    EmUARTDragonball::testClock = [] { return gNow; };
+    Check<EzBoard>("EZ");
+    Check<VzBoard>("VZ");
 }
