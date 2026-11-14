@@ -13,7 +13,10 @@
 
 #include "EmUARTDragonball.h"
 
+#include <algorithm>
+
 #include "EmCommon.h"
+#include "EmCPU68K.h"
 #include "EmHAL.h"
 #include "EmSession.h"
 #include "EmTransportSerial.h"
@@ -64,6 +67,8 @@ namespace {
 // ======================================================================
 
 static const int kMaxFifoSize = 64;
+
+uint64 (*EmUARTDragonball::testClock)() = nullptr;
 
 static Bool PrvPinBaud(EmTransportSerial::Baud& newBaud);
 static Bool PrvPinBaud(EmTransportSerial::Baud& newBaud, EmTransportSerial::Baud testBaud);
@@ -143,14 +148,17 @@ void EmUARTDragonball::StateChanged(State& newState, Bool sendTxData) {
     // This bit enables the receiver block. While this bit is low, the receiver is disabled and the
     // receive FIFO is flushed. This bit resets to 0.
     //
-    // A disabled receiver (RX_ENABLE or UART_ENABLE low) takes nothing in, so bytes that arrive
-    // meanwhile are lost. ReceiveRxFIFO drains them from the transport instead of queueing them.
+    //
+    // UART_ENABLE low disables the whole module, receiver included, so it flushes the FIFO the
+    // same way. A disabled receiver takes nothing in: bytes that arrive meanwhile are lost, and
+    // ReceiveRxFIFO drops them from the transport at the line's rate.
 
-    if (fState.RX_ENABLE != newState.RX_ENABLE) {
-        if (newState.RX_ENABLE == 0) {
-            fRxFIFO.Clear();
-        }
+    const bool rxWasOn = fState.UART_ENABLE && fState.RX_ENABLE;
+    const bool rxOn = newState.UART_ENABLE && newState.RX_ENABLE;
+    if ((fState.RX_ENABLE && !newState.RX_ENABLE) || (rxWasOn && !rxOn)) {
+        fRxFIFO.Clear();
     }
+    if (rxWasOn != rxOn) dropMarkSet = false;
 
     // ========== TX_ENABLE ==========
     //
@@ -405,11 +413,16 @@ void EmUARTDragonball::UpdateState(State& state, Bool refreshRxData) {
 
     EmTransportSerial* transport = this->GetTransport();
     if (transport) {
-        if (sync && transport->CanRead() && transactionState == TransactionState::idle) {
+        const bool receiverOn = state.UART_ENABLE && state.RX_ENABLE;
+
+        // Bytes that reach a receiver that's off are dropped, so they don't start a receive.
+        if (sync && receiverOn && transport->CanRead() &&
+            transactionState == TransactionState::idle) {
             UpdateTransactionState(TransactionState::receiving);
         }
 
-        if (sync && !transport->CanRead() && transactionState == TransactionState::receiving) {
+        if (sync && (!receiverOn || !transport->CanRead()) &&
+            transactionState == TransactionState::receiving) {
             UpdateTransactionState(TransactionState::waitingForData);
 
             transactionTimeoutCycles =
@@ -418,7 +431,7 @@ void EmUARTDragonball::UpdateState(State& state, Bool refreshRxData) {
                                    1000000ull;
         }
 
-        this->ReceiveRxFIFO(transport, state.UART_ENABLE && state.RX_ENABLE);
+        this->ReceiveRxFIFO(transport, receiverOn);
     }
 
     if (receiveInProgress != receiveWasInProgress && !receiveInProgress) {
@@ -625,15 +638,7 @@ void EmUARTDragonball::ReceiveRxFIFO(EmTransportSerial* transport, bool receiver
     EmAssert(transport);
 
     if (!receiverOn) {
-        // The receiver is off: read and drop whatever has arrived, like the line
-        // going by a disabled receiver on the real chip.
-        char buffer[kMaxFifoSize];
-        for (size_t pending = transport->BytesPending(); pending > 0;
-             pending = transport->BytesPending()) {
-            long count = pending > sizeof(buffer) ? long(sizeof(buffer)) : long(pending);
-            if (!transport->Read(count, buffer) || count <= 0) break;
-            PRINTF("UART: Dropped %ld bytes, receiver off.", count);
-        }
+        this->DropWhileOff(transport);
         receiveInProgress = false;
         return;
     }
@@ -701,6 +706,45 @@ void EmUARTDragonball::ReceiveRxFIFO(EmTransportSerial* transport, bool receiver
     else {
         receiveInProgress = false;
     }
+}
+
+// Drops bytes that reach the receiver while it's off. The transport has no arrival times, so
+// a byte counts as arriving no earlier than when it's first seen pending, and bytes go one
+// byte time (10 bits) each from then on. A reply that turns up just before the receiver comes
+// back on stays in the transport for it, however much the transport would let through at once.
+void EmUARTDragonball::DropWhileOff(EmTransportSerial* transport) {
+    if (transport->BytesPending() == 0) {
+        dropMarkSet = false;
+        return;
+    }
+
+    const uint64 now = testClock         ? testClock()
+                       : gCPU68K         ? gCPU68K->CycleNow()
+                                         : gSession->GetSystemCycles();
+    if (!dropMarkSet || now < dropMark) {
+        dropMark = now;
+        dropMarkSet = true;
+        return;
+    }
+
+    const long baud = std::max<long>(transport->GetConfig().fBaud, 300);
+    const uint64 perByte = std::max<uint64>(1, uint64(gSession->GetClocksPerSecond()) * 10 / baud);
+    uint64 due = (now - dropMark) / perByte;
+
+    char buffer[kMaxFifoSize];
+    while (due > 0) {
+        const size_t pending = transport->BytesPending();
+        if (pending == 0) {
+            dropMarkSet = false;
+            break;
+        }
+        long count = long(std::min<uint64>({due, uint64(pending), uint64(sizeof(buffer))}));
+        if (!transport->Read(count, buffer) || count <= 0) break;
+        PRINTF("UART: Dropped %ld bytes, receiver off.", count);
+        due -= uint64(count);
+        dropMark += uint64(count) * perByte;
+    }
+    if (dropMarkSet && transport->BytesPending() == 0) dropMarkSet = false;
 }
 
 /***********************************************************************
@@ -944,6 +988,7 @@ bool EmUARTDragonball::RestorePending(const PendingState& pending) {
     for(unsigned i=0;i<pending.rxCount;i++) fRxFIFO.Put(pending.rx[i]);
     for(unsigned i=0;i<pending.txCount;i++) fTxFIFO.Put(pending.tx[i]);
     receiveInProgress=pending.receiving;
+    dropMarkSet=false;
     fState=State(fState.UART_TYPE);
     return true;
 }
