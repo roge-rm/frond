@@ -2502,6 +2502,12 @@ test-68k-ez-uart-spi: prepare out/frond-68k
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-ez-uart-spi.mk FROND_TEST_ROOT=$(CURDIR) ez-uart-spi-test
 
+.PHONY: test-68k-host-transport
+test: test-68k-host-transport
+test-68k-host-transport: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-host-transport.mk FROND_TEST_ROOT=$(CURDIR) host-transport-test
+
 .PHONY: test-68k-dana
 test: test-68k-dana
 test-68k-dana: prepare out/frond-68k

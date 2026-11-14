@@ -12,18 +12,19 @@
 #include "EmTransportSerial.h"
 #include "HostLink.h"
 
-// Bytes the guest could have received since the last read at its baud rate (10 bits a byte), up
-// to a FIFO's worth when idle. Time is the guest's system cycles.
+// Bytes the guest could have received since the mark at its baud rate (10 bits a byte), up to 64.
+// Time is the guest's system cycles, or the clock passed in.
 class BaudCredit68k {
    public:
-    void Restart() { mark = gSession->GetSystemCycles(); }
+    void Restart() { Restart(gSession->GetSystemCycles()); }
+    void Restart(uint64_t now) { mark = now; }
     // No credit left over, counting again from now.
-    void Reset() {
+    void Reset(uint64_t now) {
         credit = 0;
-        Restart();
+        mark = now;
     }
-    long Take(long baud) {
-        const uint64_t now = gSession->GetSystemCycles();
+    long Take(long baud) { return Take(baud, gSession->GetSystemCycles()); }
+    long Take(long baud, uint64_t now) {
         const double perByte = gSession->GetClocksPerSecond() * 10.0 / std::max<long>(baud, 300);
         if (now > mark && perByte > 0) {
             const long more = long(double(now - mark) / perByte);
@@ -53,7 +54,7 @@ class HostTransport68k : public EmTransportSerial {
     bool Open() override {
         open = true;
         link.DropReceived();
-        credit.Reset();
+        credit.Reset(Now());
         waiting = false;
         idleUntil = 0;
         return true;
@@ -68,6 +69,7 @@ class HostTransport68k : public EmTransportSerial {
         const long allowed = Allowed();
         count = long(link.Take(static_cast<uint8_t*>(data), size_t(std::max(0L, std::min(count, allowed)))));
         credit -= count;
+        if (link.Available() == 0) waiting = false;
         if (FrameGapOn() && count > 0 && static_cast<uint8_t*>(data)[count - 1] == kIrdaEof)
             idleUntil = Now() + FrameGapCycles();
         return true;
@@ -100,6 +102,9 @@ class HostTransport68k : public EmTransportSerial {
         TrackArrival();
     }
 
+    // Tests drive the clock with this.
+    static inline uint64_t (*testClock)() = nullptr;
+
    private:
     // The host link has no arrival times, so bytes count as arriving when they're first seen
     // waiting, and credit only builds while some are. A frame sent after a quiet spell then comes
@@ -107,21 +112,29 @@ class HostTransport68k : public EmTransportSerial {
     // wakeup after its own frame is sent, so a reply that's all in before then is never read.
     void TrackArrival() {
         const bool any = link.Available() > 0;
-        if (any && !waiting) credit.Reset();
+        if (any && !waiting) credit.Reset(Now());
         waiting = any;
     }
     long Credit() {
         TrackArrival();
-        return waiting ? credit.Take(config.fBaud) : 0;
+        return waiting ? credit.Take(config.fBaud, Now()) : 0;
     }
-    // Credit, held at zero during a frame gap and stopping after the frame's EOF.
+    // Credit, held at zero during a frame gap and stopping after the frame's EOF. Credit starts
+    // again from the end of the gap, so the next frame comes in at the line's rate after it.
     long Allowed() {
+        if (FrameGapOn() && idleUntil) {
+            const uint64_t now = Now();
+            // A gap reaching past a full one from now was set before a load moved the clock back.
+            if (idleUntil > now + FrameGapCycles()) idleUntil = now;
+            if (now < idleUntil) {
+                TrackArrival();
+                return 0;
+            }
+            credit.Reset(idleUntil);
+            idleUntil = 0;
+        }
         const long c = Credit();
         if (!FrameGapOn()) return c;
-        const uint64_t now = Now();
-        // A gap reaching past a full one from now was set before a load moved the clock back.
-        if (idleUntil > now + FrameGapCycles()) idleUntil = 0;
-        if (now < idleUntil) return 0;
         return std::min<long>(c, long(link.CountThrough(kIrdaEof)));
     }
     // 5 ms: the T415 drops an SNRM that follows a XID frame much closer than that, and the
@@ -129,7 +142,9 @@ class HostTransport68k : public EmTransportSerial {
     uint64_t FrameGapCycles() const { return uint64_t(gSession->GetClocksPerSecond() * 0.005); }
     bool FrameGapOn() const { return frameGap && config.fIrda; }
     // The CPU's own cycle count, which moves mid-slice; the system count only moves between slices.
-    static uint64_t Now() { return gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles(); }
+    static uint64_t Now() {
+        return testClock ? testClock() : gCPU68K ? gCPU68K->CycleNow() : gSession->GetSystemCycles();
+    }
     static constexpr uint8_t kIrdaEof = 0xc1;
     bool frameGap{false};
     uint64_t idleUntil{0};
