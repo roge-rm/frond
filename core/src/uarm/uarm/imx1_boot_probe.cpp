@@ -206,9 +206,10 @@ struct Probe {
         }
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
-    // graphicsGpu and graphicsDma, left out of the saved layout's size, and mmcsdCardId, saved in a
+    // graphicsGpu, graphicsDma and graphicsUndo, left out of the saved layout's size, and mmcsdCardId, saved in a
     // section of its own.
-    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string);
+    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
+                                           sizeof(Imx1GraphicsCommands::Undo);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -238,6 +239,8 @@ struct Probe {
     }
     // What the command decoder said about the batch it last refused. For the stop text, not saved.
     Imx1GraphicsCommands::Refusal graphicsRefusal;
+    // What a graphics submission keeps to undo its batch (Imx1GraphicsCommands::keep). Not saved.
+    Imx1GraphicsCommands::Undo graphicsUndo;
     uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
     uint64_t i2cIssueStep = 0;
     uint32_t i2cIssuePc = 0;
@@ -994,15 +997,27 @@ struct Probe {
                  p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
                  p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
                 p.graphicsMemory) {
-                auto commands = p.graphicsCommands;
+                // The batch is decoded in place and undone where it's dropped, so the queued batches aren't copied.
+                auto& commands = p.graphicsCommands;
+                commands.keep(p.graphicsUndo);
                 const auto prepared = commands.prepareCopy(candidate,p.peripherals.eimState(),*p.graphicsMemory);
                 if (prepared != Imx1BootstrapAccess::ok) {
                     p.graphicsRefusal = commands.refusal();
+                    commands.undo(p.graphicsUndo);
                     return prepared;
                 }
                 candidate.startEngine(commands.duration());
+                // acceptGraphics runs graphicsCommitted on the commands from before the batch, which changes them
+                // only with the ring off or a batch done. Where either holds, the new commands wait in a copy.
+                if (!candidate.engineState().ringBytes() || candidate.engineState().completed()) {
+                    auto decoded = commands;
+                    commands.undo(p.graphicsUndo);
+                    const auto accepted = p.acceptGraphics(candidate,!preview);
+                    if (accepted == Imx1BootstrapAccess::ok && !preview) p.graphicsCommands = std::move(decoded);
+                    return accepted;
+                }
                 const auto accepted = p.acceptGraphics(candidate,!preview);
-                if (accepted == Imx1BootstrapAccess::ok && !preview) p.graphicsCommands = std::move(commands);
+                if (accepted != Imx1BootstrapAccess::ok || preview) commands.undo(p.graphicsUndo);
                 return accepted;
             }
             return status == Imx1BootstrapAccess::ok ? p.acceptGraphics(candidate, !preview) : status;

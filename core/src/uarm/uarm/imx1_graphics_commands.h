@@ -12,11 +12,23 @@
 // Validated ring batches retain their register snapshot until guest-time completion.
 class Imx1GraphicsCommands {
    public:
-    void reset() { *this = {}; }
+    // Back to a new object's state. In place, and nothing to do when nothing has changed since the last
+    // reset: graphicsCommitted calls it on every advance while the ring is off.
+    void reset() {
+        if (!touched) return;
+        values.fill(0);
+        known.fill(false);
+        batches.clear();
+        queuedWords = 0;
+        ticks = 0;
+        refused = {};
+        touched = false;
+    }
     uint64_t duration() const { return ticks; }
     // Register values and every queued batch with its fills and inline pixels.
     static constexpr uint32_t stateVersion = 3;
     template <class A> void state(A& a) {
+        touched = true;
         a.DoBuffer32(values.data(), values.size());
         for (auto& k : known) a.DoBool(k);
         a.Require(!known[idctScanSlot] || values[idctScanSlot] <= 2, "idct scan");
@@ -47,6 +59,7 @@ class Imx1GraphicsCommands {
     }
     Imx1BootstrapAccess prepare(const Imx1Cs5Configuration& configuration,
                                 const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+        touched = true;
         // Candidate decoding owns its inline pixels and publishes nothing on rejection.
         auto candidate = *this;
         candidate.refused = {};
@@ -59,12 +72,19 @@ class Imx1GraphicsCommands {
     // the same result as prepare where it succeeds.
     Imx1BootstrapAccess prepareCopy(const Imx1Cs5Configuration& configuration,
                                     const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
+        touched = true;
         refused = {};
         return decode(configuration, eim, memory);
     }
     // What the decoder named in the batch it last refused, with one value. Not saved.
     struct Refusal { const char* what = nullptr; uint32_t value = 0; };
     const Refusal& refusal() const { return refused; }
+    // prepareCopy on this object for a caller that may still drop the result: keep before it and undo after puts the
+    // object back as it was. decode changes only the registers, the counts and the refusal, and adds batches at the
+    // end, so no queued batch is copied.
+    struct Undo;
+    void keep(Undo& u) const;
+    void undo(const Undo& u);
    private:
     Imx1BootstrapAccess decode(const Imx1Cs5Configuration& configuration,
                                const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
@@ -379,6 +399,7 @@ class Imx1GraphicsCommands {
                                  Imx1GraphicsMemory& memory) {
         using A = Imx1BootstrapAccess;
         if (!configuration.engineState().completed()) return A::sequence;
+        touched = true;
         while (configuration.engineState().completed()) {
             if (batches.empty()) return A::sequence;
             const auto& batch = batches.front();
@@ -962,6 +983,7 @@ class Imx1GraphicsCommands {
     }
     Imx1BootstrapAccess refuse(const char* what, uint32_t value) const {
         refused = {what, value};
+        touched = true;
         return Imx1BootstrapAccess::sideEffect;
     }
     // TwGfxTransformBlt with a rotation or mirror (200aa564, from 2009b538): the copy state with DP_CNTL (472) giving
@@ -1537,9 +1559,39 @@ class Imx1GraphicsCommands {
     std::array<bool,0x800> known{};
     std::deque<Batch> batches;
     uint32_t queuedWords = 0;
+    // Whether anything may have changed since construction or the last reset. Not saved; it sits in the
+    // padding after queuedWords, so the size is the same.
+    mutable bool touched = false;
     uint64_t ticks = 0;
     mutable Refusal refused;
 };
+struct Imx1GraphicsCommands::Undo {
+    std::array<uint32_t,0x800> values;
+    std::array<bool,0x800> known;
+    size_t batches;
+    uint32_t queuedWords;
+    bool touched;
+    uint64_t ticks;
+    Refusal refused;
+};
+inline void Imx1GraphicsCommands::keep(Undo& u) const {
+    u.values = values;
+    u.known = known;
+    u.batches = batches.size();
+    u.queuedWords = queuedWords;
+    u.touched = touched;
+    u.ticks = ticks;
+    u.refused = refused;
+}
+inline void Imx1GraphicsCommands::undo(const Undo& u) {
+    values = u.values;
+    known = u.known;
+    batches.resize(u.batches);
+    queuedWords = u.queuedWords;
+    touched = u.touched;
+    ticks = u.ticks;
+    refused = u.refused;
+}
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update state() and stateVersion");
 #endif
