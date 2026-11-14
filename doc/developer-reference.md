@@ -551,7 +551,7 @@ out/frond-68k iiix.frond --serial pty
 | `--rom FILE` | The ROM or session. A plain positional file works the same. |
 | `--device NAME` | Expect this device, for example `palm-iiix` or `palm-m515`. |
 | `--check-rom` | Check the ROM (header, then Cloudpilot's own check) and print what it found, without starting. Not with a session. |
-| `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. Not with `--desktop-socket`. |
+| `--run-for SECONDS` | Run headless for this many guest seconds, as fast as the host allows, 0.001 to 3600. The guest clock starts at 2026-10-26 00:00:00 and follows guest time, so runs repeat. Not with `--desktop-socket`. |
 | `--framebuffer-output FILE` | Save the LCD as a PNG at the end of `--run-for`. |
 | `--input-replay FILE` | Replay timed pen and key events and snapshots, the same format as in [Input replay](#input-replay). |
 | `--speed original\|uncapped` | Original runs at the device's real clock (16.58 MHz on the IIIx, 20.25 MHz on the Vx and IIIc, 33.16 MHz on the VZ Palms), Uncapped at 8 times that with timers on real time. Default original. |
@@ -851,6 +851,8 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_ZODIAC_A4_PACKET`, `FROND_ZODIAC_A4_MASK`, `FROND_ZODIAC_A4_DESTINATION`, `FROND_ZODIAC_A4_SOURCE2` | Private packet, mask, destination and second source files for `test-zodiac-graphics-a4`. |
 | `FROND_ZODIAC_PLAIN_PACKET`, `FROND_ZODIAC_PLAIN_SOURCE` | Private packet and source files for `test-zodiac-graphics-plain-copy`. |
 | `FROND_ZODIAC_HOSTDATA_PACKET`, `FROND_ZODIAC_HOSTDATA_SOURCE` | Private packet and source files for the host-data and keyed-copy Zodiac graphics tests. |
+| `ZODIAC_TEST_CARD` | `1` makes `test-zodiac-normal-runtime` run only the SD card command carried through a save and load. |
+| `ZODIAC_TEST_PULL` | `1` makes `test-zodiac-normal-runtime` run only the card taken out mid-command. |
 | `ZODIAC_TEST_STOP` | `1` makes `test-zodiac-normal-runtime` also check the stop path. |
 | `ZODIAC_NDK` | Android NDK for `test-zodiac-state-fingerprint`. Default the newest in `$ANDROID_HOME/ndk`. |
 | `FROND_TEST_CORE`, `FROND_TEST_SESSION` | Core and TX session for the desktop workflow test. |
@@ -874,6 +876,10 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
 | `SPEED_SSH_KEY` | Optional ssh key for `SPEED_HOST`. |
+| `TEST_TIMEOUT` | Seconds each `make test` recipe line may run before it's killed and fails. Default 300; a target can set its own. |
+| `TEST_KILL_GRACE` | Seconds between TERM and KILL when a test line times out. Default 10. |
+| `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
+| `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |
 
 ### Build
@@ -907,7 +913,7 @@ All in `tools/`. Most take `--help`.
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form. Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap. Optional `--cs4-port0-input=BYTE` enables the private CS4 diagnostic recorder, requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private W4200 reset echo with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See Zodiac bring-up and input scenarios. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
-| `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`). |
+| `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`), and guest counts against `tools/speed-baseline.json` (`make count-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
 | `host-profile.h` | Host timing used by the benchmarks. |
@@ -953,6 +959,7 @@ All in `tools/`. Most take `--help`.
 | `test-desktop` | The Qt tests. Needs `mtools`. |
 | `smoke`, `smoke-sessions` | Real-firmware check per device, and making its sessions. Skips a device without firmware. |
 | `speed-check` | Speed against fixed guest work. |
+| `count-check` | Guest counts and hashes against `tools/speed-baseline.json`, wall-clock rounds only where they moved. |
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `device-session-probe` | Build the device session probe. |

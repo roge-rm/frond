@@ -19,6 +19,10 @@ namespace Platform {
 
     void GetDate(uint32& year, uint32& month, uint32& day);
 
+    // The clock GetTime and GetDate read: Unix seconds, taken as UTC. nullptr (the default) is
+    // the host's local time.
+    void SetClock(int64 (*secondsNow)());
+
     uint32 Random();
 }  // namespace Platform
 

@@ -20,6 +20,30 @@ endif
 
 all: out/frond desktop
 
+# Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
+# which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
+# Change the limit for one target with `test-foo: TEST_TIMEOUT = 900`, or for a run with
+# `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
+TEST_TIMEOUT ?= 300
+TEST_KILL_GRACE ?= 10
+export TEST_KILL_GRACE
+test: SHELL = $(CURDIR)/tests/timed-shell.sh
+test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
+test: export TEST_TIMEOUT
+test-%: export TEST_TIMEOUT
+test: export TEST_NAME = $@
+test-%: export TEST_NAME = $@
+prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
+out/% build/% core/% vendor/%: SHELL = /bin/sh
+test-desktop: TEST_TIMEOUT = 3600
+# The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
+# 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
+test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
+    test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
+    test-frond-arm-install test-device-profiles: TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
+
+
 .PHONY: test-memory-stick-media
 test: test-memory-stick-controller test-memory-stick-media
 test-memory-stick-media: prepare
@@ -1365,6 +1389,13 @@ SPEED_HOST ?=
 .PHONY: speed-check
 speed-check: benchmark-replay
 	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) SPEED_SSH_KEY=$(SPEED_SSH_KEY) SPEED_REAL_MS=$(SPEED_REAL_MS) python3 tools/speed-check.py
+
+# Guest instruction, cycle and frame counts and hashes against tools/speed-baseline.json, one run each.
+# Wall-clock rounds only for recipes whose counts moved. COUNT_ARGS adds options (--only, --update, --against).
+COUNT_ARGS ?=
+.PHONY: count-check
+count-check: benchmark-replay
+	python3 tools/speed-check.py --counts $(COUNT_ARGS)
 
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there

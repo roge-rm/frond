@@ -12,11 +12,26 @@ uint64 Platform::GetMilliseconds() {
         .count();
 }
 
-void Platform::GetTime(uint32& hour, uint32& min, uint32& sec) {
-    time_t time = chrono::system_clock::to_time_t(chrono::system_clock::now());
+namespace {
+    int64 (*guestClock)() = nullptr;
 
-    tm t;
-    localtime_r(&time, &t);
+    tm Now() {
+        tm t;
+        if (guestClock) {
+            const time_t time = time_t(guestClock());
+            gmtime_r(&time, &t);
+        } else {
+            const time_t time = chrono::system_clock::to_time_t(chrono::system_clock::now());
+            localtime_r(&time, &t);
+        }
+        return t;
+    }
+}  // namespace
+
+void Platform::SetClock(int64 (*secondsNow)()) { guestClock = secondsNow; }
+
+void Platform::GetTime(uint32& hour, uint32& min, uint32& sec) {
+    const tm t = Now();
 
     hour = t.tm_hour;
     min = t.tm_min;
@@ -24,10 +39,7 @@ void Platform::GetTime(uint32& hour, uint32& min, uint32& sec) {
 }
 
 void Platform::GetDate(uint32& year, uint32& month, uint32& day) {
-    time_t time = chrono::system_clock::to_time_t(chrono::system_clock::now());
-
-    tm t;
-    localtime_r(&time, &t);
+    const tm t = Now();
 
     year = t.tm_year + 1900;
     month = t.tm_mon + 1;

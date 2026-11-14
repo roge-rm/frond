@@ -240,12 +240,11 @@ uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
 
         uint64_t cyclesAdvanced;
 
-        if constexpr (injected) {
-            cyclesAdvanced = cpuCycle<T::MEMORY_SYSTEM_KIND, injected>(cpu, cyclesToAdvance);
+        if (!injected && sleeping) {
+            cyclesAdvanced = cyclesToAdvance;
         } else {
-            cyclesAdvanced = sleeping
-                                 ? cyclesToAdvance
-                                 : cpuCycle<T::MEMORY_SYSTEM_KIND, injected>(cpu, cyclesToAdvance);
+            cyclesAdvanced = cpuCycle<T::MEMORY_SYSTEM_KIND, injected>(cpu, cyclesToAdvance);
+            this->runInstructions += cyclesAdvanced;
         }
 
         scheduler->Advance(cyclesAdvanced, cyclesPerSecond);

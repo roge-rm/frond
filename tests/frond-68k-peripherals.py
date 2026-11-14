@@ -30,6 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
+import boot_fixture  # noqa: E402
+from wait_for import wait_until, WaitTimeout  # noqa: E402
 
 CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
           'modemsync']
@@ -95,13 +97,33 @@ class Machine:
             raise AssertionError(f'{prc.name}: {reply}')
 
     def wait_line(self, text, timeout, mark=0):
-        end = time.monotonic() + timeout
+        try:
+            return wait_until(lambda: next((line for line in self.core.lines[mark:] if text in line), None),
+                              timeout, 0.1, f'"{text}" in the core output')
+        except WaitTimeout:
+            raise AssertionError(f'no "{text}" in {timeout} s')
+
+    def settle(self, name, check, deadline=10):
+        """Frames of name until check(rows) holds or the deadline passes; returns the last rows. The caller
+        asserts on them as before."""
+        rows = self.frame(name)
+        end = time.monotonic() + deadline
+        while not check(rows) and time.monotonic() < end:
+            time.sleep(0.2)
+            rows = self.frame(name)
+        return rows
+
+    def stable_frame(self, name, deadline=10, gap=0.2):
+        """A frame that two reads in a row agree on, so the panel has finished redrawing."""
+        before = self.frame(name)
+        end = time.monotonic() + deadline
         while time.monotonic() < end:
-            for line in self.core.lines[mark:]:
-                if text in line:
-                    return line
-            time.sleep(0.1)
-        raise AssertionError(f'no "{text}" in {timeout} s')
+            time.sleep(gap)
+            rows = self.frame(name)
+            if rows == before:
+                return rows
+            before = rows
+        return before
 
 
 def check_tones(rom, session, root, probes):
@@ -139,6 +161,13 @@ def panel(rows):
     return tuple(rows[100][0:3])
 
 
+def backlight_is(m, state, deadline=10):
+    """Waits for backlight-state to report state; the caller still asserts on the reply."""
+    end = time.monotonic() + deadline
+    while state not in m.send('backlight-state', 'backlight:') and time.monotonic() < end:
+        time.sleep(0.2)
+
+
 def check_backlight(rom, session, root, probes):
     """Holding power for 2.5 s turns the backlight on and the panel green; again turns it off.
     The lit state survives a save and reload."""
@@ -148,10 +177,8 @@ def check_backlight(rom, session, root, probes):
             raise AssertionError('backlight on at start')
         unlit = panel(m.frame('unlit.png'))
         m.core.key(r, 'power', 2500)
-        time.sleep(1)
-        if 'on' not in m.send('backlight-state', 'backlight:'):
-            raise AssertionError('backlight not on after holding power')
-        lit = panel(m.frame('lit.png'))
+        backlight_is(m, 'on')
+        lit = panel(m.settle('lit.png', lambda rows: panel(rows) != unlit))
         # The IIIx's backlight is green; the T415's is a lighter blue-green, so it only has to change the panel.
         if m.device == 'palm-iiix':
             if not (lit[1] > lit[0] + 40 and lit[1] > lit[2] + 40) or lit == unlit:
@@ -160,12 +187,12 @@ def check_backlight(rom, session, root, probes):
             raise AssertionError(f'lit panel {lit} not blue-green (unlit {unlit})')
         m.send(f'save-session "{r / "lit.frond"}"', 'wrote session')
         m.core.key(r, 'power', 2500)
-        time.sleep(1)
-        if 'off' not in m.send('backlight-state', 'backlight:') or panel(m.frame('off.png')) != unlit:
+        backlight_is(m, 'off')
+        if 'off' not in m.send('backlight-state', 'backlight:') or panel(m.settle('off.png', lambda rows: panel(rows) == unlit)) != unlit:
             raise AssertionError('backlight not off after holding power again')
     with Machine(r / 'lit.frond', root, 'backlight-reload') as m:
-        time.sleep(1)
-        if 'on' not in m.send('backlight-state', 'backlight:') or panel(m.frame('reloaded.png')) != lit:
+        backlight_is(m, 'on')
+        if 'on' not in m.send('backlight-state', 'backlight:') or panel(m.settle('reloaded.png', lambda rows: panel(rows) == lit)) != lit:
             raise AssertionError('backlight not on after reload')
     return f'panel {unlit} lit {lit}'
 
@@ -179,14 +206,12 @@ def check_contrast(rom, session, root, probes):
         for value in (0, 50, 100):
             if f'contrast {value}' not in m.send(f'display contrast={value}', 'display:'):
                 raise AssertionError(f'contrast {value} not taken')
-            time.sleep(1)
-            frames[value] = m.frame(f'contrast-{value}.png')
+            frames[value] = m.stable_frame(f'contrast-{value}.png')
         if len({tuple(map(bytes, f)) for f in frames.values()}) != 3:
             raise AssertionError('contrast 0, 50 and 100 do not all look different')
         m.send(f'save-session "{r / "contrast.frond"}"', 'wrote session')
     with Machine(r / 'contrast.frond', root, 'contrast-reload') as m:
-        time.sleep(1)
-        if m.frame('reloaded.png') != frames[100]:
+        if m.settle('reloaded.png', lambda rows: rows == frames[100]) != frames[100]:
             raise AssertionError('contrast 100 not back after reload')
     return 'contrast 0, 50 and 100 differ, 100 kept through save and reload'
 
@@ -198,24 +223,20 @@ def check_sleep(rom, session, root, probes):
     saved asleep also wakes from the power button after a reload."""
     with Machine(session, root, 'sleep-power') as m:
         r = m.root
-        time.sleep(1)
+        m.settle('start.png', lambda rows: rows is not None and m.launcher(rows))
         m.core.key(r, 'power', 150)
-        time.sleep(2)
-        if m.frame('asleep.png') is not None:
+        if m.settle('asleep.png', lambda rows: rows is None) is not None:
             raise AssertionError('LCD on after power')
         m.send(f'save-session "{r / "asleep.frond"}"', 'wrote session')
         m.core.key(r, 'power', 150)
-        time.sleep(2)
-        rows = m.frame('awake.png')
+        rows = m.settle('awake.png', lambda rows: rows is not None and m.launcher(rows))
         if rows is None or not m.launcher(rows):
             raise AssertionError('power did not wake to the launcher')
     with Machine(r / 'asleep.frond', root, 'sleep-power-reload') as m:
-        time.sleep(1)
-        if m.frame('asleep.png') is not None:
+        if m.settle('asleep.png', lambda rows: rows is None) is not None:
             raise AssertionError('reloaded asleep session has the LCD on')
         m.core.key(m.root, 'power', 150)
-        time.sleep(2)
-        rows = m.frame('awake.png')
+        rows = m.settle('awake.png', lambda rows: rows is not None and m.launcher(rows))
         if rows is None or not m.launcher(rows):
             raise AssertionError('power did not wake the reloaded session')
 
@@ -225,15 +246,15 @@ def check_sleep(rom, session, root, probes):
         mark = len(m.core.lines)
         m.core.launch('Frond alarm')
         launched = time.monotonic() - 3
-        time.sleep(9)
+        # Auto-off is 5 s after the probe starts.
+        m.settle('auto-off.png', lambda rows: rows is None, 20)
         if m.frame('auto-off.png') is not None:
             raise AssertionError('auto-off did not turn the LCD off')
         m.send(f'save-session "{r / "auto-off.frond"}"', 'wrote session')
         if any('tone: 1501' in line for line in m.core.lines[mark:]):
             raise AssertionError('alarm went off early')
     with Machine(r / 'auto-off.frond', root, 'sleep-alarm-reload', '--tone-log') as m:
-        time.sleep(1)
-        if m.frame('asleep.png') is not None:
+        if m.settle('asleep.png', lambda rows: rows is None) is not None:
             raise AssertionError('reloaded auto-off session has the LCD on')
         m.wait_line('tone: 1501', max(5, launched + 30 - time.monotonic()))
         woke = time.monotonic() - launched
@@ -289,15 +310,21 @@ def beam_memo(root, name, sender, send_session, receiver, recv_session, digits):
         try:
             make_memo(a, digits)
             a.core.tap(a.root, 8, 202)
+            # The menu has to be open a moment before an item is tapped; nothing marks that.
             time.sleep(1.5)
             a.core.tap(a.root, *BEAM_MEMO[sender])
             # The beam takes about 5 s. Export waits for Palm OS to be free of dialogs, so Yes is
-            # tapped first, twice in case the dialog came late.
+            # tapped once the receiver's screen shows the dialog, and again if the memo hasn't come.
+            # Nothing may touch the receiver until the beam is through: a frame taken on it while the
+            # sender is still looking for it makes the sender fail with "Could not find a receiving
+            # handheld". The sender's discovery has no log line, so this stays a fixed wait.
             time.sleep(7)
-            b.frame('dialog.png')
+            dialog = b.frame('dialog.png')
             for _ in range(2):
                 b.core.tap(b.root, *ACCEPT)
-                time.sleep(4)
+                b.settle('accepted.png', lambda rows: rows != dialog, 8)
+                if digits.encode() in memo_text(b, 'received.pdb'):
+                    break
             if digits.encode() not in memo_text(b, 'received.pdb'):
                 a.frame('sender.png')
                 b.frame('receiver.png')
@@ -308,7 +335,7 @@ def beam_memo(root, name, sender, send_session, receiver, recv_session, digits):
             link.kill()
             link.wait()
     with Machine(b.root / 'received.frond', root, f'{name}-reload', device=receiver) as r:
-        time.sleep(1)
+        r.stable_frame('loaded.png', 5)
         if digits.encode() not in memo_text(r, 'reloaded.pdb'):
             raise AssertionError(f'{sender} to {receiver}: memo {digits} gone after reload')
 
@@ -340,8 +367,8 @@ def hotsync(m, port, *args, rate='57600'):
         raise AssertionError(f'pilot-xfer {args} timed out')
     if process.returncode != 0:
         raise AssertionError(f'pilot-xfer {args}: {out.strip()[-300:]}')
-    # The HotSync app needs a moment to finish before the next press.
-    time.sleep(3)
+    # The HotSync app is ready for the next press once its screen stops changing.
+    m.stable_frame('hotsync-done.png', 15, 0.5)
     return out
 
 
@@ -879,20 +906,11 @@ RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_con
 
 
 def launcher_session(device, rom, root):
-    """Boots rom through the device's setup recipe and saves the launcher as a session."""
+    """A copy of the device's boot-once launcher session (tests/boot_fixture.py) in root."""
     root.mkdir(parents=True, exist_ok=True)
-    session = root / 'launcher.frond'
-    core = palm_boot.Core(['--rom', rom, '--device', device], root / 'boot.txt')
-    try:
-        # The core may wait for a free emulator slot first.
-        end = time.monotonic() + 900
-        while time.monotonic() < end and not any(line.startswith('frond-68k:') for line in core.lines):
-            time.sleep(1)
-        palm_boot.setup_device(device, core, root)
-        core.send(f'save-session "{session}"', 'wrote session')
-    finally:
-        core.close()
-    return session
+    fixture = boot_fixture.launcher_fixture(device, rom)
+    fixture.copy_logs(root)
+    return fixture.copy_to(root / 'launcher.frond')
 
 
 def main():

@@ -62,6 +62,7 @@
 #include "DebugSupport.h"
 #include "Debugger.h"
 #include "EmCommon.h"
+#include "Platform.h"
 #include "EmCPU68K.h"
 #include "EmDevice.h"
 #include "EmHAL.h"
@@ -680,7 +681,16 @@ class Console {
                 lock_guard<mutex> lock(guard);
                 lines.push_back(line);
             }
+            // A piped stdin (a test or script driving the core) closing means nobody is left to
+            // send quit; a terminal's EOF (Ctrl-D) keeps the window running.
+            if (!isatty(STDIN_FILENO)) closed = true;
         }).detach();
+    }
+    // True once stdin has closed and every line it sent has been handled.
+    bool Finished() {
+        if (!closed) return false;
+        lock_guard<mutex> lock(guard);
+        return lines.empty();
     }
     bool Next(string& line) {
         lock_guard<mutex> lock(guard);
@@ -693,6 +703,7 @@ class Console {
    private:
     mutex guard;
     deque<string> lines;
+    atomic<bool> closed{false};
 };
 
 // Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns, push and Back.
@@ -924,6 +935,12 @@ string exportDatabaseZip(const string& name, vector<uint8_t>& out) {
     return "missing";
 }
 
+// Headless runs read the guest clock instead of the host's, so they repeat: 2026-10-26 00:00:00
+// UTC (as in benchmark-replay) plus the guest seconds run so far.
+constexpr int64_t kHeadlessEpoch = 1792972800;
+const double* headlessGuestSeconds = nullptr;
+int64 HeadlessClock() { return kHeadlessEpoch + (headlessGuestSeconds ? int64_t(*headlessGuestSeconds) : 0); }
+
 class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
@@ -989,6 +1006,7 @@ class Runner {
 
     // Headless: runs for options.runFor guest seconds as fast as the host can.
     int RunHeadless() {
+        headlessGuestSeconds = &guestSeconds;
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
             cout << "card: " << reply << endl;
@@ -1035,6 +1053,7 @@ class Runner {
         speedMark = {wallMs(), double(gSession->GetSystemCycles())};
         while (!quit) {
             string line;
+            if (!desktop && !guestCall && console.Finished()) break;
             // A command waiting for the guest's event loop holds back the ones after it.
             while (!quit && !desktop && !guestCall && console.Next(line)) Command(line);
             if (window) PollWindow();
@@ -3642,6 +3661,7 @@ int main(int argc, char** argv) {
         cerr << "--desktop-socket cannot be combined with --run-for or --check-rom" << endl;
         return 2;
     }
+    if (options.runFor > 0) Platform::SetClock(HeadlessClock);
     if (options.saveOnDisconnect && !options.desktopSocket) {
         cerr << "--save-on-disconnect needs --desktop-socket" << endl;
         return 2;
@@ -3730,6 +3750,7 @@ int main(int argc, char** argv) {
             cerr << error.what() << endl;
             status = 1;
         }
+        headlessGuestSeconds = nullptr;
     }
     runtimeCards.Install(RuntimeCards::Pair{});
     cout.flush();

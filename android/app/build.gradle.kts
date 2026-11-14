@@ -21,6 +21,12 @@ val coreSourceOverride = providers.gradleProperty("frond.coreSource").orNull
 val coreSource: File = coreSourceOverride?.let { File(it).let { path -> if (path.isAbsolute) path else File(repoRoot, it) } }
     ?: File(repoRoot, "core")
 
+// The native code compiles through ccache when it's on PATH, unless FROND_CCACHE=0.
+// prefix_command= keeps icecream out, as its nodes have no NDK compiler.
+val ccache: String? = if (providers.environmentVariable("FROND_CCACHE").orNull == "0") null else
+    providers.environmentVariable("PATH").orNull?.split(File.pathSeparator)
+        ?.map { File(it, "ccache") }?.firstOrNull { it.isFile && it.canExecute() }?.path
+
 // SDL2 and SDL2_image match the desktop build (Debian's libsdl2 2.32.4 and
 // libsdl2-image 2.8.8). The tarballs are the GitHub releases, checked against these
 // hashes; their signatures from Sam Lantinga's key were verified once when pinned.
@@ -119,6 +125,8 @@ val networkTasks = listOf("arm64-v8a", "x86_64").map { abi ->
             "install/include/glib-2.0/glib.h", "install/include/glib-2.0/glibconfig.h",
             "install/lib/pkgconfig/glib-2.0.pc", "install/lib/pkgconfig/slirp.pc")
             .map { File(networkRoot, "$abi/$it") })
+        // meson wraps the NDK compiler in ccache by itself; keep icecream out of it.
+        environment("CCACHE_PREFIX", "")
         commandLine("python3", rootProject.file("build-network.py"),
             "--ndk", File(androidComponents.sdkComponents.sdkDirectory.get().asFile, "ndk/28.2.13676358"),
             "--abi", abi, "--root", networkRoot)
@@ -179,6 +187,10 @@ android {
                     "-DFROND_JIT_DIFFERENTIAL=${if (jitDifferential) "ON" else "OFF"}",
                     "-DFROND_DYNARMIC=${dynarmicSource.absolutePath}",
                     "-DFROND_BOOST_INCLUDE=$boostInclude",
+                )
+                if (ccache != null) arguments += listOf(
+                    "-DCMAKE_C_COMPILER_LAUNCHER=$ccache;prefix_command=",
+                    "-DCMAKE_CXX_COMPILER_LAUNCHER=$ccache;prefix_command=",
                 )
                 if (jitDifferential) targets += listOf("main", "main68k", "frondcard", "frondlink", "jit-differential", "benchmark-replay")
             }
