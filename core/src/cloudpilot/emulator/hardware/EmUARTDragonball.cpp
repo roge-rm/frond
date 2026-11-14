@@ -142,6 +142,9 @@ void EmUARTDragonball::StateChanged(State& newState, Bool sendTxData) {
     //
     // This bit enables the receiver block. While this bit is low, the receiver is disabled and the
     // receive FIFO is flushed. This bit resets to 0.
+    //
+    // A disabled receiver (RX_ENABLE or UART_ENABLE low) takes nothing in, so bytes that arrive
+    // meanwhile are lost. ReceiveRxFIFO drains them from the transport instead of queueing them.
 
     if (fState.RX_ENABLE != newState.RX_ENABLE) {
         if (newState.RX_ENABLE == 0) {
@@ -415,7 +418,7 @@ void EmUARTDragonball::UpdateState(State& state, Bool refreshRxData) {
                                    1000000ull;
         }
 
-        this->ReceiveRxFIFO(transport);
+        this->ReceiveRxFIFO(transport, state.UART_ENABLE && state.RX_ENABLE);
     }
 
     if (receiveInProgress != receiveWasInProgress && !receiveInProgress) {
@@ -618,8 +621,22 @@ void EmUARTDragonball::TransmitTxFIFO(EmTransportSerial* transport) {
  *
  ***********************************************************************/
 
-void EmUARTDragonball::ReceiveRxFIFO(EmTransportSerial* transport) {
+void EmUARTDragonball::ReceiveRxFIFO(EmTransportSerial* transport, bool receiverOn) {
     EmAssert(transport);
+
+    if (!receiverOn) {
+        // The receiver is off: read and drop whatever has arrived, like the line
+        // going by a disabled receiver on the real chip.
+        char buffer[kMaxFifoSize];
+        for (size_t pending = transport->BytesPending(); pending > 0;
+             pending = transport->BytesPending()) {
+            long count = pending > sizeof(buffer) ? long(sizeof(buffer)) : long(pending);
+            if (!transport->Read(count, buffer) || count <= 0) break;
+            PRINTF("UART: Dropped %ld bytes, receiver off.", count);
+        }
+        receiveInProgress = false;
+        return;
+    }
 
     if (transport->CanRead()) {
         receiveInProgress = true;

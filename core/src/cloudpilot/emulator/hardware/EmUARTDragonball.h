@@ -136,7 +136,7 @@ class EmUARTDragonball {
     void UpdateState(State&, Bool refreshRxData);
 
     void TransmitTxFIFO(EmTransportSerial*);
-    void ReceiveRxFIFO(EmTransportSerial*);
+    void ReceiveRxFIFO(EmTransportSerial*, bool receiverOn);
 
     EmTransportSerial* GetTransport(void);
 
