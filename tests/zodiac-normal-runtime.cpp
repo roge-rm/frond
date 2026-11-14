@@ -621,7 +621,8 @@ void sleepAndWake() {
     assert(byWork > 0);
     for (int i = 0; i < 100000 && soc->Status().pc != romBase + woken; ++i) step(1);
     assert(soc->Status().pc == romBase + woken);
-    // Asleep, a slice is at most sliceTicks.
+    // Asleep, a slice is at most sliceTicks. The state is saved on Exact.
+    assert(!soc->FastEngine());
     for (int i = 0; i < 20; ++i) {
         const uint64_t from = soc->Status().time.ticks;
         assert(step(1).time.ticks - from <= sliceTicks && soc->Status().pc == romBase + woken);
@@ -633,7 +634,8 @@ void sleepAndWake() {
         assert(soc->SetFastEngine(fast));
         std::vector<uint8_t> first;
         for (const uint64_t asked : {1, 1000}) {
-            assert(soc->Load(asleep.size(), asleep.data()));
+            // A load keeps the machine's own engine, on Fast too with the state saved on Exact.
+            assert(soc->Load(asleep.size(), asleep.data()) && soc->FastEngine() == fast);
             const uint64_t pressed = soc->Status().time.ticks, end = pressed + 1000;
             soc->KeyDown(keyIdPower);
             uint64_t awake = 0;

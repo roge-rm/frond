@@ -1285,6 +1285,24 @@ void delayLoop(bool stores = false) {
     assert(!stores || fast.cheap.retired < 30 * 997);
     const uint64_t et = exact.cheap.time.ticks, ft = fast.cheap.time.ticks;
     assert(ft * 50 + 50 >= et * 49 && ft * 50 <= et * 51 + 50);
+    if (stores) return;
+    // In bounded runs with a small work bound the skips still come and each stops short of the bound. A run passes
+    // it by under 60 from memory waits and the last block, and by about 190 when a skip goes past it.
+    Imx1Machine* m = make(g.words, true);
+    const uint64_t before = imx1MachineDelaySkips(nullptr);
+    uint64_t most = 0;
+    Imx1MachineBounds b;
+    b.retired = 100000;
+    b.work = 3000;
+    for (unsigned i = 0; i < 1000000 && running(m); ++i) {
+        b.deadline = {imx1MachineGetStatus(m).time.ticks + (1u << 20), 0, 1};
+        most = std::max(most, imx1MachineRunBounded(m, b).workOvershoot);
+    }
+    const uint64_t bounded = imx1MachineDelaySkips(nullptr) - before;
+    std::printf("%s bounded: %llu waits skipped, work past the bound at most %llu\n", name, (unsigned long long)bounded,
+                (unsigned long long)most);
+    assert(imx1MachineInspect(m).result.stop == e.stop && bounded >= 20 && most < 100);
+    imx1MachineStop(m);
 }
 
 // The ROM's vertical wait (200adb08 to 200adb20) called 12 times, timer 1 read after each return. 200adb08 polls
