@@ -62,6 +62,8 @@ class SocIMX1 : public SoC {
     // Instructions retired and idle clocks skipped so far, for speed readouts.
     Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
     bool Halted() const { return halted; }
+    // Instructions the Fast engine ran in Dynarmic blocks so far.
+    uint64_t JitRetired() const { return imx1MachineJitRetired(machine); }
     // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps
     // up. Off, a run always reaches its guest time and runs repeat however busy the host is (tools).
     void SetHostTimeLimit(bool on) { hostTimeLimit = on; }

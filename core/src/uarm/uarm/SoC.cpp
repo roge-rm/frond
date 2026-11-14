@@ -19,11 +19,15 @@
 using namespace std;
 
 namespace {
+    uint64_t (*eventClock)() = nullptr;
     uint64_t hostMsecNow() {
+        if (eventClock) return eventClock();
         return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     }
 }
+
+void SoC::SetEventClock(uint64_t (*clock)()) { eventClock = clock; }
 
 SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
 SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1, .hostMsec = hostMsecNow()}; }

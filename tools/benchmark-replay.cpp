@@ -32,6 +32,7 @@
 #include "rom_info5.h"
 #include "MachineSession.h"
 #include "MsProCards.h"
+#include "sdcard.h"
 #include "NandFile.h"
 #include "host-profile.h"
 
@@ -47,8 +48,9 @@ uint64_t number(const std::string& s, uint64_t maximum) {
 }
 struct Event { uint64_t ms; std::string kind; int x=0, y=0; KeyId key=keyInvalid; };
 // The runner's --input-replay pen, key and snapshot lines. Pen bounds are the screen with its
-// silkscreen. "-" is no input.
-std::vector<Event> replay(const char* path, uint64_t end, int width=320, int height=480) {
+// silkscreen. "-" is no input. The Zodiac also takes "stick X Y" (each -511 to 511) and
+// "card-insert" (the --sd card goes in then, not at the start).
+std::vector<Event> replay(const char* path, uint64_t end, int width=320, int height=480, bool zodiac=false) {
     std::vector<Event> events;
     if (std::string(path)=="-") return events;
     std::ifstream input(path);
@@ -59,7 +61,9 @@ std::vector<Event> replay(const char* path, uint64_t end, int width=320, int hei
         {"web",keyIdHard4},{"up",keyIdUp},{"down",keyIdDown},
         {"left",keyIdLeft},{"right",keyIdRight},{"center",keyIdSelect},{"power",keyIdPower},
         {"voice",keyIdVoice},{"graffiti",keyIdGraffiti},{"back",keyIdBack},{"hold",keyIdHold},
-        {"hotsync",keyIdHotSync},{"jog-up",keyIdJogUp},{"jog-down",keyIdJogDown},{"jog-press",keyIdJogPress}};
+        {"hotsync",keyIdHotSync},{"jog-up",keyIdJogUp},{"jog-down",keyIdJogDown},{"jog-press",keyIdJogPress},
+        {"function",keyIdFunction},{"bluetooth",keyIdBluetooth},{"trigger-left",keyIdTriggerLeft},
+        {"trigger-right",keyIdTriggerRight},{"stick-press",keyIdStickPress}};
     std::string line;
     while (std::getline(input,line)) {
         std::istringstream tokens(line);
@@ -86,7 +90,11 @@ std::vector<Event> replay(const char* path, uint64_t end, int width=320, int hei
             if (!(tokens>>std::quoted(extra))) throw std::runtime_error("invalid keyboard key");
             e.x=irKeyboardCode(SDL_GetScancodeFromName(extra.c_str()));
             if (!e.x) throw std::runtime_error("invalid keyboard key");
-        } else if (e.kind!="pen-up" && e.kind!="keyboard-attach" && e.kind!="keyboard-detach") throw std::runtime_error("unsupported replay command");
+        } else if (zodiac && e.kind=="stick") {
+            if (!(tokens>>e.x>>e.y) || e.x<-511 || e.x>511 || e.y<-511 || e.y>511)
+                throw std::runtime_error("invalid stick offset");
+        } else if (e.kind!="pen-up" && e.kind!="keyboard-attach" && e.kind!="keyboard-detach" && !(zodiac && e.kind=="card-insert")) throw std::runtime_error("unsupported replay command");
+        if (zodiac && e.kind.rfind("keyboard-",0)==0) throw std::runtime_error("the Zodiac has no keyboard");
         if ((tokens>>extra) && extra[0]!='#') throw std::runtime_error("extra replay arguments");
         events.push_back(e);
     }
@@ -218,15 +226,24 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
     return ok;
 }
 
-// A Zodiac cold boot: its own machine, no replay or session yet. Counts and hashes as for the
-// PXA boards; instructions are the machine's retired count, and its Fast engine isn't the JIT,
-// so jit_instructions stays 0. Its runs have no host time limit, so they repeat.
+// A Zodiac cold boot: its own machine, no session. Counts and hashes as for the PXA boards;
+// instructions are the machine's retired count and jit_instructions those its Fast engine ran in
+// Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
+// they repeat. A --sd card runs from memory, so the file is never written.
+uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
-               const char* mipsArg, bool sound, const std::filesystem::path& output) {
-    if (std::string(replayArg)!="-") throw std::runtime_error("the Zodiac takes no replay yet: use -");
+               const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {
     const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalMips5(device):number(mipsArg,1000);
     if (!mips) throw std::runtime_error("MIPS must be positive");
     const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
+    const auto events=replay(replayArg,duration,display.width,display.height,true);
+    const bool cardLater=std::any_of(events.begin(),events.end(),[](const Event& e) { return e.kind=="card-insert"; });
+    if (cardLater && sdPath.empty()) throw std::runtime_error("card-insert needs --sd");
+    std::vector<uint8_t> card;
+    if (!sdPath.empty()) {
+        card=readFile(sdPath.c_str());
+        if (card.size()%512) throw std::runtime_error("the SD image isn't a whole number of sectors");
+    }
     if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
     cpuSetFastEngine(false);
     std::string why;
@@ -237,18 +254,26 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
     soc->SetHostTimeLimit(false);
     clockStart=soc->GetTime(); clockSoc=soc.get();
+    SoC::SetEventClock(eventMs);
+    if (!card.empty()) {
+        sdCardInitializeWithBytes(std::move(card),"benchmark-replay");
+        if (!cardLater) soc->SdInsert();
+    }
     auto queue=audioQueueCreate(8192);
     soc->SetAudioQueue(queue); soc->SetPcmOutputEnabled(sound); soc->SetPcmSuspended(false);
-    const uint64_t retiredStart=soc->Status().retired;
-    const size_t pixels=size_t(display.width)*display.height;
+    const uint64_t retiredStart=soc->Status().retired, jitStart=soc->JitRetired();
+    const size_t pixels=size_t(zodiacPanelWidth)*zodiacPanelHeight;
+    std::vector<uint32_t> frame(pixels);
     uint64_t lastHash=hashInit, frameSequence=hashInit, pcmHash=hashInit, frameCount=0, changed=0, pcmFrames=0, cycles=0;
+    unsigned snapshots=0;
+    size_t next=0;
     bool haveFrame=false;
     const auto start=std::chrono::steady_clock::now();
-    while (soc->GetTime()-clockStart<duration*1000000 && !soc->Halted()) {
-        cycles+=soc->Run(mips*1000,mips*1000000);
+    for (;;) {
         uint32_t first=0,last=0;
         if (auto pending=soc->GetPendingFrame(first,last)) {
-            const auto hash=hashBytes(hashInit,pending,pixels*sizeof(uint32_t));
+            std::memcpy(frame.data(),pending,pixels*sizeof(uint32_t));
+            const auto hash=hashBytes(hashInit,frame.data(),pixels*sizeof(uint32_t));
             const uint64_t guest=soc->GetTime()-clockStart;
             frameSequence=hashBytes(frameSequence,&guest,sizeof(guest));
             frameSequence=hashBytes(frameSequence,&hash,sizeof(hash));
@@ -256,24 +281,45 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             lastHash=hash; haveFrame=true; ++frameCount;
             soc->ResetPendingFrame();
         }
+        if (soc->Halted()) break;
+        const auto elapsed=soc->GetTime()-clockStart;
+        while (next<events.size() && events[next].ms*1000000<=elapsed) {
+            const auto& e=events[next++];
+            if (e.kind=="pen-down" || e.kind=="pen-move") soc->PenDown(e.x,e.y);
+            else if (e.kind=="pen-up") soc->PenUp();
+            else if (e.kind=="key-down") soc->KeyDown(e.key);
+            else if (e.kind=="key-up") soc->KeyUp(e.key);
+            else if (e.kind=="stick") soc->AnalogStick(e.x/511.0f,e.y/511.0f);
+            else if (e.kind=="card-insert") soc->SdInsert();
+            else {
+                // The panel as it is, portrait (the host turns it), black before the first frame.
+                const auto path=output/("snapshot-"+std::to_string(++snapshots)+".png");
+                if (!savePng(path,frame,zodiacPanelWidth,zodiacPanelHeight)) throw std::runtime_error("snapshot failed");
+            }
+        }
+        if (elapsed>=duration*1000000) break;
+        cycles+=soc->Run(mips*1000,mips*1000000);
         uint32_t pcm[8192];
         const auto n=audioQueuePopChunk(queue,pcm,8192);
         pcmHash=hashBytes(pcmHash,pcm,n*sizeof(uint32_t)); pcmFrames+=n;
     }
     const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     const uint64_t guestNs=soc->GetTime()-clockStart, instructions=soc->Status().retired-retiredStart;
+    const uint64_t jitInstructions=soc->JitRetired()-jitStart;
+    if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
     std::ofstream result(output/"summary.json");
     result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
            << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
            << ",\"guest_ns\":" << guestNs << ",\"cycles\":" << cycles << ",\"instructions\":" << instructions
-           << ",\"jit_instructions\":0,\"halted\":" << (soc->Halted()?"true":"false") << ",\"wall_seconds\":" << wall
+           << ",\"jit_instructions\":" << jitInstructions << ",\"halted\":" << (soc->Halted()?"true":"false") << ",\"wall_seconds\":" << wall
            << ",\"lcd_frames\":" << frameCount << ",\"changed_frames\":" << changed << ",\"pcm_frames\":" << pcmFrames
            << ",\"frame_sequence_hash\":\"" << std::hex << frameSequence << "\",\"pcm_hash\":\"" << pcmHash << "\"}\n";
     result.flush(); if (!result) throw std::runtime_error("summary write failed");
-    std::printf("%s cold boot: guest %.3f s, %llu cycles, wall %.3f s, %llu instructions%s, %llu frames, frame hash %llx, "
-                "%llu PCM frames, PCM hash %llx\n",deviceName5(device),guestNs/1e9,(unsigned long long)cycles,wall,
-                (unsigned long long)instructions,soc->Halted()?", stopped":"",(unsigned long long)frameCount,
-                (unsigned long long)frameSequence,(unsigned long long)pcmFrames,(unsigned long long)pcmHash);
+    std::printf("%s cold boot: guest %.3f s, %llu cycles, wall %.3f s, %llu instructions (%llu in the JIT)%s, %llu frames, "
+                "frame hash %llx, %llu PCM frames, PCM hash %llx\n",deviceName5(device),guestNs/1e9,(unsigned long long)cycles,wall,
+                (unsigned long long)instructions,(unsigned long long)jitInstructions,soc->Halted()?", stopped":"",
+                (unsigned long long)frameCount,(unsigned long long)frameSequence,(unsigned long long)pcmFrames,(unsigned long long)pcmHash);
+    SoC::SetEventClock(nullptr);
     clockSoc=nullptr;
 }
 }
@@ -292,16 +338,18 @@ int main(int argc, char** argv) {
         if (argc==4 && std::string(argv[1])=="--check-replay") {
             replay(argv[2],number(argv[3],600000)); return 0;
         }
-        std::string deviceName, nandPath;
+        std::string deviceName, nandPath, sdPath;
         int skip=0;
-        while (argc>skip+2 && (std::string(argv[skip+1])=="--device" || std::string(argv[skip+1])=="--nand")) {
-            (std::string(argv[skip+1])=="--device"?deviceName:nandPath)=argv[skip+2];
+        while (argc>skip+2 && (std::string(argv[skip+1])=="--device" || std::string(argv[skip+1])=="--nand" ||
+                               std::string(argv[skip+1])=="--sd")) {
+            const std::string option=argv[skip+1];
+            (option=="--device"?deviceName:option=="--nand"?nandPath:sdPath)=argv[skip+2];
             skip+=2;
         }
         char** arg=argv+skip;  // arg[1] is SESSION
         const int count=argc-skip;
         if (count!=7 && count!=8)
-            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
+            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] [--sd CARD (Zodiac)] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
         const auto duration=number(arg[3],600000);
         if (!duration) throw std::runtime_error("duration must be positive");
         const std::string soundArg=arg[5];
@@ -319,10 +367,11 @@ int main(int argc, char** argv) {
         if (coldBoot && !deviceName.empty()) {
             const auto* profile=deviceProfileNamed5(deviceName.c_str());
             if (profile && profile->board==DeviceBoard5::imx1Zodiac) {
-                runZodiac(data,DeviceType5(profile->deviceType),arg[2],duration,arg[4],soundArg=="on",arg[6]);
+                runZodiac(data,DeviceType5(profile->deviceType),arg[2],duration,arg[4],soundArg=="on",arg[6],sdPath);
                 return 0;
             }
         }
+        if (!sdPath.empty()) throw std::runtime_error("--sd is for a Zodiac cold boot only");
         if (coldBoot) { m=loadNor(std::move(data),deviceName,nandPath); data={}; }
         const auto checkInputs=[&](DeviceType5 device) {
             const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalMips5(device):number(arg[4],1000);

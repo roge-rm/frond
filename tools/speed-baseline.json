@@ -1,5 +1,5 @@
 {
-  "note": "Recipes for tools/speed-check.py --counts. A recipe runs in benchmark-replay, or in frond-68k with runner frond-68k; engines limits the engines it runs in. A cold boot without nand gets a blank NAND where the device has one. rom is under FROND_DEVICE_IMAGES, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them.",
+  "note": "Recipes for tools/speed-check.py --counts. A recipe runs in benchmark-replay, or in frond-68k with runner frond-68k; engines limits the engines it runs in. A cold boot without nand gets a blank NAND where the device has one. rom is under FROND_DEVICE_IMAGES, card (a Zodiac SD image) under ZODIAC_CARDS, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them.",
   "recipes": {
     "tg50-boot": {
       "rom": "Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin",
@@ -129,6 +129,56 @@
         }
       }
     },
+    "zodiac-doom2": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/doom2.img",
+      "replay": "zodiac-doom2.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 124000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 124000000000,
+          "cycles": 12400000000,
+          "instructions": 3193266666,
+          "jit_instructions": 0,
+          "lcd_frames": 733,
+          "changed_frames": 201,
+          "pcm_frames": 5197063,
+          "frame_sequence_hash": "900221a8ad29fdfd",
+          "pcm_hash": "83a7abb7e9d1f052",
+          "input": "50629746ed5a9b4d"
+        }
+      }
+    },
+    "zodiac-zuma": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s1/zuma.img",
+      "replay": "zodiac-zuma.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 112000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 112000000000,
+          "cycles": 11200000000,
+          "instructions": 3444201195,
+          "jit_instructions": 0,
+          "lcd_frames": 985,
+          "changed_frames": 766,
+          "pcm_frames": 4667863,
+          "frame_sequence_hash": "210488c0a68cfd3a",
+          "pcm_hash": "33f18a3bf5a9d828",
+          "input": "61439da03b3a48a5"
+        }
+      }
+    },
     "m515-boot": {
       "rom": "Palm/m515/Palm-m515-4.1-en.rom",
       "device": "palm-m515",
@@ -208,6 +258,134 @@
           "frame_sequence_hash": "96d44065747ecfd2",
           "pcm_hash": "9560997e58975f51",
           "input": "439c03b839f6c9df"
+        }
+      }
+    },
+    "e2-busy": {
+      "session": "E2_SESSION",
+      "replay": "e2-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000998616,
+          "cycles": 1920385055,
+          "instructions": 168577950,
+          "jit_instructions": 0,
+          "lcd_frames": 55,
+          "changed_frames": 53,
+          "pcm_frames": 886059,
+          "frame_sequence_hash": "14c72ba9d68e1a2a",
+          "pcm_hash": "ebf8a61a87b546e5",
+          "input": "629661b856909601"
+        },
+        "fast": {
+          "guest_ns": 20000334684,
+          "cycles": 1920197131,
+          "instructions": 167214811,
+          "jit_instructions": 124473959,
+          "lcd_frames": 56,
+          "changed_frames": 53,
+          "pcm_frames": 886029,
+          "frame_sequence_hash": "70f09d4511d93abb",
+          "pcm_hash": "ba1c4e070d79b345",
+          "input": "629661b856909601"
+        }
+      }
+    },
+    "tx-media": {
+      "session": "TX_SESSION",
+      "replay": "tx-media.replay",
+      "ms": 46000,
+      "mips": 150,
+      "results": {
+        "exact": {
+          "guest_ns": 46000415579,
+          "cycles": 6901800855,
+          "instructions": 6901800855,
+          "jit_instructions": 0,
+          "lcd_frames": 1379,
+          "changed_frames": 424,
+          "pcm_frames": 2037851,
+          "frame_sequence_hash": "2dd2125a18452a7c",
+          "pcm_hash": "39ce3f68b39f4bed",
+          "input": "b8bcd22055d58b85"
+        },
+        "fast": {
+          "guest_ns": 46000695504,
+          "cycles": 6900713022,
+          "instructions": 6900713022,
+          "jit_instructions": 6884633718,
+          "lcd_frames": 1380,
+          "changed_frames": 423,
+          "pcm_frames": 2037864,
+          "frame_sequence_hash": "98e4079eedb424f4",
+          "pcm_hash": "6a66922432d1fd9d",
+          "input": "b8bcd22055d58b85"
+        }
+      }
+    },
+    "zire72-busy": {
+      "session": "ZIRE72_SESSION",
+      "replay": "e2-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000872958,
+          "cycles": 3000450191,
+          "instructions": 3000450191,
+          "jit_instructions": 0,
+          "lcd_frames": 38,
+          "changed_frames": 33,
+          "pcm_frames": 886053,
+          "frame_sequence_hash": "269dfebb11bb6d19",
+          "pcm_hash": "5cba26f3447daec5",
+          "input": "438f1504dcbdceb5"
+        },
+        "fast": {
+          "guest_ns": 20000186841,
+          "cycles": 3000266338,
+          "instructions": 3000266338,
+          "jit_instructions": 2997035903,
+          "lcd_frames": 40,
+          "changed_frames": 29,
+          "pcm_frames": 886023,
+          "frame_sequence_hash": "bbfed819ff7683d8",
+          "pcm_hash": "a7c1a4c67e0c76e5",
+          "input": "438f1504dcbdceb5"
+        }
+      }
+    },
+    "tg50-busy": {
+      "session": "TG50_SESSION",
+      "replay": "tg50-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000688066,
+          "cycles": 1920294062,
+          "instructions": 240519247,
+          "jit_instructions": 0,
+          "lcd_frames": 142,
+          "changed_frames": 123,
+          "pcm_frames": 882030,
+          "frame_sequence_hash": "6d574eebe146fd03",
+          "pcm_hash": "10285475d349f305",
+          "input": "9d81106953ec3596"
+        },
+        "fast": {
+          "guest_ns": 20000243517,
+          "cycles": 1920202231,
+          "instructions": 240617416,
+          "jit_instructions": 176335694,
+          "lcd_frames": 142,
+          "changed_frames": 123,
+          "pcm_frames": 882011,
+          "frame_sequence_hash": "64f0c11c5a50a15c",
+          "pcm_hash": "9305d398a1ea5795",
+          "input": "9d81106953ec3596"
         }
       }
     }
