@@ -10,9 +10,9 @@
 
 # The PXA and paravirtual files only the PXA devices run. pxa_IC, pxa_GPIO, pxa_I2C, pxa_I2S and
 # pxa270_WMMX stay out of the list: the iMX1 code includes some of them.
-@pxa-only	core/src/uarm/uarm/pxa_[!GI]* core/src/uarm/uarm/pxa255_* core/src/uarm/uarm/pxa270_[!W]* core/src/uarm/uarm/pxa27x_* core/src/uarm/uarm/soc_PXA* core/src/uarm/uarm/pv_* core/src/uarm/uarm/soc_pv*
+@pxa-only	core/src/uarm/uarm/pxa_[!GI]* core/src/uarm/uarm/pxa255_* core/src/uarm/uarm/pxa270_[!W]* core/src/uarm/uarm/pxa27x_* core/src/uarm/uarm/pv_* core/src/uarm/uarm/soc_pv*
 # The iMX1 files only the Zodiac runs.
-@imx1-only	core/src/uarm/uarm/imx1_* core/src/uarm/uarm/soc_IMX1.* core/src/uarm/uarm/zodiac_* core/src/uarm/uarm/ymfm/
+@imx1-only	core/src/uarm/uarm/imx1_* core/src/uarm/uarm/zodiac_* core/src/uarm/uarm/ymfm/
 
 *	Makefile core/src/Makefile.common core/src/common/ core/src/uarm/Makefile core/src/cloudpilot/Makefile tests/ tools/ vendor/
 
