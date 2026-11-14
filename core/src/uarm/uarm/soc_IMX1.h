@@ -62,6 +62,9 @@ class SocIMX1 : public SoC {
     // Instructions retired and idle clocks skipped so far, for speed readouts.
     Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
     bool Halted() const { return halted; }
+    // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps
+    // up. Off, a run always reaches its guest time and runs repeat however busy the host is (tools).
+    void SetHostTimeLimit(bool on) { hostTimeLimit = on; }
     // Whether a redraw of the frame the machine already has is still owed.
     bool RedrawPending() const { return redraw; }
     // The sound path, for tests.
@@ -100,6 +103,7 @@ class SocIMX1 : public SoC {
     std::unique_ptr<Imx1I2cReadWindow> eeprom;
     Imx1Machine* machine{nullptr};
     bool halted{false};
+    bool hostTimeLimit{true};
 
     // The panel frame handed to the frontend, a copy, so the machine's frame is acknowledged at
     // once. The frontend turns it on the GPU.

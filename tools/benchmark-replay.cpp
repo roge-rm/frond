@@ -23,6 +23,7 @@
 #include "IrKeyboardMapping.h"
 #include "audio_queue.h"
 #include "session/session_file5.h"
+#include "soc_IMX1.h"
 #include "soc_PXA.h"
 #include "device.h"
 #include "deviceSonyTG50.h"
@@ -35,7 +36,7 @@
 #include "host-profile.h"
 
 namespace {
-SocPXA* clockSoc = nullptr;
+SoC* clockSoc = nullptr;
 uint64_t clockStart = 0, epoch = 3875817600ull; // 2026-10-26 00:00:00, Palm local epoch
 uint64_t number(const std::string& s, uint64_t maximum) {
     if (s.empty() || s.find_first_not_of("0123456789") != std::string::npos)
@@ -177,8 +178,10 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     return m;
 }
 
-// A cold boot from a NOR image, like the runner's `frond NOR --device NAME`.
-Machine loadNor(std::vector<uint8_t> data, const std::string& deviceName) {
+// A cold boot from a NOR image, like the runner's `frond NOR --device NAME [--nand NAND]`. Without
+// a NAND image a device with NAND gets a blank one, as in the runner. The NAND runs from memory, so
+// the file is never written.
+Machine loadNor(std::vector<uint8_t> data, const std::string& deviceName, const std::string& nandPath) {
     Machine m;
     RomInfo5 rom(data.data(),data.size());
     DeviceType5 device=rom.IsValid()?rom.GetDeviceType():deviceTypeInvalid;
@@ -189,11 +192,12 @@ Machine loadNor(std::vector<uint8_t> data, const std::string& deviceName) {
         device=DeviceType5(profile->deviceType);
     }
     if (!rom.IsValid() || device==deviceTypeInvalid) throw std::runtime_error("not a session or a NOR image Frond knows");
-    if (device==DeviceType5::deviceTypeTX) throw std::runtime_error("a TX cold boot needs its NAND: use a session");
     if (!deviceProfileRunnerEligible5(device) || !pxaBoard(deviceProfile5(device)->board))
         throw std::runtime_error("this ROM's device runs in frond-68k or has no board");
-    if (deviceProfileValidateFirmware5(device,data.size(),0,false,false,rom.GetFirmwareVariant())!=DeviceFirmwareError5::none)
-        throw std::runtime_error("invalid firmware geometry for the device");
+    if (!nandPath.empty()) m.nand=readFile(nandPath.c_str());
+    else m.nand.assign(deviceConfigurationGetNandSize(device),0xff);
+    if (deviceProfileValidateFirmware5(device,data.size(),m.nand.size(),false,!nandPath.empty(),rom.GetFirmwareVariant())!=DeviceFirmwareError5::none)
+        throw std::runtime_error("invalid firmware geometry for the device (the TX needs --nand)");
     m.device=device;
     m.ramSize=rom.GetRecommendedRamSize();
     if (!deviceConfigurationSupportsRamSize(device,m.ramSize)) throw std::runtime_error("unsupported RAM size");
@@ -213,6 +217,65 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
     SDL_FreeSurface(surface);
     return ok;
 }
+
+// A Zodiac cold boot: its own machine, no replay or session yet. Counts and hashes as for the
+// PXA boards; instructions are the machine's retired count, and its Fast engine isn't the JIT,
+// so jit_instructions stays 0. Its runs have no host time limit, so they repeat.
+void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
+               const char* mipsArg, bool sound, const std::filesystem::path& output) {
+    if (std::string(replayArg)!="-") throw std::runtime_error("the Zodiac takes no replay yet: use -");
+    const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalMips5(device):number(mipsArg,1000);
+    if (!mips) throw std::runtime_error("MIPS must be positive");
+    const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
+    if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
+    cpuSetFastEngine(false);
+    std::string why;
+    std::unique_ptr<SocIMX1> soc(SocIMX1::Create(rom.data(),rom.size(),why));
+    if (!soc) throw std::runtime_error("Tapwave Zodiac 2: "+why);
+    const char* jit=std::getenv("FROND_JIT");
+    const bool fast=jit && std::string(jit)=="1";
+    if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
+    soc->SetHostTimeLimit(false);
+    clockStart=soc->GetTime(); clockSoc=soc.get();
+    auto queue=audioQueueCreate(8192);
+    soc->SetAudioQueue(queue); soc->SetPcmOutputEnabled(sound); soc->SetPcmSuspended(false);
+    const uint64_t retiredStart=soc->Status().retired;
+    const size_t pixels=size_t(display.width)*display.height;
+    uint64_t lastHash=hashInit, frameSequence=hashInit, pcmHash=hashInit, frameCount=0, changed=0, pcmFrames=0, cycles=0;
+    bool haveFrame=false;
+    const auto start=std::chrono::steady_clock::now();
+    while (soc->GetTime()-clockStart<duration*1000000 && !soc->Halted()) {
+        cycles+=soc->Run(mips*1000,mips*1000000);
+        uint32_t first=0,last=0;
+        if (auto pending=soc->GetPendingFrame(first,last)) {
+            const auto hash=hashBytes(hashInit,pending,pixels*sizeof(uint32_t));
+            const uint64_t guest=soc->GetTime()-clockStart;
+            frameSequence=hashBytes(frameSequence,&guest,sizeof(guest));
+            frameSequence=hashBytes(frameSequence,&hash,sizeof(hash));
+            changed+=!haveFrame || hash!=lastHash;
+            lastHash=hash; haveFrame=true; ++frameCount;
+            soc->ResetPendingFrame();
+        }
+        uint32_t pcm[8192];
+        const auto n=audioQueuePopChunk(queue,pcm,8192);
+        pcmHash=hashBytes(pcmHash,pcm,n*sizeof(uint32_t)); pcmFrames+=n;
+    }
+    const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    const uint64_t guestNs=soc->GetTime()-clockStart, instructions=soc->Status().retired-retiredStart;
+    std::ofstream result(output/"summary.json");
+    result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
+           << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
+           << ",\"guest_ns\":" << guestNs << ",\"cycles\":" << cycles << ",\"instructions\":" << instructions
+           << ",\"jit_instructions\":0,\"halted\":" << (soc->Halted()?"true":"false") << ",\"wall_seconds\":" << wall
+           << ",\"lcd_frames\":" << frameCount << ",\"changed_frames\":" << changed << ",\"pcm_frames\":" << pcmFrames
+           << ",\"frame_sequence_hash\":\"" << std::hex << frameSequence << "\",\"pcm_hash\":\"" << pcmHash << "\"}\n";
+    result.flush(); if (!result) throw std::runtime_error("summary write failed");
+    std::printf("%s cold boot: guest %.3f s, %llu cycles, wall %.3f s, %llu instructions%s, %llu frames, frame hash %llx, "
+                "%llu PCM frames, PCM hash %llx\n",deviceName5(device),guestNs/1e9,(unsigned long long)cycles,wall,
+                (unsigned long long)instructions,soc->Halted()?", stopped":"",(unsigned long long)frameCount,
+                (unsigned long long)frameSequence,(unsigned long long)pcmFrames,(unsigned long long)pcmHash);
+    clockSoc=nullptr;
+}
 }
 // This executable replaces timeutil.o: guest RTC is tied to restored virtual time.
 uint64_t palmEpochSeconds() {
@@ -229,13 +292,16 @@ int main(int argc, char** argv) {
         if (argc==4 && std::string(argv[1])=="--check-replay") {
             replay(argv[2],number(argv[3],600000)); return 0;
         }
-        std::string deviceName;
+        std::string deviceName, nandPath;
         int skip=0;
-        if (argc>2 && std::string(argv[1])=="--device") { deviceName=argv[2]; skip=2; }
+        while (argc>skip+2 && (std::string(argv[skip+1])=="--device" || std::string(argv[skip+1])=="--nand")) {
+            (std::string(argv[skip+1])=="--device"?deviceName:nandPath)=argv[skip+2];
+            skip+=2;
+        }
         char** arg=argv+skip;  // arg[1] is SESSION
         const int count=argc-skip;
         if (count!=7 && count!=8)
-            throw std::runtime_error("usage: benchmark-replay [--device NAME] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
+            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
         const auto duration=number(arg[3],600000);
         if (!duration) throw std::runtime_error("duration must be positive");
         const std::string soundArg=arg[5];
@@ -247,9 +313,17 @@ int main(int argc, char** argv) {
         uint32_t version=0; std::string headerDevice;
         const bool folderSession=data.empty();
         const bool coldBoot=!folderSession && !frondSession::peekHeader(data.data(),data.size(),version,headerDevice);
-        if (!coldBoot && !deviceName.empty()) throw std::runtime_error("--device is for a NOR image; a session names its device");
+        if (!coldBoot && (!deviceName.empty() || !nandPath.empty()))
+            throw std::runtime_error("--device and --nand are for a NOR image; a session names its device");
         Machine m;
-        if (coldBoot) { m=loadNor(std::move(data),deviceName); data={}; }
+        if (coldBoot && !deviceName.empty()) {
+            const auto* profile=deviceProfileNamed5(deviceName.c_str());
+            if (profile && profile->board==DeviceBoard5::imx1Zodiac) {
+                runZodiac(data,DeviceType5(profile->deviceType),arg[2],duration,arg[4],soundArg=="on",arg[6]);
+                return 0;
+            }
+        }
+        if (coldBoot) { m=loadNor(std::move(data),deviceName,nandPath); data={}; }
         const auto checkInputs=[&](DeviceType5 device) {
             const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalMips5(device):number(arg[4],1000);
             if (!mips) throw std::runtime_error("MIPS must be positive");

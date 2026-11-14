@@ -372,7 +372,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
         if (run.reason == Imx1MachineYield::deadline) break;
-        if (std::chrono::steady_clock::now() - started >= runHostLimit) break;
+        if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
     const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;
     // Nothing can wake a waiting guest but input, so host time just passes. Its own clock stands
