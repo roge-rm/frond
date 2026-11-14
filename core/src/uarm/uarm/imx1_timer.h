@@ -17,6 +17,14 @@ class Imx1Timer {
     bool enabled() const { return control & 1; }
     bool outputIsolationRequired() const { return enabled() && (control & 0x20); }
     bool interruptOutput() const { return (control & 0x10) && (status & 1); }
+    // PERCLK1 cycles a count takes and the ones already counted towards the next, false when not counting.
+    bool tickDivisor(uint64_t& divisor, uint64_t& counted) const {
+        const unsigned source = (control >> 1) & 7;
+        if (!enabled() || !source) return false;
+        divisor = uint64_t(prescaler + 1) * (source == 2 ? 16 : 1);
+        counted = phase;
+        return true;
+    }
     static constexpr uint32_t stateVersion = 1;
     template <class A> void state(A& a) {
         a.Do32(control).Do32(prescaler).Do32(compare).Do32(counter).Do32(status).Do32(statusRead).Do32(phase);

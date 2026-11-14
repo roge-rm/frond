@@ -63,6 +63,28 @@ uint64_t scanPollSkips = 0, scanPollRounds = 0;  // for tests
 bool scanPollSkip = true;
 // Spans shorter than this are left to the step.
 constexpr uint64_t leanMinimumSpan = 8;
+// The last timer count worked out, kept for the cycles that read the same while the board doesn't change: a
+// polling loop reads the count many times between two of its ticks.
+struct TimerCountMemo {
+    const Imx1Bootstrap* board;
+    uint64_t changes, hclk, from, until;
+    uint32_t address, mode, value;
+};
+TimerCountMemo timerCountMemo{};
+// Imx1Bootstrap::timerCountAfter, through timerCountMemo.
+bool timerCountAfter(const Imx1Bootstrap& board, uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode,
+                     uint32_t& value, uint64_t hclk = 0) {
+    auto& m = timerCountMemo;
+    if (m.board == &board && m.changes == board.changeCount() && m.address == address && size == 4 && m.mode == mode &&
+        m.hclk == hclk && cycles >= m.from && cycles <= m.until) {
+        value = m.value;
+        return true;
+    }
+    uint64_t until;
+    if (!board.timerCountAfter(address, size, cycles, mode, value, hclk, &until)) return false;
+    m = {&board, board.changeCount(), hclk, cycles, until, address, mode, value};
+    return true;
+}
 
 struct Probe {
     explicit Probe(const Imx1ProbeOptions& config)
@@ -541,7 +563,7 @@ struct Probe {
         // Wait clocks still deferred (graphics accesses answered earlier) count after the CPU cycles, as
         // chargeDeferred charges them; the span has to hold their cost too.
         if (quietCycles <= uint64_t(ran) + leanCs5.waitCost || p.failed || p.graphicsWireStatus != Imx1BootstrapAccess::ok ||
-            !p.peripherals.timerCountAfter(pa, size, deferredCycles + ran, quietMode, *value,
+            !timerCountAfter(p.peripherals, pa, size, deferredCycles + ran, quietMode, *value,
                                            deferredHclk + leanCs5.waitClocks)) return false;
         ++leanTimerReads;
         return true;
@@ -747,7 +769,7 @@ struct Probe {
         auto done = [&](uint64_t cycles, bool& known) {
             uint32_t count;
             // Wait clocks still deferred count after the cycles, as chargeDeferred charges them.
-            known = peripherals.timerCountAfter(timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
+            known = timerCountAfter(peripherals, timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
             return known && count - base >= wait;
         };
         bool known;
@@ -886,7 +908,7 @@ struct Probe {
             !(Imx1Bootstrap::isRamAddress(address) && !(write && p.peripherals.pcmDmaReads(address, size))) &&
             !(!write && p.resolve(address, size))) {
             timerCountKnown = !write && quietCycles && !deferredHclk && !p.failed && !memIsInstructionFetch(p.mem) &&
-                p.peripherals.timerCountAfter(address, size, deferredCycles, quietMode, timerCount);
+                timerCountAfter(p.peripherals, address, size, deferredCycles, quietMode, timerCount);
             if (!timerCountKnown) p.chargeDeferred();
         }
         // Further data accesses within one instruction also wait for the nominal bus clock.

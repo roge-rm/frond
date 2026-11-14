@@ -174,18 +174,22 @@ class Imx1Bootstrap {
     // What a read of timer 1 or 2's counter gives after cycles more CPU cycles in this clock mode, then hclk
     // HCLK cycles (bus wait clocks, charged after the CPU cycles), with nothing charged. Only for cycles in which
     // no timer reaches its compare value. False for any other access, or when the sum is too big to work out in
-    // one piece.
+    // one piece. With sameUntil, also the most cycles (at least cycles) that give the same count and that this
+    // call would take; the result holds for those until the board changes (changeCount).
     bool timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value,
-                         uint64_t hclk = 0) const;
+                         uint64_t hclk = 0, uint64_t* sameUntil = nullptr) const;
+    // Moves on whenever the board's state can have changed, and is never the same for two boards.
+    uint64_t changeCount() const { return runCache.changes; }
     static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
     // Registers whose reads change nothing access commits but the GPIO port's accessed mark, and read the same
     // anywhere in a span where no interrupt line or input changes: the ASP status, GPIO and AITC.
     // Also CGM CSCR, the timers' control, prescaler, compare, capture and status (the count has its own path) and DMA
     // DISR and DIMR: reads that change nothing but a timer's status-read flag, which a charge in between leaves as is.
     // And the RTC's registers: reads only mark it used, and the span ends at its next second or sampling period.
+    // And MMCSD STATUS: a read changes nothing, and the span ends where the clock stop or command in progress does.
     static bool quietReadAddress(uint32_t address) {
         const uint32_t timer = address & ~0x1000u;
-        return address == 0x0021501c || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
+        return address == 0x0021501c || address == 0x00214004 || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
                address == 0x0021b000 || (timer >= 0x00202000 && timer <= 0x00202014 && timer != 0x00202010 && !(timer & 3)) ||
                address == 0x00209004 || address == 0x00209008 || (Imx1Rtc::registerName(address) && !(address & 3));
     }
@@ -228,6 +232,7 @@ class Imx1Bootstrap {
         const auto lines = interruptLines();
         const bool asserted = lines.irq == Imx1AitcLine::asserted || lines.fiq == Imx1AitcLine::asserted;
         if (!asserted) return false;
+        runCache.changes = RunCache::nextChange();
         if (systemStop == stopStopped) { cgm.wakePlls(); systemStop = stopWaking; }
         else if (systemStop == stopArmed) { cgm.wakePlls(); systemStop = stopRunning; }
         else cgm.wakeMcuPll();
@@ -551,8 +556,17 @@ class Imx1Bootstrap {
         // Whether the other level of the settled drive keeps the GPIO outputs known. Worked out from the GPIO
         // alone, so it holds until the next committed drive.
         bool otherValid = false, otherAccepted = false;
+        uint64_t changes = nextChange();
+        static uint64_t nextChange() {
+            static uint64_t count = 0;
+            return ++count;
+        }
         RunCache() = default;
-        RunCache(const RunCache&) = default;
+        RunCache(const RunCache& other)
+            : asserted(other.asserted), known(other.known), driveValue(other.driveValue), driveKnown(other.driveKnown),
+              changing(other.changing), drivePort(other.drivePort), sourcesValid(other.sourcesValid),
+              driveSettled(other.driveSettled), uartShared(other.uartShared), otherValid(other.otherValid),
+              otherAccepted(other.otherAccepted) {}
         // Once uart() has handed out a reference the flag stays, whatever is assigned onto the board.
         RunCache& operator=(const RunCache& other) {
             asserted = other.asserted; known = other.known;
@@ -561,6 +575,7 @@ class Imx1Bootstrap {
             sourcesValid = other.sourcesValid; driveSettled = other.driveSettled;
             otherValid = other.otherValid; otherAccepted = other.otherAccepted;
             uartShared = uartShared || other.uartShared;
+            changes = nextChange();
             return *this;
         }
     };
@@ -602,6 +617,7 @@ class Imx1Bootstrap {
     struct SourceChange {
         const Imx1Bootstrap& board;
         explicit SourceChange(const Imx1Bootstrap& board) : board(board) {
+            board.runCache.changes = RunCache::nextChange();
             board.runCache.sourcesValid = false;
             ++board.runCache.changing;
         }

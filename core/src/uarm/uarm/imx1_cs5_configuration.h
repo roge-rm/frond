@@ -100,7 +100,15 @@ class Imx1Cs5Configuration {
     // CPU cycles of this period that advanceCpuCycles can take in one call or in any split with the same
     // result, as no graphics model changes state within them. 0 when a change is due or can't be worked out.
     uint64_t quietCpuCycles(Imx1PllRatio period) const {
-        if (!clocks.programmed() || controller.delayRunning()) return 0;
+        if (controller.delayRunning()) return 0;
+        if (!clocks.programmed()) {
+            // Before the clocks are programmed every CPU cycle is one tick of the models (advanceDisplay), and an
+            // idle HCLK moves none of them.
+            uint64_t ticks = std::min(engine.idleQuietTicks(), sd.idleQuietTicks());
+            ticks = std::min(ticks, display.idleQuietTicks());
+            if (acquisition.deadlineRemaining()) ticks = std::min(ticks, acquisition.deadlineRemaining());
+            return ticks == UINT64_MAX ? UINT64_MAX : ticks ? ticks - 1 : 0;
+        }
         const uint64_t steps = idleQuietSteps(period.numerator, period.denominator);
         return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
     }

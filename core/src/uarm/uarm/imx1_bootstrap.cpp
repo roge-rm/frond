@@ -45,22 +45,45 @@ void Imx1Bootstrap::advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assume
 
 // The same sums as advanceCpuCycles and advanceSystemOutput, down to the PERCLK1 cycles a timer gets.
 bool Imx1Bootstrap::timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value,
-                                     uint64_t hclk) const {
+                                     uint64_t hclk, uint64_t* sameUntil) const {
     if (size != 4 || (address != 0x00202010 && address != 0x00203010)) return false;
     if (cgm.systemRestartRemaining() || cycles > UINT32_MAX || hclk > UINT32_MAX || (hclk && systemStopped())) return false;
-    uint64_t systemClocks = cycles * cgm.busDivider();
+    const uint64_t bus = cgm.busDivider();
+    uint64_t systemClocks = cycles * bus;
+    // Mode 3: system clocks = (cycles * a + systemPllPhase) / d, and the most cycles the overflow check takes.
+    uint64_t a = 0, d = 0, most = UINT32_MAX;
     if (mode == 3) {
         const auto mcu = cgm.mcuPllTargetRatio();
         const auto system = cgm.systemPllActiveRatio();
         const uint64_t units = cycles * mcu.denominator * cgm.mcuPrescaler();
-        if (units > (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator) return false;
+        const uint64_t limit = (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator;
+        if (units > limit) return false;
         systemClocks = (units * system.numerator + systemPllPhase) / (mcu.numerator * system.denominator);
+        a = uint64_t(mcu.denominator) * cgm.mcuPrescaler() * system.numerator;
+        d = mcu.numerator * system.denominator;
+        most = std::min<uint64_t>(most, limit / (uint64_t(mcu.denominator) * cgm.mcuPrescaler()));
     }
     // advanceHclkCycles: each HCLK cycle is busDivider system clocks.
-    systemClocks += hclk * cgm.busDivider();
-    auto timer = address < 0x00203000 ? timer1 : timer2;
-    timer.advance((systemClocks + perclk1Phase) / cgm.perclk1Divider());
-    return timer.access(0x10, 4, false, value, false) == Imx1TimerAccess::ok;
+    systemClocks += hclk * bus;
+    const auto& source = address < 0x00203000 ? timer1 : timer2;
+    auto timer = source;
+    const uint64_t divider = cgm.perclk1Divider();
+    timer.advance((systemClocks + perclk1Phase) / divider);
+    if (timer.access(0x10, 4, false, value, false) != Imx1TimerAccess::ok) return false;
+    if (sameUntil) {
+        uint64_t divisor, counted;
+        if (!source.tickDivisor(divisor, counted)) *sameUntil = most;
+        else {
+            // The counts advance makes are floor((system clocks + perclk1Phase + counted * divider) / (divider * divisor)),
+            // so the count moves at the first cycle whose system clocks reach the next multiple.
+            const __uint128_t period = __uint128_t(divider) * divisor;
+            const __uint128_t offset = __uint128_t(perclk1Phase) + __uint128_t(counted) * divider;
+            const __uint128_t next = ((systemClocks + offset) / period + 1) * period - offset - __uint128_t(hclk) * bus;
+            __uint128_t first = mode == 3 ? (next * d - systemPllPhase + a - 1) / a : (next + bus - 1) / bus;
+            *sameUntil = uint64_t(std::min<__uint128_t>(first - 1, most));
+        }
+    }
+    return true;
 }
 
 void Imx1Bootstrap::advanceHclkCycles(uint32_t cycles) {
