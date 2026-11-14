@@ -835,6 +835,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |
 | `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py`, `tests/host-call-wake.py`, `tests/patched-traps.py`, `tests/card-swap-rom.py`, `tests/card-reinsert-rom.py` and `tests/link-irda-cores.py` (palm-tx only). Default `build/smoke/machines`. |
 | `FROND_REQUIRE_SESSIONS` | `1` makes those two tests fail instead of skipping when a session or the probes are missing. |
+| `FROND_NO_RECORD` | `1` stops `make test-NAME` writing its result to `build/check-passes.tsv`. |
 | `FROND_REQUIRE_E3` | `1` makes `tests/smoke.py` and `tests/frond-arm-install.py` fail instead of skipping the Tungsten E3 when its firmware or session is missing. |
 | `FROND_REQUIRE_E2_DENVFS` | The same for the E2 de-NVFS image (`palm-e2-denvfs`), whose NOR comes from `FROND_TEST_E2_DENVFS_NOR`. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
@@ -1077,7 +1078,7 @@ Tests in `make test`, by area:
 | Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem`, `test-ir-peer`, `test-ir-printer` |
-| Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link` |
+| Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-audio-metrics`, `test-audio-timing`, `test-tx-baseline`, `test-menu-response`, `test-wm9712-irq`, `test-pxa-ac97-irq`, `test-pace-patch` |
 
 Not in `make test`. The first group builds a program and runs it with a private session, the rest are firmware-free and can be run by name:
 
