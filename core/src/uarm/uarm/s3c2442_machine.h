@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "memory_buffer.h"
 #include "s3c2442_blocks.h"
 #include "s3c2442_nand.h"
 
@@ -63,8 +64,8 @@ class S3c2442Machine {
     bool loadRam(uint32_t physical, const uint8_t* data, size_t size);
     // A CPU reset at pc: SVC mode, interrupts off, MMU and caches off.
     void start(uint32_t pc);
-    // Runs until the machine stops or about instructions more have run. Returns why it stopped, budget
-    // when it can go on.
+    // Runs until the machine stops or about instructions more have run, idle CPU cycles counted as
+    // instructions. Returns why it stopped, budget when it can go on.
     S3c2442Stop run(uint64_t instructions);
     const S3c2442StopInfo& stopInfo() const { return stopped; }
     // One line on why the machine stopped.
@@ -106,7 +107,9 @@ class S3c2442Machine {
     bool mmio(uint32_t address, unsigned size, bool write, uint32_t& value);
     bool refuse(uint32_t address, unsigned size, bool write, uint32_t value, const std::string& text);
     void advance(uint64_t cpuCycles);
-    uint64_t cyclesToEvent() const;
+    // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
+    // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
+    uint64_t cyclesToEvent(bool wakeOnly = false) const;
     void updateLines();
 
     S3c2442Options options;
@@ -115,6 +118,9 @@ class S3c2442Machine {
     ArmMem* mem = nullptr;
     ArmRam* ram[4] = {};
     uint8_t* ramBuffer = nullptr;
+    MemoryBuffer ramMemory{};
+    // Undefined instruction exceptions already reported or from before start().
+    uint64_t undefinedSeen = 0;
     bool irqLine = false, fiqLine = false;
     uint64_t retiredCount = 0, cycleCount = 0, idleCount = 0, elapsedNs = 0;
     // Remainders of each clock domain in CPU cycles times the domain's rate.

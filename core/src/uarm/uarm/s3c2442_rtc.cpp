@@ -109,9 +109,9 @@ void S3cRtc::advance(uint64_t ticks, S3cIntc& intc) {
     secondPhase = total;
 }
 
-uint64_t S3cRtc::ticksToEvent() const {
+uint64_t S3cRtc::ticksToEvent(bool tick, bool alarmCheck) const {
     uint64_t best = UINT64_MAX;
-    if (ticnt & 0x80) best = ((ticnt & 0x7f) + 1) * tickUnit - tickPhase;
-    if (rtcalm & 0x40 && rtcalm & 0x3f && second - secondPhase < best) best = second - secondPhase;
+    if (tick && ticnt & 0x80) best = ((ticnt & 0x7f) + 1) * tickUnit - tickPhase;
+    if (alarmCheck && rtcalm & 0x40 && rtcalm & 0x3f && second - secondPhase < best) best = second - secondPhase;
     return best;
 }

@@ -94,8 +94,8 @@ class S3cPwm {
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     void advance(uint64_t pclkTicks, S3cIntc& intc);
-    // PCLK ticks until the next interrupt, UINT64_MAX with none due.
-    uint64_t ticksToEvent() const;
+    // PCLK ticks until the next interrupt of a timer in timers (bit n timer n), UINT64_MAX with none due.
+    uint64_t ticksToEvent(uint32_t timers = 0x1f) const;
     // The timer's count, TCNTO.
     uint32_t count(unsigned timer) const { return timers[timer].count; }
 
@@ -119,7 +119,9 @@ class S3cWatchdog {
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     void advance(uint64_t pclkTicks, S3cIntc& intc);
-    uint64_t ticksToEvent() const;
+    // PCLK ticks until the count runs out with the reset on, or with the interrupt on when interrupts is
+    // set. UINT64_MAX when it can't run out (stopped, or WTCNT and WTDAT both 0).
+    uint64_t ticksToEvent(bool interrupts = true) const;
     // Set when the count ran out with the reset output on; the machine stops on it.
     bool resetRequested = false;
 
@@ -139,7 +141,8 @@ class S3cRtc {
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     void advance(uint64_t ticks32k, S3cIntc& intc);
-    uint64_t ticksToEvent() const;
+    // 32 kHz ticks until the next tick interrupt (tick) or alarm check (alarmCheck), UINT64_MAX with none due.
+    uint64_t ticksToEvent(bool tick = true, bool alarmCheck = true) const;
 
     uint32_t rtccon, ticnt, rtcalm, alarm[6], bcd[7];
     uint64_t secondPhase, tickPhase;
@@ -202,7 +205,8 @@ class S3cLcd {
     S3cAccess write(uint32_t offset, uint32_t value, S3cIntc& intc);
     // HCLK ticks.
     void advance(uint64_t hclkTicks, S3cIntc& intc);
-    uint64_t ticksToEvent() const;
+    // HCLK ticks to the next frame sync; with interruptOnly, UINT64_MAX when LCDINTMSK masks it.
+    uint64_t ticksToEvent(bool interruptOnly = false) const;
     bool enabled() const { return lcdcon[0] & 1; }
     // HCLK ticks in one line and lines in one frame, from the timing registers.
     uint64_t lineTicks() const;

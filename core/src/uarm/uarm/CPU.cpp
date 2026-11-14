@@ -548,6 +548,9 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
     if (cpuPrvArm920<kind>(cpu) &&
         cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard.active) {
         // An unmodelled cache/buffer target is a diagnostic trap, with FSR/FAR retained.
+        ++cpu->undefinedCount;
+        cpu->undefinedPc = cpu->curInstrPC;
+        cpu->undefinedInstr = 0;
         cpuPrvException<kind>(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (cpu->T ? 2 : 4),
                         ARM_SR_MODE_UND | ARM_SR_I);
         return;

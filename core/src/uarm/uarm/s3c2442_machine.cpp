@@ -43,7 +43,9 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
     }
     std::unique_ptr<S3c2442Machine> m(new S3c2442Machine(options));
     m->mem = memInit();
-    MemoryBuffer buffer{};
+    // uARM has no teardown for the bus, RAM regions or CPU, which live as long as the process, as with the
+    // other machines; the destructor gives back the SDRAM, the only large part.
+    MemoryBuffer& buffer = m->ramMemory;
     if (!memoryBufferAllocate(&buffer, options.ramBytes)) {
         error = "SDRAM could not be allocated";
         return nullptr;
@@ -90,7 +92,10 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     std::memset(steppingstone, 0, sizeof steppingstone);
 }
 
-S3c2442Machine::~S3c2442Machine() = default;
+S3c2442Machine::~S3c2442Machine() {
+    // Nothing runs on the CPU after this, and its RAM regions point into the buffer.
+    if (ramMemory.buffer) memoryBufferRelease(&ramMemory);
+}
 
 bool S3c2442Machine::loadRam(uint32_t physical, const uint8_t* data, size_t size) {
     if (physical < sdramBase || uint64_t(physical) + size > uint64_t(sdramBase) + options.ramBytes) return false;
@@ -101,6 +106,7 @@ bool S3c2442Machine::loadRam(uint32_t physical, const uint8_t* data, size_t size
 void S3c2442Machine::start(uint32_t pc) {
     cpuReset(cpuCore, pc);
     stopped = {};
+    undefinedSeen = cpuUndefinedTaken(cpuCore, nullptr, nullptr);
 }
 
 uint32_t S3c2442Machine::pc() const { return cpuGetRegisters(cpuCore)[15]; }
@@ -265,7 +271,8 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             break;
     }
     if (result == S3cAccess::ok) {
-        if (write) updateLines();
+        // Reads change levels too, such as URXH draining the receive FIFO.
+        updateLines();
         return true;
     }
     std::string text;
@@ -311,7 +318,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
 }
 
 // CPU cycles until the next timer, watchdog, frame or RTC event, UINT64_MAX with none due.
-uint64_t S3c2442Machine::cyclesToEvent() const {
+uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     const uint64_t cpuHz = clock.cpuClock();
     uint64_t best = UINT64_MAX;
     auto consider = [&](uint64_t ticks, uint64_t hz, uint64_t rest) {
@@ -321,18 +328,28 @@ uint64_t S3c2442Machine::cyclesToEvent() const {
         const uint64_t cycles = need <= rest ? 1 : uint64_t((need - rest + hz - 1) / hz);
         best = std::min(best, std::max<uint64_t>(cycles, 1));
     };
-    consider(std::min(pwm.ticksToEvent(), watchdog.ticksToEvent()), clock.pclk(), pclkRest);
-    consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
-    consider(rtc.ticksToEvent(), 32768, rtcRest);
+    if (!wakeOnly) {
+        consider(std::min(pwm.ticksToEvent(), watchdog.ticksToEvent()), clock.pclk(), pclkRest);
+        consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
+        consider(rtc.ticksToEvent(), 32768, rtcRest);
+        return best;
+    }
+    auto open = [&](unsigned source) { return !(intc.intmsk & (1u << source)); };
+    const uint32_t timers = (~intc.intmsk >> s3cIrq::timer0) & 0x1f;
+    const bool wdtInterrupt = open(s3cIrq::wdtAc97) && !(intc.intsubmsk & (1u << s3cSubIrq::wdt));
+    consider(std::min(pwm.ticksToEvent(timers), watchdog.ticksToEvent(wdtInterrupt)), clock.pclk(), pclkRest);
+    if (open(s3cIrq::lcd)) consider(lcd.ticksToEvent(true), clock.hclk(), hclkRest);
+    consider(rtc.ticksToEvent(open(s3cIrq::tick), open(s3cIrq::rtc)), 32768, rtcRest);
     return best;
 }
 
 S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
     if (stopped.stop == S3c2442Stop::budget) stopped.stop = S3c2442Stop::running;
     if (stopped.stop != S3c2442Stop::running) return stopped.stop;
-    const uint64_t target = retiredCount + instructions;
+    const uint64_t target = retiredCount + idleCount + instructions;
     while (stopped.stop == S3c2442Stop::running) {
-        if (retiredCount >= target) { stopped.stop = S3c2442Stop::budget; break; }
+        const uint64_t used = retiredCount + idleCount;
+        if (used >= target) { stopped.stop = S3c2442Stop::budget; break; }
         // IDLE in CLKCON or the ARM920T's wait for interrupt: time goes on to the next event.
         if (clock.idle() || cpuArm920Waiting(cpuCore)) {
             if (intc.irq() || intc.fiq()) {
@@ -340,17 +357,20 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
                 cpuArm920EndWait(cpuCore);
                 continue;
             }
-            const uint64_t skip = cyclesToEvent();
+            // Masked sources still count while idle, but only an unmasked one can end it. External
+            // interrupts (EINT, UART receive) come from outside between runs.
+            uint64_t skip = cyclesToEvent(true);
             if (skip == UINT64_MAX) {
                 stopped.stop = S3c2442Stop::idleNoWake;
                 stopped.pc = pc();
                 break;
             }
+            skip = std::min(skip, target - used);
             idleCount += skip;
             advance(skip);
             continue;
         }
-        const uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - retiredCount}) : 1;
+        const uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - used}) : 1;
         if (!history.empty()) {
             history[historyNext] = pc();
             historyNext = (historyNext + 1) % history.size();
@@ -369,7 +389,8 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
         // Any undefined instruction stops the run: neither eboot nor the kernel take one on purpose, and
         // the CPU also takes one for coprocessor forms it doesn't model (FCSE, for one).
         uint32_t undefinedPc = 0, undefinedInstr = 0;
-        if (cpuUndefinedTaken(cpuCore, &undefinedPc, &undefinedInstr) && stopped.stop == S3c2442Stop::running) {
+        if (cpuUndefinedTaken(cpuCore, &undefinedPc, &undefinedInstr) > undefinedSeen && stopped.stop == S3c2442Stop::running) {
+            undefinedSeen = cpuUndefinedTaken(cpuCore, nullptr, nullptr);
             stopped.stop = S3c2442Stop::undefined;
             stopped.pc = undefinedPc;
             stopped.value = undefinedInstr;

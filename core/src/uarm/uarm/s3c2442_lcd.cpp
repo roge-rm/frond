@@ -124,7 +124,7 @@ void S3cLcd::advance(uint64_t hclkTicks, S3cIntc& intc) {
     phase = total % frame;
 }
 
-uint64_t S3cLcd::ticksToEvent() const {
-    if (!enabled()) return UINT64_MAX;
+uint64_t S3cLcd::ticksToEvent(bool interruptOnly) const {
+    if (!enabled() || (interruptOnly && lcdintmsk & 2)) return UINT64_MAX;
     return lineTicks() * frameLines() - phase;
 }

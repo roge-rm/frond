@@ -107,9 +107,10 @@ void S3cPwm::advance(uint64_t pclkTicks, S3cIntc& intc) {
     }
 }
 
-uint64_t S3cPwm::ticksToEvent() const {
+uint64_t S3cPwm::ticksToEvent(uint32_t which) const {
     uint64_t best = UINT64_MAX;
     for (unsigned i = 0; i < 5; ++i) {
+        if (!(which & (1u << i))) continue;
         const auto& t = timers[i];
         const uint64_t d = divisor(i);
         if (!t.running || !d) continue;

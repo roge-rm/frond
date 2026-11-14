@@ -146,8 +146,10 @@ void S3cWatchdog::advance(uint64_t pclkTicks, S3cIntc& intc) {
     }
 }
 
-uint64_t S3cWatchdog::ticksToEvent() const {
-    if (!(wtcon & 0x20) || !(wtcon & 5)) return UINT64_MAX;
+uint64_t S3cWatchdog::ticksToEvent(bool interrupts) const {
+    if (!(wtcon & 0x20) || !(wtcon & (interrupts ? 5 : 1))) return UINT64_MAX;
+    // Reloading 0 from WTDAT leaves it stopped at 0 (see advance).
+    if (!wtcnt && !wtdat) return UINT64_MAX;
     const uint64_t d = divisor();
     const uint64_t steps = wtcnt ? wtcnt : uint64_t(wtdat) + 1;
     return steps * d - phase;

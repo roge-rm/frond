@@ -2593,7 +2593,7 @@ S3C2442_SOURCES = core/src/uarm/uarm/s3c2442_intc.cpp core/src/uarm/uarm/s3c2442
 	core/src/uarm/uarm/s3c2442_uart.cpp core/src/uarm/uarm/s3c2442_lcd.cpp core/src/uarm/uarm/s3c2442_nand.cpp
 S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442_nand.h \
 	core/src/uarm/uarm/s3c2442_machine.h core/src/uarm/uarm/rx1950_nand_image.h
-.PHONY: rx1950-boot test-s3c2442 test-rx1950-boot
+.PHONY: rx1950-boot test-s3c2442 test-s3c2442-machine test-rx1950-boot
 rx1950-boot: build/rx1950-boot
 build/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) \
 		core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp
@@ -2608,6 +2608,14 @@ test-s3c2442: prepare
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm \
 		tests/s3c2442-blocks.cpp $(S3C2442_SOURCES) core/src/uarm/uarm/rx1950_nand_image.cpp -o build/test-s3c2442
 	./build/test-s3c2442
+
+test: test-s3c2442-machine
+test-s3c2442-machine: out/frond tests/s3c2442-machine.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) core/src/uarm/uarm/s3c2442_machine.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/rx1950-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/s3c2442-machine.cpp core/src/uarm/uarm/s3c2442_machine.cpp \
+		$(S3C2442_SOURCES) @build/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o build/test-s3c2442-machine
+	./build/test-s3c2442-machine
 
 # The rx1950's bootloader and OS to the kernel's first serial lines, when the firmware is here.
 test-rx1950-boot: build/rx1950-boot
