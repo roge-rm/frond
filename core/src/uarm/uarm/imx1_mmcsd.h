@@ -32,7 +32,7 @@ class Imx1Mmcsd {
             pullCard();
             return false;
         }
-        resume.pulled = false;
+        resume.pulled = pulledNot;
         slot.card = card;
         // Through pointers, so only the code that attaches a card links vSD.
         slot.command = vsdCommand;
@@ -52,6 +52,7 @@ class Imx1Mmcsd {
     bool clockRunning() const { return running; }
     bool canInterrupt() const {
         if (!emptySlot || !(control & 4)) return false;
+        if (resume.pulled == pulledRead || resume.pulled == pulledWrite) return remaining && !(registers[9] & 1);
         if (slot.dataPhase) return !(registers[9] & dataMask());
         return remaining && (!(registers[9] & 4) || (slot.data && !(registers[9] & dataMask())));
     }
@@ -96,8 +97,7 @@ class Imx1Mmcsd {
     }
     void advancePerclk2(uint64_t clocks) {
         if (!running || !(control & 4)) return;
-        static constexpr unsigned prescalers[]{1,2,3,3,4,5,5,5};
-        const unsigned divider = prescalers[registers[2] >> 3] << (registers[2] & 7);
+        const unsigned divider = clockDivider();
         const uint64_t fraction = clocks % divider + phase;
         const uint64_t ticks = clocks / divider + fraction / divider;
         phase = fraction % divider;
@@ -108,6 +108,13 @@ class Imx1Mmcsd {
             if (ticks < remaining) { remaining -= unsigned(ticks); return; }
             const uint64_t left = ticks - remaining;
             remaining = 0;
+            if (resume.pulled == pulledRead || resume.pulled == pulledWrite) {
+                // The time-out of a block cut short (pullCard), alerted through DATA_TRANS_DONE.
+                status |= 0x800 | (resume.pulled == pulledRead ? 1 : 4 | 2u << 9);
+                if (!(registers[9] & 1)) interrupt = true;
+                resume.pulled = pulledIdle;
+                return;
+            }
             if (slot.dataPhase) {
                 // The block clocks have passed; the bytes wait for the DMA.
                 slot.dataPhase = false;
@@ -177,7 +184,7 @@ class Imx1Mmcsd {
                 if (!enable || !ready || running || staged != 15) return A::sequence;
                 // After a card is taken out any command goes out and times out, as to a card that
                 // doesn't answer.
-                if (slot.card || resume.pulled) return launchCardCommand();
+                if (slot.card || resume.pulled != pulledNot) return launchCardCommand();
                 const uint32_t command = registers[10], format = registers[3];
                 const bool resetCommand = command == 0 && format == 0x80;
                 const bool responseCommand = (command == 55 && format == 1) ||
@@ -193,6 +200,11 @@ class Imx1Mmcsd {
             if (running) {
                 if (value == 4) { control = 4; return A::ok; }
                 // Stopping an active transfer remains outside the command-only subset.
+                // A card taken out leaves a time-out under way that the clock stop ends.
+                if (remaining && (resume.pulled == pulledRead || resume.pulled == pulledWrite)) {
+                    remaining = 0;
+                    resume.pulled = pulledIdle;
+                }
                 if (!enable || !stop || remaining || (value & 0x20)) return A::sideEffect;
                 if (!stopRemaining) stopRemaining = 8;
                 control = 4; status = 0; interrupt = false;
@@ -214,9 +226,10 @@ class Imx1Mmcsd {
             value = slot.response[slot.responseRead++];
             return A::ok;
         }
-        if (index == 13 && resume.pulled && !write) {
+        if (index == 13 && resume.pulled != pulledNot && !write) {
             // After a card is taken out: a response that came in before still reads.
-            // ASSUMPTION "empty response FIFO reads 0": the manual doesn't give the value; 0, nothing changed.
+            // ASSUMPTION "empty response FIFO reads 0": 20.6.12 gives only the reset value, 0x0000; an
+            // empty FIFO is taken to read that, changing nothing.
             value = slot.responseRead < slot.responseCount ? slot.response[slot.responseRead++] : 0;
             return A::ok;
         }
@@ -258,26 +271,53 @@ class Imx1Mmcsd {
                   (slot.data || (!slot.dataPhase && !slot.dataWaiting && !slot.dataBytes)), "card transfer");
         if (A::loading && a.ok()) { resume.card = std::move(card); resume.valid = true; }
     }
-    // The card was taken out with the slot in use; saved in a section of its own while set.
-    bool cardPulled() const { return resume.pulled; }
-    void setCardPulled(bool pulled) { resume.pulled = pulled; }
+    // Whether the card was taken out with the slot in use, and the time-out still under way for a
+    // block it cut short: pulledNot, pulledIdle, pulledRead or pulledWrite. Saved in a section of its
+    // own while set.
+    static constexpr uint32_t pulledNot = 0, pulledIdle = 1, pulledRead = 2, pulledWrite = 3;
+    uint32_t cardPulled() const { return resume.pulled; }
+    void setCardPulled(uint32_t pulled) { resume.pulled = uint8_t(pulled); }
 
    private:
-    // The card leaves the slot. A command still on the wire gets no response and ends with
-    // TIME_OUT_RESP, as with no card (20.6). A response already in stays in the FIFO.
-    // ASSUMPTION "data cut short": a data phase under way ends with DATA_TRANS_DONE and TIME_OUT_READ
-    // for a read, WRITE_CRC_ERROR for a write (no CRC status comes back), as a failed card access does.
+    // Card clock: PERCLK2 divided by CLK_RATE's prescaler and divider.
+    unsigned clockDivider() const {
+        static constexpr unsigned prescalers[]{1,2,3,3,4,5,5,5};
+        return prescalers[registers[2] >> 3] << (registers[2] & 7);
+    }
+    // The card leaves the slot.
+    // A command still on the wire gets no response: TIME_OUT_RESP with END_CMD_RESP, once 48 + RES_TO
+    // card clocks have passed from its start, as with no card (Table 20-6). A response already in
+    // stays in the FIFO.
+    // A block read cut short: TIME_OUT_READ with DATA_TRANS_DONE (Table 20-15) after READ_TO units of
+    // CLK_20M / 256, PERCLK2 here (Table 20-10). A block write cut short: CRC_WRITE_ERR with
+    // WR_CRC_ERROR_CODE 10, "No CRC response" (Table 20-6), with DATA_TRANS_DONE (Table 20-15).
+    // ASSUMPTION "data cut short": the read time-out counts from the pull rather than from the command,
+    // and a read whose block clocks had passed but still waited on its DMA is cut short too. The write
+    // ends when the rest of its block clocks have passed, or at once if it was waiting on its DMA.
     void pullCard() {
-        resume.pulled = true;
+        resume.pulled = pulledIdle;
         if (slot.dataPhase || slot.dataWaiting) {
-            remaining = 0;
-            status |= 0x800 | (slot.dataWrite ? 4 : 1);
-            if (!(registers[9] & dataMask())) interrupt = true;
+            const bool write = slot.dataWrite;
+            if (write) remaining = slot.dataPhase ? remaining : 0;
+            else remaining = unsigned((uint64_t(registers[5]) * 256 + clockDivider() - 1) / clockDivider());
             endData();
+            if (remaining) {
+                resume.pulled = uint8_t(write ? pulledWrite : pulledRead);
+            } else {
+                status |= 0x800 | (write ? 4 | 2u << 9 : 1);
+                if (!(registers[9] & 1)) interrupt = true;
+            }
             return;
         }
-        if (running && remaining && !stopRemaining) {
-            responseExpected = (registers[3] & 7) != 0;
+        if (running && remaining && !stopRemaining && !responseExpected && (registers[3] & 7)) {
+            // Answered: the count had the response bits in; it times out after RES_TO instead.
+            const uint32_t format = registers[3];
+            const uint32_t start = 48 + ((format & 0x80) ? 80 : 0);
+            const uint32_t answered = start + 2 + ((format & 7) == 2 ? 136 : 48);
+            const uint32_t passed = answered > remaining ? answered - remaining : 0;
+            const uint32_t timeout = start + registers[4];
+            remaining = timeout > passed ? timeout - passed : 1;
+            responseExpected = true;
             slot.responseCount = slot.responseRead = 0;
         }
         endData();
@@ -347,6 +387,7 @@ class Imx1Mmcsd {
         endData();
         for (auto& value : registers) value = 0;
         registers[2] = 0x36; registers[4] = 0x40; registers[5] = 0xffff;
+        if (resume.pulled != pulledNot) resume.pulled = pulledIdle;
     }
     uint32_t psr0 = 0xffffc410, psr1 = 0xfffffbef;
     uint32_t registers[13]{0,0,0x36,0,0x40,0xffff,0,0,0,0,0,0,0};
@@ -375,7 +416,8 @@ class Imx1Mmcsd {
     // A loaded card section's card state, for the next attachCard.
     // pulled: see cardPulled.
     struct Resume {
-        bool valid = false, pulled = false;
+        bool valid = false;
+        uint8_t pulled = 0;
         std::vector<uint8_t> card;
     } resume;
 

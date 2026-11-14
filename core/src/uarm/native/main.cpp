@@ -774,6 +774,10 @@ bool gFastEngineMissing = false;
             // The saved card is gone: eject it as a hot eject would; the one there now goes in later.
             soc->SdEject();
             sdInsertPending = sdCardInitialized();
+        } else if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); zodiac && zodiac->CardSwappedOnLoad()) {
+            // The Zodiac found another card than the saved one: in later, as a new card, so the guest
+            // sees the slot empty first.
+            sdInsertPending = sdCardInitialized();
         } else if (soc->SdInserted()) {
             if (!soc->SdRemount()) {
                 cerr << "failed to remount SD card: session and card image do not match" << endl;
@@ -781,9 +785,6 @@ bool gFastEngineMissing = false;
             }
         } else if (sdCardInitialized() && !embeddedCard) {
             soc->SdInsert();
-        } else if (auto* zodiac = dynamic_cast<SocIMX1*>(soc); zodiac && zodiac->CardSwappedOnLoad()) {
-            // Another card than the saved one: in later, as a new card.
-            sdInsertPending = true;
         }
         const uint64_t ejectedAt = soc->GetTime();
         std::optional<uint64_t> awakeAt;

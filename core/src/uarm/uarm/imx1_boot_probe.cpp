@@ -2512,9 +2512,9 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     // In states saved after a card was taken out of the slot in use.
     if (open("SDPL", stateCardPulledVersion, false, a)) {
         uint32_t pulled = 0;
-        a.Do32(pulled).Require(pulled == 1, "card pulled");
+        a.Do32(pulled).Require(pulled >= Imx1Mmcsd::pulledIdle && pulled <= Imx1Mmcsd::pulledWrite, "card pulled");
         if (!finish(a)) return info;
-        staged.board->setMmcsdCardPulled(true);
+        staged.board->setMmcsdCardPulled(pulled);
     } else if (info.status != S::ok) return info;
     // The card's id, in states saved with a known card in.
     if (open("SDID", stateCardIdVersion, false, a)) {
@@ -2669,7 +2669,7 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     }
     if (p->peripherals.mmcsdCardPulled()) {
         auto a = file.begin(stateFourcc("SDPL"), stateCardPulledVersion);
-        uint32_t pulled = 1;
+        uint32_t pulled = p->peripherals.mmcsdCardPulled();
         a.Do32(pulled);
         file.end();
     }

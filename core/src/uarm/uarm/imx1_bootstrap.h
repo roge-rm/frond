@@ -64,8 +64,8 @@ class Imx1Bootstrap {
         return false;
     }
     VSD* mmcsdCard() const { return mmcsd.card(); }
-    bool mmcsdCardPulled() const { return mmcsd.cardPulled(); }
-    void setMmcsdCardPulled(bool pulled) { mmcsd.setCardPulled(pulled); }
+    uint32_t mmcsdCardPulled() const { return mmcsd.cardPulled(); }
+    void setMmcsdCardPulled(uint32_t pulled) { mmcsd.setCardPulled(pulled); }
     // The card section: saved only while a card is in, so a state with the slot empty keeps the BOOT layout.
     static constexpr uint32_t cardStateVersion = Imx1Mmcsd::cardStateVersion;
     template <class A> void stateCard(A& a) {
