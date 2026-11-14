@@ -1,0 +1,81 @@
+{
+  "note": "Recipes for tools/speed-check.py --counts. rom is under FROND_DEVICE_IMAGES, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them.",
+  "recipes": {
+    "tg50-boot": {
+      "rom": "Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin",
+      "device": "sony-clie-tg50",
+      "ms": 13000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 13000381599,
+          "cycles": 1248192385,
+          "instructions": 155126198,
+          "jit_instructions": 0,
+          "lcd_frames": 64,
+          "changed_frames": 55,
+          "pcm_frames": 573316,
+          "frame_sequence_hash": "ad4c5e6b654eb045",
+          "pcm_hash": "dad5a1a67b0e3c65",
+          "input": "c6d5985cf183bae9"
+        },
+        "fast": {
+          "guest_ns": 13000754414,
+          "cycles": 1248194690,
+          "instructions": 155163709,
+          "jit_instructions": 150080976,
+          "lcd_frames": 65,
+          "changed_frames": 57,
+          "pcm_frames": 573332,
+          "frame_sequence_hash": "4c7cad6bbd121500",
+          "pcm_hash": "c0b651f793f26165",
+          "input": "c6d5985cf183bae9"
+        }
+      }
+    },
+    "zire72-boot": {
+      "rom": "Palm/Zire-72/Palm-Zire72-nor.bin",
+      "device": "palm-zire-72",
+      "ms": 13000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 13000395101,
+          "cycles": 1950450567,
+          "instructions": 1950450567,
+          "jit_instructions": 0,
+          "lcd_frames": 87,
+          "changed_frames": 83,
+          "pcm_frames": 575927,
+          "frame_sequence_hash": "5e3e2f05a8f0b4cf",
+          "pcm_hash": "f6093bf0f4b5979",
+          "input": "f44dd41217682740"
+        },
+        "fast": {
+          "guest_ns": 13000267761,
+          "cycles": 1950222066,
+          "instructions": 1950222066,
+          "jit_instructions": 1940229959,
+          "lcd_frames": 89,
+          "changed_frames": 85,
+          "pcm_frames": 575921,
+          "frame_sequence_hash": "a3a9d34d9c915b42",
+          "pcm_hash": "75bbde5dbf1c7519",
+          "input": "f44dd41217682740"
+        }
+      }
+    },
+    "bike": {
+      "session": "BIKE_SESSION",
+      "replay": "bike-level1.replay",
+      "ms": 10000,
+      "mips": 100
+    },
+    "frondbench": {
+      "session": "FRONDBENCH_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": 100
+    }
+  }
+}

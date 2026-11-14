@@ -1384,6 +1384,13 @@ SPEED_HOST ?=
 speed-check: benchmark-replay
 	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) SPEED_SSH_KEY=$(SPEED_SSH_KEY) SPEED_REAL_MS=$(SPEED_REAL_MS) python3 tools/speed-check.py
 
+# Guest instruction, cycle and frame counts and hashes against tools/speed-baseline.json, one run each.
+# Wall-clock rounds only for recipes whose counts moved. COUNT_ARGS adds options (--only, --update, --against).
+COUNT_ARGS ?=
+.PHONY: count-check
+count-check: benchmark-replay
+	python3 tools/speed-check.py --counts $(COUNT_ARGS)
+
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there
 # are rebuilt; the stamp only moves when libdynarmic.a changed. A build folder configured from

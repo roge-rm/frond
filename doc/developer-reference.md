@@ -874,6 +874,10 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
 | `SPEED_SSH_KEY` | Optional ssh key for `SPEED_HOST`. |
+| `TEST_TIMEOUT` | Seconds each `make test` recipe line may run before it's killed and fails. Default 300; a target can set its own. |
+| `TEST_KILL_GRACE` | Seconds between TERM and KILL when a test line times out. Default 10. |
+| `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
+| `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |
 
 ### Build
@@ -907,7 +911,7 @@ All in `tools/`. Most take `--help`.
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form. Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap. Optional `--cs4-port0-input=BYTE` enables the private CS4 diagnostic recorder, requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private W4200 reset echo with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See Zodiac bring-up and input scenarios. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
-| `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`). |
+| `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`), and guest counts against `tools/speed-baseline.json` (`make count-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
 | `host-profile.h` | Host timing used by the benchmarks. |
@@ -953,6 +957,7 @@ All in `tools/`. Most take `--help`.
 | `test-desktop` | The Qt tests. Needs `mtools`. |
 | `smoke`, `smoke-sessions` | Real-firmware check per device, and making its sessions. Skips a device without firmware. |
 | `speed-check` | Speed against fixed guest work. |
+| `count-check` | Guest counts and hashes against `tools/speed-baseline.json`, wall-clock rounds only where they moved. |
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `device-session-probe` | Build the device session probe. |
