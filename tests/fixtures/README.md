@@ -49,6 +49,8 @@ the `.files-intent` and `.files-commit` it left, and `*.expect` lists what it ho
 
 `e2-busy.replay` (hard keys and scrolls, also used on the Zire 72), `tg50-busy.replay` and
 `tx-media.replay` (the T|X Media demo clip) drive the busy recipes of `make count-check` from
-each device's smoke session. `zodiac-doom2.replay` and `zodiac-zuma.replay` take a Zodiac from
-a cold boot through the setup wizard, put the card in and start the game (`benchmark-replay
---sd CARD`). They hold only input events.
+each device's smoke session. `zodiac-doom2.replay`, `zodiac-zuma.replay`, `zodiac-origo.replay`
+(the Origo Prologue demo mission), `zodiac-dudes.replay` (an Animated Dudes cutscene),
+`zodiac-mtx.replay` (an MTX Mototrax race) and `zodiac-firehammer.replay` take a Zodiac from a
+cold boot through the setup wizard, put the card in and start the game (`benchmark-replay --sd
+CARD`). They hold only input events.

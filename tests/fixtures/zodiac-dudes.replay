@@ -1,0 +1,60 @@
+# Zodiac cold boot through the setup wizard (as zodiac-doom2.replay), then the card goes in at 91.5 s.
+# Card: Animated Dudes with PopAccess (zodiac-z1/cards/s2/animated-dudes.img). PopAccess, back to the card
+# view, Animated Dudes; New game, the name "a", Ok. Its story cutscene runs from about 128 s. Run for 170 s.
+40000 pen-down 240 160
+40100 pen-up
+41600 pen-down 355 240
+41700 pen-up
+43200 pen-down 20 20
+43300 pen-up
+44800 pen-down 459 298
+44900 pen-up
+46400 pen-down 240 120
+46500 pen-up
+48000 pen-down 440 305
+48100 pen-up
+49600 key-down function
+52600 key-up function
+54100 stick 0 -511
+56100 stick 0 0
+57600 stick 0 511
+59600 stick 0 0
+61100 stick -511 0
+63100 stick 0 0
+64600 stick 511 0
+66600 stick 0 0
+68100 stick 0 -511
+69100 stick 361 -361
+70100 stick 511 0
+71100 stick 361 361
+72100 stick 0 511
+73100 stick -361 361
+74100 stick -511 0
+75100 stick -361 -361
+76100 stick 0 -511
+77100 stick 0 0
+78600 pen-down 440 305
+78700 pen-up
+80200 pen-down 410 305
+80300 pen-up
+81800 pen-down 410 305
+81900 pen-up
+83400 pen-down 410 305
+83500 pen-up
+91000 snapshot "s.png"
+91500 card-insert
+95500 pen-down 143 272
+95700 pen-up
+98700 pen-down 370 80
+98900 pen-up
+100900 pen-down 144 75
+101100 pen-up
+118000 pen-down 120 100
+118200 pen-up
+124000 pen-down 94 206
+124200 pen-up
+126000 pen-down 440 294
+126200 pen-up
+130000 snapshot "s.png"
+150000 snapshot "s.png"
+169000 snapshot "s.png"

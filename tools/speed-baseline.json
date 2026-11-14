@@ -179,6 +179,106 @@
         }
       }
     },
+    "zodiac-origo": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/origo.img",
+      "replay": "zodiac-origo.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 135000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 135000000000,
+          "cycles": 13500000000,
+          "instructions": 7815446702,
+          "jit_instructions": 7692454633,
+          "lcd_frames": 1870,
+          "changed_frames": 148,
+          "pcm_frames": 5682173,
+          "frame_sequence_hash": "79654be963689cf5",
+          "pcm_hash": "8fcdfec4c23e9619",
+          "input": "bfe0084c852e07f2"
+        }
+      }
+    },
+    "zodiac-dudes": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/animated-dudes.img",
+      "replay": "zodiac-dudes.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 170000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 170000000000,
+          "cycles": 17000000000,
+          "instructions": 6122008460,
+          "jit_instructions": 5478302460,
+          "lcd_frames": 4190,
+          "changed_frames": 938,
+          "pcm_frames": 7225673,
+          "frame_sequence_hash": "f642069ebad55558",
+          "pcm_hash": "8aef53e11b97f0c6",
+          "input": "3ee3771c3485f9d7"
+        }
+      }
+    },
+    "zodiac-mtx": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/mtx-mototrax.img",
+      "replay": "zodiac-mtx.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 160000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 160000000000,
+          "cycles": 16000000000,
+          "instructions": 7553063587,
+          "jit_instructions": 7190085785,
+          "lcd_frames": 3092,
+          "changed_frames": 1801,
+          "pcm_frames": 6784673,
+          "frame_sequence_hash": "e5fcee3215b9dd81",
+          "pcm_hash": "1ae7bf6763f9c5f5",
+          "input": "3fd73abe78f92c90"
+        }
+      }
+    },
+    "zodiac-firehammer": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/firehammer.img",
+      "replay": "zodiac-firehammer.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 136000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 136000000000,
+          "cycles": 13600000000,
+          "instructions": 3405016613,
+          "jit_instructions": 3345625978,
+          "lcd_frames": 1122,
+          "changed_frames": 857,
+          "pcm_frames": 5726273,
+          "frame_sequence_hash": "9b5680253851646a",
+          "pcm_hash": "222f344255457769",
+          "input": "73072af5d72fe69c"
+        }
+      }
+    },
     "m515-boot": {
       "rom": "Palm/m515/Palm-m515-4.1-en.rom",
       "device": "palm-m515",
