@@ -26,8 +26,7 @@ Exits 1 when a count moved or a run failed.
                  [--timing] [--async-rounds] [--update] [--baseline FILE]
 
   FROND_DEVICE_IMAGES   firmware folder (deviceimages/palm) for the cold-boot recipes
-  ZODIAC_CARDS          folder of Zodiac game cards for the recipes with a card (tinydeck:
-                        /var/lib/lab/frond-work/zodiac/senna-cards/zodiac-z1/cards)
+  ZODIAC_CARDS          folder of Zodiac game cards for the recipes with a card (s1/, s2/)
   BIKE_SESSION, ...     session files for the session recipes, named by each recipe's "session"
   SPEED_LOCK            a lock file (tinydeck: /var/lib/lab/frond-speed/.speed-lock): count runs
                         hold it shared, wall-clock rounds exclusive

@@ -118,4 +118,4 @@
 18330 pen-up
 18500 pen-down 300 141
 18580 pen-up
-19500 snapshot "/var/lib/lab/frond-work/tg50-fast/runs/shots/busy-end.png"
+19500 snapshot "busy-end.png"

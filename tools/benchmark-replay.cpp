@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -241,7 +242,11 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     if (cardLater && sdPath.empty()) throw std::runtime_error("card-insert needs --sd");
     std::vector<uint8_t> card;
     if (!sdPath.empty()) {
-        card=readFile(sdPath.c_str());
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(sdPath,ec)) throw std::runtime_error("--sd needs an SD image file");
+        std::ifstream input(sdPath,std::ios::binary);
+        card.assign(std::istreambuf_iterator<char>(input),{});
+        if (input.bad() || card.empty()) throw std::runtime_error("cannot read the SD image, or it is empty");
         if (card.size()%512) throw std::runtime_error("the SD image isn't a whole number of sectors");
     }
     if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
@@ -335,8 +340,16 @@ int main(int argc, char** argv) {
     const bool jitAsync=asyncEnv && *asyncEnv && std::string(asyncEnv)!="0";
     cpuSetJitSync(!jitAsync);
     try {
-        if (argc==4 && std::string(argv[1])=="--check-replay") {
-            replay(argv[2],number(argv[3],600000)); return 0;
+        // --check-replay REPLAY MILLISECONDS [DEVICE]: parse only, with the device's screen and commands.
+        if ((argc==4 || argc==5) && std::string(argv[1])=="--check-replay") {
+            const auto* profile=argc==5?deviceProfileNamed5(argv[4]):nullptr;
+            if (argc==5 && (!profile || profile->deviceType==deviceTypeInvalid)) throw std::runtime_error(std::string("unknown device ")+argv[4]);
+            if (!profile) { replay(argv[2],number(argv[3],600000)); return 0; }
+            const auto device=DeviceType5(profile->deviceType);
+            const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
+            const bool zodiac=profile->board==DeviceBoard5::imx1Zodiac;
+            replay(argv[2],number(argv[3],600000),display.width,display.height+(zodiac?0:display.graffitiHeight),zodiac);
+            return 0;
         }
         std::string deviceName, nandPath, sdPath;
         int skip=0;
