@@ -220,6 +220,17 @@ def digest(path):
     return h.hexdigest()[:16]
 
 
+def images_path(name):
+    """A file under FROND_DEVICE_IMAGES."""
+    return Path(os.environ.get('FROND_DEVICE_IMAGES', '')) / name
+
+
+def recipe_key(r, path):
+    """Digest of everything a recipe starts from: its ROM or session, and its NAND image."""
+    key = digest(path)
+    return key if 'nand' not in r else hashlib.sha256((key + digest(images_path(r['nand']))).encode()).hexdigest()[:16]
+
+
 def recipe_input(r):
     """The recipe's session or ROM path, or (None, why it's skipped)."""
     if 'rom' in r:
@@ -232,6 +243,8 @@ def recipe_input(r):
         if not value:
             return None, f"set {r['session']}"
         path = Path(value)
+    if 'nand' in r and not images_path(r['nand']).exists():
+        return None, f"{images_path(r['nand'])} is missing"
     return (path, None) if path.exists() else (None, f'{path} is missing')
 
 
@@ -250,14 +263,40 @@ class Lock:
             self.file.close()
 
 
+CORE_68K = ROOT / 'out/frond-68k'
+
+
+def run_68k(r, path, out, exclusive):
+    """A frond-68k --run-for run: its cycle count and hashes of the last frame and the sound."""
+    out.mkdir(mode=0o700)
+    seconds = r['ms'] / 1000
+    cmd = [str(CORE_68K), str(path), '--device', r['device'], '--run-for', f'{seconds:g}', '--speed', 'original',
+           '--framebuffer-output', str(out / 'frame.png'), '--audio-output', str(out / 'audio.wav')]
+    with Lock(exclusive):
+        start = time.monotonic()
+        res = subprocess.run(cmd, capture_output=True, text=True, cwd=out)
+        wall = time.monotonic() - start
+    (out.parent / (out.name + '.log')).write_text(res.stdout + res.stderr)
+    m = re.search(r'^ran (\d+) cycles, ([0-9.]+) guest seconds', res.stdout, re.M)
+    if res.returncode or not m:
+        raise RuntimeError((res.stderr.strip().splitlines() or ['failed'])[-1])
+    files = {k: out / f for k, f in (('frame_sequence_hash', 'frame.png'), ('pcm_hash', 'audio.wav'))}
+    s = {'engine': 'exact', 'cycles': int(m[1]), 'guest_ns': round(float(m[2]) * 1e9), 'wall_seconds': wall,
+         **{k: digest(f) if f.exists() else 'none' for k, f in files.items()}}
+    return s
+
+
 def replay_run(bench, r, path, engine, out, exclusive, asynchronous=False):
-    """One benchmark-replay run; returns its summary.json."""
+    """One benchmark-replay run, or a frond-68k one for a 68k recipe; returns its summary."""
+    if r.get('runner') == 'frond-68k':
+        return run_68k(r, path, out, exclusive)
     env = dict(os.environ, FROND_JIT='1' if engine == 'fast' else '0')
     env.pop('BENCH_JIT_ASYNC', None)
     if asynchronous:
         env['BENCH_JIT_ASYNC'] = '1'
     replay = r.get('replay', '-')
-    cmd = [str(bench), *(['--device', r['device']] if 'rom' in r else []), str(path),
+    cmd = [str(bench), *(['--device', r['device']] if 'rom' in r else []),
+           *(['--nand', str(images_path(r['nand']))] if 'nand' in r else []), str(path),
            replay if replay == '-' else str(FIXTURES / replay), str(r['ms']), str(r['mips']),
            r.get('sound', 'on'), str(out)]
     with Lock(exclusive):
@@ -310,8 +349,8 @@ def counts_main(args):
         if path is None:
             jobs.append((name, None, why))
             continue
-        keys[name] = digest(path)
-        jobs += [(name, engine, path) for engine in engines]
+        keys[name] = recipe_key(recipes[name], path)
+        jobs += [(name, engine, path) for engine in engines if engine in recipes[name].get('engines', engines)]
     with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
         runs = {(n, e): pool.submit(replay_run, BENCH, recipes[n], p, e, base / f'{n}-{e}', False)
                 for n, e, p in jobs if e}
@@ -326,12 +365,13 @@ def counts_main(args):
             lines.append(f'{label}: FAILED, {e}')
             failed.append(label)
             continue
-        got = {k: s[k] for k in COUNTS}
+        got = {k: s[k] for k in COUNTS if k in s}
         got['input'] = keys[name]
         report[label] = got
         want = r.get('results', {}).get(engine)
         jit = f", {got['jit_instructions']} in the JIT" if engine == 'fast' else ''
-        summary = f"{got['instructions']} instructions{jit}, frames {s['frame_sequence_hash']}, pcm {s['pcm_hash']}"
+        count = f"{got['instructions']} instructions" if 'instructions' in got else f"{got['cycles']} cycles"
+        summary = f"{count}{jit}, frames {s['frame_sequence_hash']}, pcm {s['pcm_hash']}"
         if args.update:
             r.setdefault('results', {})[engine] = got
             lines.append(f'{label}: baseline set, {summary}')
@@ -340,7 +380,7 @@ def counts_main(args):
         elif want.get('input') != got['input']:
             lines.append(f"{label}: skipped, input {got['input']} isn't the baseline's {want.get('input')}")
         else:
-            diffs = [k for k in COUNTS if got[k] != want.get(k)]
+            diffs = [k for k in COUNTS if got.get(k) != want.get(k)]
             if not diffs:
                 lines.append(f'{label}: same, {summary}')
             else:
@@ -355,7 +395,8 @@ def counts_main(args):
         lines.append(f'wrote {baseline_path}')
     print('\n'.join(lines), flush=True)
     timed = moved if not args.timing else [
-        (n, e, recipe_input(recipes[n])[0]) for n in names for e in engines if recipe_input(recipes[n])[0]]
+        (n, e, recipe_input(recipes[n])[0]) for n in names for e in engines
+        if recipe_input(recipes[n])[0] and e in recipes[n].get('engines', engines)]
     timing = {}
     if args.rounds and timed:
         print(f'wall-clock rounds ({args.rounds} each{", against " + str(against) if against else ""}):', flush=True)
