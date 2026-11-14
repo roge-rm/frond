@@ -88,6 +88,11 @@ void jitWriteProtectPage(FrondJit *jit, uint8_t *hostPage);
 // refused without trying it, with *fsr 0, for the interpreter.
 bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr);
 bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr);
+// A device page noted by an earlier callback: the access goes straight to its handler, with its
+// result in *ok. 1 if it did, 2 if it did and cpuJitPageGen no longer gives gen, 0 for anything
+// else, which takes cpuJitRead or cpuJitWrite.
+int cpuJitIoRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen);
+int cpuJitIoWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, bool *ok, uint64_t gen);
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
 // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
 // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the
