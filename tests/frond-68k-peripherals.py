@@ -30,6 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot  # noqa: E402
+import boot_fixture  # noqa: E402
 
 CHECKS = ['tones', 'backlight', 'contrast', 'sleep', 'beam', 'serial', 'usb', 'unix', 'card-flags', 'databases', 'ppp', 'modem', 'irphone',
           'modemsync']
@@ -879,20 +880,11 @@ RUN = {'tones': check_tones, 'backlight': check_backlight, 'contrast': check_con
 
 
 def launcher_session(device, rom, root):
-    """Boots rom through the device's setup recipe and saves the launcher as a session."""
+    """A copy of the device's boot-once launcher session (tests/boot_fixture.py) in root."""
     root.mkdir(parents=True, exist_ok=True)
-    session = root / 'launcher.frond'
-    core = palm_boot.Core(['--rom', rom, '--device', device], root / 'boot.txt')
-    try:
-        # The core may wait for a free emulator slot first.
-        end = time.monotonic() + 900
-        while time.monotonic() < end and not any(line.startswith('frond-68k:') for line in core.lines):
-            time.sleep(1)
-        palm_boot.setup_device(device, core, root)
-        core.send(f'save-session "{session}"', 'wrote session')
-    finally:
-        core.close()
-    return session
+    fixture = boot_fixture.launcher_fixture(device, rom)
+    fixture.copy_logs(root)
+    return fixture.copy_to(root / 'launcher.frond')
 
 
 def main():

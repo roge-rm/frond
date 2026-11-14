@@ -26,6 +26,7 @@ from palm_boot import CORE, CORE_68K, DEVICES_68K, PROFILES, ROM_DEVICES, Core, 
 from firmware_variants import firmware_variant
 ZIRE_NOR = palm_images() / 'Palm/Zire-72/Palm-Zire72-nor.bin'
 from guest_faults import check_diagnostics, describe, parse_contract, observed_faults
+from boot_fixture import launcher_fixture
 
 
 def core_for(device):
@@ -210,16 +211,21 @@ def suite(args):
             self.assertIn(args.device, result.stderr)
             self.check_phase('boot', self.root / 'boot.log')
 
+        @classmethod
+        def launcher_session(cls):
+            """root/launcher.session, copied from the boot-once launcher fixture with its setup log and frames."""
+            session = cls.root / 'launcher.session'
+            if not session.exists():
+                fixture = launcher_fixture(args.device, args.nor, args.nand,
+                                           getattr(args, 'engine', 'exact'), variant)
+                fixture.copy_logs(cls.root)
+                fixture.copy_to(session)
+            return session
+
         @unittest.skipUnless(args.launcher, 'pass --launcher for setup and session acceptance')
         def test_launcher_and_fresh_process_session(self):
-            session = self.root / 'launcher.session'
-            core = Core(self.image, self.root / 'setup.log')
-            try:
-                setup_device(args.device, core, self.root, variant=variant)
-                core.wait_frame(self.root / 'launcher.png', launcher_check(args.device, variant), 60)
-                core.send(f'save-session "{session}"', 'wrote session')
-            finally:
-                self.assertEqual(core.close(), 0)
+            # The fixture's setup ran to the launcher, saved the session and quit cleanly when it was built.
+            session = self.launcher_session()
             self.assertTrue(session_file(session).is_file())
             session_hash = sha(session)
             reloaded = Core(session_args(session), self.root / 'reload.log')
@@ -251,7 +257,7 @@ def suite(args):
             phase = 'reset-hard' if hard else 'reset-soft'
             root = self.root / phase
             root.mkdir()
-            session = self.root / 'launcher.session'
+            session = self.launcher_session()
             before_hash = sha(session)
             core = Core(session_args(session), root / 'guest.log')
             try:
@@ -272,13 +278,13 @@ def suite(args):
             # Damaged sessions loaded into a running frond-68k are refused and leave it running as it was.
             root = self.root / 'refusal'
             root.mkdir()
-            good = session_file(self.root / 'launcher.session').read_bytes()
+            good = session_file(self.launcher_session()).read_bytes()
             damaged = {'truncated': good[:-2], 'garbage': bytes(len(good)), 'empty': b''}
             # A session for another device: the same file with the name field changed.
             other = bytearray(good)
             other[8:40] = b'palm-tx'.ljust(32, b'\0')
             damaged['other-device'] = bytes(other)
-            core = Core(session_args(self.root / 'launcher.session'), root / 'guest.log')
+            core = Core(session_args(self.launcher_session()), root / 'guest.log')
             try:
                 core.wait_frame(root / 'before.png', launcher_check(args.device), 60)
                 for name, data in damaged.items():
@@ -306,7 +312,7 @@ def suite(args):
 
             def panel(rows):
                 return max(row[x] for row in rows for x in range(0, len(row), 4))  # Red of the unlit panel.
-            core = Core(session_args(self.root / 'launcher.session'), root / 'guest.log')
+            core = Core(session_args(self.launcher_session()), root / 'guest.log')
             try:
                 normal = panel(core.wait_frame(root / 'normal.png', launcher_check(args.device), 60))
                 core.send('display contrast=90', 'display:')
@@ -326,7 +332,7 @@ def suite(args):
                              (ROOT / 'build/test-device-session').is_file(),
                              'pass --launcher and build device-session-probe for running-state rollback')
         def test_running_session_rollback(self):
-            result = run_guest([str(ROOT / 'build/test-device-session'), str(session_file(self.root / 'launcher.session'))],
+            result = run_guest([str(ROOT / 'build/test-device-session'), str(session_file(self.launcher_session()))],
                                capture_output=True, text=True, timeout=args.boot_timeout)
             (self.root / 'rollback.log').write_text(result.stdout + result.stderr)
             if result.returncode == 77:
