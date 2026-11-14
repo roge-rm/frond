@@ -1,0 +1,22 @@
+# Which source paths each check covers, for `make recheck` (tools/check-record.py).
+# Columns: check name globs (space separated), a tab, then path patterns. A pattern ending in /
+# is a folder prefix, otherwise a glob on the whole path. A leading ! excludes. @name is a list
+# defined below. For each check the first rule that fits gives its paths. Rules marked * are
+# added to every check. A check no rule fits reruns every time.
+# Keep it broad: a needless rerun costs time, a missed one hides a break. Any change under
+# tests/, tools/ or vendor/ reruns everything, since test helpers, fixtures and Dynarmic are
+# shared in ways the Makefile doesn't show. `tools/check-record.py audit` lists what the
+# Makefile and #include say a check needs that this map misses; keep it at 0.
+
+# The PXA and paravirtual files only the PXA devices run. pxa_IC, pxa_GPIO, pxa_I2C, pxa_I2S and
+# pxa270_WMMX stay out of the list: the iMX1 code includes some of them.
+@pxa-only	core/src/uarm/uarm/pxa_[!GI]* core/src/uarm/uarm/pxa255_* core/src/uarm/uarm/pxa270_[!W]* core/src/uarm/uarm/pxa27x_* core/src/uarm/uarm/pv_* core/src/uarm/uarm/soc_pv*
+# The iMX1 files only the Zodiac runs.
+@imx1-only	core/src/uarm/uarm/imx1_* core/src/uarm/uarm/zodiac_* core/src/uarm/uarm/ymfm/
+
+*	Makefile core/src/Makefile.common core/src/common/ core/src/uarm/Makefile core/src/cloudpilot/Makefile tests/ tools/ vendor/
+
+test-zodiac-* test-imx1-*	core/src/uarm/ !@pxa-only zodiac-rom/
+test-68k-* test-frond-68k* test-dana-* test-memory-stick-* test-ms-*	core/src/cloudpilot/ core/src/argparse/ core/src/uarm/ !@imx1-only desktop/ link/ print/ zodiac-rom/
+test-pxa-* test-pxa2* test-tg50-* test-tx-* test-e2-* test-z72-* test-iwmmxt-* test-xscale-* test-frond-arm-*	core/src/uarm/ !@imx1-only
+test-*	core/ vendor/ desktop/ link/ print/ tools/ zodiac-rom/ packaging/

@@ -835,6 +835,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_DESKTOP`, `FROND_IR_PROBE` | `frond-desktop` and the IR probe PRC for `tests/link-irda-cores.py`. Defaults `out/frond-desktop` and a probe built with pilrc and the SDK. |
 | `FROND_ARM_SESSIONS` | Folder of ARM machine folders, one per device name, for `tests/frond-arm-install.py`, `tests/host-call-wake.py`, `tests/patched-traps.py`, `tests/card-swap-rom.py`, `tests/card-reinsert-rom.py` and `tests/link-irda-cores.py` (palm-tx only). Default `build/smoke/machines`. |
 | `FROND_REQUIRE_SESSIONS` | `1` makes those two tests fail instead of skipping when a session or the probes are missing. |
+| `FROND_NO_RECORD` | `1` stops `make test-NAME` writing its result to `build/check-passes.tsv`. |
 | `FROND_REQUIRE_E3` | `1` makes `tests/smoke.py` and `tests/frond-arm-install.py` fail instead of skipping the Tungsten E3 when its firmware or session is missing. |
 | `FROND_REQUIRE_E2_DENVFS` | The same for the E2 de-NVFS image (`palm-e2-denvfs`), whose NOR comes from `FROND_TEST_E2_DENVFS_NOR`. |
 | `FROND_IIIX_ROM`, `FROND_IIIX_CORE` | IIIx ROM and `frond-68k` binary for the opt-in IIIx run in the desktop workflow test (`iiixRealRom`). |
@@ -916,6 +917,8 @@ All in `tools/`. Most take `--help`.
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form. Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap. Optional `--cs4-port0-input=BYTE` enables the private CS4 diagnostic recorder, requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private W4200 reset echo with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See Zodiac bring-up and input scenarios. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
+| `check-record.py` | Records each `make test-NAME` result in `build/check-passes.tsv` and picks the checks to rerun from `tests/check-paths.tsv` (`make recheck-list` and `make recheck`, see [testing.md](testing.md)). The targets are `recheck` and `recheck-list`. |
+| `commit-build.sh` | Builds `frond`, `frond-68k` and `benchmark-replay` once per clean commit into `build/out-<hash>/` of the main checkout, copies that folder to tinydeck once, lists and prunes old folders (see [testing.md](testing.md)). |
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`), and guest counts against `tools/speed-baseline.json` (`make count-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
@@ -1075,7 +1078,7 @@ Tests in `make test`, by area:
 | Link protocol | `test-link-protocol` |
 | Bluetooth | `test-bluetooth`, `test-bluetooth-link`, `test-bluetooth-results`, `test-csr-bcsp`, `test-csr-controller-lifecycle`, `test-csr-peer-services` |
 | Network | `test-network`, `test-network-reliability`, `test-host-network`, `test-wifi`, `test-modem`, `test-ir-peer`, `test-ir-printer` |
-| Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link` |
+| Debugger and tools | `test-gdbstub`, `test-pace-debug`, `test-pace-step`, `test-debugger-inspect`, `test-developer-run`, `test-compatibility`, `test-gameplay-metrics`, `test-build-tools`, `test-render-link`, `test-audio-metrics`, `test-audio-timing`, `test-tx-baseline`, `test-menu-response`, `test-wm9712-irq`, `test-pxa-ac97-irq`, `test-pace-patch` |
 
 Not in `make test`. The first group builds a program and runs it with a private session, the rest are firmware-free and can be run by name:
 
