@@ -547,32 +547,60 @@ void sideBySide() {
     std::puts("PASS: copies, stretch runs and the stretch blit side by side on one surface, shared stretch pixels refused");
 }
 // A plain copy onto itself gives what reading the whole source first would, moving any way (the Network panel
-// moves 122 screen rows 18 down). Unequal pitches stop.
+// moves 122 screen rows 18 down), with or without a scissor and on both write paths. Unequal pitches, keyed
+// copies and moves along a row that leave the surface's rows stop.
 void overlapMoves() {
     auto pixel = [](unsigned x, unsigned y) { return destination + (y * 13 + x) * 2; };
-    struct Move { unsigned sx, sy, dx, dy, w, h; };
-    for (const Move m : {Move{2,1,2,2,4,5}, Move{2,3,2,1,4,5}, Move{1,1,2,1,5,3}, Move{4,2,1,2,6,3},
-                         Move{3,0,3,1,2,7}, Move{0,0,5,0,8,4}, Move{1,1,2,2,3,3}, Move{3,3,1,2,4,4},
-                         Move{1,3,3,1,4,3}, Move{4,1,2,3,5,4}, Move{0,0,1,6,9,2}}) {
-        Fixture f; planes(f);
-        uint32_t model[13*8];
-        for (unsigned i = 0; i < 13*8; ++i) { model[i] = 0x100 + i; f.write(destination+i*2,model[i]); }
-        uint32_t copied[13*8];
-        std::copy(model, model+13*8, copied);
-        for (unsigned y = 0; y < m.h; ++y)
-            for (unsigned x = 0; x < m.w; ++x) copied[(m.dy+y)*13+m.dx+x] = model[(m.sy+y)*13+m.sx+x];
-        auto p = packet(); p[13] = destination; p[15] = 13;
-        p[21] = m.sx << 16 | m.sy; p[22] = m.dx << 16 | m.dy; p[23] = m.w << 16 | m.h;
-        assert(f.append(p) == A::ok); f.finish();
-        for (unsigned y = 0; y < 8; ++y)
-            for (unsigned x = 0; x < 13; ++x) assert(f.read(pixel(x,y)) == copied[y*13+x]);
+    // Scissor l, t to r, b (exclusive); 0, 0 to 13, 20 is the whole surface.
+    struct Move { unsigned sx, sy, dx, dy, w, h, l = 0, t = 0, r = 13, b = 20; };
+    for (const bool direct : {true, false}) {
+        Imx1GraphicsCommands::directFills = direct;
+        for (const Move m : {Move{2,1,2,2,4,5}, Move{2,3,2,1,4,5}, Move{1,1,2,1,5,3}, Move{4,2,1,2,6,3},
+                             Move{3,0,3,1,2,7}, Move{0,0,5,0,8,4}, Move{1,1,2,2,3,3}, Move{3,3,1,2,4,4},
+                             Move{1,3,3,1,4,3}, Move{4,1,2,3,5,4}, Move{0,0,1,6,9,2},
+                             // 3 rows down, height 5, cut to its first 2 rows: the clipped rectangles share nothing.
+                             Move{1,0,1,3,4,5,0,0,13,5},
+                             // 1 row down cut to 3 rows, and 2 columns right cut on both sides.
+                             Move{1,0,1,1,4,5,0,2,13,5}, Move{0,1,2,1,8,3,3,0,9,20},
+                             // Diagonal with the scissor's top left inside the copy.
+                             Move{1,1,2,2,5,4,3,3,13,20}}) {
+            Fixture f; planes(f);
+            uint32_t model[13*8];
+            for (unsigned i = 0; i < 13*8; ++i) { model[i] = 0x100 + i; f.write(destination+i*2,model[i]); }
+            uint32_t copied[13*8];
+            std::copy(model, model+13*8, copied);
+            for (unsigned y = 0; y < m.h; ++y)
+                for (unsigned x = 0; x < m.w; ++x) {
+                    const unsigned tx = m.dx + x, ty = m.dy + y;
+                    if (tx >= m.l && tx < m.r && ty >= m.t && ty < m.b) copied[ty*13+tx] = model[(m.sy+y)*13+m.sx+x];
+                }
+            auto p = packet(); p[13] = destination; p[15] = 13; p[17] = m.t << 16 | m.l; p[19] = m.b << 16 | m.r;
+            p[21] = m.sx << 16 | m.sy; p[22] = m.dx << 16 | m.dy; p[23] = m.w << 16 | m.h;
+            assert(f.append(p) == A::ok); f.finish();
+            for (unsigned y = 0; y < 8; ++y)
+                for (unsigned x = 0; x < 13; ++x) assert(f.read(pixel(x,y)) == copied[y*13+x]);
+        }
     }
+    Imx1GraphicsCommands::directFills = true;
     Fixture f; planes(f);
     // The same rows read with another pitch.
     auto p = packet(); p[13] = destination; p[15] = 12;
     p[21] = 0x00010001; p[22] = 0x00010002; p[23] = 0x00030003;
     assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
-    std::puts("PASS: plain copies moved onto themselves any way, other pitches refused");
+    // A source 1 pixel into the surface, read from its columns 11..13: the last one is on the next row.
+    p = packet(); p[13] = destination + 2; p[15] = 13;
+    p[21] = 0x000a0000; p[22] = 0x00090000; p[23] = 0x00030001;
+    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
+    // A keyed copy one row down onto itself.
+    const std::vector<uint32_t> keyed{0x4b2,0x00cc0a00,0x41b,0x4598b4df,0x401,destination,0x402,13,0x46b,destination,
+        0x46c,13,0x46f,0,0x470,0x0014000d,0xc0051c00,0x01000005,0xf800,0,0x00010001,0x00010002,0x00030003};
+    assert(f.append(keyed,0x200aa504) == A::sideEffect && refused(f,"copy-overlap",0));
+    // An odd move can only come from an odd source offset, which never draws.
+    p = packet(); p[13] = destination + 1; p[15] = 13;
+    p[21] = 0x00010001; p[22] = 0x00010002; p[23] = 0x00030003;
+    assert(f.append(p) == A::sequence);
+    std::puts("PASS: plain copies moved onto themselves any way, clipped or not, on both paths; other pitches, keyed "
+              "copies and moves out of the surface's rows refused");
 }
 // The vertical wait reads the scan status with any batch in the ring.
 void scanStatus() {

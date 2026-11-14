@@ -278,7 +278,9 @@ class Imx1GraphicsCommands {
                     // side by side on one surface share no byte and are drawn.
                     const Area from{address, uint64_t(pitch) * 2, uint64_t(width) * 2, height};
                     const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
-                    if (from.overlaps(to)) {
+                    // A plain copy reads only the source pixels under the clipped destination.
+                    const Area read = stretch ? from : Area{fill.sourceBase, fill.sourcePitch, uint64_t(fill.width) * 2, fill.height};
+                    if (read.overlaps(to)) {
                         // ASSUMPTION "overlapping copy": a single plain copy onto itself on one surface gives what
                         // reading the whole source first would (memmove), in any direction. The ROM's copy helper
                         // sends DP_CNTL 3f (top to bottom, left to right) whichever way it moves, and the Network
@@ -643,7 +645,11 @@ class Imx1GraphicsCommands {
         }
         const bool rows = rowMove != 0;
         const int64_t step = std::abs(rows ? rowMove : columnMove);
-        if (!step || (rows ? step >= height : step >= width)) return false;
+        if (!step) return false;
+        if (rows ? step >= height : step >= width) {
+            out.push_back(fill);
+            return true;
+        }
         const int64_t length = rows ? height : width;
         for (int64_t i = 0; i < length; i += step) {
             const int64_t size = std::min(step, length - i);
