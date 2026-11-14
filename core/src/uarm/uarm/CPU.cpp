@@ -5281,6 +5281,10 @@ static inline uint64_t cpuPrvJitPageGen(const ArmCpu *cpu) {
     return (uint64_t(t.epoch) << 32) | uint32_t(t.gen + t.gains);
 }
 
+// The io tables are keyed by the raw va, so they assume no FCSE PID remap.
+#ifndef NO_SUPPORT_FCSE
+#error "cpuPrvJitIo keys on the raw va; add the FCSE PID before the lookup"
+#endif
 template <bool write>
 static FORCE_INLINE int cpuPrvJitIo(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen) {
     if ((va & (size - 1)) || cpu->nativeCallDepth || cpu->model == ArmCpuModel::arm920t) return 0;
