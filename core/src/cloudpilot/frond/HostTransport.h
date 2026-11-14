@@ -17,6 +17,11 @@
 class BaudCredit68k {
    public:
     void Restart() { mark = gSession->GetSystemCycles(); }
+    // No credit left over, counting again from now.
+    void Reset() {
+        credit = 0;
+        Restart();
+    }
     long Take(long baud) {
         const uint64_t now = gSession->GetSystemCycles();
         const double perByte = gSession->GetClocksPerSecond() * 10.0 / std::max<long>(baud, 300);
@@ -48,7 +53,8 @@ class HostTransport68k : public EmTransportSerial {
     bool Open() override {
         open = true;
         link.DropReceived();
-        credit.Restart();
+        credit.Reset();
+        waiting = false;
         idleUntil = 0;
         return true;
     }
@@ -70,7 +76,7 @@ class HostTransport68k : public EmTransportSerial {
         if (open && count > 0) link.Send(static_cast<const uint8_t*>(data), size_t(count));
         return true;
     }
-    bool CanRead() override { return open && link.Available() && Allowed() > 0; }
+    bool CanRead() override { return open && Allowed() > 0; }
     bool CanWrite() override { return open; }
     size_t BytesPending() override { return open ? std::min<size_t>(link.Available(), size_t(Allowed())) : 0; }
 
@@ -91,10 +97,23 @@ class HostTransport68k : public EmTransportSerial {
     void Service(bool lineDriverOn) {
         if (lineDriverOn != open) lineDriverOn ? Open() : Close();
         if (!open) link.DropReceived();
+        TrackArrival();
     }
 
    private:
-    long Credit() { return credit.Take(config.fBaud); }
+    // The host link has no arrival times, so bytes count as arriving when they're first seen
+    // waiting, and credit only builds while some are. A frame sent after a quiet spell then comes
+    // in at the line's rate instead of all at once. Palm OS 3.1's IR framer re-arms its receive
+    // wakeup after its own frame is sent, so a reply that's all in before then is never read.
+    void TrackArrival() {
+        const bool any = link.Available() > 0;
+        if (any && !waiting) credit.Reset();
+        waiting = any;
+    }
+    long Credit() {
+        TrackArrival();
+        return waiting ? credit.Take(config.fBaud) : 0;
+    }
     // Credit, held at zero during a frame gap and stopping after the frame's EOF.
     long Allowed() {
         const long c = Credit();
@@ -114,6 +133,7 @@ class HostTransport68k : public EmTransportSerial {
     static constexpr uint8_t kIrdaEof = 0xc1;
     bool frameGap{false};
     uint64_t idleUntil{0};
+    bool waiting{false};
 
     HostLink68k& link;
     bool open{false};
