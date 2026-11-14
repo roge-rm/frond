@@ -296,6 +296,16 @@ void keyedModes() {
     // Control 4 with ROP cc copies the pixels that match the key.
     assert(f.append(keyed,0x200aa504) == A::ok); f.finish();
     for (unsigned x = 0; x < 9; ++x) assert(f.read(screen+(296*480+40+x)*2) == (bitmapBit(x,0) ? 0xa55au : 0xffffu));
+    // 4b1 with source type 0, as the stretch restore leaves it (Date Book's Delete Event dialog), copies the same.
+    // Other source types stop.
+    for (uint32_t datatype : {0x40000d04u,0x40010d04u}) {
+        Fixture g; stretchPlanes(g);
+        auto typed = keyed; typed.insert(typed.begin(),{0x4b1,datatype});
+        if (datatype == 0x40000d04) {
+            assert(g.append(typed,0x200aa504) == A::ok); g.finish();
+            for (unsigned x = 0; x < 9; ++x) assert(g.read(screen+(296*480+40+x)*2) == (bitmapBit(x,0) ? 0xa55au : 0xffffu));
+        } else assert(g.append(typed,0x200aa504) == A::sideEffect);
+    }
     // Other compare words and other ROPs stop by name.
     for (uint32_t control : {0x01000001u,0x01000000u,0x02000405u,0x01000105u}) {
         keyed[17] = control;
@@ -532,6 +542,36 @@ void sideBySide() {
     blit = dateBookStretch(); blit[19] = blit[28] = screen+(296*480+10)*2; blit[21] = blit[27] = 480;
     assert(f.append(blit,0x200b0b14) == A::sideEffect && refused(f,"stretch-overlap",0x00020128));
     std::puts("PASS: copies, stretch runs and the stretch blit side by side on one surface, shared pixels refused");
+}
+// A plain copy onto itself that moves straight up, down, left or right gives what reading the whole source
+// first would (the Network panel moves 122 screen rows 18 down). Diagonal moves and unequal pitches stop.
+void overlapMoves() {
+    auto pixel = [](unsigned x, unsigned y) { return destination + (y * 13 + x) * 2; };
+    struct Move { unsigned sx, sy, dx, dy, w, h; };
+    for (const Move m : {Move{2,1,2,2,4,5}, Move{2,3,2,1,4,5}, Move{1,1,2,1,5,3}, Move{4,2,1,2,6,3},
+                         Move{3,0,3,1,2,7}, Move{0,0,5,0,8,4}}) {
+        Fixture f; planes(f);
+        uint32_t model[13*8];
+        for (unsigned i = 0; i < 13*8; ++i) { model[i] = 0x100 + i; f.write(destination+i*2,model[i]); }
+        uint32_t copied[13*8];
+        std::copy(model, model+13*8, copied);
+        for (unsigned y = 0; y < m.h; ++y)
+            for (unsigned x = 0; x < m.w; ++x) copied[(m.dy+y)*13+m.dx+x] = model[(m.sy+y)*13+m.sx+x];
+        auto p = packet(); p[13] = destination; p[15] = 13;
+        p[21] = m.sx << 16 | m.sy; p[22] = m.dx << 16 | m.dy; p[23] = m.w << 16 | m.h;
+        assert(f.append(p) == A::ok); f.finish();
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) assert(f.read(pixel(x,y)) == copied[y*13+x]);
+    }
+    Fixture f; planes(f);
+    auto p = packet(); p[13] = destination; p[15] = 13;
+    p[21] = 0x00010001; p[22] = 0x00020002; p[23] = 0x00030003;
+    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
+    // The same rows read with another pitch.
+    p = packet(); p[13] = destination; p[15] = 12;
+    p[21] = 0x00010001; p[22] = 0x00010002; p[23] = 0x00030003;
+    assert(f.append(p) == A::sideEffect && refused(f,"copy-overlap",0));
+    std::puts("PASS: plain copies moved straight onto themselves, diagonal moves and other pitches refused");
 }
 // The vertical wait reads the scan status with any batch in the ring.
 void scanStatus() {
@@ -1127,7 +1167,7 @@ void transformSaved() {
 }
 int main() {
     hostSourceType();
-    geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); scanStatus(); executionAndReset(); privateCapture();
+    geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
     stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
