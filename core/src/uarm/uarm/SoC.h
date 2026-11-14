@@ -128,6 +128,9 @@ class SoC {
     virtual void DumpMMU() = 0;
 
     struct ArmCpu *GetCpu() { return cpu; }
+    // Cycles the CPU ran in the run calls, sleep left out: one per guest instruction on the ARM
+    // cores. A counter for tools like benchmark-replay, not saved.
+    uint64_t GetRunInstructions() const { return runInstructions; }
     struct SyscallDispatch *GetSyscallDispatch() { return syscallDispatch; };
     uint32_t GetRamSize() { return ramSize; };
     struct NAND *GetNand() { return nand; };
@@ -230,6 +233,7 @@ class SoC {
     struct AudioQueue *audioQueue;
 
     bool sleeping{false};
+    uint64_t runInstructions{0};
     bool powerOnReset{false};
     bool framebufferDirty{true};
     bool pcmEnabled{false};

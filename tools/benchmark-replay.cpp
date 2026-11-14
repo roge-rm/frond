@@ -301,6 +301,10 @@ int main(int argc, char** argv) {
         }
         m.memory={}; m.savestate={};
         clockStart=soc->GetTime(); clockSoc=soc.get();
+        // Guest instructions run and those run in the JIT (Fast only), counted from here.
+        const uint64_t instructionsStart=soc->GetRunInstructions();
+        uint64_t jitBlocks=0, jitStart=0;
+        const bool fast=cpuJitExecutionCounts(soc->GetCpu(),&jitBlocks,&jitStart);
         auto queue=audioQueueCreate(8192);
         soc->SetAudioQueue(queue); soc->SetPcmOutputEnabled(sound); soc->SetPcmSuspended(false);
         std::ofstream frames(output/"frames.csv"), inputs(output/"inputs.csv");
@@ -387,11 +391,15 @@ int main(int argc, char** argv) {
         frames.flush(); inputs.flush();
         if (!frames || !inputs) throw std::runtime_error("trace write failed");
         const uint64_t guestNs=soc->GetTime()-clockStart;
+        const uint64_t instructions=soc->GetRunInstructions()-instructionsStart;
+        uint64_t jitInstructions=0;
+        if (fast && cpuJitExecutionCounts(soc->GetCpu(),&jitBlocks,&jitInstructions)) jitInstructions-=jitStart;
         const double hostMips=cycles/wall/1e6;
         std::ofstream result(output/"summary.json");
         result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":" << (coldBoot?"true":"false")
-               << ",\"jit_async\":" << (jitAsync?"true":"false") << ",\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
+               << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":" << (jitAsync?"true":"false") << ",\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
                << ",\"palm_epoch\":" << epoch << ",\"guest_ns\":" << guestNs << ",\"cycles\":" << cycles
+               << ",\"instructions\":" << instructions << ",\"jit_instructions\":" << jitInstructions
                << ",\"wall_seconds\":" << wall << ",\"cpu_seconds\":" << cpu
                << ",\"cpu_user_seconds\":" << user << ",\"cpu_system_seconds\":" << system << ",\"host_mips\":" << hostMips
                << ",\"lcd_frames\":" << frameCount << ",\"changed_frames\":" << changed
@@ -399,9 +407,9 @@ int main(int argc, char** argv) {
                << ",\"frame_sequence_hash\":\"" << std::hex << frameSequence << "\",\"pcm_hash\":\"" << pcmHash << "\"}\n";
         result.flush(); if (!result) throw std::runtime_error("summary write failed");
         std::printf("%s %s: guest %.3f s, %llu cycles, wall %.3f s, host CPU %.3f s (user %.3f, sys %.3f), %.1f MIPS, "
-                    "%llu frames, frame hash %llx, %llu PCM frames, PCM hash %llx\n",
+                    "%llu instructions (%llu in the JIT), %llu frames, frame hash %llx, %llu PCM frames, PCM hash %llx\n",
                     deviceName5(device),coldBoot?"cold boot":"session",guestNs/1e9,(unsigned long long)cycles,wall,cpu,user,system,
-                    hostMips,(unsigned long long)frameCount,(unsigned long long)frameSequence,
+                    hostMips,(unsigned long long)instructions,(unsigned long long)jitInstructions,(unsigned long long)frameCount,(unsigned long long)frameSequence,
                     (unsigned long long)pcmFrames,(unsigned long long)pcmHash);
         std::fflush(stdout);
         // Pauses on the guest thread: the longest work requests, the most host time in any 20
