@@ -14,6 +14,7 @@ struct GamepadState {
     bool a{false}, b{false}, x{false}, y{false};
     bool leftShoulder{false}, rightShoulder{false}, leftStick{false};
     bool back{false}, start{false}, guide{false};
+    int dpadX{0}, dpadY{0}; // -1, 0 or 1; the last direction pressed on an axis wins
 };
 
 // What a controller holds on the device: keys and the analogue stick.
@@ -28,7 +29,8 @@ constexpr float gamepadStickRest = 0.12f;
 
 // The Zodiac from a controller. The left stick is the analogue stick over its whole range and its
 // click the stick's press. A, B, X and Y are the Action keys by place (bottom, right, left, top), the
-// shoulders are the triggers, Start and Guide are Home and Back is Function.
+// shoulders are the triggers, Start and Guide are Home and Back is Function. The d-pad pushes the stick
+// to full travel on its axis and wins over the left stick there.
 inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
     GamepadInput input;
     auto hold = [&](bool down, KeyId key) { if (down) input.keys |= deviceKeyBit(key); };
@@ -43,10 +45,15 @@ inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
     hold(pad.back, keyIdFunction);
     const float x = std::max(pad.leftX / 32767.0f, -1.0f), y = std::max(pad.leftY / 32767.0f, -1.0f);
     const float length = std::hypot(x, y);
+    float sx = 0, sy = 0;
     if (length > gamepadStickRest) {
         const float scale = (length - gamepadStickRest) / (1 - gamepadStickRest) / length;
-        input.stick = {std::clamp(x * scale, -1.0f, 1.0f), std::clamp(y * scale, -1.0f, 1.0f), true};
+        sx = std::clamp(x * scale, -1.0f, 1.0f);
+        sy = std::clamp(y * scale, -1.0f, 1.0f);
     }
+    if (pad.dpadX) sx = float(pad.dpadX);
+    if (pad.dpadY) sy = float(pad.dpadY);
+    if (sx != 0 || sy != 0) input.stick = {sx, sy, true};
     return input;
 }
 

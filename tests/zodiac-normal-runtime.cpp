@@ -105,12 +105,12 @@ struct FakePort : ZodiacInputPort {
     bool setStick(int x, int y) override { if (refuse) return false; stickX = x; stickY = y; return true; }
 };
 
-// Each shared key id reaches its own pin, and a key the Zodiac doesn't have reaches none.
+// Each shared key id reaches its own pin (Action top D10, right D9, bottom D8, left D14), and a key the Zodiac doesn't have reaches none.
 void keyPins() {
     struct { KeyId key; uint8_t port, pin; } const expected[] = {
         {keyIdHome, 0, 7}, {keyIdTriggerLeft, 0, 8}, {keyIdTriggerRight, 0, 9}, {keyIdPower, 0, 10}, {keyIdStickPress, 3, 7},
-        {keyIdHard2, 3, 8}, {keyIdHard4, 3, 9}, {keyIdHard3, 3, 10}, {keyIdFunction, 3, 12}, {keyIdBluetooth, 3, 13},
-        {keyIdHard1, 3, 14}};
+        {keyIdHard2, 3, 9}, {keyIdHard4, 3, 10}, {keyIdHard3, 3, 14}, {keyIdFunction, 3, 12}, {keyIdBluetooth, 3, 13},
+        {keyIdHard1, 3, 8}};
     unsigned mapped = 0;
     for (unsigned key = 0; key < keyIdCount; ++key) {
         const int control = zodiacControlFor(KeyId(key));

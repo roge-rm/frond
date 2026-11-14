@@ -91,10 +91,10 @@ void named(bool fast) {
     static const struct {Imx1ZodiacControl control;unsigned port;uint32_t bit;const char* name;} expected[]={
         {Imx1ZodiacControl::home,0,1u<<7,"home"},{Imx1ZodiacControl::triggerLeft,0,1u<<8,"trigger-left"},
         {Imx1ZodiacControl::triggerRight,0,1u<<9,"trigger-right"},{Imx1ZodiacControl::power,0,1u<<10,"power"},
-        {Imx1ZodiacControl::stickClick,3,1u<<7,"stick-click"},{Imx1ZodiacControl::actionRight,3,1u<<8,"action-right"},
-        {Imx1ZodiacControl::actionUp,3,1u<<9,"action-up"},{Imx1ZodiacControl::actionLeft,3,1u<<10,"action-left"},
+        {Imx1ZodiacControl::stickClick,3,1u<<7,"stick-click"},{Imx1ZodiacControl::actionRight,3,1u<<9,"action-right"},
+        {Imx1ZodiacControl::actionUp,3,1u<<10,"action-up"},{Imx1ZodiacControl::actionLeft,3,1u<<14,"action-left"},
         {Imx1ZodiacControl::function,3,1u<<12,"function"},{Imx1ZodiacControl::bluetooth,3,1u<<13,"bluetooth"},
-        {Imx1ZodiacControl::actionDown,3,1u<<14,"action-down"}};
+        {Imx1ZodiacControl::actionDown,3,1u<<8,"action-down"}};
     assert(sizeof expected/sizeof *expected==size_t(Imx1ZodiacControl::count));
     for(const auto& e:expected) {
         const auto& pin=imx1ZodiacControlPins[unsigned(e.control)];

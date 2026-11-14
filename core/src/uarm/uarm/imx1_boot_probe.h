@@ -299,7 +299,8 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
                                                  bool commit = true);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
-// buttons. ASSUMPTION "Zodiac button sides": which trigger is left and where each action button sits.
+// buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
+// and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
 // ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
 // Not wired: D22 (cradle or HotSync, active high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
@@ -309,8 +310,8 @@ enum class Imx1ZodiacControl {
 struct Imx1ZodiacControlPin { const char* name; uint8_t port, pin; }; // port 0 is A, 3 is D
 inline constexpr Imx1ZodiacControlPin imx1ZodiacControlPins[] = {
     {"home", 0, 7}, {"trigger-left", 0, 8}, {"trigger-right", 0, 9}, {"power", 0, 10}, {"stick-click", 3, 7},
-    {"action-right", 3, 8}, {"action-up", 3, 9}, {"action-left", 3, 10}, {"function", 3, 12}, {"bluetooth", 3, 13},
-    {"action-down", 3, 14}};
+    {"action-right", 3, 9}, {"action-up", 3, 10}, {"action-left", 3, 14}, {"function", 3, 12}, {"bluetooth", 3, 13},
+    {"action-down", 3, 8}};
 static_assert(sizeof imx1ZodiacControlPins / sizeof *imx1ZodiacControlPins == size_t(Imx1ZodiacControl::count));
 Imx1BootstrapAccess imx1MachineSetZodiacControl(Imx1Machine*, Imx1ZodiacControl, bool pressed, bool commit = true);
 // Stick offsets from rest, right and down positive, -511..511. This is a fixed virtual stick: rest is raw
