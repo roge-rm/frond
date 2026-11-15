@@ -149,6 +149,7 @@ struct Machine {
     Pxa270wmmx* wmmx = nullptr;
     ArmMem* mem = nullptr;
     Device* device = nullptr;
+    PatchDispatch* patches = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -171,6 +172,7 @@ Machine makeMachine(bool fast) {
     m.cpu = cpuInit(kSetup, mem, ARM_MEMORY_SYSTEM_MMU, true, false, -1, 0x69054114, 0x0b16a16a, pd, &pace,
                     createSystemState());
     patchDispatchSetCpu(pd, m.cpu);
+    m.patches = pd;
     m.wmmx = pxa270wmmxInit(m.cpu);
     m.device = new Device;
     m.device->cpu = m.cpu;
@@ -2154,6 +2156,14 @@ bool directed(Engines& e) {
         {"msr cpsr_fc in place with the flags",
          {0xe129f000, 0x03a01007, 0x13a01009, 0xe10f3000, 0xe321f0d3}, false, SVC, {{0, 0x60000013}},
          {{Expect::REG, 1, 7}, {Expect::REG, 3, 0x60000013, 0xf80000ff}, {Expect::CPSR, 0, 0x600000d3, 0xf00000ff}}},
+        // The syscall dispatch pair LDR R12, [R9, #-table] then LDR PC, [R12, #offset]. The table is the
+        // word at kCode + 12 (kCode), and its entry at kCode + 0x20 is the B . at kCode + 8.
+        {"syscall pair, table 16",
+         {0xe519c010, 0xe59cf020, kSpinArm, kCode, 0xe1a00000, 0xe1a00000, 0xe1a00000, 0xe1a00000, kCode + 8},
+         false, SVC, {{9, kCode + 0x1c}}, {{Expect::REG, 12, kCode}}},
+        {"syscall pair, table 4",
+         {0xe519c004, 0xe59cf020, kSpinArm, kCode, 0xe1a00000, 0xe1a00000, 0xe1a00000, 0xe1a00000, kCode + 8},
+         false, SVC, {{9, kCode + 0x10}}, {{Expect::REG, 12, kCode}}},
         {"conditional msr cpsr_c, in place and with an irq waiting",
          {0xe3500000, 0x0321f013, 0x1321f093, 0xe10f3000, 0xe321f0d3, 0xe5840900, 0x0321f093, 0x1321f013,
           0xe2811001, 0xe5840904, 0xe321f013, 0xe2811001},
@@ -2177,6 +2187,44 @@ bool directed(Engines& e) {
             break;
         }
     }
+    return ok;
+}
+
+// The syscall dispatch pair goes to the JIT unless the patch dispatch could take it to a patch:
+// tables other than 4, 8 and 12 and unaligned offsets never can, table 12 offset 0x55c can
+// once it's patched. A machine of its own, as the patch stays.
+bool syscallPlain() {
+    Machine m = makeMachine(true);
+    struct Want {
+        const char* name;
+        uint32_t load, jump;
+        bool plain;
+    };
+    auto check = [&](const Want& w) {
+        memcpy(m.ram + kCode, &w.load, 4);
+        memcpy(m.ram + kCode + 4, &w.jump, 4);
+        const bool load = cpuJitPlain(m.cpu, kCode, w.load, false), jump = cpuJitPlain(m.cpu, kCode + 4, w.jump, false);
+        if (load == w.plain && jump == w.plain) return true;
+        printf("FAIL syscall pair %s: load %s, jump %s, want %s\n", w.name, load ? "plain" : "interpreted",
+               jump ? "plain" : "interpreted", w.plain ? "plain" : "interpreted");
+        return false;
+    };
+    const Want before[] = {
+        {"table 16", 0xe519c010, 0xe59cf0a8, true},
+        {"table 4", 0xe519c004, 0xe59cf320, true},
+        {"table 12 offset 0x55c, no patch", 0xe519c00c, 0xe59cf55c, true},
+        {"table 14", 0xe519c00e, 0xe59cf020, true},
+        {"table 0", 0xe519c000, 0xe59cf020, true},
+    };
+    const Want after[] = {
+        {"table 12 offset 0x55c, patched", 0xe519c00c, 0xe59cf55c, false},
+        {"table 12 offset 0x55e", 0xe519c00c, 0xe59cf55e, true},
+        {"table 16 offset 0x55c", 0xe519c010, 0xe59cf55c, true},
+    };
+    bool ok = true;
+    for (const Want& w : before) ok = check(w) && ok;
+    patchDispatchAddPatch(m.patches, 0xc55c, nullptr, [](void*, uint32_t, const uint32_t*, uint32_t*) {}, nullptr);
+    for (const Want& w : after) ok = check(w) && ok;
     return ok;
 }
 
@@ -3059,6 +3107,7 @@ int main(int argc, char** argv) {
         ok = directed(e) && ok;
         ok = privilegeSwitch(e) && ok;
         ok = inPlaceMsr(e) && ok;
+        ok = syscallPlain() && ok;
         ok = fallbackTicks(e) && ok;
         ok = idleSkip(e) && ok;
         ok = idleClock(e) && ok;
