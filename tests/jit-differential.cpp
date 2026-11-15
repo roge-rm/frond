@@ -44,6 +44,7 @@
 #include "memory_buffer.h"
 #include "patch_dispatch.h"
 #include "jit_dynarmic.h"
+#include "idle_loops.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -2255,6 +2256,119 @@ bool fallbackTicks(Engines& e) {
     return ok;
 }
 
+// The kernel wait loops (idle_loops.h), placed near kCode + 0x1000 with their IRQ window, and
+// the Zire 72 and T|X register roles: globals at 0x22000 (pointer at 0x23000), the counter at
+// 0x23010, OSCR a RAM word at 0x23110, the window's ICCR a RAM word at 0x23200, SP 0x26000.
+// Exact steps the loop for whole passes; Fast with the skip and Fast without it must land in
+// the same state (OSCR stands still here, as it does in a Fast run). With an IRQ waiting all
+// three take it in the window; at the 50 ms threshold all three call the clock routine (a B .
+// here). Each case says how many skips Fast must make.
+bool idleSkip(Engines& e) {
+    constexpr uint32_t globals = 0x22000, pointer = 0x23000, counterVa = 0x23010;
+    constexpr uint32_t timer = 0x23100, iccr = 0x23200, sp = 0x26000;
+    struct Want {
+        const char* name;
+        IdleLoopKind kind;
+        uint32_t counter;
+        bool past, afterPass, irq;
+        uint32_t passes;  // 0: run to the B .
+        uint64_t skips;
+    };
+    const Want wants[] = {
+        {"zire 72", IdleLoopKind::zire72, 1000, false, true, false, 40, 1},
+        {"zire 72 entered", IdleLoopKind::zire72, 1000, false, false, false, 40, 1},
+        {"zire 72 past the threshold", IdleLoopKind::zire72, 200000, true, true, false, 40, 1},
+        {"zire 72 irq waiting", IdleLoopKind::zire72, 1000, false, true, true, 0, 0},
+        {"zire 72 at the threshold", IdleLoopKind::zire72, 162500, false, true, false, 0, 0},
+        {"t|x", IdleLoopKind::tx, 1000, false, true, false, 40, 1},
+        {"t|x entered", IdleLoopKind::tx, 0x27800, false, false, false, 40, 1},
+        {"t|x past the threshold", IdleLoopKind::tx, 0xffffffff, true, true, false, 40, 1},
+        {"t|x irq waiting", IdleLoopKind::tx, 1000, false, true, true, 0, 0},
+        {"t|x at the threshold", IdleLoopKind::tx, 162500, false, true, false, 0, 0},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        const IdleLoop* l = nullptr;
+        for (const IdleLoop& x : kIdleLoops)
+            if (x.kind == w.kind) l = &x;
+        const bool zire = w.kind == IdleLoopKind::zire72;
+        // Each ROM's head and window sit at these offsets in a 32-byte line.
+        const uint32_t head = kCode + 0x1000 + (zire ? 0x10 : 0x14);
+        std::vector<std::pair<int, uint32_t>> regs;
+        if (zire)
+            regs = {{0, w.counter}, {4, timer}, {5, pointer}, {6, 0xffffffff}, {7, 162500}, {8, counterVa}, {10, w.past}};
+        else
+            regs = {{4, w.past}, {5, counterVa}, {7, timer}, {8, pointer - 20}, {10, 0}};
+        regs.push_back({13, sp});
+        regs.push_back({14, w.afterPass ? head + l->windowReturn : 0x11800});
+        Directed d{w.name, {0xe1a00000}, false, SVC, regs, {}};
+        const Case c = directedCase(d, 7);
+        const Assembled a = assemble(c);
+        Snapshot states[3];
+        uint64_t skipped[3] = {};
+        bool stopped[3] = {};
+        // 0 Exact, 1 Fast, 2 Fast without the skip.
+        for (int k = 0; k < 3; ++k) {
+            Machine& m = k ? e.fast : e.exact;
+            cpuSetIdleSkip(k != 2);
+            prepare(m, c, a);
+            auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
+            for (uint32_t i = 0; i < l->count; ++i) put(head + 4 * i, l->words[i]);
+            for (uint32_t i = 0; i < kIdleWindowCount; ++i) put(head + l->window + 4 * i, kIdleWindowWords[i]);
+            put(head + l->window + kIdleWindowLiteral, iccr);
+            put(head + (zire ? 0x4b4 : 0x5ab4), kSpinArm);  // the clock routine
+            put(pointer, globals);
+            put(counterVa, w.counter);
+            put(globals + kIdleWakeWord, 0);
+            m.ram[globals + kIdleWindowByte] = 0x84;
+            put(timer + 16, 0x12345678);
+            cpuInvalidateCodeCache(m.cpu);
+            cpuSetReg(m.cpu, 15, head);
+            // The kernel waits with FIQs unmasked.
+            cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & ~0x40u);
+            if (w.irq) {
+                cpuIrq(m.cpu, false, true);
+                m.device->irqs++;
+            }
+            uint64_t s0, c0, s1, c1;
+            cpuJitIdleSkips(&s0, &c0);
+            if (w.passes) {
+                // Whole passes: Exact steps them, Fast gets them as one budget.
+                uint64_t ran = 0;
+                const uint64_t want = uint64_t(w.passes) * l->pass;
+                if (!k)
+                    for (; ran < want; ++ran) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+                else
+                    while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+                if (ran != want) {
+                    printf("FAIL idle skip, %s: engine %d ran %" PRIu64 " cycles, not %" PRIu64 "\n", w.name, k,
+                           ran, want);
+                    ok = false;
+                }
+                stopped[k] = cpuGetRegisters(m.cpu)[15] == head;
+            } else {
+                for (int i = 0; i < 400 && !atSpin(m); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, k ? 50 : 1);
+                stopped[k] = atSpin(m);
+            }
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k] = s1 - s0;
+            states[k] = snapshot(m, stopped[k]);
+        }
+        cpuSetIdleSkip(true);
+        std::vector<std::string> diffs = differences(states[0], states[1]);
+        for (const std::string& s : differences(states[0], states[2])) diffs.push_back("without the skip, " + s);
+        if (diffs.empty() && stopped[0] && skipped[1] == w.skips && !skipped[2]) {
+            printf("idle skip, %s: same in all three, %" PRIu64 " skips\n", w.name, skipped[1]);
+            continue;
+        }
+        printf("FAIL idle skip, %s: %" PRIu64 " skips (want %" PRIu64 "), %" PRIu64 " without%s\n", w.name,
+               skipped[1], w.skips, skipped[2], stopped[0] ? "" : ", exact did not stop where expected");
+        for (const std::string& s : diffs) printf("  %s\n", s.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
 // The XScale fetch buffers when the guest rewrites code without invalidating. The
 // interpreter fills a buffer at A (an MCR the JIT hands back), the code at Y then rewrites
 // A+8, and the guest later jumps back to A+8 with no invalidation. An XScale (Exact) runs
@@ -2877,6 +2991,7 @@ int main(int argc, char** argv) {
         ok = privilegeSwitch(e) && ok;
         ok = inPlaceMsr(e) && ok;
         ok = fallbackTicks(e) && ok;
+        ok = idleSkip(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;

@@ -150,6 +150,11 @@ uint64_t cpuJitExceptionReturns();
 uint64_t cpuJitCpsrWrites();
 // MSR CPSRs that couldn't run in place and went to the interpreter, in every CPU so far (tests).
 uint64_t cpuJitCpsrInterprets();
+// Fast idle skip of the PalmOS 5 kernel wait loop (idle_loops.h), on unless FROND_IDLE_SKIP=0.
+// Code compiled while it was off keeps running the loop.
+void cpuSetIdleSkip(bool on);
+// Skips so far and the cycles they passed, in every CPU (tests).
+void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles);
 // MRC and MCR p15 c3 (domain access control) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitDomainCalls();
 // Translated ordinary blocks and instructions executed in generated code.
