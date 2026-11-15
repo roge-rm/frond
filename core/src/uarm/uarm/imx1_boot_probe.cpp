@@ -65,8 +65,11 @@ bool delayHalted = false, delayHaltOff = false, delayPassed = false;
 static bool delayLoopPc(uint32_t pc) { return pc == 0x2009f678 || pc == 0x2008492c; }
 uint32_t jitBudget = 0;
 uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0, delaySkipCycles = 0, delayHaltSkips = 0;  // for tests
-uint64_t scanPollSkips = 0, scanPollRounds = 0;  // for tests
-bool scanPollSkip = true;
+uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
+bool scanPollSkip = true, fifoWaitSkip = true;
+// The shortest timer count, in CPU cycles, for which skipFifoWait passes FIFO wait rounds. A round's work in the
+// JIT, its 50-odd instructions and the pointer read, ends about 55 cycles into a count in Origo (200 cycles each).
+constexpr uint64_t fifoRoundMost = 128;
 // Spans shorter than this are left to the step.
 constexpr uint64_t leanMinimumSpan = 8;
 // The last timer count worked out, kept for the cycles that read the same while the board doesn't change: a
@@ -941,6 +944,102 @@ struct Probe {
         scanPollRounds += n;
         return 3 * n;
     }
+    // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
+    // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
+    // the reads that saw no change. The pointer moves only when a batch completes, which ends the quiet span, so
+    // inside the span each round reads the same value and ends at the next timer count. At the delay's timer read
+    // (2008492c) the rounds up to the last count that leaves room in the span pass at once: the time goes to the
+    // start of that count, r3 takes it as the round's delay would and r5 counts the rounds passed. Only where a
+    // count lasts well over a round's work, so that each round really starts in the count after the one before.
+    // Returns whether rounds passed.
+    bool skipFifoWait() {
+        const uint32_t* r = cpuGetRegisters(cpu);
+        if (!fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
+            !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu))
+            return false;
+        static constexpr uint32_t caller[] = {0xe1a00006u, 0xeb000e28u, 0xe594101cu, 0xe5940014u, 0xe0010198u,
+            0xe0841101u, 0xe2811ca0u, 0xe5911a0cu, 0xe591121cu, 0xe5841014u, 0xe1510000u, 0x1a000002u, 0xe0855006u,
+            0xe155000bu, 0x9a000000u, 0xe3a05000u, 0xe5940008u, 0xe5942010u, 0xe0622120u, 0xe0821001u, 0xe2411001u,
+            0xe08a0120u, 0xe0010000u, 0xe584100cu, 0xe584000cu, 0xe1500007u, 0xbaffffe4u};
+        // 20084910-20084935, the delay from 20084912 (the last word's high half is the next function's).
+        static constexpr uint32_t delay[] = {0x491d4770u, 0xd1002800u, 0x680a2001u, 0xd40405d2u, 0x604a221fu,
+            0x320422ffu, 0x690b600au, 0x1ad2690au, 0xd3fb4282u, 0x00004770u};
+        uint32_t w, pa;
+        for (unsigned i = 0; i < std::size(caller); ++i)
+            if (!cpuArm920PeekWord(cpu, 0x200b9010 + 4 * i, &w, &pa) || w != caller[i]) return false;
+        for (unsigned i = 0; i < std::size(delay); ++i)
+            if (!cpuArm920PeekWord(cpu, 0x20084910 + 4 * i, &w, &pa) ||
+                (i + 1 < std::size(delay) ? w : w & 0xffff) != delay[i])
+                return false;
+        uint32_t timer;
+        if (!cpuArm920PeekWord(cpu, r[1] + 16, nullptr, &timer) || !Imx1Bootstrap::timerCountAddress(timer) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok)
+            return false;
+        // The pointer read as the next round makes it, with the room it leaves (200b9018-200b9078).
+        if (!graphicsMemory || !cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver ||
+            cs5Configuration.engineState().completed() || cs5Configuration.engineState().idleQuietTicks() == UINT64_MAX ||
+            !leanCs5Ready())
+            return false;
+        uint32_t index, chip, last, bytes, producer;
+        if (!cpuArm920PeekWord(cpu, r[4] + 28, &index, &pa) || !cpuArm920PeekWord(cpu, r[4] + 20, &last, &pa) ||
+            !cpuArm920PeekWord(cpu, r[4] + 8, &bytes, &pa) || !cpuArm920PeekWord(cpu, r[4] + 16, &producer, &pa) ||
+            !cpuArm920PeekWord(cpu, r[4] + (index * r[8] << 2) + 0xaa0c, &chip, &pa) ||
+            !cpuArm920PeekWord(cpu, chip + 0x21c, nullptr, &pa) || pa != 0x1601021c)
+            return false;
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool user = (cpsr & 31) == ARM_SR_MODE_USR;
+        uint32_t pointer;
+        if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok ||
+            !cs5Configuration.quietRegisterRead(peripherals.eimState(), 0x200b9030, pa, 0, pointer) || pointer != last)
+            return false;
+        const uint32_t room = ((bytes >> 2) - producer + pointer - 1) & (r[10] + (bytes >> 2));
+        if (int32_t(room) >= int32_t(r[7])) return false;
+        // The round's delay started at count r3 and still waits for the next.
+        const uint32_t start = r[3];
+        uint32_t count;
+        auto at = [&](uint64_t cycles) {
+            return timerCountAfter(peripherals, timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
+        };
+        // This round's delay read its count in the count's first half, so a round's work fits in one.
+        uint64_t left;
+        if (!peripherals.timerCountAfter(timer, 4, deferredCycles, quietMode, count, deferredHclk, &left) ||
+            count != start || left < deferredCycles)
+            return false;
+        left -= deferredCycles - 1;
+        // Room for the last round and the JIT in the span; the skip counts as work, like skipDelay.
+        const uint64_t keep = leanMinimumSpan + 2 * fifoRoundMost;
+        if (quietCycles <= keep) return false;
+        uint64_t high = quietCycles - keep;
+        if (bounds) {
+            const uint64_t used = work - sliceWorkStart;
+            if (used + keep >= bounds->work) return false;
+            high = std::min(high, bounds->work - used - keep);
+        }
+        if (!at(high)) return false;
+        const uint32_t rounds = count - start;
+        if (rounds < 2 || rounds > (1u << 30)) return false;
+        // The first cycle of count start + rounds.
+        uint64_t low = 0;
+        while (high - low > 1) {
+            const uint64_t mid = low + (high - low) / 2;
+            if (!at(mid)) return false;
+            if (count - start >= rounds) high = mid; else low = mid;
+        }
+        uint32_t value;
+        uint64_t until;
+        if (!peripherals.timerCountAfter(timer, 4, deferredCycles + high, quietMode, value, deferredHclk, &until) ||
+            value != start + rounds || until < deferredCycles + high + fifoRoundMost ||
+            2 * left <= until - deferredCycles - high + 1)
+            return false;
+        deferredCycles += high;
+        quietCycles -= high;
+        work += high;
+        cpuSetReg(cpu, 3, start + rounds);
+        cpuSetReg(cpu, 5, uint32_t((uint64_t(r[5]) + rounds) % (uint64_t(r[11]) + 1)));
+        ++fifoWaitSkips;
+        fifoWaitRounds += rounds;
+        return true;
+    }
     // A board register read on the lean path (quietReadAddress): inside the quiet span it reads what the step would
     // after charging, so it needs no charge.
     __attribute__((noinline)) bool leanBoardRead(uint32_t pa, uint32_t ran, uint32_t& value) {
@@ -1797,6 +1896,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 if (p->fastJit && jitSlack && hard >= jitSlack && !p->interruptedPrefixCount) {
                     if (delayHalted) {
                         delayHalted = false;
+                        p->skipFifoWait();
                         const int skipped = p->skipDelay();
                         delayHaltOff = skipped == 1;
                         delayPassed = skipped == 2;
@@ -1939,6 +2039,9 @@ uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*) { return delaySkipCycles
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
+uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
+uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
+void imx1SetFifoWaitSkip(bool skip) { fifoWaitSkip = skip; }
 
 void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
 

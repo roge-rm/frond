@@ -230,6 +230,11 @@ uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*);
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*);
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
+// The graphics FIFO wait's rounds Fast blocks passed at once, since the process started: the times and the rounds.
+// imx1SetFifoWaitSkip(false) turns the skip off, for tests.
+uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);
+uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
+void imx1SetFifoWaitSkip(bool skip);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.

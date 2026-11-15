@@ -1466,6 +1466,90 @@ void scanPolls() {
     assert(n >= 1000 && r >= 10000);
 }
 
+// The ROM's graphics FIFO wait (200b9010-200b9078 with the Thumb delay at 20084912) waits for a fill to leave
+// the ring empty. Fast with the skip passes most rounds at once and ends where Fast without it and Exact do: the
+// read pointer, the rounds counted in r5, the delay's last count in r3 and the timer count after the wait.
+void fifoWait() {
+    GraphicsGuest g;
+    // A 256 by 200 frame, so the display changes state seldom and quiet spans hold many rounds.
+    g.setup(); g.display(0xc80100, 0x960014); g.clocks();
+    // Timer 1 free running at PERCLK1 / 256, which the delay keeps: counts of 200-odd cycles, as in the ROM.
+    g.store(0x00202004, 255); g.store(0x00202000, 0x103);
+    g.fill(64);
+    const uint32_t caller[] = {0xe1a00006, 0xeb000e28, 0xe594101c, 0xe5940014, 0xe0010198, 0xe0841101, 0xe2811ca0,
+        0xe5911a0c, 0xe591121c, 0xe5841014, 0xe1510000, 0x1a000002, 0xe0855006, 0xe155000b, 0x9a000000, 0xe3a05000,
+        0xe5940008, 0xe5942010, 0xe0622120, 0xe0821001, 0xe2411001, 0xe08a0120, 0xe0010000, 0xe584100c, 0xe584000c,
+        0xe1500007, 0xbaffffe4};
+    for (unsigned i = 0; i < std::size(caller); ++i) g.word(0xb9010 + 4 * i, caller[i]);
+    const uint32_t delay[] = {0x491d4770, 0xd1002800, 0x680a2001, 0xd40405d2, 0x604a221f, 0x320422ff, 0x690b600a,
+        0x1ad2690a, 0xd3fb4282, 0x00004770};
+    for (unsigned i = 0; i < std::size(delay); ++i) g.word(0x84910 + 4 * i, delay[i]);
+    g.word(0x84988, 0x00202000);                          // the delay's timer: timer 1
+    // For the table call: ldr ip, =20084913; bx ip.
+    g.word(0xbc8bc, 0xe59fc000); g.word(0xbc8c0, 0xe12fff1c); g.word(0xbc8c4, 0x20084913);
+    // The driver's state at r4 in SRAM: ring bytes, producer, the last pointer read and the registers' address.
+    constexpr uint32_t state = 0x00304000;
+    g.store(state + 8, 0x10000); g.store(state + 16, g.ring); g.store(state + 20, 0); g.store(state + 28, 0);
+    g.store(state + 0xaa0c, 0x16010000);
+    std::vector<uint32_t> words;
+    load(words, 4, state); load(words, 5, 0); load(words, 6, 1); load(words, 7, 0x3fff); load(words, 8, 0x261);
+    load(words, 10, 0xffffffff); load(words, 11, 10000000);
+    const size_t call = words.size();
+    words.push_back(0);                                   // b 200b9010
+    const size_t back = words.size();
+    load(words, 9, 0x00202010);
+    words.push_back(0xe5999000);                          // ldr r9, [r9]: the timer count after the wait
+    words.push_back(0xe5941014);                          // ldr r1, [r4, #20]: the last pointer read
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.branch(base + uint32_t(call) * 4, 0xb9010);
+    g.branch(0xb907c, base + uint32_t(back) * 4);
+    g.end();
+    const uint64_t skips = imx1MachineFifoWaitSkips(nullptr), rounds = imx1MachineFifoWaitRounds(nullptr);
+    // Bounded runs of 20000 work, which the skips stop short of. Between runs in the delay's loop, r3 - r5 stays
+    // what the wait started with, rounds passed or not.
+    std::vector<uint32_t> gaps;
+    const auto run = [&](bool fast) {
+        Imx1Machine* m = make(g.words, fast);
+        Imx1MachineBounds b;
+        b.retired = 100000;
+        b.work = 20000;
+        for (unsigned i = 0; i < 100000 && running(m); ++i) {
+            b.deadline = {imx1MachineGetStatus(m).time.ticks + (1u << 20), 0, 1};
+            imx1MachineRunBounded(m, b);
+            if (imx1MachineGetStatus(m).pc != 0x2008492c) continue;
+            const auto& r = imx1MachineInspect(m).result.registers;
+            if (r[14] == 0x200b9018 && r[5]) gaps.push_back(r[3] - r[5]);
+        }
+        return finish(m);
+    };
+    const auto exact = run(false), fast = run(true);
+    const uint64_t n = imx1MachineFifoWaitSkips(nullptr) - skips, r = imx1MachineFifoWaitRounds(nullptr) - rounds;
+    imx1SetFifoWaitSkip(false);
+    const auto plain = run(true);
+    imx1SetFifoWaitSkip(true);
+    assert(imx1MachineFifoWaitSkips(nullptr) - skips == n);
+    print("fifo wait exact", exact); print("fifo wait fast", fast); print("fifo wait no skip", plain);
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    const auto& p = plain.run.result;
+    std::printf("fifo wait: %llu skips of %llu rounds, pointer %u %u %u, rounds counted %u %u %u, last count %u %u %u, "
+                "timer %u %u %u (fast, no skip, exact)\n", (unsigned long long)n, (unsigned long long)r, f.registers[1],
+                p.registers[1], e.registers[1], f.registers[5], p.registers[5], e.registers[5], f.registers[3],
+                p.registers[3], e.registers[3], f.registers[9], p.registers[9], e.registers[9]);
+    std::fflush(stdout);
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && f.stop == e.stop && p.stop == e.stop);
+    assert(e.registers[1] == g.ring && f.registers[1] == e.registers[1] && p.registers[1] == e.registers[1]);
+    for (unsigned reg : {3u, 5u, 9u})
+        assert(f.registers[reg] == p.registers[reg] && f.registers[reg] == e.registers[reg]);
+    std::printf("fifo wait: %zu stops in the wait, r3 - r5 from %u to %u\n", gaps.size(),
+                gaps.empty() ? 0 : *std::min_element(gaps.begin(), gaps.end()),
+                gaps.empty() ? 0 : *std::max_element(gaps.begin(), gaps.end()));
+    std::fflush(stdout);
+    assert(gaps.size() >= 5 && std::count(gaps.begin(), gaps.end(), gaps[0]) == std::ptrdiff_t(gaps.size()));
+    assert(n >= 5 && r >= 500);
+}
+
 // The ROM's vertical wait, given at 0xadb08.
 void waitLoop(GraphicsGuest& g) {
     const uint32_t loop[] = {0xe590154c, 0xe3110e40, 0x0afffffc, 0xe590154c, 0xe3110e40, 0x1afffffc,
@@ -2006,6 +2090,7 @@ void jitLong() {
     romDelayLoop();
     delayShort();
     scanPolls();
+    fifoWait();
     scanPollIrqs();
     jitDomain();
     jitReturns();
