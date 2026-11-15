@@ -58,8 +58,9 @@ LeanCs5 leanCs5{};
 // next block (SLOW_PATH_REASON_RESCHEDULE, cleared after the run).
 bool inJit = false, jitHalt = false;
 // Fast blocks: a timer count read by a delay loop's load (delayLoopPc) ends the run, and the next run starts with
-// skipDelay (delayHalted). delayHaltOff stops that until the next step once a skip found nothing to pass.
-bool delayHalted = false, delayHaltOff = false;
+// skipDelay (delayHalted). delayHaltOff stops that until the next step once a skip found nothing to pass. After a
+// skip that passed cycles (delayPassed), the next run's first such read doesn't end it: it sees the wait over.
+bool delayHalted = false, delayHaltOff = false, delayPassed = false;
 // The ROM's delay loop loads: ARM at 2009f678, Thumb at 2008492c. Both are marked access pcs.
 static bool delayLoopPc(uint32_t pc) { return pc == 0x2009f678 || pc == 0x2008492c; }
 uint32_t jitBudget = 0;
@@ -575,8 +576,12 @@ struct Probe {
                                            deferredHclk + leanCs5.waitClocks)) return false;
         ++leanTimerReads;
         if (inJit && delayLoopPc(pc) && !delayHaltOff && !jitHalt) {
-            jitHalt = delayHalted = true;
-            cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+            if (delayPassed) {
+                delayPassed = false;
+            } else {
+                jitHalt = delayHalted = true;
+                cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+            }
         }
         return true;
     }
@@ -1775,7 +1780,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
         for (uint32_t slice = 0; slice < retiredBudget;) {
             if (!runStep(p, idleHclkLimit)) break;
             ++slice;
-            delayHalted = delayHaltOff = false;
+            delayHalted = delayHaltOff = delayPassed = false;
             for (;;) {
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode) break;
@@ -1794,6 +1799,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         delayHalted = false;
                         const int skipped = p->skipDelay();
                         delayHaltOff = skipped == 1;
+                        delayPassed = skipped == 2;
                         delayHaltSkips += skipped == 2;
                         // The skip counts as work: the slice's limits are worked out again before anything runs.
                         if (skipped == 2) continue;
@@ -1812,6 +1818,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     const uint32_t ran = cpuArm920RunJit(p->cpu, jitBudget, &stop,
                                                          uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
                     inJit = false;
+                    delayPassed = false;
                     if (jitHalt) {
                         jitHalt = false;
                         if (!cpuArm920Waiting(p->cpu)) cpuClearSlowPath(p->cpu, SLOW_PATH_REASON_RESCHEDULE);
@@ -1833,7 +1840,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
                     }
                     if (stop == arm920JitBudget) {
-                        p->skipDelay();
+                        delayPassed = p->skipDelay() == 2;
                         if (ran) continue;
                         break;
                     }
@@ -1860,6 +1867,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 uint32_t blNext;
                 uint64_t busAccesses;
                 leanCs5 = {};
+                delayPassed = false;
                 const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses);
                 p->result.busAccesses += busAccesses;
                 // Graphics memory writes add their wait clocks to the work and the deferred charge, and their

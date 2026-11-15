@@ -1375,8 +1375,9 @@ void romDelayLoop() {
     const auto words = romDelayGuest(0);
     const uint64_t halts = imx1MachineDelayHaltSkips(nullptr);
     const auto exact = runGuest(words, false), fast = runGuest(words, true);
-    const uint64_t n = imx1MachineDelayHaltSkips(nullptr) - halts;
+    const uint64_t n = imx1MachineDelayHaltSkips(nullptr) - halts, runs = imx1MachineJitRuns(nullptr);
     print("rom delay exact", exact); print("rom delay blocks", fast);
+    std::printf("rom delay: %llu JIT runs\n", (unsigned long long)runs);
     const auto& e = exact.run.result;
     const auto& f = fast.run.result;
     std::printf("rom delay: %llu waits passed after a halt, retired %llu against %llu, ticks %llu against %llu, "
@@ -1390,6 +1391,9 @@ void romDelayLoop() {
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[9] >= 50 * 40 &&
            f.registers[8] <= e.registers[8] + 2);
     assert(n >= 25 && fast.cheap.retired * 2 < exact.cheap.retired);
+    // After a pass the next run goes on through the loop's next timer read, which ends the wait, instead of halting
+    // there again: 212 runs here, 260 when every such read halts.
+    assert(runs < 230);
     // In bounded runs the waits are still passed after a halt, with 600 adds after each call. A pass counts as work,
     // so the JIT run after it stops short of the slice's work bound: this guest never passes the bound.
     Imx1Machine* m = make(romDelayGuest(600), true);
