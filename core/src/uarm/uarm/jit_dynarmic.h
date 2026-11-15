@@ -118,6 +118,9 @@ uint64_t cpuJitPermContext(ArmCpu *cpu);
 // RAM, *lines gets the page's code flags, one per 64 bytes: set one and the first write to
 // that line comes back through jitCodeWritten. Null for ROM.
 uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines);
+// ARM920T Fast blocks: translation read code at pa, in a page cpuJitWatchCode marked. A store to its
+// 64-byte line drops the page's code; stores to the page's other lines don't.
+void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa);
 // Stops watching every RAM page.
 void cpuJitForgetCode(ArmCpu *cpu);
 // Moves on with every TLB flush, which every mapping change goes through.

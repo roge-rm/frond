@@ -18,6 +18,15 @@ inline uint64_t imx1Gcd(uint64_t a, uint64_t b) {
 // When the product doesn't fit 128 bits it returns a smaller count, never a larger one. At least 1.
 inline uint64_t imx1StepsUntil(uint64_t phase, uint64_t den, uint64_t n, uint64_t d, uint64_t target) {
     if (!target || !n || !d || !den) return 1;
+    // The same sums in 64 bits when every product fits.
+    uint64_t whole64, scaled64, divisor64;
+    if (!__builtin_mul_overflow(target, den, &whole64)) {
+        if (whole64 <= phase) return 1;
+        if (!__builtin_mul_overflow(whole64 - phase, d, &scaled64) && !__builtin_mul_overflow(den, n, &divisor64)) {
+            const uint64_t steps = scaled64 / divisor64 + (scaled64 % divisor64 != 0);
+            return steps ? steps : 1;
+        }
+    }
     const __uint128_t max = ~__uint128_t(0);
     const __uint128_t whole = __uint128_t(target) * den;
     if (whole <= phase) return 1;
@@ -33,6 +42,12 @@ inline uint64_t imx1StepsUntil(uint64_t phase, uint64_t den, uint64_t n, uint64_
 // Smallest count of steps of stepClocks source clocks after which a divider with this phase has made cycles cycles.
 inline uint64_t imx1StepsUntilDivided(uint64_t cycles, uint64_t divider, uint64_t phase, uint64_t stepClocks) {
     if (!cycles || !divider || !stepClocks) return 1;
+    uint64_t need64;
+    if (!__builtin_mul_overflow(cycles, divider, &need64)) {
+        if (need64 <= phase) return 1;
+        const uint64_t left = need64 - phase;
+        return left / stepClocks + (left % stepClocks != 0);
+    }
     const __uint128_t need = __uint128_t(cycles) * divider;
     if (need <= phase) return 1;
     const __uint128_t steps = (need - phase + stepClocks - 1) / stepClocks;

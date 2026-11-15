@@ -222,6 +222,8 @@ uint64_t imx1MachineJitReads(const Imx1Machine*);
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*);
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);
+// Of those, the ones at the start of a run a delay loop's timer read ended (the ROM's loops at 2009f678 and 2008492c).
+uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*);
 uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*);
 // The vertical wait's scan status polls Fast blocks passed at once, since the process started: the times and the
 // rounds. imx1SetScanPollSkip(false) turns the skip off, for tests.

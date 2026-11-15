@@ -316,8 +316,12 @@ void cpuArm920SetLeanWrite(ArmCpu*, Arm920LeanWrite write);
 void cpuArm920LeanReset(ArmCpu*);
 // Drops the lean TLB, after anything that can change which pages are plain.
 void cpuArm920LeanFlush(ArmCpu*);
-// A store the guarded step made to RAM at pa. Fast drops its decoded code when the page holds some.
+// A write over the whole RAM page at pa (DMA). Fast drops its decoded and translated code when the page
+// holds some.
 void cpuArm920LeanStored(ArmCpu*, uint32_t pa);
+// A store the guarded step made to RAM at [pa, pa + size): as cpuArm920LeanStored, only when one of the
+// 64-byte lines it touches held code.
+void cpuArm920LeanStoredBytes(ArmCpu*, uint32_t pa, uint32_t size);
 // Runs at most budget instructions on the lean path and returns how many it retired. It stops before an
 // instruction or access it can't take as plain (MMIO, faults, misaligned accesses, CP15, SWI, MSR of the
 // control field, exception returns and forms the guard rejects), leaving the CPU at that instruction for

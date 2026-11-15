@@ -881,7 +881,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `TEST_TIMEOUT` | Seconds each `make test` recipe line may run before it's killed and fails. Default 300; a target can set its own. |
 | `TEST_KILL_GRACE` | Seconds between TERM and KILL when a test line times out. Default 10. |
 | `E2_SESSION`, `TX_SESSION`, `ZIRE72_SESSION`, `TG50_SESSION` | Smoke session files for the `e2-busy`, `tx-media`, `zire72-busy` and `tg50-busy` recipes of `make count-check`. No default; a recipe without one is skipped. |
-| `ZODIAC_CARDS` | Folder of Zodiac SD card images for the `zodiac-doom2` and `zodiac-zuma` recipes of `make count-check` (`s2/doom2.img` with PopAccess, `s1/zuma.img`). No default; those recipes are skipped without it. |
+| `ZODIAC_CARDS` | Folder of Zodiac SD card images for the Zodiac game recipes of `make count-check`: `s2/doom2.img`, `s2/origo.img`, `s2/animated-dudes.img`, `s2/mtx-mototrax.img` and `s2/firehammer.img` with PopAccess, `s1/zuma.img`. No default; those recipes are skipped without it. |
 | `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
 | `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |

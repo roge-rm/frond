@@ -2,7 +2,7 @@
 // table change only shows after a CP15 TLB flush, a domain change and an SDRAM mode change take the lean path's
 // host pages away, a cacheable load of unbacked memory stops both engines at the same pc, and states saved under
 // either engine carry on under Fast as an uninterrupted Exact run does. Code rewritten in place drops what Fast
-// decoded from it. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
+// decoded from it, and stores to other lines of its page don't. Timer count reads answered on the lean path give Exact's values and bus count, a cacheable timer
 // mapping stops both engines at the same read, and a DMA controller write that starts the PCM DMA takes its buffer
 // page off the lean path while the DMA sends what both paths wrote. An IRQ raised by an MMIO write and an FIQ that
 // comes during a CS5 write (graphics memory or the one starting a fill) are taken where the stepped run takes them.
@@ -12,7 +12,8 @@
 // ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
 // reads on the lean path give Exact's values. Fast blocks answer those reads and board writes in generated code,
 // take an IRQ such a write lets in within a block, answer CGM, timer and DMA register reads and watchdog and DISR
-// writes there, pass the ROM's timer delay loop at once and run exception returns and line-end Thumb BL pairs.
+// writes there, pass the ROM's timer delay loops (ARM and Thumb) at once and run exception returns and line-end
+// Thumb BL pairs.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -52,7 +53,7 @@ void thumbLoop(std::vector<uint32_t>& words) {
     for (size_t i = 0; i < std::size(h); i += 2) words.push_back(h[i] | uint32_t(h[i + 1]) << 16);
 }
 
-enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode, freshCode };
+enum class Tail { tlb, domain, sdram, code, timer, cachedTimer, dma, dmaOther, ttbr, user, hotCode, freshCode, lineCode };
 
 // The graphics guest's setup with programmed clocks gives the step quiet spans, which the lean path runs.
 // The test code follows it, running from the linked alias at 0x20000000.
@@ -279,6 +280,24 @@ std::vector<uint32_t> guest(Tail tail, uint32_t& stopPc, uint32_t& savePc) {
         sumLoop(words, 8);
         load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
         sumLoop(words, 11);
+        words.push_back(0xe1a0e00f);                      // mov lr, pc
+        words.push_back(0xe12fff10);                      // bx r0
+        stopPc = pc();
+        break;
+    case Tail::lineCode:
+        // Data next to code: 64 rounds of a store to another 64-byte line of the function's page and a call
+        // (r10 = 64), then the function's own line rewritten as mov r9, #2 with no invalidate, and a call.
+        load(words, 0, 0x00310000);
+        words.push_back(0xe3a0a000);                      // mov r10, #0
+        load(words, 3, 64);
+        for (uint32_t w : {0xe5800100u,                   // loop: str r0, [r0, #0x100]
+                           0xe1a0e00fu, 0xe12fff10u,      // mov lr, pc; bx r0: r9 = 1
+                           0xe08aa009u,                   // add r10, r10, r9
+                           0xe2533001u,                   // subs r3, r3, #1
+                           0x1afffff9u})                  // bne loop
+            words.push_back(w);
+        sumLoop(words, 8);
+        load(words, 1, 0xe3a09002); words.push_back(0xe5801000);  // rewrite it as mov r9, #2, no invalidate
         words.push_back(0xe1a0e00f);                      // mov lr, pc
         words.push_back(0xe12fff10);                      // bx r0
         stopPc = pc();
@@ -996,6 +1015,13 @@ void blocks() {
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
     }
     {
+        // Stores to another line of the function's page keep its translation; the rewrite of its own line drops it.
+        const auto [exact, fast] = both(Tail::lineCode, "line code");
+        assert(fast.run.result.registers[10] == 64 && fast.run.result.registers[9] == 2);
+        assert(exact.run.result.registers[10] == 64 && exact.run.result.registers[9] == 1);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
+    }
+    {
         // Compiled in place mid-run, so the new page's code is translated with no lean step in between: its
         // marking has to take away the JIT's writable page and the host TLB's write entry for the rewrite.
         setenv("FROND_JIT_THREAD", "0", 1);
@@ -1025,12 +1051,13 @@ void blocks() {
     cpuSetJitSync(false);
     unsetenv("FROND_JIT_HOT");
     uint64_t shipped = 0;
-    for (Tail tail : {Tail::tlb, Tail::domain, Tail::user, Tail::code, Tail::hotCode, Tail::freshCode, Tail::dmaOther}) {
+    for (Tail tail : {Tail::tlb, Tail::domain, Tail::user, Tail::code, Tail::hotCode, Tail::freshCode, Tail::lineCode,
+                      Tail::dmaOther}) {
         const auto words = guest(tail, stopPc, savePc);
         const auto exact = runGuest(words, false), fast = runGuest(words, true), lean = runLean(words);
         assert(fast.run.result.stop == exact.run.result.stop && fast.run.result.trace.pc == exact.run.result.trace.pc);
-        if (tail != Tail::code && tail != Tail::hotCode) sameResult(exact, fast);
-        else assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2);
+        if (tail != Tail::code && tail != Tail::hotCode && tail != Tail::lineCode) sameResult(exact, fast);
+        else assert(fast.run.result.registers[10] == (tail == Tail::lineCode ? 64u : 1u) && fast.run.result.registers[9] == 2);
         sameMemory(exact, lean, fast);
         shipped += fast.jit;
     }
@@ -1235,8 +1262,9 @@ void jitRingPolls() {
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time. With stores, each wait comes right after graphics memory stores, whose wait clocks are still
 // deferred when the skip looks at the timer.
-void delayLoop(bool stores = false) {
-    const char* name = stores ? "delay after stores" : "delay";
+// thumb: the same wait in the Thumb form (as at 2008492c), the wait in r3.
+void delayLoop(bool stores = false, bool thumb = false) {
+    const char* name = thumb ? "thumb delay" : stores ? "delay after stores" : "delay";
     GraphicsGuest g;
     // With stores the display stays off, so the quiet span holds the stores and the wait after them.
     g.setup(); if (!stores) g.display(); g.clocks();
@@ -1244,14 +1272,23 @@ void delayLoop(bool stores = false) {
     g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
     std::vector<uint32_t> words;
     load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0); load(words, 2, 0x16800100);
+    if (thumb) load(words, 3, 120);
     const size_t outer = words.size();
     // outer: 600 adds, so the stores land in a JIT run, not the slice's tail, then str r7, [r2] 4 times
     if (stores) for (unsigned i = 0; i < 604; ++i) words.push_back(i < 600 ? 0xe2855001 : 0xe5827000);
     words.push_back(0xe5960010);                          // ldr r0, [r6, #16]
-    words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
-    words.push_back(0xe0411000);                          // sub r1, r1, r0
-    words.push_back(0xe3510078);                          // cmp r1, #120
-    words.push_back(0x3afffffb);                          // bcc loop
+    if (thumb) {
+        words.push_back(0xe28fc001);                      // add r12, pc, #1
+        words.push_back(0xe12fff1c);                      // bx r12: Thumb from the next word
+        words.push_back(0x1a096931);                      // loop: ldr r1, [r6, #16]; subs r1, r1, r0
+        words.push_back(0xd3fb4299);                      // cmp r1, r3; bcc loop
+        words.push_back(0x4728a500);                      // adr r5, the next word; bx r5
+    } else {
+        words.push_back(0xe5961010);                      // loop: ldr r1, [r6, #16]
+        words.push_back(0xe0411000);                      // sub r1, r1, r0
+        words.push_back(0xe3510078);                      // cmp r1, #120
+        words.push_back(0x3afffffb);                      // bcc loop
+    }
     words.push_back(0xe1510008);                          // cmp r1, r8
     words.push_back(0x81a08001);                          // movhi r8, r1: the most counts any wait saw
     words.push_back(0xe0899001);                          // add r9, r9, r1: all the counts the waits saw
@@ -1302,6 +1339,75 @@ void delayLoop(bool stores = false) {
     std::printf("%s bounded: %llu waits skipped, work past the bound at most %llu\n", name, (unsigned long long)bounded,
                 (unsigned long long)most);
     assert(imx1MachineInspect(m).result.stop == e.stop && bounded >= 20 && most < 100);
+    imx1MachineStop(m);
+}
+
+// The ROM's Thumb delay loop at 2008492c, called 50 times from ARM with a wait of 40 counts at prescaler 16. Its timer
+// read ends the JIT run where it is, so the next run passes the wait at once.
+// adds: that many adds after each call, run in the JIT before the next timer read.
+std::vector<uint32_t> romDelayGuest(unsigned adds) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 15);                              // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    g.word(0x8492c, 0x1ad2690a);                          // loop: ldr r2, [r1, #16]; subs r2, r2, r3
+    g.word(0x84930, 0xd3fb4282);                          // cmp r2, r0; bcc loop
+    g.word(0x84934, 0x46c04770);                          // bx lr; nop
+    std::vector<uint32_t> words;
+    load(words, 1, 0x00202000); load(words, 7, 50); load(words, 8, 0); load(words, 9, 0); load(words, 12, 0x2008492d);
+    const size_t top = words.size();
+    words.push_back(0xe3a00028);                          // outer: mov r0, #40
+    words.push_back(0xe5913010);                          // ldr r3, [r1, #16]
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    words.push_back(0xe12fff1c);                          // bx r12: the Thumb loop
+    for (unsigned i = 0; i < adds; ++i) words.push_back(0xe2855001);  // add r5, r5, #1
+    words.push_back(0xe1520008);                          // cmp r2, r8
+    words.push_back(0x81a08002);                          // movhi r8, r2: the most counts any wait saw
+    words.push_back(0xe0899002);                          // add r9, r9, r2: all the counts the waits saw
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return g.words;
+}
+
+void romDelayLoop() {
+    const auto words = romDelayGuest(0);
+    const uint64_t halts = imx1MachineDelayHaltSkips(nullptr);
+    const auto exact = runGuest(words, false), fast = runGuest(words, true);
+    const uint64_t n = imx1MachineDelayHaltSkips(nullptr) - halts;
+    print("rom delay exact", exact); print("rom delay blocks", fast);
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    std::printf("rom delay: %llu waits passed after a halt, retired %llu against %llu, ticks %llu against %llu, "
+                "most %u against %u, sum %u against %u\n", (unsigned long long)n,
+                (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired,
+                (unsigned long long)fast.cheap.time.ticks, (unsigned long long)exact.cheap.time.ticks, f.registers[8],
+                e.registers[8], f.registers[9], e.registers[9]);
+    std::fflush(stdout);
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[9] >= 50 * 40);
+    // Each wait ends once it has seen 40 counts, as in Exact; most of them are passed after a halt.
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[9] >= 50 * 40 &&
+           f.registers[8] <= e.registers[8] + 2);
+    assert(n >= 25 && fast.cheap.retired * 2 < exact.cheap.retired);
+    // In bounded runs the waits are still passed after a halt, with 600 adds after each call. A pass counts as work,
+    // so the JIT run after it stops short of the slice's work bound: this guest never passes the bound.
+    Imx1Machine* m = make(romDelayGuest(600), true);
+    const uint64_t before = imx1MachineDelayHaltSkips(nullptr);
+    uint64_t most = 0;
+    Imx1MachineBounds b;
+    b.retired = 100000;
+    b.work = 10000;
+    for (unsigned i = 0; i < 1000000 && running(m); ++i) {
+        b.deadline = {imx1MachineGetStatus(m).time.ticks + (1u << 20), 0, 1};
+        most = std::max(most, imx1MachineRunBounded(m, b).workOvershoot);
+    }
+    const uint64_t bounded = imx1MachineDelayHaltSkips(nullptr) - before;
+    std::printf("rom delay bounded: %llu waits passed after a halt, work past the bound at most %llu\n",
+                (unsigned long long)bounded, (unsigned long long)most);
+    std::fflush(stdout);
+    const auto& r = imx1MachineInspect(m).result;
+    assert(r.stop == e.stop && r.registers[7] == 0 && bounded >= 25 && most == 0);
     imx1MachineStop(m);
 }
 
@@ -1892,6 +1998,8 @@ void jitLong() {
     jitSwiTimer();
     delayLoop();
     delayLoop(true);
+    delayLoop(false, true);
+    romDelayLoop();
     delayShort();
     scanPolls();
     scanPollIrqs();
@@ -1995,6 +2103,17 @@ int main() {
         print("code exact", exact); print("code fast", fast);
         assert(exact.run.result.registers[10] == 1 && exact.run.result.registers[9] == 1);
         assert(fast.run.result.registers[10] == 1 && fast.run.result.registers[9] == 2 && fast.drops > 0);
+        assert(fast.run.result.stop == exact.run.result.stop && fast.cheap.retired == exact.cheap.retired);
+    }
+    {
+        // Stores to another line of a code page keep what Fast decoded; only the rewrite of the code's own line
+        // drops it.
+        const auto words = guest(Tail::lineCode, stopPc, savePc);
+        const auto exact = runGuest(words, false), fast = runGuest(words, true);
+        print("line code exact", exact); print("line code fast", fast);
+        assert(exact.run.result.registers[10] == 64 && exact.run.result.registers[9] == 1);
+        assert(fast.run.result.registers[10] == 64 && fast.run.result.registers[9] == 2);
+        assert(fast.drops >= 1 && fast.drops <= 2);
         assert(fast.run.result.stop == exact.run.result.stop && fast.cheap.retired == exact.cheap.retired);
     }
     {

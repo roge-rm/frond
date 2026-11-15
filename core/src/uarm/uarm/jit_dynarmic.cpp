@@ -282,8 +282,8 @@ struct Env final : public A32::UserCallbacks {
     ArmCpu *cpu = nullptr;
     bool arm920 = false;
     // ARM920T: lineBound for the probe's single-step diagnostic mode, blocks ended at each 32-byte line.
-    // Otherwise (Fast blocks) code pages are watched by physical page through the lean path's stores
-    // (jitCodeWrittenPa), so the guest's I-cache invalidations change nothing.
+    // Otherwise (Fast blocks) code pages are watched by physical page and 64-byte line through the lean
+    // path's stores (jitCodeWrittenPa), so the guest's I-cache invalidations change nothing.
     bool lineBound = false;
     std::unordered_map<uint32_t, std::vector<uint32_t>> byPa;  // Fast blocks: virtual code pages by physical page
     uint64_t blocks = 0, instructions = 0;
@@ -368,6 +368,8 @@ struct Env final : public A32::UserCallbacks {
         const uint32_t page = va >> 12;
         auto it = code.find(page);
         if (it == code.end()) it = NotePage(page);
+        // Fast blocks: the CPU keeps the 64-byte lines by physical page; a store to one drops the page's code.
+        if (arm920 && !lineBound && it->second.host) cpuJitNoteArm920Code(cpu, (it->second.pa << 12) | (va & 0xfffu));
         uint8_t *lines = it->second.lines;
         if (lines && !lines[(va & 0xfffu) >> 6]) {
             // The flags are the CPU's, so both privilege levels' direct stores to the page
@@ -646,7 +648,8 @@ struct Env final : public A32::UserCallbacks {
             AfterIo();
             return v;
         }
-        uint_fast8_t fsr;
+        // The ARM920T's lean path refuses without setting fsr: that's an exit, not a guest abort.
+        uint_fast8_t fsr = 0;
         if (!cpuJitRead(cpu, va, sizeof(T), &v, &fsr)) {
             AccessFailed(va, sizeof(T), false, fsr);
             return 0;
@@ -681,7 +684,7 @@ struct Env final : public A32::UserCallbacks {
             AfterIo();
             return;
         }
-        uint_fast8_t fsr;
+        uint_fast8_t fsr = 0;
         if (!cpuJitWrite(cpu, va, sizeof(T), &v, &fsr)) {
             AccessFailed(va, sizeof(T), true, fsr);
             return;
@@ -1433,8 +1436,10 @@ void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
 
 void jitGuestInvalidateAll(FrondJit *j, uint32_t pc) {
     stats.invalAll++;
-    auto &st = stats.invalAllPc[pc];
-    if (!st.first++ && stats.on) cpuJitFetch(j->cpu, pc & ~3u, &st.second);
+    if (stats.on) {
+        auto &st = stats.invalAllPc[pc];
+        if (!st.first++) cpuJitFetch(j->cpu, pc & ~3u, &st.second);
+    }
     jitPrvEach(j, [](Env &e) {
         if (e.lineBound) e.jit->ClearCache();
         else if (!e.arm920 && !e.unwatched.empty()) e.DropUnwatched(0, ~0u);
