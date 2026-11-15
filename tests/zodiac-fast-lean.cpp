@@ -12,7 +12,8 @@
 // ends as an Exact run does. Graphics memory loads of every width, the identity read and GPIO, AITC and ASP status
 // reads on the lean path give Exact's values. Fast blocks answer those reads and board writes in generated code,
 // take an IRQ such a write lets in within a block, answer CGM, timer and DMA register reads and watchdog and DISR
-// writes there, pass the ROM's timer delay loop at once and run exception returns and line-end Thumb BL pairs.
+// writes there, pass the ROM's timer delay loops (ARM and Thumb) at once and run exception returns and line-end
+// Thumb BL pairs.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
@@ -1261,8 +1262,9 @@ void jitRingPolls() {
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time. With stores, each wait comes right after graphics memory stores, whose wait clocks are still
 // deferred when the skip looks at the timer.
-void delayLoop(bool stores = false) {
-    const char* name = stores ? "delay after stores" : "delay";
+// thumb: the same wait in the Thumb form (as at 2008492c), the wait in r3.
+void delayLoop(bool stores = false, bool thumb = false) {
+    const char* name = thumb ? "thumb delay" : stores ? "delay after stores" : "delay";
     GraphicsGuest g;
     // With stores the display stays off, so the quiet span holds the stores and the wait after them.
     g.setup(); if (!stores) g.display(); g.clocks();
@@ -1270,14 +1272,23 @@ void delayLoop(bool stores = false) {
     g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
     std::vector<uint32_t> words;
     load(words, 6, 0x00202000); load(words, 7, 20); load(words, 8, 0); load(words, 9, 0); load(words, 2, 0x16800100);
+    if (thumb) load(words, 3, 120);
     const size_t outer = words.size();
     // outer: 600 adds, so the stores land in a JIT run, not the slice's tail, then str r7, [r2] 4 times
     if (stores) for (unsigned i = 0; i < 604; ++i) words.push_back(i < 600 ? 0xe2855001 : 0xe5827000);
     words.push_back(0xe5960010);                          // ldr r0, [r6, #16]
-    words.push_back(0xe5961010);                          // loop: ldr r1, [r6, #16]
-    words.push_back(0xe0411000);                          // sub r1, r1, r0
-    words.push_back(0xe3510078);                          // cmp r1, #120
-    words.push_back(0x3afffffb);                          // bcc loop
+    if (thumb) {
+        words.push_back(0xe28fc001);                      // add r12, pc, #1
+        words.push_back(0xe12fff1c);                      // bx r12: Thumb from the next word
+        words.push_back(0x1a096931);                      // loop: ldr r1, [r6, #16]; subs r1, r1, r0
+        words.push_back(0xd3fb4299);                      // cmp r1, r3; bcc loop
+        words.push_back(0x4728a500);                      // adr r5, the next word; bx r5
+    } else {
+        words.push_back(0xe5961010);                      // loop: ldr r1, [r6, #16]
+        words.push_back(0xe0411000);                      // sub r1, r1, r0
+        words.push_back(0xe3510078);                      // cmp r1, #120
+        words.push_back(0x3afffffb);                      // bcc loop
+    }
     words.push_back(0xe1510008);                          // cmp r1, r8
     words.push_back(0x81a08001);                          // movhi r8, r1: the most counts any wait saw
     words.push_back(0xe0899001);                          // add r9, r9, r1: all the counts the waits saw
@@ -1329,6 +1340,49 @@ void delayLoop(bool stores = false) {
                 (unsigned long long)most);
     assert(imx1MachineInspect(m).result.stop == e.stop && bounded >= 20 && most < 100);
     imx1MachineStop(m);
+}
+
+// The ROM's Thumb delay loop at 2008492c, called 50 times from ARM with a wait of 40 counts at prescaler 16. Its timer
+// read ends the JIT run where it is, so the next run passes the wait at once.
+void romDelayLoop() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 15);                              // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    g.word(0x8492c, 0x1ad2690a);                          // loop: ldr r2, [r1, #16]; subs r2, r2, r3
+    g.word(0x84930, 0xd3fb4282);                          // cmp r2, r0; bcc loop
+    g.word(0x84934, 0x46c04770);                          // bx lr; nop
+    std::vector<uint32_t> words;
+    load(words, 1, 0x00202000); load(words, 7, 50); load(words, 8, 0); load(words, 9, 0); load(words, 12, 0x2008492d);
+    const size_t top = words.size();
+    words.push_back(0xe3a00028);                          // outer: mov r0, #40
+    words.push_back(0xe5913010);                          // ldr r3, [r1, #16]
+    words.push_back(0xe1a0e00f);                          // mov lr, pc
+    words.push_back(0xe12fff1c);                          // bx r12: the Thumb loop
+    words.push_back(0xe1520008);                          // cmp r2, r8
+    words.push_back(0x81a08002);                          // movhi r8, r2: the most counts any wait saw
+    words.push_back(0xe0899002);                          // add r9, r9, r2: all the counts the waits saw
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    const uint64_t halts = imx1MachineDelayHaltSkips(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const uint64_t n = imx1MachineDelayHaltSkips(nullptr) - halts;
+    print("rom delay exact", exact); print("rom delay blocks", fast);
+    const auto& e = exact.run.result;
+    const auto& f = fast.run.result;
+    std::printf("rom delay: %llu waits passed after a halt, retired %llu against %llu, ticks %llu against %llu, "
+                "most %u against %u, sum %u against %u\n", (unsigned long long)n,
+                (unsigned long long)fast.cheap.retired, (unsigned long long)exact.cheap.retired,
+                (unsigned long long)fast.cheap.time.ticks, (unsigned long long)exact.cheap.time.ticks, f.registers[8],
+                e.registers[8], f.registers[9], e.registers[9]);
+    std::fflush(stdout);
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[9] >= 50 * 40);
+    // Each wait ends once it has seen 40 counts, as in Exact; most of them are passed after a halt.
+    assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[9] >= 50 * 40 &&
+           f.registers[8] <= e.registers[8] + 2);
+    assert(n >= 25 && fast.cheap.retired * 2 < exact.cheap.retired);
 }
 
 // The ROM's vertical wait (200adb08 to 200adb20) called 12 times, timer 1 read after each return. 200adb08 polls
@@ -1918,6 +1972,8 @@ void jitLong() {
     jitSwiTimer();
     delayLoop();
     delayLoop(true);
+    delayLoop(false, true);
+    romDelayLoop();
     delayShort();
     scanPolls();
     scanPollIrqs();
