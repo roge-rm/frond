@@ -269,6 +269,15 @@ struct UserConfig {
     /// the call, so the callback may change the registers and CPSR in the JIT state.
     std::optional<std::size_t> psr_coprocessor;
 
+    /// Frond: with psr_coprocessor, an MSR CPSR that writes the control field runs in place
+    /// when it changes nothing in the control byte but I and F and the word at the slot's
+    /// GetOneWord opc1 1 is 0 (no interrupt waiting). Otherwise the block ends with an
+    /// Interpret terminal at the MSR, whose tick the block has already counted, and 1 goes
+    /// to the word at SendOneWord opc1 5 (0 when it ran in place). The in-place
+    /// path also writes I and F into bytes 2 and 3 of the word at GetOneWord and SendOneWord
+    /// opc1 2 (the host's own copy of them). Either way the block ends at the MSR.
+    bool psr_inline_interrupt_mask = false;
+
     /// When set to true, UserCallbacks::InstructionSynchronizationBarrierRaised will be
     /// called when an ISB instruction is executed.
     /// When set to false, ISB will be treated as a NOP instruction.

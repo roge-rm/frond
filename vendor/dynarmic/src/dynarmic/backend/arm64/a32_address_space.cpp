@@ -208,7 +208,7 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
 }
 
 IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor, A32::TranslateCallbacks* tcb) const {
-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets});
+    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets, conf.psr_inline_interrupt_mask});
 
     Optimization::PolyfillPass(ir_block, {});
     Optimization::NamingPass(ir_block);

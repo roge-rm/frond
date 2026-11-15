@@ -43,6 +43,7 @@ struct Stats {
     uint64_t cold = 0;  // runs ended at code not compiled yet
     uint64_t queued = 0;  // of those, at code waiting for the compile thread
     uint64_t psr = 0;  // MSR CPSR and MOVS PC calls from generated code
+    uint64_t psrInterpret = 0;  // MSR CPSRs the in-place check sent to the interpreter
     uint64_t cp15 = 0, cp15User = 0;  // MRC and MCR p15 c3 and c7 c5 1 calls, and those in user mode
     uint64_t icacheLine = 0;  // of those, MCR p15 c7 c5 1 (I-cache line invalidate)
     uint64_t privSwitches = 0;  // runs ended by a privilege change in generated code
@@ -119,13 +120,13 @@ struct Stats {
         fprintf(stderr,
                 "jit: codePages %llu unwatched %llu pagesWritten %llu mapChecks %llu mapChanged %llu "
                 "unwatchedDropped %llu fetchDropped %llu msrCpsr %llu writeMaps %llu writeProtects %llu cp15 %llu "
-                "cp15User %llu icacheLine %llu privSwitches %llu swi %llu\n",
+                "cp15User %llu icacheLine %llu privSwitches %llu swi %llu msrCpsrInterpret %llu\n",
                 (unsigned long long)codePages, (unsigned long long)unwatched, (unsigned long long)pagesWritten,
                 (unsigned long long)mapChecks, (unsigned long long)mapChanged, (unsigned long long)unwatchedDropped,
                 (unsigned long long)fetchDropped,
                 (unsigned long long)psr, (unsigned long long)writeMaps, (unsigned long long)writeProtects,
                 (unsigned long long)cp15, (unsigned long long)cp15User, (unsigned long long)icacheLine,
-                (unsigned long long)privSwitches, (unsigned long long)swi);
+                (unsigned long long)privSwitches, (unsigned long long)swi, (unsigned long long)psrInterpret);
         fprintf(stderr,
                 "jit: wmmx %llu ldc/stc %llu failed %llu cparWrites %llu cparChanges %llu interpret wmmx "
                 "cdp %llu mcr/mrc %llu mcrr/mrrc %llu ldc/stc %llu nv %llu\n",
@@ -822,7 +823,17 @@ struct Env final : public A32::UserCallbacks {
     void MemoryWrite32(A32::VAddr va, std::uint32_t v) override { Write(va, v); }
     void MemoryWrite64(A32::VAddr va, std::uint64_t v) override { Write(va, v); }
 
+    // An in-place MSR CPSR that couldn't run in place (psrInterpret set) has had its tick
+    // counted, so it's taken back for the interpreter's.
+    uint32_t psrInterpret = 0;
     void InterpreterFallback(A32::VAddr pc, size_t) override {
+        if (psrInterpret) {
+            psrInterpret = 0;
+            stats.psrInterpret++;
+            undoTick = true;
+            jit->HaltExecution(kInterpret);
+            return;
+        }
         if (stats.on) {
             uint32_t w = 0;
             cpuJitFetch(cpu, pc & ~3u, &w);
@@ -865,7 +876,8 @@ struct Env final : public A32::UserCallbacks {
         jit->HaltExecution(kInterpret);
     }
 
-    // MSR CPSR with more than the flags. The fork ends the block after this call, so the
+    // MSR CPSR with more than the flags, but not one psr_inline_interrupt_mask runs in place
+    // (only I and F changed, nothing waiting). The fork ends the block after this call, so the
     // banked registers and CPSR can change under it. A set slow path (an unmasked pending
     // interrupt, a Thumb switch) ends the run there, and so does a privilege change, with
     // nothing run or checked at the new privilege in this JIT.
@@ -1076,7 +1088,9 @@ struct PsrCoprocessor final : public A32::Coprocessor {
         return std::nullopt;
     }
     CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned opc, A32::CoprocReg, A32::CoprocReg, unsigned) override {
+        if (opc == 2) return cpuJitInterruptMaskWord(env->cpu);
         if (opc == 3) return cpuJitAccessPcSlot(env->cpu);
+        if (opc == 5) return &env->psrInterpret;
         return std::monostate{};
     }
     // opc 0: MSR CPSR, opc 1: MSR SPSR (written whole, mask ignored), opc 2: MOVS PC.
@@ -1085,7 +1099,11 @@ struct PsrCoprocessor final : public A32::Coprocessor {
         if (opc == 2) return Callback{&Env::ExceptionReturn, env};
         return std::array<std::uint32_t *, 2>{cpuJitSpsr(env->cpu), &ignored};
     }
-    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, A32::CoprocReg, A32::CoprocReg, unsigned) override {
+    // opc1 0: MRS SPSR. 1 and 2: the waiting interrupts and the I and F bytes, for an
+    // in-place MSR CPSR (psr_inline_interrupt_mask).
+    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned opc, A32::CoprocReg, A32::CoprocReg, unsigned) override {
+        if (opc == 1) return cpuJitWaitingWord(env->cpu);
+        if (opc == 2) return cpuJitInterruptMaskWord(env->cpu);
         return cpuJitSpsr(env->cpu);
     }
     CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, A32::CoprocReg) override { return std::monostate{}; }
@@ -1328,6 +1346,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.code_cache_size = jitPrvCodeCache ? jitPrvCodeCache : privileged ? kCodeCache : kUserCodeCache;
     conf.coprocessors[kPsrCoprocessor] = std::make_shared<PsrCoprocessor>(&e);
     conf.psr_coprocessor = kPsrCoprocessor;
+    // An MSR CPSR that only masks or unmasks interrupts, with none waiting, runs in place.
+    // User mode can't write the control byte, so its MSRs all take the callback.
+    conf.psr_inline_interrupt_mask = privileged;
     conf.coprocessors[15] = std::make_shared<Cp15Coprocessor>(&e);
     l->wmmx[0] = std::make_shared<WmmxCoprocessor>(&e, false);
     l->wmmx[1] = std::make_shared<WmmxCoprocessor>(&e, true);

@@ -144,6 +144,11 @@ uint32_t *cpuJitSpsr(ArmCpu *cpu);
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu);
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc);
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
+// For the fork's in-place MSR CPSR (psr_inline_interrupt_mask): the waiting IRQ and FIQ
+// counts as one word, 0 when none is waiting, and the word whose bytes 2 and 3 are the
+// CPU's I and F (generated code writes them so cpuIrq sees the masks mid-run).
+uint32_t *cpuJitWaitingWord(ArmCpu *cpu);
+uint32_t *cpuJitInterruptMaskWord(ArmCpu *cpu);
 // MOVS PC or SUBS PC: CPSR = SPSR in any mode and PC = target, as in the interpreter.
 uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target);
 bool cpuJitPrivileged(ArmCpu *cpu);

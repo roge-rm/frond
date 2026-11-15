@@ -166,6 +166,31 @@ bool TranslatorVisitor::frond_PSR(u32 instruction, bool& should_continue) {
     }
     const IR::U32 value = imm ? ir.Imm32(mcl::bit::rotate_right<u32>(instruction & 0xFF, static_cast<int>((instruction >> 8) & 0xF) * 2))
                               : ir.GetRegister(static_cast<Reg>(instruction & 0xF));
+    if (!spsr && options.psr_inline_interrupt_mask && (mask & 1)) {
+        // In place when the control byte changes only in I and F and no interrupt is
+        // waiting: bad is 0 then, and keep is all ones otherwise, so the write and the host's
+        // I and F bytes are left as they were for the interpreter.
+        const u32 fields = 0xFFu | ((mask & 8) ? 0xF8000000u : 0u);
+        const IR::U32 old_cpsr = ir.GetCpsr();
+        const IR::U32 changed = ir.Eor(old_cpsr, value);
+        const IR::U32 waiting = ir.CoprocGetOneWord(coproc, false, 1, CoprocReg::C0, CoprocReg::C0, 0);
+        const IR::U32 bad = ir.Or(ir.And(changed, ir.Imm32(0x3F)), waiting);
+        const IR::U32 keep = ir.ArithmeticShiftRight(ir.Or(bad, ir.Sub(ir.Imm32(0), bad)), ir.Imm8(31));
+        const IR::U32 take = ir.AndNot(ir.And(changed, ir.Imm32(fields)), keep);
+        const IR::U32 cpsr = ir.Eor(old_cpsr, take);
+        ir.SetCpsr(cpsr);
+        const IR::U32 word = ir.CoprocGetOneWord(coproc, false, 2, CoprocReg::C0, CoprocReg::C0, 0);
+        const IR::U32 if_bytes = ir.Or(ir.LogicalShiftLeft(ir.And(cpsr, ir.Imm32(0x80)), ir.Imm8(9)),
+                                       ir.LogicalShiftLeft(ir.And(cpsr, ir.Imm32(0x40)), ir.Imm8(18)));
+        const IR::U32 bytes_take = ir.AndNot(ir.And(ir.Eor(word, if_bytes), ir.Imm32(0xFFFF0000)), keep);
+        ir.CoprocSendOneWord(coproc, false, 2, CoprocReg::C0, CoprocReg::C0, 0, ir.Eor(word, bytes_take));
+        ir.CoprocSendOneWord(coproc, false, 5, CoprocReg::C0, CoprocReg::C0, 0, ir.And(keep, ir.Imm32(1)));
+        ir.SetCheckBit(ir.IsZero(bad));
+        ir.SetTerm(IR::Term::CheckBit{IR::Term::LinkBlock{ir.current_location.AdvancePC(4)},
+                                      IR::Term::Interpret{ir.current_location}});
+        should_continue = false;
+        return true;
+    }
     ir.CoprocSendTwoWords(coproc, false, spsr ? 1 : 0, CoprocReg::C0, value, ir.Imm32(mask));
     if (!spsr) {
         ir.SetTerm(IR::Term::LinkBlock{ir.current_location.AdvancePC(4)});
