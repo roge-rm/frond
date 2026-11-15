@@ -141,10 +141,28 @@ class Imx1Cs5Configuration {
         }
         return true;
     }
+    // ticksAfter with rates prepared for the fraction's denominator (Imx1GraphicsRate): the same ticks in a few
+    // multiplications and at most one division. False where ticksAfter has to decide (a period that doesn't divide
+    // the denominator or an overflow on the way).
+    bool ticksAfterQuick(uint64_t cycles, Imx1PllRatio cpu, uint64_t busClocks, Imx1PllRatio bus, Imx1GraphicsRate& cpuRate,
+                         Imx1GraphicsRate& busRate, uint64_t& ticks) const {
+        if (!clocks.programmed() ||
+            !cpuRate.ready(timeFraction, uint64_t(cpu.numerator) * 390625, uint64_t(cpu.denominator) * 64) ||
+            !busRate.ready(timeFraction, uint64_t(bus.numerator) * 390625, uint64_t(bus.denominator) * 64))
+            return false;
+        uint64_t cpuTicks, cpuRest, busTicks, busRest, rest;
+        if (!cpuRate.split(cycles, cpuTicks, cpuRest) || !busRate.split(busClocks, busTicks, busRest) ||
+            __builtin_add_overflow(cpuRest, busRest, &rest) || __builtin_add_overflow(rest, timeFraction.phase, &rest) ||
+            __builtin_add_overflow(cpuTicks, busTicks, &ticks))
+            return false;
+        return !__builtin_add_overflow(ticks, rest < timeFraction.denominator ? 0 : cpuRate.quotient(rest), &ticks);
+    }
     // A register read that changes nothing, as access answers it after ticks more of graphics time with no
     // change due: the scan status (54c), the acquisition registers but the FIFO and the engine's ring pointer
     // polls. False for anything else and wherever access would refuse it.
-    bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value) const {
+    // scanRate (when given) keeps the display's pixel rate prepared (Imx1GraphicsDisplay::scanStatusAfter).
+    bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value,
+                           Imx1GraphicsRate* scanRate = nullptr) const {
         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address)) return false;
         if (address == 0x16010000 && pc == 0x200871dc) return quietIdentityRead(eim, value);
         if (Imx1GraphicsAcquisition::owns(address))
@@ -156,18 +174,19 @@ class Imx1Cs5Configuration {
             return false;
         const bool scanStatus = (pc == 0x200adb08 || pc == 0x200adb14) && !engine.completed();
         if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return false;
-        return display.scanStatusAfter(pc, ticks, value);
+        return display.scanStatusAfter(pc, ticks, value, nullptr, scanRate);
     }
     // The scan status read by the vertical wait (200adb08 or 200adb14) as quietRegisterRead answers it after ticks
     // more, with the display's region (Imx1GraphicsDisplay::scanStatusAfter), which only grows with ticks.
-    bool quietScanStatus(const Imx1Eim& eim, uint32_t pc, uint64_t ticks, uint32_t& value, unsigned& region) const {
+    bool quietScanStatus(const Imx1Eim& eim, uint32_t pc, uint64_t ticks, uint32_t& value, unsigned& region,
+                         Imx1GraphicsRate* scanRate = nullptr) const {
         constexpr uint32_t address = 0x1601054c;
         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address) ||
             Imx1GraphicsAcquisition::owns(address) || Imx1GraphicsEngine::owns(address) ||
             Imx1GraphicsInterrupts::owns(address) || Imx1GraphicsClocks::owns(address) ||
             (pc != 0x200adb08 && pc != 0x200adb14) || engine.completed() || !memoryReady(eim))
             return false;
-        return display.scanStatusAfter(pc, ticks, value, &region);
+        return display.scanStatusAfter(pc, ticks, value, &region, scanRate);
     }
     // The identity read in the register read helper (200871dc) as access answers it, changing nothing. No other
     // model owns 0x16010000, so access reaches its identity case.

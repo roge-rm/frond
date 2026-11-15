@@ -211,10 +211,10 @@ struct Probe {
         }
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
-    // graphicsGpu, graphicsDma and graphicsUndo, left out of the saved layout's size, and mmcsdCardId, saved in a
-    // section of its own.
+    // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
+    // mmcsdCardId, saved in a section of its own.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
-                                           sizeof(Imx1GraphicsCommands::Undo);
+                                           sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -657,6 +657,8 @@ struct Probe {
     // The GPIO side of a CS5 register read: the acquisition source the port B pins select and the settled A13
     // drive. Neither the pins nor the graphics state change in a run except through a board write, which clears
     // leanCs5, so the first read of a run works them out for the rest.
+    // The graphics time and pixel rates of lean CS5 register reads (Imx1GraphicsRate), kept across reads, not saved.
+    Imx1GraphicsRate leanCpuRate, leanBusRate, leanScanRate;
     __attribute__((noinline)) bool leanRegisterReady() {
         if (leanCs5.registerChecked) return leanCs5.registerUsable;
         leanCs5.registerChecked = true;
@@ -690,11 +692,13 @@ struct Probe {
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady())
             return false;
         uint64_t ticks = 0;
-        if (!cs5Configuration.ticksAfter(deferredCycles + ran, peripherals.cpuReferencePeriod(quietMode),
-                                         deferredHclk + leanCs5.waitClocks + leanCs5.clocks, peripherals.busReferencePeriod(),
-                                         ticks) ||
-            !cs5Configuration.quietRegisterRead(peripherals.eimState(), pc, pa, ticks, value))
+        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        const auto busPeriod = peripherals.busReferencePeriod();
+        const uint64_t cycles = deferredCycles + ran, clocks = deferredHclk + leanCs5.waitClocks + leanCs5.clocks;
+        if (!cs5Configuration.ticksAfterQuick(cycles, cpuPeriod, clocks, busPeriod, leanCpuRate, leanBusRate, ticks) &&
+            !cs5Configuration.ticksAfter(cycles, cpuPeriod, clocks, busPeriod, ticks))
             return false;
+        if (!cs5Configuration.quietRegisterRead(peripherals.eimState(), pc, pa, ticks, value, &leanScanRate)) return false;
         leanCs5.waitClocks += leanCs5.clocks;
         leanCs5.waitCost += leanCs5.cost;
         ++leanCs5Reads;
@@ -905,9 +909,10 @@ struct Probe {
             uint64_t ticks;
             uint32_t value;
             unsigned at;
-            if (!cs5Configuration.ticksAfter(deferredCycles + 3 * i, cpuPeriod, deferredHclk + (i + 1) * clocks, busPeriod,
-                                             ticks) ||
-                !cs5Configuration.quietScanStatus(peripherals.eimState(), pc, ticks, value, at))
+            const uint64_t cycles = deferredCycles + 3 * i, hclk = deferredHclk + (i + 1) * clocks;
+            if ((!cs5Configuration.ticksAfterQuick(cycles, cpuPeriod, hclk, busPeriod, leanCpuRate, leanBusRate, ticks) &&
+                 !cs5Configuration.ticksAfter(cycles, cpuPeriod, hclk, busPeriod, ticks)) ||
+                !cs5Configuration.quietScanStatus(peripherals.eimState(), pc, ticks, value, at, &leanScanRate))
                 return false;
             if (region) { *region = at; return value == want; }
             return at == first;

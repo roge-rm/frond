@@ -158,21 +158,32 @@ class Imx1GraphicsDisplay {
     // The scan status (54c) as access reads it after ticks more, for ticks within idleQuietTicks (no clock change,
     // latch or frame boundary on the way). False where access refuses the read.
     // region (when given) is 0 before the status rows, 1 in them and 2 after them; it only grows with ticks.
-    bool scanStatusAfter(uint32_t pc, uint64_t ticks, uint32_t& value, unsigned* region = nullptr) const {
+    // rate (when given) keeps the pixel rate prepared for pixelFraction, which gives the same at in fewer divisions.
+    bool scanStatusAfter(uint32_t pc, uint64_t ticks, uint32_t& value, unsigned* region = nullptr,
+                         Imx1GraphicsRate* rate = nullptr) const {
         if (pc != 0x200ad7b0 && pc != 0x200adb08 && pc != 0x200adb14) return false;
         uint64_t at = phase;
         if (enabled && framePeriod) {
-            if (rateNumerator && ticks > UINT64_MAX / rateNumerator) return false;
-            auto fraction = pixelFraction;
-            if (!fraction.supports(rateDenominator)) return false;
-            at += fraction.add(ticks * rateNumerator, rateDenominator);
+            uint64_t units, whole, rest;
+            if (__builtin_mul_overflow(ticks, rateNumerator, &units)) return false;
+            if (rate && rate->ready(pixelFraction, rateNumerator, rateDenominator) && rate->split(ticks, whole, rest) &&
+                !__builtin_add_overflow(rest, pixelFraction.phase, &rest)) {
+                at += whole + (rest < pixelFraction.denominator ? 0 : rate->quotient(rest));
+            } else {
+                auto fraction = pixelFraction;
+                if (!fraction.supports(rateDenominator)) return false;
+                at += fraction.add(units, rateDenominator);
+            }
             if (at >= framePeriod) return false;
         }
         const uint32_t total = activeWord(0x420) & 0x7ff;
         const uint32_t vertical = activeWord(0x428);
-        const uint64_t row = enabled && total ? at / (uint64_t(total) * pixelCycles) : 0;
-        value = enabled && row >= (vertical & 0x3ff) && row < (vertical >> 16) ? 0x400 : 0;
-        if (region) *region = !enabled || row < (vertical & 0x3ff) ? 0 : row < (vertical >> 16) ? 1 : 2;
+        // The row (at / line, 0 with no line total) against the status rows, multiplied out: under 2^32, no overflow.
+        const uint64_t line = uint64_t(total) * pixelCycles, top = vertical & 0x3ff, bottom = vertical >> 16;
+        const bool inTop = enabled && total ? at >= top * line : top == 0;
+        const bool inBottom = enabled && total ? at >= bottom * line : bottom == 0;
+        value = enabled && inTop && !inBottom ? 0x400 : 0;
+        if (region) *region = !enabled || !inTop ? 0 : !inBottom ? 1 : 2;
         return true;
     }
     Imx1BootstrapAccess access(const Imx1GraphicsWindows& windows, uint32_t pc, uint32_t address,

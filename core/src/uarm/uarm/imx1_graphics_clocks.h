@@ -19,10 +19,21 @@ struct Imx1GraphicsFraction {
     }
     uint64_t add(uint64_t n, uint64_t d) {
         assert(supports(d));
+        if (d == denominator) {
+            const uint64_t whole = n / d;
+            const auto fraction = phase + n % d;
+            const bool carry = fraction >= d;
+            phase = carry ? fraction - d : fraction;
+            return whole + carry;
+        }
         if (denominator % d == 0) {
-            const auto fraction = phase + (n % d) * (denominator / d);
-            phase = fraction % denominator;
-            return n / d + fraction / denominator;
+            // phase < denominator and (n % d) * (denominator / d) <= denominator - denominator / d, so the sum is
+            // under twice the denominator (which supports keeps under 2^63): one subtraction stands for / and %.
+            const uint64_t whole = n / d;
+            auto fraction = phase + (n % d) * (denominator / d);
+            const bool carry = fraction >= denominator;
+            phase = carry ? fraction - denominator : fraction;
+            return whole + carry;
         }
         const auto common = denominator * (d / imx1Gcd(d, denominator));
         const auto fraction = phase * (common / denominator) + (n % d) * (common / d);
@@ -41,6 +52,42 @@ struct Imx1GraphicsFraction {
     }
     template <class A> void state(A& a) {
         a.Do64(phase).Do64(denominator).Require(denominator && phase < denominator, "graphics fraction");
+    }
+};
+
+// add(units * scale, d) for any units on a fraction whose denominator d divides, worked out ahead: each unit
+// gives whole ticks and rest over the denominator, so a sum of parts needs one division, by multiplication with
+// the denominator's reciprocal (quotient). Prepared again when the denominator, scale or d changes; the phase is
+// read live. usable is false where d doesn't divide.
+struct Imx1GraphicsRate {
+    uint64_t denominator = 0, scale = 0, d = 0, whole = 0, rest = 0, reciprocal = 0;  // floor(2^64 / denominator)
+    bool usable = false;
+    // x / denominator: the reciprocal's estimate is at most one short.
+    uint64_t quotient(uint64_t x) const {
+        if (denominator == 1) return x;
+        uint64_t q = uint64_t((unsigned __int128)x * reciprocal >> 64);
+        while (x - q * denominator >= denominator) ++q;
+        return q;
+    }
+    bool ready(const Imx1GraphicsFraction& f, uint64_t s, uint64_t divisor) {
+        if (f.denominator != denominator || s != scale || divisor != d) {
+            denominator = f.denominator;
+            scale = s;
+            d = divisor;
+            usable = divisor && f.denominator % divisor == 0 && f.denominator <= std::numeric_limits<uint64_t>::max() / 2;
+            if (usable) {
+                whole = s / divisor;
+                rest = (s % divisor) * (f.denominator / divisor);  // under the denominator
+                reciprocal = f.denominator > 1 ? uint64_t(((unsigned __int128)1 << 64) / f.denominator) : 0;
+            }
+        }
+        return usable;
+    }
+    // units' whole ticks and remainder; false where units * scale or either part overflows (addWhole's limit).
+    bool split(uint64_t units, uint64_t& ticks, uint64_t& remainder) const {
+        uint64_t product;
+        return !__builtin_mul_overflow(units, scale, &product) && !__builtin_mul_overflow(units, whole, &ticks) &&
+               !__builtin_mul_overflow(units, rest, &remainder);
     }
 };
 
