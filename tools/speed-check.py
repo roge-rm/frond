@@ -11,6 +11,8 @@ session isn't given is skipped.
   SPEED_MIPS                        MIPS cap, default 100
   SPEED_BENCH                       another benchmark-replay binary (default: the clean-tree commit build
                                     from tools/commit-build.sh when it exists, else build/benchmark-replay)
+  SPEED_68K                         another frond-68k binary for the 68k recipes (default: the one next to
+                                    the benchmark-replay in use, else out/frond-68k)
   SPEED_HOST                        an ssh destination (user@host) to run on instead of here, in ~/frond-speed/
   SPEED_SSH_KEY                     optional ssh key for SPEED_HOST
   SPEED_REAL_MS                     optional FrondBench times from a real device, like Integer=1000,Memory=500,
@@ -271,6 +273,8 @@ def recipe_input(r):
         if not value:
             return None, f"set {r['session']}"
         path = Path(value)
+    if r.get('runner') == 'frond-68k' and not CORE_68K.exists():
+        return None, f'{CORE_68K} is missing (set SPEED_68K or use a tools/commit-build.sh folder)'
     if 'nand' in r and not images_path(r['nand']).exists():
         return None, f"{images_path(r['nand'])} is missing"
     if 'card' in r:
@@ -296,7 +300,10 @@ class Lock:
             self.file.close()
 
 
-CORE_68K = COMMIT_BUILD / 'frond-68k' if COMMIT_BUILD else ROOT / 'out/frond-68k'
+# SPEED_68K, else the frond-68k next to the benchmark-replay in use (commit-build folders hold
+# both, so a copied folder brings it along), else the checkout's out/frond-68k.
+CORE_68K = Path(os.environ.get('SPEED_68K') or (BENCH.parent / 'frond-68k' if (BENCH.parent / 'frond-68k').exists()
+                else ROOT / 'out/frond-68k')).absolute()
 
 
 def run_68k(r, path, out, exclusive):
