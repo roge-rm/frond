@@ -6,6 +6,7 @@
 #include "cpu_diagnostics.h"
 #ifdef FROND_DYNARMIC
 #include "jit_dynarmic.h"
+#include "idle_loops.h"
 #endif
 
 #include <cstdio>
@@ -230,6 +231,8 @@ struct ArmCpu {
     struct PacePatch *pacePatch;
     uint32_t paceOffset;
     bool modePace;
+    // Idle loop heads cpuJitPlain left to the interpreter (Fast idle skip), 0 for none.
+    uint32_t idleHeads[2];
     bool sleeping;
     bool arm920WaitEnabled, arm920Waiting;
 
@@ -5753,7 +5756,128 @@ static int cpuPrvJitSyscallPlain(ArmCpu *cpu, uint32_t pc, uint32_t i) {
     return !cpuPrvJitLdrWord(other, 9, 12);
 }
 
+// Fast idle skip (idle_loops.h). FROND_IDLE_SKIP=0 turns it off, for measuring.
+static bool cpuPrvIdleSkipOn = [] {
+    const char *v = getenv("FROND_IDLE_SKIP");
+    return !(v && *v && !strcmp(v, "0"));
+}();
+static uint64_t cpuPrvIdleSkips = 0, cpuPrvIdleSkipCycles = 0;
+
+void cpuSetIdleSkip(bool on) { cpuPrvIdleSkipOn = on; }
+void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles) {
+    *skips = cpuPrvIdleSkips;
+    *cycles = cpuPrvIdleSkipCycles;
+}
+
+static bool cpuPrvIdleWordsAt(ArmCpu *cpu, uint32_t va, const uint32_t *words, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t w;
+        if (!cpuJitFetch(cpu, va + 4 * i, &w) || w != words[i]) return false;
+    }
+    return true;
+}
+
+// The idle loop whose head is at pc (word is its first instruction), or null. PXA Fast only.
+static const IdleLoop *cpuPrvIdleLoopAt(ArmCpu *cpu, uint32_t pc, uint32_t word) {
+    if (!cpuPrvIdleSkipOn || cpu->model == ArmCpuModel::arm920t || !cpu->jit || (pc & 3)) return nullptr;
+    for (const IdleLoop &l : kIdleLoops) {
+        if (word != l.words[0]) continue;
+        if (cpuPrvIdleWordsAt(cpu, pc, l.words, l.count) &&
+            cpuPrvIdleWordsAt(cpu, pc + uint32_t(l.window), kIdleWindowWords, kIdleWindowCount))
+            return &l;
+    }
+    return nullptr;
+}
+
+// At an idle loop's head (cpuJitPlain leaves it to the interpreter, so a run stops there),
+// after a pass (LR is the window's return) and with no IRQ to take in the window and no
+// unmasked FIQ, all but the last of the passes that fit in left pass at once. In a Fast run
+// OSCR stands still (cyclesInProgress moves only between runs), so both reads of a pass give
+// the same value and every pass leaves the same state: the counter as it is, the window's
+// stores done again and the registers set below. The last pass runs as usual and the run ends
+// partway through it, as it would without the skip, and cpuPrvCycleJit shows peripherals the
+// time at the start of the run that reached the head until then, so the passes read the OSCR
+// that one run without the skip would. When the end falls between a pass's two OSCR reads the
+// counter takes the whole run's time, which is how it reaches the 50 ms threshold.
+// A pass past the threshold calls the clock routine, so those aren't skipped. Returns the
+// cycles passed, 0 if none.
+static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
+    uint32_t *r = cpu->regs;
+    const uint32_t pc = r[REG_NO_PC];
+    if ((pc != cpu->idleHeads[0] && pc != cpu->idleHeads[1]) || !pc || !cpuPrvIdleSkipOn || cpu->T || !left ||
+        cpu->waitingIrqs || (cpu->waitingFiqs && !cpu->F) || cpu->nativeCallDepth || cpu->modePace)
+        return 0;
+    uint32_t word;
+    if (!cpuJitFetch(cpu, pc, &word)) return 0;
+    const IdleLoop *l = cpuPrvIdleLoopAt(cpu, pc, word);
+    if (!l || r[REG_NO_LR] != pc + l->windowReturn) return 0;
+    const uint32_t p = l->pass;
+    const uint32_t passes = (left - 1) / p;
+    if (!passes) return 0;
+    uint_fast8_t fsr;
+    auto read = [&](uint32_t va, uint32_t &v) { return cpuJitRead(cpu, va, 4, &v, &fsr); };
+    const bool zire = l->kind == IdleLoopKind::zire72;
+    // Globals pointer, idle counter address and value, timer base.
+    uint32_t globals, counterVa, counter, timer;
+    if (zire) {
+        counterVa = r[8];
+        timer = r[4];
+        if (!read(r[5], globals)) return 0;
+    } else {
+        counterVa = r[5];
+        timer = r[7];
+        if (!read(r[8] + 20, globals)) return 0;
+    }
+    uint32_t wake, oscr, iccr;
+    uint8_t byte;
+    const uint32_t byteVa = globals + kIdleWindowByte;
+    if (!read(counterVa, counter) || !read(globals + kIdleWakeWord, wake) || wake ||
+        !cpuJitRead(cpu, byteVa, 1, &byte, &fsr) || !read(pc + uint32_t(l->window) + kIdleWindowLiteral, iccr))
+        return 0;
+    // A pass that goes straight to the body, as every pass will.
+    if (zire) {
+        const uint32_t c = r[0];
+        if (c != counter || (!(r[7] > c && r[6] != c) && !r[10])) return 0;
+    } else if (counter >= 162500 && !r[4]) {
+        return 0;
+    }
+    // Both OSCR reads of each pass.
+    if (!read(timer + 16, oscr)) return 0;
+    // The window's stores: ICCR, then SPSR and LR pushed below SP; the byte with bit 0 clear.
+    const uint32_t one = 1, sp = r[REG_NO_SP], ret = pc + l->windowReturn, spsr = cpu->SPSR;
+    const uint8_t cleared = byte & ~1u;
+    if (!cpuJitWrite(cpu, iccr, 4, &one, &fsr) || cpu->waitingIrqs || (cpu->waitingFiqs && !cpu->F) ||
+        !cpuJitWrite(cpu, sp - 8, 4, &spsr, &fsr) || !cpuJitWrite(cpu, sp - 4, 4, &ret, &fsr) ||
+        !cpuJitWrite(cpu, byteVa, 1, &cleared, &fsr))
+        return 0;
+    if (zire) {
+        r[0] = counter;
+        r[1] = wake;
+        r[2] = globals;
+        r[11] = oscr;
+    } else {
+        r[0] = wake;
+        r[1] = counter;
+        r[2] = spsr;
+        r[6] = oscr;
+        r[12] = counter - 0x27800 - (counter >= 0x27800 ? 0x2c4 : 0);
+    }
+    // The pass ends with a compare with 0: Z and C set.
+    cpu->flags = ARM_SR_Z | ARM_SR_C;
+    cpuPrvIdleSkips++;
+    cpuPrvIdleSkipCycles += uint64_t(passes) * p;
+    return passes * p;
+}
+
 bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+    // An idle loop's head ends a run, for cpuPrvIdleSkip.
+    if (!thumb && (word == kIdleLoopZire72[0] || word == kIdleLoopTx[0]) && cpuPrvIdleLoopAt(cpu, pc, word)) {
+        if (pc != cpu->idleHeads[0] && pc != cpu->idleHeads[1]) {
+            cpu->idleHeads[1] = cpu->idleHeads[0];
+            cpu->idleHeads[0] = pc;
+        }
+        return false;
+    }
     if (cpu->model == ArmCpuModel::arm920t) {
         // Fast blocks: MRC and MCR p15, 0, Rd, c3, c0, 0 (the domain access control register) run in the JIT's
         // p15 slot, which does what the ARM920T's coprocessor 15 does for them. So do the slot's other words
@@ -5911,6 +6035,10 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t acc = 0;
     CycleProgress progress(cpu, &acc);
     static bool faultReported = false;
+    // An idle skip and the run after it show peripherals the time at the start of the run
+    // that reached the loop's head, as one run without the skip would (see cpuPrvIdleSkip).
+    uint32_t held = 0;
+    bool holding = false;
 
     while (acc < cycles) {
         if (armKindIsArm920(memorySystemKind) && icacheArm920ContinuationPending(cpu->ic)) {
@@ -5920,10 +6048,25 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
         }
         uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
         int stop;
+        const uint32_t runStart = acc;
         acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
         cpu->flags = cpsr & 0xf0000000UL;
         cpu->Q = !!(cpsr & ARM_SR_Q);
         cpu->T = !!(cpsr & ARM_SR_T);
+        // An idle loop's head: all but its last pass in the budget go at once, then the head
+        // goes to the interpreter below as usual.
+        if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles &&
+            (cpu->regs[REG_NO_PC] == cpu->idleHeads[0] || cpu->regs[REG_NO_PC] == cpu->idleHeads[1])) {
+            if (!holding) held = runStart;
+            cpu->cyclesInProgress = &held;
+            if (const uint32_t skipped = cpuPrvIdleSkip(cpu, cycles - acc)) {
+                acc += skipped;
+                holding = true;
+            }
+        } else if (holding) {
+            holding = false;
+        }
+        if (!holding) cpu->cyclesInProgress = &acc;
         if (stop == FROND_JIT_FAULT && !faultReported) {
             faultReported = true;
             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
@@ -6038,6 +6181,8 @@ uint64_t cpuJitExceptionReturns() { return 0; }
 uint64_t cpuJitDomainCalls() { return 0; }
 uint64_t cpuJitCpsrWrites() { return 0; }
 uint64_t cpuJitCpsrInterprets() { return 0; }
+void cpuSetIdleSkip(bool) {}
+void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; }
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
