@@ -348,6 +348,13 @@ bool cpuArm920JitOn(const ArmCpu*);
 void cpuArm920DropJit(ArmCpu*);
 // Most instructions a JIT run can pass its budget by, plus one.
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu*);
+// Fast blocks, from a lean write hook: the pc of the marked access-pc instruction making the access (0 if none).
+uint32_t cpuArm920TakeJitAccessPc(ArmCpu*);
+// Fast blocks, from an access hook: the board charged cycles of the run (the hook's ran) before the access, and
+// span is the quiet span from there. Later hooks get ran and left from that point. cpuArm920JitCharged is the
+// run's total, for its end.
+void cpuArm920JitCharge(ArmCpu*, uint32_t cycles, uint32_t span);
+uint32_t cpuArm920JitCharged(const ArmCpu*);
 // Runs about budget instructions in translated code and returns how many ran, at most budget - 1 +
 // cpuArm920JitMaxUnchecked. stop gets arm920JitBudget when the budget ran out (or translated code was
 // dropped), arm920JitExit when the CPU is left at an instruction or access the JIT can't take (MMIO, CS5,

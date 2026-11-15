@@ -279,6 +279,8 @@ struct ArmCpu {
     // Fast blocks: the pc of the last access-pc instruction generated code ran (cpuArm920SetJitAccessPcs), taken by
     // the lean read callback for the access it makes, then cleared.
     uint32_t jitAccessPc;
+    // Fast blocks: cycles of this run the board has charged already (cpuArm920JitCharge), taken off the hooks' ran.
+    uint32_t jitCharged;
     const uint32_t *jitAccessPcs;
     uint32_t jitAccessPcCount;
     // Most instructions this lean run may retire (cpuArm920RunLeanFor), and whether the JIT's callbacks are
@@ -1043,6 +1045,14 @@ static bool cpuPrvArm920CodePage(const ArmCpu *cpu, uint32_t pa) {
     return cpu->leanCode && cpu->leanCode->page(pa);
 }
 
+#ifdef FROND_DYNARMIC
+// The cycles of the blocks this JIT run has finished that the board hasn't charged yet.
+static uint32_t cpuPrvJitRanUncharged(const ArmCpu *cpu) {
+    const uint32_t ran = jitRanNow(cpu->jit);
+    return ran > cpu->jitCharged ? ran - cpu->jitCharged : 0;
+}
+#endif
+
 template <int size, bool write>
 static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, void *buf, uint32_t va,
                                                          bool privileged) {
@@ -1067,7 +1077,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
             // step is taken again by the step, which changes nothing for the reads and writes these callbacks answer.
             uint32_t ran = cpu->leanDone;
 #ifdef FROND_DYNARMIC
-            if (cpu->leanJit) ran = jitRanNow(cpu->jit);
+            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu);
 #endif
             const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
             if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
@@ -1086,7 +1096,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
             // ran as for reads: in Fast blocks the cycles of the blocks the run has finished.
             uint32_t ran = cpu->leanDone;
 #ifdef FROND_DYNARMIC
-            if (cpu->leanJit) ran = jitRanNow(cpu->jit);
+            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu);
 #endif
             const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
             if (cpu->leanWrite(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, value, ran, left, &cost)) {
@@ -5293,6 +5303,15 @@ uint32_t cpuArm920LeanGeneration(const ArmCpu *cpu) { return cpu->mem->hostTlb.g
 
 uint64_t cpuArm920LeanCodeDrops(const ArmCpu *cpu) { return cpu->leanCodeDrops; }
 
+uint32_t cpuArm920TakeJitAccessPc(ArmCpu *cpu) { return std::exchange(cpu->jitAccessPc, 0); }
+
+void cpuArm920JitCharge(ArmCpu *cpu, uint32_t cycles, uint32_t span) {
+    cpu->jitCharged += cycles;
+    cpu->leanBudget = span;
+}
+
+uint32_t cpuArm920JitCharged(const ArmCpu *cpu) { return cpu->jitCharged; }
+
 void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
     cpu->jitAccessPcs = pcs;
     cpu->jitAccessPcCount = count;
@@ -5312,6 +5331,9 @@ bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
 }
 #else
 void cpuArm920SetJitAccessPcs(ArmCpu *, const uint32_t *, uint32_t) {}
+uint32_t cpuArm920TakeJitAccessPc(ArmCpu *) { return 0; }
+void cpuArm920JitCharge(ArmCpu *, uint32_t, uint32_t) {}
+uint32_t cpuArm920JitCharged(const ArmCpu *) { return 0; }
 bool cpuArm920PeekWord(ArmCpu *, uint32_t, uint32_t *, uint32_t *) { return false; }
 uint32_t cpuArm920RunLean(ArmCpu *, uint32_t, uint32_t *blNext, uint64_t *busAccesses) {
     *blNext = ~0u;
@@ -6162,6 +6184,7 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span)
     // In a JIT run leanBudget only gives the access hooks their left.
     cpu->leanBudget = span ? span : budget;
     cpu->jitAccessPc = 0;
+    cpu->jitCharged = 0;
     uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
     int jitStop;
     const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);

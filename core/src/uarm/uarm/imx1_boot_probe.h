@@ -221,6 +221,8 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*);
 uint64_t imx1MachineJitReads(const Imx1Machine*);
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*);
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*);
+// Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
+uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);
 // Of those, the ones at the start of a run a delay loop's timer read ended (the ROM's loops at 2009f678 and 2008492c).
 uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*);

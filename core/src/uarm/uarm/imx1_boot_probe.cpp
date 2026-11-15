@@ -66,6 +66,7 @@ static bool delayLoopPc(uint32_t pc) { return pc == 0x2009f678 || pc == 0x200849
 uint32_t jitBudget = 0;
 uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0, delaySkipCycles = 0, delayHaltSkips = 0;  // for tests
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
+uint64_t jitChargedWrites = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
 // The shortest timer count, in CPU cycles, for which skipFifoWait passes FIFO wait rounds. A round's work in the
 // JIT, its 50-odd instructions and the pointer read with its CS5 wait clocks, ends about 55 cycles into a count in
@@ -721,6 +722,13 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
+        // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
+        if (pa == 0x16010220 && inJit) {
+            const uint32_t pc = cpuArm920TakeJitAccessPc(p.cpu);
+            return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4) && p.graphicsMemory &&
+                   p.cs5Configuration.virtualProfile() && !p.options.cs5ConfigurationObserver &&
+                   p.jitChargedWrite(pa, 4, value, ran, pc);
+        }
         if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
             return false;
@@ -743,6 +751,39 @@ struct Probe {
         if ((pa & ~0x3ffu) == 0x0021c000) return offset == 0x30 || offset == 0x34;
         if ((pa & ~0xffu) == 0x00223000) return offset == 0x04 || offset == 0x08 || offset == 0x0c;
         return pa == 0x00202014 || pa == 0x00203014 || pa == 0x00201004 || pa == 0x00209004;
+    }
+    // A write from generated code that needs the board at its own time: the cycles before the run and the run's
+    // finished blocks (ran) are charged first, then access takes it as the step does with pc as the instruction's.
+    // The block the write is in is charged at the run's end, so the write lands up to one block early. The quiet
+    // span is worked out again, and the run stops at its next block if the span now ends before its budget.
+    __attribute__((noinline)) bool jitChargedWrite(uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t pc) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver) return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        auto& t = result.trace;
+        const auto saved = t;
+        t.pc = pc;
+        t.cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        graphicsSampledPin = 32;
+        graphicsSampleOffset = 0;
+        uint32_t datum = value;
+        const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
+        t = saved;
+        if (!ok) return false;
+        ++jitChargedWrites;
+        updateInterrupts();
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+        if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
+            jitHalt = true;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
+        return true;
     }
     // A board write from generated code, taken as the step takes it after charging the cycles before the run. The
     // run's own cycles are charged at its end, so the write lands up to one run early. The interrupt lines follow
@@ -1530,6 +1571,7 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     leanCs5Reads = 0;
     leanCs5MemoryReads = 0;
     leanBoardReads = 0;
+    jitChargedWrites = 0;
     deferredHclk = 0;
     // The core has process lifetime, as in the existing standalone CPU diagnostics.
     auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
@@ -1933,8 +1975,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     leanCs5 = {};
                     ++jitRuns;
                     if (ran) {
-                        deferredCycles += ran;
-                        quietCycles = ran < quietCycles ? quietCycles - ran : 0;
+                        // Cycles a charged write took already (jitChargedWrite) aren't deferred again.
+                        const uint32_t left = ran - std::min(ran, cpuArm920JitCharged(p->cpu));
+                        deferredCycles += left;
+                        quietCycles = left < quietCycles ? quietCycles - left : 0;
                         p->retired += ran;
                         jitRetired += ran;
                         p->work += ran;
@@ -2012,10 +2056,10 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
     // The register reads the graphics model answers by pc that Fast blocks take in generated code: the identity
     // read in the register read helper, the scan status reads and the engine's ring pointer polls. And the delay
-    // loops' timer reads (delayLoopPc).
+    // loops' timer reads (delayLoopPc), and the batch producers' ring pointer writes (jitChargedWrite).
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
                                              0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
-                                             0x2009f678, 0x2008492c};
+                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
@@ -2035,6 +2079,7 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*) { return jitRuns; }
 uint64_t imx1MachineJitReads(const Imx1Machine*) { return jitReads; }
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*) { return jitRegisterReads; }
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*) { return jitBoardWrites; }
+uint64_t imx1MachineJitChargedWrites(const Imx1Machine*) { return jitChargedWrites; }
 uint64_t imx1MachineDelaySkips(const Imx1Machine*) { return delaySkips; }
 uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*) { return delayHaltSkips; }
 uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*) { return delaySkipCycles; }

@@ -1258,6 +1258,31 @@ void jitRingPolls() {
     assert(r >= 300);
 }
 
+// Twelve fills submitted from the ROM's producer at 200a9ed4, each followed by a busy poll and a spin while the engine
+// runs, then a pixel read. Fast blocks take the ring pointer writes in generated code (9 or 10 of 12 here) and
+// end with Exact's registers, pixel included. The other producer (200aa504) refuses this batch in Exact too.
+void jitRingSubmits() {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    for (unsigned i = 0; i < 12; ++i) {
+        g.fill(1, 0xa9ed4);
+        g.busy();
+        g.spin(20000);
+    }
+    g.op(0, 0x16800000, false, 0);
+    g.end();
+    const uint64_t before = imx1MachineJitChargedWrites(nullptr);
+    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    print("jit ring submits exact", exact); print("jit ring submits blocks", fast);
+    const uint64_t w = imx1MachineJitChargedWrites(nullptr) - before;
+    std::printf("jit ring submits: %llu of 12 in generated code, pixel %08x\n", (unsigned long long)w,
+                exact.run.result.registers[6]);
+    std::fflush(stdout);
+    assert(exact.run.result.registers[6] == 0xffffffff);
+    sameResult(exact, fast);
+    assert(w >= 8);
+}
+
 // The ROM's timer delay loop (2009f678) waiting 120 counts of timer 1 at prescaler 256, 20 times. Fast blocks skip
 // the rest of each quiet span the wait covers, so fewer instructions run, and end the loop as Exact does in about
 // Exact's guest time. With stores, each wait comes right after graphics memory stores, whose wait clocks are still
@@ -2083,6 +2108,7 @@ void jitLong() {
     jitStoreTimer();
     jitBoardRegisters();
     jitRingPolls();
+    jitRingSubmits();
     jitSwiTimer();
     delayLoop();
     delayLoop(true);
