@@ -5791,12 +5791,16 @@ static const IdleLoop *cpuPrvIdleLoopAt(ArmCpu *cpu, uint32_t pc, uint32_t word)
 
 // At an idle loop's head (cpuJitPlain leaves it to the interpreter, so a run stops there),
 // after a pass (LR is the window's return) and with no IRQ to take in the window and no
-// unmasked FIQ, the passes that fit in left (plus the overshoot cpuMaxOvershootCycles allows)
-// pass at once. In a Fast run OSCR stands still (cyclesInProgress moves only between runs),
-// so both reads of a pass give the same value and every pass leaves the same state: the
-// counter as it is, the window's stores done again and the registers set below. A pass past
-// the 50 ms threshold calls the clock routine, so those aren't skipped. Returns the cycles
-// passed, 0 if none.
+// unmasked FIQ, all but the last of the passes that fit in left pass at once. In a Fast run
+// OSCR stands still (cyclesInProgress moves only between runs), so both reads of a pass give
+// the same value and every pass leaves the same state: the counter as it is, the window's
+// stores done again and the registers set below. The last pass runs as usual and the run ends
+// partway through it, as it would without the skip, and cpuPrvCycleJit shows peripherals the
+// time at the start of the run that reached the head until then, so the passes read the OSCR
+// that one run without the skip would. When the end falls between a pass's two OSCR reads the
+// counter takes the whole run's time, which is how it reaches the 50 ms threshold.
+// A pass past the threshold calls the clock routine, so those aren't skipped. Returns the
+// cycles passed, 0 if none.
 static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     uint32_t *r = cpu->regs;
     const uint32_t pc = r[REG_NO_PC];
@@ -5808,7 +5812,7 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     const IdleLoop *l = cpuPrvIdleLoopAt(cpu, pc, word);
     if (!l || r[REG_NO_LR] != pc + l->windowReturn) return 0;
     const uint32_t p = l->pass;
-    const uint32_t passes = p - 1 <= cpuMaxOvershootCycles(cpu) && left <= UINT32_MAX - p ? (left + p - 1) / p : left / p;
+    const uint32_t passes = (left - 1) / p;
     if (!passes) return 0;
     uint_fast8_t fsr;
     auto read = [&](uint32_t va, uint32_t &v) { return cpuJitRead(cpu, va, 4, &v, &fsr); };
@@ -6031,6 +6035,10 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
     uint32_t acc = 0;
     CycleProgress progress(cpu, &acc);
     static bool faultReported = false;
+    // An idle skip and the run after it show peripherals the time at the start of the run
+    // that reached the loop's head, as one run without the skip would (see cpuPrvIdleSkip).
+    uint32_t held = 0;
+    bool holding = false;
 
     while (acc < cycles) {
         if (armKindIsArm920(memorySystemKind) && icacheArm920ContinuationPending(cpu->ic)) {
@@ -6040,17 +6048,25 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
         }
         uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
         int stop;
+        const uint32_t runStart = acc;
         acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
         cpu->flags = cpsr & 0xf0000000UL;
         cpu->Q = !!(cpsr & ARM_SR_Q);
         cpu->T = !!(cpsr & ARM_SR_T);
-        // An idle loop's head: its passes up to the budget go at once, and the call ends there.
-        if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles) {
+        // An idle loop's head: all but its last pass in the budget go at once, then the head
+        // goes to the interpreter below as usual.
+        if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles &&
+            (cpu->regs[REG_NO_PC] == cpu->idleHeads[0] || cpu->regs[REG_NO_PC] == cpu->idleHeads[1])) {
+            if (!holding) held = runStart;
+            cpu->cyclesInProgress = &held;
             if (const uint32_t skipped = cpuPrvIdleSkip(cpu, cycles - acc)) {
                 acc += skipped;
-                break;
+                holding = true;
             }
+        } else if (holding) {
+            holding = false;
         }
+        if (!holding) cpu->cyclesInProgress = &acc;
         if (stop == FROND_JIT_FAULT && !faultReported) {
             faultReported = true;
             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",

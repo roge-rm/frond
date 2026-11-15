@@ -2259,13 +2259,62 @@ bool fallbackTicks(Engines& e) {
 // The kernel wait loops (idle_loops.h), placed near kCode + 0x1000 with their IRQ window, and
 // the Zire 72 and T|X register roles: globals at 0x22000 (pointer at 0x23000), the counter at
 // 0x23010, OSCR a RAM word at 0x23110, the window's ICCR a RAM word at 0x23200, SP 0x26000.
+// The clock routine is a B . here.
+constexpr uint32_t kIdleGlobals = 0x22000, kIdlePointer = 0x23000, kIdleCounter = 0x23010;
+constexpr uint32_t kIdleTimer = 0x23100, kIdleIccr = 0x23200, kIdleSp = 0x26000;
+
+struct IdleSetup {
+    const IdleLoop* loop = nullptr;
+    uint32_t head = 0;
+    Case c;
+    Assembled a;
+};
+
+IdleSetup idleSetup(const char* name, IdleLoopKind kind, uint32_t counter, bool past, bool afterPass) {
+    IdleSetup s;
+    for (const IdleLoop& x : kIdleLoops)
+        if (x.kind == kind) s.loop = &x;
+    const bool zire = kind == IdleLoopKind::zire72;
+    // Each ROM's head and window sit at these offsets in a 32-byte line.
+    s.head = kCode + 0x1000 + (zire ? 0x10 : 0x14);
+    std::vector<std::pair<int, uint32_t>> regs;
+    if (zire)
+        regs = {{0, counter}, {4, kIdleTimer}, {5, kIdlePointer}, {6, 0xffffffff}, {7, 162500}, {8, kIdleCounter}, {10, past}};
+    else
+        regs = {{4, past}, {5, kIdleCounter}, {7, kIdleTimer}, {8, kIdlePointer - 20}, {10, 0}};
+    regs.push_back({13, kIdleSp});
+    regs.push_back({14, afterPass ? s.head + s.loop->windowReturn : 0x11800});
+    Directed d{name, {0xe1a00000}, false, SVC, regs, {}};
+    s.c = directedCase(d, 7);
+    s.a = assemble(s.c);
+    return s;
+}
+
+void idlePrepare(Machine& m, const IdleSetup& s, uint32_t counter) {
+    const IdleLoop* l = s.loop;
+    const uint32_t head = s.head;
+    prepare(m, s.c, s.a);
+    auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
+    for (uint32_t i = 0; i < l->count; ++i) put(head + 4 * i, l->words[i]);
+    for (uint32_t i = 0; i < kIdleWindowCount; ++i) put(head + l->window + 4 * i, kIdleWindowWords[i]);
+    put(head + l->window + kIdleWindowLiteral, kIdleIccr);
+    put(head + (l->kind == IdleLoopKind::zire72 ? 0x4b4 : 0x5ab4), kSpinArm);  // the clock routine
+    put(kIdlePointer, kIdleGlobals);
+    put(kIdleCounter, counter);
+    put(kIdleGlobals + kIdleWakeWord, 0);
+    m.ram[kIdleGlobals + kIdleWindowByte] = 0x84;
+    put(kIdleTimer + 16, 0x12345678);
+    cpuInvalidateCodeCache(m.cpu);
+    cpuSetReg(m.cpu, 15, head);
+    // The kernel waits with FIQs unmasked.
+    cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & ~0x40u);
+}
+
 // Exact steps the loop for whole passes; Fast with the skip and Fast without it must land in
 // the same state (OSCR stands still here, as it does in a Fast run). With an IRQ waiting all
-// three take it in the window; at the 50 ms threshold all three call the clock routine (a B .
-// here). Each case says how many skips Fast must make.
+// three take it in the window; at the 50 ms threshold all three call the clock routine. Each
+// case says how many skips Fast must make.
 bool idleSkip(Engines& e) {
-    constexpr uint32_t globals = 0x22000, pointer = 0x23000, counterVa = 0x23010;
-    constexpr uint32_t timer = 0x23100, iccr = 0x23200, sp = 0x26000;
     struct Want {
         const char* name;
         IdleLoopKind kind;
@@ -2288,22 +2337,8 @@ bool idleSkip(Engines& e) {
     };
     bool ok = true;
     for (const auto& w : wants) {
-        const IdleLoop* l = nullptr;
-        for (const IdleLoop& x : kIdleLoops)
-            if (x.kind == w.kind) l = &x;
-        const bool zire = w.kind == IdleLoopKind::zire72;
-        // Each ROM's head and window sit at these offsets in a 32-byte line.
-        const uint32_t head = kCode + 0x1000 + (zire ? 0x10 : 0x14);
-        std::vector<std::pair<int, uint32_t>> regs;
-        if (zire)
-            regs = {{0, w.counter}, {4, timer}, {5, pointer}, {6, 0xffffffff}, {7, 162500}, {8, counterVa}, {10, w.past}};
-        else
-            regs = {{4, w.past}, {5, counterVa}, {7, timer}, {8, pointer - 20}, {10, 0}};
-        regs.push_back({13, sp});
-        regs.push_back({14, w.afterPass ? head + l->windowReturn : 0x11800});
-        Directed d{w.name, {0xe1a00000}, false, SVC, regs, {}};
-        const Case c = directedCase(d, 7);
-        const Assembled a = assemble(c);
+        const IdleSetup s = idleSetup(w.name, w.kind, w.counter, w.past, w.afterPass);
+        const IdleLoop* l = s.loop;
         Snapshot states[3];
         uint64_t skipped[3] = {};
         bool stopped[3] = {};
@@ -2311,21 +2346,7 @@ bool idleSkip(Engines& e) {
         for (int k = 0; k < 3; ++k) {
             Machine& m = k ? e.fast : e.exact;
             cpuSetIdleSkip(k != 2);
-            prepare(m, c, a);
-            auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
-            for (uint32_t i = 0; i < l->count; ++i) put(head + 4 * i, l->words[i]);
-            for (uint32_t i = 0; i < kIdleWindowCount; ++i) put(head + l->window + 4 * i, kIdleWindowWords[i]);
-            put(head + l->window + kIdleWindowLiteral, iccr);
-            put(head + (zire ? 0x4b4 : 0x5ab4), kSpinArm);  // the clock routine
-            put(pointer, globals);
-            put(counterVa, w.counter);
-            put(globals + kIdleWakeWord, 0);
-            m.ram[globals + kIdleWindowByte] = 0x84;
-            put(timer + 16, 0x12345678);
-            cpuInvalidateCodeCache(m.cpu);
-            cpuSetReg(m.cpu, 15, head);
-            // The kernel waits with FIQs unmasked.
-            cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & ~0x40u);
+            idlePrepare(m, s, w.counter);
             if (w.irq) {
                 cpuIrq(m.cpu, false, true);
                 m.device->irqs++;
@@ -2345,7 +2366,7 @@ bool idleSkip(Engines& e) {
                            ran, want);
                     ok = false;
                 }
-                stopped[k] = cpuGetRegisters(m.cpu)[15] == head;
+                stopped[k] = cpuGetRegisters(m.cpu)[15] == s.head;
             } else {
                 for (int i = 0; i < 400 && !atSpin(m); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, k ? 50 : 1);
                 stopped[k] = atSpin(m);
@@ -2356,14 +2377,62 @@ bool idleSkip(Engines& e) {
         }
         cpuSetIdleSkip(true);
         std::vector<std::string> diffs = differences(states[0], states[1]);
-        for (const std::string& s : differences(states[0], states[2])) diffs.push_back("without the skip, " + s);
+        for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
         if (diffs.empty() && stopped[0] && skipped[1] == w.skips && !skipped[2]) {
             printf("idle skip, %s: same in all three, %" PRIu64 " skips\n", w.name, skipped[1]);
             continue;
         }
         printf("FAIL idle skip, %s: %" PRIu64 " skips (want %" PRIu64 "), %" PRIu64 " without%s\n", w.name,
                skipped[1], w.skips, skipped[2], stopped[0] ? "" : ", exact did not stop where expected");
-        for (const std::string& s : diffs) printf("  %s\n", s.c_str());
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
+// A long idle: OSCR moves between calls, as at a scheduler event, and the counter grows when a
+// call ends between a pass's two OSCR reads, until the 50 ms threshold sends the loop to the
+// clock routine. Calls of 1000 cycles (not a whole number of passes) with OSCR 5000 ticks on
+// after each. Fast with the skip must reach the clock routine after as many calls as Fast
+// without it, having skipped, and on the Zire 72 Exact and Fast must both reach it. On the
+// T|X a Fast run only ends at the loop's last branch, after both reads, so neither Fast
+// reaches it here; in the real kernel IRQs taken in the window end runs there too.
+bool idleClock(Engines& e) {
+    constexpr uint32_t budget = 1000, step = 5000, limit = 2000;
+    bool ok = true;
+    for (const IdleLoopKind kind : {IdleLoopKind::zire72, IdleLoopKind::tx}) {
+        const char* name = kind == IdleLoopKind::zire72 ? "zire 72" : "t|x";
+        const IdleSetup s = idleSetup(name, kind, 0, false, true);
+        uint32_t calls[3] = {};
+        uint64_t skipped[3] = {};
+        for (int k = 0; k < 3; ++k) {
+            Machine& m = k ? e.fast : e.exact;
+            cpuSetIdleSkip(k != 2);
+            idlePrepare(m, s, 0);
+            uint64_t s0, c0, s1, c1;
+            cpuJitIdleSkips(&s0, &c0);
+            uint32_t oscr = 0x12345678;
+            for (; calls[k] < limit && !atSpin(m); ++calls[k]) {
+                for (uint32_t ran = 0; ran < budget && !atSpin(m);)
+                    ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, budget - ran);
+                oscr += step;
+                memcpy(m.ram + kIdleTimer + 16, &oscr, 4);
+            }
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k] = s1 - s0;
+            if (!atSpin(m)) calls[k] = 0;
+        }
+        cpuSetIdleSkip(true);
+        const bool reached = kind == IdleLoopKind::tx || (calls[0] && calls[1]);
+        if (reached && calls[1] == calls[2] && skipped[1] && !skipped[2]) {
+            printf("idle clock, %s: calls to the clock routine (0: never) Exact %u, Fast %u (%" PRIu64
+                   " skips), without the skip %u\n",
+                   name, calls[0], calls[1], skipped[1], calls[2]);
+            continue;
+        }
+        printf("FAIL idle clock, %s: calls to the clock routine (0: never) Exact %u, Fast %u (%" PRIu64
+               " skips), without the skip %u\n",
+               name, calls[0], calls[1], skipped[1], calls[2]);
         ok = false;
     }
     return ok;
@@ -2992,6 +3061,7 @@ int main(int argc, char** argv) {
         ok = inPlaceMsr(e) && ok;
         ok = fallbackTicks(e) && ok;
         ok = idleSkip(e) && ok;
+        ok = idleClock(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
