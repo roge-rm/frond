@@ -1795,6 +1795,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         const int skipped = p->skipDelay();
                         delayHaltOff = skipped == 1;
                         delayHaltSkips += skipped == 2;
+                        // The skip counts as work: the slice's limits are worked out again before anything runs.
+                        if (skipped == 2) continue;
                     }
                     if (const uint64_t passed = p->skipScanPoll(hard - jitSlack)) {
                         slice += uint32_t(passed);

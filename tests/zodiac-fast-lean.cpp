@@ -1344,7 +1344,8 @@ void delayLoop(bool stores = false, bool thumb = false) {
 
 // The ROM's Thumb delay loop at 2008492c, called 50 times from ARM with a wait of 40 counts at prescaler 16. Its timer
 // read ends the JIT run where it is, so the next run passes the wait at once.
-void romDelayLoop() {
+// adds: that many adds after each call, run in the JIT before the next timer read.
+std::vector<uint32_t> romDelayGuest(unsigned adds) {
     GraphicsGuest g;
     g.setup(); g.display(); g.clocks();
     g.store(0x00202004, 15);                              // TPRER1
@@ -1359,6 +1360,7 @@ void romDelayLoop() {
     words.push_back(0xe5913010);                          // ldr r3, [r1, #16]
     words.push_back(0xe1a0e00f);                          // mov lr, pc
     words.push_back(0xe12fff1c);                          // bx r12: the Thumb loop
+    for (unsigned i = 0; i < adds; ++i) words.push_back(0xe2855001);  // add r5, r5, #1
     words.push_back(0xe1520008);                          // cmp r2, r8
     words.push_back(0x81a08002);                          // movhi r8, r2: the most counts any wait saw
     words.push_back(0xe0899002);                          // add r9, r9, r2: all the counts the waits saw
@@ -1366,8 +1368,13 @@ void romDelayLoop() {
     words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne outer
     for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
     g.end();
+    return g.words;
+}
+
+void romDelayLoop() {
+    const auto words = romDelayGuest(0);
     const uint64_t halts = imx1MachineDelayHaltSkips(nullptr);
-    const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
+    const auto exact = runGuest(words, false), fast = runGuest(words, true);
     const uint64_t n = imx1MachineDelayHaltSkips(nullptr) - halts;
     print("rom delay exact", exact); print("rom delay blocks", fast);
     const auto& e = exact.run.result;
@@ -1383,6 +1390,25 @@ void romDelayLoop() {
     assert(f.stop == e.stop && f.trace.pc == e.trace.pc && f.registers[7] == 0 && f.registers[9] >= 50 * 40 &&
            f.registers[8] <= e.registers[8] + 2);
     assert(n >= 25 && fast.cheap.retired * 2 < exact.cheap.retired);
+    // In bounded runs the waits are still passed after a halt, with 600 adds after each call. A pass counts as work,
+    // so the JIT run after it stops short of the slice's work bound: this guest never passes the bound.
+    Imx1Machine* m = make(romDelayGuest(600), true);
+    const uint64_t before = imx1MachineDelayHaltSkips(nullptr);
+    uint64_t most = 0;
+    Imx1MachineBounds b;
+    b.retired = 100000;
+    b.work = 10000;
+    for (unsigned i = 0; i < 1000000 && running(m); ++i) {
+        b.deadline = {imx1MachineGetStatus(m).time.ticks + (1u << 20), 0, 1};
+        most = std::max(most, imx1MachineRunBounded(m, b).workOvershoot);
+    }
+    const uint64_t bounded = imx1MachineDelayHaltSkips(nullptr) - before;
+    std::printf("rom delay bounded: %llu waits passed after a halt, work past the bound at most %llu\n",
+                (unsigned long long)bounded, (unsigned long long)most);
+    std::fflush(stdout);
+    const auto& r = imx1MachineInspect(m).result;
+    assert(r.stop == e.stop && r.registers[7] == 0 && bounded >= 25 && most == 0);
+    imx1MachineStop(m);
 }
 
 // The ROM's vertical wait (200adb08 to 200adb20) called 12 times, timer 1 read after each return. 200adb08 polls
