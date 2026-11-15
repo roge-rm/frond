@@ -68,7 +68,9 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
 // The shortest timer count, in CPU cycles, for which skipFifoWait passes FIFO wait rounds. A round's work in the
-// JIT, its 50-odd instructions and the pointer read, ends about 55 cycles into a count in Origo (200 cycles each).
+// JIT, its 50-odd instructions and the pointer read with its CS5 wait clocks, ends about 55 cycles into a count in
+// Origo (200 cycles each). The skip also wants the current round to have read its count in the count's first half,
+// which measures that work, wait clocks included.
 constexpr uint64_t fifoRoundMost = 128;
 // Spans shorter than this are left to the step.
 constexpr uint64_t leanMinimumSpan = 8;
@@ -1896,13 +1898,13 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 if (p->fastJit && jitSlack && hard >= jitSlack && !p->interruptedPrefixCount) {
                     if (delayHalted) {
                         delayHalted = false;
-                        p->skipFifoWait();
+                        const bool rounds = p->skipFifoWait();
                         const int skipped = p->skipDelay();
                         delayHaltOff = skipped == 1;
                         delayPassed = skipped == 2;
                         delayHaltSkips += skipped == 2;
-                        // The skip counts as work: the slice's limits are worked out again before anything runs.
-                        if (skipped == 2) continue;
+                        // A skip counts as work: the slice's limits are worked out again before anything runs.
+                        if (rounds || skipped == 2) continue;
                     }
                     if (const uint64_t passed = p->skipScanPoll(hard - jitSlack)) {
                         slice += uint32_t(passed);
