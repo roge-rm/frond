@@ -1,3 +1,4 @@
+#include "DimText.h"
 #include "MainWindow.h"
 #include "DanaViewControls.h"
 #include "LicencesDialog.h"
@@ -1760,7 +1761,7 @@ void MainWindow::refreshSessions(const QString& select) {
         auto* second = new ElidedLabel(detail, line);
         second->setObjectName("sessionDetail");
         if (info.old) { name->setEnabled(false); second->setEnabled(false); }
-        else second->setForegroundRole(QPalette::PlaceholderText);
+        else frondDimText::dim(second);
         name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         second->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         text->addWidget(name); text->addWidget(second);

@@ -6734,6 +6734,20 @@ for line in s.makefile('rb'):
                    sd->visualItemRect(sd->item(0)).height() >= detail->height();
         }());
         cards->resize(520, cards->height());
+        // A dark theme whose placeholder colour is still dark: the detail line follows the text colour.
+        {
+            const auto saved = QApplication::palette();
+            auto dark = saved;
+            dark.setColor(QPalette::Window, QColor(30, 30, 30));
+            dark.setColor(QPalette::WindowText, QColor(230, 230, 230));
+            dark.setColor(QPalette::PlaceholderText, QColor(60, 60, 60));
+            QApplication::setPalette(dark);
+            auto* detail = sd->itemWidget(sd->item(0))->findChild<QLabel*>("cardDetail");
+            QTRY_VERIFY(detail->palette().color(QPalette::WindowText).lightness() > 120);
+            QApplication::setPalette(saved);
+            QTRY_COMPARE(detail->palette().color(QPalette::WindowText).lightness() > 120,
+                         saved.color(QPalette::WindowText).lightness() > 120);
+        }
         if (kinds.contains("ms")) {
             auto* ms = cards->findChild<QListWidget*>("memorySticks");
             QCOMPARE(ms->count(), 1);
