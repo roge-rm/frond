@@ -193,13 +193,13 @@
         "fast": {
           "guest_ns": 135000000000,
           "cycles": 13500000000,
-          "instructions": 5987650619,
-          "jit_instructions": 5893827059,
+          "instructions": 5510243525,
+          "jit_instructions": 5419588751,
           "lcd_frames": 1870,
           "changed_frames": 148,
           "pcm_frames": 5682173,
           "frame_sequence_hash": "814b15a89a927bce",
-          "pcm_hash": "1daf0bb8f60503a9",
+          "pcm_hash": "8fcdfec4c23e9619",
           "input": "bfe0084c852e07f2"
         }
       }
@@ -218,13 +218,13 @@
         "fast": {
           "guest_ns": 170000000000,
           "cycles": 17000000000,
-          "instructions": 5701669940,
-          "jit_instructions": 5061084034,
+          "instructions": 5691298051,
+          "jit_instructions": 5051361495,
           "lcd_frames": 4190,
           "changed_frames": 938,
           "pcm_frames": 7225673,
           "frame_sequence_hash": "4e50fb0bca3bae9e",
-          "pcm_hash": "f45c9082101b305b",
+          "pcm_hash": "3e915732d8e95723",
           "input": "3ee3771c3485f9d7"
         }
       }
@@ -243,8 +243,8 @@
         "fast": {
           "guest_ns": 160000000000,
           "cycles": 16000000000,
-          "instructions": 6635511540,
-          "jit_instructions": 6296343935,
+          "instructions": 6612160576,
+          "jit_instructions": 6273346339,
           "lcd_frames": 3092,
           "changed_frames": 1801,
           "pcm_frames": 6784673,
