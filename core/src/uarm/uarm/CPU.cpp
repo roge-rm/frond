@@ -5576,6 +5576,14 @@ bool cpuJitSlowPath(ArmCpu *cpu) { return cpu->slowPath != 0; }
 
 uint32_t *cpuJitSpsr(ArmCpu *cpu) { return &cpu->SPSR; }
 
+// Generated code loads and stores these as whole little-endian words.
+static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__);
+static_assert(offsetof(ArmCpu, waitingIrqs) % 4 == 0 && offsetof(ArmCpu, waitingFiqs) == offsetof(ArmCpu, waitingIrqs) + 2);
+static_assert(offsetof(ArmCpu, Q) % 4 == 0 && offsetof(ArmCpu, I) == offsetof(ArmCpu, Q) + 2 &&
+              offsetof(ArmCpu, F) == offsetof(ArmCpu, Q) + 3 && sizeof(bool) == 1);
+uint32_t *cpuJitWaitingWord(ArmCpu *cpu) { return reinterpret_cast<uint32_t *>(&cpu->waitingIrqs); }
+uint32_t *cpuJitInterruptMaskWord(ArmCpu *cpu) { return reinterpret_cast<uint32_t *>(&cpu->Q); }
+
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu) { return &cpu->jitAccessPc; }
 
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc) {
@@ -5594,6 +5602,7 @@ void cpuJitIcacheInvalLine(ArmCpu *cpu, uint32_t va) { icacheInvalAddr(cpu->ic, 
 
 // MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
 uint64_t cpuJitDomainCalls() { return jitDomainCalls(); }
+uint64_t cpuJitCpsrInterprets() { return jitPsrInterprets(); }
 uint32_t cpuJitGetDomain(ArmCpu *cpu) { return mmuGetDomainCfg(cpu->memorySystem.mmu); }
 void cpuJitSetDomain(ArmCpu *cpu, uint32_t value) { mmuSetDomainCfg(cpu->memorySystem.mmu, value); }
 
@@ -5621,7 +5630,11 @@ uint32_t cpuJitSwi(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr) {
     return cpuPrvMaterializeCPSR(cpu);
 }
 
+static uint64_t jitCpsrWrites;
+uint64_t cpuJitCpsrWrites() { return jitCpsrWrites; }
+
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value) {
+    ++jitCpsrWrites;
     cpu->flags = cpsr & 0xf0000000UL;
     cpu->Q = !!(cpsr & ARM_SR_Q);
     cpu->T = !!(cpsr & ARM_SR_T);
@@ -6023,6 +6036,8 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span)
 #else
 uint64_t cpuJitExceptionReturns() { return 0; }
 uint64_t cpuJitDomainCalls() { return 0; }
+uint64_t cpuJitCpsrWrites() { return 0; }
+uint64_t cpuJitCpsrInterprets() { return 0; }
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}

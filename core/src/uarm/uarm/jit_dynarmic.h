@@ -54,6 +54,8 @@ uint32_t jitRanNow(const FrondJit *jit);
 // MRC and MCR p15 c3 (domain access control) run in privileged mode from generated code, in
 // every JIT so far (tests).
 uint64_t jitDomainCalls();
+// MSR CPSRs the in-place check sent to the interpreter, in every JIT so far (tests).
+uint64_t jitPsrInterprets();
 // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
 void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
 // Code cache size in bytes for JITs made after this (tests); 0 for the default.
@@ -144,6 +146,11 @@ uint32_t *cpuJitSpsr(ArmCpu *cpu);
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu);
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc);
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
+// For the fork's in-place MSR CPSR (psr_inline_interrupt_mask): the waiting IRQ and FIQ
+// counts as one word, 0 when none is waiting, and the word whose bytes 2 and 3 are the
+// CPU's I and F (generated code writes them so cpuIrq sees the masks mid-run).
+uint32_t *cpuJitWaitingWord(ArmCpu *cpu);
+uint32_t *cpuJitInterruptMaskWord(ArmCpu *cpu);
 // MOVS PC or SUBS PC: CPSR = SPSR in any mode and PC = target, as in the interpreter.
 uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target);
 bool cpuJitPrivileged(ArmCpu *cpu);

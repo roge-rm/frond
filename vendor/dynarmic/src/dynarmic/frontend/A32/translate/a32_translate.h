@@ -42,6 +42,9 @@ struct TranslationOptions {
 
     /// Frond: see UserConfig::coprocessor_unscaled_offsets.
     std::uint16_t coprocessor_unscaled_offsets = 0;
+
+    /// Frond: see UserConfig::psr_inline_interrupt_mask.
+    bool psr_inline_interrupt_mask = false;
 };
 
 /**

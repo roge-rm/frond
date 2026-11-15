@@ -109,15 +109,28 @@ struct WmmxSaver {
 // A device page at kDevice (mapped at virtual 0x2f000, 0x30000 unmapped) that
 // counts the accesses it takes, as a FIFO or doorbell register would see them. Reads return
 // the count so far. Offsets 0x800-0x80f refuse every access (a bus error, no side effect).
+// With interrupt lines on (directed cases only), a write to 0x900 raises the IRQ, 0x904
+// lowers it, and 0x908 and 0x90c do the same for the FIQ.
 constexpr uint32_t kDevice = 0x40000000;
 struct Device {
     uint32_t reads = 0, writes = 0;
+    ArmCpu* cpu = nullptr;
+    bool lines = false;
+    uint32_t irqs = 0, fiqs = 0;  // raised and not lowered
 };
 
 bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
     Device& d = *static_cast<Device*>(userData);
     const uint32_t off = pa - kDevice;
     if (off >= 0x800 && off < 0x810) return false;
+    if (write && d.lines && off >= 0x900 && off < 0x910) {
+        const bool fiq = off >= 0x908, raise = !(off & 4);
+        uint32_t& n = fiq ? d.fiqs : d.irqs;
+        if (raise || n) {
+            cpuIrq(d.cpu, fiq, raise);
+            n += raise ? 1 : -1;
+        }
+    }
     if (write) {
         d.writes++;
     } else {
@@ -159,6 +172,7 @@ Machine makeMachine(bool fast) {
     patchDispatchSetCpu(pd, m.cpu);
     m.wmmx = pxa270wmmxInit(m.cpu);
     m.device = new Device;
+    m.device->cpu = m.cpu;
     if (!memRegionAdd(mem, kDevice, 0x1000, deviceAccess, m.device)) abort();
     return m;
 }
@@ -411,6 +425,7 @@ struct Case {
     std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
     // Maps the page tables at 0x8000 (privileged only), so a case can remap pages.
     bool tablesPage = false;
+    bool interruptLines = false;  // the device page's IRQ and FIQ registers
 };
 
 struct Assembled {
@@ -1521,7 +1536,9 @@ constexpr uint64_t kLimit = 20000;
 
 void prepare(Machine& m, const Case& c, const Assembled& a) {
     memcpy(m.ram, a.image.data(), kRamSize);
-    *m.device = Device{};
+    for (; m.device->irqs; --m.device->irqs) cpuIrq(m.cpu, false, false);
+    for (; m.device->fiqs; --m.device->fiqs) cpuIrq(m.cpu, true, false);
+    *m.device = Device{0, 0, m.cpu, c.interruptLines};
     cpuInvalidateCodeCache(m.cpu);
     cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, SVC | 0xc0);
     cpuSetReg(m.cpu, 15, kSetup);
@@ -1680,6 +1697,7 @@ struct Directed {
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
     std::vector<uint32_t> swiHandler;
     bool tablesPage = false;
+    bool interruptLines = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1733,6 +1751,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.dacr = d.dacr;
     c.swiHandler = d.swiHandler;
     c.tablesPage = d.tablesPage;
+    c.interruptLines = d.interruptLines;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -2097,6 +2116,48 @@ bool directed(Engines& e) {
          {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
          false, SVC, {{1, 0x20100}, {2, 0x20200}},
          {{Expect::REG, 7, 0x1000c}}},
+        // MSR CPSR_c that only changes I and F runs in place in Fast when no interrupt is
+        // waiting; one that changes the mode, or with an interrupt waiting, calls back. On
+        // the PXA cores a waiting interrupt stops the run whenever F is clear. Each starts
+        // in SVC with I and F set; r4 is the device page.
+        {"msr cpsr_c in place, unmask and mask I and F",
+         {0xe321f013, 0xe2811001, 0xe321f053, 0xe2811001, 0xe321f093, 0xe2811001, 0xe321f0d3, 0xe10f3000,
+          0xe2811001},
+         false, SVC, {{1, 0}}, {{Expect::REG, 1, 4}, {Expect::REG, 3, 0xd3, 0xff}, {Expect::CPSR, 0, 0xd3, 0xff}}},
+        {"irq raised while masked, taken at the msr that unmasks I",
+         {0xe5840900, 0xe2811001, 0xe321f093, 0xe2811001, 0xe321f013, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0x92, 0xff}, {Expect::REG, 14, kCode + 0x18}}, 0x200, 1, {}, false,
+         true},
+        {"fiq raised while masked, taken at the msr that unmasks F",
+         {0xe5840908, 0xe2811001, 0xe321f053, 0xe2811001, 0xe321f013, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0xd1, 0xff}, {Expect::REG, 14, kCode + 0x18}}, 0x200, 1, {}, false,
+         true},
+        // Fast notices an interrupt a store raised when the run next leaves generated code,
+        // here at the BKPT, which goes to the interpreter: the store has to see the new masks.
+        {"irq raised by a store after an in-place unmask",
+         {0xe321f013, 0xe2811001, 0xe5840900, 0xe1200070, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 1}, {Expect::CPSR, 0, 0x92, 0xff}, {Expect::REG, 14, kCode + 0x10}}, 0x200, 1, {}, false,
+         true},
+        {"fiq raised by a store after an in-place unmask of F",
+         {0xe321f093, 0xe2811001, 0xe5840908, 0xe1200070, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 1}, {Expect::CPSR, 0, 0xd1, 0xff}, {Expect::REG, 14, kCode + 0x10}}, 0x200, 1, {}, false,
+         true},
+        {"msr cpsr_c with a masked irq waiting, then lowered and unmasked",
+         {0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f0d3, 0xe5840904, 0xe321f013, 0xe2811001, 0xe321f0d3},
+         false, SVC, {{1, 0}, {4, 0x2f000}}, {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0xd3, 0xff}}, 0x200, 1, {}, false,
+         true},
+        {"msr cpsr_c mode changes go to the interpreter",
+         {0xe321f0df, 0xe3a0d005, 0xe321f0d2, 0xe3a0d007, 0xe321f013, 0xe2811001, 0xe321f0d3, 0xe2811001},
+         false, SVC, {{1, 0}, {13, 0x123}},
+         {{Expect::REG, 1, 2}, {Expect::REG, 13, 0x123}, {Expect::CPSR, 0, 0xd3, 0xff}}},
+        {"msr cpsr_fc in place with the flags",
+         {0xe129f000, 0x03a01007, 0x13a01009, 0xe10f3000, 0xe321f0d3}, false, SVC, {{0, 0x60000013}},
+         {{Expect::REG, 1, 7}, {Expect::REG, 3, 0x60000013, 0xf80000ff}, {Expect::CPSR, 0, 0x600000d3, 0xf00000ff}}},
+        {"conditional msr cpsr_c, in place and with an irq waiting",
+         {0xe3500000, 0x0321f013, 0x1321f093, 0xe10f3000, 0xe321f0d3, 0xe5840900, 0x0321f093, 0x1321f013,
+          0xe2811001, 0xe5840904, 0xe321f013, 0xe2811001},
+         false, SVC, {{0, 0}, {1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::REG, 3, 0x13, 0xff}, {Expect::CPSR, 0, 0x13, 0xff}}, 0x200, 1, {}, false, true},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -2114,6 +2175,82 @@ bool directed(Engines& e) {
             ok = false;
             break;
         }
+    }
+    return ok;
+}
+
+// MSR CPSR_c changing only I and F, with nothing waiting, runs in Fast's generated code:
+// a block of four, run in one budget, sends none to the interpreter and makes no
+// cpuJitSetCpsr call. A mode change, or any MSR CPSR with an interrupt waiting (even a
+// masked one), goes to the interpreter once each.
+bool inPlaceMsr(Engines& e) {
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+        uint64_t interprets;
+    };
+    const Want wants[] = {
+        {"in place", {0xe321f013, 0xe321f053, 0xe321f093, 0xe321f0d3, 0xe2811001}, 0},
+        {"mode changes", {0xe321f0d2, 0xe2811001, 0xe321f0d3, 0xe2811001}, 2},
+        {"masked irq waiting", {0xe5840900, 0xe321f0d3, 0xe5840904, 0xe321f0d3, 0xe2811001}, 1},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        prepare(e.fast, c, assemble(c));
+        const uint64_t writes = cpuJitCpsrWrites(), interprets = cpuJitCpsrInterprets();
+        for (int i = 0; i < 4 && !atSpin(e.fast); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 5000);
+        const uint64_t calls = cpuJitCpsrWrites() - writes, sent = cpuJitCpsrInterprets() - interprets;
+        if (atSpin(e.fast) && !calls && sent == w.interprets) continue;
+        printf("FAIL msr cpsr %s: %" PRIu64 " to the interpreter (want %" PRIu64 "), %" PRIu64
+               " cpuJitSetCpsr calls%s\n",
+               w.name, sent, w.interprets, calls, atSpin(e.fast) ? "" : ", did not stop");
+        ok = false;
+    }
+    return ok;
+}
+
+// Fast counts the same ticks as Exact across instructions it hands to the interpreter: an
+// MSR CPSR that couldn't run in place (its tick is taken back) and an STM^ the JIT never
+// translates. Exact steps to the stop to count them, and Fast's calls must add up to the
+// same.
+bool fallbackTicks(Engines& e) {
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+    };
+    const Want wants[] = {
+        {"msr cpsr_c mode changes",
+         {0xe2811001, 0xe321f0d2, 0xe2811001, 0xe2811001, 0xe321f0d3, 0xe2811001, 0xe321f0d2, 0xe321f0d3, 0xe2811001}},
+        {"msr cpsr_c with a masked irq waiting",
+         {0xe2811001, 0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f093, 0xe2811001, 0xe5840904,
+          0xe321f0d3, 0xe2811001}},
+        {"stm^", {0xe2811001, 0xe8c40001, 0xe2811001, 0xe8c40002, 0xe2811001, 0xe2811001}},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        const Assembled a = assemble(c);
+        prepare(e.exact, c, a);
+        uint32_t ticks = 0;
+        for (int i = 0; i < 200 && !atSpin(e.exact); ++i) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        // Each Fast call runs at least to a block's end and returns all its ticks. Each case
+        // ends with an ADD, so Fast's last block runs the spin branch once too: Exact does the same.
+        if (atSpin(e.exact)) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        prepare(e.fast, c, a);
+        uint32_t fast = 0;
+        for (int i = 0; i < 200 && !atSpin(e.fast); ++i) fast += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
+        if (atSpin(e.exact) && atSpin(e.fast) && fast == ticks) {
+            printf("fallback ticks, %s: %u in both engines\n", w.name, ticks);
+            continue;
+        }
+        printf("FAIL fallback ticks, %s: exact %u ticks%s, fast %u%s\n", w.name, ticks,
+               atSpin(e.exact) ? "" : " (did not stop)", fast, atSpin(e.fast) ? "" : " (did not stop)");
+        ok = false;
     }
     return ok;
 }
@@ -2738,6 +2875,8 @@ int main(int argc, char** argv) {
     if (runDirected && !single) {
         ok = directed(e) && ok;
         ok = privilegeSwitch(e) && ok;
+        ok = inPlaceMsr(e) && ok;
+        ok = fallbackTicks(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
