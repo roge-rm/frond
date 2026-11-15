@@ -54,6 +54,8 @@ uint32_t jitRanNow(const FrondJit *jit);
 // MRC and MCR p15 c3 (domain access control) run in privileged mode from generated code, in
 // every JIT so far (tests).
 uint64_t jitDomainCalls();
+// MSR CPSRs the in-place check sent to the interpreter, in every JIT so far (tests).
+uint64_t jitPsrInterprets();
 // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
 void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
 // Code cache size in bytes for JITs made after this (tests); 0 for the default.

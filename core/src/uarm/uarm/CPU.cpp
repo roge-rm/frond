@@ -5602,6 +5602,7 @@ void cpuJitIcacheInvalLine(ArmCpu *cpu, uint32_t va) { icacheInvalAddr(cpu->ic, 
 
 // MRC and MCR p15, 0, Rd, c3: what cp15prvCoprocRegXferFunc does for CRn 3, any CRm and op2.
 uint64_t cpuJitDomainCalls() { return jitDomainCalls(); }
+uint64_t cpuJitCpsrInterprets() { return jitPsrInterprets(); }
 uint32_t cpuJitGetDomain(ArmCpu *cpu) { return mmuGetDomainCfg(cpu->memorySystem.mmu); }
 void cpuJitSetDomain(ArmCpu *cpu, uint32_t value) { mmuSetDomainCfg(cpu->memorySystem.mmu, value); }
 
@@ -6035,6 +6036,8 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span)
 #else
 uint64_t cpuJitExceptionReturns() { return 0; }
 uint64_t cpuJitDomainCalls() { return 0; }
+uint64_t cpuJitCpsrWrites() { return 0; }
+uint64_t cpuJitCpsrInterprets() { return 0; }
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}

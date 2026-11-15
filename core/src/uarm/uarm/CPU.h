@@ -148,6 +148,8 @@ void cpuSetJitSync(bool sync);
 uint64_t cpuJitExceptionReturns();
 // MSR CPSR writes generated code hands to the interpreter's code, in every CPU so far (tests).
 uint64_t cpuJitCpsrWrites();
+// MSR CPSRs that couldn't run in place and went to the interpreter, in every CPU so far (tests).
+uint64_t cpuJitCpsrInterprets();
 // MRC and MCR p15 c3 (domain access control) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitDomainCalls();
 // Translated ordinary blocks and instructions executed in generated code.

@@ -36,6 +36,7 @@ using PageTable = std::array<std::uint8_t *, A32::UserConfig::NUM_PAGE_TABLE_ENT
 
 // MRC and MCR p15 c3 run in privileged mode from generated code, for jitDomainCalls.
 std::atomic<uint64_t> domainCalls{0};
+std::atomic<uint64_t> psrInterprets{0};
 
 // Counters for FROND_JIT_STATS=1.
 struct Stats {
@@ -830,6 +831,7 @@ struct Env final : public A32::UserCallbacks {
         if (psrInterpret) {
             psrInterpret = 0;
             stats.psrInterpret++;
+            psrInterprets.fetch_add(1, std::memory_order_relaxed);
             undoTick = true;
             jit->HaltExecution(kInterpret);
             return;
@@ -1403,6 +1405,8 @@ void jitDestroy(FrondJit *j) {
 uint32_t jitMaxUnchecked(const FrondJit *j) { return j->maxUnchecked; }
 
 uint64_t jitDomainCalls() { return domainCalls.load(std::memory_order_relaxed); }
+
+uint64_t jitPsrInterprets() { return psrInterprets.load(std::memory_order_relaxed); }
 
 uint32_t jitRanNow(const FrondJit *j) {
     const Env *e = j->running;

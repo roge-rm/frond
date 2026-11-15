@@ -2146,7 +2146,7 @@ bool directed(Engines& e) {
          {0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f0d3, 0xe5840904, 0xe321f013, 0xe2811001, 0xe321f0d3},
          false, SVC, {{1, 0}, {4, 0x2f000}}, {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0xd3, 0xff}}, 0x200, 1, {}, false,
          true},
-        {"msr cpsr_c mode changes call back",
+        {"msr cpsr_c mode changes go to the interpreter",
          {0xe321f0df, 0xe3a0d005, 0xe321f0d2, 0xe3a0d007, 0xe321f013, 0xe2811001, 0xe321f0d3, 0xe2811001},
          false, SVC, {{1, 0}, {13, 0x123}},
          {{Expect::REG, 1, 2}, {Expect::REG, 13, 0x123}, {Expect::CPSR, 0, 0xd3, 0xff}}},
@@ -2179,18 +2179,80 @@ bool directed(Engines& e) {
     return ok;
 }
 
-// MSR CPSR_c changing only I and F, with nothing waiting, runs in Fast's generated code
-// without calling back: a block of four, run in one budget, makes no cpuJitSetCpsr call.
+// MSR CPSR_c changing only I and F, with nothing waiting, runs in Fast's generated code:
+// a block of four, run in one budget, sends none to the interpreter and makes no
+// cpuJitSetCpsr call. A mode change, or any MSR CPSR with an interrupt waiting (even a
+// masked one), goes to the interpreter once each.
 bool inPlaceMsr(Engines& e) {
-    const Directed d{"in-place msr", {0xe321f013, 0xe321f053, 0xe321f093, 0xe321f0d3, 0xe2811001}, false, SVC, {{1, 0}}};
-    const Case c = directedCase(d, 1);
-    prepare(e.fast, c, assemble(c));
-    const uint64_t before = cpuJitCpsrWrites();
-    for (int i = 0; i < 4 && !atSpin(e.fast); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 5000);
-    const uint64_t calls = cpuJitCpsrWrites() - before;
-    if (atSpin(e.fast) && !calls) return true;
-    printf("FAIL in-place msr: %" PRIu64 " cpuJitSetCpsr calls%s\n", calls, atSpin(e.fast) ? "" : ", did not stop");
-    return false;
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+        uint64_t interprets;
+    };
+    const Want wants[] = {
+        {"in place", {0xe321f013, 0xe321f053, 0xe321f093, 0xe321f0d3, 0xe2811001}, 0},
+        {"mode changes", {0xe321f0d2, 0xe2811001, 0xe321f0d3, 0xe2811001}, 2},
+        {"masked irq waiting", {0xe5840900, 0xe321f0d3, 0xe5840904, 0xe321f0d3, 0xe2811001}, 1},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        prepare(e.fast, c, assemble(c));
+        const uint64_t writes = cpuJitCpsrWrites(), interprets = cpuJitCpsrInterprets();
+        for (int i = 0; i < 4 && !atSpin(e.fast); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 5000);
+        const uint64_t calls = cpuJitCpsrWrites() - writes, sent = cpuJitCpsrInterprets() - interprets;
+        if (atSpin(e.fast) && !calls && sent == w.interprets) continue;
+        printf("FAIL msr cpsr %s: %" PRIu64 " to the interpreter (want %" PRIu64 "), %" PRIu64
+               " cpuJitSetCpsr calls%s\n",
+               w.name, sent, w.interprets, calls, atSpin(e.fast) ? "" : ", did not stop");
+        ok = false;
+    }
+    return ok;
+}
+
+// Fast counts the same ticks as Exact across instructions it hands to the interpreter: an
+// MSR CPSR that couldn't run in place (its tick is taken back) and an STM^ the JIT never
+// translates. Exact steps to the stop to count them, and Fast's calls must add up to the
+// same.
+bool fallbackTicks(Engines& e) {
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+    };
+    const Want wants[] = {
+        {"msr cpsr_c mode changes",
+         {0xe2811001, 0xe321f0d2, 0xe2811001, 0xe2811001, 0xe321f0d3, 0xe2811001, 0xe321f0d2, 0xe321f0d3, 0xe2811001}},
+        {"msr cpsr_c with a masked irq waiting",
+         {0xe2811001, 0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f093, 0xe2811001, 0xe5840904,
+          0xe321f0d3, 0xe2811001}},
+        {"stm^", {0xe2811001, 0xe8c40001, 0xe2811001, 0xe8c40002, 0xe2811001, 0xe2811001}},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        const Assembled a = assemble(c);
+        prepare(e.exact, c, a);
+        uint32_t ticks = 0;
+        for (int i = 0; i < 200 && !atSpin(e.exact); ++i) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        // Each Fast call runs at least to a block's end and returns all its ticks. Each case
+        // ends with an ADD, so Fast's last block runs the spin branch once too: Exact does the same.
+        if (atSpin(e.exact)) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        prepare(e.fast, c, a);
+        uint32_t fast = 0;
+        for (int i = 0; i < 200 && !atSpin(e.fast); ++i) fast += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
+        if (atSpin(e.exact) && atSpin(e.fast) && fast == ticks) {
+            printf("fallback ticks, %s: %u in both engines\n", w.name, ticks);
+            continue;
+        }
+        printf("FAIL fallback ticks, %s: exact %u ticks%s, fast %u%s\n", w.name, ticks,
+               atSpin(e.exact) ? "" : " (did not stop)", fast, atSpin(e.fast) ? "" : " (did not stop)");
+        ok = false;
+    }
+    return ok;
 }
 
 // The XScale fetch buffers when the guest rewrites code without invalidating. The
@@ -2814,6 +2876,7 @@ int main(int argc, char** argv) {
         ok = directed(e) && ok;
         ok = privilegeSwitch(e) && ok;
         ok = inPlaceMsr(e) && ok;
+        ok = fallbackTicks(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
