@@ -184,8 +184,11 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
         for (const auto& media : m.media)
             if (media.kind==frondMachine::kindNand) m.nand.assign(deviceConfigurationGetNandSize(m.device),0xff);
     // A card the session carries opens in the card store, in the slot as saved. The work copy takes its writes.
-    if (std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; }) &&
-        !frondNative::attachFolderMedia(contents,folder)) throw std::runtime_error("the session's card did not open");
+    if (std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; })) {
+        frondSession::Contents card;
+        card.media=m.media;
+        if (!frondNative::attachFolderMedia(card,folder)) throw std::runtime_error("the session's card did not open");
+    }
     if (m.savestate.empty() || m.memory.empty()) throw std::runtime_error("complete RAM and peripheral state required");
     if (m.device==deviceTypeTG50 && m.memory.size()!=tg50RamBackingSize+2*MEMORY_BUFFER_GRANULARITY)
         throw std::runtime_error("TG50 session requires complete RAM and CPU/peripheral state");
