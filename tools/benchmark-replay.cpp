@@ -232,7 +232,7 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 // Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
 // they repeat. A --sd card runs from memory, so the file is never written.
 // BENCH_ZODIAC_SAVE=MS:FILE saves the machine at the first slice boundary at or after MS into FILE (the
-// guest ns since the start, then the state) and stops there. BENCH_ZODIAC_LOAD=FILE starts from such a file
+// guest ns since the start, then the state) and stops there, or carries on with BENCH_ZODIAC_SAVE_CONTINUE=1. BENCH_ZODIAC_LOAD=FILE starts from such a file
 // instead of the cold boot, with the same replay; events before the saved time are skipped and summary
 // counts are from the load. Either engine can load a state the other saved.
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
@@ -279,6 +279,8 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         if (colon==std::string::npos || colon+1==text.size()) throw std::runtime_error("BENCH_ZODIAC_SAVE needs MS:FILE");
         saveAt=number(text.substr(0,colon).c_str(),UINT32_MAX)*1000000; savePath=text.substr(colon+1);
     }
+    const char* goOn=std::getenv("BENCH_ZODIAC_SAVE_CONTINUE");
+    const bool continueAfterSave=goOn && std::string(goOn)=="1";
     if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
         auto state=readFile(load);
         uint64_t savedNs=0;
@@ -340,8 +342,9 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             out.write(reinterpret_cast<const char*>(&elapsed),sizeof(elapsed));
             out.write(static_cast<const char*>(buffer.data),std::streamsize(buffer.size));
             out.flush(); if (!out) throw std::runtime_error("BENCH_ZODIAC_SAVE: write failed");
-            std::fprintf(stderr,"saved at %.3f s\n",elapsed/1e9);
-            break;
+            std::fprintf(stderr,"saved at %.3f s ready reads %llu\n",elapsed/1e9,(unsigned long long)soc->YmfReadyReads());
+            if (!continueAfterSave) break;
+            saveAt=UINT64_MAX;
         }
         if (elapsed>=duration*1000000) break;
         cycles+=soc->Run(mips*1000,mips*1000000);
@@ -362,9 +365,9 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
-    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\nmemory hash %llx\npcm hash %llx\nready reads %llu\n",soc->LcdEnabled()?"on":"off",
+    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\nmemory hash %llx\npcm hash %llx\nready last read at %lld ns\nready reads %llu\n",soc->LcdEnabled()?"on":"off",
                             soc->ChipSummary().c_str(),(unsigned long long)soc->MemoryHash(),(unsigned long long)pcmHash,
-                            (unsigned long long)soc->YmfReadyReads());
+                            (long long)(soc->YmfLastReadyReadNs()-clockStart),(unsigned long long)soc->YmfReadyReads());
     std::ofstream result(output/"summary.json");
     result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
            << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")

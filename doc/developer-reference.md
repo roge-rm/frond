@@ -879,8 +879,9 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
-| `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS. |
-| `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty) with the YMF768 ready register reads so far, screen on and off times, and at the end the chip registers, the memory and PCM hashes and the ready register reads. |
+| `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS and stop. |
+| `BENCH_ZODIAC_SAVE_CONTINUE` | `1` makes `benchmark-replay` carry on after a `BENCH_ZODIAC_SAVE`. |
+| `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty) with the YMF768 ready register reads so far, screen on and off times, and at the end the chip registers, the memory and PCM hashes, the guest time of the last ready register read and the ready register reads. |
 | `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |

@@ -242,6 +242,8 @@ uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
 void imx1SetFifoWaitSkip(bool skip);
 // CPU reads of the YMF768's ready register (bank 1 38) since the machine was made or loaded, for tests.
 uint64_t imx1MachineYmfReadyReads(const Imx1Machine*);
+// The board time of the last of those reads, for tests (not saved).
+Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine*);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.

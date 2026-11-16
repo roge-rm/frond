@@ -113,7 +113,11 @@ class Imx1Bootstrap {
         if (size != 1) return Imx1BootstrapAccess::width;
         SourceChange change(*this);
         if (write) ymf.write(address & 1, uint8_t(value));
-        else value = ymf.read(address & 1);
+        else {
+            const uint64_t reads = ymf.readyRegisterReads();
+            value = ymf.read(address & 1);
+            if (ymf.readyRegisterReads() != reads) ymf.noteReadyRead(elapsedReference);
+        }
         if (!ymfDriveLine()) return Imx1BootstrapAccess::sideEffect;
         return Imx1BootstrapAccess::ok;
     }

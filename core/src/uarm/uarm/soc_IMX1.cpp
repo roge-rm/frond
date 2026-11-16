@@ -270,6 +270,12 @@ uint64_t SocIMX1::GetTime() {
     return uint64_t(__uint128_t(time.ticks) * 1000000000 / ticksPerSecond);
 }
 
+uint64_t SocIMX1::YmfLastReadyReadNs() const {
+    const auto time = imx1MachineYmfLastReadyRead(machine);
+    return uint64_t((__uint128_t(time.ticks) * time.denominator + time.numerator) * 1000000000 /
+                    (__uint128_t(ticksPerSecond) * time.denominator));
+}
+
 bool SocIMX1::LcdEnabled() {
     uint32_t width = 0, height = 0;
     return imx1MachinePeekFrame(machine, width, height) != nullptr;

@@ -68,6 +68,8 @@ class SocIMX1 : public SoC {
     uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
     uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
     uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }
+    // The guest time of the last of them in ns, on GetTime's clock, for tests.
+    uint64_t YmfLastReadyReadNs() const;
     // The RAM and graphics memory hashed, for comparing where two runs end.
     uint64_t MemoryHash() const { return imx1MachineMemoryHash(machine); }
     // The sound and graphics chips' registers as text (imx1MachineChipSummary).

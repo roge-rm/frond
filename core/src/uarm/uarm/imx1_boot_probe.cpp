@@ -2131,6 +2131,10 @@ uint64_t imx1MachineYmfReadyReads(const Imx1Machine* machine) {
     return machine->probe->peripherals.ymf768().readyRegisterReads();
 }
 
+Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine* machine) {
+    return machine->probe->peripherals.ymf768().lastReadyRead();
+}
+
 void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
 
 bool imx1MachineSetFastBlocks(Imx1Machine* machine, bool blocks) {

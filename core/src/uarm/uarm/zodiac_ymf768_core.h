@@ -85,7 +85,7 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
     index = other.index; bank = other.bank; fifoQueued = other.fifoQueued; fifoPartial = other.fifoPartial;
     fifoWait = other.fifoWait; timerAcc = other.timerAcc; engineAcc = other.engineAcc;
     readyPending = other.readyPending; std::memcpy(readyAcc, other.readyAcc, sizeof(readyAcc));
-    readyNumerator = other.readyNumerator; readyReads = other.readyReads;
+    readyNumerator = other.readyNumerator; readyReads = other.readyReads; readyReadTime = other.readyReadTime;
     enginePeriod = other.enginePeriod; samples = other.samples;
     std::memcpy(last, other.last, sizeof(last));
     pendingRight = other.pendingRight;

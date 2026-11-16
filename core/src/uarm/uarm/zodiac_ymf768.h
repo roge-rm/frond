@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include "imx1_reference_time.h"
 
 // The Zodiac's Yamaha YMF768 on CS4: an index port at 0x15000000 and a data port at 0x15000001, two banks of
 // 256 registers (common register 0f bit 0 picks the bank). There is no register manual; everything here is
@@ -147,6 +148,8 @@ class Imx1Ymf768 {
 
     // For tests.
     uint64_t readyRegisterReads() const { return readyReads; }
+    const Imx1ReferenceTime& lastReadyRead() const { return readyReadTime; }
+    void noteReadyRead(const Imx1ReferenceTime& now) { readyReadTime = now; }
     unsigned queuedRecords() const { return fifoQueued; }
     uint64_t engineSamples() const { return samples; }
     uint64_t engineQuietSamples() const { return quietSamples; }
@@ -236,6 +239,7 @@ class Imx1Ymf768 {
     uint64_t readyAcc[3];   // their time so far, as advanceReady counts it
     uint64_t readyNumerator;  // the System PLL numerator readyAcc is counted at, 0 before the first advance
     mutable uint64_t readyReads = 0;  // not saved, for tests: CPU reads of bank 1 38
+    Imx1ReferenceTime readyReadTime;  // not saved, for tests: the board time of the last one (noteReadyRead)
     uint64_t timerAcc;
     uint64_t engineAcc;     // system clocks x denominator x engineRate since the last sample, of enginePeriod
     uint64_t enginePeriod;  // 32768 x the System PLL numerator at the last advance, 0 before the first
