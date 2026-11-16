@@ -1,5 +1,5 @@
 {
-  "note": "Recipes for tools/speed-check.py --counts. A recipe runs in benchmark-replay, or in frond-68k with runner frond-68k; engines limits the engines it runs in. A cold boot without nand gets a blank NAND where the device has one. rom is under FROND_DEVICE_IMAGES, card (a Zodiac SD image) under ZODIAC_CARDS, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them.",
+  "note": "Recipes for tools/speed-check.py --counts. A recipe runs in benchmark-replay, or in frond-68k with runner frond-68k; engines limits the engines it runs in. A cold boot without nand gets a blank NAND where the device has one. rom is under FROND_DEVICE_IMAGES, card (a Zodiac SD image) under ZODIAC_CARDS, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them. A recipe with measure set runs and prints what it read (read: speedy takes Speedy 7.1's detail form from RAM) but has no results to compare.",
   "recipes": {
     "tg50-boot": {
       "rom": "Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin",
@@ -488,6 +488,62 @@
           "input": "9d81106953ec3596"
         }
       }
+    },
+    "speedy-tx": {
+      "session": "SPEEDY_TX_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-zire72": {
+      "session": "SPEEDY_ZIRE72_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-e2": {
+      "session": "SPEEDY_E2_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-tg50": {
+      "session": "SPEEDY_TG50_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "frondbench-zire72": {
+      "session": "FRONDBENCH_ZIRE72_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
+    },
+    "frondbench-e2": {
+      "session": "FRONDBENCH_E2_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
+    },
+    "frondbench-tg50": {
+      "session": "FRONDBENCH_TG50_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
     }
   }
 }

@@ -1,0 +1,319 @@
+diff --git a/core/src/uarm/uarm/CPU.cpp b/core/src/uarm/uarm/CPU.cpp
+index 186fc132..d3056a5b 100644
+--- a/core/src/uarm/uarm/CPU.cpp
++++ b/core/src/uarm/uarm/CPU.cpp
+@@ -329,6 +329,33 @@ static FORCE_INLINE bool cpuPrvConditionFails(const struct ArmCpu *cpu, uint32_t
+     return table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)];
+ }
+ 
++#include "cost_profile.h"
++// Called before each interpreted instruction runs; thumb is the CPU's state before it.
++static void costProfileInstr(const struct ArmCpu *cpu, uint32_t instr, bool thumb) {
++    CostProfile& p = costProfile();
++    p.arm920 = cpu->model == ArmCpuModel::arm920t;
++    unsigned count;
++    bool load;
++    const unsigned cls = costClassify(instr, count, load);
++    p.cls[cls]++;
++    p.hist[cpu->curInstrPC >> 24]++;
++    CostBucket& bucket = p.bucketOf(cpu->curInstrPC);
++    p.cur = &bucket;
++    bucket.n++;
++    bucket.cls[cls]++;
++    if (thumb) { p.thumb++; p.clsThumb[cls]++; }
++    else p.arm++;
++    if (cls != cc_thumb_raw && cls != cc_peephole && (instr >> 28) != 0xe && (instr >> 28) != 0xf && cpuPrvConditionFails(cpu, instr)) {
++        p.failed++;
++        bucket.failed++;
++    } else if (count) {
++        (load ? p.ldmWords : p.stmWords) += count;
++        (load ? bucket.ldmw : bucket.stmw) += count;
++    }
++    if (cls == cc_peephole && (instr & 0xf) == 4) p.memcpyBytes += cpu->regs[2];
++    costProfileTick(p);
++}
++
+ static FORCE_INLINE uint32_t cpuPrvClz(uint32_t val) {
+     if (!val) return 32;
+ 
+@@ -1182,7 +1209,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+ #endif
+ 
+ #ifndef __EMSCRIPTEN__
+-    if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
++    if constexpr (false && armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
+       if constexpr (!arm920) {
+         struct HostTlb &hostTlb = cpu->mem->hostTlb;
+         if constexpr (write) {
+@@ -1215,6 +1242,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+         }
+ 
+         pa = MMU_TRANSLATE_RESULT_PA(translateResult);
++        costProfileAccess(arm920, pa, size, write);
+         if constexpr (arm920) {
+             auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
+             dc->mem = cpu->mem;
+@@ -1230,6 +1258,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+         }
+ 
+         pa = vaddr;
++        costProfileAccess(arm920, pa, size, write);
+     }
+ 
+ #ifndef __EMSCRIPTEN__
+@@ -4592,7 +4621,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
+ 
+     while (cycleAcc < cycles) {
+         if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
++        { CostProfile& p = costProfile(); p.paceOps++; costProfileTick(p); p.inPace = true; }
+         cpuPrvCyclePace(cpu);
++        costProfile().inPace = false;
+         cycleAcc += 20;
+ 
+         if (cpu->slowPath) break;
+@@ -4673,6 +4704,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+                 return acc;
+             }
+             cpu->regs[REG_NO_PC] = pc + size;
++            costProfileInstr(cpu, instr, size == 2);
+             cpuPrvDecompressExecFn(decoded)(cpu, instr);
+             if (cpu->slowPath) break;
+             continue;
+@@ -4684,6 +4716,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+             if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
+             else instr = line->translatedThumbInstructions[offset >> 1];
+             cpu->regs[REG_NO_PC] = pc + size;
++            costProfileInstr(cpu, instr, size == 2);
+             cpuPrvDecompressExecFn(int32_t(cached) >> DECODED_BITS_SHIFT)(cpu, instr);
+             if (cpu->slowPath) return acc;
+ 
+@@ -4780,6 +4813,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
+         cpuPrvDispatchExecFnThumb<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
+                                                               translatedInstr);
+ #else
++        costProfileInstr(cpu, translatedInstr, true);
+         cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
+ #endif
+ 
+@@ -4868,6 +4902,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
+         cpuPrvDispatchExecFnArm<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
+                                                             instr);
+ #else
++        costProfileInstr(cpu, instr, false);
+         cpuPrvDecompressExecFn(decoded)(cpu, instr);
+ #endif
+ 
+diff --git a/core/src/uarm/uarm/cost_profile.h b/core/src/uarm/uarm/cost_profile.h
+new file mode 100644
+index 00000000..d4499452
+--- /dev/null
++++ b/core/src/uarm/uarm/cost_profile.h
+@@ -0,0 +1,180 @@
++// Debug only (tools/debug/cost-profile.patch, never applied by the build): counts what the
++// interpreter runs, per cost class, and loads and stores per memory region. Exact engine only
++// (FROND_JIT=0). FROND_COST_PROFILE=file writes a cumulative line every 1M cycles and a final
++// line, then the hot code address histogram.
++#ifndef _COST_PROFILE_H_
++#define _COST_PROFILE_H_
++
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++
++enum CostClass {
++    cc_dp, cc_dp_regshift, cc_dp_pc, cc_mul, cc_mul_long, cc_dsp_mul, cc_clz_sat,
++    cc_ldr, cc_str, cc_ldr_pc, cc_ldrh, cc_strh, cc_ldm, cc_stm, cc_swp,
++    cc_b, cc_bl, cc_bx, cc_mrs_msr, cc_cp15, cc_cp14, cc_cp_other, cc_ldc_stc, cc_swi,
++    cc_peephole, cc_thumb_raw, cc_undef, cc_count
++};
++static const char* const costClassNames[cc_count] = {
++    "dp", "dp_regshift", "dp_pc", "mul", "mul_long", "dsp_mul", "clz_sat",
++    "ldr", "str", "ldr_pc", "ldrh", "strh", "ldm", "stm", "swp",
++    "b", "bl", "bx", "mrs_msr", "cp15", "cp14", "cp_other", "ldc_stc", "swi",
++    "peephole", "thumb_raw", "undef"
++};
++enum CostRegion { cr_sdram, cr_sram, cr_flash, cr_device, cr_count };
++static const char* const costRegionNames[cr_count] = {"sdram", "sram", "flash", "device"};
++
++// Counts per 256 bytes of code address, to take the guest's idle loops out of a run afterwards.
++struct CostBucket {
++    uint64_t n = 0, cls[cc_count] = {}, failed = 0, ldmw = 0, stmw = 0, regL[cr_count] = {}, regS[cr_count] = {};
++};
++
++struct CostProfile {
++    CostBucket* regions[256] = {};  // by address >> 24, 65536 buckets each
++    CostBucket* cur = nullptr;
++    CostBucket& bucketOf(uint32_t pc) {
++        CostBucket*& r = regions[pc >> 24];
++        if (!r) r = new CostBucket[65536];
++        return r[(pc >> 8) & 0xffff];
++    }
++    uint64_t cls[cc_count] = {}, clsThumb[cc_count] = {};
++    uint64_t failed = 0, thumb = 0, arm = 0, ldmWords = 0, stmWords = 0, paceOps = 0, memcpyBytes = 0;
++    uint64_t loads[cr_count][3] = {}, stores[cr_count][3] = {};  // by size 1, 2, 4 or more
++    uint64_t paceAcc[cr_count][2] = {};  // accesses made while PACE runs a 68k op, by region and load/store
++    bool inPace = false;
++    uint64_t hist[256] = {};
++    uint64_t nextSnapshot = 1000000;
++    bool arm920 = false;
++    FILE* out = nullptr;
++    CostProfile() {
++        if (const char* path = std::getenv("FROND_COST_PROFILE")) out = std::fopen(path, "w");
++        std::atexit([] { costProfileFinal(); });
++    }
++    static void costProfileFinal();
++};
++
++static inline CostProfile& costProfile() {
++    static CostProfile p;
++    return p;
++}
++
++static inline void costProfileDump(CostProfile& p, const char* tag) {
++    if (!p.out) return;
++    std::fprintf(p.out, "%s busy=%llu arm=%llu thumb=%llu failed=%llu pace=%llu ldmw=%llu stmw=%llu memcpy=%llu",
++                 tag, (unsigned long long)(p.arm + p.thumb + 20 * p.paceOps), (unsigned long long)p.arm,
++                 (unsigned long long)p.thumb, (unsigned long long)p.failed, (unsigned long long)p.paceOps,
++                 (unsigned long long)p.ldmWords, (unsigned long long)p.stmWords, (unsigned long long)p.memcpyBytes);
++    for (int i = 0; i < cc_count; i++) std::fprintf(p.out, " c.%s=%llu", costClassNames[i], (unsigned long long)p.cls[i]);
++    for (int r = 0; r < cr_count; r++) {
++        for (int s = 0; s < 3; s++)
++            std::fprintf(p.out, " r.%s.l%d=%llu r.%s.s%d=%llu", costRegionNames[r], s, (unsigned long long)p.loads[r][s],
++                         costRegionNames[r], s, (unsigned long long)p.stores[r][s]);
++    }
++    for (int r = 0; r < cr_count; r++)
++        std::fprintf(p.out, " pace.%s.l=%llu pace.%s.s=%llu", costRegionNames[r], (unsigned long long)p.paceAcc[r][0],
++                     costRegionNames[r], (unsigned long long)p.paceAcc[r][1]);
++    std::fprintf(p.out, "\n");
++    std::fflush(p.out);
++}
++
++inline void CostProfile::costProfileFinal() {
++    CostProfile& p = costProfile();
++    costProfileDump(p, "FINAL");
++    if (!p.out) return;
++    uint64_t total = p.arm + p.thumb;
++    for (int r = 0; r < 256; r++) {
++        if (!p.regions[r]) continue;
++        for (uint32_t i = 0; i < 65536; i++) {
++            const CostBucket& b = p.regions[r][i];
++            if (b.n < 1000 || b.n * 2000 < total) continue;
++            std::fprintf(p.out, "BUCKET 0x%08x n=%llu failed=%llu ldmw=%llu stmw=%llu", (unsigned)(r << 24 | i << 8),
++                         (unsigned long long)b.n, (unsigned long long)b.failed, (unsigned long long)b.ldmw,
++                         (unsigned long long)b.stmw);
++            for (int c = 0; c < cc_count; c++) std::fprintf(p.out, " c.%s=%llu", costClassNames[c], (unsigned long long)b.cls[c]);
++            for (int g = 0; g < cr_count; g++)
++                std::fprintf(p.out, " r.%s.l=%llu r.%s.s=%llu", costRegionNames[g], (unsigned long long)b.regL[g],
++                             costRegionNames[g], (unsigned long long)b.regS[g]);
++            std::fprintf(p.out, "\n");
++        }
++    }
++    for (int i = 0; i < 256; i++)
++        if (p.hist[i]) std::fprintf(p.out, "PCHIST 0x%02x000000 %llu\n", i, (unsigned long long)p.hist[i]);
++    std::fclose(p.out);
++    p.out = nullptr;
++}
++
++static inline unsigned costRegionOf(bool arm920, uint32_t pa) {
++    if (arm920) {  // i.MX1: SRAM at 0x00300000, SDRAM at 0x08000000, flash from 0x10000000
++        if (pa >= 0x08000000 && pa < 0x10000000) return cr_sdram;
++        if (pa >= 0x00300000 && pa < 0x00320000) return cr_sram;
++        if (pa >= 0x10000000 && pa < 0x14000000) return cr_flash;
++        return cr_device;
++    }
++    if (pa >= 0xA0000000u && pa < 0xB0000000u) return cr_sdram;
++    if (pa >= 0x5C000000u && pa < 0x5C040000u) return cr_sram;  // PXA27x internal memory
++    if (pa < 0x04000000u) return cr_flash;                      // static chip select 0
++    return cr_device;
++}
++
++// A PACE 68k op charges 20 cycles.
++static inline void costProfileTick(CostProfile& p) {
++    if (p.arm + p.thumb + 20 * p.paceOps >= p.nextSnapshot) {
++        p.nextSnapshot += 1000000;
++        costProfileDump(p, "SNAP");
++    }
++}
++
++static inline void costProfileAccess(bool arm920, uint32_t pa, unsigned size, bool write) {
++    CostProfile& p = costProfile();
++    const unsigned s = size == 1 ? 0 : size == 2 ? 1 : 2;
++    if (!p.inPace && p.cur) (write ? p.cur->regS : p.cur->regL)[costRegionOf(arm920, pa)]++;
++    if (p.inPace) { p.paceAcc[costRegionOf(arm920, pa)][write]++; return; }
++    (write ? p.stores : p.loads)[costRegionOf(arm920, pa)][s]++;
++}
++
++// instr is the ARM word, or the raw Thumb halfword for a Thumb instruction with no ARM form.
++static inline unsigned costClassify(uint32_t w, unsigned& ldmCount, bool& isLoadMulti) {
++    ldmCount = 0;
++    isLoadMulti = false;
++    if ((w >> 16) == 0) return cc_thumb_raw;
++    if ((w & 0xfffffff0u) == 0xfff9ee90u) return cc_peephole;
++    if ((w >> 28) == 0xf) return ((w >> 25) & 7) == 5 ? cc_bl : cc_dp;  // BLX imm, else PLD
++    switch ((w >> 26) & 3) {
++        case 0: {
++            if ((w & 0x0ffffff0u) == 0x012fff10u || (w & 0x0ffffff0u) == 0x012fff30u) return cc_bx;
++            if ((w & 0x0fc000f0u) == 0x00000090u) return cc_mul;
++            if ((w & 0x0f8000f0u) == 0x00800090u) return cc_mul_long;
++            if ((w & 0x0fb00ff0u) == 0x01000090u) return cc_swp;
++            if ((w & 0x0e000090u) == 0x00000090u && (w & 0x60)) return ((w & (1 << 20)) || ((w >> 5) & 3) == 2) ? cc_ldrh : cc_strh;
++            if ((w & 0x0f900090u) == 0x01000080u) return cc_dsp_mul;
++            if ((w & 0x0f900ff0u) == 0x01000050u) return cc_clz_sat;
++            if ((w & 0x0fff0ff0u) == 0x016f0f10u) return cc_clz_sat;
++            if ((w & 0x0fbf0fffu) == 0x010f0000u) return cc_mrs_msr;
++            if ((w & 0x0db0f000u) == 0x0120f000u) return cc_mrs_msr;
++            const unsigned op = (w >> 21) & 15;
++            const bool test = op >= 8 && op <= 11;
++            if (!test && ((w >> 12) & 15) == 15) return cc_dp_pc;
++            if (!(w & (1 << 25)) && (w & (1 << 4))) return cc_dp_regshift;
++            return cc_dp;
++        }
++        case 1:
++            if ((w & (1 << 25)) && (w & (1 << 4))) return cc_undef;
++            if (w & (1 << 20)) return ((w >> 12) & 15) == 15 ? cc_ldr_pc : cc_ldr;
++            return cc_str;
++        case 2:
++            if (w & (1 << 25)) return (w & (1 << 24)) ? cc_bl : cc_b;
++            ldmCount = __builtin_popcount(w & 0xffff);
++            isLoadMulti = w & (1 << 20);
++            return isLoadMulti ? cc_ldm : cc_stm;
++        default:
++            if (((w >> 24) & 15) == 15) return cc_swi;
++            if (!(w & (1 << 25))) return cc_ldc_stc;
++            if (w & (1 << 4)) {
++                const unsigned cp = (w >> 8) & 15;
++                return cp == 15 ? cc_cp15 : cp == 14 ? cc_cp14 : cc_cp_other;
++            }
++            return cc_cp_other;
++    }
++}
++
++#endif
+diff --git a/core/src/uarm/uarm/pxa_PwrClk.cpp b/core/src/uarm/uarm/pxa_PwrClk.cpp
+index 84120849..92762cdb 100644
+--- a/core/src/uarm/uarm/pxa_PwrClk.cpp
++++ b/core/src/uarm/uarm/pxa_PwrClk.cpp
+@@ -101,6 +101,9 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData,
+                 if (read)  // CLKCFG: PXA27x reads back T, HT and B; F reads 0
+                     val = pc->isPXA270 ? (pc->turbo ? 1 : 0) | pc->clkcfgBits : 0;
+                 else {
++                    fprintf(stderr, "COSTCLK t=%llu clkcfg=0x%x cccr=0x%08x pc=0x%08x\n",
++                            (unsigned long long)pc->soc->GetTime(), (unsigned)val, (unsigned)pc->CCCR,
++                            (unsigned)cpuGetRegExternal(cpu, 15));
+                     pc->turbo = (val & 1) != 0;
+                     if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
+                     if (val & 2)
+@@ -172,9 +175,11 @@ static bool pxaPwrClkPrvClockMgrMemAccessF(void *userData, uint32_t pa, uint8_t
+ 
+     switch (pa) {
+         case 0:  // CCCR
+-            if (write)
++            if (write) {
++                fprintf(stderr, "COSTCLK t=%llu cccr=0x%08x (was 0x%08x)\n", (unsigned long long)pc->soc->GetTime(),
++                        (unsigned)val, (unsigned)pc->CCCR);
+                 pc->CCCR = val;
+-            else
++            } else
+                 val = pc->CCCR;
+             break;
+ 

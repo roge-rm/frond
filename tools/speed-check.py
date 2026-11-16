@@ -23,7 +23,8 @@ instruction and cycle counts, frame and PCM counts and hashes against the baseli
 needs no quiet machine. Exact always repeats; Fast runs with sync compiles (BENCH_JIT_ASYNC is
 dropped), which repeat too. Async Fast doesn't, so it's never compared. Only recipes whose counts
 moved then get wall-clock rounds; --timing gives rounds for every recipe, for release-notes figures.
-Exits 1 when a count moved or a run failed.
+A recipe with "measure": true is run but not compared or stored; "read": "speedy" or "frondbench" prints what
+the guest showed (Speedy's three times, FrondBench's four). Exits 1 when a count moved or a run failed.
 
   speed-check.py --counts [--only a,b] [--engines exact,fast] [--jobs 4] [--rounds N] [--against OLD-BENCH]
                  [--timing] [--async-rounds] [--update] [--baseline FILE]
@@ -227,6 +228,21 @@ COUNTS = ('guest_ns', 'cycles', 'instructions', 'jit_instructions', 'lcd_frames'
 BASELINE = ROOT / 'tools/speed-baseline.json'
 
 
+def speedy_times(out):
+    """Speedy's detail form (opened by the replay) as read from guest RAM: Calc, Mem, Graph and Total seconds."""
+    data = (out / 'ram-end.bin').read_bytes()
+    found = {}
+    for key, label in (('calc', b'Calc Test :'), ('mem', b'Mem Test :'), ('graph', b'Graph Test :'), ('total', b'Total :')):
+        for at in re.finditer(re.escape(label), data):  # the last copy that has a time after it
+            m = re.search(rb'(\d+\.\d\d) sec', data[at.end():at.end() + 80], re.S)
+            if m:
+                found[key] = float(m[1])
+    return found
+
+
+READERS = {'speedy': speedy_times, 'frondbench': lambda out: (frondbench_results(out) or {}).get('ms', {})}
+
+
 def digest(path):
     """First 16 hex digits of the SHA-256 of a session or ROM, or of a machine folder's files."""
     h = hashlib.sha256()
@@ -332,6 +348,8 @@ def replay_run(bench, r, path, engine, out, exclusive, asynchronous=False):
         return run_68k(r, path, out, exclusive)
     env = dict(os.environ, FROND_JIT='1' if engine == 'fast' else '0')
     env.pop('BENCH_JIT_ASYNC', None)
+    if r.get('read'):
+        env['BENCH_DUMP_RAM'] = '1'
     if asynchronous:
         env['BENCH_JIT_ASYNC'] = '1'
     replay = r.get('replay', '-')
@@ -347,6 +365,10 @@ def replay_run(bench, r, path, engine, out, exclusive, asynchronous=False):
     if res.returncode:
         raise RuntimeError((res.stderr.strip().splitlines() or ['failed'])[-1])
     s = json.loads((out / 'summary.json').read_text())
+    if r.get('read'):
+        s['read'] = READERS[r['read']](out)
+        for big in ('ram-start.bin', 'ram-end.bin'):
+            (out / big).unlink(missing_ok=True)
     if s.get('engine', engine) != engine:
         raise RuntimeError(f"ran {s.get('engine')}, not {engine}: is the JIT built in?")
     return s
@@ -412,6 +434,12 @@ def counts_main(args):
         got['input'] = keys[name]
         report[label] = got
         want = r.get('results', {}).get(engine)
+        if r.get('measure'):
+            # Measure-only: nothing stored or compared; the readings are printed.
+            got['read'] = s.get('read', {})
+            lines.append(f"{label}: measured, {got.get('instructions', got.get('cycles'))} instructions, "
+                         f"{got['cycles']} cycles, {s['guest_ns'] / 1e9:.3f} guest s, read {got['read']}")
+            continue
         jit = f", {got['jit_instructions']} in the JIT" if engine == 'fast' else ''
         count = f"{got['instructions']} instructions" if 'instructions' in got else f"{got['cycles']} cycles"
         summary = f"{count}{jit}, frames {s['frame_sequence_hash']}, pcm {s['pcm_hash']}"

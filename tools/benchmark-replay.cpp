@@ -179,6 +179,10 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     m.memory=std::move(contents.memory); m.savestate=std::move(contents.savestate);
     m.media=std::move(contents.media);
     m.folder=folder;
+    // A NAND that lives in the machine folder is attached after the SoC is made; the SoC needs a buffer of the right size first.
+    if (m.nand.empty())
+        for (const auto& media : m.media)
+            if (media.kind==frondMachine::kindNand) m.nand.assign(deviceConfigurationGetNandSize(m.device),0xff);
     for (const auto& media : m.media)
         if (media.kind==frondMachine::kindSd) throw std::runtime_error("use a session without an SD card for this benchmark");
     if (m.savestate.empty() || m.memory.empty()) throw std::runtime_error("complete RAM and peripheral state required");
