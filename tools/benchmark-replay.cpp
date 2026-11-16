@@ -261,6 +261,8 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const char* jit=std::getenv("FROND_JIT");
     const bool fast=jit && std::string(jit)=="1";
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
+    // BENCH_ZODIAC_READY_SKIP=0 runs the YMF768 ready wait's tries one by one on Fast, for tests.
+    if (const char* ready=std::getenv("BENCH_ZODIAC_READY_SKIP")) imx1SetReadyWaitSkip(std::string(ready)!="0");
     soc->SetHostTimeLimit(false);
     clockStart=soc->GetTime(); clockSoc=soc.get();
     SoC::SetEventClock(eventMs);
@@ -297,6 +299,11 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     uint64_t lastHash=hashInit, frameSequence=hashInit, pcmHash=hashInit, frameCount=0, changed=0, pcmFrames=0, cycles=0;
     unsigned snapshots=0;
     bool haveFrame=false;
+    const char* traceEnv=std::getenv("BENCH_ZODIAC_TRACE");
+    const bool trace=traceEnv!=nullptr;
+    const uint64_t traceStepMs=trace&&*traceEnv?number(traceEnv,100000):250;
+    uint64_t traceNext=0;
+    bool lastLcd=true;  // changed frames and handed-over events, guest time
     const auto start=std::chrono::steady_clock::now();
     for (;;) {
         uint32_t first=0,last=0;
@@ -307,6 +314,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             frameSequence=hashBytes(frameSequence,&guest,sizeof(guest));
             frameSequence=hashBytes(frameSequence,&hash,sizeof(hash));
             changed+=!haveFrame || hash!=lastHash;
+            if (trace && (!haveFrame || hash!=lastHash)) std::fprintf(stderr,"frame %.3f ms hash %llx\n",guest/1e6,(unsigned long long)hash);
             lastHash=hash; haveFrame=true; ++frameCount;
             soc->ResetPendingFrame();
         }
@@ -314,6 +322,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         const auto elapsed=soc->GetTime()-clockStart;
         while (next<events.size() && events[next].ms*1000000<=elapsed) {
             const auto& e=events[next++];
+            if (trace) std::fprintf(stderr,"event %s at %.3f ms (due %llu)\n",e.kind.c_str(),elapsed/1e6,(unsigned long long)e.ms);
             if (e.kind=="pen-down" || e.kind=="pen-move") soc->PenDown(e.x,e.y);
             else if (e.kind=="pen-up") soc->PenUp();
             else if (e.kind=="key-down") soc->KeyDown(e.key);
@@ -341,11 +350,21 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         uint32_t pcm[8192];
         const auto n=audioQueuePopChunk(queue,pcm,8192);
         pcmHash=hashBytes(pcmHash,pcm,n*sizeof(uint32_t)); pcmFrames+=n;
+        if (trace) {
+            const bool lcd=soc->LcdEnabled();
+            if (lcd!=lastLcd) { std::fprintf(stderr,"lcd %s at %.3f ms wall %.3f\n",lcd?"on":"off",(soc->GetTime()-clockStart)/1e6,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()); lastLcd=lcd; }
+        }
+        if (trace && elapsed>=traceNext) {
+            const auto st=soc->Status();
+            std::fprintf(stderr,"state %.0f ms pc %08x retired %llu idleHclk %llu wall %.3f jit %llu runs %llu skips %llu haltskips %llu ready %llu\n",elapsed/1e6,st.pc,(unsigned long long)st.retired,(unsigned long long)st.idleHclk,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),(unsigned long long)soc->JitRetired(),(unsigned long long)soc->JitRuns(),(unsigned long long)soc->DelaySkips(),(unsigned long long)soc->DelayHaltSkips(),(unsigned long long)soc->ReadyWaitTries());
+            traceNext=elapsed+traceStepMs*1000000;
+        }
     }
     const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
+    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\n",soc->LcdEnabled()?"on":"off",soc->ChipSummary().c_str());
     std::ofstream result(output/"summary.json");
     result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
            << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")

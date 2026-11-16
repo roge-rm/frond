@@ -64,6 +64,12 @@ class SocIMX1 : public SoC {
     bool Halted() const { return halted; }
     // Instructions the Fast engine ran in Dynarmic blocks so far.
     uint64_t JitRetired() const { return imx1MachineJitRetired(machine); }
+    uint64_t JitRuns() const { return imx1MachineJitRuns(machine); }
+    uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
+    uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
+    uint64_t ReadyWaitTries() const { return imx1MachineReadyWaitTries(machine); }
+    // The sound and graphics chips' registers as text (imx1MachineChipSummary).
+    std::string ChipSummary() const { return imx1MachineChipSummary(machine); }
     // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps
     // up. Off, a run always reaches its guest time and runs repeat however busy the host is (tools).
     void SetHostTimeLimit(bool on) { hostTimeLimit = on; }

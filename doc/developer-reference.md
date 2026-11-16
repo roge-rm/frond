@@ -871,6 +871,10 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_TEST_TG50_CORE`, `FROND_TEST_TG50_NOR`, `FROND_TEST_TG50_SESSION`, `FROND_TEST_TG50_HOST_SESSION`, `FROND_TEST_TG50_TONE_SESSION`, `FROND_TEST_TG50_SHOTS`, `FROND_TEST_TG50_BT_SOCKET` | TG50 core, firmware, sessions, picture folder and Bluetooth socket for the TG50 desktop tests. |
 | `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
+| `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
+| `BENCH_ZODIAC_READY_SKIP` | `0` makes `benchmark-replay` run the YMF768 ready wait's tries one by one on Fast. |
+| `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS. |
+| `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty), screen on and off times, and the chip registers at the end. |
 | `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
@@ -1049,6 +1053,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it. Outside `make test`. |
 | `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
 | `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |
+| `test-zodiac-wake-fast` | Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try; `--exact` against Exact too. Needs the Zodiac ROM in `FROND_DEVICE_IMAGES`. Outside `make test`. |
 | `test-zodiac-machine` | Qualified generated guests, one-shot against sliced execution. Outside `make test`. |
 | `test-zodiac-machine-state` | Zodiac machine save and load. Outside `make test`. |
 | `test-zodiac-machine-state-cli` | Two probe processes, one saves and the other loads and has to end like an uninterrupted run. Outside `make test`. |

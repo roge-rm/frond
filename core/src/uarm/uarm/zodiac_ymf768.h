@@ -53,6 +53,9 @@ class Imx1Ymf768 {
         return regs[b & 1][i & 0xff];
     }
 
+    // The selected register and bank, for tests.
+    uint8_t selectedIndex() const { return index; }
+    uint8_t selectedBank() const { return bank; }
     // The interrupt line: true while asserted (GPIO B15 low).
     bool interrupt() const { return running() && request(); }
 

@@ -2439,6 +2439,12 @@ test-zodiac-machine-state: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
 	./build/test-zodiac-machine-state
 
+.PHONY: test-zodiac-wake-fast
+# Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try. Needs the
+# Zodiac ROM in FROND_DEVICE_IMAGES, else skipped.
+test-zodiac-wake-fast: benchmark-replay
+	python3 tests/zodiac-wake-fast.py
+
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.
 test-zodiac-fast-lean: build/zodiac-boot-probe
