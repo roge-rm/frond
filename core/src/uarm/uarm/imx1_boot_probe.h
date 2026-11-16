@@ -4,6 +4,7 @@
 #include "arm_diagnostic.h"
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "imx1_bootstrap.h"
 #include "imx1_cs4_capture.h"
@@ -239,6 +240,11 @@ void imx1SetScanPollSkip(bool skip);
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
 void imx1SetFifoWaitSkip(bool skip);
+// The YMF768 ready wait's tries Fast blocks passed at once, since the process started: the times and the tries.
+// imx1SetReadyWaitSkip(false) turns the skip off, for tests.
+uint64_t imx1MachineReadyWaitSkips(const Imx1Machine*);
+uint64_t imx1MachineReadyWaitTries(const Imx1Machine*);
+void imx1SetReadyWaitSkip(bool skip);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.
@@ -251,6 +257,9 @@ uint64_t imx1MachineLeanCs5Reads(const Imx1Machine*);
 uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*);
 // ASP status, GPIO and AITC reads the Fast engine answered on its lean path.
 uint64_t imx1MachineLeanBoardReads(const Imx1Machine*);
+// The YMF768's selected bank, index and registers and the graphics chip's clock registers as text, for comparing
+// where two runs end.
+std::string imx1MachineChipSummary(const Imx1Machine*);
 // A hash of SRAM, SDRAM and graphics memory as they are in memory (cache contents left out), for tests.
 uint64_t imx1MachineMemoryHash(const Imx1Machine*);
 // Times the Fast engine dropped its decoded code for a store to a page it came from.
