@@ -723,6 +723,7 @@ struct Probe {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
         // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
+        // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
         if (pa == 0x16010220 && inJit) {
             const uint32_t pc = cpuArm920TakeJitAccessPc(p.cpu);
             return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4) && p.graphicsMemory &&
