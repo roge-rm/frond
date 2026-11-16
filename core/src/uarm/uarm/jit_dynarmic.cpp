@@ -70,6 +70,9 @@ struct Stats {
     void NoteCallback(uint32_t va, bool write) {
         if (on) callbackPage[(va >> 12) | (write ? 0x80000000u : 0)]++;
     }
+    // Refused accesses that ended a run, by virtual address, size and direction.
+    std::unordered_map<uint64_t, uint64_t> faultAccess;
+    std::unordered_map<uint32_t, uint64_t> faultPc;  // pc of the instruction a refused access ended the run on
     const bool on = [] {
         const char *v = getenv("FROND_JIT_STATS");
         return v && *v && strcmp(v, "0");
@@ -159,6 +162,18 @@ struct Stats {
         for (size_t i = 0; i < top.size() && i < 16; i++)
             fprintf(stderr, "jit: callback %s page %08x %llu\n", top[i].second >> 31 ? "write" : "read",
                     top[i].second << 12, (unsigned long long)top[i].first);
+        std::vector<std::pair<uint64_t, uint64_t>> faults;
+        for (auto &[key, n] : faultAccess) faults.push_back({n, key});
+        std::sort(faults.rbegin(), faults.rend());
+        for (size_t i = 0; i < faults.size() && i < 12; i++)
+            fprintf(stderr, "jit: fault %s %08x size %u %llu\n", faults[i].second >> 40 ? "write" : "read",
+                    uint32_t(faults[i].second), unsigned(faults[i].second >> 32) & 0xff,
+                    (unsigned long long)faults[i].first);
+        top.clear();
+        for (auto &[pc, n] : faultPc) top.push_back({n, pc});
+        std::sort(top.rbegin(), top.rend());
+        for (size_t i = 0; i < top.size() && i < 12; i++)
+            fprintf(stderr, "jit: fault at %08x %llu\n", top[i].second, (unsigned long long)top[i].first);
     }
 } stats;
 
@@ -604,6 +619,7 @@ struct Env final : public A32::UserCallbacks {
             stats.aborts++;
             dataAbort = {true, {va, uint8_t(fsr), uint8_t(size), write}};
         }
+        if (stats.on) stats.faultAccess[va | uint64_t(size) << 32 | uint64_t(write) << 40]++;
         Fault();
     }
 
@@ -1567,7 +1583,10 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     e.instructions += ran;
     stats.runs++;
     stats.ran += ran;
-    if (Has(hr, kFault)) stats.fault++;
+    if (Has(hr, kFault)) {
+        stats.fault++;
+        if (stats.on) stats.faultPc[regs[15]]++;
+    }
     if (Has(hr, kInterpret)) stats.interpret++;
     if (Has(hr, kSlowPath)) stats.halt++;
     if (e.dataAbort.set) {

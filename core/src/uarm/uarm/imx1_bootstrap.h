@@ -182,14 +182,15 @@ class Imx1Bootstrap {
     uint64_t changeCount() const { return runCache.changes; }
     static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
     // Registers whose reads change nothing access commits but the GPIO port's accessed mark, and read the same
-    // anywhere in a span where no interrupt line or input changes: the ASP status, GPIO and AITC.
+    // anywhere in a span where no interrupt line or input changes: the ASP status and FIFO pointers, GPIO and AITC.
+    // The ASP's write pointer moves only where a slot completes, which ends the span.
     // Also CGM CSCR, the timers' control, prescaler, compare, capture and status (the count has its own path) and DMA
     // DISR and DIMR: reads that change nothing but a timer's status-read flag, which a charge in between leaves as is.
     // And the RTC's registers: reads only mark it used, and the span ends at its next second or sampling period.
     // And MMCSD STATUS: a read changes nothing, and the span ends where the clock stop or command in progress does.
     static bool quietReadAddress(uint32_t address) {
         const uint32_t timer = address & ~0x1000u;
-        return address == 0x0021501c || address == 0x00214004 || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
+        return address == 0x0021501c || address == 0x00215034 || address == 0x00214004 || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
                address == 0x0021b000 || (timer >= 0x00202000 && timer <= 0x00202014 && timer != 0x00202010 && !(timer & 3)) ||
                address == 0x00209004 || address == 0x00209008 || (Imx1Rtc::registerName(address) && !(address & 3));
     }
