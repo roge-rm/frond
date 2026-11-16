@@ -85,7 +85,7 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
     index = other.index; bank = other.bank; fifoQueued = other.fifoQueued; fifoPartial = other.fifoPartial;
     fifoWait = other.fifoWait; timerAcc = other.timerAcc; engineAcc = other.engineAcc;
     readyPending = other.readyPending; std::memcpy(readyAcc, other.readyAcc, sizeof(readyAcc));
-    readyReads = other.readyReads;
+    readyNumerator = other.readyNumerator; readyReads = other.readyReads;
     enginePeriod = other.enginePeriod; samples = other.samples;
     std::memcpy(last, other.last, sizeof(last));
     pendingRight = other.pendingRight;
@@ -101,7 +101,7 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
 void Imx1Ymf768::reset() {
     std::memset(regs, 0, sizeof(regs));
     index = 0; bank = 0; fifoQueued = 0; fifoPartial = 0; fifoWait = 0;
-    readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc));
+    readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); readyNumerator = 0;
     timerAcc = 0; engineAcc = 0; enginePeriod = 0; samples = 0; pendingRight = 0;
     quietOutput = false; quietSamples = 0;
     for (auto& v : last) v = 0;

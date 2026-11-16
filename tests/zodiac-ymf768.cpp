@@ -422,6 +422,44 @@ static void powerSteps() {
     assert(y.readyRegisterReads() > 10);
 }
 
+// A System PLL numerator change in the middle of a step: the time counted so far stays the same guest time, also
+// in a copy loaded from a state saved before the change.
+static void powerStepsPllChange() {
+    const uint64_t ms = 32768ull * pllNumerator / pllDenominator / 1000;  // 96000 System PLL clocks
+    Imx1Ymf768 y;
+    put(y, 0x0f, 1);
+    put(y, 0x30, 0xff); put(y, 0x30, 0xe6);  // clock (2 ms) and power up (10 ms) under way
+    assert(get(y, 0x38) == 0 && y.readyBusy());
+    y.advance(ms, pllNumerator, pllDenominator);
+    std::vector<uint8_t> chip, steps;
+    { StateWriter w(chip); y.state(w); }
+    { StateWriter w(steps); y.stateReady(w); }
+    Imx1Ymf768 loaded;
+    { StateReader r(chip.data(), chip.size()); loaded.state(r); assert(r.complete()); }
+    { StateReader r(steps.data(), steps.size()); loaded.stateReady(r); assert(r.complete()); }
+    // Twice the numerator: twice the clocks a millisecond.
+    for (auto* m : {&y, &loaded}) {
+        m->advance(2 * ms - 1, pllNumerator * 2, pllDenominator);
+        assert(get(*m, 0x38) == 0);
+        m->advance(1, pllNumerator * 2, pllDenominator);
+        assert(get(*m, 0x38) == 1);
+        m->advance(8 * 2 * ms - 1, pllNumerator * 2, pllDenominator);
+        assert(get(*m, 0x38) == 1);
+        m->advance(1, pllNumerator * 2, pllDenominator);
+        assert(get(*m, 0x38) == 3 && !m->readyBusy());
+    }
+    // A numerator that doesn't divide evenly rounds the time so far down, so the step ends a clock late at most.
+    put(y, 0x30, 0xff); put(y, 0x30, 0xe6);
+    y.advance(ms / 3, pllNumerator, pllDenominator);
+    const uint64_t odd = pllNumerator * 7 / 3 + 1;  // 109376
+    const uint64_t left = (32768ull * odd * 2 - (ms / 3) * pllDenominator * 1000 * odd / pllNumerator) /
+                          (pllDenominator * 1000);
+    y.advance(left - 1, odd, pllDenominator);
+    assert(get(y, 0x38) == 0);
+    y.advance(2, odd, pllDenominator);
+    assert(get(y, 0x38) == 1);
+}
+
 // Guest programs built from words with a literal pool at the end.
 struct Program {
     std::vector<uint32_t> code;
@@ -686,10 +724,46 @@ static void olderState() {
     imx1MachineStop(loaded);
 }
 
+// A machine in the middle of a power step loads a state saved without the ready section (no step under way): every
+// step reads as done at once. The guest starts the clock and the power up and then reads 38 into r5 over and over.
+static void readyStepsDroppedOnLoad() {
+    Program g;
+    g.ymf(0x0f, 1); g.ymf(0x30, 0xff); g.ymf(0x30, 0xe6); g.storeByte(0x15000000, 0x38);
+    const size_t loop = g.here();
+    g.load(2, 0x15000001);
+    g.code.push_back(0xe5d25000);  // ldrb r5, [r2]
+    g.branch(loop);
+    g.finish();
+    const auto hasReady = [](const std::vector<uint8_t>& state) {
+        static const uint8_t name[4] = {'Y', 'M', 'F', 'R'};
+        return std::search(state.begin(), state.end(), name, name + 4) != state.end();
+    };
+    for (unsigned fast = 0; fast < 2; ++fast) {
+        auto* done = create(g, fast, true);
+        auto r = run(done, 1000, 1000);
+        assert(r.result.registers[5] == 0);
+        for (unsigned n = 0; n < 2000 && r.result.registers[5] != 3; ++n) r = run(done, 5000, 5000);
+        assert(r.result.registers[5] == 3);
+        std::vector<uint8_t> state;
+        assert(imx1MachineSaveState(done, state) == Imx1StateStatus::ok && !hasReady(state));
+        imx1MachineStop(done);
+        auto* busy = create(g, fast, true);
+        r = run(busy, 1000, 1000);
+        assert(r.result.registers[5] == 0);
+        std::vector<uint8_t> mid;
+        assert(imx1MachineSaveState(busy, mid) == Imx1StateStatus::ok && hasReady(mid));
+        assert(imx1MachineLoadState(busy, state.data(), state.size()).status == Imx1StateStatus::ok);
+        r = run(busy, 50, 50);
+        assert(r.result.registers[5] == 3);
+        imx1MachineStop(busy);
+    }
+}
+
 int main() {
     unsetenv("FROND_JIT"); cpuSetJitSync(true); setenv("FROND_JIT_HOT", "1", 1);
     registers();
     powerSteps();
+    powerStepsPllChange();
     pitch();
     fourOperators();
     const uint32_t h = sequence();
@@ -703,7 +777,8 @@ int main() {
     guestInterrupts();
     lineRefused();
     olderState();
+    readyStepsDroppedOnLoad();
     std::puts("PASS: YMF768 registers, FIFO and interrupt, power steps, A4 pitch, four operators, the stored note sequence, FM on "
               "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
-              "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states");
+              "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states, ready steps dropped by a state without them");
 }

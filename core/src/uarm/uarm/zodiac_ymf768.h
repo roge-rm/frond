@@ -117,7 +117,7 @@ class Imx1Ymf768 {
         a.Require(engine.size() == engineStateBytes() && (!A::loading || engineStateValid(engine)), "ymf768 engine");
         if (A::loading && a.ok()) { loadEngine(engine); quietOutput = false; }
         // Done unless the ready section follows.
-        if (A::loading) { readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); }
+        if (A::loading) { readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); readyNumerator = 0; }
     }
 
     // SSI1 word mixing: slot 0 makes a frame and keeps its right half for the slot 1 word.
@@ -131,14 +131,18 @@ class Imx1Ymf768 {
 
     // The power steps still under way (readyBits), saved in a section of their own (stateReady) only while there
     // are any: without one a load finds them all done, as every state saved before the model had them.
-    static constexpr uint32_t readyStateVersion = 1;
+    static constexpr uint32_t readyStateVersion = 2;
     bool readyBusy() const { return readyPending != 0; }
     template <class A> void stateReady(A& a) {
         a.Do8(readyPending);
         for (auto& v : readyAcc) a.Do64(v);
-        a.Require(readyPending < 8 && readyPending == (readyPending & readySteady(regs[1][0x30])), "ymf768 ready");
+        a.Do64(readyNumerator);
+        a.Require(readyPending < 8 && readyPending == (readyPending & readySteady(regs[1][0x30])) &&
+                  readyNumerator < (uint64_t(1) << 32), "ymf768 ready");
+        // Each time stays under its step's period at readyNumerator (advanceReady).
         for (unsigned n = 0; n < 3; ++n)
-            a.Require(readyAcc[n] < (uint64_t(1) << 50) && (readyPending & (1u << n) || !readyAcc[n]), "ymf768 ready");
+            a.Require((readyPending & (1u << n) || !readyAcc[n]) &&
+                      (!readyAcc[n] || readyAcc[n] < readyPeriod(readyNumerator, n)), "ymf768 ready");
     }
 
     // For tests.
@@ -171,13 +175,22 @@ class Imx1Ymf768 {
         for (unsigned n = 0; n < 3; ++n)
             if ((started | ~readyPending) & (1u << n)) readyAcc[n] = 0;
     }
+    static uint64_t readyPeriod(uint64_t numerator, unsigned n) {
+        static constexpr uint64_t ms[3] = {2, 10, 2};
+        return 32768ull * numerator * ms[n];
+    }
     void advanceReady(uint64_t clocks, uint64_t numerator, uint64_t denominator) {
         // Milliseconds as the sequencer tick counts them: system clocks x denominator x 1000 against
-        // 32768 x numerator a millisecond.
-        static constexpr uint64_t ms[3] = {2, 10, 2};
+        // 32768 x numerator a millisecond. The times so far are in units of the numerator they were counted
+        // at (readyNumerator), so a new numerator rescales them first, rounding down. A time is under
+        // 32768 x 10 x the old numerator, so neither product overflows.
+        if (readyNumerator && readyNumerator != numerator)
+            for (auto& v : readyAcc)
+                v = v / readyNumerator * numerator + v % readyNumerator * numerator / readyNumerator;
+        readyNumerator = numerator;
         for (unsigned n = 0; n < 3; ++n) {
             if (!(readyPending & (1u << n))) continue;
-            const uint64_t period = 32768ull * numerator * ms[n];
+            const uint64_t period = readyPeriod(numerator, n);
             // clocks x denominator x 1000 is at least clocks, so a span of period clocks finishes any step.
             readyAcc[n] = clocks >= period ? period : std::min(readyAcc[n] + clocks * denominator * 1000, period);
             if (readyAcc[n] >= period) { readyPending &= uint8_t(~(1u << n)); readyAcc[n] = 0; }
@@ -221,6 +234,7 @@ class Imx1Ymf768 {
     uint8_t index, bank, fifoQueued, fifoPartial, fifoWait;
     uint8_t readyPending;   // readyBits steps under way
     uint64_t readyAcc[3];   // their time so far, as advanceReady counts it
+    uint64_t readyNumerator;  // the System PLL numerator readyAcc is counted at, 0 before the first advance
     mutable uint64_t readyReads = 0;  // not saved, for tests: CPU reads of bank 1 38
     uint64_t timerAcc;
     uint64_t engineAcc;     // system clocks x denominator x engineRate since the last sample, of enginePeriod
