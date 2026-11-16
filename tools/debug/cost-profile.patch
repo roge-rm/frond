@@ -108,7 +108,7 @@ new file mode 100644
 index 00000000..d4499452
 --- /dev/null
 +++ b/core/src/uarm/uarm/cost_profile.h
-@@ -0,0 +1,180 @@
+@@ -0,0 +1,181 @@
 +// Debug only (tools/debug/cost-profile.patch, never applied by the build): counts what the
 +// interpreter runs, per cost class, and loads and stores per memory region. Exact engine only
 +// (FROND_JIT=0). FROND_COST_PROFILE=file writes a cumulative line every 1M cycles and a final
@@ -132,8 +132,8 @@ index 00000000..d4499452
 +    "b", "bl", "bx", "mrs_msr", "cp15", "cp14", "cp_other", "ldc_stc", "swi",
 +    "peephole", "thumb_raw", "undef"
 +};
-+enum CostRegion { cr_sdram, cr_sram, cr_flash, cr_device, cr_count };
-+static const char* const costRegionNames[cr_count] = {"sdram", "sram", "flash", "device"};
++enum CostRegion { cr_sdram, cr_sram, cr_flash, cr_device, cr_static, cr_count };
++static const char* const costRegionNames[cr_count] = {"sdram", "sram", "flash", "device", "static"};
 +
 +// Counts per 256 bytes of code address, to take the guest's idle loops out of a run afterwards.
 +struct CostBucket {
@@ -224,6 +224,7 @@ index 00000000..d4499452
 +    if (pa >= 0xA0000000u && pa < 0xB0000000u) return cr_sdram;
 +    if (pa >= 0x5C000000u && pa < 0x5C040000u) return cr_sram;  // PXA27x internal memory
 +    if (pa < 0x04000000u) return cr_flash;                      // static chip select 0
++    if (pa < 0x40000000u) return cr_static;                     // static chip selects 1-5, PCMCIA
 +    return cr_device;
 +}
 +

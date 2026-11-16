@@ -49,7 +49,7 @@ def show(name, d):
     cls = sorted(((k[2:], v) for k, v in d.items() if k.startswith('c.') and v >= 1), key=lambda x: -x[1])
     out.append('  classes: ' + ', '.join(f'{k} {100 * v / max(arm, 1):.1f}%' for k, v in cls if v / max(arm, 1) >= 0.0005))
     regs = []
-    for r in ('sdram', 'sram', 'flash', 'device'):
+    for r in ('sdram', 'sram', 'flash', 'device', 'static'):
         l = sum(d.get(f'r.{r}.l{s}', 0) for s in range(3))
         st = sum(d.get(f'r.{r}.s{s}', 0) for s in range(3))
         pl, ps = d.get(f'pace.{r}.l', 0), d.get(f'pace.{r}.s', 0)

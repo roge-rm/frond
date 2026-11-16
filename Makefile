@@ -1192,6 +1192,13 @@ test-tx-lifecycle-rom: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-tx-lifecycle-rom
 
 .PHONY: test-host-serial
+test: test-xscale-cost
+.PHONY: test-xscale-cost
+test-xscale-cost:
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Icore/src/uarm/uarm tests/xscale-cost.cpp -o build/test-xscale-cost
+	./build/test-xscale-cost
+
 test: test-host-serial
 test-host-serial: prepare core/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
