@@ -1,0 +1,6 @@
+# ZQuake on the T|X from its launcher screen: Launch starts the game, whose autoexec.cfg runs `timedemo demo1`; the result is a console line in guest RAM
+500 pen-down 45 300
+1300 pen-up
+2500 pen-down 45 300
+3300 pen-up
+120000 snapshot "a.png"
