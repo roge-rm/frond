@@ -87,4 +87,5 @@ def main():
         base, pos = top, end
 
 
-main()
+if __name__ == "__main__":
+    main()
