@@ -45,7 +45,7 @@ prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin
 out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
-test-zodiac-machine test-zodiac-fast-lean: TEST_TIMEOUT = 1800
+test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: TEST_TIMEOUT = 1800
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
@@ -2451,11 +2451,11 @@ test-zodiac-machine-state: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
 	./build/test-zodiac-machine-state
 
-.PHONY: test-zodiac-wake-fast
-# Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try. Needs the
-# Zodiac ROM in FROND_DEVICE_IMAGES, else skipped.
-test-zodiac-wake-fast: benchmark-replay
-	python3 tests/zodiac-wake-fast.py
+.PHONY: test-zodiac-ymf-ready
+# The Zodiac boot's chip power cycle, sleep and wake end their YMF768 power waits in a few tries, alike in Exact and
+# Fast and through a load mid-wait. Needs the Zodiac ROM in FROND_DEVICE_IMAGES, else skipped (minutes in Exact).
+test-zodiac-ymf-ready: benchmark-replay
+	python3 tests/zodiac-ymf-ready.py
 
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.

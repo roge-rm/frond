@@ -69,12 +69,6 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
-// Fast blocks: the YMF768 ready wait's tries passed at once (skipReadyWait), and the last try it saw: its timer
-// count and counter, and the stack it was on. readyWaitSkip false turns the skip off, for tests.
-uint64_t readyWaitSkips = 0, readyWaitTries = 0;  // for tests
-bool readyWaitSkip = true;
-struct ReadyWaitTry { const void* machine; uint32_t count, counter, sp; };
-ReadyWaitTry readyWaitLast{}, readyWaitBefore{};
 // Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
 // the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
 // the next step once a skip after such a halt passed nothing.
@@ -1116,143 +1110,6 @@ struct Probe {
         fifoWaitRounds += rounds;
         return true;
     }
-    // Fast blocks: the ROM's YMF768 ready wait (200bdcfc) reads bank 1 register 38 (200b691c through 200cf00c) until
-    // it has a bit of the mask in r5, at most r6 + 1 times. Each try selects bank 1 (register 0f) and reads 38, with
-    // a one count timer delay (20084912) after each, so a try lasts two timer counts. The model answers 38 with 1 at
-    // all times, so the sleep entry's and the wake's waits run all their 500001 and 340001 tries, about 1.3 and
-    // 0.9 s.
-    // Fast runs stop at every try's data read (200cf06c) for the step. There, when the try before was two counts
-    // back, the tries up to the last count pair in the span pass at once: the time goes the same distance into the
-    // count two counts on per try, and the try counter (200cf00c's saved r4) and the count the bank select's delay
-    // started at (r3 and 200cf048's saved r3) follow. A try leaves the chip (index 38, bank 1), the driver's shadow
-    // bytes and the stack as the one before did. Only where the JIT would run next. Returns whether tries passed.
-    bool skipReadyWait() {
-        const uint32_t* r = cpuGetRegisters(cpu);
-        if (!readyWaitSkip || r[15] != 0x200cf06c || r[14] != 0x200cf06c || cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu))
-            return false;
-        // The stack: 200cf048's frame (r3, r4, r9, lr 200cf030), then 200cf00c's (the counter, mask and limit of
-        // the wait in r4 to r6, lr 200bdd24).
-        const uint32_t sp = r[13];
-        uint32_t frame[8], framePa[8];
-        for (unsigned i = 0; i < 8; ++i)
-            if (!cpuArm920PeekWord(cpu, sp + 4 * i, &frame[i], &framePa[i])) return false;
-        const uint32_t counter = frame[4], waitMask = frame[5], limit = frame[6];
-        if (frame[3] != 0x200cf030u || frame[7] != 0x200bdd24u || frame[0] != r[3]) return false;
-        // Whatever comes from the chip and the board while the tries run: the read answers the same without a bit of
-        // the mask, no interrupt is waiting to be taken when a try puts back the CPSR it found (200cf048's saved r4,
-        // from 200cf198), and the delay's timer counts.
-        const auto& ymf = peripherals.ymf768();
-        if (!peripherals.ymf768Enabled() || !options.cs4Port0InputKnown || options.cs4Observer || ymf.selectedBank() != 1 ||
-            ymf.selectedIndex() != 0x38 || r[4] != 0xa0000000u || (ymf.readRegister(1, 0x38) & waitMask) ||
-            (irqRaised && !(frame[1] & 0x80)) || (fiqRaised && !(frame[1] & 0x40)) || failed ||
-            graphicsWireStatus != Imx1BootstrapAccess::ok)
-            return false;
-        uint32_t base, pa, timer;
-        if (!cpuArm920PeekWord(cpu, 0x20084988, &base, &pa) || !cpuArm920PeekWord(cpu, base + 16, nullptr, &timer) ||
-            !Imx1Bootstrap::timerCountAddress(timer))
-            return false;
-        // The bank select's delay started at count r3 and ended at the next, which this is; the try before was here two
-        // counts back, on the same stack.
-        const uint32_t start = r[3] + 1;
-        // A try seen again (a run that stopped here again before the step) checks against the one before it.
-        if (readyWaitLast.machine == this && readyWaitLast.sp == sp && readyWaitLast.counter == counter &&
-            readyWaitLast.count == start)
-            readyWaitLast = readyWaitBefore;
-        const ReadyWaitTry last = readyWaitLast;
-        readyWaitBefore = last;
-        readyWaitLast = {this, start, counter, sp};
-        uint32_t count;
-        uint64_t until;
-        // Tries in between that weren't seen here (their data read stepped without a stop before it) lasted two counts
-        // each as well.
-        const uint32_t since = counter - last.counter;
-        if (last.machine != this || last.sp != sp || since - 1 > 15 || start - last.count != 2 * since ||
-            counter >= limit || !peripherals.timerCountAfter(timer, 4, deferredCycles, quietMode, count, deferredHclk, &until) ||
-            count != start || until < deferredCycles)
-            return false;
-        // Cycles to the end of this count; the span keeps room for the last try passed and the one after.
-        const uint64_t left = until - deferredCycles + 1;
-        const uint64_t keep = leanMinimumSpan + 4 * left;
-        if (quietCycles <= keep) return false;
-        uint64_t high = quietCycles - keep;
-        if (bounds) {
-            const uint64_t used = work - sliceWorkStart;
-            if (used + keep >= bounds->work) return false;
-            high = std::min(high, bounds->work - used - keep);
-        }
-        auto at = [&](uint64_t cycles) {
-            return timerCountAfter(peripherals, timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
-        };
-        if (!at(high)) return false;
-        // Count target + 1 starts inside the span.
-        const uint32_t counts = count - start;
-        if (counts < 5 || counts > (1u << 30)) return false;
-        const uint32_t pairs = std::min((counts - 1) / 2, limit - counter);
-        if (pairs < 2) return false;
-        const uint32_t target = start + 2 * pairs;
-        // The first cycle of count target + 1, then as far back as this count has left.
-        uint64_t low = 0;
-        while (high - low > 1) {
-            const uint64_t mid = low + (high - low) / 2;
-            if (!at(mid)) return false;
-            if (count - start >= target + 1 - start) high = mid; else low = mid;
-        }
-        if (high <= left || !at(high - left) || count != target) return false;
-        const uint64_t passed = high - left;
-        // 200bdcfc-200bdd37 the wait, 200b691c the read of 38, 200cf00c-200cf11f the register read and the bank
-        // select, 200cf198 and 200ceedc-200ceee8 the IRQ mask, 200c0c54-200c0c7b the port reads and the delay call.
-        static constexpr uint32_t wait[] = {0xe92d4070u, 0xe1a06001u, 0xe1a05000u, 0xe3a04000u, 0xea000003u,
-            0xe2844001u, 0xe1540006u, 0x83e0000bu, 0x8a000003u, 0xebffe2fdu, 0xe1100005u, 0x0afffff8u, 0xe3a00000u,
-            0xe8bd4070u, 0xe12fff1eu};
-        static constexpr uint32_t read38[] = {0xe3a01001u, 0xe3a00038u, 0xea0061b8u};
-        static constexpr uint32_t access[] = {0xe92d4070u, 0xe1a06000u, 0xe1a05001u, 0xeb00005eu, 0xe1a04000u,
-            0xe1a00005u, 0xeb000032u, 0xe1a00006u, 0xeb000005u, 0xe1a05000u, 0xe1a00004u, 0xebffffa9u, 0xe1a00005u,
-            0xe8bd4070u, 0xe12fff1eu, 0xe92d4218u, 0xe5999000u, 0xe5999000u, 0xe59f1024u, 0xe3a044a0u, 0xe0811009u,
-            0xe5c10001u, 0xe5c40000u, 0xebffc6f9u, 0xe5d44001u, 0xebffc6fdu, 0xe1a00004u, 0xe8bd4218u, 0xe12fff1eu,
-            0x000098b4u, 0xe92d40f8u, 0xe1a07001u, 0xe1a06000u, 0xe1a05002u, 0xeb00003fu, 0xe1a04000u, 0xe1a00005u,
-            0xeb000013u, 0xe1a01007u, 0xe1a00006u, 0xeb000002u, 0xe1a00004u, 0xe8bd40f8u, 0xeaffff89u, 0xe92d4230u,
-            0xe5999000u, 0xe5999000u, 0xe1a05001u, 0xe59f101cu, 0xe3a044a0u, 0xe0811009u, 0xe5c10001u, 0xe5c40000u,
-            0xebffc6dbu, 0xe5c45001u, 0xe8bd4230u, 0xeaffc6deu, 0x000098b4u, 0xe92d0208u, 0xe5999000u, 0xe5999000u,
-            0xe2001001u, 0xe59f0010u, 0xe0800009u, 0xe5c01000u, 0xe8bd0208u, 0xe3a0000fu, 0xeaffffe7u, 0x000098b4u};
-        static constexpr uint32_t mask[] = {0xe92d4010u, 0xebffff4eu, 0xe1a04000u, 0xe3800080u, 0xebffff4du,
-            0xe1a00004u, 0xe8bd4010u, 0xe12fff1eu};
-        static constexpr uint32_t cpsrAccess[] = {0xe10f0000u, 0xe12fff1eu, 0xe121f000u, 0xe12fff1eu};
-        static constexpr uint32_t port[] = {0xe3a004a0u, 0xe5d00000u, 0xe12fff1eu, 0xe3a004a0u, 0xe5d00000u,
-            0xe12fff1eu, 0xe3a004a0u, 0xe5d00000u, 0xe3a00001u, 0xea003978u};
-        // The Thumb delay from 20084912 (the last word's high half is the next function's).
-        static constexpr uint32_t delay[] = {0x491d4770u, 0xd1002800u, 0x680a2001u, 0xd40405d2u, 0x604a221fu,
-            0x320422ffu, 0x690b600au, 0x1ad2690au, 0xd3fb4282u, 0x00004770u};
-        uint32_t w;
-        auto code = [&](uint32_t at, const uint32_t* words, size_t n, uint32_t lastMask = ~0u) {
-            for (size_t i = 0; i < n; ++i)
-                if (!cpuArm920PeekWord(cpu, at + 4 * uint32_t(i), &w, &pa) ||
-                    ((w ^ words[i]) & (i + 1 < n ? ~0u : lastMask)))
-                    return false;
-            return true;
-        };
-        if (!code(0x200bdcfc, wait, std::size(wait)) || !code(0x200b691c, read38, std::size(read38)) ||
-            !code(0x200cf00c, access, std::size(access)) || !code(0x200cf198, mask, std::size(mask)) ||
-            !code(0x200ceedc, cpsrAccess, std::size(cpsrAccess)) || !code(0x200c0c54, port, std::size(port)) ||
-            !code(0x20084910, delay, std::size(delay), 0xffff))
-            return false;
-        uint8_t* stack = peripherals.plainPage(framePa[0] & ~0xfffu, true);
-        uint8_t* counterPage = peripherals.plainPage(framePa[4] & ~0xfffu, true);
-        if (!stack || !counterPage) return false;
-        deferredCycles += passed;
-        quietCycles -= passed;
-        work += passed;
-        const uint32_t bankStart = target - 1, tries = counter + pairs;
-        cpuSetReg(cpu, 3, bankStart);
-        std::memcpy(stack + (framePa[0] & 0xfffu), &bankStart, 4);
-        std::memcpy(counterPage + (framePa[4] & 0xfffu), &tries, 4);
-        cpuArm920LeanStoredBytes(cpu, framePa[0], 4);
-        cpuArm920LeanStoredBytes(cpu, framePa[4], 4);
-        readyWaitBefore = {this, target - 2, tries - 1, sp};
-        readyWaitLast = {this, target, tries, sp};
-        ++readyWaitSkips;
-        readyWaitTries += pairs;
-        return true;
-    }
     // A board register read on the lean path (quietReadAddress): inside the quiet span it reads what the step would
     // after charging, so it needs no charge.
     __attribute__((noinline)) bool leanBoardRead(uint32_t pa, uint32_t ran, uint32_t& value) {
@@ -2126,7 +1983,6 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         // A skip counts as work: the slice's limits are worked out again before anything runs.
                         if (rounds || skipped == 2) continue;
                     }
-                    if (p->skipReadyWait()) continue;
                     const bool halted = std::exchange(scanHalted, false);
                     if (const uint64_t passed = p->skipScanPoll(hard - jitSlack)) {
                         slice += uint32_t(passed);
@@ -2271,9 +2127,9 @@ void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
 void imx1SetFifoWaitSkip(bool skip) { fifoWaitSkip = skip; }
-uint64_t imx1MachineReadyWaitSkips(const Imx1Machine*) { return readyWaitSkips; }
-uint64_t imx1MachineReadyWaitTries(const Imx1Machine*) { return readyWaitTries; }
-void imx1SetReadyWaitSkip(bool skip) { readyWaitSkip = skip; }
+uint64_t imx1MachineYmfReadyReads(const Imx1Machine* machine) {
+    return machine->probe->peripherals.ymf768().readyRegisterReads();
+}
 
 void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
 
@@ -3028,6 +2884,12 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
         staged.board->stateYmf768(a);
         if (!finish(a)) return info;
     } else if (info.status != S::ok) return info;
+    // The YMF768's power steps, only in states saved while one was under way.
+    if (open("YMFR", Imx1Bootstrap::ymf768ReadyStateVersion, false, a)) {
+        if (!staged.ymfSection) return fail(S::invalidValue, stateFourcc("YMFR"), "ready steps without the chip");
+        staged.board->stateYmf768Ready(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     if (!open("SRAM", stateMemoryVersion, true, a)) return info;
     staged.board->stateSram(a);
     if (!finish(a)) return info;
@@ -3174,6 +3036,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
         auto a = file.begin(stateFourcc("YMF "), Imx1Bootstrap::ymf768StateVersion);
         p->peripherals.stateYmf768(a);
         file.end();
+        if (p->peripherals.ymf768().readyBusy()) {
+            auto r = file.begin(stateFourcc("YMFR"), Imx1Bootstrap::ymf768ReadyStateVersion);
+            p->peripherals.stateYmf768Ready(r);
+            file.end();
+        }
     }
     { auto a = file.begin(stateFourcc("SRAM"), stateMemoryVersion); p->peripherals.stateSram(a); file.end(); }
     for (unsigned bank = 0; bank < 2; ++bank) {

@@ -261,8 +261,6 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const char* jit=std::getenv("FROND_JIT");
     const bool fast=jit && std::string(jit)=="1";
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
-    // BENCH_ZODIAC_READY_SKIP=0 runs the YMF768 ready wait's tries one by one on Fast, for tests.
-    if (const char* ready=std::getenv("BENCH_ZODIAC_READY_SKIP")) imx1SetReadyWaitSkip(std::string(ready)!="0");
     soc->SetHostTimeLimit(false);
     clockStart=soc->GetTime(); clockSoc=soc.get();
     SoC::SetEventClock(eventMs);
@@ -356,7 +354,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         }
         if (trace && elapsed>=traceNext) {
             const auto st=soc->Status();
-            std::fprintf(stderr,"state %.0f ms pc %08x retired %llu idleHclk %llu wall %.3f jit %llu runs %llu skips %llu haltskips %llu ready %llu\n",elapsed/1e6,st.pc,(unsigned long long)st.retired,(unsigned long long)st.idleHclk,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),(unsigned long long)soc->JitRetired(),(unsigned long long)soc->JitRuns(),(unsigned long long)soc->DelaySkips(),(unsigned long long)soc->DelayHaltSkips(),(unsigned long long)soc->ReadyWaitTries());
+            std::fprintf(stderr,"state %.0f ms pc %08x retired %llu idleHclk %llu wall %.3f jit %llu runs %llu skips %llu haltskips %llu ready reads %llu\n",elapsed/1e6,st.pc,(unsigned long long)st.retired,(unsigned long long)st.idleHclk,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),(unsigned long long)soc->JitRetired(),(unsigned long long)soc->JitRuns(),(unsigned long long)soc->DelaySkips(),(unsigned long long)soc->DelayHaltSkips(),(unsigned long long)soc->YmfReadyReads());
             traceNext=elapsed+traceStepMs*1000000;
         }
     }
@@ -364,7 +362,9 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
-    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\n",soc->LcdEnabled()?"on":"off",soc->ChipSummary().c_str());
+    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\nmemory hash %llx\npcm hash %llx\nready reads %llu\n",soc->LcdEnabled()?"on":"off",
+                            soc->ChipSummary().c_str(),(unsigned long long)soc->MemoryHash(),(unsigned long long)pcmHash,
+                            (unsigned long long)soc->YmfReadyReads());
     std::ofstream result(output/"summary.json");
     result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
            << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")

@@ -240,11 +240,8 @@ void imx1SetScanPollSkip(bool skip);
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
 void imx1SetFifoWaitSkip(bool skip);
-// The YMF768 ready wait's tries Fast blocks passed at once, since the process started: the times and the tries.
-// imx1SetReadyWaitSkip(false) turns the skip off, for tests.
-uint64_t imx1MachineReadyWaitSkips(const Imx1Machine*);
-uint64_t imx1MachineReadyWaitTries(const Imx1Machine*);
-void imx1SetReadyWaitSkip(bool skip);
+// CPU reads of the YMF768's ready register (bank 1 38) since the machine was made or loaded, for tests.
+uint64_t imx1MachineYmfReadyReads(const Imx1Machine*);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.
