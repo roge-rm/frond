@@ -106,6 +106,7 @@ def parser():
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
     p.add_argument('--reset', action='store_true', help='soft reset the guest after the installs and the card, before the launch')
     p.add_argument('--sd-insert', type=Path, help='raw SD image to put in the slot after the installs (the card then stays in the saved session)')
+    p.add_argument('--sd-eject', action='store_true', help='eject the card after the replay, before the session is saved (the card stays in the session)')
     launch = p.add_mutually_exclusive_group(required=True)
     launch.add_argument('--app', help='exact Palm application database name')
     launch.add_argument('--resume-app', action='store_true',
@@ -505,6 +506,9 @@ def run(args):
                             zlib.error) as error:
                         raise RunError('export', f'Unreadable named database archive: {archive}: {error}') from error
                     result['artifacts']['exports'].append({'database': name, 'path': str(archive)})
+                if args.sd_eject:
+                    result['stage'] = 'sd-eject'
+                    control.require('sd-eject')
                 result['stage'] = 'save'
                 control.require('save', machine / 'working.frond')
                 result['artifacts']['session_saved'] = True

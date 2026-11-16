@@ -50,7 +50,8 @@ uint64_t number(const std::string& s, uint64_t maximum) {
 struct Event { uint64_t ms; std::string kind; int x=0, y=0; KeyId key=keyInvalid; };
 // The runner's --input-replay pen, key and snapshot lines. Pen bounds are the screen with its
 // silkscreen. "-" is no input. The Zodiac also takes "stick X Y" (each -511 to 511) and
-// "card-insert" (the --sd card goes in then, not at the start).
+// "card-insert" (the --sd card goes in then, not at the start). A PXA session saved with its card
+// ejected takes "card-insert" too, and puts the card it carries in the slot then.
 std::vector<Event> replay(const char* path, uint64_t end, int width=320, int height=480, bool zodiac=false) {
     std::vector<Event> events;
     if (std::string(path)=="-") return events;
@@ -94,7 +95,7 @@ std::vector<Event> replay(const char* path, uint64_t end, int width=320, int hei
         } else if (zodiac && e.kind=="stick") {
             if (!(tokens>>e.x>>e.y) || e.x<-511 || e.x>511 || e.y<-511 || e.y>511)
                 throw std::runtime_error("invalid stick offset");
-        } else if (e.kind!="pen-up" && e.kind!="keyboard-attach" && e.kind!="keyboard-detach" && !(zodiac && e.kind=="card-insert")) throw std::runtime_error("unsupported replay command");
+        } else if (e.kind!="pen-up" && e.kind!="keyboard-attach" && e.kind!="keyboard-detach" && e.kind!="card-insert") throw std::runtime_error("unsupported replay command");
         if (zodiac && e.kind.rfind("keyboard-",0)==0) throw std::runtime_error("the Zodiac has no keyboard");
         if ((tokens>>extra) && extra[0]!='#') throw std::runtime_error("extra replay arguments");
         events.push_back(e);
@@ -183,8 +184,9 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     if (m.nand.empty())
         for (const auto& media : m.media)
             if (media.kind==frondMachine::kindNand) m.nand.assign(deviceConfigurationGetNandSize(m.device),0xff);
-    for (const auto& media : m.media)
-        if (media.kind==frondMachine::kindSd) throw std::runtime_error("use a session without an SD card for this benchmark");
+    // A card the session carries opens in the card store; it has to be saved ejected, and a replay's
+    // card-insert puts it in. The work copy takes the card's writes.
+    if (!frondNative::attachFolderMedia(contents,folder)) throw std::runtime_error("the session's card did not open");
     if (m.savestate.empty() || m.memory.empty()) throw std::runtime_error("complete RAM and peripheral state required");
     if (m.device==deviceTypeTG50 && m.memory.size()!=tg50RamBackingSize+2*MEMORY_BUFFER_GRANULARITY)
         throw std::runtime_error("TG50 session requires complete RAM and CPU/peripheral state");
@@ -555,6 +557,7 @@ int main(int argc, char** argv) {
                 else if (e.kind=="key-up") soc->KeyUp(e.key);
                 else if (e.kind=="keyboard-down" || e.kind=="keyboard-up") soc->KeyboardKey(uint8_t(e.x),e.kind=="keyboard-down");
                 else if (e.kind=="keyboard-attach" || e.kind=="keyboard-detach") soc->AttachKeyboard(e.kind=="keyboard-attach");
+                else if (e.kind=="card-insert") soc->SdInsert();
                 else {
                     // Before the first LCD frame (a cold boot with the LCD still off) it saves black.
                     if (!haveFrame) std::fprintf(stderr,"snapshot %u at %llu ms: no LCD frame yet, saved black\n",
