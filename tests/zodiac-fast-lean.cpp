@@ -1470,18 +1470,20 @@ void scanPolls() {
     g.branch(base + uint32_t(call) * 4, 0xadb08);
     g.end();
     const uint64_t skips = imx1MachineScanPollSkips(nullptr), rounds = imx1MachineScanPollRounds(nullptr);
+    const uint64_t halts = imx1MachineScanHalts(nullptr);
     const auto exact = runGuest(g.words, false), fast = runGuest(g.words, true);
     const uint64_t n = imx1MachineScanPollSkips(nullptr) - skips, r = imx1MachineScanPollRounds(nullptr) - rounds;
+    const uint64_t h = imx1MachineScanHalts(nullptr) - halts;
     imx1SetScanPollSkip(false);
     const auto plain = runGuest(g.words, true);
     imx1SetScanPollSkip(true);
-    assert(imx1MachineScanPollSkips(nullptr) - skips == n);
+    assert(imx1MachineScanPollSkips(nullptr) - skips == n && imx1MachineScanHalts(nullptr) - halts == h);
     print("scan polls exact", exact); print("scan polls fast", fast); print("scan polls no skip", plain);
     const auto& e = exact.run.result;
     const auto& f = fast.run.result;
     const auto& p = plain.run.result;
-    std::printf("scan polls: %llu skips of %llu rounds, timer sum %u fast, %u no skip, %u exact, last %u %u %u\n",
-                (unsigned long long)n, (unsigned long long)r, f.registers[9], p.registers[9], e.registers[9],
+    std::printf("scan polls: %llu skips of %llu rounds, %llu run ends, timer sum %u fast, %u no skip, %u exact, last %u %u %u\n",
+                (unsigned long long)n, (unsigned long long)r, (unsigned long long)h, f.registers[9], p.registers[9], e.registers[9],
                 f.registers[1], p.registers[1], e.registers[1]);
     std::fflush(stdout);
     assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0);
@@ -1489,6 +1491,8 @@ void scanPolls() {
     same(exact, fast);
     assert(f.cs5WaitClocks == p.cs5WaitClocks && f.cs5WaitClocks == e.cs5WaitClocks);
     assert(n >= 1000 && r >= 10000);
+    // The waits are entered inside a run: their reads end it so the next run can skip.
+    assert(h >= 12);
 }
 
 // The ROM's graphics FIFO wait (200b9010-200b9078 with the Thumb delay at 20084912) waits for a fill to leave

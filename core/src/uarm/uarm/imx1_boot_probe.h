@@ -231,6 +231,8 @@ uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*);
 // rounds. imx1SetScanPollSkip(false) turns the skip off, for tests.
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*);
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
+// Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
+uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
 // The graphics FIFO wait's rounds Fast blocks passed at once, since the process started: the times and the rounds.
 // imx1SetFifoWaitSkip(false) turns the skip off, for tests.

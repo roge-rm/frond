@@ -68,6 +68,11 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
+// Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
+// the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
+// the next step once a skip after such a halt passed nothing.
+bool scanHalted = false, scanHaltOff = false;
+uint64_t scanHalts = 0;  // for tests
 // The shortest timer count, in CPU cycles, for which skipFifoWait passes FIFO wait rounds. A round's work in the
 // JIT, its 50-odd instructions and the pointer read with its CS5 wait clocks, ends about 55 cycles into a count in
 // Origo (200 cycles each). The skip also wants the current round to have read its count in the count's first half,
@@ -710,6 +715,12 @@ struct Probe {
             !cs5Configuration.ticksAfter(cycles, cpuPeriod, clocks, busPeriod, ticks))
             return false;
         if (!cs5Configuration.quietRegisterRead(peripherals.eimState(), pc, pa, ticks, value, &leanScanRate)) return false;
+        if (inJit && scanPollSkip && !scanHaltOff && !jitHalt && (pc == 0x200adb08 || pc == 0x200adb14) &&
+            value == (pc == 0x200adb08 ? 0u : 0x400u)) {
+            jitHalt = scanHalted = true;
+            ++scanHalts;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
         leanCs5.waitClocks += leanCs5.clocks;
         leanCs5.waitCost += leanCs5.cost;
         ++leanCs5Reads;
@@ -1925,6 +1936,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             if (!runStep(p, idleHclkLimit)) break;
             ++slice;
             delayHalted = delayHaltOff = delayPassed = false;
+            scanHalted = scanHaltOff = false;
             for (;;) {
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode) break;
@@ -1949,11 +1961,13 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         // A skip counts as work: the slice's limits are worked out again before anything runs.
                         if (rounds || skipped == 2) continue;
                     }
+                    const bool halted = std::exchange(scanHalted, false);
                     if (const uint64_t passed = p->skipScanPoll(hard - jitSlack)) {
                         slice += uint32_t(passed);
                         leanCs5 = {};
                         continue;
                     }
+                    scanHaltOff |= halted;
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
                     leanCs5 = {};
@@ -2086,6 +2100,7 @@ uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*) { return delayHaltSkips; 
 uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*) { return delaySkipCycles; }
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
+uint64_t imx1MachineScanHalts(const Imx1Machine*) { return scanHalts; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
