@@ -92,6 +92,12 @@ int main() {
             assert(cpuCycleAnyKind(cpu, 1) >= 1);
         }
         assert(cpuGetRegisters(cpu)[15] == end);
+        // PilotMain: a jump to the entry with r0 set, then a call to Call68KFunc, both stepped by hand.
+        cpuSetReg(cpu, 0, 1);
+        cpuSetReg(cpu, 2, 0x2300);
+        cpuSetReg(cpu, 14, 0x6000);
+        log.step({1000, app, 0, 0, 0, 4});
+        log.step({1001, 0x2300, 0, 0, 0, 4});
     }
     std::ifstream in(path);
     std::stringstream all;
@@ -102,9 +108,16 @@ int main() {
     auto has = [&](const char* s) { return log.find(s) != std::string::npos; };
     assert(has("3000 entry pc=00001000 r0=00000000 r1=00004000 r2=00002300 lr=00006000"));
     assert(has("3000 table 00004000 slots=612"));
-    assert(has("3000 call 5 ") && has("r0=00000007 r1=00003000") && has("r1=\"Hello glue\""));
-    assert(has("3000 ret 5 ") && has("r0=0000002a"));
-    assert(has("3000 call DAL 2 ") && has("3000 ret DAL 2 r0=00000009"));
+    auto line = [&](const char* kind) {  // the first line holding kind
+        const size_t at = log.find(kind);
+        return at == std::string::npos ? std::string() : log.substr(at, log.find('\n', at) - at);
+    };
+    const std::string call = line("3000 call 5 "), ret = line("3000 ret 5 ");
+    assert(call.find(" r0=00000007 r1=00003000 ") != std::string::npos && call.find(" r1=\"Hello glue\"") != std::string::npos);
+    assert(ret.find("r0=0000002a") != std::string::npos);
+    assert(line("3000 call DAL 2 ").size() && line("3000 ret DAL 2 ").find("r0=00000009") != std::string::npos);
+    assert(line("3000 entry2 ").find("r0=00000001 r1=") != std::string::npos && line("3000 entry2 ").find(" r2=00002300 ") != std::string::npos);
+    assert(line("3000 call 1000 Call68KFunc").size());
     std::remove(path.c_str());
     std::puts("ok");
     return 0;

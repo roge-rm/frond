@@ -46,16 +46,6 @@ public:
         const bool jumped = pc != expectedPc;
         expectedPc = pc + t.instructionSize;
         if (!frames.empty()) returns(pc, r);
-        if (debug && jumped && (lastPc >> 24) == romRegion && (pc >> 24) != romRegion && ms() >= 90000 && debugLines < 3000 &&
-            debugTargets.insert(t.pc).second) {
-            ++debugLines;
-            uint32_t magic = 0;
-            read(pc + 28, &magic, 4);
-            std::fprintf(out, "%llu jump from=%08x pc=%08x thumb=%d r0=%08x r1=%08x r2=%08x r3=%08x r9=%08x sp=%08x lr=%08x w28=%08x table=%d%d%d%d\n",
-                         (unsigned long long) ms(), lastPc, pc, int(!arm), r[0], r[1], r[2], r[3], r[9], r[13], r[14], magic,
-                         int(looksLikeTable(r[0])), int(looksLikeTable(r[1])), int(looksLikeTable(r[2])), int(looksLikeTable(r[3])));
-            std::fflush(out);
-        }
         lastPc = pc;
         // The ROM's TwLoadModule (QuickRun) calls the TNA header with r0 = 0 and the TwGlue table (in RAM) in r1,
         // r2 = 0. The second call, PilotMain, has emulStateP in r0 and Call68KFunc in r2.
@@ -84,11 +74,9 @@ private:
     FILE* out;
     PhysicalRead physical;
     void* physicalContext;
-    bool debug = std::getenv("FROND_TWGLUE_LOG_DEBUG") != nullptr;
-    uint32_t lastEntry = 0, lastPc = 0, debugLines = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
+    uint32_t lastEntry = 0, lastPc = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::vector<Frame> frames;
-    std::unordered_set<uint32_t> debugTargets;
 
     uint64_t ms() const { return time->ticks * 1000 / 32768; }
     // The page tables are walked here through the physical reader: the Zodiac's memory is one bus callback, so

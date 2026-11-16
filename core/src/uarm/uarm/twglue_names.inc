@@ -1,4 +1,4 @@
-// TwGlue slot names in table order (612). The list is from tools/twglue_names.txt in Ecliptic (vs-sr-dev/ecliptic, MIT),
+// TwGlue slot names in table order (612). The list is from tools/twglue_names.txt in Ecliptic (vs-sr-dev/ecliptic, MIT, Copyright (c) 2026 Samuele Voltan; licence in licences/ecliptic-LICENSE),
 // which took it from the Tapwave SDK's TwGlue.h.
 "DbgBreak_",
 "DbgMessage_",

@@ -1647,8 +1647,10 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->result.stop = Imx1ProbeStop::budget;
     p->observer = observer;
     p->observerContext = context;
-    if (!observer)
-        if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime(), Probe::peekPhysical, p)) {
+    if (observer) {
+        if (std::getenv("FROND_TWGLUE_LOG"))
+            std::fprintf(stderr, "FROND_TWGLUE_LOG: this run has its own observer, so the TwGlue log is off.\n");
+    } else if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime(), Probe::peekPhysical, p)) {
             p->observer = twGlueLogObserve;
             p->observerContext = log;
         }
