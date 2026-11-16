@@ -494,6 +494,7 @@ int main(int argc, char** argv) {
             // A Memory Stick device has no SD slot: an SD flag from the shared card store is dropped.
             if (stick) soc->SdEject();
             const bool hasSd=std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; });
+            if (hasSd && soc->SdInserted() && !soc->SdRemount()) throw std::runtime_error("the session and its card image do not match");
             if ((soc->SdInserted() && !hasSd) || soc->networkSimulation.GetMode()!=NetworkSimulation::disabled)
                 throw std::runtime_error("use an ejected SD and disabled network fixture");
         }
