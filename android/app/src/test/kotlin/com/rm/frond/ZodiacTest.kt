@@ -27,7 +27,9 @@ class ZodiacTest {
     @Test fun newMachinesRunFastAtOriginalSpeed() {
         assertEquals(Engine.FAST, MachineSettings.defaults(zodiac).engine)
         assertEquals(CpuSpeed.ORIGINAL, MachineSettings.defaults(zodiac).speed)
-        assertEquals(Engine.EXACT, MachineSettings.defaults(Device.TX).engine)
+        assertEquals(Engine.FAST, MachineSettings.defaults(Device.TX).engine)
+        assertEquals(Engine.FAST, MachineSettings.defaults(Device.ZIRE72).engine)
+        assertEquals(Engine.EXACT, MachineSettings.defaults(Device.E2).engine)
         assertTrue(MachineSettings.defaults(zodiac).arguments().containsAll(listOf("--engine", "fast")))
         assertFalse("--mips" in MachineSettings.defaults(zodiac).arguments())
         assertFalse("--no-sound" in MachineSettings.defaults(zodiac).arguments(soundSupported = zodiac.sound))
@@ -37,12 +39,12 @@ class ZodiacTest {
 
     @Test fun choosingAnotherDeviceKeepsAChosenEngine() {
         // Left at the default: it follows the device.
-        assertEquals(Engine.FAST, MachineSettings.defaults(Device.TX).forDevice(Device.TX, zodiac).engine)
-        assertEquals(Engine.EXACT, MachineSettings.defaults(zodiac).forDevice(zodiac, Device.TX).engine)
+        assertEquals(Engine.FAST, MachineSettings.defaults(Device.E2).forDevice(Device.E2, zodiac).engine)
+        assertEquals(Engine.EXACT, MachineSettings.defaults(zodiac).forDevice(zodiac, Device.E2).engine)
         // Chosen: it stays.
-        assertEquals(Engine.EXACT, MachineSettings(engine = Engine.EXACT).forDevice(zodiac, Device.TX).engine)
-        val tx = MachineSettings(engine = Engine.FAST)
-        assertEquals(Engine.FAST, tx.forDevice(Device.TX, Device.E2).engine)
+        assertEquals(Engine.EXACT, MachineSettings(engine = Engine.EXACT).forDevice(zodiac, Device.E2).engine)
+        val tx = MachineSettings(engine = Engine.EXACT)
+        assertEquals(Engine.EXACT, tx.forDevice(Device.TX, Device.E2).engine)
         assertEquals(tx, tx.forDevice(Device.TX, Device.E2))
     }
 

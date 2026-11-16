@@ -136,7 +136,8 @@ data class Device internal constructor(
     // The Tapwave Zodiac: a landscape screen, an engine of its own that runs best on Fast, and an
     // analogue stick and triggers that a controller drives through the core's own mapping.
     val zodiac: Boolean get() = id == ZODIAC_ID
-    val defaultEngine: Engine get() = if (zodiac) Engine.FAST else Engine.EXACT
+    // New machines of the Zodiac, T|X and Zire 72 start on Fast; they fall behind Original speed on Exact.
+    val defaultEngine: Engine get() = if (zodiac || id == "palm-tx" || id == "palm-zire-72") Engine.FAST else Engine.EXACT
     val buttons: List<String> get() = buttonsText.split('|')
 
     internal fun unresolvedFirmware(): Device = withFirmware(firmwareVariants.firstOrNull { !it.powerSupported })

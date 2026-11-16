@@ -2247,11 +2247,11 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
-    // A new Zodiac starts on Fast and other new machines on Exact, until the Engine is changed by hand; an
+    // A new Zodiac starts on Fast and the T|X, Zire 72 too, and other new machines on Exact, until the Engine is changed by hand; an
     // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
     void zodiacEngineDefault() {
         const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
-        QVERIFY(frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::tx));
+        QVERIFY(frondFirmware::fastByDefault(frondFirmware::Device::tx) && frondFirmware::fastByDefault(frondFirmware::Device::zire72) && frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::e2));
         const frondSessions::Preferences fresh;
         QTemporaryDir root;
         {
@@ -2261,14 +2261,14 @@ for line in s.makefile('rb'):
             const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
             pick("tapwave-zodiac-2");
             QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
-            pick("palm-tx");
+            pick("palm-e2");
             QVERIFY(!engine->currentData().toBool());
             pick("tapwave-zodiac-2");
             QVERIFY(engine->currentData().toBool());
             // Exact chosen by hand stays when the device changes.
             engine->setCurrentIndex(engine->findData(false));
             emit engine->activated(engine->currentIndex());
-            pick("palm-tx"); pick("tapwave-zodiac-2");
+            pick("palm-e2"); pick("tapwave-zodiac-2");
             QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
         }
         {

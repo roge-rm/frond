@@ -4,7 +4,7 @@ How to measure speed, latency and audio, and which diagnostic patches exist. Com
 
 ## Engines
 
-Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. On the Tapwave Zodiac 2, Fast runs the JIT and skips some of Exact's cache and bus timing, so its frames and sound can differ a little from Exact's; new Zodiac machines start on it. The Palm IIIx, Dana and Dana Wireless (`frond-68k`) only have the Exact engine, there is no JIT for 68k and the setting is hidden for them.
+Each machine runs on the Exact engine (the interpreter) or the Fast engine (the Dynarmic JIT, built in on x86-64 and arm64 unless `FROND_FAST=0`). `--engine exact|fast` picks one, default exact. `FROND_JIT=1` or `0` in the environment overrides both. A debugger attached to a machine runs it on Exact. On the Tapwave Zodiac 2, Fast runs the JIT and skips some of Exact's cache and bus timing, so its frames and sound can differ a little from Exact's; new Zodiac machines start on it. New T|X and Zire 72 machines start on Fast too, as they fall behind Original speed on Exact. The Palm IIIx, Dana and Dana Wireless (`frond-68k`) only have the Exact engine, there is no JIT for 68k and the setting is hidden for them.
 
 Fast interprets code until a block has been reached a few times, then compiles it on a background thread. Tuning variables, for measuring and tests only:
 
