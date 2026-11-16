@@ -1795,6 +1795,18 @@ test-zodiac-ldm-return: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-ldm-return
 	./build/test-zodiac-ldm-return
 
+# The TwGlue log on a small ARM program.
+.PHONY: test-zodiac-twglue-log
+test-zodiac-twglue-log: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-twglue-log.cpp core/src/uarm/uarm/imx1_boot_probe.cpp \
+		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
+		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
+		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-twglue-log
+	./build/test-zodiac-twglue-log
+
 # ARM920 word stores of PC, base-restored abort and interpreter fallback.
 .PHONY: test-zodiac-store-pc
 test-zodiac-store-pc: build/zodiac-boot-probe
