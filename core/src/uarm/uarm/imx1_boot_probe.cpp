@@ -561,6 +561,20 @@ struct Probe {
         *counted = page != nullptr;
         return page;
     }
+    // ROM, SRAM and SDRAM in normal mode read with no time and no side effect, for the TwGlue log. Stays within
+    // one 4 KiB page.
+    static bool peekPhysical(void* context, uint32_t pa, void* data, uint32_t size) {
+        auto& p = *static_cast<Probe*>(context);
+        if (const auto* rom = p.resolve(pa, size)) {
+            std::memcpy(data, rom, size);
+            return true;
+        }
+        if ((pa & 0xfff) + size > 0x1000 || !p.options.bootstrapPeripherals) return false;
+        const uint8_t* page = p.peripherals.plainPage(pa & ~0xfffu, false);
+        if (!page) return false;
+        std::memcpy(data, page + (pa & 0xfff), size);
+        return true;
+    }
     // A timer count read on the lean path, answered as access answers it inside the quiet cycles: the
     // instructions the run finished are cycles still to charge, and no charge is needed. A CS5 register read
     // (single loads only) goes to leanRegisterRead.
@@ -1634,7 +1648,7 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->observer = observer;
     p->observerContext = context;
     if (!observer)
-        if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime())) {
+        if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime(), Probe::peekPhysical, p)) {
             p->observer = twGlueLogObserve;
             p->observerContext = log;
         }

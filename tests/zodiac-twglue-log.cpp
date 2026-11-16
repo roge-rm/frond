@@ -1,5 +1,6 @@
 // The TwGlue log: a small ARM program is run one instruction at a time with the log watching, and the file it
-// writes is checked for the entry, a table call with a string argument, its return, and an r9 module call.
+// writes is checked for the entry, a table call with a string argument, its return, and an r9 module call. The MMU
+// is on with a coarse page table, so the log's own page walk is used for every read.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "CPU.h"
+#include "MMU.h"
 #include "imx1_boot_probe.h"
 #include "memory_buffer.h"
 #include "RAM.h"
@@ -22,6 +24,11 @@ namespace {
 MemoryBuffer backing{};
 void put(uint32_t address, uint32_t value) { std::memcpy(backing.buffer + address, &value, 4); }
 uint32_t bl(uint32_t from, uint32_t to) { return 0xeb000000 | (((to - from - 8) >> 2) & 0xffffff); }
+bool physical(void*, uint32_t pa, void* data, uint32_t size) {
+    if (uint64_t(pa) + size > 0x20000) return false;
+    std::memcpy(data, backing.buffer + pa, size);
+    return true;
+}
 }
 
 int main() {
@@ -48,6 +55,9 @@ int main() {
     for (uint32_t i = 0; i < TwGlueLog::slots; ++i) put(table + 4 * i, 0x20000000 + 4 * i);
     put(table + 20, fn);
     std::memcpy(backing.buffer + text, "Hello glue", 11);
+    constexpr uint32_t ttb = 0x10000, coarse = 0xc000;
+    put(ttb, coarse | 1);
+    for (uint32_t i = 0; i < 0x20; ++i) put(coarse + 4 * i, (i << 12) | 0xff2);  // small pages, AP 3, identity
 
     auto* mem = memInit();
     ramInit(mem, nullptr, 0, 0x20000, &backing, true);
@@ -56,6 +66,8 @@ int main() {
                           createSystemState(), ArmCpuModel::arm920t, true);
     patchDispatchSetCpu(patches, cpu);
     cpuReset(cpu, app);
+    mmuSetDomainCfg(cpuGetMMU(cpu), 3);
+    mmuSetTTP(cpuGetMMU(cpu), ttb);
     cpuSetReg(cpu, ARM_REG_NUM_CPSR, 0xa00000df);
     cpuSetReg(cpu, 0, 0);
     cpuSetReg(cpu, 1, table);
@@ -70,7 +82,7 @@ int main() {
     FILE* out = std::fopen(path.c_str(), "w");
     assert(out);
     {
-        TwGlueLog log(cpu, &time, out);
+        TwGlueLog log(cpu, &time, out, physical, nullptr);
         for (int n = 0; n < 200; ++n) {
             const uint32_t pc = cpuGetRegisters(cpu)[15];
             if (pc == end) break;

@@ -5,8 +5,10 @@
 // and through the r9 module tables (DAL, Boot, UI). It rides the Zodiac machine's per-instruction observer, so
 // the machine runs one instruction at a time on the interpreter while it is on. Only call data is logged.
 #include "CPU.h"
+#include "MMU.h"
 #include "imx1_boot_probe.h"
 #include "imx1_reference_time.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -21,7 +23,11 @@ public:
     static constexpr uint32_t slots = 612;
     static constexpr uint32_t call68kIndex = 1000;
 
-    TwGlueLog(ArmCpu* cpu, const Imx1ReferenceTime* time, FILE* out) : cpu(cpu), time(time), out(out) {}
+    // Reads physical memory with no side effect: false where it isn't plain ROM or RAM.
+    using PhysicalRead = bool (*)(void* context, uint32_t pa, void* data, uint32_t size);
+
+    TwGlueLog(ArmCpu* cpu, const Imx1ReferenceTime* time, FILE* out, PhysicalRead physical, void* physicalContext)
+        : cpu(cpu), time(time), out(out), physical(physical), physicalContext(physicalContext) {}
     ~TwGlueLog() { if (out) std::fclose(out); }
 
     static const char* name(uint32_t index) {
@@ -40,30 +46,28 @@ public:
         const bool jumped = pc != expectedPc;
         expectedPc = pc + t.instructionSize;
         if (!frames.empty()) returns(pc, r);
-        if (debug && ms() >= 100000 && (pc >> 24) != romRegion && pc >= 0x10000 && debugPages.insert(pc >> 12).second && debugLines < 900) {
+        if (debug && jumped && (lastPc >> 24) == romRegion && (pc >> 24) != romRegion && ms() >= 90000 && debugLines < 3000 &&
+            debugTargets.insert(t.pc).second) {
             ++debugLines;
             uint32_t magic = 0;
             read(pc + 28, &magic, 4);
-            std::fprintf(out, "%llu newpage pc=%08x thumb=%d r0=%08x r1=%08x r2=%08x lr=%08x w28=%08x t=%d\n", (unsigned long long) ms(), pc, int(!arm), r[0], r[1], r[2], r[14], magic, int(looksLikeTable(r[1])));
+            std::fprintf(out, "%llu jump from=%08x pc=%08x thumb=%d r0=%08x r1=%08x r2=%08x r3=%08x r9=%08x sp=%08x lr=%08x w28=%08x table=%d%d%d%d\n",
+                         (unsigned long long) ms(), lastPc, pc, int(!arm), r[0], r[1], r[2], r[3], r[9], r[13], r[14], magic,
+                         int(looksLikeTable(r[0])), int(looksLikeTable(r[1])), int(looksLikeTable(r[2])), int(looksLikeTable(r[3])));
             std::fflush(out);
         }
-        if (debug && jumped && arm && !(pc & 3) && pc >= 0x10000 && (pc >> 24) != romRegion && debugLines < 600 && entryHeader(pc)) {
-            ++debugLines;
-            std::fprintf(out, "%llu header pc=%08x r0=%08x r1=%08x r2=%08x lr=%08x\n", (unsigned long long) ms(), pc, r[0], r[1], r[2], r[14]);
-            std::fflush(out);
-        }
-        if (debug && jumped && pc >= 0x10000 && (pc >> 24) != romRegion && r[0] == 0 && r[1] >= 0x1000 && (r[2] >> 24) == romRegion &&
-            debugLines < 600) {
-            ++debugLines;
-            std::fprintf(out, "%llu rom-jump pc=%08x r1=%08x r2=%08x lr=%08x table=%d\n", (unsigned long long) ms(), pc, r[1], r[2], r[14], int(looksLikeTable(r[1])));
-            std::fflush(out);
-        }
-        if (jumped && arm && !(pc & 3) && (pc >> 24) != romRegion && r[0] == 0 && r[1] >= 0x1000) {
+        lastPc = pc;
+        // The ROM's TwLoadModule (QuickRun) calls the TNA header with r0 = 0 and the TwGlue table (in RAM) in r1,
+        // r2 = 0. The second call, PilotMain, has emulStateP in r0 and Call68KFunc in r2.
+        if (jumped && arm && !(pc & 3) && (pc >> 24) != romRegion && r[0] == 0 && r[1] >= 0x1000 && entryHeader(pc)) {
             const bool table = looksLikeTable(r[1]);
-            if (table && !(r[1] == tableBase && pc - lastEntry < 0x10000)) entry(pc, r);
+            if (table && !(r[1] == tableBase && pc == lastEntry)) entry(pc, r);
+        } else if (jumped && tableBase && pc == lastEntry && r[0]) {
+            secondEntry(r);
         }
         if (!tableBase) return;
-        if (pc >= lowest && pc <= highest) {
+        // Only calls from game code: the ROM calls many of the same functions itself.
+        if (pc >= lowest && pc <= highest && (r[14] >> 24) != romRegion) {
             const auto it = targets.find(pc);
             if (it != targets.end()) call(it->second, pc, r);
         }
@@ -78,14 +82,46 @@ private:
     ArmCpu* cpu;
     const Imx1ReferenceTime* time;
     FILE* out;
+    PhysicalRead physical;
+    void* physicalContext;
     bool debug = std::getenv("FROND_TWGLUE_LOG_DEBUG") != nullptr;
-    uint32_t lastEntry = 0, debugLines = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
+    uint32_t lastEntry = 0, lastPc = 0, debugLines = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::vector<Frame> frames;
-    std::unordered_set<uint32_t> debugPages;
+    std::unordered_set<uint32_t> debugTargets;
 
     uint64_t ms() const { return time->ticks * 1000 / 32768; }
-    bool read(uint32_t address, void* data, uint32_t size) { return cpuInspectRead(cpu, address, data, size); }
+    // The page tables are walked here through the physical reader: the Zodiac's memory is one bus callback, so
+    // cpuInspectRead and the MMU's inspect walk refuse it.
+    bool translate(uint32_t va, uint32_t& pa) {
+        const uint32_t ttb = mmuGetTTP(cpuGetMMU(cpu));
+        if (ttb == MMU_DISABLED_TTP) { pa = va; return true; }
+        uint32_t first, second;
+        if (!physical(physicalContext, (ttb & ~0x3fffu) + (va >> 20) * 4, &first, 4)) return false;
+        switch (first & 3) {
+        case 2: pa = (first & 0xfff00000u) | (va & 0xfffff); return true;
+        case 1: if (!physical(physicalContext, (first & 0xfffffc00u) + ((va >> 12) & 0xff) * 4, &second, 4)) return false; break;
+        case 3: if (!physical(physicalContext, (first & 0xfffff000u) + ((va >> 10) & 0x3ff) * 4, &second, 4)) return false; break;
+        default: return false;
+        }
+        switch (second & 3) {
+        case 1: pa = (second & 0xffff0000u) | (va & 0xffff); return true;
+        case 2: pa = (second & 0xfffff000u) | (va & 0xfff); return true;
+        case 3: pa = (second & 0xfffffc00u) | (va & 0x3ff); return true;
+        default: return false;
+        }
+    }
+
+    bool read(uint32_t address, void* data, uint32_t size) {
+        for (uint32_t offset = 0; offset < size;) {
+            const uint32_t va = address + offset, count = std::min<uint32_t>(0x400 - (va & 0x3ff), size - offset);
+            uint32_t pa;
+            if (va < address || !translate(va, pa) || !physical(physicalContext, pa, static_cast<uint8_t*>(data) + offset, count))
+                return false;
+            offset += count;
+        }
+        return true;
+    }
 
     // The first words of the table are ROM function addresses (Thumb bit allowed).
     bool looksLikeTable(uint32_t address) {
@@ -146,6 +182,12 @@ private:
                      targets.size(), r[2]);
         std::fflush(out);
         ++entries;
+    }
+
+    void secondEntry(const uint32_t* r) {
+        std::fprintf(out, "%llu entry2 r0=%08x r1=%08x r2=%08x lr=%08x\n", (unsigned long long) ms(), r[0], r[1], r[2], r[14]);
+        if (r[2] >= 0x1000 && !targets.count(r[2] & ~1u)) add(r[2] & ~1u, call68kIndex);
+        std::fflush(out);
     }
 
     void add(uint32_t target, uint32_t index) {
@@ -223,7 +265,7 @@ inline std::unique_ptr<TwGlueLog>& twGlueLogInstance() {
 inline void twGlueLogObserve(void* context, const Imx1ProbeTrace& t) { static_cast<TwGlueLog*>(context)->step(t); }
 
 // Returns the log for env FROND_TWGLUE_LOG, or null when it is unset or can't be opened.
-inline TwGlueLog* twGlueLogCreate(ArmCpu* cpu, const Imx1ReferenceTime* time) {
+inline TwGlueLog* twGlueLogCreate(ArmCpu* cpu, const Imx1ReferenceTime* time, TwGlueLog::PhysicalRead physical, void* context) {
     const char* path = std::getenv("FROND_TWGLUE_LOG");
     if (!path || !*path) return nullptr;
     FILE* out = std::fopen(path, "w");
@@ -232,7 +274,7 @@ inline TwGlueLog* twGlueLogCreate(ArmCpu* cpu, const Imx1ReferenceTime* time) {
         return nullptr;
     }
     std::setvbuf(out, nullptr, _IOFBF, 1 << 16);
-    twGlueLogInstance() = std::make_unique<TwGlueLog>(cpu, time, out);
+    twGlueLogInstance() = std::make_unique<TwGlueLog>(cpu, time, out, physical, context);
     return twGlueLogInstance().get();
 }
 
