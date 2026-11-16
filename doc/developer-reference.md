@@ -802,12 +802,19 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_SAVE_TIMING` | Print a line to stderr for each background save with its timings. |
 | `FROND_SAVE_REFERENCE` | For tests: before each socket save, also do the whole save on the emulation thread to this file, at the same instant, to compare the background save with. |
 | `FROND_SAVE_TEST_WRITES` | For tests: during each background write, write a numbered mark to the last NAND page and SD sector, standing in for the guest. |
+| `FROND_TWGLUE_LOG` | Zodiac: file to write a log of a Tapwave game's TwGlue and r9 module calls to. See below. |
 | `FROND_VFS_TRACE` | Trace guest file calls for Memory Stick file access to stderr. |
 | `FROND_TRACE_WAKE` | Log `native: host wake` to stderr each time the core wakes an idle UI task for a host call (T|X and Zire 72), for `tests/host-call-wake.py`. |
 | `FROND_WIFI_TRACE` | Trace the virtual Wi-Fi card. |
 | `FROND_HOST_PROFILE` | Print host timing figures from the benchmark tools. |
 | `FROND_WEBCAMS` | Desktop app: a colon separated list of video devices that replaces the search of /dev/video*, for tests. |
 | `SDL_VIDEODRIVER`, `SDL_AUDIODRIVER` | Standard SDL; `dummy` for headless. |
+
+### TwGlue call log
+
+`FROND_TWGLUE_LOG=FILE` writes a text log of what a Tapwave Native Application calls on the Zodiac, from the desktop app or `benchmark-replay`. The log starts when the game's ARM entry is first called (the `entry` line) and takes the TwGlue table address from it. Each call to a table entry gives a `call` line with the guest time in ms, the slot index and name, r0 to r3, the first four stack words, lr and any text the values point at. When the function returns, a `ret` line gives r0. Calls through the r9 module tables are logged the same way as `call DAL 146`, `Boot 518` or `UI n`, by module and index only, since the names aren't known. Calls the game makes to Call68KFunc are logged as slot 1000. Only call data is written, nothing from the game.
+
+While it is on the machine runs one instruction at a time on the interpreter, Fast included, so it is much slower than normal. With it off nothing changes. Start it before the game launches, as a state saved after the entry call has no entry to read the table from. The slot names are from Ecliptic's `twglue_names.txt` (MIT).
 
 ### Tests and tools
 
@@ -991,6 +998,7 @@ All in `tools/`. Most take `--help`.
 | `test-imx1-live-clocks` | Asynchronous PRESC/BCLK divider changes, retained timer/reference phases, active/staged ratio guards and unchanged FastBus limits. Outside `make test`. |
 | `test-zodiac-user-bank` | Privileged User-bank transfers, bank visibility, saved-context MOVS returns and guarded forms. Outside `make test`. |
 | `test-zodiac-ldm-return` | LDM exception-return bank ordering, base writeback, partial faults, target policy, cache/MMU continuation and explicit Fast interpreter fallback. Outside `make test`. |
+| `test-zodiac-twglue-log` | The TwGlue log on a small ARM program: entry, a table call with a text argument and its return, and an r9 module call. Outside `make test`. |
 | `test-zodiac-arm-add-pc` | Aligned ARM ADD PC linkage, flags, wraparound, retained fetch state and generated Exact/Fast parity. Outside `make test`. |
 | `test-zodiac-irq` | IRQ/FIQ boundaries and masks, banked return, NIMASK and unknown-input guards, timer and GPIO ISR acknowledgement, Thumb BL interruption, stall preflight, generated batches and ARMv5 regressions. Outside `make test`. |
 | `test-zodiac-exception` | ARM/Thumb SWI entry and MOVS return, F preservation on exceptions, banked registers, vectors, cache/MMU continuations, probe guards and Exact/Fast generated code with ARMv5 regressions. Outside `make test`. |

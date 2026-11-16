@@ -6,6 +6,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include "twglue_log.h"
 #include "imx1_graphics_frame.h"
 #include "imx1_graphics_commands.h"
 #include "imx1_graphics_gpu_gles.h"
@@ -1632,6 +1633,11 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->result.stop = Imx1ProbeStop::budget;
     p->observer = observer;
     p->observerContext = context;
+    if (!observer)
+        if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime())) {
+            p->observer = twGlueLogObserve;
+            p->observerContext = log;
+        }
     activeMachine = new Imx1Machine{p, 0};
     return activeMachine;
 }
