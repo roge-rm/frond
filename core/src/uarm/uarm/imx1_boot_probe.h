@@ -354,7 +354,9 @@ void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
 // and that machine then continues the way the saved one did. Observers, contexts, the idle
 // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
 // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
-// Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+// The app refuses a state from another core revision (imx1StateAllowCoreRevision aside), so a bump stops every
+// saved session from loading. Bump it only when an old state can't carry on correctly at all. A state() list
+// change is caught by the layout fingerprint and section versions; behaviour changes leave the revision as is.
 inline constexpr uint32_t imx1MachineStateCoreRevision = 760;
 enum class Imx1StateStatus {
     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
