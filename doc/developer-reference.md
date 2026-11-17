@@ -979,6 +979,7 @@ All in `tools/`. Most take `--help`.
 | `count-check` | Guest counts and hashes against `tools/speed-baseline.json`, wall-clock rounds only where they moved. |
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
+| `check-frondbench` | Rebuild FrondBench and compare it with the committed `tools/frondbench/FrondBench.prc`. Skipped when the Palm tools are missing. |
 | `device-session-probe` | Build the device session probe. |
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |

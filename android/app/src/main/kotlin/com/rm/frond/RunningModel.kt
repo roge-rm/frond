@@ -403,6 +403,28 @@ class RunningModel(
         }
     }
 
+    // Install on This Device is on when the core has guest services and nothing else is running.
+    val canInstallFrondBench get() = databases != null && busy == null
+
+    fun installFrondBench() {
+        val d = databases ?: return
+        if (busy != null || waiting()) return
+        busy = "Installing"
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    d.install { FrondBench.open(activity.applicationContext) }
+                    null
+                } catch (e: Exception) {
+                    if (e is PalmDatabases.Failed) e.message else "Couldn't install FrondBench."
+                }
+            }
+            busy = null
+            if (error != null) alert = "Couldn't install" to error else note = "FrondBench installed"
+            loadApps()
+        }
+    }
+
     // The applications in RAM, as the core lists them; null until the first read.
     var apps by mutableStateOf<List<PalmDatabases.Info>?>(null)
         private set

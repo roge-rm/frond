@@ -133,6 +133,7 @@ private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
     }
+    FrondBenchRows(enabled = model.canInstallFrondBench, onInstall = { model.installFrondBench() })
     deleting?.let { name ->
         AlertDialog(
             onDismissRequest = { deleting = null },
