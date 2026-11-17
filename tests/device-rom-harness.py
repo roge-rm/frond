@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 import palm_boot
 from guest_process import run_guest
+from boot_fixture import Fixture
 
 spec = importlib.util.spec_from_file_location('device_rom', ROOT / 'tests/device-rom.py')
 rom = importlib.util.module_from_spec(spec)
@@ -177,6 +178,11 @@ class HarnessTest(unittest.TestCase):
         expectation.write_bytes(payload)
         evidence = self.root / 'snapshot-evidence'
         original_suite = rom.suite
+        # A stand-in for the boot-once launcher fixture, so the unused core is never started.
+        stored = self.root / 'fixture'
+        (stored / 'logs').mkdir(parents=True)
+        (stored / 'launcher.session').write_bytes(b'session')
+        fixture = Fixture(stored / 'launcher.session', stored / 'logs', False)
 
         def replace_source(args):
             expectation.write_bytes(b'{}')
@@ -188,6 +194,7 @@ class HarnessTest(unittest.TestCase):
                 '--expected-faults', str(expectation), '--evidence', str(evidence)]
         with patch.object(rom, 'ROOT', self.root), patch.object(rom, 'CORE', core), \
              patch.object(rom, 'suite', side_effect=replace_source), patch.object(sys, 'argv', argv), \
+             patch.object(rom, 'launcher_fixture', return_value=fixture), \
              patch.object(rom, 'run_guest', return_value=subprocess.CompletedProcess([], 0, 'continued guest input', '')), \
              contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(rom.main(), 0)
