@@ -552,7 +552,8 @@ class Imx1Cs5Configuration {
     uint8_t defaults = 0, interfaceMode = 0;
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes == 5136, "update state() and stateVersion");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 5136, "update state() and stateVersion");
 #endif
 
 struct Imx1ProbeCs5ConfigurationEvent {

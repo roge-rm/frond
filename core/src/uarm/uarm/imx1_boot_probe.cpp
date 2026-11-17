@@ -1362,7 +1362,23 @@ struct Probe {
                 if (!preview) p.cs5Reset = candidate;
                 return status;
             }
-            auto candidate = p.cs5Configuration;
+            // A preview works on a copy. A commit works on the chip in place and puts the copy back unless
+            // the result is taken (accept), as it would have dropped a refused candidate.
+            Imx1Cs5Configuration saved = p.cs5Configuration;
+            auto& candidate = preview ? saved : p.cs5Configuration;
+            bool kept = preview;
+            struct Restore {
+                bool& kept; Imx1Cs5Configuration& chip; const Imx1Cs5Configuration& saved;
+                ~Restore() { if (!kept) chip = saved; }
+            } restore{kept, p.cs5Configuration, saved};
+            // acceptGraphics(candidate, !preview), with the commit already in place.
+            auto accept = [&] {
+                if (preview) return p.acceptGraphics(candidate, false);
+                const auto drive = p.driveGraphicsLine(candidate, true);
+                if (drive != Imx1BootstrapAccess::ok) return drive;
+                kept = true;
+                return p.graphicsCommitted();
+            };
             // Alternate-board mode 2 requires the native B22 output selector as well as the axis mux.
             const bool stick = p.peripherals.gpioOutputPattern(1,0,0,0x00400000);
             const bool aux = p.peripherals.gpioOutputPattern(1,0,0x00400000,0);
@@ -1400,15 +1416,15 @@ struct Probe {
                 if (!candidate.engineState().ringBytes() || candidate.engineState().completed()) {
                     auto decoded = commands;
                     commands.undo(p.graphicsUndo);
-                    const auto accepted = p.acceptGraphics(candidate,!preview);
+                    const auto accepted = accept();
                     if (accepted == Imx1BootstrapAccess::ok && !preview) p.graphicsCommands = std::move(decoded);
                     return accepted;
                 }
-                const auto accepted = p.acceptGraphics(candidate,!preview);
+                const auto accepted = accept();
                 if (accepted != Imx1BootstrapAccess::ok || preview) commands.undo(p.graphicsUndo);
                 return accepted;
             }
-            return status == Imx1BootstrapAccess::ok ? p.acceptGraphics(candidate, !preview) : status;
+            return status == Imx1BootstrapAccess::ok ? accept() : status;
         };
         Imx1BootstrapAccess status;
         if (diagnosticCs5 && p.cs5Configuration.virtualProfile()) {
@@ -2702,7 +2718,8 @@ struct ProbeState {
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields, stateIdentityVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1ProbeResult) == 352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Arm920SavedState) == 43328, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Bootstrap) - Imx1Bootstrap::unsavedBytes == 2344, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2723,10 +2740,11 @@ static_assert(sizeof(Imx1Watchdog) == 40, "update its stateVersion and the size 
 static_assert(sizeof(Imx1Rtc) == 48, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs4Capture) == 1040, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs5Reset) == 8, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsGpio) == 36, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsWindows) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsLookup) == 3080, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(Imx1GraphicsLookup::layoutBytes() == 3080, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsController) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsEngine) == 96, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsDisplay) == 1504, "update its stateVersion and the size in stateLayoutFingerprint");
