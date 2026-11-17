@@ -23,6 +23,7 @@
 #include "CPU.h"
 #include "MMU.h"
 #include "pxa270_WMMX.h"
+#include "xscale_cost.h"
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
@@ -258,6 +259,33 @@ bool EndsBlock(uint32_t w, uint32_t pc, bool thumb) {
 // the request, so translation there gives what it would have given in place then.
 // Translation marks the words it reads; before the block is installed they are fetched
 // again and compared (Env::CodeUnchanged).
+// Ticks per instruction from the cost model (xscale_cost.h), as the interpreter charges them: the
+// table's cost when the condition passed, 1 when it failed. On PXA a tick is a core clock. On the
+// ARM920T a tick holds the clocks above bit 32 and the instructions below (a Thumb pair counts 2,
+// as the board steps each half), since its board counts both; budgets there are clocks << 32, so a
+// run still stops once its clocks reach the budget.
+struct TickModel {
+    bool on = false;
+    uint8_t core = 0;
+    unsigned shift = 0;
+
+    uint64_t Ticks(bool thumb, uint32_t instruction) const {
+        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
+        if (!shift) return c;
+        return (c << shift) | (thumb && instruction > 0xffff ? 2 : 1);
+    }
+    uint64_t Failed() const { return shift ? (uint64_t(1) << shift) | 1 : 1; }
+};
+
+TickModel jitPrvTickModel(ArmCpu *cpu) {
+    TickModel m;
+    uint8_t core = 0;
+    m.on = cpuJitCostCore(cpu, &core);
+    m.core = core;
+    m.shift = cpuGetModel(cpu) == ArmCpuModel::arm920t ? 32 : 0;
+    return m;
+}
+
 struct Snapshot final : public A32::CodeSnapshot {
     uint32_t base = 0;  // the word holding the first instruction
     std::vector<uint32_t> words;
@@ -266,6 +294,12 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint32_t> marked;  // access pcs among them
     size_t next = 0;
     bool arm920 = false;
+    TickModel model;
+
+    std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
+        return model.Ticks(thumb, instruction);
+    }
+    std::uint64_t GetTicksForConditionFailed() override { return model.Failed(); }
 
     std::optional<std::uint32_t> MemoryReadCode(A32::VAddr va) override {
         const uint32_t i = (va - base) >> 2;
@@ -755,6 +789,7 @@ struct Env final : public A32::UserCallbacks {
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
+        s->model = model;
         s->base = pc & ~3u;
         auto word = [&](uint32_t va) {
             const uint32_t i = (va - s->base) >> 2;
@@ -827,7 +862,7 @@ struct Env final : public A32::UserCallbacks {
     void Cp15User(uint32_t pc) {
         stats.cp15User++;
         rewindPc = pc;
-        undoTick = true;
+        undo = TicksAt(pc, false);
         jit->HaltExecution(kInterpret);
     }
 
@@ -848,7 +883,7 @@ struct Env final : public A32::UserCallbacks {
             psrInterpret = 0;
             stats.psrInterpret++;
             psrInterprets.fetch_add(1, std::memory_order_relaxed);
-            undoTick = true;
+            undo = TicksAt(pc, jit->Cpsr() & 0x20);
             jit->HaltExecution(kInterpret);
             return;
         }
@@ -865,6 +900,7 @@ struct Env final : public A32::UserCallbacks {
                 else stats.interpWmmx[3]++;
             }
         }
+        // Its block didn't count it (the fork's frond_interpreted); the interpreter charges it.
         jit->HaltExecution(kInterpret);
     }
     // SWI (not the semihosting ones, cpuJitPlain): PC is past it. The run ends at the
@@ -888,9 +924,10 @@ struct Env final : public A32::UserCallbacks {
 
     // Undefined, unpredictable and no-execute: PC is past the instruction and its tick
     // is counted, so step back and let the interpreter run it.
-    void ExceptionRaised(A32::VAddr pc, A32::Exception) override {
+    void ExceptionRaised(A32::VAddr pc, A32::Exception exception) override {
         jit->Regs()[15] = pc;
-        undoTick = true;
+        // A fetch that failed counted 1 (dynarmic's default).
+        undo = exception == A32::Exception::NoExecuteFault ? 1 : TicksAt(pc, jit->Cpsr() & 0x20);
         jit->HaltExecution(kInterpret);
     }
 
@@ -1088,11 +1125,31 @@ struct Env final : public A32::UserCallbacks {
     }
 
     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+    std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
+        return model.Ticks(thumb, instruction);
+    }
+    std::uint64_t GetTicksForConditionFailed() override { return model.Failed(); }
     // Called at the start of a run and again after a CallSVC that doesn't halt, once AddTicks has taken the cycles so
     // far: the rest of the run's budget, so a run that goes on past a SWI still ends on time.
     std::uint64_t GetTicksRemaining() override { return budget > ran ? budget - ran : 0; }
 
-    bool undoTick = false;
+    // The ticks of an instruction the run counted and the interpreter runs again, taken off at the end.
+    uint64_t undo = 0;
+    TickModel model;
+
+    // What translation counted for the instruction at pc, read as dynarmic reads it.
+    uint64_t TicksAt(uint32_t pc, bool thumb) {
+        uint32_t w;
+        if (!cpuJitFetch(cpu, pc & ~3u, &w)) return 1;
+        if (!thumb) return model.Ticks(false, w);
+        uint32_t i = (pc & 2) ? w >> 16 : w & 0xffff;
+        if (i >= 0xe800) {
+            const uint32_t next = pc + 2;
+            if (!cpuJitFetch(cpu, next & ~3u, &w)) return 1;
+            i = (i << 16) | ((next & 2) ? w >> 16 : w & 0xffff);
+        }
+        return model.Ticks(true, i);
+    }
 };
 
 
@@ -1260,6 +1317,7 @@ struct FrondJit {
     unsigned ahead = 0;
     FrondJitAbort abort{};  // the last run's, for FROND_JIT_ABORT
     const Env *running = nullptr;  // the level jitRun is in, for jitRanNow
+    uint32_t lastInstructions = 0;  // the last run's (jitLastInstructions)
 };
 
 const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
@@ -1376,6 +1434,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     l->jit = std::make_unique<A32::Jit>(conf);
     e.jit = l->jit.get();
     e.maxInstructions = j->maxUnchecked;
+    e.model = jitPrvTickModel(j->cpu);
     l->jit->SetCompileThread(e.lineBound ? A32::Jit::CompileThread::Off : j->mode);
     l->jit->SetCompileAhead(e.lineBound ? 0 : j->ahead);
     if (Level *o = j->level[!privileged].get()) {
@@ -1427,7 +1486,7 @@ uint64_t jitPsrInterprets() { return psrInterprets.load(std::memory_order_relaxe
 uint32_t jitRanNow(const FrondJit *j) {
     const Env *e = j->running;
     if (!e) return 0;
-    const int64_t ran = int64_t(e->budget) - e->jit->TicksRemainingNow();
+    const int64_t ran = (int64_t(e->budget) - e->jit->TicksRemainingNow()) >> e->model.shift;
     return ran <= 0 ? 0 : uint32_t(std::min<int64_t>(ran, UINT32_MAX));
 }
 
@@ -1564,9 +1623,11 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     }
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
-    e.budget = cycles;
+    e.model = jitPrvTickModel(j->cpu);
+    // ARM920T ticks hold the clocks above bit 32 (TickModel); dynarmic's tick count is signed.
+    e.budget = e.model.shift ? std::min<uint64_t>(cycles, INT32_MAX) << e.model.shift : cycles;
     e.ran = 0;
-    e.undoTick = false;
+    e.undo = 0;
     e.dataAbort.set = false;
     j->running = &e;
     const HaltReason hr = jit.Run();
@@ -1579,10 +1640,13 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     std::memcpy(regs, jit.Regs().data(), 16 * sizeof(uint32_t));
     cpsr = jit.Cpsr();
     uint64_t ran = e.ran;
-    if (e.undoTick && ran) ran--;
-    e.instructions += ran;
+    ran -= std::min(ran, e.undo);
+    const uint32_t clocks = uint32_t(ran >> e.model.shift);
+    // PXA ticks are clocks: instructions counts them there.
+    j->lastInstructions = e.model.shift ? uint32_t(ran) : clocks;
+    e.instructions += j->lastInstructions;
     stats.runs++;
-    stats.ran += ran;
+    stats.ran += j->lastInstructions;
     if (Has(hr, kFault)) {
         stats.fault++;
         if (stats.on) stats.faultPc[regs[15]]++;
@@ -1601,5 +1665,9 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         stop = FROND_JIT_COLD;
     else
         stop = FROND_JIT_BUDGET;
-    return uint32_t(ran);
+    return clocks;
 }
+
+uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
+
+uint64_t jitFaultExits() { return stats.fault; }

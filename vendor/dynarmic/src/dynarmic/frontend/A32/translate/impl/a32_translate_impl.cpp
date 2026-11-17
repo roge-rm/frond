@@ -29,6 +29,7 @@ bool TranslatorVisitor::VFPConditionPassed(Cond cond) {
 }
 
 bool TranslatorVisitor::InterpretThisInstruction() {
+    frond_interpreted = true;
     ir.SetTerm(IR::Term::Interpret(ir.current_location));
     return false;
 }

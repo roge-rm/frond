@@ -42,9 +42,12 @@ void jitExecutionCounts(const FrondJit* jit, uint64_t* blocks, uint64_t* instruc
 void jitSetExecutionCounts(FrondJit* jit, uint64_t blocks, uint64_t instructions);
 void jitDestroy(FrondJit *jit);
 const FrondJitAbort &jitLastAbort(const FrondJit *jit);
-// Runs up to about cycles instructions. Returns how many ran, at most
-// cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.
+// Runs up to about cycles clocks, each instruction charged its cost model cost (1 with the model
+// off, 1 when its condition fails). Returns the clocks run, at most
+// cycles - 1 + jitMaxUnchecked(jit) x the largest instruction cost for cycles >= 1.
 uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
+// The instructions the last jitRun ran, a Thumb pair counted 2 (ARM920T); its clocks elsewhere.
+uint32_t jitLastInstructions(const FrondJit *jit);
 // Most instructions generated code runs between two budget checks: no block is longer and
 // every link checks. 0 means no limit (FROND_JIT_MAX_UNCHECKED=0, for measuring only).
 uint32_t jitMaxUnchecked(const FrondJit *jit);
@@ -56,6 +59,8 @@ uint32_t jitRanNow(const FrondJit *jit);
 uint64_t jitDomainCalls();
 // MSR CPSRs the in-place check sent to the interpreter, in every JIT so far (tests).
 uint64_t jitPsrInterprets();
+// Runs that left a block at a failed access (a guest abort or a refused access), all JITs.
+uint64_t jitFaultExits();
 // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
 void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
 // Code cache size in bytes for JITs made after this (tests); 0 for the default.

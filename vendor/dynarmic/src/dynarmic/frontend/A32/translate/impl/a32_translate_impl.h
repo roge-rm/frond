@@ -37,6 +37,9 @@ struct TranslatorVisitor final {
     bool VFPConditionPassed(Cond cond);
 
     bool InterpretThisInstruction();
+    // Frond: set by InterpretThisInstruction. The instruction isn't counted in the block's cycles, as one
+    // a PreCodeReadHook sends to the interpreter isn't: InterpreterFallback's interpreter charges it.
+    bool frond_interpreted = false;
     bool UnpredictableInstruction();
     bool UndefinedInstruction();
     bool DecodeError();

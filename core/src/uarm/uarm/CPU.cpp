@@ -293,8 +293,9 @@ struct ArmCpu {
     // that the step would count as bus accesses.
     Arm920CodeMap* leanCode;
     uint64_t leanBus, leanCodeDrops;
-    // Instructions this lean run has finished, and the probe's answer for reads of pages that aren't plain.
-    uint32_t leanDone;
+    // Cost model clocks of the instructions this lean run has finished (leanRetired the instructions), the
+    // running one's charge, and the probe's answer for reads of pages that aren't plain.
+    uint32_t leanDone, leanRetired, leanCharge;
     Arm920LeanRead leanRead;
     // The probe's answer for single stores to pages that aren't plain, the instruction the lean loop is running
     // and the run's budget, which such a store can shrink.
@@ -1155,11 +1156,11 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
             // Fast blocks answer reads the same way, with ran the cycles of the blocks the run has finished (its
             // time is charged at its end). An access there that a later one in the same instruction leaves to the
             // step is taken again by the step, which changes nothing for the reads and writes these callbacks answer.
-            uint32_t ran = cpu->leanDone;
+            uint32_t ran = cpu->leanDone, charge = cpu->leanCharge;
 #ifdef FROND_DYNARMIC
-            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu);
+            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu), charge = 1;
 #endif
-            const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
+            const uint32_t left = ran + charge < cpu->leanBudget ? cpu->leanBudget - ran - charge : 0;
             if (size <= 4 && MMU_TRANSLATE_RESULT_OK(r) && !cached && cpu->leanRead &&
                 cpu->leanRead(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size,
                               cpu->leanJit ? std::exchange(cpu->jitAccessPc, 0) : cpu->curInstrPC, ran, left,
@@ -1174,11 +1175,11 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
             uint32_t value = 0, cost = 0;
             memcpy(&value, buf, size);
             // ran as for reads: in Fast blocks the cycles of the blocks the run has finished.
-            uint32_t ran = cpu->leanDone;
+            uint32_t ran = cpu->leanDone, charge = cpu->leanCharge;
 #ifdef FROND_DYNARMIC
-            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu);
+            if (cpu->leanJit) ran = cpuPrvJitRanUncharged(cpu), charge = 1;
 #endif
-            const uint32_t left = ran + 1 < cpu->leanBudget ? cpu->leanBudget - ran - 1 : 0;
+            const uint32_t left = ran + charge < cpu->leanBudget ? cpu->leanBudget - ran - charge : 0;
             if (cpu->leanWrite(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r), size, value, ran, left, &cost)) {
                 cpu->leanBudget -= cost;
                 ++cpu->leanBus;
@@ -1497,15 +1498,22 @@ uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
     const uint32_t interpreter = std::max(instruction, pace) - 1;
 #ifdef FROND_DYNARMIC
     if (cpu && cpu->jit) {
-        // cpuPrvCycleJit: a run passes its budget by at most L - 1 (every link checks, no
-        // block is longer than L, a JIT instruction counts 1), then a run that stopped for the
-        // interpreter runs one more instruction before the budget check.
+        // cpuPrvCycleJit: a run passes its budget by at most L x the largest cost - 1 (every link
+        // checks, no block is longer than L instructions, a Thumb pair counting one and costing
+        // less than the largest), then a run that stopped for the interpreter runs one more
+        // instruction before the budget check.
         const uint32_t l = jitMaxUnchecked(cpu->jit);
         if (!l) return UINT32_MAX;
-        return std::max(l - 1 + instruction, interpreter);
+        const uint32_t most = cpu->ic->costOn ? cost::maxInstructionCost(cost::Core(cpu->costCore)) : 1;
+        return std::max(l * most - 1 + instruction, interpreter);
     }
 #endif
     return interpreter;
+}
+
+bool cpuJitCostCore(const struct ArmCpu *cpu, uint8_t *core) {
+    *core = cpu->costCore;
+    return cpu->ic->costOn;
 }
 
 void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz) {
@@ -1521,7 +1529,14 @@ void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uin
 
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
     cpu->costCore = core;
-    cpu->costMemory = on && memory && cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->model != ArmCpuModel::arm920t;
+    // Fast charges the table only, in its generated code and the instructions it interprets alike, so the
+    // two always agree; the data cache and region charges are Exact's.
+    bool fast = false;
+#ifdef FROND_DYNARMIC
+    fast = cpu->jit && !cpu->jitLoopOnly;
+#endif
+    cpu->costMemory = on && memory && !fast && cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
+                      cpu->model != ArmCpuModel::arm920t;
     cpu->paceCost = on ? cost::paceOpCost(cost::Core(core)) : 20;
     icacheSetCost(cpu->ic, on, core);
     cost::dataCacheReset(cpu->dcache, cost::Core(core));
@@ -5338,19 +5353,22 @@ static uint32_t cpuPrvLeanDecodeThumb(uint16_t raw, uint32_t &translated) {
 }
 
 template <int size>
-static FORCE_INLINE void cpuPrvLeanDecodeSlot(struct icacheline *line, unsigned offset, uint32_t &instr,
-                                              uint32_t &decoded) {
+static FORCE_INLINE void cpuPrvLeanDecodeSlot(struct icache *ic, struct icacheline *line, unsigned offset,
+                                              uint32_t &instr, uint32_t &decoded, uint32_t &cost) {
     if constexpr (size == 4) {
         memcpy(&instr, line->data + offset, 4);
         decoded = cpuPrvLeanDecodeArm(instr);
         line->decoded[offset >> 1] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_ARM;
+        line->cost[offset >> 1] = icacheCostOf(ic, instr, false);
     } else {
         uint16_t raw;
         memcpy(&raw, line->data + offset, 2);
         decoded = cpuPrvLeanDecodeThumb(raw, instr);
         line->decoded[offset >> 1] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_THUMB;
         line->translatedThumbInstructions[offset >> 1] = instr;
+        line->cost[offset >> 1] = icacheCostOf(ic, raw, true);
     }
+    cost = line->cost[offset >> 1];
 }
 
 // Notes that the decode cache holds code from the RAM line at pa. A newly noted page loses its lean TLB
@@ -5425,7 +5443,7 @@ static bool cpuPrvLeanStepWord(void *ctx, uint32_t va, unsigned size, bool privi
 // see memory as Exact does. False (nothing run) for anything that isn't a plain page or faults.
 template <int size>
 static __attribute__((noinline)) bool cpuPrvLeanFetchSlow(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr,
-                                                         uint32_t &decoded) {
+                                                         uint32_t &decoded, uint32_t &cost) {
     struct icache *ic = cpu->ic;
     if ((pc & (size - 1)) || icacheArm920ContinuationPending(ic) || !cpu->leanPage) return false;
     struct ArmMmu *mmu = cpu->memorySystem.mmu;
@@ -5439,20 +5457,23 @@ static __attribute__((noinline)) bool cpuPrvLeanFetchSlow(struct ArmCpu *cpu, ui
         if constexpr (size == 4) {
             memcpy(&instr, page + (pa & 0xfffu), 4);
             decoded = cpuPrvLeanDecodeArm(instr);
+            cost = icacheCostOf(ic, instr, false);
         } else {
             uint16_t raw;
             memcpy(&raw, page + (pa & 0xfffu), 2);
             decoded = cpuPrvLeanDecodeThumb(raw, instr);
+            cost = icacheCostOf(ic, raw, true);
         }
         return true;
     }
     struct icacheline *line = cpuPrvLeanFillLine(cpu, pc, cpu->privileged, pa, page, ram);
-    cpuPrvLeanDecodeSlot<size>(line, calculateLineIndex(pc), instr, decoded);
+    cpuPrvLeanDecodeSlot<size>(ic, line, calculateLineIndex(pc), instr, decoded, cost);
     return true;
 }
 
 template <int size>
-static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr, uint32_t &decoded) {
+static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr, uint32_t &decoded,
+                                         uint32_t &cost) {
     struct icache *ic = cpu->ic;
     struct icacheline *line = ic->cache + calculateIndex(pc);
     if (likely(!(pc & (size - 1)) && line->revision == ic->revision && line->tag == calculateTag(pc) &&
@@ -5464,24 +5485,28 @@ static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32
             decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
             if constexpr (size == 4) memcpy(&instr, line->data + offset, 4);
             else instr = line->translatedThumbInstructions[offset >> 1];
+            cost = line->cost[offset >> 1];
             return true;
         }
-        cpuPrvLeanDecodeSlot<size>(line, offset, instr, decoded);
+        cpuPrvLeanDecodeSlot<size>(ic, line, offset, instr, decoded, cost);
         return true;
     }
-    return cpuPrvLeanFetchSlow<size>(cpu, pc, instr, decoded);
+    return cpuPrvLeanFetchSlow<size>(cpu, pc, instr, decoded, cost);
 }
 
+// Runs while the clocks charged are under the budget and the instructions under the count. An instruction
+// whose charge would pass the budget is left for the step, so the run never passes it.
 template <int size>
 static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
     uint32_t done = 0;
-    const uint32_t before = cpu->leanDone;
-    while (before + done < cpu->leanBudget && before + done < cpu->leanCount) {
-        cpu->leanDone = before + done;
+    while (cpu->leanDone < cpu->leanBudget && cpu->leanRetired < cpu->leanCount) {
         const uint32_t pc = cpu->regs[REG_NO_PC];
-        uint32_t instr, decoded;
+        uint32_t instr, decoded, cost;
         cpu->curInstrPC = pc;
-        if (!cpuPrvLeanFetch<size>(cpu, pc, instr, decoded)) break;
+        if (!cpuPrvLeanFetch<size>(cpu, pc, instr, decoded, cost)) break;
+        const uint32_t charge = cpuPrvSlotCharge(cpu, cost);
+        if (charge > cpu->leanBudget - cpu->leanDone) break;
+        cpu->leanCharge = charge;
         cpu->regs[REG_NO_PC] = pc + size;
         cpu->leanInstr = instr;
         // Accesses of an instruction the step runs again are counted there, not here.
@@ -5492,20 +5517,23 @@ static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
             cpu->leanBus = bus;
             break;
         }
+        cpu->leanDone += charge;
+        ++cpu->leanRetired;
         ++done;
         if (cpu->slowPath) break;
     }
-    cpu->leanDone = before + done;
     return done;
 }
 
-uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64_t *busAccesses) {
-    return cpuArm920RunLeanFor(cpu, budget, UINT32_MAX, blNext, busAccesses);
+uint32_t cpuArm920RunLean(ArmCpu *cpu, uint32_t budget, uint32_t *blNext, uint64_t *busAccesses, uint32_t *clocks) {
+    return cpuArm920RunLeanFor(cpu, budget, UINT32_MAX, blNext, busAccesses, clocks);
 }
 
-uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint32_t *blNext, uint64_t *busAccesses) {
+uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint32_t *blNext, uint64_t *busAccesses,
+                             uint32_t *clocks) {
     *blNext = ~0u;
     *busAccesses = 0;
+    if (clocks) *clocks = 0;
     if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK | SLOW_PATH_REASON_INJECTED_CALL_DONE);
@@ -5517,19 +5545,22 @@ uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint3
     cpu->leanBlNext = ~0u;
     cpu->leanBus = 0;
     cpu->leanDone = 0;
+    cpu->leanRetired = 0;
+    cpu->leanCharge = 1;
     cpu->leanBudget = budget;
     cpu->leanCount = count;
     uint32_t done = 0;
     for (;;) {
         done += cpu->T ? cpuPrvLeanLoop<2>(cpu) : cpuPrvLeanLoop<4>(cpu);
         // Carry on only past an ARM/Thumb switch; a failed fetch leaves no slow path reason.
-        if (done >= cpu->leanBudget || done >= count || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
+        if (cpu->leanDone >= cpu->leanBudget || done >= count || cpu->leanExit || cpu->slowPath != SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE) break;
         cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE);
     }
     cpu->leanRun = false;
     cpu->leanExit = false;
     *blNext = cpu->leanBlNext;
     *busAccesses = cpu->leanBus;
+    if (clocks) *clocks = cpu->leanDone;
     return done;
 }
 
@@ -6111,9 +6142,6 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     if (!cpuJitFetch(cpu, pc, &word)) return 0;
     const IdleLoop *l = cpuPrvIdleLoopAt(cpu, pc, word);
     if (!l || r[REG_NO_LR] != pc + l->windowReturn) return 0;
-    const uint32_t p = l->pass;
-    const uint32_t passes = (left - 1) / p;
-    if (!passes) return 0;
     uint_fast8_t fsr;
     auto read = [&](uint32_t va, uint32_t &v) { return cpuJitRead(cpu, va, 4, &v, &fsr); };
     const bool zire = l->kind == IdleLoopKind::zire72;
@@ -6134,13 +6162,13 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     if (!read(counterVa, counter) || !read(globals + kIdleWakeWord, wake) || wake ||
         !cpuJitRead(cpu, byteVa, 1, &byte, &fsr) || !read(pc + uint32_t(l->window) + kIdleWindowLiteral, iccr))
         return 0;
-    // A pass that goes straight to the body, as every pass will.
-    if (zire) {
-        const uint32_t c = r[0];
-        if (c != counter || (!(r[7] > c && r[6] != c) && !r[10])) return 0;
-    } else if (counter >= 162500 && !r[4]) {
-        return 0;
-    }
+    // A pass that goes straight to the body, as every pass will, and what it costs (the table's cost of
+    // each instruction it runs, as Fast charges them).
+    if (zire && r[0] != counter) return 0;
+    const uint32_t p = idlePassCost(*l, counter, r, cpu->ic->costOn, cost::Core(cpu->costCore));
+    if (!p) return 0;
+    const uint32_t passes = (left - 1) / p;
+    if (!passes) return 0;
     // Both OSCR reads of each pass.
     if (!read(timer + 16, oscr)) return 0;
     // The window's stores: ICCR, then SPSR and LR pushed below SP; the byte with bit 0 clear.
@@ -6452,8 +6480,9 @@ bool cpuArm920JitCanRun(const ArmCpu *cpu) {
            !icacheArm920ContinuationPending(cpu->ic);
 }
 
-uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span) {
+uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span, uint32_t *instructions) {
     *stop = arm920JitExit;
+    if (instructions) *instructions = 0;
     if (!cpu->jitBlocks || !budget) return 0;
     cpuClearSlowPath(cpu, arm920JitClearedSlowPath);
     if (!cpuArm920JitCanRun(cpu)) return 0;
@@ -6469,6 +6498,7 @@ uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span)
     uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
     int jitStop;
     const uint32_t ran = jitRun(cpu->jit, cpu->regs, cpsr, budget, jitStop);
+    if (instructions) *instructions = jitLastInstructions(cpu->jit);
     *stop = jitStop == FROND_JIT_BUDGET ? arm920JitBudget :
             jitStop == FROND_JIT_HALT   ? arm920JitHalt :
             jitStop == FROND_JIT_COLD   ? arm920JitCold : arm920JitExit;
@@ -6492,8 +6522,9 @@ bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
 bool cpuArm920JitCanRun(const ArmCpu *) { return false; }
-uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t) {
+uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t, uint32_t *instructions) {
     *stop = arm920JitExit;
+    if (instructions) *instructions = 0;
     return 0;
 }
 #endif

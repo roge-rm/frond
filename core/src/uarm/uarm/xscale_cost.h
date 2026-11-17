@@ -351,6 +351,15 @@ constexpr uint32_t thumbPairCost(uint32_t pair, Core core) {
     return thumbCost(pair >> 16, core) + thumbCost(pair & 0xffff, core);
 }
 
+// An instruction as dynarmic reads it, whose condition passed: an ARM word, a 16-bit Thumb halfword, or
+// a Thumb pair as one 32-bit word (above 0xffff). Frond's own ARM words (0xfff9xxxx: PACE entry and
+// dispatch, peepholes) cost 1, as in the I-cache.
+constexpr uint32_t jitInstructionCost(bool thumb, uint32_t instruction, Core core) {
+    if (thumb) return instruction > 0xffff ? thumbPairCost(instruction, core) : thumbCost(instruction, core);
+    if ((instruction & 0xffff0000u) == 0xfff90000u) return 1;
+    return armCost(instruction, core);
+}
+
 // thumbCost of every halfword, one table per core, built on first use.
 inline const uint8_t* thumbCostTable(Core core) {
     struct Tables {

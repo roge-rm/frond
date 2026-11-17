@@ -974,7 +974,11 @@ struct Probe {
             return 0;
         const bool user = (cpsr & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady()) return 0;
-        const uint64_t clocks = leanCs5.clocks, round = 3 + uint64_t(leanCs5.cost);
+        // A round's cost model clocks: the load, the test and the taken branch.
+        constexpr uint64_t roundClocks = cost::armCost(0xe590154cu, cost::Core::arm920t) +
+                                         cost::armCost(0xe3110e40u, cost::Core::arm920t) +
+                                         cost::armCost(0x0afffffcu, cost::Core::arm920t);
+        const uint64_t clocks = leanCs5.clocks, round = roundClocks + uint64_t(leanCs5.cost);
         // The span keeps room for the JIT's last rounds; the slice for the work the rounds add.
         const uint64_t keep = leanMinimumSpan + 4 * round;
         if (quietCycles <= keep) return 0;
@@ -983,12 +987,12 @@ struct Probe {
         const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
         const auto busPeriod = peripherals.busReferencePeriod();
         unsigned first = 0;
-        // Round i reads after 3 i cycles and i + 1 reads' wait clocks.
+        // Round i reads after roundClocks i cycles and i + 1 reads' wait clocks.
         auto same = [&](uint64_t i, unsigned* region) {
             uint64_t ticks;
             uint32_t value;
             unsigned at;
-            const uint64_t cycles = deferredCycles + 3 * i, hclk = deferredHclk + (i + 1) * clocks;
+            const uint64_t cycles = deferredCycles + roundClocks * i, hclk = deferredHclk + (i + 1) * clocks;
             if ((!cs5Configuration.ticksAfterQuick(cycles, cpuPeriod, hclk, busPeriod, leanCpuRate, leanBusRate, ticks) &&
                  !cs5Configuration.ticksAfter(cycles, cpuPeriod, hclk, busPeriod, ticks)) ||
                 !cs5Configuration.quietScanStatus(peripherals.eimState(), pc, ticks, value, at, &leanScanRate))
@@ -1005,7 +1009,7 @@ struct Probe {
         }
         // Rounds 0 to low read want; they pass, round low + 1 on runs.
         const uint64_t n = low + 1 >= most ? most : low + 1;
-        deferredCycles += 3 * n;
+        deferredCycles += roundClocks * n;
         quietCycles -= n * round;
         deferredHclk += n * clocks;
         result.cs5WaitClocks += n * clocks;
@@ -1951,7 +1955,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             if (!runStep(p, idleHclkLimit)) break;
     } else {
         // Fast: after each step, the rest of a quiet span runs in the JIT and on the lean path. Their instructions
-        // are charged one cycle each through the deferred charge, and they stop before anything the step has
+        // are charged their cost model clocks through the deferred charge, as the step charges them, and they stop before anything the step has
         // to see (MMIO, CP15, faults, a guard refusal), which the next step runs. The JIT may pass the span by
         // up to its block length (the charge then comes a little late); the slice, the bounds and the GPIO
         // event it never passes. The last instruction before the slice's retired or work limit is left to the
@@ -1999,8 +2003,11 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     inJit = true;
                     // The slice limits instructions, the quiet span instructions and wait clocks together: the
                     // run's graphics accesses are checked against the span alone.
+                    // ran is the run's cost model clocks, instructions what it retired (fewer or as many).
+                    uint32_t instructions = 0;
                     const uint32_t ran = cpuArm920RunJit(p->cpu, jitBudget, &stop,
-                                                         uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+                                                         uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)),
+                                                         &instructions);
                     inJit = false;
                     delayPassed = false;
                     if (jitHalt) {
@@ -2019,10 +2026,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         const uint32_t left = ran - std::min(ran, cpuArm920JitCharged(p->cpu));
                         deferredCycles += left;
                         quietCycles = left < quietCycles ? quietCycles - left : 0;
-                        p->retired += ran;
-                        jitRetired += ran;
-                        p->work += ran;
-                        slice += ran;
+                        p->retired += instructions;
+                        jitRetired += instructions;
+                        p->work += instructions;
+                        slice += instructions;
                         p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
                     }
                     if (stop == arm920JitBudget) {
@@ -2039,7 +2046,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     }
                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
-                    leanCount = stop == arm920JitCold || ran < 4 ? 32 : 1;
+                    leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;
                 }
                 if (quietCycles < leanMinimumSpan || slice + 1 >= retiredBudget) break;
                 uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
@@ -2054,7 +2061,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 uint64_t busAccesses;
                 leanCs5 = {};
                 delayPassed = false;
-                const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses);
+                // budget is in cost model clocks, and bounds the instructions too (each costs 1 at least).
+                uint32_t clocks = 0;
+                const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses,
+                                                         &clocks);
                 p->result.busAccesses += busAccesses;
                 // Graphics memory writes add their wait clocks to the work and the deferred charge, and their
                 // cost to the span used, as cs5Wait would.
@@ -2064,8 +2074,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 quietCycles -= leanCs5.waitCost;
                 leanCs5 = {};
                 if (!ran) break;
-                deferredCycles += ran;
-                quietCycles -= ran;
+                deferredCycles += clocks;
+                quietCycles -= clocks;
                 p->retired += ran;
                 leanRetired += ran;
                 p->work += ran;

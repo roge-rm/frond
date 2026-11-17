@@ -5,6 +5,7 @@
 
 #include <mcl/bit/bit_count.hpp>
 
+#include "dynarmic/frontend/A32/translate/conditional_state.h"
 #include "dynarmic/frontend/A32/translate/impl/a32_translate_impl.h"
 #include "dynarmic/interface/A32/config.h"
 
@@ -983,11 +984,16 @@ bool TranslatorVisitor::thumb16_B_t1(Cond cond, Imm<8> imm8) {
         return thumb16_UDF();
     }
 
+    // Frond: as ARM's B<cond>, a block-leading condition, so a failed one is charged the
+    // condition-failed ticks (the block ends before it otherwise).
+    if (!IsConditionPassed(*this, cond)) {
+        return true;
+    }
+
     const s32 imm32 = static_cast<s32>((imm8.SignExtend<u32>() << 1) + 4);
     const auto then_location = ir.current_location.AdvancePC(imm32).AdvanceIT();
-    const auto else_location = ir.current_location.AdvancePC(2).AdvanceIT();
 
-    ir.SetTerm(IR::Term::If{cond, IR::Term::LinkBlock{then_location}, IR::Term::LinkBlock{else_location}});
+    ir.SetTerm(IR::Term::LinkBlock{then_location});
     return false;
 }
 

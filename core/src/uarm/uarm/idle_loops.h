@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include "xscale_cost.h"
+
 // The PalmOS 5 kernel wait loops the Fast engine skips (cpuPrvIdleSkip in CPU.cpp). Each pass
 // reads OSCR, sets bit 0 of a kernel byte, calls the IRQ window (ICCR = 1, IRQs unmasked for
 // one instruction), clears the bit, reads OSCR again, adds the difference to an idle counter
@@ -17,7 +19,7 @@ struct IdleLoop {
     uint32_t count;
     int32_t window;          // the IRQ window, from the head
     uint32_t windowReturn;   // the window call's return address, from the head
-    uint32_t pass;           // instructions in a pass that goes straight to the body
+    uint32_t body;           // the body's first word: a pass runs from there to the end, the window included
 };
 
 // The IRQ window, the same in both ROMs. Its literal (the ICCR address) is at +0xe8.
@@ -49,9 +51,59 @@ constexpr uint32_t kIdleLoopTx[] = {
 };
 
 constexpr IdleLoop kIdleLoops[] = {
-    {IdleLoopKind::zire72, kIdleLoopZire72, sizeof(kIdleLoopZire72) / 4, -0x570, 0x50, 39},
-    {IdleLoopKind::tx, kIdleLoopTx, sizeof(kIdleLoopTx) / 4, 0x66c0, 0x4c, 42},
+    {IdleLoopKind::zire72, kIdleLoopZire72, sizeof(kIdleLoopZire72) / 4, -0x570, 0x50, 13},
+    {IdleLoopKind::tx, kIdleLoopTx, sizeof(kIdleLoopTx) / 4, 0x66c0, 0x4c, 11},
 };
+
+// What a pass that goes straight to the body costs: its head instructions (each with whether its
+// condition passes), then every word from body to the end and the window's, all passing. The head
+// depends on registers a skipped pass doesn't change. Zire 72: r7 (the threshold) and r6 against the
+// counter c, then r10. T|X: c against 0x27800 and 162500, then r4. Every head here goes to the body.
+// on: the cost model's table for core, otherwise 1 an instruction. Returns 0 for a head that doesn't
+// go to the body.
+inline uint32_t idlePassCost(const IdleLoop &l, uint32_t c, const uint32_t *r, bool on, cost::Core core) {
+    struct Step {
+        uint8_t word;
+        bool passes;
+    };
+    Step head[6];
+    unsigned n = 0;
+    if (l.kind == IdleLoopKind::zire72) {
+        // cmp r7, r0; bls 4; cmp r6, r0; bne body; 4: cmp r10, #0; bne body
+        head[n++] = {0, true};
+        const bool ls = r[7] <= c;
+        head[n++] = {1, ls};
+        bool body = false;
+        if (!ls) {
+            body = r[6] != c;
+            head[n++] = {2, true};
+            head[n++] = {3, body};
+        }
+        if (!body) {
+            if (!r[10]) return 0;
+            head[n++] = {4, true};
+            head[n++] = {5, true};
+        }
+    } else {
+        // ldr r0, [r5]; subs r12, r0, #0x27800; subscs r12, r12, #0x2c4; cmpcs r4, #0; bne body
+        const bool cs = c >= 0x27800, past = c >= 162500;
+        if (past && !r[4]) return 0;
+        head[n++] = {0, true};
+        head[n++] = {1, true};
+        head[n++] = {2, cs};
+        head[n++] = {3, past};
+        head[n++] = {4, true};
+    }
+    auto charge = [&](uint32_t w, bool passes) -> uint32_t {
+        if (!on) return 1;
+        return passes ? cost::armCost(w, core) : cost::conditionFailedCost(core);
+    };
+    uint32_t sum = 0;
+    for (unsigned i = 0; i < n; i++) sum += charge(l.words[head[i].word], head[i].passes);
+    for (uint32_t i = l.body; i < l.count; i++) sum += charge(l.words[i], true);
+    for (uint32_t i = 0; i < kIdleWindowCount; i++) sum += charge(kIdleWindowWords[i], true);
+    return sum;
+}
 
 // The kernel globals' wake word and window byte, from the globals pointer.
 constexpr uint32_t kIdleWakeWord = 0x21c0, kIdleWindowByte = 0x21d0;

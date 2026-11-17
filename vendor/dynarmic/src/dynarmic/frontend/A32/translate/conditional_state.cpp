@@ -44,7 +44,7 @@ bool IsConditionPassed(TranslatorVisitor& v, IR::Cond cond) {
         } else {
             if (cond == v.ir.block.GetCondition()) {
                 v.ir.block.SetConditionFailedLocation(v.ir.current_location.AdvancePC(static_cast<int>(v.current_instruction_size)).AdvanceIT());
-                v.ir.block.ConditionFailedCycleCount()++;
+                v.ir.block.ConditionFailedCycleCount() += v.options.condition_failed_ticks;
                 return true;
             }
 
@@ -75,7 +75,7 @@ bool IsConditionPassed(TranslatorVisitor& v, IR::Cond cond) {
     v.cond_state = ConditionalState::Translating;
     v.ir.block.SetCondition(cond);
     v.ir.block.SetConditionFailedLocation(v.ir.current_location.AdvancePC(static_cast<int>(v.current_instruction_size)).AdvanceIT());
-    v.ir.block.ConditionFailedCycleCount() = v.ir.block.CycleCount() + 1;
+    v.ir.block.ConditionFailedCycleCount() = v.ir.block.CycleCount() + v.options.condition_failed_ticks;
     return true;
 }
 

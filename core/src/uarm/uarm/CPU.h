@@ -170,6 +170,8 @@ bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears);
 // interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
 // generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
 uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu);
+// Fast: whether the cost model charges a table, and its cost::Core in core.
+bool cpuJitCostCore(const struct ArmCpu *cpu, uint8_t *core);
 // Cost model (xscale_cost.h): on charges core's (cost::Core) table per instruction and a PACE op, memory
 // adds the region and data cache charges (XScale only). Off: 1 per instruction, 20 per PACE op.
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory);
@@ -338,14 +340,17 @@ void cpuArm920LeanStored(ArmCpu*, uint32_t pa);
 // A store the guarded step made to RAM at [pa, pa + size): as cpuArm920LeanStored, only when one of the
 // 64-byte lines it touches held code.
 void cpuArm920LeanStoredBytes(ArmCpu*, uint32_t pa, uint32_t size);
-// Runs at most budget instructions on the lean path and returns how many it retired. It stops before an
+// Runs the lean path while its cost model clocks are under budget (an instruction that would pass it is left
+// for the step) and returns the instructions it retired, with their clocks in clocks. It stops before an
 // instruction or access it can't take as plain (MMIO, faults, misaligned accesses, CP15, SWI, MSR of the
 // control field, exception returns and forms the guard rejects), leaving the CPU at that instruction for
 // the guarded step. blNext is the Thumb BL suffix address after a prefix that ended the run, else ~0.
 // busAccesses gets the data accesses the step would have counted as bus accesses.
-uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses);
+uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses,
+                          uint32_t* clocks = nullptr);
 // The same, retiring at most count instructions.
-uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t* blNext, uint64_t* busAccesses);
+uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t* blNext, uint64_t* busAccesses,
+                             uint32_t* clocks = nullptr);
 // ARM920T Fast blocks: Dynarmic in normal blocks over the lean pages, run only through cpuArm920RunJit. On
 // needs cpuArm920SetLean first and makes the JIT on first use; false when there is no JIT in the build or the
 // CPU has the single-step diagnostic JIT. Turning it on again drops translated code.
@@ -362,15 +367,16 @@ uint32_t cpuArm920TakeJitAccessPc(ArmCpu*);
 // run's total, for its end.
 void cpuArm920JitCharge(ArmCpu*, uint32_t cycles, uint32_t span);
 uint32_t cpuArm920JitCharged(const ArmCpu*);
-// Runs about budget instructions in translated code and returns how many ran, at most budget - 1 +
-// cpuArm920JitMaxUnchecked. stop gets arm920JitBudget when the budget ran out (or translated code was
+// Runs about budget cost model clocks in translated code and returns the clocks run, at most budget - 1 +
+// cpuArm920JitMaxUnchecked x the largest instruction cost, with the instructions in instructions (a Thumb
+// pair counts 2). stop gets arm920JitBudget when the budget ran out (or translated code was
 // dropped), arm920JitExit when the CPU is left at an instruction or access the JIT can't take (MMIO, CS5,
 // faults, CP15...) for the lean path or the step, arm920JitCold at code not compiled yet, arm920JitHalt for a
 // slow path reason (an interrupt). The JIT compiles as on the other devices (cpuSetJitSync for runs that
 // repeat). The leanRead and leanWrite hooks get left from span (cycles the run's accesses can take with the
 // instructions, budget when 0) instead of budget, which may count instructions only.
 enum Arm920JitStop { arm920JitBudget, arm920JitExit, arm920JitCold, arm920JitHalt };
-uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop, uint32_t span = 0);
+uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop, uint32_t span = 0, uint32_t* instructions = nullptr);
 // Whether cpuArm920RunJit would run translated code now: false with the JIT off, an interrupt or other slow path
 // reason for the step, a wait for interrupt, mode pacing, a native call, the debug stub or an I-cache continuation.
 bool cpuArm920JitCanRun(const ArmCpu*);

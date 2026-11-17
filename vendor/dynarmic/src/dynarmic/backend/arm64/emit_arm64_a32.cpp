@@ -253,6 +253,13 @@ static void EmitA32CheckMemoryAbortAt(oaknut::CodeGenerator& code, EmitContext& 
     EmitSetUpperLocationDescriptor(code, ctx, current_location, ctx.block.Location());
     code.MOV(Wscratch0, current_location.PC());
     code.STR(Wscratch0, Xstate, offsetof(A32JitState, regs) + sizeof(u32) * 15);
+    // Frond: the block's instructions before this one ran; the interpreter charges this one.
+    if (ctx.conf.enable_cycle_counting) {
+        if (const u64 before = ctx.block.FrondCyclesBefore(current_location.PC())) {
+            code.MOV(Xscratch0, before);
+            code.SUB(Xticks, Xticks, Xscratch0);
+        }
+    }
     EmitRelocation(code, ctx, LinkTarget::ReturnFromRunCode);
 }
 

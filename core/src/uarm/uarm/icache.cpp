@@ -266,6 +266,10 @@ static uint16_t icachePrvCost(struct icache* ic, uint32_t word) {
     }
 }
 
+uint16_t icacheCostOf(struct icache* ic, uint32_t word, bool thumb) {
+    return thumb ? icachePrvCost<2>(ic, word) : icachePrvCost<4>(ic, word);
+}
+
 void icacheSetCost(struct icache* ic, bool on, uint8_t core) {
     ic->costOn = on;
     ic->costCore = core;

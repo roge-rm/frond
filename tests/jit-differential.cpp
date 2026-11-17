@@ -45,6 +45,7 @@
 #include "patch_dispatch.h"
 #include "jit_dynarmic.h"
 #include "idle_loops.h"
+#include "xscale_cost.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -172,6 +173,8 @@ Machine makeMachine(bool fast) {
     m.cpu = cpuInit(kSetup, mem, ARM_MEMORY_SYSTEM_MMU, true, false, -1, 0x69054114, 0x0b16a16a, pd, &pace,
                     createSystemState());
     patchDispatchSetCpu(pd, m.cpu);
+    // The XScale table, as on a PXA27x: both engines charge each instruction its cost.
+    cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), false);
     m.patches = pd;
     m.wmmx = pxa270wmmxInit(m.cpu);
     m.device = new Device;
@@ -201,13 +204,14 @@ bool gThread = false;  // --thread: Fast compiles on the compile thread
 
 struct RunResult {
     bool stopped = false;
-    uint64_t ran = 0;        // instructions run, for Exact (which steps one at a time)
+    uint64_t ran = 0;        // cycles charged, for Exact (which steps one at a time)
     uint32_t worstOver = 0;  // most a cpuCycle call ran past its budget
 };
 
-// Exact steps one instruction at a time, so ran counts the instructions to the stop. Fast
-// runs budgets from the schedule, so runs start and end in the middle of blocks.
-RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit) {
+// Exact steps one instruction at a time, so ran counts the cycles to the stop. Fast runs
+// budgets from the schedule, so runs start and end in the middle of blocks; with oneBlock
+// every call has a budget of 1 and runs a block (or an interpreted instruction).
+RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit, bool oneBlock = false) {
     RunResult r;
     Rng s(scheduleSeed);
     while (r.ran < limit) {
@@ -216,7 +220,7 @@ RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit) {
             return r;
         }
         uint32_t b = 1;
-        if (m.fast) {
+        if (m.fast && !oneBlock) {
             const uint32_t k = s.below(100);
             b = k < 10 ? 1 : k < 30 ? 2 + s.below(19) : k < 70 ? 21 + s.below(180) : k < 95 ? 201 + s.below(1800) : 5000;
         }
@@ -1561,7 +1565,29 @@ struct Engines {
     Machine exact, fast;
     uint32_t bound = 0;
     uint32_t worstOver = 0;  // most any Fast call ran past its budget
+    // Cycle checks made, and of those, the ones where a Fast run left a block at a failed access.
+    uint64_t cycleChecks = 0, cycleFaults = 0;
 };
+
+// The cycles the JIT charges equal the interpreter's: Fast again, one block a call, so it
+// stops at the spin, having run it once more than Exact when the spin ends the last block.
+std::string cycleCheck(Engines& e, const Case& c, const Assembled& a, uint64_t exactCycles) {
+    prepare(e.fast, c, a);
+    const uint64_t faults = jitFaultExits();
+    const RunResult f = run(e.fast, c.seed * 31 + 7, kLimit * 4, true);
+    if (!f.stopped) return "fast did not stop running one block a call";
+    e.cycleChecks++;
+    if (jitFaultExits() != faults) e.cycleFaults++;
+    const uint64_t spin = a.thumb ? cost::thumbCost(kSpinThumb, cost::Core::pxa27x)
+                                  : cost::armCost(kSpinArm, cost::Core::pxa27x);
+    // The spin's mode may differ from the start's; either cost is allowed.
+    const uint64_t spinOther = a.thumb ? cost::armCost(kSpinArm, cost::Core::pxa27x)
+                                       : cost::thumbCost(kSpinThumb, cost::Core::pxa27x);
+    if (f.ran == exactCycles || f.ran == exactCycles + spin || f.ran == exactCycles + spinOther) return "";
+    char line[120];
+    snprintf(line, sizeof(line), "cycles: exact %" PRIu64 ", fast %" PRIu64, exactCycles, f.ran);
+    return line;
+}
 
 Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* exactState = nullptr) {
     Outcome o;
@@ -1583,9 +1609,14 @@ Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* ex
         snprintf(line, sizeof(line), "fast overshoot %u past the bound %u", f.worstOver, e.bound);
         o.diffs.push_back(line);
     }
-    if (x.worstOver) {
+    // Exact steps one instruction a call, so it passes a budget of 1 by its cost - 1.
+    if (x.worstOver > cpuMaxOvershootCycles(e.exact.cpu)) {
         snprintf(line, sizeof(line), "exact overshoot %u", x.worstOver);
         o.diffs.push_back(line);
+    }
+    if (o.diffs.empty() && x.stopped) {
+        const std::string d = cycleCheck(e, c, a, x.ran);
+        if (!d.empty()) o.diffs.push_back(d);
     }
     o.ok = o.diffs.empty();
     return o;
@@ -1647,16 +1678,19 @@ void trace(Engines& e, const Case& c) {
     const Assembled a = assemble(c);
     prepare(e.exact, c, a);
     prepare(e.fast, c, a);
+    uint32_t xc = 0, fc = 0;  // the cycles each engine's last call charged
     for (int i = 0; i < 400; ++i) {
         const uint32_t* x = cpuGetRegisters(e.exact.cpu);
         const uint32_t* f = cpuGetRegisters(e.fast.cpu);
-        printf("  step %2d: exact pc %08x cpsr %08x | fast pc %08x cpsr %08x\n", i, x[15],
-               cpuGetRegExternal(e.exact.cpu, ARM_REG_NUM_CPSR), f[15], cpuGetRegExternal(e.fast.cpu, ARM_REG_NUM_CPSR));
+        printf("  step %2d: exact pc %08x cpsr %08x +%u | fast pc %08x cpsr %08x +%u\n", i, x[15],
+               cpuGetRegExternal(e.exact.cpu, ARM_REG_NUM_CPSR), xc, f[15], cpuGetRegExternal(e.fast.cpu, ARM_REG_NUM_CPSR),
+               fc);
+        xc = fc = 0;
         for (int r = 0; r < 15; ++r)
             if (x[r] != f[r]) printf("           r%d exact %08x fast %08x\n", r, x[r], f[r]);
         if (atSpin(e.exact) && atSpin(e.fast)) break;
-        if (!atSpin(e.exact)) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
-        if (!atSpin(e.fast)) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
+        if (!atSpin(e.exact)) xc = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        if (!atSpin(e.fast)) fc = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
     }
 }
 
@@ -2169,6 +2203,18 @@ bool directed(Engines& e) {
           0xe2811001, 0xe5840904, 0xe321f013, 0xe2811001},
          false, SVC, {{0, 0}, {1, 0}, {4, 0x2f000}},
          {{Expect::REG, 1, 2}, {Expect::REG, 3, 0x13, 0xff}, {Expect::CPSR, 0, 0x13, 0xff}}, 0x200, 1, {}, false, true},
+        // Cycle checks (cycleCheck runs on every case; these aim at the charges). Conditions that
+        // fail at a block's start (after the BEQ) and inside one, and a failing BNE.
+        {"cycles: failed conditions", {0xe3b00000, 0x0a000000, 0xe1a00000, 0x12811001, 0x13a02005, 0x02833001,
+                                        0x1a000000, 0xe2811001},
+         false, SVC, {{1, 0}, {3, 0}}, {{Expect::REG, 1, 1}, {Expect::REG, 3, 1}}},
+        // Thumb: a BL pair, a failing BNE inside a block and one at a block's start (after the BEQ).
+        {"cycles: thumb bl and failing bne", {0xf000, 0xf800, 0x2000, 0xd100, 0x3101, 0x2000, 0xd000, 0x3101, 0xd100,
+                                              0x3201},
+         true, SVC, {{1, 0}, {2, 0}}, {{Expect::REG, 1, 1}, {Expect::REG, 2, 1}}},
+        // STMIA and LDMIA r12 of 1 to 14 registers, then STMs of 15 and 16.
+        {"cycles: ldm and stm of every count", {0xe88c0001, 0xe89c0001, 0xe88c0003, 0xe89c0003, 0xe88c0007, 0xe89c0007, 0xe88c000f, 0xe89c000f, 0xe88c001f, 0xe89c001f, 0xe88c003f, 0xe89c003f, 0xe88c007f, 0xe89c007f, 0xe88c00ff, 0xe89c00ff, 0xe88c01ff, 0xe89c01ff, 0xe88c03ff, 0xe89c03ff, 0xe88c07ff, 0xe89c07ff, 0xe88c0fff, 0xe89c0fff, 0xe88c2fff, 0xe89c2fff, 0xe88c6fff, 0xe89c6fff, 0xe88c7fff, 0xe88cffff},
+         false, SVC, {{12, 0x24000}}},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -2402,11 +2448,12 @@ bool idleSkip(Engines& e) {
             uint64_t s0, c0, s1, c1;
             cpuJitIdleSkips(&s0, &c0);
             if (w.passes) {
-                // Whole passes: Exact steps them, Fast gets them as one budget.
+                // Whole passes, in cycles: Exact steps them, Fast gets them as one budget.
                 uint64_t ran = 0;
-                const uint64_t want = uint64_t(w.passes) * l->pass;
+                const uint64_t want = uint64_t(w.passes) * idlePassCost(*l, w.counter, cpuGetRegisters(m.cpu), true,
+                                                                        cost::Core::pxa27x);
                 if (!k)
-                    for (; ran < want; ++ran) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+                    while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
                 else
                     while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
                 if (ran != want) {
@@ -2440,11 +2487,11 @@ bool idleSkip(Engines& e) {
 
 // A long idle: OSCR moves between calls, as at a scheduler event, and the counter grows when a
 // call ends between a pass's two OSCR reads, until the 50 ms threshold sends the loop to the
-// clock routine. Calls of 1000 cycles (not a whole number of passes) with OSCR 5000 ticks on
-// after each. Fast with the skip must reach the clock routine after as many calls as Fast
-// without it, having skipped, and on the Zire 72 Exact and Fast must both reach it. On the
-// T|X a Fast run only ends at the loop's last branch, after both reads, so neither Fast
-// reaches it here; in the real kernel IRQs taken in the window end runs there too.
+// clock routine. Calls of 1000 cycles (not a whole number of passes, a call's overshoot taken
+// off the next) with OSCR 5000 ticks on after each. Fast with the skip must reach the clock
+// routine after as many calls as Fast without it, having skipped, and on the Zire 72 Exact and
+// Fast must both reach it. A T|X Fast run that ends at the loop's last branch, after both
+// reads, adds nothing, so on the T|X the Fast count isn't checked against 0.
 bool idleClock(Engines& e) {
     constexpr uint32_t budget = 1000, step = 5000, limit = 2000;
     bool ok = true;
@@ -2459,10 +2506,13 @@ bool idleClock(Engines& e) {
             idlePrepare(m, s, 0);
             uint64_t s0, c0, s1, c1;
             cpuJitIdleSkips(&s0, &c0);
-            uint32_t oscr = 0x12345678;
+            uint32_t oscr = 0x12345678, debt = 0;
             for (; calls[k] < limit && !atSpin(m); ++calls[k]) {
-                for (uint32_t ran = 0; ran < budget && !atSpin(m);)
-                    ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, budget - ran);
+                // What a call runs past its budget comes off the next one, as the scheduler does.
+                const uint32_t want = budget - std::min(debt, budget - 1);
+                uint32_t ran = 0;
+                while (ran < want && !atSpin(m)) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, want - ran);
+                debt = debt - (budget - want) + (ran > want ? ran - want : 0);
                 oscr += step;
                 memcpy(m.ram + kIdleTimer + 16, &oscr, 4);
             }
@@ -3084,7 +3134,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     Engines e{makeMachine(false), makeMachine(true)};
     e.bound = cpuMaxOvershootCycles(e.fast.cpu);
-    if (cpuMaxOvershootCycles(e.exact.cpu) != 19 || e.bound <= 19 || e.bound == UINT32_MAX) {
+    if (cpuMaxOvershootCycles(e.exact.cpu) != 53 || e.bound <= 53 || e.bound == UINT32_MAX) {
         fprintf(stderr, "unexpected bounds: exact %u fast %u\n", cpuMaxOvershootCycles(e.exact.cpu), e.bound);
         return 1;
     }
@@ -3150,8 +3200,10 @@ int main(int argc, char** argv) {
         }
     }
     printf("jit-differential: %" PRIu64 " cases (seeds %" PRIu64 " to %" PRIu64 "), %" PRIu64
-           " instructions, %" PRIu64 " did not stop, %" PRIu64 " failures, %.1f s, bound %u, worst overshoot %u\n",
+           " cycles, %" PRIu64 " did not stop, %" PRIu64 " failures, %.1f s, bound %u, worst overshoot %u\n",
            cases, first, first + cases - 1, instructions, unstopped, failures, elapsed(), e.bound, e.worstOver);
+    printf("jit-differential: %" PRIu64 " cycle checks, %" PRIu64 " with a block left at a failed access\n",
+           e.cycleChecks, e.cycleFaults);
     printf(ok ? "jit-differential: ok\n" : "jit-differential: FAILED\n");
     return ok ? 0 : 1;
 }
