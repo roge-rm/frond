@@ -900,6 +900,8 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `TEST_KILL_GRACE` | Seconds between TERM and KILL when a test line times out. Default 10. |
 | `E2_SESSION`, `TX_SESSION`, `ZIRE72_SESSION`, `TG50_SESSION` | Smoke session files for the `e2-busy`, `tx-media`, `zire72-busy` and `tg50-busy` recipes of `make count-check`. No default; a recipe without one is skipped. |
 | `ZODIAC_CARDS` | Folder of Zodiac SD card images for the Zodiac game recipes of `make count-check`: `s2/doom2.img`, `s2/origo.img`, `s2/animated-dudes.img`, `s2/mtx-mototrax.img` and `s2/firehammer.img` with PopAccess, `s1/zuma.img`. No default; those recipes are skipped without it. |
+| `ZODIAC_ROM` | The Zodiac 1.1 ROM for `make test-zodiac-twgfx`. Default `Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom` under `FROND_DEVICE_IMAGES`; the test skips without it. |
+| `ZODIAC_TWGFX_ARGS` | Options for `make test-zodiac-twgfx`: `--update` rewrites `tests/zodiac-twgfx.golden`, `--engines fast` runs Fast only. |
 | `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
 | `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |
@@ -940,6 +942,7 @@ All in `tools/`. Most take `--help`.
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`), and guest counts against `tools/speed-baseline.json` (`make count-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
+| `zodiac-twgfx/` | Zodiac TwGfx test program: a native (TNA) app that calls every TwGfx function and option and the Window Manager's drawing modes, `build.py` to make its PRC, `run.py` to run it headless and table what Frond draws or refuses (`make test-zodiac-twgfx`). |
 | `host-profile.h` | Host timing used by the benchmarks. |
 | `analyze-pcm.py` | Signal levels and silent gaps in 16-bit little-endian PCM. |
 | `analyze-audio-buffers.py`, `analyze-audio-timing.py`, `analyze-gameplay.py`, `analyze-menu-response.py` | Read the traces from the optional debug patches (two in `tools/debug/`, the rest in git history, see performance.md). |
@@ -987,6 +990,8 @@ All in `tools/`. Most take `--help`.
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
 | `check-frondbench` | Rebuild FrondBench and compare it with the committed `tools/frondbench/FrondBench.prc`. Skipped when the Palm tools are missing. |
+| `zodiac-twgfx` | Build the Zodiac TwGfx test program into `build/zodiac-twgfx/TwGfxTest.prc` with arm-palmos-gcc, m68k-palmos-gcc and build-prc. |
+| `test-zodiac-twgfx` | Run the TwGfx test program on Fast and Exact from a card and check its table (ok, the ROM's error, refused with Frond's stop text, or crashed) against `tests/zodiac-twgfx.golden`. Needs the Palm tools, mtools and `ZODIAC_ROM`; skipped without them. About 5 minutes. Outside `make test`. |
 | `device-session-probe` | Build the device session probe. |
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |

@@ -1382,8 +1382,8 @@ struct Probe {
             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
-                 p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
-                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
+                 p.result.trace.pc == 0x200a9a9c || Imx1GraphicsEngine::stretchProducer(p.result.trace.pc) ||
+                 Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
                 p.graphicsMemory) {
                 // The batch is decoded in place and undone where it's dropped, so the queued batches aren't copied.
                 auto& commands = p.graphicsCommands;
@@ -3089,6 +3089,11 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
     staged.commands->state(a);
     if (!finish(a)) return info;
+    // The last keyed copy's colour compare, in states saved after one. Without it none has been seen.
+    if (open("GCMP", Imx1GraphicsCommands::compareStateVersion, false, a)) {
+        staged.commands->stateCompare(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     if (p.graphicsMemory) {
         staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
         if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
@@ -3225,6 +3230,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
         file.end();
     }
     { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
+    if (p->graphicsCommands.compareSeen()) {
+        auto a = file.begin(stateFourcc("GCMP"), Imx1GraphicsCommands::compareStateVersion);
+        p->graphicsCommands.stateCompare(a);
+        file.end();
+    }
     if (p->graphicsMemory) {
         { auto a = file.begin(stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion); p->graphicsMemory->state(a); file.end(); }
         for (unsigned bank = 0; bank < 2; ++bank) {

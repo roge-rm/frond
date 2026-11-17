@@ -114,7 +114,9 @@ static void checkFills(uint64_t minPixels) {
             assert(C::completeFill(*state, eim, gpuMemory, f) == A::ok);
             assert(C::completeFillCpu(*state, eim, cpuMemory, f) == A::ok);
             if (gpu->statistics().fills == before) ++cpuFills;
-            if ((a4 && f.pixels.empty()) || (doubled && f.paint && f.paint != 0x00800080)) {
+            // A plain copy with invert is a ROP fill, CPU only.
+            if ((a4 && f.pixels.empty()) || (doubled && f.paint && f.paint != 0x00800080) ||
+                (f.plain && f.invert && !doubled && !a4 && !f.keyEqual)) {
                 assert(gpu->statistics().fills == before);
                 ++cpuKinds;
             }

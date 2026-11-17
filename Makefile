@@ -22,7 +22,7 @@ all: out/frond desktop
 
 # Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
 # which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
-# Change the limit for one target with `test-foo: TEST_TIMEOUT = 900`, or for a run with
+# Change the limit for one target with `test-foo: export TEST_TIMEOUT = 900`, or for a run with
 # `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
 TEST_TIMEOUT ?= 300
 TEST_KILL_GRACE ?= 10
@@ -43,15 +43,15 @@ recheck:
 	@python3 tools/check-record.py recheck $(CHECKS)
 prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
 out/% build/% core/% vendor/%: SHELL = /bin/sh
-test-desktop: TEST_TIMEOUT = 3600
+test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
-test-zodiac-machine test-zodiac-fast-lean: TEST_TIMEOUT = 1800
+test-zodiac-machine test-zodiac-fast-lean: export TEST_TIMEOUT = 1800
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
     test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
-    test-frond-arm-install test-device-profiles: TEST_TIMEOUT = 1800
-test-frond-68k-peripherals: TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
+    test-frond-arm-install test-device-profiles: export TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
 .PHONY: test-memory-stick-media
@@ -1420,6 +1420,30 @@ check-frondbench:
 	else \
 		$(MAKE) -B frondbench && cmp $(FRONDBENCH_DIR)/FrondBench.prc $(FRONDBENCH_SRC)/FrondBench.prc \
 			&& echo "check-frondbench: ok, $$(sha256sum $(FRONDBENCH_SRC)/FrondBench.prc | cut -c1-16)"; \
+	fi
+
+# Zodiac TwGfx test program (tools/zodiac-twgfx): every TwGfx call and option, and the Window Manager's drawing
+# modes and patterns, run headless through benchmark-replay on Fast and Exact. The table (ok, the ROM's error,
+# refused with Frond's stop text, or crashed) is checked against tests/zodiac-twgfx.golden; pass
+# ZODIAC_TWGFX_ARGS=--update to rewrite it, or --engines fast for Fast only. Needs arm-palmos-gcc,
+# m68k-palmos-gcc, build-prc, mtools and the Zodiac 1.1 ROM (ZODIAC_ROM, or under FROND_DEVICE_IMAGES);
+# skipped without them. The PRC, card, states and table go in build/zodiac-twgfx.
+ZODIAC_TWGFX_DIR := build/zodiac-twgfx
+ZODIAC_ROM ?= $(if $(FROND_DEVICE_IMAGES),$(FROND_DEVICE_IMAGES)/Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom)
+ZODIAC_TWGFX_ARGS ?=
+.PHONY: zodiac-twgfx test-zodiac-twgfx
+# About 5 minutes for both engines.
+test-zodiac-twgfx: export TEST_TIMEOUT = 1200
+zodiac-twgfx:
+	python3 tools/zodiac-twgfx/build.py $(ZODIAC_TWGFX_DIR)
+test-zodiac-twgfx:
+	@if ! command -v arm-palmos-gcc >/dev/null || ! command -v m68k-palmos-gcc >/dev/null || ! command -v build-prc >/dev/null \
+		|| ! command -v mformat >/dev/null || [ ! -f "$(ZODIAC_ROM)" ]; then \
+		echo "test-zodiac-twgfx: skipped, needs arm-palmos-gcc, m68k-palmos-gcc, build-prc, mtools and ZODIAC_ROM"; \
+	else \
+		$(MAKE) benchmark-replay zodiac-twgfx && python3 tools/zodiac-twgfx/run.py --bench build/benchmark-replay \
+			--rom "$(ZODIAC_ROM)" --fixture tests/fixtures/zodiac-doom2.replay --prc $(ZODIAC_TWGFX_DIR)/TwGfxTest.prc \
+			--work $(ZODIAC_TWGFX_DIR) --golden tests/zodiac-twgfx.golden $(ZODIAC_TWGFX_ARGS); \
 	fi
 
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
