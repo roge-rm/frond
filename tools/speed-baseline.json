@@ -489,6 +489,14 @@
         }
       }
     },
+    "zquake-tx": {
+      "session": "ZQUAKE_TX_SESSION",
+      "replay": "zquake-timedemo.replay",
+      "ms": 130000,
+      "mips": "original",
+      "measure": true,
+      "read": "zquake"
+    },
     "speedy-tx": {
       "session": "SPEEDY_TX_SESSION",
       "replay": "speedy-run.replay",

@@ -183,8 +183,12 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     if (m.nand.empty())
         for (const auto& media : m.media)
             if (media.kind==frondMachine::kindNand) m.nand.assign(deviceConfigurationGetNandSize(m.device),0xff);
-    for (const auto& media : m.media)
-        if (media.kind==frondMachine::kindSd) throw std::runtime_error("use a session without an SD card for this benchmark");
+    // A card the session carries opens in the card store, in the slot as saved. The work copy takes its writes.
+    if (std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; })) {
+        frondSession::Contents card;
+        card.media=m.media;
+        if (!frondNative::attachFolderMedia(card,folder)) throw std::runtime_error("the session's card did not open");
+    }
     if (m.savestate.empty() || m.memory.empty()) throw std::runtime_error("complete RAM and peripheral state required");
     if (m.device==deviceTypeTG50 && m.memory.size()!=tg50RamBackingSize+2*MEMORY_BUFFER_GRANULARITY)
         throw std::runtime_error("TG50 session requires complete RAM and CPU/peripheral state");
@@ -492,7 +496,9 @@ int main(int argc, char** argv) {
             if (!m.legacy) soc->ReleaseKeyboard();
             // A Memory Stick device has no SD slot: an SD flag from the shared card store is dropped.
             if (stick) soc->SdEject();
-            if (soc->SdInserted() || soc->networkSimulation.GetMode()!=NetworkSimulation::disabled)
+            const bool hasSd=std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; });
+            if (hasSd && soc->SdInserted() && !soc->SdRemount()) throw std::runtime_error("the session and its card image do not match");
+            if ((soc->SdInserted() && !hasSd) || soc->networkSimulation.GetMode()!=NetworkSimulation::disabled)
                 throw std::runtime_error("use an ejected SD and disabled network fixture");
         }
         m.memory={}; m.savestate={};

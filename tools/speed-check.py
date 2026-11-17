@@ -23,8 +23,8 @@ instruction and cycle counts, frame and PCM counts and hashes against the baseli
 needs no quiet machine. Exact always repeats; Fast runs with sync compiles (BENCH_JIT_ASYNC is
 dropped), which repeat too. Async Fast doesn't, so it's never compared. Only recipes whose counts
 moved then get wall-clock rounds; --timing gives rounds for every recipe, for release-notes figures.
-A recipe with "measure": true is run but not compared or stored; "read": "speedy" or "frondbench" prints what
-the guest showed (Speedy's three times, FrondBench's four). Exits 1 when a count moved or a run failed.
+A recipe with "measure": true is run but not compared or stored; "read": "speedy", "frondbench" or "zquake" prints what
+the guest showed (Speedy's three times, FrondBench's four, ZQuake's timedemo line). Exits 1 when a count moved or a run failed.
 
   speed-check.py --counts [--only a,b] [--engines exact,fast] [--jobs 4] [--rounds N] [--against OLD-BENCH]
                  [--timing] [--async-rounds] [--update] [--baseline FILE]
@@ -240,7 +240,15 @@ def speedy_times(out):
     return found
 
 
-READERS = {'speedy': speedy_times, 'frondbench': lambda out: (frondbench_results(out) or {}).get('ms', {})}
+def zquake_timedemo(out):
+    """ZQuake's timedemo line (frames, seconds, fps) as read from guest RAM: the last one that is new since the start."""
+    pat = re.compile(rb'(\d+) frames +(\d+\.\d) seconds +(\d+\.\d) fps')
+    before = {m.group() for m in pat.finditer((out / 'ram-start.bin').read_bytes())}
+    found = [m for m in pat.finditer((out / 'ram-end.bin').read_bytes()) if m.group() not in before]
+    return {'frames': int(found[-1][1]), 'seconds': float(found[-1][2]), 'fps': float(found[-1][3])} if found else {}
+
+
+READERS = {'speedy': speedy_times, 'zquake': zquake_timedemo, 'frondbench': lambda out: (frondbench_results(out) or {}).get('ms', {})}
 
 
 def digest(path):
