@@ -10,7 +10,8 @@ import java.io.IOException
 // (install, launch-app, delete-db, export and export-db on the control socket). Files pass through private
 // copies in the app cache, as the core only takes paths. Every call blocks; run them off the main thread.
 class PalmDatabases(private val context: Context, private val link: ControlLink) {
-    class Failed(message: String) : Exception(message)
+    // code is the core's reply code, e.g. asleep, when the core refused the command.
+    class Failed(message: String, val code: String = "") : Exception(message)
 
     // A RAM database as the core lists it, from its database header.
     data class Info(val name: String, val type: String, val creator: String, val resource: Boolean) {
@@ -21,7 +22,7 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
 
     private fun run(command: String, argument: String): ControlLink.Reply {
         val reply = link.request(command, argument, timeoutSeconds = 120)
-        if (!reply.ok) throw Failed(message(reply))
+        if (!reply.ok) throw Failed(message(reply), reply.code)
         return reply
     }
 
@@ -54,7 +55,7 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     // The application goes first: if the core refuses it (ROM, running, open) nothing is touched.
     // A data database that can't go is reported after the rest were tried.
     fun deleteApplication(name: String) {
-        val all = list()
+        val all = list(wake = true)
         val app = all.firstOrNull { it.name == name && it.application } ?: throw Failed("There is no application named \"$name\".")
         delete(app.name)
         val failed = dataOf(all, app).mapNotNull { data ->
@@ -79,7 +80,8 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
     }
 
     // The RAM databases, from the core's database directory (db-list), sorted by name.
-    fun list(): List<Info> = parseList(run("db-list", "").message)
+    // A sleeping Palm answers asleep and stays asleep, unless wake: a lookup for a delete you asked for.
+    fun list(wake: Boolean = false): List<Info> = parseList(run("db-list", if (wake) "wake" else "").message)
 
     private fun <T> withExport(name: String?, use: (File) -> T): T {
         folder.mkdirs()

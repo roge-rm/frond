@@ -52,6 +52,7 @@ class InternalFiles(
         host.lifecycleScope.launch {
             var message: String? = null
             var listed: List<PalmDatabases.Info>? = null
+            var asleep = false
             val error = withContext(Dispatchers.IO) {
                 val failed = try {
                     message = task(databases)
@@ -59,12 +60,15 @@ class InternalFiles(
                 } catch (e: Exception) {
                     failure(e)
                 }
-                listed = try { databases.list() } catch (e: Exception) { null }
+                listed = try { databases.list() } catch (e: Exception) {
+                    asleep = e is PalmDatabases.Failed && e.code == "asleep"
+                    null
+                }
                 failed
             }
             busy = null
             listed.let { all ->
-                if (all == null) summary = "Couldn't read the databases"
+                if (all == null) summary = if (asleep) "The Palm is asleep" else "Couldn't read the databases"
                 else {
                     val (shown, by) = entriesOf(all)
                     entries = shown

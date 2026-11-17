@@ -49,11 +49,19 @@ SoC::SoC()
 }
 
 void SoC::KeyDown(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = true;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));
 }
 
 void SoC::KeyUp(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = false;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyUp(key));
+}
+
+// A power event popped in the last second still counts: the guest may not have left sleep yet.
+bool SoC::PowerKeyPending() {
+    return powerHeld || jammedKey == keyIdPower || (powerPopped && GetTime() - powerPoppedAt < 1000000000ull) ||
+           keyEventQueue->Any([](const KeyEvent& event) { return event.key == keyIdPower; });
 }
 
 void SoC::PenDown(int x, int y) {
@@ -231,6 +239,7 @@ void SoC::HardReset() {
 void SoC::Reset() {
     penEventQueue->Clear();
     keyEventQueue->Clear();
+    powerPopped = false;
     penDown = false;
     if (audioQueue) audioQueueClear(audioQueue);
     framebufferAccessLowWatermark = 0;

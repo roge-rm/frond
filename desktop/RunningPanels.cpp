@@ -104,7 +104,7 @@ QStringList AppsPanel::names() const {
     return out;
 }
 
-void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all) {
+void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, const QString& note) {
     const auto apps = runningRules::applications(all);
     const int row = list->currentRow();
     list->clear();
@@ -134,5 +134,6 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all) {
         list->setItemWidget(item, widget);
     }
     if (row >= 0 && row < list->count()) list->setCurrentRow(row);
+    empty->setText(note.isEmpty() ? tr("No applications") : note);
     empty->setVisible(apps.empty());
 }

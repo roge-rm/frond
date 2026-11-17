@@ -36,6 +36,11 @@ class PalmDatabasesTest {
         assertEquals("Could not launch.", PalmDatabases.message(ControlLink.Reply(false, "launch", "Could not launch.")))
     }
 
+    @Test fun asleepKeepsTheCoresMessage() {
+        val asleep = ControlLink.Reply(false, "asleep", "The Palm is asleep. Turn it on and try again.")
+        assertEquals("The Palm is asleep. Turn it on and try again.", PalmDatabases.message(asleep))
+    }
+
     @Test fun launchFailureNamesTheDatabaseName() {
         val text = PalmDatabases.launchFailed("Memos")
         assertTrue(text.contains("\"Memos\""))

@@ -15,6 +15,14 @@ class Queue {
 
     size_t GetSize() const;
 
+    // True when an item still queued matches.
+    template <typename F>
+    bool Any(F matches) const {
+        for (size_t i = 0; i < size; i++)
+            if (matches(items[(next + items.size() - size + i) % items.size()])) return true;
+        return false;
+    }
+
     void Clear();
 
    private:

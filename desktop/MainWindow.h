@@ -187,7 +187,7 @@ class MainWindow : public QMainWindow {
     void updateMips();
     void pollMips();
     void listApps();
-    void databasesReply(bool ok, const QString& message);
+    void databasesReply(bool ok, const QString& code, const QString& message);
     void deleteApplication(const QString& name);
     void deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all);
     void deleteNext();
@@ -287,6 +287,7 @@ class MainWindow : public QMainWindow {
     QLabel* serialState;
     QLabel* usbState;
     PrinterPanel* printerPanel;
+    QTimer* appsRetryTimer{nullptr};   // re-lists a sleeping Palm every 2 s while the Applications panel shows it
     QTimer* printerTimer;
     QTimer* mipsTimer;
     PrintSource usbPrint, irPrint;

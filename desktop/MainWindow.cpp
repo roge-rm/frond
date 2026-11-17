@@ -842,7 +842,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
         });
-        if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "db-list") { databasesReply(ok, code, message); return; }
         if (command == "wifi-module-state") {
             if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
             return;
@@ -1375,6 +1375,7 @@ void MainWindow::panelChanged(int page) {
         placeOverlays();
         if (page < 0 && overlayBarShown) overlayTimer->start();
     }
+    if (page != 0 && appsRetryTimer) appsRetryTimer->stop();
     if (page == 0) { appsStale = true; listApps(); }
     setPanelOpen(page >= 0);
 }
@@ -2837,7 +2838,7 @@ void MainWindow::listApps() {
     appsStale = false;
     if (client.request("db-list")) { busy = true; refresh(); }
 }
-void MainWindow::databasesReply(bool ok, const QString& message) {
+void MainWindow::databasesReply(bool ok, const QString& code, const QString& message) {
     const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
     if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
     if (internalFiles) {
@@ -2845,6 +2846,20 @@ void MainWindow::databasesReply(bool ok, const QString& message) {
         internalFiles->setDatabases(ok ? all : knownDatabases);
         if (!ok) internalFiles->note->setText(message);
     }
+    // A list isn't asked for on a sleeping Palm, which would wake it; the panel says it's asleep.
+    if (!ok && code == "asleep") {
+        knownDatabases.clear();
+        appsPanel->setDatabases({}, tr("The Palm is asleep"));
+        // A plain db-list never wakes it; ask again until the Palm is on, while the panel stays open.
+        if (!appsRetryTimer) {
+            appsRetryTimer = new QTimer(this);
+            appsRetryTimer->setSingleShot(true);
+            connect(appsRetryTimer, &QTimer::timeout, this, [this] { appsStale = true; listApps(); });
+        }
+        if (panels->current() == 0) appsRetryTimer->start(2000);
+        return;
+    }
+    if (appsRetryTimer) appsRetryTimer->stop();
     // A list that can't be had (Palm OS still starting) is left as it was.
     if (!ok) { log->appendPlainText("db-list: " + message); return; }
     knownDatabases = all;
@@ -2959,7 +2974,7 @@ void MainWindow::deleteApplication(const QString& name) {
     deleteApp = {};
     deleteApp.active = deleteApp.lookup = true;
     deleteApp.name = name;
-    if (!send("db-list")) deleteApp = {};
+    if (!send("db-list", "wake")) deleteApp = {};
 }
 void MainWindow::deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all) {
     if (!ok) { deleteApp = {}; failure(message); return; }
