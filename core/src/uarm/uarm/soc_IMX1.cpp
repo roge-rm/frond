@@ -7,6 +7,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
@@ -98,6 +99,9 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     soc->rom.assign(romData, romData + size);
     soc->eeprom = std::make_unique<Imx1I2cReadWindow>(image);
     Imx1ProbeResult failure{};
+    // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
+    // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
+    imx1SetGuestExceptions(!std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));
     soc->machine = imx1MachineCreate(soc->rom.data(), uint32_t(size), Imx1ProbeEntry::physicalFlash, false,
                                      zodiacMachineOptions(soc->eeprom.get()), nullptr, nullptr, &failure);
     if (!soc->machine) {

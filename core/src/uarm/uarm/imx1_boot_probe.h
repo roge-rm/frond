@@ -235,6 +235,9 @@ uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
 // Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
 uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
+// Whether data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T, for
+// every machine in the process. Off (the default), the machine stops on them. CP15 refusals still stop.
+void imx1SetGuestExceptions(bool on);
 // The graphics FIFO wait's rounds Fast blocks passed at once, since the process started: the times and the rounds.
 // imx1SetFifoWaitSkip(false) turns the skip off, for tests.
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);

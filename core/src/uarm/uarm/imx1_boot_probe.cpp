@@ -69,6 +69,10 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
+// Data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T. Off, the
+// machine stops on them (cpu-exception, unsupported-instruction). Off by default for the probe and its tests;
+// SocIMX1 turns it on unless FROND_ZODIAC_STOP_ON_EXCEPTION is set.
+bool guestExceptions = false;
 // Fast blocks: the YMF768 ready wait's tries passed at once (skipReadyWait), and the last try it saw: its timer
 // count and counter, and the stack it was on. readyWaitSkip false turns the skip off, for tests.
 uint64_t readyWaitSkips = 0, readyWaitTries = 0;  // for tests
@@ -1510,6 +1514,24 @@ bool condition(uint32_t instruction, uint32_t cpsr) {
 bool softwareInterrupt(uint32_t i, bool thumb) {
     return thumb ? (i & 0xff00) == 0xdf00 : (i & 0x0f000000) == 0x0f000000;
 }
+// Undefined on the ARM920T (ARMv4T, ARM DDI0100I A3.16 and A6.2): the ARM undefined space and Thumb's undefined
+// conditional branch. The core raises the undefined instruction exception for both.
+bool undefinedInstruction(uint32_t i, bool thumb) {
+    return thumb ? (i & 0xff00) == 0xde00 : i >> 28 != 15 && (i & 0x0e000010) == 0x06000010;
+}
+// An abort or undefined instruction entry as the ARM920T takes it (ARM DDI0100I A2.6): the vector, abort or
+// undefined mode, I set, F kept, ARM state, SPSR the old CPSR, and the link: the next instruction for undefined,
+// the aborted instruction + 4 for a prefetch abort and + 8 for a data abort, in both states.
+bool guestEntry(ArmCpu* cpu, const Imx1ProbeTrace& t, uint64_t before, bool undefined, bool fetchAbort) {
+    if (cpuExceptionSequence(cpu) != before + 1) return false;
+    const auto* r = cpuGetRegisters(cpu);
+    const uint32_t vector = r[15] >= 0xffff0000 ? r[15] - 0xffff0000 : r[15];
+    const uint32_t mode = undefined ? 0x1b : 0x17;
+    const uint32_t want = undefined ? 0x04 : fetchAbort ? 0x0c : 0x10;
+    const uint32_t link = t.pc + (undefined ? t.instructionSize : fetchAbort ? 4 : 8);
+    return vector == want && r[14] == link && cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
+           cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x80 | mode);
+}
 bool armMode(uint32_t mode) {
     return mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 ||
            mode == 0x17 || mode == 0x1b || mode == 0x1f;
@@ -1964,26 +1986,36 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     t = {step, cpuGetRegisters(p->cpu)[15], 0,
          cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
     uint_fast8_t fsr = 0;
+    // A fetch that aborts goes to the prefetch abort vector in the step below, outside a Thumb BL pair.
+    bool fetchAbort = false;
     if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
-        if (!p->failed) {
+        if (p->failed) return false;
+        if (!guestExceptions || p->blPrefix) {
             p->result.stop = Imx1ProbeStop::exception;
             p->result.address = t.pc;
             p->result.value = fsr;
             p->result.size = t.instructionSize;
+            return false;
         }
-        return false;
+        fetchAbort = true;
+        t.instruction = 0;
     }
-    if (t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
+    if (!fetchAbort && t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
         const unsigned source = (t.instruction >> 12) & 15;
         t.operand = source == 15 ? t.pc + 8 : cpuGetRegisters(p->cpu)[source];
     }
     if (p->observer) p->observer(p->observerContext, t);
     const bool thumb = t.instructionSize == 2;
-    if (p->prefixCapacityExceeded || (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
+    const bool refused = !fetchAbort && (p->prefixCapacityExceeded ||
+        (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
         (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc) :
          t.instruction >> 28 == 15 ||
          (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
-                                                                        cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR))))) {
+                                                                        cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR)))));
+    // A refused ARM instruction passed its condition, so an undefined one here takes the exception.
+    const bool undefined = refused && guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
+                           undefinedInstruction(t.instruction, thumb);
+    if (refused && !undefined) {
         p->result.stop = Imx1ProbeStop::unsupportedInstruction;
         return false;
     }
@@ -2023,14 +2055,21 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     const bool softwareEntry = softwareInterrupt(t.instruction, thumb) &&
                                (thumb || condition(t.instruction, t.cpsr));
-    if (cpuExceptionSequence(p->cpu) != exceptions &&
-        !(softwareEntry && cpuExceptionSequence(p->cpu) == exceptions + 1 &&
-          (cpuGetRegisters(p->cpu)[15] == 8 || cpuGetRegisters(p->cpu)[15] == 0xffff0008) &&
-          cpuGetRegisters(p->cpu)[14] == t.pc + t.instructionSize &&
-          cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
-          cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x93))) {
-        p->result.stop = !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10 ?
+    const bool entered = cpuExceptionSequence(p->cpu) != exceptions;
+    const bool guestTaken = entered && guestExceptions &&
+                            !(!fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10) &&
+                            guestEntry(p->cpu, t, exceptions, undefined, fetchAbort);
+    if ((entered && !guestTaken &&
+         !(softwareEntry && cpuExceptionSequence(p->cpu) == exceptions + 1 &&
+           (cpuGetRegisters(p->cpu)[15] == 8 || cpuGetRegisters(p->cpu)[15] == 0xffff0008) &&
+           cpuGetRegisters(p->cpu)[14] == t.pc + t.instructionSize &&
+           cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
+           cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x93))) ||
+        ((undefined || fetchAbort) && !guestTaken)) {
+        p->result.stop = undefined ? Imx1ProbeStop::unsupportedInstruction :
+                         !fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10 ?
                          Imx1ProbeStop::unsupportedCp15 : Imx1ProbeStop::exception;
+        if (fetchAbort) { p->result.address = t.pc; p->result.value = fsr; p->result.size = t.instructionSize; }
         return false;
     }
     if (p->options.diagnosticSnapshot) {
@@ -2287,6 +2326,7 @@ uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
 uint64_t imx1MachineScanHalts(const Imx1Machine*) { return scanHalts; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
+void imx1SetGuestExceptions(bool on) { guestExceptions = on; }
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
 void imx1SetFifoWaitSkip(bool skip) { fifoWaitSkip = skip; }

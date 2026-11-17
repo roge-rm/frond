@@ -101,6 +101,12 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             mmuSetTTPArm920(cp15->mmu, val & 1 ? cp15->ttb : MMU_DISABLED_TTP);
             return true;
         }
+        // ASSUMPTION "ARM920T FSR and FAR reads ignore CRm": DDI0151C gives CRm as zero for registers 5 and 6,
+        // and the Zodiac ROM's abort handler (200c8f60) reads them as c5,c5 and c6,c6.
+        if ((CRn == 5 || CRn == 6) && op2 == 0 && read) {
+            cpuSetReg(cpu, Rx, CRn == 5 ? cp15->FSR : cp15->FAR);
+            return true;
+        }
         if (CRm == 0 && op2 == 0) {
             if (CRn == 2) {
                 if (read) cpuSetReg(cpu, Rx, cp15->ttb);
