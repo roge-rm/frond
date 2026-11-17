@@ -37,7 +37,8 @@ class SdlEventHandler {
     DeviceStick Stick() const { return stick; }
     // Rumbles every open game controller while on, as the guest's vibrate motor (the Zodiac's rumble).
     // Call it once a slice with the motor's state; nowUsec is host time.
-    void Rumble(bool on, uint64_t nowUsec);
+    // Returns whether a game controller is open.
+    bool Rumble(bool on, uint64_t nowUsec);
     bool RedrawRequested() const;
     bool QuitRequested() const;
     void ClearQuitRequested() { quitRequested = false; }

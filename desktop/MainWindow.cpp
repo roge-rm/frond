@@ -789,6 +789,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(&client, &DesktopClient::serialState, this, [this](const QString& state) { showSerial(state); });
     connect(&client, &DesktopClient::usbState, this, [this](const QString& state) { showUsb(state); });
     connect(&client, &DesktopClient::bluetoothState, this, &MainWindow::showBluetooth);
+    connect(&client, &DesktopClient::rumbleState, this, [this](bool on) { palmHolder->setRumble(on); });
     connect(&client,&DesktopClient::infraredState,this,[this](const QString& state){showIrda(state);});
     // A Bluetooth switch waiting for the core to be free goes once the current request is done.
     connect(&client, &DesktopClient::result, this, [this] { QTimer::singleShot(0, this, [this] {
@@ -2198,6 +2199,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         ? tr("Serial: Unknown connection") : QString();
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
+    if (!runningPreferences.rumble) arguments << "--no-rumble";
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
     if (!m68k && runningPreferences.fastAudio) {
         const auto option = frondAudio::lowLatencyOption(startDevice, sourceSession,

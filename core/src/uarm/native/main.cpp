@@ -114,6 +114,7 @@ struct Options {
     bool cardProtected;
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
+    bool disableRumble;      // --no-rumble
 };
 
 namespace {
@@ -1264,7 +1265,9 @@ bool gFastEngineMissing = false;
                     if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
                     attention = current;
 #else
-                    sdlEventHandler.Rumble(current.vibrate, timestampUsec());
+                    const bool on = current.vibrate && !options.disableRumble;
+                    const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
+                    if (desktop) desktop->rumbleChanged(on && !controller);
 #endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
@@ -1582,6 +1585,11 @@ int main(int argc, char** argv) {
         .scan<'u', unsigned int>()
         .default_value(512u);
 
+    program.add_argument("--no-rumble")
+        .help("Zodiac: no rumble on game controllers or in the window")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -1752,7 +1760,8 @@ int main(int argc, char** argv) {
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
                        .fastEngine = program.get("--engine") == "fast",
-                       .viewFollowsWindow = program.get("--view-turn") == "window"};
+                       .viewFollowsWindow = program.get("--view-turn") == "window",
+                       .disableRumble = program.get<bool>("--no-rumble")};
 
     logEnable();
 

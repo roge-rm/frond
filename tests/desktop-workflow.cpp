@@ -688,6 +688,43 @@ for line in s.makefile('rb'):
         QCOMPARE(prefs.scale, 7); QVERIFY(prefs.smooth && prefs.fastAudio);
         QSettings().clear();
     }
+    void rumbleSetting() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        frondSessions::Preferences saved;
+        saved.rumble = false;
+        QVERIFY(frondSessions::writePreferences(source.fileName(), saved).isEmpty());
+        frondSessions::Preferences loaded;
+        QVERIFY(frondSessions::readPreferences(source.fileName(), &loaded));
+        QVERIFY(!loaded.rumble);
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+s.sendall(b'0\tevent\tfuture-event\t\n')
+s.sendall(b'0\tevent\trumble\t'+b'on'.hex().encode()+b'\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(source.fileName(), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QVERIFY(args.readAll().contains("--no-rumble"));
+        // The unknown event is skipped and the rumble one reaches the Palm's holder.
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<PalmHolder*>()->rumbleShown(), 5000);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QSettings().clear();
+    }
     void serialSetting() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;

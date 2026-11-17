@@ -132,6 +132,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "card" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit cardState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "rumble" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit rumbleState(QString::fromUtf8(QByteArray::fromHex(fields[3])) == "on");
             else if (fields[2] == "sd-progress" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
                 const auto parts = QString::fromUtf8(QByteArray::fromHex(fields[3])).split(' ');
@@ -143,7 +146,7 @@ void DesktopClient::receive() {
                 if (!pending.isEmpty()) deadline.start();
                 emit sdProgress(done, total);
             }
-            else return fail(tr("The emulator sent an unexpected event."));
+            // Any other event name is from a newer core and is skipped.
             continue;
         }
         if (backgroundId && fields[0] == QByteArray::number(backgroundId) && (fields[1] == "ok" || fields[1] == "error") &&
