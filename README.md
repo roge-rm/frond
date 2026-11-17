@@ -144,6 +144,8 @@ You can also type with an emulated Palm infrared keyboard, once Palm's keyboard 
 
 Install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. Each app's row has Launch, Export and Delete.
 
+FrondBench, a small speed test, installs from the Help menu on the desktop or the Applications sheet on Android, or saves as a PRC for a real Palm; see [FrondBench](doc/using-frond.md#frondbench).
+
 Cards live in a Cards drawer, and a card sits in one machine at a time. Frond makes and imports SD images up to 2 GB, 1 GB on the E2 and E3. Files copies between your computer or phone and the card. Close any files on the Palm before you eject. Files also opens the Palm's own databases, under Internal.
 
 The TG50 takes a Memory Stick from 4 to 128 MB, or a Memory Stick Pro from 256 MB to 2 GB. Files copies files and folders to and from it. Sony Launcher runs apps from its Card category. See [Storage cards](doc/using-frond.md#storage-cards).

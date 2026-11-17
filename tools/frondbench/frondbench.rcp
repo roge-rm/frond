@@ -2,7 +2,7 @@
 
 FORM ID MainForm AT (0 0 160 160) NOFRAME USABLE
 BEGIN
- TITLE "FrondBench"
+ TITLE "FrondBench 1.1"
  BUTTON "Run" ID RunButton AT (1 145 36 12)
 END
 
@@ -14,4 +14,4 @@ BEGIN
  BUTTONS "OK"
 END
 
-VERSION ID 1 "1.0"
+VERSION ID 1 "1.1"

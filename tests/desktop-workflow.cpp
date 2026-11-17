@@ -6208,6 +6208,48 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    // Help ends with a FrondBench submenu holding Install on This Device and Save FrondBench.prc…; Install sends the bundled PRC through
+    // the normal install path and is greyed out until the device can install.
+    void frondBenchActions() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = fakeInstallCore(files.path());
+        const auto machine = cardsMachine("Palm TX", false);
+        MainWindow window(core);
+        window.show();
+        auto* install = window.findChild<QAction*>("installFrondBenchAction");
+        auto* save = window.findChild<QAction*>("saveFrondBenchAction");
+        QVERIFY(install && save);
+        QVERIFY(install->text().contains("Install") && save->text().contains("FrondBench.prc"));
+        auto* menu = window.findChild<QAction*>("frondBenchMenu");
+        QVERIFY(menu && menu->menu() && menu->menu()->actions().contains(install) && menu->menu()->actions().contains(save));
+        QCOMPARE(window.menuBar()->actions().last()->menu()->actions().last(), menu);
+        QVERIFY(!install->isEnabled());
+        window.openSession(machine + "/Palm TX.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("installApp")->isEnabled(), 20000);
+        QTRY_VERIFY(install->isEnabled());
+        QFile bundled(":/frondbench/FrondBench.prc");
+        QVERIFY(bundled.open(QIODevice::ReadOnly));
+        const auto bytes = bundled.readAll();
+        QVERIFY(bytes.size() > 1000);
+        install->trigger();
+        const auto log = files.path() + "/installs";
+        const auto read = [&] { QFile f(log); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList(); };
+        QTRY_COMPARE_WITH_TIMEOUT(read().size(), 1, 5000);
+        QCOMPARE(QFileInfo(read().first()).fileName(), QString("FrondBench.prc"));
+        QFile sent(read().first());
+        QVERIFY(sent.open(QIODevice::ReadOnly));
+        QCOMPARE(sent.readAll(), bytes);
+        const auto saved = files.filePath("saved.prc");
+        QVERIFY(window.saveFrondBench(saved));
+        QFile copy(saved);
+        QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), bytes);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
     // The core dying partway through a batch ends the batch: installing works again after a restart.
     void installCoreDies() {
         cardsReset();

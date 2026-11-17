@@ -64,6 +64,7 @@ fun AboutScreen(model: HomeModel) {
             Text("Copyright Frond, CloudpilotEmu and uARM authors.", Modifier.padding(top = 12.dp))
             Text("GPL-3.0-or-later, with no warranty.")
             TextButton(onClick = { uris.openUri(SOURCE) }) { Text("github.com/roge-rm/frond") }
+            FrondBenchRows(enabled = false, onInstall = null)
             Header("Licences", Modifier.padding(top = 8.dp))
             LicenceRow("GNU General Public License 3", "Frond", listOf(Licences.GPL))
             for (e in entries) LicenceRow(e.name, e.licence, e.files)

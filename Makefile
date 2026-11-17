@@ -1399,6 +1399,18 @@ $(FRONDBENCH_DIR)/FrondBench.prc: $(FRONDBENCH_SRC)/frondbench.c $(FRONDBENCH_SR
 	m68k-palmos-gcc -L$(PALM_SDK)/lib/m68k-palmos-coff $(FRONDBENCH_DIR)/frondbench.o -o $(FRONDBENCH_DIR)/frondbench
 	cd $(FRONDBENCH_SRC) && pilrc -q -ro frondbench.rcp $(CURDIR)/$(FRONDBENCH_DIR)/frondbench.ro
 	build-prc -o $@ $(FRONDBENCH_SRC)/frondbench.def $(FRONDBENCH_DIR)/frondbench $(FRONDBENCH_DIR)/frondbench.ro
+	python3 $(FRONDBENCH_SRC)/fixdates.py $@
+
+# The committed tools/frondbench/FrondBench.prc is what the apps ship. This rebuilds it and compares;
+# it is skipped with a message when the Palm tools are missing.
+.PHONY: check-frondbench
+check-frondbench:
+	@if ! command -v m68k-palmos-gcc >/dev/null || ! command -v pilrc >/dev/null || ! command -v build-prc >/dev/null || [ ! -d "$(PALM_SDK)/include" ]; then \
+		echo "check-frondbench: skipped, needs m68k-palmos-gcc, pilrc, build-prc and PALM_SDK"; \
+	else \
+		$(MAKE) -B frondbench && cmp $(FRONDBENCH_DIR)/FrondBench.prc $(FRONDBENCH_SRC)/FrondBench.prc \
+			&& echo "check-frondbench: ok, $$(sha256sum $(FRONDBENCH_SRC)/FrondBench.prc | cut -c1-16)"; \
+	fi
 
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
 # BIKE_SESSION and FRONDBENCH_SESSION are session files you supply; a workload without one is skipped.

@@ -63,10 +63,12 @@ val dynarmicSource: File = File(repoRoot, "vendor/dynarmic")
 val boostInclude = providers.gradleProperty("frond.boostInclude").getOrElse("/usr/include")
 
 // The licence notices shown by About: the repo's licences/ folder plus the GPL text from LICENSE.
+// The committed FrondBench.prc goes in the same assets folder, for Install and Save.
 val licencesAssets = layout.buildDirectory.dir("generated/licences-assets")
 val copyLicences = tasks.register<Sync>("copyLicences") {
     from(File(repoRoot, "licences")) { into("licences") }
     from(File(repoRoot, "LICENSE")) { into("licences"); rename { "GPL-3.0.txt" } }
+    from(File(repoRoot, "tools/frondbench/FrondBench.prc")) { into("frondbench") }
     into(licencesAssets)
 }
 tasks.configureEach {
@@ -283,6 +285,6 @@ val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
         "-o \"$hostStorage/libfrondcard.so\"")
 }
 tasks.withType<Test>().configureEach {
-    dependsOn(buildHostStorage)
+    dependsOn(buildHostStorage, copyLicences)
     systemProperty("java.library.path", hostStorage.absolutePath)
 }
