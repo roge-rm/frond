@@ -254,8 +254,8 @@ bool secondCardWrite(uint32_t sector, const void* buffer) {
 }
 void listSectors(const char* what, const std::vector<uint32_t>& sectors) {
     std::fprintf(stderr,"sd2 %s %zu sectors:",what,sectors.size());
-    for (size_t i=0; i<sectors.size() && i<64; ++i) std::fprintf(stderr," %u",sectors[i]);
-    std::fprintf(stderr,"%s\n",sectors.size()>64?" ...":"");
+    for (size_t i=0; i<sectors.size() && i<256; ++i) std::fprintf(stderr," %u",sectors[i]);
+    std::fprintf(stderr,"%s\n",sectors.size()>256?" ...":"");
 }
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
                const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {

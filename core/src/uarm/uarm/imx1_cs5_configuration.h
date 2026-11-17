@@ -421,7 +421,9 @@ class Imx1Cs5Configuration {
                pc == 0x204d218e || pc == 0x204d22f4 || pc == 0x204d2314 || pc == 0x204d231c ||
                pc == 0x204d3652 || pc == 0x204d2742 || pc == 0x204d247e || pc == 0x204d2522 ||
                pc == 0x204d2534 || pc == 0x204d2574 || pc == 0x204d2586 || pc == 0x204d277a ||
-               pc == 0x204d22ae)));
+               pc == 0x204d22ae ||
+               // The SD driver's bus flush reads anywhere in it once slot 2 has had a card.
+               (sd.cardUsed() && pc >= 0x204d2140 && pc < 0x204d3b20))));
         if (!virtualProfile() || write || (!controllerIdentity &&
             pc != (address == 0x16010000 ? 0x200bac00u : 0x200bac28u)))
             return Imx1BootstrapAccess::externalInput;
