@@ -31,6 +31,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
+| `--no-rumble` | Zodiac: turn rumble off (the machine setting Rumble off), on game controllers and in the window. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
 | `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on ARM devices with sound when the firmware is not qualified for the preview, including modified E3 images and the TG50. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
@@ -258,6 +259,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
 | `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
+| `rumble` | `on` or `off`, sent while the Zodiac's guest rumble motor is on, Rumble is enabled and no game controller that can rumble is open, so the window can show it. |
 | `shortcut` | A key pressed in the Palm window that belongs to the app, as `ctrl+s`, `ctrl+shift+s`, `ctrl+1` or `f12`: F11, F12, and Ctrl (with Shift) and a letter or digit. They never reach the Palm. With the infrared keyboard attached, Ctrl keys go to the Palm and only `f11` and `f12` are sent. |
 | `serial`, `usb`, `infrared`, `bluetooth`, `microphone`, `camera` | The new state, sent when it changes, for example a peer connecting or the camera going back to the pattern. |
 
@@ -790,6 +792,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
+| `FROND_IDLE_SKIP` | `0` turns off the Fast engine's skip of the PalmOS 5 kernel idle wait loop (Zire 72 and T\|X), for measuring. |
 | `FROND_ZODIAC_GPU` | Zodiac in Fast: `on` (or `1`) draws the graphics engine's fills on the host GPU, `diff` draws them on both and checks each GPU fill against the CPU's, reporting mismatches to stderr. Off by default. |
 | `FROND_ZODIAC_GPU_DEVICE` | The EGL device's DRM node to draw on, e.g. `/dev/dri/renderD128`, or `surfaceless` for Mesa's surfaceless platform. Default: the first hardware device. |
 | `FROND_ZODIAC_GPU_QUIET` | Leave out the GPU's fill and transfer counts when it stops. |
@@ -889,6 +892,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
+| `SPEED_68K` | `frond-68k` binary for the 68k recipes of `tools/speed-check.py`. Default the one next to the `benchmark-replay` in use, else `out/frond-68k`. |
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
 | `SPEED_SSH_KEY` | Optional ssh key for `SPEED_HOST`. |
@@ -989,6 +993,8 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. Outside `make test`. |
 | `test-zodiac` | All the Zodiac tests below that are in `make test`. |
 | `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. |
+| `test-zodiac-rumble` | YMF768 bank 1 register 0x48 motor and LED bits reaching the attention path, on the model and through the machine in Exact and Fast. |
+| `test-zodiac-stick-view` | The stick turning with the guest and host orientation. |
 | `test-zodiac-ymf768` | YMF768 register answers, FIFO and interrupt line, A4 pitch and mixing. |
 | `test-tg50-voicerec` | The TG50 Voice Recorder opens on the ROM PACE. Skips without the TG50 session. |
 | `test-zodiac-dcache` | ARM920 data cache, writeback, aliases, maintenance and instruction/JIT coherence in Exact and Fast. Outside `make test`. |
@@ -1111,6 +1117,8 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
 | `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
 | `test-68k-ms` | Memory Stick controller (MB86189) on the 68k core, and runtime card changes for it. |
+| `test-68k-ez-uart-spi` | EZ and VZ UART receive with the receiver off, and the SPIM interrupt following its control bits. |
+| `test-68k-host-transport` | `frond-68k` host link pacing: bytes reach the guest at the line's rate after an idle spell, a drain and refill, and an IrDA frame gap. |
 | `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
 | `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |
