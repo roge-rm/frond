@@ -65,6 +65,18 @@ Under Applications (the Linux panel or the Android sheet):
 
 Close Palm dialogs first if an install or export can't get through.
 
+### FrondBench
+
+FrondBench times four tests on a Palm and shows the numbers, so Frond's speed can be checked against real devices. On Linux, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm.
+
+On a real device:
+
+1. Install FrondBench.prc with HotSync, by beaming it or from a card, like any other app.
+2. Open FrondBench and tap Run. Leave the device alone until it's done. Don't run it from a card on a device that is also syncing or beaming.
+3. The results are on screen and in a new Memo. A HotSync brings the Memo to your computer.
+
+To report, open a Real device benchmark issue on GitHub and paste the Memo text. Without HotSync, type in the device, the OS version, how it was run (stock, overclocked, with hacks like UDMH) and the four numbers from the screen.
+
 ## Settings
 
 Set these when you add a machine, or in Edit settings while it's stopped. On Android most are in the Display sheet while it runs too.

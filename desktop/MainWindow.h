@@ -56,6 +56,8 @@ class MainWindow : public QMainWindow {
     // Installs the files on the running device one after the other, in order. A failure doesn't
     // stop the rest; the failures are listed together at the end.
     void installFiles(const QStringList& paths);
+    // Writes the bundled FrondBench.prc to path.
+    bool saveFrondBench(const QString& path);
  protected:
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -299,6 +301,11 @@ class MainWindow : public QMainWindow {
     QPlainTextEdit* log;
     QList<QWidget*> runningButtons;
     QAction* importAction;
+    // Installs the bundled FrondBench.prc through the same path as a chosen file.
+    void installFrondBench();
+    QAction* installBenchAction = nullptr;
+    QAction* saveBenchAction = nullptr;
+    std::unique_ptr<QTemporaryDir> benchDir;  // holds the PRC the core installs from
     QPushButton *cardPick, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry, *linkedInsert;
     QLabel* linkedState;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;

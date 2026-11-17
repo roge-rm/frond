@@ -32,6 +32,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -715,6 +716,16 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         // Any button closes the box, so the licences open from here and the box comes back.
         do box.exec(); while (box.clickedButton() == licences && (showLicences(this), true));
     });
+    help->addSeparator();
+    auto* bench = help->addMenu(tr("Frond&Bench"));
+    bench->menuAction()->setObjectName("frondBenchMenu");
+    installBenchAction = bench->addAction(tr("&Install on This Device"), this, &MainWindow::installFrondBench);
+    installBenchAction->setObjectName("installFrondBenchAction");
+    saveBenchAction = bench->addAction(tr("&Save FrondBench.prc…"), this, [this] {
+        const auto path = QFileDialog::getSaveFileName(this, tr("Save FrondBench.prc"), QDir::home().filePath("FrondBench.prc"), tr("Palm applications (*.prc)"));
+        if (!path.isEmpty() && !saveFrondBench(path)) failure(tr("Couldn't save the file."));
+    });
+    saveBenchAction->setObjectName("saveFrondBenchAction");
     connect(&client, &DesktopClient::diagnostic, this, [this](const QString& text) {
         log->moveCursor(QTextCursor::End); log->insertPlainText(text);
     });
@@ -1265,6 +1276,7 @@ void MainWindow::refresh() {
     const bool guest = frondFirmware::guestServices(currentDevice());
     appsPanel->setEnabled(enabled && guest);
     appsPanel->setToolTip(guest ? QString() : reason);
+    installBenchAction->setEnabled(enabled && guest);
     hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
     hardResetButton->setToolTip(guest ? QString() : reason);
     storageHeading->setVisible(!m68k);
@@ -2963,6 +2975,20 @@ QStringList MainWindow::installPaths(const QMimeData* data) const {
         if (suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
     }
     return out;
+}
+void MainWindow::installFrondBench() {
+    if (!benchDir) benchDir = std::make_unique<QTemporaryDir>();
+    const auto path = benchDir->filePath("FrondBench.prc");
+    if (!benchDir->isValid() || !saveFrondBench(path)) { failure(tr("Couldn't prepare FrondBench.")); return; }
+    installFiles({path});
+}
+bool MainWindow::saveFrondBench(const QString& path) {
+    QFile in(":/frondbench/FrondBench.prc");
+    if (!in.open(QIODevice::ReadOnly)) return false;
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly)) return false;
+    out.write(in.readAll());
+    return out.commit();
 }
 void MainWindow::installFiles(const QStringList& paths) {
     if (paths.isEmpty() || busy || installTotal > 0) return;
