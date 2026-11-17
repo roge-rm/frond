@@ -185,6 +185,8 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // so the CPU runs longer stretches between scheduler updates. Every PXA device does this.
     pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
     cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
+    // GPIO levels change only at scheduler events, for the Fast poll skip.
+    cpuSetPollPeek(cpu, GpioPeekCB, this);
 #endif
     rtc = pxaRtcInit(mem, ic);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
@@ -1180,6 +1182,10 @@ uint32_t SocPXA::TimerElapsedCB(void* ctx) {
 bool SocPXA::OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr) {
     auto* self = static_cast<SocPXA*>(ctx);
     return pxaTimrPeek(self->tmr, self->TimerElapsedAt(cycles), oscr);
+}
+// The Fast poll skip's look at a GPIO level register (cpuSetPollPeek).
+bool SocPXA::GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value) {
+    return pxaGpioPeekLevel(static_cast<SocPXA*>(ctx)->gpio, pa, value);
 }
 void SocPXA::TimerRescheduleCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);

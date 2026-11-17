@@ -8,6 +8,7 @@
 #include "jit_dynarmic.h"
 #include "idle_loops.h"
 #include "delay_loops.h"
+#include "poll_loops.h"
 #endif
 
 #include <cstdio>
@@ -306,6 +307,7 @@ struct ArmCpu {
         uint32_t costKey;  // costOn and costCore the costs are for, plus 1; 0 for none
         uint32_t cost[3];  // per head form (idleHeadVariant), 0 until worked out
         const struct DelayLoop *delay;  // delayMatch only: the delay loop, in place of loop
+        const struct PollLoop *poll;    // pollMatch only: the poll loop, in place of loop
     } idleMatch[2];
     // The same for the OSCR delay loops (delay_loops.h, cpuPrvDelaySkip). cost[0] and cost[1] are the pass
     // and load costs for costKey.
@@ -317,6 +319,11 @@ struct ArmCpu {
     uint32_t delayOscrPa;
     bool (*delayPeek)(void *, uint32_t, uint32_t *);
     void *delayPeekContext;
+    // The same for the GPIO level polls (poll_loops.h, cpuPrvPollSkip), and the level peek (cpuSetPollPeek).
+    uint32_t pollHeads[2];
+    IdleMatch pollMatch[2];
+    bool (*pollPeek)(void *, uint32_t, uint32_t *);
+    void *pollPeekContext;
     bool sleeping;
     bool arm920WaitEnabled, arm920Waiting;
 
@@ -387,7 +394,7 @@ struct ArmCpu {
     void DoSaveLoad(T &chunkHelper, uint32_t version);
 };
 
-// Drops the idle and delay loop matches (cpuPrvIdleLoopAt, cpuPrvDelayLoopAt): those with a line in the RAM
+// Drops the idle, delay and poll loop matches (cpuPrvIdleLoopAt, cpuPrvDelayLoopAt, cpuPrvPollLoopAt): those with a line in the RAM
 // page at host, or all of them for null.
 static void cpuPrvIdleForget(ArmCpu *cpu, const uint8_t *host = nullptr) {
     auto forget = [&](ArmCpu::IdleMatch &m) {
@@ -398,6 +405,7 @@ static void cpuPrvIdleForget(ArmCpu *cpu, const uint8_t *host = nullptr) {
     };
     for (auto &m : cpu->idleMatch) forget(m);
     for (auto &m : cpu->delayMatch) forget(m);
+    for (auto &m : cpu->pollMatch) forget(m);
 }
 
 enum ImmShiftType {
@@ -6706,12 +6714,137 @@ static uint32_t cpuPrvDelaySkip(ArmCpu *cpu, uint32_t left) {
     return passes * pass;
 }
 
+// Fast GPIO level poll skip (poll_loops.h). FROND_POLL_SKIP=0 turns it off, for measuring.
+static bool cpuPrvPollSkipOn = [] {
+    const char *v = getenv("FROND_POLL_SKIP");
+    return !(v && *v && !strcmp(v, "0"));
+}();
+static uint64_t cpuPrvPollSkips = 0, cpuPrvPollSkipCycles = 0;
+
+void cpuSetPollSkip(bool on) { cpuPrvPollSkipOn = on; }
+void cpuJitPollSkips(uint64_t *skips, uint64_t *cycles) {
+    *skips = cpuPrvPollSkips;
+    *cycles = cpuPrvPollSkipCycles;
+}
+
+void cpuSetPollPeek(ArmCpu *cpu, bool (*peek)(void *, uint32_t, uint32_t *), void *context) {
+    cpu->pollPeek = peek;
+    cpu->pollPeekContext = context;
+    cpuPrvIdleForget(cpu);
+}
+
+static bool cpuPrvPollCodeAt(ArmCpu *cpu, uint32_t va, const PollLoop &l) {
+    for (uint32_t i = 0; i < l.count; ++i) {
+        uint32_t w;
+        if (!cpuJitFetch(cpu, va + 4 * i, &w) || w != l.code[i]) return false;
+    }
+    return true;
+}
+
+// Whether word (at a word aligned pc, ARM) is a poll loop's first instruction.
+static FORCE_INLINE bool cpuPrvPollFirst(uint32_t word, bool thumb) {
+    return !thumb && (word == kPollLoopE2NandReady[0] || word == kPollLoopE2NandBusy[0]);
+}
+
+// The poll loop whose head is at pc, or null. PXA Fast with a level peek hooked (cpuSetPollPeek) only.
+// Kept per head (cpu->pollMatch) and dropped as the delay loop matches are (cpuPrvDelayLoopAt).
+static const PollLoop *cpuPrvPollLoopAt(ArmCpu *cpu, uint32_t pc, bool thumb, ArmCpu::IdleMatch **match = nullptr) {
+    if (match) *match = nullptr;
+    if (!cpuPrvPollSkipOn || !cpu->pollPeek || cpu->model == ArmCpuModel::arm920t || !cpu->jit || thumb || (pc & 3))
+        return nullptr;
+    const uint32_t mapGen = mmuFlushCount(cpu->memorySystem.mmu);
+    const uint64_t perm = cpuJitPermContext(cpu);
+    for (auto &m : cpu->pollMatch)
+        if (m.pc == pc && m.mapGen == mapGen && m.permContext == perm && m.privileged == cpu->privileged) {
+            if (match) *match = &m;
+            return m.poll;
+        }
+    for (const PollLoop &l : kPollLoops) {
+        if (!cpuPrvPollCodeAt(cpu, pc, l)) continue;
+        // Kept in the slot already at pc, else an empty one, else one not at a current head.
+        ArmCpu::IdleMatch *slot = &cpu->pollMatch[0];
+        for (auto &m : cpu->pollMatch)
+            if (m.pc == pc) slot = &m;
+        if (slot->pc != pc) {
+            if (cpu->pollMatch[0].pc && (!cpu->pollMatch[1].pc || cpu->pollMatch[0].pc == cpu->pollHeads[0] ||
+                                         cpu->pollMatch[0].pc == cpu->pollHeads[1]))
+                slot = &cpu->pollMatch[1];
+        }
+        *slot = ArmCpu::IdleMatch{};
+        slot->poll = &l;
+        if (cpuPrvIdleWatch(cpu, *slot, pc, 4 * l.count)) {
+            slot->pc = pc;
+            slot->mapGen = mapGen;
+            slot->permContext = perm;
+            slot->privileged = cpu->privileged;
+            if (match) *match = slot;
+        }
+        return &l;
+    }
+    return nullptr;
+}
+
+// At a poll loop's head (cpuJitPlain leaves it to the interpreter, so a run stops there), the passes that
+// stay in the loop go at once, each charged what it costs, up to all but the last pass that fits in left,
+// or up to the pass its counter leaves on. The polled level changes only at scheduler events, which come
+// between runs, so every pass in this run reads what the peek gives now, as in Exact; the loop leaves on
+// the first pass after the event that changes it. The loaded register, counter and flags are left as the
+// last skipped pass leaves them. Returns the cycles passed, 0 if none.
+static uint32_t cpuPrvPollSkip(ArmCpu *cpu, uint32_t left) {
+    uint32_t *r = cpu->regs;
+    const uint32_t pc = r[REG_NO_PC];
+    if ((pc != cpu->pollHeads[0] && pc != cpu->pollHeads[1]) || !pc || !left || cpu->T ||
+        (cpu->waitingIrqs && !cpu->I) || (cpu->waitingFiqs && !cpu->F) || cpu->nativeCallDepth || cpu->modePace)
+        return 0;
+    ArmCpu::IdleMatch *match;
+    const PollLoop *l = cpuPrvPollLoopAt(cpu, pc, false, &match);
+    if (!l) return 0;
+    const uint32_t va = r[l->base];
+    if (va & 3) return 0;
+    const MMUTranslateResult t = mmuTranslateCached<false, true>(cpu->memorySystem.mmu, va, cpu->privileged);
+    if (!MMU_TRANSLATE_RESULT_OK(t)) return 0;
+    const uint32_t pa = MMU_TRANSLATE_RESULT_PA(t);
+    uint32_t v;
+    if (!cpu->pollPeek(cpu->pollPeekContext, pa, &v)) return 0;
+    uint32_t most = pollStaying(*l, v, r);
+    if (!most) return 0;
+    const bool on = cpu->ic->costOn;
+    const cost::Core core = cost::Core(cpu->costCore);
+    uint32_t pass, load;
+    if (match) {
+        const uint32_t key = ((uint32_t(on) << 8) | cpu->costCore) + 1;
+        if (match->costKey != key) {
+            match->costKey = key;
+            match->cost[0] = pollPassCost(*l, on, core, &match->cost[1]);
+        }
+        pass = match->cost[0];
+    } else {
+        pass = pollPassCost(*l, on, core, &load);
+    }
+    // The load's region charge (Fast at Original), which the interpreter adds before the access.
+    if (cpu->costMemory) pass += cpu->regionCharge[cost::pxaRegion(pa)][0];
+    most = std::min(most, (left - 1) / pass);
+    if (!most) return 0;
+    cpu->flags = pollAfter(*l, v, most, r, cpu->flags);
+    cpuPrvPollSkips++;
+    cpuPrvPollSkipCycles += uint64_t(most) * pass;
+    return most * pass;
+}
+
 bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
     // A delay loop's head ends a run, for cpuPrvDelaySkip.
     if (cpuPrvDelayFirst(pc, word, thumb) && cpuPrvDelayLoopAt(cpu, pc, thumb)) {
         if (pc != cpu->delayHeads[0] && pc != cpu->delayHeads[1]) {
             cpu->delayHeads[1] = cpu->delayHeads[0];
             cpu->delayHeads[0] = pc;
+        }
+        return false;
+    }
+    // A poll loop's head ends a run, for cpuPrvPollSkip.
+    if (cpuPrvPollFirst(word, thumb) && cpuPrvPollLoopAt(cpu, pc, thumb)) {
+        if (pc != cpu->pollHeads[0] && pc != cpu->pollHeads[1]) {
+            cpu->pollHeads[1] = cpu->pollHeads[0];
+            cpu->pollHeads[0] = pc;
         }
         return false;
     }
@@ -6927,6 +7060,10 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
         if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles &&
             (cpu->regs[REG_NO_PC] == cpu->delayHeads[0] || cpu->regs[REG_NO_PC] == cpu->delayHeads[1]))
             acc += cpuPrvDelaySkip(cpu, cycles - acc);
+        // A GPIO level poll's head: the same (cpuPrvPollSkip).
+        if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles &&
+            (cpu->regs[REG_NO_PC] == cpu->pollHeads[0] || cpu->regs[REG_NO_PC] == cpu->pollHeads[1]))
+            acc += cpuPrvPollSkip(cpu, cycles - acc);
         if (stop == FROND_JIT_FAULT && !faultReported) {
             faultReported = true;
             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
@@ -7049,6 +7186,9 @@ void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; 
 void cpuSetDelaySkip(bool) {}
 void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; }
 void cpuSetDelayTimer(ArmCpu *, uint32_t, bool (*)(void *, uint32_t, uint32_t *), void *) {}
+void cpuSetPollSkip(bool) {}
+void cpuJitPollSkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; }
+void cpuSetPollPeek(ArmCpu *, bool (*)(void *, uint32_t, uint32_t *), void *) {}
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}

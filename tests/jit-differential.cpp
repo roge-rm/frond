@@ -46,6 +46,7 @@
 #include "jit_dynarmic.h"
 #include "idle_loops.h"
 #include "delay_loops.h"
+#include "poll_loops.h"
 #include "xscale_cost.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
@@ -171,6 +172,29 @@ bool timerPeek(void* context, uint32_t cycles, uint32_t* oscr) {
     return !t.match || *oscr - t.start < t.match - t.start;
 }
 
+// A stand-in GPIO level page for the poll skip (poll_loops.h): a page at kLevels (mapped at virtual
+// 0x2a000 in cases that ask for it) whose words read level[0-3]. The test changes them only between
+// cpuCycle calls, as scheduler events would. Peek answers for the third word (GPLR2) only.
+constexpr uint32_t kLevels = 0x40e00000, kLevelsVa = 0x2a000;
+struct TestLevels {
+    uint32_t level[4] = {};
+};
+
+bool levelsAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    const TestLevels& t = *static_cast<TestLevels*>(userData);
+    if (!write) {
+        const uint32_t at = pa - kLevels, v = at < 16 ? t.level[at >> 2] : 0;
+        memcpy(buf, &v, size < 4 ? size : 4);
+    }
+    return true;
+}
+
+bool levelsPeek(void* context, uint32_t pa, uint32_t* value) {
+    if (pa != kLevels + 8) return false;
+    *value = static_cast<TestLevels*>(context)->level[2];
+    return true;
+}
+
 struct Machine {
     bool fast = false;
     ArmCpu* cpu = nullptr;
@@ -180,6 +204,7 @@ struct Machine {
     Device* device = nullptr;
     PatchDispatch* patches = nullptr;
     TestTimer* timer = nullptr;
+    TestLevels* levels = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -213,6 +238,9 @@ Machine makeMachine(bool fast) {
     m.timer->cpu = m.cpu;
     if (!memRegionAdd(mem, kTimer, 0x1000, timerAccess, m.timer)) abort();
     cpuSetDelayTimer(m.cpu, kTimer + 0x10, timerPeek, m.timer);
+    m.levels = new TestLevels;
+    if (!memRegionAdd(mem, kLevels, 0x1000, levelsAccess, m.levels)) abort();
+    cpuSetPollPeek(m.cpu, levelsPeek, m.levels);
     return m;
 }
 
@@ -467,6 +495,7 @@ struct Case {
     bool tablesPage = false;
     bool interruptLines = false;  // the device page's IRQ and FIQ registers
     bool timerPage = false;       // the test timer at 0x2e000
+    bool levelsPage = false;      // the test GPIO levels at 0x2a000
 };
 
 struct Assembled {
@@ -560,6 +589,7 @@ Assembled assemble(const Case& c) {
     page(0x2d000, 3, true);
     if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
     if (c.timerPage) put32(kL2a + (kTimerVa >> 12) * 4, ptePage(kTimer, 3, false));
+    if (c.levelsPage) put32(kL2a + (kLevelsVa >> 12) * 4, ptePage(kLevels, 3, false));
     if (c.tablesPage) page(kL2a, 1, false);
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
@@ -1771,6 +1801,7 @@ struct Directed {
     bool tablesPage = false;
     bool interruptLines = false;
     bool timerPage = false;
+    bool levelsPage = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1826,6 +1857,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.tablesPage = d.tablesPage;
     c.interruptLines = d.interruptLines;
     c.timerPage = d.timerPage;
+    c.levelsPage = d.levelsPage;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -2813,6 +2845,196 @@ bool delayMatchDropped(Engines& e) {
     return ok;
 }
 
+// The ROM GPIO level polls (poll_loops.h) at kCode with a B . after them, the address register at GPLR2
+// of the test levels page. r3 holds the tested bit too, for pollMatchDropped.
+struct PollSetup {
+    const PollLoop* loop = nullptr;
+    Case c;
+    Assembled a;
+};
+
+const char* pollName(PollLoopKind kind) { return kind == PollLoopKind::e2NandReady ? "e2 nand ready" : "e2 nand busy"; }
+
+PollSetup pollSetup(const char* name, PollLoopKind kind, uint32_t counter) {
+    PollSetup s;
+    for (const PollLoop& x : kPollLoops)
+        if (x.kind == kind) s.loop = &x;
+    const PollLoop& l = *s.loop;
+    std::vector<std::pair<int, uint32_t>> regs = {{l.base, kLevelsVa + 8}, {3, l.mask}};
+    if (l.counter != kNoCounter) regs.push_back({l.counter, counter});
+    Directed d{name, std::vector<uint32_t>(l.code, l.code + l.count), false, SVC, regs, {}};
+    d.levelsPage = true;
+    s.c = directedCase(d, 12);
+    s.a = assemble(s.c);
+    return s;
+}
+
+// GPLR2 with the tested bit as a pass that stays (or leaves) sees it, other bits set too.
+uint32_t pollLevel(const PollLoop& l, bool stays) { return stays == l.staysSet ? 0x12340000u | l.mask : 0x12340000u; }
+
+uint64_t pollSkipCount() {
+    uint64_t skips, cycles;
+    cpuJitPollSkips(&skips, &cycles);
+    return skips;
+}
+
+// Exact steps the loop one instruction at a time, Fast with and without the skip in as few calls as it
+// takes; the level changes only between calls, as at a scheduler event. All three must land in the same
+// state after the same cycles: at the end of the first budget still in the loop, then (when the level
+// flips, or the counter runs out) leaving on the same pass. A budget ending mid-pass lets each engine
+// end at an instruction of its own (Fast's JIT may run one more than Exact): there Fast must land
+// where Exact or Fast without the skip does, state and cycles. With memory charges Fast without the skip runs past its budget by its charges, so it isn't
+// compared.
+bool pollSkip(Engines& e) {
+    struct Want {
+        const char* what;
+        bool stays;        // the level the loop starts with
+        uint32_t passes;   // the first budget, in passes
+        bool flip;         // then the level changes and the loop runs until it leaves
+        uint32_t counter;  // the counter's start (counting loops only)
+        uint64_t skips;    // Fast's skips (at least, when leaving)
+        bool countOnly;    // counting loops only
+        bool memory = false;
+        uint32_t sweep = 1;  // first budgets of passes, passes + 1 cycle, ...
+    };
+    const Want wants[] = {
+        {"steady", true, 40, false, 0, 1, false},
+        {"steady, budget mid-pass", true, 40, false, 0, 1, false, false, 8},
+        {"leaves after the event", true, 40, true, 0, 1, false},
+        {"already leaving", false, 0, true, 0, 0, false},
+        {"steady, memory charges", true, 40, false, 0, 1, false, true},
+        {"leaves after the event, memory charges", true, 40, true, 0, 1, false, true},
+        {"counter from 0 runs out", true, 0, true, 0, 1, true},
+        {"counter from 495 runs out", true, 0, true, 495, 1, true},
+        {"counter from 498 runs out", true, 0, true, 498, 1, true},
+        {"counter from 499 runs out", true, 0, true, 499, 0, true},
+        {"counter runs out, memory charges", true, 0, true, 0, 1, true, true},
+    };
+    auto memory = [&](Machine& m, bool on) {
+        cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), on);
+        cpuSetCostClocks(m.cpu, cost::kClocksTx.core, cost::kClocksTx.bus, cost::kClocksTx.memory);
+        if (m.fast) cpuSetJitMemoryCost(m.cpu, on);
+    };
+    bool ok = true;
+    for (const PollLoop& l : kPollLoops) {
+        for (const auto& w : wants) for (uint32_t i = 0; i < w.sweep; ++i) {
+            const bool counting = l.counter != kNoCounter;
+            if (w.countOnly && !counting) continue;
+            char name[96];
+            if (w.sweep > 1) snprintf(name, sizeof(name), "%s %s, +%u", pollName(l.kind), w.what, i);
+            else snprintf(name, sizeof(name), "%s %s", pollName(l.kind), w.what);
+            const PollSetup s = pollSetup(name, l.kind, w.counter);
+            uint32_t load;
+            uint32_t pass = pollPassCost(l, true, cost::Core::pxa27x, &load);
+            if (w.memory) pass += cost::regionCost(cost::Core::pxa27x, cost::device, false, cost::kClocksTx);
+            const uint32_t spin = cost::armCost(kSpinArm, cost::Core::pxa27x);
+            const uint64_t first = uint64_t(w.passes) * pass + i;
+            Snapshot states[3];
+            uint64_t skipped[3] = {}, ran[3] = {}, want = first;
+            bool stopped[3] = {};
+            // 0 Exact, 1 Fast, 2 Fast without the skip.
+            const bool without = !w.memory;
+            for (int k = 0; k < (without ? 3 : 2); ++k) {
+                Machine& m = k ? e.fast : e.exact;
+                cpuSetPollSkip(k != 2);
+                if (w.memory) memory(m, true);
+                prepare(m, s.c, s.a);
+                *m.levels = TestLevels{};
+                m.levels->level[2] = pollLevel(l, w.stays);
+                const uint64_t s0 = pollSkipCount();
+                ran[k] = first ? delayRun(m, !k, first) : 0;
+                if (w.flip) {
+                    if (w.passes) m.levels->level[2] = pollLevel(l, false);
+                    if (!k) {
+                        // Exact to the B ., then four of its passes.
+                        uint64_t at = 0;
+                        for (int j = 0; j < 100000 && !atSpin(m); ++j) at += delayRun(m, true, 1);
+                        want = ran[0] + at + 4 * spin;
+                        ran[k] += at + delayRun(m, true, 4 * spin);
+                    } else {
+                        ran[k] += delayRun(m, false, want - ran[k]);
+                    }
+                }
+                const uint32_t pc = cpuGetRegisters(m.cpu)[15] & ~1u;
+                stopped[k] = w.flip ? atSpin(m) : i ? pc >= kCode && pc < kCode + 4 * l.count : pc == kCode;
+                skipped[k] = pollSkipCount() - s0;
+                states[k] = snapshot(m, stopped[k]);
+                if (w.memory) memory(m, false);
+            }
+            cpuSetPollSkip(true);
+            std::vector<std::string> diffs = differences(states[0], states[1]);
+            bool cyclesOk = ran[0] == want && ran[1] == want && (!without || ran[2] == want);
+            if (i) {
+                // Mid-pass: as Exact, or as Fast without the skip.
+                const std::vector<std::string> other = differences(states[2], states[1]);
+                cyclesOk = (diffs.empty() && ran[1] == ran[0]) || (other.empty() && ran[1] == ran[2]);
+                if (cyclesOk) diffs.clear();
+                else for (const std::string& d : other) diffs.push_back("against without the skip, " + d);
+            } else if (without) {
+                for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
+            }
+            const bool skipsOk = w.flip && w.skips ? skipped[1] >= w.skips : skipped[1] == w.skips;
+            if (diffs.empty() && stopped[0] && cyclesOk && skipsOk && !skipped[2]) {
+                printf("poll skip, %s: same in %s, %" PRIu64 " skips, %" PRIu64 " cycles\n", name,
+                       without ? "all three" : "both", skipped[1], ran[1]);
+                continue;
+            }
+            printf("FAIL poll skip, %s: %" PRIu64 " skips (want %s%" PRIu64 "), cycles exact %" PRIu64 " fast %" PRIu64
+                   " without %" PRIu64 " (want %" PRIu64 ")%s\n",
+                   name, skipped[1], w.flip && w.skips ? "at least " : "", w.skips, ran[0], ran[1], ran[2], want,
+                   stopped[0] ? "" : ", exact did not stop where expected");
+            for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Fast keeps a poll loop's match per head. A store to the loop's code (the bit test against r3, which
+// holds the bit too, so the passes run the same) must drop it: the next run makes no skip, and lands
+// where Fast without the skip does.
+bool pollMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const PollLoop& l : kPollLoops) {
+        const char* name = pollName(l.kind);
+        const PollSetup s = pollSetup(name, l.kind, 0);
+        uint32_t load;
+        const uint64_t want = 40ull * pollPassCost(l, true, cost::Core::pxa27x, &load);
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetPollSkip(k == 0);
+            prepare(m, s.c, s.a);
+            *m.levels = TestLevels{};
+            m.levels->level[2] = pollLevel(l, true);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // tst r0, r3 (ready) or and r1, r1, r3 (busy).
+                    const uint32_t word = l.kind == PollLoopKind::e2NandReady ? 0xe1100003u : 0xe0011003u;
+                    memAccess(m.mem, kCode + 4, 4, true, (void*)&word);
+                }
+                const uint64_t s0 = pollSkipCount();
+                delayRun(m, false, want);
+                skipped[k][run] = pollSkipCount() - s0;
+            }
+            states[k] = snapshot(m, (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode);
+        }
+        cpuSetPollSkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("poll match dropped, %s: no skip after the store, same as without the skip\n", name);
+            continue;
+        }
+        printf("FAIL poll match dropped, %s: skips %" PRIu64 " then %" PRIu64 " (want 1 then 0), without %" PRIu64
+               " %" PRIu64 "\n",
+               name, skipped[0][0], skipped[0][1], skipped[1][0], skipped[1][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
 // The XScale fetch buffers when the guest rewrites code without invalidating. The
 // interpreter fills a buffer at A (an MCR the JIT hands back), the code at Y then rewrites
 // A+8, and the guest later jumps back to A+8 with no invalidation. An XScale (Exact) runs
@@ -3441,6 +3663,8 @@ int main(int argc, char** argv) {
         ok = idleMatchDropped(e) && ok;
         ok = delaySkip(e) && ok;
         ok = delayMatchDropped(e) && ok;
+        ok = pollSkip(e) && ok;
+        ok = pollMatchDropped(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;

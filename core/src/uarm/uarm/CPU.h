@@ -164,6 +164,15 @@ void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles);
 // would read with that many cycles in progress (cpuCyclesInProgress) without changing anything, and
 // returns false when that load would reach a timer match. Without it there is no delay skip.
 void cpuSetDelayTimer(ArmCpu *cpu, uint32_t oscrPa, bool (*peek)(void *, uint32_t, uint32_t *), void *context);
+// Fast skip of the ROMs' GPIO level polls (poll_loops.h), on unless FROND_POLL_SKIP=0. Code compiled
+// while it was off keeps running the loops.
+void cpuSetPollSkip(bool on);
+// Skips so far and the cycles they passed, in every CPU (tests).
+void cpuJitPollSkips(uint64_t *skips, uint64_t *cycles);
+// What the poll skip reads: peek gives the word a load of physical address pa would read, without
+// changing anything, and returns true only for registers that change only at scheduler events (between
+// cpuCycle runs). Without it there is no poll skip.
+void cpuSetPollPeek(ArmCpu *cpu, bool (*peek)(void *, uint32_t, uint32_t *), void *context);
 // MRC and MCR p15 c3 (domain access control) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitDomainCalls();
 // Translated ordinary blocks and instructions executed in generated code.
