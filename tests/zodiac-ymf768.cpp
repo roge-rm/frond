@@ -1,6 +1,6 @@
 // The Zodiac's YMF768 model. On the model: the register answers the ROM's driver waits for, the sequencer FIFO
-// and its interrupt line, A4's pitch, four-operator channels, a known note sequence against a stored hash, the
-// FM engine running on guest time with or without SSI1 words and in any batching, a save or copy changing
+// and its interrupt line, A4's pitch, the MA-2 operator fields, four-operator channels, a known note sequence
+// against a stored hash, the FM engine running on guest time with or without SSI1 words and in any batching, a save or copy changing
 // nothing in the run, a loaded copy carrying on the same, quiet idling giving a full run's samples and state,
 // and bad saved values refused. Through the machine:
 // FM added to SSI1's words the same in Exact and Fast with a state saved mid-note; a guest that takes the
@@ -8,6 +8,7 @@
 // with SSI1 off and then on, alike in Exact, Fast and Exact with stepped idle; a B15 change the GPIO refuses
 // stopping the run; and an older state without the chip loading with B15 as it was, then a reset giving sound.
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -69,7 +70,8 @@ static void voice(Imx1Ymf768& y, unsigned ch, unsigned tl, unsigned alg) {
     put(y, 0xd0 + ch, alg);
     for (unsigned n = 0; n < 2; ++n) {
         const unsigned s = 0x10 + slots[ch] + 4 * n;
-        put(y, s, 0x21); put(y, s + 0x20, n ? 0 : tl); put(y, s + 0x40, 0xf2); put(y, s + 0x60, 0x25); put(y, s + 0x80, 0);
+        // MA-2 fields: MULT 1 and EGT; RR 5, DR 2; AR 15, SL 2; TL; sine.
+        put(y, s, 0x14); put(y, s + 0x20, 0x52); put(y, s + 0x40, 0xf2); put(y, s + 0x60, (n ? 0 : tl) << 2); put(y, s + 0x80, 0);
     }
 }
 static void key(Imx1Ymf768& y, unsigned ch, unsigned note, bool on) {
@@ -102,6 +104,48 @@ static void pitch() {
     }
     fprintf(stderr, "A4: %u crossings, peak %d\n", crossings, peak);
     assert(crossings >= 438 && crossings <= 442 && peak > 2000);
+}
+
+// The operator bytes in the MA-2 layout the ROM's voices use: the carrier's MULT in group 0 bits 4-7 sets the
+// pitch, its TL in group 3 bits 2-7 (not 0-5) sets the level, its WS in group 4 bits 0-2 the waveform, and a
+// modulator with MULT 0 (x 0.5) at a low TL puts a subharmonic under A4.
+static void ma2Fields() {
+    struct Run { unsigned crossings; int32_t peak; double halfBelow; };
+    auto run = [](uint8_t carrier0, uint8_t carrier3, uint8_t carrier4, uint8_t mod0, unsigned modTl) {
+        Imx1Ymf768 y;
+        put(y, 0x0f, 1); put(y, 0x10, 16); put(y, 0x0f, 0);
+        voice(y, 0, modTl, 0);
+        put(y, 0x10, mod0); put(y, 0x14, carrier0); put(y, 0x74, carrier3); put(y, 0x94, carrier4);
+        key(y, 0, 69, true);
+        std::vector<int32_t> v;
+        for (unsigned i = 0; i < 44118; ++i) { int32_t l, r; frame(y, l, r); v.push_back(l); }
+        Run out{0, 0, 0};
+        for (size_t i = 1; i < v.size(); ++i) {
+            if (v[i - 1] < 0 && v[i] >= 0) ++out.crossings;
+            out.peak = std::max(out.peak, std::abs(v[i]));
+        }
+        // Energy at 220 Hz against 440 Hz over the last half second (Goertzel on SSI1's 44117.6 frames).
+        auto power = [&](double hz) {
+            const double w = 2 * 3.141592653589793 * hz / 44117.647;
+            double a = 0, b = 0;
+            for (size_t i = v.size() / 2; i < v.size(); ++i) { const double c = v[i] + 2 * std::cos(w) * a - b; b = a; a = c; }
+            return a * a + b * b - 2 * std::cos(w) * a * b;
+        };
+        out.halfBelow = power(220) / power(440);
+        return out;
+    };
+    const Run plain = run(0x14, 0x00, 0, 0x14, 63);
+    const Run octave = run(0x24, 0x00, 0, 0x14, 63);
+    const Run ksl = run(0x14, 0x03, 0, 0x14, 63);    // KSL 3 only: OPL3 key scaling, far above TL 63
+    const Run quiet = run(0x14, 0xfc, 0, 0x14, 63);  // TL 63
+    const Run half = run(0x14, 0x00, 1, 0x14, 63);   // half sine: positive halves only
+    const Run sub = run(0x14, 0x00, 0, 0x04, 8);     // modulator MULT 0 at TL 8
+    fprintf(stderr, "MA-2 fields: crossings %u %u, peaks %d %d %d %d, 220/440 %.3f %.3f\n", plain.crossings,
+            octave.crossings, plain.peak, ksl.peak, quiet.peak, half.peak, plain.halfBelow, sub.halfBelow);
+    assert(plain.crossings >= 438 && plain.crossings <= 442 && octave.crossings >= 876 && octave.crossings <= 884);
+    assert(plain.peak > 2000 && ksl.peak > quiet.peak * 10 && quiet.peak < plain.peak / 50);
+    assert(half.crossings == 0 || half.crossings < 5);
+    assert(plain.halfBelow < 0.001 && sub.halfBelow > 0.01);
 }
 
 // Four-operator channels sound, on an OPL3 pair (0, 8) and on an emulated one (3, 11), and only through the
@@ -254,8 +298,8 @@ static Imx1Ymf768 quietVoices(bool skipping) {
     y.setQuietSkipping(skipping);
     put(y, 0x0f, 1); put(y, 0x10, 31); put(y, 0x0f, 0);
     voice(y, 0, 20, 0x08); voice(y, 1, 30, 0x01); voice(y, 8, 16, 0); voice(y, 12, 16, 0);
-    // Release rate 10, so notes end within the script.
-    for (unsigned slot : {0x70u, 0x74u, 0x71u, 0x75u, 0x80u, 0x84u, 0x88u, 0x8cu}) put(y, slot, 0x2a);
+    // Release rate 10 (group 1, decay 2 as before), so notes end within the script.
+    for (unsigned slot : {0x30u, 0x34u, 0x31u, 0x35u, 0x40u, 0x44u, 0x48u, 0x4cu}) put(y, slot, 0xa2);
     return y;
 }
 // Plays the script from frame `start` to the end, with the writes due at each frame, saving at `saveAt`.
@@ -267,7 +311,7 @@ static void quietScript(Imx1Ymf768& y, unsigned start, std::vector<int32_t>& out
             case 2000: key(y, 0, 60, true); key(y, 1, 64, true); break;
             case 5000: key(y, 0, 60, false); key(y, 1, 64, false); break;
             case 14000: put(y, 0xd8, 0x05); put(y, 0xf0, 20); break;  // four operators on 8 and 12, a pan
-            case 16000:  // a slow attack (rate 1) stays quiet for a while after its key on
+            case 16000:  // a slow attack (rate 1, group 2 with SL 2) stays quiet for a while after its key on
                 put(y, 0x50, 0x12); put(y, 0x54, 0x12); key(y, 0, 62, true); break;
             case 20000: key(y, 8, 48, true); break;
             case 23000: key(y, 0, 62, false); key(y, 8, 48, false); break;
@@ -395,7 +439,7 @@ struct Program {
         ymf(0x0f, 1); ymf(0x10, 31); ymf(0x0f, 0);
         for (unsigned n = 0; n < 2; ++n) {
             const unsigned s = 0x10 + 4 * n;
-            ymf(s, 0x21); ymf(s + 0x20, n ? 0 : 24); ymf(s + 0x40, 0xf2); ymf(s + 0x60, 0x25); ymf(s + 0x80, 0);
+            ymf(s, 0x14); ymf(s + 0x20, 0x52); ymf(s + 0x40, 0xf2); ymf(s + 0x60, n ? 0 : 24 << 2); ymf(s + 0x80, 0);
         }
         ymf(0xd0, 0x10); ymf(0xb0, 580 & 0xff); ymf(0xc0, 2 | 4 << 2 | 0x20);
     }
@@ -623,6 +667,7 @@ int main() {
     registers();
     pitch();
     fourOperators();
+    ma2Fields();
     const uint32_t h = sequence();
     fprintf(stderr, "sequence hash %08x\n", h);
     assert(h == 0xf1879438u && sequence() == h);
@@ -634,7 +679,7 @@ int main() {
     guestInterrupts();
     lineRefused();
     olderState();
-    std::puts("PASS: YMF768 registers, FIFO and interrupt, A4 pitch, four operators, the stored note sequence, FM on "
+    std::puts("PASS: YMF768 registers, FIFO and interrupt, A4 pitch, MA-2 operator fields, four operators, the stored note sequence, FM on "
               "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
               "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states");
 }

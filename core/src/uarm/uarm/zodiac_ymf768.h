@@ -17,10 +17,11 @@
 //   bank 0 register 6 bit 0 runs it. Bank 0 08 bit 0 asks for more records while fewer than two are queued,
 //   and the interrupt line (GPIO B15, which the ROM sets to interrupt while low) is low while it asks and the
 //   FIFO runs.
-// - FM synthesis: OPL3 style operators (slots 10-2f, groups at +00 +20 +40 +60 +80 as OPL3's 20 40 60 80 e0),
-//   F-number, block and key on in b0/c0 as OPL3's a0/b0, algorithm and feedback in d0. The operators,
-//   envelopes and LFOs are ymfm's OPL3 (zodiac_ymf768_core.h); this layer maps the 16 channels onto it and
-//   adds what OPL3 doesn't have: channel level e0 and pan f0, bank 1 channel level e0 and master level 10.
+// - FM synthesis: 32 operators (slots 10-2f, five groups at +00 +20 +40 +60 +80) with MA-2 voice fields
+//   (syncOperator), F-number, block and key on in b0/c0 as OPL3's a0/b0, LFO, feedback and algorithm in d0.
+//   The operators, envelopes and LFOs are ymfm's OPL3 (zodiac_ymf768_core.h); this layer maps the 16 channels
+//   onto it and adds what OPL3 doesn't have: channel level e0 and pan f0, bank 1 channel level e0 and master
+//   level 10.
 // The FM engine runs on guest time, 49716 samples a guest second whatever SSI1 does, so envelopes and notes go
 // on while SSI1 is off. 49716 Hz is the rate the ROM's F-number table is tuned for (A4 = 580 in block 4 is
 // 440 Hz there, 0x200d64bc), so the chip's clock is taken as its own crystal, not an i.MX1 clock. SSI1 words
@@ -167,6 +168,7 @@ class Imx1Ymf768 {
     // Channels 3 and 11 have no OPL3 four-operator pair; they run as two FM pairs added.
     static bool emulatedPair(unsigned ch) { return ch == 3 || ch == 11; }
     void engineWrite(unsigned reg, uint8_t value);
+    void syncOperator(unsigned slot);
     void syncAlgorithm(unsigned first);
     void syncFrequency(unsigned ch);
     void sample(int32_t& left, int32_t& right);
