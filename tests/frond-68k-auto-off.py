@@ -4,8 +4,9 @@ keeps the LCD on at 115 guest seconds and has turned itself off by 150, from the
 2 minute auto-off (the timer starts a few seconds into the boot). Fails without FROND_DEVICE_IMAGES
 or with neither ROM in it.
 
-Then, on the IIIx in a console run, the power button puts the Palm to sleep and a db-list wakes it
-with a power press and answers, with the LCD back on."""
+Then, on the IIIx in a console run, the power button puts the Palm to sleep, a db-list says it's
+asleep and leaves it asleep, and a launch of Memo Pad wakes it with a power press and starts it,
+with the LCD back on."""
 import os
 import subprocess
 import sys
@@ -50,11 +51,17 @@ def asleep_call(rom, folder):
                 raise AssertionError('power button did not put the IIIx to sleep')
             time.sleep(0.5)
         line = core.send('db-list', ('db: ', 'db-list:'), 60)
-        if not line or not line.startswith('db: '):
-            raise AssertionError(f'db-list on a sleeping IIIx: {line!r}')
+        if not line or 'the Palm is asleep' not in line:
+            raise AssertionError(f'db-list on a sleeping IIIx should say it is asleep: {line!r}')
+        time.sleep(2)
+        if core.frame(folder / 'listed.png') is not None:
+            raise AssertionError('db-list woke the IIIx')
+        line = core.send('launch "Memo Pad"', 'launch: ', 60)
+        if not line or 'launch: started Memo Pad' not in line:
+            raise AssertionError(f'launch on a sleeping IIIx: {line!r}')
         if core.frame(folder / 'woken.png') is None:
-            raise AssertionError('LCD still off after the db-list woke the IIIx')
-        print('palm-iiix: db-list woke the sleeping Palm and answered')
+            raise AssertionError('LCD still off after the launch woke the IIIx')
+        print('palm-iiix: db-list left the sleeping Palm asleep, a launch woke it and started Memo Pad')
     finally:
         core.close()
 
