@@ -201,6 +201,7 @@ open class FrondActivity : SDLActivity() {
     private var controller = ControllerInput(ControllerMap(emptyMap())) { _, _ -> }
     // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
     private var zodiacPad: ZodiacPad? = null
+    private var rumble: Rumble? = null
     lateinit var runningDevice: Device
         private set
 
@@ -499,6 +500,15 @@ open class FrondActivity : SDLActivity() {
         if (followsProgram()) requestedOrientation = orientationRequest()
     }
 
+    // The guest's alarm LED or vibrate motor changed (the Zodiac's rumble). The LED isn't shown yet.
+    @Suppress("UNUSED_PARAMETER")
+    // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
+    private var guestVibrate = false
+    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread {
+        guestVibrate = vibrate
+        if (!leaving && foreground) rumble?.set(vibrate)
+    }
+
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()
 
@@ -513,6 +523,7 @@ open class FrondActivity : SDLActivity() {
             val pad = zodiacPad
             when (event.action) {
                 android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && !leaving) {
+                    rumble?.controller = event.deviceId
                     if (pad != null) pad.key(event.deviceId, event.keyCode, true) else controller.key(event.deviceId, event.keyCode, true)
                 }
                 android.view.KeyEvent.ACTION_UP ->
@@ -527,6 +538,7 @@ open class FrondActivity : SDLActivity() {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val pad = zodiacPad
             if (!leaving && pad != null) {
+                rumble?.controller = event.deviceId
                 pad.axes(
                     event.deviceId,
                     event.getAxisValue(android.view.MotionEvent.AXIS_X),
@@ -575,7 +587,10 @@ open class FrondActivity : SDLActivity() {
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
-        if (launchDevice().zodiac) zodiacPad = ZodiacPad(ZodiacPad::push)
+        if (launchDevice().zodiac) {
+            zodiacPad = ZodiacPad(ControllerMap.load(this, launchDevice()), ZodiacPad::push)
+            rumble = Rumble(this).also { it.enabled = machineSettings.rumble }
+        }
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
             override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
@@ -583,6 +598,7 @@ open class FrondActivity : SDLActivity() {
             override fun onInputDeviceRemoved(deviceId: Int) {
                 controller.release(deviceId)
                 zodiacPad?.release(deviceId)
+                rumble?.forget(deviceId)
                 updateDanaEnvironment()
             }
         }
@@ -615,6 +631,7 @@ open class FrondActivity : SDLActivity() {
         }
         controller.releaseAll()
         zodiacPad?.releaseAll()
+        rumble?.stop()
         // The menu and sheets live in this activity, so they pause with it: a waiting microphone request
         // is dropped and the Bluetooth read stops until the Connections sheet is in front again.
         menuModel?.cancelMicrophoneRequest()
@@ -916,6 +933,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        if (!leaving) rumble?.set(guestVibrate)
         startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
@@ -1128,6 +1146,14 @@ open class FrondActivity : SDLActivity() {
     }
 
     // The bar's mode changed in the Display sheet.
+    fun applyRumble() {
+        val on = Sessions.forPath(this, sessionPath)?.settings?.rumble ?: return
+        runOnUiThread {
+            machineSettings = machineSettings.copy(rumble = on)
+            rumble?.enabled = on
+        }
+    }
+
     fun applyBarMode() {
         val mode = Sessions.forPath(this, sessionPath)?.settings?.barMode ?: return
         runOnUiThread {
@@ -1458,6 +1484,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        rumble?.stop()
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()
         stopCameraFeed()

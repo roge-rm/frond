@@ -147,4 +147,72 @@ class ZodiacTest {
         // Other devices have no program orientation: it follows the phone.
         assertEquals(Orientation.PHONE.request, Orientation.PROGRAM.request)
     }
+
+    @Test fun controlsListEveryZodiacInputWithTodaysDefaults() {
+        val on = PalmButton.on(zodiac)
+        assertEquals(13, on.size)
+        val defaults = ControllerMap.defaults(zodiac)
+        assertTrue(defaults.keys.values.all { it in on })
+        assertTrue(on.all { defaults.keysFor(it).isNotEmpty() })
+        assertEquals(PalmButton.APP1, defaults.keys[KeyEvent.KEYCODE_BUTTON_A])
+        assertEquals(PalmButton.APP1, defaults.keys[KeyEvent.KEYCODE_DPAD_CENTER])
+        assertEquals(PalmButton.APP4, defaults.keys[KeyEvent.KEYCODE_BUTTON_Y])
+        assertEquals(PalmButton.HOME, defaults.keys[KeyEvent.KEYCODE_BUTTON_START])
+        assertEquals(PalmButton.HOME, defaults.keys[KeyEvent.KEYCODE_BUTTON_MODE])
+        assertEquals(PalmButton.FUNCTION, defaults.keys[KeyEvent.KEYCODE_BUTTON_SELECT])
+        assertEquals(PalmButton.STICK_PRESS, defaults.keys[KeyEvent.KEYCODE_BUTTON_THUMBL])
+        assertEquals(PalmButton.TRIGGER_LEFT, defaults.keys[KeyEvent.KEYCODE_BUTTON_L2])
+        assertEquals(PalmButton.RIGHT, defaults.keys[KeyEvent.KEYCODE_DPAD_RIGHT])
+        assertEquals(defaults, ControllerMap.decode(null, zodiac))
+        assertEquals("Left trigger", PalmButton.TRIGGER_LEFT.label(zodiac))
+        assertEquals("Stick up", PalmButton.UP.label(zodiac))
+        assertEquals("Up", PalmButton.UP.label(Device.TX))
+    }
+
+    @Test fun controlsSaveAndLoadAsText() {
+        val map = ControllerMap.defaults(zodiac).assign(PalmButton.HOME, KeyEvent.KEYCODE_BUTTON_C).clear(PalmButton.FUNCTION)
+        assertEquals(map, ControllerMap.decode(map.encode(), zodiac))
+        assertTrue(map.keysFor(PalmButton.FUNCTION).isEmpty())
+        // A button the Zodiac doesn't list is skipped.
+        assertEquals(emptyMap<Int, PalmButton>(), ControllerMap.decode("99:power,98:jog-up", zodiac).keys)
+    }
+
+    @Test fun aRemappedKeyReachesTheRightInput() {
+        val events = mutableListOf<ZodiacPad.Event>()
+        val map = ControllerMap.defaults(zodiac)
+            .assign(PalmButton.APP2, KeyEvent.KEYCODE_BUTTON_C)
+            .assign(PalmButton.TRIGGER_RIGHT, KeyEvent.KEYCODE_BUTTON_A)
+            .clear(PalmButton.HOME)
+        val pad = ZodiacPad(map) { events += it }
+        assertTrue(pad.key(1, KeyEvent.KEYCODE_BUTTON_C, true))
+        assertTrue(pad.key(1, KeyEvent.KEYCODE_BUTTON_A, true))
+        assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_START, true))
+        // B was Action 2 and now does nothing.
+        assertFalse(pad.key(1, KeyEvent.KEYCODE_BUTTON_B, true))
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_B, true), Button(1, ZodiacPad.RIGHT_SHOULDER, true)), events)
+    }
+
+    @Test fun stickKeysAndTheHatFollowTheMap() {
+        val events = mutableListOf<ZodiacPad.Event>()
+        val map = ControllerMap.defaults(zodiac)
+            .assign(PalmButton.UP, KeyEvent.KEYCODE_BUTTON_Y)
+            .assign(PalmButton.APP3, KeyEvent.KEYCODE_DPAD_LEFT)
+        val pad = ZodiacPad(map) { events += it }
+        pad.key(1, KeyEvent.KEYCODE_BUTTON_Y, true)
+        assertEquals(listOf(Axis(1, ZodiacPad.AXIS_LEFT_Y, -32768)), events)
+        events.clear()
+        // The hat's left is now Action 3, and its right still pushes the stick.
+        pad.axes(1, 0f, 0f, -1f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_X, true)), events)
+        events.clear()
+        pad.axes(1, 0f, 0f, 1f, 0f, 0f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_X, false), Axis(1, ZodiacPad.AXIS_LEFT_X, 32767)), events)
+    }
+
+    @Test fun analogueTriggersFollowTheMapsL2AndR2() {
+        val events = mutableListOf<ZodiacPad.Event>()
+        val pad = ZodiacPad(ControllerMap.defaults(zodiac).assign(PalmButton.APP1, KeyEvent.KEYCODE_BUTTON_L2)) { events += it }
+        pad.axes(1, 0f, 0f, 0f, 0f, 0.9f, 0f)
+        assertEquals(listOf(Button(1, ZodiacPad.BUTTON_A, true)), events)
+    }
 }

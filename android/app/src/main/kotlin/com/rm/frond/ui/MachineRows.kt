@@ -128,6 +128,12 @@ fun MachineAudioPreviewRow(
     }
 }
 
+// The Zodiac's rumble on the controller's or the phone's vibrator.
+@Composable
+fun MachineRumbleRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineSwitchRow("Rumble", settings.rumble, listStyle) { onChange(settings.copy(rumble = it)) }
+}
+
 // Exact or Fast, for ARM devices.
 @Composable
 fun MachineEngineRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {

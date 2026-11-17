@@ -610,6 +610,7 @@ class RunningModel(
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
+                if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
                 s
             }
             settings = machineSettings()
@@ -617,6 +618,7 @@ class RunningModel(
             FrondActivity.running?.applySpeed()
             FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
+            FrondActivity.running?.applyRumble()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }

@@ -150,6 +150,20 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, 
     SDL_PushEvent(&event);
 }
 
+// The core's guest thread, when the guest turns its alarm LED or vibrate motor on or off (the Zodiac's
+// rumble): tells FrondActivity, which drives a controller's or the phone's vibrator.
+void frondGuestAttentionChanged(bool led, bool vibrate) {
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(type, "onGuestAttention", "(ZZ)V");
+    if (method) env->CallVoidMethod(activity, method, jboolean(led), jboolean(vibrate));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
+}
+
 // The core's guest thread, when the guest OS turns its screen (the Zodiac): tells FrondActivity, which
 // turns the app to match when its Orientation is Follow the program. orientation is SysGetOrientation's
 // number (1 portrait, 2 landscape, 3 reverse portrait, 4 reverse landscape).

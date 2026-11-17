@@ -61,6 +61,7 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (rows.audioPreview) {
                 MachineAudioPreviewRow(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             }
+            if (draft.device.zodiac) MachineRumbleRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.speed || rows.engine) Header("Speed", Modifier.padding(top = 16.dp))
             if (rows.speed) MachineSpeedRow(draft.settings, false) { model.changeMachineSettings(it) }
             if (rows.engine) MachineEngineRow(draft.settings, false) { model.changeMachineSettings(it) }

@@ -41,6 +41,8 @@
 #ifdef __ANDROID__
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
 void frondGuestOrientationChanged(int orientation);
+// In the app: the guest's alarm LED or vibrate motor changed. Guest thread.
+void frondGuestAttentionChanged(bool led, bool vibrate);
 #endif
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
@@ -112,6 +114,7 @@ struct Options {
     bool cardProtected;
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
+    bool disableRumble;      // --no-rumble
 };
 
 namespace {
@@ -806,6 +809,9 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
+#ifdef __ANDROID__
+        SoC::Attention attention{};
+#endif
         int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
@@ -1252,6 +1258,23 @@ bool gFastEngineMissing = false;
 #endif
                     }
                 }
+                // The stick turns with what the player sees: the guest's turn (in the SoC) plus the host's own.
+                // Every stick source arrives in window axes, so one offset covers them all.
+                soc->SetStickHostTurns(followGuest ? int(commandContext.rotation) : int(sdlEventHandler.DrawnRotation()));
+                // The LED and vibrate motor: the app on Android, game controllers on the desktop.
+                {
+                    SoC::Attention current = soc->GuestAttention();
+                    // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
+                    if (replayPaused) current.vibrate = false;
+#ifdef __ANDROID__
+                    if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
+                    attention = current;
+#else
+                    const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
+                    const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
+                    if (desktop) desktop->rumbleChanged(on && !controller);
+#endif
+                }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
                 if (zodiacSpeed && zodiacSpeed->Due(now)) {
                     const auto status = zodiac->Status();
@@ -1567,6 +1590,11 @@ int main(int argc, char** argv) {
         .scan<'u', unsigned int>()
         .default_value(512u);
 
+    program.add_argument("--no-rumble")
+        .help("Zodiac: no rumble on game controllers or in the window")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -1737,7 +1765,8 @@ int main(int argc, char** argv) {
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
                        .fastEngine = program.get("--engine") == "fast",
-                       .viewFollowsWindow = program.get("--view-turn") == "window"};
+                       .viewFollowsWindow = program.get("--view-turn") == "window",
+                       .disableRumble = program.get<bool>("--no-rumble")};
 
     logEnable();
 

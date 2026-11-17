@@ -96,6 +96,8 @@ class SoC {
     // right and down positive, and 0,0 when let go. A board with a stick maps it to its own
     // hardware; others ignore it.
     virtual void AnalogStick(float, float) {}
+    // Quarter turns the host shows the view by, on top of the guest's own; the stick follows the total.
+    virtual void SetStickHostTurns(int) {}
 
     void SetFramebufferDirty(uint32_t pa = 0, uint32_t size = ~0u);
     bool SetFramebuffer(uint32_t start, uint32_t size);
@@ -157,6 +159,14 @@ class SoC {
     // 2 landscape, 3 reverse portrait, 4 reverse landscape), or 0 when unknown or the device has none.
     // Guest thread only.
     virtual unsigned GuestOrientation() { return 0; }
+    // The alarm LED and vibrate motor as the guest drives them, on or off; the guest steps any pattern
+    // itself. Both off on a device without them. Guest thread only.
+    struct Attention {
+        bool led = false, vibrate = false;
+        bool operator==(const Attention& o) const { return led == o.led && vibrate == o.vibrate; }
+        bool operator!=(const Attention& o) const { return !(*this == o); }
+    };
+    virtual Attention GuestAttention() { return {}; }
     virtual void ResetPendingFrame() = 0;
     virtual DeviceType5 GetDeviceType() = 0;
     virtual DisplayMode GetDisplayMode() = 0;

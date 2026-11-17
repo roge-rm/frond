@@ -79,6 +79,12 @@ class DesktopControl {
         event("usb", state);
     }
 
+    // A cue event for the window: "on" while the guest's rumble is on and no game controller can play it.
+    void rumbleChanged(bool cue) {
+        if (cue == lastRumbleCue) return;
+        lastRumbleCue = cue; event("rumble", cue ? "on" : "off");
+    }
+
     void infraredChanged(commands::Context& ctx) {
         const auto state=ctx.infrared ? ctx.infrared->Describe() : "off";
         if (state==lastInfrared || (state=="off" && lastInfrared.empty())) return;
@@ -172,6 +178,7 @@ class DesktopControl {
     }
     bool flush() { return channel.Flush(); }
 
+    bool lastRumbleCue{false};
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";

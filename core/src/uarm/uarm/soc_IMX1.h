@@ -1,6 +1,7 @@
 #ifndef FROND_SOC_IMX1_H
 #define FROND_SOC_IMX1_H
 
+#include <atomic>
 #include <array>
 #include <memory>
 #include <string>
@@ -33,6 +34,7 @@ class SocIMX1 : public SoC {
     bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
     bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
     void AnalogStick(float x, float y) override;
+    void SetStickHostTurns(int turns) override;
     bool Save() override;
     bool Load(size_t savestateSize, void* savestateData) override;
     // A state file from the bring-up driver (gzip or plain), made with its boot pin levels.
@@ -49,6 +51,7 @@ class SocIMX1 : public SoC {
     void ResetPendingFrame() override { framePending = false; }
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
+    Attention GuestAttention() override;
     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
@@ -118,6 +121,11 @@ class SocIMX1 : public SoC {
     std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
     bool framePending{false}, redraw{true};
     GuestOrientationTracker orientationTracker;
+    // The stick as the host pushed it, and the quarter turns the guest's screen has: the guest gets the
+    // stick turned to match what the player sees.
+    std::atomic<float> stickHostX{0}, stickHostY{0};
+    std::atomic<int> stickTurns{0}, stickHostTurns{0};
+    void PushStick();
 
     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};

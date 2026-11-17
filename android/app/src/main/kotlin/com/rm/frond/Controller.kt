@@ -17,9 +17,12 @@ enum class PalmButton(val id: String) {
     // The Zire 72's side voice button.
     VOICE("voice"),
     // The CLIE T415's Jog Dial: turned up and down, pressed in, and its Back button.
-    JOG_UP("jog-up"), JOG_DOWN("jog-down"), JOG_PRESS("jog-press"), BACK("back");
+    JOG_UP("jog-up"), JOG_DOWN("jog-down"), JOG_PRESS("jog-press"), BACK("back"),
+    // The Zodiac's Function key, its two triggers and the click of its analogue stick. Its four Action
+    // keys are APP1 to APP4 and its stick's directions are UP, DOWN, LEFT and RIGHT.
+    FUNCTION("function"), TRIGGER_LEFT("trigger-left"), TRIGGER_RIGHT("trigger-right"), STICK_PRESS("stick-press");
 
-    fun label(device: Device): String = when (this) {
+    fun label(device: Device): String = if (device.zodiac) zodiacLabel() else when (this) {
         UP -> "Up"
         DOWN -> "Down"
         LEFT -> "Left"
@@ -34,17 +37,43 @@ enum class PalmButton(val id: String) {
         JOG_DOWN -> "Jog down"
         JOG_PRESS -> "Jog press"
         BACK -> "Back"
+        FUNCTION -> "Function"
+        TRIGGER_LEFT -> "Left trigger"
+        TRIGGER_RIGHT -> "Right trigger"
+        STICK_PRESS -> "Stick press"
+    }
+
+    // The Action keys go by place: bottom, right, left, top.
+    private fun zodiacLabel(): String = when (this) {
+        UP -> "Stick up"
+        DOWN -> "Stick down"
+        LEFT -> "Stick left"
+        RIGHT -> "Stick right"
+        APP1 -> "Action 1 (bottom)"
+        APP2 -> "Action 2 (right)"
+        APP3 -> "Action 3 (left)"
+        APP4 -> "Action 4 (top)"
+        HOME -> "Home"
+        FUNCTION -> "Function"
+        TRIGGER_LEFT -> "Left trigger"
+        TRIGGER_RIGHT -> "Right trigger"
+        STICK_PRESS -> "Stick press"
+        else -> id
     }
 
     companion object {
         fun byId(id: String) = entries.firstOrNull { it.id == id }
+
+        // What the Zodiac's controller settings list.
+        val ZODIAC = listOf(UP, DOWN, LEFT, RIGHT, STICK_PRESS, APP1, APP2, APP3, APP4, HOME, FUNCTION, TRIGGER_LEFT, TRIGGER_RIGHT)
 
         // The four app buttons hard1-4, as the core's DeviceControls.h names them: left to right on the
         // TX and E2, the left pair top to bottom then the right pair bottom to top on the Zire 72.
         fun appNames(device: Device) = device.appNames
 
         // The buttons a device has, in the order the settings list them.
-        fun on(device: Device): List<PalmButton> = device.buttons.mapNotNull { byId(it) }
+        fun on(device: Device): List<PalmButton> =
+            if (device.zodiac) ZODIAC else device.buttons.mapNotNull { byId(it) }
     }
 }
 
@@ -69,6 +98,7 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
         // L1, X, Y and R1 for the four app buttons left to right, Start for Home and Select for Menu.
         // B does nothing; Palm OS has no back, and B would otherwise fall back to Android's Back.
         fun defaults(device: Device): ControllerMap {
+            if (device.zodiac) return zodiacDefaults()
             val keys = mutableMapOf(
                 KeyEvent.KEYCODE_DPAD_UP to PalmButton.UP,
                 KeyEvent.KEYCODE_DPAD_DOWN to PalmButton.DOWN,
@@ -92,6 +122,29 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             val allowed = PalmButton.on(device)
             return ControllerMap(keys.filterValues { it in allowed })
         }
+
+        // The Zodiac as it was before its controls could be set: the d-pad pushes the stick, A, B, X and Y
+        // are the Action keys by place, Start and Mode are Home, Select is Function, the shoulders and
+        // the lower triggers are the triggers and the left stick's click is the stick's press.
+        fun zodiacDefaults() = ControllerMap(mapOf(
+            KeyEvent.KEYCODE_DPAD_UP to PalmButton.UP,
+            KeyEvent.KEYCODE_DPAD_DOWN to PalmButton.DOWN,
+            KeyEvent.KEYCODE_DPAD_LEFT to PalmButton.LEFT,
+            KeyEvent.KEYCODE_DPAD_RIGHT to PalmButton.RIGHT,
+            KeyEvent.KEYCODE_BUTTON_THUMBL to PalmButton.STICK_PRESS,
+            KeyEvent.KEYCODE_DPAD_CENTER to PalmButton.APP1,
+            KeyEvent.KEYCODE_BUTTON_A to PalmButton.APP1,
+            KeyEvent.KEYCODE_BUTTON_B to PalmButton.APP2,
+            KeyEvent.KEYCODE_BUTTON_X to PalmButton.APP3,
+            KeyEvent.KEYCODE_BUTTON_Y to PalmButton.APP4,
+            KeyEvent.KEYCODE_BUTTON_START to PalmButton.HOME,
+            KeyEvent.KEYCODE_BUTTON_MODE to PalmButton.HOME,
+            KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.FUNCTION,
+            KeyEvent.KEYCODE_BUTTON_L1 to PalmButton.TRIGGER_LEFT,
+            KeyEvent.KEYCODE_BUTTON_L2 to PalmButton.TRIGGER_LEFT,
+            KeyEvent.KEYCODE_BUTTON_R1 to PalmButton.TRIGGER_RIGHT,
+            KeyEvent.KEYCODE_BUTTON_R2 to PalmButton.TRIGGER_RIGHT,
+        ))
 
         // Unknown or malformed entries are skipped; null or blank gives the defaults.
         fun decode(text: String?, device: Device): ControllerMap {

@@ -184,7 +184,21 @@ void SocIMX1::Reset() {
 
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
 unsigned SocIMX1::GuestOrientation() {
-    return orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    const unsigned orientation = orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    // SysGetOrientation's numbers: landscape 2 is no turn, portrait 1 one, reverse landscape 4 two, reverse portrait 3 three.
+    static constexpr int turnsFor[] = {-1, 1, 0, 3, 2};
+    const int turns = orientation < 5 ? turnsFor[orientation] : -1;
+    if (turns >= 0 && turns != stickTurns) {
+        stickTurns = turns;
+        PushStick();
+    }
+    return orientation;
+}
+
+// The YMF768's LED and rumble motor.
+SoC::Attention SocIMX1::GuestAttention() {
+    const auto outputs = imx1MachineAttention(machine);
+    return {outputs.led, outputs.motor};
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -297,7 +311,24 @@ uint32_t* SocIMX1::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirty
     return view.data();
 }
 
-void SocIMX1::AnalogStick(float x, float y) { input.stick(zodiacStickOffset(x), zodiacStickOffset(y)); }
+void SocIMX1::AnalogStick(float x, float y) {
+    stickHostX = x;
+    stickHostY = y;
+    PushStick();
+}
+
+void SocIMX1::SetStickHostTurns(int turns) {
+    turns &= 3;
+    if (turns == stickHostTurns) return;
+    stickHostTurns = turns;
+    PushStick();
+}
+
+void SocIMX1::PushStick() {
+    float x = stickHostX, y = stickHostY;
+    zodiacStickForView(x, y, zodiacStickTotalTurns(stickTurns, stickHostTurns), x, y);
+    input.stick(zodiacStickOffset(x), zodiacStickOffset(y));
+}
 
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);

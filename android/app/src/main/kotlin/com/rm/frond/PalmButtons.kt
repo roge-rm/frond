@@ -73,6 +73,8 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.JOG_DOWN -> scancodeKey(78)
             PalmButton.JOG_PRESS -> scancodeKey(77)
             PalmButton.BACK -> scancodeKey(74)
+            // The Zodiac's inputs go through ZodiacPad.
+            PalmButton.FUNCTION, PalmButton.TRIGGER_LEFT, PalmButton.TRIGGER_RIGHT, PalmButton.STICK_PRESS -> 0
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below

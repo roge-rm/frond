@@ -5,22 +5,25 @@ import android.view.KeyEvent
 // Game controllers on the Zodiac. Their buttons and sticks go to the core as SDL game controller
 // events, which the core maps as the desktop does (native/Gamepad.h): the left stick is the analogue
 // stick, A, B, X and Y the Action keys by place, the shoulders the triggers, Start and Mode Home,
-// Select Function and the left stick's click the stick's press. The d-pad and the hat push the stick
-// all the way, and the analogue triggers and L2 and R2 work as the shoulders.
+// Select Function and the left stick's click the stick's press. The map says which controller key
+// presses which of those; its defaults are that layout. A key mapped to a stick direction pushes the
+// stick all the way. The hat counts as the d-pad keys and the analogue triggers as L2 and R2, so they
+// follow the map too. The left stick always drives the analogue stick.
 // Not thread-safe: call it from the UI thread.
-class ZodiacPad(private val send: (Event) -> Unit) {
+class ZodiacPad(var map: ControllerMap = ControllerMap.zodiacDefaults(), private val send: (Event) -> Unit) {
     sealed class Event {
         data class Button(val device: Int, val button: Int, val down: Boolean) : Event()
         data class Axis(val device: Int, val axis: Int, val value: Int) : Event()
     }
 
-    // What each device holds: SDL buttons with the keys or axes holding them, d-pad keys, and the stick's parts.
+    // What each device holds: SDL buttons with the keys or axes holding them, stick keys, and the stick's parts.
     private class Pad {
         val holds = mutableMapOf<Int, MutableSet<String>>()
         var dpadX = 0
         var dpadY = 0
         var hatX = 0f
         var hatY = 0f
+        var hatKeys = setOf<Int>()
         var stickX = 0f
         var stickY = 0f
         var sentX = 0
@@ -28,16 +31,17 @@ class ZodiacPad(private val send: (Event) -> Unit) {
     }
     private val pads = mutableMapOf<Int, Pad>()
 
-    // Returns whether the key is one the Zodiac uses.
+    // Returns whether the key is one the map uses.
     fun key(device: Int, key: Int, down: Boolean): Boolean {
         val pad = pads.getOrPut(device) { Pad() }
-        when (key) {
-            KeyEvent.KEYCODE_DPAD_LEFT -> pad.dpadX = if (down) -1 else if (pad.dpadX == -1) 0 else pad.dpadX
-            KeyEvent.KEYCODE_DPAD_RIGHT -> pad.dpadX = if (down) 1 else if (pad.dpadX == 1) 0 else pad.dpadX
-            KeyEvent.KEYCODE_DPAD_UP -> pad.dpadY = if (down) -1 else if (pad.dpadY == -1) 0 else pad.dpadY
-            KeyEvent.KEYCODE_DPAD_DOWN -> pad.dpadY = if (down) 1 else if (pad.dpadY == 1) 0 else pad.dpadY
+        val target = map.keys[key] ?: return false
+        when (target) {
+            PalmButton.LEFT -> pad.dpadX = if (down) -1 else if (pad.dpadX == -1) 0 else pad.dpadX
+            PalmButton.RIGHT -> pad.dpadX = if (down) 1 else if (pad.dpadX == 1) 0 else pad.dpadX
+            PalmButton.UP -> pad.dpadY = if (down) -1 else if (pad.dpadY == -1) 0 else pad.dpadY
+            PalmButton.DOWN -> pad.dpadY = if (down) 1 else if (pad.dpadY == 1) 0 else pad.dpadY
             else -> {
-                val button = BUTTONS[key] ?: return false
+                val button = sdlButton(target) ?: return true
                 hold(device, pad, button, "k$key", down)
                 return true
             }
@@ -51,11 +55,36 @@ class ZodiacPad(private val send: (Event) -> Unit) {
         val pad = pads.getOrPut(device) { Pad() }
         pad.stickX = stickX
         pad.stickY = stickY
-        pad.hatX = hatX
-        pad.hatY = hatY
-        trigger(device, pad, LEFT_SHOULDER, "l", leftTrigger)
-        trigger(device, pad, RIGHT_SHOULDER, "r", rightTrigger)
+        hat(device, pad, hatX, hatY)
+        trigger(device, pad, KeyEvent.KEYCODE_BUTTON_L2, leftTrigger)
+        trigger(device, pad, KeyEvent.KEYCODE_BUTTON_R2, rightTrigger)
         updateStick(device, pad)
+    }
+
+    // The hat as the d-pad keys: a direction mapped to the stick pushes it, one mapped to a button holds it.
+    private fun hat(device: Int, pad: Pad, x: Float, y: Float) {
+        pad.hatX = 0f
+        pad.hatY = 0f
+        val now = mutableSetOf<Int>()
+        if (x < -ControllerInput.RELEASE) now += KeyEvent.KEYCODE_DPAD_LEFT
+        if (x > ControllerInput.RELEASE) now += KeyEvent.KEYCODE_DPAD_RIGHT
+        if (y < -ControllerInput.RELEASE) now += KeyEvent.KEYCODE_DPAD_UP
+        if (y > ControllerInput.RELEASE) now += KeyEvent.KEYCODE_DPAD_DOWN
+        for (key in pad.hatKeys - now) hatKey(device, pad, key, false)
+        for (key in now - pad.hatKeys) hatKey(device, pad, key, true)
+        pad.hatKeys = now
+        for (key in now) when (map.keys[key]) {
+            PalmButton.LEFT -> pad.hatX = -1f
+            PalmButton.RIGHT -> pad.hatX = 1f
+            PalmButton.UP -> pad.hatY = -1f
+            PalmButton.DOWN -> pad.hatY = 1f
+            else -> {}
+        }
+    }
+
+    private fun hatKey(device: Int, pad: Pad, key: Int, down: Boolean) {
+        val button = sdlButton(map.keys[key] ?: return) ?: return
+        hold(device, pad, button, "h$key", down)
     }
 
     // Lets go of everything one device holds, as when it's unplugged.
@@ -71,7 +100,9 @@ class ZodiacPad(private val send: (Event) -> Unit) {
     }
 
     // Presses past PRESS and lets go under RELEASE, so a trigger resting near the middle doesn't chatter.
-    private fun trigger(device: Int, pad: Pad, button: Int, tag: String, value: Float) {
+    private fun trigger(device: Int, pad: Pad, key: Int, value: Float) {
+        val tag = "t$key"
+        val button = sdlButton(map.keys[key] ?: return) ?: return
         val held = pad.holds[button]?.contains(tag) == true
         if (held && value < ControllerInput.RELEASE) hold(device, pad, button, tag, false)
         else if (!held && value > ControllerInput.PRESS) hold(device, pad, button, tag, true)
@@ -118,21 +149,19 @@ class ZodiacPad(private val send: (Event) -> Unit) {
         const val AXIS_LEFT_X = 0
         const val AXIS_LEFT_Y = 1
 
-        private val BUTTONS = mapOf(
-            KeyEvent.KEYCODE_BUTTON_A to BUTTON_A,
-            KeyEvent.KEYCODE_DPAD_CENTER to BUTTON_A,
-            KeyEvent.KEYCODE_BUTTON_B to BUTTON_B,
-            KeyEvent.KEYCODE_BUTTON_X to BUTTON_X,
-            KeyEvent.KEYCODE_BUTTON_Y to BUTTON_Y,
-            KeyEvent.KEYCODE_BUTTON_SELECT to BUTTON_BACK,
-            KeyEvent.KEYCODE_BUTTON_MODE to BUTTON_GUIDE,
-            KeyEvent.KEYCODE_BUTTON_START to BUTTON_START,
-            KeyEvent.KEYCODE_BUTTON_THUMBL to LEFT_STICK,
-            KeyEvent.KEYCODE_BUTTON_L1 to LEFT_SHOULDER,
-            KeyEvent.KEYCODE_BUTTON_L2 to LEFT_SHOULDER,
-            KeyEvent.KEYCODE_BUTTON_R1 to RIGHT_SHOULDER,
-            KeyEvent.KEYCODE_BUTTON_R2 to RIGHT_SHOULDER,
-        )
+        // The SDL button the core reads for a Zodiac input, or null for the stick's directions.
+        fun sdlButton(button: PalmButton): Int? = when (button) {
+            PalmButton.APP1 -> BUTTON_A
+            PalmButton.APP2 -> BUTTON_B
+            PalmButton.APP3 -> BUTTON_X
+            PalmButton.APP4 -> BUTTON_Y
+            PalmButton.FUNCTION -> BUTTON_BACK
+            PalmButton.HOME -> BUTTON_START
+            PalmButton.STICK_PRESS -> LEFT_STICK
+            PalmButton.TRIGGER_LEFT -> LEFT_SHOULDER
+            PalmButton.TRIGGER_RIGHT -> RIGHT_SHOULDER
+            else -> null
+        }
 
         // -1 to 1 as SDL's -32768 to 32767.
         fun axisValue(value: Float): Int = if (value <= -1f) -32768 else (value.coerceAtMost(1f) * 32767f).toInt()

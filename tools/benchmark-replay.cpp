@@ -327,7 +327,12 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             else if (e.kind=="pen-up") soc->PenUp();
             else if (e.kind=="key-down") soc->KeyDown(e.key);
             else if (e.kind=="key-up") soc->KeyUp(e.key);
-            else if (e.kind=="stick") soc->AnalogStick(e.x/511.0f,e.y/511.0f);
+            else if (e.kind=="stick") {
+                // The orientation is polled here, at stick events only; the stick follows it.
+                const unsigned orientation=soc->GuestOrientation();
+                if (trace) std::fprintf(stderr,"stick %d %d, orientation %u\n",e.x,e.y,orientation);
+                soc->AnalogStick(e.x/511.0f,e.y/511.0f);
+            }
             else if (e.kind=="card-insert") soc->SdInsert();
             else {
                 // The panel as it is, portrait (the host turns it), black before the first frame.

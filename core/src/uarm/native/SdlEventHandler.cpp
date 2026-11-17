@@ -549,6 +549,28 @@ void SdlEventHandler::UpdateStick() {
 // down once and comes up when the last of them lets go.
 // A button is down if any controller holds it. The stick is the one moved last, or while that one
 // is at rest or gone, the first controller with its stick pushed.
+bool SdlEventHandler::Rumble(bool on, uint64_t nowUsec) {
+    // Sent for 1 s and again every 0.5 s, so a missed off or a controller added meanwhile is never far behind.
+    constexpr uint32_t rumbleMs = 1000;
+    const bool due = !(on == rumbling && (!on || nowUsec - rumbleSentUsec < rumbleMs * 500));
+    if (due) {
+        rumbling = on;
+        rumbleSentUsec = nowUsec;
+    }
+    bool opened = false;
+    for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+        if (!SDL_IsGameController(i)) continue;
+        if (auto* controller = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i))) {
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            if (!SDL_GameControllerHasRumble(controller)) continue;
+#endif
+            opened = true;
+            if (due) SDL_GameControllerRumble(controller, on ? 0xc000 : 0, on ? 0xffff : 0, on ? rumbleMs : 0);
+        }
+    }
+    return opened;
+}
+
 GamepadState SdlEventHandler::CombinedPads() const {
     GamepadState all;
     const GamepadState* stickPad = nullptr;

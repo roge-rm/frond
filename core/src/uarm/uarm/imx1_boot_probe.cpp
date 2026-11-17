@@ -2414,6 +2414,11 @@ unsigned imx1MachineScanOrientation(const Imx1Machine* machine) {
     static const unsigned orientations[] = {1, 4, 2, 3};
     return orientations[(display.activeWord(0x414) >> 3) & 3];
 }
+Imx1MachineAttention imx1MachineAttention(const Imx1Machine* machine) {
+    if (!machine || !machine->probe->peripherals.ymf768Enabled()) return {};
+    const auto& ymf = machine->probe->peripherals.ymf768();
+    return {ymf.led(), ymf.motor()};
+}
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;

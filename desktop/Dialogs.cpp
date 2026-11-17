@@ -169,6 +169,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     fastAudio->setObjectName("fastAudio");
     soundLayout->addWidget(audio);
     soundLayout->addWidget(fastAudio);
+    rumble = new QCheckBox(tr("Rumble"), sound);
+    rumble->setObjectName("rumble");
+    soundLayout->addWidget(rumble);
     layout->addWidget(sound);
     auto* speedBox = new QGroupBox(tr("Speed"), this);
     speedGroup = speedBox;
@@ -261,6 +264,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     showMips->setChecked(prefs.showMips);
     audio->setChecked(prefs.audio);
     fastAudio->setChecked(prefs.fastAudio);
+    rumble->setChecked(prefs.rumble);
     connect(windowScale, &QSlider::valueChanged, this, [this](int value) {
         this->automaticScale = false;
         scaleLabel->setText(tr("Size: %1×").arg(value / 4.0));
@@ -302,6 +306,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.showMips = showMips->isChecked();
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
+    prefs.rumble = rumble->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
@@ -375,6 +380,7 @@ void MachineSettings::setDevice(Device device) {
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(frontend)));
     const bool m68k = frondFirmware::runs68k(device);
     fastAudio->setVisible(!m68k);
+    rumble->setVisible(device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac);
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));
