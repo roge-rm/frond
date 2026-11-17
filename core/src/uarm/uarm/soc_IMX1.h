@@ -71,6 +71,7 @@ class SocIMX1 : public SoC {
     uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
     uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
     uint64_t ReadyWaitTries() const { return imx1MachineReadyWaitTries(machine); }
+    uint64_t PcmUnderrunWords() const { return imx1MachinePcmUnderrunWords(machine); }
     // The sound and graphics chips' registers as text (imx1MachineChipSummary).
     std::string ChipSummary() const { return imx1MachineChipSummary(machine); }
     // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps

@@ -15,6 +15,8 @@ struct icache;
 struct ArmCP15MMU* cp15MMUInit(struct ArmCpu* cpu, struct ArmMmu* mmu, struct icache* ic,
                                uint32_t cpuid, uint32_t cacheId, bool xscale, bool omap);
 void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus);
+// ARM920T only: the prefetch abort FSR (c5, op2 1). FAR is left alone.
+void cp15MMUSetInstructionFaultStatus(struct ArmCP15MMU* cp15, uint_fast8_t faultStatus);
 void cp15MMUArm920SetIcacheIndexCompatibility(ArmCP15MMU*, bool);
 uint32_t cp15MMUArm920Control(const ArmCP15MMU*);
 Arm920DataCache* cp15MMUArm920DataCache(ArmCP15MMU*);

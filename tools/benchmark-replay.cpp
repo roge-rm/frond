@@ -323,6 +323,14 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const uint64_t traceStepMs=trace&&*traceEnv?number(traceEnv,100000):250;
     uint64_t traceNext=0;
     bool lastLcd=true;  // changed frames and handed-over events, guest time
+    // BENCH_ZODIAC_WAV=FILE keeps the sound (44100 Hz stereo, 16-bit) as a WAV. BENCH_ZODIAC_PACE=FILE writes a line
+    // per 20 ms of guest time: guest ms, wall ms, PCM frames and SSI1 underrun words so far.
+    const char* wavEnv=std::getenv("BENCH_ZODIAC_WAV");
+    std::vector<uint32_t> wav;
+    std::ofstream pace;
+    if (const char* paceEnv=std::getenv("BENCH_ZODIAC_PACE")) pace.open(paceEnv);
+    const uint64_t underrunStart=soc->PcmUnderrunWords();
+    uint64_t paceNext=0;
     const auto start=std::chrono::steady_clock::now();
     for (;;) {
         uint32_t first=0,last=0;
@@ -374,6 +382,13 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         uint32_t pcm[8192];
         const auto n=audioQueuePopChunk(queue,pcm,8192);
         pcmHash=hashBytes(pcmHash,pcm,n*sizeof(uint32_t)); pcmFrames+=n;
+        if (wavEnv) wav.insert(wav.end(),pcm,pcm+n);
+        if (pace.is_open() && soc->GetTime()-clockStart>=paceNext) {
+            const auto now=soc->GetTime()-clockStart;
+            pace << now/1000000 << ' ' << std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count() << ' '
+                 << pcmFrames << ' ' << soc->PcmUnderrunWords()-underrunStart << '\n';
+            paceNext=now-now%20000000+20000000;
+        }
         if (trace) {
             const bool lcd=soc->LcdEnabled();
             if (lcd!=lastLcd) { std::fprintf(stderr,"lcd %s at %.3f ms wall %.3f\n",lcd?"on":"off",(soc->GetTime()-clockStart)/1e6,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()); lastLcd=lcd; }
@@ -385,6 +400,18 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         }
     }
     const double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    if (wavEnv) {
+        const uint32_t bytes=uint32_t(wav.size()*4), rate=44100, byteRate=rate*4, fmtSize=16, riffSize=36+bytes;
+        const uint16_t format=1, channels=2, align=4, bits=16;
+        std::ofstream out(wavEnv,std::ios::binary);
+        out.write("RIFF",4); out.write((const char*)&riffSize,4); out.write("WAVEfmt ",8); out.write((const char*)&fmtSize,4);
+        out.write((const char*)&format,2); out.write((const char*)&channels,2); out.write((const char*)&rate,4);
+        out.write((const char*)&byteRate,4); out.write((const char*)&align,2); out.write((const char*)&bits,2);
+        out.write("data",4); out.write((const char*)&bytes,4); out.write((const char*)wav.data(),bytes);
+        out.flush(); if (!out) throw std::runtime_error("BENCH_ZODIAC_WAV: write failed");
+    }
+    if (pace.is_open()) { pace.flush(); if (!pace) throw std::runtime_error("BENCH_ZODIAC_PACE: write failed"); }
+    if (std::getenv("BENCH_ZODIAC_PACE")) std::fprintf(stderr,"ssi underrun words %llu\n",(unsigned long long)(soc->PcmUnderrunWords()-underrunStart));
     const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
