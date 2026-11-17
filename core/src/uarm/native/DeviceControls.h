@@ -348,8 +348,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     // TG50 with the PEGA-GC10 clipped over its keyboard. Below: the app row, then the whole pad
     // where the keyboard was: the arrow dish on the left, A and B in the right dish, Home and Menu
     // with X and Y under them in the middle and the Hold slide on the bottom edge. Around (rotated
-    // to landscape): a grip either side of the screen, 150 wide and authored 320 tall, the arrows,
-    // Home and X on the left, A, B, Menu, Y and Hold on the right. Round keys hit their whole cap.
+    // to landscape): a grip either side of the screen, 150 wide and authored 320 tall, the arrow and
+    // A/B dishes low and outward where thumbs rest, Home, X, Menu, Y and Hold in a row above them.
+    // Hits are bigger than the drawn keys for thumbs: an arrow or A/B key's shape is its dish
+    // (deviceGamepadDishAt), the other round keys hit a circle of deviceGamepadHitRadius.
     constexpr auto padBelow=DeviceControlSection::below;
     constexpr auto padAround=DeviceControlSection::around;
     using Icon=DeviceControlIcon;
@@ -362,28 +364,28 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         {keyIdHard3, {186,22,44,16}, "To Do", Icon::tasks, 8, padBelow},
         {keyIdHard4, {234,22,44,16}, "Memo Pad", Icon::memo, 8, padBelow},
         {keyIdGraffiti, {290,18,24,24}, "Graffiti", Icon::graffiti, 12, padBelow},
-        {keyIdPadUp, {46,73,28,28}, "Pad up", Icon::up, 14, padBelow},
-        {keyIdPadDown, {46,127,28,28}, "Pad down", Icon::down, 14, padBelow},
-        {keyIdPadLeft, {19,100,28,28}, "Pad left", Icon::left, 14, padBelow},
-        {keyIdPadRight, {73,100,28,28}, "Pad right", Icon::right, 14, padBelow},
-        {keyIdPadB, {263,81,30,30}, "B", Icon::legend, 15, padBelow},
-        {keyIdPadA, {227,117,30,30}, "A", Icon::legend, 15, padBelow},
+        {keyIdPadUp, {46,73,28,28}, "Pad up", Icon::up, 14, padBelow, {11,65,98,98}},
+        {keyIdPadDown, {46,127,28,28}, "Pad down", Icon::down, 14, padBelow, {11,65,98,98}},
+        {keyIdPadLeft, {19,100,28,28}, "Pad left", Icon::left, 14, padBelow, {11,65,98,98}},
+        {keyIdPadRight, {73,100,28,28}, "Pad right", Icon::right, 14, padBelow, {11,65,98,98}},
+        {keyIdPadB, {263,81,30,30}, "B", Icon::legend, 15, padBelow, {211,65,98,98}},
+        {keyIdPadA, {227,117,30,30}, "A", Icon::legend, 15, padBelow, {211,65,98,98}},
         {keyIdPadHome, {127,128,24,24}, "Pad Home", Icon::legend, 12, padBelow},
         {keyIdPadMenu, {169,128,24,24}, "Pad Menu", Icon::legend, 12, padBelow},
         {keyIdPadX, {97,154,26,26}, "X", Icon::legend, 13, padBelow},
         {keyIdPadY, {197,154,26,26}, "Y", Icon::legend, 13, padBelow},
         {keyIdPadHold, {136,194,48,11}, "Hold", Icon::legend, 5.5f, padBelow},
-        {keyIdPadUp, {62,116,28,28}, "Pad up", Icon::up, 14, padAround},
-        {keyIdPadDown, {62,172,28,28}, "Pad down", Icon::down, 14, padAround},
-        {keyIdPadLeft, {34,144,28,28}, "Pad left", Icon::left, 14, padAround},
-        {keyIdPadRight, {90,144,28,28}, "Pad right", Icon::right, 14, padAround},
-        {keyIdPadHome, {94,214,24,24}, "Pad Home", Icon::legend, 12, padAround},
-        {keyIdPadX, {33,217,26,26}, "X", Icon::legend, 13, padAround},
-        {keyIdPadHold, {190,79,48,11}, "Hold", Icon::legend, 5.5f, padAround},
-        {keyIdPadB, {227,125,30,30}, "B", Icon::legend, 15, padAround},
-        {keyIdPadA, {191,161,30,30}, "A", Icon::legend, 15, padAround},
-        {keyIdPadMenu, {182,214,24,24}, "Pad Menu", Icon::legend, 12, padAround},
-        {keyIdPadY, {241,217,26,26}, "Y", Icon::legend, 13, padAround},
+        {keyIdPadUp, {52,144,28,28}, "Pad up", Icon::up, 14, padAround, {17,137,98,98}},
+        {keyIdPadDown, {52,200,28,28}, "Pad down", Icon::down, 14, padAround, {17,137,98,98}},
+        {keyIdPadLeft, {24,172,28,28}, "Pad left", Icon::left, 14, padAround, {17,137,98,98}},
+        {keyIdPadRight, {80,172,28,28}, "Pad right", Icon::right, 14, padAround, {17,137,98,98}},
+        {keyIdPadHome, {108,102,24,24}, "Pad Home", Icon::legend, 12, padAround},
+        {keyIdPadX, {55,101,26,26}, "X", Icon::legend, 13, padAround},
+        {keyIdPadHold, {198,72,48,11}, "Hold", Icon::legend, 5.5f, padAround},
+        {keyIdPadB, {237,153,30,30}, "B", Icon::legend, 15, padAround, {185,137,98,98}},
+        {keyIdPadA, {201,189,30,30}, "A", Icon::legend, 15, padAround, {185,137,98,98}},
+        {keyIdPadMenu, {168,102,24,24}, "Pad Menu", Icon::legend, 12, padAround},
+        {keyIdPadY, {219,101,26,26}, "Y", Icon::legend, 13, padAround},
         clieJogKey(0,-236),clieJogKey(1,-236),clieJogKey(2,-236),clieJogKey(3,-236),
     };
     static const DeviceControlProfile tg50GamepadProfile{320,224,tg50Gamepad,std::size(tg50Gamepad),{0,0,0,0},0,
@@ -741,13 +743,42 @@ inline bool deviceClusterKeyAt(const DeviceButton& b, float x, float y) {
     if(std::fabs(kx)>std::fabs(ky))return std::fabs(dx)>=std::fabs(dy) && dx*kx>0;
     return std::fabs(dy)>std::fabs(dx) && dy*ky>0;
 }
+// The PEGA-GC10's dish keys hit in their dish (the button's shape) for thumbs. An arrow takes the
+// quarter round its own direction outside a small dead middle, and within 22.5 degrees of a
+// diagonal its neighbour too, so a thumb between two arrows presses both. A and B split their dish
+// down the middle. 0 for a miss, 1 for the key's own part, 2 for the neighbour's half of a
+// diagonal. Strip units.
+constexpr float deviceGamepadDeadMiddle=0.14f;
+inline int deviceGamepadDishAt(const DeviceButton& b, float x, float y) {
+    const auto& s=b.shape;
+    const float R=s.w*0.5f,cx=s.x+R,cy=s.y+R,dx=x-cx,dy=y-cy,d=std::hypot(dx,dy);
+    const float kx=b.bounds.x+b.bounds.w*0.5f-cx,ky=b.bounds.y+b.bounds.h*0.5f-cy,k=std::hypot(kx,ky);
+    if(d>R || k<=0)return 0;
+    const float along=dx*kx+dy*ky;
+    if(b.key==keyIdPadA || b.key==keyIdPadB)return along>=0 ? 1 : 0;
+    if(d<R*deviceGamepadDeadMiddle)return 0;
+    const float c=along/(d*k);
+    return c>=0.70710678f ? 1 : c>=0.38268343f ? 2 : 0;
+}
+// The round keys off the dishes hit this far from their centre at least; landscape grips have
+// room for more than the pad under the screen.
+inline float deviceGamepadHitRadius(const DeviceButton& b) {
+    return std::max(b.bounds.w*0.5f,b.section==DeviceControlSection::around ? 21.f : 19.f);
+}
+// The Hold slide hits this far round its track.
+constexpr float deviceGamepadHoldMargin=8;
+// The key at a window point, keyInvalid for none. With also, a second key held by the same point
+// goes there (an arrow pressed with its neighbour on a diagonal), keyInvalid for none.
 inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
-                             int screenHeight, int x, int y, const DeviceControlView& view={}) {
+                             int screenHeight, int x, int y, const DeviceControlView& view={},
+                             KeyId* also=nullptr) {
+    if(also)*also=keyInvalid;
     // Integer window points hit-test at their pixel centre, in strip units.
     const DeviceControlTransform transform(profile,screenWidth,view);
     const float sx=(x+0.5f-transform.left)/transform.scale,sy=(y-screenHeight-transform.top+0.5f)/transform.scale;
     const auto part=deviceNavigatorAt(profile,sx,sy);
     if(part!=keyInvalid)return part;
+    KeyId hit=keyInvalid;
     for(size_t i=0;i<profile.count;++i) {
         if(deviceNavigatorButton(profile,profile.buttons[i]) || !deviceControlShown(profile.buttons[i],view))continue;
         const auto& b=profile.buttons[i];
@@ -758,16 +789,31 @@ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidt
         const SDL_Point offset=panel ? deviceAroundOffset(profile,b,screenWidth,screenHeight) : SDL_Point{0,0};
         const float bx=panel ? (x+0.5f-offset.x)*profile.unit : sidebar ? (x+0.5f-transform.sidebarLeft)*profile.unit : sx;
         const float by=panel ? (y+0.5f-offset.y)*profile.unit : sidebar ? (y-screenHeight-transform.sidebarTop+0.5f)*profile.unit : sy;
-        if(b.icon==DeviceControlIcon::action && b.shape.w>0) {
-            if(deviceClusterKeyAt(b,bx,by))return b.key;
+        bool on=false;
+        if(clieGamepadKey(b.key)) {
+            if(b.shape.w>0) {
+                // Exactly on a diagonal both arrows claim the point as their own.
+                const int at=deviceGamepadDishAt(b,bx,by);
+                if((at==2 || (at==1 && hit!=keyInvalid)) && also && *also==keyInvalid)*also=b.key;
+                on=at==1;
+            } else if(b.key==keyIdPadHold)
+                on=deviceRoundedDistance(r,r.h*0.5f,bx,by)<=deviceGamepadHoldMargin;
+            else
+                on=std::hypot(bx-r.x-r.w*0.5f,by-r.y-r.h*0.5f)<=deviceGamepadHitRadius(b);
+        } else if(b.icon==DeviceControlIcon::action && b.shape.w>0) {
+            on=deviceClusterKeyAt(b,bx,by);
         } else if(b.shape.w>0) {
-            if(bx>=r.x && bx<r.x+r.w && by>=r.y && by<r.y+r.h &&
-               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),bx,by)<=0)
-                return b.key;
-        } else if(deviceRoundedDistance(r,deviceButtonCorner(profile,b),bx,by)<=0)
-            return b.key;
+            on=bx>=r.x && bx<r.x+r.w && by>=r.y && by<r.y+r.h &&
+               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),bx,by)<=0;
+        } else on=deviceRoundedDistance(r,deviceButtonCorner(profile,b),bx,by)<=0;
+        if(on && hit==keyInvalid) {
+            hit=b.key;
+            // Only the pad's arrows share a point; anything else stops here.
+            if(!also || !clieGamepadKey(b.key))return hit;
+        }
     }
-    return keyInvalid;
+    if(also && hit==keyInvalid)*also=keyInvalid;
+    return hit;
 }
 // The analogue stick's well in window pixels for this view, w 0 for none.
 inline SDL_Rect deviceStickRect(const DeviceControlProfile& profile, int screenWidth, int screenHeight,

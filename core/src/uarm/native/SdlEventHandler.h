@@ -103,6 +103,8 @@ class SdlEventHandler {
         SDL_TouchID touch{};
         SDL_FingerID id{};
         KeyId key{keyInvalid};
+        // A second key held by the same finger: the pad arrow's neighbour on a diagonal.
+        KeyId also{keyInvalid};
         DeviceStick position{};
         // Put down on the knob and not yet moved, in window pixels.
         bool pressPending{false};

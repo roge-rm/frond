@@ -410,9 +410,20 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
     if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
     int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
     MapPointer(x, y);
+    auto press = [&](KeyId key) {
+        if (key && ++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+    };
+    auto unpress = [&](KeyId key) {
+        if (key && --builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
+    };
+    auto keysAt = [&](int x, int y, KeyId& also) {
+        also = keyInvalid;
+        return x >= 0 && y >= 0 ? deviceControlAt(controls, ScreenWidth(), ScreenHeight(), int((x + 0.5f)/scale),
+                                                  int((y + 0.5f)/scale), controlView, &also) : keyInvalid;
+    };
     auto release = [&] {
-        if (finger->key && --builtInHolds[finger->key] == 0 && !hardKeys[finger->key] && pointerKey != finger->key)
-            soc->KeyUp(finger->key);
+        unpress(finger->key);
+        unpress(finger->also);
         if (finger->pen) soc->PenUp();
         const bool stickFinger = finger->stick;
         *finger = {}; redrawRequested = true;
@@ -434,20 +445,22 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
             for (const auto& item : fingers) if (item.active && item.stick) return;
             const float downX = (x + 0.5f)/scale, downY = (y + 0.5f)/scale;
             const bool knob = deviceStickKnobAt(StickWell(), downX, downY);
-            *finger = {true, false, true, event.touchId, event.fingerId, keyInvalid,
+            *finger = {true, false, true, event.touchId, event.fingerId, keyInvalid, keyInvalid,
                        knob ? DeviceStick{0, 0, true} : TouchStick(x, y), knob, downX, downY};
             UpdateStick();
             return;
         }
-        const KeyId key = x >= 0 && y >= 0 ? deviceControlAt(controls, ScreenWidth(), ScreenHeight(),
-                                  int((x + 0.5f)/scale), int((y + 0.5f)/scale),controlView) : keyInvalid;
+        KeyId also = keyInvalid;
+        const KeyId key = keysAt(x, y, also);
         if (!key && !pen) return;
         if (pen) {
             if (penDown) return;
             for (const auto& item : fingers) if (item.active && item.pen) return;
+            also = keyInvalid;
         }
-        *finger = {true, pen, false, event.touchId, event.fingerId, key};
-        if (key && ++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+        *finger = {true, pen, false, event.touchId, event.fingerId, key, also};
+        press(key);
+        press(also);
         redrawRequested = true;
     }
     if (!finger || !finger->active) return;
@@ -462,23 +475,27 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
         else release();
     } else {
         // A button finger rolling onto another button lets go of the old key and presses the new
-        // one; off any button it just lets go.
-        const KeyId key = x >= 0 && y >= 0 ? deviceControlAt(controls, ScreenWidth(), ScreenHeight(),
-                              int((x + 0.5f)/scale), int((y + 0.5f)/scale),controlView) : keyInvalid;
-        if (key == finger->key) return;
-        const KeyId old = finger->key;
+        // one; off any button it just lets go. On the pad's arrows it slides through diagonals.
+        KeyId also = keyInvalid;
+        const KeyId key = keysAt(x, y, also);
+        if (key == finger->key && also == finger->also) return;
         if (!key) { release(); return; }
-        if (--builtInHolds[old] == 0 && !hardKeys[old] && pointerKey != old) soc->KeyUp(old);
+        const KeyId oldKey = finger->key, oldAlso = finger->also;
         finger->key = key;
-        if (++builtInHolds[key] == 1 && !hardKeys[key] && pointerKey != key) soc->KeyDown(key);
+        finger->also = also;
+        // Press the new keys before letting go of the old so a key kept across the move stays down.
+        if (key != oldKey && key != oldAlso) press(key);
+        if (also && also != oldKey && also != oldAlso) press(also);
+        if (oldKey != key && oldKey != also) unpress(oldKey);
+        if (oldAlso && oldAlso != key && oldAlso != also) unpress(oldAlso);
         redrawRequested = true;
     }
 }
 void SdlEventHandler::ReleaseFingers() {
     for (auto& finger : fingers) {
         if (!finger.active) continue;
-        if (finger.key && --builtInHolds[finger.key] == 0 && !hardKeys[finger.key] && pointerKey != finger.key)
-            soc->KeyUp(finger.key);
+        for (const KeyId key : {finger.key, finger.also})
+            if (key && --builtInHolds[key] == 0 && !hardKeys[key] && pointerKey != key) soc->KeyUp(key);
         if (finger.pen) soc->PenUp();
         finger = {};
     }

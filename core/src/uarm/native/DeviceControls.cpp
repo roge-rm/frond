@@ -1740,8 +1740,8 @@ float gcText(const char* text, float x, float y, float cx, float top, float sx, 
     return tg50TextDistance(text,(x-cx)/sx,(y-top)/sy,1)*std::min(sx,sy)-weight;
 }
 
-// Everything on the pad for one arrangement: the keys of section, and the body, dishes, name and
-// labels placed round them. Below draws the whole pad; around draws the grip holding keys between
+// Everything on the pad for one arrangement: the keys of section, and the body, dishes and labels
+// placed round them. Below draws the whole pad; around draws the grip holding keys between
 // x0 and x1.
 void paintClieGamepad(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
                       DeviceControlSection section, float x0, float x1) {
@@ -1760,7 +1760,7 @@ void paintClieGamepad(Canvas& canvas, const DeviceControlProfile& profile, Devic
     if(below) {
         const SDL_Rect main{4,62,312,126},lobe{92,150,136,58};
         paintGcBody(canvas,[&](float x,float y) {
-            return gcSmoothMin(deviceRoundedDistance(main,22,x,y),deviceRoundedDistance(lobe,20,x,y),6);
+            return gcSmoothMin(deviceRoundedDistance(main,22,x,y),deviceRoundedDistance(lobe,20,x,y),12);
         },4,62,316,208,5);
     } else {
         const SDL_Rect grip{int(x0)+8,62,136,198};
@@ -1834,33 +1834,6 @@ void paintClieGamepad(Canvas& canvas, const DeviceControlProfile& profile, Devic
         const float lx=t.x+t.w+12,ly=t.y+t.h*0.5f-1.7f;
         canvas.paint(lx-12,ly-1,lx+12,ly+5,[&](float x,float y) {return canvas.edge(gcText("HOLD",x,y,lx,ly,0.62f,0.55f,0.32f));},
                      [&](float,float,Rgb) {return look.ink;});
-    }
-    // The name: CLIE with its accent, wide, white with a dark edge, over GEAR in a white bar.
-    const bool named=below || x0==0;
-    if(named) {
-        const float cx=below ? 160.f : x0+76,top=below ? 85.f : 80.f,sx=3.4f,sy=1.75f;
-        // C, L, a plain I in the gap and E, with the accent over the E.
-        auto name=[&](float x,float y) {
-            const float w=tg50TextWidth("CL E",1),ix=cx+(-w*0.5f+12.2f)*sx,ex=cx+(w*0.5f-2)*sx;
-            float d=gcText("CL E",x,y,cx,top,sx,sy,0);
-            d=std::min(d,segment(x,y,ix,top,ix,top+6*sy));
-            return std::min(d,segment(x,y,ex-1.6f,top-2.6f,ex+1.8f,top-4.4f));
-        };
-        canvas.paint(cx-40,top-8,cx+40,top+14,[&](float x,float y) {return canvas.edge(name(x,y)-1.9f);},
-                     [&](float,float,Rgb) {return Rgb{120,124,132};});
-        canvas.paint(cx-40,top-8,cx+40,top+14,[&](float x,float y) {return canvas.edge(name(x,y)-1.1f);},
-                     [](float,float,Rgb) {return Rgb{250,251,252};});
-        const SDL_Rect bar{int(cx)-34,int(top)+14,68,8};
-        canvas.paint(bar.x-1,bar.y-1,bar.x+bar.w+1,bar.y+bar.h+1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(bar,1.5f,x,y));},
-                     [](float,float,Rgb) {return Rgb{248,249,250};});
-        canvas.paint(bar.x-1,bar.y-1,bar.x+bar.w+1,bar.y+bar.h+1,[&](float x,float y) {return canvas.edge(std::fabs(deviceRoundedDistance(bar,1.5f,x,y))-0.3f)*0.6f;},
-                     [&](float,float,Rgb) {return look.outline;});
-        const char* gear[]={"G","E","A","R"};
-        for(int i=0;i<4;++i) {
-            const float gx=bar.x+bar.w*(i+0.5f)/4,gy=bar.y+1.6f;
-            canvas.paint(gx-4,gy-1,gx+4,gy+6,[&](float x,float y) {return canvas.edge(gcText(gear[i],x,y,gx,gy,0.85f,0.8f,0.42f));},
-                         [&](float,float,Rgb) {return Rgb{126,130,138};});
-        }
     }
 }
 

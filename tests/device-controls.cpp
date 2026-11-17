@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <initializer_list>
+#include <cmath>
 #include <tuple>
 #include <fstream>
 #include "InputReplay.h"
@@ -2194,8 +2196,14 @@ static void clieGamepad() {
             if(!clieGamepadKey(b.key))continue;
             const auto r=deviceButtonRect(p,b,320,320,view);
             assert(deviceControlAt(p,320,320,r.x+r.w/2,r.y+r.h/2,view)==b.key);
-            // Outside a round key's corners is not that key.
-            if(b.key!=keyIdPadHold)assert(deviceControlAt(p,320,320,r.x,r.y,view)!=b.key);
+            // Past a round key's hit circle, or its dish, is not that key.
+            if(b.key!=keyIdPadHold) {
+                const float reach=(b.shape.w>0 ? b.shape.w*0.5f+std::hypot(b.bounds.x+b.bounds.w*0.5f-b.shape.x-b.shape.w*0.5f,
+                                                                           b.bounds.y+b.bounds.h*0.5f-b.shape.y-b.shape.h*0.5f)
+                                                : deviceGamepadHitRadius(b))*float(r.w)/b.bounds.w+2;
+                assert(deviceControlAt(p,320,320,int(r.x+r.w*0.5f-reach),int(r.y+r.h*0.5f-reach),view)!=b.key);
+                assert(deviceControlAt(p,320,320,int(r.x+r.w*0.5f+reach),int(r.y+r.h*0.5f+reach),view)!=b.key);
+            }
             // Right panel keys sit past the screen, left ones before it.
             if(side)assert(r.x+r.w<=150 || r.x>=470);
         }
@@ -2205,8 +2213,31 @@ static void clieGamepad() {
             for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==k && deviceControlShown(p.buttons[i],view))return deviceButtonRect(p,p.buttons[i],320,320,view);
             assert(false);return SDL_Rect{};
         };
-        const auto u=rectOf(keyIdPadUp),l=rectOf(keyIdPadLeft);
-        assert(deviceControlAt(p,320,320,(u.x+u.w/2+l.x+l.w/2)/2,(u.y+u.h/2+l.y+l.h/2)/2,view)==keyInvalid);
+        // The arrows fill their dish round a dead middle, a thumb on a diagonal holds both arrows
+        // either side of it, and A and B fill theirs.
+        const auto u=rectOf(keyIdPadUp),d=rectOf(keyIdPadDown);
+        const float ux=u.x+u.w*0.5f,dcy=(u.y+u.h*0.5f+d.y+d.h*0.5f)*0.5f,R=(d.y-u.y)*0.5f+21*float(u.w)/28;
+        assert(deviceControlAt(p,320,320,int(ux),int(dcy),view)==keyInvalid);
+        const KeyId round[]={keyIdPadUp,keyIdPadRight,keyIdPadDown,keyIdPadLeft};
+        for(int k=0;k<4;++k) {
+            const float a=float(M_PI)*(k*0.5f-0.25f);
+            KeyId also=keyInvalid;
+            const KeyId at=deviceControlAt(p,320,320,int(ux+std::cos(a)*R*0.6f),int(dcy+std::sin(a)*R*0.6f),view,&also);
+            const KeyId one=round[k],two=round[(k+1)%4];
+            if(!((at==one && also==two) || (at==two && also==one)))std::fprintf(stderr,"diag k %d side %d at %d also %d want %d %d ux %g dcy %g R %g u %d,%d,%d,%d\n",k,int(side),at,also,one,two,ux,dcy,R,u.x,u.y,u.w,u.h);
+            assert((at==one && also==two) || (at==two && also==one));
+        }
+        auto dishFilled=[&](float cx,float cy,float r,float middle,std::initializer_list<KeyId> keys) {
+            for(float y=cy-r;y<=cy+r;y+=1)for(float x=cx-r;x<=cx+r;x+=1) {
+                const float e=std::hypot(x+0.5f-cx,y+0.5f-cy);
+                if(e>r-1.5f || e<middle+1.5f)continue;
+                const KeyId at=deviceControlAt(p,320,320,int(x),int(y),view);
+                assert(std::find(keys.begin(),keys.end(),at)!=keys.end());
+            }
+        };
+        dishFilled(ux,dcy,R,R*deviceGamepadDeadMiddle,{keyIdPadUp,keyIdPadDown,keyIdPadLeft,keyIdPadRight});
+        const auto a=rectOf(keyIdPadA),bb=rectOf(keyIdPadB);
+        dishFilled((a.x+a.w*0.5f+bb.x+bb.w*0.5f)*0.5f,(a.y+a.h*0.5f+bb.y+bb.h*0.5f)*0.5f,R,0,{keyIdPadA,keyIdPadB});
         assert(seen[keyIdJogPress]==(side ? 0 : 1) && seen[keyIdHard1]==(side ? 0 : 1));
     }
     // Drawn at scale 2: each held key darkens at its lower middle, the Hold knob moves.
