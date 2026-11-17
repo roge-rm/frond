@@ -62,11 +62,50 @@ class ClieGamepadTest {
         assertEquals(PalmButton.PAD_B, map.keys[KeyEvent.KEYCODE_BUTTON_B])
         assertEquals(PalmButton.PAD_X, map.keys[KeyEvent.KEYCODE_BUTTON_X])
         assertEquals(PalmButton.PAD_Y, map.keys[KeyEvent.KEYCODE_BUTTON_Y])
-        assertEquals(PalmButton.MENU, map.keys[KeyEvent.KEYCODE_BUTTON_START])
-        assertEquals(PalmButton.HOME, map.keys[KeyEvent.KEYCODE_BUTTON_SELECT])
+        // Start is Home and Select is Menu as on every other device: the pad's own while it's plugged
+        // in (Q and W), the CLIE's otherwise.
+        assertEquals(PalmButton.HOME, map.keys[KeyEvent.KEYCODE_BUTTON_START])
+        assertEquals(PalmButton.MENU, map.keys[KeyEvent.KEYCODE_BUTTON_SELECT])
+        assertEquals(20, PalmButtons.padScancode(PalmButton.HOME))
+        assertEquals(26, PalmButtons.padScancode(PalmButton.MENU))
+        assertTrue("home" in tg50.buttons)
         assertEquals(PalmButton.PAD_HOLD, map.keys[KeyEvent.KEYCODE_BUTTON_THUMBR])
         assertTrue(map.keys.values.all { it in PalmButton.on(tg50) })
         assertEquals(map, ControllerMap.decode(map.encode(), tg50))
+    }
+
+    @Test fun coreStateBecomesTheSetting() {
+        // Unset or different: an attached or detached session state is saved, as on the desktop.
+        assertEquals(true, MachineSettings().gamepadFromCore("attached")?.gamepad)
+        assertEquals(false, MachineSettings().gamepadFromCore("detached")?.gamepad)
+        assertEquals(false, MachineSettings(gamepad = true).gamepadFromCore("detached")?.gamepad)
+        // Already the setting, a busy connector, or no pad: nothing to save.
+        assertNull(MachineSettings(gamepad = true).gamepadFromCore("attached"))
+        assertNull(MachineSettings(gamepad = false).gamepadFromCore("detached"))
+        assertNull(MachineSettings(gamepad = true).gamepadFromCore("busy"))
+        assertNull(MachineSettings().gamepadFromCore(null))
+        // Everything else stays.
+        val s = MachineSettings(jogControls = JogControls.SCREEN, jogLandscape = JogLandscape.OVER)
+        assertEquals(s.copy(gamepad = true), s.gamepadFromCore("attached"))
+    }
+
+    @Test fun landscapeJogSavesAndGoesToTheCore() {
+        assertEquals(JogLandscape.BESIDE, MachineSettings().jogLandscape)
+        // Older settings without the choice read as beside.
+        assertEquals(JogLandscape.BESIDE, MachineSettings.from(JSONObject("{\"jogControls\":\"screen\"}")).jogLandscape)
+        for (jog in JogLandscape.entries) {
+            val saved = MachineSettings(jogLandscape = jog).json()
+            assertEquals(jog.arg, saved.getString("jogControlsLandscape"))
+            assertEquals(jog, MachineSettings.from(JSONObject(saved.toString())).jogLandscape)
+            val args = MachineSettings(jogLandscape = jog).arguments(tg50Controls = true, gamepadSupported = true)
+            assertEquals(jog.arg, args[args.indexOf("--jog-controls-landscape") + 1])
+            assertTrue(MachineSettings(jogLandscape = jog).displayArgument(tg50Controls = true, gamepadSupported = true)
+                .endsWith("jog=keyboard jog-landscape=${jog.arg}"))
+        }
+        assertEquals(listOf("hidden", "beside", "under", "over"), JogLandscape.entries.map { it.arg })
+        // Only devices that take the pad get it.
+        assertFalse("--jog-controls-landscape" in MachineSettings().arguments(tg50Controls = true))
+        assertFalse("jog-landscape" in MachineSettings().displayArgument(tg50Controls = true))
     }
 
     @Test fun otherDevicesHaveNoPadButtons() {

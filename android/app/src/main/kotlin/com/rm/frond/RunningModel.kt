@@ -617,6 +617,7 @@ class RunningModel(
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
+                if (next.jogLandscape != old.jogLandscape) s = s.copy(jogLandscape = next.jogLandscape)
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
@@ -734,7 +735,7 @@ class RunningModel(
 
     private fun adoptGamepad(message: String) {
         gamepad = RunningMenu.gamepadState(message)
-        FrondActivity.running?.gamepadAttached(gamepad == "attached")
+        FrondActivity.running?.gamepadStateRead(gamepad)
     }
 
     // Plugs the pad in or out without a reset, and keeps the choice as the machine's setting.

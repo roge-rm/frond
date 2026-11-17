@@ -52,6 +52,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--gamepad on\|off` | TG50: the CLIÉ game controller plugged in or out at start, over the session's state. Without it the session's state stays. |
 | `--jog-controls hidden\|screen\|keyboard` | TG50 jog controls: hidden, left of the LCD, or left of the keyboard. Default `screen`. |
 | `--hide-jog-controls` | Same as `--jog-controls hidden`. |
+| `--jog-controls-landscape hidden\|beside\|under\|over` | TG50 jog controls in landscape with the game controller: hidden, left of the left grip, or turned on their side under or over the screen. Default `beside`. |
 
 For a headless run set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
 
@@ -309,7 +310,7 @@ State commands take no argument. Mode commands change the setting and reply with
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
 | `camera-state` | | `camera`: `pattern`, `picture`, `webcam` or `frames`; `pattern` and why after a failure |
 | `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
-| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
+| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`), `jog-landscape=`(`hidden` `beside` `under` `over`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
 | `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |

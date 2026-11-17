@@ -542,18 +542,27 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard})
         jogBox->addItem(frondSessions::jogControlsLabel(jog, false), int(jog));
     displayGrid->addWidget(jogBox, 6, 1, 1, 2);
+    // Row 7 is shared with Speed, which only the 68k Palms show.
+    jogLandscapeLabel = label(tr("Jog in landscape"), 7, displayGrid);
+    jogLandscapeBox = new QComboBox(root);
+    jogLandscapeBox->setObjectName("runningJogLandscape");
+    for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                     frondSessions::JogLandscape::under, frondSessions::JogLandscape::over})
+        jogLandscapeBox->addItem(frondSessions::jogLandscapeLabel(jog), int(jog));
+    displayGrid->addWidget(jogLandscapeBox, 7, 1, 1, 2);
     speedLabel = label(tr("Speed"), 7, displayGrid);
     speedBox = new QComboBox(root);
     speedBox->setObjectName("runningSpeed");
     speedBox->addItem(tr("Original"), false);
     speedBox->addItem(tr("Uncapped"), true);
     displayGrid->addWidget(speedBox, 7, 1, 1, 2);
-    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, jogLandscapeBox, speedBox}) runningButtons << w;
     connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
     connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
     connect(mipsToggle, &QCheckBox::clicked, this, [this] { liveDisplay("mips"); });
     connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
     connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
+    connect(jogLandscapeBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jogLandscape"); });
     connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
     auto* reset = button(tr("Reset"), "reset");
     resetButton = reset;
@@ -1248,6 +1257,7 @@ void MainWindow::refresh() {
     shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow});
     const auto& jogFrontend = frondFirmware::profile(currentDevice()).frontend;
     shown(frondSessions::jogControlsShown(jogFrontend), {jogLabel, jogBox});
+    shown(frondSessions::jogLandscapeShown(jogFrontend), {jogLandscapeLabel, jogLandscapeBox});
     jogBox->setItemText(jogBox->findData(int(frondSessions::JogControls::keyboard)),
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(jogFrontend)));
     shown(m68k, {speedLabel, speedBox});
@@ -1530,7 +1540,7 @@ void MainWindow::embedReply(bool ok, const QString& message) {
 // nothing named it only shows the settings in the controls.
 void MainWindow::liveDisplay(const QString& what) {
     if (what.isEmpty() || !client.available()) {
-        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox), f(jogLandscapeBox);
         if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
         sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
         smoothToggle->setChecked(runningPreferences.smooth);
@@ -1538,6 +1548,7 @@ void MainWindow::liveDisplay(const QString& what) {
         updateMips();
         keyboardShow->setChecked(runningPreferences.showKeyboard);
         jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
+        jogLandscapeBox->setCurrentIndex(std::max(0, jogLandscapeBox->findData(int(runningPreferences.jogLandscape))));
         speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
         return;
     }
@@ -1557,6 +1568,9 @@ void MainWindow::liveDisplay(const QString& what) {
     else if (what == "jog") {
         prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
         argument = "jog=" + frondSessions::jogControlsName(prefs.jogControls);
+    } else if (what == "jogLandscape") {
+        prefs.jogLandscape = frondSessions::JogLandscape(jogLandscapeBox->currentData().toInt());
+        argument = "jog-landscape=" + frondSessions::jogLandscapeName(prefs.jogLandscape);
     } else if (what == "speed") {
         prefs.uncapped = speedBox->currentData().toBool();
         command = "speed"; argument = prefs.uncapped ? "uncapped" : "original";
@@ -2272,6 +2286,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         arguments << "--hide-keyboard";
     if (frondSessions::jogControlsShown(frondFirmware::profile(startDevice).frontend))
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
+    if (frondSessions::jogLandscapeShown(frondFirmware::profile(startDevice).frontend))
+        arguments << "--jog-controls-landscape" << frondSessions::jogLandscapeName(runningPreferences.jogLandscape);
     // The machine's game controller setting wins over the session's at start.
     if (frondFirmware::profile(startDevice).frontend.clieGamepad && runningPreferences.gamepadSet)
         arguments << "--gamepad" << (runningPreferences.gamepad ? "on" : "off");

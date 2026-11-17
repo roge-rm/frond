@@ -62,6 +62,28 @@ inline JogControls readJogControls(const QJsonObject& object) {
         if (name == jogControlsName(jog)) return jog;
     return object.value("showJogControls").toBool(true) ? JogControls::screen : JogControls::hidden;
 }
+// CLIE jog controls in landscape with the game controller: hidden, left of the left grip, or
+// turned on their side under or over the screen. Saved as jogControlsLandscape and passed to the
+// core's --jog-controls-landscape and display jog-landscape=.
+enum class JogLandscape { hidden, beside, under, over };
+// Devices that take the game controller get the choice.
+inline bool jogLandscapeShown(const DeviceFrontend5& frontend) { return frontend.sideTabWidth > 0 && frontend.clieGamepad; }
+inline QString jogLandscapeLabel(JogLandscape jog) {
+    return jog == JogLandscape::hidden ? QCoreApplication::translate("JogControls", "Hidden")
+         : jog == JogLandscape::beside ? QCoreApplication::translate("JogControls", "Left of controller")
+         : jog == JogLandscape::under ? QCoreApplication::translate("JogControls", "Under screen")
+                                      : QCoreApplication::translate("JogControls", "Over screen");
+}
+inline QString jogLandscapeName(JogLandscape jog) {
+    return jog == JogLandscape::hidden ? QStringLiteral("hidden") : jog == JogLandscape::beside ? QStringLiteral("beside")
+         : jog == JogLandscape::under ? QStringLiteral("under") : QStringLiteral("over");
+}
+inline JogLandscape readJogLandscape(const QJsonObject& object) {
+    const auto name = object.value("jogControlsLandscape").toString();
+    for (auto jog : {JogLandscape::hidden, JogLandscape::beside, JogLandscape::under, JogLandscape::over})
+        if (name == jogLandscapeName(jog)) return jog;
+    return JogLandscape::beside;
+}
 
 // Host preferences stay beside the guest file, including before its first save.
 struct Preferences {
@@ -96,6 +118,8 @@ struct Preferences {
     bool rumble{true};
     // CLIÉ: the game controller attached. Unset (gamepadSet false) leaves the session's state at start.
     bool gamepad{false}, gamepadSet{false};
+    // CLIÉ with the game controller: the jog controls in landscape.
+    JogLandscape jogLandscape{JogLandscape::beside};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -116,6 +140,7 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     result->rumble = object.value("rumble").toBool(true);
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);
+    result->jogLandscape = readJogLandscape(object);
     // Earlier machine settings only have the printer switch.
     const auto port = object.value("usbPort").toString();
     result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
@@ -137,6 +162,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"smooth", prefs.smooth}, {"audio", prefs.audio}, {"fastAudio", prefs.fastAudio}, {"microphone", prefs.microphone},
                              {"showKeyboard", prefs.showKeyboard}, {"jogControls", jogControlsName(prefs.jogControls)},
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
+                             {"jogControlsLandscape", jogLandscapeName(prefs.jogLandscape)},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
     if (!prefs.barShown) object.insert("barShown", false);
     if (prefs.showMips) object.insert("showMips", true);

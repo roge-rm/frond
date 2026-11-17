@@ -223,6 +223,18 @@ class Canvas {
     float edge(float distance) const {return clamp01(0.5f-distance*s);}
     template <class Cover, class Colour>
     void paint(float x0, float y0, float x1, float y1, Cover cover, Colour colour) {
+        if(turned) {
+            // Turned a quarter anticlockwise: y runs left to right along the canvas, x up it.
+            const float xa=std::max(x0,clipLeft),xb=std::min(x1,clipRight);
+            const int X0=std::max(0,int(std::floor((y0+originY)*s))),X1=std::min(w,int(std::ceil((y1+originY)*s)));
+            const int Y0=std::max(0,int(std::floor(-(xb+originX)*s))),Y1=std::min(h,int(std::ceil(-(xa+originX)*s)));
+            for(int Y=Y0;Y<Y1;++Y)for(int X=X0;X<X1;++X) {
+                const float x=-(Y+0.5f)/s-originX,y=(X+0.5f)/s-originY,c=cover(x,y);
+                if(c<=0)continue;
+                auto& p=pixels[size_t(Y)*w+X];p=mix(p,colour(x,y,p),std::min(c,1.f));
+            }
+            return;
+        }
         const int X0=std::max(0,int(std::floor((std::max(x0,clipLeft)+originX)*s))),X1=std::min(w,int(std::ceil((std::min(x1,clipRight)+originX)*s)));
         const int Y0=std::max(0,int(std::floor((y0+originY)*s))),Y1=std::min(h,int(std::ceil((y1+originY)*s)));
         for(int Y=Y0;Y<Y1;++Y)for(int X=X0;X<X1;++X) {
@@ -235,6 +247,9 @@ class Canvas {
     float s;
     float originX{0},originY{0};
     float clipLeft{-1e9f},clipRight{1e9f};
+    // Upright, a pixel is at x=(X+0.5)/s-originX, y=(Y+0.5)/s-originY; turned, at
+    // x=-(Y+0.5)/s-originX, y=(X+0.5)/s-originY.
+    bool turned{false};
     std::vector<Rgb> pixels;
 };
 
@@ -1837,18 +1852,50 @@ void paintClieGamepad(Canvas& canvas, const DeviceControlProfile& profile, Devic
     }
 }
 
-// One TG50 panel beside the screen in landscape, from x0 to x1 and H tall: the TG50's brushed
+// One TG50 panel beside the screen in landscape, from x0 to x1 and y0 to y1: the TG50's brushed
 // body with a grip of the game controller on it.
 void paintClieGamepadPanel(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
-                           float x0, float x1, float H) {
+                           float x0, float x1, float y0, float y1) {
     const Rgb body{184,180,171};
-    canvas.paint(x0,0,x1,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
-        Rgb c=mix(body*1.05f,body*0.84f,std::pow(clamp01(y/H),1.2f));
+    canvas.paint(x0,y0,x1,y1,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        Rgb c=mix(body*1.05f,body*0.84f,std::pow(clamp01((y-y0)/(y1-y0)),1.2f));
         const float t=std::fabs(x-(x0+x1)*0.5f)/((x1-x0)*0.5f);
         c=c+Rgb{5,5,5}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
         return c*(1-0.08f*t*t);
     });
     paintClieGamepad(canvas,profile,pressed,DeviceControlSection::around,x0,x1);
+}
+
+// The jog tab in landscape with the game controller, on the TG50's brushed body: canvas in side
+// tab units, upright or turned (Canvas::turned). Streaks run across the window either way; rows is
+// the window's height in side tab units, for the light from above. Under or over the screen, a
+// dark bezel edge where the bar meets the LCD.
+void paintClieJogLandscape(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
+                           JogLandscape jog, float rows) {
+    const Rgb body{184,180,171};
+    // Window rows and columns, in side tab units, of a canvas point.
+    auto window=[&](float x,float y) {
+        return canvas.turned ? std::pair<float,float>{y+canvas.originY,-x-canvas.originX}
+                             : std::pair<float,float>{x+canvas.originX,y+canvas.originY};
+    };
+    const float big=1e5f;
+    canvas.paint(-big,-big,big,big,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        const auto [wx,wy]=window(x,y);
+        const float v=jog==JogLandscape::under ? wy+rows-canvas.h/canvas.s : wy;
+        Rgb c=mix(body*1.05f,body*0.84f,std::pow(clamp01(v/rows),1.2f));
+        return c+Rgb{5,5,5}*speckle(wx*0.05f,v*1.5f)+Rgb{2,2,2}*std::sin(v*5.3f+std::sin(wx*0.07f)*1.4f);
+    });
+    if(canvas.turned) {
+        // The bezel's edge along the screen side of the bar: the canvas's top under the screen,
+        // its bottom over it.
+        const float edge=jog==JogLandscape::under ? 0.f : canvas.h/canvas.s;
+        canvas.paint(-big,-big,big,big,[&](float x,float y) {
+            const float d=std::fabs(window(x,y).second-edge);
+            return canvas.edge(d-1.2f);
+        },[](float,float,Rgb) {return Rgb{40,40,42};});
+    }
+    paintClieJog(canvas,profile,0,pressed);
+    canvas.clipLeft=-1e9f;canvas.clipRight=1e9f;
 }
 
 // CLIE PEG-TG50: brushed champagne-silver body, an app row of round and slim silver keys, a
@@ -3221,26 +3268,61 @@ void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profi
     const int left=deviceScreenLeft(profile,view);
     if(!left)return;
     if(deviceControlsAround(profile,view)) {
-        // One canvas per panel, each the screen's height, in strip units from the panel's
+        // One canvas per panel, each the window's height, in strip units from the panel's
         // authored left edge; the right one ends on the window's integer right edge.
         const int right=int(left*scale)+int(screenWidth*scale);
+        const int windowWidth=int(deviceControlsWidth(profile,screenWidth,view)*scale);
+        const int rows=screenHeight+deviceJogBarHeight(profile,view);
+        const auto jog=deviceJogLandscape(profile,view);
+        const int tab=jog==JogLandscape::beside ? int(profile.sideTabWidth/profile.unit*scale) : 0;
         for(bool second:{false,true}) {
             const int x0=second ? profile.panelWidth : 0;
-            Canvas canvas(profile.panelWidth,screenHeight*profile.unit,scale/profile.unit);
-            canvas.w=second ? int(deviceControlsWidth(profile,screenWidth,view)*scale)-right : int(left*scale);
-            canvas.h=int(screenHeight*scale);
+            const int x=second ? right : tab;
+            Canvas canvas(profile.panelWidth,rows*profile.unit,scale/profile.unit);
+            canvas.w=second ? windowWidth-right : int(left*scale)-tab;
+            canvas.h=int(rows*scale);
             canvas.pixels.assign(size_t(canvas.w)*canvas.h,Rgb{0,0,0});
             canvas.originX=-float(x0);
-            if(profile.style==DeviceControlStyle::tg50)
-                paintClieGamepadPanel(canvas,profile,pressed,float(x0),float(x0+profile.panelWidth),float(screenHeight*profile.unit));
-            else paintZodiacControls(canvas,profile,pressed,stick,DeviceControlSection::around,float(x0),
-                                     float(x0+profile.panelWidth),float(screenHeight*profile.unit),screenHeight);
-            const int x=second ? right : 0;
+            if(profile.style==DeviceControlStyle::tg50) {
+                // The grip's keys sit where deviceAroundOffset puts them.
+                DeviceButton probe{};probe.bounds.x=x0;
+                const float down=float(deviceAroundOffset(profile,probe,screenWidth,screenHeight,view).y*profile.unit);
+                canvas.originY=down;
+                paintClieGamepadPanel(canvas,profile,pressed,float(x0),float(x0+profile.panelWidth),-down,rows*profile.unit-down);
+            } else paintZodiacControls(canvas,profile,pressed,stick,DeviceControlSection::around,float(x0),
+                                       float(x0+profile.panelWidth),float(screenHeight*profile.unit),screenHeight);
             if(auto* texture=canvasTexture(renderer,canvas)) {
                 const SDL_Rect dest{x,0,canvas.w,canvas.h};
                 SDL_RenderCopy(renderer,texture,nullptr,&dest);
                 SDL_DestroyTexture(texture);
             }
+        }
+        if(jog==JogLandscape::hidden)return;
+        // The side tab on the TG50's body: a column left of the left grip, or a bar between the
+        // grips under or over the screen with the tab turned on its side.
+        const auto r=deviceJogLandscapeRect(profile,screenWidth,screenHeight,view);
+        const auto& st=profile.sideTab;
+        const int u=profile.unit;
+        const bool turned=jog!=JogLandscape::beside;
+        SDL_Rect dest=turned ? SDL_Rect{int(left*scale),jog==JogLandscape::under ? int(screenHeight*scale) : 0,
+                                        right-int(left*scale),0}
+                             : SDL_Rect{0,0,tab,int(rows*scale)};
+        if(turned)dest.h=(jog==JogLandscape::under ? int(rows*scale) : int(r.h*scale))-dest.y;
+        Canvas canvas(1,1,scale/u);
+        canvas.w=dest.w;canvas.h=dest.h;
+        canvas.pixels.assign(size_t(canvas.w)*canvas.h,Rgb{0,0,0});
+        canvas.turned=turned;
+        if(turned) {
+            canvas.originX=-(st.x+st.w-(dest.y/scale-r.y)*u);
+            canvas.originY=-(st.y+(dest.x/scale-r.x)*u);
+        } else {
+            canvas.originX=-(st.x-r.x*u);
+            canvas.originY=-(st.y-r.y*u);
+        }
+        paintClieJogLandscape(canvas,profile,pressed,jog,float(rows*u));
+        if(auto* texture=canvasTexture(renderer,canvas)) {
+            SDL_RenderCopy(renderer,texture,nullptr,&dest);
+            SDL_DestroyTexture(texture);
         }
         return;
     }

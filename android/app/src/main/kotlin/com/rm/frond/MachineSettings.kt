@@ -16,6 +16,15 @@ enum class JogControls(val label: String, val arg: String) {
     fun label(besideButtons: Boolean) = if (this == KEYBOARD && besideButtons) "Beside the buttons" else label
 }
 
+// Where the CLIE jog controls go in landscape with the game controller; arg is the saved name and
+// the core's --jog-controls-landscape value.
+enum class JogLandscape(val label: String, val arg: String) {
+    HIDDEN("Hidden", "hidden"),
+    BESIDE("Left of controller", "beside"),
+    UNDER("Under screen", "under"),
+    OVER("Over screen", "over"),
+}
+
 // CPU engine; arg is the saved name and the core's --engine value. Fast falls back to Exact
 // where the core has no JIT.
 enum class Engine(val label: String, val arg: String) {
@@ -62,6 +71,8 @@ data class MachineSettings(
     val showKeyboard: Boolean = true,
     // New machines put the jog controls left of the keyboard.
     val jogControls: JogControls = JogControls.KEYBOARD,
+    // CLIE with the game controller: the jog controls in landscape.
+    val jogLandscape: JogLandscape = JogLandscape.BESIDE,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
     // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
@@ -91,7 +102,7 @@ data class MachineSettings(
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
-        .put("showJogControls", jogControls != JogControls.HIDDEN)
+        .put("showJogControls", jogControls != JogControls.HIDDEN).put("jogControlsLandscape", jogLandscape.arg)
         .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) } }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
@@ -105,6 +116,7 @@ data class MachineSettings(
         if (smoothing) add("--smooth-lcd")
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
         if (jogControls) addAll(listOf("--jog-controls", this@MachineSettings.jogControls.arg))
+        if (gamepadSupported) addAll(listOf("--jog-controls-landscape", jogLandscape.arg))
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
@@ -125,11 +137,20 @@ data class MachineSettings(
 
     // The core's display command argument, for changing these while it runs.
     fun displayArgument(tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                        jogControls: Boolean = tg50Controls): String = buildString {
+                        jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): String = buildString {
         append("fit=${this@MachineSettings.size.arg} smooth=${if (smoothing) "on" else "off"}")
         if (tg50Controls) append(" keyboard=${if (showKeyboard) "on" else "off"}")
         if (jogControls) append(" jog=${this@MachineSettings.jogControls.arg}")
+        if (gamepadSupported) append(" jog-landscape=${jogLandscape.arg}")
         if (m68k && !colourLcd) append(" contrast=$contrast")
+    }
+
+    // The pad state the core reports, as the setting, so a session loaded with its own state starts
+    // with it next time, as on the desktop. Null when nothing changes: busy or unknown, or the setting
+    // already matches.
+    fun gamepadFromCore(state: String?): MachineSettings? {
+        val attached = when (state) { "attached" -> true; "detached" -> false; else -> return null }
+        return if (gamepad == attached) null else copy(gamepad = attached)
     }
 
     // The same settings for another device: an engine left at the old device's default takes the new one's.
@@ -160,6 +181,7 @@ data class MachineSettings(
                 microphone = json.optBoolean("microphone", fallback.microphone),
                 showKeyboard = json.optBoolean("showKeyboard", true),
                 jogControls = jogControls(json),
+                jogLandscape = JogLandscape.entries.firstOrNull { it.arg == json.optString("jogControlsLandscape") } ?: fallback.jogLandscape,
                 engine = Engine.entries.firstOrNull { it.arg == json.optString("engine") } ?: fallback.engine,
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
                 contrastSet = json.has("contrast") || fallback.contrastSet,

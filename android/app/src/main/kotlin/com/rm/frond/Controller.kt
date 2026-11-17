@@ -141,8 +141,9 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
         }
 
         // The CLIE with the game controller: the d-pad is the arrows, A and B (south and east) are the pad's
-        // A and B, X and Y (west and north) its X and Y, Start is Menu, Select is Home and R3 is Hold. The
-        // shoulders and lower triggers press the CLIE's four app buttons.
+        // A and B, X and Y (west and north) its X and Y, Start is Home and Select is Menu (the pad's while it's
+        // plugged in, the CLIE's otherwise, as on every other device) and R3 is Hold. The shoulders and lower
+        // triggers press the CLIE's four app buttons.
         fun gamepadDefaults(device: Device) = ControllerMap(mapOf(
             KeyEvent.KEYCODE_DPAD_UP to PalmButton.UP,
             KeyEvent.KEYCODE_DPAD_DOWN to PalmButton.DOWN,
@@ -153,8 +154,8 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             KeyEvent.KEYCODE_BUTTON_B to PalmButton.PAD_B,
             KeyEvent.KEYCODE_BUTTON_X to PalmButton.PAD_X,
             KeyEvent.KEYCODE_BUTTON_Y to PalmButton.PAD_Y,
-            KeyEvent.KEYCODE_BUTTON_START to PalmButton.MENU,
-            KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.HOME,
+            KeyEvent.KEYCODE_BUTTON_START to PalmButton.HOME,
+            KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.MENU,
             KeyEvent.KEYCODE_BUTTON_THUMBR to PalmButton.PAD_HOLD,
             KeyEvent.KEYCODE_BUTTON_L1 to PalmButton.APP1,
             KeyEvent.KEYCODE_BUTTON_L2 to PalmButton.APP2,

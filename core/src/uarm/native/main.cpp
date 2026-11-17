@@ -94,6 +94,8 @@ struct Options {
     optional<bool> gamepad;
     bool hideJogControls;
     optional<JogPlacement> jogPlacement;
+    // Where the jog controls go in landscape with the game controller; unset is beside.
+    optional<JogLandscape> jogLandscape;
     WindowFit windowFit;
     uint32_t windowBackground;
     optional<DisplayMode> displayMode;
@@ -846,10 +848,12 @@ bool gFastEngineMissing = false;
         // The game controller drawn at start: the one the start option asks for, else the session's.
         // The guest thread follows what the SoC really has from then on (an attach can be refused).
         const bool gamepadAtStart = soc->GamepadSupported() && options.gamepad.value_or(soc->GamepadAttached());
-        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog, gamepadAtStart};
+        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog, gamepadAtStart,
+                                options.jogLandscape.value_or(JogLandscape::beside)};
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
         controlView.gamepad = display.gamepad;
+        if (deviceType == deviceTypeTG50) controlView.jogLandscape = display.jogLandscape;
         // A device with two arrangements starts with its controls around the screen; a fitted
         // window then puts them around when landscape and below when portrait, again after each resize.
         controlView = deviceControlViewForWindow(deviceControls(deviceType, controlView), controlView, 0, 0);
@@ -1498,6 +1502,7 @@ bool gFastEngineMissing = false;
                     if (deviceType == deviceTypeTG50) {
                         controlView = deviceControlView(display.keyboard, display.jog);
                         controlView.gamepad = display.gamepad;
+                        controlView.jogLandscape = display.jogLandscape;
                     }
                     arrangeForRotation(shownRotation);
                     const bool wasFitted = fitted;
@@ -1731,6 +1736,14 @@ int main(int argc, char** argv) {
             if (!parseJogPlacement(value, placement)) throw runtime_error("invalid jog controls: " + value);
             return placement;
         });
+    program.add_argument("--jog-controls-landscape")
+        .help("TG50 jog controls in landscape with the game controller: hidden, beside (left of the left grip), "
+              "under or over (the screen, turned on their side); default: beside")
+        .action([](const string& value) {
+            JogLandscape placement;
+            if (!parseJogLandscape(value, placement)) throw runtime_error("invalid landscape jog controls: " + value);
+            return placement;
+        });
 
     program.add_argument("--display")
         .help(
@@ -1820,6 +1833,7 @@ int main(int argc, char** argv) {
                        .gamepad = program.present<bool>("--gamepad"),
                        .hideJogControls = program.get<bool>("--hide-jog-controls"),
                        .jogPlacement = program.present<JogPlacement>("--jog-controls"),
+                       .jogLandscape = program.present<JogLandscape>("--jog-controls-landscape"),
                        .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),
                        .windowBackground = program.present<uint32_t>("--window-background").value_or(0),
                        .displayMode = program.present<DisplayMode>("--display"),

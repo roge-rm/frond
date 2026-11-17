@@ -384,7 +384,8 @@ int SdlEventHandler::ScreenHeight() const {
 }
 bool SdlEventHandler::OnScreen(int x,int y) const {
     const int left=int(scale*deviceScreenLeft((*shownControls),controlView));
-    return x>=left && y>=0 && x<left+int(scale*ScreenWidth()) && y<int(scale*ScreenHeight());
+    const int top=int(scale*deviceScreenTop((*shownControls),controlView));
+    return x>=left && y>=top && x<left+int(scale*ScreenWidth()) && y<top+int(scale*ScreenHeight());
 }
 void SdlEventHandler::ReleasePointer() {
     if (pointerStick) {
@@ -639,6 +640,7 @@ DeviceKeyMask SdlEventHandler::PressedButtons() const {
 // Map pixel centres before truncation so fractional scales keep taps on the drawn pixel.
 int SdlEventHandler::RotateX(int x, int y) {
     x-=int(scale*deviceScreenLeft((*shownControls),controlView));
+    y-=int(scale*deviceScreenTop((*shownControls),controlView));
     switch (rotation) {
         case Rotation::landscape_90:
             return int((scale * width - 0.5f - y) / scale);
@@ -656,6 +658,7 @@ int SdlEventHandler::RotateX(int x, int y) {
 
 int SdlEventHandler::RotateY(int x, int y) {
     x-=int(scale*deviceScreenLeft((*shownControls),controlView));
+    y-=int(scale*deviceScreenTop((*shownControls),controlView));
     switch (rotation) {
         case Rotation::landscape_90:
             return int((x + 0.5f) / scale);

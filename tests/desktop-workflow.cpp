@@ -3499,6 +3499,41 @@ for line in s.makefile('rb'):
     }
     // The TG50's Game controller row: attaches and detaches live, greys while the connector is
     // taken, and is saved for the machine and passed at the next start.
+    // TG50 Jog in landscape: started with the saved choice, changed live from the Display panel and saved.
+    void jogLandscapeLive() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Jog", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        frondSessions::Preferences prefs;
+        prefs.jogLandscape = frondSessions::JogLandscape::over;
+        QVERIFY(frondSessions::writePreferences(managedSession("Jog"), prefs).isEmpty());
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Jog"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        QFile f(files.path() + "/args"); QVERIFY(f.open(QIODevice::ReadOnly));
+        const auto arguments = QString::fromUtf8(f.readAll()).split('\n');
+        const auto at = arguments.indexOf("--jog-controls-landscape");
+        QVERIFY(at >= 0 && at + 1 < arguments.size() && arguments.at(at + 1) == "over");
+        window.findChild<PanelHost*>("panelHost")->open(2);
+        auto* box = window.findChild<QComboBox*>("runningJogLandscape");
+        QVERIFY(box && !box->isHidden());
+        QCOMPARE(box->count(), 4);
+        QCOMPARE(box->currentText(), QString("Over screen"));
+        QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 4000);
+        box->setCurrentIndex(box->findData(int(frondSessions::JogLandscape::under)));
+        emit box->activated(box->currentIndex());
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display jog-landscape=under"), 4000);
+        frondSessions::Preferences kept;
+        QVERIFY(frondSessions::readPreferences(managedSession("Jog"), &kept));
+        QVERIFY(kept.jogLandscape == frondSessions::JogLandscape::under);
+    }
     void clieGamepadSwitch() {
         QSettings().clear(); QSettings().setValue("resume", false);
         QDir(managedFolder()).removeRecursively();
@@ -4159,6 +4194,7 @@ for line in s.makefile('rb'):
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             frondSessions::Preferences prefs;
             prefs.showKeyboard = keyboard; prefs.jogControls = jog; prefs.microphone = true;
+            prefs.jogLandscape = frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4);
             QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
             QFile::remove(core.fileName() + ".args");
             MainWindow window(core.fileName()); window.show(); window.openSession(path, true);
@@ -4170,9 +4206,14 @@ for line in s.makefile('rb'):
             QVERIFY(at >= 0 && at + 1 < arguments.size());
             QCOMPARE(QString::fromUtf8(arguments.at(at + 1)), frondSessions::jogControlsName(jog));
             QVERIFY(!arguments.contains("--hide-jog-controls"));
+            const auto landscape = arguments.indexOf("--jog-controls-landscape");
+            QVERIFY(landscape >= 0 && landscape + 1 < arguments.size());
+            QCOMPARE(QString::fromUtf8(arguments.at(landscape + 1)),
+                     frondSessions::jogLandscapeName(frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4)));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(frondSessions::readPreferences(path, &prefs));
             QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.jogControls, jog);
+            QVERIFY(prefs.jogLandscape == frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4));
             QVERIFY(prefs.microphone);
             QCOMPARE(digest(path), guest);
         }
@@ -4193,6 +4234,19 @@ for line in s.makefile('rb'):
         QCOMPARE(controls.jogControls->itemText(2), QString("Left of keyboard"));
         QCOMPARE(controls.jogControls->currentText(), QString("Left of screen"));
         QCOMPARE(MachineSettings(frondSessions::Preferences{}, false).jogControls->currentText(), QString("Left of keyboard"));
+        QVERIFY(!controls.jogLandscape->isHidden() && !controls.jogLandscapeLabel->isHidden());
+        QCOMPARE(controls.jogLandscapeLabel->text(), QString("Jog in landscape"));
+        QCOMPARE(controls.jogLandscape->count(), 4);
+        QCOMPARE(controls.jogLandscape->itemText(0), QString("Hidden"));
+        QCOMPARE(controls.jogLandscape->itemText(1), QString("Left of controller"));
+        QCOMPARE(controls.jogLandscape->itemText(2), QString("Under screen"));
+        QCOMPARE(controls.jogLandscape->itemText(3), QString("Over screen"));
+        QCOMPARE(controls.jogLandscape->currentText(), QString("Left of controller"));
+        for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                         frondSessions::JogLandscape::under, frondSessions::JogLandscape::over}) {
+            controls.jogLandscape->setCurrentIndex(int(jog));
+            QVERIFY(controls.values().jogLandscape == jog);
+        }
         for (bool keyboard : {false, true})
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             controls.showKeyboard->setChecked(keyboard); controls.jogControls->setCurrentIndex(int(jog));
@@ -4204,6 +4258,7 @@ for line in s.makefile('rb'):
         controls.setDevice(frondFirmware::Device::tx);
         QVERIFY(controls.showKeyboard->isHidden());
         QVERIFY(controls.jogControls->isHidden() && controls.jogControlsLabel->isHidden());
+        QVERIFY(controls.jogLandscape->isHidden() && controls.jogLandscapeLabel->isHidden());
         QVERIFY(controls.values().microphone);
     }
     void legacyTg50KeepsJogBesideScreen() {

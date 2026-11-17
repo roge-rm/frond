@@ -221,7 +221,7 @@ open class FrondActivity : SDLActivity() {
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
@@ -591,6 +591,26 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
+    // The pad state the core reports (RunningMenu.gamepadState): the buttons follow it, and an
+    // attached or detached state becomes the machine's setting, so a session loaded with its own
+    // state keeps it on the next start. A busy connector leaves the setting.
+    fun gamepadStateRead(state: String?) {
+        gamepadAttached(state == "attached")
+        runOnUiThread {
+            val next = machineSettings.gamepadFromCore(state) ?: return@runOnUiThread
+            machineSettings = next
+            val attached = next.gamepad ?: return@runOnUiThread
+            val id = Sessions.forPath(this, sessionPath)?.id ?: return@runOnUiThread
+            Thread({
+                try {
+                    Sessions.updateSettings(applicationContext, id) { it.copy(gamepad = attached) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "game controller setting: ${e.message}")
+                }
+            }, "FrondGamepadSetting").apply { isDaemon = true }.start()
+        }
+    }
+
     private fun configureController(device: Device) {
         controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
@@ -827,7 +847,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
             changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
         }
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (wanted == display) return
         display = wanted
         link.whenConnected {
@@ -935,7 +955,7 @@ open class FrondActivity : SDLActivity() {
         Thread({
             if (launchDevice().clieGamepad) {
                 val pad = link.request("gamepad-state", timeoutSeconds = 60)
-                if (pad.ok) gamepadAttached(pad.message.startsWith("attached"))
+                if (pad.ok) gamepadStateRead(RunningMenu.gamepadState(pad.message))
             }
             val reply = link.request("keyboard-state", timeoutSeconds = 60)
             if (!reply.ok) return@Thread

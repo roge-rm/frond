@@ -2174,6 +2174,167 @@ struct ZodiacHandler : SdlEventHandler {
 // The PEGA-GC10 on the TG50: below in place of the keyboard, around as a grip either side of the
 // screen. Every pad key appears once per arrangement, hits at its centre and not in the gaps, and
 // darkens or moves while held; the app row and side tab only show below.
+// The jog tab with the game controller: left of the pad in portrait (keyboard shown or not), and
+// hidden, upright left of the left grip, or turned under or over the screen in landscape.
+static void clieGamepadJog(const char* directory) {
+    const auto& p=deviceControls(DeviceArt::tg50,true);
+    const KeyId jogKeys[]={keyIdJogUp,keyIdJogPress,keyIdJogDown,keyIdBack};
+    auto rectOf=[&](KeyId k,const DeviceControlView& view) {
+        for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==k && deviceControlShown(p.buttons[i],view))
+            return deviceButtonRect(p,p.buttons[i],320,320,view);
+        return SDL_Rect{0,0,0,0};
+    };
+    auto centreHits=[&](const DeviceControlView& view) {
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];
+            if(!deviceControlShown(b,view))continue;
+            const auto r=deviceButtonRect(p,b,320,320,view);
+            const KeyId at=deviceControlAt(p,320,320,r.x+r.w/2,r.y+r.h/2,view);
+            if(at!=b.key)std::fprintf(stderr,"jog view key %d at %d,%d hits %d\n",b.key,r.x+r.w/2,r.y+r.h/2,at);
+            assert(at==b.key);
+        }
+    };
+    // Portrait: left of the pad, the strip narrowed to make room as left of the keyboard.
+    for(bool keyboard:{true,false}) {
+        auto view=deviceControlView(keyboard,JogPlacement::keyboard);view.gamepad=true;
+        assert(deviceSideTabBelowScreen(p,view) && deviceScreenLeft(p,view)==0 && deviceScreenTop(p,view)==0);
+        assert(deviceControlsWidth(p,320,view)==320);
+        const DeviceControlTransform t(p,320,view);
+        assert(t.left==38 && std::fabs(t.scale-282.f/320)<1e-5f);
+        for(KeyId k:jogKeys) {
+            const auto r=rectOf(k,view);
+            assert(r.w>0 && r.x>=0 && r.x+r.w<=38 && r.y>=320 && r.y+r.h<=320+deviceControlsHeight(p,320,view));
+        }
+        // Every pad key is right of the tab.
+        for(int k=keyIdPadUp;k<=keyIdPadHold;++k)assert(rectOf(KeyId(k),view).x>=38);
+        centreHits(view);
+        // Left of screen and hidden stay as they were.
+        auto screen=deviceControlView(keyboard,JogPlacement::screen);screen.gamepad=true;
+        assert(!deviceSideTabBelowScreen(p,screen) && deviceScreenLeft(p,screen)==38 && deviceControlsWidth(p,320,screen)==358);
+        auto hidden=deviceControlView(keyboard,JogPlacement::hidden);hidden.gamepad=true;
+        assert(deviceScreenLeft(p,hidden)==0 && rectOf(keyIdJogPress,hidden).w==0);
+    }
+    // Landscape: the landscape choice decides, whatever the portrait one.
+    JogLandscape parsed;
+    assert(parseJogLandscape("hidden",parsed) && parsed==JogLandscape::hidden);
+    assert(parseJogLandscape("beside",parsed) && parsed==JogLandscape::beside);
+    assert(parseJogLandscape("under",parsed) && parsed==JogLandscape::under);
+    assert(parseJogLandscape("over",parsed) && parsed==JogLandscape::over && !parseJogLandscape("left",parsed));
+    {
+        DisplayChange change;std::string error;
+        assert(parseDisplayChange("jog-landscape=under",true,change,error) && change.jogLandscape==JogLandscape::under && !change.jog);
+        DisplaySettings settings;
+        assert(settings.jogLandscape==JogLandscape::beside);
+        settings.Apply(change);assert(settings.jogLandscape==JogLandscape::under);
+        DisplayChange later;assert(parseDisplayChange("jog=keyboard jog-landscape=over",true,later,error));
+        change.Merge(later);assert(change.jogLandscape==JogLandscape::over && change.jog==JogPlacement::keyboard);
+        assert(!parseDisplayChange("jog-landscape=left",true,change,error));
+        assert(!parseDisplayChange("jog-landscape=under",false,change,error));
+    }
+    for(auto jog:{JogLandscape::hidden,JogLandscape::beside,JogLandscape::under,JogLandscape::over}) {
+        auto view=deviceControlView(true,JogPlacement::hidden);
+        view.gamepad=true;view.arrangement=DeviceControlArrangement::around;view.jogLandscape=jog;
+        const bool beside=jog==JogLandscape::beside,turned=jog==JogLandscape::under || jog==JogLandscape::over;
+        assert(deviceJogLandscape(p,view)==jog);
+        assert(deviceControlsWidth(p,320,view)==(beside ? 658 : 620));
+        assert(deviceControlsHeight(p,320,view)==(turned ? 38 : 0));
+        assert(deviceScreenLeft(p,view)==(beside ? 188 : 150));
+        assert(deviceScreenTop(p,view)==(jog==JogLandscape::over ? 38 : 0));
+        // The grips keep their size: every pad key the same size as with the tab hidden.
+        auto plain=view;plain.jogLandscape=JogLandscape::hidden;
+        for(int k=keyIdPadUp;k<=keyIdPadHold;++k) {
+            const auto a=rectOf(KeyId(k),view),b=rectOf(KeyId(k),plain);
+            assert(a.w==b.w && a.h==b.h && a.x==b.x+(beside ? 38 : 0) && a.y==b.y+(turned ? 19 : 0));
+        }
+        centreHits(view);
+        if(jog==JogLandscape::hidden) {
+            for(KeyId k:jogKeys)assert(rectOf(k,view).w==0);
+            continue;
+        }
+        const auto up=rectOf(keyIdJogUp,view),press=rectOf(keyIdJogPress,view),down=rectOf(keyIdJogDown,view),back=rectOf(keyIdBack,view);
+        for(auto r:{up,press,down,back}) {
+            if(beside)assert(r.x>=0 && r.x+r.w<=38 && r.y>=0 && r.y+r.h<=320);
+            else {
+                // Between the grips, in the bar's rows.
+                assert(r.x>=150 && r.x+r.w<=470);
+                if(jog==JogLandscape::under)assert(r.y>=320 && r.y+r.h<=358);
+                else assert(r.y>=0 && r.y+r.h<=38);
+            }
+        }
+        if(turned) {
+            // Turned: jog up on the left, then the wheel (wider than tall), jog down and Back, on one row.
+            assert(up.x+up.w<=press.x && press.x+press.w<=down.x && down.x+down.w<=back.x);
+            assert(press.w>press.h && up.y==down.y && up.h==30 && up.w==26);
+            // Hits follow the turn: past the gaps either side of the wheel along the bar is jog up
+            // and down, the gaps and past the bar's ends are nothing.
+            const int cy=press.y+press.h/2;
+            assert(deviceControlAt(p,320,320,press.x+2,cy,view)==keyIdJogPress);
+            assert(deviceControlAt(p,320,320,press.x-3,cy,view)==keyInvalid);
+            assert(deviceControlAt(p,320,320,press.x-9,cy,view)==keyIdJogUp);
+            assert(deviceControlAt(p,320,320,press.x+press.w+8,cy,view)==keyIdJogDown);
+            assert(deviceControlAt(p,320,320,up.x-6,cy,view)==keyInvalid);
+            assert(deviceControlAt(p,320,320,press.x+press.w/2,jog==JogLandscape::under ? 318 : 39,view)==keyInvalid);
+        } else {
+            assert(up.y+up.h<=press.y && press.y+press.h<=down.y && down.y+down.h<=back.y && press.h>press.w);
+            assert(deviceControlAt(p,320,320,40,press.y+press.h/2,view)!=keyIdJogPress);
+        }
+        // The pen lands on the moved screen, and a click on the wheel presses it.
+        {
+            Guest guest(deviceTypeTG50);guest.setDisplay({320,320,0,224});auto display=guest.display();
+            TouchInput input(&guest,1,display,Rotation::portrait_0,view);
+            auto pointer=[&](Uint32 type,int x,int y) {
+                SDL_Event e{};e.type=type;e.button.button=SDL_BUTTON_LEFT;e.button.x=x;e.button.y=y;
+                input.HandleEvent(e);
+            };
+            const int top=deviceScreenTop(p,view),left=deviceScreenLeft(p,view);
+            pointer(SDL_MOUSEBUTTONDOWN,left,top);guest.pen(true,0,0);
+            pointer(SDL_MOUSEBUTTONUP,left,top);guest.pen(false);
+            pointer(SDL_MOUSEBUTTONDOWN,left+319,top+319);guest.pen(true,319,319);
+            pointer(SDL_MOUSEBUTTONUP,left+319,top+319);guest.pen(false);
+            for(auto [x,y]:{std::pair<int,int>{left,top-1},{left,top+320},{left-1,top}}) {
+                pointer(SDL_MOUSEBUTTONDOWN,x,y);guest.noPen();guest.expect({});
+                pointer(SDL_MOUSEBUTTONUP,x,y);guest.noPen();guest.expect({});
+            }
+            const auto wheel=rectOf(keyIdJogPress,view);
+            pointer(SDL_MOUSEBUTTONDOWN,wheel.x+wheel.w/2,wheel.y+wheel.h/2);guest.noPen();guest.expect({{keyIdJogPress,true}});
+            pointer(SDL_MOUSEBUTTONUP,wheel.x+wheel.w/2,wheel.y+wheel.h/2);guest.noPen();guest.expect({{keyIdJogPress,false}});
+        }
+        // Drawn: the screen stays clear, each jog key darkens when held.
+        const float scale=2;
+        const int w=int(deviceControlsWidth(p,320,view)*scale),h=int((320+deviceControlsHeight(p,320,view))*scale);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto draw=[&](DeviceKeyMask pressed) {
+            SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);
+            drawDeviceSidebar(renderer,p,320,320,scale,pressed,view);
+            drawDeviceControls(renderer,p,320,320,scale,pressed,view);
+            SDL_RenderPresent(renderer);
+        };
+        draw(0);
+        const int top=deviceScreenTop(p,view),left=deviceScreenLeft(p,view);
+        for(int y:{top+1,top+160,top+318})for(int x:{left+1,left+160,left+318})
+            assert(readPixel(surface,int(x*scale),int(y*scale)).g==0);
+        // Nothing left undrawn round the screen.
+        for(int y=0;y<h;y+=7)for(int x=0;x<w;x+=7) {
+            const bool onScreen=x>=left*scale && x<(left+320)*scale && y>=top*scale && y<(top+320)*scale;
+            if(!onScreen)assert(readPixel(surface,x,y).g>0);
+        }
+        const char* names[]={"hidden","beside","under","over"};
+        if(directory)assert(IMG_SavePNG(surface,(std::string(directory)+"/clie-gamepad-landscape-jog-"+names[int(jog)]+".png").c_str())==0);
+        for(KeyId k:jogKeys) {
+            const auto r=rectOf(k,view);
+            const int cx=int((r.x+r.w*0.5f)*scale),cy=int((r.y+r.h*0.5f)*scale);
+            // Off the chevron: a quarter in along the key's short side.
+            const int px=turned ? cx : int((r.x+r.w*0.25f)*scale),py=turned ? int((r.y+r.h*0.25f)*scale) : cy;
+            draw(0);const int idle=brightness(readPixel(surface,px,py));
+            draw(deviceKeyBit(k));const int held=brightness(readPixel(surface,px,py));
+            if(!(held<idle-12))std::fprintf(stderr,"jog key %d (%s) at %d,%d: idle %d held %d\n",k,names[int(jog)],px,py,idle,held);
+            assert(held<idle-12);
+        }
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+}
+
 static void clieGamepad() {
     const auto& p=deviceControls(DeviceArt::tg50,true);
     const auto& plain=deviceControls(DeviceArt::tg50,false);
@@ -2313,7 +2474,7 @@ static void clieGamepad() {
         SDL_RenderPresent(renderer);
         assert(IMG_SavePNG(surface,(std::string(directory)+"/clie-gamepad-portrait-5x.png").c_str())==0);
         SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
-    }
+    }    clieGamepadJog(directory);
 }
 
 static void zodiacControls() {
@@ -2863,7 +3024,7 @@ int main(int argc,char** argv) {
         zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, game controller, multi-touch, releases and pressed art");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--clie-gamepad")==0) {
-        clieGamepad();SDL_Quit();puts("PASS: TG50 game controller below and around, keys, hit areas and pressed art");return 0;
+        clieGamepad();SDL_Quit();puts("PASS: TG50 game controller below and around, keys, hit areas, jog tab placements and pressed art");return 0;
     }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;

@@ -208,8 +208,10 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     DrawSilkscreen();
 
     if (frameTextureValid && lcdEnabled) {
+        // The jog tab turned over the screen moves it down; that only comes with the upright frame.
+        const int top = int(scale * deviceScreenTop(deviceControls(deviceType,controlView),controlView));
         SDL_Rect dest = {.x = int(scale * deviceScreenLeft(deviceControls(deviceType,controlView),controlView)),
-                         .y = 0,
+                         .y = top,
                          .w = int(scale * displayConfiguration.width),
                          .h = int(scale * displayConfiguration.height)};
 
@@ -303,7 +305,8 @@ void SdlRenderer::ClearWindow() {
     SDL_RenderClear(renderer);
     const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
     const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
-    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType,controlView),controlView), 0, landscape ? screenHeight : displayConfiguration.width,
+    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType,controlView),controlView),
+                          deviceScreenTop(deviceControls(deviceType,controlView),controlView), landscape ? screenHeight : displayConfiguration.width,
                           landscape ? displayConfiguration.width : screenHeight};
     const uint8_t panel = lcdEnabled ? 0xff : 0;
     SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);

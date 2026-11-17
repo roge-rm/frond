@@ -235,8 +235,8 @@ class MainWindow : public QMainWindow {
     bool contrastPending{false};
     QCheckBox *smoothToggle{nullptr}, *mipsToggle{nullptr}, *keyboardShow{nullptr};
     QSlider* sizeSlider{nullptr};
-    QComboBox *jogBox{nullptr}, *speedBox{nullptr};
-    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *speedLabel{nullptr};
+    QComboBox *jogBox{nullptr}, *jogLandscapeBox{nullptr}, *speedBox{nullptr};
+    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *jogLandscapeLabel{nullptr}, *speedLabel{nullptr};
     QByteArray listGeometry;    // the list window's geometry while a machine runs
     std::vector<runningRules::Database> knownDatabases;
     bool appsStale{false};      // the Applications list needs a fresh db-list
