@@ -800,6 +800,11 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	./build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
 
+# Left idle after a cold boot, the private IIIx and m515 ROMs turn off at the OS's 2 minute auto-off.
+.PHONY: test-frond-68k-auto-off
+test-frond-68k-auto-off: out/frond-68k
+	python3 tests/frond-68k-auto-off.py
+
 # Console database commands while a guest app is busy for 45 s on the private IIIx 3.1 ROM: they
 # wait for its event loop or fail with an error, and the core runs on. Skips without the ROM, or
 # m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.

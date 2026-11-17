@@ -300,7 +300,7 @@ namespace {
     }
 
     void TailpatchUIInitialize(void) {
-        ::SysSetAutoOffTime(0);
+        // Auto-off stays as the OS set it from the Prefs, as on the real Palm.
         EmLowMem::fgLowMem.globals.sysRandomSeed = Platform::Random();
 
         ::FtrSet('pose', 0, 0);
