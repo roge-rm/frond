@@ -1,11 +1,11 @@
 // FrondBench: times fixed amounts of integer, memory, drawing and database
 // work so an emulated device can be compared with a real one.
-// Needs Palm OS 3.5 or later. Results go on screen and in FrondBenchResults.
+// Needs Palm OS 3.5 or later. Results go on screen and into a new Memo.
 #include <PalmOS.h>
 #include "frondbench.h"
 
 #define appCreator 'FBnc'
-#define resultsName "FrondBenchResults"
+#define versionText "1.1"
 #define tempName "FrondBenchTemp"
 
 // Work per test, sized for roughly 2 to 5 seconds on a Palm TX.
@@ -18,14 +18,13 @@
 #define dbRecordSize 32
 
 #define testCount 4
-#define lineCount 10
 #define lineLength 40
 #define firstLineY 16
 
 static const Char* testNames[testCount] = { "Integer", "Memory", "Drawing", "Database" };
 static UInt32 testMs[testCount], testScore[testCount];
 static Boolean haveResults;
-static Char infoLine[2][lineLength];
+static Char infoLine[3][lineLength];
 static Char statusLine[lineLength];
 static UInt32 checksum;
 static UInt32 ticksPerSecond;
@@ -57,10 +56,11 @@ static void formatId(Char* out, UInt32 id, Err error) {
 }
 
 static void readDeviceInfo(void) {
-    UInt32 rom = 0, company = 0, device = 0;
+    UInt32 rom = 0, company = 0, device = 0, processor = 0;
     Char companyText[12], deviceText[12];
     Err companyError, deviceError;
     FtrGet(sysFtrCreator, sysFtrNumROMVersion, &rom);
+    FtrGet(sysFtrCreator, sysFtrNumProcessorID, &processor);
     companyError = FtrGet(sysFtrCreator, sysFtrNumOEMCompanyID, &company);
     deviceError = FtrGet(sysFtrCreator, sysFtrNumOEMDeviceID, &device);
     formatId(companyText, company, companyError);
@@ -69,6 +69,7 @@ static void readDeviceInfo(void) {
               sysGetROMVerMajor(rom), sysGetROMVerMinor(rom), sysGetROMVerFix(rom),
               ticksPerSecond);
     StrPrintF(infoLine[1], "Company %s  Device %s", companyText, deviceText);
+    StrPrintF(infoLine[2], "ROM %lx  CPU %lx", rom, processor);
 }
 
 static void drawLine(Int16 row, const Char* left, const Char* middle, const Char* right) {
@@ -88,32 +89,33 @@ static void drawResults(void) {
     FntSetFont(stdFont);
     drawLine(0, infoLine[0], 0, 0);
     drawLine(1, infoLine[1], 0, 0);
-    drawLine(2, "Test", "ms", "per sec");
+    drawLine(2, infoLine[2], 0, 0);
+    drawLine(3, "Test", "ms", "per sec");
     for (i = 0; i < testCount; i++) {
         if (haveResults) {
             StrPrintF(ms, "%lu", testMs[i]);
             StrPrintF(score, "%lu", testScore[i]);
             total += testMs[i];
-            drawLine(3 + i, testNames[i], ms, score);
+            drawLine(4 + i, testNames[i], ms, score);
         } else {
-            drawLine(3 + i, testNames[i], "-", "-");
+            drawLine(4 + i, testNames[i], "-", "-");
         }
     }
     if (haveResults) {
         StrPrintF(ms, "%lu", total);
-        drawLine(7, "Total", ms, 0);
+        drawLine(8, "Total", ms, 0);
         StrPrintF(score, "%lx", checksum);
-        drawLine(8, "Checksum", 0, score);
+        drawLine(9, "Checksum", 0, score);
     } else {
-        drawLine(7, "Total", "-", 0);
-        drawLine(8, 0, 0, 0);
+        drawLine(8, "Total", "-", 0);
+        drawLine(9, 0, 0, 0);
     }
-    drawLine(9, statusLine, 0, 0);
+    drawLine(10, statusLine, 0, 0);
 }
 
 static void setStatus(const Char* text) {
     StrCopy(statusLine, text);
-    drawLine(9, statusLine, 0, 0);
+    drawLine(10, statusLine, 0, 0);
 }
 
 // Integer math through PACE on OS 5: adds, 16-bit multiplies, shifts, xor
@@ -224,16 +226,15 @@ static UInt32 databaseTest(void) {
     return (UInt32)dbRounds * dbRecords * 2;
 }
 
-// Replaces FrondBenchResults with one text record holding the last run.
+// Puts the last run into a new Memo, replacing the Memo an earlier run made.
 static void saveResults(void) {
-    Char text[400], line[60];
-    LocalID id;
+    Char text[480], line[60];
     DmOpenRef db;
-    UInt16 index = 0;
+    UInt16 index, count;
     MemHandle record;
     UInt32 total = 0;
     Int16 i;
-    StrPrintF(text, "FrondBench 1.0\n%s\n%s\n", infoLine[0], infoLine[1]);
+    StrPrintF(text, "FrondBench %s\n%s\n%s\n%s\n", versionText, infoLine[0], infoLine[1], infoLine[2]);
     for (i = 0; i < testCount; i++) {
         StrPrintF(line, "%s %lu ms %lu/s\n", testNames[i], testMs[i], testScore[i]);
         StrCat(text, line);
@@ -241,12 +242,23 @@ static void saveResults(void) {
     }
     StrPrintF(line, "Total %lu ms\nChecksum %lx\n", total, checksum);
     StrCat(text, line);
-    id = DmFindDatabase(0, resultsName);
-    if (id) DmDeleteDatabase(0, id);
-    if (DmCreateDatabase(0, resultsName, appCreator, 'DATA', false)) return;
-    id = DmFindDatabase(0, resultsName);
-    db = id ? DmOpenDatabase(0, id, dmModeReadWrite) : 0;
-    if (!db) return;
+    db = DmOpenDatabaseByTypeCreator('DATA', 'memo', dmModeReadWrite);
+    if (!db) {
+        if (DmCreateDatabase(0, "MemoDB", 'memo', 'DATA', false)) return;
+        db = DmOpenDatabaseByTypeCreator('DATA', 'memo', dmModeReadWrite);
+        if (!db) return;
+    }
+    count = DmNumRecords(db);
+    for (index = count; index > 0; index--) {
+        record = DmQueryRecord(db, index - 1);
+        if (record) {
+            const Char* old = MemHandleLock(record);
+            Boolean ours = StrNCompare(old, "FrondBench ", 11) == 0;
+            MemHandleUnlock(record);
+            if (ours) DmRemoveRecord(db, index - 1);
+        }
+    }
+    index = dmMaxRecordIndex;
     record = DmNewRecord(db, &index, StrLen(text) + 1);
     if (record) {
         DmWrite(MemHandleLock(record), 0, text, StrLen(text) + 1);
@@ -281,7 +293,7 @@ static void runTests(FormType* form) {
     EvtResetAutoOffTimer();
     haveResults = true;
     saveResults();
-    StrCopy(statusLine, "Done, results saved");
+    StrCopy(statusLine, "Done, saved to a Memo");
     FrmDrawForm(form);
     drawResults();
 }
