@@ -1,6 +1,7 @@
 #ifndef FROND_SOC_IMX1_H
 #define FROND_SOC_IMX1_H
 
+#include <atomic>
 #include <array>
 #include <memory>
 #include <string>
@@ -119,6 +120,11 @@ class SocIMX1 : public SoC {
     std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
     bool framePending{false}, redraw{true};
     GuestOrientationTracker orientationTracker;
+    // The stick as the host pushed it, and the quarter turns the guest's screen has: the guest gets the
+    // stick turned to match what the player sees.
+    std::atomic<float> stickHostX{0}, stickHostY{0};
+    std::atomic<int> stickTurns{0};
+    void PushStick();
 
     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};

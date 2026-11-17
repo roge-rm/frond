@@ -52,6 +52,18 @@ inline int zodiacStickOffset(float axis) {
     return int(std::lround(std::clamp(axis, -1.0f, 1.0f) * 511.0f));
 }
 
+// A host stick position (x right, y down, as the player sees the view) in the frame the guest reads it in,
+// when the OS has turned its screen by `turns` quarter turns from landscape (1 portrait, 2 reverse
+// landscape, 3 reverse portrait). No turns leaves the values as they are.
+inline void zodiacStickForView(float x, float y, int turns, float& outX, float& outY) {
+    switch (turns & 3) {
+        case 1: outX = -y; outY = x; break;
+        case 2: outX = -x; outY = -y; break;
+        case 3: outX = y; outY = -x; break;
+        default: outX = x; outY = y; break;
+    }
+}
+
 // The 256 byte identity EEPROM the ROM expects, worked out from the ROM itself: the DAL's packed
 // globals (resource amdd, found through the big card's boot header) hold the 128 byte key at
 // 1c0, and the EEPROM carries it at 50..cf. Everything else reads ff. Only the layout this was
