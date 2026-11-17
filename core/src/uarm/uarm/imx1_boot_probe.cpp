@@ -2343,6 +2343,9 @@ void imx1MachineSetPcmOutput(Imx1Machine* machine, void (*hook)(void*, uint16_t,
     machine->probe->peripherals.setPcmOutput(hook, context);
 }
 
+extern uint64_t imx1PcmUnderrunWords;
+uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*) { return imx1PcmUnderrunWords; }
+
 Imx1MachineAudio imx1MachineAudio(const Imx1Machine* machine) {
     const auto& board = machine->probe->peripherals;
     Imx1MachineAudio a;

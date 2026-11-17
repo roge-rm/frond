@@ -471,6 +471,9 @@ void Imx1Bootstrap::pcmDmaBeat() {
     }
 }
 
+// Words SSI1 sent again from an empty FIFO, across every machine in the process, for tools. Not saved.
+uint64_t imx1PcmUnderrunWords = 0;
+
 void Imx1Bootstrap::pcmWordBoundary() {
     if (ssi1Shifting) {
         ssi1LastTransmitted = ssi1ShiftWord;
@@ -483,7 +486,10 @@ void Imx1Bootstrap::pcmWordBoundary() {
             ssi1ShiftWord = ssi1TxFifo[0];
             --ssi1TxCount;
             std::move(ssi1TxFifo + 1, ssi1TxFifo + 1 + ssi1TxCount, ssi1TxFifo);
-        } else ssi1Underrun = true;
+        } else {
+            ssi1Underrun = true;
+            ++imx1PcmUnderrunWords;
+        }
         // An underrun retransmits the previous shift-register value.
         ssi1Shifting = true;
     }

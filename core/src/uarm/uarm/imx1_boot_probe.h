@@ -244,6 +244,8 @@ void imx1SetFifoWaitSkip(bool skip);
 // imx1SetReadyWaitSkip(false) turns the skip off, for tests.
 uint64_t imx1MachineReadyWaitSkips(const Imx1Machine*);
 uint64_t imx1MachineReadyWaitTries(const Imx1Machine*);
+// SSI1 words sent again from an empty FIFO since the process started (every machine, not saved), for tools.
+uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*);
 void imx1SetReadyWaitSkip(bool skip);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
