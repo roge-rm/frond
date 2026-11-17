@@ -317,9 +317,16 @@ void SocIMX1::AnalogStick(float x, float y) {
     PushStick();
 }
 
+void SocIMX1::SetStickHostTurns(int turns) {
+    turns &= 3;
+    if (turns == stickHostTurns) return;
+    stickHostTurns = turns;
+    PushStick();
+}
+
 void SocIMX1::PushStick() {
     float x = stickHostX, y = stickHostY;
-    zodiacStickForView(x, y, stickTurns, x, y);
+    zodiacStickForView(x, y, zodiacStickTotalTurns(stickTurns, stickHostTurns), x, y);
     input.stick(zodiacStickOffset(x), zodiacStickOffset(y));
 }
 

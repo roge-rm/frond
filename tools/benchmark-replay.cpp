@@ -328,7 +328,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             else if (e.kind=="key-down") soc->KeyDown(e.key);
             else if (e.kind=="key-up") soc->KeyUp(e.key);
             else if (e.kind=="stick") {
-                // The runner polls the guest's orientation each slice; the stick follows it.
+                // The orientation is polled here, at stick events only; the stick follows it.
                 const unsigned orientation=soc->GuestOrientation();
                 if (trace) std::fprintf(stderr,"stick %d %d, orientation %u\n",e.x,e.y,orientation);
                 soc->AnalogStick(e.x/511.0f,e.y/511.0f);

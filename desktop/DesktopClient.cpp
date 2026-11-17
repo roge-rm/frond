@@ -103,6 +103,10 @@ void DesktopClient::receive() {
         input.remove(0, at + 1);
         if (fields.size() != 4) return fail(tr("The emulator sent an invalid control response."));
         if (fields[0] == "0" && fields[1] == "event") {
+            // An event name from a newer core is skipped; a known one that is malformed or out of order fails.
+            static const QList<QByteArray> knownEvents{"ready", "close", "shortcut", "microphone", "camera", "serial", "usb",
+                                                       "infrared", "bluetooth", "dana-view", "card", "rumble", "sd-progress"};
+            if (!knownEvents.contains(fields[2])) continue;
             if (fields[2] == "ready" && !ready) { ready = true; deadline.stop(); emit started(); }
             else if (fields[2] == "close" && ready) emit closeRequested();
             else if (fields[2] == "shortcut" && ready && fields[3].size() % 2 == 0 &&
@@ -146,7 +150,7 @@ void DesktopClient::receive() {
                 if (!pending.isEmpty()) deadline.start();
                 emit sdProgress(done, total);
             }
-            // Any other event name is from a newer core and is skipped.
+            else return fail(tr("The emulator sent an unexpected event."));
             continue;
         }
         if (backgroundId && fields[0] == QByteArray::number(backgroundId) && (fields[1] == "ok" || fields[1] == "error") &&

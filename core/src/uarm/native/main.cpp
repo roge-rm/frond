@@ -1258,14 +1258,19 @@ bool gFastEngineMissing = false;
 #endif
                     }
                 }
+                // The stick turns with what the player sees: the guest's turn (in the SoC) plus the host's own.
+                // Every stick source arrives in window axes, so one offset covers them all.
+                soc->SetStickHostTurns(followGuest ? int(commandContext.rotation) : int(sdlEventHandler.DrawnRotation()));
                 // The LED and vibrate motor: the app on Android, game controllers on the desktop.
                 {
-                    const SoC::Attention current = soc->GuestAttention();
+                    SoC::Attention current = soc->GuestAttention();
+                    // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
+                    if (replayPaused) current.vibrate = false;
 #ifdef __ANDROID__
                     if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
                     attention = current;
 #else
-                    const bool on = current.vibrate && !options.disableRumble;
+                    const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
                     const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
                     if (desktop) desktop->rumbleChanged(on && !controller);
 #endif

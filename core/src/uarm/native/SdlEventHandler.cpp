@@ -561,6 +561,9 @@ bool SdlEventHandler::Rumble(bool on, uint64_t nowUsec) {
     for (int i = 0; i < SDL_NumJoysticks(); ++i) {
         if (!SDL_IsGameController(i)) continue;
         if (auto* controller = SDL_GameControllerFromInstanceID(SDL_JoystickGetDeviceInstanceID(i))) {
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            if (!SDL_GameControllerHasRumble(controller)) continue;
+#endif
             opened = true;
             if (due) SDL_GameControllerRumble(controller, on ? 0xc000 : 0, on ? 0xffff : 0, on ? rumbleMs : 0);
         }

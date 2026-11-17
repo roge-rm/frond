@@ -52,6 +52,9 @@ inline int zodiacStickOffset(float axis) {
     return int(std::lround(std::clamp(axis, -1.0f, 1.0f) * 511.0f));
 }
 
+// The guest's turns and the host's own turns of the view add up.
+inline int zodiacStickTotalTurns(int guestTurns, int hostTurns) { return (guestTurns + hostTurns) & 3; }
+
 // A host stick position (x right, y down, as the player sees the view) in the frame the guest reads it in,
 // when the OS has turned its screen by `turns` quarter turns from landscape (1 portrait, 2 reverse
 // landscape, 3 reverse portrait). No turns leaves the values as they are.

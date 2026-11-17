@@ -47,6 +47,7 @@ class SdlEventHandler {
     void SetShortcutSink(std::function<void(const std::string&)> sink) { shortcutSink = std::move(sink); }
 
     void SetRotation(Rotation rotation);
+    Rotation DrawnRotation() const { return rotation; }
     // A new set of shown controls and window scale; releases pointers and touches held on
     // the old ones. A SetLayout with the new layout follows.
     void SetView(DeviceControlView controlView, float scale);

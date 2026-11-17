@@ -25,5 +25,11 @@ int main() {
     float x = 0.5f, y = -0.25f;
     zodiacStickForView(x, y, 1, x, y);
     check(x == 0.25f && y == 0.5f, "in place");
+    // The host's turn adds to the guest's; none leaves the guest's alone.
+    check(zodiacStickTotalTurns(1, 0) == 1 && zodiacStickTotalTurns(0, 0) == 0, "no host turn");
+    check(zodiacStickTotalTurns(1, 1) == 2 && zodiacStickTotalTurns(3, 2) == 1 && zodiacStickTotalTurns(0, 3) == 3, "total turns");
+    // The touch stick and keys all arrive in window axes, so a host turn turns them the same way.
+    zodiacStickForView(1, 0, zodiacStickTotalTurns(0, 1), x, y);
+    check(x == 0 && y == 1, "host turn alone");
     std::puts("zodiac stick view: ok");
 }

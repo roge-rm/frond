@@ -502,7 +502,12 @@ open class FrondActivity : SDLActivity() {
 
     // The guest's alarm LED or vibrate motor changed (the Zodiac's rumble). The LED isn't shown yet.
     @Suppress("UNUSED_PARAMETER")
-    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread { if (!leaving) rumble?.set(vibrate) }
+    // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
+    private var guestVibrate = false
+    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread {
+        guestVibrate = vibrate
+        if (!leaving && foreground) rumble?.set(vibrate)
+    }
 
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()
@@ -928,6 +933,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        if (!leaving) rumble?.set(guestVibrate)
         startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
