@@ -835,7 +835,12 @@ class Imx1GraphicsCommands {
     }
     // GMC words whose source and ROP fields store() copies into DP_MIX, so 4b2 holds what the engine uses after
     // any of them, whichever of 41b and 4b2 came last. d598b4df is the stretch blit's own (200b085c-200b0868).
+    // The brush type in bits 4-7 doesn't touch those fields: 8x8 brush types 0 and 1 count as the solid brush's d.
+    static uint32_t solidBrushGmc(uint32_t value) {
+        return (value & 0xff) == 0x0f || (value & 0xff) == 0x1f ? (value & ~0xffu) | 0xdf : value;
+    }
     static bool mixAlias(uint32_t value) {
+        value = solidBrushGmc(value);
         return value == 0x5798b4df || value == 0x4598b4df || value == 0x45e0b4df || value == 0x55e0b4df ||
                value == 0xd798d4df || value == 0x5598b4df || value == 0xd598b4df;
     }
@@ -1048,30 +1053,45 @@ class Imx1GraphicsCommands {
         // Host SRCCOPY is limited to the observed native RGB565 control words.
         // ASSUMPTION "host upload takes its source type from 41b": the ROM sends RGB565 rows with 4b1 source
         // type 0 left by the stretch restore (200b0b48 on), so 4b1 may hold type 3 or 0 here.
-        if (host && !a4 && !mono && (gmc != 0x5798b4df || values[0x4b2] != 0x00cc0b00 ||
-                     (values[0x4b1] != 0x40030d04 && values[0x4b1] != 0x40000d04) || values[0x472] != 0x3f))
+        // ASSUMPTION "host upload ignores the brush": after a pattern fill the bitmap routine (ROP cc, no pattern term)
+        // leaves the 8x8 brush set up: GMC brush type 0 or 1 (bits 4-7), 4b1 bit 30 clear and its brush type
+        // (bits 8-12) the same (seen after WinPaintRectangle with the gray pattern, 4b1 00030004).
+        const uint32_t hostBrush = values[0x4b1], brushType = (gmc >> 4) & 15;
+        const bool solidBrush = gmc == 0x5798b4df && (hostBrush == 0x40030d04 || hostBrush == 0x40000d04);
+        const bool patternBrush = brushType <= 1 && gmc == (0x5798b40fu | brushType << 4) &&
+            (hostBrush & ~0x1f00u) == 0x00030004 && ((hostBrush >> 8) & 31) == brushType;
+        const bool patternBrush0 = brushType <= 1 && gmc == (0x5798b40fu | brushType << 4) &&
+            (hostBrush & ~0x1f00u) == 0x00000004 && ((hostBrush >> 8) & 31) == brushType;
+        if (host && !a4 && !mono && (!(solidBrush || patternBrush || patternBrush0) || values[0x4b2] != 0x00cc0b00 ||
+                     values[0x472] != 0x3f))
             return refuse("host-upload-state", values[0x4b1]);
         // Admitted GMC and shadow words are those of the 9 November 2026 empty-card run.
         // The producer changes its datatype shadow without emitting it, so that field is not compared.
         if (mono && (gmc != 0x579804df || values[0x4b2] != 0x00cc0b00 ||
                      (values[0x4b1] & ~0x00070000u) != 0x40000d04 || values[0x472] != 0x3f)) return A::sideEffect;
         // A keyed copy keeps the ROP that was set: cc, or f0 with the solid brush (200aa2e4-200aa2f4).
+        // A copy whose ROP has no pattern term (cc, 99, 33) may also find the 8x8 brush left by a pattern fill: GMC brush
+        // type 0 or 1 and 4b1's brush type (bits 8-12) the same, bit 30 either way. Counted as the solid brush here.
+        const bool ropNoBrush = ((gmc >> 21) & 15) == ((gmc >> 17) & 15);
+        const uint32_t copyGmc = copy && ropNoBrush ? solidBrushGmc(gmc) : gmc;
+        const uint32_t copyMix = copyGmc != gmc && ((values[0x4b1] >> 8) & 31) == ((gmc >> 4) & 15) ?
+            (values[0x4b1] & ~0x40001f00u) | 0x40000d00u : values[0x4b1];
         const bool keyedPaint = copy && !plain && gmc == 0x45e0b4df && values[0x4b2] == 0x00f00a00;
-        if (copy && !plain && gmc != 0x4598b4df && !keyedPaint) return refuse("keyed-copy-41b", gmc);
+        if (copy && !plain && copyGmc != 0x4598b4df && !keyedPaint) return refuse("keyed-copy-41b", gmc);
         // A plain copy takes any ROP3. The ROP setter (200af9e4) writes only GMC bits 17-24 and DP_MIX 16-23 (and
         // 0-7 with bit 25 for a ROP4), both sent; the copy helper then leaves DP_MIX's ROP as it is (200a9d1c, shadow
         // only). The bitmap routine sets 99 for winInvert and 33 for winPaintInverse (2008a744-2008a77c).
         // TwGfxMaskBlt's ROP4 is ccaa (2009aaa0): GMC 555434df, DP_MIX 0eaa0acc after its producer (200ab02c-200ab0ac).
         // GMC bit 15 is clear: 200afa74 clears it before the producer (2009aac4) and sets it again after (2009aaf0).
         const uint32_t copyRop = (gmc >> 17) & 255;
-        if (copy && plain && (mask ? gmc != 0x555434df : (gmc & ~0x01fe0000u) != 0x5400b4dfu))
+        if (copy && plain && (mask ? gmc != 0x555434df : (copyGmc & ~0x01fe0000u) != 0x5400b4dfu))
             return refuse(mask ? "mask-blt-41b" : "plain-copy-41b", gmc);
         if (copy && !keyedPaint && values[0x4b2] != (mask ? 0x0eaa0accu : plain ? 0x00000a00u | copyRop << 16 : 0x00cc0a00u))
             return mask ? refuse("mask-blt-mix", values[0x4b2]) : A::sideEffect;
         // A copy may also find 4b1 with source type 0, left by the stretch restore as for the host upload above
         // (seen keyed, in Date Book's Delete Event dialog). The copy GMCs checked above carry source type 3.
         if (copy && (
-                     (values[0x4b1] != 0x40030d04 && values[0x4b1] != 0x40000d04) || values[0x472] != 0x3f ||
+                     (copyMix != 0x40030d04 && copyMix != 0x40000d04) || values[0x472] != 0x3f ||
                      values[0x471] != 0x1fff1fff)) return A::sideEffect;
         if (plain && (values[0x4b3] != 0xffffffff || values[0x41d] ||
                       values[0x41e] || values[0x30f] != 0x20)) return A::sideEffect;
@@ -1301,10 +1321,11 @@ class Imx1GraphicsCommands {
         // clipping, datatypes and the bits above the source field. And DP_MIX must be current (mixAlias).
         const uint32_t gmc = values[0x41b];
         const bool keyed = gmc == 0x4598b4df && compareSeen();
-        if (!keyed && ((gmc & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc))) return refuse("stretch-state", 0x41b);
+        if (!keyed && ((solidBrushGmc(gmc) & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc))) return refuse("stretch-state", 0x41b);
+        // After a pattern fill the 8x8 brush is still set up: 4b1's brush type (bits 8-12) is the GMC's, not d.
         const bool smooth = values[0x488] == 0x02020008;
         if (smooth && keyed) return refuse("stretch-smooth", values[0x412]);
-        for (auto item : {std::pair<uint32_t,uint32_t>{0x4b2,0x01cc1200}, {0x4b1,0x40037d04},
+        for (auto item : {std::pair<uint32_t,uint32_t>{0x4b2,0x01cc1200}, {0x4b1,gmc != solidBrushGmc(gmc) ? 0x40037004u | ((gmc >> 4) & 15) << 8 : 0x40037d04u},
                  {0x472,0x3f}, {0x488,smooth ? 0x02020008u : 0x02020009u}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
                  {0x42e,0}, {0x42f,0}, {0x430,0}, {0x431,0}, {0x432,0}, {0x433,0}})
             if (values[item.first] != item.second) return refuse("stretch-state", item.first);

@@ -22,7 +22,7 @@ all: out/frond desktop
 
 # Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
 # which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
-# Change the limit for one target with `test-foo: TEST_TIMEOUT = 900`, or for a run with
+# Change the limit for one target with `test-foo: export TEST_TIMEOUT = 900`, or for a run with
 # `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
 TEST_TIMEOUT ?= 300
 TEST_KILL_GRACE ?= 10
@@ -43,15 +43,15 @@ recheck:
 	@python3 tools/check-record.py recheck $(CHECKS)
 prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
 out/% build/% core/% vendor/%: SHELL = /bin/sh
-test-desktop: TEST_TIMEOUT = 3600
+test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
-test-zodiac-machine test-zodiac-fast-lean: TEST_TIMEOUT = 1800
+test-zodiac-machine test-zodiac-fast-lean: export TEST_TIMEOUT = 1800
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
     test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
-    test-frond-arm-install test-device-profiles: TEST_TIMEOUT = 1800
-test-frond-68k-peripherals: TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
+    test-frond-arm-install test-device-profiles: export TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
 .PHONY: test-memory-stick-media

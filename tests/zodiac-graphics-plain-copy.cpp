@@ -389,6 +389,19 @@ void hostSourceType() {
         } else assert(f.append(host,0x200ac300) == A::sideEffect && refused(f,"host-upload-state",datatype));
     }
 }
+// A bitmap paint after a pattern fill finds the 8x8 brush still set up (GMC brush type 0 or 1, 4b1 bit 30 clear).
+void hostAfterPattern() {
+    struct Case { uint32_t gmc, mix, ok; } cases[] = {
+        {0x5798b40f,0x00030004,1}, {0x5798b41f,0x00030104,1}, {0x5798b40f,0x00000004,1},
+        {0x5798b40f,0x40030004,0}, {0x5798b40f,0x00030104,0}, {0x5798b42f,0x00030204,0}, {0x5798b40f,0x00070004,0}};
+    for (auto c : cases) {
+        Fixture f;
+        const std::vector<uint32_t> host{0x41b,c.gmc,0x4b2,0x00cc0b00,0x4b1,c.mix,
+            0xc0031900,0,0x00020002,0x1234f800,0x56780000};
+        if (c.ok) { assert(f.append(host,0x200ac300) == A::ok); f.finish(); }
+        else assert(f.append(host,0x200ac300) == A::sideEffect && refused(f,"host-upload-state",c.mix));
+    }
+}
 void scissor() {
     Fixture f; planes(f);
     // The 3 by 2 copy to x 5, y 3 cut at column 7 and row 4: two pixels of its first row.
@@ -1599,7 +1612,7 @@ void patternFill() {
     std::puts("PASS: 8x8 mono pattern fills from a queued or finished upload, f0 and 5a, anchored at the surface origin; type 1 leaves clear bits");
 }
 int main() {
-    hostSourceType();
+    hostSourceType(); hostAfterPattern();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
     stretchStaleGmc(); stretchRatios(); smoothStretch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
     ropCopies(); maskBlt(); tileBlt(); patternFill();

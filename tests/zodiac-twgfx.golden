@@ -322,3 +322,7 @@ exact 159 win-pattern-line lines: ok 1e72af78 (unchanged) window d3eecf63
 fast 159 win-pattern-line lines: ok 1e72af78 (unchanged) window d3eecf63
 exact 160 win-copy-rect display invert over colour: ok 1e72af78 (unchanged) window 957bbd8e
 fast 160 win-copy-rect display invert over colour: ok 1e72af78 (unchanged) window 957bbd8e
+exact 161 win-pattern gray then bitmap paint: ok 1e72af78 (unchanged) window 27b6ccdd
+fast 161 win-pattern gray then bitmap paint: ok 1e72af78 (unchanged) window 27b6ccdd
+exact 162 win-pattern gray then bitmap overlay: ok 1e72af78 (unchanged) window 27b6ccdd
+fast 162 win-pattern gray then bitmap overlay: ok 1e72af78 (unchanged) window 27b6ccdd

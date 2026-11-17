@@ -209,6 +209,16 @@ static Err tWinPatternLine(int a) {
     if (a) WinPaintLines(2, lines); else WinPaintLine(2, 3, 50, 40);
     return winEnd();
 }
+/* arg: draw mode; the gray pattern fills a rectangle, then a bitmap is painted in the same draw. */
+static Err tWinPatternBitmap(int a) {
+    RectangleType r = winRect(2, 2, 30, 20);
+    winBegin();
+    WinSetPatternType(2);
+    WinPaintRectangle(&r, 0);
+    WinSetDrawMode(a);
+    WinPaintBitmap(palmBitmapOf(2, 16, 0), 4, 4);
+    return winEnd();
+}
 static Err tWinLine(int a) { winBegin(); WinSetDrawMode(a); WinPaintLine(2, 3, 50, 40); return winEnd(); }
 static Err tWinPixel(int a) { (void)a; winBegin(); WinPaintPixel(9, 9); return winEnd(); }
 static Err tWinChars(int a) { winBegin(); WinSetDrawMode(a); WinPaintChars("TwGfx", 5, 4, 4); return winEnd(); }
@@ -414,6 +424,8 @@ static const Test tests[] = {
     {"win-pattern-line paint", tWinPatternLine, 0},
     {"win-pattern-line lines", tWinPatternLine, 1},
     {"win-copy-rect display invert over colour", tWinCopyOver, 3},
+    {"win-pattern gray then bitmap paint", tWinPatternBitmap, 0},
+    {"win-pattern gray then bitmap overlay", tWinPatternBitmap, 4},
 };
 #define TEST_COUNT ((int)(sizeof tests / sizeof tests[0]))
 
