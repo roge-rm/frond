@@ -1422,6 +1422,28 @@ check-frondbench:
 			&& echo "check-frondbench: ok, $$(sha256sum $(FRONDBENCH_SRC)/FrondBench.prc | cut -c1-16)"; \
 	fi
 
+# Zodiac TwGfx test program (tools/zodiac-twgfx): every TwGfx call and option, and the Window Manager's drawing
+# modes and patterns, run headless through benchmark-replay on Fast and Exact. The table (ok, the ROM's error,
+# refused with Frond's stop text, or crashed) is checked against tests/zodiac-twgfx.golden; pass
+# ZODIAC_TWGFX_ARGS=--update to rewrite it, or --engines fast for Fast only. Needs arm-palmos-gcc,
+# m68k-palmos-gcc, build-prc, mtools and the Zodiac 1.1 ROM (ZODIAC_ROM, or under FROND_DEVICE_IMAGES);
+# skipped without them. The PRC, card, states and table go in build/zodiac-twgfx.
+ZODIAC_TWGFX_DIR := build/zodiac-twgfx
+ZODIAC_ROM ?= $(if $(FROND_DEVICE_IMAGES),$(FROND_DEVICE_IMAGES)/Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom)
+ZODIAC_TWGFX_ARGS ?=
+.PHONY: zodiac-twgfx test-zodiac-twgfx
+zodiac-twgfx:
+	python3 tools/zodiac-twgfx/build.py $(ZODIAC_TWGFX_DIR)
+test-zodiac-twgfx:
+	@if ! command -v arm-palmos-gcc >/dev/null || ! command -v m68k-palmos-gcc >/dev/null || ! command -v build-prc >/dev/null \
+		|| ! command -v mformat >/dev/null || [ ! -f "$(ZODIAC_ROM)" ]; then \
+		echo "test-zodiac-twgfx: skipped, needs arm-palmos-gcc, m68k-palmos-gcc, build-prc, mtools and ZODIAC_ROM"; \
+	else \
+		$(MAKE) benchmark-replay zodiac-twgfx && python3 tools/zodiac-twgfx/run.py --bench build/benchmark-replay \
+			--rom "$(ZODIAC_ROM)" --fixture tests/fixtures/zodiac-doom2.replay --prc $(ZODIAC_TWGFX_DIR)/TwGfxTest.prc \
+			--work $(ZODIAC_TWGFX_DIR) --golden tests/zodiac-twgfx.golden $(ZODIAC_TWGFX_ARGS); \
+	fi
+
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
 # BIKE_SESSION and FRONDBENCH_SESSION are session files you supply; a workload without one is skipped.
 # SPEED_HOST=user@host runs on that machine in ~/frond-speed/ (SPEED_SSH_KEY and SPEED_REAL_MS are optional).

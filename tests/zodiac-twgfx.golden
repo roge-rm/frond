@@ -1,0 +1,307 @@
+# tools/zodiac-twgfx/run.py: engine, test, name: ok, error (the ROM's code), refused (Frond's stop) or crashed
+exact 0 get-info: ok
+fast 0 get-info: ok
+exact 1 get-memory-usage accelerator: ok
+fast 1 get-memory-usage accelerator: ok
+exact 2 get-display-surface: ok
+fast 2 get-display-surface: ok
+exact 3 get-palm-display-surface: ok
+fast 3 get-palm-display-surface: ok
+exact 4 in-vblank: ok
+fast 4 in-vblank: ok
+exact 5 wait-for-vblank: ok
+fast 5 wait-for-vblank: ok
+exact 6 alloc-surface 1bpp: error 710b
+fast 6 alloc-surface 1bpp: error 710b
+exact 7 alloc-surface rgb565-le: ok
+fast 7 alloc-surface rgb565-le: ok
+exact 8 alloc-surface rgb565-be: error 710b
+fast 8 alloc-surface rgb565-be: error 710b
+exact 9 alloc-surface 2bpp: error 710b
+fast 9 alloc-surface 2bpp: error 710b
+exact 10 alloc-surface 4bpp: error 710b
+fast 10 alloc-surface 4bpp: error 710b
+exact 11 alloc-surface 8bpp: error 710b
+fast 11 alloc-surface 8bpp: error 710b
+exact 12 alloc-surface location 0: error 710c
+fast 12 alloc-surface location 0: error 710c
+exact 13 alloc-surface location 2: error 710c
+fast 13 alloc-surface location 2: error 710c
+exact 14 get-surface-info: ok
+fast 14 get-surface-info: ok
+exact 15 set-clip: ok
+fast 15 set-clip: ok
+exact 16 get-clip: ok
+fast 16 get-clip: ok
+exact 17 set-clip null: ok
+fast 17 set-clip null: ok
+exact 18 lock-unlock update: ok
+fast 18 lock-unlock update: ok
+exact 19 lock-unlock no-update: ok
+fast 19 lock-unlock no-update: ok
+exact 20 read-surface: ok
+fast 20 read-surface: ok
+exact 21 read-surface async: ok
+fast 21 read-surface async: ok
+exact 22 read-surface-region: ok
+fast 22 read-surface-region: ok
+exact 23 read-surface-region async: ok
+fast 23 read-surface-region async: ok
+exact 24 read-surface-region wide-rows: ok
+fast 24 read-surface-region wide-rows: ok
+exact 25 write-surface: ok
+fast 25 write-surface: ok
+exact 26 write-surface async: ok
+fast 26 write-surface async: ok
+exact 27 write-surface-region: ok
+fast 27 write-surface-region: ok
+exact 28 write-surface-region async: ok
+fast 28 write-surface-region async: ok
+exact 29 write-surface-region wide-rows: ok
+fast 29 write-surface-region wide-rows: ok
+exact 30 is-surface-ready: ok
+fast 30 is-surface-ready: ok
+exact 31 bitblt: ok
+fast 31 bitblt: ok
+exact 32 bitblt to-display: ok
+fast 32 bitblt to-display: ok
+exact 33 bitblt overlap: ok
+fast 33 bitblt overlap: ok
+exact 34 bitblt clipped: ok
+fast 34 bitblt clipped: ok
+exact 35 async-blt: ok
+fast 35 async-blt: ok
+exact 36 transparent-blt key-000000: ok
+fast 36 transparent-blt key-000000: ok
+exact 37 transparent-blt key-ff00ff: ok
+fast 37 transparent-blt key-ff00ff: ok
+exact 38 mask-blt 1bpp: refused: unsupported-peripheral (external-input-unavailable) at pc 200ab294, address 16010220
+fast 38 mask-blt 1bpp: refused: unsupported-peripheral (external-input-unavailable) at pc 200ab294, address 16010220
+exact 39 blend-blt alpha-000000: ok
+fast 39 blend-blt alpha-000000: ok
+exact 40 blend-blt alpha-808080: ok
+fast 40 blend-blt alpha-808080: ok
+exact 41 blend-blt alpha-ffffff: ok
+fast 41 blend-blt alpha-ffffff: ok
+exact 42 blend-blt alpha-204080: ok
+fast 42 blend-blt alpha-204080: ok
+exact 43 blend-blt alpha-404040: ok
+fast 43 blend-blt alpha-404040: ok
+exact 44 mask-blend-blt 4bpp: ok
+fast 44 mask-blend-blt 4bpp: ok
+exact 45 stretch-blt 2x: ok
+fast 45 stretch-blt 2x: ok
+exact 46 stretch-blt half: ok
+fast 46 stretch-blt half: ok
+exact 47 stretch-blt uneven: ok
+fast 47 stretch-blt uneven: ok
+exact 48 stretch-blt to-display: ok
+fast 48 stretch-blt to-display: ok
+exact 49 stretch-blt2 flags-0: ok
+fast 49 stretch-blt2 flags-0: ok
+exact 50 stretch-blt2 flags-1: ok
+fast 50 stretch-blt2 flags-1: ok
+exact 51 stretch-blt2 flags-2: ok
+fast 51 stretch-blt2 flags-2: ok
+exact 52 stretch-blt2 flags-4: ok
+fast 52 stretch-blt2 flags-4: ok
+exact 53 stretch-blt2 flags-5: ok
+fast 53 stretch-blt2 flags-5: ok
+exact 54 stretch-blt2 flags-3: ok
+fast 54 stretch-blt2 flags-3: ok
+exact 55 stretch-blt2 flags-8: error 7113
+fast 55 stretch-blt2 flags-8: error 7113
+exact 56 stretch-blt2 uneven flags-0: ok
+fast 56 stretch-blt2 uneven flags-0: ok
+exact 57 stretch-blt2 uneven flags-1: ok
+fast 57 stretch-blt2 uneven flags-1: ok
+exact 58 stretch-blt2 uneven flags-2: ok
+fast 58 stretch-blt2 uneven flags-2: ok
+exact 59 stretch-blt2 uneven flags-4: ok
+fast 59 stretch-blt2 uneven flags-4: ok
+exact 60 stretch-blt2 uneven flags-5: ok
+fast 60 stretch-blt2 uneven flags-5: ok
+exact 61 tile-blt: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
+fast 61 tile-blt: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
+exact 62 tile-blt aligned-5-3: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
+fast 62 tile-blt aligned-5-3: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
+exact 63 transform-blt rot-0 mirror-0: ok
+fast 63 transform-blt rot-0 mirror-0: ok
+exact 64 transform-blt rot-0 mirror-1: ok
+fast 64 transform-blt rot-0 mirror-1: ok
+exact 65 transform-blt rot-0 mirror-2: ok
+fast 65 transform-blt rot-0 mirror-2: ok
+exact 66 transform-blt rot-0 mirror-3: ok
+fast 66 transform-blt rot-0 mirror-3: ok
+exact 67 transform-blt rot-1 mirror-0: ok
+fast 67 transform-blt rot-1 mirror-0: ok
+exact 68 transform-blt rot-1 mirror-1: ok
+fast 68 transform-blt rot-1 mirror-1: ok
+exact 69 transform-blt rot-1 mirror-2: ok
+fast 69 transform-blt rot-1 mirror-2: ok
+exact 70 transform-blt rot-1 mirror-3: ok
+fast 70 transform-blt rot-1 mirror-3: ok
+exact 71 transform-blt rot-2 mirror-0: ok
+fast 71 transform-blt rot-2 mirror-0: ok
+exact 72 transform-blt rot-2 mirror-1: ok
+fast 72 transform-blt rot-2 mirror-1: ok
+exact 73 transform-blt rot-2 mirror-2: ok
+fast 73 transform-blt rot-2 mirror-2: ok
+exact 74 transform-blt rot-2 mirror-3: ok
+fast 74 transform-blt rot-2 mirror-3: ok
+exact 75 transform-blt rot-3 mirror-0: ok
+fast 75 transform-blt rot-3 mirror-0: ok
+exact 76 transform-blt rot-3 mirror-1: ok
+fast 76 transform-blt rot-3 mirror-1: ok
+exact 77 transform-blt rot-3 mirror-2: ok
+fast 77 transform-blt rot-3 mirror-2: ok
+exact 78 transform-blt rot-3 mirror-3: ok
+fast 78 transform-blt rot-3 mirror-3: ok
+exact 79 draw-points: ok
+fast 79 draw-points: ok
+exact 80 draw-color-points: ok
+fast 80 draw-color-points: ok
+exact 81 draw-lines 2: ok
+fast 81 draw-lines 2: ok
+exact 82 draw-lines 6: ok
+fast 82 draw-lines 6: ok
+exact 83 draw-line-segments: ok
+fast 83 draw-line-segments: ok
+exact 84 draw-rect: ok
+fast 84 draw-rect: ok
+exact 85 draw-rect clipped: ok
+fast 85 draw-rect clipped: ok
+exact 86 fill-rect: ok
+fast 86 fill-rect: ok
+exact 87 fill-rect clipped: ok
+fast 87 fill-rect clipped: ok
+exact 88 fill-rect display: ok
+fast 88 fill-rect display: ok
+exact 89 draw-spans: ok
+fast 89 draw-spans: ok
+exact 90 set-clip fill-rect: ok
+fast 90 set-clip fill-rect: ok
+exact 91 set-clip draw-lines: ok
+fast 91 set-clip draw-lines: ok
+exact 92 draw-bitmap 1bpp: ok
+fast 92 draw-bitmap 1bpp: ok
+exact 93 draw-bitmap rgb565-le: ok
+fast 93 draw-bitmap rgb565-le: ok
+exact 94 draw-bitmap rgb565-be: ok
+fast 94 draw-bitmap rgb565-be: ok
+exact 95 draw-bitmap 2bpp: ok
+fast 95 draw-bitmap 2bpp: ok
+exact 96 draw-bitmap 4bpp: ok
+fast 96 draw-bitmap 4bpp: ok
+exact 97 draw-bitmap 8bpp: ok
+fast 97 draw-bitmap 8bpp: ok
+exact 98 draw-palm-bitmap v2 1bpp: ok
+fast 98 draw-palm-bitmap v2 1bpp: ok
+exact 99 draw-palm-bitmap v2 8bpp: ok
+fast 99 draw-palm-bitmap v2 8bpp: ok
+exact 100 draw-palm-bitmap v2 16bpp: ok
+fast 100 draw-palm-bitmap v2 16bpp: ok
+exact 101 draw-palm-bitmap v3 rgb565-be 108dpi: ok
+fast 101 draw-palm-bitmap v3 rgb565-be 108dpi: ok
+exact 102 draw-palm-bitmap v3 rgb565-le 108dpi: ok
+fast 102 draw-palm-bitmap v3 rgb565-le 108dpi: ok
+exact 103 win-paint-rect paint: ok
+fast 103 win-paint-rect paint: ok
+exact 104 win-paint-rect erase: ok
+fast 104 win-paint-rect erase: ok
+exact 105 win-paint-rect mask: ok
+fast 105 win-paint-rect mask: ok
+exact 106 win-paint-rect invert: ok
+fast 106 win-paint-rect invert: ok
+exact 107 win-paint-rect overlay: ok
+fast 107 win-paint-rect overlay: ok
+exact 108 win-paint-rect paint-inverse: ok
+fast 108 win-paint-rect paint-inverse: ok
+exact 109 win-paint-rect swap: ok
+fast 109 win-paint-rect swap: ok
+exact 110 win-paint-rect rounded: ok
+fast 110 win-paint-rect rounded: ok
+exact 111 win-pattern black: ok
+fast 111 win-pattern black: ok
+exact 112 win-pattern white: ok
+fast 112 win-pattern white: ok
+exact 113 win-pattern gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+fast 113 win-pattern gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+exact 114 win-pattern custom: ok
+fast 114 win-pattern custom: ok
+exact 115 win-pattern light-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+fast 115 win-pattern light-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+exact 116 win-pattern dark-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+fast 116 win-pattern dark-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+exact 117 win-paint-line paint: ok
+fast 117 win-paint-line paint: ok
+exact 118 win-paint-line invert: ok
+fast 118 win-paint-line invert: ok
+exact 119 win-paint-pixel: ok
+fast 119 win-paint-pixel: ok
+exact 120 win-paint-chars paint: ok
+fast 120 win-paint-chars paint: ok
+exact 121 win-paint-chars overlay: ok
+fast 121 win-paint-chars overlay: ok
+exact 122 win-paint-chars swap: refused: unsupported-instruction (ok) at pc 200c7186, address 00000000
+fast 122 win-paint-chars swap: refused: unsupported-instruction (ok) at pc 200c7186, address 00000000
+exact 123 win-paint-frame: ok
+fast 123 win-paint-frame: ok
+exact 124 win-paint-bitmap 8bpp paint: ok
+fast 124 win-paint-bitmap 8bpp paint: ok
+exact 125 win-paint-bitmap 8bpp erase: ok
+fast 125 win-paint-bitmap 8bpp erase: ok
+exact 126 win-paint-bitmap 8bpp mask: ok
+fast 126 win-paint-bitmap 8bpp mask: ok
+exact 127 win-paint-bitmap 8bpp invert: refused: unsupported-peripheral (unsupported-side-effect) at pc 200a9ed4, address 16010220, plain-copy-41b 5532b4df
+fast 127 win-paint-bitmap 8bpp invert: refused: unsupported-peripheral (unsupported-side-effect) at pc 200a9ed4, address 16010220, plain-copy-41b 5532b4df
+exact 128 win-paint-bitmap 8bpp overlay: ok
+fast 128 win-paint-bitmap 8bpp overlay: ok
+exact 129 win-paint-bitmap 8bpp paint-inverse: ok
+fast 129 win-paint-bitmap 8bpp paint-inverse: ok
+exact 130 win-paint-bitmap 8bpp swap: ok
+fast 130 win-paint-bitmap 8bpp swap: ok
+exact 131 win-paint-bitmap 16bpp paint: ok
+fast 131 win-paint-bitmap 16bpp paint: ok
+exact 132 win-paint-bitmap 16bpp overlay: ok
+fast 132 win-paint-bitmap 16bpp overlay: ok
+exact 133 win-copy-rect display paint: ok
+fast 133 win-copy-rect display paint: ok
+exact 134 win-copy-rect display erase: ok
+fast 134 win-copy-rect display erase: ok
+exact 135 win-copy-rect display mask: ok
+fast 135 win-copy-rect display mask: ok
+exact 136 win-copy-rect display invert: ok
+fast 136 win-copy-rect display invert: ok
+exact 137 win-copy-rect display overlay: ok
+fast 137 win-copy-rect display overlay: ok
+exact 138 win-copy-rect display paint-inverse: ok
+fast 138 win-copy-rect display paint-inverse: ok
+exact 139 win-copy-rect display swap: ok
+fast 139 win-copy-rect display swap: ok
+exact 140 win-copy-rect offscreen paint: ok
+fast 140 win-copy-rect offscreen paint: ok
+exact 141 win-copy-rect offscreen overlay: ok
+fast 141 win-copy-rect offscreen overlay: ok
+exact 142 win-copy-rect offscreen swap: ok
+fast 142 win-copy-rect offscreen swap: ok
+exact 143 win-scroll-rect up: ok
+fast 143 win-scroll-rect up: ok
+exact 144 win-scroll-rect down: ok
+fast 144 win-scroll-rect down: ok
+exact 145 win-scroll-rect left: ok
+fast 145 win-scroll-rect left: ok
+exact 146 win-scroll-rect right: ok
+fast 146 win-scroll-rect right: ok
+exact 147 win-save-restore-bits: ok
+fast 147 win-save-restore-bits: ok
+exact 148 win-native-coords: ok
+fast 148 win-native-coords: ok
+exact 149 win-coords 108: ok
+fast 149 win-coords 108: ok
+exact 150 win-coords 144: ok
+fast 150 win-coords 144: ok
+exact 151 free-surface: ok
+fast 151 free-surface: ok
+exact 152 close: ok
+fast 152 close: ok
