@@ -8,15 +8,17 @@ it and saves the machine there, then runs Exact and Fast from that state through
 - the ready register reads, the screen on and off times, the frames after the last event and the chip registers at
   the end are the same in Exact and Fast;
 - in the boot case, in each engine, a run loaded from a state saved in the middle of the power up (a power step under
-  way) reads the register as many times in all, last at the same guest time, and ends with the same chip registers
-  as the run that saved it and carried on. In Exact that run is also the same as the one that never saved. In Fast
-  it can be a read off: saving drops the JIT's translated code, and the JIT charges its blocks to the board at
-  their ends, so new block bounds move the guest's timer reads a little (one read and 1 us here).
+  way) reads the register as many times, last at the same guest time, and ends with the same chip registers as the
+  run that saved it and carried on from it loaded in place. A load lets go of the held pen, and the tap's pen is
+  still held at the save (it stays down 125 ms at least), so only a run that loaded too can match it exactly.
+- the run that saved and carried on without a load saved at the same read. In Exact it's the same as the run that
+  never saved. In Fast it can be a read off:
+  saving drops the JIT's translated code, and the JIT charges its blocks to the board at their ends, so new block
+  bounds move the guest's timer reads a little (one read and 1 us here).
 Memory and PCM hashes aren't compared between the engines, whose guest timing differs as in count-check, nor across a
 load, after which benchmark-replay takes frames, traces and ends at other slice points.
 
-Cases: the boot powers the chip down at about 35 s and up again for the first tap's click at 40.04 s (the tap is
-short so nothing is held across the save); sleep and wake (power at 12 s and 14.5 s, a tap at 16.5 s).
+Cases: the boot powers the chip down at about 35 s and up again for the first tap's click at 40.04 s; sleep and wake (power at 12 s and 14.5 s, a tap at 16.5 s).
 
   zodiac-ymf-ready.py [--rom ROM] [--keep DIR]
 
@@ -96,21 +98,29 @@ def case(work, name, events, save_ms, mid_ms, end, after_ms, sleeps=False):
             failures.append(f'{name} {engine}: no frame after {after_ms} ms')
         if not mid_ms:
             continue
-        # Saved mid-wait and carried on, and loaded from that state: the same run.
+        # Saved mid-wait and carried on.
         mid = Path(work) / f'{name}-{engine}-mid.state'
         kept = parse(bench(work, f'{name}-{engine}-mid-save', replay, end,
                            {'FROND_JIT': jit, 'BENCH_ZODIAC_LOAD': str(state), 'BENCH_ZODIAC_SAVE': f'{mid_ms}:{mid}',
                             'BENCH_ZODIAC_SAVE_CONTINUE': '1'})[0], after_ms)
         if b'YMFR' not in mid.read_bytes():
             failures.append(f'{name} {engine}: the state saved at {mid_ms} ms has no power step under way')
+        # Saved mid-wait and carried on from the state loaded in place, and loaded in a new run: the same run.
+        reloaded = parse(bench(work, f'{name}-{engine}-mid-reload', replay, end,
+                               {'FROND_JIT': jit, 'BENCH_ZODIAC_LOAD': str(state),
+                                'BENCH_ZODIAC_SAVE': f'{mid_ms}:{Path(work) / f"{name}-{engine}-mid-reload.state"}',
+                                'BENCH_ZODIAC_SAVE_CONTINUE': 'reload'})[0], after_ms)
         resumed = parse(bench(work, f'{name}-{engine}-mid', replay, end,
                               {'FROND_JIT': jit, 'BENCH_ZODIAC_LOAD': str(mid)})[0], after_ms)
-        if kept[5] is None or kept[5] + resumed[3] != kept[3] or resumed[4] != kept[4]:
-            failures.append(f'{name} {engine}: {kept[5]} + {resumed[3]} ready register reads across the load, '
-                            f'{resumed[4]}; {kept[3]} carrying on, {kept[4]}')
-        if resumed[2] != kept[2]:
-            differ(f'{name} {engine}: chip registers after a load mid-wait differ from the run that carried on',
-                   resumed[2], kept[2])
+        if kept[5] is None or reloaded[5] != kept[5]:
+            failures.append(f'{name} {engine}: saved at {reloaded[5]} ready register reads loading in place, '
+                            f'{kept[5]} carrying on')
+        if resumed[3] != reloaded[3] or resumed[4] != reloaded[4]:
+            failures.append(f'{name} {engine}: {resumed[3]} ready register reads after the load, {resumed[4]}; '
+                            f'{reloaded[3]} loading in place, {reloaded[4]}')
+        if resumed[2] != reloaded[2]:
+            differ(f'{name} {engine}: chip registers after a load mid-wait differ from the run that loaded in place',
+                   resumed[2], reloaded[2])
         # Saving changes nothing in Exact; in Fast it can move the guest a read (see above).
         if abs(kept[3] - reads) > (engine == 'fast') or (engine == 'exact' and kept[4] != last):
             failures.append(f'{name} {engine}: {kept[3]} ready register reads saving on the way ({kept[4]}), '

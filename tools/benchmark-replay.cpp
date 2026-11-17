@@ -240,7 +240,9 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 // Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
 // they repeat. A --sd card runs from memory, so the file is never written.
 // BENCH_ZODIAC_SAVE=MS:FILE saves the machine at the first slice boundary at or after MS into FILE (the
-// guest ns since the start, then the state) and stops there, or carries on with BENCH_ZODIAC_SAVE_CONTINUE=1. BENCH_ZODIAC_LOAD=FILE starts from such a file
+// guest ns since the start, then the state) and stops there, or carries on with BENCH_ZODIAC_SAVE_CONTINUE=1.
+// BENCH_ZODIAC_SAVE_CONTINUE=reload carries on from the state it saved, loaded in place, which lets go of the
+// held keys and pen as a load does. BENCH_ZODIAC_LOAD=FILE starts from such a file
 // instead of the cold boot, with the same replay; events before the saved time are skipped and summary
 // counts are from the load. Either engine can load a state the other saved.
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
@@ -288,7 +290,8 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         saveAt=number(text.substr(0,colon).c_str(),UINT32_MAX)*1000000; savePath=text.substr(colon+1);
     }
     const char* goOn=std::getenv("BENCH_ZODIAC_SAVE_CONTINUE");
-    const bool continueAfterSave=goOn && std::string(goOn)=="1";
+    const bool reloadAfterSave=goOn && std::string(goOn)=="reload";
+    const bool continueAfterSave=goOn && (std::string(goOn)=="1" || reloadAfterSave);
     if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
         auto state=readFile(load);
         uint64_t savedNs=0;
@@ -353,6 +356,13 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             std::fprintf(stderr,"saved at %.3f s ready reads %llu\n",elapsed/1e9,(unsigned long long)soc->YmfReadyReads());
             if (!continueAfterSave) break;
             saveAt=UINT64_MAX;
+            if (reloadAfterSave) {
+                std::vector<uint8_t> copy(static_cast<const uint8_t*>(buffer.data),static_cast<const uint8_t*>(buffer.data)+buffer.size);
+                if (!soc->Load(copy.size(),copy.data()))
+                    throw std::runtime_error("BENCH_ZODIAC_SAVE_CONTINUE: reload refused");
+                clockStart=soc->GetTime()-elapsed;
+                std::fprintf(stderr,"loaded at %.3f s\n",elapsed/1e9);
+            }
         }
         if (elapsed>=duration*1000000) break;
         cycles+=soc->Run(mips*1000,mips*1000000);
