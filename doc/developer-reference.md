@@ -221,13 +221,15 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `os-version` | Ask the Palm for its OS version. |
 | `set-auto-off SECONDS` | Set the auto-off time until the next reset, 0 for never. Not on the TG50. The built-in usage line leaves out the argument. |
 | `install FILE` | Install a PRC or PDB. |
-| `launch NAME` | Launch an app by its database name. Refused while the Palm is asleep. |
+| `launch NAME` | Launch an app by its database name. |
 | `db-list` | List the RAM databases. |
 | `db-export FILE` | Export the RAM databases to a ZIP. |
 | `db-export-rom FILE` | Export RAM and ROM databases (not the PACE cache). |
 | `db-export-all FILE` | Export every database. |
 
 `install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
+
+A sleeping Palm is woken first with a power button press, here and on the control socket, for `install`, `launch`, `os-version`, `set-auto-off`, the `db-` commands, `launch-app`, `delete-db`, `export`, `export-db` and the Memory Stick file commands. The guest runs until it's awake and takes host calls, 5 guest seconds at most. One still asleep then refuses the command, saying the Palm is asleep (`not-ready` on the control socket).
 
 ## Control socket
 

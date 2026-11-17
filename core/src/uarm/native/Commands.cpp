@@ -299,6 +299,10 @@ namespace {
             return;
         }
 
+        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+            cout << "OS version failed: the Palm is asleep" << endl;
+            return;
+        }
         try {
             GuestExport guest(*ctx->soc);
             if (!guest.Ready()) {
@@ -346,6 +350,10 @@ namespace {
             return;
         }
 
+        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+            cout << "set-auto-off failed: the Palm is asleep" << endl;
+            return;
+        }
         if (!syscallDispatchPrepare(sd)) {
             cout << "unable to prepare save environment for syscalls" << endl;
             return;
@@ -411,7 +419,10 @@ namespace {
                 break;
 
             case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE:
-                cout << "db installation not currently possible" << endl;
+                if (frondNative::guestAsleep(*ctx->soc))
+                    cout << "installation failed: the Palm is asleep" << endl;
+                else
+                    cout << "db installation not currently possible" << endl;
                 break;
 
             case DB_INSTALL_RESULT_ERR_UNKNOWN:
@@ -429,6 +440,10 @@ namespace {
             return;
         }
 
+        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+            cout << "database list failed: the Palm is asleep" << endl;
+            return;
+        }
         DbMetadataList metadataList;
         std::unique_ptr<GuestExport> guest;
         try {
@@ -469,7 +484,10 @@ namespace {
         try {
             std::vector<uint8_t> archive;
             if (!GuestDatabaseOps::Export(*ctx->soc, "", archive, type)) {
-                cout << "Palm OS is not ready for database export; try again" << endl;
+                if (frondNative::guestAsleep(*ctx->soc))
+                    cout << "export failed: the Palm is asleep" << endl;
+                else
+                    cout << "Palm OS is not ready for database export; try again" << endl;
                 return;
             }
             if (util::WriteFile(args[0], archive.data(), archive.size()))

@@ -422,6 +422,13 @@ class DesktopControl {
         }
         return {false, "command", "Unknown second SD slot command."};
     }
+    // A host call refused: the Palm stayed asleep after the power press, or Palm OS isn't at a
+    // point that takes host calls.
+    static Reply notReady(commands::Context& ctx) {
+        if (frondNative::guestAsleep(*ctx.soc)) return {false, "not-ready", "The Palm is asleep. Turn it on and try again."};
+        return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+    }
+
     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
         // On a Memory Stick device the card store holds a Memory Stick Pro, reached through ms-*.
         // This comes before the argument checks so every sd-* command gets the same answer.
@@ -475,10 +482,7 @@ class DesktopControl {
         if (command == "launch-app") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
             const auto launched = GuestDatabaseOps::Launch(*ctx.soc, path);
-            if (launched == GuestDatabaseOps::LaunchResult::notReady && frondNative::guestAsleep(*ctx.soc))
-                return {false, "not-ready", "The Palm is asleep. Turn it on and try again."};
-            if (launched == GuestDatabaseOps::LaunchResult::notReady)
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (launched == GuestDatabaseOps::LaunchResult::notReady) return notReady(ctx);
             if (launched != GuestDatabaseOps::LaunchResult::launched)
                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
             return {true, "launched", "Application launched."};
@@ -486,7 +490,7 @@ class DesktopControl {
         if (command == "delete-db") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm database name (up to 31 bytes)."};
             const auto deleted = GuestDatabaseOps::Delete(*ctx.soc, path);
-            if (!deleted) return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!deleted) return notReady(ctx);
             switch (*deleted) {
                 case DeleteDbResult::deleted: return {true, "deleted", "Database deleted."};
                 case DeleteDbResult::missing: return {false, "missing", "There is no Palm database with that name."};
@@ -664,8 +668,7 @@ class DesktopControl {
                     if ((!contents.empty() && !input.read(reinterpret_cast<char*>(contents.data()), contents.size())) || input.peek() != std::char_traits<char>::eof())
                         return {false, "read", "Could not read the complete host file."};
                 }
-                if (!GuestDatabaseOps::Ready(*ctx.soc))
-                    return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+                if (!GuestDatabaseOps::Wake(*ctx.soc) || !GuestDatabaseOps::Ready(*ctx.soc)) return notReady(ctx);
                 if (command == "ms-files") {
                     const auto listing = GuestFiles::List(*ctx.soc, cardPath, cancel);
                     std::string text = "space\t" + std::to_string(listing.used) + "\t" + std::to_string(listing.total) + "\n";
@@ -859,7 +862,9 @@ class DesktopControl {
                 case DB_INSTALL_RESULT_ERR_IS_OPEN: return {false, "open", "Close this application on the Palm before replacing it."};
                 case DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE: return {false, "overwrite", "The existing database could not be replaced."};
                 case DB_INSTALL_RESULT_ERR_NOT_SUPPORTED: return {false, "unsupported", "Installation is not supported by this firmware."};
-                case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE: return {false, "not-ready", "Wait for Palm OS to finish starting, then try again."};
+                case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE:
+                    if (frondNative::guestAsleep(*ctx.soc)) return notReady(ctx);
+                    return {false, "not-ready", "Wait for Palm OS to finish starting, then try again."};
                 default: return {false, "install", "Application installation failed."};
             }
         }
@@ -873,16 +878,14 @@ class DesktopControl {
                 destination=path.substr(0,split);database=path.substr(split+1);
             }
             std::vector<uint8_t> archive;
-            if (!GuestDatabaseOps::Export(*ctx.soc, database, archive))
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!GuestDatabaseOps::Export(*ctx.soc, database, archive)) return notReady(ctx);
             writeAtomic(destination, archive.data(), archive.size());
             return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
         }
         if (command == "db-list") {
             // One line per RAM database: type, creator and attributes in hex, then the hex name.
             DbMetadataList list;
-            if (!GuestDatabaseOps::List(*ctx.soc, list))
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!GuestDatabaseOps::List(*ctx.soc, list)) return notReady(ctx);
             std::string text;
             for (const auto& db : list) {
                 char fields[32];
