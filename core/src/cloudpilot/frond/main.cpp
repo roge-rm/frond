@@ -1108,18 +1108,28 @@ class Runner {
     // Host commands that call into Palm OS (install, launch, database lists and exports) wait for
     // the guest's event loop, where no app or system call is half done, and run there inside the
     // emulation. One waits at a time; it fails with a reason after kGuestCallSeconds of guest time,
-    // or at once while asleep or stopped in the debugger.
+    // or at once when stopped in the debugger. A sleeping Palm is woken first with a power button
+    // press, as a person would; one still asleep kWakeSeconds later, or that falls asleep while
+    // the call waits, refuses it.
     static constexpr double kGuestCallSeconds = 30;
+    static constexpr double kWakeSeconds = 5;
     struct GuestCall {
         function<void()> run;
         function<void(const string&)> refuse;
         double deadline;
+        double wakeDeadline;  // guest seconds; 0 when the Palm was awake
     };
     optional<GuestCall> guestCall;
 
     void Guest(function<void()> run, function<void(const string&)> refuse) {
         if (!gSystemState.IsUIInitialized()) return refuse("Palm OS hasn't finished starting");
-        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds};
+        double wakeDeadline = 0;
+        if (!gSession->IsPowerOn() && !gDebugger.IsStopped()) {
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::press));
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::release));
+            wakeDeadline = guestSeconds + kWakeSeconds;
+        }
+        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds, wakeDeadline};
         EmPalmOS::RequestSafePoint();
     }
 
@@ -1166,8 +1176,10 @@ class Runner {
         if (!guestCall) return;
         string why;
         if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
-        else if (!gSession->IsPowerOn()) why = "the Palm is asleep";
-        else if (guestSeconds >= guestCall->deadline)
+        else if (!gSession->IsPowerOn()) {
+            if (guestSeconds < guestCall->wakeDeadline) return;
+            why = "the Palm is asleep";
+        } else if (guestSeconds >= guestCall->deadline)
             why = "Palm OS is busy, its event loop didn't run in " + to_string(int(kGuestCallSeconds)) + " s";
         else return;
         GuestCall call = std::move(*guestCall);

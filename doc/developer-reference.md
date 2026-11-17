@@ -619,7 +619,7 @@ Read from standard input, one per line, unless `--desktop-socket` is used. Paths
 | `gdb-state` | `off`, or `listening` or `connected`, then `running` or `stopped`. |
 | `gdb-app FILE [NAME]` | Tell the stub which executable (COFF or ELF) the app came from, and its database name, see below. |
 
-`launch`, `install` and the `db-` commands call into Palm OS, so they wait for the running app's next event loop call (EvtGetEvent) and run there, and the console takes no other command meanwhile. If the app is busy for 30 guest seconds, the Palm is asleep or the debugger has stopped it, the command fails with the reason (`export failed: Palm OS is busy, ...`) and the session runs on. After an install, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays.
+`launch`, `install` and the `db-` commands call into Palm OS, so they wait for the running app's next event loop call (EvtGetEvent) and run there, and the console takes no other command meanwhile. A sleeping Palm is woken first with a power button press. If the app is busy for 30 guest seconds, the Palm is still asleep 5 guest seconds after that press or the debugger has stopped it, the command fails with the reason (`export failed: Palm OS is busy, ...`) and the session runs on. After an install, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays.
 
 ### Control socket
 

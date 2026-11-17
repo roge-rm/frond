@@ -801,6 +801,7 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
 
 # Left idle after a cold boot, the private IIIx and m515 ROMs turn off at the OS's 2 minute auto-off.
+# Needs FROND_DEVICE_IMAGES.
 .PHONY: test-frond-68k-auto-off
 test-frond-68k-auto-off: out/frond-68k
 	python3 tests/frond-68k-auto-off.py

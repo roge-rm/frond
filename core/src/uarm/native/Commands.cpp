@@ -347,17 +347,26 @@ namespace {
         }
 
         if (!syscallDispatchPrepare(sd)) {
-            cout << "unable to prepare save environment for syscalls" << endl;
+            cout << "Palm OS is not ready for set-auto-off" << endl;
             return;
         }
 
         // The 68k trap goes through PACE to the OS's own SysSetAutoOffTime. The ARM call by
-        // table offset read a bad address on the TX and reset it.
+        // table offset read a bad address on the T|X and reset it. The second call returns what
+        // the first left in place, which the no-sleep patch holds at 0.
         try {
+            ReadOnlyGuest transaction(*ctx->soc);
             syscall68k_SysSetAutoOffTime(sd, SC_EXECUTE_FULL, timeout);
-            cout << "auto-off set to " << timeout << " s" << endl;
+            const uint16_t now = syscall68k_SysSetAutoOffTime(sd, SC_EXECUTE_FULL, timeout);
+            transaction.Commit();
+            if (now == timeout)
+                cout << "auto-off set to " << timeout << " s" << endl;
+            else if (now == 0)
+                cout << "auto-off stays off: this firmware's no-sleep patch holds it" << endl;
+            else
+                cout << "auto-off is " << now << " s" << endl;
         } catch (const std::exception& error) {
-            cout << "set-auto-off failed: " << error.what() << endl;
+            cout << "set-auto-off failed: " << error.what() << "; guest restored" << endl;
         }
     }
 
