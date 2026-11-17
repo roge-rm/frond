@@ -49,6 +49,7 @@ class SocIMX1 : public SoC {
     void ResetPendingFrame() override { framePending = false; }
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
+    Attention GuestAttention() override;
     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}

@@ -35,6 +35,9 @@ class SdlEventHandler {
     DeviceKeyMask PressedButtons() const;
     // Where the analogue stick is held, for drawing; centred when let go.
     DeviceStick Stick() const { return stick; }
+    // Rumbles every open game controller while on, as the guest's vibrate motor (the Zodiac's rumble).
+    // Call it once a slice with the motor's state; nowUsec is host time.
+    void Rumble(bool on, uint64_t nowUsec);
     bool RedrawRequested() const;
     bool QuitRequested() const;
     void ClearQuitRequested() { quitRequested = false; }
@@ -118,6 +121,9 @@ class SdlEventHandler {
     std::map<SDL_JoystickID, GamepadState> pads;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
+    // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
+    bool rumbling{false};
+    uint64_t rumbleSentUsec{0};
     DeviceKeyMask padKeys{0};
     DeviceStick padStick{};
     DeviceStick stick{};

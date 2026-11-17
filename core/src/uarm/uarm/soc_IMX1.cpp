@@ -187,6 +187,12 @@ unsigned SocIMX1::GuestOrientation() {
     return orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
 }
 
+// The YMF768's LED and rumble motor.
+SoC::Attention SocIMX1::GuestAttention() {
+    const auto outputs = imx1MachineAttention(machine);
+    return {outputs.led, outputs.motor};
+}
+
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
 bool SocIMX1::Save() {
     if (halted) {

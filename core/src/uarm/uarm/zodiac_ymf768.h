@@ -53,6 +53,12 @@ class Imx1Ymf768 {
         return regs[b & 1][i & 0xff];
     }
 
+    // Bank 1 register 48, the chip's two outputs: bit 0 the LED, bit 1 the rumble motor. The ROM sets both
+    // with 0d = 0d and 49 = 3 first (0x200b5bf0 motor, 0x200b5c88 LED), on or off only; the OS times any
+    // pattern itself. For the host; the guest never reads it back.
+    bool led() const { return regs[1][0x48] & 1; }
+    bool motor() const { return regs[1][0x48] & 2; }
+
     // The selected register and bank, for tests.
     uint8_t selectedIndex() const { return index; }
     uint8_t selectedBank() const { return bank; }

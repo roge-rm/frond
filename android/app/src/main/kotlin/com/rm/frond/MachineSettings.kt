@@ -83,12 +83,14 @@ data class MachineSettings(
     val usbPort: String = UsbPort.OFF,
     // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
     val wifiModule: Boolean = true,
+    // Zodiac: its rumble motor drives the controller's or the phone's vibrator.
+    val rumble: Boolean = true,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -168,6 +170,7 @@ data class MachineSettings(
                 usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
+                rumble = json.optBoolean("rumble", fallback.rumble),
             )
         }
     }

@@ -119,6 +119,7 @@ class RunningSheetsTest {
             assertEquals(AudioRow.SOUND, rows.first())
             assertEquals(device.id, !device.runs68k || device.microphone, AudioRow.MICROPHONE in rows)
             assertEquals(device.id, !device.runs68k, AudioRow.AUDIO_PREVIEW in rows)
+            assertEquals(device.id, device.zodiac, AudioRow.RUMBLE in rows)
         }
     }
 

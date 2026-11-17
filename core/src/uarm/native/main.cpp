@@ -41,6 +41,8 @@
 #ifdef __ANDROID__
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
 void frondGuestOrientationChanged(int orientation);
+// In the app: the guest's alarm LED or vibrate motor changed. Guest thread.
+void frondGuestAttentionChanged(bool led, bool vibrate);
 #endif
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
@@ -806,6 +808,9 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
+#ifdef __ANDROID__
+        SoC::Attention attention{};
+#endif
         int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
@@ -1251,6 +1256,16 @@ bool gFastEngineMissing = false;
                         frondGuestOrientationChanged(int(orientation));
 #endif
                     }
+                }
+                // The LED and vibrate motor: the app on Android, game controllers on the desktop.
+                {
+                    const SoC::Attention current = soc->GuestAttention();
+#ifdef __ANDROID__
+                    if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
+                    attention = current;
+#else
+                    sdlEventHandler.Rumble(current.vibrate, timestampUsec());
+#endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
                 if (zodiacSpeed && zodiacSpeed->Due(now)) {

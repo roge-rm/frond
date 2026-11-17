@@ -297,6 +297,10 @@ void imx1MachineAcknowledgeFrame(Imx1Machine*);
 // 1 portrait (as wired), 2 landscape, 3 reverse portrait, 4 reverse landscape, the SysGetOrientation
 // numbers. 0 while the display is off or not set up.
 unsigned imx1MachineScanOrientation(const Imx1Machine*);
+// The YMF768's LED and rumble motor outputs as the guest last set them, false while the chip is off. Reads
+// only; for the frontends.
+struct Imx1MachineAttention { bool led = false, motor = false; };
+Imx1MachineAttention imx1MachineAttention(const Imx1Machine*);
 // How many times the guest has started up from the ROM's entry, by its first register write. Counts a guest
 // reset and a power-on, not sleep and wake.
 uint32_t imx1MachineStartups(const Imx1Machine*);

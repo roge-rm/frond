@@ -157,6 +157,14 @@ class SoC {
     // 2 landscape, 3 reverse portrait, 4 reverse landscape), or 0 when unknown or the device has none.
     // Guest thread only.
     virtual unsigned GuestOrientation() { return 0; }
+    // The alarm LED and vibrate motor as the guest drives them, on or off; the guest steps any pattern
+    // itself. Both off on a device without them. Guest thread only.
+    struct Attention {
+        bool led = false, vibrate = false;
+        bool operator==(const Attention& o) const { return led == o.led && vibrate == o.vibrate; }
+        bool operator!=(const Attention& o) const { return !(*this == o); }
+    };
+    virtual Attention GuestAttention() { return {}; }
     virtual void ResetPendingFrame() = 0;
     virtual DeviceType5 GetDeviceType() = 0;
     virtual DisplayMode GetDisplayMode() = 0;
