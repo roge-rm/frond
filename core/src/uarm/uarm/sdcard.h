@@ -10,6 +10,7 @@
 #include "buffer.h"
 
 #include <string>
+#include <utility>
 
 #define SD_SECTOR_SIZE 512
 #define SD_CARD_ID_MAX_LEN 32
@@ -18,6 +19,86 @@ class CardBacking;
 class CardSnapshot;
 struct FileCardIoHooks;
 
+// A card store: one card's bytes on a backing (RAM or a .frondsd file), its dirty pages and id.
+// Slot 0 is the store every device has; the sdCard* functions below act on it. The Zodiac's
+// second slot (the W4200's) has slot 1. Each store is used from the emulation thread only.
+class SdCardStore {
+   public:
+    SdCardStore();
+    ~SdCardStore();
+    SdCardStore(const SdCardStore&) = delete;
+    SdCardStore& operator=(const SdCardStore&) = delete;
+
+    void initialize(size_t sectors, const char* id);
+    void initializeWithData(size_t sectors, void* buf, const char* id);
+    bool initializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset, const char* id);
+    void initializeWithBytes(std::vector<uint8_t>&& bytes, const char* id);
+    void rekey(const char* id);
+    bool commit();
+    bool fileBacked() const;
+    bool backedBy(const char* path) const;
+    bool runsOn(const char* path) const;
+    void markStale() { backingStale = true; }
+    std::string backingPath() const;
+    bool pinned() const;
+    bool forEachChange(const CardSnapshot& pin,
+                       const std::function<bool(uint64_t offset, uint64_t length, const uint8_t* data)>& fn);
+    bool setChunkCrcs(std::vector<uint32_t> table);
+    void trustChunks(const std::vector<uint64_t>& chunks);
+    bool adoptSaved(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
+    bool adoptSavedFromRam(const char* path, uint64_t payloadBytes, uint64_t payloadOffset);
+    void reset();
+    bool readBytes(uint64_t offset, uint64_t length, void* data);
+    bool writeBytes(uint64_t offset, uint64_t length, const void* data);
+    uint64_t epoch() const { return epochCount; }
+    bool initialized() const { return backing != nullptr; }
+    bool read(uint32_t sector, void* data);
+    bool write(uint32_t sector, const void* data);
+    size_t sectorCount() const { return sectorsTotal; }
+    struct Buffer data();
+    struct Buffer dirtyPages();
+    bool isDirty() const { return dirty; }
+    void setDirty(bool isDirty) { dirty = isDirty; }
+    const char* getId() const { return initialized() ? cardId : ""; }
+    std::shared_ptr<const CardSnapshot> snapshot();
+    void trackWrites(bool on);
+    void setAdoptHooks(FileCardIoHooks* hooks) { adoptHooks = hooks; }
+    bool restore(const std::shared_ptr<const CardSnapshot>& snapshot);
+
+   private:
+    bool sidecarChunks(const char* path, uint64_t payloadBytes, uint64_t payloadOffset, std::vector<uint32_t>& table);
+    bool takeTracked(std::vector<std::pair<uint32_t, std::vector<uint8_t>>>& out);
+    void noteWritten(uint64_t sector);
+    void markDirty(uint32_t sector);
+    void allocateDirtyPages(size_t sectors);
+
+    size_t sectorsTotal = 0;
+    bool dirty = false;
+    std::unique_ptr<CardBacking> backing;
+    // A save moved the sidecar on but the card couldn't follow; it isn't backed by any sidecar
+    // until it's replaced or adopted, so the next save copies it whole.
+    bool backingStale = false;
+    std::vector<uint8_t> dataView;
+    bool dataViewValid = false;
+    std::vector<uint32_t> dirtyPageBits;
+    char cardId[SD_CARD_ID_MAX_LEN + 1]{};
+    uint64_t epochCount = 0;
+    // Test hooks for the Open a move onto a saved file makes.
+    FileCardIoHooks* adoptHooks = nullptr;
+    // Sectors written while a background save writes (trackWrites), one bit each, so the note
+    // never outgrows the card.
+    bool tracking = false;
+    std::vector<bool> writtenSectors;
+};
+
+constexpr unsigned sdCardStoreCount = 2;
+// The store for `slot`: 0 for the first (and usually only) card slot, 1 for the Zodiac's second.
+SdCardStore& sdCardStore(unsigned slot);
+// Slot 1's sectors as vSD callbacks.
+bool sdCardStore1Read(uint32_t sector, void* data);
+bool sdCardStore1Write(uint32_t sector, const void* data);
+
+// Slot 0's store, as before stores were per slot.
 void sdCardInitialize(size_t sectors, const char* id);
 void sdCardInitializeWithData(size_t sectors, void* buf, const char* id);
 bool sdCardInitializeFromFile(const char* path, uint64_t payloadBytes, uint64_t payloadOffset,

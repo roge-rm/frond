@@ -85,9 +85,13 @@ class SocIMX1 : public SoC {
     bool CardSwappedOnLoad() const { return cardSwapped; }
     // Whether slot 1 has the card attached, for tests.
     bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
-    // Slot 2, the W4200's SD slot: the card to have in it, or null for none. The caller keeps the card.
-    void SetSecondCard(VSD* card) { vsd2 = card; card2Sync = true; SyncSecondCard(); }
+    // Slot 2, the W4200's SD slot, holds sdCardStore(1)'s card (Sd2Insert). Whether the machine has it
+    // attached, for tests.
     bool SecondCardAttached() const { return imx1MachineGraphicsSdCard(machine) != nullptr; }
+    bool HasSecondSdSlot() const override { return true; }
+    bool Sd2Insert() override;
+    void Sd2Eject() override;
+    bool Sd2Inserted() const override { return card2In; }
     // Whether the machine has the pen down just now.
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
@@ -112,12 +116,13 @@ class SocIMX1 : public SoC {
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
     void SyncCard();
-    // The same for slot 2 and vsd2.
+    // The same for slot 2, card2In and vsd2.
     void SyncSecondCard();
 
     std::vector<uint8_t> rom, saved, powerOn;
+    // Slot 2's card on sdCardStore(1), made at its first insert.
     VSD* vsd2{nullptr};
-    bool card2Sync{false};
+    bool card2In{false}, card2Sync{false};
     std::unique_ptr<Imx1I2cReadWindow> eeprom;
     Imx1Machine* machine{nullptr};
     bool halted{false};

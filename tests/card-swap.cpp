@@ -601,6 +601,105 @@ static void ClassicCounter() {
     std::printf("classic Memory Stick generation ok\n");
 }
 
+// The Zodiac's second SD slot: its card in sdCardStore(1), saved beside the first as sd2.frondsd, a
+// session with one card loading with slot 2 empty, take-out and put-in, and --card-swap leaving it be.
+static void SecondSlot() {
+    const char* device = "tapwave-zodiac-2";
+    const uint64_t bytes = 32u << 20;
+    auto& second = sdCardStore(1);
+    const auto a = Machine("second-slot");
+    // An old session with one card: slot 2 stays empty.
+    {
+        auto contents = Contents(device);
+        WriteSd(a / frondMachine::sdSibling, bytes, 0x11, 1, Id(1));
+        contents.media.push_back(FileMedia(frondMachine::kindSd, bytes, 1, Id(1)));
+        SaveFrond(a, contents);
+        frondSession::Contents got;
+        assert(Load(a, got, nullptr) && got.media.size() == 1);
+        assert(frondNative::attachFolderMedia(got, a) && sdCardInitialized() && !second.initialized());
+    }
+    // A second card in RAM next to the first, then both saved: a full copy of the second, a journal of
+    // the first.
+    const size_t sectors = bytes / SD_SECTOR_SIZE;
+    second.initializeWithData(sectors, std::calloc(sectors, SD_SECTOR_SIZE), "22222222222222222222222222222222");
+    std::vector<uint8_t> marker(SD_SECTOR_SIZE, 0x5a);
+    assert(second.write(3, marker.data()));
+    marker.assign(SD_SECTOR_SIZE, 0x6b);
+    assert(sdCardWrite(4, marker.data()));
+    auto save = [&](uint64_t firstGeneration, uint64_t secondGeneration) {
+        auto contents = Contents(device);
+        frondMachine::Media first, other;
+        frondNative::SdSave firstSave, secondSave;
+        assert(frondNative::beginSdSave(a, first, true, firstSave, frondMachine::kindSd));
+        assert(frondNative::beginSdSave(a, other, false, secondSave, frondMachine::kindSd2, true));
+        assert(first.contentGeneration == firstGeneration && other.contentGeneration == secondGeneration);
+        assert(other.name == frondMachine::sd2Sibling && other.writeProtected && !other.inserted);
+        contents.media = {first, other};
+        bool published = false;
+        assert(frondSession::saveFolderFromTemps(a, contents, {fs::path(), fs::path()}, &published) && published);
+        assert(frondNative::completeSdSave(a, firstSave) && frondNative::completeSdSave(a, secondSave));
+        assert(Settled(a, frondMachine::kindSd) && Settled(a, frondMachine::kindSd2));
+    };
+    save(2, 1);
+    // A card in RAM stays there and is copied whole again.
+    marker.assign(SD_SECTOR_SIZE, 0x7c);
+    assert(second.write(5, marker.data()));
+    save(3, 2);
+    sdCardReset();
+    second.reset();
+    frondSession::Contents got;
+    assert(Load(a, got, nullptr) && got.media.size() == 2);
+    assert(frondNative::attachFolderMedia(got, a) && sdCardInitialized() && second.initialized());
+    assert(std::string(second.getId()) == "22222222222222222222222222222222");
+    std::vector<uint8_t> sector(SD_SECTOR_SIZE);
+    assert(second.read(3, sector.data()) && sector[0] == 0x5a && second.read(5, sector.data()) && sector[0] == 0x7c);
+    assert(second.read(4, sector.data()) && sector[0] == 0);
+    assert(sdCardRead(4, sector.data()) && sector[0] == 0x6b && sdCardRead(3, sector.data()) && sector[0] == 0x11);
+    // On its file now, a change saves as a journal.
+    assert(second.runsOn((a / frondMachine::sd2Sibling).c_str()));
+    marker.assign(SD_SECTOR_SIZE, 0x5b);
+    assert(second.write(3, marker.data()));
+    save(4, 3);
+    assert(second.read(3, sector.data()) && sector[0] == 0x5b);
+    // --card-swap with the first slot's identity leaves the second card as saved.
+    auto swap = Swap(true, Id(1));
+    assert(Load(a, got, &swap) && got.media.size() == 2 && !got.sd2Swapped && !got.sdSwapped);
+    // Taken out: sd2.frondsd stays, slot 2 is empty and the first card is untouched.
+    CardIdentity id{};
+    assert(frondNative::takeOutFileCard(a, frondMachine::kindSd2, true, id).ok);
+    assert(!second.initialized() && sdCardInitialized() && Settled(a, frondMachine::kindSd2));
+    assert(std::string(id.begin(), id.end()) == "22222222222222222222222222222222");
+    // Gone while off: the slot is empty under --card-swap, and refused without it.
+    const auto drawer = Machine("second-slot-drawer");
+    fs::rename(a / frondMachine::sd2Sibling, drawer / frondMachine::sd2Sibling);
+    assert(!Load(a, got, nullptr));
+    assert(Load(a, got, &swap) && got.media.size() == 1 && got.sd2Swapped);
+    // Another card file there: refused, it goes in with sd2-put-in.
+    WriteSd(a / frondMachine::sd2Sibling, bytes, 0x33, 7, Id(3));
+    assert(!Load(a, got, &swap));
+    fs::remove(a / frondMachine::sd2Sibling);
+    // Put back in while running.
+    fs::rename(drawer / frondMachine::sd2Sibling, a / frondMachine::sd2Sibling);
+    assert(frondNative::putInSd2(a, deviceTypeZodiac2, id, true).ok && second.initialized());
+    assert(frondNative::slotCards().sd2Protected && !frondNative::slotCards().sdProtected);
+    assert(second.read(5, sector.data()) && sector[0] == 0x7c);
+    assert(!frondNative::putInSd2(a, deviceTypeZodiac2, id, true).ok);
+    // A candidate in slot 2 leaves slot 1's alone.
+    second.reset();
+    const auto b = Machine("second-slot-candidate");
+    frondSdCandidate::Candidate candidate;
+    assert(frondSdCandidate::create(b, 256u << 20, {}, candidate).ok);
+    assert(frondSdCandidate::attach(candidate, 256u << 20, "33333333333333333333333333333333", 1));
+    assert(frondSdCandidate::live(0).path.empty() && !frondSdCandidate::live(1).path.empty());
+    assert(sdCardInitialized() && second.sectorCount() == (256u << 20) / SD_SECTOR_SIZE);
+    second.reset();
+    frondSdCandidate::releaseUnused(1);
+    assert(frondSdCandidate::live(1).path.empty());
+    sdCardReset();
+    frondNative::slotCards() = {};
+    std::printf("second SD slot save, load, take-out and put-in ok\n");
+}
+
 static void Arguments() {
     CardIdentity id{};
     bool protect = true;
@@ -611,7 +710,7 @@ static void Arguments() {
     assert(!frondNative::parsePutIn(hex.substr(1), id, protect));
     assert(frondNative::identityHex(Id(1)).size() == 64);
     assert(frondNative::takenOutReply(id, true) == hex + " protected");
-    assert(frondMachine::packableName("slot.json"));
+    assert(frondMachine::packableName("slot.json") && frondMachine::packableName(frondMachine::sd2Sibling));
     std::printf("card swap arguments ok\n");
 }
 
@@ -624,6 +723,7 @@ int main() {
     TakeOutClassic();
     SdCounter();
     ClassicCounter();
+    SecondSlot();
     fs::remove_all(Root());
     std::printf("card swap ok\n");
 }

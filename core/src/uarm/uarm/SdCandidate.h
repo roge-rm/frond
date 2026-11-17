@@ -48,9 +48,10 @@ struct Candidate {
     int fd{-1};  // open for writing and holding the lock
 };
 
-inline Candidate& live() {
-    static Candidate current;
-    return current;
+// Each card store (sdCardStore) has its own live candidate.
+inline Candidate& live(unsigned slot = 0) {
+    static Candidate current[sdCardStoreCount];
+    return current[slot < sdCardStoreCount ? slot : 0];
 }
 
 inline bool candidateName(std::string_view name) { return name.rfind(prefix, 0) == 0; }
@@ -66,25 +67,25 @@ inline void discard(Candidate& candidate) {
 }
 
 // Makes `candidate` the live one. An earlier candidate is no longer used by the card and goes.
-inline void setLive(Candidate&& candidate) {
-    auto& current = live();
+inline void setLive(Candidate&& candidate, unsigned slot = 0) {
+    auto& current = live(slot);
     if (current.path != candidate.path) discard(current);
     current = std::move(candidate);
     candidate = {};
 }
 
 // Removes the live candidate once the card no longer runs on it.
-inline void releaseUnused() {
-    auto& current = live();
+inline void releaseUnused(unsigned slot = 0) {
+    auto& current = live(slot);
     if (current.path.empty()) return;
     std::error_code ec;
-    const auto running = sdCardBackingPath();
+    const auto running = sdCardStore(slot).backingPath();
     if (!running.empty() && std::filesystem::equivalent(running, current.path, ec) && !ec) return;
     discard(current);
 }
 
-inline bool liveIn(const std::filesystem::path& folder) {
-    const auto& current = live();
+inline bool liveIn(const std::filesystem::path& folder, unsigned slot = 0) {
+    const auto& current = live(slot);
     std::error_code ec;
     return !current.path.empty() && std::filesystem::equivalent(current.path.parent_path(), folder, ec) && !ec;
 }
@@ -395,13 +396,13 @@ inline Result exportRaw(const CardSnapshot& pin, const std::filesystem::path& de
 
 // Puts a finished candidate on as the live card. On failure the candidate goes and the old
 // card stays.
-inline bool attach(Candidate& candidate, uint64_t payloadBytes, const std::string& identity) {
-    if (!sdCardInitializeFromFile(candidate.path.c_str(), payloadBytes, frondSdFile::headerBytes,
-                                  identity.c_str())) {
+inline bool attach(Candidate& candidate, uint64_t payloadBytes, const std::string& identity, unsigned slot = 0) {
+    if (!sdCardStore(slot).initializeFromFile(candidate.path.c_str(), payloadBytes, frondSdFile::headerBytes,
+                                              identity.c_str())) {
         discard(candidate);
         return false;
     }
-    setLive(std::move(candidate));
+    setLive(std::move(candidate), slot);
     return true;
 }
 }  // namespace frondSdCandidate

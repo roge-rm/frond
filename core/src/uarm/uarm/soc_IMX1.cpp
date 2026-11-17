@@ -156,10 +156,36 @@ void SocIMX1::SyncCard() {
     cardSync = false;
 }
 
+bool SocIMX1::Sd2Insert() {
+    auto& store = sdCardStore(1);
+    if (card2In) return true;
+    if (!store.initialized()) return false;
+    const size_t sectors = store.sectorCount();
+    if (sectors > zodiacCardSectors) {
+        std::cerr << "zodiac: the second card is over 2 GB, which the Zodiac can't use; left out" << std::endl;
+        return false;
+    }
+    if (!vsd2) vsd2 = vsdInit(sdCardStore1Read, sdCardStore1Write, 0);
+    vsdReset(vsd2, uint32_t(sectors));
+    card2In = true;
+    card2Sync = true;
+    SyncSecondCard();
+    return true;
+}
+
+void SocIMX1::Sd2Eject() {
+    if (!card2In) return;
+    card2In = false;
+    card2Sync = true;
+    SyncSecondCard();
+    if (vsd2) vsdReset(vsd2, 0);
+}
+
 void SocIMX1::SyncSecondCard() {
     if (!card2Sync || halted) return;
-    if (imx1MachineSetGraphicsSdCard(machine, vsd2, false) != Imx1BootstrapAccess::ok ||
-        imx1MachineSetGraphicsSdCard(machine, vsd2, true) != Imx1BootstrapAccess::ok) return;
+    VSD* const card = card2In ? vsd2 : nullptr;
+    if (imx1MachineSetGraphicsSdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineSetGraphicsSdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
     card2Sync = false;
 }
 
@@ -187,6 +213,7 @@ void SocIMX1::Reset() {
     StateChanged();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
+    if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
     card2Sync = true;
     SyncSecondCard();
 }
@@ -265,6 +292,8 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
         }
     }
     // Slot 2's card stays in through the load (imx1MachineLoadState); this puts in or takes out the one asked for.
+    // A card that didn't carry on from the state's SD2 section starts idle.
+    if (card2In && !info.graphicsSdResumed) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
     card2Sync = true;
     SyncSecondCard();
     return true;

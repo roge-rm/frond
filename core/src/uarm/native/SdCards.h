@@ -17,7 +17,8 @@
 #include <sys/stat.h>
 #include <vector>
 
-// SD card create, import and export for the CLI and the desktop control socket.
+// SD card create, import and export for the CLI and the desktop control socket. `slot` is the
+// card store (sdCardStore): 0, or 1 for the Zodiac's second SD slot.
 namespace frondNative {
 
 using SdResult = frondSdCandidate::Result;
@@ -51,13 +52,13 @@ inline std::string sdImageSizes(int32_t deviceType) {
     return "Use a raw SD image of 32 to " + std::to_string(most >> 20) + " MiB, aligned to 512 bytes.";
 }
 
-inline SdResult sdInRam(std::vector<uint8_t>& image) {
+inline SdResult sdInRam(std::vector<uint8_t>& image, unsigned slot = 0) {
     auto* owned = static_cast<uint8_t*>(malloc(image.size()));
     if (!owned) throw std::bad_alloc();
     std::memcpy(owned, image.data(), image.size());
     const auto id = md5(owned, image.size());
-    sdCardInitializeWithData(image.size() / SD_SECTOR_SIZE, owned, id.c_str());
-    frondSdCandidate::releaseUnused();
+    sdCardStore(slot).initializeWithData(image.size() / SD_SECTOR_SIZE, owned, id.c_str());
+    frondSdCandidate::releaseUnused(slot);
     return {true, "inserted", {}};
 }
 
@@ -66,12 +67,12 @@ inline constexpr const char* sdNeedsFolder = "SD cards above 128 MiB need a save
 // Replaces the card with a new formatted one. Up to 128 MiB it lives in RAM; above that it is a
 // candidate sidecar in `folder` on a random identity. The old card stays if this fails.
 inline SdResult createSdCard(const std::filesystem::path& folder, int32_t deviceType, unsigned mib,
-                             const frondSdCandidate::Progress& progress = {}) {
+                             const frondSdCandidate::Progress& progress = {}, unsigned slot = 0) {
     if (!sdCreateAllowed(deviceType, mib)) return frondSdCandidate::fail("size", sdCreateSizes(deviceType));
     const uint64_t bytes = uint64_t(mib) << 20;
     if (bytes <= frondSdCandidate::ramMaxBytes) {
         auto image = frondSd::create(mib);
-        return sdInRam(image);
+        return sdInRam(image, slot);
     }
     if (folder.empty()) return frondSdCandidate::fail("folder", sdNeedsFolder);
     const auto layout = frondSd::layout(mib);
@@ -80,14 +81,15 @@ inline SdResult createSdCard(const std::filesystem::path& folder, int32_t device
     frondSdCandidate::Candidate candidate;
     auto result = frondSdCandidate::create(folder, bytes, sectors, candidate, progress);
     if (!result.ok) return result;
-    if (!frondSdCandidate::attach(candidate, bytes, frondSdCandidate::randomIdentity()))
+    if (!frondSdCandidate::attach(candidate, bytes, frondSdCandidate::randomIdentity(), slot))
         return frondSdCandidate::fail("write", "Could not open the card file.");
     return {true, "inserted", {}};
 }
 
 // Replaces the card with a copy of a raw image. Images above 128 MiB stream into a candidate.
 inline SdResult loadSdImage(const std::filesystem::path& folder, int32_t deviceType,
-                            const std::filesystem::path& source, const frondSdCandidate::Progress& progress = {}) {
+                            const std::filesystem::path& source, const frondSdCandidate::Progress& progress = {},
+                            unsigned slot = 0) {
     struct stat st{};
     if (::stat(source.c_str(), &st) < 0 || !S_ISREG(st.st_mode))
         return frondSdCandidate::fail("read", "Could not read the card image.");
@@ -97,20 +99,21 @@ inline SdResult loadSdImage(const std::filesystem::path& folder, int32_t deviceT
         std::vector<uint8_t> image;
         if (!frondMachine::readBytes(source, image) || image.size() != bytes)
             return frondSdCandidate::fail("read", "Could not read the card image.");
-        return sdInRam(image);
+        return sdInRam(image, slot);
     }
     if (folder.empty()) return frondSdCandidate::fail("folder", sdNeedsFolder);
     frondSdCandidate::Candidate candidate;
     auto result = frondSdCandidate::importImage(folder, source, bytes, candidate, progress);
     if (!result.ok) return result;
-    if (!frondSdCandidate::attach(candidate, bytes, frondSdCandidate::randomIdentity()))
+    if (!frondSdCandidate::attach(candidate, bytes, frondSdCandidate::randomIdentity(), slot))
         return frondSdCandidate::fail("write", "Could not open the card file.");
     return {true, "inserted", {}};
 }
 
 // Writes the card's raw sectors to `dest` from a pinned snapshot.
-inline SdResult exportSd(const std::filesystem::path& dest, const frondSdCandidate::Progress& progress = {}) {
-    auto pin = sdCardSnapshot();
+inline SdResult exportSd(const std::filesystem::path& dest, const frondSdCandidate::Progress& progress = {},
+                         unsigned slot = 0) {
+    auto pin = sdCardStore(slot).snapshot();
     if (!pin) return frondSdCandidate::fail("empty", "This session has no card.");
     return frondSdCandidate::exportRaw(*pin, dest, progress);
 }
