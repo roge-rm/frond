@@ -2178,7 +2178,13 @@ static void clieGamepad() {
     const auto& p=deviceControls(DeviceArt::tg50,true);
     const auto& plain=deviceControls(DeviceArt::tg50,false);
     assert(&p!=&plain && plain.panelWidth==0 && p.panelWidth==150 && p.panelHeight==320 && p.keyboardHeight==0);
-    if(!clieGamepadPreview())assert(&deviceControls(DeviceArt::tg50)==&plain);
+    assert(&deviceControls(DeviceArt::tg50)==&plain);
+    {
+        DeviceControlView v;v.gamepad=true;
+        assert(&deviceControls(deviceTypeTG50,v)==&p);
+        v.gamepad=false;
+        assert(&deviceControls(deviceTypeTG50,v)==&plain);
+    }
     for(size_t i=0;i<plain.count;++i)assert(!clieGamepadKey(plain.buttons[i].key));
     DeviceControlView below=deviceControlView(true,JogPlacement::screen);
     DeviceControlView around=below;around.arrangement=DeviceControlArrangement::around;
@@ -2208,6 +2214,25 @@ static void clieGamepad() {
             if(side)assert(r.x+r.w<=150 || r.x>=470);
         }
         for(int k=keyIdPadUp;k<=keyIdPadHold;++k)assert(seen[k]==1);
+        // Home, Menu, X and Y each own a whole circle 46 units across under the screen, 42 in the
+        // grips: 10 and 9 mm on a 6.8" 1080x2460 phone, where a unit is about 0.22 mm either way.
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];
+            if(!deviceControlShown(b,view) || (b.key!=keyIdPadHome && b.key!=keyIdPadMenu && b.key!=keyIdPadX && b.key!=keyIdPadY))continue;
+            // Points round the key's centre in strip units, taken to window pixels as the hit test does.
+            const DeviceControlTransform t(p,320,view);
+            const SDL_Point offset=side ? deviceAroundOffset(p,b,320,320) : SDL_Point{0,0};
+            const float reach=(side ? 21 : 23)-0.8f;
+            assert(deviceGamepadHitRadius(b)>=(side ? 21 : 23));
+            for(int step=0;step<32;++step) {
+                const float a=float(M_PI)*step/16;
+                const float ux=b.bounds.x+b.bounds.w*0.5f+std::cos(a)*reach,uy=b.bounds.y+b.bounds.h*0.5f+std::sin(a)*reach;
+                const float wx=side ? offset.x+ux/p.unit : t.left+ux*t.scale,wy=side ? offset.y+uy/p.unit : 320+t.top+uy*t.scale;
+                const KeyId at=deviceControlAt(p,320,320,int(std::lround(wx-0.5f)),int(std::lround(wy-0.5f)),view);
+                if(at!=b.key)std::fprintf(stderr,"pad key %d side %d angle step %d hits %d\n",b.key,int(side),step,at);
+                assert(at==b.key);
+            }
+        }
         // Between the arrows is no key.
         auto rectOf=[&](KeyId k) {
             for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==k && deviceControlShown(p.buttons[i],view))return deviceButtonRect(p,p.buttons[i],320,320,view);

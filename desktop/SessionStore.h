@@ -94,6 +94,8 @@ struct Preferences {
     bool showMips{false};
     // Zodiac: rumble on game controllers, or a tag in the window without one.
     bool rumble{true};
+    // CLIÉ: the game controller attached. Unset (gamepadSet false) leaves the session's state at start.
+    bool gamepad{false}, gamepadSet{false};
 };
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
@@ -112,6 +114,8 @@ inline bool readPreferences(const QString& path, Preferences* result) {
     result->barShown = object.value("barShown").toBool(true);
     result->showMips = object.value("showMips").toBool(false);
     result->rumble = object.value("rumble").toBool(true);
+    result->gamepadSet = object.value("gamepad").isBool();
+    result->gamepad = object.value("gamepad").toBool(false);
     // Earlier machine settings only have the printer switch.
     const auto port = object.value("usbPort").toString();
     result->usbPort = port == "printer" || port == "wifi" ? port : object.value("usbPrinter").toBool(false) ? "printer" : "off";
@@ -137,6 +141,7 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
     if (!prefs.barShown) object.insert("barShown", false);
     if (prefs.showMips) object.insert("showMips", true);
     if (!prefs.rumble) object.insert("rumble", false);
+    if (prefs.gamepadSet) object.insert("gamepad", prefs.gamepad);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);
     if (prefs.usbPort == "printer") object.insert("usbPrinter", true);
     if (!prefs.wifiModule) object.insert("wifiModule", false);

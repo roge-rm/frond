@@ -104,6 +104,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool GamepadAttached() const override { return gamepad.Attached(); }
     bool AttachGamepad(bool attach, bool identify = true) override;
     std::string GamepadState() const override;
+    bool GamepadHold() const override { return gamepad.Attached() && gamepad.HoldOn(); }
     const ClieGamepad& Gamepad() const { return gamepad; }
 
     // One infrared accessory at a time. Hook ownership is host-only and is not
@@ -225,6 +226,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     void SyncGamepadLine();
     bool GamepadPortReady();
     void InstallGamepadHooks();
+    bool GamepadConnectorBusy() const;
     SerialHostHooks serialHostHooks{};
     IrHostHooks irHostHooks{};
     unsigned irReplacementDepth{};

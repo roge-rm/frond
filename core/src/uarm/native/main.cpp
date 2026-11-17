@@ -90,6 +90,8 @@ struct Options {
     optional<float> windowScale;
     bool smoothLcd;
     bool hideKeyboard;
+    // The CLIÉ game controller at start (the machine setting); unset keeps the session's.
+    optional<bool> gamepad;
     bool hideJogControls;
     optional<JogPlacement> jogPlacement;
     WindowFit windowFit;
@@ -841,19 +843,29 @@ bool gFastEngineMissing = false;
                                                          : options.jogPlacement.value_or(JogPlacement::screen);
         // The display settings, controlView and fitted belong to the SDL thread once the
         // guest thread starts; the display command changes them through it.
-        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog};
+        // The game controller drawn at start: the one the start option asks for, else the session's.
+        // The guest thread follows what the SoC really has from then on (an attach can be refused).
+        const bool gamepadAtStart = soc->GamepadSupported() && options.gamepad.value_or(soc->GamepadAttached());
+        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog, gamepadAtStart};
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
+        controlView.gamepad = display.gamepad;
         // A device with two arrangements starts with its controls around the screen; a fitted
         // window then puts them around when landscape and below when portrait, again after each resize.
-        controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, 0, 0);
+        controlView = deviceControlViewForWindow(deviceControls(deviceType, controlView), controlView, 0, 0);
         // The TG50 with the game controller attached splits it either side of the screen when
         // rotated to landscape and puts it below in portrait, whatever the window's shape.
-        const bool tg50Pad = deviceType == deviceTypeTG50 && deviceControls(deviceType).panelWidth > 0;
+        auto tg50Pad = [&] { return deviceType == deviceTypeTG50 && controlView.gamepad; };
         auto arrangeForRotation = [&](Rotation shown) {
-            if (!tg50Pad) return;
+            if (deviceType != deviceTypeTG50) return;
             const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
-            controlView.arrangement = landscape ? DeviceControlArrangement::around : DeviceControlArrangement::below;
+            controlView.arrangement = tg50Pad() && landscape ? DeviceControlArrangement::around : DeviceControlArrangement::below;
+        };
+        // The TG50 can't turn its screen, and it's square: with the game controller, landscape puts
+        // the grips either side of the upright LCD instead of turning the frame.
+        auto frameRotation = [&](Rotation shown) {
+            const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
+            return tg50Pad() && landscape ? Rotation::portrait_0 : shown;
         };
         arrangeForRotation(rotation);
         bool fitted = options.windowFit != WindowFit::none;
@@ -861,16 +873,17 @@ bool gFastEngineMissing = false;
         const string windowTitle = !sessionFolder.empty()
             ? std::filesystem::path(options.norOrSession).stem().string()
             : string(deviceProfile5(deviceType)->displayName);
-        SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, rotation, deviceControls(deviceType), controlView, fitted);
+        SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, frameRotation(rotation),
+                                     deviceControls(deviceType, controlView), controlView, fitted);
         if (!window) {
             cerr << "failed to init SDL" << endl;
             return false;
         }
         auto arrangeForWindow = [&] {
-            if (!fitted || tg50Pad) return;
+            if (!fitted || tg50Pad()) return;
             int w = 0, h = 0;
             SDL_GetWindowSize(window, &w, &h);
-            controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, w, h);
+            controlView = deviceControlViewForWindow(deviceControls(deviceType, controlView), controlView, w, h);
         };
         arrangeForWindow();
         // The rotation drawn and mapped for a chosen one: the Zodiac's panel stands upright in a
@@ -878,7 +891,7 @@ bool gFastEngineMissing = false;
         auto rotationForWindow = [&](Rotation chosen) {
             int w = 0, h = 0;
             SDL_GetWindowSize(window, &w, &h);
-            return windowRotation(chosen, soc->FrameQuarterTurn() && !followGuest, fitted, w, h);
+            return windowRotation(frameRotation(chosen), soc->FrameQuarterTurn() && !followGuest, fitted, w, h);
         };
         Rotation drawnRotation = rotationForWindow(rotation);
 
@@ -961,9 +974,11 @@ bool gFastEngineMissing = false;
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
-        // FROND_CLIE_GAMEPAD=1 has the game controller plugged in from the start (until the menu
-        // switch); it identifies on its first press, as one plugged in while the CLIÉ was off.
-        if (soc->GamepadSupported() && clieGamepadPreview() && !soc->AttachGamepad(true, false))
+        // --gamepad (the machine setting) wins over the session's at start, after host serial has
+        // had the connector. It plugs in without the plug-in pulse and identifies on its first
+        // press, as one plugged in while the CLIÉ was off.
+        if (options.gamepad && soc->GamepadSupported() && *options.gamepad != soc->GamepadAttached() &&
+            !soc->AttachGamepad(*options.gamepad, false))
             cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;
         commandContext.infrared = &infrared;
@@ -1130,6 +1145,7 @@ bool gFastEngineMissing = false;
         auto guestLoop = [&]() {
             DrawGate gate;
             vector<RenderLink::Input> inputs;
+            bool gamepadShown = gamepadAtStart;
             bool wasHeadless = false;
             FrondPerformance performance(mainLoop.GetTimesliceSizeUsec());
 #ifdef __ANDROID__
@@ -1265,13 +1281,23 @@ bool gFastEngineMissing = false;
                 for (const auto& message : usb.TakeMessages()) cout << message << endl;
 
 
+                // The game controller plugged in or out (a command, a session load, a refused start):
+                // the window shows it or the keyboard again.
+                if (const bool attached = soc->GamepadAttached(); attached != gamepadShown) {
+                    gamepadShown = attached;
+                    DisplayChange change;
+                    change.gamepad = attached;
+                    commandContext.changeDisplay(change);
+                }
                 // Hand the frame to the SDL thread; it uploads and presents it.
                 if (!headless) {
                     const uint64_t handoffStart = zodiacSpeed ? timestampUsec() : 0;
                     const bool lcdEnabled = soc->LcdEnabled();
                     uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
                     const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
-                    const DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
+                    DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
+                    // The pad's Hold slide stays over while it's on.
+                    if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
                     const DeviceStick stick = sdlEventHandler.Stick();
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
@@ -1469,14 +1495,18 @@ bool gFastEngineMissing = false;
                 if (!appBackground && displayPending) {
                     display.Apply(*displayPending);
                     displayPending.reset();
-                    if (deviceType == deviceTypeTG50) controlView = deviceControlView(display.keyboard, display.jog);
+                    if (deviceType == deviceTypeTG50) {
+                        controlView = deviceControlView(display.keyboard, display.jog);
+                        controlView.gamepad = display.gamepad;
+                    }
                     arrangeForRotation(shownRotation);
                     const bool wasFitted = fitted;
                     fitted = display.fit != WindowFit::none;
                     sdlRenderer.reset();
                     if (fitted != wasFitted) SDL_SetWindowResizable(window, fitted ? SDL_TRUE : SDL_FALSE);
                     if (!fitted)
-                        sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType), controlView);
+                        sdlResizeWindow(window, displayConfiguration, scale, frameRotation(shownRotation),
+                                        deviceControls(deviceType, controlView), controlView);
                     rebuild = true;
                 }
 
@@ -1487,7 +1517,8 @@ bool gFastEngineMissing = false;
                         sdlRenderer.reset();
                         // A fitted window keeps its size and lays the rotated device out inside it.
                         if (!fitted)
-                            sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType), controlView);
+                            sdlResizeWindow(window, displayConfiguration, scale, frameRotation(shownRotation),
+                                        deviceControls(deviceType, controlView), controlView);
                     }
                     if (newRenderer(rotationPending)) {
                         rotationPending.reset();
@@ -1684,6 +1715,12 @@ int main(int argc, char** argv) {
     program.add_argument("--hide-keyboard")
         .help("hide the TG50 keyboard")
         .default_value(false).implicit_value(true);
+    program.add_argument("--gamepad")
+        .help("CLIÉ game controller on the TG50 at start, on or off, over the session's; default: the session's")
+        .action([](const string& value) {
+            if (value != "on" && value != "off") throw runtime_error("invalid --gamepad: " + value);
+            return value == "on";
+        });
     program.add_argument("--hide-jog-controls")
         .help("hide the TG50 jog controls; same as --jog-controls hidden")
         .default_value(false).implicit_value(true);
@@ -1780,6 +1817,7 @@ int main(int argc, char** argv) {
                        .windowScale = program.present<float>("--window-scale"),
                        .smoothLcd = program.get<bool>("--smooth-lcd"),
                        .hideKeyboard = program.get<bool>("--hide-keyboard"),
+                       .gamepad = program.present<bool>("--gamepad"),
                        .hideJogControls = program.get<bool>("--hide-jog-controls"),
                        .jogPlacement = program.present<JogPlacement>("--jog-controls"),
                        .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),

@@ -95,11 +95,13 @@ namespace {
 SdlEventHandler::SdlEventHandler(SoC* soc, float scale,
                                  DisplayConfiguration& deviceDisplayConfiguration,
                                  Rotation rotation, DeviceControlView controlView)
-    : SdlEventHandler(soc, deviceControls(soc->GetDeviceType()), scale, deviceDisplayConfiguration, rotation, controlView) {}
+    : SdlEventHandler(soc, deviceControls(soc->GetDeviceType(), controlView), scale, deviceDisplayConfiguration, rotation, controlView) {
+    followsDevice = true;
+}
 
 SdlEventHandler::SdlEventHandler(SoC* soc, const DeviceControlProfile& controls, float scale,
                                  DisplayConfiguration& deviceDisplayConfiguration, Rotation rotation, DeviceControlView controlView)
-    : soc(soc), controls(controls), controlView(controlView), scale(scale), rotation(rotation) {
+    : soc(soc), shownControls(&controls), controlView(controlView), scale(scale), rotation(rotation) {
     width = deviceDisplayConfiguration.width;
     height = deviceDisplayConfiguration.height + deviceDisplayConfiguration.graffitiHeight;
 }
@@ -143,7 +145,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                                                           : TouchStick(event.button.x, event.button.y);
                     UpdateStick();
                 } else if (event.button.x>=0 && event.button.y>=0) {
-                    pointerKey=deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
+                    pointerKey=deviceControlAt((*shownControls),ScreenWidth(),ScreenHeight(),
                                                 int((event.button.x + 0.5f)/scale),int((event.button.y + 0.5f)/scale),controlView);
                     if (pointerKey && !hardKeys[pointerKey] && !builtInHolds[pointerKey]) soc->KeyDown(pointerKey);
                     redrawRequested=true;
@@ -175,7 +177,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 }
                 if (pointerKey) {
                     if (event.motion.x<0 || event.motion.y<0 ||
-                        deviceControlAt(controls,ScreenWidth(),ScreenHeight(),
+                        deviceControlAt((*shownControls),ScreenWidth(),ScreenHeight(),
                                         int((event.motion.x + 0.5f)/scale),int((event.motion.y + 0.5f)/scale),controlView)!=pointerKey)
                         ReleasePointer();
                     break;
@@ -206,7 +208,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 KeyId builtIn = soc->GamepadAttached() ? clieGamepadHostKey(scan) : keyInvalid;
-                if (!builtIn) builtIn = builtInKeyboardKey(controls, scan);
+                if (!builtIn) builtIn = builtInKeyboardKey((*shownControls), scan);
                 if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtIn) {
                     if (!builtInHeld[scan]) {
                         builtInHeld[scan] = builtIn;
@@ -217,8 +219,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 enum KeyId key = mapKey(event.key.keysym.sym);
-                if (key >= keyIdFunction && !hasKey(controls, key)) break;
-                if (stickKeyBit(key) && hasStick(controls)) {
+                if (key >= keyIdFunction && !hasKey((*shownControls), key)) break;
+                if (stickKeyBit(key) && hasStick(*shownControls)) {
                     stickKeys |= stickKeyBit(key);
                     UpdateStick();
                     break;
@@ -254,7 +256,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     break;
                 }
                 enum KeyId key = mapKey(event.key.keysym.sym);
-                if (stickKeyBit(key) && hasStick(controls)) {
+                if (stickKeyBit(key) && hasStick(*shownControls)) {
                     stickKeys &= uint8_t(~stickKeyBit(key));
                     UpdateStick();
                     break;
@@ -269,7 +271,7 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
 
             // A game controller, for the Zodiac and the CLIÉ game controller. It is opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (controls.style == DeviceControlStyle::zodiac || soc->GamepadSupported())
+                if (shownControls->style == DeviceControlStyle::zodiac || soc->GamepadSupported())
                     SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
@@ -359,6 +361,7 @@ void SdlEventHandler::SetRotation(Rotation rotation) {
 }
 void SdlEventHandler::SetView(DeviceControlView controlView, float scale) {
     ReleaseFingers(); ReleasePointer(); this->controlView = controlView; this->scale = scale; redrawRequested=true;
+    if (followsDevice) shownControls = &deviceControls(soc->GetDeviceType(), controlView);
 }
 void SdlEventHandler::SetLayout(const WindowLayout& layout, bool fitted) {
     ReleaseFingers(); ReleasePointer(); this->layout = layout; this->fitted = fitted;
@@ -380,7 +383,7 @@ int SdlEventHandler::ScreenHeight() const {
     return rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270 ? width : height;
 }
 bool SdlEventHandler::OnScreen(int x,int y) const {
-    const int left=int(scale*deviceScreenLeft(controls,controlView));
+    const int left=int(scale*deviceScreenLeft((*shownControls),controlView));
     return x>=left && y>=0 && x<left+int(scale*ScreenWidth()) && y<int(scale*ScreenHeight());
 }
 void SdlEventHandler::ReleasePointer() {
@@ -407,8 +410,8 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
     Finger* finger = nullptr;
     for (auto& item : fingers)
         if (item.active && item.touch == event.touchId && item.id == event.fingerId) finger = &item;
-    int windowWidth = int(scale * deviceControlsWidth(controls,ScreenWidth(),controlView));
-    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight(controls,ScreenWidth(),controlView)));
+    int windowWidth = int(scale * deviceControlsWidth((*shownControls),ScreenWidth(),controlView));
+    int windowHeight = int(scale * (ScreenHeight() + deviceControlsHeight((*shownControls),ScreenWidth(),controlView)));
     if (auto* window = SDL_GetWindowFromID(event.windowID)) SDL_GetWindowSize(window, &windowWidth, &windowHeight);
     int x = int(std::floor(event.x * windowWidth)), y = int(std::floor(event.y * windowHeight));
     MapPointer(x, y);
@@ -420,7 +423,7 @@ void SdlEventHandler::HandleFinger(const SDL_TouchFingerEvent& event) {
     };
     auto keysAt = [&](int x, int y, KeyId& also) {
         also = keyInvalid;
-        return x >= 0 && y >= 0 ? deviceControlAt(controls, ScreenWidth(), ScreenHeight(), int((x + 0.5f)/scale),
+        return x >= 0 && y >= 0 ? deviceControlAt((*shownControls), ScreenWidth(), ScreenHeight(), int((x + 0.5f)/scale),
                                                   int((y + 0.5f)/scale), controlView, &also) : keyInvalid;
     };
     auto release = [&] {
@@ -527,7 +530,7 @@ void SdlEventHandler::ReleaseInputs() {
     redrawRequested=true;
 }
 SDL_Rect SdlEventHandler::StickWell() const {
-    return deviceStickRect(controls, ScreenWidth(), ScreenHeight(), controlView);
+    return deviceStickRect((*shownControls), ScreenWidth(), ScreenHeight(), controlView);
 }
 // x and y are window pixels after MapPointer, as for the keys.
 DeviceStick SdlEventHandler::TouchStick(int x, int y) const {
@@ -608,9 +611,9 @@ GamepadState SdlEventHandler::CombinedPads() const {
 }
 void SdlEventHandler::UpdateGamepad() {
     const bool clie = soc->GamepadAttached();
-    if (controls.style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
+    if (shownControls->style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
     if (!padFocused) return;
-    const GamepadInput input = controls.style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads())
+    const GamepadInput input = shownControls->style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads())
                                : clie ? clieGamepadInput(CombinedPads()) : GamepadInput{};
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
@@ -635,7 +638,7 @@ DeviceKeyMask SdlEventHandler::PressedButtons() const {
 
 // Map pixel centres before truncation so fractional scales keep taps on the drawn pixel.
 int SdlEventHandler::RotateX(int x, int y) {
-    x-=int(scale*deviceScreenLeft(controls,controlView));
+    x-=int(scale*deviceScreenLeft((*shownControls),controlView));
     switch (rotation) {
         case Rotation::landscape_90:
             return int((scale * width - 0.5f - y) / scale);
@@ -652,7 +655,7 @@ int SdlEventHandler::RotateX(int x, int y) {
 }
 
 int SdlEventHandler::RotateY(int x, int y) {
-    x-=int(scale*deviceScreenLeft(controls,controlView));
+    x-=int(scale*deviceScreenLeft((*shownControls),controlView));
     switch (rotation) {
         case Rotation::landscape_90:
             return int((x + 0.5f) / scale);

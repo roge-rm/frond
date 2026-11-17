@@ -89,6 +89,8 @@ struct DeviceControlView {
     // the silkscreen and strip. Beside the LCD while the keyboard is hidden.
     bool sideTabBesideKeyboard{false};
     DeviceControlArrangement arrangement{DeviceControlArrangement::below};
+    // The CLIE game controller is attached: the TG50 shows it in place of its keyboard.
+    bool gamepad{false};
 };
 // Where the CLIE jog controls go: hidden, left of the LCD, or left of the keyboard. keyboard is
 // the saved name; on a CLIE without a keyboard it puts them beside the silkscreen and buttons.
@@ -124,15 +126,6 @@ inline DeviceArt deviceArt(const char* name) {
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
 // The PEGA-GC10 game controller's keys.
 constexpr bool clieGamepadKey(KeyId key) { return key>=keyIdPadUp && key<=keyIdPadHold; }
-// Art preview of the PEGA-GC10 on the TG50: FROND_CLIE_GAMEPAD=1 swaps in the TG50 profile with the
-// pad attached. Read once; off by default.
-inline bool clieGamepadPreview() {
-    static const bool on=[] {
-        const char* value=std::getenv("FROND_CLIE_GAMEPAD");
-        return value && *value && *value!='0';
-    }();
-    return on;
-}
 // gamepad picks the profile with the PEGA-GC10 attached on a CLIE that takes it.
 inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     // App keys hit their whole pocket; the five-way entries place the direction parts. The TX's
@@ -370,10 +363,10 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         {keyIdPadRight, {73,100,28,28}, "Pad right", Icon::right, 14, padBelow, {11,65,98,98}},
         {keyIdPadB, {263,81,30,30}, "B", Icon::legend, 15, padBelow, {211,65,98,98}},
         {keyIdPadA, {227,117,30,30}, "A", Icon::legend, 15, padBelow, {211,65,98,98}},
-        {keyIdPadHome, {127,128,24,24}, "Pad Home", Icon::legend, 12, padBelow},
-        {keyIdPadMenu, {169,128,24,24}, "Pad Menu", Icon::legend, 12, padBelow},
-        {keyIdPadX, {97,154,26,26}, "X", Icon::legend, 13, padBelow},
-        {keyIdPadY, {197,154,26,26}, "Y", Icon::legend, 13, padBelow},
+        {keyIdPadHome, {124,84,24,24}, "Pad Home", Icon::legend, 12, padBelow},
+        {keyIdPadMenu, {172,84,24,24}, "Pad Menu", Icon::legend, 12, padBelow},
+        {keyIdPadX, {110,138,26,26}, "X", Icon::legend, 13, padBelow},
+        {keyIdPadY, {184,138,26,26}, "Y", Icon::legend, 13, padBelow},
         {keyIdPadHold, {136,194,48,11}, "Hold", Icon::legend, 5.5f, padBelow},
         {keyIdPadUp, {52,144,28,28}, "Pad up", Icon::up, 14, padAround, {17,137,98,98}},
         {keyIdPadDown, {52,200,28,28}, "Pad down", Icon::down, 14, padAround, {17,137,98,98}},
@@ -567,10 +560,12 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
         default: return empty;
     }
 }
-inline const DeviceControlProfile& deviceControls(DeviceArt art) {
-    return deviceControls(art,art==DeviceArt::tg50 && clieGamepadPreview());
-}
+inline const DeviceControlProfile& deviceControls(DeviceArt art) {return deviceControls(art,false);}
 inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
+// The profile a view shows: with the game controller when it is attached.
+inline const DeviceControlProfile& deviceControls(DeviceType5 device, const DeviceControlView& view) {
+    return deviceControls(deviceArt(device),view.gamepad);
+}
 inline bool deviceControlShown(const DeviceButton& button, const DeviceControlView& view) {
     switch(button.section) {
         case DeviceControlSection::main: return true;
@@ -760,10 +755,10 @@ inline int deviceGamepadDishAt(const DeviceButton& b, float x, float y) {
     const float c=along/(d*k);
     return c>=0.70710678f ? 1 : c>=0.38268343f ? 2 : 0;
 }
-// The round keys off the dishes hit this far from their centre at least; landscape grips have
-// room for more than the pad under the screen.
+// The round keys off the dishes hit this far from their centre at least: 10 mm across under the
+// screen and 9 mm in the grips on a 6.8" 1080x2460 phone, where a unit is about 0.22 mm either way.
 inline float deviceGamepadHitRadius(const DeviceButton& b) {
-    return std::max(b.bounds.w*0.5f,b.section==DeviceControlSection::around ? 21.f : 19.f);
+    return std::max(b.bounds.w*0.5f,b.section==DeviceControlSection::around ? 21.f : 23.f);
 }
 // The Hold slide hits this far round its track.
 constexpr float deviceGamepadHoldMargin=8;

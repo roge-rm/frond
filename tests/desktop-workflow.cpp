@@ -2969,6 +2969,11 @@ s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 here=sys.argv[0].rsplit('/',1)[0]
 log=open(here+'/sent','a')
+open(here+'/args','w').write('\n'.join(sys.argv[1:]))
+# The game controller: --gamepad on attaches it at start; a "padbusy" file has serial holding the connector.
+pad=b'attached waiting' if '--gamepad' in sys.argv and sys.argv[sys.argv.index('--gamepad')+1]=='on' else b'detached'
+def padstate():
+    return b'detached busy' if pad==b'detached' and os.path.exists(here+'/padbusy') else pad
 # Lines put in the "emit" file go to the app as shortcut events.
 def emit():
     while True:
@@ -2992,7 +2997,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     text=bytes.fromhex(arg.decode())
     if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
-    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'camera-mode':
@@ -3005,6 +3010,11 @@ for line in s.makefile('rb'):
         s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic,b'camera-state':cam,b'camera-mode':cam}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
+    if cmd==b'gamepad':
+        if text==b'on' and padstate()!=b'detached':
+            s.sendall(i+b'\terror\tbusy\t'+b'The connector is in use.'.hex().encode()+b'\n'); continue
+        pad=b'attached waiting' if text==b'on' else b'detached'
+    if cmd in (b'gamepad',b'gamepad-state'): message=padstate()
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
@@ -3404,6 +3414,7 @@ for line in s.makefile('rb'):
         auto menuAction = [&](const char* name) { auto* a = window.findChild<QAction*>(name); if (!a) qWarning("no %s", name); return a; };
         // The T|X has no Hold; the rows it has are there and the others are not.
         QVERIFY(!menuAction("machineHold")->isVisible());
+        QVERIFY(!menuAction("machineGamepad")->isVisible());
         QVERIFY(menuAction("machineMicrophone")->isVisible() && !menuAction("machineMicrophone")->isEnabled());
         for (auto* name : {"machineKeyboard", "machineNetwork", "machineScreenshot", "machineSave", "machineReset"})
             QTRY_VERIFY2_WITH_TIMEOUT(menuAction(name)->isVisible() && menuAction(name)->isEnabled(), name, 4000);
@@ -3483,6 +3494,78 @@ for line in s.makefile('rb'):
         QCOMPARE(menus, QStringList({"&File", "&Help"}));
         answer.stop();
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The TG50's Game controller row: attaches and detaches live, greys while the connector is
+    // taken, and is saved for the machine and passed at the next start.
+    void clieGamepadSwitch() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pad", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        auto args = [&] {
+            QFile f(files.path() + "/args"); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n');
+        };
+        auto saved = [&] {
+            frondSessions::Preferences kept;
+            if (!frondSessions::readPreferences(managedSession("Pad"), &kept)) return QString("none");
+            return kept.gamepadSet ? QString(kept.gamepad ? "on" : "off") : QString("unset");
+        };
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            auto* bar = window.findChild<RunningBar*>("runningBar");
+            QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            // No setting yet: the session's state stays at start.
+            QVERIFY(!args().contains("--gamepad"));
+            auto* row = window.findChild<QAction*>("machineGamepad");
+            QTRY_VERIFY_WITH_TIMEOUT(row->isVisible() && row->isEnabled() && !row->isChecked(), 5000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad on"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("on"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad off"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("off"));
+            // Serial takes the connector: the row greys with the reason, found by the poll.
+            { QFile busy(files.path() + "/padbusy"); QVERIFY(busy.open(QIODevice::WriteOnly)); }
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller (connector in use)"));
+            QVERIFY(QFile::remove(files.path() + "/padbusy"));
+            QTRY_VERIFY_WITH_TIMEOUT(row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // The next start passes the machine's choice.
+        QCOMPARE(saved(), QString("on"));
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            const auto list = args();
+            const auto at = list.indexOf("--gamepad");
+            QVERIFY(at >= 0 && list.value(at + 1) == "on");
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineGamepad")->isChecked(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }

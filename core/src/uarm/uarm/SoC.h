@@ -66,6 +66,8 @@ class SoC {
     virtual bool GamepadAttached() const { return false; }
     virtual bool AttachGamepad(bool, bool = true) { return false; }
     virtual std::string GamepadState() const { return "unavailable"; }
+    // The pad's Hold slide is on (attached only).
+    virtual bool GamepadHold() const { return false; }
     virtual void Reset();
     // Next Reset() is a power-on reset; the Zire uses it for a hard reset (clean boot).
     void RequestPowerOnReset() { powerOnReset = true; }

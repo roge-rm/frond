@@ -1418,6 +1418,12 @@ void SocPXA::InstallGamepadHooks() {
         [](void*) {}};
 }
 
+// Host serial, infrared, the infrared keyboard or the USB cable has the connector's line.
+bool SocPXA::GamepadConnectorBusy() const {
+    return serialHostHooks.context || irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
+           deviceTg50UsbCableAttached(dev);
+}
+
 bool SocPXA::AttachGamepad(bool attach, bool identify) {
     if (!GamepadSupported()) return false;
     if (!attach) {
@@ -1430,8 +1436,7 @@ bool SocPXA::AttachGamepad(bool attach, bool identify) {
         return true;
     }
     if (gamepad.Attached()) return true;
-    if (serialHostHooks.context || irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
-        deviceTg50UsbCableAttached(dev)) return false;
+    if (GamepadConnectorBusy()) return false;
     // AUX about 78 mV (code 0x7f, >> 4 = 7): SonySys's serial-ID accessory class 0x200. The real
     // resistor isn't known; this class gets no 'A' prompt, which the pad ignores anyway.
     deviceTg50SetAccessoryAux(dev, 78);
@@ -1444,7 +1449,7 @@ bool SocPXA::AttachGamepad(bool attach, bool identify) {
 
 std::string SocPXA::GamepadState() const {
     if (!GamepadSupported()) return "unavailable";
-    if (!gamepad.Attached()) return "detached";
+    if (!gamepad.Attached()) return GamepadConnectorBusy() ? "detached busy" : "detached";
     static const char* phases[] = {"waiting", "plugging", "identifying", "identified"};
     return std::string("attached ") + phases[int(gamepad.GetPhase())] + (gamepad.HoldOn() ? " hold" : "") +
            " ids=" + std::to_string(gamepad.IdsSent()) + " replies=" + std::to_string(gamepad.Replies()) +

@@ -124,6 +124,8 @@ Keys, with the infrared keyboard detached:
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
 
+**Game controller** (TG50, in the Machine menu on Linux) plugs Sony's CLIÉ game controller into the connector or takes it out while the machine runs. It's drawn in place of the keyboard, and after Rotate its grips sit either side of the upright screen. The TG50's own driver runs it. It's saved for each machine; a session loaded later brings its own state. It's greyed while serial, infrared or USB has the connector. While it's in, the arrows are its arrows, Z and X are A and B, A and S are X and Y, Q is Home, W is Menu and H moves the Hold slide, and these keys no longer type. A game controller works it too: the d-pad or left stick, A, B, X and Y, Start for Home, Back for Menu and the right shoulder button for Hold.
+
 The 68k Palms have the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on the silkscreen, each drawn after its own device. The m520's screen is 320×320. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync in the Connections panel (Linux) or in the Connections sheet (Android). On the CLIÉ T415, F1 to F4 are the app buttons and, while its jog controls are shown, Page Up and Page Down turn the Jog Dial, End presses it and Home is Back.
 
 **Hold** (TG50) latches the device's Hold switch, which turns off the screen and controls, and audio keeps playing. It's saved with the machine.
