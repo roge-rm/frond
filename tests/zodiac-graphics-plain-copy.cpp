@@ -255,11 +255,7 @@ void stretchBlit() {
         p = dateBookStretch(); p[item.first] = item.second;
         assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",p[item.first-1]));
     }
-    // Smooth (488 bit 0 clear) only with the stretch's own GMC (smoothStretch has the rest).
-    for (uint32_t gmc : {0x5598b4dfu,0x5798b4dfu}) {
-        p = dateBookStretch(); p[23] = 0x02020008; p[3] = gmc;
-        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-smooth",0x00800080));
-    }
+    // Smooth (488 bit 0 clear) is in smoothStretch, refused with the keyed stale GMC in keyedStretch.
     // The stretch words from any other producer, and other packets from this one, are refused.
     for (uint32_t pc : {0x200a9ed4u,0x200b0200u,0x200b1790u}) assert(f.append(dateBookStretch(),pc) != A::ok);
     p = dateBookStretch(); p.insert(p.end(),{0xc0011a00,0,0x00010001});
@@ -845,9 +841,10 @@ uint32_t smoothOracle(Fixture& f, uint32_t base, uint32_t pitch, unsigned x, uns
     return value;
 }
 void smoothStretch() {
-    for (bool clip : {false,true}) {
+    // Its own GMC, then the copy helper's left on the chip (bit 31 clear), as Street Hoops' third stretch has it.
+    for (bool clip : {false,true}) for (uint32_t gmc : {0xd598b4dfu,0x5598b4dfu}) {
         Fixture f; hoopsPlanes(f);
-        auto p = hoopsStretch();
+        auto p = hoopsStretch(); p[3] = gmc;
         // A scissor that cuts the left and top too, so the filter starts away from the origin.
         if (clip) p[11] = 0x00050003;
         assert(f.append(p,0x200b0b14) == A::ok);
@@ -934,6 +931,13 @@ void keyedStretch() {
             checkKeyedStretch(f,control);
         }
     Imx1GraphicsCommands::directFills = true;
+    // Smooth with the keyed stale GMC: refused.
+    {
+        Fixture f; stretchPlanes(f);
+        assert(f.append(keyedPacket(0x01000005,0),0x200aa504) == A::ok); f.finish();
+        auto p = staleKeyedStretch(); p[21] = 0x02020008;
+        assert(p[20] == 0x488 && f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-smooth",0x00800080));
+    }
     // No keyed packet seen: refused, as before.
     {
         Fixture f; stretchPlanes(f);

@@ -1097,8 +1097,9 @@ class Imx1GraphicsCommands {
     // the start phase in quarter pixels and the ROM only sends whole pixels (464 & 30003 is always 0).
     // Smooth (488 bit 0 clear, twGfxStretchSmooth) filters through source 2, one row down (416).
     // ASSUMPTION "smooth stretch bilinear": the chip's taps are not known (485 is never written); it is drawn as
-    // the plane stretch filters, per 5/6/5 channel (completeSmoothFill). Only with the stretch's own GMC
-    // d598b4df: whether a stale GMC without bit 31 still runs the 488 op is not known.
+    // the plane stretch filters, per 5/6/5 channel (completeSmoothFill). Also with a stale GMC without bit 31
+    // (dp_op), as Street Hoops sends after the copy helper's 5598b4df: Thruster's stretches with that GMC stretch,
+    // so bit 31 doesn't gate the 488 op either (assumed). Not with the keyed stale GMC, never seen.
     // ASSUMPTION "stale compare in the stretch": a stale GMC with bit 28 (compare disable) clear, 4598b4df as the
     // keyed copy leaves it, runs the stretch keyed with the last keyed copy packet's control and source key
     // (Thruster). Without one seen it stays refused.
@@ -1117,7 +1118,7 @@ class Imx1GraphicsCommands {
         const bool keyed = gmc == 0x4598b4df && compareSeen();
         if (!keyed && ((gmc & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc))) return refuse("stretch-state", 0x41b);
         const bool smooth = values[0x488] == 0x02020008;
-        if (smooth && gmc != 0xd598b4df) return refuse("stretch-smooth", values[0x412]);
+        if (smooth && keyed) return refuse("stretch-smooth", values[0x412]);
         for (auto item : {std::pair<uint32_t,uint32_t>{0x4b2,0x01cc1200}, {0x4b1,0x40037d04},
                  {0x472,0x3f}, {0x488,smooth ? 0x02020008u : 0x02020009u}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
                  {0x42e,0}, {0x42f,0}, {0x430,0}, {0x431,0}, {0x432,0}, {0x433,0}})
