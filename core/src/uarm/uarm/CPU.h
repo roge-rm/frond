@@ -155,6 +155,15 @@ uint64_t cpuJitCpsrInterprets();
 void cpuSetIdleSkip(bool on);
 // Skips so far and the cycles they passed, in every CPU (tests).
 void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles);
+// Fast skip of the ROMs' OSCR delay loops (delay_loops.h), on unless FROND_DELAY_SKIP=0. Code compiled
+// while it was off keeps running the loops.
+void cpuSetDelaySkip(bool on);
+// Skips so far and the cycles they passed, in every CPU (tests).
+void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles);
+// The OS timer the delay skip reads: OSCR's physical address, and peek, which gives what a load of it
+// would read with that many cycles in progress (cpuCyclesInProgress) without changing anything, and
+// returns false when that load would reach a timer match. Without it there is no delay skip.
+void cpuSetDelayTimer(ArmCpu *cpu, uint32_t oscrPa, bool (*peek)(void *, uint32_t, uint32_t *), void *context);
 // MRC and MCR p15 c3 (domain access control) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitDomainCalls();
 // Translated ordinary blocks and instructions executed in generated code.

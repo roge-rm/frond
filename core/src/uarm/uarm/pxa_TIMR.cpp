@@ -240,6 +240,18 @@ uint32_t pxaTimrNextBatch(PxaTimr* timr, uint32_t maximum) {
     return std::min(uint64_t(UINT32_MAX), uint64_t(timr->synchronizedTicks) + next);
 }
 
+bool pxaTimrPeek(const PxaTimr* timr, uint32_t elapsed, uint32_t* oscr) {
+    const uint32_t ticks = timr->elapsedTicks && elapsed > timr->synchronizedTicks ? elapsed - timr->synchronizedTicks : 0;
+    *oscr = timr->OSCR + ticks;
+    // As pxaTimrPrvCheckMatchMultiStep.
+    for (unsigned i = 0; i < 4; ++i) {
+        if (!(timr->OIER & (1u << i)) && !(i == 3 && timr->OWER)) continue;
+        const uint32_t delta = timr->OSMR[i] - timr->OSCR;
+        if (delta && ticks >= delta) return false;
+    }
+    return true;
+}
+
 uint32_t pxaTimrTicksToNextInterrupt(struct PxaTimr *timr) {
     uint32_t ticksToNextInterrupt = ~0;
 

@@ -23,6 +23,11 @@ uint32_t pxaTimrTicksToNextInterrupt(struct PxaTimr* timr);
 void pxaTimrEnableBatching(PxaTimr* timr, uint32_t (*elapsedTicks)(void*),
                            void (*reschedule)(void*), void* context);
 uint32_t pxaTimrNextBatch(PxaTimr* timr, uint32_t maximum = 32);
+// OSCR's physical address.
+constexpr uint32_t kPxaTimrOscrPa = 0x40A00010;
+// What an OSCR read would give once the batch has elapsed ticks (the elapsedTicks callback's count), in *oscr,
+// without changing anything. False when that read would reach a match whose interrupt or watchdog is on.
+bool pxaTimrPeek(const PxaTimr* timr, uint32_t elapsed, uint32_t* oscr);
 
 void pxaTimrSuspendInterrupts(struct PxaTimr* timr, bool suspendInterrupts);
 

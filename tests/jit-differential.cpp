@@ -45,6 +45,7 @@
 #include "patch_dispatch.h"
 #include "jit_dynarmic.h"
 #include "idle_loops.h"
+#include "delay_loops.h"
 #include "xscale_cost.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
@@ -143,6 +144,33 @@ bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, vo
     return true;
 }
 
+// A stand-in OS timer for the delay skip (delay_loops.h): a page at kTimer (mapped at virtual 0x2e000 in
+// cases that ask for it) whose OSCR (+0x10) reads start plus one tick every period cycles, counting the
+// cycles of the calls before (base, kept by the test) and the one in progress. From tick match on, peek
+// says a load would reach a timer match.
+constexpr uint32_t kTimer = 0x40a00000, kTimerVa = 0x2e000;
+struct TestTimer {
+    ArmCpu* cpu = nullptr;
+    uint64_t base = 0;
+    uint32_t start = 0, period = 1, match = 0;
+    uint32_t at(uint32_t cycles) const { return start + uint32_t((base + cycles) / period); }
+};
+
+bool timerAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    const TestTimer& t = *static_cast<TestTimer*>(userData);
+    if (!write) {
+        const uint32_t v = pa - kTimer == 0x10 ? t.at(cpuCyclesInProgress(t.cpu)) : 0;
+        memcpy(buf, &v, size < 4 ? size : 4);
+    }
+    return true;
+}
+
+bool timerPeek(void* context, uint32_t cycles, uint32_t* oscr) {
+    const TestTimer& t = *static_cast<TestTimer*>(context);
+    *oscr = t.at(cycles);
+    return !t.match || *oscr - t.start < t.match - t.start;
+}
+
 struct Machine {
     bool fast = false;
     ArmCpu* cpu = nullptr;
@@ -151,6 +179,7 @@ struct Machine {
     ArmMem* mem = nullptr;
     Device* device = nullptr;
     PatchDispatch* patches = nullptr;
+    TestTimer* timer = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -180,6 +209,10 @@ Machine makeMachine(bool fast) {
     m.device = new Device;
     m.device->cpu = m.cpu;
     if (!memRegionAdd(mem, kDevice, 0x1000, deviceAccess, m.device)) abort();
+    m.timer = new TestTimer;
+    m.timer->cpu = m.cpu;
+    if (!memRegionAdd(mem, kTimer, 0x1000, timerAccess, m.timer)) abort();
+    cpuSetDelayTimer(m.cpu, kTimer + 0x10, timerPeek, m.timer);
     return m;
 }
 
@@ -433,6 +466,7 @@ struct Case {
     // Maps the page tables at 0x8000 (privileged only), so a case can remap pages.
     bool tablesPage = false;
     bool interruptLines = false;  // the device page's IRQ and FIQ registers
+    bool timerPage = false;       // the test timer at 0x2e000
 };
 
 struct Assembled {
@@ -525,6 +559,7 @@ Assembled assemble(const Case& c) {
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
     if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
+    if (c.timerPage) put32(kL2a + (kTimerVa >> 12) * 4, ptePage(kTimer, 3, false));
     if (c.tablesPage) page(kL2a, 1, false);
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
@@ -1735,6 +1770,7 @@ struct Directed {
     std::vector<uint32_t> swiHandler;
     bool tablesPage = false;
     bool interruptLines = false;
+    bool timerPage = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1789,6 +1825,7 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.swiHandler = d.swiHandler;
     c.tablesPage = d.tablesPage;
     c.interruptLines = d.interruptLines;
+    c.timerPage = d.timerPage;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -2580,6 +2617,202 @@ bool idleMatchDropped(Engines& e) {
     return ok;
 }
 
+// The ROM OSCR delay loops (delay_loops.h) at kCode with a B . after them, the timer base register at
+// kTimerVa (OSCR at +0x10). r3 holds the target too, for delayMatchDropped.
+struct DelaySetup {
+    const DelayLoop* loop = nullptr;
+    Case c;
+    Assembled a;
+};
+
+const char* delayName(DelayLoopKind kind) {
+    return kind == DelayLoopKind::e2 ? "e2" : kind == DelayLoopKind::tg50 ? "tg50" : "zire 72";
+}
+
+DelaySetup delaySetup(const char* name, DelayLoopKind kind, uint32_t target, uint32_t low) {
+    DelaySetup s;
+    for (const DelayLoop& x : kDelayLoops)
+        if (x.kind == kind) s.loop = &x;
+    const DelayLoop& l = *s.loop;
+    std::vector<std::pair<int, uint32_t>> regs = {{l.base, kTimerVa}, {l.target, target}, {3, target}};
+    if (l.low != kNoLow) regs.push_back({l.low, low});
+    Directed d{name, std::vector<uint32_t>(l.code, l.code + l.count), l.thumb, SVC, regs, {}};
+    d.timerPage = true;
+    s.c = directedCase(d, 11);
+    s.a = assemble(s.c);
+    return s;
+}
+
+void delayPrepare(Machine& m, const DelaySetup& s, uint32_t start, uint32_t period, uint32_t match) {
+    prepare(m, s.c, s.a);
+    *m.timer = TestTimer{m.cpu, 0, start, period, match};
+}
+
+// Runs want cycles: Exact one instruction a call, Fast in as few calls as it takes, each call's cycles
+// added to the timer's base. Returns the cycles run.
+uint64_t delayRun(Machine& m, bool exact, uint64_t want) {
+    uint64_t ran = 0;
+    while (ran < want) {
+        const uint32_t r = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, exact ? 1 : uint32_t(want - ran));
+        ran += r;
+        m.timer->base += r;
+    }
+    return ran;
+}
+
+uint64_t delaySkipCount() {
+    uint64_t skips, cycles;
+    cpuJitDelaySkips(&skips, &cycles);
+    return skips;
+}
+
+// Exact steps the loop one instruction at a time, its OSCR moving with every cycle; Fast with the skip must
+// land in the same state after the same cycles: leaving on the same pass, or at the end of its budget with
+// the same OSCR loaded and flags. With OSCR standing still Fast without the skip must too. Each case says
+// how many skips Fast must make (at least, when it leaves).
+bool delaySkip(Engines& e) {
+    struct Want {
+        const char* what;
+        uint32_t ticks;   // target - start
+        uint32_t period;  // cycles per tick
+        uint32_t low;     // TG50's low bound, from start
+        uint32_t match;   // ticks to a timer match, 0 for none
+        bool leaves;      // runs until past the B .; otherwise 40 passes
+        uint64_t skips;
+        bool tg50Only;
+        bool memory = false;  // memory charges in both engines (Fast at Original), at the T|X's clocks
+        uint32_t sweep = 1;   // runs with ticks, ticks + 1, ... (so some leave right at a tick)
+    };
+    const uint32_t start = 1000;
+    const Want wants[] = {
+        {"leaves", 300, 3, 0, 0, true, 1, false},
+        {"budget", 1000000, 3, 0, 0, false, 1, false},
+        {"leaves, a tick a cycle", 300, 1, 0, 0, true, 1, false, false, 16},
+        {"budget, a tick a cycle", 1000000, 1, 0, 0, false, 1, false},
+        {"oscr standing still", 10, 1u << 30, 0, 0, false, 1, false},
+        {"at a match", 300, 3, 0, 100, true, 1, false},
+        {"already past", 0xffffffff, 3, 0, 0, true, 0, false},
+        {"below the low bound", 300, 3, 5, 0, true, 0, true},
+        {"leaves, memory charges", 300, 3, 0, 0, true, 1, false, true},
+        {"budget, memory charges", 1000000, 3, 0, 0, false, 1, false, true},
+        {"budget, memory charges, a tick a cycle", 1000000, 1, 0, 0, false, 1, false, true},
+        {"leaves, memory charges, a tick a cycle", 300, 1, 0, 0, true, 1, false, true, 16},
+    };
+    auto memory = [&](Machine& m, bool on) {
+        cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), on);
+        cpuSetCostClocks(m.cpu, cost::kClocksTx.core, cost::kClocksTx.bus, cost::kClocksTx.memory);
+        if (m.fast) cpuSetJitMemoryCost(m.cpu, on);
+    };
+    bool ok = true;
+    for (const DelayLoop& l : kDelayLoops) {
+        for (const auto& w : wants) for (uint32_t i = 0; i < w.sweep; ++i) {
+            if (w.tg50Only && l.kind != DelayLoopKind::tg50) continue;
+            char name[96];
+            if (w.sweep > 1) snprintf(name, sizeof(name), "%s %s, %u ticks", delayName(l.kind), w.what, w.ticks + i);
+            else snprintf(name, sizeof(name), "%s %s", delayName(l.kind), w.what);
+            const uint32_t target = start + w.ticks + i, low = l.low == kNoLow ? 0 : start + w.low;
+            const DelaySetup s = delaySetup(name, l.kind, target, low);
+            const bool frozen = w.period >= (1u << 30);
+            uint32_t load;
+            uint32_t pass = delayPassCost(l, true, cost::Core::pxa27x, &load);
+            if (w.memory)
+                pass += cost::regionCost(cost::Core::pxa27x, cost::device, false, cost::kClocksTx);
+            const uint32_t spin = l.thumb ? cost::thumbCost(kSpinThumb, cost::Core::pxa27x)
+                                          : cost::armCost(kSpinArm, cost::Core::pxa27x);
+            Snapshot states[3];
+            uint64_t skipped[3] = {}, ran[3] = {}, want = uint64_t(40) * pass;
+            bool stopped[3] = {};
+            // 0 Exact, 1 Fast, 2 Fast without the skip.
+            for (int k = 0; k < (frozen ? 3 : 2); ++k) {
+                Machine& m = k ? e.fast : e.exact;
+                cpuSetDelaySkip(k != 2);
+                if (w.memory) memory(m, true);
+                delayPrepare(m, s, start, w.period, w.match ? start + w.match : 0);
+                const uint64_t s0 = delaySkipCount();
+                if (w.leaves && !k) {
+                    // Exact to the B ., then four of its passes.
+                    uint64_t at = 0;
+                    for (int i = 0; i < 100000 && !atSpin(m); ++i) at += delayRun(m, true, 1);
+                    want = at + 4 * spin;
+                    ran[k] = at + delayRun(m, true, 4 * spin);
+                } else {
+                    ran[k] = delayRun(m, !k, want);
+                }
+                stopped[k] = w.leaves ? atSpin(m) : (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode;
+                skipped[k] = delaySkipCount() - s0;
+                states[k] = snapshot(m, stopped[k]);
+                if (w.memory) memory(m, false);
+            }
+            cpuSetDelaySkip(true);
+            std::vector<std::string> diffs = differences(states[0], states[1]);
+            if (frozen)
+                for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
+            const bool skipsOk = w.leaves && w.skips ? skipped[1] >= w.skips : skipped[1] == w.skips;
+            if (diffs.empty() && stopped[0] && ran[0] == want && ran[1] == want && skipsOk && !skipped[2]) {
+                printf("delay skip, %s: same in %s, %" PRIu64 " skips, %" PRIu64 " cycles\n", name,
+                       frozen ? "all three" : "both", skipped[1], want);
+                continue;
+            }
+            printf("FAIL delay skip, %s: %" PRIu64 " skips (want %s%" PRIu64 "), cycles exact %" PRIu64 " fast %" PRIu64
+                   " (want %" PRIu64 ")%s\n",
+                   name, skipped[1], w.leaves && w.skips ? "at least " : "", w.skips, ran[0], ran[1], want,
+                   stopped[0] ? "" : ", exact did not stop where expected");
+            for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Fast keeps a delay loop's match per head. A store to the loop's code (cmp against r3, which holds the
+// target too, so the passes run the same) must drop it: the next run makes no skip, and lands where Fast
+// without the skip does. OSCR stands still, so both run the same passes.
+bool delayMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const DelayLoop& l : kDelayLoops) {
+        const char* name = delayName(l.kind);
+        const uint32_t start = 1000, target = start + 10;
+        const DelaySetup s = delaySetup(name, l.kind, target, l.low == kNoLow ? 0 : start);
+        uint32_t load;
+        const uint64_t want = 40ull * delayPassCost(l, true, cost::Core::pxa27x, &load);
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetDelaySkip(k == 0);
+            delayPrepare(m, s, start, 1u << 30, 0);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // The compare with the target: cmp r1, r3 (E2, TG50) or cmp r0, r3 (Zire 72).
+                    const uint32_t at = kCode + (l.thumb ? 2 : 4);
+                    if (l.thumb) {
+                        const uint16_t h = 0x4299;
+                        memAccess(m.mem, at, 2, true, (void*)&h);
+                    } else {
+                        const uint32_t word = (l.code[1] & ~15u) | 3;
+                        memAccess(m.mem, at, 4, true, (void*)&word);
+                    }
+                }
+                const uint64_t s0 = delaySkipCount();
+                delayRun(m, false, want);
+                skipped[k][run] = delaySkipCount() - s0;
+            }
+            states[k] = snapshot(m, (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode);
+        }
+        cpuSetDelaySkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("delay match dropped, %s: 1 skip before the store, none after\n", name);
+            continue;
+        }
+        printf("FAIL delay match dropped, %s: skips %" PRIu64 " before the store, %" PRIu64 " after (want 1, 0)\n",
+               name, skipped[0][0], skipped[0][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
 // The XScale fetch buffers when the guest rewrites code without invalidating. The
 // interpreter fills a buffer at A (an MCR the JIT hands back), the code at Y then rewrites
 // A+8, and the guest later jumps back to A+8 with no invalidation. An XScale (Exact) runs
@@ -3206,6 +3439,8 @@ int main(int argc, char** argv) {
         ok = idleSkip(e) && ok;
         ok = idleClock(e) && ok;
         ok = idleMatchDropped(e) && ok;
+        ok = delaySkip(e) && ok;
+        ok = delayMatchDropped(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;

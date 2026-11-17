@@ -7,6 +7,7 @@
 #ifdef FROND_DYNARMIC
 #include "jit_dynarmic.h"
 #include "idle_loops.h"
+#include "delay_loops.h"
 #endif
 
 #include <cstdio>
@@ -304,7 +305,18 @@ struct ArmCpu {
         bool privileged;
         uint32_t costKey;  // costOn and costCore the costs are for, plus 1; 0 for none
         uint32_t cost[3];  // per head form (idleHeadVariant), 0 until worked out
+        const struct DelayLoop *delay;  // delayMatch only: the delay loop, in place of loop
     } idleMatch[2];
+    // The same for the OSCR delay loops (delay_loops.h, cpuPrvDelaySkip). cost[0] and cost[1] are the pass
+    // and load costs for costKey.
+    uint32_t delayHeads[2];
+    IdleMatch delayMatch[2];
+    // The OS timer for the delay skip (cpuSetDelayTimer): OSCR's physical address, and what a load of it
+    // would give with that many cycles in progress, without changing anything. False when such a load
+    // would reach a match. Host binding, never saved.
+    uint32_t delayOscrPa;
+    bool (*delayPeek)(void *, uint32_t, uint32_t *);
+    void *delayPeekContext;
     bool sleeping;
     bool arm920WaitEnabled, arm920Waiting;
 
@@ -375,15 +387,17 @@ struct ArmCpu {
     void DoSaveLoad(T &chunkHelper, uint32_t version);
 };
 
-// Drops the idle loop matches (cpuPrvIdleLoopAt): those with a line in the RAM page at host, or all of them
-// for null.
+// Drops the idle and delay loop matches (cpuPrvIdleLoopAt, cpuPrvDelayLoopAt): those with a line in the RAM
+// page at host, or all of them for null.
 static void cpuPrvIdleForget(ArmCpu *cpu, const uint8_t *host = nullptr) {
-    for (auto &m : cpu->idleMatch) {
-        if (!m.pc) continue;
+    auto forget = [&](ArmCpu::IdleMatch &m) {
+        if (!m.pc) return;
         bool drop = !host;
         for (uint32_t i = 0; i < m.pageCount && !drop; i++) drop = m.pages[i] == host;
         if (drop) m.pc = 0;
-    }
+    };
+    for (auto &m : cpu->idleMatch) forget(m);
+    for (auto &m : cpu->delayMatch) forget(m);
 }
 
 enum ImmShiftType {
@@ -6546,7 +6560,161 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     return passes * p;
 }
 
+// Fast OSCR delay skip (delay_loops.h). FROND_DELAY_SKIP=0 turns it off, for measuring.
+static bool cpuPrvDelaySkipOn = [] {
+    const char *v = getenv("FROND_DELAY_SKIP");
+    return !(v && *v && !strcmp(v, "0"));
+}();
+static uint64_t cpuPrvDelaySkips = 0, cpuPrvDelaySkipCycles = 0;
+
+void cpuSetDelaySkip(bool on) { cpuPrvDelaySkipOn = on; }
+void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles) {
+    *skips = cpuPrvDelaySkips;
+    *cycles = cpuPrvDelaySkipCycles;
+}
+
+void cpuSetDelayTimer(ArmCpu *cpu, uint32_t oscrPa, bool (*peek)(void *, uint32_t, uint32_t *), void *context) {
+    cpu->delayOscrPa = oscrPa;
+    cpu->delayPeek = peek;
+    cpu->delayPeekContext = context;
+    cpuPrvIdleForget(cpu);
+}
+
+static bool cpuPrvDelayCodeAt(ArmCpu *cpu, uint32_t va, const DelayLoop &l) {
+    for (uint32_t i = 0; i < l.count; ++i) {
+        const uint32_t at = va + (l.thumb ? 2 : 4) * i;
+        uint32_t w;
+        if (!cpuJitFetch(cpu, at, &w)) return false;
+        if (l.thumb) w = (at & 2) ? w >> 16 : w & 0xffff;
+        if (w != l.code[i]) return false;
+    }
+    return true;
+}
+
+// Whether the instruction at pc (in word, as cpuJitPlain has it) is a delay loop's first.
+static FORCE_INLINE bool cpuPrvDelayFirst(uint32_t pc, uint32_t word, bool thumb) {
+    if (thumb) return ((pc & 2) ? word >> 16 : word & 0xffff) == kDelayLoopE2[0];
+    return word == kDelayLoopTg50[0] || word == kDelayLoopZire72[0];
+}
+
+// The delay loop whose head is at pc, or null. PXA Fast with a timer hooked (cpuSetDelayTimer) only. Kept
+// per head (cpu->delayMatch) and dropped as the idle loop matches are (cpuPrvIdleLoopAt); *match is it, or
+// null when the loop's pages can't be watched.
+static const DelayLoop *cpuPrvDelayLoopAt(ArmCpu *cpu, uint32_t pc, bool thumb, ArmCpu::IdleMatch **match = nullptr) {
+    if (match) *match = nullptr;
+    if (!cpuPrvDelaySkipOn || !cpu->delayPeek || cpu->model == ArmCpuModel::arm920t || !cpu->jit ||
+        (pc & (thumb ? 1 : 3)))
+        return nullptr;
+    const uint32_t mapGen = mmuFlushCount(cpu->memorySystem.mmu);
+    const uint64_t perm = cpuJitPermContext(cpu);
+    for (auto &m : cpu->delayMatch)
+        if (m.pc == pc && m.delay->thumb == thumb && m.mapGen == mapGen && m.permContext == perm &&
+            m.privileged == cpu->privileged) {
+            if (match) *match = &m;
+            return m.delay;
+        }
+    for (const DelayLoop &l : kDelayLoops) {
+        if (l.thumb != thumb || !cpuPrvDelayCodeAt(cpu, pc, l)) continue;
+        // Kept in the slot already at pc, else an empty one, else one not at a current head.
+        ArmCpu::IdleMatch *slot = &cpu->delayMatch[0];
+        for (auto &m : cpu->delayMatch)
+            if (m.pc == pc) slot = &m;
+        if (slot->pc != pc) {
+            if (cpu->delayMatch[0].pc && (!cpu->delayMatch[1].pc || cpu->delayMatch[0].pc == cpu->delayHeads[0] ||
+                                          cpu->delayMatch[0].pc == cpu->delayHeads[1]))
+                slot = &cpu->delayMatch[1];
+        }
+        *slot = ArmCpu::IdleMatch{};
+        slot->delay = &l;
+        if (cpuPrvIdleWatch(cpu, *slot, pc, (l.thumb ? 2 : 4) * l.count)) {
+            slot->pc = pc;
+            slot->mapGen = mapGen;
+            slot->permContext = perm;
+            slot->privileged = cpu->privileged;
+            if (match) *match = slot;
+        }
+        return &l;
+    }
+    return nullptr;
+}
+
+// At a delay loop's head (cpuJitPlain leaves it to the interpreter, so a run stops there), the passes that
+// stay in the loop go at once, each charged what it costs, up to all but the last pass that fits in left.
+// Pass k loads OSCR at the cycles in progress now plus k passes plus the load's own charge (its cost, and
+// its region charge with memory charges), as the interpreter would show it, so the loop leaves on the pass
+// Exact's would. A Fast run without the skip reads the OSCR of the run's start until the run ends. The
+// skip stops short of a load that would reach a timer match, so that load raises its interrupt. The loaded
+// register and the flags are left as the last skipped pass leaves them. Returns the cycles passed, 0 if none.
+static uint32_t cpuPrvDelaySkip(ArmCpu *cpu, uint32_t left) {
+    uint32_t *r = cpu->regs;
+    const uint32_t pc = r[REG_NO_PC];
+    if ((pc != cpu->delayHeads[0] && pc != cpu->delayHeads[1]) || !pc || !left || !cpu->cyclesInProgress ||
+        (cpu->waitingIrqs && !cpu->I) || (cpu->waitingFiqs && !cpu->F) || cpu->nativeCallDepth || cpu->modePace)
+        return 0;
+    ArmCpu::IdleMatch *match;
+    const DelayLoop *l = cpuPrvDelayLoopAt(cpu, pc, cpu->T, &match);
+    if (!l) return 0;
+    const uint32_t va = r[l->base] + 16;
+    if (va & 3) return 0;
+    const MMUTranslateResult t = mmuTranslateCached<false, true>(cpu->memorySystem.mmu, va, cpu->privileged);
+    if (!MMU_TRANSLATE_RESULT_OK(t) || MMU_TRANSLATE_RESULT_PA(t) != cpu->delayOscrPa) return 0;
+    const bool on = cpu->ic->costOn;
+    const cost::Core core = cost::Core(cpu->costCore);
+    uint32_t pass, load;
+    if (match) {
+        const uint32_t key = ((uint32_t(on) << 8) | cpu->costCore) + 1;
+        if (match->costKey != key) {
+            match->costKey = key;
+            match->cost[0] = delayPassCost(*l, on, core, &match->cost[1]);
+        }
+        pass = match->cost[0];
+        load = match->cost[1];
+    } else {
+        pass = delayPassCost(*l, on, core, &load);
+    }
+    // The load's region charge (Fast at Original), which the interpreter adds before the access.
+    if (cpu->costMemory) {
+        const uint32_t charge = cpu->regionCharge[cost::pxaRegion(cpu->delayOscrPa)][0];
+        pass += charge;
+        load += charge;
+    }
+    const uint32_t most = (left - 1) / pass;
+    if (!most) return 0;
+    const uint32_t now = *cpu->cyclesInProgress + cpu->jitHint.pending + load;
+    auto stays = [&](uint32_t k, uint32_t &v) {
+        return cpu->delayPeek(cpu->delayPeekContext, now + k * pass, &v) && delayStays(*l, v, r);
+    };
+    uint32_t first, last;
+    if (!stays(0, first)) return 0;
+    // OSCR wrapping within the budget would make the passes that stay not a run from the first.
+    cpu->delayPeek(cpu->delayPeekContext, now + (most - 1) * pass, &last);
+    if (last < first) return 0;
+    // Passes below lo stay; hi is the first that doesn't, or most.
+    uint32_t lo = 1, hi = most;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        uint32_t v;
+        if (stays(mid, v)) lo = mid + 1;
+        else hi = mid;
+    }
+    const uint32_t passes = lo;
+    cpu->delayPeek(cpu->delayPeekContext, now + (passes - 1) * pass, &last);
+    cpu->flags = delayFlags(*l, last, r);
+    r[l->value] = last;
+    cpuPrvDelaySkips++;
+    cpuPrvDelaySkipCycles += uint64_t(passes) * pass;
+    return passes * pass;
+}
+
 bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+    // A delay loop's head ends a run, for cpuPrvDelaySkip.
+    if (cpuPrvDelayFirst(pc, word, thumb) && cpuPrvDelayLoopAt(cpu, pc, thumb)) {
+        if (pc != cpu->delayHeads[0] && pc != cpu->delayHeads[1]) {
+            cpu->delayHeads[1] = cpu->delayHeads[0];
+            cpu->delayHeads[0] = pc;
+        }
+        return false;
+    }
     // An idle loop's head ends a run, for cpuPrvIdleSkip.
     if (!thumb && (word == kIdleLoopZire72[0] || word == kIdleLoopTx[0]) && cpuPrvIdleLoopAt(cpu, pc, word)) {
         if (pc != cpu->idleHeads[0] && pc != cpu->idleHeads[1]) {
@@ -6754,6 +6922,11 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
             holding = false;
         }
         if (!holding) cpu->cyclesInProgress = &acc;
+        // An OSCR delay loop's head: the passes before the one that leaves go at once (cpuPrvDelaySkip),
+        // then the head goes to the interpreter below as usual.
+        if (stop == FROND_JIT_INTERPRET && !cpu->slowPath && acc < cycles &&
+            (cpu->regs[REG_NO_PC] == cpu->delayHeads[0] || cpu->regs[REG_NO_PC] == cpu->delayHeads[1]))
+            acc += cpuPrvDelaySkip(cpu, cycles - acc);
         if (stop == FROND_JIT_FAULT && !faultReported) {
             faultReported = true;
             fprintf(stderr, "jit: data access fault near pc=0x%08x, guest state is not exact\n",
@@ -6873,6 +7046,9 @@ uint64_t cpuJitCpsrWrites() { return 0; }
 uint64_t cpuJitCpsrInterprets() { return 0; }
 void cpuSetIdleSkip(bool) {}
 void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; }
+void cpuSetDelaySkip(bool) {}
+void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles) { *skips = *cycles = 0; }
+void cpuSetDelayTimer(ArmCpu *, uint32_t, bool (*)(void *, uint32_t, uint32_t *), void *) {}
 bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}

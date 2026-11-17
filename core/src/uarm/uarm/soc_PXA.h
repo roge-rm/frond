@@ -209,6 +209,8 @@ class SocPXA : public SocGeneric<SocPXA> {
 #ifndef __EMSCRIPTEN__
     static uint32_t TimerElapsedCB(void* ctx);
     static void TimerRescheduleCB(void* ctx);
+    static bool OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr);
+    uint32_t TimerElapsedAt(uint32_t cycles) const;
 #endif
 
    private:

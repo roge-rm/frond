@@ -184,6 +184,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // The OS timer runs in batches up to its next match, synchronised on register access,
     // so the CPU runs longer stretches between scheduler updates. Every PXA device does this.
     pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
+    cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
 #endif
     rtc = pxaRtcInit(mem, ic);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
@@ -1165,12 +1166,20 @@ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
 }
 
 #ifndef __EMSCRIPTEN__
+// OS timer ticks elapsed in this batch with that many cycles in progress.
+uint32_t SocPXA::TimerElapsedAt(uint32_t cycles) const {
+    if (PowerSleeping() && sleeping) return 0;
+    const uint64_t extra = runningCyclesPerSecond ? uint64_t(cycles) * 1_sec / runningCyclesPerSecond : 0;
+    return scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+}
 uint32_t SocPXA::TimerElapsedCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);
-    if (self->PowerSleeping() && self->sleeping) return 0;
-    const uint64_t extra = self->runningCyclesPerSecond
-        ? uint64_t(cpuCyclesInProgress(self->cpu)) * 1_sec / self->runningCyclesPerSecond : 0;
-    return self->scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+    return self->TimerElapsedAt(cpuCyclesInProgress(self->cpu));
+}
+// The Fast delay skip's look at OSCR (cpuSetDelayTimer).
+bool SocPXA::OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr) {
+    auto* self = static_cast<SocPXA*>(ctx);
+    return pxaTimrPeek(self->tmr, self->TimerElapsedAt(cycles), oscr);
 }
 void SocPXA::TimerRescheduleCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);
