@@ -847,6 +847,15 @@ bool gFastEngineMissing = false;
         // A device with two arrangements starts with its controls around the screen; a fitted
         // window then puts them around when landscape and below when portrait, again after each resize.
         controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, 0, 0);
+        // The TG50 with the game controller attached splits it either side of the screen when
+        // rotated to landscape and puts it below in portrait, whatever the window's shape.
+        const bool tg50Pad = deviceType == deviceTypeTG50 && deviceControls(deviceType).panelWidth > 0;
+        auto arrangeForRotation = [&](Rotation shown) {
+            if (!tg50Pad) return;
+            const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
+            controlView.arrangement = landscape ? DeviceControlArrangement::around : DeviceControlArrangement::below;
+        };
+        arrangeForRotation(rotation);
         bool fitted = options.windowFit != WindowFit::none;
         // The window is named after the machine: its session file's name, or the device without one.
         const string windowTitle = !sessionFolder.empty()
@@ -858,7 +867,7 @@ bool gFastEngineMissing = false;
             return false;
         }
         auto arrangeForWindow = [&] {
-            if (!fitted) return;
+            if (!fitted || tg50Pad) return;
             int w = 0, h = 0;
             SDL_GetWindowSize(window, &w, &h);
             controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, w, h);
@@ -1457,6 +1466,7 @@ bool gFastEngineMissing = false;
                     display.Apply(*displayPending);
                     displayPending.reset();
                     if (deviceType == deviceTypeTG50) controlView = deviceControlView(display.keyboard, display.jog);
+                    arrangeForRotation(shownRotation);
                     const bool wasFitted = fitted;
                     fitted = display.fit != WindowFit::none;
                     sdlRenderer.reset();
@@ -1469,6 +1479,7 @@ bool gFastEngineMissing = false;
                 if (!appBackground && (rotationPending || rebuild)) {
                     if (rotationPending) {
                         shownRotation = *rotationPending;
+                        arrangeForRotation(shownRotation);
                         sdlRenderer.reset();
                         // A fitted window keeps its size and lays the rotated device out inside it.
                         if (!fitted)

@@ -1638,6 +1638,246 @@ void paintClieJog(Canvas& canvas, const DeviceControlProfile& profile, int ox, D
     }
 }
 
+// Sony PEGA-GC10 game controller: a light silver-grey moulded body with a darker side wall under
+// its face, two pale dishes (four round arrow keys with olive rings on the left, A with a red ring
+// and B with a blue one on the right), dark grey Home, Menu, X and Y in white collars, the printed
+// name and a Hold slide. Strip units.
+struct GcLook {
+    Rgb faceTop{214,220,230}, faceBottom{170,178,192}, side{124,130,142}, outline{96,100,108};
+    Rgb dishTop{164,170,182}, dishBottom{232,236,242};
+    Rgb ink{112,116,124}, glow{226,146,44};
+    Rgb olive{146,154,58}, red{198,90,56}, blue{54,76,178};
+};
+const GcLook gcLook{};
+float gcSmoothMin(float a, float b, float k) {return 0.5f*(a+b-std::sqrt((a-b)*(a-b)+k*k));}
+
+// A moulded part of the body: d is its outline; the face is the same outline raised by lift, so
+// the side wall shows below it.
+template <class D>
+void paintGcBody(Canvas& canvas, D d, float x0, float y0, float x1, float y1, float lift) {
+    const GcLook& look=gcLook;
+    canvas.paint(x0-6,y0-lift-4,x1+6,y1+8,[&](float x,float y) {return clamp01((4-d(x,y-3))/8)*0.5f;},
+                 [](float,float,Rgb) {return Rgb{34,32,30};});
+    canvas.paint(x0-1,y0-1,x1+1,y1+1,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float x,float y,Rgb) {
+        return look.side*(0.9f+0.12f*clamp01((y1-y)/lift))+Rgb{3,3,3}*speckle(x*0.4f,y*0.4f);
+    });
+    canvas.paint(x0-1,y0-1,x1+1,y1+1,[&](float x,float y) {return canvas.edge(std::fabs(d(x,y))-0.4f)*0.8f;},
+                 [&](float,float,Rgb) {return look.outline*0.8f;});
+    // The face sits lift above the outline's top; t runs 0 to 1 down it.
+    auto face=[&](float x,float y) {return d(x,y+lift);};
+    const float top=y0-lift,bottom=y1-lift;
+    canvas.paint(x0-1,top-1,x1+1,y1+1,[&](float x,float y) {return canvas.edge(face(x,y));},[&](float x,float y,Rgb) {
+        const float t=clamp01((y-top)/(bottom-top));
+        Rgb c=mix(look.faceTop,look.faceBottom,std::pow(t,1.3f));
+        // Rounded over at the rim: brighter towards the top edge, darker towards the bottom.
+        const float rim=clamp01(1+face(x,y)/3.5f);
+        c=c*(1+0.1f*rim*(1-2*t));
+        return c+Rgb{4,4,4}*speckle(x*0.6f,y*0.6f);
+    });
+    canvas.paint(x0-1,top-1,x1+1,y1+1,[&](float x,float y) {
+        return canvas.edge(std::fabs(face(x,y)+1.1f)-0.4f)*0.7f*clamp01((top+18-y)/18);
+    },[](float,float,Rgb) {return Rgb{252,253,255};});
+    canvas.paint(x0-1,top-1,x1+1,y1+1,[&](float x,float y) {return canvas.edge(std::fabs(face(x,y))-0.35f)*0.45f;},
+                 [&](float,float,Rgb) {return look.outline;});
+}
+
+// A shallow round dish in the face: shaded under its upper rim, lit towards the bottom.
+void paintGcDish(Canvas& canvas, float cx, float cy, float r) {
+    const GcLook& look=gcLook;
+    auto d=[&](float x,float y) {return std::hypot(x-cx,y-cy)-r;};
+    canvas.paint(cx-r-2,cy-r-2,cx+r+2,cy+r+2,[&](float x,float y) {return canvas.edge(d(x,y));},[&](float x,float y,Rgb) {
+        // Shaded more towards the upper rim, where the face falls away into the dish.
+        const float t=clamp01(0.5f+0.5f*(y-cy)/r),rim=clamp01(1+d(x,y)/(r*0.4f));
+        const Rgb c=mix(look.dishTop,look.dishBottom,std::pow(t,0.8f));
+        return c*(1-0.1f*rim*clamp01(1-2*t));
+    });
+    // A dark crease round the upper rim and a light one round the lower.
+    canvas.paint(cx-r-2,cy-r-2,cx+r+2,cy+r+2,[&](float x,float y) {
+        return canvas.edge(std::fabs(d(x,y)+0.4f)-0.45f)*clamp01(0.2f+(cy-y)/r);
+    },[&](float,float,Rgb) {return look.outline;});
+    canvas.paint(cx-r-2,cy-r-2,cx+r+2,cy+r+2,[&](float x,float y) {
+        return canvas.edge(std::fabs(d(x,y)-0.6f)-0.5f)*clamp01((y-cy)/r)*0.9f;
+    },[](float,float,Rgb) {return Rgb{250,251,253};});
+}
+
+// A round key in its hit circle: a dark groove, a coloured ring (or a white collar for the dark
+// keys), then a domed cap that sinks and darkens while held, with its glyph.
+template <class Glyph>
+void paintGcKey(Canvas& canvas, const SDL_Rect& r, bool dark, Rgb ring, bool held, Glyph glyph) {
+    const GcLook& look=gcLook;
+    const float cx=r.x+r.w*0.5f,cy=r.y+r.h*0.5f,R=r.w*0.5f,sink=held ? 0.7f : 0;
+    auto d=[&](float x,float y) {return std::hypot(x-cx,y-cy);};
+    const float x0=cx-R-3,y0=cy-R-3,x1=cx+R+3,y1=cy+R+4;
+    // Lip of the hole, lit underneath, then the groove.
+    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(std::fabs(d(x,y)-R-0.5f)-0.6f)*clamp01((y-cy)/R+0.2f);},
+                 [](float,float,Rgb) {return Rgb{250,251,253};});
+    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y)-R);},[](float,float,Rgb) {return Rgb{78,80,86};});
+    const float ringOuter=R-0.9f,ringInner=dark ? R-4.2f : R-2.6f;
+    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(d(x,y)-ringOuter);},[&](float,float y,Rgb) {
+        const float t=clamp01((y-cy+R)/(2*R));
+        return dark ? mix(Rgb{250,250,250},Rgb{196,198,204},t) : mix(ring*1.15f,ring*0.78f,t);
+    });
+    // The cap, domed and lit from above left.
+    const float rc=ringInner-0.4f;
+    auto cap=[&](float x,float y) {return std::hypot(x-cx,y-cy-sink)-rc;};
+    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {return canvas.edge(cap(x,y));},[&](float x,float y,Rgb) {
+        const float ux=(x-cx)/rc,uy=(y-cy-sink)/rc;
+        const float light=clamp01(1-((ux+0.3f)*(ux+0.3f)+(uy+0.4f)*(uy+0.4f))*0.55f);
+        Rgb c=dark ? mix(Rgb{62,64,70},Rgb{132,135,142},light) : mix(Rgb{196,198,200},Rgb{252,252,250},light);
+        c=mix(c*0.82f,c,clamp01(-cap(x,y)/1.6f));
+        return held ? c*0.76f : c;
+    });
+    canvas.paint(x0,y0,x1,y1,[&](float x,float y) {
+        return canvas.edge(std::fabs(cap(x,y)+0.9f)-0.35f)*(held ? 0.15f : 0.55f)*clamp01((cy-y)/rc);
+    },[](float,float,Rgb) {return Rgb{255,255,255};});
+    const Rgb ink=held ? look.glow : dark ? Rgb{164,168,176} : Rgb{168,170,174};
+    canvas.paint(cx-rc,cy-rc+sink,cx+rc,cy+rc+sink,[&](float x,float y) {return canvas.edge(glyph(x-cx,y-cy-sink));},
+                 [&](float,float,Rgb) {return ink;});
+}
+
+// Text in the TG50 stroke font scaled sx across and sy down, centred on cx with its cap top at y.
+float gcText(const char* text, float x, float y, float cx, float top, float sx, float sy, float weight) {
+    return tg50TextDistance(text,(x-cx)/sx,(y-top)/sy,1)*std::min(sx,sy)-weight;
+}
+
+// Everything on the pad for one arrangement: the keys of section, and the body, dishes, name and
+// labels placed round them. Below draws the whole pad; around draws the grip holding keys between
+// x0 and x1.
+void paintClieGamepad(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
+                      DeviceControlSection section, float x0, float x1) {
+    const GcLook& look=gcLook;
+    auto key=[&](KeyId id) -> const DeviceButton* {
+        for(size_t i=0;i<profile.count;++i) {
+            const auto& b=profile.buttons[i];
+            if(b.key==id && b.section==section && b.bounds.x>=x0 && b.bounds.x<x1)return &b;
+        }
+        return nullptr;
+    };
+    auto centre=[](const DeviceButton* b) {return std::pair<float,float>{b->bounds.x+b->bounds.w*0.5f,b->bounds.y+b->bounds.h*0.5f};};
+    const bool below=section==DeviceControlSection::below;
+    const auto* up=key(keyIdPadUp);const auto* b=key(keyIdPadB);
+    // Body: below, the wide body with a lobe under X and Y for the Hold slide; around, one grip.
+    if(below) {
+        const SDL_Rect main{4,62,312,126},lobe{92,150,136,58};
+        paintGcBody(canvas,[&](float x,float y) {
+            return gcSmoothMin(deviceRoundedDistance(main,22,x,y),deviceRoundedDistance(lobe,20,x,y),6);
+        },4,62,316,208,5);
+    } else {
+        const SDL_Rect grip{int(x0)+8,62,136,198};
+        paintGcBody(canvas,[&](float x,float y) {return deviceRoundedDistance(grip,30,x,y);},x0+8,62,x0+144,260,5);
+    }
+    // Dishes round the arrows and round A and B.
+    if(up) {
+        const auto* down=key(keyIdPadDown);
+        const auto [ux,uy]=centre(up);const auto [dx,dy]=centre(down);
+        paintGcDish(canvas,ux,(uy+dy)*0.5f,(dy-uy)*0.5f+21);
+    }
+    if(b) {
+        const auto* a=key(keyIdPadA);
+        const auto [bx,by]=centre(b);const auto [ax,ay]=centre(a);
+        paintGcDish(canvas,(ax+bx)*0.5f,(ay+by)*0.5f,std::hypot(bx-ax,by-ay)*0.5f+23);
+    }
+    auto held=[&](KeyId id) {return (pressed&deviceKeyBit(id))!=0;};
+    // Arrow keys: faint moulded triangles pointing out.
+    const std::pair<KeyId,std::pair<float,float>> arrows[]={{keyIdPadUp,{0,-1}},{keyIdPadDown,{0,1}},
+                                                           {keyIdPadLeft,{-1,0}},{keyIdPadRight,{1,0}}};
+    for(const auto& [id,dir]:arrows) {
+        const auto* k=key(id);if(!k)continue;
+        const float ux=dir.first,uy=dir.second,s=4.2f;
+        paintGcKey(canvas,k->bounds,false,look.olive,held(id),[&](float x,float y) {
+            const std::array<std::array<float,2>,3> t{{{ux*s,uy*s},{-ux*s*0.4f-uy*s*0.7f,-uy*s*0.4f+ux*s*0.7f},
+                                                        {-ux*s*0.4f+uy*s*0.7f,-uy*s*0.4f-ux*s*0.7f}}};
+            return polygon(x,y,t)+0.1f;
+        });
+    }
+    // Lettered keys: A and B in their rings, X and Y dark.
+    const struct {KeyId id; const char* text; bool dark; Rgb ring;} lettered[]={
+        {keyIdPadA,"A",false,look.red},{keyIdPadB,"B",false,look.blue},{keyIdPadX,"X",true,{}},{keyIdPadY,"Y",true,{}},
+        {keyIdPadHome,"",true,{}},{keyIdPadMenu,"",true,{}}};
+    for(const auto& l:lettered) {
+        const auto* k=key(l.id);if(!k)continue;
+        const float size=l.dark ? 1.25f : 1.35f;
+        paintGcKey(canvas,k->bounds,l.dark,l.ring,held(l.id),[&](float x,float y) {
+            if(!*l.text)return 1e9f;
+            return gcText(l.text,x,y,0,-3*size,size,size,0.55f);
+        });
+        // Home and Menu are named underneath.
+        if(l.id==keyIdPadHome || l.id==keyIdPadMenu) {
+            const auto [cx,cy]=centre(k);
+            const char* name=l.id==keyIdPadHome ? "HOME" : "MENU";
+            const float top=k->bounds.y+k->bounds.h+3.2f;
+            canvas.paint(cx-12,top-1,cx+12,top+5,[&](float x,float y) {return canvas.edge(gcText(name,x,y,cx,top,0.62f,0.55f,0.32f));},
+                         [&](float,float,Rgb) {return look.ink;});
+        }
+    }
+    // Hold: a dark track with a silver knob that slides right to hold, showing an amber mark.
+    if(const auto* hold=key(keyIdPadHold)) {
+        const SDL_Rect t=hold->bounds;
+        const bool on=held(keyIdPadHold);
+        const float corner=t.h*0.5f;
+        canvas.paint(t.x-2,t.y-2,t.x+t.w+2,t.y+t.h+3,[&](float x,float y) {return canvas.edge(std::fabs(deviceRoundedDistance(t,corner,x,y)-0.6f)-0.6f)*clamp01((y-t.y)/t.h);},
+                     [](float,float,Rgb) {return Rgb{248,249,251};});
+        canvas.paint(t.x-1,t.y-1,t.x+t.w+1,t.y+t.h+1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(t,corner,x,y));},
+                     [&](float,float y,Rgb) {return mix(Rgb{40,42,46},Rgb{82,84,90},clamp01((y-t.y)/t.h));});
+        const float mx=t.x+5.5f,my=t.y+t.h*0.5f;
+        if(on)canvas.paint(mx-3,my-3,mx+3,my+3,[&](float x,float y) {return canvas.edge(std::hypot(x-mx,y-my)-2.0f);},
+                           [&](float,float,Rgb) {return look.glow;});
+        const SDL_Rect knob{on ? t.x+t.w-int(t.w*0.55f)-1 : t.x+1,t.y+1,int(t.w*0.55f),t.h-2};
+        canvas.paint(knob.x-1,knob.y-1,knob.x+knob.w+1,knob.y+knob.h+1,[&](float x,float y) {
+            return canvas.edge(deviceRoundedDistance(knob,knob.h*0.5f,x,y));
+        },[&](float x,float y,Rgb) {
+            const Rgb c=mix(Rgb{236,238,242},Rgb{150,154,162},clamp01((y-knob.y)/knob.h));
+            // Ridges to grip.
+            const float rx=x-knob.x-knob.w*0.5f;
+            return std::fabs(rx)<knob.w*0.3f ? c*(0.94f+0.06f*std::cos(rx*2.6f)) : c;
+        });
+        const float lx=t.x+t.w+12,ly=t.y+t.h*0.5f-1.7f;
+        canvas.paint(lx-12,ly-1,lx+12,ly+5,[&](float x,float y) {return canvas.edge(gcText("HOLD",x,y,lx,ly,0.62f,0.55f,0.32f));},
+                     [&](float,float,Rgb) {return look.ink;});
+    }
+    // The name: CLIE with its accent, wide, white with a dark edge, over GEAR in a white bar.
+    const bool named=below || x0==0;
+    if(named) {
+        const float cx=below ? 160.f : x0+76,top=below ? 85.f : 80.f,sx=3.4f,sy=1.75f;
+        // C, L, a plain I in the gap and E, with the accent over the E.
+        auto name=[&](float x,float y) {
+            const float w=tg50TextWidth("CL E",1),ix=cx+(-w*0.5f+12.2f)*sx,ex=cx+(w*0.5f-2)*sx;
+            float d=gcText("CL E",x,y,cx,top,sx,sy,0);
+            d=std::min(d,segment(x,y,ix,top,ix,top+6*sy));
+            return std::min(d,segment(x,y,ex-1.6f,top-2.6f,ex+1.8f,top-4.4f));
+        };
+        canvas.paint(cx-40,top-8,cx+40,top+14,[&](float x,float y) {return canvas.edge(name(x,y)-1.9f);},
+                     [&](float,float,Rgb) {return Rgb{120,124,132};});
+        canvas.paint(cx-40,top-8,cx+40,top+14,[&](float x,float y) {return canvas.edge(name(x,y)-1.1f);},
+                     [](float,float,Rgb) {return Rgb{250,251,252};});
+        const SDL_Rect bar{int(cx)-34,int(top)+14,68,8};
+        canvas.paint(bar.x-1,bar.y-1,bar.x+bar.w+1,bar.y+bar.h+1,[&](float x,float y) {return canvas.edge(deviceRoundedDistance(bar,1.5f,x,y));},
+                     [](float,float,Rgb) {return Rgb{248,249,250};});
+        canvas.paint(bar.x-1,bar.y-1,bar.x+bar.w+1,bar.y+bar.h+1,[&](float x,float y) {return canvas.edge(std::fabs(deviceRoundedDistance(bar,1.5f,x,y))-0.3f)*0.6f;},
+                     [&](float,float,Rgb) {return look.outline;});
+        const char* gear[]={"G","E","A","R"};
+        for(int i=0;i<4;++i) {
+            const float gx=bar.x+bar.w*(i+0.5f)/4,gy=bar.y+1.6f;
+            canvas.paint(gx-4,gy-1,gx+4,gy+6,[&](float x,float y) {return canvas.edge(gcText(gear[i],x,y,gx,gy,0.85f,0.8f,0.42f));},
+                         [&](float,float,Rgb) {return Rgb{126,130,138};});
+        }
+    }
+}
+
+// One TG50 panel beside the screen in landscape, from x0 to x1 and H tall: the TG50's brushed
+// body with a grip of the game controller on it.
+void paintClieGamepadPanel(Canvas& canvas, const DeviceControlProfile& profile, DeviceKeyMask pressed,
+                           float x0, float x1, float H) {
+    const Rgb body{184,180,171};
+    canvas.paint(x0,0,x1,H,[](float,float) {return 1.f;},[&](float x,float y,Rgb) {
+        Rgb c=mix(body*1.05f,body*0.84f,std::pow(clamp01(y/H),1.2f));
+        const float t=std::fabs(x-(x0+x1)*0.5f)/((x1-x0)*0.5f);
+        c=c+Rgb{5,5,5}*speckle(x*0.05f,y*1.5f)+Rgb{2,2,2}*std::sin(y*5.3f+std::sin(x*0.07f)*1.4f);
+        return c*(1-0.08f*t*t);
+    });
+    paintClieGamepad(canvas,profile,pressed,DeviceControlSection::around,x0,x1);
+}
+
 // CLIE PEG-TG50: brushed champagne-silver body, an app row of round and slim silver keys, a
 // silver QWERTY with printed legends and a left-side Jog Dial. The strip canvas is in strip
 // units; the side tab canvas, beside the LCD or left of the keyboard, is in side tab units.
@@ -1682,6 +1922,10 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
     SilverKeyLook caps=keys;caps.dome=0.3f;
     const float capInset=1.3f;
     const Rgb ink{62,62,68},glow{226,146,44};
+    // The app row: main keys, or below ones with the game controller attached.
+    auto appRow=[](const DeviceButton& b) {
+        return b.section==DeviceControlSection::main || (b.section==DeviceControlSection::below && !clieGamepadKey(b.key));
+    };
     const DeviceButton* up=nullptr;const DeviceButton* dn=nullptr;
     for(size_t i=0;i<profile.count;++i) {
         if(profile.buttons[i].key==keyIdUp)up=&profile.buttons[i];
@@ -1726,7 +1970,7 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
     SDL_Rect bar{0,0,0,0};
     for(size_t i=0;i<profile.count;++i) {
         const auto& b=profile.buttons[i];
-        if(b.section!=DeviceControlSection::main)continue;
+        if(!appRow(b))continue;
         const SDL_Rect r=shifted(b.bounds);
         if(b.key!=keyIdUp && b.key!=keyIdDown)printed(b.icon,r.x+r.w*0.5f,10.2f,b.bounds.w<30 ? 0.52f : 0.5f);
         if(b.bounds.w>30) {
@@ -1761,7 +2005,7 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
     };
     for(size_t i=0;i<profile.count;++i) {
         const auto& b=profile.buttons[i];
-        if(b.section!=DeviceControlSection::main || b.key==keyIdUp || b.key==keyIdDown)continue;
+        if(!appRow(b) || b.key==keyIdUp || b.key==keyIdDown)continue;
         const SDL_Rect r=shifted(b.bounds);
         const bool held=down(b.key);
         const float corner=deviceButtonCorner(profile,b);
@@ -1803,6 +2047,9 @@ void paintTg50Controls(Canvas& canvas, const DeviceControlProfile& profile, int 
             return canvas.edge(std::fabs(y-b.y)-0.35f)*canvas.edge(deviceRoundedDistance(pill,corner,x,y)+1.5f)*0.7f;
         },[](float,float,Rgb) {return Rgb{90,90,96};});
     }
+
+    // The game controller where the keyboard was.
+    if(!sidebar && profile.panelWidth>0)paintClieGamepad(canvas,profile,pressed,DeviceControlSection::below,0,float(profile.width));
 
     // Keyboard: silver keys with dark legends that light amber while held, blue and red
     // symbols printed on the body under them.
@@ -3011,8 +3258,10 @@ void drawDeviceSidebar(SDL_Renderer* renderer, const DeviceControlProfile& profi
             canvas.h=int(screenHeight*scale);
             canvas.pixels.assign(size_t(canvas.w)*canvas.h,Rgb{0,0,0});
             canvas.originX=-float(x0);
-            paintZodiacControls(canvas,profile,pressed,stick,DeviceControlSection::around,float(x0),
-                                float(x0+profile.panelWidth),float(screenHeight*profile.unit),screenHeight);
+            if(profile.style==DeviceControlStyle::tg50)
+                paintClieGamepadPanel(canvas,profile,pressed,float(x0),float(x0+profile.panelWidth),float(screenHeight*profile.unit));
+            else paintZodiacControls(canvas,profile,pressed,stick,DeviceControlSection::around,float(x0),
+                                     float(x0+profile.panelWidth),float(screenHeight*profile.unit),screenHeight);
             const int x=second ? right : 0;
             if(auto* texture=canvasTexture(renderer,canvas)) {
                 const SDL_Rect dest{x,0,canvas.w,canvas.h};

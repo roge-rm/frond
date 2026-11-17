@@ -122,7 +122,19 @@ inline DeviceArt deviceArt(const char* name) {
 }
 // h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
-inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+// The PEGA-GC10 game controller's keys.
+constexpr bool clieGamepadKey(KeyId key) { return key>=keyIdPadUp && key<=keyIdPadHold; }
+// Art preview of the PEGA-GC10 on the TG50: FROND_CLIE_GAMEPAD=1 swaps in the TG50 profile with the
+// pad attached. Read once; off by default.
+inline bool clieGamepadPreview() {
+    static const bool on=[] {
+        const char* value=std::getenv("FROND_CLIE_GAMEPAD");
+        return value && *value && *value!='0';
+    }();
+    return on;
+}
+// gamepad picks the profile with the PEGA-GC10 attached on a CLIE that takes it.
+inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     // App keys hit their whole pocket; the five-way entries place the direction parts. The TX's
     // five-way nearly fills the bar's height, with each app key in its own pocket either side.
     static const DeviceButton tx[] = {
@@ -333,6 +345,50 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     };
     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::tg50,0.3f,1,0,176,clieJogTab(-236,208),clieJogWidth};
+    // TG50 with the PEGA-GC10 clipped over its keyboard. Below: the app row, then the whole pad
+    // where the keyboard was: the arrow dish on the left, A and B in the right dish, Home and Menu
+    // with X and Y under them in the middle and the Hold slide on the bottom edge. Around (rotated
+    // to landscape): a grip either side of the screen, 150 wide and authored 320 tall, the arrows,
+    // Home and X on the left, A, B, Menu, Y and Hold on the right. Round keys hit their whole cap.
+    constexpr auto padBelow=DeviceControlSection::below;
+    constexpr auto padAround=DeviceControlSection::around;
+    using Icon=DeviceControlIcon;
+    static const DeviceButton tg50Gamepad[] = {
+        {keyIdHome, {6,18,24,24}, "Home", Icon::home, 12, padBelow},
+        {keyIdHard1, {42,22,44,16}, "Date Book", Icon::calendar, 8, padBelow},
+        {keyIdHard2, {90,22,44,16}, "Address", Icon::phone, 8, padBelow},
+        {keyIdUp, {138,22,44,8}, "Up", Icon::up, 8, padBelow, {138,22,44,16}},
+        {keyIdDown, {138,30,44,8}, "Down", Icon::down, 8, padBelow, {138,22,44,16}},
+        {keyIdHard3, {186,22,44,16}, "To Do", Icon::tasks, 8, padBelow},
+        {keyIdHard4, {234,22,44,16}, "Memo Pad", Icon::memo, 8, padBelow},
+        {keyIdGraffiti, {290,18,24,24}, "Graffiti", Icon::graffiti, 12, padBelow},
+        {keyIdPadUp, {46,73,28,28}, "Pad up", Icon::up, 14, padBelow},
+        {keyIdPadDown, {46,127,28,28}, "Pad down", Icon::down, 14, padBelow},
+        {keyIdPadLeft, {19,100,28,28}, "Pad left", Icon::left, 14, padBelow},
+        {keyIdPadRight, {73,100,28,28}, "Pad right", Icon::right, 14, padBelow},
+        {keyIdPadB, {263,81,30,30}, "B", Icon::legend, 15, padBelow},
+        {keyIdPadA, {227,117,30,30}, "A", Icon::legend, 15, padBelow},
+        {keyIdPadHome, {127,128,24,24}, "Pad Home", Icon::legend, 12, padBelow},
+        {keyIdPadMenu, {169,128,24,24}, "Pad Menu", Icon::legend, 12, padBelow},
+        {keyIdPadX, {97,154,26,26}, "X", Icon::legend, 13, padBelow},
+        {keyIdPadY, {197,154,26,26}, "Y", Icon::legend, 13, padBelow},
+        {keyIdPadHold, {136,194,48,11}, "Hold", Icon::legend, 5.5f, padBelow},
+        {keyIdPadUp, {62,116,28,28}, "Pad up", Icon::up, 14, padAround},
+        {keyIdPadDown, {62,172,28,28}, "Pad down", Icon::down, 14, padAround},
+        {keyIdPadLeft, {34,144,28,28}, "Pad left", Icon::left, 14, padAround},
+        {keyIdPadRight, {90,144,28,28}, "Pad right", Icon::right, 14, padAround},
+        {keyIdPadHome, {94,214,24,24}, "Pad Home", Icon::legend, 12, padAround},
+        {keyIdPadX, {33,217,26,26}, "X", Icon::legend, 13, padAround},
+        {keyIdPadHold, {190,79,48,11}, "Hold", Icon::legend, 5.5f, padAround},
+        {keyIdPadB, {227,125,30,30}, "B", Icon::legend, 15, padAround},
+        {keyIdPadA, {191,161,30,30}, "A", Icon::legend, 15, padAround},
+        {keyIdPadMenu, {182,214,24,24}, "Pad Menu", Icon::legend, 12, padAround},
+        {keyIdPadY, {241,217,26,26}, "Y", Icon::legend, 13, padAround},
+        clieJogKey(0,-236),clieJogKey(1,-236),clieJogKey(2,-236),clieJogKey(3,-236),
+    };
+    static const DeviceControlProfile tg50GamepadProfile{320,224,tg50Gamepad,std::size(tg50Gamepad),{0,0,0,0},0,
+                                                         {0,0,0,0},DeviceControlStyle::tg50,0.3f,1,0,0,
+                                                         clieJogTab(-236,208),clieJogWidth,150,320};
     // Tapwave Zodiac: power, the analogue stick, Function and Home on the left and four silver
     // Action keys in a round recess on the right, the shoulder triggers above them and the small
     // round Bluetooth button. Action keys are named by place and send hard1-4 as bottom, right, left,
@@ -500,7 +556,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         case DeviceArt::m520: return m520Profile;
         case DeviceArt::m130: return m130Profile;
         case DeviceArt::iiic: return iiicProfile;
-        case DeviceArt::tg50: return tg50Profile;
+        case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
@@ -509,12 +565,16 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         default: return empty;
     }
 }
+inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+    return deviceControls(art,art==DeviceArt::tg50 && clieGamepadPreview());
+}
 inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
 inline bool deviceControlShown(const DeviceButton& button, const DeviceControlView& view) {
     switch(button.section) {
         case DeviceControlSection::main: return true;
         case DeviceControlSection::keyboard: return view.keyboard;
-        case DeviceControlSection::sideTab: return view.sideTab;
+        // Panels either side of the screen leave no room for a side tab.
+        case DeviceControlSection::sideTab: return view.sideTab && view.arrangement!=DeviceControlArrangement::around;
         case DeviceControlSection::below: return view.arrangement==DeviceControlArrangement::below;
         case DeviceControlSection::around: return view.arrangement==DeviceControlArrangement::around;
     }

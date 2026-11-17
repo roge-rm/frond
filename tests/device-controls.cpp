@@ -2169,6 +2169,97 @@ struct ZodiacHandler : SdlEventHandler {
     using SdlEventHandler::SdlEventHandler;
     bool DirectTouch(SDL_TouchID) const override {return true;}
 };
+// The PEGA-GC10 on the TG50: below in place of the keyboard, around as a grip either side of the
+// screen. Every pad key appears once per arrangement, hits at its centre and not in the gaps, and
+// darkens or moves while held; the app row and side tab only show below.
+static void clieGamepad() {
+    const auto& p=deviceControls(DeviceArt::tg50,true);
+    const auto& plain=deviceControls(DeviceArt::tg50,false);
+    assert(&p!=&plain && plain.panelWidth==0 && p.panelWidth==150 && p.panelHeight==320 && p.keyboardHeight==0);
+    if(!clieGamepadPreview())assert(&deviceControls(DeviceArt::tg50)==&plain);
+    for(size_t i=0;i<plain.count;++i)assert(!clieGamepadKey(plain.buttons[i].key));
+    DeviceControlView below=deviceControlView(true,JogPlacement::screen);
+    DeviceControlView around=below;around.arrangement=DeviceControlArrangement::around;
+    assert(deviceControlsWidth(p,320,around)==620 && deviceControlsHeight(p,320,around)==0 && deviceScreenLeft(p,around)==150);
+    // Below, the pad takes the keyboard's place: the same size as the TG50 with its keyboard shown.
+    assert(deviceControlsWidth(p,320,below)==358 && deviceControlsHeight(p,320,below)==deviceControlsHeight(plain,320,below));
+    for(auto view:{below,around}) {
+        const bool side=view.arrangement==DeviceControlArrangement::around;
+        int seen[keyIdCount]={};
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];
+            if(!deviceControlShown(b,view))continue;
+            ++seen[b.key];
+            if(side)assert(clieGamepadKey(b.key));
+            if(!clieGamepadKey(b.key))continue;
+            const auto r=deviceButtonRect(p,b,320,320,view);
+            assert(deviceControlAt(p,320,320,r.x+r.w/2,r.y+r.h/2,view)==b.key);
+            // Outside a round key's corners is not that key.
+            if(b.key!=keyIdPadHold)assert(deviceControlAt(p,320,320,r.x,r.y,view)!=b.key);
+            // Right panel keys sit past the screen, left ones before it.
+            if(side)assert(r.x+r.w<=150 || r.x>=470);
+        }
+        for(int k=keyIdPadUp;k<=keyIdPadHold;++k)assert(seen[k]==1);
+        // Between the arrows is no key.
+        auto rectOf=[&](KeyId k) {
+            for(size_t i=0;i<p.count;++i)if(p.buttons[i].key==k && deviceControlShown(p.buttons[i],view))return deviceButtonRect(p,p.buttons[i],320,320,view);
+            assert(false);return SDL_Rect{};
+        };
+        const auto u=rectOf(keyIdPadUp),l=rectOf(keyIdPadLeft);
+        assert(deviceControlAt(p,320,320,(u.x+u.w/2+l.x+l.w/2)/2,(u.y+u.h/2+l.y+l.h/2)/2,view)==keyInvalid);
+        assert(seen[keyIdJogPress]==(side ? 0 : 1) && seen[keyIdHard1]==(side ? 0 : 1));
+    }
+    // Drawn at scale 2: each held key darkens at its lower middle, the Hold knob moves.
+    const char* directory=std::getenv("FROND_CLIE_GAMEPAD_SCREENSHOT_DIR");
+    for(auto view:{below,around}) {
+        const bool side=view.arrangement==DeviceControlArrangement::around;
+        const float scale=2;
+        const int w=int(deviceControlsWidth(p,320,view)*scale),h=int((320+deviceControlsHeight(p,320,view))*scale);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        auto draw=[&](DeviceKeyMask pressed) {
+            SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);
+            drawDeviceSidebar(renderer,p,320,320,scale,pressed,view);
+            drawDeviceControls(renderer,p,320,320,scale,pressed,view);
+            SDL_RenderPresent(renderer);
+        };
+        const std::string name=std::string("clie-gamepad-")+(side ? "landscape" : "portrait");
+        draw(0);
+        assert(readPixel(surface,int((deviceScreenLeft(p,view)+160)*scale),int(160*scale)).g==0);
+        if(directory)assert(IMG_SavePNG(surface,(std::string(directory)+"/"+name+".png").c_str())==0);
+        for(size_t i=0;i<p.count;++i) {
+            const auto& b=p.buttons[i];
+            if(!deviceControlShown(b,view) || !clieGamepadKey(b.key))continue;
+            const auto r=deviceButtonRect(p,b,320,320,view);
+            const int cx=int((r.x+r.w*(b.key==keyIdPadHold ? 0.85f : 0.3f))*scale),cy=int((r.y+r.h*0.7f)*scale);
+            draw(0);const int idle=brightness(readPixel(surface,cx,cy));
+            draw(deviceKeyBit(b.key));const int held=brightness(readPixel(surface,cx,cy));
+            // The Hold knob slides over the dark track; the keys sink and darken.
+            const bool changed=b.key==keyIdPadHold ? held>idle+12 : held<idle-12;
+            if(!changed)std::fprintf(stderr,"pad key %d at %d,%d: idle %d held %d\n",b.key,cx,cy,idle,held);
+            assert(changed);
+        }
+        if(directory) {
+            draw(deviceKeyBit(keyIdPadUp)|deviceKeyBit(keyIdPadA)|deviceKeyBit(keyIdPadX)|deviceKeyBit(keyIdPadHome)|deviceKeyBit(keyIdPadHold));
+            assert(IMG_SavePNG(surface,(std::string(directory)+"/"+name+"-held.png").c_str())==0);
+        }
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+    // A close-up of the pad at scale 5 under the screen, idle.
+    if(directory) {
+        const float scale=5;
+        const int w=int(deviceControlsWidth(p,320,below)*scale),h=int((320+deviceControlsHeight(p,320,below))*scale);
+        auto* surface=SDL_CreateRGBSurfaceWithFormat(0,w,h,32,SDL_PIXELFORMAT_RGBA32);
+        auto* renderer=SDL_CreateSoftwareRenderer(surface);assert(surface && renderer);
+        SDL_SetRenderDrawColor(renderer,255,0,255,255);SDL_RenderClear(renderer);
+        drawDeviceSidebar(renderer,p,320,320,scale,0,below);
+        drawDeviceControls(renderer,p,320,320,scale,0,below);
+        SDL_RenderPresent(renderer);
+        assert(IMG_SavePNG(surface,(std::string(directory)+"/clie-gamepad-portrait-5x.png").c_str())==0);
+        SDL_DestroyRenderer(renderer);SDL_FreeSurface(surface);
+    }
+}
+
 static void zodiacControls() {
     const auto* profile=deviceProfile5(deviceTypeZodiac2);
     assert(profile && profile->frontend.available && profile->board==DeviceBoard5::imx1Zodiac);
@@ -2715,6 +2806,9 @@ int main(int argc,char** argv) {
     if(argc==2 && std::strcmp(argv[1],"--zodiac")==0) {
         zodiacControls();SDL_Quit();puts("PASS: Zodiac below and around arrangements, keys, Bluetooth, stick, game controller, multi-touch, releases and pressed art");return 0;
     }
+    if(argc==2 && std::strcmp(argv[1],"--clie-gamepad")==0) {
+        clieGamepad();SDL_Quit();puts("PASS: TG50 game controller below and around, keys, hit areas and pressed art");return 0;
+    }
     if(argc==2 && std::strcmp(argv[1],"--tg50-layout")==0) {
         tg50RuntimeTab();SDL_Quit();puts("PASS: TG50 sidebar/LCD pixel boundaries and pen bounds at fractional scales and four rotations");return 0;
     }
@@ -2757,5 +2851,6 @@ int main(int argc,char** argv) {
     tg50RuntimeTab();
     tg50LiveDisplay();
     zodiacControls();
-    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen");
+    clieGamepad();
+    SDL_Quit();puts("PASS: TX, E2 and Zire 72 device buttons, holds/chords, focus/drag/rotation release, touch isolation, scales, pressed rendering and E2 and Zire 72 silkscreens; Zire 72, m515, IIIx, m125 and TG50 hit areas, the IIIe, IIIxe, IIIc, V, Vx, m100, m105, m130, m500, c500, m505 and m520 art, pressed art and silkscreens; TG50 keyboard and side tab hiding; Zodiac arrangements, stick and keys; iPAQ 210, rx1950 and h4350 bars and h4350 keyboard hiding; T415 art, jog tab and silkscreen; TG50 game controller art");
 }
