@@ -1,8 +1,8 @@
 diff --git a/core/src/uarm/uarm/CPU.cpp b/core/src/uarm/uarm/CPU.cpp
-index 186fc132..d3056a5b 100644
+index 186fc132..d7fec2b6 100644
 --- a/core/src/uarm/uarm/CPU.cpp
 +++ b/core/src/uarm/uarm/CPU.cpp
-@@ -329,6 +329,33 @@ static FORCE_INLINE bool cpuPrvConditionFails(const struct ArmCpu *cpu, uint32_t
+@@ -329,6 +329,36 @@ static FORCE_INLINE bool cpuPrvConditionFails(const struct ArmCpu *cpu, uint32_t
      return table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)];
  }
  
@@ -22,7 +22,10 @@ index 186fc132..d3056a5b 100644
 +    bucket.cls[cls]++;
 +    if (thumb) { p.thumb++; p.clsThumb[cls]++; }
 +    else p.arm++;
-+    if (cls != cc_thumb_raw && cls != cc_peephole && (instr >> 28) != 0xe && (instr >> 28) != 0xf && cpuPrvConditionFails(cpu, instr)) {
++    const bool condFailed = cls != cc_thumb_raw && cls != cc_peephole && (instr >> 28) != 0xe && (instr >> 28) != 0xf &&
++                            cpuPrvConditionFails(cpu, instr);
++    costProfileStatic(p, instr, thumb, cpu->curInstrPC, condFailed);
++    if (condFailed) {
 +        p.failed++;
 +        bucket.failed++;
 +    } else if (count) {
@@ -36,7 +39,7 @@ index 186fc132..d3056a5b 100644
  static FORCE_INLINE uint32_t cpuPrvClz(uint32_t val) {
      if (!val) return 32;
  
-@@ -1182,7 +1209,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+@@ -1182,7 +1212,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
  #endif
  
  #ifndef __EMSCRIPTEN__
@@ -45,33 +48,42 @@ index 186fc132..d3056a5b 100644
        if constexpr (!arm920) {
          struct HostTlb &hostTlb = cpu->mem->hostTlb;
          if constexpr (write) {
-@@ -1215,6 +1242,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+@@ -1215,6 +1245,16 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
          }
  
          pa = MMU_TRANSLATE_RESULT_PA(translateResult);
-+        costProfileAccess(arm920, pa, size, write);
++        if constexpr (arm920) {
++            const auto ctl = cp15MMUArm920Control(cpu->cp15.cp15mmu);
++            costProfileAccess(arm920, vaddr, pa, size, write, mmuIsOn(cpu->memorySystem.mmu), ctl & 4,
++                              MMU_TRANSLATE_RESULT_CACHEABLE(translateResult), MMU_TRANSLATE_RESULT_BUFFERABLE(translateResult),
++                              false, ctl & 0x4000);
++        } else {
++            costProfileAccess(arm920, vaddr, pa, size, write, mmuIsOn(cpu->memorySystem.mmu), cpu->memorySystem.mmu->dcOn,
++                              MMU_TRANSLATE_RESULT_CACHEABLE(translateResult), MMU_TRANSLATE_RESULT_BUFFERABLE(translateResult),
++                              translateResult & (1ull << 60), true);
++        }
          if constexpr (arm920) {
              auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
              dc->mem = cpu->mem;
-@@ -1230,6 +1258,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
+@@ -1230,6 +1270,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
          }
  
          pa = vaddr;
-+        costProfileAccess(arm920, pa, size, write);
++        costProfileAccess(arm920, vaddr, pa, size, write, false, false, false, false, false, true);
      }
  
  #ifndef __EMSCRIPTEN__
-@@ -4592,7 +4621,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
+@@ -4592,7 +4633,9 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
  
      while (cycleAcc < cycles) {
          if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
-+        { CostProfile& p = costProfile(); p.paceOps++; costProfileTick(p); p.inPace = true; }
++        { CostProfile& p = costProfile(); p.paceOps++; p.staticClock += cost::paceOpCost(cost::Core::pxa27x); costProfileTick(p); p.inPace = true; }
          cpuPrvCyclePace(cpu);
 +        costProfile().inPace = false;
          cycleAcc += 20;
  
          if (cpu->slowPath) break;
-@@ -4673,6 +4704,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+@@ -4673,6 +4716,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
                  return acc;
              }
              cpu->regs[REG_NO_PC] = pc + size;
@@ -79,7 +91,7 @@ index 186fc132..d3056a5b 100644
              cpuPrvDecompressExecFn(decoded)(cpu, instr);
              if (cpu->slowPath) break;
              continue;
-@@ -4684,6 +4716,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
+@@ -4684,6 +4728,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
              if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
              else instr = line->translatedThumbInstructions[offset >> 1];
              cpu->regs[REG_NO_PC] = pc + size;
@@ -87,7 +99,7 @@ index 186fc132..d3056a5b 100644
              cpuPrvDecompressExecFn(int32_t(cached) >> DECODED_BITS_SHIFT)(cpu, instr);
              if (cpu->slowPath) return acc;
  
-@@ -4780,6 +4813,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
+@@ -4780,6 +4825,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
          cpuPrvDispatchExecFnThumb<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
                                                                translatedInstr);
  #else
@@ -95,7 +107,7 @@ index 186fc132..d3056a5b 100644
          cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
  #endif
  
-@@ -4868,6 +4902,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
+@@ -4868,6 +4914,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
          cpuPrvDispatchExecFnArm<memorySystemKind, injected>(cpuPrvDecompressExecFn(decoded), cpu,
                                                              instr);
  #else
@@ -103,12 +115,93 @@ index 186fc132..d3056a5b 100644
          cpuPrvDecompressExecFn(decoded)(cpu, instr);
  #endif
  
+diff --git a/core/src/uarm/uarm/MMU.cpp b/core/src/uarm/uarm/MMU.cpp
+index 75799a76..6a5d5365 100644
+--- a/core/src/uarm/uarm/MMU.cpp
++++ b/core/src/uarm/uarm/MMU.cpp
+@@ -67,7 +67,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+                                                          bool priviledged, bool write, bool inspect = false,
+                                                          bool checkRead = true, uint8_t *access = nullptr,
+                                                          bool *uniformP = nullptr) {
+-    bool c = false, b = false;
++    bool c = false, b = false, x = false;
+     bool section = false, coarse = true, pxa_tex_page = false;
+     uint32_t va, paPage = 0, sz, t, pa;
+     int_fast16_t i;
+@@ -105,6 +105,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+             ap = (t >> 10) & 3;
+             c = !!(t & 0x08);
+             b = !!(t & 0x04);
++            x = mmu->xscale && (t & 0x1000);
+             section = true;
+             goto translated;
+ 
+@@ -129,6 +130,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+             return TRANSLATE_RESULT_FAULT(0x07 | (dom << 4));
+ 
+         case 1:  // 64K mapping
++            x = mmu->xscale && (t & 0x1000);
+ 
+             paPage = t & 0xFFFF0000UL;
+             va = adr & 0xFFFF0000UL;
+@@ -152,6 +154,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
+             if (coarse) {
+                 if (mmu->xscale) {
+                     pxa_tex_page = true;
++                    x = t & 0x40;
+                     ap = 0;
+                     goto page_size_4k;
+                 } else {
+@@ -197,6 +200,7 @@ translated:
+             tlbEntry->ap = ap;
+             tlbEntry->c = c;
+             tlbEntry->b = b;
++            tlbEntry->x = x;
+             tlbEntry->domain = dom;
+             tlbEntry->section = section;
+             tlbEntry->pa = (paPage + offset) >> 12;
+@@ -218,6 +222,7 @@ translated:
+ 
+     if (c) result |= (1ull << 62);
+     if (b) result |= (1ull << 61);
++    if (x) result |= (1ull << 60);
+ 
+     return result;
+ }
+@@ -239,6 +244,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
+ 
+     if (tlbEntry->c) result |= (1ull << 62);
+     if (tlbEntry->b) result |= (1ull << 61);
++    if (tlbEntry->x) result |= (1ull << 60);
+ 
+     return result;
+ }
+diff --git a/core/src/uarm/uarm/MMU_internal.h b/core/src/uarm/uarm/MMU_internal.h
+index bd9b45c5..574b747a 100644
+--- a/core/src/uarm/uarm/MMU_internal.h
++++ b/core/src/uarm/uarm/MMU_internal.h
+@@ -14,6 +14,7 @@ struct TlbEntry {
+     uint32_t c : 1;
+     uint32_t section : 1;
+     uint32_t b : 1;
++    uint32_t x : 1;  // XScale X bit (cost profile only)
+ };
+ 
+ struct ArmMmu {
+@@ -92,6 +93,6 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t
+         return mmuTranslate(mmu, addr, privileged, write);
+     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
+     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
+-    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61);
++    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61) | (uint64_t(entry.x) << 60);
+ }
+ #endif
 diff --git a/core/src/uarm/uarm/cost_profile.h b/core/src/uarm/uarm/cost_profile.h
 new file mode 100644
-index 00000000..d4499452
+index 00000000..8e5a004c
 --- /dev/null
 +++ b/core/src/uarm/uarm/cost_profile.h
-@@ -0,0 +1,181 @@
+@@ -0,0 +1,286 @@
 +// Debug only (tools/debug/cost-profile.patch, never applied by the build): counts what the
 +// interpreter runs, per cost class, and loads and stores per memory region. Exact engine only
 +// (FROND_JIT=0). FROND_COST_PROFILE=file writes a cumulative line every 1M cycles and a final
@@ -119,6 +212,9 @@ index 00000000..d4499452
 +#include <cstdint>
 +#include <cstdio>
 +#include <cstdlib>
++#include <string>
++
++#include "dcache_cost.h"
 +
 +enum CostClass {
 +    cc_dp, cc_dp_regshift, cc_dp_pc, cc_mul, cc_mul_long, cc_dsp_mul, cc_clz_sat,
@@ -154,17 +250,35 @@ index 00000000..d4499452
 +    uint64_t paceAcc[cr_count][2] = {};  // accesses made while PACE runs a 68k op, by region and load/store
 +    bool inPace = false;
 +    uint64_t hist[256] = {};
++    // Cache model (dcache_cost.h): events per region, ARM and PACE accesses apart; accesses per policy;
++    // the static cost classes (xscale_cost.h) of passed instructions, ARM and Thumb apart, and LDM/STM
++    // word counts per class; I-cache line fetches and misses.
++    cost::DataCacheState dc, ic;
++    bool cacheReset = false;
++    uint64_t ev[cr_count][6] = {}, pev[cr_count][6] = {}, pol[cr_count][5] = {};
++    uint64_t kA[cost::classCount] = {}, kT[cost::classCount] = {}, words[3][17] = {};
++    uint64_t peepholes = 0, iLines = 0, iMisses = 0, cacheOps[4] = {};
++    uint32_t lastILine = 0xffffffffu;
++    // The cost model's clock at the device's clocks (FROND_COST_CLOCKS tx, e2, tg50 or zodiac): static
++    // costs (table, PACE op, failed conditions, static bus and device region charges) in sclk, the data
++    // cache model's stalls (cacheStall, PACE's own accesses update the cache but aren't charged) in mst.
++    cost::Clocks clocks = cost::kClocksTx;
++    uint64_t staticClock = 0, stall = 0;
 +    uint64_t nextSnapshot = 1000000;
 +    bool arm920 = false;
 +    FILE* out = nullptr;
 +    CostProfile() {
 +        if (const char* path = std::getenv("FROND_COST_PROFILE")) out = std::fopen(path, "w");
++        if (const char* c = std::getenv("FROND_COST_CLOCKS")) {
++            const std::string n = c;
++            clocks = n == "e2" ? cost::kClocksE2 : n == "tg50" ? cost::kClocksTg50 : n == "zodiac" ? cost::kClocksZodiac : cost::kClocksTx;
++        }
 +        std::atexit([] { costProfileFinal(); });
 +    }
 +    static void costProfileFinal();
 +};
 +
-+static inline CostProfile& costProfile() {
++inline CostProfile& costProfile() {
 +    static CostProfile p;
 +    return p;
 +}
@@ -184,6 +298,24 @@ index 00000000..d4499452
 +    for (int r = 0; r < cr_count; r++)
 +        std::fprintf(p.out, " pace.%s.l=%llu pace.%s.s=%llu", costRegionNames[r], (unsigned long long)p.paceAcc[r][0],
 +                     costRegionNames[r], (unsigned long long)p.paceAcc[r][1]);
++    static const char* const evNames[6] = {"hit", "fill", "wb", "buf", "ul", "us"};
++    for (int r = 0; r < cr_count; r++)
++        for (int e = 0; e < 6; e++)
++            std::fprintf(p.out, " e.%s.%s=%llu pe.%s.%s=%llu", costRegionNames[r], evNames[e], (unsigned long long)p.ev[r][e],
++                         costRegionNames[r], evNames[e], (unsigned long long)p.pev[r][e]);
++    for (int r = 0; r < cr_count; r++)
++        for (int q = 0; q < 5; q++) std::fprintf(p.out, " pol.%s.%d=%llu", costRegionNames[r], q, (unsigned long long)p.pol[r][q]);
++    for (int c = 0; c < cost::classCount; c++)
++        std::fprintf(p.out, " kA.%d=%llu kT.%d=%llu", c, (unsigned long long)p.kA[c], c, (unsigned long long)p.kT[c]);
++    for (int k = 0; k < 3; k++)
++        for (int n = 0; n < 17; n++)
++            if (p.words[k][n]) std::fprintf(p.out, " w.%d.%d=%llu", k, n, (unsigned long long)p.words[k][n]);
++    std::fprintf(p.out, " mst=%llu", (unsigned long long)p.stall);
++    std::fprintf(p.out, " sclk=%llu", (unsigned long long)p.staticClock);
++    std::fprintf(p.out, " peep=%llu iline=%llu imiss=%llu cop.inv=%llu cop.line=%llu cop.alloc=%llu cop.wb=%llu",
++                 (unsigned long long)p.peepholes, (unsigned long long)p.iLines, (unsigned long long)p.iMisses,
++                 (unsigned long long)p.cacheOps[0], (unsigned long long)p.cacheOps[1], (unsigned long long)p.cacheOps[2],
++                 (unsigned long long)p.cacheOps[3]);
 +    std::fprintf(p.out, "\n");
 +    std::fflush(p.out);
 +}
@@ -236,12 +368,78 @@ index 00000000..d4499452
 +    }
 +}
 +
-+static inline void costProfileAccess(bool arm920, uint32_t pa, unsigned size, bool write) {
++static inline cost::Core costProfileCore(const CostProfile& p) { return p.arm920 ? cost::Core::arm920t : cost::Core::pxa27x; }
++
++static inline void costProfileCacheInit(CostProfile& p) {
++    if (p.cacheReset) return;
++    p.cacheReset = true;
++    cost::dataCacheReset(p.dc, costProfileCore(p));
++    cost::dataCacheReset(p.ic, costProfileCore(p));
++}
++
++// mmuOn, cacheOn (control register C), c, b, x from the translation; roundRobin the ARM920T RR bit.
++static inline void costProfileAccess(bool arm920, uint32_t va, uint32_t pa, unsigned size, bool write, bool mmuOn,
++                                     bool cacheOn, bool c, bool b, bool x, bool roundRobin) {
 +    CostProfile& p = costProfile();
++    p.arm920 = arm920;
++    costProfileCacheInit(p);
 +    const unsigned s = size == 1 ? 0 : size == 2 ? 1 : 2;
-+    if (!p.inPace && p.cur) (write ? p.cur->regS : p.cur->regL)[costRegionOf(arm920, pa)]++;
-+    if (p.inPace) { p.paceAcc[costRegionOf(arm920, pa)][write]++; return; }
-+    (write ? p.stores : p.loads)[costRegionOf(arm920, pa)][s]++;
++    const unsigned r = costRegionOf(arm920, pa);
++    const cost::Core core = costProfileCore(p);
++    const cost::Policy pol = cost::policyOf(core, mmuOn, cacheOn, c, b, x);
++    if (r == cr_sdram || r == cr_sram || r == cr_flash) {
++        p.pol[r][unsigned(pol)]++;
++        const cost::CacheEvents e = cost::dataCacheAccess(p.dc, core, va, pol, write, roundRobin);
++        uint64_t* ev = p.inPace ? p.pev[r] : p.ev[r];
++        ev[0] += e.hits; ev[1] += e.fills; ev[2] += e.writebacks; ev[3] += e.buffered;
++        ev[4] += e.uncachedLoads; ev[5] += e.uncachedStores;
++        const cost::Region cr = r == cr_sram ? cost::sram : r == cr_flash ? cost::flash : cost::sdram;
++        const uint32_t st = cost::cacheStall(p.dc, core, e, cost::cacheCosts(core, cr, p.clocks), p.staticClock + p.stall);
++        if (!p.inPace) p.stall += st;
++    } else if (!p.inPace) {
++        p.staticClock += cost::regionCost(core, r == cr_static ? cost::staticBus : cost::device, write, p.clocks);
++    }
++    if (!p.inPace && p.cur) (write ? p.cur->regS : p.cur->regL)[r]++;
++    if (p.inPace) { p.paceAcc[r][write]++; return; }
++    (write ? p.stores : p.loads)[r][s]++;
++}
++
++// CP15 c7 on the XScale: invalidate all (c6/c7 op2 0), invalidate line (c6 op2 1), clean line (c10 op2 1),
++// clean and invalidate line (c14 op2 1 on the ARM920T), line allocate (c2 op2 5), drain (c10 op2 4).
++static inline void costProfileCacheOp(unsigned CRm, unsigned op2, uint32_t val) {
++    CostProfile& p = costProfile();
++    costProfileCacheInit(p);
++    const cost::Core core = costProfileCore(p);
++    cost::CacheEvents e;
++    if ((CRm == 6 || CRm == 7) && op2 == 0) { cost::dataCacheInvalidateAll(p.dc); p.cacheOps[0]++; }
++    else if (CRm == 6 && op2 == 1) { e = cost::dataCacheLineOp(p.dc, core, val, false, true); p.cacheOps[1]++; }
++    else if (CRm == 10 && op2 == 1) { e = cost::dataCacheLineOp(p.dc, core, val, true, false); p.cacheOps[1]++; }
++    else if (CRm == 14 && op2 == 1) { e = cost::dataCacheLineOp(p.dc, core, val, true, true); p.cacheOps[1]++; }
++    else if (CRm == 2 && op2 == 5) { e = cost::dataCacheAllocateLine(p.dc, core, val); p.cacheOps[2]++; }
++    else if (CRm == 10 && op2 == 4) cost::dataCacheDrain(p.dc);
++    if ((CRm == 5 || CRm == 7) && op2 == 0) cost::dataCacheInvalidateAll(p.ic);
++    p.cacheOps[3] += e.writebacks;
++    p.stall += cost::cacheStall(p.dc, core, e, cost::cacheCosts(core, cost::sdram, p.clocks), p.staticClock + p.stall);
++}
++
++// Static cost class of a passed instruction, and the I-cache line its fetch reads.
++static inline void costProfileStatic(CostProfile& p, uint32_t instr, bool thumb, uint32_t pc, bool failed) {
++    costProfileCacheInit(p);
++    const uint32_t iline = pc >> 5;
++    if (iline != p.lastILine) {
++        p.lastILine = iline;
++        p.iLines++;
++        if (cost::dataCacheAccess(p.ic, costProfileCore(p), pc, cost::Policy::writeBack, false).fills) p.iMisses++;
++    }
++    if (failed) { p.staticClock += 1; return; }
++    if ((instr & 0xfffffff0u) == 0xfff9ee90u) { p.peepholes++; p.staticClock += 1; return; }
++    unsigned words = 0;
++    const cost::Class c = (instr >> 16) == 0 ? cost::thumbClass(instr, costProfileCore(p), words)
++                                             : cost::armClass(instr, costProfileCore(p), words);
++    (thumb ? p.kT : p.kA)[c]++;
++    p.staticClock += cost::classCost(cost::tableFor(costProfileCore(p)), c, words) + (thumb ? cost::thumbPenalty(c, costProfileCore(p)) : 0);
++    const int k = c == cost::ldm ? 0 : c == cost::ldmPc ? 1 : c == cost::stm ? 2 : -1;
++    if (k >= 0) p.words[k][words > 16 ? 16 : words]++;
 +}
 +
 +// instr is the ARM word, or the raw Thumb halfword for a Thumb instruction with no ARM form.
@@ -290,6 +488,26 @@ index 00000000..d4499452
 +}
 +
 +#endif
+diff --git a/core/src/uarm/uarm/cp15mmu.cpp b/core/src/uarm/uarm/cp15mmu.cpp
+index bf12e693..f88b0339 100644
+--- a/core/src/uarm/uarm/cp15mmu.cpp
++++ b/core/src/uarm/uarm/cp15mmu.cpp
+@@ -1,6 +1,7 @@
+ //(c) uARM project    https://github.com/uARM-Palm/uARM    uARM@dmitry.gr
+ 
+ #include "cp15mmu.h"
++#include "cost_profile.h"
+ 
+ #include <cstdlib>
+ #include <cstring>
+@@ -287,6 +288,7 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
+             goto success;
+ 
+         case 7:  // cache ops
++            if (!read) costProfileCacheOp(CRm, op2, val);
+             if ((CRm == 6 || CRm == 7) && op2 == 0) mmuDcacheInvalidate(cp15->mmu);
+             if ((CRm == 5 || CRm == 7) && op2 == 0) {
+                 icacheInvalGuest(cp15->ic);  // invalidate entire {icache(5) or both i and dcache(7)}
 diff --git a/core/src/uarm/uarm/pxa_PwrClk.cpp b/core/src/uarm/uarm/pxa_PwrClk.cpp
 index 84120849..92762cdb 100644
 --- a/core/src/uarm/uarm/pxa_PwrClk.cpp

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Report a FROND_COST_PROFILE file (tools/debug/cost-profile.patch) as a mix table.
+"""Report a FROND_COST_PROFILE file (tools/debug/cost-profile.patch) as a mix table, with the data cache
+model's events (core/src/uarm/uarm/dcache_cost.h) when the profile has them. Set FROND_COST_CLOCKS (tx, e2,
+tg50 or zodiac) on the profiled run for the model clock line: static costs and cache stalls at those clocks.
 
   cost-profile-report.py FILE                       whole run
   cost-profile-report.py FILE NAME=MS ... [--rate MIPS] [--start CYCLES]
@@ -55,6 +57,23 @@ def show(name, d):
         pl, ps = d.get(f'pace.{r}.l', 0), d.get(f'pace.{r}.s', 0)
         regs.append(f'{r} L {l:.0f} S {st:.0f}' + (f' (pace L {pl:.0f} S {ps:.0f})' if pl or ps else ''))
     out.append('  region accesses: ' + '; '.join(regs))
+    # Data cache model (dcache_cost.h): hits, line fills, dirty halves written back, write buffer entries,
+    # uncached loads and stores; ARM accesses (PACE's apart). I-cache: line fetches and misses.
+    cache = []
+    for r in ('sdram', 'sram', 'flash'):
+        ev = [d.get(f'e.{r}.{e}', 0) for e in ('hit', 'fill', 'wb', 'buf', 'ul', 'us')]
+        pe = [d.get(f'pe.{r}.{e}', 0) for e in ('hit', 'fill', 'wb', 'buf', 'ul', 'us')]
+        if any(ev) or any(pe):
+            cache.append(f'{r} hit {ev[0]:.0f} fill {ev[1]:.0f} wb {ev[2]:.0f} buf {ev[3]:.0f} ul {ev[4]:.0f} us {ev[5]:.0f}'
+                         + (f' (pace hit {pe[0]:.0f} fill {pe[1]:.0f} buf {pe[3]:.0f})' if any(pe) else ''))
+    if cache:
+        out.append('  data cache: ' + '; '.join(cache))
+    if 'sclk' in d:
+        out.append(f"  model clocks: static {d['sclk']:.0f}  cache stalls {d.get('mst', 0):.0f}  "
+                   f"total {d['sclk'] + d.get('mst', 0):.0f}")
+    if d.get('iline'):
+        out.append(f"  icache: lines {d['iline']:.0f} misses {d.get('imiss', 0):.0f} "
+                   f"({100 * d.get('imiss', 0) / max(arm, 1):.3f}% of instructions)")
     return '\n'.join(out)
 
 
