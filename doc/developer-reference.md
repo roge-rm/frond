@@ -229,7 +229,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 
 `install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
 
-A sleeping Palm is woken first with a power button press, here and on the control socket, for `install`, `launch`, `os-version`, `set-auto-off`, the `db-` commands, `launch-app`, `delete-db`, `export`, `export-db` and the Memory Stick file commands. The guest runs until it's awake and takes host calls, 5 guest seconds at most. One still asleep then refuses the command, saying the Palm is asleep (`not-ready` on the control socket).
+The commands you start wake a sleeping Palm first with a power button press, here and on the control socket: `install`, `launch`, `set-auto-off`, the `db-export` commands, `launch-app`, `delete-db`, `export`, `export-db`, `db-list wake` and the Memory Stick file commands. No press is added while one from the host is held or queued. The guest runs until it's awake and takes host calls, 5 guest seconds at most. `db-list` and `os-version` leave it asleep. A Palm still asleep refuses the command, saying so (`asleep` on the control socket).
 
 ## Control socket
 
@@ -253,7 +253,7 @@ Two requests with ID 0 get no reply: `cancel-files` (argument is the job ID of a
 
 Commands that touch files or the guest pause audio while they run and don't catch up the lost time.
 
-Error codes seen across commands: `argument`, `unsupported` (the device lacks it), `not-ready` (the Palm isn't at a point where it can take the call, try again), `busy`, `empty`, `cancelled`, `timeout`, `command` (unknown) and `failed`.
+Error codes seen across commands: `argument`, `unsupported` (the device lacks it), `not-ready` (the Palm isn't at a point where it can take the call, try again), `asleep` (the Palm is asleep, see above), `busy`, `empty`, `cancelled`, `timeout`, `command` (unknown) and `failed`.
 
 ### Events
 
@@ -284,7 +284,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `delete-db` | database name, up to 31 bytes | `deleted`; errors `missing`, `rom`, `running` (the open application), `open`, `delete`, `not-ready` |
 | `export` | ZIP file | `exported`: all RAM databases |
 | `export-db` | ZIP file, newline, database name | `exported`: that database |
-| `db-list` | | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name |
+| `db-list` | none, or `wake` | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name; error `asleep` unless `wake` |
 | `input-replay` | file | `loaded`; error `replay` with the line |
 | `replay-state` | | `running`, `paused` or `finished`, message is the last event time in ms |
 | `replay-continue` | | `continued`: a paused replay goes on; error `not-paused` |

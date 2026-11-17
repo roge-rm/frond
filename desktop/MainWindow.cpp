@@ -842,7 +842,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (internalListWanted) listInternal();
             if (appsStale) listApps();
         });
-        if (command == "db-list") { databasesReply(ok, message); return; }
+        if (command == "db-list") { databasesReply(ok, code, message); return; }
         if (command == "wifi-module-state") {
             if (ok) printerPanel->setModuleReadout(frondPrint::moduleReadout(message, printerPanel->moduleOn()));
             return;
@@ -2837,13 +2837,19 @@ void MainWindow::listApps() {
     appsStale = false;
     if (client.request("db-list")) { busy = true; refresh(); }
 }
-void MainWindow::databasesReply(bool ok, const QString& message) {
+void MainWindow::databasesReply(bool ok, const QString& code, const QString& message) {
     const auto all = ok ? runningRules::parseDatabases(message) : std::vector<runningRules::Database>{};
     if (deleteApp.active && deleteApp.lookup) { deleteLookup(ok, message, all); return; }
     if (internalFiles) {
         // A failed list keeps the last one and says why; it isn't asked for again until the next change.
         internalFiles->setDatabases(ok ? all : knownDatabases);
         if (!ok) internalFiles->note->setText(message);
+    }
+    // A list isn't asked for on a sleeping Palm, which would wake it; the panel says it's asleep.
+    if (!ok && code == "asleep") {
+        knownDatabases.clear();
+        appsPanel->setDatabases({}, tr("The Palm is asleep"));
+        return;
     }
     // A list that can't be had (Palm OS still starting) is left as it was.
     if (!ok) { log->appendPlainText("db-list: " + message); return; }
@@ -2959,7 +2965,7 @@ void MainWindow::deleteApplication(const QString& name) {
     deleteApp = {};
     deleteApp.active = deleteApp.lookup = true;
     deleteApp.name = name;
-    if (!send("db-list")) deleteApp = {};
+    if (!send("db-list", "wake")) deleteApp = {};
 }
 void MainWindow::deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all) {
     if (!ok) { deleteApp = {}; failure(message); return; }

@@ -110,7 +110,7 @@ private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
     }
     val apps = model.apps
     if (apps == null) Progress()
-    else if (apps.isEmpty()) EmptyNote("No applications")
+    else if (apps.isEmpty()) EmptyNote(model.appsNote ?: "No applications")
     for (app in apps.orEmpty()) {
         ListItem(
             headlineContent = { Text(app.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },

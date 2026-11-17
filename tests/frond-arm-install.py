@@ -7,8 +7,8 @@ and a launch work with it in front too. With the creator app itself in front it 
 another app's install leaves it in front. Two installs in a row at the launcher work, an event
 the notified app queues (a switch to Memo Pad) isn't overridden by the relaunch, an install while a
 launch is under way doesn't keep the launcher, and a session saved by the next console command after an install at
-the launcher loads with the launcher listing the app. A launch, install or database list sent to a
-sleeping Palm wakes it with a power press and succeeds.
+the launcher loads with the launcher listing the app. A launch or install sent to a sleeping Palm
+wakes it with a power press and succeeds; a database list says it's asleep and leaves it asleep.
 
 Sessions: --session DEVICE=PATH, else FROND_ARM_SESSIONS/DEVICE (a folder of machine folders), else
 build/smoke/machines/DEVICE; a device with none is skipped, printing SKIPPED, and with
@@ -211,21 +211,34 @@ def saved_after_install(device, session, work, root, after):
         core.close()
 
 
+LIST_REPLIES = ('FrondSyncLog', 'not ready', 'list failed')
+
+
 def sleep(core, root, name):
-    """Puts the Palm to sleep with the power key."""
+    """Puts the Palm to sleep with the power key and waits until the DAL sleeps: a db-list, which
+    doesn't wake it, answers that the Palm is asleep, and the LCD stays off after it."""
     core.key(root, 'power')
     end = time.monotonic() + 30
     while core.frame(root / f'{name}.png') is not None:
         if time.monotonic() > end:
             raise AssertionError('the power key did not put the Palm to sleep')
         time.sleep(1)
-    time.sleep(1)  # the LCD goes off before the DAL sleeps
+    end = time.monotonic() + 10
+    while True:
+        reply = core.send('db-list', LIST_REPLIES, 60).strip()
+        if 'the Palm is asleep' in reply:
+            break
+        if 'FrondSyncLog' in reply or time.monotonic() > end:
+            raise AssertionError(f'db-list on a sleeping Palm should say it is asleep: {reply!r}')
+        time.sleep(0.5)
+    if core.frame(root / f'{name}-listed.png') is not None:
+        raise AssertionError('db-list woke the Palm')
 
 
 def asleep(core, device, root, memo):
-    """Host calls while the Palm sleeps (power key) wake it with a power press: a launch of Memo
-    Pad succeeds and brings it up, and an install and db-list each wake it again and succeed. The
-    core stays up and the screen is live afterwards."""
+    """Host calls while the Palm sleeps (power key): a db-list says it's asleep and leaves it
+    asleep; a launch of Memo Pad wakes it with a power press and brings Memo Pad up, and an
+    install wakes it again and succeeds. The core stays up and the screen is live afterwards."""
     device.reopen(core, root)
     time.sleep(2)
     sleep(core, root, 'asleep')
@@ -242,16 +255,16 @@ def asleep(core, device, root, memo):
         raise AssertionError(f'a launch while asleep should wake the Palm and launch: {replies!r}')
     if woken is None or device.body(woken) != device.body(memo):
         raise AssertionError('a launch while asleep did not wake the Palm into Memo Pad')
-    for name, command, wanted, ok in (('install', f'install "{PROBE}"', REPLIES, 'successful'),
-                                      ('db-list', 'db-list', ('FrondSyncLog', 'not ready', 'list failed'), 'FrondSyncLog')):
-        sleep(core, root, f'asleep-{name}')
-        started = time.monotonic()
-        reply = core.send(command, wanted, 120).strip()
-        print(f'frond-arm install: {device.name} asleep {name}: {reply!r} after {time.monotonic() - started:.1f} s', flush=True)
-        if core.process.poll() is not None:
-            raise AssertionError(f'the core quit on {name} while asleep')
-        if ok not in reply:
-            raise AssertionError(f'{name} while asleep should wake the Palm and succeed: {reply!r}')
+    sleep(core, root, 'asleep-install')
+    started = time.monotonic()
+    reply = core.send(f'install "{PROBE}"', REPLIES, 120).strip()
+    print(f'frond-arm install: {device.name} asleep install: {reply!r} after {time.monotonic() - started:.1f} s', flush=True)
+    if core.process.poll() is not None:
+        raise AssertionError('the core quit on install while asleep')
+    if 'successful' not in reply:
+        raise AssertionError(f'install while asleep should wake the Palm and succeed: {reply!r}')
+    if 'FrondSyncLog' not in core.send('db-list', LIST_REPLIES, 60):
+        raise AssertionError('db-list after the install woke the Palm')
     time.sleep(2)
     if core.frame(root / 'woken-1.png') is None or core.frame(root / 'woken-2.png') is None:
         raise AssertionError('the screen went dark after waking')

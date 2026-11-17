@@ -437,17 +437,23 @@ class RunningModel(
     // The applications in RAM, as the core lists them; null until the first read.
     var apps by mutableStateOf<List<PalmDatabases.Info>?>(null)
         private set
+    // Shown for an empty list instead of "No applications", e.g. while the Palm is asleep.
+    var appsNote by mutableStateOf<String?>(null)
+        private set
 
     fun loadApps() {
         val d = databases ?: return
         if (waitingForGdb) return
         activity.lifecycleScope.launch {
+            var note: String? = null
             apps = withContext(Dispatchers.IO) {
                 try { RunningSheets.applications(d.list()) } catch (e: Exception) {
                     Log.w(FrondActivity.TAG, "application list: ${e.message}")
+                    if (e is PalmDatabases.Failed && e.code == "asleep") note = "The Palm is asleep"
                     emptyList()
                 }
             }
+            appsNote = note
         }
     }
 

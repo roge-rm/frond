@@ -187,7 +187,7 @@ class MainWindow : public QMainWindow {
     void updateMips();
     void pollMips();
     void listApps();
-    void databasesReply(bool ok, const QString& message);
+    void databasesReply(bool ok, const QString& code, const QString& message);
     void deleteApplication(const QString& name);
     void deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all);
     void deleteNext();

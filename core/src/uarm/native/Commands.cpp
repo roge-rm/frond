@@ -299,7 +299,7 @@ namespace {
             return;
         }
 
-        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+        if (frondNative::guestAsleep(*ctx->soc)) {
             cout << "OS version failed: the Palm is asleep" << endl;
             return;
         }
@@ -440,7 +440,7 @@ namespace {
             return;
         }
 
-        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+        if (frondNative::guestAsleep(*ctx->soc)) {
             cout << "database list failed: the Palm is asleep" << endl;
             return;
         }

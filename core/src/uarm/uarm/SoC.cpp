@@ -49,11 +49,18 @@ SoC::SoC()
 }
 
 void SoC::KeyDown(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = true;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));
 }
 
 void SoC::KeyUp(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = false;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyUp(key));
+}
+
+bool SoC::PowerKeyPending() const {
+    return powerHeld || jammedKey == keyIdPower ||
+           keyEventQueue->Any([](const KeyEvent& event) { return event.key == keyIdPower; });
 }
 
 void SoC::PenDown(int x, int y) {

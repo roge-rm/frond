@@ -422,10 +422,10 @@ class DesktopControl {
         }
         return {false, "command", "Unknown second SD slot command."};
     }
-    // A host call refused: the Palm stayed asleep after the power press, or Palm OS isn't at a
-    // point that takes host calls.
+    // A host call refused: the Palm is asleep (a list, or still asleep after the power press), or
+    // Palm OS isn't at a point that takes host calls.
     static Reply notReady(commands::Context& ctx) {
-        if (frondNative::guestAsleep(*ctx.soc)) return {false, "not-ready", "The Palm is asleep. Turn it on and try again."};
+        if (frondNative::guestAsleep(*ctx.soc)) return {false, "asleep", "The Palm is asleep. Turn it on and try again."};
         return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
     }
 
@@ -444,7 +444,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -884,8 +884,9 @@ class DesktopControl {
         }
         if (command == "db-list") {
             // One line per RAM database: type, creator and attributes in hex, then the hex name.
+            if (!path.empty() && path != "wake") return {false, "argument", "db-list takes only wake."};
             DbMetadataList list;
-            if (!GuestDatabaseOps::List(*ctx.soc, list)) return notReady(ctx);
+            if (!GuestDatabaseOps::List(*ctx.soc, list, path == "wake")) return notReady(ctx);
             std::string text;
             for (const auto& db : list) {
                 char fields[32];

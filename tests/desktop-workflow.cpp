@@ -3626,6 +3626,8 @@ for line in s.makefile('rb'):
     if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
         log.write(cmd.decode()+' '+text+'\n'); log.flush()
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none',b'microphone-state':b'off'}.get(cmd,b'done')
+    if cmd==b'db-list' and text!='wake' and os.path.exists(sys.argv[0].rsplit('/',1)[0]+'/asleep'):
+        s.sendall(i+b'\terror\tasleep\t'+b'The Palm is asleep. Turn it on and try again.'.hex().encode()+b'\n'); continue
     if cmd==b'db-list':
         message='\n'.join(t.encode().hex()+' '+c.encode().hex()+' %08x '%a+n.encode().hex() for t,c,a,n in dbs).encode()
     if cmd==b'delete-db':
@@ -3691,7 +3693,8 @@ for line in s.makefile('rb'):
             // A fresh list first, then the application, then the data with its creator.
             const auto list = commands();
             const int at = int(list.indexOf("delete-db Memos"));
-            QVERIFY(at > 0 && list[at - 1] == "db-list ");
+            // The lookup wakes a sleeping Palm, as the delete would.
+            QVERIFY(at > 0 && list[at - 1] == "db-list wake");
             QCOMPARE(list[at + 1], QString("delete-db Memo Data"));
             QVERIFY(!list.contains("delete-db Notes") && !list.contains("delete-db Other Data"));
         }
@@ -3736,6 +3739,17 @@ for line in s.makefile('rb'):
         window.findChild<QToolButton*>("panelClose")->click();
         QVERIFY(!panels->isVisible() && !window.findChild<QAction*>("barApplications")->isChecked());
         QTRY_COMPARE_WITH_TIMEOUT(window.height(), slim, 2000);
+        // A sleeping Palm: the list says so, with no error box, and the list didn't wake it.
+        QFile(files.filePath("asleep")).open(QIODevice::WriteOnly);
+        press("Ctrl+1");
+        QTRY_COMPARE_WITH_TIMEOUT(apps->names(), QStringList(), 5000);
+        QCOMPARE(apps->findChild<QLabel*>("appsEmpty")->text(), QString("The Palm is asleep"));
+        QVERIFY(apps->findChild<QLabel*>("appsEmpty")->isVisible());
+        QCOMPARE(commands().filter(QRegularExpression("^db-list")).last(), QString("db-list "));
+        for (auto* box : window.findChildren<QMessageBox*>()) QVERIFY(!box->isVisible());
+        QFile::remove(files.filePath("asleep"));
+        press("Ctrl+1");
+        QTRY_COMPARE_WITH_TIMEOUT(panels->current(), -1, 2000);
         answer.stop();
         QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         window.findChild<QPushButton*>("stop")->click();

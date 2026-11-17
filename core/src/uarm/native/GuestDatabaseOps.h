@@ -24,7 +24,9 @@ inline bool Ready(SoC& soc) {
     return NativeBoundary::Prepare(soc, false) || syscallDispatchPrepare(soc.GetSyscallDispatch(), SYSCALL_PREPARE_LOOK);
 }
 
-// Host calls on a sleeping Palm wake it first with a power button press, as a person would. The
+// Host calls the user starts (install, launch, delete, export, card files) wake a sleeping Palm
+// first with a power button press, as a person would; lists and other looks don't. No press is
+// added while one from the host is held or still queued, as the two would put it back to sleep. The
 // press and release go through the key queue like the frontend's (the PXA holds a short press for
 // 250 ms so the DAL stays up), then the guest runs until it's awake, past that hold and at a point
 // that takes host calls, or awake for 3 s, kWakeSeconds of guest time at most. The T|X's UI task
@@ -34,8 +36,10 @@ inline bool Ready(SoC& soc) {
 inline bool Wake(SoC& soc) {
     if (!frondNative::guestAsleep(soc)) return true;
     if (!soc.PowerButtonSupported()) return false;
-    soc.KeyDown(keyIdPower);
-    soc.KeyUp(keyIdPower);
+    if (!soc.PowerKeyPending()) {
+        soc.KeyDown(keyIdPower);
+        soc.KeyUp(keyIdPower);
+    }
     constexpr uint64_t cyclesPerSecond = 100000000, slice = 2000000;  // 20 ms
     constexpr uint64_t kWakeSeconds = 5000000000, hold = 300000000, settle = 3000000000;  // ns
     const uint64_t start = soc.GetTime();
@@ -226,10 +230,11 @@ inline std::optional<DeleteDbResult> Delete(SoC& soc, const std::string& name) {
     return result;
 }
 
-// The RAM databases' directory entries, without serialising any database. Read-only: the guest
+// The RAM databases' directory entries, without serialising any database. Only wakes a sleeping
+// Palm with wake (a lookup for a delete the user asked for). Read-only: the guest
 // is rolled back afterwards like Export. Returns false only when no supported boundary is available.
-inline bool List(SoC& soc, DbMetadataList& list) {
-    if (!Wake(soc)) return false;
+inline bool List(SoC& soc, DbMetadataList& list, bool wake = false) {
+    if (wake ? !Wake(soc) : frondNative::guestAsleep(soc)) return false;
     if (NativeBoundary::Prepare(soc)) {
         ReadOnlyGuest transaction(soc);
         NativeBoundary::Session session(soc);
