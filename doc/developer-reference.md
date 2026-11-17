@@ -219,7 +219,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `save-nand IMAGE` | Export the raw NAND with its spare bytes. |
 | `dump-mmu` | Print the MMU mappings. |
 | `os-version` | Ask the Palm for its OS version. |
-| `set-auto-off SECONDS` | Set the auto-off time. Not on the TG50. The built-in usage line leaves out the argument. |
+| `set-auto-off SECONDS` | Set the auto-off time until the next reset, 0 for never. Not on the TG50. The built-in usage line leaves out the argument. |
 | `install FILE` | Install a PRC or PDB. |
 | `launch NAME` | Launch an app by its database name. |
 | `db-list` | List the RAM databases. |

@@ -628,6 +628,11 @@ uint16_t syscall68k_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint3
                        [=]() { pacePush32(memPtr); });
 }
 
+uint16_t syscall68k_SysSetAutoOffTime(struct SyscallDispatch* sd, uint32_t flags, uint16_t seconds) {
+    return syscall68k(sd, flags, SYSCALL_68K_SYS_SET_AUTO_OFF_TIME, false,
+                       [=]() { pacePush16(seconds); });
+}
+
 uint16_t syscall68k_MemNumCards(struct SyscallDispatch* sd, uint32_t flags) {
     return syscall68k(sd, flags, SYSCALL_68K_MEM_NUM_CARDS, false, []() {});
 }
