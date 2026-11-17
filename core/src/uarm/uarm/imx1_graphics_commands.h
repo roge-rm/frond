@@ -268,7 +268,8 @@ class Imx1GraphicsCommands {
                     if (status != A::ok) return status;
                     if (brush == 1) {
                         ticks += uint64_t(fill.width) * fill.height;
-                        transparentPattern(pattern, first, fill, fills);
+                        transparentPattern(pattern, first, fill);
+                        fills.push_back(std::move(fill));
                         continue;
                     }
                     if (brush == 0) patternPixels(pattern, first, fill);
@@ -538,7 +539,7 @@ class Imx1GraphicsCommands {
     static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
                         const Fill& fill, Imx1GpuFill& out) {
         if (!gpuFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
-            maskFill(fill) || ropFill(fill) ||
+            patternFill(fill) || maskFill(fill) || ropFill(fill) ||
             ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             (fill.a4 && fill.pixels.empty()) || transformed(fill) ||
             (fill.doubled && (ratioX(fill) != 0x80 || ratioY(fill) != 0x80)) ||
@@ -582,6 +583,7 @@ class Imx1GraphicsCommands {
         if (planeFill(fill)) return completePlaneFill(configuration, eim, memory, fill);
         if (idctFill(fill)) return completeIdctFill(configuration, eim, memory, fill);
         if (smoothFill(fill)) return completeSmoothFill(configuration, eim, memory, fill);
+        if (patternFill(fill)) return completePatternFill(configuration, eim, memory, fill);
         if (fastFill(configuration, eim, memory, fill)) return A::ok;
         const bool masked = maskFill(fill), rop = ropFill(fill);
         for (uint32_t y = 0; y < fill.height; ++y)
@@ -682,7 +684,7 @@ class Imx1GraphicsCommands {
     static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                          const Fill& fill) {
         if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
-            maskFill(fill) || ropFill(fill) ||
+            patternFill(fill) || maskFill(fill) || ropFill(fill) ||
             ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             transformed(fill) ||
             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
@@ -999,21 +1001,57 @@ class Imx1GraphicsCommands {
     // destination, as solid fills of each row's runs of set bits. Rows and columns line up as patternPixels.
     // ASSUMPTION "brush type 1 transparent": the Radeon's BRUSH_8X8_MONO_FG_LA. The ROM sends it for erase (with the
     // pattern inverted), mask and overlay, each of which draws one colour and leaves the rest.
-    void transparentPattern(const uint8_t* pattern, uint32_t xy, const Fill& fill, std::vector<Fill>& fills) const {
-        const uint32_t left = (xy >> 16) + fill.sourceX, top = (xy & 0xffff) + fill.sourceY;
+    void transparentPattern(const uint8_t* pattern, uint32_t xy, Fill& fill) const {
+        // One fill for the rectangle: the pattern's rows in sourceBase and sourcePitch, the pattern origin in
+        // sourceX and sourceY, painted on a fill that is no copy marking it (patternFill).
+        fill.sourceBase = pattern[0] | pattern[1] << 8 | pattern[2] << 16 | uint32_t(pattern[3]) << 24;
+        fill.sourcePitch = pattern[4] | pattern[5] << 8 | pattern[6] << 16 | uint32_t(pattern[7]) << 24;
+        fill.sourceX += xy >> 16;
+        fill.sourceY += xy & 0xffff;
+        fill.colour = values[0x41f];
+        fill.painted = true;
+    }
+    // A brush type 1 fill (transparentPattern). Saved states that predate it never carry painted without a copy.
+    static bool patternFill(const Fill& fill) {
+        return fill.painted && !fill.plain && !fill.keyed && !fill.a4 && !fill.doubled && !fill.invert && !fill.keyEqual;
+    }
+    // Draws a pattern fill: colour where a pattern bit is set, the destination left where clear, row (y + sourceY) & 7
+    // and column (x + sourceX) & 7 of the pattern, bit 7 first. Rows in order, each pixel one write.
+    static Imx1BootstrapAccess completePatternFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                                   Imx1GraphicsMemory& memory, const Fill& fill) {
+        using A = Imx1BootstrapAccess;
+        uint8_t rows[8];
+        for (unsigned i = 0; i < 8; ++i) rows[i] = uint8_t((i < 4 ? fill.sourceBase : fill.sourcePitch) >> ((i & 3) * 8));
+        const auto set = [&](uint32_t x, uint32_t y) {
+            return (rows[(fill.sourceY + y) & 7] >> (7 - ((fill.sourceX + x) & 7))) & 1;
+        };
+        unsigned bank = 0;
+        uint32_t offset = 0;
+        uint8_t* destination = (!directFills || ((fill.base | fill.pitch) & 1)) ? nullptr :
+            memory.gpuSpan(configuration, eim, fill.base, uint64_t(fill.height - 1) * fill.pitch + fill.width * 2, bank, offset);
+        uint64_t writes = 0;
+        uint32_t first = UINT32_MAX, end = 0;
         for (uint32_t y = 0; y < fill.height; ++y)
-            for (uint32_t x = 0; x < fill.width;) {
-                const auto set = [&](uint32_t at) { return (pattern[(top + y) & 7] >> (7 - ((left + at) & 7))) & 1; };
-                if (!set(x)) { ++x; continue; }
-                uint32_t end = x + 1;
-                while (end < fill.width && set(end)) ++end;
-                Fill run = fill;
-                run.base = fill.base + y * fill.pitch + x * 2;
-                run.width = end - x;
-                run.height = 1;
-                fills.push_back(std::move(run));
-                x = end;
+            for (uint32_t x = 0; x < fill.width; ++x) {
+                if (!set(x, y)) continue;
+                if (destination) {
+                    uint8_t* out = destination + y * fill.pitch + x * 2;
+                    out[0] = uint8_t(fill.colour);
+                    out[1] = uint8_t(fill.colour >> 8);
+                    first = std::min(first, offset + y * fill.pitch + x * 2);
+                    end = std::max(end, offset + y * fill.pitch + x * 2 + 2);
+                    ++writes;
+                    continue;
+                }
+                uint32_t colour = fill.colour;
+                const auto status = memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x * 2, 2, true, colour);
+                if (status != A::ok) return status;
             }
+        if (destination) {
+            if (writes) memory.noteWrites(bank, first, end, writes);
+            ++directFillCount;
+        }
+        return A::ok;
     }
     Imx1BootstrapAccess a4Source(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                const Imx1GraphicsMemory& memory, uint32_t xy,

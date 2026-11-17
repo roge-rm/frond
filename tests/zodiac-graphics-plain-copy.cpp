@@ -1611,10 +1611,51 @@ void patternFill() {
     assert(f.append(order,0x200b0200) == A::sideEffect);
     std::puts("PASS: 8x8 mono pattern fills from a queued or finished upload, f0 and 5a, anchored at the surface origin; type 1 leaves clear bits");
 }
+// A brush type 1 fill of the whole 480 by 320 screen with the gray pattern is one queued fill. Saved mid-batch it
+// loads, and finishes with the pixels of a run that never saved.
+void patternSaved() {
+    const uint32_t brush = 0xe5e000, surface = 0xe10000;
+    const uint8_t rows[8]{0xaa,0x55,0xaa,0x55,0xaa,0x55,0xaa,0x55};
+    const uint32_t d0 = rows[0]|rows[1]<<8|rows[2]<<16|uint32_t(rows[3])<<24, d1 = d0;
+    const std::vector<uint32_t> mono{0x423,brush,0x401,brush,0x402,0x10,0x4b2,0x00cc0b00,0x41b,0x5798b303,0x4b1,0x40036003,
+        0xc0011a00,0,0x00100001,0x000704f0,d0,d0>>8,d0>>16,d0>>24,d1,d1>>8,d1>>16,d1>>24};
+    const std::vector<uint32_t> fill{0x401,surface,0x402,480,0x46f,0,0x470,0x01e001e0,0x41f,0x07e0,0x41e,0xf800,
+        0x4b2,0x00f00a00,0x41b,0x55e0341f,0x4b1,0x00030104,0xc0011a00,0x00000000,0x01e00140};
+    auto setup = [&](Fixture& f) {
+        for (unsigned i = 0; i < 480*320; ++i) f.write(surface+i*2,0xa55a);
+        assert(f.append(mono,0x200af1fc) == A::ok);
+        f.finish();
+        assert(f.append(fill,0x200b0200) == A::ok);
+    };
+    Fixture reference; setup(reference);
+    assert(reference.commands.duration() >= 480*320);
+    reference.finish();
+    Fixture saved; setup(saved);
+    std::vector<uint8_t> bytes[2];
+    StateWriter configurationOut(bytes[0]); saved.state.state(configurationOut);
+    StateWriter commandsOut(bytes[1]); saved.commands.state(commandsOut);
+    Fixture loaded;
+    for (unsigned i = 0; i < 480*320; ++i) loaded.write(surface+i*2,0xa55a);
+    StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+    StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+    if (!configurationIn.complete() || !commandsIn.complete()) {
+        std::fprintf(stderr,"pattern batch state: %s %s\n",configurationIn.detail() ? configurationIn.detail() : "ok",
+                     commandsIn.detail() ? commandsIn.detail() : "ok");
+        std::abort();
+    }
+    loaded.finish();
+    for (unsigned y = 0; y < 320; ++y)
+        for (unsigned x = 0; x < 480; ++x) {
+            const uint32_t expected = ((rows[y & 7] >> (7 - (x & 7))) & 1) ? 0x07e0 : 0xa55a;
+            assert(reference.read(surface+(y*480+x)*2) == expected);
+            assert(loaded.read(surface+(y*480+x)*2) == expected);
+        }
+    std::puts("PASS: a full-screen type 1 pattern fill is one fill, saves mid-batch, loads and finishes the same");
+}
 int main() {
     hostSourceType(); hostAfterPattern();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
     stretchStaleGmc(); stretchRatios(); smoothStretch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
-    ropCopies(); maskBlt(); tileBlt(); patternFill();
+    ropCopies(); maskBlt(); tileBlt(); patternFill(); patternSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
