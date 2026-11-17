@@ -2368,8 +2368,11 @@ test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
 
 .PHONY: test-zodiac-graphics-acquisition
 .PHONY: test-zodiac-graphics-sd
-test-zodiac-graphics-sd: prepare
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/zodiac-graphics-sd.cpp -o build/test-zodiac-graphics-sd
+# Slot 2 (the W4200 SD block): the empty slot's answers, then a card: detect and its interrupt, init, PIO
+# transfers, errors and a state saved mid-transfer.
+test-zodiac-graphics-sd: prepare core/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-graphics-sd.cpp core/src/uarm/uarm/vSD.cpp core/src/common/libcommon.a -o build/test-zodiac-graphics-sd
 	./build/test-zodiac-graphics-sd
 
 test-zodiac-graphics-acquisition: zodiac-boot-probe prepare test-zodiac-live-controls

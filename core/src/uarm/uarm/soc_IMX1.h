@@ -85,6 +85,9 @@ class SocIMX1 : public SoC {
     bool CardSwappedOnLoad() const { return cardSwapped; }
     // Whether slot 1 has the card attached, for tests.
     bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
+    // Slot 2, the W4200's SD slot: the card to have in it, or null for none. The caller keeps the card.
+    void SetSecondCard(VSD* card) { vsd2 = card; card2Sync = true; SyncSecondCard(); }
+    bool SecondCardAttached() const { return imx1MachineGraphicsSdCard(machine) != nullptr; }
     // Whether the machine has the pen down just now.
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
@@ -109,8 +112,12 @@ class SocIMX1 : public SoC {
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
     void SyncCard();
+    // The same for slot 2 and vsd2.
+    void SyncSecondCard();
 
     std::vector<uint8_t> rom, saved, powerOn;
+    VSD* vsd2{nullptr};
+    bool card2Sync{false};
     std::unique_ptr<Imx1I2cReadWindow> eeprom;
     Imx1Machine* machine{nullptr};
     bool halted{false};

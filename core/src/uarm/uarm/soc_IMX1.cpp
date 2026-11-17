@@ -156,6 +156,13 @@ void SocIMX1::SyncCard() {
     cardSync = false;
 }
 
+void SocIMX1::SyncSecondCard() {
+    if (!card2Sync || halted) return;
+    if (imx1MachineSetGraphicsSdCard(machine, vsd2, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineSetGraphicsSdCard(machine, vsd2, true) != Imx1BootstrapAccess::ok) return;
+    card2Sync = false;
+}
+
 void SocIMX1::StateChanged() {
     pcm.restart();
     const auto status = imx1MachineGetStatus(machine);
@@ -180,6 +187,8 @@ void SocIMX1::Reset() {
     StateChanged();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
+    card2Sync = true;
+    SyncSecondCard();
 }
 
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
@@ -255,6 +264,9 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
             SyncCard();
         }
     }
+    // Slot 2's card stays in through the load (imx1MachineLoadState); this puts in or takes out the one asked for.
+    card2Sync = true;
+    SyncSecondCard();
     return true;
 }
 
@@ -391,6 +403,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     }
     const auto before = imx1MachineGetStatus(machine);
     SyncCard();
+    SyncSecondCard();
     PumpInput();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
     const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};
