@@ -575,7 +575,7 @@ open class FrondActivity : SDLActivity() {
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
-        if (launchDevice().zodiac) zodiacPad = ZodiacPad(ZodiacPad::push)
+        if (launchDevice().zodiac) zodiacPad = ZodiacPad(ControllerMap.load(this, launchDevice()), ZodiacPad::push)
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
             override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
