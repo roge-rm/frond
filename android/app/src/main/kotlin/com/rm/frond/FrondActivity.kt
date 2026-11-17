@@ -341,7 +341,7 @@ open class FrondActivity : SDLActivity() {
             cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -578,9 +578,24 @@ open class FrondActivity : SDLActivity() {
         }, "FrondFirmware").apply { isDaemon = true }.start()
     }
 
+    private var palmButtons: PalmButtons? = null
+    private var padAttached = false
+
+    // The CLIE game controller went in or out; held controller keys let go first.
+    fun gamepadAttached(on: Boolean) {
+        runOnUiThread {
+            if (padAttached == on) return@runOnUiThread
+            controller.releaseAll()
+            padAttached = on
+            palmButtons?.padAttached = on
+        }
+    }
+
     private fun configureController(device: Device) {
         controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
+        buttons.padAttached = padAttached
+        palmButtons = buttons
         controller = ControllerInput(ControllerMap.load(this, device), buttons::press)
     }
 
@@ -918,6 +933,10 @@ open class FrondActivity : SDLActivity() {
             return
         }
         Thread({
+            if (launchDevice().clieGamepad) {
+                val pad = link.request("gamepad-state", timeoutSeconds = 60)
+                if (pad.ok) gamepadAttached(pad.message.startsWith("attached"))
+            }
             val reply = link.request("keyboard-state", timeoutSeconds = 60)
             if (!reply.ok) return@Thread
             val attached = reply.message == "attached"
@@ -1013,6 +1032,7 @@ open class FrondActivity : SDLActivity() {
         val model = menuModel ?: return
         model.readKeyboard()
         model.readHold()
+        model.readGamepad()
         model.readNetwork()
         model.readMicrophone()
         model.readCard()
@@ -1031,6 +1051,7 @@ open class FrondActivity : SDLActivity() {
         when (id) {
             RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
             RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
+            RunningMenu.Id.GAMEPAD -> model.changeGamepad(model.gamepad != "attached")
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()

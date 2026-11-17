@@ -85,20 +85,23 @@ data class MachineSettings(
     val wifiModule: Boolean = true,
     // Zodiac: its rumble motor drives the controller's or the phone's vibrator.
     val rumble: Boolean = true,
+    // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
+    val gamepad: Boolean? = null,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) } }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
     // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                  jogControls: Boolean = tg50Controls): List<String> = buildList {
+                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
+        if (gamepadSupported) this@MachineSettings.gamepad?.let { addAll(listOf("--gamepad", if (it) "on" else "off")) }
         if (smoothing) add("--smooth-lcd")
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
         if (jogControls) addAll(listOf("--jog-controls", this@MachineSettings.jogControls.arg))
@@ -171,6 +174,7 @@ data class MachineSettings(
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
                 rumble = json.optBoolean("rumble", fallback.rumble),
+                gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
             )
         }
     }

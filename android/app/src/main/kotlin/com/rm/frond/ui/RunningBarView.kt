@@ -181,7 +181,7 @@ private fun Menu(state: RunningBarState, actions: RunningBarActions) {
     val model = state.model ?: return
     val rows = RunningMenu.rows(device, RunningMenu.State(
         hold = model.hold, keyboard = model.keyboard, beamOff = !model.beam.active,
-        microphone = model.microphone, network = model.network, busy = model.busy != null,
+        gamepad = model.gamepad, microphone = model.microphone, network = model.network, busy = model.busy != null,
     ))
     DropdownMenu(state.menuOpen, { state.menuOpen = false }) {
         var group = rows.first().group
