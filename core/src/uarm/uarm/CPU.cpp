@@ -208,6 +208,7 @@ struct ArmCpu {
     uint32_t pendingCharge;
     uint64_t costClock;
     cost::Clocks costClocks;
+    bool costSdram16;  // the SDRAM bus is 16 bits wide (MDCNFG DWID0), from the memory controller; not saved
     uint32_t regionCharge[cost::regionCount][2];
     cost::CacheCosts cacheCosts[3];
     cost::DataCacheState dcache;
@@ -390,10 +391,10 @@ static __attribute__((noinline)) void cpuPrvCostAccess(struct ArmCpu *cpu, uint3
         const struct ArmMmu *mmu = cpu->memorySystem.mmu;
         const cost::Policy p = cost::policyOf(core, mmu->transTablPA != MMU_DISABLED_TTP, mmu->dcOn, info & 1,
                                               info & 2, info & 4);
-        const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, cpu->dcacheHint);
+        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+        const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, now, cpu->dcacheHint);
         if (!(e.fills | e.writebacks | e.buffered | e.uncachedLoads | e.uncachedStores)) return;
         const unsigned k = region == cost::sram ? 1 : region == cost::flash ? 2 : 0;
-        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
         charge = cost::cacheStall(cpu->dcache, core, e, cpu->cacheCosts[k], now);
     }
     if (!cpu->modePace) cpu->pendingCharge += charge;
@@ -1522,9 +1523,15 @@ void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uin
     cpu->costClocks = c;
     for (unsigned r = 0; r < cost::regionCount; r++)
         for (unsigned w = 0; w < 2; w++) cpu->regionCharge[r][w] = cost::regionCost(core, cost::Region(r), w, c);
-    cpu->cacheCosts[0] = cost::cacheCosts(core, cost::sdram, c);
+    cpu->cacheCosts[0] = cost::cacheCosts(core, cost::sdram, c, cpu->costSdram16);
     cpu->cacheCosts[1] = cost::cacheCosts(core, cost::sram, c);
     cpu->cacheCosts[2] = cost::cacheCosts(core, cost::flash, c);
+}
+
+void cpuSetCostSdramWidth(struct ArmCpu *cpu, bool sdram16) {
+    if (cpu->costSdram16 == sdram16) return;
+    cpu->costSdram16 = sdram16;
+    cpuSetCostClocks(cpu, cpu->costClocks.core, cpu->costClocks.bus, cpu->costClocks.memory);
 }
 
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
@@ -1569,7 +1576,8 @@ void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va)
 template <typename T>
 void cpuCostSave(const struct ArmCpu *cpu, T &savestate) {
     if (!cpu->costMemory) return;
-    auto chunk = savestate.GetChunk(ChunkType::costDataCache, 1);
+    // Version 2 adds the write buffer slots.
+    auto chunk = savestate.GetChunk(ChunkType::costDataCache, 2);
     if (!chunk) ERR("unable to allocate chunk");
     uint8_t bytes[cost::kDataCacheSaveBytes];
     cost::dataCacheSaveBytes(cpu->dcache, bytes);
@@ -1585,17 +1593,18 @@ void cpuCostLoad(struct ArmCpu *cpu, T &loader) {
     cpu->costClock = 0;
     cpu->pendingCharge = 0;
     if (!cpu->costMemory || !loader.HasChunk(ChunkType::costDataCache)) return;
-    auto chunk = loader.GetChunkOrFail(ChunkType::costDataCache, 1, "data cache cost model");
+    uint32_t version = 0;
+    auto chunk = loader.GetChunkOrFail(ChunkType::costDataCache, 2, "data cache cost model", version);
     if (!chunk) return;
     uint8_t bytes[cost::kDataCacheSaveBytes];
     uint64_t clock = 0;
     LoadChunkHelper helper(*chunk);
-    helper.Do64(clock).DoBuffer(bytes, sizeof(bytes));
+    helper.Do64(clock).DoBuffer(bytes, version >= 2 ? cost::kDataCacheSaveBytes : cost::kDataCacheSaveBytesV1);
     if (chunk->HasError()) {
         loader.NotifyError();
         return;
     }
-    cost::dataCacheLoadBytes(cpu->dcache, bytes);
+    cost::dataCacheLoadBytes(cpu->dcache, bytes, version);
     cpu->costClock = clock;
 }
 

@@ -177,6 +177,8 @@ bool cpuJitCostCore(const struct ArmCpu *cpu, uint8_t *core);
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory);
 // The clocks the region and data cache charges are worked out from, in kHz.
 void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz);
+// The SDRAM bus width the data cache charges use: 16 bits (MDCNFG DWID0 set) or 32.
+void cpuSetCostSdramWidth(struct ArmCpu *cpu, bool sdram16);
 // A CP15 c7 write (crm, op2, the register's value) for the data cache model.
 void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va);
 // Host checkpoint repair preserves the separately serialized XScale fetch buffers.

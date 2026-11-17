@@ -47,13 +47,19 @@ static_assert(regionCost(Core::pxa27x, sdram, false, kClocksTx) == 0, "T|X SDRAM
 // The data cache model (dcache_cost.h).
 static_assert(std::is_trivially_copyable<DataCacheState>::value && std::is_standard_layout<DataCacheState>::value,
               "cache state is plain data");
-static_assert(kDataCacheSaveBytes == 4144, "cache state save size");
+static_assert(kDataCacheSaveBytesV1 == 4144 && kDataCacheSaveBytes == 4240, "cache state save size");
 
-static CacheEvents cload(DataCacheState &s, Core core, uint32_t va, Policy p = Policy::writeBack, bool rr = true) {
-    return dataCacheAccess(s, core, va, p, false, rr);
+// An access at core clock now, queued on the bus at the T|X's costs as the CPU does.
+static CacheEvents caccess(DataCacheState &s, Core core, uint32_t va, Policy p, bool store, uint64_t now, bool rr) {
+    const CacheEvents e = dataCacheAccess(s, core, va, p, store, now, rr);
+    cacheStall(s, core, e, cacheCosts(core, sdram, kClocksTx, true), now);
+    return e;
 }
-static CacheEvents cstore(DataCacheState &s, Core core, uint32_t va, Policy p = Policy::writeBack) {
-    return dataCacheAccess(s, core, va, p, true);
+static CacheEvents cload(DataCacheState &s, Core core, uint32_t va, Policy p = Policy::writeBack, bool rr = true) {
+    return caccess(s, core, va, p, false, 0, rr);
+}
+static CacheEvents cstore(DataCacheState &s, Core core, uint32_t va, Policy p = Policy::writeBack, uint64_t now = 0) {
+    return caccess(s, core, va, p, true, now, true);
 }
 static bool same(const CacheEvents &a, const CacheEvents &b) {
     return a.fills == b.fills && a.writebacks == b.writebacks && a.buffered == b.buffered &&
@@ -125,6 +131,21 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
     expectEvents(cload(s, x, 0xa0100000u), ev(1, 0, 0, 0, 0, 0), "store miss didn't allocate");
     dataCacheDrain(s);
     expectEvents(cstore(s, x, 0xa0100014u, Policy::buffered), ev(0, 0, 1, 0, 0, 0), "drain stops coalescing");
+    // Coalescing with any of the eight entries that hasn't started draining. At the T|X's costs a 16-bit
+    // entry drains in 27 clocks: from an idle bus at 1000 the first entry starts at once, the next waits.
+    dataCacheReset(s, x);
+    expectEvents(cstore(s, x, 0xa0500000u, Policy::buffered, 1000), ev(0, 0, 1, 0, 0, 0), "A to an idle bus");
+    expectEvents(cstore(s, x, 0xa0500004u, Policy::buffered, 1000), ev(0, 0, 0, 0, 0, 0), "A again at the same clock");
+    expectEvents(cstore(s, x, 0xa0500008u, Policy::buffered, 1001), ev(0, 0, 1, 0, 0, 0), "A draining: a new entry");
+    expectEvents(cstore(s, x, 0xa0600000u, Policy::buffered, 1002), ev(0, 0, 1, 0, 0, 0), "B");
+    expectEvents(cstore(s, x, 0xa050000cu, Policy::buffered, 1003), ev(0, 0, 0, 0, 0, 0), "A joins its waiting entry");
+    expectEvents(cstore(s, x, 0xa0600004u, Policy::buffered, 1004), ev(0, 0, 0, 0, 0, 0), "B joins, not the newest");
+    expectEvents(cstore(s, x, 0xa0600008u, Policy::buffered, 1055), ev(0, 0, 1, 0, 0, 0), "B started at 1054");
+    // Write-backs take entries no store joins.
+    dataCacheReset(s, x);
+    for (uint32_t i = 0; i < 32; i++) cstore(s, x, 0xa0000000u + i * 1024, Policy::writeBackAllocate);
+    for (uint32_t i = 0; i < 8; i++) cload(s, x, 0xa0000000u + (32 + i) * 1024);
+    expectEvents(cstore(s, x, 0xa0000000u, Policy::buffered), ev(0, 0, 1, 0, 0, 0), "a written back block takes an entry");
     // Write-through: hits stay clean and still go to the buffer.
     dataCacheReset(s, x);
     cload(s, x, 0xa0000000u, Policy::writeThrough);
@@ -203,12 +224,15 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
         r ^= r << 5;
         return r;
     };
-    for (int i = 0; i < 100000; i++) dataCacheAccess(s, x, 0xa0000000u + (next() & 0xffffc), Policy::writeBack, next() & 1);
+    for (int i = 0; i < 100000; i++) caccess(s, x, 0xa0000000u + (next() & 0xffffc), Policy::writeBack, next() & 1, uint64_t(i) * 3, true);
+    for (int i = 0; i < 20; i++) caccess(s, x, 0xa0000000u + (next() & 0xffffc), Policy::buffered, true, 300000, true);
     static uint8_t bytes[kDataCacheSaveBytes], bytes2[kDataCacheSaveBytes];
     dataCacheSaveBytes(s, bytes);
     expect(bytes[0] == uint8_t(s.line[0]) && bytes[3] == uint8_t(s.line[0] >> 24), "line 0 little-endian", bytes[0], 0);
     expect(bytes[4096] == s.victim[0] && bytes[4128] == uint8_t(s.random), "victims and random after lines", bytes[4096], 0);
-    expect(bytes[4136] == uint8_t(s.busFreeAt), "buffer time last", bytes[4136], 0);
+    expect(bytes[4136] == uint8_t(s.busFreeAt), "bus time", bytes[4136], 0);
+    expect(bytes[4144] == uint8_t(s.bufferBlock[0]) && bytes[4176] == uint8_t(s.bufferStart[0]),
+           "write buffer slots last", bytes[4144], 0);
     std::memset(&t, 0x5a, sizeof t);
     dataCacheLoadBytes(t, bytes);
     dataCacheSaveBytes(t, bytes2);
@@ -217,10 +241,19 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
     for (int i = 0; i < 100000; i++) {
         const uint32_t va = 0xa0000000u + (next() & 0xffffc);
         const bool st = next() & 1;
-        if (!same(dataCacheAccess(s, x, va, Policy::writeBack, st), dataCacheAccess(t, x, va, Policy::writeBack, st)))
+        const Policy p = (i & 7) ? Policy::writeBack : Policy::buffered;
+        if (!same(caccess(s, x, va, p, st, 300000 + uint64_t(i), true), caccess(t, x, va, p, st, 300000 + uint64_t(i), true)))
             sameRun = false;
     }
     expect(sameRun, "loaded state runs as the saved one", 0, 1);
+    // Version 1 bytes (no write buffer slots) load with nothing to join.
+    dataCacheSaveBytes(s, bytes);
+    std::memset(&t, 0x5a, sizeof t);
+    dataCacheLoadBytes(t, bytes, 1);
+    bool emptyBuffer = t.bufferNext == 0;
+    for (unsigned i = 0; i < kWriteBufferSlots; i++) emptyBuffer = emptyBuffer && !t.bufferBlock[i] && !t.bufferStart[i];
+    expect(emptyBuffer && t.busFreeAt == s.busFreeAt && std::memcmp(t.line, s.line, sizeof t.line) == 0,
+           "version 1 loads lines and bus time, empty buffer", 0, 1);
 
     // One hash over a fixed mixed run on both cores (every policy, maintenance) and the final state bytes.
     for (Core core : {x, a}) {
@@ -228,11 +261,11 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
         for (int i = 0; i < 400000; i++) {
             const uint32_t n = next(), va = (n & 3) == 0 ? 0xa0000000u + (n & 0x3ffff8) : 0xa0000000u + (n & 0x7ff8);
             const Policy p = Policy((next() >> 7) % 5);
-            const CacheEvents e = dataCacheAccess(s, core, va, p, n & 4, n & 8);
+            const CacheEvents e = dataCacheAccess(s, core, va, p, n & 4, uint64_t(i) * 9, n & 8);
             mix(hash, uint32_t(e.fills) | uint32_t(e.writebacks) << 8 | uint32_t(e.buffered) << 16 |
                           uint32_t(e.uncachedLoads) << 24);
             mix(hash, uint32_t(e.uncachedStores) | uint32_t(e.hits) << 8);
-            mix(hash, cacheStall(s, core, e, cacheCosts(core, sdram, kClocksTx), uint64_t(i) * 9));
+            mix(hash, cacheStall(s, core, e, cacheCosts(core, sdram, kClocksTx, i & 1), uint64_t(i) * 9));
             if ((n & 0xfff) == 0) mix(hash, dataCacheLineOp(s, core, va, true, (n >> 12) & 1).writebacks);
             if ((n & 0xffff) == 1) dataCacheInvalidateAll(s);
         }
@@ -240,14 +273,17 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
         for (uint8_t b : bytes) mix(hash, b);
     }
 
-    // The charges in core clocks: SDRAM against the memory clock on the T|X (x3) and E2 (x2), the PXbus on
-    // the TG50 (x4).
+    // The charges in core clocks: SDRAM against the memory clock on the T|X and Zire 72 (x3) and E2 (x2), the
+    // PXbus on the TG50 (x4, the slower side there). The T|X and E2 have 16-bit SDRAM, the Zire 72 and TG50 32-bit.
     {
-        const CacheCosts tx = cacheCosts(x, sdram, kClocksTx), e2 = cacheCosts(Core::pxa25x, sdram, kClocksE2),
-                         tg = cacheCosts(Core::pxa25x, sdram, kClocksTg50);
-        expect(tx.fill == 84 && tx.writeback == 57 && tx.buffered == 26, "T|X SDRAM charges", tx.fill, 84);
-        expect(e2.fill == 56 && e2.writeback == 38 && e2.buffered == 17, "E2 SDRAM charges", e2.fill, 56);
-        expect(tg.fill == 112 && tg.writeback == 76 && tg.buffered == 34, "TG50 SDRAM charges", tg.fill, 112);
+        const CacheCosts tx = cacheCosts(x, sdram, kClocksTx, true), e2 = cacheCosts(Core::pxa25x, sdram, kClocksE2, true),
+                         tg = cacheCosts(Core::pxa25x, sdram, kClocksTg50, false), z72 = cacheCosts(x, sdram, kClocksTx, false);
+        expect(tx.fill == 84 && tx.writeback == 57 && tx.buffered == 27, "T|X SDRAM charges", tx.fill, 84);
+        expect(e2.fill == 56 && e2.writeback == 38 && e2.buffered == 18, "E2 SDRAM charges", e2.fill, 56);
+        expect(tg.fill == 112 && tg.writeback == 76 && tg.buffered == 36, "TG50 SDRAM charges", tg.fill, 112);
+        expect(z72.fill == 60 && z72.writeback == 45 && z72.buffered == 15, "Zire 72 SDRAM charges", z72.fill, 60);
+        const CacheCosts f16 = cacheCosts(x, flash, kClocksTx, true), f32 = cacheCosts(x, flash, kClocksTx, false);
+        expect(f16.fill == f32.fill && f16.buffered == f32.buffered, "flash charges ignore the SDRAM width", f16.fill, f32.fill);
 
         // A fill on an idle bus costs its time; one behind a dirty eviction waits for the write-back.
         dataCacheReset(s, x);
@@ -262,7 +298,7 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
         uint32_t st = 0;
         for (int i = 0; i < 8; i++) st += cacheStall(s, x, b, tx, 10000);
         expect(st == 0, "eight buffered stores", st, 0);
-        expect(cacheStall(s, x, b, tx, 10000) == 26, "the ninth waits", 0, 26);
+        expect(cacheStall(s, x, b, tx, 10000) == 27, "the ninth waits", 0, 27);
         CacheEvents u;
         u.uncachedLoads = 1;
         expect(cacheStall(s, x, u, tx, 100000) == 30, "uncached load", 0, 30);
@@ -272,12 +308,14 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
     for (Core core : {Core::pxa25x, x, a})
         for (Region g : {sdram, sram, flash})
             for (Clocks c : {kClocksTx, kClocksE2, kClocksTg50, kClocksZodiac}) {
-                const CacheCosts k = cacheCosts(core, g, c);
-                mix(hash, k.fill);
-                mix(hash, k.writeback);
-                mix(hash, k.buffered);
-                mix(hash, k.uncachedLoad);
-                mix(hash, k.uncachedStore);
+                for (bool w : {false, true}) {
+                    const CacheCosts k = cacheCosts(core, g, c, w);
+                    mix(hash, k.fill);
+                    mix(hash, k.writeback);
+                    mix(hash, k.buffered);
+                    mix(hash, k.uncachedLoad);
+                    mix(hash, k.uncachedStore);
+                }
             }
 }
 
@@ -531,7 +569,7 @@ int main() {
 
     uint64_t cacheHash = 0xcbf29ce484222325ull;
     cacheTests(cacheHash, mixHash);
-    const uint64_t wantCacheHash = 0xeee7d4dbb83c5d19ull;
+    const uint64_t wantCacheHash = 0x51ff708747dbc0b5ull;
     if (cacheHash != wantCacheHash) {
         std::printf("FAIL cache hash: got 0x%016llx, want 0x%016llx\n", (unsigned long long)cacheHash,
                     (unsigned long long)wantCacheHash);

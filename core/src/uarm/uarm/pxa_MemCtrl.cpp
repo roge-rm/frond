@@ -25,6 +25,7 @@ struct PxaMemCtrlr {
     // partition again, so boot code that clears RAM before that never reaches it.
     bool sdramHeld;
     struct ArmMem* mem;
+    struct ArmCpu* cpu;
 
     template <typename T>
     void DoSaveLoad(T& chunkHelper, uint32_t version) {
@@ -51,6 +52,10 @@ struct PxaMemCtrlr {
     }
 };
 
+// The cost model's SDRAM width: partition pair 0/1 (DWID0, bit 2: 1 is 16 bits), where every PXA
+// device's SDRAM sits.
+static void pxaMemCtrlrPrvSyncCost(struct PxaMemCtrlr* mc) { cpuSetCostSdramWidth(mc->cpu, (mc->mdcnfg & 4) != 0); }
+
 static bool pxaMemCtrlrPrvClockMgrMemAccessF(void* userData, uint32_t pa, uint_fast8_t size,
                                              bool write, void* buf) {
     struct PxaMemCtrlr* mc = (struct PxaMemCtrlr*)userData;
@@ -73,6 +78,7 @@ static bool pxaMemCtrlrPrvClockMgrMemAccessF(void* userData, uint32_t pa, uint_f
         case 0:  // MDCNFG
             if (write) {
                 mc->mdcnfg = val;
+                pxaMemCtrlrPrvSyncCost(mc);
                 // DE0-DE3 (3.5.2.1): any enabled partition ends the sleep-exit hold.
                 if (mc->sdramHeld && (val & 0x00030003)) {
                     mc->sdramHeld = false;
@@ -221,7 +227,7 @@ static bool pxaMemCtrlrPrvClockMgrMemAccessF(void* userData, uint32_t pa, uint_f
     return true;
 }
 
-struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev) {
+struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, struct ArmCpu* cpu, uint_fast8_t socRev) {
     struct PxaMemCtrlr* mc = (struct PxaMemCtrlr*)malloc(sizeof(*mc));
     uint_fast8_t i;
 
@@ -230,8 +236,10 @@ struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev)
     memset(mc, 0, sizeof(*mc));
     mc->g2 = socRev == 2;
     mc->mem = physMem;
+    mc->cpu = cpu;
 
     mc->mdcnfg = 0x0b000b00ul;
+    pxaMemCtrlrPrvSyncCost(mc);
     mc->mdmrs = 0x00220022ul;
     mc->mdrefr = 0x23ca4ffful;
     mc->sxcnfg = 0x40044004ul;
@@ -273,6 +281,7 @@ void pxaMemCtrlrLoad(struct PxaMemCtrlr* pxaMemCtrlr, T& loader) {
     LoadChunkHelper helper(*chunk);
     pxaMemCtrlr->sdramHeld = false;  // v0 never held SDRAM.
     pxaMemCtrlr->DoSaveLoad(helper, version);
+    pxaMemCtrlrPrvSyncCost(pxaMemCtrlr);
     if (!memHoldRam(pxaMemCtrlr->mem, pxaMemCtrlr->sdramHeld)) loader.NotifyError();
 }
 

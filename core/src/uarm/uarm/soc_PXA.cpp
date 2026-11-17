@@ -220,7 +220,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     }
 
     i2c = pxaI2cInit(mem, ic, dma, PXA_I2C_BASE, PXA_I_I2C);
-    memCtrl = pxaMemCtrlrInit(mem, socRev);
+    memCtrl = pxaMemCtrlrInit(mem, cpu, socRev);
     ac97 = pxaAC97Init(mem, ic, dma);
 
     // SSP/SSP1

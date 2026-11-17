@@ -19,6 +19,7 @@
 #include "peephole_cost.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
+#include "dcache_cost.h"
 #include "xscale_cost.h"
 
 namespace {
@@ -106,6 +107,24 @@ struct CpuSaver {
     void Load(T& l) { cpuLoad(cpu, l); }
 };
 
+// cpuSave plus a version 1 data cache section (the clock and 4144 bytes, an empty cache) for a CPU that
+// saves none of its own.
+struct CpuSaverV1 {
+    ArmCpu* cpu;
+    template <class T>
+    void Save(T& s) {
+        cpuSave(cpu, s);
+        auto chunk = s.GetChunk(ChunkType::costDataCache, 1);
+        if (!chunk) abort();
+        std::vector<uint8_t> bytes(cost::kDataCacheSaveBytesV1, 0);
+        uint64_t clock = 0;
+        SaveChunkHelper helper(*chunk);
+        helper.Do64(clock).DoBuffer(bytes.data(), bytes.size());
+    }
+    template <class T>
+    void Load(T& l) { cpuLoad(cpu, l); }
+};
+
 uint32_t runBatch(Machine& m) {
     const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, kBatch);
     // A batch can end early (the MMU switch), never later than the bound.
@@ -165,6 +184,19 @@ void testSaveLoad() {
     for (uint32_t i = 0; i < 20; i++) cold += runBatch(e);
     for (uint32_t i = 0; i < 20; i++) warm += runBatch(e);
     check(cold > 0 && warm > 0, "session without the section runs");
+
+    // A version 1 section (before the write buffer slots) loads and runs.
+    Savestate<ChunkType> v1;
+    CpuSaverV1 v1Saver{d.cpu};
+    check(v1.Save(v1Saver), "session with a version 1 section saves");
+    Machine g = makeMachine(true);
+    memcpy(g.ram, d.ram, kRamSize);
+    SavestateLoader<ChunkType> v1Loader;
+    CpuSaver v1Target{g.cpu};
+    check(v1Loader.Load(v1.GetBuffer(), v1.GetSize(), v1Target), "session with a version 1 section loads");
+    uint64_t v1Run = 0;
+    for (uint32_t i = 0; i < 40; i++) v1Run += runBatch(g);
+    check(v1Run > 0, "session with a version 1 section runs");
 }
 
 // Every peephole's routine, run by peephole_cost.h, gives the result the peephole computes.
