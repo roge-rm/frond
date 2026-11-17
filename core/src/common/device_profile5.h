@@ -686,7 +686,7 @@ struct DeviceCardSlotInfo5 {
     DeviceStorageSlot5 kind;
 };
 inline unsigned deviceProfileCardSlotCount5(const DeviceProfile5& p) {
-    return deviceTypeIsDana5(p.deviceType) ? 2 :
+    return deviceTypeIsDana5(p.deviceType) || p.board == DeviceBoard5::imx1Zodiac ? 2 :
         deviceProfileStorageSlot5(p) == DeviceStorageSlot5::none ? 0 : 1;
 }
 inline bool deviceProfileCardSlot5(const DeviceProfile5& p, unsigned index, DeviceCardSlotInfo5& out) {

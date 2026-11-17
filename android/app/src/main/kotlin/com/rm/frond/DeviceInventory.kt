@@ -1348,6 +1348,9 @@ internal val deviceInventory = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
             )),
+            StorageSlot(2, 2, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
         ),
     ),
     Device(

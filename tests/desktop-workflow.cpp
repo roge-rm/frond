@@ -579,6 +579,7 @@ card='inserted' if any((src.parent/n).exists() for n in cards) else 'none'
 flag=lambda n: pathlib.Path(__file__).with_name(n).exists()
 if card=='inserted' and flag('start-ejected'): card='ejected'
 identity='00'*32
+card2='none'
 for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
@@ -592,6 +593,9 @@ for line in s.makefile('rb'):
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
+    elif cmd=='sd2-state': message=card2
+    elif cmd in ('sd2-create','sd2-reinsert'): card2='inserted'
+    elif cmd=='sd2-eject': card2='ejected'
     elif cmd=='sd-put-in': card='inserted'; identity=arg.split(' ')[0]
     elif cmd=='sd-eject': card='ejected'
     elif cmd=='sd-take-out': card='none'; message=identity+' writable'
@@ -2315,6 +2319,61 @@ for line in s.makefile('rb'):
             MachineSettingsDialog fastDialog(zodiac, fast);
             QVERIFY(fastDialog.controls->values().fastEngine);
         }
+    }
+    // The Zodiac's second SD slot: its own button and dialog, through the sd2- commands; other devices have no button.
+    void zodiacSecondCard() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "tapwave-zodiac-2");
+        const auto a = cardsMachine("Zodiac", false, "tapwave-zodiac-2");
+        MainWindow window(core);
+        window.show();
+        auto* button = window.findChild<QPushButton*>("secondCard");
+        QVERIFY(button && !button->isEnabled());
+        window.openSession(a + "/Zodiac.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(), 10000);
+        int step = 0;
+        QStringList errors;
+        auto press = [](QWidget* dialog, const QString& text) {
+            for (auto* b : dialog->findChildren<QPushButton*>())
+                if (b->text() == text && b->isVisibleTo(dialog)) { b->click(); return true; }
+            return false;
+        };
+        auto statusIs = [](QWidget* dialog, const QString& text) {
+            for (auto* l : dialog->findChildren<QLabel*>()) if (l->text() == text) return true;
+            return false;
+        };
+        QTimer poll; poll.setInterval(20);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Eject")) box->button(QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
+            }
+            QDialog* dialog = nullptr;
+            for (auto* d : window.findChildren<QDialog*>()) if (d->isVisible() && d->windowTitle() == "SD card 2") dialog = d;
+            if (!dialog) return;
+            // The press runs from its own timer, as the Eject question is modal and this one can't fire inside it.
+            auto later = [&, dialog](int next, const char* text) {
+                step = next;
+                QTimer::singleShot(0, &window, [&, dialog, text] { press(dialog, text); });
+            };
+            if (step == 0 && statusIs(dialog, "No card")) later(1, "New card");
+            else if (step == 1 && statusIs(dialog, "Inserted")) later(2, "Eject");
+            else if (step == 2 && statusIs(dialog, "Ejected")) later(3, "Insert");
+            else if (step == 3 && statusIs(dialog, "Inserted")) { step = 4; dialog->reject(); }
+        });
+        poll.start();
+        button->click();
+        QTRY_COMPARE_WITH_TIMEOUT(step, 4, 10000);
+        poll.stop();
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(' ')));
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        QStringList got;
+        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts))
+            if (line.startsWith("sd2-") && !line.startsWith("sd2-state")) got << line.trimmed();
+        QCOMPARE(got, QStringList({"sd2-create\t32", "sd2-eject", "sd2-reinsert"}));
     }
     // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
     // the speed too, no contrast, and the Engine.

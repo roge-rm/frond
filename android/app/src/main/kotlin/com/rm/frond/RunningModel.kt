@@ -61,6 +61,10 @@ class RunningModel(
     override val leaveLabel get() = "Insert"
     override val prompt = ClashPrompt()
     // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
+    // The Zodiac's second SD slot.
+    var secondState by mutableStateOf(SdCard.State.UNKNOWN)
+        private set
+    private fun secondOf(c: SdCard) = if (device.storageSlots.size > 1) c.secondState() else SdCard.State.UNKNOWN
     var memoryStickPro by mutableStateOf(false)
         private set
     var canCancelFiles by mutableStateOf(false)
@@ -145,9 +149,11 @@ class RunningModel(
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            val second = withContext(Dispatchers.IO) { secondOf(c) }
             danaCards?.let { cards -> withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} } }
             slotShown = slot
             state = s
+            secondState = second
             writeProtected = protection
             memoryStickPro = pro
             changed = c.changed
@@ -177,9 +183,11 @@ class RunningModel(
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            val second = withContext(Dispatchers.IO) { secondOf(c) }
             if (busy != null) return@launch
             slotShown = slot
             state = s
+            secondState = second
             writeProtected = protection
             memoryStickPro = pro
         }
