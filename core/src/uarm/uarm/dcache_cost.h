@@ -345,13 +345,13 @@ struct CacheCharge {
     uint16_t uncachedStore16;  // an unbuffered store, the core waiting for it
 };
 
-// XScale SDRAM and flash: fill 28, dirty half 19, buffer entry 6 clocks; fitted to FrondBench Memory and
-// Drawing and the Speedy runs (M1b notes). Uncached load and store 10 and 6: estimates, the runs make
+// XScale SDRAM and flash: fill 28, dirty half 19, buffer entry 8.5 clocks; fitted to FrondBench Memory and
+// Drawing and the Speedy runs (M1b and M5 notes). Uncached load and store 10 and 6: estimates, the runs make
 // almost none. SRAM sits on the internal bus: estimates, no run touches it.
 constexpr CacheCharge kXscaleCacheCharges[3] = {
-    /* sdram */ {448, 304, 96, 160, 96},
+    /* sdram */ {448, 304, 136, 160, 96},
     /* sram */ {128, 64, 32, 64, 32},
-    /* flash */ {448, 304, 96, 160, 96},
+    /* flash */ {448, 304, 136, 160, 96},
 };
 // ARM920T (Zodiac, against HCLK): the XScale's figures, untuned until a Zodiac Speedy run.
 constexpr CacheCharge kArm920CacheCharges[3] = {

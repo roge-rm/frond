@@ -245,9 +245,9 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
     {
         const CacheCosts tx = cacheCosts(x, sdram, kClocksTx), e2 = cacheCosts(Core::pxa25x, sdram, kClocksE2),
                          tg = cacheCosts(Core::pxa25x, sdram, kClocksTg50);
-        expect(tx.fill == 84 && tx.writeback == 57 && tx.buffered == 18, "T|X SDRAM charges", tx.fill, 84);
-        expect(e2.fill == 56 && e2.writeback == 38 && e2.buffered == 12, "E2 SDRAM charges", e2.fill, 56);
-        expect(tg.fill == 112 && tg.writeback == 76 && tg.buffered == 24, "TG50 SDRAM charges", tg.fill, 112);
+        expect(tx.fill == 84 && tx.writeback == 57 && tx.buffered == 26, "T|X SDRAM charges", tx.fill, 84);
+        expect(e2.fill == 56 && e2.writeback == 38 && e2.buffered == 17, "E2 SDRAM charges", e2.fill, 56);
+        expect(tg.fill == 112 && tg.writeback == 76 && tg.buffered == 34, "TG50 SDRAM charges", tg.fill, 112);
 
         // A fill on an idle bus costs its time; one behind a dirty eviction waits for the write-back.
         dataCacheReset(s, x);
@@ -262,7 +262,7 @@ static void cacheTests(uint64_t &hash, void (*mix)(uint64_t &, uint32_t)) {
         uint32_t st = 0;
         for (int i = 0; i < 8; i++) st += cacheStall(s, x, b, tx, 10000);
         expect(st == 0, "eight buffered stores", st, 0);
-        expect(cacheStall(s, x, b, tx, 10000) == 18, "the ninth waits", 0, 18);
+        expect(cacheStall(s, x, b, tx, 10000) == 26, "the ninth waits", 0, 26);
         CacheEvents u;
         u.uncachedLoads = 1;
         expect(cacheStall(s, x, u, tx, 100000) == 30, "uncached load", 0, 30);
@@ -531,7 +531,7 @@ int main() {
 
     uint64_t cacheHash = 0xcbf29ce484222325ull;
     cacheTests(cacheHash, mixHash);
-    const uint64_t wantCacheHash = 0xf90e37240eb5bf7bull;
+    const uint64_t wantCacheHash = 0xeee7d4dbb83c5d19ull;
     if (cacheHash != wantCacheHash) {
         std::printf("FAIL cache hash: got 0x%016llx, want 0x%016llx\n", (unsigned long long)cacheHash,
                     (unsigned long long)wantCacheHash);
