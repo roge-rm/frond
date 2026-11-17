@@ -2,6 +2,7 @@
 #define FROND_CLIE_GAMEPAD_H
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include "keys.h"
 #include "savestate/savestateAll.h"
@@ -198,7 +199,9 @@ class ClieGamepad {
 
  private:
     static constexpr uint32_t version = 1;
-    bool attached{}, hold{};
+    // Read by the SDL thread while the emulation thread changes it.
+    std::atomic<bool> attached{};
+    bool hold{};
     Phase phase{Phase::idle};
     uint16_t physical{}, sentDown{};
     uint32_t head{}, count{};
@@ -208,7 +211,8 @@ class ClieGamepad {
     uint32_t ids{}, replies{}, sent{};
 
     void Clear() {
-        attached = hold = false;
+        attached = false;
+        hold = false;
         phase = Phase::idle;
         physical = sentDown = 0;
         head = count = 0;
@@ -257,11 +261,13 @@ class ClieGamepad {
     }
     template <class H> void Transfer(H& h) {
         uint8_t phaseValue = uint8_t(phase);
-        h.DoBool(attached).DoBool(hold).Do8(phaseValue).Do16(physical).Do16(sentDown).Do32(head).Do32(count)
+        bool attachedValue = attached;
+        h.DoBool(attachedValue).DoBool(hold).Do8(phaseValue).Do16(physical).Do16(sentDown).Do32(head).Do32(count)
             .DoBuffer(queue.data(), queue.size()).Do8(idPos).Do8(replyPos)
             .Do64(nextByteAt).Do64(pullUntil).Do64(nextIdAt).Do64(idDeadline).Do64(lastSentAt).Do64(portWaitSince)
             .Do32(ids).Do32(replies).Do32(sent);
         phase = Phase(phaseValue);
+        attached = attachedValue;
     }
 };
 #endif

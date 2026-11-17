@@ -136,6 +136,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_pushScancode(JNI
     event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
     event.key.keysym.scancode = SDL_Scancode(scancode);
     event.key.keysym.sym = SDL_GetKeyFromScancode(SDL_Scancode(scancode));
+    event.key.keysym.mod = KMOD_RESERVED;  // SdlEventHandler drops these while the pad is detached
     SDL_PushEvent(&event);
 }
 

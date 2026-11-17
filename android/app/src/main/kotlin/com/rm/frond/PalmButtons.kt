@@ -11,13 +11,16 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
     private val taps = Executors.newSingleThreadExecutor { Thread(it, "FrondTap").apply { isDaemon = true } }
 
     // The CLIE game controller is plugged in: the arrows, Home and Menu and the pad's own buttons go to it,
-    // as the keys the core maps to it, and not to the CLIE's own buttons.
+    // as the keys the core maps to it, and not to the CLIE's own buttons. The core drops these keys if it
+    // has detached since, so a stale flag types no letters.
     @Volatile var padAttached = false
 
     fun press(button: PalmButton, down: Boolean) {
         if (button.gamepadOnly && !padAttached) return
         if (padAttached && device.clieGamepad) {
-            val scancode = padScancode(button)
+            // The face buttons X and Y are the CLIE's app buttons 2 and 3 in the default map; with the pad in they are its X and Y.
+            val routed = when (button) { PalmButton.APP2 -> PalmButton.PAD_X; PalmButton.APP3 -> PalmButton.PAD_Y; else -> button }
+            val scancode = padScancode(routed)
             if (scancode != 0) { pushScancode(scancode, down); return }
         }
         if (button.id !in device.buttons) return

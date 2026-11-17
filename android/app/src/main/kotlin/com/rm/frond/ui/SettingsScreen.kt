@@ -148,7 +148,7 @@ private fun ControlsScreen(model: HomeModel, device: Device) {
 @Composable
 private fun ControllerButtons(model: HomeModel, device: Device) {
     val map = model.controllers[device] ?: return
-    for (button in PalmButton.on(model.controllerDevices[device] ?: device)) {
+    for (button in PalmButton.listed(model.controllerDevices[device] ?: device)) {
         val waiting = model.capturing == (device to button)
         Row(
             Modifier.fillMaxWidth()

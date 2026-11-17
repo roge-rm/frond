@@ -54,24 +54,27 @@ class ClieGamepadTest {
         assertNull(RunningMenu.gamepadState("unavailable"))
     }
 
-    @Test fun defaultMapHasThePadButtons() {
+    @Test fun defaultMapKeepsTheOldButtonsAndAddsThePadKeys() {
         val map = ControllerMap.defaults(tg50)
         assertEquals(PalmButton.UP, map.keys[KeyEvent.KEYCODE_DPAD_UP])
         assertEquals(PalmButton.RIGHT, map.keys[KeyEvent.KEYCODE_DPAD_RIGHT])
-        assertEquals(PalmButton.PAD_A, map.keys[KeyEvent.KEYCODE_BUTTON_A])
-        assertEquals(PalmButton.PAD_B, map.keys[KeyEvent.KEYCODE_BUTTON_B])
-        assertEquals(PalmButton.PAD_X, map.keys[KeyEvent.KEYCODE_BUTTON_X])
-        assertEquals(PalmButton.PAD_Y, map.keys[KeyEvent.KEYCODE_BUTTON_Y])
-        // Start is Home and Select is Menu as on every other device: the pad's own while it's plugged
-        // in (Q and W), the CLIE's otherwise.
+        // As before the pad: X and Y are app buttons 2 and 3, Start is Home.
+        assertEquals(PalmButton.APP2, map.keys[KeyEvent.KEYCODE_BUTTON_X])
+        assertEquals(PalmButton.APP3, map.keys[KeyEvent.KEYCODE_BUTTON_Y])
         assertEquals(PalmButton.HOME, map.keys[KeyEvent.KEYCODE_BUTTON_START])
         assertEquals(PalmButton.MENU, map.keys[KeyEvent.KEYCODE_BUTTON_SELECT])
+        assertEquals(PalmButton.PAD_A, map.keys[KeyEvent.KEYCODE_BUTTON_A])
+        assertEquals(PalmButton.PAD_B, map.keys[KeyEvent.KEYCODE_BUTTON_B])
+        assertEquals(PalmButton.PAD_HOLD, map.keys[KeyEvent.KEYCODE_BUTTON_THUMBR])
         assertEquals(20, PalmButtons.padScancode(PalmButton.HOME))
         assertEquals(26, PalmButtons.padScancode(PalmButton.MENU))
         assertTrue("home" in tg50.buttons)
-        assertEquals(PalmButton.PAD_HOLD, map.keys[KeyEvent.KEYCODE_BUTTON_THUMBR])
         assertTrue(map.keys.values.all { it in PalmButton.on(tg50) })
         assertEquals(map, ControllerMap.decode(map.encode(), tg50))
+        // The settings list leaves out what does nothing without the pad.
+        val listed = PalmButton.listed(tg50)
+        assertTrue(listed.none { it.gamepadOnly || it == PalmButton.LEFT || it == PalmButton.RIGHT || it == PalmButton.MENU })
+        assertTrue(PalmButton.APP2 in listed)
     }
 
     @Test fun coreStateBecomesTheSetting() {

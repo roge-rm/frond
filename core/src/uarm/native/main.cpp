@@ -847,7 +847,16 @@ bool gFastEngineMissing = false;
         // guest thread starts; the display command changes them through it.
         // The game controller drawn at start: the one the start option asks for, else the session's.
         // The guest thread follows what the SoC really has from then on (an attach can be refused).
-        const bool gamepadAtStart = soc->GamepadSupported() && options.gamepad.value_or(soc->GamepadAttached());
+        // Host serial, infrared or USB set for the machine hold the connector, so they win over
+        // the game controller (the session's or --gamepad): it stays detached and shows as in use.
+        const bool hostHoldsConnector = serialConfig.kind != HostSerial::Kind::off || infraredPhone || infraredPrinter ||
+                                        infraredConfig.kind != HostSerial::Kind::off || usbConfig.kind != HostSerial::Kind::off;
+        if (hostHoldsConnector && soc->GamepadSupported() && (soc->GamepadAttached() || options.gamepad.value_or(false))) {
+            soc->AttachGamepad(false);
+            cerr << "game controller: detached, host serial, infrared or USB has the connector" << endl;
+        }
+        const bool gamepadAtStart = soc->GamepadSupported() && !hostHoldsConnector &&
+                                    options.gamepad.value_or(soc->GamepadAttached());
         DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog, gamepadAtStart,
                                 options.jogLandscape.value_or(JogLandscape::beside)};
         DeviceControlView controlView = deviceType == deviceTypeTG50
@@ -978,10 +987,10 @@ bool gFastEngineMissing = false;
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
-        // --gamepad (the machine setting) wins over the session's at start, after host serial has
-        // had the connector. It plugs in without the plug-in pulse and identifies on its first
-        // press, as one plugged in while the CLIÉ was off.
-        if (options.gamepad && soc->GamepadSupported() && *options.gamepad != soc->GamepadAttached() &&
+        // --gamepad (the machine setting) wins over the session's at start unless host serial,
+        // infrared or USB is set (handled above). It plugs in without the plug-in pulse and
+        // identifies on its first press, as one plugged in while the CLIÉ was off.
+        if (options.gamepad && !hostHoldsConnector && soc->GamepadSupported() && *options.gamepad != soc->GamepadAttached() &&
             !soc->AttachGamepad(*options.gamepad, false))
             cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;

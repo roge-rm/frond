@@ -600,9 +600,10 @@ open class FrondActivity : SDLActivity() {
             val next = machineSettings.gamepadFromCore(state) ?: return@runOnUiThread
             machineSettings = next
             val attached = next.gamepad ?: return@runOnUiThread
-            val id = Sessions.forPath(this, sessionPath)?.id ?: return@runOnUiThread
+            val path = sessionPath
             Thread({
                 try {
+                    val id = Sessions.forPath(applicationContext, path)?.id ?: return@Thread
                     Sessions.updateSettings(applicationContext, id) { it.copy(gamepad = attached) }
                 } catch (e: Exception) {
                     Log.w(TAG, "game controller setting: ${e.message}")

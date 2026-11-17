@@ -77,7 +77,7 @@ enum class PalmButton(val id: String) {
         // What the Zodiac's controller settings list.
         val ZODIAC = listOf(UP, DOWN, LEFT, RIGHT, STICK_PRESS, APP1, APP2, APP3, APP4, HOME, FUNCTION, TRIGGER_LEFT, TRIGGER_RIGHT)
 
-        // The CLIE game controller's buttons, listed after the device's own and the pad's arrows, Home and Menu.
+        // The CLIE game controller's buttons and the arrows and Menu it adds to the TG50's own.
         val PAD = listOf(PAD_A, PAD_B, PAD_X, PAD_Y, PAD_HOLD)
         val PAD_SHARED = listOf(LEFT, RIGHT, MENU)
 
@@ -85,11 +85,16 @@ enum class PalmButton(val id: String) {
         // TX and E2, the left pair top to bottom then the right pair bottom to top on the Zire 72.
         fun appNames(device: Device) = device.appNames
 
-        // The buttons a device has, in the order the settings list them.
+        // The buttons a controller map may hold for a device. The game controller's extra ones keep their
+        // default keys and aren't listed (see listed).
         fun on(device: Device): List<PalmButton> =
             if (device.zodiac) ZODIAC else device.buttons.mapNotNull { byId(it) }.let { own ->
                 if (device.clieGamepad) own + PAD_SHARED.filter { it !in own } + PAD else own
             }
+
+        // The buttons the settings list, in order: the device's own, without the ones only the game controller uses.
+        fun listed(device: Device): List<PalmButton> = own(device)
+        private fun own(device: Device): List<PalmButton> = if (device.zodiac) ZODIAC else device.buttons.mapNotNull { byId(it) }
     }
 }
 
@@ -135,33 +140,17 @@ data class ControllerMap(val keys: Map<Int, PalmButton>) {
             keys[KeyEvent.KEYCODE_BUTTON_THUMBL] = PalmButton.BACK
             // The TX's Home is a hardware button, its first app button.
             keys[KeyEvent.KEYCODE_BUTTON_START] = if ("home" in device.buttons) PalmButton.HOME else PalmButton.APP1
-            if (device.clieGamepad) return gamepadDefaults(device)
+            // The CLIE game controller's own keys: they only do something while it's plugged in, and the
+            // face buttons X and Y that press the CLIE's app buttons then press the pad's X and Y (PalmButtons).
+            if (device.clieGamepad) {
+                keys[KeyEvent.KEYCODE_BUTTON_A] = PalmButton.PAD_A
+                keys[KeyEvent.KEYCODE_DPAD_CENTER] = PalmButton.PAD_A
+                keys[KeyEvent.KEYCODE_BUTTON_B] = PalmButton.PAD_B
+                keys[KeyEvent.KEYCODE_BUTTON_THUMBR] = PalmButton.PAD_HOLD
+            }
             val allowed = PalmButton.on(device)
             return ControllerMap(keys.filterValues { it in allowed })
         }
-
-        // The CLIE with the game controller: the d-pad is the arrows, A and B (south and east) are the pad's
-        // A and B, X and Y (west and north) its X and Y, Start is Home and Select is Menu (the pad's while it's
-        // plugged in, the CLIE's otherwise, as on every other device) and R3 is Hold. The shoulders and lower
-        // triggers press the CLIE's four app buttons.
-        fun gamepadDefaults(device: Device) = ControllerMap(mapOf(
-            KeyEvent.KEYCODE_DPAD_UP to PalmButton.UP,
-            KeyEvent.KEYCODE_DPAD_DOWN to PalmButton.DOWN,
-            KeyEvent.KEYCODE_DPAD_LEFT to PalmButton.LEFT,
-            KeyEvent.KEYCODE_DPAD_RIGHT to PalmButton.RIGHT,
-            KeyEvent.KEYCODE_DPAD_CENTER to PalmButton.PAD_A,
-            KeyEvent.KEYCODE_BUTTON_A to PalmButton.PAD_A,
-            KeyEvent.KEYCODE_BUTTON_B to PalmButton.PAD_B,
-            KeyEvent.KEYCODE_BUTTON_X to PalmButton.PAD_X,
-            KeyEvent.KEYCODE_BUTTON_Y to PalmButton.PAD_Y,
-            KeyEvent.KEYCODE_BUTTON_START to PalmButton.HOME,
-            KeyEvent.KEYCODE_BUTTON_SELECT to PalmButton.MENU,
-            KeyEvent.KEYCODE_BUTTON_THUMBR to PalmButton.PAD_HOLD,
-            KeyEvent.KEYCODE_BUTTON_L1 to PalmButton.APP1,
-            KeyEvent.KEYCODE_BUTTON_L2 to PalmButton.APP2,
-            KeyEvent.KEYCODE_BUTTON_R2 to PalmButton.APP3,
-            KeyEvent.KEYCODE_BUTTON_R1 to PalmButton.APP4,
-        ).filterValues { it in PalmButton.on(device) })
 
         // The Zodiac as it was before its controls could be set: the d-pad pushes the stick, A, B, X and Y
         // are the Action keys by place, Start and Mode are Home, Select is Function, the shoulders and

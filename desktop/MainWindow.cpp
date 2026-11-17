@@ -1920,7 +1920,15 @@ void MainWindow::editSession(const QString& path) {
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
     if (dialog.exec() != QDialog::Accepted) return;
-    if (const auto error = frondSessions::writePreferences(path, dialog.controls->values()); !error.isEmpty()) failure(error);
+    // The dialog doesn't edit the game controller; the file's current value stays, whatever the
+    // dialog was opened with.
+    auto values = dialog.controls->values();
+    frondSessions::Preferences current;
+    if (loadPreferences(path, device, &current).isEmpty()) {
+        values.gamepad = current.gamepad;
+        values.gamepadSet = current.gamepadSet;
+    }
+    if (const auto error = frondSessions::writePreferences(path, values); !error.isEmpty()) failure(error);
 }
 void MainWindow::renameSession(const QString& path) {
     const auto info = infoFor(path);

@@ -222,10 +222,25 @@ def main():
         print(f'clie gamepad: reloaded {text}')
         todo2 = press(c, work, 'reload-a-todo', 'a')
         assert differ(todo, todo2) < 0.003, 'A after the reload is not To Do'
+        # USB can't take the connector while the pad is in, and says so.
+        ok, code, text = c.request('usb-mode', 'pty')
+        assert not ok and code == 'usb' and 'game controller' in text, f'usb-mode with the pad in: {ok} {code} {text}'
+        assert c.ok('gamepad-state').startswith('attached'), 'a refused USB took the pad'
         c.ok('gamepad', 'off')
         assert c.ok('gamepad-state') == 'detached'
         c.quit()
         c = None
+
+        # Host serial, infrared or USB set at start wins over the session's pad, which stays detached.
+        for option in (['--serial', 'pty'], ['--usb', 'pty']):
+            c = Client([saved, *option], work / f'host-{option[0][2:]}.log')
+            c.until('guest-ready', lambda _: True, 120)
+            text = c.ok('gamepad-state')
+            assert text == 'detached busy', f'{option[0]} with the session\'s pad: {text}'
+            ok, code, _ = c.request('gamepad', 'on')
+            assert not ok and code == 'busy', f'{option[0]}: the pad took the connector'
+            c.quit()
+            c = None
     except AssertionError as error:
         print(f'clie gamepad: FAIL, {error} (see {work})')
         return 1

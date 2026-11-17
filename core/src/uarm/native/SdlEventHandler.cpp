@@ -198,6 +198,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     }
                 }
                 if (event.key.repeat) break;
+                // Android's controller keys for the pad (KMOD_RESERVED): none once the pad is detached.
+                if ((event.key.keysym.mod & KMOD_RESERVED) && !soc->GamepadAttached()) break;
                 const auto scan = event.key.keysym.scancode;
                 const auto code = irKeyboardCode(scan);
                 if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() &&
