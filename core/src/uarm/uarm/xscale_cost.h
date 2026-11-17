@@ -351,6 +351,19 @@ constexpr uint32_t thumbPairCost(uint32_t pair, Core core) {
     return thumbCost(pair >> 16, core) + thumbCost(pair & 0xffff, core);
 }
 
+// thumbCost of every halfword, one table per core, built on first use.
+inline const uint8_t* thumbCostTable(Core core) {
+    struct Tables {
+        uint8_t cost[3][65536];
+        Tables() {
+            for (unsigned k = 0; k < 3; k++)
+                for (uint32_t h = 0; h < 65536; h++) cost[k][h] = uint8_t(thumbCost(h, Core(k)));
+        }
+    };
+    static const Tables tables;
+    return tables.cost[unsigned(core)];
+}
+
 constexpr uint32_t conditionFailedCost(Core core) { return tableFor(core).conditionFailed; }
 constexpr uint32_t paceOpCost(Core core) { return tableFor(core).paceOp; }
 

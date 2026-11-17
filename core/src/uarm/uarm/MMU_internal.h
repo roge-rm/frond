@@ -14,6 +14,7 @@ struct TlbEntry {
     uint32_t c : 1;
     uint32_t section : 1;
     uint32_t b : 1;
+    uint32_t x : 1;  // XScale X bit, for the data cache model
 };
 
 struct ArmMmu {
@@ -92,6 +93,6 @@ static FORCE_INLINE MMUTranslateResult mmuTranslateCached(ArmMmu* mmu, uint32_t 
         return mmuTranslate(mmu, addr, privileged, write);
     const auto fsr = checkPermissions(mmu, entry.ap, entry.domain, entry.section, privileged, write);
     if (fsr) return (1ull << 63) | (uint64_t(fsr) << 32);
-    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61);
+    return uint64_t((addr & 0xfff) | (entry.pa << 12)) | (uint64_t(entry.c) << 62) | (uint64_t(entry.b) << 61) | (uint64_t(entry.x) << 60);
 }
 #endif

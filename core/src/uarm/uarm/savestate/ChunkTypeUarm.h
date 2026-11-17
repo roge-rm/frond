@@ -66,6 +66,7 @@ enum class ChunkType : uint32_t {
     irKeyboard = 0x100c0,
     libertasCF = 0x100d0,
     xscaleDcache = 0x100e0,
+    costDataCache = 0x100f0,
 };
 
 inline ChunkType operator+(ChunkType chunkType, uint32_t index) {

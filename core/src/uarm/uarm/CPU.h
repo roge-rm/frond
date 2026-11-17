@@ -170,6 +170,13 @@ bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears);
 // interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
 // generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
 uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu);
+// Cost model (xscale_cost.h): on charges core's (cost::Core) table per instruction and a PACE op, memory
+// adds the region and data cache charges (XScale only). Off: 1 per instruction, 20 per PACE op.
+void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory);
+// The clocks the region and data cache charges are worked out from, in kHz.
+void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz);
+// A CP15 c7 write (crm, op2, the register's value) for the data cache model.
+void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va);
 // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
 // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
 void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);

@@ -13,6 +13,7 @@
 #include "pxa_RTC.h"
 #include "pxa270_KPC.h"
 #include "savestate/savestateAll.h"
+#include "xscale_cost.h"
 
 #define PXA_CLOCK_MANAGER_BASE 0x41300000UL
 #define PXA_CLOCK_MANAGER_SIZE 0x00001000UL
@@ -86,6 +87,14 @@ static bool pxaPwrClkPrvCoproc7regXferFunc(struct ArmCpu *cpu, void *userData, b
     return false;
 }
 
+// The cost model's region and data cache charges follow the clocks CCCR and CLKCFG give, from the
+// CLKCFG write (the frequency change sequence), reset and load.
+static void pxaPwrClkPrvSyncCost(struct PxaPwrClk *pc) {
+    const cost::Clocks c = pc->isPXA270 ? cost::pxa27xClocks(pc->CCCR, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
+                                        : cost::pxa25xClocks(pc->CCCR, pc->turbo);
+    cpuSetCostClocks(pc->cpu, c.core, c.bus, c.memory);
+}
+
 static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, bool two, bool read,
                                             uint8_t op1, uint8_t Rx, uint8_t CRn, uint8_t CRm,
                                             uint8_t op2) {
@@ -103,6 +112,7 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
                 else {
                     pc->turbo = (val & 1) != 0;
                     if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
+                    pxaPwrClkPrvSyncCost(pc);
                     if (val & 2)
                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
                                 (unsigned long)pc->CCCR, (unsigned long)val);
@@ -483,6 +493,7 @@ void pxaPwrClkFinishSleep(PxaPwrClk* pc) {
     pc->turbo = false;
     pc->clkcfgBits = 0;
     pc->sleeping = pc->wakePending = false;
+    pxaPwrClkPrvSyncCost(pc);
     pxaPwrClkSyncUdc(pc);
     if (pc->PCFR & 0x4000) {
         pc->PSSR &= ~0x10u;
@@ -517,6 +528,7 @@ void pxaPwrClkReset(struct PxaPwrClk *pc) {
 
     // pretend we just power-no-resetted
     pc->RCSR |= 1;
+    pxaPwrClkPrvSyncCost(pc);
     pxaPwrClkSyncUdc(pc);
 }
 
@@ -548,6 +560,7 @@ void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
     }
     pc->DoSaveLoad(helper, version);
     if (pc->wakePending && !pc->sleeping) loader.NotifyError();
+    pxaPwrClkPrvSyncCost(pc);
     // The later UDC load refreshes requests from its restored FIFO state.
     pxaPwrClkSyncUdc(pc,false);
 }

@@ -1,5 +1,6 @@
 #include "imx1_boot_probe.h"
 #include "imx1_cs5_bus.h"
+#include "xscale_cost.h"
 
 #include <algorithm>
 #include <cassert>
@@ -1641,6 +1642,8 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
     patchDispatchSetCpu(patches, p->cpu);
+    // ARM920T cost table only: the board's own bus, CS5 and cache models time its memory.
+    cpuSetCostModel(p->cpu, true, uint8_t(cost::Core::arm920t), false);
     if (p->options.bootstrapPeripherals) cpuArm920EnableWait(p->cpu);
     cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
     cpuArm920SetIcacheIndexCompatibility(p->cpu, p->options.arm920IcacheIndexCompatibility);

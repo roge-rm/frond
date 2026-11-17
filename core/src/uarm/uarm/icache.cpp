@@ -9,6 +9,7 @@
 #include "CPU.h"
 #include "arm920_state.h"
 #include "cputil.h"
+#include "xscale_cost.h"
 
 void icacheConfigureArm920(struct icache* ic) {
     ic->arm920 = true;
@@ -241,13 +242,51 @@ static void icacheRememberFetch(struct icache* ic, uint32_t va, uint32_t pa, uin
 #endif
 }
 
+// The charge slot (icacheCostSlot) of an instruction: word is the ARM word or the Thumb halfword.
+template <int sz>
+static uint16_t icachePrvCost(struct icache* ic, uint32_t word) {
+    if (!ic->costOn) return ICACHE_COST_ONE;
+    const cost::Core core = cost::Core(ic->costCore);
+    if constexpr (sz == 2) {
+        const uint32_t half = word & 0xffff;
+        // Only the conditional B has a condition (14 and 15 are UDF and SWI).
+        const uint32_t cond = (half & 0xf000) == 0xd000 && ((half >> 8) & 15) < 14 ? (half >> 8) & 15 : 14;
+        return icacheCostSlot(cost::thumbCostTable(core)[half], cond);
+    } else {
+        // Frond's own words (PACE entry and dispatch, peepholes) cost 1 here: a peephole charges the routine
+        // it replaces itself.
+        if ((word & 0xffff0000u) == 0xfff90000u) return ICACHE_COST_ONE;
+        auto& m = ic->armCostMemo[(word ^ (word >> 10) ^ (word >> 20)) & 1023];
+        if (m.word != word) {
+            m.word = word;
+            m.cost = uint8_t(cost::armCost(word, core));
+        }
+        const uint32_t cond = word >> 28;
+        return icacheCostSlot(m.cost, cond >= 14 ? 14 : cond);
+    }
+}
+
+void icacheSetCost(struct icache* ic, bool on, uint8_t core) {
+    ic->costOn = on;
+    ic->costCore = core;
+    for (auto& m : ic->armCostMemo) {
+        m.word = 0;
+        m.cost = uint8_t(on ? cost::armCost(0, cost::Core(core)) : 1);
+    }
+    ic->lastCost = ICACHE_COST_ONE;
+    icacheInval(ic);  // lines hold slots charged under the old setting
+}
+
 template <int msys, int sz>
-static void icacheDecodeFetch(uint32_t word, uint32_t va, uint32_t& instr, uint32_t& decoded) {
+static void icacheDecodeFetch(struct icache* ic, uint32_t word, uint32_t va, uint32_t& instr, uint32_t& decoded) {
     if constexpr (sz == 4) {
         instr = word;
         decoded = cpuDecodeArm<msys>(instr);
+        ic->lastCost = icachePrvCost<4>(ic, word);
     } else {
-        decoded = cpuDecodeThumb<msys>((word >> ((va & 2) * 8)) & 0xffff, instr);
+        const uint32_t half = (word >> ((va & 2) * 8)) & 0xffff;
+        decoded = cpuDecodeThumb<msys>(half, instr);
+        ic->lastCost = icachePrvCost<2>(ic, half);
     }
 }
 
@@ -451,8 +490,12 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
             }
             ic->arm920ContinuationPc += 4;
         }
-        if constexpr (sz == 2) decoded = cpuDecodeThumb<msys>(word, instr);
-        else icacheDecodeFetch<msys, sz>(word, va, instr, decoded);
+        if constexpr (sz == 2) {
+            decoded = cpuDecodeThumb<msys>(word, instr);
+            ic->lastCost = icachePrvCost<2>(ic, word);
+        } else {
+            icacheDecodeFetch<msys, sz>(ic, word, va, instr, decoded);
+        }
         return true;
     }
     const uint32_t key = icacheFetchKey(ic, privileged);
@@ -472,7 +515,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                     }
                     buffer.fetchKey = key;
                 }
-                icacheDecodeFetch<msys, sz>(buffer.words[(va & 31) / 4], va, instr, decoded);
+                icacheDecodeFetch<msys, sz>(ic, buffer.words[(va & 31) / 4], va, instr, decoded);
                 return true;
             }
     }
@@ -522,7 +565,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 return false;
             }
             icacheRememberFetch(ic, va, maskLine(pa), key, words);
-            icacheDecodeFetch<msys, sz>(words[(va & 31) / 4], va, instr, decoded);
+            icacheDecodeFetch<msys, sz>(ic, words[(va & 31) / 4], va, instr, decoded);
             return true;
         }
 
@@ -536,10 +579,12 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
 
             if (sz == 4) {
                 decoded = cpuDecodeArm<msys>(instr);
+                ic->lastCost = icachePrvCost<4>(ic, instr);
             } else {
                 uint32_t translatedInstr;
 
                 decoded = cpuDecodeThumb<msys>(instr, translatedInstr);
+                ic->lastCost = icachePrvCost<2>(ic, instr);
                 instr = translatedInstr;
             }
 
@@ -589,6 +634,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 // fprintf(stderr, "decode cache miss ARM\n");
                 decoded = cpuDecodeArm<msys>(instr);
                 line->decoded[iInst] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_ARM;
+                line->cost[iInst] = icachePrvCost<4>(ic, instr);
             } else {
 #ifdef __EMSCRIPTEN__
                 decoded = line->decoded[iInst] & ~DECODED_BITS;
@@ -611,6 +657,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
                 decoded = cpuDecodeThumb<msys>(instrThumb, instr);
                 line->decoded[iInst] = (decoded << DECODED_BITS_SHIFT) | DECODED_BITS_THUMB;
                 line->translatedThumbInstructions[iInst] = instr;
+                line->cost[iInst] = icachePrvCost<2>(ic, instrThumb);
             } else {
 #ifdef __EMSCRIPTEN__
                 decoded = line->decoded[iInst] & ~DECODED_BITS;
@@ -626,6 +673,7 @@ bool icacheFetch(struct icache* ic, uint32_t va, bool privileged, uint_fast8_t* 
         default:
             __builtin_unreachable();
     }
+    ic->lastCost = line->cost[calculateLineIndex(va) >> 1];
 
     return true;
 }

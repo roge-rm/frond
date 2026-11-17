@@ -38,6 +38,10 @@
 #include "patch68k.h"
 #include "patch_dispatch.h"
 #include "peephole.h"
+#include <algorithm>
+#include "xscale_cost.h"
+#include "dcache_cost.h"
+#include "peephole_cost.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -193,6 +197,26 @@ struct ArmCpu {
     const uint32_t* cyclesInProgress;
 #endif
 
+    // Cost model (xscale_cost.h, dcache_cost.h). The I-cache charges costCore's table per instruction when
+    // its costOn is set (1 per instruction otherwise); costMemory adds the region and data cache charges
+    // of loads and stores (XScale). pendingCharge holds the running instruction's memory charges until its
+    // loop adds them to the count; costClock is every finished batch's clocks, the base of the data cache
+    // model's bus time. regionCharge and cacheCosts are in core clocks at costClocks. paceCost is a 68k op.
+    bool costMemory;
+    uint8_t costCore;
+    uint32_t paceCost;
+    uint32_t pendingCharge;
+    uint64_t costClock;
+    cost::Clocks costClocks;
+    uint32_t regionCharge[cost::regionCount][2];
+    cost::CacheCosts cacheCosts[3];
+    cost::DataCacheState dcache;
+    uint8_t dcacheHint[32];  // the way each set hit last, looked at first; not saved
+#ifndef __EMSCRIPTEN__
+    // Per host TLB entry, written with it: the page's C (bit 0), B (1) and X (2) bits and its region (4-6).
+    uint8_t hostTlbInfo[2][HOST_TLB_SIZE];
+#endif
+
     struct ArmBankedRegs bank_usr;  // usr regs when in another mode
     struct ArmBankedRegs bank_svc;  // svc regs when in another mode
     struct ArmBankedRegs bank_abt;  // abt regs when in another mode
@@ -328,6 +352,60 @@ static FORCE_INLINE bool cpuPrvConditionFails(const struct ArmCpu *cpu, uint32_t
     if ((instr >> 28) == 0x0e) return false;
     return table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | (instr >> 28)];
 }
+
+// What an instruction costs from its charge slot (icacheCostSlot): its cost, or 1 when its condition fails.
+static FORCE_INLINE uint32_t cpuPrvSlotCharge(const struct ArmCpu *cpu, uint32_t slot) {
+    const uint32_t cond = slot >> 8;
+    if (likely(cond == 14)) return slot & 0xff;
+    return table_conditions[((cpu->flags & 0xf0000000UL) >> 24) | cond] ? 1 : slot & 0xff;
+}
+
+// Adds the memory charges of the instruction that just ran to the loop's count and to what peripherals see.
+static FORCE_INLINE void cpuPrvTakeCharge(struct ArmCpu *cpu, uint32_t &acc, uint32_t &shown) {
+    if (unlikely(cpu->pendingCharge)) {
+        acc += cpu->pendingCharge;
+        cpu->pendingCharge = 0;
+        shown = acc;
+    }
+}
+
+static FORCE_INLINE uint8_t cpuPrvCostInfo(bool c, bool b, bool x, cost::Region region) {
+    return uint8_t((c ? 1 : 0) | (b ? 2 : 0) | (x ? 4 : 0) | (unsigned(region) << 4));
+}
+
+#ifndef __EMSCRIPTEN__
+// One load or store's charge: the data cache model's for SDRAM, SRAM and flash, the region charge for the
+// rest. info is the page's (cpuPrvCostInfo). Only inside a batch: accesses from outside one (host reads,
+// injected call setup) neither change the model nor charge. PACE's accesses change it without a charge,
+// as its op cost covers them.
+static __attribute__((noinline)) void cpuPrvCostAccess(struct ArmCpu *cpu, uint32_t va, uint8_t info, bool write) {
+    if (!cpu->cyclesInProgress) return;
+    const cost::Region region = cost::Region(info >> 4);
+    const cost::Core core = cost::Core(cpu->costCore);
+    uint32_t charge;
+    if (!cost::regionCached(region)) {
+        charge = cpu->regionCharge[region][write];
+    } else {
+        const struct ArmMmu *mmu = cpu->memorySystem.mmu;
+        const cost::Policy p = cost::policyOf(core, mmu->transTablPA != MMU_DISABLED_TTP, mmu->dcOn, info & 1,
+                                              info & 2, info & 4);
+        const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, cpu->dcacheHint);
+        if (!(e.fills | e.writebacks | e.buffered | e.uncachedLoads | e.uncachedStores)) return;
+        const unsigned k = region == cost::sram ? 1 : region == cost::flash ? 2 : 0;
+        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+        charge = cost::cacheStall(cpu->dcache, core, e, cpu->cacheCosts[k], now);
+    }
+    if (!cpu->modePace) cpu->pendingCharge += charge;
+}
+
+// A host TLB hit's charge, from the page's info stored when the entry was filled.
+template <int size, bool write>
+static FORCE_INLINE void cpuPrvCostHostHit(struct ArmCpu *cpu, uint32_t va) {
+    const uint8_t info = cpu->hostTlbInfo[write][(va >> 12) & (HOST_TLB_SIZE - 1)];
+    cpuPrvCostAccess(cpu, va, info, write);
+    if constexpr (size == 8) cpuPrvCostAccess(cpu, va + 4, info, write);
+}
+#endif
 
 static FORCE_INLINE uint32_t cpuPrvClz(uint32_t val) {
     if (!val) return 32;
@@ -914,7 +992,7 @@ static FORCE_INLINE void cpuPrvHostRead(const uint8_t *addr, void *bufP) {
 // permission check passed for that privilege and the current domains, S and R.
 template <bool write>
 static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
-                                            bool privileged) {
+                                            bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
         if (mmu->tlb[va >> 12].revision != mmu->revision) return;
@@ -934,6 +1012,7 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
         hostTlb.ram = (struct ArmRam *)ram.uD;
         hostTlb.write[(va >> 12) & (HOST_TLB_SIZE - 1)] = {
             hostTlbKey(hostTlb.gen, va, privileged), uintptr_t(uint32_t(ppage - vpage))};
+        cpu->hostTlbInfo[1][(va >> 12) & (HOST_TLB_SIZE - 1)] = info;
     } else {
         uint8_t *host;
         if (holds(ram)) {
@@ -947,6 +1026,7 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
         }
         hostTlb.read[(va >> 12) & (HOST_TLB_SIZE - 1)] = {hostTlbKey(hostTlb.gen, va, privileged),
                                                           uintptr_t(host) - vpage};
+        cpu->hostTlbInfo[0][(va >> 12) & (HOST_TLB_SIZE - 1)] = info;
     }
 }
 
@@ -957,7 +1037,7 @@ static __attribute__((noinline)) void cpuPrvHostTlbFill(struct ArmCpu *cpu, uint
 // access went to. Regions don't overlap, so an address inside it reaches that handler.
 template <bool write>
 static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t va, uint32_t pa,
-                                                   bool privileged) {
+                                                   bool privileged, uint8_t info) {
     const struct ArmMmu *mmu = cpu->memorySystem.mmu;
     if (mmu->transTablPA != MMU_DISABLED_TTP) {
         if (mmu->tlb[va >> 12].revision != mmu->revision) return;
@@ -970,7 +1050,7 @@ static __attribute__((noinline)) void cpuPrvJitFill(struct ArmCpu *cpu, uint32_t
         return r.ub && r.pa < uint64_t(ppage) + 0x1000 && ppage < r.ub;
     };
     if (meets(mem->regions[REGION_RAM]) || meets(mem->regions[REGION_ROM])) {
-        cpuPrvHostTlbFill<write>(cpu, va, pa, privileged);
+        cpuPrvHostTlbFill<write>(cpu, va, pa, privileged, info);
         return;
     }
     for (unsigned i = REGION_BASE; i < NUM_MEM_REGIONS; i++) {
@@ -1187,11 +1267,14 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         struct HostTlb &hostTlb = cpu->mem->hostTlb;
         if constexpr (write) {
             const struct HostTlbEntry &e = hostTlb.write[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
-            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged)))
+            if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
+                if (!jit && cpu->costMemory) cpuPrvCostHostHit<size, true>(cpu, vaddr);
                 return ramAccessInline<size, true>(hostTlb.ram, vaddr + uint32_t(e.addend), buf);
+            }
         } else {
             const struct HostTlbEntry &e = hostTlb.read[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
             if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
+                if (!jit && cpu->costMemory) cpuPrvCostHostHit<size, false>(cpu, vaddr);
                 cpuPrvHostRead<size>((const uint8_t *)(e.addend + vaddr), buf);
                 return true;
             }
@@ -1201,6 +1284,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
 #endif
 
     uint32_t pa;
+    uint8_t costInfo = 0;
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU) {
         MMUTranslateResult translateResult =
 #ifndef __EMSCRIPTEN__
@@ -1215,6 +1299,18 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         }
 
         pa = MMU_TRANSLATE_RESULT_PA(translateResult);
+        costInfo = cpuPrvCostInfo(MMU_TRANSLATE_RESULT_CACHEABLE(translateResult),
+                                  MMU_TRANSLATE_RESULT_BUFFERABLE(translateResult),
+                                  MMU_TRANSLATE_RESULT_XSCALE_X(translateResult), cost::pxaRegion(pa));
+#ifndef __EMSCRIPTEN__
+        // Before the access, so a device read sees its own charge.
+        if constexpr (!arm920 && !jit) {
+            if (cpu->costMemory) {
+                cpuPrvCostAccess(cpu, vaddr, costInfo, write);
+                if constexpr (size == 8) cpuPrvCostAccess(cpu, vaddr + 4, costInfo, write);
+            }
+        }
+#endif
         if constexpr (arm920) {
             auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
             dc->mem = cpu->mem;
@@ -1248,11 +1344,11 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8 && !arm920) {
 #ifdef FROND_DYNARMIC
         if constexpr (jit) {
-            cpuPrvJitFill<write>(cpu, vaddr, pa, priviledged);
+            cpuPrvJitFill<write>(cpu, vaddr, pa, priviledged, costInfo);
             return true;
         }
 #endif
-        cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged);
+        cpuPrvHostTlbFill<write>(cpu, vaddr, pa, priviledged, costInfo);
     }
 #endif
 
@@ -1370,21 +1466,122 @@ void cpuSetJitCodeCacheSize(size_t) {}
 bool cpuJitCacheClears(const struct ArmCpu *, uint64_t *) { return false; }
 #endif
 
+// The most one interpreted instruction can charge, memory included.
+static uint32_t cpuPrvMaxInstructionCharge(const struct ArmCpu *cpu) {
+    if (!cpu || !cpu->ic->costOn) return 1;
+    const cost::Core core = cost::Core(cpu->costCore);
+    uint32_t most = cost::maxInstructionCost(core);
+    if (cpu->costMemory) {
+        // One access books at most a fill behind two dirty halves and a buffered store, or one uncached
+        // access, or one region charge; the first can also wait for a full write buffer. An LDM or STM
+        // makes at most 16 accesses. A peephole charges its whole routine, which this doesn't bound: the
+        // memcpy peephole's charge grows with its size.
+        uint32_t access = 0, drain = 0;
+        for (const cost::CacheCosts &k : cpu->cacheCosts) {
+            const uint32_t cached = k.fill + 2 * k.writeback + k.buffered;
+            const uint32_t uncached = k.uncachedLoad > k.uncachedStore ? k.uncachedLoad : k.uncachedStore;
+            access = std::max({access, cached, uncached});
+            drain = std::max({drain, k.writeback, k.buffered});
+        }
+        for (const auto &r : cpu->regionCharge) access = std::max({access, r[0], r[1]});
+        most += cost::writeBufferDepth(core) * drain + 16 * access;
+    }
+    return most;
+}
+
+// A batch stops once its count reaches the budget, so it passes it by at most the largest single charge
+// - 1: an interpreted instruction or a PACE op.
 uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
-    constexpr uint32_t interpreter = 19;
+    const uint32_t instruction = cpuPrvMaxInstructionCharge(cpu);
+    const uint32_t pace = cpu ? cpu->paceCost : 20;
+    const uint32_t interpreter = std::max(instruction, pace) - 1;
 #ifdef FROND_DYNARMIC
     if (cpu && cpu->jit) {
         // cpuPrvCycleJit: a run passes its budget by at most L - 1 (every link checks, no
-        // block is longer than L), then a run that stopped for the interpreter runs one
-        // more instruction before the budget check. PACE batches stay at 19.
+        // block is longer than L, a JIT instruction counts 1), then a run that stopped for the
+        // interpreter runs one more instruction before the budget check.
         const uint32_t l = jitMaxUnchecked(cpu->jit);
         if (!l) return UINT32_MAX;
-        return l > interpreter ? l : interpreter;
+        return std::max(l - 1 + instruction, interpreter);
     }
-#else
-    (void)cpu;
 #endif
     return interpreter;
+}
+
+void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz) {
+    const cost::Clocks c = {coreKHz, busKHz, memoryKHz};
+    const cost::Core core = cost::Core(cpu->costCore);
+    cpu->costClocks = c;
+    for (unsigned r = 0; r < cost::regionCount; r++)
+        for (unsigned w = 0; w < 2; w++) cpu->regionCharge[r][w] = cost::regionCost(core, cost::Region(r), w, c);
+    cpu->cacheCosts[0] = cost::cacheCosts(core, cost::sdram, c);
+    cpu->cacheCosts[1] = cost::cacheCosts(core, cost::sram, c);
+    cpu->cacheCosts[2] = cost::cacheCosts(core, cost::flash, c);
+}
+
+void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
+    cpu->costCore = core;
+    cpu->costMemory = on && memory && cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->model != ArmCpuModel::arm920t;
+    cpu->paceCost = on ? cost::paceOpCost(cost::Core(core)) : 20;
+    icacheSetCost(cpu->ic, on, core);
+    cost::dataCacheReset(cpu->dcache, cost::Core(core));
+    std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpu->costClock = 0;
+    cpu->pendingCharge = 0;
+    cpuSetCostClocks(cpu, cpu->costClocks.core, cpu->costClocks.bus, cpu->costClocks.memory);
+}
+
+void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va) {
+    if (!cpu->costMemory) return;
+    const cost::Core core = cost::Core(cpu->costCore);
+    cost::CacheEvents e;
+    if ((crm == 7 || crm == 6) && op2 == 0) cost::dataCacheInvalidateAll(cpu->dcache);
+    else if (crm == 6 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, false, true);
+    else if (crm == 10 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, false);
+    else if (crm == 14 && op2 == 1) e = cost::dataCacheLineOp(cpu->dcache, core, va, true, true);
+    else if (crm == 2 && op2 == 5) e = cost::dataCacheAllocateLine(cpu->dcache, core, va);
+    else if (crm == 10 && op2 == 4) cost::dataCacheDrain(cpu->dcache);
+    else return;
+#ifndef __EMSCRIPTEN__
+    // A clean's write-backs go on the bus and are charged to the MCR, inside a batch.
+    if (e.writebacks && cpu->cyclesInProgress) {
+        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+        cpu->pendingCharge += cost::cacheStall(cpu->dcache, core, e, cpu->cacheCosts[0], now);
+    }
+#endif
+}
+
+template <typename T>
+void cpuCostSave(const struct ArmCpu *cpu, T &savestate) {
+    if (!cpu->costMemory) return;
+    auto chunk = savestate.GetChunk(ChunkType::costDataCache, 1);
+    if (!chunk) ERR("unable to allocate chunk");
+    uint8_t bytes[cost::kDataCacheSaveBytes];
+    cost::dataCacheSaveBytes(cpu->dcache, bytes);
+    SaveChunkHelper helper(*chunk);
+    helper.Do64(cpu->costClock).DoBuffer(bytes, sizeof(bytes));
+}
+
+// A session without the section starts with an empty cache: the first accesses miss.
+template <typename T>
+void cpuCostLoad(struct ArmCpu *cpu, T &loader) {
+    cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
+    std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpu->costClock = 0;
+    cpu->pendingCharge = 0;
+    if (!cpu->costMemory || !loader.HasChunk(ChunkType::costDataCache)) return;
+    auto chunk = loader.GetChunkOrFail(ChunkType::costDataCache, 1, "data cache cost model");
+    if (!chunk) return;
+    uint8_t bytes[cost::kDataCacheSaveBytes];
+    uint64_t clock = 0;
+    LoadChunkHelper helper(*chunk);
+    helper.Do64(clock).DoBuffer(bytes, sizeof(bytes));
+    if (chunk->HasError()) {
+        loader.NotifyError();
+        return;
+    }
+    cost::dataCacheLoadBytes(cpu->dcache, bytes);
+    cpu->costClock = clock;
 }
 
 void cpuWriteProtectHost(struct ArmCpu *cpu, const uint8_t *host, uint32_t size) {
@@ -1700,26 +1897,75 @@ static void execFn_tg50LibraryRefnum(struct ArmCpu *cpu, uint32_t instr) {
         cpu->regs[3] = 2;
 }
 
+// Charges a peephole the clocks of the ADS routine it replaces, less the 1 its own slot charged, and
+// runs that routine's loads and stores through the data cache model in order. before: the registers as
+// the peephole found them.
+template <int memorySystemKind>
+static void cpuPrvPeepholeCharge(struct ArmCpu *cpu, uint32_t instr, const uint32_t *before) {
+#ifndef __EMSCRIPTEN__
+    if (!cpu->ic->costOn) return;
+    size_t count = 0;
+    const uint32_t *words = peepholeRoutine(instr, &count);
+    uint32_t regs[16];
+    std::memcpy(regs, before, sizeof(regs));
+    uint32_t flags = cpu->flags & 0xf0000000UL;
+    uint32_t owed = 1;
+    cost::runRoutine(
+        words, count, regs, flags, cost::Core(cpu->costCore),
+        [cpu, &owed](uint32_t c) {
+            const uint32_t taken = c < owed ? c : owed;
+            owed -= taken;
+            cpu->pendingCharge += c - taken;
+        },
+        [cpu](uint32_t va, bool store) {
+            if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU) {
+                if (!cpu->costMemory) return;
+                const MMUTranslateResult r =
+                    store ? mmuTranslateCached<true, true>(cpu->memorySystem.mmu, va, cpu->privileged)
+                          : mmuTranslateCached<false, true>(cpu->memorySystem.mmu, va, cpu->privileged);
+                if (!MMU_TRANSLATE_RESULT_OK(r)) return;
+                cpuPrvCostAccess(cpu, va,
+                                 cpuPrvCostInfo(MMU_TRANSLATE_RESULT_CACHEABLE(r), MMU_TRANSLATE_RESULT_BUFFERABLE(r),
+                                                MMU_TRANSLATE_RESULT_XSCALE_X(r),
+                                                cost::pxaRegion(MMU_TRANSLATE_RESULT_PA(r))),
+                                 store);
+            } else {
+                (void)cpu, (void)va, (void)store;
+            }
+        });
+#else
+    (void)cpu, (void)instr, (void)before;
+#endif
+}
+
 static void execFn_peephole_ADC_udiv10(struct ArmCpu *cpu, uint32_t instr) {
+    uint32_t before[16];
+    std::memcpy(before, cpu->regs, sizeof(before));
     const uint32_t num = cpuPrvGetRegNotPC(cpu, 0);
 
     cpuPrvSetRegNotPC(cpu, 0, num / 10ul);
     cpuPrvSetRegNotPC(cpu, 1, num % 10ul);
 
     cpuPrvSetPC(cpu, cpuPrvGetRegNotPC(cpu, REG_NO_LR));
+    cpuPrvPeepholeCharge<ARM_MEMORY_SYSTEM_MMU>(cpu, instr, before);
 }
 
 static void execFn_peephole_ADC_sdiv10(struct ArmCpu *cpu, uint32_t instr) {
+    uint32_t before[16];
+    std::memcpy(before, cpu->regs, sizeof(before));
     const int32_t num = cpuPrvGetRegNotPC(cpu, 0);
 
     cpuPrvSetRegNotPC(cpu, 0, num / 10l);
     cpuPrvSetRegNotPC(cpu, 1, num % 10l);
 
     cpuPrvSetPC(cpu, cpuPrvGetRegNotPC(cpu, REG_NO_LR));
+    cpuPrvPeepholeCharge<ARM_MEMORY_SYSTEM_MMU>(cpu, instr, before);
 }
 
 template <int memorySystemKind>
 static void execFn_peephole_ADC_memcpy(struct ArmCpu *cpu, uint32_t instr) {
+    uint32_t before[16];
+    std::memcpy(before, cpu->regs, sizeof(before));
     uint32_t src = cpuPrvGetRegNotPC(cpu, 1);
     uint32_t dest = cpuPrvGetRegNotPC(cpu, 0);
     uint32_t size = cpuPrvGetRegNotPC(cpu, 2);
@@ -1739,6 +1985,7 @@ static void execFn_peephole_ADC_memcpy(struct ArmCpu *cpu, uint32_t instr) {
         cpuPrvHandleMemErr<memorySystemKind>(cpu, result.faultAddr, result.wasWrite, false, result.fsr);
     } else {
         cpuPrvSetPC<memorySystemKind>(cpu, cpuPrvGetRegNotPC(cpu, REG_NO_LR));
+        cpuPrvPeepholeCharge<memorySystemKind>(cpu, instr, before);
     }
 }
 
@@ -2756,6 +3003,8 @@ static void execFn_swi(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind>
 static void execFn_peephole_ADC_udivmod(struct ArmCpu *cpu, uint32_t instr) {
+    uint32_t before[16];
+    std::memcpy(before, cpu->regs, sizeof(before));
     const uint32_t num = cpuPrvGetRegNotPC(cpu, 1);
     const uint32_t den = cpuPrvGetRegNotPC(cpu, 0);
 
@@ -2770,10 +3019,13 @@ static void execFn_peephole_ADC_udivmod(struct ArmCpu *cpu, uint32_t instr) {
     cpuPrvSetRegNotPC(cpu, 1, num % den);
 
     cpuPrvSetPC<memorySystemKind>(cpu, cpuPrvGetRegNotPC(cpu, REG_NO_LR));
+    cpuPrvPeepholeCharge<memorySystemKind>(cpu, instr, before);
 }
 
 template <int memorySystemKind>
 static void execFn_peephole_ADC_sdivmod(struct ArmCpu *cpu, uint32_t instr) {
+    uint32_t before[16];
+    std::memcpy(before, cpu->regs, sizeof(before));
     const int32_t num = cpuPrvGetRegNotPC(cpu, 1);
     const int32_t den = cpuPrvGetRegNotPC(cpu, 0);
 
@@ -2788,6 +3040,7 @@ static void execFn_peephole_ADC_sdivmod(struct ArmCpu *cpu, uint32_t instr) {
     cpuPrvSetRegNotPC(cpu, 1, num % den);
 
     cpuPrvSetPC<memorySystemKind>(cpu, cpuPrvGetRegNotPC(cpu, REG_NO_LR));
+    cpuPrvPeepholeCharge<memorySystemKind>(cpu, instr, before);
 }
 
 template <int memorySystemKind, bool wasT>
@@ -4054,6 +4307,7 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
 
     memset(cpu, 0, sizeof(*cpu));
     cpu->model = model;
+    cpu->paceCost = 20;  // cost model off: 20 per PACE op (cpuSetCostModel)
 
     cpu->debugStub = gdbStubInit(cpu, debugPort);
 
@@ -4580,7 +4834,7 @@ struct CycleProgress {
     ~CycleProgress() { cpu->cyclesInProgress = previous; }
 };
 uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
-    return cpu->cyclesInProgress ? *cpu->cyclesInProgress : 0;
+    return cpu->cyclesInProgress ? *cpu->cyclesInProgress + cpu->pendingCharge : 0;
 }
 #endif
 
@@ -4593,7 +4847,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
     while (cycleAcc < cycles) {
         if (cpu->debugStub) gdbStubReportPc(cpu->debugStub, paceGetPC(), false);
         cpuPrvCyclePace(cpu);
-        cycleAcc += 20;
+        cycleAcc += cpu->paceCost;
 
         if (cpu->slowPath) break;
     }
@@ -4610,7 +4864,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCyclePace(struct ArmCpu *cpu, uint32_t cyc
 template <int size>
 static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const struct icacheline* line,
                                              uint32_t lineVa, uint32_t lineEpoch, uint32_t va,
-                                             uint32_t& instr, uint32_t& decoded) {
+                                             uint32_t& instr, uint32_t& decoded, uint32_t& cost) {
     // lineVa is line aligned, so this also requires va to be aligned to size.
     if ((va & ~uint32_t((1u << CACHE_LINE_WIDTH_BITS) - size)) != lineVa) return false;
     if (ic->epoch != lineEpoch) return false;
@@ -4619,6 +4873,7 @@ static FORCE_INLINE bool cpuPrvFetchSameLine(const struct icache* ic, const stru
     constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
     if ((cached & DECODED_BITS) != kind) return false;
     decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
+    cost = line->cost[offset >> 1];
     if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
     else instr = line->translatedThumbInstructions[offset >> 1];
     return true;
@@ -4657,8 +4912,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
     while (acc < cycles) {
         uint32_t pc = cpu->regs[REG_NO_PC];
         cpu->curInstrPC = pc;
-        acc += 1;
-        cycleAcc = acc;
 
         const struct icacheline *line = ic->cache + calculateIndex(pc);
         uint32_t offset = calculateLineIndex(pc);
@@ -4668,12 +4921,18 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
                      line->fetchKey != icacheFetchKey(ic, cpu->privileged))) {
             uint32_t instr = 0, decoded = 0;
             uint_fast8_t fsr;
+            // A fetch sees the first clock of its instruction; a failed one costs just that.
+            acc += 1;
+            cycleAcc = acc;
             if (!icacheFetch<memorySystemKind, size, false>(ic, pc, cpu->privileged, &fsr, instr, decoded)) {
                 cpuPrvHandleMemErr<memorySystemKind>(cpu, pc, false, true, fsr);
                 return acc;
             }
+            acc += cpuPrvSlotCharge(cpu, ic->lastCost) - 1;
+            cycleAcc = acc;
             cpu->regs[REG_NO_PC] = pc + size;
             cpuPrvDecompressExecFn(decoded)(cpu, instr);
+            cpuPrvTakeCharge(cpu, acc, cycleAcc);
             if (cpu->slowPath) break;
             continue;
         }
@@ -4683,8 +4942,11 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
             uint32_t instr;
             if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
             else instr = line->translatedThumbInstructions[offset >> 1];
+            acc += cpuPrvSlotCharge(cpu, line->cost[offset >> 1]);
+            cycleAcc = acc;
             cpu->regs[REG_NO_PC] = pc + size;
             cpuPrvDecompressExecFn(int32_t(cached) >> DECODED_BITS_SHIFT)(cpu, instr);
+            cpuPrvTakeCharge(cpu, acc, cycleAcc);
             if (cpu->slowPath) return acc;
 
             pc += size;
@@ -4696,8 +4958,6 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleLine(struct ArmCpu *cpu, uint32_t cyc
             if ((cached & DECODED_BITS) != kind) break;
 
             cpu->curInstrPC = pc;
-            acc += 1;
-            cycleAcc = acc;
         }
     }
 
@@ -4721,6 +4981,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
     bool ok;
     uint32_t translatedInstr;
     uint32_t decoded;
+    uint32_t cost = ICACHE_COST_ONE;
     uint_fast8_t fsr;
 
     while (acc < cycles) {
@@ -4748,24 +5009,29 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         const uint32_t pc = cpu->curInstrPC;
         if constexpr (armKindIsArm920(memorySystemKind)) {
             ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, cpu->privileged, &fsr, translatedInstr, decoded);
+            cost = ic->lastCost;
         } else {
-            ok = cpuPrvFetchSameLine<2>(ic, line, lineVa, lineEpoch, pc, translatedInstr, decoded);
+            ok = cpuPrvFetchSameLine<2>(ic, line, lineVa, lineEpoch, pc, translatedInstr, decoded, cost);
             if (!ok) {
                 // Fetch through copies, so the fast path's values stay in registers.
-                uint32_t slowInstr = 0, slowDecoded = 0;
+                uint32_t slowInstr = 0, slowDecoded = 0, slowCost = 0;
                 const uint32_t key = icacheFetchKey(ic, cpu->privileged);
-                ok = icacheFetchCached<2>(ic, pc, key, slowInstr, slowDecoded);
-                if (!ok)
+                ok = icacheFetchCached<2>(ic, pc, key, slowInstr, slowDecoded, slowCost);
+                if (!ok) {
                     ok = icacheFetch<memorySystemKind, 2, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
                                                                     slowDecoded);
+                    slowCost = ic->lastCost;
+                }
                 translatedInstr = slowInstr;
                 decoded = slowDecoded;
+                cost = slowCost;
                 cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
             }
         }
 #else
         ok = icacheFetch<memorySystemKind, 2, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr,
                                                         translatedInstr, decoded);
+        cost = cpu->ic->lastCost;
 #endif
 
         if (!ok) {
@@ -4773,6 +5039,8 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
             return acc;  // exit here so that debugger can see us execute first instr
                          // of execption handler
         }
+        acc += cpuPrvSlotCharge(cpu, cost) - 1;
+        cycleAcc = acc;
 
         cpu->regs[REG_NO_PC] += 2;
 
@@ -4783,6 +5051,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleThumb(struct ArmCpu *cpu, uint32_t cy
         cpuPrvDecompressExecFn(decoded)(cpu, translatedInstr);
 #endif
 
+        cpuPrvTakeCharge(cpu, acc, cycleAcc);
         if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
 
         if constexpr (injected) {
@@ -4809,6 +5078,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
 #endif
     bool ok;
     uint32_t instr, decoded;
+    uint32_t cost = ICACHE_COST_ONE;
     uint_fast8_t fsr;
 
     while (acc < cycles) {
@@ -4836,24 +5106,29 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         const uint32_t pc = cpu->curInstrPC;
         if constexpr (armKindIsArm920(memorySystemKind)) {
             ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, cpu->privileged, &fsr, instr, decoded);
+            cost = ic->lastCost;
         } else {
-            ok = cpuPrvFetchSameLine<4>(ic, line, lineVa, lineEpoch, pc, instr, decoded);
+            ok = cpuPrvFetchSameLine<4>(ic, line, lineVa, lineEpoch, pc, instr, decoded, cost);
             if (!ok) {
                 // Fetch through copies, so the fast path's values stay in registers.
-                uint32_t slowInstr = 0, slowDecoded = 0;
+                uint32_t slowInstr = 0, slowDecoded = 0, slowCost = 0;
                 const uint32_t key = icacheFetchKey(ic, cpu->privileged);
-                ok = icacheFetchCached<4>(ic, pc, key, slowInstr, slowDecoded);
-                if (!ok)
+                ok = icacheFetchCached<4>(ic, pc, key, slowInstr, slowDecoded, slowCost);
+                if (!ok) {
                     ok = icacheFetch<memorySystemKind, 4, injected>(ic, pc, cpu->privileged, &fsr, slowInstr,
                                                                     slowDecoded);
+                    slowCost = ic->lastCost;
+                }
                 instr = slowInstr;
                 decoded = slowDecoded;
+                cost = slowCost;
                 cpuPrvRememberLine(ic, pc, key, line, lineVa, lineEpoch);
             }
         }
 #else
         ok = icacheFetch<memorySystemKind, 4, injected>(cpu->ic, cpu->curInstrPC, cpu->privileged, &fsr, instr,
                                                         decoded);
+        cost = cpu->ic->lastCost;
 #endif
 
         if (!ok) {
@@ -4861,6 +5136,8 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
             return acc;  // exit here so that debugger can see us execute first instr
                          // of execption handler
         }
+        acc += cpuPrvSlotCharge(cpu, cost) - 1;
+        cycleAcc = acc;
 
         cpu->regs[REG_NO_PC] += 4;
 
@@ -4871,6 +5148,7 @@ ATTR_EMCC_NOINLINE static uint32_t cpuCycleArm(struct ArmCpu *cpu, uint32_t cycl
         cpuPrvDecompressExecFn(decoded)(cpu, instr);
 #endif
 
+        cpuPrvTakeCharge(cpu, acc, cycleAcc);
         if constexpr (debug) gdbStubInstructionExecuted(cpu->debugStub);
 
         if constexpr (injected) {
@@ -6034,6 +6312,7 @@ static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, const Frond
     const uint32_t pc = cpu->regs[REG_NO_PC];
     cpu->curInstrPC = pc;
     acc += 1;
+    uint32_t shown = acc;
     uint32_t instr = 0, decoded = 0;
     uint_fast8_t fsr;
     const uint32_t size = cpu->T ? 2 : 4;
@@ -6045,11 +6324,13 @@ static void cpuPrvJitInterpretOne(struct ArmCpu *cpu, uint32_t &acc, const Frond
         cpuPrvHandleMemErr<memorySystemKind>(cpu, pc, false, true, fsr);
         return;
     }
+    if (ok) acc += cpuPrvSlotCharge(cpu, cpu->ic->lastCost) - 1;
     cpu->regs[REG_NO_PC] = pc + size;
     if (abort)
         cpuPrvDataAbort(cpu, abort->addr, abort->size, abort->write, abort->fsr);
     else
         cpuPrvDecompressExecFn(decoded)(cpu, instr);
+    cpuPrvTakeCharge(cpu, acc, shown);
 }
 
 template <int memorySystemKind>
@@ -6234,7 +6515,7 @@ bool cpuProcessPendingInterrupts(struct ArmCpu* cpu) {
 
 // memorySystemKind is cpuInterpreterKind(cpu), picked by the caller when it made the CPU.
 template <int memorySystemKind, bool injected>
-ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
+static FORCE_INLINE uint32_t cpuPrvCycleBody(struct ArmCpu *cpu, uint32_t cycles) {
     if (armKindIsArm920(memorySystemKind) && cpu->arm920Waiting) return 0;
     cpuProcessPendingInterrupts(cpu);
 
@@ -6273,6 +6554,19 @@ ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
                               : cpuCycleArm<memorySystemKind, injected, false>(cpu, cycles);
 }
 
+// A batch's clocks, with any memory charge left over from outside the loops, go into costClock.
+static FORCE_INLINE uint32_t cpuPrvEndBatch(struct ArmCpu *cpu, uint32_t ran) {
+    ran += cpu->pendingCharge;
+    cpu->pendingCharge = 0;
+    cpu->costClock += ran;
+    return ran;
+}
+
+template <int memorySystemKind, bool injected>
+ATTR_EMCC_NOINLINE uint32_t cpuCycle(struct ArmCpu *cpu, uint32_t cycles) {
+    return cpuPrvEndBatch(cpu, cpuPrvCycleBody<memorySystemKind, injected>(cpu, cycles));
+}
+
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MMU, true>(struct ArmCpu *cpu, uint32_t cycles);
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MPU, true>(struct ArmCpu *cpu, uint32_t cycles);
 template uint32_t cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(struct ArmCpu *cpu, uint32_t cycles);
@@ -6297,7 +6591,7 @@ static uint32_t cpuPrvCycleOne(struct ArmCpu *cpu) {
                  : cpuCycleArm<memorySystemKind, true, false>(cpu, 1);
 }
 
-uint32_t cpuCyclePure(struct ArmCpu *cpu) {
+static uint32_t cpuPrvCyclePureBody(struct ArmCpu *cpu) {
     if (cpu->arm920Waiting) return 0;
     const bool arm920 = cpu->model == ArmCpuModel::arm920t;
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
@@ -6319,6 +6613,8 @@ uint32_t cpuCyclePure(struct ArmCpu *cpu) {
                    ? cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MMU, false>(cpu)
                    : cpuPrvCycleOne<ARM_MEMORY_SYSTEM_MPU, false>(cpu);
 }
+
+uint32_t cpuCyclePure(struct ArmCpu *cpu) { return cpuPrvEndBatch(cpu, cpuPrvCyclePureBody(cpu)); }
 
 void cpuStartInjectedSyscall(struct ArmCpu *cpu, uint32_t syscall) {
     const uint8_t table = syscall >> 12;
@@ -6510,6 +6806,7 @@ void cpuSave(ArmCpu *cpu, T &savestate) {
     }
 
     patchDispatchSave(cpu->patchDispatch, savestate);
+    cpuCostSave(cpu, savestate);
 
     auto chunk = savestate.GetChunk(ChunkType::cpu, SAVESTATE_VERSION);
     if (!chunk) ERR("unable to allocate chunk");
@@ -6536,6 +6833,7 @@ void cpuLoad(ArmCpu *cpu, T &loader) {
         cp15MPULoad(cpu->cp15.cp15mpu, loader);
     }
     patchDispatchLoad(cpu->patchDispatch, loader);
+    cpuCostLoad(cpu, loader);
 
     uint32_t version;
     auto chunk = loader.GetChunkOrFail(ChunkType::cpu, SAVESTATE_VERSION, "cpu", version);

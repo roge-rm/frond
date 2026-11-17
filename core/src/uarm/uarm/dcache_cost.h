@@ -204,6 +204,33 @@ inline CacheEvents dataCacheAccess(DataCacheState& s, Core core, uint32_t va, Po
     return e;
 }
 
+// dataCacheAccess with the way each set hit last looked at first (hint, one byte per set, any start
+// values). Gives the same events and state as dataCacheAccess: a set never holds two valid lines with one
+// address, so the hinted way is the one the full search would find.
+inline CacheEvents dataCacheAccessHinted(DataCacheState& s, Core core, uint32_t va, Policy p, bool store,
+                                         uint8_t* hint, bool roundRobin = true) {
+    const CacheGeometry& g = cacheGeometry(core);
+    const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
+    if (policyCached(p)) {
+        uint32_t& l = s.line[set * g.ways + hint[set] % g.ways];
+        if ((l & (kLineValid | kLineAddressMask)) == (((va >> 5) & kLineAddressMask) | kLineValid)) {
+            CacheEvents e;
+            e.hits = 1;
+            if (store) {
+                if (p == Policy::writeThrough) detail::bufferStore(s, va, e);
+                else l |= (va & 16) ? kLineDirtyHigh : kLineDirtyLow;
+            }
+            return e;
+        }
+    }
+    const CacheEvents e = dataCacheAccess(s, core, va, p, store, roundRobin);
+    if (policyCached(p)) {
+        const int way = detail::findWay(s, g, va);
+        if (way >= 0) hint[set] = uint8_t(way);
+    }
+    return e;
+}
+
 // Cache maintenance (CP15 c7). Each returns the dirty halves it wrote back.
 inline void dataCacheInvalidateAll(DataCacheState& s) {
     for (uint32_t& l : s.line) l = 0;  // dirty data is dropped, as the hardware does

@@ -764,6 +764,16 @@ test-xscale-stale-dcache: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-xscale-stale-dcache
 	./build/test-xscale-stale-dcache 2>build/xscale-stale-dcache.err
 
+# The cost model's data cache in sessions: a warm cache saved mid-run gives the same Exact counts.
+.PHONY: test-xscale-cost-session
+test: test-xscale-cost-session
+test-xscale-cost-session: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/cost-session-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/xscale-cost-session.cpp @build/cost-session-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-xscale-cost-session
+	./build/test-xscale-cost-session
+
 .PHONY: test-mem-region-bounds
 test-mem-region-bounds: out/frond
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/mem-bounds-core.rsp

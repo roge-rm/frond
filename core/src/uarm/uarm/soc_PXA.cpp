@@ -6,6 +6,7 @@
 // clang-format on
 
 #include "soc_PXA.h"
+#include "xscale_cost.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -104,6 +105,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                   gdbPort, deviceType == deviceTypeTG50 ? CPUID_PXA250
                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
                   socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
+
+    // XScale cost model: the table, region and data cache charges; PwrClk sets the clocks.
+    cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
 
 #ifndef __EMSCRIPTEN__
     cpuSetDebugSoc(cpu,this);
