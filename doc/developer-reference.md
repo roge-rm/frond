@@ -299,6 +299,9 @@ State commands take no argument. Mode commands change the setting and reply with
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
+| `gamepad-state` | | `gamepad`: `detached`, `unavailable` (not a TG50), or `attached` with the pad's phase (`waiting`, `plugging`, `identifying`, `identified`), `hold` when its Hold slide is on, and `ids=`, `replies=`, `sent=` counts |
+| `gamepad` | `on` or `off` | `gamepad`: plugs the CLIÉ game controller into the TG50's connector or takes it out, while running; `busy` if serial, infrared or the USB cable has the connector |
+| `gamepad-key` | `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `home`, `menu` or `hold`, space, `d` or `u` | `gamepad`; `detached` with no pad. `hold d` moves the Hold slide |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
@@ -362,6 +365,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `key-down KEY`, `key-up KEY` | A key by name or by number (1 up to the highest key id). |
 | `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
+| `gamepad-attach`, `gamepad-detach` | Plug the TG50's game controller in or out. Its buttons are the keys `pad-up`, `pad-down`, `pad-left`, `pad-right`, `pad-a`, `pad-b`, `pad-x`, `pad-y`, `pad-home`, `pad-menu` and `pad-hold` (each press of `pad-hold` moves the slide). |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
 | `pause` | Hold the main loop's guest time and the replay until the `replay-continue` command, which picks up at the pause's time. Commands that run the guest themselves (`guest-ready`, `install`, `launch-app`, the database and card commands) still run it. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |

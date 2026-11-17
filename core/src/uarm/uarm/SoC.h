@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
 #include "NetworkSimulation.h"
 #include "LibertasCF.h"
@@ -58,6 +59,13 @@ class SoC {
     virtual void AttachKeyboard(bool) {}
     virtual bool KeyboardKey(uint8_t, bool) { return false; }
     virtual void ReleaseKeyboard() {}
+    // The CLIÉ game controller on the interface connector (TG50 only). Attach and detach run on
+    // the SoC's thread while it runs, like plugging the pad in; identify false skips the plug-in
+    // handshake (the pad then identifies on its first press). False if the connector is taken.
+    virtual bool GamepadSupported() const { return false; }
+    virtual bool GamepadAttached() const { return false; }
+    virtual bool AttachGamepad(bool, bool = true) { return false; }
+    virtual std::string GamepadState() const { return "unavailable"; }
     virtual void Reset();
     // Next Reset() is a power-on reset; the Zire uses it for a hard reset (clean boot).
     void RequestPowerOnReset() { powerOnReset = true; }

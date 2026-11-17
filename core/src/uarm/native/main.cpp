@@ -961,6 +961,10 @@ bool gFastEngineMissing = false;
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
+        // FROND_CLIE_GAMEPAD=1 has the game controller plugged in from the start (until the menu
+        // switch); it identifies on its first press, as one plugged in while the CLIÉ was off.
+        if (soc->GamepadSupported() && clieGamepadPreview() && !soc->AttachGamepad(true, false))
+            cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;
         commandContext.infrared = &infrared;
         if (infraredPhone) {

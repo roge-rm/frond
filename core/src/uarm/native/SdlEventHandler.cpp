@@ -205,7 +205,8 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                     if (++codeHolds[code] == 1) soc->KeyboardKey(code, true);
                     break;
                 }
-                const KeyId builtIn = builtInKeyboardKey(controls, scan);
+                KeyId builtIn = soc->GamepadAttached() ? clieGamepadHostKey(scan) : keyInvalid;
+                if (!builtIn) builtIn = builtInKeyboardKey(controls, scan);
                 if (scan > SDL_SCANCODE_UNKNOWN && size_t(scan) < builtInHeld.size() && builtIn) {
                     if (!builtInHeld[scan]) {
                         builtInHeld[scan] = builtIn;
@@ -266,9 +267,10 @@ void SdlEventHandler::HandleEvent(const SDL_Event& polled) {
                 break;
             }
 
-            // A game controller, for the Zodiac only. It is opened so SDL reports its buttons and axes.
+            // A game controller, for the Zodiac and the CLIÉ game controller. It is opened so SDL reports its buttons and axes.
             case SDL_CONTROLLERDEVICEADDED:
-                if (controls.style == DeviceControlStyle::zodiac) SDL_GameControllerOpen(event.cdevice.which);
+                if (controls.style == DeviceControlStyle::zodiac || soc->GamepadSupported())
+                    SDL_GameControllerOpen(event.cdevice.which);
                 break;
 
             case SDL_CONTROLLERDEVICEREMOVED:
@@ -605,9 +607,11 @@ GamepadState SdlEventHandler::CombinedPads() const {
     return all;
 }
 void SdlEventHandler::UpdateGamepad() {
-    if (controls.style != DeviceControlStyle::zodiac) return;
+    const bool clie = soc->GamepadAttached();
+    if (controls.style != DeviceControlStyle::zodiac && !clie && !padKeys) return;
     if (!padFocused) return;
-    const GamepadInput input = zodiacGamepadInput(CombinedPads());
+    const GamepadInput input = controls.style == DeviceControlStyle::zodiac ? zodiacGamepadInput(CombinedPads())
+                               : clie ? clieGamepadInput(CombinedPads()) : GamepadInput{};
     for (unsigned key = 1; key < keyIdCount; ++key) {
         const DeviceKeyMask bit = deviceKeyBit(KeyId(key));
         if ((input.keys & bit) == (padKeys & bit)) continue;

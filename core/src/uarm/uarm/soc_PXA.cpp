@@ -649,7 +649,12 @@ static int UsbDetectPin(DeviceType5 type) {
 }
 
 bool SocPXA::SetUsbTestCable(bool connected) {
-    if (GetDeviceType() == deviceTypeTG50) { deviceTg50SetUsbCable(dev, connected); return true; }
+    if (GetDeviceType() == deviceTypeTG50) {
+        // One accessory on the connector: the pad's ID resistor stays while it's in.
+        if (gamepad.Attached()) return !connected;
+        deviceTg50SetUsbCable(dev, connected);
+        return true;
+    }
     const int pin=UsbDetectPin(GetDeviceType());
     if(pin<0)return false;
     pxaGpioSetState(gpio, pin, GetDeviceType()==deviceTypeZire72 ? connected : !connected);
@@ -687,6 +692,12 @@ bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
 }
 
 void SocPXA::OnEngageKey(KeyId key, bool down) {
+    if (key >= keyIdPadUp && key <= keyIdPadHold) {
+        // The pad's buttons only reach the guest through the pad.
+        if (gamepad.Key(key, down, GetTime())) RescheduleCB(this, RESCHEDULE_TASK_UART);
+        SyncGamepadLine();
+        return;
+    }
     if (key == keyIdPower && down) powerKeyDownAt = GetTime();
     deviceKey(dev, key, down);
     keypadKeyEvt(kp, key, down);
@@ -761,6 +772,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (socRev != 2) pxaUartLoad(hwUart, loader, 1);
     pxaUartLoad(stUart, loader, 2);
     irKeyboard.Load(loader);
+    gamepad.Load(loader);
     pxaUartLoad(btUart, loader, 3);
 
     pxaSspLoad(ssp[0], loader, 0);
@@ -804,6 +816,20 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (pxaI2sHasCodec(i2s))
         pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pwrClk), false);
     deviceLoad(dev, loader, RestoringCheckpoint());
+    // The loaded GPIO and AUX already match the loaded pad. The hooks are wiring: the pad takes them
+    // unless a host endpoint holds the line, which leaves the connector empty instead.
+    if (gamepad.Attached() && (!GamepadSupported() || (serialHostHooks.context && serialHostHooks.context != this) ||
+                               irHostHooks.context || irKeyboard.Attached())) {
+        fprintf(stderr, "game controller: the connector is in use, loaded without the pad\n");
+        gamepad.Detach();
+        if (GetDeviceType() == deviceTypeTG50) {
+            deviceTg50SetAccessoryAux(dev, 0);
+            pxaGpioSetState(gpio, 3, true);
+        }
+    }
+    if (gamepad.Attached()) InstallGamepadHooks();
+    else if (serialHostHooks.context == this) serialHostHooks = {};
+    gamepadLineLow = gamepad.LineLow();
     if (pxaI2sHasCodec(i2s)) {
         if (!pxaI2sClockStateValid(i2s)) loader.NotifyError();
         pxaI2sRefresh(i2s);
@@ -862,6 +888,7 @@ void SocPXA::OnSave(T &savestate) {
     if (socRev != 2) pxaUartSave(hwUart, savestate, 1);
     pxaUartSave(stUart, savestate, 2);
     irKeyboard.Save(savestate);
+    gamepad.Save(savestate);
     pxaUartSave(btUart, savestate, 3);
 
     pxaSspSave(ssp[0], savestate, 0);
@@ -1104,6 +1131,10 @@ void SocPXA::CycleBatch0() {
     if (usbHostHooks.tick && !usbHostPaused &&
         (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime()))
         usbHostHooks.tick(usbHostHooks.context, GetTime());
+    if (gamepad.Attached() && !usbHostPaused) {
+        gamepad.Tick(GetTime(), GamepadPortReady());
+        SyncGamepadLine();
+    }
 }
 
 bool SocPXA::Batch0Required() {
@@ -1129,8 +1160,8 @@ bool SocPXA::Batch0Required() {
 // host can sleep, else 0.
 uint32_t SocPXA::Batch0Ticks() {
     if (Batch0Required()) return 1;
-    if (!usbHostHooks.wake || usbHostPaused) return 0;
-    const uint64_t wake = usbHostHooks.wake(usbHostHooks.context);
+    uint64_t wake = usbHostHooks.wake && !usbHostPaused ? usbHostHooks.wake(usbHostHooks.context) : UINT64_MAX;
+    if (gamepad.Attached() && !usbHostPaused) wake = std::min(wake, gamepad.Wake(GetTime()));
     if (wake == UINT64_MAX) return 0;
     const uint64_t now = GetTime(), period = 36_sec / 3686400ULL;
     if (wake <= now + period) return 1;
@@ -1348,14 +1379,76 @@ SerialHostRoute SocPXA::GetSerialRoute() {
     return {this,[](void* p,const SerialHostHooks* h){return static_cast<SocPXA*>(p)->SetSerialHostHooks(h);},
         [](void* p){return static_cast<SocPXA*>(p)->SerialEnabled();},
         [](void* p){auto* s=static_cast<SocPXA*>(p);return s->HostIoPaused() || s->irReplacementDepth!=0 || s->PowerSleeping();},
-        [](void* p){auto* s=static_cast<SocPXA*>(p);return !s->KeyboardAttached() && !s->irKeyboard.Pending() && !s->IrHostAttached();}};
+        [](void* p){auto* s=static_cast<SocPXA*>(p);return !s->KeyboardAttached() && !s->irKeyboard.Pending() && !s->IrHostAttached() && !s->gamepad.Attached();}};
 }
 bool SocPXA::SetSerialHostHooks(const SerialHostHooks* hooks) {
+    // The game controller holds the line until it's detached.
+    if (serialHostHooks.context == this) return false;
     if (hooks && (GetDeviceType()!=deviceTypeTG50 || !hooks->context || !hooks->read || !hooks->write ||
         !hooks->pending || !hooks->replaced || !hooks->modeChanged || serialHostHooks.context ||
         irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() || !pxaUartIrState(ffUart).idle)) return false;
     serialHostHooks=hooks?*hooks:SerialHostHooks{};
     return true;
+}
+
+bool SocPXA::GamepadSupported() const { return const_cast<SocPXA*>(this)->GetDeviceType() == deviceTypeTG50; }
+
+bool SocPXA::GamepadPortReady() { return SerialEnabled() && pxaUartReceiverEnabled(ffUart); }
+
+void SocPXA::SyncGamepadLine() {
+    // GPIO3 is the connector's HotSync line, active low, held high with nothing on it.
+    const bool low = gamepad.LineLow();
+    if (low == gamepadLineLow) return;
+    gamepadLineLow = low;
+    pxaGpioSetState(gpio, 3, !low);
+}
+
+void SocPXA::InstallGamepadHooks() {
+    serialHostHooks = {this,
+        [](void* p) -> uint_fast16_t { auto* s = static_cast<SocPXA*>(p); return s->gamepad.Read(s->GetTime()); },
+        // Runs inside the UART batch, which keeps going while Pending() holds.
+        [](uint_fast16_t value, void* p) { auto* s = static_cast<SocPXA*>(p); s->gamepad.Write(uint8_t(value), s->GetTime()); },
+        [](void* p) { return static_cast<SocPXA*>(p)->gamepad.Pending(); },
+        [](void* p) {
+            // Sleep: the ROM's driver drops the pad on 'slp!', so it identifies again on its next press.
+            auto* s = static_cast<SocPXA*>(p);
+            if (s->PowerSleeping()) { s->gamepad.Forget(); s->SyncGamepadLine(); }
+        },
+        // The pad polls the port while it waits on it (ClieGamepad::Wake), so a mode change needs nothing.
+        [](void*) {}};
+}
+
+bool SocPXA::AttachGamepad(bool attach, bool identify) {
+    if (!GamepadSupported()) return false;
+    if (!attach) {
+        if (!gamepad.Attached()) return true;
+        // Unplugged: bytes on the way are lost and the driver keeps a held key until its 30 s drop.
+        gamepad.Detach();
+        SyncGamepadLine();
+        serialHostHooks = {};
+        deviceTg50SetAccessoryAux(dev, 0);
+        return true;
+    }
+    if (gamepad.Attached()) return true;
+    if (serialHostHooks.context || irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
+        deviceTg50UsbCableAttached(dev)) return false;
+    // AUX about 78 mV (code 0x7f, >> 4 = 7): SonySys's serial-ID accessory class 0x200. The real
+    // resistor isn't known; this class gets no 'A' prompt, which the pad ignores anyway.
+    deviceTg50SetAccessoryAux(dev, 78);
+    InstallGamepadHooks();
+    gamepad.Attach(GetTime(), identify);
+    SyncGamepadLine();
+    RescheduleCB(this, RESCHEDULE_TASK_UART);
+    return true;
+}
+
+std::string SocPXA::GamepadState() const {
+    if (!GamepadSupported()) return "unavailable";
+    if (!gamepad.Attached()) return "detached";
+    static const char* phases[] = {"waiting", "plugging", "identifying", "identified"};
+    return std::string("attached ") + phases[int(gamepad.GetPhase())] + (gamepad.HoldOn() ? " hold" : "") +
+           " ids=" + std::to_string(gamepad.IdsSent()) + " replies=" + std::to_string(gamepad.Replies()) +
+           " sent=" + std::to_string(gamepad.BytesSent());
 }
 
 // Not while a byte is still going out. A received byte the guest hasn't read yet stays the

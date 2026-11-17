@@ -1,6 +1,7 @@
 #ifndef FROND_DESKTOP_CONTROL_H
 #define FROND_DESKTOP_CONTROL_H
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -436,7 +437,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -567,6 +568,26 @@ class DesktopControl {
             if (!ctx.soc->SetHoldSwitch(path == "on"))
                 return {false, "unsupported", "This device has no supported Hold switch."};
             return {true, "hold", ctx.soc->HoldSwitchOn() ? "on" : "off"};
+        }
+        if (command == "gamepad-state") return {true, "gamepad", ctx.soc->GamepadState()};
+        if (command == "gamepad") {
+            if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
+            if (!ctx.soc->GamepadSupported()) return {false, "unsupported", "This device takes no game controller."};
+            if (!ctx.soc->AttachGamepad(path == "on"))
+                return {false, "busy", "The connector is in use (serial, infrared or USB); turn that off first."};
+            return {true, "gamepad", ctx.soc->GamepadState()};
+        }
+        if (command == "gamepad-key") {
+            // NAME d|u, NAME one of up down left right a b x y home menu hold; queued like other keys.
+            static const char* names[] = {"up", "down", "left", "right", "a", "b", "x", "y", "home", "menu", "hold"};
+            const auto space = path.find(' ');
+            const std::string name = path.substr(0, space), state = space == std::string::npos ? "" : path.substr(space + 1);
+            const auto found = std::find(std::begin(names), std::end(names), name);
+            if (found == std::end(names) || (state != "d" && state != "u")) return {false, "argument", "Use a pad button name followed by d or u."};
+            if (!ctx.soc->GamepadAttached()) return {false, "detached", "The game controller isn't attached."};
+            const auto key = KeyId(keyIdPadUp + (found - std::begin(names)));
+            if (state == "d") ctx.soc->KeyDown(key); else ctx.soc->KeyUp(key);
+            return {true, "gamepad", "Pad event queued."};
         }
         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
         if (command == "keyboard-attach") {

@@ -28,7 +28,10 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
         {"left", keyIdLeft}, {"right", keyIdRight}, {"center", keyIdSelect},
         {"power", keyIdPower}, {"voice", keyIdVoice},
         {"graffiti", keyIdGraffiti}, {"back", keyIdBack}, {"hold", keyIdHold}, {"hotsync", keyIdHotSync},
-        {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress}};
+        {"jog-up", keyIdJogUp}, {"jog-down", keyIdJogDown}, {"jog-press", keyIdJogPress},
+        {"pad-up", keyIdPadUp}, {"pad-down", keyIdPadDown}, {"pad-left", keyIdPadLeft}, {"pad-right", keyIdPadRight},
+        {"pad-a", keyIdPadA}, {"pad-b", keyIdPadB}, {"pad-x", keyIdPadX}, {"pad-y", keyIdPadY},
+        {"pad-home", keyIdPadHome}, {"pad-menu", keyIdPadMenu}, {"pad-hold", keyIdPadHold}};
     std::string line;
     size_t number = 0;
     while (std::getline(file, line)) {
@@ -74,6 +77,9 @@ bool InputReplay::Load(const std::string& path, int width, int height, std::stri
         } else if (command == "keyboard-attach" || command == "keyboard-detach") {
             event.kind = Kind::keyboardAttach;
             event.x = command == "keyboard-attach";
+        } else if (command == "gamepad-attach" || command == "gamepad-detach") {
+            event.kind = Kind::gamepadAttach;
+            event.x = command == "gamepad-attach";
         } else if (command == "stick") {
             // The analogue stick in hundredths of its travel, right and down positive.
             event.kind = Kind::stick;
@@ -107,6 +113,7 @@ void InputReplay::Dispatch(uint64_t elapsedMs, SoC& soc, const std::function<boo
             case Kind::keyboardDown: soc.KeyboardKey(event.x,true); break;
             case Kind::keyboardUp: soc.KeyboardKey(event.x,false); break;
             case Kind::keyboardAttach: soc.AttachKeyboard(event.x); break;
+            case Kind::gamepadAttach: soc.AttachGamepad(event.x); break;
             case Kind::stick: soc.AnalogStick(event.x / 100.0f, event.y / 100.0f); break;
             case Kind::pause: paused = true; pausedAtMs = event.at; break;
             case Kind::snapshot: {
