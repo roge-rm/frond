@@ -285,6 +285,6 @@ val buildHostStorage = tasks.register<Exec>("buildHostStorage") {
         "-o \"$hostStorage/libfrondcard.so\"")
 }
 tasks.withType<Test>().configureEach {
-    dependsOn(buildHostStorage)
+    dependsOn(buildHostStorage, copyLicences)
     systemProperty("java.library.path", hostStorage.absolutePath)
 }

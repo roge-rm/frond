@@ -11,7 +11,8 @@ class FrondBenchTest {
         val committed = File("../../tools/frondbench/FrondBench.prc")
         val built = File("build/generated/licences-assets/frondbench/FrondBench.prc")
         assertTrue(committed.length() > 1000)
-        if (built.isFile) assertArrayEquals(committed.readBytes(), built.readBytes())
+        assertTrue("copied asset missing: ${built.path}", built.isFile)
+        assertArrayEquals(committed.readBytes(), built.readBytes())
         assertTrue(FrondBench.ASSET.endsWith(FrondBench.FILE_NAME))
     }
 }

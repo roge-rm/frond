@@ -67,7 +67,7 @@ Close Palm dialogs first if an install or export can't get through.
 
 ### FrondBench
 
-FrondBench times four tests on a Palm and shows the numbers, so Frond's speed can be checked against real devices. On Linux, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm.
+FrondBench times four tests on a Palm and shows the numbers, so Frond's speed can be checked against real devices. On the desktop, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm. On Android, Install on This Device and Save FrondBench.prc… are at the bottom of the Applications sheet while a machine runs, and Save is also in About. The results go to a Memo (Memos on the T|X, T5, LifeDrive and Treo), so a HotSync brings them to your computer.
 
 On a real device:
 

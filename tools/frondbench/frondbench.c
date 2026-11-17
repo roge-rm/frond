@@ -226,10 +226,20 @@ static UInt32 databaseTest(void) {
     return (UInt32)dbRounds * dbRecords * 2;
 }
 
-// Puts the last run into a new Memo, replacing the Memo an earlier run made.
-static void saveResults(void) {
+// True when the text is an earlier FrondBench results Memo: "FrondBench <d>.<d>\n" first and a Checksum line.
+static Boolean isOurMemo(const Char* t) {
+    if (StrNCompare(t, "FrondBench ", 11) != 0) return false;
+    if (t[11] < '0' || t[11] > '9' || t[12] != '.' || t[13] < '0' || t[13] > '9' || t[14] != '\n') return false;
+    return StrStr(t, "\nChecksum ") != 0;
+}
+
+// Puts the last run into a new Memo and deletes the Memo an earlier run made. Garnet's Memos app
+// keeps its Memos in MemosDB-PMem, older Palm OS in MemoDB. Neither is created here (a database
+// made without Memo Pad's AppInfo could upset it); returns false when the device has neither.
+static Boolean saveResults(void) {
     Char text[480], line[60];
     DmOpenRef db;
+    LocalID id;
     UInt16 index, count;
     MemHandle record;
     UInt32 total = 0;
@@ -242,20 +252,20 @@ static void saveResults(void) {
     }
     StrPrintF(line, "Total %lu ms\nChecksum %lx\n", total, checksum);
     StrCat(text, line);
-    db = DmOpenDatabaseByTypeCreator('DATA', 'memo', dmModeReadWrite);
-    if (!db) {
-        if (DmCreateDatabase(0, "MemoDB", 'memo', 'DATA', false)) return;
-        db = DmOpenDatabaseByTypeCreator('DATA', 'memo', dmModeReadWrite);
-        if (!db) return;
-    }
+    id = DmFindDatabase(0, "MemosDB-PMem");
+    if (!id) id = DmFindDatabase(0, "MemoDB");
+    db = id ? DmOpenDatabase(0, id, dmModeReadWrite) : 0;
+    if (!db) return false;
     count = DmNumRecords(db);
     for (index = count; index > 0; index--) {
+        UInt16 attr;
+        if (DmRecordInfo(db, index - 1, &attr, 0, 0) != 0 || (attr & dmRecAttrDelete)) continue;
         record = DmQueryRecord(db, index - 1);
         if (record) {
             const Char* old = MemHandleLock(record);
-            Boolean ours = StrNCompare(old, "FrondBench ", 11) == 0;
+            Boolean ours = isOurMemo(old);
             MemHandleUnlock(record);
-            if (ours) DmRemoveRecord(db, index - 1);
+            if (ours) DmDeleteRecord(db, index - 1);
         }
     }
     index = dmMaxRecordIndex;
@@ -266,6 +276,7 @@ static void saveResults(void) {
         DmReleaseRecord(db, index, true);
     }
     DmCloseDatabase(db);
+    return record != 0;
 }
 
 static void runTests(FormType* form) {
@@ -292,8 +303,7 @@ static void runTests(FormType* form) {
     }
     EvtResetAutoOffTimer();
     haveResults = true;
-    saveResults();
-    StrCopy(statusLine, "Done, saved to a Memo");
+    StrCopy(statusLine, saveResults() ? "Done, saved to a Memo" : "Done, no Memo app to save to");
     FrmDrawForm(form);
     drawResults();
 }

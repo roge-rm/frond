@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # 2026-11-16 00:00:00 UTC in seconds since 1904.
-FIXED = 1794787200 + 2082844800 - 1794787200 + 0
+FIXED = 3877632000
 
 path = Path(sys.argv[1])
 data = bytearray(path.read_bytes())
