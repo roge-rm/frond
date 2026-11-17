@@ -173,6 +173,8 @@ class MainWindow : public QMainWindow {
     // The core's reply to window-id: embeds the Palm, or keeps its own window.
     void embedReply(bool ok, const QString& message);
     void afterDevice();
+    void pollGamepad();
+    void gamepadReply(const QString& message);
     void setBarShown(bool shown);
     // Full screen: the Palm fills the screen, the bar and an open panel float over it.
     void toggleFullScreen();
@@ -233,8 +235,8 @@ class MainWindow : public QMainWindow {
     bool contrastPending{false};
     QCheckBox *smoothToggle{nullptr}, *mipsToggle{nullptr}, *keyboardShow{nullptr};
     QSlider* sizeSlider{nullptr};
-    QComboBox *jogBox{nullptr}, *speedBox{nullptr};
-    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *speedLabel{nullptr};
+    QComboBox *jogBox{nullptr}, *jogLandscapeBox{nullptr}, *speedBox{nullptr};
+    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *jogLandscapeLabel{nullptr}, *speedLabel{nullptr};
     QByteArray listGeometry;    // the list window's geometry while a machine runs
     std::vector<runningRules::Database> knownDatabases;
     bool appsStale{false};      // the Applications list needs a fresh db-list
@@ -315,6 +317,8 @@ class MainWindow : public QMainWindow {
     bool protectionKnown{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
+    // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.
+    QString gamepadState;
     QLabel *sdStatus, *storageHeading;
     QPushButton* danaCards;
     QPushButton* secondCard;

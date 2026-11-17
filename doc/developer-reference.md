@@ -49,8 +49,10 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--window-background RRGGBB` | Colour around a fitted device. Default 000000. |
 | `--smooth-lcd` | Smooth pixels instead of sharp nearest-neighbour. |
 | `--hide-keyboard` | Hide the TG50 keyboard. |
+| `--gamepad on\|off` | TG50: the CLIÉ game controller plugged in or out at start, over the session's state. Without it the session's state stays. |
 | `--jog-controls hidden\|screen\|keyboard` | TG50 jog controls: hidden, left of the LCD, or left of the keyboard. Default `screen`. |
 | `--hide-jog-controls` | Same as `--jog-controls hidden`. |
+| `--jog-controls-landscape hidden\|beside\|under\|over` | TG50 jog controls in landscape with the game controller: hidden, left of the left grip, or turned on their side under or over the screen. Default `beside`. |
 
 For a headless run set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
 
@@ -299,13 +301,16 @@ State commands take no argument. Mode commands change the setting and reply with
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
+| `gamepad-state` | | `gamepad`: `detached` (`detached busy` while host serial, infrared, the infrared keyboard or the USB cable has the connector), `unavailable` (not a TG50), or `attached` with the pad's phase (`waiting`, `plugging`, `identifying`, `identified`), `hold` when its Hold slide is on, and `ids=`, `replies=`, `sent=` counts |
+| `gamepad` | `on` or `off` | `gamepad`: plugs the CLIÉ game controller into the TG50's connector or takes it out, while running; `busy` if serial, infrared or the USB cable has the connector |
+| `gamepad-key` | `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `home`, `menu` or `hold`, space, `d` or `u` | `gamepad`; `detached` with no pad. `hold d` moves the Hold slide |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
 | `camera-state` | | `camera`: `pattern`, `picture`, `webcam` or `frames`; `pattern` and why after a failure |
 | `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
-| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
+| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`), `jog-landscape=`(`hidden` `beside` `under` `over`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
 | `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |
@@ -362,6 +367,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `key-down KEY`, `key-up KEY` | A key by name or by number (1 up to the highest key id). |
 | `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
+| `gamepad-attach`, `gamepad-detach` | Plug the TG50's game controller in or out. Its buttons are the keys `pad-up`, `pad-down`, `pad-left`, `pad-right`, `pad-a`, `pad-b`, `pad-x`, `pad-y`, `pad-home`, `pad-menu` and `pad-hold` (each press of `pad-hold` moves the slide). |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
 | `pause` | Hold the main loop's guest time and the replay until the `replay-continue` command, which picks up at the pause's time. Commands that run the guest themselves (`guest-ready`, `install`, `launch-app`, the database and card commands) still run it. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
@@ -855,6 +861,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo`, `make test-z72-camera-rom` and `make test-z72-video-rom` (skipped when empty), and the fake 1 kHz microphone level read by the core `make z72-test-mic` builds for the Voice Memo and video tests. |
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
+| `FROND_CLIE_GAMEPAD_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves the CLIÉ game controller renders to. |
 | `FROND_ZODIAC_ROM`, `FROND_ZODIAC_SHOTS`, `FROND_ZODIAC_STATE`, `FROND_ZODIAC_WINDOW` | Opt-in Zodiac run in the desktop workflow test: the ROM, a folder for pictures of the Palm window, a bring-up state file read by the developer build of the core, and the window to capture. |
 | `FROND_ZODIAC_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves Zodiac screenshots to. |
 | `FROND_ZODIAC_PROBE`, `FROND_ZODIAC_PROBE_ENGINE` | Probe program and engine (`exact` or `fast`) for the Zodiac graphics Python tests. |
@@ -1097,7 +1104,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |

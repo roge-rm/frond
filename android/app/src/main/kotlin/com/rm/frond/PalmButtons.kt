@@ -10,7 +10,19 @@ import java.util.concurrent.Executors
 class PalmButtons(private val device: Device, private val link: ControlLink, private val dir: File) {
     private val taps = Executors.newSingleThreadExecutor { Thread(it, "FrondTap").apply { isDaemon = true } }
 
+    // The CLIE game controller is plugged in: the arrows, Home and Menu and the pad's own buttons go to it,
+    // as the keys the core maps to it, and not to the CLIE's own buttons. The core drops these keys if it
+    // has detached since, so a stale flag types no letters.
+    @Volatile var padAttached = false
+
     fun press(button: PalmButton, down: Boolean) {
+        if (button.gamepadOnly && !padAttached) return
+        if (padAttached && device.clieGamepad) {
+            // The face buttons X and Y are the CLIE's app buttons 2 and 3 in the default map; with the pad in they are its X and Y.
+            val routed = when (button) { PalmButton.APP2 -> PalmButton.PAD_X; PalmButton.APP3 -> PalmButton.PAD_Y; else -> button }
+            val scancode = padScancode(routed)
+            if (scancode != 0) { pushScancode(scancode, down); return }
+        }
         if (button.id !in device.buttons) return
         val key = sdlKey(button, device)
         if (key != 0) {
@@ -47,6 +59,26 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
         // In libmain.so, which SDLActivity loads.
         @JvmStatic external fun push(keycode: Int, down: Boolean)
 
+        // A key with its SDL scancode, for the keys the core maps to the game controller while it's plugged in.
+        @JvmStatic external fun pushScancode(scancode: Int, down: Boolean)
+
+        // The host keys the core maps to the pad (BuiltInKeyboardMapping.h): arrows, Z and X for A and B,
+        // A and S for X and Y, Q Home, W Menu and H Hold. SDL scancodes.
+        fun padScancode(button: PalmButton): Int = when (button) {
+            PalmButton.UP -> 82
+            PalmButton.DOWN -> 81
+            PalmButton.LEFT -> 80
+            PalmButton.RIGHT -> 79
+            PalmButton.PAD_A -> 29
+            PalmButton.PAD_B -> 27
+            PalmButton.PAD_X -> 4
+            PalmButton.PAD_Y -> 22
+            PalmButton.HOME -> 20
+            PalmButton.MENU -> 26
+            PalmButton.PAD_HOLD -> 11
+            else -> 0
+        }
+
         // How long the pen stays down for a tap, in ms.
         private const val TAP_MS = 80
 
@@ -75,6 +107,7 @@ class PalmButtons(private val device: Device, private val link: ControlLink, pri
             PalmButton.BACK -> scancodeKey(74)
             // The Zodiac's inputs go through ZodiacPad.
             PalmButton.FUNCTION, PalmButton.TRIGGER_LEFT, PalmButton.TRIGGER_RIGHT, PalmButton.STICK_PRESS -> 0
+            PalmButton.PAD_A, PalmButton.PAD_B, PalmButton.PAD_X, PalmButton.PAD_Y, PalmButton.PAD_HOLD -> 0
         }
 
         // Where Home and Menu are in the core's pen coordinates (screen pixels, the silkscreen below

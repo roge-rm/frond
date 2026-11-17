@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "CPU.h"
+#include "ClieGamepad.h"
 #include "IrKeyboard.h"
 #include <string>
 #include "fast_audio.h"
@@ -97,6 +98,14 @@ class SocPXA : public SocGeneric<SocPXA> {
     void AttachKeyboard(bool value) override;
     bool KeyboardKey(uint8_t code, bool down) override;
     void ReleaseKeyboard() override;
+
+    // PEGA-GC10 on the TG50 connector: owns the FFUART hooks, AUX and GPIO3 while attached.
+    bool GamepadSupported() const override;
+    bool GamepadAttached() const override { return gamepad.Attached(); }
+    bool AttachGamepad(bool attach, bool identify = true) override;
+    std::string GamepadState() const override;
+    bool GamepadHold() const override { return gamepad.Attached() && gamepad.HoldOn(); }
+    const ClieGamepad& Gamepad() const { return gamepad; }
 
     // One infrared accessory at a time. Hook ownership is host-only and is not
     // serialized. Reset/accepted load invalidate the peer; checkpoints do not.
@@ -212,6 +221,12 @@ class SocPXA : public SocGeneric<SocPXA> {
 
    private:
     IrKeyboard irKeyboard;
+    ClieGamepad gamepad;
+    bool gamepadLineLow{};  // GPIO3 as the pad last drove it; wiring, follows the loaded pad
+    void SyncGamepadLine();
+    bool GamepadPortReady();
+    void InstallGamepadHooks();
+    bool GamepadConnectorBusy() const;
     SerialHostHooks serialHostHooks{};
     IrHostHooks irHostHooks{};
     unsigned irReplacementDepth{};

@@ -65,6 +65,8 @@ struct DeviceFrontend5 {
     bool holdPresent{false}, holdSupported{false};
     int sideTabWidth{0};
     bool memoryStick{false};
+    // Takes the CLIÉ game controller (PEGA-GC10) on its interface connector.
+    bool clieGamepad{false};
 };
 
 struct DeviceProfile5 {
@@ -157,7 +159,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 0, 0,
      {true, "tg50", 320, 320, 0, 251, "Date Book|Address|To Do|Memo Pad",
       "up|down|app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, false, false, "", "tg50-clie",
-      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true},
+      DeviceStorageSlot5::memoryStick, 1073741887, true, true, 38, true, true},
      4 | 8 | 16 | 32 | 64 | 128, 1886, 200000000},
     // DragonBall EZ with 4 MiB RAM and a 2 MiB flash part, run by frond-68k. Takes the IIIx 3.1 ROMs, the
     // generic OS 3.5 EZ ROMs and the IIIx/V 4.1 ROM. Piezo, serial, IrDA and the snap-on Palm III modem; nothing else

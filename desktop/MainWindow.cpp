@@ -260,12 +260,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     }
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
         if (command == "speed-state" && runningPreferences.showMips) palmHolder->setMips(ok ? message : QString());
+        if (command == "gamepad-state" && ok) gamepadReply(message);
     });
     mipsTimer = new QTimer(this);
     mipsTimer->setInterval(1000);
     connect(mipsTimer, &QTimer::timeout, this, [this] { pollMips(); });
     printerTimer = new QTimer(this);
-    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); });
+    connect(printerTimer, &QTimer::timeout, this, [this] { printerPoll(); pollGamepad(); });
     printerTimer->start(1000);
     auto* danaPending = new QLabel(root);
     danaPending->setObjectName("danaPendingPeripherals"); danaPending->setEnabled(false); connectionsLayout->addWidget(danaPending);
@@ -541,18 +542,27 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard})
         jogBox->addItem(frondSessions::jogControlsLabel(jog, false), int(jog));
     displayGrid->addWidget(jogBox, 6, 1, 1, 2);
+    // Row 7 is shared with Speed, which only the 68k Palms show.
+    jogLandscapeLabel = label(tr("Jog in landscape"), 7, displayGrid);
+    jogLandscapeBox = new QComboBox(root);
+    jogLandscapeBox->setObjectName("runningJogLandscape");
+    for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                     frondSessions::JogLandscape::under, frondSessions::JogLandscape::over})
+        jogLandscapeBox->addItem(frondSessions::jogLandscapeLabel(jog), int(jog));
+    displayGrid->addWidget(jogLandscapeBox, 7, 1, 1, 2);
     speedLabel = label(tr("Speed"), 7, displayGrid);
     speedBox = new QComboBox(root);
     speedBox->setObjectName("runningSpeed");
     speedBox->addItem(tr("Original"), false);
     speedBox->addItem(tr("Uncapped"), true);
     displayGrid->addWidget(speedBox, 7, 1, 1, 2);
-    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, speedBox}) runningButtons << w;
+    for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, jogLandscapeBox, speedBox}) runningButtons << w;
     connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
     connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
     connect(mipsToggle, &QCheckBox::clicked, this, [this] { liveDisplay("mips"); });
     connect(keyboardShow, &QCheckBox::clicked, this, [this] { liveDisplay("keyboard"); });
     connect(jogBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jog"); });
+    connect(jogLandscapeBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("jogLandscape"); });
     connect(speedBox, qOverload<int>(&QComboBox::activated), this, [this] { liveDisplay("speed"); });
     auto* reset = button(tr("Reset"), "reset");
     resetButton = reset;
@@ -674,6 +684,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     addToolBar(Qt::TopToolBarArea, runningBar);
     runningBar->installEventFilter(this);
     connect(runningBar, &RunningBar::chosen, this, &MainWindow::barChosen);
+    connect(runningBar->menu(), &QMenu::aboutToShow, this, [this] { pollGamepad(); });
     connect(runningBar, &RunningBar::pressed, this, &MainWindow::barPressed);
     connect(runningBar, &RunningBar::networkChosen, this, [this](const QString& mode) {
         if (const auto index = network->findData(mode); index >= 0 && network->isEnabled()) { network->setCurrentIndex(index); emit network->activated(index); }
@@ -760,7 +771,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (exchangeDialog) exchangeDialog->reject();
         else endExchange();
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
-        holdKnown = holdOn = irdaQueued = false; showCamera("pattern");
+        holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); showCamera("pattern");
         mipsTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
@@ -1026,6 +1037,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         }
         if (command == "camera-state" || command == "camera-mode") { showCamera(message); refresh(); if (command == "camera-state") return; }
         if (command=="keyboard-state" || command=="keyboard-attach") keyboard->setChecked(message=="attached");
+        if (command == "gamepad") gamepadReply(message);
         if (command == "display" && contrastPending) {
             contrastPending = false;
             runningPreferences.contrast = contrast->value();
@@ -1245,6 +1257,7 @@ void MainWindow::refresh() {
     shown(currentDevice() == frondFirmware::deviceFromId("sony-clie-tg50"), {keyboardShow});
     const auto& jogFrontend = frondFirmware::profile(currentDevice()).frontend;
     shown(frondSessions::jogControlsShown(jogFrontend), {jogLabel, jogBox});
+    shown(frondSessions::jogLandscapeShown(jogFrontend), {jogLandscapeLabel, jogLandscapeBox});
     jogBox->setItemText(jogBox->findData(int(frondSessions::JogControls::keyboard)),
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(jogFrontend)));
     shown(m68k, {speedLabel, speedBox});
@@ -1332,6 +1345,9 @@ void MainWindow::refresh() {
     state.running = running;
     if (holdKnown) state.hold = holdOn;
     state.keyboardAttached = keyboard->isChecked();
+    if (gamepadState == "attached" || gamepadState == "detached") state.gamepad = gamepadState == "attached";
+    if (gamepadState == "busy") state.gamepad = false;
+    state.gamepadBusy = gamepadState == "busy";
     state.beamOff = irda->currentData() == "off";
     state.microphone = microphoneArmed ? "on" : microphoneState->text().isEmpty() ? "off" : "off " + microphoneState->text();
     state.network = network->currentData().toString();
@@ -1524,7 +1540,7 @@ void MainWindow::embedReply(bool ok, const QString& message) {
 // nothing named it only shows the settings in the controls.
 void MainWindow::liveDisplay(const QString& what) {
     if (what.isEmpty() || !client.available()) {
-        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox);
+        const QSignalBlocker a(sizeSlider), b(smoothToggle), m(mipsToggle), c(keyboardShow), d(jogBox), e(speedBox), f(jogLandscapeBox);
         if (!sizeSlider->isSliderDown()) sizeSlider->setValue(runningPreferences.scale);
         sizeLabel->setText(tr("Size: %1×").arg(sizeSlider->value() / 4.0));
         smoothToggle->setChecked(runningPreferences.smooth);
@@ -1532,6 +1548,7 @@ void MainWindow::liveDisplay(const QString& what) {
         updateMips();
         keyboardShow->setChecked(runningPreferences.showKeyboard);
         jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
+        jogLandscapeBox->setCurrentIndex(std::max(0, jogLandscapeBox->findData(int(runningPreferences.jogLandscape))));
         speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
         return;
     }
@@ -1551,6 +1568,9 @@ void MainWindow::liveDisplay(const QString& what) {
     else if (what == "jog") {
         prefs.jogControls = frondSessions::JogControls(jogBox->currentData().toInt());
         argument = "jog=" + frondSessions::jogControlsName(prefs.jogControls);
+    } else if (what == "jogLandscape") {
+        prefs.jogLandscape = frondSessions::JogLandscape(jogLandscapeBox->currentData().toInt());
+        argument = "jog-landscape=" + frondSessions::jogLandscapeName(prefs.jogLandscape);
     } else if (what == "speed") {
         prefs.uncapped = speedBox->currentData().toBool();
         command = "speed"; argument = prefs.uncapped ? "uncapped" : "original";
@@ -1629,12 +1649,37 @@ void MainWindow::afterDevice() {
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
          storageSupported() ? cardCommand("state") : "network-state");
 }
+// The game controller's state, asked in the background each second and when the Machine menu opens,
+// so a session load or a peripheral taking the connector shows in the menu.
+void MainWindow::pollGamepad() {
+    if (!client.running() || stopping || !frondFirmware::profile(runningDevice).frontend.clieGamepad) return;
+    client.requestBackground("gamepad-state");
+}
+// The reply to gamepad or gamepad-state. The machine setting follows the core, so a session loaded
+// with the other state keeps it on the next start; a pad the connector refused keeps the setting.
+void MainWindow::gamepadReply(const QString& message) {
+    const QString state = message.startsWith("attached") ? "attached" : message == "detached busy" ? "busy"
+                        : message == "detached" ? "detached" : QString();
+    if (state == gamepadState) return;
+    gamepadState = state;
+    const bool attached = state == "attached";
+    if (!sessionPath.isEmpty() && (state == "attached" || state == "detached") &&
+        (!runningPreferences.gamepadSet || runningPreferences.gamepad != attached)) {
+        runningPreferences.gamepad = attached;
+        runningPreferences.gamepadSet = true;
+        if (const auto error = frondSessions::writePreferences(sessionPath, runningPreferences); !error.isEmpty()) failure(error);
+    }
+    refresh();
+}
 void MainWindow::barChosen(runningRules::Id id) {
     using runningRules::Id;
     // Each row does what its control does, so the menu and the panels always agree.
     switch (id) {
         case Id::Hold: holdToggle->click(); break;
         case Id::Keyboard: keyboard->click(); break;
+        case Id::Gamepad:
+            if (gamepadState == "attached" || gamepadState == "detached") send("gamepad", gamepadState == "attached" ? "off" : "on");
+            break;
         case Id::Microphone: microphoneToggle->click(); break;
         case Id::Display: panels->open(2); break;
         case Id::Connections: panels->open(3); break;
@@ -1875,7 +1920,15 @@ void MainWindow::editSession(const QString& path) {
     if (const auto error = loadPreferences(path, device, &prefs); !error.isEmpty()) return failure(error);
     MachineSettingsDialog dialog(device, prefs, this);
     if (dialog.exec() != QDialog::Accepted) return;
-    if (const auto error = frondSessions::writePreferences(path, dialog.controls->values()); !error.isEmpty()) failure(error);
+    // The dialog doesn't edit the game controller; the file's current value stays, whatever the
+    // dialog was opened with.
+    auto values = dialog.controls->values();
+    frondSessions::Preferences current;
+    if (loadPreferences(path, device, &current).isEmpty()) {
+        values.gamepad = current.gamepad;
+        values.gamepadSet = current.gamepadSet;
+    }
+    if (const auto error = frondSessions::writePreferences(path, values); !error.isEmpty()) failure(error);
 }
 void MainWindow::renameSession(const QString& path) {
     const auto info = infoFor(path);
@@ -2154,6 +2207,7 @@ void MainWindow::startSession(const frondSessions::Info& info) {
 void MainWindow::launch(const QString& target, QStringList arguments, frondFirmware::Device startDevice) {
     sessionPath = target;
     holdKnown = holdOn = false;
+    gamepadState.clear();
     const auto caps = frondFirmware::capabilities(startDevice);
     const bool m68k = frondFirmware::runs68k(startDevice);
     if (m68k) {
@@ -2240,6 +2294,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         arguments << "--hide-keyboard";
     if (frondSessions::jogControlsShown(frondFirmware::profile(startDevice).frontend))
         arguments << "--jog-controls" << frondSessions::jogControlsName(runningPreferences.jogControls);
+    if (frondSessions::jogLandscapeShown(frondFirmware::profile(startDevice).frontend))
+        arguments << "--jog-controls-landscape" << frondSessions::jogLandscapeName(runningPreferences.jogLandscape);
+    // The machine's game controller setting wins over the session's at start.
+    if (frondFirmware::profile(startDevice).frontend.clieGamepad && runningPreferences.gamepadSet)
+        arguments << "--gamepad" << (runningPreferences.gamepad ? "on" : "off");
     // A saved machine in the managed folder: its slot (a linked card it takes now) gives the card
     // flags. frond-68k has no cards.
     finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};

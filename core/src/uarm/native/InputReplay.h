@@ -33,7 +33,7 @@ class InputReplay {
     const std::vector<std::string>& SnapshotResults() const { return snapshots; }
 
    private:
-    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, snapshot, stick, pause };
+    enum class Kind { penDown, penUp, keyDown, keyUp, keyboardDown, keyboardUp, keyboardAttach, gamepadAttach, snapshot, stick, pause };
     struct Event {
         uint64_t at;
         Kind kind;

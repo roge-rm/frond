@@ -57,4 +57,26 @@ inline GamepadInput zodiacGamepadInput(const GamepadState& pad) {
     return input;
 }
 
+// The CLIÉ game controller from a controller: the same face buttons by name, the d-pad or the left
+// stick past half travel for the arrows, Start or Guide Home, Back Menu, the right shoulder the
+// Hold slide (each press moves it).
+inline GamepadInput clieGamepadInput(const GamepadState& pad) {
+    GamepadInput input;
+    auto hold = [&](bool down, KeyId key) { if (down) input.keys |= deviceKeyBit(key); };
+    hold(pad.a, keyIdPadA);
+    hold(pad.b, keyIdPadB);
+    hold(pad.x, keyIdPadX);
+    hold(pad.y, keyIdPadY);
+    hold(pad.start || pad.guide, keyIdPadHome);
+    hold(pad.back, keyIdPadMenu);
+    hold(pad.rightShoulder, keyIdPadHold);
+    const int x = pad.dpadX ? pad.dpadX : pad.leftX > 16384 ? 1 : pad.leftX < -16384 ? -1 : 0;
+    const int y = pad.dpadY ? pad.dpadY : pad.leftY > 16384 ? 1 : pad.leftY < -16384 ? -1 : 0;
+    hold(x < 0, keyIdPadLeft);
+    hold(x > 0, keyIdPadRight);
+    hold(y < 0, keyIdPadUp);
+    hold(y > 0, keyIdPadDown);
+    return input;
+}
+
 #endif

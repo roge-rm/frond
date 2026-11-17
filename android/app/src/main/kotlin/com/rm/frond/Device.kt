@@ -88,6 +88,8 @@ data class Device internal constructor(
     val usbWifi: Boolean = false,
     // The Dana Wireless's built-in 802.11b module, with the network through the core's router.
     val builtInWifi: Boolean = false,
+    // Takes the CLIE game controller (PEGA-GC10) on its interface connector, run by the core.
+    val clieGamepad: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
     val runs68k: Boolean = false,
     val hotSyncButton: Boolean = false,

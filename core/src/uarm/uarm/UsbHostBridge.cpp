@@ -4,6 +4,10 @@
 #include "../../common/UsbHostBridge.cpp"
 bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error) {
     if(!soc) return Start(Backend{},config,error);
+    if(config.kind!=HostSerial::Kind::off && soc->GamepadAttached()){
+        error="The game controller is attached; detach it first.";
+        return false;
+    }
     Backend backend{
         [soc] { return soc->GetUsbPort(); },
         [soc](bool attached) { soc->SetUsbTestCable(attached); },
@@ -12,7 +16,8 @@ bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error)
         [soc] { return soc->UsbHostIoPaused(); },
         [soc] { return soc->GetTime(); },
         [soc] { soc->KickUsbHost(); },
-        [soc](const UsbHostHooks* hooks) { soc->SetUsbHostHooks(hooks); }
+        [soc](const UsbHostHooks* hooks) { soc->SetUsbHostHooks(hooks); },
+        [soc] { return !soc->GamepadAttached(); }
     };
     return Start(std::move(backend),config,error);
 }

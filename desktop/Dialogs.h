@@ -27,6 +27,9 @@ class MachineSettings : public QWidget {
     DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
+    // TG50: the jog controls in landscape with the game controller.
+    QComboBox* jogLandscape;
+    QLabel* jogLandscapeLabel;
     // Never shown for 68k devices.
     QComboBox* engine;
     // 68k devices only.

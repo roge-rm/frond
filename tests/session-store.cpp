@@ -995,6 +995,22 @@ class SessionStoreTest : public QObject {
         QCOMPARE(jogControlsLabel(JogControls::keyboard, false), QString("Left of keyboard"));
         QCOMPARE(jogControlsLabel(JogControls::keyboard, true), QString("Beside the buttons"));
         QCOMPARE(jogControlsName(JogControls::keyboard), QString("keyboard"));
+        // Jog in landscape: only where the game controller fits, beside by default and for older
+        // settings, each choice round trips.
+        QVERIFY(jogLandscapeShown(tg50) && !jogLandscapeShown(noKeyboard));
+        QVERIFY(Preferences{}.jogLandscape == JogLandscape::beside);
+        write(preferencesPath(one), R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true})");
+        QVERIFY(readPreferences(one, &loaded) && loaded.jogLandscape == JogLandscape::beside);
+        for (auto jog : {JogLandscape::hidden, JogLandscape::beside, JogLandscape::under, JogLandscape::over}) {
+            loaded.jogLandscape = jog;
+            QVERIFY(writePreferences(one, loaded).isEmpty());
+            Preferences roundTrip;
+            QVERIFY(readPreferences(one, &roundTrip) && roundTrip.jogLandscape == jog);
+            QFile saved(preferencesPath(one)); QVERIFY(saved.open(QIODevice::ReadOnly));
+            QCOMPARE(QJsonDocument::fromJson(saved.readAll()).object().value("jogControlsLandscape").toString(), jogLandscapeName(jog));
+        }
+        QCOMPARE(jogLandscapeLabel(JogLandscape::beside), QString("Left of controller"));
+        QCOMPARE(jogLandscapeLabel(JogLandscape::under), QString("Under screen"));
     }
     // A Palm IIIx session: one v8 file with no cards, its contrast and speed in the machine settings.
     void iiixSession() {

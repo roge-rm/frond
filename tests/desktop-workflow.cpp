@@ -2969,6 +2969,11 @@ s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 here=sys.argv[0].rsplit('/',1)[0]
 log=open(here+'/sent','a')
+open(here+'/args','w').write('\n'.join(sys.argv[1:]))
+# The game controller: --gamepad on attaches it at start; a "padbusy" file has serial holding the connector.
+pad=b'attached waiting' if '--gamepad' in sys.argv and sys.argv[sys.argv.index('--gamepad')+1]=='on' else b'detached'
+def padstate():
+    return b'detached busy' if pad==b'detached' and os.path.exists(here+'/padbusy') else pad
 # Lines put in the "emit" file go to the app as shortcut events.
 def emit():
     while True:
@@ -2992,7 +2997,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     text=bytes.fromhex(arg.decode())
     if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
-    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'camera-mode':
@@ -3005,6 +3010,11 @@ for line in s.makefile('rb'):
         s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic,b'camera-state':cam,b'camera-mode':cam}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
+    if cmd==b'gamepad':
+        if text==b'on' and padstate()!=b'detached':
+            s.sendall(i+b'\terror\tbusy\t'+b'The connector is in use.'.hex().encode()+b'\n'); continue
+        pad=b'attached waiting' if text==b'on' else b'detached'
+    if cmd in (b'gamepad',b'gamepad-state'): message=padstate()
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
@@ -3404,6 +3414,7 @@ for line in s.makefile('rb'):
         auto menuAction = [&](const char* name) { auto* a = window.findChild<QAction*>(name); if (!a) qWarning("no %s", name); return a; };
         // The T|X has no Hold; the rows it has are there and the others are not.
         QVERIFY(!menuAction("machineHold")->isVisible());
+        QVERIFY(!menuAction("machineGamepad")->isVisible());
         QVERIFY(menuAction("machineMicrophone")->isVisible() && !menuAction("machineMicrophone")->isEnabled());
         for (auto* name : {"machineKeyboard", "machineNetwork", "machineScreenshot", "machineSave", "machineReset"})
             QTRY_VERIFY2_WITH_TIMEOUT(menuAction(name)->isVisible() && menuAction(name)->isEnabled(), name, 4000);
@@ -3483,6 +3494,113 @@ for line in s.makefile('rb'):
         QCOMPARE(menus, QStringList({"&File", "&Help"}));
         answer.stop();
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // The TG50's Game controller row: attaches and detaches live, greys while the connector is
+    // taken, and is saved for the machine and passed at the next start.
+    // TG50 Jog in landscape: started with the saved choice, changed live from the Display panel and saved.
+    void jogLandscapeLive() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Jog", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        frondSessions::Preferences prefs;
+        prefs.jogLandscape = frondSessions::JogLandscape::over;
+        QVERIFY(frondSessions::writePreferences(managedSession("Jog"), prefs).isEmpty());
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Jog"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        QFile f(files.path() + "/args"); QVERIFY(f.open(QIODevice::ReadOnly));
+        const auto arguments = QString::fromUtf8(f.readAll()).split('\n');
+        const auto at = arguments.indexOf("--jog-controls-landscape");
+        QVERIFY(at >= 0 && at + 1 < arguments.size() && arguments.at(at + 1) == "over");
+        window.findChild<PanelHost*>("panelHost")->open(2);
+        auto* box = window.findChild<QComboBox*>("runningJogLandscape");
+        QVERIFY(box && !box->isHidden());
+        QCOMPARE(box->count(), 4);
+        QCOMPARE(box->currentText(), QString("Over screen"));
+        QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 4000);
+        box->setCurrentIndex(box->findData(int(frondSessions::JogLandscape::under)));
+        emit box->activated(box->currentIndex());
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display jog-landscape=under"), 4000);
+        frondSessions::Preferences kept;
+        QVERIFY(frondSessions::readPreferences(managedSession("Jog"), &kept));
+        QVERIFY(kept.jogLandscape == frondSessions::JogLandscape::under);
+    }
+    void clieGamepadSwitch() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pad", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        auto args = [&] {
+            QFile f(files.path() + "/args"); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n');
+        };
+        auto saved = [&] {
+            frondSessions::Preferences kept;
+            if (!frondSessions::readPreferences(managedSession("Pad"), &kept)) return QString("none");
+            return kept.gamepadSet ? QString(kept.gamepad ? "on" : "off") : QString("unset");
+        };
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            auto* bar = window.findChild<RunningBar*>("runningBar");
+            QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            // No setting yet: the session's state stays at start.
+            QVERIFY(!args().contains("--gamepad"));
+            auto* row = window.findChild<QAction*>("machineGamepad");
+            QTRY_VERIFY_WITH_TIMEOUT(row->isVisible() && row->isEnabled() && !row->isChecked(), 5000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad on"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("on"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad off"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("off"));
+            // Serial takes the connector: the row greys with the reason, found by the poll.
+            { QFile busy(files.path() + "/padbusy"); QVERIFY(busy.open(QIODevice::WriteOnly)); }
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller (connector in use)"));
+            QVERIFY(QFile::remove(files.path() + "/padbusy"));
+            QTRY_VERIFY_WITH_TIMEOUT(row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // The next start passes the machine's choice.
+        QCOMPARE(saved(), QString("on"));
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            const auto list = args();
+            const auto at = list.indexOf("--gamepad");
+            QVERIFY(at >= 0 && list.value(at + 1) == "on");
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineGamepad")->isChecked(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
@@ -4076,6 +4194,7 @@ for line in s.makefile('rb'):
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             frondSessions::Preferences prefs;
             prefs.showKeyboard = keyboard; prefs.jogControls = jog; prefs.microphone = true;
+            prefs.jogLandscape = frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4);
             QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
             QFile::remove(core.fileName() + ".args");
             MainWindow window(core.fileName()); window.show(); window.openSession(path, true);
@@ -4087,9 +4206,14 @@ for line in s.makefile('rb'):
             QVERIFY(at >= 0 && at + 1 < arguments.size());
             QCOMPARE(QString::fromUtf8(arguments.at(at + 1)), frondSessions::jogControlsName(jog));
             QVERIFY(!arguments.contains("--hide-jog-controls"));
+            const auto landscape = arguments.indexOf("--jog-controls-landscape");
+            QVERIFY(landscape >= 0 && landscape + 1 < arguments.size());
+            QCOMPARE(QString::fromUtf8(arguments.at(landscape + 1)),
+                     frondSessions::jogLandscapeName(frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4)));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(frondSessions::readPreferences(path, &prefs));
             QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.jogControls, jog);
+            QVERIFY(prefs.jogLandscape == frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4));
             QVERIFY(prefs.microphone);
             QCOMPARE(digest(path), guest);
         }
@@ -4110,6 +4234,19 @@ for line in s.makefile('rb'):
         QCOMPARE(controls.jogControls->itemText(2), QString("Left of keyboard"));
         QCOMPARE(controls.jogControls->currentText(), QString("Left of screen"));
         QCOMPARE(MachineSettings(frondSessions::Preferences{}, false).jogControls->currentText(), QString("Left of keyboard"));
+        QVERIFY(!controls.jogLandscape->isHidden() && !controls.jogLandscapeLabel->isHidden());
+        QCOMPARE(controls.jogLandscapeLabel->text(), QString("Jog in landscape"));
+        QCOMPARE(controls.jogLandscape->count(), 4);
+        QCOMPARE(controls.jogLandscape->itemText(0), QString("Hidden"));
+        QCOMPARE(controls.jogLandscape->itemText(1), QString("Left of controller"));
+        QCOMPARE(controls.jogLandscape->itemText(2), QString("Under screen"));
+        QCOMPARE(controls.jogLandscape->itemText(3), QString("Over screen"));
+        QCOMPARE(controls.jogLandscape->currentText(), QString("Left of controller"));
+        for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                         frondSessions::JogLandscape::under, frondSessions::JogLandscape::over}) {
+            controls.jogLandscape->setCurrentIndex(int(jog));
+            QVERIFY(controls.values().jogLandscape == jog);
+        }
         for (bool keyboard : {false, true})
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             controls.showKeyboard->setChecked(keyboard); controls.jogControls->setCurrentIndex(int(jog));
@@ -4121,6 +4258,7 @@ for line in s.makefile('rb'):
         controls.setDevice(frondFirmware::Device::tx);
         QVERIFY(controls.showKeyboard->isHidden());
         QVERIFY(controls.jogControls->isHidden() && controls.jogControlsLabel->isHidden());
+        QVERIFY(controls.jogLandscape->isHidden() && controls.jogLandscapeLabel->isHidden());
         QVERIFY(controls.values().microphone);
     }
     void legacyTg50KeepsJogBesideScreen() {

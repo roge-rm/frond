@@ -33,6 +33,8 @@ template <typename T> void tg50BoardSave(Tg50Board *, T &);
 template <typename T> bool tg50BoardLoad(Tg50Board *, T &, bool preserveInput);
 bool tg50BoardIrPowerEnabled(Tg50Board *);
 void tg50BoardSetUsbCable(Tg50Board *, bool connected);
+// AD7873 AUX in mV, the connector accessory's ID resistor.
+void tg50BoardSetAccessoryAux(Tg50Board *, uint16_t mV);
 bool tg50BoardUsbCableAttached(Tg50Board *);
 bool tg50BoardUsbListening(Tg50Board *);
 void tg50BoardSetTransportObserver(Tg50Board *, void (*)(void *), void *);

@@ -103,13 +103,17 @@ class SdlEventHandler {
         SDL_TouchID touch{};
         SDL_FingerID id{};
         KeyId key{keyInvalid};
+        // A second key held by the same finger: the pad arrow's neighbour on a diagonal.
+        KeyId also{keyInvalid};
         DeviceStick position{};
         // Put down on the knob and not yet moved, in window pixels.
         bool pressPending{false};
         float downX{0}, downY{0};
     };
     std::array<Finger,16> fingers{};
-    const DeviceControlProfile& controls;
+    // The shown profile; one made from the device follows the view's game controller.
+    const DeviceControlProfile* shownControls;
+    bool followsDevice{false};
     DeviceControlView controlView;
     KeyId pointerKey{keyInvalid};
     // The pointer holding the stick, and arrow keys standing in for it (up, down, left, right).

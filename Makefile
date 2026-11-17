@@ -1090,6 +1090,20 @@ test: test-tg50-voicerec
 test-tg50-voicerec: out/frond
 	python3 tests/tg50-voicerec.py
 
+# CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
+# skips without the TG50 smoke session (tests/clie-gamepad.py).
+.PHONY: test-clie-gamepad
+test: test-clie-gamepad
+test-clie-gamepad: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/clie-gamepad-model.cpp core/src/common/libcommon.a -o build/test-clie-gamepad-model
+	./build/test-clie-gamepad-model
+ifeq ($(FROND_TG50_SESSION),)
+	@echo "test-clie-gamepad: TG50 session part skipped, no FROND_TG50_SESSION"
+else
+	python3 tests/clie-gamepad.py
+endif
+
 # TG50 USB HotSync over a PTY with pilot-link; skips without the TG50 session (make smoke-sessions) or pilot-link.
 .PHONY: test-tg50-usb-hotsync
 test-tg50-usb-hotsync: out/frond

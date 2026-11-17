@@ -221,7 +221,7 @@ open class FrondActivity : SDLActivity() {
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
@@ -341,7 +341,7 @@ open class FrondActivity : SDLActivity() {
             cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -578,9 +578,45 @@ open class FrondActivity : SDLActivity() {
         }, "FrondFirmware").apply { isDaemon = true }.start()
     }
 
+    private var palmButtons: PalmButtons? = null
+    private var padAttached = false
+
+    // The CLIE game controller went in or out; held controller keys let go first.
+    fun gamepadAttached(on: Boolean) {
+        runOnUiThread {
+            if (padAttached == on) return@runOnUiThread
+            controller.releaseAll()
+            padAttached = on
+            palmButtons?.padAttached = on
+        }
+    }
+
+    // The pad state the core reports (RunningMenu.gamepadState): the buttons follow it, and an
+    // attached or detached state becomes the machine's setting, so a session loaded with its own
+    // state keeps it on the next start. A busy connector leaves the setting.
+    fun gamepadStateRead(state: String?) {
+        gamepadAttached(state == "attached")
+        runOnUiThread {
+            val next = machineSettings.gamepadFromCore(state) ?: return@runOnUiThread
+            machineSettings = next
+            val attached = next.gamepad ?: return@runOnUiThread
+            val path = sessionPath
+            Thread({
+                try {
+                    val id = Sessions.forPath(applicationContext, path)?.id ?: return@Thread
+                    Sessions.updateSettings(applicationContext, id) { it.copy(gamepad = attached) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "game controller setting: ${e.message}")
+                }
+            }, "FrondGamepadSetting").apply { isDaemon = true }.start()
+        }
+    }
+
     private fun configureController(device: Device) {
         controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
+        buttons.padAttached = padAttached
+        palmButtons = buttons
         controller = ControllerInput(ControllerMap.load(this, device), buttons::press)
     }
 
@@ -812,7 +848,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
             changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
         }
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (wanted == display) return
         display = wanted
         link.whenConnected {
@@ -918,6 +954,10 @@ open class FrondActivity : SDLActivity() {
             return
         }
         Thread({
+            if (launchDevice().clieGamepad) {
+                val pad = link.request("gamepad-state", timeoutSeconds = 60)
+                if (pad.ok) gamepadStateRead(RunningMenu.gamepadState(pad.message))
+            }
             val reply = link.request("keyboard-state", timeoutSeconds = 60)
             if (!reply.ok) return@Thread
             val attached = reply.message == "attached"
@@ -1013,6 +1053,7 @@ open class FrondActivity : SDLActivity() {
         val model = menuModel ?: return
         model.readKeyboard()
         model.readHold()
+        model.readGamepad()
         model.readNetwork()
         model.readMicrophone()
         model.readCard()
@@ -1031,6 +1072,7 @@ open class FrondActivity : SDLActivity() {
         when (id) {
             RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
             RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
+            RunningMenu.Id.GAMEPAD -> model.changeGamepad(model.gamepad != "attached")
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()

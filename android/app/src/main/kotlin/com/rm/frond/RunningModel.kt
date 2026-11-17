@@ -113,6 +113,7 @@ class RunningModel(
                 readCard()
                 readKeyboard()
                 readHold()
+                readGamepad()
                 readNetwork()
                 readRadio()
             }
@@ -616,6 +617,7 @@ class RunningModel(
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
+                if (next.jogLandscape != old.jogLandscape) s = s.copy(jogLandscape = next.jogLandscape)
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
@@ -715,6 +717,40 @@ class RunningModel(
             val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
             if (reply.ok) activity.runOnUiThread { keyboard = reply.message == "attached" }
             if (reply.ok) null else reply.message
+        }
+    }
+
+    // The CLIE game controller: see RunningMenu.State.gamepad.
+    var gamepad by mutableStateOf<String?>(null)
+        private set
+
+    fun readGamepad() {
+        val l = link ?: return
+        if (!device.clieGamepad || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("gamepad-state", timeoutSeconds = 30) }
+            if (reply.ok) adoptGamepad(reply.message)
+        }
+    }
+
+    private fun adoptGamepad(message: String) {
+        gamepad = RunningMenu.gamepadState(message)
+        FrondActivity.running?.gamepadStateRead(gamepad)
+    }
+
+    // Plugs the pad in or out without a reset, and keeps the choice as the machine's setting.
+    fun changeGamepad(on: Boolean) {
+        if (!device.clieGamepad || gamepad == null) return
+        device(if (on) "Plugging in" else "Unplugging", "Couldn't change the game controller", false) { l ->
+            val changed = l.request("gamepad", if (on) "on" else "off", timeoutSeconds = 30)
+            val current = l.request("gamepad-state", timeoutSeconds = 30)
+            if (current.ok) activity.runOnUiThread { adoptGamepad(current.message) }
+            if (changed.ok) {
+                sessionId?.let { id ->
+                    try { Sessions.updateSettings(activity.applicationContext, id) { it.copy(gamepad = on) } } catch (_: Exception) {}
+                }
+            }
+            if (!changed.ok) changed.message else if (!current.ok) current.message else null
         }
     }
 
