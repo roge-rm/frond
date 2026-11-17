@@ -118,7 +118,12 @@ class Imx1Ymf768 {
         if (!A::loading) saveEngine(engine);
         a.DoVector(engine, engineStateBytes());
         a.Require(engine.size() == engineStateBytes() && (!A::loading || engineStateValid(engine)), "ymf768 engine");
-        if (A::loading && a.ok()) { loadEngine(engine); quietOutput = false; }
+        if (A::loading && a.ok()) {
+            loadEngine(engine);
+            // States saved before the MA-2 mapping hold operator registers as the old mapping wrote them.
+            for (unsigned slot = 0; slot < 32; ++slot) syncOperator(slot, true);
+            quietOutput = false;
+        }
     }
 
     // SSI1 word mixing: slot 0 makes a frame and keeps its right half for the slot 1 word.
@@ -168,7 +173,7 @@ class Imx1Ymf768 {
     // Channels 3 and 11 have no OPL3 four-operator pair; they run as two FM pairs added.
     static bool emulatedPair(unsigned ch) { return ch == 3 || ch == 11; }
     void engineWrite(unsigned reg, uint8_t value);
-    void syncOperator(unsigned slot);
+    void syncOperator(unsigned slot, bool onlyChanged = false);
     void syncAlgorithm(unsigned first);
     void syncFrequency(unsigned ch);
     void sample(int32_t& left, int32_t& right);
