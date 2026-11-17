@@ -230,7 +230,8 @@ def sleep(core, root, name):
         reply = core.send('db-list', LIST_REPLIES, 60).strip()
         if 'the Palm is asleep' in reply:
             break
-        if 'FrondSyncLog' in reply or time.monotonic() > end:
+        # The DAL can still answer for a moment after the LCD goes off: retry until the deadline.
+        if time.monotonic() > end:
             raise AssertionError(f'db-list on a sleeping Palm should say it is asleep: {reply!r}')
         time.sleep(0.5)
     if core.frame(root / f'{name}-listed.png') is not None:
@@ -269,7 +270,7 @@ def asleep(core, device, root, memo):
     if 'successful' not in reply:
         raise AssertionError(f'install while asleep should wake the Palm and succeed: {reply!r}')
     if 'FrondSyncLog' not in core.send('db-list', LIST_REPLIES, 60):
-        raise AssertionError('db-list after the install woke the Palm')
+        raise AssertionError('db-list after the install should list, so the Palm is awake')
     time.sleep(2)
     if core.frame(root / 'woken-1.png') is None or core.frame(root / 'woken-2.png') is None:
         raise AssertionError('the screen went dark after waking')

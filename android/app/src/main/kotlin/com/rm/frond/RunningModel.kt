@@ -95,6 +95,8 @@ class RunningModel(
     // Asking for a database name: "launch", "export" or "other" (the sheets' by-name dialog), with the RAM databases found for the list.
     var naming by mutableStateOf<String?>(null)
     var found by mutableStateOf(emptyList<PalmDatabases.Info>())
+    // Shown for an empty list in the by-name dialog, e.g. while the Palm is asleep.
+    var foundNote by mutableStateOf<String?>(null)
 
     val available get() = card != null
 
@@ -475,18 +477,22 @@ class RunningModel(
         val d = databases ?: return
         if (busy != null || naming != null || waiting()) return
         found = emptyList()
+        foundNote = null
         naming = what
         listing = true
         val asked = ++asks
         activity.lifecycleScope.launch {
+            var note: String? = null
             val list = withContext(Dispatchers.IO) {
                 try { d.list() } catch (e: Exception) {
                     Log.w(FrondActivity.TAG, "database list: ${e.message}")
+                    if (e is PalmDatabases.Failed && e.code == "asleep") note = "The Palm is asleep"
                     emptyList()
                 }
             }
             // A later question has its own list coming.
             if (asked != asks) return@launch
+            foundNote = note
             found = if (what == "launch") list.filter { it.application } else list
             listing = false
         }

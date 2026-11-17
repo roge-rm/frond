@@ -3747,7 +3747,9 @@ for line in s.makefile('rb'):
         QVERIFY(apps->findChild<QLabel*>("appsEmpty")->isVisible());
         QCOMPARE(commands().filter(QRegularExpression("^db-list")).last(), QString("db-list "));
         for (auto* box : window.findChildren<QMessageBox*>()) QVERIFY(!box->isVisible());
+        // Turned on by hand: the open panel asks again by itself and shows the list.
         QFile::remove(files.filePath("asleep"));
+        QTRY_VERIFY_WITH_TIMEOUT(!apps->names().isEmpty(), 6000);
         press("Ctrl+1");
         QTRY_COMPARE_WITH_TIMEOUT(panels->current(), -1, 2000);
         answer.stop();

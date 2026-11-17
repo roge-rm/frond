@@ -98,7 +98,7 @@ class SoC {
     void KeyDown(enum KeyId key);
     void KeyUp(enum KeyId key);
     // A power press from the host the guest may not have had yet: held, queued or jammed.
-    bool PowerKeyPending() const;
+    bool PowerKeyPending();
     void PenDown(int x, int y);
     void PenUp();
     // The clock key and pen events are stamped with, in milliseconds; null is the host's steady clock.
@@ -275,6 +275,8 @@ class SoC {
 
     uint64_t eventQueueTicks{0};
     uint64_t eventQueueTicksAtPenDown{0};
+    bool powerPopped{false};  // a power event reached the guest; powerPoppedAt is its time
+    uint64_t powerPoppedAt{0};
     bool powerHeld{false};  // the host holds power, from KeyDown to KeyUp
     KeyId jammedKey{keyInvalid};
     uint64_t releaseJammedKeyAt{0};

@@ -1375,6 +1375,7 @@ void MainWindow::panelChanged(int page) {
         placeOverlays();
         if (page < 0 && overlayBarShown) overlayTimer->start();
     }
+    if (page != 0 && appsRetryTimer) appsRetryTimer->stop();
     if (page == 0) { appsStale = true; listApps(); }
     setPanelOpen(page >= 0);
 }
@@ -2849,8 +2850,16 @@ void MainWindow::databasesReply(bool ok, const QString& code, const QString& mes
     if (!ok && code == "asleep") {
         knownDatabases.clear();
         appsPanel->setDatabases({}, tr("The Palm is asleep"));
+        // A plain db-list never wakes it; ask again until the Palm is on, while the panel stays open.
+        if (!appsRetryTimer) {
+            appsRetryTimer = new QTimer(this);
+            appsRetryTimer->setSingleShot(true);
+            connect(appsRetryTimer, &QTimer::timeout, this, [this] { appsStale = true; listApps(); });
+        }
+        if (panels->current() == 0) appsRetryTimer->start(2000);
         return;
     }
+    if (appsRetryTimer) appsRetryTimer->stop();
     // A list that can't be had (Palm OS still starting) is left as it was.
     if (!ok) { log->appendPlainText("db-list: " + message); return; }
     knownDatabases = all;

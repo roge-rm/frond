@@ -42,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -96,7 +97,14 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
 
 @Composable
 private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
-    LaunchedEffect(Unit) { model.loadApps() }
+    // While the list says the Palm is asleep, ask again every 2 s (a plain list never wakes it).
+    LaunchedEffect(Unit) {
+        model.loadApps()
+        while (true) {
+            delay(2000)
+            if (model.appsNote != null) model.loadApps()
+        }
+    }
     var exportName by rememberSaveable { mutableStateOf<String?>(null) }
     var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.install(uris) }
@@ -165,6 +173,7 @@ private fun OtherDatabaseDialog(model: RunningModel, onLaunch: (String) -> Unit,
             Column {
                 OutlinedTextField(name, { name = it }, label = { Text("Database name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 if (model.listing) Progress()
+                else if (shown.isEmpty() && model.foundNote != null) EmptyNote(model.foundNote!!)
                 else if (shown.isNotEmpty()) {
                     LazyColumn(Modifier.padding(top = 8.dp).heightIn(max = 240.dp)) {
                         items(shown, key = { it.name }) { db ->
