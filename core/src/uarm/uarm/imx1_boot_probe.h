@@ -24,6 +24,9 @@ struct Imx1ProbeTrace {
     uint64_t step;
     uint32_t pc, instruction, cpsr, operand;
     uint32_t instructionSize;
+    // False when the fetch at pc aborted: no instruction was fetched and instruction is 0. Sits in the padding,
+    // so the struct's size doesn't change, and isn't saved in states (a load sets it true).
+    bool fetched = true;
 };
 struct Imx1ProbeAccess {
     uint64_t step;
@@ -235,9 +238,11 @@ uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
 // Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
 uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
-// Whether data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T, for
-// every machine in the process. Off (the default), the machine stops on them. CP15 refusals still stop.
-void imx1SetGuestExceptions(bool on);
+// Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
+// ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
+// Execution thread, between runs; false inside a bounded run or after stop.
+bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on);
+bool imx1MachineGuestExceptions(const Imx1Machine* machine);
 // The graphics FIFO wait's rounds Fast blocks passed at once, since the process started: the times and the rounds.
 // imx1SetFifoWaitSkip(false) turns the skip off, for tests.
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);

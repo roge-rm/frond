@@ -23,6 +23,8 @@ struct ArmCP15MMU {
     uint32_t ttb;
     uint32_t FSR;  // fault sttaus register
     uint32_t FAR;  // fault address register
+    // ARM920T prefetch abort FSR (c5, op2 1), set on prefetch aborts. Not saved in machine states.
+    uint32_t IFSR;
 
     union {
         struct {
@@ -105,6 +107,12 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
         // and the Zodiac ROM's abort handler (200c8f60) reads them as c5,c5 and c6,c6.
         if ((CRn == 5 || CRn == 6) && op2 == 0 && read) {
             cpuSetReg(cpu, Rx, CRn == 5 ? cp15->FSR : cp15->FAR);
+            return true;
+        }
+        // DDI0151C register 5: opcode_2 1 is the prefetch abort FSR, read and written like the data FSR.
+        if (CRn == 5 && CRm == 0 && op2 == 1) {
+            if (read) cpuSetReg(cpu, Rx, cp15->IFSR);
+            else cp15->IFSR = val;
             return true;
         }
         if (CRm == 0 && op2 == 0) {
@@ -494,7 +502,7 @@ void cp15MMUConfigureArm920Bootstrap(struct ArmCP15MMU* cp15) {
     cp15->control = 0x78;  // DDI0151C table 2-10, assuming VINITHI low.
     cp15->mmuSwitchCy = 0;
     cp15->ttb = 0;
-    cp15->FSR = cp15->FAR = 0;
+    cp15->FSR = cp15->FAR = cp15->IFSR = 0;
     cp15->dataCache.reset();
     cpuClearSlowPath(cp15->cpu, SLOW_PATH_REASON_CP15);
     icacheConfigureArm920(cp15->ic);
@@ -507,6 +515,10 @@ void cp15MMUConfigureArm920Bootstrap(struct ArmCP15MMU* cp15) {
 void cp15MMUSetFaultStatus(struct ArmCP15MMU* cp15, uint32_t addr, uint_fast8_t faultStatus) {
     cp15->FAR = addr;
     cp15->FSR = faultStatus;
+}
+
+void cp15MMUSetInstructionFaultStatus(struct ArmCP15MMU* cp15, uint_fast8_t faultStatus) {
+    cp15->IFSR = faultStatus;
 }
 
 template <typename T>
@@ -589,6 +601,8 @@ void cp15MMUArm920Apply(ArmCP15MMU* cp, const Arm920SavedState& s) {
     cp->ttb = s.ttb;
     cp->FSR = s.fsr;
     cp->FAR = s.far;
+    // Not in the saved layout: a loaded machine starts with it clear.
+    cp->IFSR = 0;
     cp->mmuSwitchCy = s.mmuSwitchCy;
     auto& dc = cp->dataCache;
     for (unsigned segment = 0; segment < 8; ++segment)

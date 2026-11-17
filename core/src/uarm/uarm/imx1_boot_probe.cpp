@@ -69,10 +69,6 @@ uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0,
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
 bool scanPollSkip = true, fifoWaitSkip = true;
-// Data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T. Off, the
-// machine stops on them (cpu-exception, unsupported-instruction). Off by default for the probe and its tests;
-// SocIMX1 turns it on unless FROND_ZODIAC_STOP_ON_EXCEPTION is set.
-bool guestExceptions = false;
 // Fast blocks: the YMF768 ready wait's tries passed at once (skipReadyWait), and the last try it saw: its timer
 // count and counter, and the stack it was on. readyWaitSkip false turns the skip off, for tests.
 uint64_t readyWaitSkips = 0, readyWaitTries = 0;  // for tests
@@ -278,6 +274,10 @@ struct Probe {
     // fastJit: Dynarmic blocks run there first (cpuArm920RunJit), falling back to the lean path and the step.
     // fastBlocks is whether Fast may use them (on by default, off for lean-only runs).
     bool fastEngine = false, fastJit = false, fastBlocks = fastBlocksDefault;
+    // Data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T. Off, the
+    // machine stops on them (cpu-exception, unsupported-instruction). Off for the probe and its tests; SocIMX1
+    // turns it on unless FROND_ZODIAC_STOP_ON_EXCEPTION is set (imx1MachineSetGuestExceptions). Not saved.
+    bool guestExceptions = false;
     Imx1BootstrapAccess driveGraphicsLine(const Imx1Cs5Configuration& candidate, bool commit) {
         if (!options.graphicsIrqA13) return Imx1BootstrapAccess::ok;
         const auto line = candidate.interruptState().interruptOutput();
@@ -1989,8 +1989,10 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     // A fetch that aborts goes to the prefetch abort vector in the step below, outside a Thumb BL pair.
     bool fetchAbort = false;
     if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
+        t.instruction = 0;
+        t.fetched = false;
         if (p->failed) return false;
-        if (!guestExceptions || p->blPrefix) {
+        if (!p->guestExceptions || p->blPrefix) {
             p->result.stop = Imx1ProbeStop::exception;
             p->result.address = t.pc;
             p->result.value = fsr;
@@ -1998,7 +2000,6 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
             return false;
         }
         fetchAbort = true;
-        t.instruction = 0;
     }
     if (!fetchAbort && t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
         const unsigned source = (t.instruction >> 12) & 15;
@@ -2013,7 +2014,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
          (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
                                                                         cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR)))));
     // A refused ARM instruction passed its condition, so an undefined one here takes the exception.
-    const bool undefined = refused && guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
+    const bool undefined = refused && p->guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
                            undefinedInstruction(t.instruction, thumb);
     if (refused && !undefined) {
         p->result.stop = Imx1ProbeStop::unsupportedInstruction;
@@ -2056,7 +2057,7 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     const bool softwareEntry = softwareInterrupt(t.instruction, thumb) &&
                                (thumb || condition(t.instruction, t.cpsr));
     const bool entered = cpuExceptionSequence(p->cpu) != exceptions;
-    const bool guestTaken = entered && guestExceptions &&
+    const bool guestTaken = entered && p->guestExceptions &&
                             !(!fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10) &&
                             guestEntry(p->cpu, t, exceptions, undefined, fetchAbort);
     if ((entered && !guestTaken &&
@@ -2326,7 +2327,13 @@ uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
 uint64_t imx1MachineScanHalts(const Imx1Machine*) { return scanHalts; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
-void imx1SetGuestExceptions(bool on) { guestExceptions = on; }
+bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
+    auto* p = machine->probe;
+    if (p->bounds || p->stopped) return false;
+    p->guestExceptions = on;
+    return true;
+}
+bool imx1MachineGuestExceptions(const Imx1Machine* machine) { return machine->probe->guestExceptions; }
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
 void imx1SetFifoWaitSkip(bool skip) { fifoWaitSkip = skip; }

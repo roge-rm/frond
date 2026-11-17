@@ -56,7 +56,9 @@ class Imx1GraphicsLookup {
     }
     static constexpr uint32_t stateVersion = 1;
     template <class A> void state(A& a) {
-        for (auto& e : writable()) a.Do32(e.first).Do32(e.second).DoBool(e.firstKnown).DoBool(e.secondKnown);
+        // A save only reads the table, so a shared one isn't copied.
+        Entries& table = A::loading ? writable() : *entries;
+        for (auto& e : table) a.Do32(e.first).Do32(e.second).DoBool(e.firstKnown).DoBool(e.secondKnown);
         a.Do32(index).DoBool(selected).DoBool(indexed).DoBool(secondPending);
         a.Require(index <= entries->size(), "lookup index");
     }

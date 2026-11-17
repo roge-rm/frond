@@ -99,9 +99,6 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     soc->rom.assign(romData, romData + size);
     soc->eeprom = std::make_unique<Imx1I2cReadWindow>(image);
     Imx1ProbeResult failure{};
-    // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
-    // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
-    imx1SetGuestExceptions(!std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));
     soc->machine = imx1MachineCreate(soc->rom.data(), uint32_t(size), Imx1ProbeEntry::physicalFlash, false,
                                      zodiacMachineOptions(soc->eeprom.get()), nullptr, nullptr, &failure);
     if (!soc->machine) {
@@ -109,6 +106,9 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         return nullptr;
     }
     imx1MachineEnableYmf768(soc->machine);
+    // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
+    // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
+    imx1MachineSetGuestExceptions(soc->machine, !std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));
     // The state before the first instruction, which Reset loads again.
     if (imx1MachineSaveState(soc->machine, soc->powerOn, "power-on") != Imx1StateStatus::ok) {
         error = "the i.MX1 machine's power-on state could not be kept";
