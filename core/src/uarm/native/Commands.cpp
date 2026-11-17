@@ -325,7 +325,7 @@ namespace {
         if (args.size() != 1) return env.PrintUsage();
 
         uint32_t timeout;
-        if (!(istringstream(args[0]) >> timeout)) {
+        if (!(istringstream(args[0]) >> timeout) || timeout > 0xffff) {
             cout << "invalid timeout" << endl;
             return env.PrintUsage();
         }
@@ -351,7 +351,14 @@ namespace {
             return;
         }
 
-        syscall_SysSetAutoOffTime(sd, SC_EXECUTE_PURE, timeout);
+        // The 68k trap goes through PACE to the OS's own SysSetAutoOffTime. The ARM call by
+        // table offset read a bad address on the TX and reset it.
+        try {
+            syscall68k_SysSetAutoOffTime(sd, SC_EXECUTE_FULL, timeout);
+            cout << "auto-off set to " << timeout << " s" << endl;
+        } catch (const std::exception& error) {
+            cout << "set-auto-off failed: " << error.what() << endl;
+        }
     }
 
     void CmdInstall(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -598,7 +605,7 @@ namespace {
          {.name = "os-version", .description = "Retrieve OS version. ", .cmd = CmdOsVersion},
          {.name = "set-auto-off",
           .usage = "set-auto-off <timeout>",
-          .description = "Set auto off timeout (warning: wakeup will currently fail). ",
+          .description = "Set the auto-off time in seconds until the next reset, 0 for never.",
           .cmd = CmdSetAutoOff},
          {.name = "install",
           .usage = "install <database>",
