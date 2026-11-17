@@ -72,6 +72,7 @@ class SoC {
     // changes, on the instruction that changes it. maxCycles stays in cyclesPerSecond units, and so does
     // what the call returns. A slower cyclesPerSecond (a host that can't keep up) runs at that rate.
     void SetFollowCoreClock(bool follow) { followCoreClock = follow; }
+    bool FollowsCoreClock() const { return followCoreClock; }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
 #ifndef __EMSCRIPTEN__

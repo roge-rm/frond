@@ -117,8 +117,8 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
                     if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
                     const uint64_t before = pc->coreHz;
                     pxaPwrClkPrvSyncCost(pc);
-                    // A new clock ends the batch at this instruction, so the SoC runs the rest at the new rate.
-                    if (pc->coreHz != before) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+                    // A new clock ends the batch at this instruction, so Original runs the rest at the new rate.
+                    if (pc->coreHz != before && pc->soc->FollowsCoreClock()) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
                     if (val & 2)
                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
                                 (unsigned long)pc->CCCR, (unsigned long)val);
