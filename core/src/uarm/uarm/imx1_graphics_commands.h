@@ -22,6 +22,8 @@ class Imx1GraphicsCommands {
         queuedWords = 0;
         ticks = 0;
         refused = {};
+        compare = 0;
+        compareKey = 0;
         touched = false;
     }
     uint64_t duration() const { return ticks; }
@@ -56,6 +58,18 @@ class Imx1GraphicsCommands {
             }
         }
         a.Do32(queuedWords).Do64(ticks);
+    }
+    // The colour compare the last keyed copy packet set (stateCompare), in an optional section of its own,
+    // written only once one has been seen. A state without it loads with none seen.
+    static constexpr uint32_t compareStateVersion = 1;
+    bool compareSeen() const { return compare & compareKnown; }
+    template <class A> void stateCompare(A& a) {
+        touched = true;
+        uint32_t flags = compare, key = compareKey;
+        a.Do32(flags).Do32(key).Require((flags & compareKnown) && !(flags & ~3u) && key <= 0xffff, "colour compare");
+        if (!a.ok()) return;
+        compare = uint8_t(flags);
+        compareKey = uint16_t(key);
     }
     Imx1BootstrapAccess prepare(const Imx1Cs5Configuration& configuration,
                                 const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
@@ -257,6 +271,9 @@ class Imx1GraphicsCommands {
                     if (control != 0x01000005 && control != 0x01000004) return refuse("keyed-control", control);
                     if (sourceKey > 0xffff || destinationKey) return A::sideEffect;
                     keyEqual = control == 0x01000004;
+                    // The compare words stay on the chip for a later stretch that finds this GMC (stretchBlit).
+                    compare = uint8_t(compareKnown | (keyEqual ? compareEqual : 0));
+                    compareKey = uint16_t(sourceKey);
                 }
                 std::vector<Area> sources, destinations;
                 std::vector<bool> covered;
@@ -485,7 +502,8 @@ class Imx1GraphicsCommands {
     // (the CPU loop reads and writes pixel by pixel, the GPU reads the source as it was before the fill).
     static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
                         const Fill& fill, Imx1GpuFill& out) {
-        if (!gpuFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
+        if (!gpuFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
+            ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             (fill.a4 && fill.pixels.empty()) || transformed(fill) ||
             (fill.doubled && (ratioX(fill) != 0x80 || ratioY(fill) != 0x80)) ||
             (fill.height > 1 && fill.pitch < fill.width * 2) ||
@@ -525,6 +543,7 @@ class Imx1GraphicsCommands {
         using A = Imx1BootstrapAccess;
         if (planeFill(fill)) return completePlaneFill(configuration, eim, memory, fill);
         if (idctFill(fill)) return completeIdctFill(configuration, eim, memory, fill);
+        if (smoothFill(fill)) return completeSmoothFill(configuration, eim, memory, fill);
         if (fastFill(configuration, eim, memory, fill)) return A::ok;
         for (uint32_t y = 0; y < fill.height; ++y)
             for (uint32_t x = 0; x < fill.width; ++x) {
@@ -622,7 +641,8 @@ class Imx1GraphicsCommands {
     // checked, so none can fail; false, with nothing done, for the rest.
     static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                          const Fill& fill) {
-        if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
+        if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
+            ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             transformed(fill) ||
             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
         const bool source = fill.keyed || fill.plain || fill.a4;
@@ -714,6 +734,9 @@ class Imx1GraphicsCommands {
     // The source column or row a stretch reads for destination column or row i of the unclipped rectangle.
     static uint32_t stretchStep(uint32_t i, uint32_t ratio) { return uint32_t((uint64_t(i) * ratio) >> 8); }
     static bool transformed(const Fill& fill) { return fill.plain && fill.keyEqual; }
+    // A smooth stretch (stretchBlit with 488 02020008): plain, doubled and painted, which no other fill is
+    // (only keyed copies are painted).
+    static bool smoothFill(const Fill& fill) { return fill.plain && fill.doubled && fill.painted && !fill.keyed && !fill.a4; }
     // A transform's source step for one destination column (colour) or row (sourcePitch), signed.
     static int64_t signedStep(uint32_t step) { return int64_t(int32_t(step)); }
     // Where the bytes a fill reads begin: sourceBase, or for a transform the lowest pixel it reaches.
@@ -727,8 +750,10 @@ class Imx1GraphicsCommands {
         if (transformed(fill)) return uint64_t(std::abs(signedStep(fill.colour)) * (fill.width - 1) +
                                                std::abs(signedStep(fill.sourcePitch)) * (fill.height - 1) + 2);
         if (!fill.doubled) return uint64_t(fill.height - 1) * fill.sourcePitch + fill.width * 2;
-        return uint64_t(stretchStep(fill.sourceY + fill.height - 1, ratioY(fill))) * fill.sourcePitch +
-               (stretchStep(fill.sourceX + fill.width - 1, ratioX(fill)) + 1) * 2;
+        // The smooth filter reads one more column and row.
+        const uint32_t more = smoothFill(fill) ? 1 : 0;
+        return uint64_t(stretchStep(fill.sourceY + fill.height - 1, ratioY(fill)) + more) * fill.sourcePitch +
+               (stretchStep(fill.sourceX + fill.width - 1, ratioX(fill)) + 1 + more) * 2;
     }
     struct Batch {
         uint32_t end = 0, words = 0, option = 0;
@@ -1070,8 +1095,13 @@ class Imx1GraphicsCommands {
     // (2008a72c) and its keyed modes must have.
     // ASSUMPTION "stretch steps from the origin": the step starts at 464 with no half pixel offset; 464 carries
     // the start phase in quarter pixels and the ROM only sends whole pixels (464 & 30003 is always 0).
-    // Smooth (488 bit 0 clear, twGfxStretchSmooth) filters through source 2, one row down (416); its filter is
-    // not known and stays refused.
+    // Smooth (488 bit 0 clear, twGfxStretchSmooth) filters through source 2, one row down (416).
+    // ASSUMPTION "smooth stretch bilinear": the chip's taps are not known (485 is never written); it is drawn as
+    // the plane stretch filters, per 5/6/5 channel (completeSmoothFill). Only with the stretch's own GMC
+    // d598b4df: whether a stale GMC without bit 31 still runs the 488 op is not known.
+    // ASSUMPTION "stale compare in the stretch": a stale GMC with bit 28 (compare disable) clear, 4598b4df as the
+    // keyed copy leaves it, runs the stretch keyed with the last keyed copy packet's control and source key
+    // (Thruster). Without one seen it stays refused.
     Imx1BootstrapAccess stretchBlit(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                     const Imx1GraphicsMemory& memory, Fill& fill) const {
         using A = Imx1BootstrapAccess;
@@ -1084,10 +1114,12 @@ class Imx1GraphicsCommands {
         // fields alias DP_MIX, which the stretch always sends after it, so only the rest must match: the
         // clipping, datatypes and the bits above the source field. And DP_MIX must be current (mixAlias).
         const uint32_t gmc = values[0x41b];
-        if ((gmc & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc)) return refuse("stretch-state", 0x41b);
-        if (values[0x488] == 0x02020008) return refuse("stretch-smooth", values[0x412]);
+        const bool keyed = gmc == 0x4598b4df && compareSeen();
+        if (!keyed && ((gmc & 0x7001ffffu) != 0x5000b4dfu || !mixAlias(gmc))) return refuse("stretch-state", 0x41b);
+        const bool smooth = values[0x488] == 0x02020008;
+        if (smooth && gmc != 0xd598b4df) return refuse("stretch-smooth", values[0x412]);
         for (auto item : {std::pair<uint32_t,uint32_t>{0x4b2,0x01cc1200}, {0x4b1,0x40037d04},
-                 {0x472,0x3f}, {0x488,0x02020009}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
+                 {0x472,0x3f}, {0x488,smooth ? 0x02020008u : 0x02020009u}, {0x471,0x1fff1fff}, {0x48f,0xffffffff}, {0x4a1,0}, {0x4a0,0},
                  {0x42e,0}, {0x42f,0}, {0x430,0}, {0x431,0}, {0x432,0}, {0x433,0}})
             if (values[item.first] != item.second) return refuse("stretch-state", item.first);
         if ((values[0x416] >> 16) != (values[0x464] >> 16) || (values[0x416] & 0xffff) != ((values[0x464] + 4) & 0xffff) ||
@@ -1111,14 +1143,25 @@ class Imx1GraphicsCommands {
         const uint32_t left = std::max(x, values[0x46f] & 0x1fff), top = std::max(y, (values[0x46f] >> 16) & 0x1fff);
         const uint32_t right = std::min(x + width, values[0x470] & 0x1fff), bottom = std::min(y + height, (values[0x470] >> 16) & 0x1fff);
         const uint64_t source = uint64_t(values[0x46b]) + (uint64_t(sy) * sourcePitch + sx) * 2;
-        const uint64_t sourceLength = (uint64_t(sourceHeight - 1) * sourcePitch + sourceWidth) * 2;
+        // The smooth filter reads one more column and row, past the rectangle with no clamping, as the plane
+        // stretch does (ASSUMPTION "filter reads past the rect"): the column after a row's last is the next
+        // row's first.
+        const uint32_t readWidth = sourceWidth + (smooth ? 1 : 0), readHeight = sourceHeight + (smooth ? 1 : 0);
+        const uint64_t sourceLength = (uint64_t(readHeight - 1) * sourcePitch + readWidth) * 2;
         if (source > 0xffffffffu || (source & 1) || !memory.contains(configuration, eim, uint32_t(source), sourceLength)) return A::sequence;
         fill.sourceX = left - x;
         fill.sourceY = top - y;
         fill.pitch = pitch * 2;
         fill.sourcePitch = sourcePitch * 2;
         fill.sourceBase = uint32_t(source);
-        fill.plain = fill.doubled = true;
+        fill.doubled = true;
+        fill.plain = !keyed;
+        fill.painted = smooth;
+        if (keyed) {
+            fill.keyed = true;
+            fill.colour = compareKey;
+            fill.keyEqual = compare & compareEqual;
+        }
         fill.paint = values[0x412] == 0x00800080 ? 0 : values[0x412];
         if (left >= right || top >= bottom) return A::ok;
         const uint64_t address = uint64_t(values[0x401]) + uint64_t(top) * fill.pitch + left * 2;
@@ -1129,7 +1172,7 @@ class Imx1GraphicsCommands {
         const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
         if (!memory.contains(configuration, eim, fill.base, length)) return A::sequence;
         // Reading a source the blit is writing needs an order the driver never relies on. Refused.
-        const Area from{source, uint64_t(sourcePitch) * 2, uint64_t(sourceWidth) * 2, sourceHeight};
+        const Area from{source, uint64_t(sourcePitch) * 2, uint64_t(readWidth) * 2, readHeight};
         const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
         return from.overlaps(to) ? refuse("stretch-overlap", values[0x465]) : A::ok;
     }
@@ -1536,6 +1579,37 @@ class Imx1GraphicsCommands {
         }
         return A::ok;
     }
+    // A smooth stretch's RGB565 pixels, filtered as completePlaneFill does on each 5/6/5 channel
+    // (ASSUMPTION "smooth stretch bilinear").
+    static Imx1BootstrapAccess completeSmoothFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                                  Imx1GraphicsMemory& memory, const Fill& fill) {
+        using A = Imx1BootstrapAccess;
+        const uint32_t rx = ratioX(fill), ry = ratioY(fill);
+        const uint32_t first = stretchStep(fill.sourceX, rx), last = stretchStep(fill.sourceX + fill.width - 1, rx) + 1;
+        std::vector<uint8_t> above((last - first + 1) * 2), below(above.size());
+        for (uint32_t y = 0; y < fill.height; ++y) {
+            const uint32_t position = (fill.sourceY + y) * ry, row = position >> 8, wy = position & 255;
+            const uint32_t at = fill.sourceBase + row * fill.sourcePitch + first * 2;
+            if (!memory.copyGpuRange(configuration, eim, at, uint32_t(above.size()), above.data()) ||
+                !memory.copyGpuRange(configuration, eim, at + fill.sourcePitch, uint32_t(below.size()), below.data()))
+                return A::sequence;
+            for (uint32_t x = 0; x < fill.width; ++x) {
+                const uint32_t across = (fill.sourceX + x) * rx, column = (across >> 8) - first, wx = across & 255;
+                const uint32_t a = read16(&above[column * 2]), b = read16(&above[column * 2 + 2]);
+                const uint32_t c = read16(&below[column * 2]), d = read16(&below[column * 2 + 2]);
+                uint32_t value = 0;
+                for (unsigned shift : {0u, 5u, 11u}) {
+                    const uint32_t mask = shift == 5 ? 63 : 31;
+                    const uint32_t top = ((a >> shift) & mask) * (256 - wx) + ((b >> shift) & mask) * wx;
+                    const uint32_t bottom = ((c >> shift) & mask) * (256 - wx) + ((d >> shift) & mask) * wx;
+                    value |= ((top * (256 - wy) + bottom * wy + 32768) >> 16) << shift;
+                }
+                const auto status = memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x * 2, 2, true, value);
+                if (status != A::ok) return status;
+            }
+        }
+        return A::ok;
+    }
     // The words a player may write through the ring and read back with the engine idle.
     static bool playerRegister(uint32_t reg) {
         for (uint32_t known : {0x41bu, 0x472u, 0x4b2u, 0x4b1u, 0x401u, 0x402u, 0x46bu, 0x46cu, 0x488u, 0x30eu, 0x30fu,
@@ -1562,6 +1636,11 @@ class Imx1GraphicsCommands {
     // Whether anything may have changed since construction or the last reset. Not saved; it sits in the
     // padding after queuedWords, so the size is the same.
     mutable bool touched = false;
+    // The last keyed copy packet's compare (compareKnown once one came, compareEqual for control 4) and its
+    // source key. Saved by stateCompare; they sit in the padding before ticks, so the size is the same.
+    static constexpr uint8_t compareKnown = 1, compareEqual = 2;
+    uint8_t compare = 0;
+    uint16_t compareKey = 0;
     uint64_t ticks = 0;
     mutable Refusal refused;
 };
@@ -1571,6 +1650,8 @@ struct Imx1GraphicsCommands::Undo {
     size_t batches;
     uint32_t queuedWords;
     bool touched;
+    uint8_t compare;
+    uint16_t compareKey;
     uint64_t ticks;
     Refusal refused;
 };
@@ -1580,6 +1661,8 @@ inline void Imx1GraphicsCommands::keep(Undo& u) const {
     u.batches = batches.size();
     u.queuedWords = queuedWords;
     u.touched = touched;
+    u.compare = compare;
+    u.compareKey = compareKey;
     u.ticks = ticks;
     u.refused = refused;
 }
@@ -1589,6 +1672,8 @@ inline void Imx1GraphicsCommands::undo(const Undo& u) {
     batches.resize(u.batches);
     queuedWords = u.queuedWords;
     touched = u.touched;
+    compare = u.compare;
+    compareKey = u.compareKey;
     ticks = u.ticks;
     refused = u.refused;
 }

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include "zodiac-graphics-setup.h"
 #include "imx1_graphics_commands.h"
@@ -254,9 +255,11 @@ void stretchBlit() {
         p = dateBookStretch(); p[item.first] = item.second;
         assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",p[item.first-1]));
     }
-    // Smooth (488 bit 0 clear) filters, and how is not known.
-    p = dateBookStretch(); p[23] = 0x02020008;
-    assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-smooth",0x00800080));
+    // Smooth (488 bit 0 clear) only with the stretch's own GMC (smoothStretch has the rest).
+    for (uint32_t gmc : {0x5598b4dfu,0x5798b4dfu}) {
+        p = dateBookStretch(); p[23] = 0x02020008; p[3] = gmc;
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-smooth",0x00800080));
+    }
     // The stretch words from any other producer, and other packets from this one, are refused.
     for (uint32_t pc : {0x200a9ed4u,0x200b0200u,0x200b1790u}) assert(f.append(dateBookStretch(),pc) != A::ok);
     p = dateBookStretch(); p.insert(p.end(),{0xc0011a00,0,0x00010001});
@@ -810,6 +813,177 @@ void stretchRatios() {
     assert(f.append(p,0x200b0b14) != A::ok);
     std::puts("PASS: stretch blit at ratios 10 to 1ff hex each way, clipped or not, on both CPU paths");
 }
+// Street Hoops' smooth stretch (flags 5): 320x200 RGB565 to 480x320 at 00a000ab, scissor to 479 by 319.
+constexpr uint32_t hoopsSource = 0xe9bc00, hoopsScreen = 0xf06000;
+std::vector<uint32_t> hoopsStretch() {
+    return {0x4a1,0,0x41b,0xd598b4df,0x472,0x3f,0x4b2,0x01cc1200,0x4b1,0x40037d04,
+        0x46f,0,0x470,0x013f01df,0x401,hoopsScreen,0x402,0x1e0,0x46b,hoopsSource,0x46c,0x140,0x488,0x02020008,
+        0x416,4,0x4020c419,0x140,hoopsSource,0x00020410,0x1e1,0x140,0x00a000ab,0x00020420,0x1e1,0x140,0x00a000ab,
+        0x00020464,0,0,0x01e00140};
+}
+uint32_t hoopsPixel(unsigned x, unsigned y) {
+    return ((x * 3 + y * 5) & 31) << 11 | ((x * 7 + y * 2) & 63) << 5 | ((x ^ y * 3) & 31);
+}
+// The source, its row past the end (the filter reads it) and a screen of a55a.
+void hoopsPlanes(Fixture& f) {
+    for (unsigned y = 0; y < 201; ++y) for (unsigned x = 0; x < 320; ++x) f.write(hoopsSource+(y*320+x)*2,hoopsPixel(x,y));
+    for (unsigned i = 0; i < 480*320; ++i) f.write(hoopsScreen+i*2,0xa55a);
+}
+// The bilinear oracle per 5/6/5 channel: source position i * ratio from the origin, the pixel to its right (the
+// next row's first past a row's end) and the two one row down, weights from the low 8 bits, rounded to nearest.
+uint32_t smoothOracle(Fixture& f, uint32_t base, uint32_t pitch, unsigned x, unsigned y, uint32_t rx, uint32_t ry) {
+    const uint32_t px = x * rx, py = y * ry, wx = px & 255, wy = py & 255;
+    const uint32_t at = base + ((py >> 8) * pitch + (px >> 8)) * 2;
+    const uint32_t a = f.read(at), b = f.read(at+2), c = f.read(at+pitch*2), d = f.read(at+pitch*2+2);
+    uint32_t value = 0;
+    for (unsigned shift : {0u,5u,11u}) {
+        const uint32_t mask = shift == 5 ? 63 : 31;
+        auto ch = [&](uint32_t v) { return (v >> shift) & mask; };
+        const double top = ch(a) * (256.0 - wx) + ch(b) * double(wx), bottom = ch(c) * (256.0 - wx) + ch(d) * double(wx);
+        value |= uint32_t(std::floor((top * (256.0 - wy) + bottom * wy) / 65536.0 + 0.5)) << shift;
+    }
+    return value;
+}
+void smoothStretch() {
+    for (bool clip : {false,true}) {
+        Fixture f; hoopsPlanes(f);
+        auto p = hoopsStretch();
+        // A scissor that cuts the left and top too, so the filter starts away from the origin.
+        if (clip) p[11] = 0x00050003;
+        assert(f.append(p,0x200b0b14) == A::ok);
+        f.finish();
+        unsigned smoothed = 0;
+        for (unsigned y = 0; y < 320; ++y)
+            for (unsigned x = 0; x < 480; ++x) {
+                const bool inside = x < 479 && y < 319 && (!clip || (x >= 3 && y >= 5));
+                const uint32_t expected = inside ? smoothOracle(f,hoopsSource,320,x,y,0xab,0xa0) : 0xa55a;
+                const uint32_t got = f.read(hoopsScreen+(y*480+x)*2);
+                if (got != expected) {
+                    std::fprintf(stderr,"smooth clip %d at %u,%u: %04x, not %04x\n",clip,x,y,got,expected);
+                    std::abort();
+                }
+                // The nearest source pixel would differ here if no filter ran.
+                if (inside && got != hoopsPixel(x*0xab >> 8,y*0xa0 >> 8)) ++smoothed;
+            }
+        assert(smoothed > 100000);
+    }
+    // Column 478 reads column 320 (weight 74): the next row's first pixel. Changing it changes that pixel.
+    {
+        Fixture f; hoopsPlanes(f);
+        const uint32_t before = smoothOracle(f,hoopsSource,320,478,0,0xab,0xa0);
+        f.write(hoopsSource+320*2,0xffff);
+        const uint32_t after = smoothOracle(f,hoopsSource,320,478,0,0xab,0xa0);
+        assert(before != after);
+        assert(f.append(hoopsStretch(),0x200b0b14) == A::ok);
+        f.finish();
+        assert(f.read(hoopsScreen+478*2) == after);
+    }
+    // A smooth stretch saved mid-batch loads and finishes the same.
+    {
+        Fixture reference; hoopsPlanes(reference);
+        assert(reference.append(hoopsStretch(),0x200b0b14) == A::ok);
+        reference.finish();
+        Fixture saved; hoopsPlanes(saved);
+        assert(saved.append(hoopsStretch(),0x200b0b14) == A::ok);
+        std::vector<uint8_t> bytes[2];
+        StateWriter configurationOut(bytes[0]); saved.state.state(configurationOut);
+        StateWriter commandsOut(bytes[1]); saved.commands.state(commandsOut);
+        Fixture loaded; hoopsPlanes(loaded);
+        StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+        StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+        assert(configurationIn.complete() && commandsIn.complete());
+        loaded.finish();
+        for (unsigned i = 0; i < 480*320; ++i) assert(loaded.read(hoopsScreen+i*2) == reference.read(hoopsScreen+i*2));
+    }
+    std::puts("PASS: smooth stretch 320x200 to 480x320 at 00a000ab, bilinear per 5/6/5 channel, scissor, one column past, saved");
+}
+// Thruster's stretch with the GMC a keyed copy left (bit 28 clear, colour compare on): drawn through the last
+// keyed packet's compare.
+std::vector<uint32_t> staleKeyedStretch() {
+    auto p = dateBookStretch(); p.erase(p.begin()+2,p.begin()+4);
+    return p;
+}
+std::vector<uint32_t> keyedPacket(uint32_t control, uint32_t key) {
+    return {0x4b2,0x00cc0a00,0x41b,0x4598b4df,0x401,screen,0x402,0x1e0,0x46b,scratch,0x46c,0x140,0x46f,0,0x470,0x014001e0,
+        0xc0051c00,control,key,0,0,0x00010100,0x00010001};
+}
+void checkKeyedStretch(Fixture& f, uint32_t control, uint32_t key = 0) {
+    for (unsigned y = 290; y < 320; ++y)
+        for (unsigned x = 0; x < 64; ++x) {
+            const bool inside = x >= 2 && x < 20 && y >= 296 && y < 318;
+            const bool black = inside && bitmapBit((x-2)/2,(y-296)/2);
+            // Control 5 draws where the source differs from the key, 4 where it equals it.
+            const bool drawn = inside && ((black ? 0u : 0xffffu) == key) == (control == 0x01000004);
+            const uint32_t expected = !drawn ? 0xa55au : black ? 0u : 0xffffu;
+            if (f.read(screen+(y*480+x)*2) != expected) {
+                std::fprintf(stderr,"keyed stretch %08x at %u,%u: %04x, not %04x\n",control,x,y,f.read(screen+(y*480+x)*2),expected);
+                std::abort();
+            }
+        }
+}
+void keyedStretch() {
+    for (uint32_t control : {0x01000005u,0x01000004u})
+        for (bool direct : {true,false}) {
+            Imx1GraphicsCommands::directFills = direct;
+            Fixture f; stretchPlanes(f);
+            assert(f.append(keyedPacket(control,0),0x200aa504) == A::ok); f.finish();
+            assert(f.commands.compareSeen());
+            stretchPlanes(f);
+            assert(f.append(staleKeyedStretch(),0x200b0b14) == A::ok);
+            f.finish();
+            checkKeyedStretch(f,control);
+        }
+    Imx1GraphicsCommands::directFills = true;
+    // No keyed packet seen: refused, as before.
+    {
+        Fixture f; stretchPlanes(f);
+        auto p = dateBookStretch(); p[3] = 0x4598b4df;
+        assert(!f.commands.compareSeen());
+        assert(f.append(p,0x200b0b14) == A::sideEffect && refused(f,"stretch-state",0x41b));
+    }
+    // A batch refused after its keyed packet leaves the compare as it was, through prepare and through
+    // prepareCopy with keep and undo.
+    for (bool copy : {false,true}) {
+        Fixture f; stretchPlanes(f);
+        assert(f.append(keyedPacket(0x01000005,0),0x200aa504) == A::ok); f.finish();
+        auto bad = keyedPacket(0x01000004,0xffff); bad.insert(bad.end(),{0xc0011a00,0,0x00010001});
+        if (copy) {
+            const auto begin = f.state.engineState().producer();
+            for (unsigned i = 0; i < bad.size(); ++i) f.write(0x150000+((begin+i)&16383)*4,bad[i],4);
+            auto candidate = f.state;
+            uint32_t end = (begin+uint32_t(bad.size()))&16383;
+            assert(candidate.access(f.eim,0x200aa504,0x16010220,4,true,end) == A::ok);
+            auto undo = std::make_unique<Imx1GraphicsCommands::Undo>();
+            f.commands.keep(*undo);
+            assert(f.commands.prepareCopy(candidate,f.eim,f.memory) != A::ok);
+            f.commands.undo(*undo);
+        } else assert(f.append(bad,0x200aa504) != A::ok);
+        stretchPlanes(f);
+        assert(f.append(staleKeyedStretch(),0x200b0b14) == A::ok); f.finish();
+        checkKeyedStretch(f,0x01000005);
+    }
+    // The compare saves in its own section and loads into a fresh object; without it the stretch is refused.
+    {
+        Fixture f; stretchPlanes(f);
+        assert(f.append(keyedPacket(0x01000004,0xffff),0x200aa504) == A::ok); f.finish();
+        std::vector<uint8_t> bytes;
+        StateWriter out(bytes); f.commands.stateCompare(out);
+        Fixture fresh; stretchPlanes(fresh);
+        auto p = dateBookStretch(); p[3] = 0x4598b4df;
+        assert(fresh.append(p,0x200b0b14) == A::sideEffect && refused(fresh,"stretch-state",0x41b));
+        StateReader in(bytes.data(),bytes.size()); fresh.commands.stateCompare(in);
+        assert(in.complete() && fresh.commands.compareSeen());
+        stretchPlanes(fresh);
+        assert(fresh.append(p,0x200b0b14) == A::ok); fresh.finish();
+        checkKeyedStretch(fresh,0x01000004,0xffff);
+        // A section without the known flag is refused.
+        std::vector<uint8_t> zero(8,0);
+        Imx1GraphicsCommands c;
+        StateReader bad(zero.data(),zero.size()); c.stateCompare(bad);
+        assert(!bad.ok() && !c.compareSeen());
+    }
+    std::puts("PASS: stretch with a keyed copy's stale GMC drawn through its compare (5 and 4), refused with none seen, saved");
+}
 constexpr uint32_t lineSurface = 0xe08000, lineBackground = 0x3333;
 // The fill state the line routine sends (2008ae14 to 200afd00): solid brush, ROP f0, scissor on.
 void linePlanes(Fixture& f) { for (unsigned i = 0; i < 128*128; ++i) f.write(lineSurface+i*2,lineBackground); }
@@ -1197,6 +1371,6 @@ void transformSaved() {
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
-    stretchStaleGmc(); stretchRatios(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
+    stretchStaleGmc(); stretchRatios(); smoothStretch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }

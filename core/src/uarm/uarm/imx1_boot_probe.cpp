@@ -3062,6 +3062,11 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
     staged.commands->state(a);
     if (!finish(a)) return info;
+    // The last keyed copy's colour compare, in states saved after one. Without it none has been seen.
+    if (open("GCMP", Imx1GraphicsCommands::compareStateVersion, false, a)) {
+        staged.commands->stateCompare(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     if (p.graphicsMemory) {
         staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
         if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
@@ -3190,6 +3195,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     { auto a = file.begin(stateFourcc("CS5R"), Imx1Cs5Reset::stateVersion); p->cs5Reset.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("CS5C"), Imx1Cs5Configuration::stateVersion); p->cs5Configuration.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
+    if (p->graphicsCommands.compareSeen()) {
+        auto a = file.begin(stateFourcc("GCMP"), Imx1GraphicsCommands::compareStateVersion);
+        p->graphicsCommands.stateCompare(a);
+        file.end();
+    }
     if (p->graphicsMemory) {
         { auto a = file.begin(stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion); p->graphicsMemory->state(a); file.end(); }
         for (unsigned bank = 0; bank < 2; ++bank) {
