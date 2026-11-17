@@ -1432,6 +1432,8 @@ ZODIAC_TWGFX_DIR := build/zodiac-twgfx
 ZODIAC_ROM ?= $(if $(FROND_DEVICE_IMAGES),$(FROND_DEVICE_IMAGES)/Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom)
 ZODIAC_TWGFX_ARGS ?=
 .PHONY: zodiac-twgfx test-zodiac-twgfx
+# About 5 minutes for both engines.
+test-zodiac-twgfx: export TEST_TIMEOUT = 1200
 zodiac-twgfx:
 	python3 tools/zodiac-twgfx/build.py $(ZODIAC_TWGFX_DIR)
 test-zodiac-twgfx:

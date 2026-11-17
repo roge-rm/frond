@@ -118,6 +118,17 @@ def read_result(png):
     return words
 
 
+def window_hash(png):
+    """A hash of the snapshot's top-left 64x64 landscape pixels, where the Window Manager tests draw on the display."""
+    rows, height = read_png_rows(png, DISPLAY_W - 1)
+    h = hashlib.sha256()
+    for ly in range(64):
+        for lx in range(64):
+            py = height - 1 - lx
+            h.update(bytes(rows[py][ly * 4:ly * 4 + 3]))
+    return h.hexdigest()[:8]
+
+
 class Runner:
     def __init__(self, args, card):
         self.args, self.card, self.work = args, card, args.work
@@ -150,9 +161,12 @@ class Runner:
     def states(self):
         boot = os.path.join(self.work, 'boot91.state')
         launched = os.path.join(self.work, 'launched.state')
-        # make relinks benchmark-replay every time, so the boot is redone only when the binary's bytes change.
-        with open(self.args.bench, 'rb') as f:
-            bench_hash = hashlib.sha256(f.read()).hexdigest()
+        # make relinks benchmark-replay every time, so the boot is redone only when the binary's bytes, the ROM or the
+        # fixture change.
+        bench_hash = ''
+        for path in (self.args.bench, self.args.rom, self.args.fixture):
+            with open(path, 'rb') as f:
+                bench_hash += hashlib.sha256(f.read()).hexdigest() + '\n'
         stamp = boot + '.bench'
         if not os.path.exists(boot) or not os.path.exists(stamp) or open(stamp).read() != bench_hash:
             log('cold boot to %d ms (Fast)' % BOOT_MS)
@@ -184,16 +198,18 @@ class Runner:
         events = ['%d pen-down %d %d' % (TAP_MS, cell[0], cell[1]), '%d pen-up' % (TAP_MS + 40), '%d snapshot "s.png"' % (end - 10)]
         name = '%s-%03d' % (engine, n)
         stop, out = self.bench(name, events, end, engine == 'fast', load=launched)
-        words = read_result(os.path.join(out, 'snapshot-1.png'))
-        shutil.rmtree(out, ignore_errors=True)
+        png = os.path.join(out, 'snapshot-1.png')
+        words = read_result(png)
         done = words is not None and words[2] == 3 and words[3] == n
+        window = window_hash(png) if done else None
+        shutil.rmtree(out, ignore_errors=True)
         if stop:
             return ('refused: ' + stop if not done else 'refused after its result: ' + stop), None, None
         if not done:
             return 'crashed (no result in %d ms)' % budget_ms, None, None
         os.remove(os.path.join(self.work, name + '.log'))
         status = 'ok' if words[4] == 0 else 'error %04x' % words[4]
-        return status, '%04x%04x%s' % (words[5], words[6], '' if words[7] else ' (unchanged)'), words[8]
+        return status, '%04x%04x%s window %s' % (words[5], words[6], '' if words[7] else ' (unchanged)', window), words[8]
 
     def engine(self, engine, names, launched, timings):
         def budget(n):
@@ -250,16 +266,23 @@ def main():
             timings = {n: r[2] for n, r in columns[engine].items()}
     table = ['| # | Test | ' + ' | '.join(e.capitalize() for e in engines) + ' | Surface hash |',
              '|---|---|' + '---|' * len(engines) + '---|']
-    golden = []
+    golden, differ = [], []
     for n, name in enumerate(names):
         cells = [columns[e][n][0] for e in engines]
         sums = sorted(set(columns[e][n][1] for e in engines if columns[e][n][1]))
         table.append('| %d | %s | %s | %s |' % (n, name, ' | '.join(cells), ', '.join(sums) + (' (differ)' if len(sums) > 1 else '')))
-        golden += ['%s %d %s: %s' % (e, n, name, short(c)) for e, c in zip(engines, cells)]
+        if len(sums) > 1:
+            differ.append(n)
+        # The surface hash goes in the golden line too, so a drawing change shows as well as a status change.
+        golden += ['%s %d %s: %s%s' % (e, n, name, short(columns[e][n][0]), ' ' + columns[e][n][1] if columns[e][n][1] else '')
+                   for e in engines]
     with open(os.path.join(args.work, 'table.md'), 'w') as f:
         f.write('\n'.join(table) + '\n')
     bad = sum(1 for line in golden if ': refused' in line or ': crashed' in line)
     log('%d tests, %d results refused or crashed; table in %s' % (len(names), bad, os.path.join(args.work, 'table.md')))
+    if differ:
+        sys.exit('run.py: Fast and Exact drew different surfaces in tests %s; see %s' %
+                 (', '.join(map(str, differ)), os.path.join(args.work, 'table.md')))
     order = lambda l: (int(l.split(' ', 2)[1]), l.split(' ', 1)[0])
     golden.sort(key=order)
     if not args.golden:
@@ -272,7 +295,8 @@ def main():
     if args.update:
         kept = [l for l in old if l.split(' ', 1)[0] not in engines]
         with open(args.golden, 'w') as f:
-            f.write("# tools/zodiac-twgfx/run.py: engine, test, name: ok, error (the ROM's code), refused (Frond's stop) or crashed\n")
+            f.write("# tools/zodiac-twgfx/run.py: engine, test, name: ok, error (the ROM's code), refused (Frond's stop) or crashed,\n"
+                    "# then the 64x64 test surface's hash and the display's top-left 64x64 hash where the program reported them\n")
             f.write('\n'.join(sorted(kept + golden, key=order)) + '\n')
         log('updated %s' % args.golden)
         return

@@ -953,6 +953,8 @@ class Imx1GraphicsCommands {
     // The 8x8 mono brush the brush upload (200aedd0) put at 423: a row in the low byte of each of 8 words
     // (200af0d0-200af1fc). The newest queued upload to it, else memory, as the chip finds it once the queued
     // batches are done. False if a queued fill other than an upload writes there, or 41d isn't 0.
+    // Read at decode, not when the batch runs, so a CPU write to the brush in between would be missed; the pattern
+    // setter (2009c540) only writes it through the upload.
     bool brushPattern(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                       uint8_t* pattern) const {
         // The pattern setter (2009c540) passes no origin, so the upload always writes 41d 0 (200aef18-200aef4c).
@@ -1822,6 +1824,8 @@ class Imx1GraphicsCommands {
     mutable bool touched = false;
     // The last keyed copy packet's compare (compareKnown once one came, compareEqual for control 4) and its
     // source key. Saved by stateCompare; they sit in the padding before ticks, so the size is the same.
+    // The padding here is full, so the size asserts below and in imx1_boot_probe.cpp catch any field added. Moving
+    // these out would change the size word in stateLayoutFingerprint and so refuse every older save.
     static constexpr uint8_t compareKnown = 1, compareEqual = 2;
     uint8_t compare = 0;
     uint16_t compareKey = 0;

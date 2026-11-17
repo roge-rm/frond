@@ -214,6 +214,15 @@ static Err tWinPixel(int a) { (void)a; winBegin(); WinPaintPixel(9, 9); return w
 static Err tWinChars(int a) { winBegin(); WinSetDrawMode(a); WinPaintChars("TwGfx", 5, 4, 4); return winEnd(); }
 static Err tWinFrame(int a) { RectangleType r = winRect(6, 6, 40, 30); (void)a; winBegin(); WinPaintRectangleFrame(1, &r); WinPaintRoundedRectangleFrame(&r, 1, 4, 2); return winEnd(); }
 static Err tWinBitmap(int a) { winBegin(); WinSetDrawMode(a % 10); WinPaintBitmap(palmBitmapOf(2, a / 10 ? 16 : 8, 0), 4, 4); return winEnd(); }
+/* arg: draw mode; a copy within the display over a band of the fore colour, so that ROPs reading the destination
+ * show (the display is white). */
+static Err tWinCopyOver(int a) {
+    RectangleType band = winRect(0, 0, 16, 64), r = winRect(0, 0, 30, 20);
+    winBegin();
+    WinPaintRectangle(&band, 0);
+    WinCopyRectangle(displayWindow, displayWindow, &r, 8, 9, a);
+    return winEnd();
+}
 static Err tWinCopy(int a) {
     RectangleType r = winRect(0, 0, 30, 20);
     winBegin();
@@ -404,6 +413,7 @@ static const Test tests[] = {
     {"win-pattern gray paint-inverse", tWinPatternMode, 52},
     {"win-pattern-line paint", tWinPatternLine, 0},
     {"win-pattern-line lines", tWinPatternLine, 1},
+    {"win-copy-rect display invert over colour", tWinCopyOver, 3},
 };
 #define TEST_COUNT ((int)(sizeof tests / sizeof tests[0]))
 
