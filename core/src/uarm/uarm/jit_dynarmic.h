@@ -61,6 +61,11 @@ uint64_t jitDomainCalls();
 uint64_t jitPsrInterprets();
 // Runs that left a block at a failed access (a guest abort or a refused access), all JITs.
 uint64_t jitFaultExits();
+// Memory read and write callbacks, all JITs (tests).
+uint64_t jitMemoryCallbacks();
+// Whether JITs made from now on check the data cache hint (cpuJitCostHint) when memory is charged.
+// Without it every load and store goes to the callbacks then (tests). On by default.
+void jitSetCostHint(bool on);
 // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
 void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
 // Code cache size in bytes for JITs made after this (tests); 0 for the default.

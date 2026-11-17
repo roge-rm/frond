@@ -3,6 +3,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include "xscale_cost.h"
 
@@ -89,6 +94,7 @@ struct CacheEvents {
     uint8_t uncachedStores = 0;  // stores that waited on the bus (C=0, B=0)
     uint8_t hits = 0;            // loads and stores that hit a line (counted, never charged)
     uint32_t bufferBlock = 0;    // the new write buffer entry's block, when buffered
+    uint32_t evicted = 0;        // the valid line a fill or line allocate replaced (DataCacheState::line), or 0
 };
 
 // The model's whole state, a fixed layout with no pointers: the session saves it as saveBytes() gives.
@@ -139,9 +145,29 @@ inline int findWay(const DataCacheState& s, const CacheGeometry& g, uint32_t va)
     const uint32_t tag = (va >> 5) | kLineValid;
     const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
     const uint32_t* base = s.line + set * g.ways;
+    // Four ways at a time (ways is a multiple of 4); a set holds at most one match.
+#if defined(__SSE2__)
+    const __m128i m = _mm_set1_epi32(int(kLineValid | kLineAddressMask)), t = _mm_set1_epi32(int(tag));
+    for (unsigned w = 0; w < g.ways; w += 4) {
+        const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(base + w));
+        const int hit = _mm_movemask_ps(_mm_castsi128_ps(_mm_cmpeq_epi32(_mm_and_si128(v, m), t)));
+        if (hit) return int(w + unsigned(__builtin_ctz(unsigned(hit))));
+    }
+    return -1;
+#elif defined(__aarch64__)
+    const uint32x4_t m = vdupq_n_u32(kLineValid | kLineAddressMask), t = vdupq_n_u32(tag);
+    for (unsigned w = 0; w < g.ways; w += 4) {
+        const uint32x4_t c = vceqq_u32(vandq_u32(vld1q_u32(base + w), m), t);
+        if (vmaxvq_u32(c))
+            for (unsigned i = 0; i < 4; i++)
+                if ((base[w + i] & (kLineValid | kLineAddressMask)) == tag) return int(w + i);
+    }
+    return -1;
+#else
     for (unsigned w = 0; w < g.ways; w++)
         if ((base[w] & (kLineValid | kLineAddressMask)) == tag) return int(w);
     return -1;
+#endif
 }
 
 // Takes the next victim of va's set, writes it back if dirty and puts va's line there, clean.
@@ -163,6 +189,7 @@ inline uint32_t& allocate(DataCacheState& s, const CacheGeometry& g, uint32_t va
     uint32_t& l = s.line[set * g.ways + way];
     if (l & kLineValid) {
         e.writebacks = uint8_t(e.writebacks + dirtyHalves(l));
+        e.evicted = l;
     }
     l = ((va >> 5) & kLineAddressMask) | kLineValid;
     return l;
@@ -241,7 +268,7 @@ inline CacheEvents dataCacheAccessHinted(DataCacheState& s, Core core, uint32_t 
         }
     }
     const CacheEvents e = dataCacheAccess(s, core, va, p, store, now, roundRobin);
-    if (policyCached(p)) {
+    if (policyCached(p) && (e.hits | e.fills)) {  // a miss that didn't allocate leaves the set as it was
         const int way = detail::findWay(s, g, va);
         if (way >= 0) hint[set] = uint8_t(way);
     }

@@ -572,6 +572,9 @@ struct Env final : public A32::UserCallbacks {
 
     void ClearPages() {
         stats.pageClears++;
+        // The data cache hint is keyed by va alone and assumes the policy each page had when its
+        // entry was noted, so it goes with the mappings.
+        cpuCostHintClear(cpu);
         for (auto &list : filled) {
             for (const Filled &f : list) (*pages)[f.page] = nullptr;
             list.clear();
@@ -687,14 +690,23 @@ struct Env final : public A32::UserCallbacks {
         if (cpuJitSlowPath(cpu)) jit->HaltExecution(kSlowPath);
     }
 
-    // Fast at Original (cpuJitMemoryCost): every load and store comes to the callbacks, which
-    // charge the data cache and region model, so the page table is left empty. The charges wait
-    // in the CPU's pendingCharge until the run ends; once they reach what's left of the budget
-    // (as of the last block end), the run ends at the next link.
+    // Fast at Original (cpuJitMemoryCost): generated loads and stores check the CPU's data cache
+    // hint (cpuJitCostHint) before the page table, and come to the callbacks unless the hint
+    // says the access hits or joins a write buffer entry, at no charge. The callbacks charge the
+    // data cache and region model. The charges wait in the CPU's pending charge until the run
+    // ends; once they reach what's left of the budget (as of the last block end), the run ends
+    // at the next link. Until a callback has ended it that way, generated code checks that too
+    // before it takes a hit, and leaves it to the callback, so the run ends where it would if
+    // every access came here. Code is compiled with the hint check while this is set
+    // (frond_cost_hint_on).
     bool memoryCost = false;
+    bool hinted = true;  // without the hint (jitSetCostHint), the page table stays empty while memoryCost is set
 
     void Charged() {
-        if (int64_t(cpuJitPendingCharge(cpu)) >= jit->TicksRemainingNow()) jit->HaltExecution(kCharged);
+        if (int64_t(cpuJitPendingCharge(cpu)) >= jit->TicksRemainingNow()) {
+            jit->HaltExecution(kCharged);
+            cpuJitCostHalted(cpu);
+        }
     }
 
     template <typename T>
@@ -725,7 +737,7 @@ struct Env final : public A32::UserCallbacks {
         if (memoryCost) {
             AfterIo();
             Charged();
-            return v;
+            if (!hinted) return v;
         }
         const uint32_t page = va >> 12;
         if (!(*pages)[page]) {
@@ -734,7 +746,7 @@ struct Env final : public A32::UserCallbacks {
                 stats.pageFills++;
                 (*pages)[page] = ReadOnly(host);
                 NoteFilled(page);
-            } else {
+            } else if (!memoryCost) {
                 AfterIo();
             }
         }
@@ -765,9 +777,11 @@ struct Env final : public A32::UserCallbacks {
         // also land here for pages that already are.
         CheckGen();
         if (memoryCost) {
-            AfterIo();
             Charged();
-            return;
+            if (!hinted) {
+                AfterIo();
+                return;
+            }
         }
         const uint32_t page = va >> 12;
         uint8_t *const entry = (*pages)[page];
@@ -1413,6 +1427,9 @@ static constexpr size_t kUserCodeCache = kCodeCache;
 #endif
 
 static size_t jitPrvCodeCache = 0;
+static bool jitPrvCostHint = true;
+
+void jitSetCostHint(bool on) { jitPrvCostHint = on; }
 
 void jitSetCodeCacheSize(size_t bytes) { jitPrvCodeCache = bytes; }
 
@@ -1436,6 +1453,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.page_table = l->pages;
     conf.page_table_writes_via_callbacks = false;
     conf.page_table_write_protect_bit = true;
+    e.hinted = jitPrvCostHint;
+    conf.frond_cost_hint = e.hinted ? cpuJitCostHint(j->cpu) : nullptr;
+    conf.frond_cost_hint_on = &e.memoryCost;
     conf.page_table_pointer_mask_bits = 1;
     conf.check_halt_on_link = true;
     conf.check_halt_on_memory_access = true;
@@ -1650,11 +1670,14 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     jit.SetCpsr(cpsr);
     e.model = jitPrvTickModel(j->cpu);
     if (const bool m = cpuJitMemoryCost(j->cpu); m != e.memoryCost) {
+        // Code compiled before has the hint check, or not, for the old setting.
         e.memoryCost = m;
-        if (m) e.ClearPages();
+        e.ClearPages();
+        if (!e.code.empty()) jit.ClearCache();
     }
     // ARM920T ticks hold the clocks above bit 32 (TickModel); dynarmic's tick count is signed.
     e.budget = e.model.shift ? std::min<uint64_t>(cycles, INT32_MAX) << e.model.shift : cycles;
+    if (e.memoryCost && e.hinted) cpuJitCostRunStart(j->cpu, cycles, !e.model.shift);
     e.ran = 0;
     e.undo = 0;
     e.dataAbort.set = false;
@@ -1700,3 +1723,5 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
 uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
 
 uint64_t jitFaultExits() { return stats.fault; }
+
+uint64_t jitMemoryCallbacks() { return stats.reads + stats.writes; }

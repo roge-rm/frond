@@ -22,6 +22,7 @@
 #include "savestate/savestateAll.h"
 #include "system_state.h"
 #include "dcache_cost.h"
+#include "jit_dynarmic.h"
 #include "xscale_cost.h"
 
 namespace {
@@ -276,6 +277,93 @@ void testPeepholeRoutines() {
     }
 }
 
+// kProgram's MMU setup, then a stream of 48 KB of loads (fills that go round every way of every set) with
+// a load and a store to one hot line at 0x300000 each step. The hot line's loads and stores hit, through
+// the JIT's data cache hint once it holds them, until the stream evicts the line; the next load fills it
+// clean and the next store dirties it again. Two stores 3840 bytes ahead of the stream miss the cache:
+// the first takes a write buffer entry, the second joins it if it hasn't started draining, and the
+// stream's fill of that line later turns such stores into hits. r3 counts the passes.
+const std::vector<uint32_t> kHot = [] {
+    std::vector<uint32_t> p(kProgram.begin(), kProgram.begin() + 9);
+    const std::vector<uint32_t> loop = {
+        0xe3a0d603,  // mov sp, #0x300000             the hot line
+        // outer:
+        0xe3a00602,  // mov r0, #0x200000
+        0xe3a02903,  // mov r2, #0xc000
+        // inner:
+        0xe8b00ff0,  // ldmia r0!, {r4-r11}
+        0xe59dc000,  // ldr r12, [sp]
+        0xe28cc001,  // add r12, r12, #1
+        0xe58dc004,  // str r12, [sp, #4]
+        0xe58dc014,  // str r12, [sp, #20]
+        0xe580cf00,  // str r12, [r0, #0xf00]       a line not in the cache: a write buffer entry
+        0xe580cf04,  // str r12, [r0, #0xf04]       joins it while it hasn't started draining
+        0xe2833001,  // add r3, r3, #1
+        0xe2522020,  // subs r2, r2, #32
+        0x1afffff5,  // bne inner
+        0xeafffff2,  // b outer
+    };
+    p.insert(p.end(), loop.begin(), loop.end());
+    return p;
+}();
+
+// Fast at Original with the data cache hint charges exactly what it charges with every access going to
+// the callbacks: every batch, the registers and the memory, straight and across a session save and load
+// (the hint isn't saved), while far fewer accesses reach the callbacks. The stream evicts the hot line
+// every 32 fills of its set, so a hint left behind by an eviction would let a load miss for free or a
+// store skip dirtying the line, and the counts would part.
+void testFastHint() {
+    constexpr uint32_t kRuns = 3000, kSave = 1700;
+    auto run = [](bool hint) {
+        jitSetCostHint(hint);
+        Machine m = makeMachine(true, true, kHot);
+        cpuSetJitMemoryCost(m.cpu, true);
+        return m;
+    };
+    Machine plain = run(false);
+    std::vector<uint32_t> plainRuns;
+    uint64_t from = jitMemoryCallbacks();
+    for (uint32_t i = 0; i < kRuns; i++) plainRuns.push_back(runBatch(plain));
+    const uint64_t plainCalls = jitMemoryCallbacks() - from;
+
+    Machine hinted = run(true);
+    std::vector<uint32_t> hintedRuns;
+    from = jitMemoryCallbacks();
+    for (uint32_t i = 0; i < kRuns; i++) hintedRuns.push_back(runBatch(hinted));
+    const uint64_t hintedCalls = jitMemoryCallbacks() - from;
+    const uint32_t passes = cpuGetRegisters(hinted.cpu)[3];
+    uint64_t clocks = 0;
+    for (uint32_t r : hintedRuns) clocks += r;
+    printf("hint: %u passes, %.2f clocks per pass, callbacks %llu without the hint, %llu with it\n", passes,
+           passes ? double(clocks) / passes : 0.0, (unsigned long long)plainCalls, (unsigned long long)hintedCalls);
+    check(passes > 1536 * 2, "the hint run went round the stream more than twice");
+    check(hintedRuns == plainRuns, "the hint charges what the callbacks charge, batch by batch");
+    check(!memcmp(cpuGetRegisters(plain.cpu), cpuGetRegisters(hinted.cpu), 16 * 4), "the hint: same registers");
+    check(!memcmp(plain.ram + 0x300000, hinted.ram + 0x300000, 32), "the hint: same hot line");
+    check(!memcmp(plain.ram + 0x200000, hinted.ram + 0x200000, 0x10000), "the hint: same stream");
+    check(hintedCalls * 2 < plainCalls, "hits stay in generated code");
+
+    // Saved mid-run and loaded into a new machine: the hint starts empty and the counts carry on.
+    Machine b = run(true);
+    std::vector<uint32_t> resumed;
+    for (uint32_t i = 0; i < kSave; i++) resumed.push_back(runBatch(b));
+    Savestate<ChunkType> state;
+    CpuSaver saver{b.cpu};
+    check(state.Save(saver), "Fast session saves");
+    Machine c = run(true);
+    memcpy(c.ram, b.ram, kRamSize);
+    SavestateLoader<ChunkType> loader;
+    CpuSaver target{c.cpu};
+    check(loader.Load(state.GetBuffer(), state.GetSize(), target), "Fast session loads");
+    for (uint32_t i = kSave; i < kRuns; i++) resumed.push_back(runBatch(c));
+    check(resumed == hintedRuns, "Fast loaded run with the hint charges what the straight run charges");
+    check(!memcmp(cpuGetRegisters(c.cpu), cpuGetRegisters(hinted.cpu), 16 * 4), "Fast loaded run: same registers");
+    jitSetCostHint(true);
+    cpuSetFastEngine(false);
+    unsetenv("FROND_JIT_HOT");
+    cpuSetJitSync(false);
+}
+
 // Clocks per inner pass of kCounted over 3000 batches, after 500 to warm up.
 double clocksPerPass(Machine& m) {
     for (uint32_t i = 0; i < 500; i++) runBatch(m);
@@ -309,6 +397,7 @@ int main() {
     testPeepholeRoutines();
     testSaveLoad();
     testFastCharges();
+    testFastHint();
     if (failures) {
         printf("%d failures\n", failures);
         return 1;

@@ -180,6 +180,31 @@ struct Arm920CodeMap {
     }
 };
 
+// Fast's data cache hint, in the layout generated code reads (A32::UserConfig::frond_cost_hint).
+// join[VA[14:4]] is va & ~15 when a store there goes to the write buffer (a buffered or write-through
+// page, or a write-back one without the line) and a write buffer slot holds its block; joinStart is the
+// latest such slot's drain start. The store joins it, at no charge and with no change, when that start
+// is at or after the store's clock, runBase - ticks left + pending (as cpuPrvCostAccess's now, with
+// runBase the run's base clock plus its budget), so generated code checks that too, with the ticks left
+// at most budget. halted is set once a callback has ended the run for its charges (at the next link):
+// from then on hits needn't go to the callbacks for that.
+struct CostJitHint {
+    uint32_t load[1024];
+    uint32_t store[2048];
+    uint32_t pending;
+    uint32_t pad;  // 0: generated code reads pending as a 64-bit word
+    uint32_t halted;
+    uint32_t pad2;
+    int64_t runBase;
+    int64_t budget;
+    uint32_t join[2048];
+    uint64_t joinStart[2048];
+};
+static_assert(offsetof(CostJitHint, store) == 1024 * 4 && offsetof(CostJitHint, pending) == 3072 * 4 &&
+              offsetof(CostJitHint, halted) == 12296 && offsetof(CostJitHint, runBase) == 12304 &&
+              offsetof(CostJitHint, budget) == 12312 && offsetof(CostJitHint, join) == 12320 &&
+              offsetof(CostJitHint, joinStart) == 20512);
+
 struct ArmCpu {
     uint64_t exceptionSequence;
     ArmCpuModel model;
@@ -199,7 +224,7 @@ struct ArmCpu {
 
     // Cost model (xscale_cost.h, dcache_cost.h). The I-cache charges costCore's table per instruction when
     // its costOn is set (1 per instruction otherwise); costMemory adds the region and data cache charges
-    // of loads and stores (XScale). pendingCharge holds the running instruction's memory charges until its
+    // of loads and stores (XScale). jitHint.pending holds the running instruction's memory charges until its
     // loop adds them to the count; costClock is every finished batch's clocks, the base of the data cache
     // model's bus time. regionCharge and cacheCosts are in core clocks at costClocks. paceCost is a 68k op.
     bool costMemory;
@@ -208,7 +233,6 @@ struct ArmCpu {
     bool costInJitRun;     // a JIT run is in progress: the data cache model's time adds jitRanNow
     uint8_t costCore;
     uint32_t paceCost;
-    uint32_t pendingCharge;
     uint64_t costClock;
     cost::Clocks costClocks;
     bool costSdram16;  // the SDRAM bus is 16 bits wide (MDCNFG DWID0), from the memory controller; not saved
@@ -216,6 +240,14 @@ struct ArmCpu {
     cost::CacheCosts cacheCosts[3];
     cost::DataCacheState dcache;
     uint8_t dcacheHint[32];  // the way each set hit last, looked at first; not saved
+    // Fast's data cache hint, checked by generated loads and stores before the page table
+    // (A32::UserConfig::frond_cost_hint), always a subset of dcache: load[VA[14:5]] is va & ~31 when that
+    // line is in the model and its page is cached, store[VA[14:4]] is va & ~15 when the line is in the
+    // model, its page write-back and that half dirty, so those accesses cost nothing and change nothing.
+    // Kept only while costJitHint is set; not saved (a load or reset empties it). pending is the running
+    // instruction's memory charges (pendingCharge), which generated code compares with the cycles left.
+    CostJitHint jitHint;
+    bool costJitHint;  // Fast with memory charges: jitHint is kept
 #ifndef __EMSCRIPTEN__
     // Per host TLB entry, written with it: the page's C (bit 0), B (1) and X (2) bits and its region (4-6).
     uint8_t hostTlbInfo[2][HOST_TLB_SIZE];
@@ -367,9 +399,9 @@ static FORCE_INLINE uint32_t cpuPrvSlotCharge(const struct ArmCpu *cpu, uint32_t
 
 // Adds the memory charges of the instruction that just ran to the loop's count and to what peripherals see.
 static FORCE_INLINE void cpuPrvTakeCharge(struct ArmCpu *cpu, uint32_t &acc, uint32_t &shown) {
-    if (unlikely(cpu->pendingCharge)) {
-        acc += cpu->pendingCharge;
-        cpu->pendingCharge = 0;
+    if (unlikely(cpu->jitHint.pending)) {
+        acc += cpu->jitHint.pending;
+        cpu->jitHint.pending = 0;
         shown = acc;
     }
 }
@@ -377,6 +409,122 @@ static FORCE_INLINE void cpuPrvTakeCharge(struct ArmCpu *cpu, uint32_t &acc, uin
 static FORCE_INLINE uint8_t cpuPrvCostInfo(bool c, bool b, bool x, cost::Region region) {
     return uint8_t((c ? 1 : 0) | (b ? 2 : 0) | (x ? 4 : 0) | (unsigned(region) << 4));
 }
+
+// The hint's empty entries: each one holds a block of the next index, which no address of its own index
+// matches.
+static void cpuPrvJoinClear(struct ArmCpu *cpu) {
+    for (uint32_t i = 0; i < 2048; i++) cpu->jitHint.join[i] = ((i + 1) & 2047) << 4;
+}
+
+static void cpuPrvHintClear(struct ArmCpu *cpu) {
+    for (uint32_t i = 0; i < 1024; i++) cpu->jitHint.load[i] = ((i + 1) & 1023) << 5;
+    for (uint32_t i = 0; i < 2048; i++) cpu->jitHint.store[i] = ((i + 1) & 2047) << 4;
+    cpuPrvJoinClear(cpu);
+    cpu->jitHint.pad = 0;
+    cpu->jitHint.halted = 0;
+    cpu->jitHint.runBase = INT64_MAX / 2;
+    cpu->jitHint.budget = 0;
+}
+
+// Drops a 16-byte block (its address) from the join table.
+static FORCE_INLINE void cpuPrvJoinDrop(struct ArmCpu *cpu, uint32_t block) {
+    const uint32_t i = (block >> 4) & 2047;
+    if (cpu->jitHint.join[i] == block) cpu->jitHint.join[i] = ((i + 1) & 2047) << 4;
+}
+
+// After a store to block went to the write buffer: sets block's join entry. A store that took an entry
+// (queued) has it in the slot written last, whose drain start is the latest (starts never go down);
+// one that joined left the slots as they were, so an entry already there is still right.
+static void cpuPrvJoinNote(struct ArmCpu *cpu, cost::Core core, uint32_t block, bool queued) {
+    const uint32_t i = (block >> 4) & 2047;
+    const unsigned depth = cost::writeBufferDepth(core);
+    if (queued) {
+        cpu->jitHint.join[i] = block;
+        cpu->jitHint.joinStart[i] = cpu->dcache.bufferStart[(cpu->dcache.bufferNext + depth - 1) % depth];
+        return;
+    }
+    if (cpu->jitHint.join[i] == block) return;
+    const uint32_t tag = ((block >> 4) & 0x0fffffffu) | (1u << 31);
+    bool found = false;
+    uint64_t start = 0;
+    for (unsigned k = 0; k < depth; k++) {
+        if (cpu->dcache.bufferBlock[k] != tag) continue;
+        if (!found || cpu->dcache.bufferStart[k] > start) start = cpu->dcache.bufferStart[k];
+        found = true;
+    }
+    if (!found) return;
+    cpu->jitHint.join[i] = block;
+    cpu->jitHint.joinStart[i] = start;
+}
+
+// cacheStall, dropping the join entry of a block whose slot it reuses when that slot was the block's
+// latest (the slots go round in order, so its older ones went before).
+static uint32_t cpuPrvCacheStall(struct ArmCpu *cpu, cost::Core core, const cost::CacheEvents &e,
+                                 const cost::CacheCosts &k, uint64_t now) {
+    if (cpu->costJitHint && (e.writebacks | e.buffered)) {
+        const unsigned depth = cost::writeBufferDepth(core);
+        const unsigned n = std::min<unsigned>(e.writebacks + e.buffered, depth);
+        for (unsigned q = 0; q < n; q++) {
+            const unsigned slot = (cpu->dcache.bufferNext + q) % depth;
+            const uint32_t b = cpu->dcache.bufferBlock[slot];
+            if (!b) continue;
+            const uint32_t block = b << 4, i = (block >> 4) & 2047;
+            if (cpu->jitHint.join[i] == block && cpu->jitHint.joinStart[i] == cpu->dcache.bufferStart[slot])
+                cpuPrvJoinDrop(cpu, block);
+        }
+    }
+    return cost::cacheStall(cpu->dcache, core, e, k, now);
+}
+
+// Drops a line (its address, va & ~31) from the hint: its loads, or only its two store halves.
+static FORCE_INLINE void cpuPrvHintDrop(struct ArmCpu *cpu, uint32_t line, bool loads) {
+    CostJitHint &h = cpu->jitHint;
+    if (loads) {
+        const uint32_t i = (line >> 5) & 1023;
+        if (h.load[i] == line) h.load[i] = ((i + 1) & 1023) << 5;
+    }
+    for (uint32_t half = line; half < line + 32; half += 16) {
+        const uint32_t i = (half >> 4) & 2047;
+        if (h.store[i] == half) h.store[i] = ((i + 1) & 2047) << 4;
+    }
+}
+
+// After an access at va under a cached policy p: notes va's line in the hint if the model now holds it,
+// and its dirty halves for stores if the page is write-back. Reads the way dcacheHint points at, where
+// dataCacheAccessHinted leaves a line it found or filled.
+static FORCE_INLINE void cpuPrvHintNote(struct ArmCpu *cpu, cost::Core core, uint32_t va, cost::Policy p) {
+    const cost::CacheGeometry &g = cost::cacheGeometry(core);
+    const unsigned set = (va >> 5) & ((1u << g.setBits) - 1);
+    const uint32_t l = cpu->dcache.line[set * g.ways + cpu->dcacheHint[set] % g.ways];
+    if ((l & (cost::kLineValid | cost::kLineAddressMask)) != (((va >> 5) & cost::kLineAddressMask) | cost::kLineValid))
+        return;
+    const uint32_t line = va & ~31u;
+    cpu->jitHint.load[(line >> 5) & 1023] = line;
+    if (p < cost::Policy::writeBack) return;
+    if (l & cost::kLineDirtyLow) cpu->jitHint.store[(line >> 4) & 2047] = line;
+    if (l & cost::kLineDirtyHigh) cpu->jitHint.store[((line + 16) >> 4) & 2047] = line + 16;
+}
+
+static FORCE_INLINE uint32_t cpuPrvEvictedLine(uint32_t l) { return (l & cost::kLineAddressMask) << 5; }
+
+void cpuCostHintClear(struct ArmCpu *cpu) {
+    if (cpu->costJitHint) cpuPrvHintClear(cpu);
+}
+
+const uint32_t *cpuJitCostHint(struct ArmCpu *cpu) { return cpu->jitHint.load; }
+
+void cpuJitCostRunStart(struct ArmCpu *cpu, uint32_t budget, bool joins) {
+    cpu->jitHint.halted = 0;
+    // Without a batch the callbacks leave the model alone, and outside cpuPrvCycleJit their clock leaves
+    // out jitRanNow; an impossible base sends every such store to them, as does a run counting in
+    // fractions of a clock (!joins).
+    cpu->jitHint.runBase = joins && cpu->cyclesInProgress && cpu->costInJitRun
+                               ? int64_t(cpu->costClock + *cpu->cyclesInProgress + budget)
+                               : INT64_MAX / 2;
+    cpu->jitHint.budget = budget;
+}
+
+void cpuJitCostHalted(struct ArmCpu *cpu) { cpu->jitHint.halted = 1; }
 
 #ifndef __EMSCRIPTEN__
 // One load or store's charge: the data cache model's for SDRAM, SRAM and flash, the region charge for the
@@ -394,16 +542,34 @@ static __attribute__((noinline)) void cpuPrvCostAccess(struct ArmCpu *cpu, uint3
         const struct ArmMmu *mmu = cpu->memorySystem.mmu;
         const cost::Policy p = cost::policyOf(core, mmu->transTablPA != MMU_DISABLED_TTP, mmu->dcOn, info & 1,
                                               info & 2, info & 4);
-        uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+        uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->jitHint.pending;
 #ifdef FROND_DYNARMIC
         if (cpu->costInJitRun) now += jitRanNow(cpu->jit);
 #endif
         const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, now, cpu->dcacheHint);
-        if (!(e.fills | e.writebacks | e.buffered | e.uncachedLoads | e.uncachedStores)) return;
+        if (cpu->costJitHint) {
+            if (e.evicted) cpuPrvHintDrop(cpu, cpuPrvEvictedLine(e.evicted), true);
+            if (cost::policyCached(p)) cpuPrvHintNote(cpu, core, va, p);
+            // A filled line turns its blocks' stores into hits.
+            if (e.fills) {
+                cpuPrvJoinDrop(cpu, va & ~31u);
+                cpuPrvJoinDrop(cpu, (va & ~31u) + 16);
+            }
+        }
+        // Stores that go to the write buffer: buffered and write-through pages, and write-back ones that
+        // missed without allocating.
+        const bool buffer = cpu->costJitHint && write &&
+                            (p == cost::Policy::buffered || p == cost::Policy::writeThrough ||
+                             (p == cost::Policy::writeBack && !e.hits));
+        if (!(e.fills | e.writebacks | e.buffered | e.uncachedLoads | e.uncachedStores)) {
+            if (buffer) cpuPrvJoinNote(cpu, core, va & ~15u, false);
+            return;
+        }
         const unsigned k = region == cost::sram ? 1 : region == cost::flash ? 2 : 0;
-        charge = cost::cacheStall(cpu->dcache, core, e, cpu->cacheCosts[k], now);
+        charge = cpuPrvCacheStall(cpu, core, e, cpu->cacheCosts[k], now);
+        if (buffer) cpuPrvJoinNote(cpu, core, va & ~15u, e.buffered);
     }
-    if (!cpu->modePace) cpu->pendingCharge += charge;
+    if (!cpu->modePace) cpu->jitHint.pending += charge;
 }
 
 // A host TLB hit's charge, from the page's info stored when the entry was filled.
@@ -1555,31 +1721,45 @@ static bool cpuPrvCostMemory(const struct ArmCpu *cpu) {
            cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->model != ArmCpuModel::arm920t;
 }
 
+// Works out costMemory and costJitHint; the hint starts empty whenever it starts being kept.
+static void cpuPrvSetCostMemory(struct ArmCpu *cpu) {
+    cpu->costMemory = cpuPrvCostMemory(cpu);
+    bool fast = false;
+#ifdef FROND_DYNARMIC
+    fast = cpu->jit && !cpu->jitLoopOnly;
+#endif
+    const bool hint = cpu->costMemory && fast;
+    if (hint && !cpu->costJitHint) cpuPrvHintClear(cpu);
+    cpu->costJitHint = hint;
+}
+
 void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on) {
     cpu->costJitMemory = on;
     const bool was = cpu->costMemory;
-    cpu->costMemory = cpuPrvCostMemory(cpu);
+    cpuPrvSetCostMemory(cpu);
     if (cpu->costMemory && !was) {
         // The model wasn't kept while off: it starts empty.
         cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
         std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+        cpuCostHintClear(cpu);
     }
 }
 
 bool cpuJitMemoryCost(const struct ArmCpu *cpu) { return cpu->costMemory; }
 
-uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu) { return cpu->pendingCharge; }
+uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu) { return cpu->jitHint.pending; }
 
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
     cpu->costCore = core;
     cpu->costMemoryAsked = memory;
     cpu->paceCost = on ? cost::paceOpCost(cost::Core(core)) : 20;
     icacheSetCost(cpu->ic, on, core);
-    cpu->costMemory = cpuPrvCostMemory(cpu);
+    cpuPrvSetCostMemory(cpu);
     cost::dataCacheReset(cpu->dcache, cost::Core(core));
     std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpuCostHintClear(cpu);
     cpu->costClock = 0;
-    cpu->pendingCharge = 0;
+    cpu->jitHint.pending = 0;
     cpuSetCostClocks(cpu, cpu->costClocks.core, cpu->costClocks.bus, cpu->costClocks.memory);
 }
 
@@ -1594,11 +1774,24 @@ void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va)
     else if (crm == 2 && op2 == 5) e = cost::dataCacheAllocateLine(cpu->dcache, core, va);
     else if (crm == 10 && op2 == 4) cost::dataCacheDrain(cpu->dcache);
     else return;
+    // The hint drops what the model lost: every line, the line, its dirty halves or the replaced line.
+    // Join entries go with a drain (every slot emptied) and with the line an allocate takes.
+    if (cpu->costJitHint) {
+        if (op2 == 0) cpuPrvHintClear(cpu);
+        else if (crm == 6 || crm == 14) cpuPrvHintDrop(cpu, va & ~31u, true);
+        else if (crm == 10 && op2 == 1) cpuPrvHintDrop(cpu, va & ~31u, false);
+        else if (crm == 10 && op2 == 4) cpuPrvJoinClear(cpu);
+        else if (crm == 2 && op2 == 5) {
+            if (e.evicted) cpuPrvHintDrop(cpu, cpuPrvEvictedLine(e.evicted), true);
+            cpuPrvJoinDrop(cpu, va & ~31u);
+            cpuPrvJoinDrop(cpu, (va & ~31u) + 16);
+        }
+    }
 #ifndef __EMSCRIPTEN__
     // A clean's write-backs go on the bus and are charged to the MCR, inside a batch.
     if (e.writebacks && cpu->cyclesInProgress) {
-        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
-        cpu->pendingCharge += cost::cacheStall(cpu->dcache, core, e, cpu->cacheCosts[0], now);
+        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->jitHint.pending;
+        cpu->jitHint.pending += cpuPrvCacheStall(cpu, core, e, cpu->cacheCosts[0], now);
     }
 #endif
 }
@@ -1620,8 +1813,9 @@ template <typename T>
 void cpuCostLoad(struct ArmCpu *cpu, T &loader) {
     cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
     std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    cpuCostHintClear(cpu);  // refilled from the loaded model by the accesses that follow
     cpu->costClock = 0;
-    cpu->pendingCharge = 0;
+    cpu->jitHint.pending = 0;
     if (!cpu->costMemory || !loader.HasChunk(ChunkType::costDataCache)) return;
     uint32_t version = 0;
     auto chunk = loader.GetChunkOrFail(ChunkType::costDataCache, 2, "data cache cost model", version);
@@ -1969,7 +2163,7 @@ static void cpuPrvPeepholeCharge(struct ArmCpu *cpu, uint32_t instr, const uint3
         [cpu, &owed](uint32_t c) {
             const uint32_t taken = c < owed ? c : owed;
             owed -= taken;
-            cpu->pendingCharge += c - taken;
+            cpu->jitHint.pending += c - taken;
         },
         [cpu](uint32_t va, bool store) {
             if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU) {
@@ -4888,7 +5082,7 @@ struct CycleProgress {
     ~CycleProgress() { cpu->cyclesInProgress = previous; }
 };
 uint32_t cpuCyclesInProgress(const ArmCpu* cpu) {
-    return cpu->cyclesInProgress ? *cpu->cyclesInProgress + cpu->pendingCharge : 0;
+    return cpu->cyclesInProgress ? *cpu->cyclesInProgress + cpu->jitHint.pending : 0;
 }
 #endif
 
@@ -6432,8 +6626,8 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
         acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
         cpu->costInJitRun = false;
         // The run's memory charges (Fast at Original).
-        acc += cpu->pendingCharge;
-        cpu->pendingCharge = 0;
+        acc += cpu->jitHint.pending;
+        cpu->jitHint.pending = 0;
         cpu->flags = cpsr & 0xf0000000UL;
         cpu->Q = !!(cpsr & ARM_SR_Q);
         cpu->T = !!(cpsr & ARM_SR_T);
@@ -6640,8 +6834,8 @@ static FORCE_INLINE uint32_t cpuPrvCycleBody(struct ArmCpu *cpu, uint32_t cycles
 
 // A batch's clocks, with any memory charge left over from outside the loops, go into costClock.
 static FORCE_INLINE uint32_t cpuPrvEndBatch(struct ArmCpu *cpu, uint32_t ran) {
-    ran += cpu->pendingCharge;
-    cpu->pendingCharge = 0;
+    ran += cpu->jitHint.pending;
+    cpu->jitHint.pending = 0;
     cpu->costClock += ran;
     return ran;
 }

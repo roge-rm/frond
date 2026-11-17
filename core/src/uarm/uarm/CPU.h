@@ -182,6 +182,15 @@ void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on);
 bool cpuJitMemoryCost(const struct ArmCpu *cpu);
 // Memory charges since the batch's count was last brought up to date.
 uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu);
+// Fast's data cache hint (A32::UserConfig::frond_cost_hint), at a fixed address for the CPU's life.
+const uint32_t *cpuJitCostHint(struct ArmCpu *cpu);
+// Before a JIT run with memory charges: the run's budget, for the hint's write buffer check (joins: the
+// run counts whole clocks).
+void cpuJitCostRunStart(struct ArmCpu *cpu, uint32_t budget, bool joins);
+// The run is ending for its memory charges (at the next link).
+void cpuJitCostHalted(struct ArmCpu *cpu);
+// Empties the hint (a TLB flush, the page table cleared or the control register's C bit changed).
+void cpuCostHintClear(struct ArmCpu *cpu);
 // The clocks the region and data cache charges are worked out from, in kHz.
 void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz);
 // The SDRAM bus width the data cache charges use: 16 bits (MDCNFG DWID0 set) or 32.

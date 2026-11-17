@@ -712,6 +712,8 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .page_table_address_space_bits = 32,
         .page_table_pointer_mask_bits = conf.page_table_pointer_mask_bits,
         .page_table_write_protect_bit = conf.page_table_write_protect_bit,
+        .frond_cost_hint = conf.frond_cost_hint,
+        .frond_cost_hint_on = conf.frond_cost_hint_on,
         .silently_mirror_page_table = true,
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,
