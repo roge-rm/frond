@@ -46,6 +46,7 @@ typedef void* WinHandle;
 #define slotWinPaintBitmap 263
 #define slotWinPaintChars 265
 #define slotWinPaintLine 266
+#define slotWinPaintLines 267
 #define slotWinPaintPixel 268
 #define slotWinPaintRectangle 270
 #define slotWinPaintRectangleFrame 271
@@ -116,6 +117,7 @@ extern void** twGlue;
 #define WinPaintBitmap(b, x, y) GLUE(slotWinPaintBitmap, void (*)(const void*, Int32, Int32))(b, x, y)
 #define WinPaintChars(s, n, x, y) GLUE(slotWinPaintChars, void (*)(const char*, Int32, Int32, Int32))(s, n, x, y)
 #define WinPaintLine(a, b, c, d) GLUE(slotWinPaintLine, void (*)(Int32, Int32, Int32, Int32))(a, b, c, d)
+#define WinPaintLines(n, l) GLUE(slotWinPaintLines, void (*)(Int32, const Int16*))(n, l)
 #define WinPaintPixel(x, y) GLUE(slotWinPaintPixel, void (*)(Int32, Int32))(x, y)
 #define WinPaintRectangle(r, c) GLUE(slotWinPaintRectangle, void (*)(const RectangleType*, Int32))(r, c)
 #define WinPaintRectangleFrame(f, r) GLUE(slotWinPaintRectangleFrame, void (*)(Int32, const RectangleType*))(f, r)

@@ -305,3 +305,17 @@ exact 151 free-surface: ok
 fast 151 free-surface: ok
 exact 152 close: ok
 fast 152 close: ok
+exact 153 win-pattern gray erase: ok
+fast 153 win-pattern gray erase: ok
+exact 154 win-pattern gray mask: ok
+fast 154 win-pattern gray mask: ok
+exact 155 win-pattern gray invert: ok
+fast 155 win-pattern gray invert: ok
+exact 156 win-pattern gray overlay: ok
+fast 156 win-pattern gray overlay: ok
+exact 157 win-pattern gray paint-inverse: ok
+fast 157 win-pattern gray paint-inverse: ok
+exact 158 win-pattern-line paint: ok
+fast 158 win-pattern-line paint: ok
+exact 159 win-pattern-line lines: ok
+fast 159 win-pattern-line lines: ok

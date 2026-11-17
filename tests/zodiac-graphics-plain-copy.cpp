@@ -339,8 +339,8 @@ void brushUpload() {
         assert(f.read(brush,4) == d0 && f.read(brush+12,4) == d0>>24 && f.read(brush+28,4) == d1>>24);
         assert(f.read(brush-1,1) == 0xee && f.read(brush+32,1) == 0xee);
         // The driver puts the surface back and fills with brush type 0 or 1: a stop that names the type, except 0
-        // (patternFill).
-        for (uint32_t type : {1u,6u,7u,10u}) {
+        // and 1 (patternFill).
+        for (uint32_t type : {6u,7u,10u}) {
             const uint32_t gmc = 0x55e0340f | type << 4;
             assert(f.append({0x401,destination,0x402,13,0x4b2,0x00f00a00,0x41b,gmc,0x4b1,0x00030004u|type<<8,
                 0xc0011a00,0x00010001,0x00020002},0x200b0200) == A::sideEffect && refused(f,"pattern-brush",type));
@@ -1557,6 +1557,27 @@ void patternFill() {
         for (unsigned y = 1; y < 7; ++y)
             for (unsigned x = 2; x < 12; ++x) assert(f.read(destination+(y*13+x)*2) == 0);
     }
+    // Type 1 (erase, mask and overlay with a pattern, GMC 55e0341f from the ROM): 41f where a bit is set, the
+    // destination left where clear.
+    for (bool queued : {true,false}) {
+        Fixture f; planes(f);
+        assert(f.append(mono,0x200af1fc) == A::ok);
+        if (!queued) f.finish();
+        auto clear = fill; clear[15] = 0x55e0341f; clear[17] = 0x00030104;
+        assert(f.append(clear,0x200b0200) == A::ok);
+        assert(f.state.advanceCpuCycles(4000) && f.commands.complete(f.state,f.eim,f.memory) == A::ok);
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) {
+                const bool inside = x >= 2 && x < 12 && y >= 1 && y < 7;
+                const uint32_t expected = inside && ((rows[y & 7] >> (7 - (x & 7))) & 1) ? 0x07e0 : 0xa55a;
+                assert(f.read(destination+(y*13+x)*2) == expected);
+            }
+        // Only with ROP f0, and 4b1 naming type 1.
+        auto rop = clear; rop[13] = 0x005a0a00; rop[15] = 0x54b4341f;
+        assert(f.append(rop,0x200b0200) == A::sideEffect && refused(f,"pattern-brush-rop",0x5a));
+        auto typed = clear; typed[17] = 0x00030004;
+        assert(f.append(typed,0x200b0200) == A::sideEffect);
+    }
     Fixture f; planes(f);
     assert(f.append(mono,0x200af1fc) == A::ok);
     // A queued write over the brush that isn't an upload, an origin, a line with the pattern, and 4b1 naming
@@ -1575,7 +1596,7 @@ void patternFill() {
     assert(f.append(order,0x200b0200) == A::sideEffect);
     order = fill; order[17] = 0x40030004;
     assert(f.append(order,0x200b0200) == A::sideEffect);
-    std::puts("PASS: 8x8 mono pattern fills from a queued or finished upload, f0 and 5a, anchored at the surface origin");
+    std::puts("PASS: 8x8 mono pattern fills from a queued or finished upload, f0 and 5a, anchored at the surface origin; type 1 leaves clear bits");
 }
 int main() {
     hostSourceType();

@@ -191,6 +191,24 @@ static Err tWinPattern(int a) {
     WinPaintRectangle(&r, 0);
     return winEnd();
 }
+/* arg: draw mode * 10 + pattern type; erase, mask and overlay with a pattern reach the transparent 8x8 brush
+ * (2008a048-2008a0e0). */
+static Err tWinPatternMode(int a) {
+    RectangleType r = winRect(4, 4, 40, 30);
+    winBegin();
+    WinSetDrawMode(a / 10);
+    WinSetPatternType(a % 10);
+    WinPaintRectangle(&r, 0);
+    return winEnd();
+}
+/* arg: 0 WinPaintLine, 1 WinPaintLines, with the gray pattern. */
+static Err tWinPatternLine(int a) {
+    static const Int16 lines[8] = { 2, 3, 50, 40, 60, 2, 4, 50 };
+    winBegin();
+    WinSetPatternType(2);
+    if (a) WinPaintLines(2, lines); else WinPaintLine(2, 3, 50, 40);
+    return winEnd();
+}
 static Err tWinLine(int a) { winBegin(); WinSetDrawMode(a); WinPaintLine(2, 3, 50, 40); return winEnd(); }
 static Err tWinPixel(int a) { (void)a; winBegin(); WinPaintPixel(9, 9); return winEnd(); }
 static Err tWinChars(int a) { winBegin(); WinSetDrawMode(a); WinPaintChars("TwGfx", 5, 4, 4); return winEnd(); }
@@ -379,6 +397,13 @@ static const Test tests[] = {
     {"win-coords 144", tWinNative, 144},
     {"free-surface", tFree, 0},
     {"close", tClose, 0},
+    {"win-pattern gray erase", tWinPatternMode, 12},
+    {"win-pattern gray mask", tWinPatternMode, 22},
+    {"win-pattern gray invert", tWinPatternMode, 32},
+    {"win-pattern gray overlay", tWinPatternMode, 42},
+    {"win-pattern gray paint-inverse", tWinPatternMode, 52},
+    {"win-pattern-line paint", tWinPatternLine, 0},
+    {"win-pattern-line lines", tWinPatternLine, 1},
 };
 #define TEST_COUNT ((int)(sizeof tests / sizeof tests[0]))
 

@@ -251,17 +251,26 @@ class Imx1GraphicsCommands {
                     engine.stretchCopySubmission() || (count & 1))
                     return A::sideEffect;
                 if (count > (engine.fillSubmission() ? 8u : 2u)) return refuse("rectangle-count", count / 2);
-                // Brush types 1, 6, 7 and a draw the pattern uploaded to 423 too and are refused; type 0 is drawn
-                // (brushPattern).
+                // Brush types 0 and 1 draw the 8x8 mono pattern uploaded to 423 (brushPattern), 13 the solid colour.
+                // Types 6, 7 and a come only from the AHI brush upload (200aedd0, GetProc 1011), which nothing
+                // outside the ROM's driver calls, and are refused.
                 const uint32_t brush = known[0x41b] ? (values[0x41b] >> 4) & 15 : 13;
-                if (brush != 13 && brush != 0) return refuse("pattern-brush", brush);
+                if (brush != 13 && brush != 0 && brush != 1) return refuse("pattern-brush", brush);
                 uint8_t pattern[8];
-                if (brush == 0 && !brushPattern(configuration, eim, memory, pattern)) return refuse("pattern-brush-data", values[0x423]);
+                if (brush != 13 && !brushPattern(configuration, eim, memory, pattern)) return refuse("pattern-brush-data", values[0x423]);
+                // The fill routine sends type 1 for erase, mask and overlay with a pattern (2008a048-2008a0e0),
+                // always with ROP f0.
+                if (brush == 1 && ((values[0x41b] >> 17) & 255) != 0xf0) return refuse("pattern-brush-rop", (values[0x41b] >> 17) & 255);
                 for (uint32_t pair = 0; pair < count; pair += 2) {
                     if (!take(first) || !take(second)) return A::sequence;
                     Fill fill{};
                     const auto status = rectangle(configuration, eim, memory, first, second, fill, false);
                     if (status != A::ok) return status;
+                    if (brush == 1) {
+                        ticks += uint64_t(fill.width) * fill.height;
+                        transparentPattern(pattern, first, fill, fills);
+                        continue;
+                    }
                     if (brush == 0) patternPixels(pattern, first, fill);
                     // ROP3 5a is destination xor pattern, f0 is the pattern alone.
                     fill.invert = ((values[0x41b] >> 17) & 255) == 0x5a;
@@ -979,6 +988,26 @@ class Imx1GraphicsCommands {
                 fill.pixels[size_t(y) * fill.width + x] = uint16_t(values[((pattern[(top + y) & 7] >> (7 - ((left + x) & 7))) & 1) ?
                                                                          0x41f : 0x41e]);
     }
+    // A fill with brush type 1 (8x8 mono, foreground and leave alone): set bits take 41f and clear ones leave the
+    // destination, as solid fills of each row's runs of set bits. Rows and columns line up as patternPixels.
+    // ASSUMPTION "brush type 1 transparent": the Radeon's BRUSH_8X8_MONO_FG_LA. The ROM sends it for erase (with the
+    // pattern inverted), mask and overlay, each of which draws one colour and leaves the rest.
+    void transparentPattern(const uint8_t* pattern, uint32_t xy, const Fill& fill, std::vector<Fill>& fills) const {
+        const uint32_t left = (xy >> 16) + fill.sourceX, top = (xy & 0xffff) + fill.sourceY;
+        for (uint32_t y = 0; y < fill.height; ++y)
+            for (uint32_t x = 0; x < fill.width;) {
+                const auto set = [&](uint32_t at) { return (pattern[(top + y) & 7] >> (7 - ((left + at) & 7))) & 1; };
+                if (!set(x)) { ++x; continue; }
+                uint32_t end = x + 1;
+                while (end < fill.width && set(end)) ++end;
+                Fill run = fill;
+                run.base = fill.base + y * fill.pitch + x * 2;
+                run.width = end - x;
+                run.height = 1;
+                fills.push_back(std::move(run));
+                x = end;
+            }
+    }
     Imx1BootstrapAccess a4Source(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                const Imx1GraphicsMemory& memory, uint32_t xy,
                                uint32_t width, uint32_t height, Fill& fill) const {
@@ -1054,12 +1083,12 @@ class Imx1GraphicsCommands {
             values[0x472] != 0x3f || values[0x471] != 0x1fff1fff || values[0x488] != 4 || !known[0x48f] ||
             values[0x48f] != 0xffffffff || values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20 ||
             (values[0x484] & ~0x000f0f0fu))) return refuse("blend-state", gmc);
-        // Brush 13 is the solid colour, 0 the 8x8 mono pattern (brushPattern); 4b1 bits 8-11 name the same type.
+        // Brush 13 is the solid colour, 0 and 1 the 8x8 mono pattern (brushPattern); 4b1 bits 8-11 name the same type.
         // The pattern fill (2008a154) clears GMC bit 15 and 4b1 bit 30 through 200afa74 first (2008a170), so
         // those two bits are set for the solid brush and clear for the pattern.
         const uint32_t brush = (gmc >> 4) & 15;
-        const bool msbOrder = brush == 0;
-        if (!host && !copy && !blend && ((brush != 13 && brush != 0) || ((gmc >> 8) & 15) != 4 ||
+        const bool msbOrder = brush == 0 || brush == 1;
+        if (!host && !copy && !blend && ((brush != 13 && brush != 0 && brush != 1) || ((gmc >> 8) & 15) != 4 ||
             (rop != 0xf0 && rop != 0x5a) || !(gmc & (1u << 28)) ||
             !(gmc & (1u << 30)) || bool(gmc & (1u << 15)) == msbOrder || (gmc & 0x80000000u) || values[0x488] != 4 ||
             (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0])) return A::sideEffect;
