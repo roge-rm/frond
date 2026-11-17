@@ -323,6 +323,13 @@ VSD* imx1MachineMmcsdCard(const Imx1Machine*);
 // Null or empty for none.
 constexpr size_t imx1CardIdBytes = 32;
 void imx1MachineSetMmcsdCardId(Imx1Machine*, const char* id);
+// The card in the W4200's own SD slot (slot 2, Zodiac only), or null to take it out. The slot's card detect
+// (16010910 bit 2) follows it, and with the driver's card events on an insert or remove raises the chip's SD
+// interrupt. Needs the virtual graphics profile. A state saved once the slot has had a card keeps the slot's
+// registers, the transfer under way and the card's own state in its SD2 section. Setting the card already in
+// changes nothing.
+Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine*, VSD* card, bool commit = true);
+VSD* imx1MachineGraphicsSdCard(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
@@ -399,6 +406,8 @@ struct Imx1StateInfo {
     // The saved card's id, when the state has it.
     bool cardIdKnown = false;
     char cardId[imx1CardIdBytes + 1]{};
+    // Slot 2: the state has an SD2 section, and (load only) the card in slot 2 took on its card state.
+    bool graphicsSdSection = false, graphicsSdResumed = false;
 };
 // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
 // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is

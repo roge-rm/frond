@@ -16,6 +16,9 @@ class Imx1GraphicsInterrupts {
         if (enabled & pending & known) return Imx1GpioLine::asserted;
         return enabled & ~known ? Imx1GpioLine::unknown : Imx1GpioLine::clear;
     }
+    // The SD block's card insert or remove event (Imx1GraphicsSd::attachCard).
+    static constexpr uint32_t sdMask = 0x02000000;
+    void raiseSd() { pending |= sdMask; known |= sdMask; }
     void observeDisplay(bool sourceKnown, bool event) {
         if (sourceKnown && event) { pending |= displayMask; known |= displayMask; }
         else if (!sourceKnown && !(pending & known & displayMask)) known &= ~displayMask;
@@ -56,6 +59,10 @@ class Imx1GraphicsInterrupts {
                 if (value & ~known) return A::externalInput;
                 enabled = value;
             }
+        } else if (write && pc == 0x204d21b6) {
+            // The card interrupt handler's own acknowledge.
+            if (value != sdMask) return A::sideEffect;
+            pending &= ~value;
         } else if (write) {
             if (pc != 0x20087824) return A::externalInput;
             if (value & ~nativeMask) return A::reservedBits;

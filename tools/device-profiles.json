@@ -2133,6 +2133,23 @@
               "guest_qualified_sizes_bytes": []
             }
           ]
+        },
+        {
+          "id": 2,
+          "label": 2,
+          "kind": "sd",
+          "media_families": [
+            {
+              "family": "sdsc",
+              "csd_format": "sd-v1",
+              "min_bytes": 33554432,
+              "max_bytes": 2147483648,
+              "block_bytes": 512,
+              "size_rule": "legacy-profile-aligned-512",
+              "runtime_sizes_bytes": [],
+              "guest_qualified_sizes_bytes": []
+            }
+          ]
         }
       ],
       "device_type": 9,

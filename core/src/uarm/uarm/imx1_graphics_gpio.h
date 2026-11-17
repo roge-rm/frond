@@ -46,10 +46,11 @@ class Imx1GraphicsGpio {
             return Imx1BootstrapAccess::ok;
         }
         // The card driver's own updates of pin 14: direction set, latch cleared (204d26f4) or set (204d2716,
-        // and 204d2f6e when it comes back from sleep with the slot empty).
+        // and 204d2f6e when it comes back from sleep with the slot empty), and the card interrupt handler's
+        // on insert (204d2200) and remove (204d2254).
         if (!index && offset == 0 &&
-            ((!write && (pc == 0x204d26f4 || pc == 0x204d2716 || pc == 0x204d2f6e)) ||
-             (write && (pc == 0x204d2708 || pc == 0x204d272a || pc == 0x204d2f82)))) {
+            ((!write && (pc == 0x204d26f4 || pc == 0x204d2716 || pc == 0x204d2f6e || pc == 0x204d2200 || pc == 0x204d2254)) ||
+             (write && (pc == 0x204d2708 || pc == 0x204d272a || pc == 0x204d2f82 || pc == 0x204d2212 || pc == 0x204d2268)))) {
             if (!state.dataKnown || !state.controlKnown) return Imx1BootstrapAccess::sequence;
             if (!write) value = state.data;
             else {

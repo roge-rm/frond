@@ -122,7 +122,7 @@ class DesktopControl {
             case DesktopChannel::Poll::idle: break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -269,6 +269,12 @@ class DesktopControl {
             const bool ok = sdCardWrite(uint32_t(sdCardSectorCount() - 1), sector.data());
             std::cerr << "save test: SD " << (ok ? "" : "not ") << "marked " << mark << std::endl;
         }
+        if (auto& second = sdCardStore(1); second.initialized() && second.sectorCount()) {
+            std::vector<uint8_t> sector(SD_SECTOR_SIZE, 0);
+            std::memcpy(sector.data(), mark.data(), mark.size());
+            const bool ok = second.write(uint32_t(second.sectorCount() - 1), sector.data());
+            std::cerr << "save test: SD2 " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
     }
     unsigned testMarks{};
     // Emulation thread: waits for saveJob, finishes the card and NAND files and answers.
@@ -349,6 +355,72 @@ class DesktopControl {
             }
         };
     }
+    // The second SD slot's commands (the Zodiac's), as the sd- ones on sdCardStore(1).
+    Reply dispatchSecondSd(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
+        auto& store = sdCardStore(1);
+        auto& soc = *ctx.soc;
+        if (command == "sd2-state") return {true, "card", !store.initialized() ? "none" : soc.Sd2Inserted() ? "inserted" : "ejected"};
+        if (command == "sd2-create" || command == "sd2-insert") {
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the current card before replacing it."};
+            const auto device = soc.GetDeviceType();
+            const auto progress = sdProgress(job);
+            frondNative::SdResult result;
+            if (command == "sd2-create") {
+                if (path.empty() || path.size() > 4 || path.find_first_not_of("0123456789") != std::string::npos)
+                    return {false, "size", frondNative::sdCreateSizes(device)};
+                result = frondNative::createSdCard(ctx.sessionFolder, device, unsigned(std::stoul(path)), progress, 1);
+            } else {
+                struct stat st{};
+                if (::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+                    (!frondSd::validSize(uint64_t(st.st_size)) || !frondNative::sdImageFits(device, uint64_t(st.st_size))))
+                    return {false, "size", frondNative::sdImageSizes(device)};
+                result = frondNative::loadSdImage(ctx.sessionFolder, device, path, progress, 1);
+            }
+            if (!result.ok) return {false, result.code, result.message};
+            frondNative::slotCards().sd2Protected = false;
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-take-out") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the card before taking it out."};
+            frondNative::CardIdentity identity{};
+            const bool protect = frondNative::slotCards().sd2Protected;
+            const auto result = frondNative::takeOutFileCard(ctx.sessionFolder, frondMachine::kindSd2, protect, identity);
+            if (!result.ok) return {false, result.code, result.message};
+            frondNative::slotCards().sd2Protected = false;
+            return {true, "taken-out", frondNative::takenOutReply(identity, protect)};
+        }
+        if (command == "sd2-put-in") {
+            frondNative::CardIdentity identity{};
+            bool protect = false;
+            if (!frondNative::parsePutIn(path, identity, protect))
+                return {false, "argument", "Use the card's 64-digit identity, then protected or writable."};
+            const auto result = frondNative::putInSd2(ctx.sessionFolder, soc.GetDeviceType(), identity, protect);
+            if (!result.ok) return {false, result.code, result.message};
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-eject") {
+            if (!store.initialized() || !soc.Sd2Inserted()) return {false, "empty", "No card is inserted in the second slot."};
+            soc.Sd2Eject();
+            frondNative::noteEjected(soc);
+            return {true, "ejected", "SD card ejected from the second slot. Its contents remain in this session."};
+        }
+        if (command == "sd2-reinsert") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-export") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the card before exporting its image."};
+            const auto result = frondNative::exportSd(path, sdProgress(job), 1);
+            if (!result.ok) return {false, result.code, result.message};
+            return {true, "exported", "SD image exported."};
+        }
+        return {false, "command", "Unknown second SD slot command."};
+    }
     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
         // On a Memory Stick device the card store holds a Memory Stick Pro, reached through ms-*.
         // This comes before the argument checks so every sd-* command gets the same answer.
@@ -358,11 +430,13 @@ class DesktopControl {
                 return command == "sd-state" && path.empty() ? Reply{true, "card", "none"}
                                                              : Reply{false, "unsupported", "This device has no SD slot."};
         }
+        if (command.rfind("sd2-", 0) == 0 && !ctx.soc->HasSecondSdSlot())
+            return {false, "unsupported", "This device has no second SD slot."};
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
-        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -745,6 +819,7 @@ class DesktopControl {
             if (!result.ok) return {false, result.code, result.message};
             return {true, "exported", "SD image exported."};
         }
+        if (command.rfind("sd2-", 0) == 0) return dispatchSecondSd(ctx, command, path, job);
         if (command == "save") {
             if (!frondNative::saveMachine(path, *ctx.soc, ctx.sessionPath, ctx.sessionFolder)) return {false, "save", "Could not save device state."};
             return {true, "saved", "Session saved."};

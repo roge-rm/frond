@@ -74,13 +74,14 @@ inline void noteTakenOut(const char* name, bool out) {
 
 constexpr const char* takeOutNeedsFolder = "Save the machine before taking its card out.";
 
-// Writes the card store's card (SD, or a Memory Stick with `kind`) into the folder's card file
-// and closes it. A card on this folder's file is journalled and the journal applied; any other is
+// Writes the card store's card (SD, the second SD slot's, or a Memory Stick with `kind`) into the
+// folder's card file and closes it. A card on this folder's file is journalled and the journal applied; any other is
 // copied whole. If this fails the card stays in the store as it was.
 inline SdResult takeOutFileCard(const std::filesystem::path& folder, uint32_t kind, bool writeProtected,
                                 CardIdentity& identity, const CardIdentity* cardIdentity = nullptr) {
     if (folder.empty()) return frondSdCandidate::fail("folder", takeOutNeedsFolder);
-    if (!sdCardInitialized()) return frondSdCandidate::fail("empty", "This session has no card.");
+    auto& store = cardStore(kind);
+    if (!store.initialized()) return frondSdCandidate::fail("empty", "This session has no card.");
     frondMachine::Media media;
     SdSave save;
     if (!beginSdSave(folder, media, false, save, kind, writeProtected, cardIdentity)) {
@@ -89,13 +90,13 @@ inline SdResult takeOutFileCard(const std::filesystem::path& folder, uint32_t ki
     }
     if (!finishSdSave(folder, save)) {
         // The journal stays; the folder's .frond is older, so the next load drops it.
-        if (!save.journal.empty()) sdCardTrustChunks(save.chunks);
+        if (!save.journal.empty()) store.trustChunks(save.chunks);
         abandonSdSave(save);
         return frondSdCandidate::fail("write", "Could not write the card file.");
     }
     identity = media.identity;
-    sdCardReset();
-    frondSdCandidate::releaseUnused();
+    store.reset();
+    frondSdCandidate::releaseUnused(cardStoreSlot(kind));
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
     FileCardBacking::DiscardGenerations(sidecar);
     frondSession::syncDir(folder);
@@ -103,11 +104,12 @@ inline SdResult takeOutFileCard(const std::filesystem::path& folder, uint32_t ki
     return {true, "taken-out", {}};
 }
 
-// Opens the folder's card file (SD or Pro) in the card store as a new card with `identity`.
+// Opens the folder's card file (SD, second SD or Pro) in its card store as a new card with `identity`.
 inline SdResult openFileCard(const std::filesystem::path& folder, uint32_t kind, int32_t deviceType,
                              const CardIdentity& identity) {
     if (folder.empty()) return frondSdCandidate::fail("folder", "This machine has no folder to take a card from.");
-    if (sdCardInitialized()) return frondSdCandidate::fail("busy", "Take the current card out first.");
+    auto& store = cardStore(kind);
+    if (store.initialized()) return frondSdCandidate::fail("busy", "Take the current card out first.");
     const char* name = frondMachine::fileCardSibling(kind);
     frondSession::CardSwap swap;
     swap.identityGiven = true;
@@ -121,7 +123,7 @@ inline SdResult openFileCard(const std::filesystem::path& folder, uint32_t kind,
     if (!fits) return frondSdCandidate::fail("size", "This machine doesn't take a card of that size.");
     char id[SD_CARD_ID_MAX_LEN + 1]{};
     std::memcpy(id, identity.data(), SD_CARD_ID_MAX_LEN);
-    if (!sdCardInitializeFromFile((folder / name).c_str(), media.physicalSize, frondSdFile::headerBytes, id))
+    if (!store.initializeFromFile((folder / name).c_str(), media.physicalSize, frondSdFile::headerBytes, id))
         return frondSdCandidate::fail("card", "Could not open the card file.");
     noteTakenOut(name, false);
     return {true, "opened", {}};
@@ -132,6 +134,14 @@ inline SdResult putInSd(const std::filesystem::path& folder, int32_t deviceType,
                         bool writeProtected) {
     auto result = openFileCard(folder, frondMachine::kindSd, deviceType, identity);
     if (result.ok) slotCards().sdProtected = writeProtected;
+    return result;
+}
+
+// The same for the second SD slot's card, sd2.frondsd.
+inline SdResult putInSd2(const std::filesystem::path& folder, int32_t deviceType, const CardIdentity& identity,
+                         bool writeProtected) {
+    auto result = openFileCard(folder, frondMachine::kindSd2, deviceType, identity);
+    if (result.ok) slotCards().sd2Protected = writeProtected;
     return result;
 }
 

@@ -45,7 +45,7 @@ struct Contents {
     std::vector<uint8_t> metadata, nor, nand, memory, savestate;
     std::vector<frondMachine::Media> media;
     // Under --card-swap: the slot holds another card than the one saved, or none.
-    bool sdSwapped{}, msSwapped{};
+    bool sdSwapped{}, msSwapped{}, sd2Swapped{};
 };
 
 // A load with --card-swap: the frontend may have changed the card files while the machine was off.
@@ -709,7 +709,8 @@ inline bool saveFolderFromTemps(const std::filesystem::path& folder, const Conte
     // A card the new .frond no longer describes, after an unmount or detach, goes with its
     // generations, or the folder would refuse to load.
     for (const auto* sibling :
-         {frondMachine::sdSibling, frondMachine::msSibling, frondMachine::msProSibling, frondMachine::nandSibling}) {
+         {frondMachine::sdSibling, frondMachine::sd2Sibling, frondMachine::msSibling, frondMachine::msProSibling,
+          frondMachine::nandSibling}) {
         const bool described = std::any_of(contents.media.begin(), contents.media.end(),
                                            [&](const frondMachine::Media& m) { return m.name == sibling; });
         if (described || (keep && std::find(keep->begin(), keep->end(), sibling) != keep->end())) continue;
@@ -773,7 +774,9 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
         media.logicalSize = g->LogicalBytes();
         if (!frondMachine::msHeaderLooksRight(path, media.physicalSize, &media.contentGeneration)) return false;
     } else {
-        media.kind = media.name == frondMachine::msProSibling ? frondMachine::kindMsPro : frondMachine::kindSd;
+        media.kind = media.name == frondMachine::msProSibling ? frondMachine::kindMsPro
+                     : media.name == frondMachine::sd2Sibling ? frondMachine::kindSd2
+                                                               : frondMachine::kindSd;
         if (const auto settled = frondStorage::settleChanges(path); !settled.ok) {
             std::cerr << settled.message << std::endl;
             return false;
@@ -794,21 +797,23 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
     return true;
 }
 
-// Fits the saved cards to the card files now in the folder, slot by slot (SD; Memory Stick or Pro).
-// A saved card whose file is there unchanged, with the same identity when one is given, stays as
-// saved: same SD or Pro generation, same classic stick change counter. A missing file empties the
-// slot; another card, or the same one changed, is checked as a new card. The device profile check
-// comes later, as for any load.
+// Fits the saved cards to the card files now in the folder, slot by slot (SD; Memory Stick or Pro;
+// the Zodiac's second SD). A saved card whose file is there unchanged, with the same identity when
+// one is given, stays as saved: same SD or Pro generation, same classic stick change counter. A
+// missing file empties the slot; another card, or the same one changed, is checked as a new card,
+// except in the second SD slot, which refuses the load. The device profile check comes later, as
+// for any load.
 inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parsed, const CardSwap& swap) {
     std::vector<frondMachine::Media> cards;
     const std::vector<std::vector<const char*>> slots = {{frondMachine::sdSibling},
-                                                         {frondMachine::msSibling, frondMachine::msProSibling}};
+                                                         {frondMachine::msSibling, frondMachine::msProSibling},
+                                                         {frondMachine::sd2Sibling}};
     for (size_t slot = 0; slot < slots.size(); ++slot) {
         const frondMachine::Media* saved = nullptr;
         for (const auto& media : parsed.media) {
             if (media.kind == frondMachine::kindNand) continue;
-            const bool sd = media.kind == frondMachine::kindSd;
-            if (sd == (slot == 0)) {
+            const size_t at = media.kind == frondMachine::kindSd ? 0 : media.kind == frondMachine::kindSd2 ? 2 : 1;
+            if (at == slot) {
                 if (saved) return false;
                 saved = &media;
             }
@@ -824,8 +829,10 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
             present = name;
         }
         if (!saved && !present) continue;
-        bool& swapped = slot == 0 ? parsed.sdSwapped : parsed.msSwapped;
-        if (saved && present && saved->name == present && (!swap.identityGiven || swap.identity == saved->identity)) {
+        bool& swapped = slot == 0 ? parsed.sdSwapped : slot == 2 ? parsed.sd2Swapped : parsed.msSwapped;
+        // --card-identity names the first slot's or the stick's card, never the second SD slot's.
+        if (saved && present && saved->name == present &&
+            (slot == 2 || !swap.identityGiven || swap.identity == saved->identity)) {
             std::error_code ec;
             const auto path = folder / present;
             uint64_t changes = 0;
@@ -843,6 +850,12 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
         }
         swapped = true;
         if (!present) continue;
+        // A card file with no saved card there was taken out: the slot loads empty and sd2-put-in brings it back.
+        if (slot == 2 && !saved) continue;
+        if (slot == 2) {
+            std::cerr << "the second SD card file changed while the machine was off; put it in with sd2-put-in" << std::endl;
+            return false;
+        }
         frondMachine::Media card;
         if (!swappedInCard(folder, present, swap, card)) return false;
         cards.push_back(std::move(card));
@@ -885,7 +898,7 @@ inline bool loadV7Bytes(const uint8_t* data, size_t size, const std::filesystem:
     if (!parseFolderSession(data, size, parsed) || !unpackNand(folder, folder, parsed.media)) return false;
     if (swap) {
         if (!resolveCardSwap(folder, parsed, *swap) ||
-            frondMachine::checkSiblings(folder, parsed.media, full) != frondMachine::SiblingStatus::ok)
+            frondMachine::checkSiblings(folder, parsed.media, full, true) != frondMachine::SiblingStatus::ok)
             return false;
         out = std::move(parsed);
         return true;
@@ -986,6 +999,7 @@ inline bool isMachineFolder(const std::filesystem::path& path) {
     std::filesystem::path session;
     if (frondMachine::sessionFile(path, session)) return true;
     return std::filesystem::is_regular_file(path / frondMachine::sdSibling, ec) ||
+           std::filesystem::is_regular_file(path / frondMachine::sd2Sibling, ec) ||
            std::filesystem::is_regular_file(path / frondMachine::msSibling, ec) ||
            std::filesystem::is_regular_file(path / frondMachine::msProSibling, ec) ||
            std::filesystem::is_regular_file(path / frondMachine::nandSibling, ec);
@@ -998,6 +1012,7 @@ inline bool frondInFolder(const std::filesystem::path& file) {
     if (name == parent.filename().string() + ".frond") return true;
     std::error_code ec;
     return std::filesystem::is_regular_file(parent / frondMachine::sdSibling, ec) ||
+           std::filesystem::is_regular_file(parent / frondMachine::sd2Sibling, ec) ||
            std::filesystem::is_regular_file(parent / frondMachine::msSibling, ec) ||
            std::filesystem::is_regular_file(parent / frondMachine::msProSibling, ec) ||
            std::filesystem::is_regular_file(parent / frondMachine::nandSibling, ec);

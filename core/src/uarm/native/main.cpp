@@ -128,6 +128,8 @@ bool gFastEngineMissing = false;
     // run swapInsertDelay awake, as a hot swap would. The stick's write protection is set from
     // `msProtect`.
     bool sdSwapped = false, msSwapped = false, msProtect = false;
+    // The session's second SD card (the Zodiac's slot 2) was saved in its slot.
+    bool secondCardIn = false;
     // A v9 session's NAND, attached from nand.frondnand once the SoC is made. A NAND in RAM came
     // from malloc (a session) or new[] (--nand or a blank one), freed that way once a save moves
     // it onto a file.
@@ -274,7 +276,7 @@ bool gFastEngineMissing = false;
                     cerr << "session SD card is not supported by device profile" << endl;
                     return false;
                 }
-            if (!frondNative::attachFolderMedia(contents, folder)) {
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindSd)) {
                 cerr << "session SD sidecar is missing or unreadable" << endl;
                 return false;
             }
@@ -295,12 +297,26 @@ bool gFastEngineMissing = false;
                 cerr << "session Memory Stick Pro is not supported by device profile" << endl;
                 return false;
             }
-            if (!frondNative::attachFolderMedia(contents, folder)) {
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindMsPro)) {
                 cerr << "session Memory Stick Pro sidecar is missing or unreadable" << endl;
                 return false;
             }
             embeddedCard = true;
             msProCard = true;
+        }
+        // The Zodiac's second SD slot opens into its own card store, and goes in before the state loads.
+        for (const auto& media : contents.media) {
+            if (media.kind != frondMachine::kindSd2) continue;
+            if (profile->board != DeviceBoard5::imx1Zodiac || !deviceProfileSdSizeValid5(profile->deviceType, media.physicalSize)) {
+                cerr << "session second SD card is not supported by device profile" << endl;
+                return false;
+            }
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindSd2)) {
+                cerr << "session second SD sidecar is missing or unreadable" << endl;
+                return false;
+            }
+            secondCardIn = media.inserted;
+            frondNative::slotCards().sd2Protected = media.writeProtected;
         }
         // What the slots carry outside the card store, kept to the next save.
         for (const auto& media : contents.media) {
@@ -750,6 +766,11 @@ bool gFastEngineMissing = false;
                 return false;
             }
             msCtrlrSwapOnLoad(memoryStick, true);
+        }
+        // Slot 2's card goes in first, so the load carries it on from the state's SD2 section.
+        if (secondCardIn && !soc->Sd2Insert()) {
+            cerr << "session second SD card could not be put in" << endl;
+            return false;
         }
         if (!soc->Load(savestate.size, savestate.data)) {
             cerr << "failed to restore savestate" << endl;
@@ -1499,6 +1520,8 @@ bool gFastEngineMissing = false;
         // A candidate card no save adopted holds nothing the folder needs.
         sdCardReset();
         frondSdCandidate::releaseUnused();
+        sdCardStore(1).reset();
+        frondSdCandidate::releaseUnused(1);
 
         if (desktop && desktop->SaveFailed()) return false;
 

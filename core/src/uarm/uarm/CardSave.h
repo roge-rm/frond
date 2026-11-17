@@ -20,10 +20,15 @@
 
 // The SD card's part of a machine-folder save, apart from the SoC. On the TG50 the same card
 // store holds a Memory Stick Pro, saved the same way as ms.frondmsp (kind 3), or a classic stick
-// as a v2 ms.frondms (kind 2); `kind` picks which.
+// as a v2 ms.frondms (kind 2); `kind` picks which. The Zodiac's second SD slot (kind 5) has a
+// card store of its own and saves as sd2.frondsd.
 namespace frondNative {
 
 using StoreIdentity = std::array<uint8_t, frondMachine::identityBytes>;
+
+// The card store index a kind of card lives in.
+inline unsigned cardStoreSlot(uint32_t kind) { return kind == frondMachine::kindSd2 ? 1 : 0; }
+inline SdCardStore& cardStore(uint32_t kind) { return sdCardStore(cardStoreSlot(kind)); }
 
 // `identity` replaces the card store's id, for a classic stick whose identity is raw bytes.
 inline void fillSdMedia(frondMachine::Media& media, bool inserted, uint32_t kind = frondMachine::kindSd,
@@ -32,7 +37,8 @@ inline void fillSdMedia(frondMachine::Media& media, bool inserted, uint32_t kind
     media.name = frondMachine::fileCardSibling(kind);
     media.inserted = inserted;
     media.writeProtected = writeProtected;
-    const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
+    auto& store = cardStore(kind);
+    const uint64_t bytes = uint64_t(store.sectorCount()) * SD_SECTOR_SIZE;
     media.logicalSize = bytes;
     media.physicalSize = bytes;
     if (kind == frondMachine::kindMs) {
@@ -46,7 +52,7 @@ inline void fillSdMedia(frondMachine::Media& media, bool inserted, uint32_t kind
         media.identity = *identity;
         return;
     }
-    const char* id = sdCardGetId();
+    const char* id = store.getId();
     if (id && *id) std::memcpy(media.identity.data(), id, std::min(size_t(32), std::strlen(id)));
 }
 
@@ -167,7 +173,8 @@ inline bool publishStore(const std::filesystem::path& folder, frondMachine::Medi
 inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& media, bool inserted,
                       SdSave& save, bool writeProtected = false, const StoreIdentity* identity = nullptr) {
     fillSdMedia(media, inserted, save.kind, writeProtected, identity);
-    auto pin = sdCardSnapshot();
+    auto& store = cardStore(save.kind);
+    auto pin = store.snapshot();
     if (!pin) return false;
     const uint64_t stored = frondMachine::storeBytes(media);
     const auto shape = save.kind == frondMachine::kindMs ? frondSession::msShape(stored) : frondSession::sdShape(stored);
@@ -175,7 +182,7 @@ inline bool publishSd(const std::filesystem::path& folder, frondMachine::Media& 
     // A file-backed card's pin may be read on the save's worker; a card in RAM is copied.
     return publishStore(folder, media, save, stored, shape,
                         [&](uint64_t off, uint64_t n, void* dest) { return pin->Read(off, n, dest); },
-                        sdCardFileBacked() ? pin : nullptr);
+                        store.fileBacked() ? pin : nullptr);
 }
 
 // Writes the full copy publishStore left under deferJournals, then fsyncs the folder. Reads only
@@ -281,9 +288,10 @@ inline bool journalStore(const std::filesystem::path& folder, frondMachine::Medi
 
 // The card store's journal: its changes from a snapshot taken now.
 inline bool journalSd(const std::filesystem::path& folder, frondMachine::Media& media, SdSave& save) {
-    auto pin = sdCardSnapshot();
+    auto& store = cardStore(save.kind);
+    auto pin = store.snapshot();
     if (!pin) return false;
-    return journalStore(folder, media, save, [&](const StoreChangeFn& fn) { return sdCardForEachChange(*pin, fn); });
+    return journalStore(folder, media, save, [&](const StoreChangeFn& fn) { return store.forEachChange(*pin, fn); });
 }
 
 // True when a journal or full copy newer than sd.frondsd is there and the folder's .frond is past
@@ -317,7 +325,8 @@ inline bool beginSdSave(const std::filesystem::path& folder, frondMachine::Media
     save = {};
     save.kind = kind;
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
-    if (!unsettledSd(folder, kind) && sdCardBackedBy(sidecar.c_str()) && !sdCardPinned()) {
+    auto& store = cardStore(kind);
+    if (!unsettledSd(folder, kind) && store.backedBy(sidecar.c_str()) && !store.pinned()) {
         fillSdMedia(media, inserted, kind, writeProtected, identity);
         frondSdFile::Info info;
         if (frondMachine::readSdHeader(sidecar, info) == frondMachine::SiblingStatus::ok &&
@@ -350,7 +359,7 @@ inline bool finishSdSave(const std::filesystem::path& folder, SdSave& save) {
         std::vector<uint32_t> table;
         if (!frondSession::applySdJournal(folder, save.journal, &table, frondSession::JournalStep::all, save.kind))
             return false;
-        sdCardSetChunkCrcs(std::move(table));
+        cardStore(save.kind).setChunkCrcs(std::move(table));
     }
     frondSession::removeSdJournals(folder, {}, save.kind);
     return true;
@@ -369,27 +378,29 @@ inline void afterSdPublish(const std::filesystem::path& folder, uint32_t kind = 
     const auto sidecar = folder / frondMachine::fileCardSibling(kind);
     std::error_code ec;
     if (!std::filesystem::is_regular_file(sidecar, ec)) return;
-    const uint64_t bytes = uint64_t(sdCardSectorCount()) * SD_SECTOR_SIZE;
+    auto& store = cardStore(kind);
+    const uint64_t bytes = uint64_t(store.sectorCount()) * SD_SECTOR_SIZE;
     // Opened from sd.frondsd: a journal applied in place, or a full copy renamed over it. If the
     // card can't move onto the file now there, the next save copies it whole.
-    if (sdCardRunsOn(sidecar.c_str())) {
-        if (!sdAdoptFailForTest() && sdCardAdoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes)) return;
-        sdCardMarkStale();
+    if (store.runsOn(sidecar.c_str())) {
+        if (!sdAdoptFailForTest() && store.adoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes)) return;
+        store.markStale();
         std::fprintf(stderr, "frond: the card couldn't move onto the saved file; the next save copies it\n");
         return;
     }
     FileCardBacking::DiscardGenerations(sidecar);
     // A classic stick read from a v1 file, or made in this session, runs in RAM until its first
     // save, then on the v2 file that save wrote, so later saves are journals.
-    if (kind == frondMachine::kindMs && !sdCardFileBacked()) {
-        if (!sdCardAdoptSavedFromRam(sidecar.c_str(), bytes, frondSdFile::headerBytes))
+    if (kind == frondMachine::kindMs && !store.fileBacked()) {
+        if (!store.adoptSavedFromRam(sidecar.c_str(), bytes, frondSdFile::headerBytes))
             std::fprintf(stderr, "frond: the Memory Stick couldn't move onto the saved file; the next save copies it\n");
         return;
     }
-    if (frondSdCandidate::liveIn(folder) &&
-        sdCardBackedBy(frondSdCandidate::live().path.c_str()) &&
-        sdCardAdoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes))
-        frondSdCandidate::releaseUnused();
+    const unsigned slot = cardStoreSlot(kind);
+    if (frondSdCandidate::liveIn(folder, slot) &&
+        store.backedBy(frondSdCandidate::live(slot).path.c_str()) &&
+        store.adoptSaved(sidecar.c_str(), bytes, frondSdFile::headerBytes))
+        frondSdCandidate::releaseUnused(slot);
 }
 
 // Everything after saveFolderFromTemps published the .frond. When the card file can't be
@@ -403,7 +414,7 @@ inline bool completeSdSave(const std::filesystem::path& folder, SdSave& save) {
         afterSdPublish(folder, save.kind);
         return true;
     }
-    if (!save.journal.empty()) sdCardTrustChunks(save.chunks);
+    if (!save.journal.empty()) cardStore(save.kind).trustChunks(save.chunks);
     std::fprintf(stderr, "frond: saved, but the card file is still to be finished\n");
     return true;
 }
