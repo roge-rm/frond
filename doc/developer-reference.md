@@ -26,8 +26,8 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
-| `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
-| `--emulated-time` | Every guest second gets the full `--mips`, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
+| `--mips N` | A fixed core clock in MHz (Uncapped passes 3000). Default: the device's own clock, as the guest sets it (CCCR and CLKCFG on the PXA devices). |
+| `--emulated-time` | Every guest second gets the full clock, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
@@ -197,7 +197,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | --- | --- |
 | `help` | List the commands. |
 | `quit`, `exit` | Quit. |
-| `set-mips N` | Set the target MIPS. |
+| `set-mips N` | Set a fixed core clock in MHz. |
 | `input-replay FILE` | Load an input replay; its times start now and it replaces any pending replay. A bad file leaves the old one. |
 | `hold-state` | Show the Hold switch. |
 | `hold on\|off` | Set the Hold switch (TG50). |
@@ -269,7 +269,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `window-layout` | | `layout`: `x y width height windowWidth windowHeight`, where the fitted device sits in the window and the window's size, both in the window's own units. `unsupported` without a window. Only `frond`. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
-| `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
+| `speed-state` | | `speed`: `N MHz, limit N MHz, N%, N underruns` (the Zodiac's figures are MIPS) |
 | `guest-orientation` | | `orientation`: `portrait`, `landscape`, `reverse-portrait` or `reverse-landscape` (TX only; `unknown` if unreadable) |
 | `save` | file | `saved` |
 | `install` | file (PRC or PDB) | `installed`, or `needs-reset` (reset to finish). Errors: `corrupt`, `memory`, `open`, `overwrite`, `unsupported`, `not-ready`, `read` |

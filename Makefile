@@ -196,7 +196,7 @@ out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
 	cp core/src/cloudpilot/frond-68k out/frond-68k.new
 	mv -f out/frond-68k.new out/frond-68k
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
 .PHONY: test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
@@ -732,6 +732,13 @@ test-pxa-power: out/frond
 		tests/pxa-power.cpp @build/power-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-pxa-power
 	./build/test-pxa-power
+
+test-pxa-clock: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/clock-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-clock.cpp @build/clock-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-clock
+	./build/test-pxa-clock
 
 .PHONY: test-pace-debug
 test-pace-debug: build/test-gdbstub-target

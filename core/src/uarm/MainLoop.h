@@ -26,10 +26,14 @@ class MainLoop {
     void SetCyclesPerSecondLimit(uint32_t cyclesPerSecondLimit);
     // Runs every guest second at the full cycles per second limit, whatever the host manages, so
     // a slow host runs slower in wall time instead of giving the guest fewer cycles.
+    // Original speed: the limit is the SoC's own core clock, as the guest changes it, where it has one;
+    // the limit set above is the fallback. Off runs at the fixed limit.
+    void SetFollowCoreClock(bool follow);
     void SetEmulatedTime(bool emulatedTime) { this->emulatedTime = emulatedTime; }
 
    private:
-    uint64_t CalculateCyclesPerSecond(uint64_t safetyMargin);
+    uint64_t CalculateCyclesPerSecond(uint64_t safetyMargin, uint64_t limit);
+    uint64_t CurrentLimit() const;
 
    private:
     SoC* soc{nullptr};
@@ -49,6 +53,7 @@ class MainLoop {
     uint32_t maxLoad{0};
     uint32_t cyclesPerSecondLimit{0};
     bool emulatedTime{false};
+    bool followCoreClock{false};
 };
 
 #endif  // _MAIN_LOOP_H_

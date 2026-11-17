@@ -128,7 +128,7 @@ for line in s.makefile('rb'):
         held=i;continue
     s.sendall(i+b'\tok\tdone\t'+command.hex().encode()+b'\n')
     if held is not None:
-        s.sendall(held+b'\tok\tspeed\t'+b'148.00 MIPS, limit 200.00 MIPS'.hex().encode()+b'\n');held=None
+        s.sendall(held+b'\tok\tspeed\t'+b'312.00 MHz, limit 312.00 MHz'.hex().encode()+b'\n');held=None
     if command==b'quit': break
 )PY"); fake.close();
         DesktopClient client; QSignalSpy ready(&client, &DesktopClient::started), result(&client, &DesktopClient::result);
@@ -143,7 +143,7 @@ for line in s.makefile('rb'):
         QTRY_COMPARE(result.count(), 1);
         QCOMPARE(result.at(0).at(0).toString(), "save");
         QTRY_COMPARE(background.count(), 1);
-        QCOMPARE(background.at(0).at(2).toString(), "148.00 MIPS, limit 200.00 MIPS");
+        QCOMPARE(background.at(0).at(2).toString(), "312.00 MHz, limit 312.00 MHz");
         QVERIFY(!client.backgroundOut());
         QVERIFY(client.request("quit")); QTRY_COMPARE(finished.count(), 1);
         QCOMPARE(error.count(), 0);

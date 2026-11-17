@@ -807,8 +807,10 @@ class DesktopControl {
             char text[128];
             const uint64_t ipsMax = ctx.mainLoop.GetCurrentIpsMax();
             const uint64_t ips = ctx.speedDetail.empty() ? ctx.mainLoop.GetCurrentIps() : ctx.speedIps;
-            std::snprintf(text, sizeof(text), "%.2f MIPS, limit %.2f MIPS, %u%%, %llu underruns",
-                          ips / 1e6, ipsMax / 1e6, ipsMax ? unsigned(100 * ips / ipsMax) : 0u,
+            // The clock for the others; the Zodiac's figure is instructions a second.
+            const char* unit = ctx.speedDetail.empty() ? "MHz" : "MIPS";
+            std::snprintf(text, sizeof(text), "%.2f %s, limit %.2f %s, %u%%, %llu underruns",
+                          ips / 1e6, unit, ipsMax / 1e6, unit, ipsMax ? unsigned(100 * ips / ipsMax) : 0u,
                           static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()));
             if (!ctx.speedDetail.empty()) return {true, "speed", std::string(text) + "; " + ctx.speedDetail};
             return {true, "speed", text};

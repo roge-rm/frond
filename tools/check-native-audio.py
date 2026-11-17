@@ -231,7 +231,7 @@ def run(args):
             result['database_export_written'] = 'export written to ' in log_data.decode(errors='replace')
         text = log_data[:log_boundary].decode(errors='replace')
         result['sdl_underruns'] = text.count('audio underrun')
-        result['budget_mips_samples'] = [float(v) for v in re.findall(r'cp-uarm @ ([0-9.]+) MIPS', text)]
+        result['budget_mips_samples'] = [float(v) for v in re.findall(r'cp-uarm @ ([0-9.]+) MHz', text)]
         result['replay_events'] = [line for line in text.splitlines() if line.startswith('replay event ')]
         # Silence is only a failure criterion for a known continuous fixture.
         result['continuity_pass'] = (process.returncode == 0 and finishing

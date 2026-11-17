@@ -1084,6 +1084,8 @@ void SocPXA::EndSerialCheckpoint() {
     RefreshIrMode(this);
 }
 
+uint64_t SocPXA::CoreHz() const { return pxaPwrClkCoreHz(pwrClk); }
+
 uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     // Releasing a host guard does not alter the restored guest's scheduler/CPU.
     // Deliver the host notification when execution resumes, including new peer data.

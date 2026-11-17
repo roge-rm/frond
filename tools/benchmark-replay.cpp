@@ -248,8 +248,8 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
                const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {
-    const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalMips5(device):number(mipsArg,1000);
-    if (!mips) throw std::runtime_error("MIPS must be positive");
+    const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalHz5(device)/1000000:number(mipsArg,3000);
+    if (!mips) throw std::runtime_error("MHz must be positive");
     const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
     const auto events=replay(replayArg,duration,display.width,display.height,true);
     const bool cardLater=std::any_of(events.begin(),events.end(),[](const Event& e) { return e.kind=="card-insert"; });
@@ -436,7 +436,7 @@ int main(int argc, char** argv) {
         char** arg=argv+skip;  // arg[1] is SESSION
         const int count=argc-skip;
         if (count!=7 && count!=8)
-            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] [--sd CARD (Zodiac)] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
+            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] [--sd CARD (Zodiac)] SESSION|NOR REPLAY|- MILLISECONDS MHZ|original on|off NEW-output-dir [palm-epoch-seconds]");
         const auto duration=number(arg[3],600000);
         if (!duration) throw std::runtime_error("duration must be positive");
         const std::string soundArg=arg[5];
@@ -461,13 +461,13 @@ int main(int argc, char** argv) {
         if (!sdPath.empty()) throw std::runtime_error("--sd is for a Zodiac cold boot only");
         if (coldBoot) { m=loadNor(std::move(data),deviceName,nandPath); data={}; }
         const auto checkInputs=[&](DeviceType5 device) {
-            const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalMips5(device):number(arg[4],1000);
-            if (!mips) throw std::runtime_error("MIPS must be positive");
+            const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalHz5(device)/1000000:number(arg[4],3000);
+            if (!mips) throw std::runtime_error("MHz must be positive");
             const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
             if (display.width<=0 || display.height<=0) throw std::runtime_error("device has no display");
             return std::make_pair(mips,replay(arg[2],duration,display.width,display.height+display.graffitiHeight));
         };
-        // A cold boot's MIPS and replay are checked before the output directory is made.
+        // A cold boot's MHz and replay are checked before the output directory is made.
         if (coldBoot) checkInputs(m.device);
         // Atomic exclusive mkdir, private from creation (unlike create_directory + chmod).
         if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
@@ -481,6 +481,8 @@ int main(int argc, char** argv) {
         const bool pxa270=board==DeviceBoard5::pxa270Tx || board==DeviceBoard5::pxa270Zire72;
         auto soc=std::make_unique<SocPXA>(device,m.ramSize,m.nor.data(),m.nor.size(),
                    m.nand.empty()?nullptr:m.nand.data(),m.nand.size(),-1,pxa270?2:deviceGetSocRev());
+        const bool original=std::string(arg[4])=="original";
+        soc->SetFollowCoreClock(original);
         for (const auto& media : m.media)
             if (media.kind==frondMachine::kindNand && !frondNand::attachFile(soc->GetNand(),m.folder,media))
                 throw std::runtime_error("session NAND did not attach");
@@ -581,7 +583,9 @@ int main(int argc, char** argv) {
             }
             if (elapsed>=duration*1000000) break;
             const auto sliceStart=wallNs(); const auto sliceGuest=soc->GetTime();
-            const auto count=soc->Run(mips*1000,mips*1000000); // fixed 1 ms work requests
+            // Fixed 1 ms work requests; Original runs at the guest's own clock as it sets it.
+            const uint64_t hz=original&&soc->CoreHz()?soc->CoreHz():mips*1000000;
+            const auto count=soc->Run(hz/1000,hz);
             if (!count) throw std::runtime_error("guest made no progress");
             slices.push_back({uint64_t(wallNs()-sliceStart),uint64_t(soc->GetTime()-sliceGuest)});
             cycles+=count;

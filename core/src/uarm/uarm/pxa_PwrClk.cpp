@@ -38,6 +38,7 @@ struct PxaPwrClk {
     // power mgr 270 only
     uint32_t PSTR, PVCR, PUCR, PKWR, PKSR, PCMD[32];
     bool turbo, isPXA270;
+    uint64_t coreHz;  // the core clock CCCR and CLKCFG gave at the last CLKCFG write, reset, wake or load
     uint32_t clkcfgBits;  // CLKCFG HT (bit 2) and B (bit 3) from the last write, PXA27x only
     bool sleeping, wakePending;
     bool restoring;
@@ -93,6 +94,8 @@ static void pxaPwrClkPrvSyncCost(struct PxaPwrClk *pc) {
     const cost::Clocks c = pc->isPXA270 ? cost::pxa27xClocks(pc->CCCR, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
                                         : cost::pxa25xClocks(pc->CCCR, pc->turbo);
     cpuSetCostClocks(pc->cpu, c.core, c.bus, c.memory);
+    pc->coreHz = pc->isPXA270 ? cost::pxa27xCoreHz(pc->CCCR, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
+                              : cost::pxa25xCoreHz(pc->CCCR, pc->turbo);
 }
 
 static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, bool two, bool read,
@@ -112,7 +115,10 @@ static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, 
                 else {
                     pc->turbo = (val & 1) != 0;
                     if (pc->isPXA270) pc->clkcfgBits = val & 0xc;
+                    const uint64_t before = pc->coreHz;
                     pxaPwrClkPrvSyncCost(pc);
+                    // A new clock ends the batch at this instruction, so the SoC runs the rest at the new rate.
+                    if (pc->coreHz != before) cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
                     if (val & 2)
                         fprintf(stderr, "Set speed mode (CCCR + cp14 reg6) to 0x%08lx 0x%08lx\n",
                                 (unsigned long)pc->CCCR, (unsigned long)val);
@@ -373,6 +379,7 @@ static bool pxaPwrClkPrvPowerMgrMemAccessF(void *userData, uint32_t pa, uint_fas
 struct PxaPwrClk *pxaPwrClkInit(struct ArmCpu *cpu, struct ArmMem *physMem, class SoC *soc,
                                 bool isPXA270) {
     struct PxaPwrClk *pc = (struct PxaPwrClk *)malloc(sizeof(*pc));
+    pc->coreHz = 0;
     struct ArmCoprocessor cp14 = {
         .regXfer = pxaPwrClkPrvCoproc14regXferFunc,
         .dataProcessing = nullptr,
@@ -448,6 +455,7 @@ void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaK
 }
 
 void pxaPwrClkSetResetCause(PxaPwrClk* pc, uint32_t rcsr) { pc->RCSR = rcsr; }
+uint64_t pxaPwrClkCoreHz(const PxaPwrClk* pc) { return pc ? pc->coreHz : 0; }
 bool pxaPwrClkSleeping(const PxaPwrClk* pc) { return pc && pc->sleeping; }
 void pxaPwrClkRestoreInProgress(PxaPwrClk* pc, bool restoring) { pc->restoring = restoring; }
 uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc) { return pc->PMFW; }

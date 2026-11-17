@@ -3936,7 +3936,7 @@ for line in s.makefile('rb'):
             QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(one).canonicalFilePath());
         }
         {
-            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core uses the device's own.
+            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core follows the device's own clock.
             frondSessions::Preferences uncapped;
             QVERIFY(frondSessions::readPreferences(two, &uncapped)); uncapped.uncapped = true;
             QVERIFY(frondSessions::writePreferences(two, uncapped).isEmpty());
@@ -3945,7 +3945,7 @@ for line in s.makefile('rb'):
             QVERIFY(read(".args").contains("--window-scale\n1"));
             QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
             QVERIFY(!read(".args").contains("--low-latency-queue"));
-            QVERIFY(read(".args").contains("--mips\n1000\n"));
+            QVERIFY(read(".args").contains("--mips\n3000\n"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);

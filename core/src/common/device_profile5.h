@@ -93,8 +93,8 @@ struct DeviceProfile5 {
     uint32_t msSizes{0};
     // Largest Memory Stick Pro in MiB (256, 512, 1024 or 1886 for "2 GB"); 0 for none.
     uint32_t msProMaxMib{0};
-    // Real CPU clock in Hz for the Original speed setting; 0 where the board works it out itself (an ARM
-    // device then runs at 100 MIPS). ARM devices run at deviceProfileOriginalMips5 of it.
+    // Real CPU clock in Hz, the fallback for Original speed until the guest sets one (PXA, from CCCR and
+    // CLKCFG); 0 where the board works it out itself (an ARM device then runs at 100 MHz).
     uint32_t cpuHz{0};
 };
 
@@ -664,13 +664,13 @@ inline bool deviceProfileRuns68k5(int32_t deviceType) {
     return profile && (profile->board == DeviceBoard5::ez328 || profile->board == DeviceBoard5::vz328);
 }
 
-// Guest MIPS an ARM device runs at in Original speed: 150 on the 312 MHz PXA270 (set against ZQuake on a
-// T|X), scaled by CPU clock for the others. The 200 MHz PXA25x figure (96) is an estimate, not measured.
-inline uint32_t deviceProfileOriginalMips5(int32_t deviceType) {
-    if (deviceProfileRuns68k5(deviceType)) return 100;
+// The clock an ARM device runs at in Original speed before its guest has set one: the profile's CPU
+// clock, 100 MHz for the boards without one (the Zodiac works its own out). PXA devices then follow
+// their CCCR and CLKCFG.
+inline uint32_t deviceProfileOriginalHz5(int32_t deviceType) {
+    if (deviceProfileRuns68k5(deviceType)) return 100000000;
     const auto* profile = deviceProfile5(deviceType);
-    if (!profile || !profile->cpuHz) return 100;
-    return uint32_t((uint64_t(150) * profile->cpuHz + 156000000) / 312000000);
+    return profile && profile->cpuHz ? profile->cpuHz : 100000000;
 }
 
 inline DeviceStorageSlot5 deviceProfileStorageSlot5(const DeviceProfile5& profile) {

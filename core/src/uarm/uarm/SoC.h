@@ -66,6 +66,12 @@ class SoC {
     void HardReset();
 
     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+    // The core clock in Hz as the guest has set it, 0 where the board has none to follow.
+    virtual uint64_t CoreHz() const { return 0; }
+    // Original speed: a run call whose cyclesPerSecond is at least CoreHz() runs at CoreHz() as it
+    // changes, on the instruction that changes it. maxCycles stays in cyclesPerSecond units, and so does
+    // what the call returns. A slower cyclesPerSecond (a host that can't keep up) runs at that rate.
+    void SetFollowCoreClock(bool follow) { followCoreClock = follow; }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
 #ifndef __EMSCRIPTEN__
@@ -237,6 +243,7 @@ class SoC {
 
     bool sleeping{false};
     uint64_t runInstructions{0};
+    bool followCoreClock{false};
     bool powerOnReset{false};
     bool framebufferDirty{true};
     bool pcmEnabled{false};

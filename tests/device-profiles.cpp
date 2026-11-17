@@ -25,7 +25,7 @@ static void vzProfiles();
 static void t415();
 // The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
 static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
-static void originalMips();
+static void originalHz();
 
 int main() {
     static_assert(int(DisplayMode::mode_320x320) == 5 && int(DisplayMode::mode_320x480) == 6);
@@ -442,7 +442,7 @@ int main() {
     t415();
     danaInventory();
     danaWirelessInventory();
-    originalMips();
+    originalHz();
 
     // Public header layout and IDs from RomInfo5, no dump data.
     for (auto hal : {0x68737072u, 0x446d4752u, 0x50765076u, 0x615a3732u, 0x12345678u}) {
@@ -558,14 +558,15 @@ static Device68kRomInfo5 inspect68k(const std::vector<uint8_t>& rom) {
     });
 }
 
-// Original MIPS: 150 on the 312 MHz PXA270s, scaled by clock for the 200 MHz PXA25x devices, 100 for the rest.
-static void originalMips() {
+// Original's fallback clock before the guest sets one: the profile's CPU clock (312 MHz PXA270, 200 MHz
+// PXA25x), 100 MHz for the rest (the 68k devices run their own clock).
+static void originalHz() {
     for (const auto& p : deviceProfiles5) {
         const bool pxa270 = p.deviceType == deviceTypeTX || p.deviceType == deviceTypeZire72;
         const bool pxa25x = p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeTG50;
-        assert(deviceProfileOriginalMips5(p.deviceType) == (pxa270 ? 150u : pxa25x ? 96u : 100u));
+        assert(deviceProfileOriginalHz5(p.deviceType) == (pxa270 ? 312000000u : pxa25x ? 200000000u : 100000000u));
     }
-    assert(deviceProfileOriginalMips5(deviceTypeInvalid) == 100 && deviceProfileOriginalMips5(deviceTypeIIIx) == 100);
+    assert(deviceProfileOriginalHz5(deviceTypeInvalid) == 100000000 && deviceProfileOriginalHz5(deviceTypeIIIx) == 100000000);
 }
 
 // Palm IIIx: an ez328 board for frond-68k on the desktop, told from its ROM's big-endian card header alone.

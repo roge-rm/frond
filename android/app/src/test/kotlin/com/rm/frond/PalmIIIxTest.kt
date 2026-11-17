@@ -226,8 +226,8 @@ class PalmIIIxTest {
         // Without a chosen contrast the session's own stays.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
         assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())
-        assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--mips", "1000"), s.arguments())
-        // Original passes no --mips, so the core runs the device at its own.
+        assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--mips", "3000"), s.arguments())
+        // Original passes no --mips, so the core follows the device's own clock.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments())
         assertEquals("fit=fit smooth=off contrast=30", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off", s.displayArgument())

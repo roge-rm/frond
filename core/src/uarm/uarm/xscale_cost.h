@@ -423,6 +423,15 @@ constexpr Clocks pxa25xClocks(uint32_t cccr, bool turbo) {
     return {turbo ? run * n2 / 2 : run, run / 2, memory};
 }
 
+// The PXA25x core clock in Hz, exact (the clocks above are in kHz): crystal 3.6864 MHz x L x M x N.
+constexpr uint64_t pxa25xCoreHz(uint32_t cccr, bool turbo) {
+    const uint32_t lCode = cccr & 31, mCode = (cccr >> 5) & 3, nCode = (cccr >> 7) & 7;
+    const uint32_t l = lCode == 1 ? 27 : lCode == 3 ? 36 : lCode == 5 ? 45 : 27;
+    const uint32_t m = mCode == 2 ? 2 : mCode == 3 ? 4 : 1;
+    const uint32_t n2 = nCode == 3 ? 3 : nCode == 4 ? 4 : nCode == 6 ? 6 : 2;
+    return uint64_t(3686400) * l * m * (turbo ? n2 : 2) / 2;
+}
+
 // PXA27x CCCR (L, 2N, A) with CLKCFG's turbo, half-turbo and fast-bus bits, PXA27x developer's
 // manual 3.4 (figure 3-1's equations) and table 3-31. Oscillator 13 MHz.
 constexpr Clocks pxa27xClocks(uint32_t cccr, uint32_t clkcfg) {
@@ -440,6 +449,9 @@ constexpr Clocks pxa27xClocks(uint32_t cccr, uint32_t clkcfg) {
     const uint32_t memory = !a ? run / (l <= 10 ? 1 : l <= 20 ? 2 : 4) : fastBus ? run : run / 2;
     return {core, bus, memory};
 }
+
+// The PXA27x core clock in Hz (the oscillator is 13 MHz, so the kHz figure above is exact).
+constexpr uint64_t pxa27xCoreHz(uint32_t cccr, uint32_t clkcfg) { return uint64_t(pxa27xClocks(cccr, clkcfg).core) * 1000; }
 
 // The region charges: memory controller and bus clocks per access, in sixteenths, for a load and for a
 // store, turned into core clocks by the clock ratios and rounded once (half up). SDRAM, SRAM and flash

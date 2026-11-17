@@ -74,8 +74,9 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     realTimeUsec = now;
 
     // With emulated time the lag handling above only paces the loop; the guest always gets the limit.
-    double cyclesPerSecond = emulatedTime ? double(cyclesPerSecondLimit) : CalculateCyclesPerSecond(
-        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+    const uint64_t limit = CurrentLimit();
+    double cyclesPerSecond = emulatedTime ? double(limit) : CalculateCyclesPerSecond(
+        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad, limit);
 #ifdef __EMSCRIPTEN__
     const double runUsec = deltaUsec;
 #else
@@ -121,14 +122,27 @@ void MainLoop::SetCyclesPerSecondLimit(uint32_t cyclesPerSecondLimit) {
     this->cyclesPerSecondLimit = cyclesPerSecondLimit;
 }
 
-uint64_t MainLoop::CalculateCyclesPerSecond(uint64_t safetyMargin) {
+void MainLoop::SetFollowCoreClock(bool follow) {
+    followCoreClock = follow;
+    soc->SetFollowCoreClock(follow);
+}
+
+uint64_t MainLoop::CurrentLimit() const {
+    if (followCoreClock) {
+        const uint64_t hz = soc->CoreHz();
+        if (hz) return hz;
+    }
+    return cyclesPerSecondLimit;
+}
+
+uint64_t MainLoop::CalculateCyclesPerSecond(uint64_t safetyMargin, uint64_t limit) {
     const uint64_t avg = (cyclesPerSecondAverage.Calculate() * safetyMargin) / 100;
     const uint64_t avgBinned = max((avg / BIN_SIZE) * BIN_SIZE, static_cast<uint64_t>(BIN_SIZE));
 
     if (avgBinned < lastCyclesPerSecond || avg > lastCyclesPerSecond + BIN_SIZE + BIN_SIZE / 2)
         lastCyclesPerSecond = avgBinned;
 
-    if (lastCyclesPerSecond > cyclesPerSecondLimit) lastCyclesPerSecond = cyclesPerSecondLimit;
+    if (lastCyclesPerSecond > limit) lastCyclesPerSecond = limit;
 
     return lastCyclesPerSecond;
 }
