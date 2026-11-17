@@ -211,8 +211,8 @@ def saved_after_install(device, session, work, root, after):
 
 
 def asleep(core, device, root):
-    """Host calls while the Palm sleeps (power key): each is answered, the core stays up, and after
-    waking the guest takes host calls again and its screen is live."""
+    """Host calls while the Palm sleeps (power key): each is answered, a launch says the Palm is
+    asleep, the core stays up, and after waking the guest takes host calls again and its screen is live."""
     core.key(root, 'power')
     end = time.monotonic() + 30
     while core.frame(root / 'asleep.png') is not None:
@@ -222,13 +222,14 @@ def asleep(core, device, root):
     replies = {}
     for name, command, wanted in (('install', f'install "{PROBE}"', REPLIES),
                                   ('db-list', 'db-list', ('FrondSyncLog', 'not ready', 'list failed')),
-                                  ('launch', 'launch "Memo Pad"', ('launch', 'not ready', 'could not', 'failed'))):
+                                  ('launch', 'launch "Memo Pad"', ('could not', 'failed'))):
         started = time.monotonic()
-        replies[name] = core.send(command, wanted, 120).strip() if name != 'launch' else \
-            (core.send(command), time.sleep(5), 'sent')[2]
+        replies[name] = core.send(command, wanted, 120).strip()
         print(f'frond-arm install: {device.name} asleep {name}: {replies[name]!r} after {time.monotonic() - started:.1f} s', flush=True)
         if core.process.poll() is not None:
             raise AssertionError(f'the core quit on {name} while asleep')
+    if 'the Palm is asleep' not in replies['launch']:
+        raise AssertionError(f'a launch while asleep should say the Palm is asleep: {replies["launch"]!r}')
     core.key(root, 'power')
     live = settle(core, root / 'woken.png', lambda rows: rows is not None, 30)
     if live is None:

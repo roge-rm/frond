@@ -502,7 +502,10 @@ namespace {
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
         try {
-            if (GuestDatabaseOps::Launch(*ctx->soc, args[0]) != GuestDatabaseOps::LaunchResult::launched)
+            const auto result = GuestDatabaseOps::Launch(*ctx->soc, args[0]);
+            if (result == GuestDatabaseOps::LaunchResult::notReady && frondNative::guestAsleep(*ctx->soc))
+                cout << "application could not be launched: the Palm is asleep" << endl;
+            else if (result != GuestDatabaseOps::LaunchResult::launched)
                 cout << "application could not be launched at this time" << endl;
         } catch (const std::exception& error) { cout << "launch failed: " << error.what() << endl; }
     }

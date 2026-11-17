@@ -221,7 +221,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `os-version` | Ask the Palm for its OS version. |
 | `set-auto-off SECONDS` | Set the auto-off time until the next reset, 0 for never. Not on the TG50. The built-in usage line leaves out the argument. |
 | `install FILE` | Install a PRC or PDB. |
-| `launch NAME` | Launch an app by its database name. |
+| `launch NAME` | Launch an app by its database name. Refused while the Palm is asleep. |
 | `db-list` | List the RAM databases. |
 | `db-export FILE` | Export the RAM databases to a ZIP. |
 | `db-export-rom FILE` | Export RAM and ROM databases (not the PACE cache). |

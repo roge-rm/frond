@@ -475,6 +475,8 @@ class DesktopControl {
         if (command == "launch-app") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
             const auto launched = GuestDatabaseOps::Launch(*ctx.soc, path);
+            if (launched == GuestDatabaseOps::LaunchResult::notReady && frondNative::guestAsleep(*ctx.soc))
+                return {false, "not-ready", "The Palm is asleep. Turn it on and try again."};
             if (launched == GuestDatabaseOps::LaunchResult::notReady)
                 return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
             if (launched != GuestDatabaseOps::LaunchResult::launched)
