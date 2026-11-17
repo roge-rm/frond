@@ -50,7 +50,7 @@ test-zodiac-machine test-zodiac-fast-lean: export TEST_TIMEOUT = 1800
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
     test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
-    test-frond-arm-install test-device-profiles: export TEST_TIMEOUT = 1800
+    test-frond-arm-install test-device-profiles test-frond-68k-auto-off: export TEST_TIMEOUT = 1800
 test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
