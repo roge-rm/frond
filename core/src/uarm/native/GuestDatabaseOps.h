@@ -29,10 +29,10 @@ inline bool Ready(SoC& soc) {
 // added while one from the host is held or still queued, as the two would put it back to sleep. The
 // press and release go through the key queue like the frontend's (the PXA holds a short press for
 // 250 ms so the DAL stays up), then the guest runs until it's awake, past that hold and at a point
-// that takes host calls, or awake for 3 s, kWakeSeconds of guest time at most. The T|X's UI task
-// idles until the call's own Prepare wakes it, so it takes the 3 s; a launch there 1 s after the
-// wake sometimes lost the next power press. False when it's still asleep. Cycles are counted at
-// 100 MHz, like settleEject.
+// that takes host calls, or awake for 3 s (a 68k app waiting with no timeout never shows Ready),
+// kWakeSeconds of guest time at most. The T|X ignores power presses for about 2.6 s after any wake,
+// a power-key one too, so a press right after the call can be lost. False when it's still asleep.
+// Cycles are counted at 100 MHz, like settleEject.
 inline bool Wake(SoC& soc) {
     if (!frondNative::guestAsleep(soc)) return true;
     if (!soc.PowerButtonSupported()) return false;

@@ -212,6 +212,8 @@ def saved_after_install(device, session, work, root, after):
 
 
 LIST_REPLIES = ('FrondSyncLog', 'not ready', 'list failed')
+# Seconds from a wake to the next power press, past the T|X's 2.6 s with room for a slow host.
+WAKE_IGNORES_POWER = 5
 
 
 def sleep(core, root, name):
@@ -255,6 +257,9 @@ def asleep(core, device, root, memo):
         raise AssertionError(f'a launch while asleep should wake the Palm and launch: {replies!r}')
     if woken is None or device.body(woken) != device.body(memo):
         raise AssertionError('a launch while asleep did not wake the Palm into Memo Pad')
+    # The T|X ignores power presses for about 2.6 s after any wake, a power-key wake too (its
+    # keypad gets the press, Palm OS drops it), so the next press waits until the wake is 5 s old.
+    time.sleep(max(0.0, started + WAKE_IGNORES_POWER - time.monotonic()))
     sleep(core, root, 'asleep-install')
     started = time.monotonic()
     reply = core.send(f'install "{PROBE}"', REPLIES, 120).strip()
