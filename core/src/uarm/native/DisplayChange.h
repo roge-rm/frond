@@ -14,6 +14,9 @@ struct DisplayChange {
     std::optional<bool> smooth;
     std::optional<bool> keyboard;
     std::optional<JogPlacement> jog;
+    std::optional<JogLandscape> jogLandscape;
+    // The CLIÉ game controller attached; from the core itself, not the display command.
+    std::optional<bool> gamepad;
 
     // Later fields win.
     void Merge(const DisplayChange& later) {
@@ -21,6 +24,8 @@ struct DisplayChange {
         if (later.smooth) smooth = later.smooth;
         if (later.keyboard) keyboard = later.keyboard;
         if (later.jog) jog = later.jog;
+        if (later.jogLandscape) jogLandscape = later.jogLandscape;
+        if (later.gamepad) gamepad = later.gamepad;
     }
 };
 
@@ -30,17 +35,22 @@ struct DisplaySettings {
     bool smooth{false};
     bool keyboard{true};
     JogPlacement jog{JogPlacement::screen};
+    bool gamepad{false};
+    JogLandscape jogLandscape{JogLandscape::beside};
 
     void Apply(const DisplayChange& change) {
         if (change.fit) fit = *change.fit;
         if (change.smooth) smooth = *change.smooth;
         if (change.keyboard) keyboard = *change.keyboard;
         if (change.jog) jog = *change.jog;
+        if (change.jogLandscape) jogLandscape = *change.jogLandscape;
+        if (change.gamepad) gamepad = *change.gamepad;
     }
 };
 
-// Parses "fit=none|fit|whole|fill smooth=on|off keyboard=on|off jog=hidden|screen|keyboard",
-// each field optional but at least one given. keyboard and jog need a device with them
+// Parses "fit=none|fit|whole|fill smooth=on|off keyboard=on|off jog=hidden|screen|keyboard
+// jog-landscape=hidden|beside|under|over", each field optional but at least one given. keyboard
+// and the jog fields need a device with them
 // (controls). Returns false with error set for anything else.
 inline bool parseDisplayChange(const std::string& text, bool controls, DisplayChange& change, std::string& error) {
     change = {};
@@ -65,13 +75,17 @@ inline bool parseDisplayChange(const std::string& text, bool controls, DisplayCh
             if (ok) change.fit = fit;
         } else if (ok && name == "smooth") {
             ok = onOff(value, change.smooth);
-        } else if (ok && (name == "keyboard" || name == "jog")) {
+        } else if (ok && (name == "keyboard" || name == "jog" || name == "jog-landscape")) {
             if (!controls) {
                 error = "This device has no " + name + " controls.";
                 return false;
             }
             if (name == "keyboard") ok = onOff(value, change.keyboard);
-            else {
+            else if (name == "jog-landscape") {
+                JogLandscape jog;
+                ok = parseJogLandscape(value, jog);
+                if (ok) change.jogLandscape = jog;
+            } else {
                 JogPlacement jog;
                 ok = parseJogPlacement(value, jog);
                 if (ok) change.jog = jog;
@@ -86,7 +100,7 @@ inline bool parseDisplayChange(const std::string& text, bool controls, DisplayCh
         any = true;
     }
     if (!any) {
-        error = "Use fit=, smooth=, keyboard= or jog=.";
+        error = "Use fit=, smooth=, keyboard=, jog= or jog-landscape=.";
         return false;
     }
     return true;

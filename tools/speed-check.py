@@ -142,7 +142,7 @@ def bench(w, mips, out, host, rdir):
 
 def frondbench_results(out):
     """Find the results record that the run wrote, by diffing guest RAM before and after."""
-    pat = re.compile(rb'FrondBench 1\.0\n(?:[^\0]{0,380}?)Checksum [0-9A-Fa-f]+\n')
+    pat = re.compile(rb'FrondBench \d+\.\d+\n(?:[^\0]{0,470}?)Checksum [0-9A-Fa-f]+\n')
     before = {m.group() for m in pat.finditer((out / 'ram-start.bin').read_bytes())}
     after = [m.group() for m in pat.finditer((out / 'ram-end.bin').read_bytes()) if m.group() not in before]
     if not after:

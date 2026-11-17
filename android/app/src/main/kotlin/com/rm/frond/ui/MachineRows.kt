@@ -29,6 +29,7 @@ import com.rm.frond.Device
 import com.rm.frond.Engine
 import com.rm.frond.BarMode
 import com.rm.frond.JogControls
+import com.rm.frond.JogLandscape
 import com.rm.frond.MachineSettings
 import com.rm.frond.RunningModel
 import com.rm.frond.ScreenSize
@@ -79,7 +80,8 @@ fun <T> MachineChoiceRow(
     }
 }
 
-// Size, Smooth pixels, Contrast on 68k grey LCDs, Top bar, Show keyboard on the TG50 and Jog controls on CLIEs with them.
+// Size, Smooth pixels, Contrast on 68k grey LCDs, Top bar, Show keyboard on the TG50, Jog controls on CLIEs with
+// them and Jog in landscape on CLIEs that take the game controller.
 @Composable
 fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
     if (device.isDana()) {
@@ -107,6 +109,11 @@ fun MachineDisplayRows(device: Device, settings: MachineSettings, listStyle: Boo
             onChange(settings.copy(jogControls = it))
         }
     }
+    if (device.jogControls && device.clieGamepad) {
+        MachineChoiceRow("Jog in landscape", settings.jogLandscape, JogLandscape.entries, { it.label }, listStyle) {
+            onChange(settings.copy(jogLandscape = it))
+        }
+    }
 }
 
 @Composable
@@ -126,6 +133,12 @@ fun MachineAudioPreviewRow(
     MachineSwitchRow("Low-latency audio", usable && settings.fastAudio, listStyle, usable, note) {
         onChange(settings.copy(fastAudio = it))
     }
+}
+
+// The Zodiac's rumble on the controller's or the phone's vibrator.
+@Composable
+fun MachineRumbleRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    MachineSwitchRow("Rumble", settings.rumble, listStyle) { onChange(settings.copy(rumble = it)) }
 }
 
 // Exact or Fast, for ARM devices.

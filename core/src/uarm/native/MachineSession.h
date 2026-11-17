@@ -23,12 +23,12 @@
 // Native save/load of a machine folder. A lone v6 .frond extracts into <stem>/.
 namespace frondNative {
 
-// What the slots keep from load to save outside the card store: SD write protection (the card
-// doesn't model it, the descriptor carries it), and the classic stick's identity and the generation
+// What the slots keep from load to save outside the card store: SD write protection for each SD
+// slot (the card doesn't model it, the descriptor carries it), and the classic stick's identity and the generation
 // (a v1 file's change counter) it was opened at. `takenOut` are card
 // files a take-out left in the folder for the frontend to move; a save doesn't remove them.
 struct SlotCards {
-    bool sdProtected{};
+    bool sdProtected{}, sd2Protected{};
     std::array<uint8_t, frondMachine::identityBytes> msIdentity{};
     uint64_t msChanges{};
     std::vector<std::string> takenOut;
@@ -176,10 +176,11 @@ struct MachineSave {
     frondSession::Contents contents;
     std::vector<std::filesystem::path> temps;
     std::vector<std::string> keep;
-    SdSave sd, nand;
-    bool saved{}, published{};
+    // sd2: the second SD slot's card, in sdCardStore(1); `second` when this save has one.
+    SdSave sd, nand, sd2;
+    bool saved{}, published{}, second{};
     // With no card journal or copy, finishSdSave is only folder work and runs on the worker.
-    bool sdFinished{}, sdFinishOk{};
+    bool sdFinished{}, sdFinishOk{}, sd2Finished{}, sd2FinishOk{};
 };
 
 // `background`: writeMachineSave runs on a worker while the guest goes on.
@@ -187,6 +188,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
                              const std::filesystem::path& loadedFrom = {},
                              const std::filesystem::path& loadedFolder = {}, bool background = true) {
     out = {};
+    out.sd2.kind = frondMachine::kindSd2;
     const auto started = std::chrono::steady_clock::now();
     if (!soc.Save()) {
         std::cerr << "save: the device state snapshot failed" << std::endl;
@@ -205,6 +207,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
     auto& temps = out.temps;
     auto& sd = out.sd;
     auto& nand = out.nand;
+    auto& sd2 = out.sd2;
     fillState(soc, contents);
     const double stateMs = saveTimingMs(started);
     auto fail = [&](const char* why) {
@@ -212,6 +215,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         for (const auto& t : temps) frondSession::removePath(t);
         abandonSdSave(sd);
         abandonSdSave(nand);
+        abandonSdSave(sd2);
         return false;
     };
     // Journals and full copies are taken here and written by writeMachineSave.
@@ -251,12 +255,22 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
         temps.emplace_back();  // published by completeSdSave
         contents.media.push_back(std::move(media));
     }
+    // The second SD slot's card, from its own store, the same three steps.
+    if (sdCardStore(1).initialized() && soc.HasSecondSdSlot()) {
+        frondMachine::Media media;
+        if (!beginSdSave(folder, media, soc.Sd2Inserted(), sd2, frondMachine::kindSd2, slotCards().sd2Protected))
+            return fail("the second card save could not start");
+        temps.emplace_back();  // published by completeSdSave
+        contents.media.push_back(std::move(media));
+        out.second = true;
+    }
     if (saveTimingWanted())
         std::cerr << "save timing: machine state " << stateMs << " ms, card and NAND step 1 "
                   << saveTimingMs(started) - stateMs << " ms" << std::endl;
     out.keep = slotCards().takenOut;
     // From here the guest's card and NAND writes are noted, for step 3 to carry onto the saved files.
     sdCardTrackWrites(true);
+    sdCardStore(1).trackWrites(true);
     if (auto* chip = soc.GetNand()) nandTrackWrites(chip, true);
     return true;
 }
@@ -265,7 +279,7 @@ inline bool beginMachineSave(const std::filesystem::path& path, SoC& soc, Machin
 inline void writeMachineSave(MachineSave& save) {
     save.published = false;
     save.saved = false;
-    for (auto* store : {&save.nand, &save.sd}) {
+    for (auto* store : {&save.nand, &save.sd, &save.sd2}) {
         if (store->fullPending && !writeFull(save.folder, *store)) {
             std::cerr << "save: a card or NAND copy could not be written in " << save.folder << std::endl;
             return;
@@ -280,6 +294,10 @@ inline void writeMachineSave(MachineSave& save) {
         save.sdFinishOk = finishSdSave(save.folder, save.sd);
         save.sdFinished = true;
     }
+    if (save.second && save.published && save.sd2.full.empty() && save.sd2.journal.empty()) {
+        save.sd2FinishOk = finishSdSave(save.folder, save.sd2);
+        save.sd2Finished = true;
+    }
 }
 
 // Emulation thread, after writeMachineSave. Once the .frond is published the card file is
@@ -292,15 +310,18 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
         NAND* chip;
         ~StopTracking() {
             sdCardTrackWrites(false);
+            sdCardStore(1).trackWrites(false);
             if (chip) nandTrackWrites(chip, false);
         }
     } stop{soc.GetNand()};
     // The full copies are written; their pins go here, before the stores move.
     save.sd.fullPin.reset();
     save.nand.fullPin.reset();
+    save.sd2.fullPin.reset();
     if (!save.published) {
         abandonSdSave(save.sd);
         abandonSdSave(save.nand);
+        abandonSdSave(save.sd2);
         std::cerr << "save: the session file could not be written in " << folder << std::endl;
         return false;
     }
@@ -314,6 +335,14 @@ inline bool finishMachineSave(MachineSave& save, SoC& soc) {
         afterSdPublish(folder, save.sd.kind);
     else
         std::fprintf(stderr, "frond: saved, but the card file is still to be finished\n");
+    // A save without a second card has no step 3 for it.
+    const bool second = save.second;
+    if (second && !save.sd2Finished)
+        finished = completeSdSave(folder, save.sd2) && finished;
+    else if (second && save.sd2FinishOk)
+        afterSdPublish(folder, save.sd2.kind);
+    else if (second)
+        std::fprintf(stderr, "frond: saved, but the second card file is still to be finished\n");
     if (saveTimingWanted()) std::cerr << "save timing: card and NAND step 3 " << saveTimingMs(finishing) << " ms" << std::endl;
     if (!save.saved)
         std::cerr << "save: the session file is written, but a card file could not be renamed or an unused one removed in "
@@ -330,13 +359,15 @@ inline bool saveMachine(const std::filesystem::path& path, SoC& soc, const std::
     return finishMachineSave(save, soc);
 }
 
-inline bool attachFolderMedia(const frondSession::Contents& contents, const std::filesystem::path& folder) {
+// Opens the folder's card files in their card stores. `kind`, when given, opens only that kind.
+inline bool attachFolderMedia(const frondSession::Contents& contents, const std::filesystem::path& folder,
+                              uint32_t kind = 0) {
     for (const auto& media : contents.media) {
-        if (frondMachine::fileCardKind(media.kind)) {
+        if (frondMachine::fileCardKind(media.kind) && (!kind || media.kind == kind)) {
             char id[SD_CARD_ID_MAX_LEN + 1]{};
             std::memcpy(id, media.identity.data(), SD_CARD_ID_MAX_LEN);
-            if (!sdCardInitializeFromFile((folder / media.name).c_str(), media.physicalSize,
-                                          frondSdFile::headerBytes, id))
+            if (!cardStore(media.kind).initializeFromFile((folder / media.name).c_str(), media.physicalSize,
+                                                          frondSdFile::headerBytes, id))
                 return false;
         }
     }

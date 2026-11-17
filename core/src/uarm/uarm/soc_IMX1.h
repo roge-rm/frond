@@ -1,6 +1,7 @@
 #ifndef FROND_SOC_IMX1_H
 #define FROND_SOC_IMX1_H
 
+#include <atomic>
 #include <array>
 #include <memory>
 #include <string>
@@ -33,6 +34,7 @@ class SocIMX1 : public SoC {
     bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
     bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
     void AnalogStick(float x, float y) override;
+    void SetStickHostTurns(int turns) override;
     bool Save() override;
     bool Load(size_t savestateSize, void* savestateData) override;
     // A state file from the bring-up driver (gzip or plain), made with its boot pin levels.
@@ -49,6 +51,7 @@ class SocIMX1 : public SoC {
     void ResetPendingFrame() override { framePending = false; }
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
+    Attention GuestAttention() override;
     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
@@ -86,6 +89,13 @@ class SocIMX1 : public SoC {
     bool CardSwappedOnLoad() const { return cardSwapped; }
     // Whether slot 1 has the card attached, for tests.
     bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
+    // Slot 2, the W4200's SD slot, holds sdCardStore(1)'s card (Sd2Insert). Whether the machine has it
+    // attached, for tests.
+    bool SecondCardAttached() const { return imx1MachineGraphicsSdCard(machine) != nullptr; }
+    bool HasSecondSdSlot() const override { return true; }
+    bool Sd2Insert() override;
+    void Sd2Eject() override;
+    bool Sd2Inserted() const override { return card2In; }
     // Whether the machine has the pen down just now.
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
@@ -110,8 +120,13 @@ class SocIMX1 : public SoC {
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
     void SyncCard();
+    // The same for slot 2, card2In and vsd2.
+    void SyncSecondCard();
 
     std::vector<uint8_t> rom, saved, powerOn;
+    // Slot 2's card on sdCardStore(1), made at its first insert.
+    VSD* vsd2{nullptr};
+    bool card2In{false}, card2Sync{false};
     std::unique_ptr<Imx1I2cReadWindow> eeprom;
     Imx1Machine* machine{nullptr};
     bool halted{false};
@@ -122,6 +137,11 @@ class SocIMX1 : public SoC {
     std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
     bool framePending{false}, redraw{true};
     GuestOrientationTracker orientationTracker;
+    // The stick as the host pushed it, and the quarter turns the guest's screen has: the guest gets the
+    // stick turned to match what the player sees.
+    std::atomic<float> stickHostX{0}, stickHostY{0};
+    std::atomic<int> stickTurns{0}, stickHostTurns{0};
+    void PushStick();
 
     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};

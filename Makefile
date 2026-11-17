@@ -22,7 +22,7 @@ all: out/frond desktop
 
 # Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
 # which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
-# Change the limit for one target with `test-foo: TEST_TIMEOUT = 900`, or for a run with
+# Change the limit for one target with `test-foo: export TEST_TIMEOUT = 900`, or for a run with
 # `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
 TEST_TIMEOUT ?= 300
 TEST_KILL_GRACE ?= 10
@@ -43,15 +43,15 @@ recheck:
 	@python3 tools/check-record.py recheck $(CHECKS)
 prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
 out/% build/% core/% vendor/%: SHELL = /bin/sh
-test-desktop: TEST_TIMEOUT = 3600
+test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
-test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: TEST_TIMEOUT = 1800
+test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
     test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
-    test-frond-arm-install test-device-profiles: TEST_TIMEOUT = 1800
-test-frond-68k-peripherals: TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
+    test-frond-arm-install test-device-profiles: export TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
 .PHONY: test-memory-stick-media
@@ -964,6 +964,16 @@ test-zodiac-normal-runtime: out/frond
 	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
 
+.PHONY: test-zodiac-session-cards
+# A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
+test-zodiac-session-cards: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-session-cards-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-session-cards.cpp @build/zodiac-session-cards-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-session-cards
+	./build/test-zodiac-session-cards
+
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
 test-zodiac-machine: build/zodiac-boot-probe
@@ -1096,6 +1106,20 @@ test-usb-bridge-soc: out/frond
 test: test-tg50-voicerec
 test-tg50-voicerec: out/frond
 	python3 tests/tg50-voicerec.py
+
+# CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
+# skips without the TG50 smoke session (tests/clie-gamepad.py).
+.PHONY: test-clie-gamepad
+test: test-clie-gamepad
+test-clie-gamepad: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/clie-gamepad-model.cpp core/src/common/libcommon.a -o build/test-clie-gamepad-model
+	./build/test-clie-gamepad-model
+ifeq ($(FROND_TG50_SESSION),)
+	@echo "test-clie-gamepad: TG50 session part skipped, no FROND_TG50_SESSION"
+else
+	python3 tests/clie-gamepad.py
+endif
 
 # TG50 USB HotSync over a PTY with pilot-link; skips without the TG50 session (make smoke-sessions) or pilot-link.
 .PHONY: test-tg50-usb-hotsync
@@ -1423,6 +1447,42 @@ $(FRONDBENCH_DIR)/FrondBench.prc: $(FRONDBENCH_SRC)/frondbench.c $(FRONDBENCH_SR
 	m68k-palmos-gcc -L$(PALM_SDK)/lib/m68k-palmos-coff $(FRONDBENCH_DIR)/frondbench.o -o $(FRONDBENCH_DIR)/frondbench
 	cd $(FRONDBENCH_SRC) && pilrc -q -ro frondbench.rcp $(CURDIR)/$(FRONDBENCH_DIR)/frondbench.ro
 	build-prc -o $@ $(FRONDBENCH_SRC)/frondbench.def $(FRONDBENCH_DIR)/frondbench $(FRONDBENCH_DIR)/frondbench.ro
+	python3 $(FRONDBENCH_SRC)/fixdates.py $@
+
+# The committed tools/frondbench/FrondBench.prc is what the apps ship. This rebuilds it and compares;
+# it is skipped with a message when the Palm tools are missing.
+.PHONY: check-frondbench
+check-frondbench:
+	@if ! command -v m68k-palmos-gcc >/dev/null || ! command -v pilrc >/dev/null || ! command -v build-prc >/dev/null || [ ! -d "$(PALM_SDK)/include" ]; then \
+		echo "check-frondbench: skipped, needs m68k-palmos-gcc, pilrc, build-prc and PALM_SDK"; \
+	else \
+		$(MAKE) -B frondbench && cmp $(FRONDBENCH_DIR)/FrondBench.prc $(FRONDBENCH_SRC)/FrondBench.prc \
+			&& echo "check-frondbench: ok, $$(sha256sum $(FRONDBENCH_SRC)/FrondBench.prc | cut -c1-16)"; \
+	fi
+
+# Zodiac TwGfx test program (tools/zodiac-twgfx): every TwGfx call and option, and the Window Manager's drawing
+# modes and patterns, run headless through benchmark-replay on Fast and Exact. The table (ok, the ROM's error,
+# refused with Frond's stop text, or crashed) is checked against tests/zodiac-twgfx.golden; pass
+# ZODIAC_TWGFX_ARGS=--update to rewrite it, or --engines fast for Fast only. Needs arm-palmos-gcc,
+# m68k-palmos-gcc, build-prc, mtools and the Zodiac 1.1 ROM (ZODIAC_ROM, or under FROND_DEVICE_IMAGES);
+# skipped without them. The PRC, card, states and table go in build/zodiac-twgfx.
+ZODIAC_TWGFX_DIR := build/zodiac-twgfx
+ZODIAC_ROM ?= $(if $(FROND_DEVICE_IMAGES),$(FROND_DEVICE_IMAGES)/Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom)
+ZODIAC_TWGFX_ARGS ?=
+.PHONY: zodiac-twgfx test-zodiac-twgfx
+# About 5 minutes for both engines.
+test-zodiac-twgfx: export TEST_TIMEOUT = 1200
+zodiac-twgfx:
+	python3 tools/zodiac-twgfx/build.py $(ZODIAC_TWGFX_DIR)
+test-zodiac-twgfx:
+	@if ! command -v arm-palmos-gcc >/dev/null || ! command -v m68k-palmos-gcc >/dev/null || ! command -v build-prc >/dev/null \
+		|| ! command -v mformat >/dev/null || [ ! -f "$(ZODIAC_ROM)" ]; then \
+		echo "test-zodiac-twgfx: skipped, needs arm-palmos-gcc, m68k-palmos-gcc, build-prc, mtools and ZODIAC_ROM"; \
+	else \
+		$(MAKE) benchmark-replay zodiac-twgfx && python3 tools/zodiac-twgfx/run.py --bench build/benchmark-replay \
+			--rom "$(ZODIAC_ROM)" --fixture tests/fixtures/zodiac-doom2.replay --prc $(ZODIAC_TWGFX_DIR)/TwGfxTest.prc \
+			--work $(ZODIAC_TWGFX_DIR) --golden tests/zodiac-twgfx.golden $(ZODIAC_TWGFX_ARGS); \
+	fi
 
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
 # BIKE_SESSION and FRONDBENCH_SESSION are session files you supply; a workload without one is skipped.
@@ -1901,6 +1961,22 @@ test-zodiac-sound: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-sound
 	./build/test-zodiac-sound
 
+# The stick turned to the guest's frame for each screen orientation.
+.PHONY: test-zodiac-stick-view
+test-zodiac-stick-view:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm \
+		tests/zodiac-stick-view.cpp -o build/test-zodiac-stick-view
+	./build/test-zodiac-stick-view
+
+# The Zodiac's rumble motor and LED on the YMF768's bank 1 register 48, on the model and through the machine.
+.PHONY: test-zodiac-rumble
+test-zodiac-rumble: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-rumble.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-rumble
+	./build/test-zodiac-rumble
+
 # The Zodiac's YMF768 on CS4: register answers, FIFO and interrupt, pitch, a stored note sequence, FM on guest
 # time, saves that change nothing, bad states refused, Exact and Fast alike with a save mid-note, a guest run by
 # the B15 interrupt with idle skips, a refused B15 and an older state without the chip.
@@ -2364,8 +2440,11 @@ test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
 
 .PHONY: test-zodiac-graphics-acquisition
 .PHONY: test-zodiac-graphics-sd
-test-zodiac-graphics-sd: prepare
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/zodiac-graphics-sd.cpp -o build/test-zodiac-graphics-sd
+# Slot 2 (the W4200 SD block): the empty slot's answers, then a card: detect and its interrupt, init, PIO
+# transfers, errors and a state saved mid-transfer.
+test-zodiac-graphics-sd: prepare core/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-graphics-sd.cpp core/src/uarm/uarm/vSD.cpp core/src/common/libcommon.a -o build/test-zodiac-graphics-sd
 	./build/test-zodiac-graphics-sd
 
 test-zodiac-graphics-acquisition: zodiac-boot-probe prepare test-zodiac-live-controls
@@ -2527,7 +2606,7 @@ test-zodiac-bounded: build/zodiac-boot-probe
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,

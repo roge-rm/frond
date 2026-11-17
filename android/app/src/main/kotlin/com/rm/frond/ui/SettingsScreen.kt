@@ -82,8 +82,7 @@ private fun SettingsList(model: HomeModel) {
             SwitchRow("gdb server", s.debugger) { v -> model.update(s.copy(debugger = v)) }
             if (s.debugger) DebuggerPort(s.debuggerPort) { v -> model.update(s.copy(debuggerPort = v)) }
             Header("Controller", Modifier.padding(top = 16.dp))
-            // The Zodiac's controller layout is fixed, as on the desktop.
-            val added = model.added.filter { !it.zodiac }
+            val added = model.added
             if (added.isEmpty()) EmptyNote("Add a device to set its controls.")
             for (device in added) {
                 Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -149,7 +148,7 @@ private fun ControlsScreen(model: HomeModel, device: Device) {
 @Composable
 private fun ControllerButtons(model: HomeModel, device: Device) {
     val map = model.controllers[device] ?: return
-    for (button in PalmButton.on(model.controllerDevices[device] ?: device)) {
+    for (button in PalmButton.listed(model.controllerDevices[device] ?: device)) {
         val waiting = model.capturing == (device to button)
         Row(
             Modifier.fillMaxWidth()

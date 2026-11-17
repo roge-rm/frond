@@ -1,0 +1,42 @@
+name: Real device benchmark
+description: FrondBench numbers from a real Palm device
+title: "FrondBench: "
+labels: ["benchmark"]
+body:
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: Palm Tungsten T3
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Palm OS version
+      placeholder: "5.2.1"
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How it was run
+      options:
+        - Stock device
+        - Overclocked
+        - With hacks or patches (say which below)
+    validations:
+      required: true
+  - type: textarea
+    id: memo
+    attributes:
+      label: FrondBench Memo
+      description: Paste the text of the Memo FrondBench made. If you can't HotSync, type the four test times from the screen.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Overclock speed, hacks like UDMH, battery or card in use, etc.

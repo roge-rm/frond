@@ -82,6 +82,7 @@ void SocGeneric<T>::Reset() {
     const auto networkMode = std::string(networkSimulation.GetModeName());
 #endif
     const bool keyboardAttached = KeyboardAttached();
+    const bool gamepadAttached = GamepadAttached();
     const bool pcmOutputEnabled = pcmEnabled;
     const bool cardInserted = this->cardInserted;
     const uint64_t accumulatedTime = scheduler->GetTime();
@@ -98,6 +99,8 @@ void SocGeneric<T>::Reset() {
     networkSimulation.Reset();
 #endif
     AttachKeyboard(keyboardAttached);
+    // The pad stays plugged in; the rebooted ROM has forgotten it until its next press.
+    if (gamepadAttached) AttachGamepad(true, false);
     if (cardInserted) SdInsert();
 
     SetPcmOutputEnabled(pcmOutputEnabled);
@@ -319,6 +322,10 @@ void SocGeneric<T>::PumpKeyEventQueue() {
     if (keyEventQueue->GetSize() > 0) {
         if (HoldKeyEvent(keyEventQueue->Peek())) return;
         KeyEvent evt(keyEventQueue->Pop());
+        if (evt.key == keyIdPower) {
+            powerPopped = true;
+            powerPoppedAt = scheduler->GetTime();
+        }
         if (evt.key == jammedKey) return;
 
         static_cast<T&>(*this).OnEngageKey(evt.key, evt.keyDown);

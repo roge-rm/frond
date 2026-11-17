@@ -226,9 +226,10 @@ struct Probe {
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
     // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
-    // mmcsdCardId, saved in a section of its own.
+    // mmcsdCardId, saved in a section of its own, and slot 2's card part, saved in its SD2 section.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
-                                           sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate);
+                                           sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
+                                           Imx1GraphicsSd::unsavedBytes;
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -278,6 +279,8 @@ struct Probe {
     }
     // What follows a committed graphics state.
     Imx1BootstrapAccess graphicsCommitted() {
+        // Slot 2's card work runs once, on the configuration that stays.
+        cs5Configuration.runSdCardWork();
         if (!cs5Configuration.engineState().ringBytes()) graphicsCommands.reset();
         if (graphicsMemory && cs5Configuration.engineState().completed())
             return graphicsCommands.complete(cs5Configuration,peripherals.eimState(),*graphicsMemory);
@@ -1241,8 +1244,8 @@ struct Probe {
             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
-                 p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
-                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
+                 p.result.trace.pc == 0x200a9a9c || Imx1GraphicsEngine::stretchProducer(p.result.trace.pc) ||
+                 Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
                 p.graphicsMemory) {
                 // The batch is decoded in place and undone where it's dropped, so the queued batches aren't copied.
                 auto& commands = p.graphicsCommands;
@@ -2287,6 +2290,11 @@ unsigned imx1MachineScanOrientation(const Imx1Machine* machine) {
     static const unsigned orientations[] = {1, 4, 2, 3};
     return orientations[(display.activeWord(0x414) >> 3) & 3];
 }
+Imx1MachineAttention imx1MachineAttention(const Imx1Machine* machine) {
+    if (!machine || !machine->probe->peripherals.ymf768Enabled()) return {};
+    const auto& ymf = machine->probe->peripherals.ymf768();
+    return {ymf.led(), ymf.motor()};
+}
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
@@ -2322,6 +2330,19 @@ void imx1MachineSetMmcsdCardId(Imx1Machine* machine, const char* id) {
 }
 VSD* imx1MachineMmcsdCard(const Imx1Machine* machine) {
     return machine ? machine->probe->peripherals.mmcsdCard() : nullptr;
+}
+Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine* machine, VSD* card, bool commit) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (card == p->cs5Configuration.sdState().attachedCard()) return Imx1BootstrapAccess::ok;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->cs5Configuration.virtualProfile())
+        return Imx1BootstrapAccess::sequence;
+    auto candidate = p->cs5Configuration;
+    candidate.attachSdCard(card);
+    return p->acceptGraphics(candidate, commit);
+}
+VSD* imx1MachineGraphicsSdCard(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.sdState().attachedCard() : nullptr;
 }
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine* machine, uint32_t first, uint32_t second, bool commit) {
     if (!machine) return Imx1BootstrapAccess::sequence;
@@ -2471,6 +2492,8 @@ namespace {
 constexpr uint32_t stateFlagFast = 1, stateFlagRing = 2, stateFlagTerminal = 4;
 constexpr uint32_t stateIdentityVersion = 1, stateMemoryVersion = 1, stateRingVersion = 1, stateJitVersion = 1;
 constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1, stateCardIdVersion = 1, stateCardPulledVersion = 1;
+// Slot 2's section: Imx1GraphicsSd::stateCard and the card's own bytes.
+constexpr uint32_t stateGraphicsSdVersion = Imx1GraphicsSd::cardStateVersion;
 constexpr uint32_t stateRingEntries = 4096;
 constexpr uint32_t stateMaxNoteBytes = 4096;
 
@@ -2570,7 +2593,7 @@ static_assert(sizeof(Imx1Watchdog) == 40, "update its stateVersion and the size 
 static_assert(sizeof(Imx1Rtc) == 48, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs4Capture) == 1040, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs5Reset) == 8, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cs5Configuration) == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsGpio) == 36, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsWindows) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsLookup) == 3080, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2579,7 +2602,7 @@ static_assert(sizeof(Imx1GraphicsEngine) == 96, "update its stateVersion and the
 static_assert(sizeof(Imx1GraphicsDisplay) == 1504, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsInterrupts) == 12, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsSd) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1GraphicsSd) - Imx1GraphicsSd::unsavedBytes == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsClocks) == 104, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2747,6 +2770,8 @@ struct StagedState {
     bool ring = false, jit = false;
     // An older state without a YMF section keeps B15 as it was saved.
     bool ymfSection = false;
+    // Slot 2's card bytes from the SD2 section, for the card in the slot after the load.
+    std::vector<uint8_t> graphicsSdCard;
     std::vector<Probe::Recent> recent;
     uint32_t recentNext = 0, recentCount = 0;
     uint64_t jitBlocks = 0, jitInstructions = 0;
@@ -2932,10 +2957,22 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (!open("CS5C", Imx1Cs5Configuration::stateVersion, true, a)) return info;
     staged.graphics->state(a);
     if (!finish(a)) return info;
+    // Slot 2, only in states saved once it has had a card.
+    if (open("SD2 ", stateGraphicsSdVersion, false, a)) {
+        staged.graphics->sdSlot().stateCard(a);
+        a.DoVector(staged.graphicsSdCard, 1u << 20);
+        if (!finish(a)) return info;
+        info.graphicsSdSection = true;
+    } else if (info.status != S::ok) return info;
     staged.commands = std::make_unique<Imx1GraphicsCommands>();
     if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
     staged.commands->state(a);
     if (!finish(a)) return info;
+    // The last keyed copy's colour compare, in states saved after one. Without it none has been seen.
+    if (open("GCMP", Imx1GraphicsCommands::compareStateVersion, false, a)) {
+        staged.commands->stateCompare(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     if (p.graphicsMemory) {
         staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
         if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
@@ -3068,7 +3105,20 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     { auto a = file.begin(stateFourcc("CS4 "), Imx1Cs4Capture::stateVersion); p->cs4Capture.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("CS5R"), Imx1Cs5Reset::stateVersion); p->cs5Reset.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("CS5C"), Imx1Cs5Configuration::stateVersion); p->cs5Configuration.state(a); file.end(); }
+    if (p->cs5Configuration.sdState().cardUsed()) {
+        std::vector<uint8_t> card;
+        p->cs5Configuration.sdState().saveCard(card);
+        auto a = file.begin(stateFourcc("SD2 "), stateGraphicsSdVersion);
+        p->cs5Configuration.sdSlot().stateCard(a);
+        a.DoVector(card, 1u << 20);
+        file.end();
+    }
     { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
+    if (p->graphicsCommands.compareSeen()) {
+        auto a = file.begin(stateFourcc("GCMP"), Imx1GraphicsCommands::compareStateVersion);
+        p->graphicsCommands.stateCompare(a);
+        file.end();
+    }
     if (p->graphicsMemory) {
         { auto a = file.begin(stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion); p->graphicsMemory->state(a); file.end(); }
         for (unsigned bank = 0; bank < 2; ++bank) {
@@ -3128,7 +3178,11 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     info.cardResumed = card && p->peripherals.attachMmcsdCard(card);
     p->cs4Capture = *staged.cs4;
     p->cs5Reset = *staged.cs5Reset;
+    // Slot 2's card stays in, carrying on from the SD2 section when it takes it.
+    VSD* const graphicsSdCard = p->cs5Configuration.sdState().attachedCard();
     p->cs5Configuration = std::move(*staged.graphics);
+    info.graphicsSdResumed = p->cs5Configuration.reattachSdCard(
+        graphicsSdCard, info.graphicsSdSection ? &staged.graphicsSdCard : nullptr);
     p->graphicsCommands = std::move(*staged.commands);
     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
     if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->attach(p->graphicsMemory.get());

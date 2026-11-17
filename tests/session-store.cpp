@@ -441,6 +441,27 @@ class SessionStoreTest : public QObject {
         QVERIFY(ignoredName("nand.frondnand.journal-3") && ignoredName(".x.frondnand.tmp-abc"));
         QVERIFY(!packableName("nand.frondnand.journal-3.full"));
     }
+    // A Zodiac session's second SD card (kind 5, sd2.frondsd) imports with its file, and only with it.
+    void secondSdCard() {
+        const auto outside = directory.filePath("sd2");
+        auto session = v8WithSd(3);
+        session.replace(92, 4, QByteArray("\x05\0\0\0", 4));
+        session.replace(96, 32, QByteArray("sd2.frondsd").leftJustified(32, '\0', true));
+        write(outside + "/a/a.frond", session);
+        write(outside + "/a/sd2.frondsd", tinyFrondsdV2(3));
+        QString name;
+        QVERIFY(importFile(folder(), outside + "/a", &name).isEmpty());
+        write(outside + "/b/b.frond", session);
+        write(outside + "/b/sd.frondsd", tinyFrondsdV2(3));
+        QVERIFY(!importFile(folder(), outside + "/b").isEmpty());
+        write(outside + "/c/c.frond", session);
+        QVERIFY(!importFile(folder(), outside + "/c").isEmpty());
+        QVERIFY(packableName("sd2.frondsd") && machineFileName("sd2.frondsd"));
+        QVERIFY(ignoredName("sd2.frondsd.journal-3") && ignoredName(".x.frondsd.tmp-abc"));
+        QVERIFY(!packableName("sd2.frondsd.journal-3.full"));
+        QCOMPARE(sdGenerationOf(outside + "/a/a.frond", nullptr, false, true), quint64(3));
+        QCOMPARE(sdGenerationOf(outside + "/a/a.frond"), quint64(0));
+    }
     // An export carries the NAND packed; importing it unpacks and checks it.
     void exportPacksNand() {
         const auto outside = directory.filePath("packed");
@@ -974,6 +995,22 @@ class SessionStoreTest : public QObject {
         QCOMPARE(jogControlsLabel(JogControls::keyboard, false), QString("Left of keyboard"));
         QCOMPARE(jogControlsLabel(JogControls::keyboard, true), QString("Beside the buttons"));
         QCOMPARE(jogControlsName(JogControls::keyboard), QString("keyboard"));
+        // Jog in landscape: only where the game controller fits, beside by default and for older
+        // settings, each choice round trips.
+        QVERIFY(jogLandscapeShown(tg50) && !jogLandscapeShown(noKeyboard));
+        QVERIFY(Preferences{}.jogLandscape == JogLandscape::beside);
+        write(preferencesPath(one), R"({"version":1,"scale":7,"smooth":true,"audio":false,"fastAudio":true})");
+        QVERIFY(readPreferences(one, &loaded) && loaded.jogLandscape == JogLandscape::beside);
+        for (auto jog : {JogLandscape::hidden, JogLandscape::beside, JogLandscape::under, JogLandscape::over}) {
+            loaded.jogLandscape = jog;
+            QVERIFY(writePreferences(one, loaded).isEmpty());
+            Preferences roundTrip;
+            QVERIFY(readPreferences(one, &roundTrip) && roundTrip.jogLandscape == jog);
+            QFile saved(preferencesPath(one)); QVERIFY(saved.open(QIODevice::ReadOnly));
+            QCOMPARE(QJsonDocument::fromJson(saved.readAll()).object().value("jogControlsLandscape").toString(), jogLandscapeName(jog));
+        }
+        QCOMPARE(jogLandscapeLabel(JogLandscape::beside), QString("Left of controller"));
+        QCOMPARE(jogLandscapeLabel(JogLandscape::under), QString("Under screen"));
     }
     // A Palm IIIx session: one v8 file with no cards, its contrast and speed in the machine settings.
     void iiixSession() {

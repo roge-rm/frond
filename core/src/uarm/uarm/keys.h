@@ -45,7 +45,20 @@ enum KeyId {
     keyIdStickPress = keyIdTriggerRight + 1,
     // The Zodiac's Bluetooth button.
     keyIdBluetooth = keyIdStickPress + 1,
-    keyIdCount = keyIdBluetooth + 1
+    // Sony PEGA-GC10 game controller on a CLIE's connector: its four arrows, A, B, X, Y, Home,
+    // Menu and the Hold slide.
+    keyIdPadUp = keyIdBluetooth + 1,
+    keyIdPadDown = keyIdPadUp + 1,
+    keyIdPadLeft = keyIdPadDown + 1,
+    keyIdPadRight = keyIdPadLeft + 1,
+    keyIdPadA = keyIdPadRight + 1,
+    keyIdPadB = keyIdPadA + 1,
+    keyIdPadX = keyIdPadB + 1,
+    keyIdPadY = keyIdPadX + 1,
+    keyIdPadHome = keyIdPadY + 1,
+    keyIdPadMenu = keyIdPadHome + 1,
+    keyIdPadHold = keyIdPadMenu + 1,
+    keyIdCount = keyIdPadHold + 1
 };
 
 // TG50 keyboard key at drive line 2-7 and column 0-6 of the ROM's keyboard code table; column c

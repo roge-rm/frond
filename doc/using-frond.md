@@ -65,6 +65,18 @@ Under Applications (the Linux panel or the Android sheet):
 
 Close Palm dialogs first if an install or export can't get through.
 
+### FrondBench
+
+FrondBench times four tests on a Palm and shows the numbers, so Frond's speed can be checked against real devices. On the desktop, Help > FrondBench has **Install on This Device**, which puts it on the running device like any other app, and **Save FrondBench.prc…**, which writes the file for a real Palm. On Android, Install on This Device and Save FrondBench.prc… are at the bottom of the Applications sheet while a machine runs, and Save is also in About. The results go to a Memo (Memos on the T|X, T5, LifeDrive and Treo), so a HotSync brings them to your computer.
+
+On a real device:
+
+1. Install FrondBench.prc with HotSync, by beaming it or from a card, like any other app.
+2. Open FrondBench and tap Run. Leave the device alone until it's done. Don't run it from a card on a device that is also syncing or beaming.
+3. The results are on screen and in a new Memo. A HotSync brings the Memo to your computer.
+
+To report, open a Real device benchmark issue on GitHub and paste the Memo text. Without HotSync, type in the device, the OS version, how it was run (stock, overclocked, with hacks like UDMH) and the four numbers from the screen.
+
 ## Settings
 
 Set these when you add a machine, or in Edit settings while it's stopped. On Android most are in the Display sheet while it runs too.
@@ -76,7 +88,7 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
 | Show MHz | Not on the 68k Palms and Dana. Shows the clock in MHz the emulated Palm is running at (the Zodiac shows million instructions a second), in a small box at the bottom right of the Palm, updated every second. Off by default. It is in the Display panel too and is saved with the machine. |
-| Show keyboard, Jog controls | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard. |
+| Show keyboard, Jog controls, Jog in landscape | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard; with the game controller in, Left of keyboard puts them left of the controller. Jog in landscape is where they go once the game controller's grips are either side of the screen: Hidden, Left of controller, Under screen or Over screen. Under and over turn them on their side, with jog up on the left. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |
 | Contrast | The grey 68k Palms and Dana only. 0 to 100, default 50, lower fades the ink and higher darkens the panel. It's in the Display panel too and is saved with the machine. |
@@ -111,6 +123,8 @@ Keys, with the infrared keyboard detached:
 | Escape | Power | E2: Power | Power | Power | Power |
 
 On the TG50 type with the computer keyboard, left Alt is Blue and right Alt is Red. Its jog wheel, jog press and Back are on the side tab. Help → Hardware Keyboard Controls lists the same keys.
+
+**Game controller** (TG50, in the Machine menu on Linux and the corner menu on Android) plugs Sony's CLIÉ game controller into the connector or takes it out while the machine runs. It's drawn in place of the keyboard, and after Rotate its grips sit either side of the upright screen. The TG50's own driver runs it. It's saved for each machine; a session loaded later brings its own state. It's greyed while serial, infrared or USB has the connector. While it's in, the arrows are its arrows, Z and X are A and B, A and S are X and Y, Q is Home, W is Menu and H moves the Hold slide, and these keys no longer type. A game controller works it too: the d-pad or left stick, A, B, X and Y, Start for Home, Back for Menu and the right shoulder button for Hold. On Android, a game controller's d-pad, A, B, X, Y, Start (Home), Select (Menu) and R3 (Hold) press the CLIÉ controller's buttons while it's in, and the CLIÉ's own Home and Menu while it's out, and Settings → Controller → Set controls lists them for the TG50.
 
 The 68k Palms have the four app buttons, the scroll rocker and power under the screen, and the Applications, Menu, Calculator, Find and Graffiti areas on the silkscreen, each drawn after its own device. The m520's screen is 320×320. Typed text from the computer keyboard goes into the Palm. Hold power for about two seconds to turn the backlight on or off. The cradle's HotSync button is HotSync in the Connections panel (Linux) or in the Connections sheet (Android). On the CLIÉ T415, F1 to F4 are the app buttons and, while its jog controls are shown, Page Up and Page Down turn the Jog Dial, End presses it and Home is Back.
 
@@ -177,6 +191,10 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 | Import folder as card | yes | yes | yes | Pro only |
 
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
+
+### Zodiac second card
+
+The Zodiac has two SD slots. Slot 1 works like the other devices' card. Slot 2 has its own SD card 2 button on desktop and SD card 2 rows on Android, with New card, Insert image, Eject, Insert and Export image. Its card stays in the machine and is saved and copied with it, as `sd2.frondsd`. It can't go in the Cards drawer yet. Sizes are 32 MB to 2 GB.
 
 ### Dana cards
 

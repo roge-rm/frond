@@ -33,6 +33,9 @@ class PalmHolder : public QWidget {
     // The MIPS readout in the Palm's bottom right corner. The reply text starts with the figure;
     // empty text hides it.
     void setMips(const QString& reply);
+    // The rumble tag in the Palm's bottom left corner, for a Zodiac rumble no game controller plays.
+    void setRumble(bool on);
+    bool rumbleShown() const { return rumbleOn; }
     // Puts the Palm's window above the other native windows of Frond's window.
     void raisePalm();
     // The Palm's rectangle in global coordinates, empty when not embedded.
@@ -49,6 +52,8 @@ class PalmHolder : public QWidget {
     QPointer<QWindow> palm;
     QWidget* keySink{nullptr};
     QLabel* mips{nullptr};
+    QLabel* rumble{nullptr};
+    bool rumbleOn{false};
     void placeMips();
     QTimer* pollTimer{nullptr};
     QSize wanted;

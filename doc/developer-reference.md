@@ -31,6 +31,7 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
+| `--no-rumble` | Zodiac: turn rumble off (the machine setting Rumble off), on game controllers and in the window. |
 | `--fast-audio`, `--experimental-fast-audio` | Preview one qualified TX, E2, E3 or Zire 72 stereo stream before the firmware audio queue. The E3 and E2 de-NVFS image use the HAL path with an ARM stream-start verifier and no Thumb queue hooks. |
 | `--low-latency-queue` | The `--fast-audio` queue limits without the preview, on any device and firmware: low startup thresholds, and the 120 Hz slice and pending caps of 6 and 4 host periods (3072/2048 frames at the default 512) while non-silent frames were queued in the last 100 ms. The frontends pass it for Low-latency audio on ARM devices with sound when the firmware is not qualified for the preview, including modified E3 images and the TG50. |
 | `--gdb PORT` | Wait for GDB on 127.0.0.1:PORT before running, see [GDB and PACE monitor](#gdb-and-pace-monitor). |
@@ -48,8 +49,10 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--window-background RRGGBB` | Colour around a fitted device. Default 000000. |
 | `--smooth-lcd` | Smooth pixels instead of sharp nearest-neighbour. |
 | `--hide-keyboard` | Hide the TG50 keyboard. |
+| `--gamepad on\|off` | TG50: the CLIÉ game controller plugged in or out at start, over the session's state. Without it the session's state stays. |
 | `--jog-controls hidden\|screen\|keyboard` | TG50 jog controls: hidden, left of the LCD, or left of the keyboard. Default `screen`. |
 | `--hide-jog-controls` | Same as `--jog-controls hidden`. |
+| `--jog-controls-landscape hidden\|beside\|under\|over` | TG50 jog controls in landscape with the game controller: hidden, left of the left grip, or turned on their side under or over the screen. Default `beside`. |
 
 For a headless run set `SDL_VIDEODRIVER=dummy` and `SDL_AUDIODRIVER=dummy`.
 
@@ -205,6 +208,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `mount IMAGE` | Insert an SD card image. The built-in help says "Unmount SD card." |
 | `sd-take-out`, `ms-take-out` | Leave the ejected card or stick settled in the machine folder's card file and empty the slot. Prints its identity and `protected` or `writable`. |
 | `sd-put-in IDENTITY [protected\|writable]`, `ms-put-in ...` | Insert the card file in the machine folder as a new card with that identity. |
+| `sd2-take-out`, `sd2-put-in IDENTITY [protected\|writable]` | The same for the Zodiac's second SD slot. |
 | `unmount` | Eject the SD card. |
 | `reset` | Soft reset. |
 | `reset-no-ext` | Reset with Up held, so extensions don't load. |
@@ -215,7 +219,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `save-nand IMAGE` | Export the raw NAND with its spare bytes. |
 | `dump-mmu` | Print the MMU mappings. |
 | `os-version` | Ask the Palm for its OS version. |
-| `set-auto-off SECONDS` | Set the auto-off time. Not on the TG50. The built-in usage line leaves out the argument. |
+| `set-auto-off SECONDS` | Set the auto-off time until the next reset, 0 for never. Not on the TG50. The built-in usage line leaves out the argument. |
 | `install FILE` | Install a PRC or PDB. |
 | `launch NAME` | Launch an app by its database name. |
 | `db-list` | List the RAM databases. |
@@ -224,6 +228,8 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `db-export-all FILE` | Export every database. |
 
 `install` (here and on the control socket) runs where the app in front next asks for an event. On the T|X and Zire 72 an app waiting for input with no timeout, like Memo Pad, is woken first through EvtWakeup, as an interrupt would, and gets a nilEvent; `launch` and the `db-` commands do the same. After it, as after a HotSync, the app with the database's creator gets `sysAppLaunchCmdSyncNotify` unless it's in front, and an app installed while the launcher shows makes the launcher reopen with it listed. Another app in front stays, and so does a launch already under way.
+
+The commands you start wake a sleeping Palm first with a power button press, here and on the control socket: `install`, `launch`, `set-auto-off`, the `db-export` commands, `launch-app`, `delete-db`, `export`, `export-db`, `db-list wake` and the Memory Stick file commands. No press is added while one from the host is held or queued. The guest runs until it's awake and takes host calls, 5 guest seconds at most. `db-list` and `os-version` leave it asleep. A Palm still asleep refuses the command, saying so (`asleep` on the control socket).
 
 ## Control socket
 
@@ -247,7 +253,7 @@ Two requests with ID 0 get no reply: `cancel-files` (argument is the job ID of a
 
 Commands that touch files or the guest pause audio while they run and don't catch up the lost time.
 
-Error codes seen across commands: `argument`, `unsupported` (the device lacks it), `not-ready` (the Palm isn't at a point where it can take the call, try again), `busy`, `empty`, `cancelled`, `timeout`, `command` (unknown) and `failed`.
+Error codes seen across commands: `argument`, `unsupported` (the device lacks it), `not-ready` (the Palm isn't at a point where it can take the call, try again), `asleep` (the Palm is asleep, see above), `busy`, `empty`, `cancelled`, `timeout`, `command` (unknown) and `failed`.
 
 ### Events
 
@@ -257,6 +263,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `close` | The user closed the window. The launcher decides what to do. |
 | `sd-progress` | `done total` in bytes, at each whole percent of an SD or Memory Stick create, import or export. |
 | `card` | `inserted`, when a card that `--card-swap` left ejected goes in. |
+| `rumble` | `on` or `off`, sent while the Zodiac's guest rumble motor is on, Rumble is enabled and no game controller that can rumble is open, so the window can show it. |
 | `shortcut` | A key pressed in the Palm window that belongs to the app, as `ctrl+s`, `ctrl+shift+s`, `ctrl+1` or `f12`: F11, F12, and Ctrl (with Shift) and a letter or digit. They never reach the Palm. With the infrared keyboard attached, Ctrl keys go to the Palm and only `f11` and `f12` are sent. |
 | `serial`, `usb`, `infrared`, `bluetooth`, `microphone`, `camera` | The new state, sent when it changes, for example a peer connecting or the camera going back to the pattern. |
 
@@ -277,7 +284,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `delete-db` | database name, up to 31 bytes | `deleted`; errors `missing`, `rom`, `running` (the open application), `open`, `delete`, `not-ready` |
 | `export` | ZIP file | `exported`: all RAM databases |
 | `export-db` | ZIP file, newline, database name | `exported`: that database |
-| `db-list` | | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name |
+| `db-list` | none, or `wake` | `databases`: a line per RAM database, `type creator attributes` as hex, then the hex name; error `asleep` unless `wake` |
 | `input-replay` | file | `loaded`; error `replay` with the line |
 | `replay-state` | | `running`, `paused` or `finished`, message is the last event time in ms |
 | `replay-continue` | | `continued`: a paused replay goes on; error `not-paused` |
@@ -296,13 +303,16 @@ State commands take no argument. Mode commands change the setting and reply with
 | `keyboard-state` | | `keyboard`: `attached` or `detached` |
 | `keyboard-attach` | `on` or `off` | `keyboard`; `infrared` error if an infrared peer owns the UART |
 | `keyboard-key` | hex scan code, space, `d` or `u` | `keyboard` |
+| `gamepad-state` | | `gamepad`: `detached` (`detached busy` while host serial, infrared, the infrared keyboard or the USB cable has the connector), `unavailable` (not a TG50), or `attached` with the pad's phase (`waiting`, `plugging`, `identifying`, `identified`), `hold` when its Hold slide is on, and `ids=`, `replies=`, `sent=` counts |
+| `gamepad` | `on` or `off` | `gamepad`: plugs the CLIÉ game controller into the TG50's connector or takes it out, while running; `busy` if serial, infrared or the USB cable has the connector |
+| `gamepad-key` | `up`, `down`, `left`, `right`, `a`, `b`, `x`, `y`, `home`, `menu` or `hold`, space, `d` or `u` | `gamepad`; `detached` with no pad. `hold d` moves the Hold slide |
 | `sound-state` | | `sound`: `on`, `muted` or `off` |
 | `sound-mode` | `on` or `off` | `sound` |
 | `microphone-state`, `microphone-epoch` | | `microphone` |
 | `microphone-mode` | `on`, `off` or `on-return:N` (arm when the Palm app returns to the foreground, N from `microphone-epoch`) | `microphone` |
 | `camera-state` | | `camera`: `pattern`, `picture`, `webcam` or `frames`; `pattern` and why after a failure |
 | `camera-mode` | `pattern`, `picture:PATH` (PNG, JPEG, BMP), `webcam:DEVICE` (V4L2 in YUYV, Linux desktop) or `frames` | `camera`; for `frames` the path of the frames file |
-| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`) | `display`: `queued`, applied once the app is in the foreground |
+| `display` | words `fit=`(`none` `fit` `whole` `fill`), `smooth=`(`on` `off`), `keyboard=`(`on` `off`), `jog=`(`hidden` `screen` `keyboard`), `jog-landscape=`(`hidden` `beside` `under` `over`) | `display`: `queued`, applied once the app is in the foreground |
 | `serial-state`, `usb-state` | | `serial`, `usb`: `off`, `pty PATH waiting\|connected`, `tcp PORT waiting\|connected`, `unix PATH waiting\|connected`, or `off` with an error; frond-68k's modem gives `modem idle\|dialling\|online 33600` |
 | `serial-mode`, `usb-mode`, `irda-mode` | `off`, `pty`, `tcp:PORT` or `unix:PATH`, and `modem` for `serial-mode` on a device with a snap-on modem (frond-68k, `unsupported` elsewhere there), `phone` for `irda-mode` on a device with the `irPhone` capability (`unsupported` elsewhere, and on frond-68k before Palm OS 3.3) | the state |
 | `irda-state` | | `infrared`; the phone gives `phone idle\|linked\|dialling\|online 33600` |
@@ -331,6 +341,7 @@ The Zire 72 camera starts on the test pattern each run and goes back to it on a 
 | `sd-export` | file (card must be ejected) | `exported` |
 | `sd-take-out`, `ms-take-out` | | `taken-out`: `IDENTITY protected\|writable`. The ejected card is settled in the machine folder's card file and the slot is empty, so the launcher can move the file |
 | `sd-put-in`, `ms-put-in` | `IDENTITY` (64 hex digits), then `protected` or `writable` | `inserted`: the card file now in the machine folder goes in as a new card |
+| `sd2-state`, `sd2-create`, `sd2-insert`, `sd2-eject`, `sd2-reinsert`, `sd2-export`, `sd2-take-out`, `sd2-put-in` | As the `sd-` ones | The same replies for the Zodiac's second SD slot. `sd2-put-in` takes the same `IDENTITY` and `protected` or `writable`. |
 | `ms-state` | | `card`: `none`, `inserted` or `ejected` |
 | `ms-type` | | `type`: `none`, `classic MB` or `pro MiB` |
 | `ms-protection` | | `protection`: `read-only` or `writable` |
@@ -358,6 +369,7 @@ The `ms-*` and `sd-*` commands exist on devices with that slot; the other gets `
 | `key-down KEY`, `key-up KEY` | A key by name or by number (1 up to the highest key id). |
 | `stick X Y` | The analogue stick in hundredths of its travel, -100 to 100, right and down positive. `stick 0 0` lets it go. Only the Zodiac has one. |
 | `keyboard-attach`, `keyboard-detach` | Plug the infrared keyboard in or out. |
+| `gamepad-attach`, `gamepad-detach` | Plug the TG50's game controller in or out. Its buttons are the keys `pad-up`, `pad-down`, `pad-left`, `pad-right`, `pad-a`, `pad-b`, `pad-x`, `pad-y`, `pad-home`, `pad-menu` and `pad-hold` (each press of `pad-hold` moves the slide). |
 | `keyboard-down NAME`, `keyboard-up NAME` | Infrared keyboard key by SDL scancode name, quoted if it has a space, such as `"Left Shift"`. |
 | `pause` | Hold the main loop's guest time and the replay until the `replay-continue` command, which picks up at the pause's time. Commands that run the guest themselves (`guest-ready`, `install`, `launch-app`, the database and card commands) still run it. |
 | `snapshot PATH` | Save the Palm screen as a PNG. The folder must exist. The path may be quoted. A failed snapshot is logged and the run goes on. |
@@ -788,6 +800,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 | `FROND_JIT_HOT` | Times a block is reached before it's compiled. `1` compiles at once. Default 4. |
 | `FROND_JIT_MAX_UNCHECKED` | Most cycles generated code runs without checking its budget. `0` means unchecked. |
 | `FROND_JIT_STATS` | Print JIT counters at exit. |
+| `FROND_IDLE_SKIP` | `0` turns off the Fast engine's skip of the PalmOS 5 kernel idle wait loop (Zire 72 and T\|X), for measuring. |
 | `FROND_ZODIAC_GPU` | Zodiac in Fast: `on` (or `1`) draws the graphics engine's fills on the host GPU, `diff` draws them on both and checks each GPU fill against the CPU's, reporting mismatches to stderr. Off by default. |
 | `FROND_ZODIAC_GPU_DEVICE` | The EGL device's DRM node to draw on, e.g. `/dev/dri/renderD128`, or `surfaceless` for Mesa's surfaceless platform. Default: the first hardware device. |
 | `FROND_ZODIAC_GPU_QUIET` | Leave out the GPU's fill and transfer counts when it stops. |
@@ -850,6 +863,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `Z72_SESSION`, `FROND_TEST_MIC_LEVEL` | Zire 72 session for `make test-z72-voice-memo`, `make test-z72-camera-rom` and `make test-z72-video-rom` (skipped when empty), and the fake 1 kHz microphone level read by the core `make z72-test-mic` builds for the Voice Memo and video tests. |
 | `FROND_TG50_SESSION` | TG50 session for `tests/tg50-usb-hotsync.py`. Default `build/smoke/machines/sony-clie-tg50` (or the older `build/smoke/sony-clie-tg50.session`). |
 | `FROND_TG50_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves TG50 screenshots to. |
+| `FROND_CLIE_GAMEPAD_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves the CLIÉ game controller renders to. |
 | `FROND_ZODIAC_ROM`, `FROND_ZODIAC_SHOTS`, `FROND_ZODIAC_STATE`, `FROND_ZODIAC_WINDOW` | Opt-in Zodiac run in the desktop workflow test: the ROM, a folder for pictures of the Palm window, a bring-up state file read by the developer build of the core, and the window to capture. |
 | `FROND_ZODIAC_SCREENSHOT_DIR` | Folder `tests/device-controls.cpp` saves Zodiac screenshots to. |
 | `FROND_ZODIAC_PROBE`, `FROND_ZODIAC_PROBE_ENGINE` | Probe program and engine (`exact` or `fast`) for the Zodiac graphics Python tests. |
@@ -879,6 +893,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
+| `BENCH_ZODIAC_SD2` | An SD image `benchmark-replay` puts in the Zodiac's second slot from the start, in memory. The run's end lists the sectors that differ from the file on stderr. |
 | `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS and stop. |
 | `BENCH_ZODIAC_SAVE_CONTINUE` | `1` makes `benchmark-replay` carry on after a `BENCH_ZODIAC_SAVE`. |
 | `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty) with the YMF768 ready register reads so far, screen on and off times, and at the end the chip registers, the memory and PCM hashes, the guest time of the last ready register read and the ready register reads. |
@@ -886,6 +901,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
+| `SPEED_68K` | `frond-68k` binary for the 68k recipes of `tools/speed-check.py`. Default the one next to the `benchmark-replay` in use, else `out/frond-68k`. |
 | `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
 | `SPEED_SSH_KEY` | Optional ssh key for `SPEED_HOST`. |
@@ -893,6 +909,8 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `TEST_KILL_GRACE` | Seconds between TERM and KILL when a test line times out. Default 10. |
 | `E2_SESSION`, `TX_SESSION`, `ZIRE72_SESSION`, `TG50_SESSION` | Smoke session files for the `e2-busy`, `tx-media`, `zire72-busy` and `tg50-busy` recipes of `make count-check`. No default; a recipe without one is skipped. |
 | `ZODIAC_CARDS` | Folder of Zodiac SD card images for the Zodiac game recipes of `make count-check`: `s2/doom2.img`, `s2/origo.img`, `s2/animated-dudes.img`, `s2/mtx-mototrax.img` and `s2/firehammer.img` with PopAccess, `s1/zuma.img`. No default; those recipes are skipped without it. |
+| `ZODIAC_ROM` | The Zodiac 1.1 ROM for `make test-zodiac-twgfx`. Default `Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom` under `FROND_DEVICE_IMAGES`; the test skips without it. |
+| `ZODIAC_TWGFX_ARGS` | Options for `make test-zodiac-twgfx`: `--update` rewrites `tests/zodiac-twgfx.golden`, `--engines fast` runs Fast only. |
 | `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
 | `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |
@@ -933,6 +951,7 @@ All in `tools/`. Most take `--help`.
 | `speed-check.py` | Emulation speed against fixed guest work (`make speed-check`), and guest counts against `tools/speed-baseline.json` (`make count-check`). |
 | `benchmark-replay.cpp`, `benchmark-session.cpp`, `benchmark-menu.cpp` | Benchmark programs that run a replay or session for a fixed guest time. |
 | `frondbench/` | FrondBench, a Palm benchmark app (`make frondbench`). |
+| `zodiac-twgfx/` | Zodiac TwGfx test program: a native (TNA) app that calls every TwGfx function and option and the Window Manager's drawing modes, `build.py` to make its PRC, `run.py` to run it headless and table what Frond draws or refuses (`make test-zodiac-twgfx`). |
 | `host-profile.h` | Host timing used by the benchmarks. |
 | `analyze-pcm.py` | Signal levels and silent gaps in 16-bit little-endian PCM. |
 | `analyze-audio-buffers.py`, `analyze-audio-timing.py`, `analyze-gameplay.py`, `analyze-menu-response.py` | Read the traces from the optional debug patches (two in `tools/debug/`, the rest in git history, see performance.md). |
@@ -979,12 +998,17 @@ All in `tools/`. Most take `--help`.
 | `count-check` | Guest counts and hashes against `tools/speed-baseline.json`, wall-clock rounds only where they moved. |
 | `benchmark-replay`, `benchmark-replay-jit`, `benchmark-session`, `benchmark-menu` | Build and run the benchmark programs. |
 | `frondbench` | Build FrondBench with m68k-palmos-gcc. |
+| `check-frondbench` | Rebuild FrondBench and compare it with the committed `tools/frondbench/FrondBench.prc`. Skipped when the Palm tools are missing. |
+| `zodiac-twgfx` | Build the Zodiac TwGfx test program into `build/zodiac-twgfx/TwGfxTest.prc` with arm-palmos-gcc, m68k-palmos-gcc and build-prc. |
+| `test-zodiac-twgfx` | Run the TwGfx test program on Fast and Exact from a card and check its table (ok, the ROM's error, refused with Frond's stop text, or crashed) against `tests/zodiac-twgfx.golden`. Needs the Palm tools, mtools and `ZODIAC_ROM`; skipped without them. About 5 minutes. Outside `make test`. |
 | `device-session-probe` | Build the device session probe. |
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
 | `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. Outside `make test`. |
 | `test-zodiac` | All the Zodiac tests below that are in `make test`. |
 | `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. |
+| `test-zodiac-rumble` | YMF768 bank 1 register 0x48 motor and LED bits reaching the attention path, on the model and through the machine in Exact and Fast. |
+| `test-zodiac-stick-view` | The stick turning with the guest and host orientation. |
 | `test-zodiac-ymf768` | YMF768 register answers, power steps in the ready register and their save, FIFO and interrupt line, A4 pitch and mixing. |
 | `test-tg50-voicerec` | The TG50 Voice Recorder opens on the ROM PACE. Skips without the TG50 session. |
 | `test-zodiac-dcache` | ARM920 data cache, writeback, aliases, maintenance and instruction/JIT coherence in Exact and Fast. Outside `make test`. |
@@ -1058,7 +1082,8 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-graphics-a4` | Graphics A4 copy packets, with private files from `FROND_ZODIAC_A4_*`. Outside `make test`. |
 | `test-zodiac-graphics-packed-mono` | Packed monochrome graphics through the probe. Outside `make test`. |
 | `test-zodiac-graphics-plain-copy` | Plain graphics copy packets, the stretch blit at every ratio, line packets and the backlight word with drawing queued, with private files from `FROND_ZODIAC_PLAIN_*`. Outside `make test`. |
-| `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it. Outside `make test`. |
+| `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it, with a card: detect, init, PIO reads and writes, errors, and save and load mid-transfer. Outside `make test`. |
+| `test-zodiac-session-cards` | A Zodiac session with a card in each slot saves and loads with both, with slot 2 ejected, with one card, and after slot 2's card was taken out. Outside `make test`. |
 | `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
 | `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |
 | `test-zodiac-ymf-ready` | The Zodiac boot's chip power cycle (35 s and 40 s), sleep and wake end their YMF768 power waits in a few tries, run in Exact and Fast from a state Fast saved just before: screen times, frames and chip registers the same in both. A load from a state saved mid power-up gives the same register reads (within one in Fast) and chip registers. Needs the Zodiac ROM in `FROND_DEVICE_IMAGES`. Outside `make test`. |
@@ -1081,7 +1106,7 @@ Tests in `make test`, by area:
 | --- | --- |
 | CPU and engines | `test-cpu`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
 | SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
-| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
+| Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device) |
 | Audio | `test-sdl-audio`, `test-fast-audio`, `test-earlier-audio`, `test-audio-results`, `test-pxa-i2s-audio`, `test-tg50-pwm-audio`, `test-tg50-microphone-adc`, `test-tg50-microphone-dma`, `test-tg50-microphone-state`, `test-z72-microphone`, `test-z72-voice-memo`, `test-tg50-call-budget`, `test-tg50-pace`, `test-tg50-audio-replay`, `test-tg50-serial-board`, `test-tg50-serial-configuration` |
@@ -1106,6 +1131,8 @@ Not in `make test`. The first group builds a program and runs it with a private 
 | `test-frond-68k-busy` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Database commands while an app is busy for 45 s. |
 | `test-frond-68k-install` | IIIx 3.1 ROM, `m68k-palmos-gcc` and the 3.5 SDK in `../palm-os-sdk`. Installs at the launcher and with another app in front, and install and export while hidden. |
 | `test-68k-ms` | Memory Stick controller (MB86189) on the 68k core, and runtime card changes for it. |
+| `test-68k-ez-uart-spi` | EZ and VZ UART receive with the receiver off, and the SPIM interrupt following its control bits. |
+| `test-68k-host-transport` | `frond-68k` host link pacing: bytes reach the guest at the line's rate after an idle spell, a drain and refill, and an IrDA frame gap. |
 | `test-frond-arm-install` | T\|X, E2, Zire 72 and TG50 smoke sessions (`FROND_ARM_SESSIONS`, else `build/smoke/machines`), `m68k-palmos-gcc` and the 3.5 SDK. The same installs on each ARM device, and host calls while the Palm sleeps. |
 | `test-link-irda-cores` | T\|X smoke session (`FROND_ARM_SESSIONS`, else `build/smoke/machines`) and the IR probe (`FROND_IR_PROBE`, else pilrc and the SDK). Two T\|X cores beam to each other over two link hubs on loopback, also after one sleeps and wakes. |
 | `test-host-call-wake` | T\|X and Zire 72 smoke sessions as above. A GDB breakpoint on EvtWakeup: `guest-ready` wakes nothing, a host call wakes at most once. |

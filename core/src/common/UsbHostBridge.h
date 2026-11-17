@@ -32,6 +32,7 @@ class UsbHostBridge {
         std::function<uint64_t()> time;
         std::function<void()> kick;
         std::function<void(const UsbHostHooks*)> hooks;
+        std::function<bool()> canPlug;  // optional: false while something else holds the connector
     };
     bool Start(Backend backend, const Config& config, std::string& error);
     UsbHostBridge();

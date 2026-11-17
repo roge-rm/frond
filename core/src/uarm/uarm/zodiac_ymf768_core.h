@@ -56,6 +56,7 @@ struct Imx1Ymf768Engine : ymfm::fm_engine_base<ymfm::opl3_registers> {
         return noOperator;
     }
     uint8_t clockPrescale() const { return m_clock_prescale; }
+    uint8_t oplRegister(unsigned reg) const { return m_regs.read(uint16_t(reg)); }
 };
 struct Imx1Ymf768Core {
     ymfm::ymfm_interface intf;
@@ -128,13 +129,7 @@ void Imx1Ymf768::write(bool dataPort, uint8_t value) {
     regs[bank][index] = value;
     if (bank != 0) return;
     if (index >= 0x10 && index < 0xb0) {
-        // Operator slot s of group g: channel (s / 8) * 4 + s % 4, operator (s / 4) % 2 of that channel,
-        // or of the four-operator pair it belongs to.
-        static constexpr uint16_t group[5] = {0x20, 0x40, 0x60, 0x80, 0xe0};
-        const unsigned g = (index - 0x10) / 0x20, s = (index - 0x10) % 0x20;
-        const unsigned ch = (s / 8) * 4 + s % 4, n = (s / 4) % 2;
-        // ASSUMPTION "YMF768 operator group 4": the low 3 bits are the OPL3 waveform; the high bits are unknown.
-        engineWrite(group[g] + oplOperatorOffset(ymfOplChannel[ch], n), g == 4 ? value & 7 : value);
+        syncOperator((index - 0x10) % 0x20);
     } else if (index >= 0xb0 && index < 0xd0) {
         syncFrequency(index & 15);
         const unsigned ch = index & 15;
@@ -142,6 +137,32 @@ void Imx1Ymf768::write(bool dataPort, uint8_t value) {
     } else if (index >= 0xd0 && index < 0xe0) {
         syncAlgorithm(index & 11);
     }
+}
+
+// Operator slot s (0-1f): channel (s / 8) * 4 + s % 4, operator (s / 4) % 2 of that channel, or of the
+// four-operator pair it belongs to. Its five bytes, one in each group (10+s, 30+s, 50+s, 70+s, 90+s), are laid
+// out as the MA-2 voice the ROM copies in unchanged (the 2 + 5 per operator records near 0x2008171d, the SMAF
+// VMA voice body):
+//   group 0: MULT bits 4-7, VIB 3, EGT 2, SUS 1, KSR 0     group 1: RR bits 4-7, DR 0-3
+//   group 2: AR bits 4-7, SL 0-3                          group 3: TL bits 2-7, KSL 0-1
+//   group 4: DVB bits 6-7, DAM 4-5, AM 3, WS 0-2
+// They go to OPL3's 20 (AM VIB EGT KSR MULT), 40 (KSL TL), 60 (AR DR), 80 (SL RR) and e0 (WS).
+// ASSUMPTION "YMF768 MA-2 operator fields": KSL and WS as OPL3's codes; SUS, DVB and DAM have no OPL3 match
+// (ymfm's depths are global, left at 1 dB and 7 cents).
+void Imx1Ymf768::syncOperator(unsigned s, bool onlyChanged) {
+    const unsigned ch = (s / 8) * 4 + s % 4, n = (s / 4) % 2;
+    const uint8_t* r = &regs[0][0x10 + s];
+    const uint8_t g0 = r[0], g1 = r[0x20], g2 = r[0x40], g3 = r[0x60], g4 = r[0x80];
+    const unsigned op = oplOperatorOffset(ymfOplChannel[ch], n);
+    // A write marks every channel modified, so a load writes only what differs from the restored engine.
+    auto put = [&](unsigned reg, uint8_t value) {
+        if (!onlyChanged || core->engine.oplRegister(reg) != value) engineWrite(reg, value);
+    };
+    put(0x20 + op, uint8_t((g4 & 8) << 4 | (g0 & 8) << 3 | (g0 & 4) << 3 | (g0 & 1) << 4 | g0 >> 4));
+    put(0x40 + op, uint8_t((g3 & 3) << 6 | g3 >> 2));
+    put(0x60 + op, uint8_t((g2 & 0xf0) | (g1 & 0x0f)));
+    put(0x80 + op, uint8_t((g2 & 0x0f) << 4 | g1 >> 4));
+    put(0xe0 + op, uint8_t(g4 & 7));
 }
 
 // F-number and block (b0, c0 bits 0-4) and key on (c0 bit 5) of channel ch into OPL3's a0 and b0. The second

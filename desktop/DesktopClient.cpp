@@ -89,7 +89,7 @@ bool DesktopClient::requestBackground(const QString& command) {
     return true;
 }
 bool DesktopClient::cancelFiles() {
-    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
+    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "sd2-create", "sd2-insert", "sd2-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
     const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
     return socket->write(line) == line.size();
 }
@@ -103,6 +103,10 @@ void DesktopClient::receive() {
         input.remove(0, at + 1);
         if (fields.size() != 4) return fail(tr("The emulator sent an invalid control response."));
         if (fields[0] == "0" && fields[1] == "event") {
+            // An event name from a newer core is skipped; a known one that is malformed or out of order fails.
+            static const QList<QByteArray> knownEvents{"ready", "close", "shortcut", "microphone", "camera", "serial", "usb",
+                                                       "infrared", "bluetooth", "dana-view", "card", "rumble", "sd-progress"};
+            if (!knownEvents.contains(fields[2])) continue;
             if (fields[2] == "ready" && !ready) { ready = true; deadline.stop(); emit started(); }
             else if (fields[2] == "close" && ready) emit closeRequested();
             else if (fields[2] == "shortcut" && ready && fields[3].size() % 2 == 0 &&
@@ -132,6 +136,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "card" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit cardState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
+            else if (fields[2] == "rumble" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit rumbleState(QString::fromUtf8(QByteArray::fromHex(fields[3])) == "on");
             else if (fields[2] == "sd-progress" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
                 const auto parts = QString::fromUtf8(QByteArray::fromHex(fields[3])).split(' ');

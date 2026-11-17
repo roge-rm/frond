@@ -1,6 +1,7 @@
 #ifndef FROND_DESKTOP_CONTROL_H
 #define FROND_DESKTOP_CONTROL_H
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -79,6 +80,12 @@ class DesktopControl {
         event("usb", state);
     }
 
+    // A cue event for the window: "on" while the guest's rumble is on and no game controller can play it.
+    void rumbleChanged(bool cue) {
+        if (cue == lastRumbleCue) return;
+        lastRumbleCue = cue; event("rumble", cue ? "on" : "off");
+    }
+
     void infraredChanged(commands::Context& ctx) {
         const auto state=ctx.infrared ? ctx.infrared->Describe() : "off";
         if (state==lastInfrared || (state=="off" && lastInfrared.empty())) return;
@@ -116,7 +123,7 @@ class DesktopControl {
             case DesktopChannel::Poll::idle: break;
             case DesktopChannel::Poll::request: {
                 const auto& command = request.command;
-                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
+                const bool work = command == "guest-ready" || command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "db-list" || command == "reset" || command == "hard-reset" || command == "launch-app" || command == "delete-db" || command == "input-replay" || (command.rfind("sd-", 0) == 0 && command != "sd-state") || (command.rfind("sd2-", 0) == 0 && command != "sd2-state") || (command.rfind("ms-",0)==0&&command!="ms-state"&&command!="ms-type"&&command!="ms-protection");
                 if (work) {
                     // Host calls only drop capture for their length; the user's choice stays and capture comes back.
                     if (ctx.microphone) ctx.microphone->Suspend();
@@ -172,6 +179,7 @@ class DesktopControl {
     }
     bool flush() { return channel.Flush(); }
 
+    bool lastRumbleCue{false};
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
@@ -262,6 +270,12 @@ class DesktopControl {
             const bool ok = sdCardWrite(uint32_t(sdCardSectorCount() - 1), sector.data());
             std::cerr << "save test: SD " << (ok ? "" : "not ") << "marked " << mark << std::endl;
         }
+        if (auto& second = sdCardStore(1); second.initialized() && second.sectorCount()) {
+            std::vector<uint8_t> sector(SD_SECTOR_SIZE, 0);
+            std::memcpy(sector.data(), mark.data(), mark.size());
+            const bool ok = second.write(uint32_t(second.sectorCount() - 1), sector.data());
+            std::cerr << "save test: SD2 " << (ok ? "" : "not ") << "marked " << mark << std::endl;
+        }
     }
     unsigned testMarks{};
     // Emulation thread: waits for saveJob, finishes the card and NAND files and answers.
@@ -342,6 +356,79 @@ class DesktopControl {
             }
         };
     }
+    // The second SD slot's commands (the Zodiac's), as the sd- ones on sdCardStore(1).
+    Reply dispatchSecondSd(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
+        auto& store = sdCardStore(1);
+        auto& soc = *ctx.soc;
+        if (command == "sd2-state") return {true, "card", !store.initialized() ? "none" : soc.Sd2Inserted() ? "inserted" : "ejected"};
+        if (command == "sd2-create" || command == "sd2-insert") {
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the current card before replacing it."};
+            const auto device = soc.GetDeviceType();
+            const auto progress = sdProgress(job);
+            frondNative::SdResult result;
+            if (command == "sd2-create") {
+                if (path.empty() || path.size() > 4 || path.find_first_not_of("0123456789") != std::string::npos)
+                    return {false, "size", frondNative::sdCreateSizes(device)};
+                result = frondNative::createSdCard(ctx.sessionFolder, device, unsigned(std::stoul(path)), progress, 1);
+            } else {
+                struct stat st{};
+                if (::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) &&
+                    (!frondSd::validSize(uint64_t(st.st_size)) || !frondNative::sdImageFits(device, uint64_t(st.st_size))))
+                    return {false, "size", frondNative::sdImageSizes(device)};
+                result = frondNative::loadSdImage(ctx.sessionFolder, device, path, progress, 1);
+            }
+            if (!result.ok) return {false, result.code, result.message};
+            frondNative::slotCards().sd2Protected = false;
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-take-out") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the card before taking it out."};
+            frondNative::CardIdentity identity{};
+            const bool protect = frondNative::slotCards().sd2Protected;
+            const auto result = frondNative::takeOutFileCard(ctx.sessionFolder, frondMachine::kindSd2, protect, identity);
+            if (!result.ok) return {false, result.code, result.message};
+            frondNative::slotCards().sd2Protected = false;
+            return {true, "taken-out", frondNative::takenOutReply(identity, protect)};
+        }
+        if (command == "sd2-put-in") {
+            frondNative::CardIdentity identity{};
+            bool protect = false;
+            if (!frondNative::parsePutIn(path, identity, protect))
+                return {false, "argument", "Use the card's 64-digit identity, then protected or writable."};
+            const auto result = frondNative::putInSd2(ctx.sessionFolder, soc.GetDeviceType(), identity, protect);
+            if (!result.ok) return {false, result.code, result.message};
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-eject") {
+            if (!store.initialized() || !soc.Sd2Inserted()) return {false, "empty", "No card is inserted in the second slot."};
+            soc.Sd2Eject();
+            frondNative::noteEjected(soc);
+            return {true, "ejected", "SD card ejected from the second slot. Its contents remain in this session."};
+        }
+        if (command == "sd2-reinsert") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (!soc.Sd2Insert()) return {false, "size", "The second slot can't take this card."};
+            return {true, "inserted", "SD card inserted in the second slot."};
+        }
+        if (command == "sd2-export") {
+            if (!store.initialized()) return {false, "empty", "This session has no card in the second slot."};
+            if (soc.Sd2Inserted()) return {false, "busy", "Eject the card before exporting its image."};
+            const auto result = frondNative::exportSd(path, sdProgress(job), 1);
+            if (!result.ok) return {false, result.code, result.message};
+            return {true, "exported", "SD image exported."};
+        }
+        return {false, "command", "Unknown second SD slot command."};
+    }
+    // A host call refused: the Palm is asleep (a list, or still asleep after the power press), or
+    // Palm OS isn't at a point that takes host calls.
+    static Reply notReady(commands::Context& ctx) {
+        if (frondNative::guestAsleep(*ctx.soc)) return {false, "asleep", "The Palm is asleep. Turn it on and try again."};
+        return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+    }
+
     Reply dispatch(commands::Context& ctx, const std::string& command, const std::string& path, const std::string& job) {
         // On a Memory Stick device the card store holds a Memory Stick Pro, reached through ms-*.
         // This comes before the argument checks so every sd-* command gets the same answer.
@@ -351,11 +438,13 @@ class DesktopControl {
                 return command == "sd-state" && path.empty() ? Reply{true, "card", "none"}
                                                              : Reply{false, "unsupported", "This device has no SD slot."};
         }
+        if (command.rfind("sd2-", 0) == 0 && !ctx.soc->HasSecondSdSlot())
+            return {false, "unsupported", "This device has no second SD slot."};
         const bool msFilesCommand = command == "ms-files" || command == "ms-get" || command == "ms-put" ||
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
-        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
+        const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -393,8 +482,7 @@ class DesktopControl {
         if (command == "launch-app") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm application database name (up to 31 bytes)."};
             const auto launched = GuestDatabaseOps::Launch(*ctx.soc, path);
-            if (launched == GuestDatabaseOps::LaunchResult::notReady)
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (launched == GuestDatabaseOps::LaunchResult::notReady) return notReady(ctx);
             if (launched != GuestDatabaseOps::LaunchResult::launched)
                 return {false, "launch", "Could not launch that application. Check its database name and wait for Palm OS to finish starting."};
             return {true, "launched", "Application launched."};
@@ -402,7 +490,7 @@ class DesktopControl {
         if (command == "delete-db") {
             if (path.empty() || path.size() > 31) return {false, "argument", "Enter a Palm database name (up to 31 bytes)."};
             const auto deleted = GuestDatabaseOps::Delete(*ctx.soc, path);
-            if (!deleted) return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!deleted) return notReady(ctx);
             switch (*deleted) {
                 case DeleteDbResult::deleted: return {true, "deleted", "Database deleted."};
                 case DeleteDbResult::missing: return {false, "missing", "There is no Palm database with that name."};
@@ -487,6 +575,26 @@ class DesktopControl {
                 return {false, "unsupported", "This device has no supported Hold switch."};
             return {true, "hold", ctx.soc->HoldSwitchOn() ? "on" : "off"};
         }
+        if (command == "gamepad-state") return {true, "gamepad", ctx.soc->GamepadState()};
+        if (command == "gamepad") {
+            if (path != "on" && path != "off") return {false, "argument", "Use on or off."};
+            if (!ctx.soc->GamepadSupported()) return {false, "unsupported", "This device takes no game controller."};
+            if (!ctx.soc->AttachGamepad(path == "on"))
+                return {false, "busy", "The connector is in use (serial, infrared or USB); turn that off first."};
+            return {true, "gamepad", ctx.soc->GamepadState()};
+        }
+        if (command == "gamepad-key") {
+            // NAME d|u, NAME one of up down left right a b x y home menu hold; queued like other keys.
+            static const char* names[] = {"up", "down", "left", "right", "a", "b", "x", "y", "home", "menu", "hold"};
+            const auto space = path.find(' ');
+            const std::string name = path.substr(0, space), state = space == std::string::npos ? "" : path.substr(space + 1);
+            const auto found = std::find(std::begin(names), std::end(names), name);
+            if (found == std::end(names) || (state != "d" && state != "u")) return {false, "argument", "Use a pad button name followed by d or u."};
+            if (!ctx.soc->GamepadAttached()) return {false, "detached", "The game controller isn't attached."};
+            const auto key = KeyId(keyIdPadUp + (found - std::begin(names)));
+            if (state == "d") ctx.soc->KeyDown(key); else ctx.soc->KeyUp(key);
+            return {true, "gamepad", "Pad event queued."};
+        }
         if (command == "keyboard-state") return {true,"keyboard",ctx.soc->KeyboardAttached()?"attached":"detached"};
         if (command == "keyboard-attach") {
             if (path!="on" && path!="off") return {false,"argument","Use on or off."};
@@ -560,8 +668,7 @@ class DesktopControl {
                     if ((!contents.empty() && !input.read(reinterpret_cast<char*>(contents.data()), contents.size())) || input.peek() != std::char_traits<char>::eof())
                         return {false, "read", "Could not read the complete host file."};
                 }
-                if (!GuestDatabaseOps::Ready(*ctx.soc))
-                    return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+                if (!GuestDatabaseOps::Wake(*ctx.soc) || !GuestDatabaseOps::Ready(*ctx.soc)) return notReady(ctx);
                 if (command == "ms-files") {
                     const auto listing = GuestFiles::List(*ctx.soc, cardPath, cancel);
                     std::string text = "space\t" + std::to_string(listing.used) + "\t" + std::to_string(listing.total) + "\n";
@@ -738,6 +845,7 @@ class DesktopControl {
             if (!result.ok) return {false, result.code, result.message};
             return {true, "exported", "SD image exported."};
         }
+        if (command.rfind("sd2-", 0) == 0) return dispatchSecondSd(ctx, command, path, job);
         if (command == "save") {
             if (!frondNative::saveMachine(path, *ctx.soc, ctx.sessionPath, ctx.sessionFolder)) return {false, "save", "Could not save device state."};
             return {true, "saved", "Session saved."};
@@ -754,7 +862,9 @@ class DesktopControl {
                 case DB_INSTALL_RESULT_ERR_IS_OPEN: return {false, "open", "Close this application on the Palm before replacing it."};
                 case DB_INSTALL_RESULT_ERR_COULD_NOT_OVERWRITE: return {false, "overwrite", "The existing database could not be replaced."};
                 case DB_INSTALL_RESULT_ERR_NOT_SUPPORTED: return {false, "unsupported", "Installation is not supported by this firmware."};
-                case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE: return {false, "not-ready", "Wait for Palm OS to finish starting, then try again."};
+                case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE:
+                    if (frondNative::guestAsleep(*ctx.soc)) return notReady(ctx);
+                    return {false, "not-ready", "Wait for Palm OS to finish starting, then try again."};
                 default: return {false, "install", "Application installation failed."};
             }
         }
@@ -768,16 +878,15 @@ class DesktopControl {
                 destination=path.substr(0,split);database=path.substr(split+1);
             }
             std::vector<uint8_t> archive;
-            if (!GuestDatabaseOps::Export(*ctx.soc, database, archive))
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!GuestDatabaseOps::Export(*ctx.soc, database, archive)) return notReady(ctx);
             writeAtomic(destination, archive.data(), archive.size());
             return {true, "exported", database.empty()?"RAM databases exported.":"Database exported."};
         }
         if (command == "db-list") {
             // One line per RAM database: type, creator and attributes in hex, then the hex name.
+            if (!path.empty() && path != "wake") return {false, "argument", "db-list takes only wake."};
             DbMetadataList list;
-            if (!GuestDatabaseOps::List(*ctx.soc, list))
-                return {false, "not-ready", "Wait for Palm OS to reach a supported application boundary."};
+            if (!GuestDatabaseOps::List(*ctx.soc, list, path == "wake")) return notReady(ctx);
             std::string text;
             for (const auto& db : list) {
                 char fields[32];

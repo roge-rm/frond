@@ -156,6 +156,39 @@ void SocIMX1::SyncCard() {
     cardSync = false;
 }
 
+bool SocIMX1::Sd2Insert() {
+    auto& store = sdCardStore(1);
+    if (card2In) return true;
+    if (!store.initialized()) return false;
+    const size_t sectors = store.sectorCount();
+    if (sectors > zodiacCardSectors) {
+        std::cerr << "zodiac: the second card is over 2 GB, which the Zodiac can't use; left out" << std::endl;
+        return false;
+    }
+    if (!vsd2) vsd2 = vsdInit(sdCardStore1Read, sdCardStore1Write, 0);
+    vsdReset(vsd2, uint32_t(sectors));
+    card2In = true;
+    card2Sync = true;
+    SyncSecondCard();
+    return true;
+}
+
+void SocIMX1::Sd2Eject() {
+    if (!card2In) return;
+    card2In = false;
+    card2Sync = true;
+    SyncSecondCard();
+    if (vsd2) vsdReset(vsd2, 0);
+}
+
+void SocIMX1::SyncSecondCard() {
+    if (!card2Sync || halted) return;
+    VSD* const card = card2In ? vsd2 : nullptr;
+    if (imx1MachineSetGraphicsSdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineSetGraphicsSdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
+    card2Sync = false;
+}
+
 void SocIMX1::StateChanged() {
     pcm.restart();
     const auto status = imx1MachineGetStatus(machine);
@@ -180,11 +213,28 @@ void SocIMX1::Reset() {
     StateChanged();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
+    if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
+    card2Sync = true;
+    SyncSecondCard();
 }
 
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
 unsigned SocIMX1::GuestOrientation() {
-    return orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    const unsigned orientation = orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    // SysGetOrientation's numbers: landscape 2 is no turn, portrait 1 one, reverse landscape 4 two, reverse portrait 3 three.
+    static constexpr int turnsFor[] = {-1, 1, 0, 3, 2};
+    const int turns = orientation < 5 ? turnsFor[orientation] : -1;
+    if (turns >= 0 && turns != stickTurns) {
+        stickTurns = turns;
+        PushStick();
+    }
+    return orientation;
+}
+
+// The YMF768's LED and rumble motor.
+SoC::Attention SocIMX1::GuestAttention() {
+    const auto outputs = imx1MachineAttention(machine);
+    return {outputs.led, outputs.motor};
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -241,6 +291,11 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
             SyncCard();
         }
     }
+    // Slot 2's card stays in through the load (imx1MachineLoadState); this puts in or takes out the one asked for.
+    // A card that didn't carry on from the state's SD2 section starts idle.
+    if (card2In && !info.graphicsSdResumed) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
+    card2Sync = true;
+    SyncSecondCard();
     return true;
 }
 
@@ -303,7 +358,24 @@ uint32_t* SocIMX1::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirty
     return view.data();
 }
 
-void SocIMX1::AnalogStick(float x, float y) { input.stick(zodiacStickOffset(x), zodiacStickOffset(y)); }
+void SocIMX1::AnalogStick(float x, float y) {
+    stickHostX = x;
+    stickHostY = y;
+    PushStick();
+}
+
+void SocIMX1::SetStickHostTurns(int turns) {
+    turns &= 3;
+    if (turns == stickHostTurns) return;
+    stickHostTurns = turns;
+    PushStick();
+}
+
+void SocIMX1::PushStick() {
+    float x = stickHostX, y = stickHostY;
+    zodiacStickForView(x, y, zodiacStickTotalTurns(stickTurns, stickHostTurns), x, y);
+    input.stick(zodiacStickOffset(x), zodiacStickOffset(y));
+}
 
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
@@ -366,6 +438,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     }
     const auto before = imx1MachineGetStatus(machine);
     SyncCard();
+    SyncSecondCard();
     PumpInput();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
     const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};

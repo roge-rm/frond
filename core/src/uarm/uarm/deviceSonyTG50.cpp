@@ -388,6 +388,7 @@ void tg50BoardSetUsbCable(Tg50Board *board, bool connected) {
     // AD7873 AUX, 2.5 V reference: 2000 mV gives code3276 in the USB accessory band.
     ad7873setVaux(board->touch, connected ? 2000 : 0);
 }
+void tg50BoardSetAccessoryAux(Tg50Board *board, uint16_t mV) { ad7873setVaux(board->touch, mV); }
 bool tg50BoardUsbCableAttached(Tg50Board *board) {
     const auto code = ad7873getVaux(board->touch);
     return code >= 3152 && code <= 3535;

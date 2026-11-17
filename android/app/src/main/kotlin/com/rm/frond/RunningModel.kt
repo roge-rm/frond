@@ -61,6 +61,10 @@ class RunningModel(
     override val leaveLabel get() = "Insert"
     override val prompt = ClashPrompt()
     // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
+    // The Zodiac's second SD slot.
+    var secondState by mutableStateOf(SdCard.State.UNKNOWN)
+        private set
+    private fun secondOf(c: SdCard) = if (device.storageSlots.size > 1) c.secondState() else SdCard.State.UNKNOWN
     var memoryStickPro by mutableStateOf(false)
         private set
     var canCancelFiles by mutableStateOf(false)
@@ -91,6 +95,8 @@ class RunningModel(
     // Asking for a database name: "launch", "export" or "other" (the sheets' by-name dialog), with the RAM databases found for the list.
     var naming by mutableStateOf<String?>(null)
     var found by mutableStateOf(emptyList<PalmDatabases.Info>())
+    // Shown for an empty list in the by-name dialog, e.g. while the Palm is asleep.
+    var foundNote by mutableStateOf<String?>(null)
 
     val available get() = card != null
 
@@ -109,6 +115,7 @@ class RunningModel(
                 readCard()
                 readKeyboard()
                 readHold()
+                readGamepad()
                 readNetwork()
                 readRadio()
             }
@@ -145,9 +152,11 @@ class RunningModel(
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            val second = withContext(Dispatchers.IO) { secondOf(c) }
             danaCards?.let { cards -> withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} } }
             slotShown = slot
             state = s
+            secondState = second
             writeProtected = protection
             memoryStickPro = pro
             changed = c.changed
@@ -177,9 +186,11 @@ class RunningModel(
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
+            val second = withContext(Dispatchers.IO) { secondOf(c) }
             if (busy != null) return@launch
             slotShown = slot
             state = s
+            secondState = second
             writeProtected = protection
             memoryStickPro = pro
         }
@@ -403,20 +414,48 @@ class RunningModel(
         }
     }
 
+    // Install on This Device is on when the core has guest services and nothing else is running.
+    val canInstallFrondBench get() = databases != null && busy == null
+
+    fun installFrondBench() {
+        val d = databases ?: return
+        if (busy != null || waiting()) return
+        busy = "Installing"
+        activity.lifecycleScope.launch {
+            val error = withContext(Dispatchers.IO) {
+                try {
+                    d.install { FrondBench.open(activity.applicationContext) }
+                    null
+                } catch (e: Exception) {
+                    if (e is PalmDatabases.Failed) e.message else "Couldn't install FrondBench."
+                }
+            }
+            busy = null
+            if (error != null) alert = "Couldn't install" to error else note = "FrondBench installed"
+            loadApps()
+        }
+    }
+
     // The applications in RAM, as the core lists them; null until the first read.
     var apps by mutableStateOf<List<PalmDatabases.Info>?>(null)
+        private set
+    // Shown for an empty list instead of "No applications", e.g. while the Palm is asleep.
+    var appsNote by mutableStateOf<String?>(null)
         private set
 
     fun loadApps() {
         val d = databases ?: return
         if (waitingForGdb) return
         activity.lifecycleScope.launch {
+            var note: String? = null
             apps = withContext(Dispatchers.IO) {
                 try { RunningSheets.applications(d.list()) } catch (e: Exception) {
                     Log.w(FrondActivity.TAG, "application list: ${e.message}")
+                    if (e is PalmDatabases.Failed && e.code == "asleep") note = "The Palm is asleep"
                     emptyList()
                 }
             }
+            appsNote = note
         }
     }
 
@@ -438,18 +477,22 @@ class RunningModel(
         val d = databases ?: return
         if (busy != null || naming != null || waiting()) return
         found = emptyList()
+        foundNote = null
         naming = what
         listing = true
         val asked = ++asks
         activity.lifecycleScope.launch {
+            var note: String? = null
             val list = withContext(Dispatchers.IO) {
                 try { d.list() } catch (e: Exception) {
                     Log.w(FrondActivity.TAG, "database list: ${e.message}")
+                    if (e is PalmDatabases.Failed && e.code == "asleep") note = "The Palm is asleep"
                     emptyList()
                 }
             }
             // A later question has its own list coming.
             if (asked != asks) return@launch
+            foundNote = note
             found = if (what == "launch") list.filter { it.application } else list
             listing = false
         }
@@ -586,8 +629,10 @@ class RunningModel(
                 if (next.sound != old.sound && device.sound) s = s.copy(sound = next.sound)
                 if (next.showKeyboard != old.showKeyboard) s = s.copy(showKeyboard = next.showKeyboard)
                 if (next.jogControls != old.jogControls) s = s.copy(jogControls = next.jogControls)
+                if (next.jogLandscape != old.jogLandscape) s = s.copy(jogLandscape = next.jogLandscape)
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
+                if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
                 s
             }
             settings = machineSettings()
@@ -595,6 +640,7 @@ class RunningModel(
             FrondActivity.running?.applySpeed()
             FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
+            FrondActivity.running?.applyRumble()
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }
@@ -683,6 +729,40 @@ class RunningModel(
             val reply = l.request("keyboard-attach", if (on) "on" else "off", timeoutSeconds = 30)
             if (reply.ok) activity.runOnUiThread { keyboard = reply.message == "attached" }
             if (reply.ok) null else reply.message
+        }
+    }
+
+    // The CLIE game controller: see RunningMenu.State.gamepad.
+    var gamepad by mutableStateOf<String?>(null)
+        private set
+
+    fun readGamepad() {
+        val l = link ?: return
+        if (!device.clieGamepad || waitingForGdb) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { l.request("gamepad-state", timeoutSeconds = 30) }
+            if (reply.ok) adoptGamepad(reply.message)
+        }
+    }
+
+    private fun adoptGamepad(message: String) {
+        gamepad = RunningMenu.gamepadState(message)
+        FrondActivity.running?.gamepadStateRead(gamepad)
+    }
+
+    // Plugs the pad in or out without a reset, and keeps the choice as the machine's setting.
+    fun changeGamepad(on: Boolean) {
+        if (!device.clieGamepad || gamepad == null) return
+        device(if (on) "Plugging in" else "Unplugging", "Couldn't change the game controller", false) { l ->
+            val changed = l.request("gamepad", if (on) "on" else "off", timeoutSeconds = 30)
+            val current = l.request("gamepad-state", timeoutSeconds = 30)
+            if (current.ok) activity.runOnUiThread { adoptGamepad(current.message) }
+            if (changed.ok) {
+                sessionId?.let { id ->
+                    try { Sessions.updateSettings(activity.applicationContext, id) { it.copy(gamepad = on) } } catch (_: Exception) {}
+                }
+            }
+            if (!changed.ok) changed.message else if (!current.ok) current.message else null
         }
     }
 

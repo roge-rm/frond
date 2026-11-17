@@ -127,6 +127,19 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_push(JNIEnv*, jc
     SDL_PushEvent(&event);
 }
 
+// The same for the keys the core maps to the CLIE game controller while it's plugged in: the scancode is set so
+// SdlEventHandler maps it with clieGamepadHostKey.
+extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_PalmButtons_pushScancode(JNIEnv*, jclass, jint scancode, jboolean down) {
+    SDL_Event event{};
+    event.type = down ? SDL_KEYDOWN : SDL_KEYUP;
+    event.key.timestamp = SDL_GetTicks();
+    event.key.state = down ? SDL_PRESSED : SDL_RELEASED;
+    event.key.keysym.scancode = SDL_Scancode(scancode);
+    event.key.keysym.sym = SDL_GetKeyFromScancode(SDL_Scancode(scancode));
+    event.key.keysym.mod = KMOD_RESERVED;  // SdlEventHandler drops these while the pad is detached
+    SDL_PushEvent(&event);
+}
+
 // The Zodiac's game controllers from FrondActivity (ZodiacPad.kt), on the Android UI thread. They go
 // into SDL's queue as game controller events for SdlEventHandler, which maps them as the desktop does.
 // which is the Android input device id.
@@ -148,6 +161,20 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, 
     event.caxis.axis = Uint8(axis);
     event.caxis.value = Sint16(value);
     SDL_PushEvent(&event);
+}
+
+// The core's guest thread, when the guest turns its alarm LED or vibrate motor on or off (the Zodiac's
+// rumble): tells FrondActivity, which drives a controller's or the phone's vibrator.
+void frondGuestAttentionChanged(bool led, bool vibrate) {
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return;
+    jclass type = env->GetObjectClass(activity);
+    jmethodID method = env->GetMethodID(type, "onGuestAttention", "(ZZ)V");
+    if (method) env->CallVoidMethod(activity, method, jboolean(led), jboolean(vibrate));
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(type);
+    env->DeleteLocalRef(activity);
 }
 
 // The core's guest thread, when the guest OS turns its screen (the Zodiac): tells FrondActivity, which

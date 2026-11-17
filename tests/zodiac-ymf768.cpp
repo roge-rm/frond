@@ -1,6 +1,6 @@
 // The Zodiac's YMF768 model. On the model: the register answers the ROM's driver waits for, the power steps in 38
-// on guest time and their save, the sequencer FIFO
-// and its interrupt line, A4's pitch, four-operator channels, a known note sequence against a stored hash, the
+// on guest time and their save, the sequencer FIFO and its interrupt line, A4's pitch, the MA-2 operator fields,
+// four-operator channels, a known note sequence against a stored hash, the
 // FM engine running on guest time with or without SSI1 words and in any batching, a save or copy changing
 // nothing in the run, a loaded copy carrying on the same, quiet idling giving a full run's samples and state,
 // and bad saved values refused. Through the machine:
@@ -9,6 +9,7 @@
 // with SSI1 off and then on, alike in Exact, Fast and Exact with stepped idle; a B15 change the GPIO refuses
 // stopping the run; and an older state without the chip loading with B15 as it was, then a reset giving sound.
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -70,7 +71,8 @@ static void voice(Imx1Ymf768& y, unsigned ch, unsigned tl, unsigned alg) {
     put(y, 0xd0 + ch, alg);
     for (unsigned n = 0; n < 2; ++n) {
         const unsigned s = 0x10 + slots[ch] + 4 * n;
-        put(y, s, 0x21); put(y, s + 0x20, n ? 0 : tl); put(y, s + 0x40, 0xf2); put(y, s + 0x60, 0x25); put(y, s + 0x80, 0);
+        // MA-2 fields: MULT 1 and EGT; RR 5, DR 2; AR 15, SL 2; TL; sine.
+        put(y, s, 0x14); put(y, s + 0x20, 0x52); put(y, s + 0x40, 0xf2); put(y, s + 0x60, (n ? 0 : tl) << 2); put(y, s + 0x80, 0);
     }
 }
 static void key(Imx1Ymf768& y, unsigned ch, unsigned note, bool on) {
@@ -103,6 +105,88 @@ static void pitch() {
     }
     fprintf(stderr, "A4: %u crossings, peak %d\n", crossings, peak);
     assert(crossings >= 438 && crossings <= 442 && peak > 2000);
+}
+
+// The operator bytes in the MA-2 layout the ROM's voices use: the carrier's MULT in group 0 bits 4-7 sets the
+// pitch, its TL in group 3 bits 2-7 (not 0-5) sets the level, its WS in group 4 bits 0-2 the waveform, and a
+// modulator with MULT 0 (x 0.5) at a low TL puts a subharmonic under A4.
+static void ma2Fields() {
+    struct Run { unsigned crossings; int32_t peak; int32_t tail; double halfBelow; };
+    auto run = [](uint8_t carrier0, uint8_t carrier3, uint8_t carrier4, uint8_t mod0, unsigned modTl,
+                    uint8_t carrier1 = 0x52, uint8_t carrier2 = 0xf2) {
+        Imx1Ymf768 y;
+        put(y, 0x0f, 1); put(y, 0x10, 16); put(y, 0x0f, 0);
+        voice(y, 0, modTl, 0);
+        put(y, 0x10, mod0); put(y, 0x14, carrier0); put(y, 0x34, carrier1); put(y, 0x54, carrier2); put(y, 0x74, carrier3); put(y, 0x94, carrier4);
+        key(y, 0, 69, true);
+        std::vector<int32_t> v;
+        for (unsigned i = 0; i < 44118; ++i) { int32_t l, r; frame(y, l, r); v.push_back(l); }
+        Run out{0, 0, 0, 0};
+        for (size_t i = 1; i < v.size(); ++i) {
+            if (v[i - 1] < 0 && v[i] >= 0) ++out.crossings;
+            out.peak = std::max(out.peak, std::abs(v[i]));
+            if (i >= v.size() / 2) out.tail = std::max(out.tail, std::abs(v[i]));
+        }
+        // Energy at 220 Hz against 440 Hz over the last half second (Goertzel on SSI1's 44117.6 frames).
+        auto power = [&](double hz) {
+            const double w = 2 * 3.141592653589793 * hz / 44117.647;
+            double a = 0, b = 0;
+            for (size_t i = v.size() / 2; i < v.size(); ++i) { const double c = v[i] + 2 * std::cos(w) * a - b; b = a; a = c; }
+            return a * a + b * b - 2 * std::cos(w) * a * b;
+        };
+        out.halfBelow = power(220) / power(440);
+        return out;
+    };
+    const Run plain = run(0x14, 0x00, 0, 0x14, 63);
+    const Run octave = run(0x24, 0x00, 0, 0x14, 63);
+    const Run ksl = run(0x14, 0x03, 0, 0x14, 63);    // KSL 3 only: OPL3 key scaling, far above TL 63
+    const Run quiet = run(0x14, 0xfc, 0, 0x14, 63);  // TL 63 in bits 2-7
+    const Run tlHigh = run(0x14, 0xc0, 0, 0x14, 63);  // TL 48 in bits 2-7: quiet; read from bits 0-5 it would be 0
+    const Run tlLow = run(0x14, 0x3c, 0, 0x14, 63);   // TL 15: mid; read from bits 0-5 it would be 60
+    const Run half = run(0x14, 0x00, 1, 0x14, 63);   // half sine: positive halves only
+    const Run decay = run(0x14, 0x00, 0, 0x14, 63, 0x5f, 0xf3);  // DR 15, SL 3: falls to SL and holds
+    const Run sub = run(0x14, 0x00, 0, 0x04, 8);     // modulator MULT 0 at TL 8
+    fprintf(stderr, "tails plain %d decay %d tl %d %d\n", plain.tail, decay.tail, tlHigh.peak, tlLow.peak);
+    fprintf(stderr, "MA-2 fields: crossings %u %u, peaks %d %d %d %d, 220/440 %.3f %.3f\n", plain.crossings,
+            octave.crossings, plain.peak, ksl.peak, quiet.peak, half.peak, plain.halfBelow, sub.halfBelow);
+    assert(plain.crossings >= 438 && plain.crossings <= 442 && octave.crossings >= 876 && octave.crossings <= 884);
+    assert(plain.peak > 2000 && ksl.peak > quiet.peak * 10 && quiet.peak < plain.peak / 50);
+    assert(ksl.peak < plain.peak / 2);
+    assert(tlHigh.peak < plain.peak / 20);
+    assert(tlLow.peak > plain.peak / 8 && tlLow.peak < plain.peak / 2);
+    // DR 15 to SL 3 (9 dB, about 0.35 of plain's level) holds; DR and SL swapped it reads about 0.45.
+    assert(decay.tail > plain.peak * 30 / 100 && decay.tail < plain.peak * 40 / 100);
+    assert(half.crossings < 5);
+    assert(plain.halfBelow < 0.001 && sub.halfBelow > 0.01);
+}
+
+// The raw operator bytes land on OPL3's registers bit for bit, read back from the saved engine (11 bytes of
+// engine, 9 of OPL3 LFO state, then the registers). Slot 0 is channel 0's modulator (OPL3 operator 0), slot 4
+// its carrier (3), slot 8 channel 4's (OPL3 channel 3, operator 8).
+static uint8_t oplReg(Imx1Ymf768& y, unsigned reg) { return y.engineState()[11 + 9 + reg]; }
+static void operatorMapping() {
+    Imx1Ymf768 y;
+    auto setSlot = [&](unsigned s, uint8_t g0, uint8_t g1, uint8_t g2, uint8_t g3, uint8_t g4) {
+        put(y, 0x10 + s, g0); put(y, 0x30 + s, g1); put(y, 0x50 + s, g2); put(y, 0x70 + s, g3); put(y, 0x90 + s, g4);
+    };
+    struct Case { unsigned slot, op; uint8_t g[5], r20, r40, r60, r80, re0; };
+    const Case cases[] = {
+        // Each group one bit at a time: MULT 5 and VIB; EGT; SUS and KSR; AM; DVB and DAM ignored.
+        {0, 0, {0x58, 0x00, 0x00, 0x00, 0x08}, 0xc5, 0x00, 0x00, 0x00, 0x00},
+        {0, 0, {0x04, 0x00, 0x00, 0x00, 0x00}, 0x20, 0x00, 0x00, 0x00, 0x00},
+        {0, 0, {0x02, 0x00, 0x00, 0x00, 0xf0}, 0x00, 0x00, 0x00, 0x00, 0x00},
+        {0, 0, {0x01, 0x00, 0x00, 0x00, 0x00}, 0x10, 0x00, 0x00, 0x00, 0x00},
+        // RR 9 DR 4, AR 11 SL 6, TL 37 KSL 2, WS 5: all different, so a swap shows.
+        {4, 3, {0x00, 0x94, 0xb6, 0x96, 0x05}, 0x00, 0x80 | 37, 0xb4, 0x69, 0x05},
+        {8, 8, {0x3c, 0x12, 0x34, 0xfd, 0x02}, 0x63, 0x7f, 0x32, 0x41, 0x02},
+    };
+    for (const Case& c : cases) {
+        setSlot(c.slot, c.g[0], c.g[1], c.g[2], c.g[3], c.g[4]);
+        // Channel 3 of OPL3 (slot 8, ymf channel 4) is operator offset 8.
+        const unsigned base = c.op;
+        assert(oplReg(y, 0x20 + base) == c.r20 && oplReg(y, 0x40 + base) == c.r40);
+        assert(oplReg(y, 0x60 + base) == c.r60 && oplReg(y, 0x80 + base) == c.r80 && oplReg(y, 0xe0 + base) == c.re0);
+    }
 }
 
 // Four-operator channels sound, on an OPL3 pair (0, 8) and on an emulated one (3, 11), and only through the
@@ -255,8 +339,8 @@ static Imx1Ymf768 quietVoices(bool skipping) {
     y.setQuietSkipping(skipping);
     put(y, 0x0f, 1); put(y, 0x10, 31); put(y, 0x0f, 0);
     voice(y, 0, 20, 0x08); voice(y, 1, 30, 0x01); voice(y, 8, 16, 0); voice(y, 12, 16, 0);
-    // Release rate 10, so notes end within the script.
-    for (unsigned slot : {0x70u, 0x74u, 0x71u, 0x75u, 0x80u, 0x84u, 0x88u, 0x8cu}) put(y, slot, 0x2a);
+    // Release rate 10 (group 1, decay 2 as before), so notes end within the script.
+    for (unsigned slot : {0x30u, 0x34u, 0x31u, 0x35u, 0x40u, 0x44u, 0x48u, 0x4cu}) put(y, slot, 0xa2);
     return y;
 }
 // Plays the script from frame `start` to the end, with the writes due at each frame, saving at `saveAt`.
@@ -268,7 +352,7 @@ static void quietScript(Imx1Ymf768& y, unsigned start, std::vector<int32_t>& out
             case 2000: key(y, 0, 60, true); key(y, 1, 64, true); break;
             case 5000: key(y, 0, 60, false); key(y, 1, 64, false); break;
             case 14000: put(y, 0xd8, 0x05); put(y, 0xf0, 20); break;  // four operators on 8 and 12, a pan
-            case 16000:  // a slow attack (rate 1) stays quiet for a while after its key on
+            case 16000:  // a slow attack (rate 1, group 2 with SL 2) stays quiet for a while after its key on
                 put(y, 0x50, 0x12); put(y, 0x54, 0x12); key(y, 0, 62, true); break;
             case 20000: key(y, 8, 48, true); break;
             case 23000: key(y, 0, 62, false); key(y, 8, 48, false); break;
@@ -304,6 +388,35 @@ static void quietIdle() {
         std::vector<int32_t> out;
         quietScript(loaded, at, out, 0, nullptr);
         assert(std::equal(out.begin(), out.end(), fullOut.begin() + 2 * at) && loaded.engineState() == full.engineState());
+    }
+}
+
+// A state whose engine holds operator registers as an older mapping wrote them plays as a fresh sync of its
+// raw registers does, and one that already matches loads unchanged.
+static void oldStateResync() {
+    Imx1Ymf768 good = threeVoices();
+    key(good, 0, 60, true); key(good, 1, 64, true);
+    for (unsigned i = 0; i < 200; ++i) { int32_t l, r; frame(good, l, r); }
+    std::vector<uint8_t> goodBytes, oldBytes;
+    StateWriter wg(goodBytes);
+    good.state(wg);
+    // The same raw registers with the engine's operator registers as another mapping left them.
+    oldBytes = goodBytes;
+    const size_t engine = oldBytes.size() - good.engineState().size();
+    for (unsigned op : {0u, 1u, 2u, 3u, 4u, 5u, 8u, 9u, 10u, 11u, 12u, 13u})
+        for (unsigned base : {0x20u, 0x40u, 0x60u, 0x80u, 0xe0u}) oldBytes[engine + 11 + 9 + base + op] = 0x5a;
+    assert(goodBytes != oldBytes);
+    Imx1Ymf768 a, b;
+    StateReader ra(goodBytes.data(), goodBytes.size()), rb(oldBytes.data(), oldBytes.size());
+    a.state(ra); b.state(rb);
+    assert(ra.complete() && rb.complete());
+    // The good one loads as saved, and the old one comes out as the good one's engine registers.
+    for (unsigned op : {0u, 3u, 8u, 11u})
+        for (unsigned base : {0x20u, 0x40u, 0x60u, 0x80u, 0xe0u}) assert(oplReg(b, base + op) == oplReg(a, base + op));
+    for (unsigned i = 0; i < 3000; ++i) {
+        int32_t l1, r1, l2, r2, l3, r3;
+        frame(good, l1, r1); frame(a, l2, r2); frame(b, l3, r3);
+        assert(l1 == l2 && r1 == r2 && l2 == l3 && r2 == r3);
     }
 }
 
@@ -501,7 +614,7 @@ struct Program {
         ymf(0x0f, 1); ymf(0x10, 31); ymf(0x0f, 0);
         for (unsigned n = 0; n < 2; ++n) {
             const unsigned s = 0x10 + 4 * n;
-            ymf(s, 0x21); ymf(s + 0x20, n ? 0 : 24); ymf(s + 0x40, 0xf2); ymf(s + 0x60, 0x25); ymf(s + 0x80, 0);
+            ymf(s, 0x14); ymf(s + 0x20, 0x52); ymf(s + 0x40, 0xf2); ymf(s + 0x60, n ? 0 : 24 << 2); ymf(s + 0x80, 0);
         }
         ymf(0xd0, 0x10); ymf(0xb0, 580 & 0xff); ymf(0xc0, 2 | 4 << 2 | 0x20);
     }
@@ -766,6 +879,10 @@ int main() {
     powerStepsPllChange();
     pitch();
     fourOperators();
+    ma2Fields();
+    operatorMapping();
+    oldStateResync();
+    operatorMapping();
     const uint32_t h = sequence();
     fprintf(stderr, "sequence hash %08x\n", h);
     assert(h == 0xf1879438u && sequence() == h);
@@ -778,7 +895,7 @@ int main() {
     lineRefused();
     olderState();
     readyStepsDroppedOnLoad();
-    std::puts("PASS: YMF768 registers, FIFO and interrupt, power steps, A4 pitch, four operators, the stored note sequence, FM on "
+    std::puts("PASS: YMF768 registers, FIFO and interrupt, power steps, A4 pitch, MA-2 operator fields, four operators, the stored note sequence, FM on "
               "guest time, saves change nothing, quiet idling matches a full run, bad states refused, Exact == Fast on CS4 with a save mid-note, the "
               "B15 interrupt guest Exact == Fast == stepped idle, a refused B15 stops, older states, ready steps dropped by a state without them");
 }

@@ -56,6 +56,8 @@ class MainWindow : public QMainWindow {
     // Installs the files on the running device one after the other, in order. A failure doesn't
     // stop the rest; the failures are listed together at the end.
     void installFiles(const QStringList& paths);
+    // Writes the bundled FrondBench.prc to path.
+    bool saveFrondBench(const QString& path);
  protected:
     void closeEvent(QCloseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -171,6 +173,8 @@ class MainWindow : public QMainWindow {
     // The core's reply to window-id: embeds the Palm, or keeps its own window.
     void embedReply(bool ok, const QString& message);
     void afterDevice();
+    void pollGamepad();
+    void gamepadReply(const QString& message);
     void setBarShown(bool shown);
     // Full screen: the Palm fills the screen, the bar and an open panel float over it.
     void toggleFullScreen();
@@ -183,7 +187,7 @@ class MainWindow : public QMainWindow {
     void updateMips();
     void pollMips();
     void listApps();
-    void databasesReply(bool ok, const QString& message);
+    void databasesReply(bool ok, const QString& code, const QString& message);
     void deleteApplication(const QString& name);
     void deleteLookup(bool ok, const QString& message, const std::vector<runningRules::Database>& all);
     void deleteNext();
@@ -231,8 +235,8 @@ class MainWindow : public QMainWindow {
     bool contrastPending{false};
     QCheckBox *smoothToggle{nullptr}, *mipsToggle{nullptr}, *keyboardShow{nullptr};
     QSlider* sizeSlider{nullptr};
-    QComboBox *jogBox{nullptr}, *speedBox{nullptr};
-    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *speedLabel{nullptr};
+    QComboBox *jogBox{nullptr}, *jogLandscapeBox{nullptr}, *speedBox{nullptr};
+    QLabel *sizeLabel{nullptr}, *jogLabel{nullptr}, *jogLandscapeLabel{nullptr}, *speedLabel{nullptr};
     QByteArray listGeometry;    // the list window's geometry while a machine runs
     std::vector<runningRules::Database> knownDatabases;
     bool appsStale{false};      // the Applications list needs a fresh db-list
@@ -283,6 +287,7 @@ class MainWindow : public QMainWindow {
     QLabel* serialState;
     QLabel* usbState;
     PrinterPanel* printerPanel;
+    QTimer* appsRetryTimer{nullptr};   // re-lists a sleeping Palm every 2 s while the Applications panel shows it
     QTimer* printerTimer;
     QTimer* mipsTimer;
     PrintSource usbPrint, irPrint;
@@ -299,6 +304,11 @@ class MainWindow : public QMainWindow {
     QPlainTextEdit* log;
     QList<QWidget*> runningButtons;
     QAction* importAction;
+    // Installs the bundled FrondBench.prc through the same path as a chosen file.
+    void installFrondBench();
+    QAction* installBenchAction = nullptr;
+    QAction* saveBenchAction = nullptr;
+    std::unique_ptr<QTemporaryDir> benchDir;  // holds the PRC the core installs from
     QPushButton *cardPick, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry, *linkedInsert;
     QLabel* linkedState;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
@@ -308,8 +318,11 @@ class MainWindow : public QMainWindow {
     bool protectionKnown{false};
     QLabel* holdLabel;
     bool holdKnown{false}, holdOn{false};
+    // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.
+    QString gamepadState;
     QLabel *sdStatus, *storageHeading;
     QPushButton* danaCards;
+    QPushButton* secondCard;
     // Files… on a 68k device's linked Memory Stick (the T415): eject, take it out of the core, save,
     // edit its dana-cards/ file in place, then put it back in (ejected again if it was out).
     QPushButton* stickFiles;

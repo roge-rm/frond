@@ -81,6 +81,17 @@ constexpr DeviceButton clieJogKey(int i,int tabTop) {
 // Where a device with two arrangements puts its controls: in a strip under the screen, or in panels
 // either side of it as on the real landscape Zodiac.
 enum class DeviceControlArrangement { below, around };
+// Where the CLIE jog controls go in landscape with the game controller's grips beside the screen:
+// hidden, upright left of the left grip, or turned on their side under or over the screen.
+enum class JogLandscape { hidden, beside, under, over };
+inline bool parseJogLandscape(const std::string& value, JogLandscape& placement) {
+    if(value=="hidden")placement=JogLandscape::hidden;
+    else if(value=="beside")placement=JogLandscape::beside;
+    else if(value=="under")placement=JogLandscape::under;
+    else if(value=="over")placement=JogLandscape::over;
+    else return false;
+    return true;
+}
 // Which hideable parts of a strip are shown.
 struct DeviceControlView {
     bool keyboard{true};
@@ -89,6 +100,10 @@ struct DeviceControlView {
     // the silkscreen and strip. Beside the LCD while the keyboard is hidden.
     bool sideTabBesideKeyboard{false};
     DeviceControlArrangement arrangement{DeviceControlArrangement::below};
+    // The CLIE game controller is attached: the TG50 shows it in place of its keyboard.
+    bool gamepad{false};
+    // The side tab in the around arrangement, where sideTab and sideTabBesideKeyboard don't apply.
+    JogLandscape jogLandscape{JogLandscape::hidden};
 };
 // Where the CLIE jog controls go: hidden, left of the LCD, or left of the keyboard. keyboard is
 // the saved name; on a CLIE without a keyboard it puts them beside the silkscreen and buttons.
@@ -122,7 +137,10 @@ inline DeviceArt deviceArt(const char* name) {
 }
 // h4350 thumb keyboard key n, 0-38 from the top left, in the keyboard id range.
 constexpr KeyId h4350Key(int n) { return KeyId(keyIdKeyboard + n); }
-inline const DeviceControlProfile& deviceControls(DeviceArt art) {
+// The PEGA-GC10 game controller's keys.
+constexpr bool clieGamepadKey(KeyId key) { return key>=keyIdPadUp && key<=keyIdPadHold; }
+// gamepad picks the profile with the PEGA-GC10 attached on a CLIE that takes it.
+inline const DeviceControlProfile& deviceControls(DeviceArt art, bool gamepad) {
     // App keys hit their whole pocket; the five-way entries place the direction parts. The TX's
     // five-way nearly fills the bar's height, with each app key in its own pocket either side.
     static const DeviceButton tx[] = {
@@ -333,6 +351,52 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
     };
     static const DeviceControlProfile tg50Profile{320,224,tg50,std::size(tg50),{0,0,0,0},0,{0,0,0,0},
                                                   DeviceControlStyle::tg50,0.3f,1,0,176,clieJogTab(-236,208),clieJogWidth};
+    // TG50 with the PEGA-GC10 clipped over its keyboard. Below: the app row, then the whole pad
+    // where the keyboard was: the arrow dish on the left, A and B in the right dish, Home and Menu
+    // with X and Y under them in the middle and the Hold slide on the bottom edge. Around (rotated
+    // to landscape): a grip either side of the screen, 150 wide and authored 320 tall, the arrow and
+    // A/B dishes low and outward where thumbs rest, Home, X, Menu, Y and Hold in a row above them.
+    // Hits are bigger than the drawn keys for thumbs: an arrow or A/B key's shape is its dish
+    // (deviceGamepadDishAt), the other round keys hit a circle of deviceGamepadHitRadius.
+    constexpr auto padBelow=DeviceControlSection::below;
+    constexpr auto padAround=DeviceControlSection::around;
+    using Icon=DeviceControlIcon;
+    static const DeviceButton tg50Gamepad[] = {
+        {keyIdHome, {6,18,24,24}, "Home", Icon::home, 12, padBelow},
+        {keyIdHard1, {42,22,44,16}, "Date Book", Icon::calendar, 8, padBelow},
+        {keyIdHard2, {90,22,44,16}, "Address", Icon::phone, 8, padBelow},
+        {keyIdUp, {138,22,44,8}, "Up", Icon::up, 8, padBelow, {138,22,44,16}},
+        {keyIdDown, {138,30,44,8}, "Down", Icon::down, 8, padBelow, {138,22,44,16}},
+        {keyIdHard3, {186,22,44,16}, "To Do", Icon::tasks, 8, padBelow},
+        {keyIdHard4, {234,22,44,16}, "Memo Pad", Icon::memo, 8, padBelow},
+        {keyIdGraffiti, {290,18,24,24}, "Graffiti", Icon::graffiti, 12, padBelow},
+        {keyIdPadUp, {46,73,28,28}, "Pad up", Icon::up, 14, padBelow, {11,65,98,98}},
+        {keyIdPadDown, {46,127,28,28}, "Pad down", Icon::down, 14, padBelow, {11,65,98,98}},
+        {keyIdPadLeft, {19,100,28,28}, "Pad left", Icon::left, 14, padBelow, {11,65,98,98}},
+        {keyIdPadRight, {73,100,28,28}, "Pad right", Icon::right, 14, padBelow, {11,65,98,98}},
+        {keyIdPadB, {263,81,30,30}, "B", Icon::legend, 15, padBelow, {211,65,98,98}},
+        {keyIdPadA, {227,117,30,30}, "A", Icon::legend, 15, padBelow, {211,65,98,98}},
+        {keyIdPadHome, {124,84,24,24}, "Pad Home", Icon::legend, 12, padBelow},
+        {keyIdPadMenu, {172,84,24,24}, "Pad Menu", Icon::legend, 12, padBelow},
+        {keyIdPadX, {110,138,26,26}, "X", Icon::legend, 13, padBelow},
+        {keyIdPadY, {184,138,26,26}, "Y", Icon::legend, 13, padBelow},
+        {keyIdPadHold, {136,194,48,11}, "Hold", Icon::legend, 5.5f, padBelow},
+        {keyIdPadUp, {52,144,28,28}, "Pad up", Icon::up, 14, padAround, {17,137,98,98}},
+        {keyIdPadDown, {52,200,28,28}, "Pad down", Icon::down, 14, padAround, {17,137,98,98}},
+        {keyIdPadLeft, {24,172,28,28}, "Pad left", Icon::left, 14, padAround, {17,137,98,98}},
+        {keyIdPadRight, {80,172,28,28}, "Pad right", Icon::right, 14, padAround, {17,137,98,98}},
+        {keyIdPadHome, {108,102,24,24}, "Pad Home", Icon::legend, 12, padAround},
+        {keyIdPadX, {55,101,26,26}, "X", Icon::legend, 13, padAround},
+        {keyIdPadHold, {198,72,48,11}, "Hold", Icon::legend, 5.5f, padAround},
+        {keyIdPadB, {237,153,30,30}, "B", Icon::legend, 15, padAround, {185,137,98,98}},
+        {keyIdPadA, {201,189,30,30}, "A", Icon::legend, 15, padAround, {185,137,98,98}},
+        {keyIdPadMenu, {168,102,24,24}, "Pad Menu", Icon::legend, 12, padAround},
+        {keyIdPadY, {219,101,26,26}, "Y", Icon::legend, 13, padAround},
+        clieJogKey(0,-236),clieJogKey(1,-236),clieJogKey(2,-236),clieJogKey(3,-236),
+    };
+    static const DeviceControlProfile tg50GamepadProfile{320,224,tg50Gamepad,std::size(tg50Gamepad),{0,0,0,0},0,
+                                                         {0,0,0,0},DeviceControlStyle::tg50,0.3f,1,0,0,
+                                                         clieJogTab(-236,208),clieJogWidth,150,320};
     // Tapwave Zodiac: power, the analogue stick, Function and Home on the left and four silver
     // Action keys in a round recess on the right, the shoulder triggers above them and the small
     // round Bluetooth button. Action keys are named by place and send hard1-4 as bottom, right, left,
@@ -500,7 +564,7 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         case DeviceArt::m520: return m520Profile;
         case DeviceArt::m130: return m130Profile;
         case DeviceArt::iiic: return iiicProfile;
-        case DeviceArt::tg50: return tg50Profile;
+        case DeviceArt::tg50: return gamepad ? tg50GamepadProfile : tg50Profile;
         case DeviceArt::t415: return t415Profile;
         case DeviceArt::zodiac: return zodiacProfile;
         case DeviceArt::hpIpaq210: return ipaq210Profile;
@@ -509,12 +573,19 @@ inline const DeviceControlProfile& deviceControls(DeviceArt art) {
         default: return empty;
     }
 }
+inline const DeviceControlProfile& deviceControls(DeviceArt art) {return deviceControls(art,false);}
 inline const DeviceControlProfile& deviceControls(DeviceType5 device) {return deviceControls(deviceArt(device));}
+// The profile a view shows: with the game controller when it is attached.
+inline const DeviceControlProfile& deviceControls(DeviceType5 device, const DeviceControlView& view) {
+    return deviceControls(deviceArt(device),view.gamepad);
+}
 inline bool deviceControlShown(const DeviceButton& button, const DeviceControlView& view) {
     switch(button.section) {
         case DeviceControlSection::main: return true;
         case DeviceControlSection::keyboard: return view.keyboard;
-        case DeviceControlSection::sideTab: return view.sideTab;
+        // With panels either side of the screen the side tab follows the landscape choice.
+        case DeviceControlSection::sideTab:
+            return view.arrangement==DeviceControlArrangement::around ? view.jogLandscape!=JogLandscape::hidden : view.sideTab;
         case DeviceControlSection::below: return view.arrangement==DeviceControlArrangement::below;
         case DeviceControlSection::around: return view.arrangement==DeviceControlArrangement::around;
     }
@@ -529,16 +600,38 @@ inline int deviceControlsUnits(const DeviceControlProfile& profile, const Device
     if(deviceControlsAround(profile,view))return 0;
     return view.keyboard ? profile.height : profile.height-profile.keyboardHeight;
 }
+// The TG50 profile with the game controller, which has grips for the around arrangement.
+inline bool deviceGamepadProfile(const DeviceControlProfile& profile) {
+    return profile.style==DeviceControlStyle::tg50 && profile.panelWidth>0;
+}
+// The side tab left of the keyboard, or left of the game controller under the screen, which
+// takes the keyboard's place whether the keyboard is shown or not.
 inline bool deviceSideTabBelowScreen(const DeviceControlProfile& profile, const DeviceControlView& view) {
-    return profile.sideTabWidth>0 && profile.keyboardHeight>0 && view.sideTab && view.keyboard && view.sideTabBesideKeyboard;
+    return profile.sideTabWidth>0 && view.sideTab && view.sideTabBesideKeyboard &&
+           ((profile.keyboardHeight>0 && view.keyboard) ||
+            (deviceGamepadProfile(profile) && view.arrangement==DeviceControlArrangement::below));
 }
 // A device without a keyboard: the side tab left of the silkscreen and strip, under a full-width LCD.
 inline bool deviceSideTabBesideButtons(const DeviceControlProfile& profile, const DeviceControlView& view) {
     return profile.sideTabWidth>0 && profile.keyboardHeight==0 && profile.silkscreenHeight>0 && view.sideTab &&
            view.sideTabBesideKeyboard;
 }
+// The landscape side tab's place when the controls are around, hidden otherwise.
+inline JogLandscape deviceJogLandscape(const DeviceControlProfile& profile, const DeviceControlView& view) {
+    return deviceControlsAround(profile,view) && profile.sideTabWidth>0 ? view.jogLandscape : JogLandscape::hidden;
+}
+// The side tab turned on its side under or over the screen: window rows it adds.
+inline int deviceJogBarHeight(const DeviceControlProfile& profile, const DeviceControlView& view) {
+    const auto jog=deviceJogLandscape(profile,view);
+    return jog==JogLandscape::under || jog==JogLandscape::over ? profile.sideTabWidth/profile.unit : 0;
+}
+// Window rows above the screen: the turned side tab when it goes over the screen.
+inline int deviceScreenTop(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
+    return deviceJogLandscape(profile,view)==JogLandscape::over ? profile.sideTabWidth/profile.unit : 0;
+}
 inline int deviceScreenLeft(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
-    if(deviceControlsAround(profile,view))return profile.panelWidth/profile.unit;
+    if(deviceControlsAround(profile,view))
+        return (profile.panelWidth+(deviceJogLandscape(profile,view)==JogLandscape::beside ? profile.sideTabWidth : 0))/profile.unit;
     return view.sideTab && !deviceSideTabBelowScreen(profile,view) && !deviceSideTabBesideButtons(profile,view)
                ? profile.sideTabWidth/profile.unit : 0;
 }
@@ -598,7 +691,7 @@ struct DeviceControlTransform {
 // shrinks. Rounded up once in device pixels; drawing and input share the unrounded uniform scale.
 inline int deviceControlsHeight(const DeviceControlProfile& profile, int screenWidth, const DeviceControlView& view={}) {
     const DeviceControlTransform transform(profile,screenWidth,view);
-    return transform.top+int(std::ceil(deviceControlsUnits(profile,view)*transform.scale));
+    return transform.top+int(std::ceil(deviceControlsUnits(profile,view)*transform.scale))+deviceJogBarHeight(profile,view);
 }
 inline int deviceControlsHeight(const DeviceControlProfile& profile, const DeviceControlView& view={}) {
     return deviceControlsHeight(profile,profile.width/profile.unit,view);
@@ -625,17 +718,51 @@ inline int deviceAroundTop(const DeviceControlProfile& profile, const DeviceButt
     if(button.icon==DeviceControlIcon::trigger)return 0;
     return std::max(0,screenHeight*profile.unit-profile.panelHeight)/2;
 }
-// Window offset of an around key from its authored place: right panel keys move past the screen.
+// Window offset of an around key from its authored place: right panel keys move past the screen,
+// both panels past an upright side tab, and the panels take the turned side tab's rows too.
 inline SDL_Point deviceAroundOffset(const DeviceControlProfile& profile, const DeviceButton& button,
-                                   int screenWidth, int screenHeight) {
-    return {button.bounds.x>=profile.panelWidth ? screenWidth : 0,
-            deviceAroundTop(profile,button,screenHeight)/profile.unit};
+                                   int screenWidth, int screenHeight, const DeviceControlView& view={}) {
+    const int tab=deviceJogLandscape(profile,view)==JogLandscape::beside ? profile.sideTabWidth/profile.unit : 0;
+    return {(button.bounds.x>=profile.panelWidth ? screenWidth : 0)+tab,
+            deviceAroundTop(profile,button,screenHeight+deviceJogBarHeight(profile,view))/profile.unit};
+}
+// The landscape side tab in window pixels, w 0 when hidden: upright left of the left grip and
+// centred on the screen's height, or turned a quarter anticlockwise (jog up on the left, Back on
+// the right) and centred under or over the screen.
+inline SDL_Rect deviceJogLandscapeRect(const DeviceControlProfile& profile, int screenWidth, int screenHeight,
+                                       const DeviceControlView& view) {
+    const int u=profile.unit,across=profile.sideTab.w/u,along=profile.sideTab.h/u,left=deviceScreenLeft(profile,view);
+    switch(deviceJogLandscape(profile,view)) {
+        case JogLandscape::beside: return {0,(screenHeight-along)/2,across,along};
+        case JogLandscape::under: return {left+(screenWidth-along)/2,screenHeight,along,across};
+        case JogLandscape::over: return {left+(screenWidth-along)/2,0,along,across};
+        default: return {0,0,0,0};
+    }
+}
+// A window point on the landscape side tab in side tab units (as its keys' bounds), false when hidden.
+inline bool deviceJogLandscapePoint(const DeviceControlProfile& profile, int screenWidth, int screenHeight,
+                                    const DeviceControlView& view, float x, float y, float& tx, float& ty) {
+    const auto r=deviceJogLandscapeRect(profile,screenWidth,screenHeight,view);
+    if(r.w<=0)return false;
+    const auto& tab=profile.sideTab;
+    const int u=profile.unit;
+    if(deviceJogBarHeight(profile,view)) {tx=tab.x+tab.w-(y-r.y)*u;ty=tab.y+(x-r.x)*u;}
+    else {tx=tab.x+(x-r.x)*u;ty=tab.y+(y-r.y)*u;}
+    return true;
 }
 inline SDL_Rect deviceButtonRect(const DeviceControlProfile& profile,
                                 const DeviceButton& button, int screenWidth, int screenHeight,
                                 const DeviceControlView& view={}) {
+    if(button.section==DeviceControlSection::sideTab && deviceControlsAround(profile,view)) {
+        const auto r=deviceJogLandscapeRect(profile,screenWidth,screenHeight,view);
+        const auto& tab=profile.sideTab;
+        const auto& b=button.bounds;
+        const int u=profile.unit;
+        if(deviceJogBarHeight(profile,view))return {r.x+(b.y-tab.y)/u,r.y+(tab.x+tab.w-b.x-b.w)/u,b.h/u,b.w/u};
+        return {r.x+(b.x-tab.x)/u,r.y+(b.y-tab.y)/u,b.w/u,b.h/u};
+    }
     if(button.section==DeviceControlSection::around) {
-        const auto offset=deviceAroundOffset(profile,button,screenWidth,screenHeight);
+        const auto offset=deviceAroundOffset(profile,button,screenWidth,screenHeight,view);
         auto r=button.bounds;
         r.x=r.x/profile.unit+offset.x;r.y=r.y/profile.unit+offset.y;r.w/=profile.unit;r.h/=profile.unit;
         return r;
@@ -681,13 +808,42 @@ inline bool deviceClusterKeyAt(const DeviceButton& b, float x, float y) {
     if(std::fabs(kx)>std::fabs(ky))return std::fabs(dx)>=std::fabs(dy) && dx*kx>0;
     return std::fabs(dy)>std::fabs(dx) && dy*ky>0;
 }
+// The PEGA-GC10's dish keys hit in their dish (the button's shape) for thumbs. An arrow takes the
+// quarter round its own direction outside a small dead middle, and within 22.5 degrees of a
+// diagonal its neighbour too, so a thumb between two arrows presses both. A and B split their dish
+// down the middle. 0 for a miss, 1 for the key's own part, 2 for the neighbour's half of a
+// diagonal. Strip units.
+constexpr float deviceGamepadDeadMiddle=0.14f;
+inline int deviceGamepadDishAt(const DeviceButton& b, float x, float y) {
+    const auto& s=b.shape;
+    const float R=s.w*0.5f,cx=s.x+R,cy=s.y+R,dx=x-cx,dy=y-cy,d=std::hypot(dx,dy);
+    const float kx=b.bounds.x+b.bounds.w*0.5f-cx,ky=b.bounds.y+b.bounds.h*0.5f-cy,k=std::hypot(kx,ky);
+    if(d>R || k<=0)return 0;
+    const float along=dx*kx+dy*ky;
+    if(b.key==keyIdPadA || b.key==keyIdPadB)return along>=0 ? 1 : 0;
+    if(d<R*deviceGamepadDeadMiddle)return 0;
+    const float c=along/(d*k);
+    return c>=0.70710678f ? 1 : c>=0.38268343f ? 2 : 0;
+}
+// The round keys off the dishes hit this far from their centre at least: 10 mm across under the
+// screen and 9 mm in the grips on a 6.8" 1080x2460 phone, where a unit is about 0.22 mm either way.
+inline float deviceGamepadHitRadius(const DeviceButton& b) {
+    return std::max(b.bounds.w*0.5f,b.section==DeviceControlSection::around ? 21.f : 23.f);
+}
+// The Hold slide hits this far round its track.
+constexpr float deviceGamepadHoldMargin=8;
+// The key at a window point, keyInvalid for none. With also, a second key held by the same point
+// goes there (an arrow pressed with its neighbour on a diagonal), keyInvalid for none.
 inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidth,
-                             int screenHeight, int x, int y, const DeviceControlView& view={}) {
+                             int screenHeight, int x, int y, const DeviceControlView& view={},
+                             KeyId* also=nullptr) {
+    if(also)*also=keyInvalid;
     // Integer window points hit-test at their pixel centre, in strip units.
     const DeviceControlTransform transform(profile,screenWidth,view);
     const float sx=(x+0.5f-transform.left)/transform.scale,sy=(y-screenHeight-transform.top+0.5f)/transform.scale;
     const auto part=deviceNavigatorAt(profile,sx,sy);
     if(part!=keyInvalid)return part;
+    KeyId hit=keyInvalid;
     for(size_t i=0;i<profile.count;++i) {
         if(deviceNavigatorButton(profile,profile.buttons[i]) || !deviceControlShown(profile.buttons[i],view))continue;
         const auto& b=profile.buttons[i];
@@ -695,19 +851,36 @@ inline KeyId deviceControlAt(const DeviceControlProfile& profile, int screenWidt
         if(b.icon==DeviceControlIcon::stick)continue;
         const bool sidebar=b.section==DeviceControlSection::sideTab;
         const bool panel=b.section==DeviceControlSection::around;
-        const SDL_Point offset=panel ? deviceAroundOffset(profile,b,screenWidth,screenHeight) : SDL_Point{0,0};
-        const float bx=panel ? (x+0.5f-offset.x)*profile.unit : sidebar ? (x+0.5f-transform.sidebarLeft)*profile.unit : sx;
-        const float by=panel ? (y+0.5f-offset.y)*profile.unit : sidebar ? (y-screenHeight-transform.sidebarTop+0.5f)*profile.unit : sy;
-        if(b.icon==DeviceControlIcon::action && b.shape.w>0) {
-            if(deviceClusterKeyAt(b,bx,by))return b.key;
+        const SDL_Point offset=panel ? deviceAroundOffset(profile,b,screenWidth,screenHeight,view) : SDL_Point{0,0};
+        float bx=panel ? (x+0.5f-offset.x)*profile.unit : sidebar ? (x+0.5f-transform.sidebarLeft)*profile.unit : sx;
+        float by=panel ? (y+0.5f-offset.y)*profile.unit : sidebar ? (y-screenHeight-transform.sidebarTop+0.5f)*profile.unit : sy;
+        if(sidebar && deviceControlsAround(profile,view))
+            deviceJogLandscapePoint(profile,screenWidth,screenHeight,view,x+0.5f,y+0.5f,bx,by);
+        bool on=false;
+        if(clieGamepadKey(b.key)) {
+            if(b.shape.w>0) {
+                // Exactly on a diagonal both arrows claim the point as their own.
+                const int at=deviceGamepadDishAt(b,bx,by);
+                if((at==2 || (at==1 && hit!=keyInvalid)) && also && *also==keyInvalid)*also=b.key;
+                on=at==1;
+            } else if(b.key==keyIdPadHold)
+                on=deviceRoundedDistance(r,r.h*0.5f,bx,by)<=deviceGamepadHoldMargin;
+            else
+                on=std::hypot(bx-r.x-r.w*0.5f,by-r.y-r.h*0.5f)<=deviceGamepadHitRadius(b);
+        } else if(b.icon==DeviceControlIcon::action && b.shape.w>0) {
+            on=deviceClusterKeyAt(b,bx,by);
         } else if(b.shape.w>0) {
-            if(bx>=r.x && bx<r.x+r.w && by>=r.y && by<r.y+r.h &&
-               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),bx,by)<=0)
-                return b.key;
-        } else if(deviceRoundedDistance(r,deviceButtonCorner(profile,b),bx,by)<=0)
-            return b.key;
+            on=bx>=r.x && bx<r.x+r.w && by>=r.y && by<r.y+r.h &&
+               deviceRoundedDistance(b.shape,deviceButtonCorner(profile,b),bx,by)<=0;
+        } else on=deviceRoundedDistance(r,deviceButtonCorner(profile,b),bx,by)<=0;
+        if(on && hit==keyInvalid) {
+            hit=b.key;
+            // Only the pad's arrows share a point; anything else stops here.
+            if(!also || !clieGamepadKey(b.key))return hit;
+        }
     }
-    return keyInvalid;
+    if(also && hit==keyInvalid)*also=keyInvalid;
+    return hit;
 }
 // The analogue stick's well in window pixels for this view, w 0 for none.
 inline SDL_Rect deviceStickRect(const DeviceControlProfile& profile, int screenWidth, int screenHeight,

@@ -86,6 +86,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -173,6 +174,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -273,6 +275,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -342,6 +345,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -429,6 +433,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -515,6 +520,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": true,
       "firmware_variants": []
     },
     {
@@ -584,6 +590,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -653,6 +660,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -722,6 +730,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -791,6 +800,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -860,6 +870,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -929,6 +940,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -998,6 +1010,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1104,6 +1117,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1210,6 +1224,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1316,6 +1331,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1385,6 +1401,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1491,6 +1508,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1597,6 +1615,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1703,6 +1722,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1809,6 +1829,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1951,6 +1972,7 @@
       "usb_printer": true,
       "usb_wifi": true,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2093,6 +2115,7 @@
       "usb_printer": true,
       "usb_wifi": false,
       "built_in_wifi": true,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2120,6 +2143,23 @@
         {
           "id": 0,
           "label": 1,
+          "kind": "sd",
+          "media_families": [
+            {
+              "family": "sdsc",
+              "csd_format": "sd-v1",
+              "min_bytes": 33554432,
+              "max_bytes": 2147483648,
+              "block_bytes": 512,
+              "size_rule": "legacy-profile-aligned-512",
+              "runtime_sizes_bytes": [],
+              "guest_qualified_sizes_bytes": []
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "label": 2,
           "kind": "sd",
           "media_families": [
             {
@@ -2180,6 +2220,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2266,6 +2307,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2335,6 +2377,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2404,6 +2447,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2473,6 +2517,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     }
   ]

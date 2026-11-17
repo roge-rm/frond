@@ -35,6 +35,7 @@ First check the existing profiles, board dispatch and ROM detection. A device ma
 4. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
 5. Add the PACE and API bridge, so install, launch and export work.
 6. Check the Fast engine runs the device (Fast engine requirements).
+   For an ARM device, also go through the speed skips below.
 7. Add each peripheral and set its capability flag when it works.
 8. Add the button bar and silkscreen art.
 9. Fill in the frontend fields, run `make generate-device-data` and set `available`.
@@ -217,6 +218,16 @@ The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
 - `capabilities.backgroundPanel` (the TG50) keeps the machine running without drawing while the device menu is open in the background, with its audio output fenced. `capabilities.microphone` also fences the microphone and audio output during checkpointed guest work. Other boards leave both off. `capabilities.modem` (the IIIx) lets `--serial modem` put the core's snap-on Hayes modem on the serial port. `capabilities.irPhone` lets `--irda phone` put the core's mobile phone on the IR port.
 - Run `make test-jit-differential` after any CPU change. It compares the JIT with the interpreter on random machine states and blocks. `make test-jit-overshoot` checks how far a run can pass its cycle budget.
 - Smoke the device in Fast (`FROND_CORE=build/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
+
+### Speed skips (every ARM device)
+
+Check each new ARM device's firmware for the loops Frond skips instead of running, and add the ones it has:
+- The idle loop, through the idle skip and its match cache.
+- Timer delay loops that poll OSCR until a count passes.
+- Flash and NAND ready waits.
+- Any other hot loop the cost model's profile ranks high.
+
+Find their addresses with a profiled run or REA, and add each with the focused test showing a code write drops it. Exact counts move only in an Exact batch. See [performance.md](performance.md).
 
 ## Peripherals and capability flags
 

@@ -368,7 +368,9 @@ static void checkFillKinds() {
             const auto before = C::directFillCount;
             C::directFills = true;
             assert(C::completeFill(state,eim,fast,f) == A::ok);
-            assert(C::directFillCount == before + 1);
+            // A plain copy with invert is a ROP fill (ROP in colour bits 16-23), drawn only through accessGpu.
+            const bool ropFill = f.plain && f.invert && !f.doubled && !f.a4 && !f.keyEqual;
+            assert(C::directFillCount == before + (ropFill ? 0 : 1));
             C::directFills = false;
             assert(C::completeFill(state,eim,slow,f) == A::ok);
             C::directFills = true;

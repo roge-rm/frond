@@ -41,6 +41,8 @@
 #ifdef __ANDROID__
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
 void frondGuestOrientationChanged(int orientation);
+// In the app: the guest's alarm LED or vibrate motor changed. Guest thread.
+void frondGuestAttentionChanged(bool led, bool vibrate);
 #endif
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
@@ -88,8 +90,12 @@ struct Options {
     optional<float> windowScale;
     bool smoothLcd;
     bool hideKeyboard;
+    // The CLIÉ game controller at start (the machine setting); unset keeps the session's.
+    optional<bool> gamepad;
     bool hideJogControls;
     optional<JogPlacement> jogPlacement;
+    // Where the jog controls go in landscape with the game controller; unset is beside.
+    optional<JogLandscape> jogLandscape;
     WindowFit windowFit;
     uint32_t windowBackground;
     optional<DisplayMode> displayMode;
@@ -112,6 +118,7 @@ struct Options {
     bool cardProtected;
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
+    bool disableRumble;      // --no-rumble
 };
 
 namespace {
@@ -125,6 +132,8 @@ bool gFastEngineMissing = false;
     // run swapInsertDelay awake, as a hot swap would. The stick's write protection is set from
     // `msProtect`.
     bool sdSwapped = false, msSwapped = false, msProtect = false;
+    // The session's second SD card (the Zodiac's slot 2) was saved in its slot.
+    bool secondCardIn = false;
     // A v9 session's NAND, attached from nand.frondnand once the SoC is made. A NAND in RAM came
     // from malloc (a session) or new[] (--nand or a blank one), freed that way once a save moves
     // it onto a file.
@@ -271,7 +280,7 @@ bool gFastEngineMissing = false;
                     cerr << "session SD card is not supported by device profile" << endl;
                     return false;
                 }
-            if (!frondNative::attachFolderMedia(contents, folder)) {
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindSd)) {
                 cerr << "session SD sidecar is missing or unreadable" << endl;
                 return false;
             }
@@ -292,12 +301,26 @@ bool gFastEngineMissing = false;
                 cerr << "session Memory Stick Pro is not supported by device profile" << endl;
                 return false;
             }
-            if (!frondNative::attachFolderMedia(contents, folder)) {
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindMsPro)) {
                 cerr << "session Memory Stick Pro sidecar is missing or unreadable" << endl;
                 return false;
             }
             embeddedCard = true;
             msProCard = true;
+        }
+        // The Zodiac's second SD slot opens into its own card store, and goes in before the state loads.
+        for (const auto& media : contents.media) {
+            if (media.kind != frondMachine::kindSd2) continue;
+            if (profile->board != DeviceBoard5::imx1Zodiac || !deviceProfileSdSizeValid5(profile->deviceType, media.physicalSize)) {
+                cerr << "session second SD card is not supported by device profile" << endl;
+                return false;
+            }
+            if (!frondNative::attachFolderMedia(contents, folder, frondMachine::kindSd2)) {
+                cerr << "session second SD sidecar is missing or unreadable" << endl;
+                return false;
+            }
+            secondCardIn = media.inserted;
+            frondNative::slotCards().sd2Protected = media.writeProtected;
         }
         // What the slots carry outside the card store, kept to the next save.
         for (const auto& media : contents.media) {
@@ -748,6 +771,11 @@ bool gFastEngineMissing = false;
             }
             msCtrlrSwapOnLoad(memoryStick, true);
         }
+        // Slot 2's card goes in first, so the load carries it on from the state's SD2 section.
+        if (secondCardIn && !soc->Sd2Insert()) {
+            cerr << "session second SD card could not be put in" << endl;
+            return false;
+        }
         if (!soc->Load(savestate.size, savestate.data)) {
             cerr << "failed to restore savestate" << endl;
             return false;
@@ -809,6 +837,9 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
+#ifdef __ANDROID__
+        SoC::Attention attention{};
+#endif
         int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
@@ -817,27 +848,58 @@ bool gFastEngineMissing = false;
                                                          : options.jogPlacement.value_or(JogPlacement::screen);
         // The display settings, controlView and fitted belong to the SDL thread once the
         // guest thread starts; the display command changes them through it.
-        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog};
+        // The game controller drawn at start: the one the start option asks for, else the session's.
+        // The guest thread follows what the SoC really has from then on (an attach can be refused).
+        // Host serial, infrared or USB set for the machine hold the connector, so they win over
+        // the game controller (the session's or --gamepad): it stays detached and shows as in use.
+        const bool hostHoldsConnector = serialConfig.kind != HostSerial::Kind::off || infraredPhone || infraredPrinter ||
+                                        infraredConfig.kind != HostSerial::Kind::off || usbConfig.kind != HostSerial::Kind::off;
+        if (hostHoldsConnector && soc->GamepadSupported() && (soc->GamepadAttached() || options.gamepad.value_or(false))) {
+            soc->AttachGamepad(false);
+            cerr << "game controller: detached, host serial, infrared or USB has the connector" << endl;
+        }
+        const bool gamepadAtStart = soc->GamepadSupported() && !hostHoldsConnector &&
+                                    options.gamepad.value_or(soc->GamepadAttached());
+        DisplaySettings display{options.windowFit, options.smoothLcd, !options.hideKeyboard, jog, gamepadAtStart,
+                                options.jogLandscape.value_or(JogLandscape::beside)};
         DeviceControlView controlView = deviceType == deviceTypeTG50
             ? deviceControlView(display.keyboard, display.jog) : DeviceControlView{};
+        controlView.gamepad = display.gamepad;
+        if (deviceType == deviceTypeTG50) controlView.jogLandscape = display.jogLandscape;
         // A device with two arrangements starts with its controls around the screen; a fitted
         // window then puts them around when landscape and below when portrait, again after each resize.
-        controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, 0, 0);
+        controlView = deviceControlViewForWindow(deviceControls(deviceType, controlView), controlView, 0, 0);
+        // The TG50 with the game controller attached splits it either side of the screen when
+        // rotated to landscape and puts it below in portrait, whatever the window's shape.
+        auto tg50Pad = [&] { return deviceType == deviceTypeTG50 && controlView.gamepad; };
+        auto arrangeForRotation = [&](Rotation shown) {
+            if (deviceType != deviceTypeTG50) return;
+            const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
+            controlView.arrangement = tg50Pad() && landscape ? DeviceControlArrangement::around : DeviceControlArrangement::below;
+        };
+        // The TG50 can't turn its screen, and it's square: with the game controller, landscape puts
+        // the grips either side of the upright LCD instead of turning the frame.
+        auto frameRotation = [&](Rotation shown) {
+            const bool landscape = shown == Rotation::landscape_90 || shown == Rotation::landscape_270;
+            return tg50Pad() && landscape ? Rotation::portrait_0 : shown;
+        };
+        arrangeForRotation(rotation);
         bool fitted = options.windowFit != WindowFit::none;
         // The window is named after the machine: its session file's name, or the device without one.
         const string windowTitle = !sessionFolder.empty()
             ? std::filesystem::path(options.norOrSession).stem().string()
             : string(deviceProfile5(deviceType)->displayName);
-        SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, rotation, deviceControls(deviceType), controlView, fitted);
+        SDL_Window* window = initSdl(windowTitle.c_str(), displayConfiguration, scale, frameRotation(rotation),
+                                     deviceControls(deviceType, controlView), controlView, fitted);
         if (!window) {
             cerr << "failed to init SDL" << endl;
             return false;
         }
         auto arrangeForWindow = [&] {
-            if (!fitted) return;
+            if (!fitted || tg50Pad()) return;
             int w = 0, h = 0;
             SDL_GetWindowSize(window, &w, &h);
-            controlView = deviceControlViewForWindow(deviceControls(deviceType), controlView, w, h);
+            controlView = deviceControlViewForWindow(deviceControls(deviceType, controlView), controlView, w, h);
         };
         arrangeForWindow();
         // The rotation drawn and mapped for a chosen one: the Zodiac's panel stands upright in a
@@ -845,7 +907,7 @@ bool gFastEngineMissing = false;
         auto rotationForWindow = [&](Rotation chosen) {
             int w = 0, h = 0;
             SDL_GetWindowSize(window, &w, &h);
-            return windowRotation(chosen, soc->FrameQuarterTurn() && !followGuest, fitted, w, h);
+            return windowRotation(frameRotation(chosen), soc->FrameQuarterTurn() && !followGuest, fitted, w, h);
         };
         Rotation drawnRotation = rotationForWindow(rotation);
 
@@ -928,6 +990,12 @@ bool gFastEngineMissing = false;
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
+        // --gamepad (the machine setting) wins over the session's at start unless host serial,
+        // infrared or USB is set (handled above). It plugs in without the plug-in pulse and
+        // identifies on its first press, as one plugged in while the CLIÉ was off.
+        if (options.gamepad && !hostHoldsConnector && soc->GamepadSupported() && *options.gamepad != soc->GamepadAttached() &&
+            !soc->AttachGamepad(*options.gamepad, false))
+            cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;
         commandContext.infrared = &infrared;
         if (infraredPhone) {
@@ -1093,6 +1161,7 @@ bool gFastEngineMissing = false;
         auto guestLoop = [&]() {
             DrawGate gate;
             vector<RenderLink::Input> inputs;
+            bool gamepadShown = gamepadAtStart;
             bool wasHeadless = false;
             FrondPerformance performance(mainLoop.GetTimesliceSizeUsec());
 #ifdef __ANDROID__
@@ -1228,13 +1297,23 @@ bool gFastEngineMissing = false;
                 for (const auto& message : usb.TakeMessages()) cout << message << endl;
 
 
+                // The game controller plugged in or out (a command, a session load, a refused start):
+                // the window shows it or the keyboard again.
+                if (const bool attached = soc->GamepadAttached(); attached != gamepadShown) {
+                    gamepadShown = attached;
+                    DisplayChange change;
+                    change.gamepad = attached;
+                    commandContext.changeDisplay(change);
+                }
                 // Hand the frame to the SDL thread; it uploads and presents it.
                 if (!headless) {
                     const uint64_t handoffStart = zodiacSpeed ? timestampUsec() : 0;
                     const bool lcdEnabled = soc->LcdEnabled();
                     uint32_t firstDirtyLine = 0, lastDirtyLine = 0;
                     const uint32_t* frame = soc->GetPendingFrame(firstDirtyLine, lastDirtyLine);
-                    const DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
+                    DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
+                    // The pad's Hold slide stays over while it's on.
+                    if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
                     const DeviceStick stick = sdlEventHandler.Stick();
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
@@ -1254,6 +1333,23 @@ bool gFastEngineMissing = false;
                         frondGuestOrientationChanged(int(orientation));
 #endif
                     }
+                }
+                // The stick turns with what the player sees: the guest's turn (in the SoC) plus the host's own.
+                // Every stick source arrives in window axes, so one offset covers them all.
+                soc->SetStickHostTurns(followGuest ? int(commandContext.rotation) : int(sdlEventHandler.DrawnRotation()));
+                // The LED and vibrate motor: the app on Android, game controllers on the desktop.
+                {
+                    SoC::Attention current = soc->GuestAttention();
+                    // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
+                    if (replayPaused) current.vibrate = false;
+#ifdef __ANDROID__
+                    if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
+                    attention = current;
+#else
+                    const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
+                    const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
+                    if (desktop) desktop->rumbleChanged(on && !controller);
+#endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
                 if (zodiacSpeed && zodiacSpeed->Due(now)) {
@@ -1415,23 +1511,31 @@ bool gFastEngineMissing = false;
                 if (!appBackground && displayPending) {
                     display.Apply(*displayPending);
                     displayPending.reset();
-                    if (deviceType == deviceTypeTG50) controlView = deviceControlView(display.keyboard, display.jog);
+                    if (deviceType == deviceTypeTG50) {
+                        controlView = deviceControlView(display.keyboard, display.jog);
+                        controlView.gamepad = display.gamepad;
+                        controlView.jogLandscape = display.jogLandscape;
+                    }
+                    arrangeForRotation(shownRotation);
                     const bool wasFitted = fitted;
                     fitted = display.fit != WindowFit::none;
                     sdlRenderer.reset();
                     if (fitted != wasFitted) SDL_SetWindowResizable(window, fitted ? SDL_TRUE : SDL_FALSE);
                     if (!fitted)
-                        sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType), controlView);
+                        sdlResizeWindow(window, displayConfiguration, scale, frameRotation(shownRotation),
+                                        deviceControls(deviceType, controlView), controlView);
                     rebuild = true;
                 }
 
                 if (!appBackground && (rotationPending || rebuild)) {
                     if (rotationPending) {
                         shownRotation = *rotationPending;
+                        arrangeForRotation(shownRotation);
                         sdlRenderer.reset();
                         // A fitted window keeps its size and lays the rotated device out inside it.
                         if (!fitted)
-                            sdlResizeWindow(window, displayConfiguration, scale, shownRotation, deviceControls(deviceType), controlView);
+                            sdlResizeWindow(window, displayConfiguration, scale, frameRotation(shownRotation),
+                                        deviceControls(deviceType, controlView), controlView);
                     }
                     if (newRenderer(rotationPending)) {
                         rotationPending.reset();
@@ -1479,6 +1583,8 @@ bool gFastEngineMissing = false;
         // A candidate card no save adopted holds nothing the folder needs.
         sdCardReset();
         frondSdCandidate::releaseUnused();
+        sdCardStore(1).reset();
+        frondSdCandidate::releaseUnused(1);
 
         if (desktop && desktop->SaveFailed()) return false;
 
@@ -1503,7 +1609,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--card")
         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));
 
-    argparse::ArgumentParser program("frond-core", "0.16.1");
+    argparse::ArgumentParser program("frond-core", "0.17.0");
 
     program.add_description("Frond Palm OS emulator");
 
@@ -1570,6 +1676,11 @@ int main(int argc, char** argv) {
         .scan<'u', unsigned int>()
         .default_value(512u);
 
+    program.add_argument("--no-rumble")
+        .help("Zodiac: no rumble on game controllers or in the window")
+        .default_value(false)
+        .implicit_value(true);
+
     program.add_argument("--no-sound", "-q")
         .help("start with audio off")
         .default_value(false)
@@ -1621,6 +1732,12 @@ int main(int argc, char** argv) {
     program.add_argument("--hide-keyboard")
         .help("hide the TG50 keyboard")
         .default_value(false).implicit_value(true);
+    program.add_argument("--gamepad")
+        .help("CLIÉ game controller on the TG50 at start, on or off, over the session's; default: the session's")
+        .action([](const string& value) {
+            if (value != "on" && value != "off") throw runtime_error("invalid --gamepad: " + value);
+            return value == "on";
+        });
     program.add_argument("--hide-jog-controls")
         .help("hide the TG50 jog controls; same as --jog-controls hidden")
         .default_value(false).implicit_value(true);
@@ -1629,6 +1746,14 @@ int main(int argc, char** argv) {
         .action([](const string& value) {
             JogPlacement placement;
             if (!parseJogPlacement(value, placement)) throw runtime_error("invalid jog controls: " + value);
+            return placement;
+        });
+    program.add_argument("--jog-controls-landscape")
+        .help("TG50 jog controls in landscape with the game controller: hidden, beside (left of the left grip), "
+              "under or over (the screen, turned on their side); default: beside")
+        .action([](const string& value) {
+            JogLandscape placement;
+            if (!parseJogLandscape(value, placement)) throw runtime_error("invalid landscape jog controls: " + value);
             return placement;
         });
 
@@ -1717,8 +1842,10 @@ int main(int argc, char** argv) {
                        .windowScale = program.present<float>("--window-scale"),
                        .smoothLcd = program.get<bool>("--smooth-lcd"),
                        .hideKeyboard = program.get<bool>("--hide-keyboard"),
+                       .gamepad = program.present<bool>("--gamepad"),
                        .hideJogControls = program.get<bool>("--hide-jog-controls"),
                        .jogPlacement = program.present<JogPlacement>("--jog-controls"),
+                       .jogLandscape = program.present<JogLandscape>("--jog-controls-landscape"),
                        .windowFit = program.present<WindowFit>("--window-fit").value_or(WindowFit::none),
                        .windowBackground = program.present<uint32_t>("--window-background").value_or(0),
                        .displayMode = program.present<DisplayMode>("--display"),
@@ -1740,7 +1867,8 @@ int main(int argc, char** argv) {
                        .cardIdentity = program.present("--card-identity"),
                        .cardProtected = program.get<bool>("--card-protected"),
                        .fastEngine = program.get("--engine") == "fast",
-                       .viewFollowsWindow = program.get("--view-turn") == "window"};
+                       .viewFollowsWindow = program.get("--view-turn") == "window",
+                       .disableRumble = program.get<bool>("--no-rumble")};
 
     logEnable();
 

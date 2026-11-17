@@ -146,6 +146,14 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     jogControlsLabel->setBuddy(jogControls);
     showKeyboard->setChecked(prefs.showKeyboard);
     jogControls->setCurrentIndex(jogControls->findData(int(prefs.jogControls)));
+    jogLandscapeLabel = new QLabel(tr("Jog in landscape"), display);
+    jogLandscape = new QComboBox(display);
+    jogLandscape->setObjectName("jogLandscape");
+    for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                     frondSessions::JogLandscape::under, frondSessions::JogLandscape::over})
+        jogLandscape->addItem(frondSessions::jogLandscapeLabel(jog), int(jog));
+    jogLandscapeLabel->setBuddy(jogLandscape);
+    jogLandscape->setCurrentIndex(jogLandscape->findData(int(prefs.jogLandscape)));
     danaView = new DanaViewControls(display);
     danaView->setValues(prefs.danaView);
     displayLayout->addWidget(danaView);
@@ -160,6 +168,10 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     jogRow->addWidget(jogControlsLabel);
     jogRow->addWidget(jogControls, 1);
     displayLayout->addLayout(jogRow);
+    auto* jogLandscapeRow = new QHBoxLayout;
+    jogLandscapeRow->addWidget(jogLandscapeLabel);
+    jogLandscapeRow->addWidget(jogLandscape, 1);
+    displayLayout->addLayout(jogLandscapeRow);
     layout->addWidget(display);
     auto* sound = new QGroupBox(tr("Audio"), this);
     auto* soundLayout = new QVBoxLayout(sound);
@@ -169,6 +181,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     fastAudio->setObjectName("fastAudio");
     soundLayout->addWidget(audio);
     soundLayout->addWidget(fastAudio);
+    rumble = new QCheckBox(tr("Rumble"), sound);
+    rumble->setObjectName("rumble");
+    soundLayout->addWidget(rumble);
     layout->addWidget(sound);
     auto* speedBox = new QGroupBox(tr("Speed"), this);
     speedGroup = speedBox;
@@ -261,6 +276,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     showMips->setChecked(prefs.showMips);
     audio->setChecked(prefs.audio);
     fastAudio->setChecked(prefs.fastAudio);
+    rumble->setChecked(prefs.rumble);
     connect(windowScale, &QSlider::valueChanged, this, [this](int value) {
         this->automaticScale = false;
         scaleLabel->setText(tr("Size: %1×").arg(value / 4.0));
@@ -302,8 +318,10 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.showMips = showMips->isChecked();
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
+    prefs.rumble = rumble->isChecked();
     prefs.showKeyboard = showKeyboard->isChecked();
     prefs.jogControls = frondSessions::JogControls(jogControls->currentData().toInt());
+    prefs.jogLandscape = frondSessions::JogLandscape(jogLandscape->currentData().toInt());
     prefs.fastEngine = engine->currentData().toBool();
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
@@ -371,10 +389,13 @@ void MachineSettings::setDevice(Device device) {
     showKeyboard->setVisible(tg50);
     jogControlsLabel->setVisible(frondSessions::jogControlsShown(frontend));
     jogControls->setVisible(frondSessions::jogControlsShown(frontend));
+    jogLandscapeLabel->setVisible(frondSessions::jogLandscapeShown(frontend));
+    jogLandscape->setVisible(frondSessions::jogLandscapeShown(frontend));
     jogControls->setItemText(jogControls->findData(int(frondSessions::JogControls::keyboard)),
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(frontend)));
     const bool m68k = frondFirmware::runs68k(device);
     fastAudio->setVisible(!m68k);
+    rumble->setVisible(device != Device::automatic && frondFirmware::profile(device).board == DeviceBoard5::imx1Zodiac);
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));

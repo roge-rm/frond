@@ -246,6 +246,19 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 // instead of the cold boot, with the same replay; events before the saved time are skipped and summary
 // counts are from the load. Either engine can load a state the other saved.
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
+// BENCH_ZODIAC_SD2=FILE: a card in slot 2 (the W4200's SD slot) from the start, in sdCardStore(1) in
+// memory. The run's end lists the sectors that differ from the file on stderr.
+std::vector<uint8_t> secondCard;
+void listChangedSectors() {
+    auto& store=sdCardStore(1);
+    std::vector<uint32_t> sectors;
+    std::vector<uint8_t> sector(512);
+    for (uint32_t i=0; i<store.sectorCount(); ++i)
+        if (store.read(i,sector.data()) && std::memcmp(sector.data(),secondCard.data()+size_t(i)*512,512)) sectors.push_back(i);
+    std::fprintf(stderr,"sd2 changed %zu sectors:",sectors.size());
+    for (size_t i=0; i<sectors.size() && i<256; ++i) std::fprintf(stderr," %u",sectors[i]);
+    std::fprintf(stderr,"%s\n",sectors.size()>256?" ...":"");
+}
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
                const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {
     const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalHz5(device)/1000000:number(mipsArg,3000);
@@ -277,6 +290,12 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     if (!card.empty()) {
         sdCardInitializeWithBytes(std::move(card),"benchmark-replay");
         if (!cardLater) soc->SdInsert();
+    }
+    if (const char* second=std::getenv("BENCH_ZODIAC_SD2")) {
+        secondCard=readFile(second);
+        if (secondCard.empty() || secondCard.size()%512) throw std::runtime_error("BENCH_ZODIAC_SD2 needs an SD image");
+        sdCardStore(1).initializeWithBytes(std::vector<uint8_t>(secondCard),"benchmark-replay-2");
+        if (!soc->Sd2Insert() || !soc->SecondCardAttached()) throw std::runtime_error("BENCH_ZODIAC_SD2: slot 2 refused the card");
     }
     auto queue=audioQueueCreate(8192);
     soc->SetAudioQueue(queue); soc->SetPcmOutputEnabled(sound); soc->SetPcmSuspended(false);
@@ -338,7 +357,12 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             else if (e.kind=="pen-up") soc->PenUp();
             else if (e.kind=="key-down") soc->KeyDown(e.key);
             else if (e.kind=="key-up") soc->KeyUp(e.key);
-            else if (e.kind=="stick") soc->AnalogStick(e.x/511.0f,e.y/511.0f);
+            else if (e.kind=="stick") {
+                // The orientation is polled here, at stick events only; the stick follows it.
+                const unsigned orientation=soc->GuestOrientation();
+                if (trace) std::fprintf(stderr,"stick %d %d, orientation %u\n",e.x,e.y,orientation);
+                soc->AnalogStick(e.x/511.0f,e.y/511.0f);
+            }
             else if (e.kind=="card-insert") soc->SdInsert();
             else {
                 // The panel as it is, portrait (the host turns it), black before the first frame.
@@ -383,6 +407,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const uint64_t guestNs=soc->GetTime()-clockStart-resumedNs, instructions=soc->Status().retired-retiredStart;
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
+    if (!secondCard.empty()) listChangedSectors();
     if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\nmemory hash %llx\npcm hash %llx\nready last read at %lld ns\nready reads %llu\n",soc->LcdEnabled()?"on":"off",
                             soc->ChipSummary().c_str(),(unsigned long long)soc->MemoryHash(),(unsigned long long)pcmHash,
                             (long long)(soc->YmfLastReadyReadNs()-clockStart),(unsigned long long)soc->YmfReadyReads());

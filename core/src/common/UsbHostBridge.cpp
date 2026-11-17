@@ -28,6 +28,8 @@ struct UsbHostBridge::Impl {
         }
         if (self.plugPending && now >= self.plugAt) {
             self.plugPending = false;
+            // Refused (the game controller is in): the cable stays out and the host isn't attached.
+            if (self.soc.canPlug && !self.soc.canPlug()) { self.soc.cable(false); return; }
             self.soc.cable(true);
             self.host->Attach();
         }

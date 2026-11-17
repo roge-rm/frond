@@ -670,6 +670,9 @@ static void zodiac2() {
     // Landscape, no silkscreen, and no card slot, Hold or camera until those are done.
     assert(p->frontend.width == 480 && p->frontend.height == 320 && !p->frontend.silkscreenHeight);
     assert(p->frontend.sdSlot && !p->frontend.memoryStick && !p->frontend.holdPresent && !p->frontend.camera);
+    // Two native SD slots, not linked card files.
+    assert(deviceProfileCardSlotCount5(*p) == 2 && !deviceProfileLinkedCards5(*p));
+    assert(deviceProfileCardSizeValid5(p->deviceType, DeviceCardSlot5::sd2, DeviceCardFamily5::sdsc, 32ull << 20));
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared &&
            !c.bluetooth && c.sound && !c.microphone && !c.backgroundPanel);
