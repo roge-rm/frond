@@ -30,15 +30,23 @@ class Imx1GraphicsEngine {
     bool a4Submission() const { return a4; }
     bool copyHelperSubmission() const { return copyHelper; }
     bool fillSubmission() const { return fill; }
-    bool stretchCopySubmission() const { return stretchCopy; }
+    bool stretchCopySubmission() const { return runCopy != 0; }
+    // TileBlt's copies (200abb98, 200abd88), a kind of stretch copy.
+    bool tileSubmission() const { return runCopy == tileRuns; }
     // The driver's other submit sites the decoder knows: the chip's stretch blit (200b0644), the two
     // brush uploads of 200aedd0, the line routine (200afd00), the constant alpha blend (200a9414) and the
     // rotate and mirror blit (200aa564). player is a write of 220 from player code (TCPMP's RingFlush).
-    enum Other : uint8_t { none, stretchBlit, monoBrush, colourBrush, line, blend, transform, player };
+    // maskBlt is TwGfxMaskBlt's producer (200aaff8).
+    enum Other : uint8_t { none, stretchBlit, monoBrush, colourBrush, line, blend, transform, player, maskBlt };
     Other otherSubmission() const { return other; }
     static Other otherProducer(uint32_t pc) {
         return pc == 0x200b0b14 ? stretchBlit : pc == 0x200af1fc ? monoBrush : pc == 0x200af448 ? colourBrush :
-               pc == 0x200affe4 ? line : pc == 0x200a9788 ? blend : pc == 0x200aa8dc ? transform : none;
+               pc == 0x200affe4 ? line : pc == 0x200a9788 ? blend : pc == 0x200aa8dc ? transform :
+               pc == 0x200ab294 ? maskBlt : none;
+    }
+    // The software stretch (200b0644) and TileBlt (200ab830): plain copy packets of several runs.
+    static bool stretchProducer(uint32_t pc) {
+        return pc == 0x200b1568 || pc == 0x200b1790 || pc == 0x200abb98 || pc == 0x200abd88;
     }
     uint32_t submissionBegin() const { return previousProducer; }
     void start(uint64_t ticks) {
@@ -107,7 +115,8 @@ class Imx1GraphicsEngine {
             if (added > mask - occupied) return A::sideEffect;
             // The same pointer again submits nothing.
             previousProducer = writePointer;
-            hostData = keyedCopy = a4 = copyHelper = fill = stretchCopy = false;
+            hostData = keyedCopy = a4 = copyHelper = fill = false;
+            runCopy = 0;
             other = player;
             writePointer = value;
             return A::ok;
@@ -135,7 +144,9 @@ class Imx1GraphicsEngine {
         }
         if (address == 0x16010220 && pc != 0x200b8e88) {
             // 200b1568 and 200b1790 are the software stretch (200b0644), between its packets and after the last.
-            const bool stretch = pc == 0x200b1568 || pc == 0x200b1790;
+            // 200abb98 and 200abd88 are TileBlt's (200ab830): the same plain copy packets of up to 64 runs, one
+            // per tile, which partition the destination like the stretch's do.
+            const bool stretch = stretchProducer(pc);
             const Other otherPc = otherProducer(pc);
             if (write ? (pc != 0x200a9ed4 && pc != 0x200b0200 && pc != 0x200ac300 && pc != 0x200aa504 && pc != 0x200a9a9c && !stretch && !otherPc) : pc != 0x200b8c70) return A::externalInput;
             if (!ringEnabled) return A::sequence;
@@ -153,7 +164,7 @@ class Imx1GraphicsEngine {
                 a4 = pc == 0x200a9a9c;
                 copyHelper = pc == 0x200a9ed4;
                 fill = pc == 0x200b0200;
-                stretchCopy = stretch;
+                runCopy = !stretch ? 0 : pc == 0x200abb98 || pc == 0x200abd88 ? tileRuns : stretchRuns;
                 other = otherPc;
                 writePointer = value;
             } else value = writePointer;
@@ -241,7 +252,10 @@ class Imx1GraphicsEngine {
     uint32_t readPointer = 0, writePointer = 0, scratch = 0;
     bool ringEnabled = false, hostData = false, keyedCopy = false, a4 = false, copyHelper = false;
     // Set by the 220 write and read by the command decoder inside the same bus access, so not saved.
-    bool fill = false, stretchCopy = false;
+    // runCopy: 0, or stretchRuns or tileRuns for the copy packets of several runs.
+    enum : uint8_t { stretchRuns = 1, tileRuns = 2 };
+    bool fill = false;
+    uint8_t runCopy = 0;
     Other other = none;
     uint32_t previousProducer = 0;
     struct Batch { uint32_t end; uint64_t remaining; };

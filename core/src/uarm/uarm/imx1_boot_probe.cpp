@@ -1382,8 +1382,8 @@ struct Probe {
             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
-                 p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
-                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
+                 p.result.trace.pc == 0x200a9a9c || Imx1GraphicsEngine::stretchProducer(p.result.trace.pc) ||
+                 Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
                 p.graphicsMemory) {
                 // The batch is decoded in place and undone where it's dropped, so the queued batches aren't copied.
                 auto& commands = p.graphicsCommands;

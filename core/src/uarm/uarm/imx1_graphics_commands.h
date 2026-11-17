@@ -130,7 +130,8 @@ class Imx1GraphicsCommands {
         // 410 to 412, 422 and 464 to 466 come only with the stretch blit.
         // 464 to 466 come with the rotate and mirror blit too.
         auto put = [&](uint32_t reg, uint32_t value) {
-            if (other == Imx1GraphicsEngine::transform && reg >= 0x464 && reg <= 0x466) return store(reg, value, packedMono);
+            if ((other == Imx1GraphicsEngine::transform || other == Imx1GraphicsEngine::maskBlt) && reg >= 0x464 && reg <= 0x466)
+                return store(reg, value, packedMono);
             if (other != Imx1GraphicsEngine::stretchBlit && ((reg >= 0x410 && reg <= 0x412) || reg == 0x422 ||
                                                              (reg >= 0x464 && reg <= 0x466))) return false;
             return store(reg, value, packedMono);
@@ -152,7 +153,13 @@ class Imx1GraphicsCommands {
         while (left) {
             if (!take(header)) return A::sequence;
             uint32_t first, second;
-            if ((header >> 30) == 0) {
+            if (other == Imx1GraphicsEngine::maskBlt && (header & 0xc000ffffu) == 0x84f0u) {
+                // TwGfxMaskBlt's mask (200aaff8): after 464 to 466, w * h bits as host words, all to 4f0 (header
+                // bit 15, one register), row after row with no padding (200aa97c).
+                const auto status = maskBlit(configuration, eim, memory, ((header >> 16) & 0x3fff) + 1, take, left, fills);
+                if (status != A::ok) return status;
+                ++otherPackets;
+            } else if ((header >> 30) == 0) {
                 // (count - 1) << 16 | first register, then a value for each register in order. Only the
                 // stretch blit sends more than one, in threes (200b0a10-200b0acc).
                 const uint32_t count = ((header >> 16) & 0x3fff) + 1, reg = header & 0x7ff;
@@ -161,8 +168,13 @@ class Imx1GraphicsCommands {
                 for (uint32_t i = 0; i < count; ++i)
                     if (!take(first) || !put(reg + i, first)) return A::sideEffect;
                 if (reg + count - 1 == 0x466) {
-                    // The write of 466 starts the stretch, or the rotate and mirror blit.
+                    // The write of 466 starts the stretch, or the rotate and mirror blit. TwGfxMaskBlt's waits for
+                    // its mask.
                     if (count != 3) return A::sideEffect;
+                    if (other == Imx1GraphicsEngine::maskBlt) {
+                        if (!fills.empty() || otherPackets) return refuse("mask-batch", reg);
+                        continue;
+                    }
                     const bool turned = other == Imx1GraphicsEngine::transform;
                     if (!fills.empty() || ++otherPackets != 1) return refuse(turned ? "transform-batch" : "stretch-batch", reg);
                     Fill fill{};
@@ -239,14 +251,18 @@ class Imx1GraphicsCommands {
                     engine.stretchCopySubmission() || (count & 1))
                     return A::sideEffect;
                 if (count > (engine.fillSubmission() ? 8u : 2u)) return refuse("rectangle-count", count / 2);
-                // Brush types 0, 1, 6, 7 and a draw the pattern uploaded to 423. Where the chip anchors it
-                // is not known and no caller in the ROM passes an origin (41d), so they are not drawn.
-                if (known[0x41b] && ((values[0x41b] >> 4) & 15) != 13) return refuse("pattern-brush", (values[0x41b] >> 4) & 15);
+                // Brush types 1, 6, 7 and a draw the pattern uploaded to 423 too and are refused; type 0 is drawn
+                // (brushPattern).
+                const uint32_t brush = known[0x41b] ? (values[0x41b] >> 4) & 15 : 13;
+                if (brush != 13 && brush != 0) return refuse("pattern-brush", brush);
+                uint8_t pattern[8];
+                if (brush == 0 && !brushPattern(configuration, eim, memory, pattern)) return refuse("pattern-brush-data", values[0x423]);
                 for (uint32_t pair = 0; pair < count; pair += 2) {
                     if (!take(first) || !take(second)) return A::sequence;
                     Fill fill{};
                     const auto status = rectangle(configuration, eim, memory, first, second, fill, false);
                     if (status != A::ok) return status;
+                    if (brush == 0) patternPixels(pattern, first, fill);
                     // ROP3 5a is destination xor pattern, f0 is the pattern alone.
                     fill.invert = ((values[0x41b] >> 17) & 255) == 0x5a;
                     if (fill.invert && !engine.fillSubmission()) return A::sideEffect;
@@ -258,7 +274,7 @@ class Imx1GraphicsCommands {
                 // A plain copy packet holds n copies as 3n words. The copy helper (200a9cf8) sends one,
                 // the software stretch (200b0644) one for each run of its x and y tables.
                 const uint32_t copyWords = plain ? ((header >> 16) & 0x3fff) + 1 : 3;
-                const bool stretch = engine.stretchCopySubmission();
+                const bool stretch = engine.stretchCopySubmission(), tile = engine.tileSubmission();
                 if (copyWords % 3 || (copyWords != 3 && !stretch)) return A::sideEffect;
                 if (plain ? ((!engine.copyHelperSubmission() && !stretch) || !fills.empty() || ++plainPackets != 1) :
                             (!engine.keyedCopySubmission() || ++copyPackets != 1)) return A::sideEffect;
@@ -292,7 +308,9 @@ class Imx1GraphicsCommands {
                     const uint32_t x = sourceXY >> 16, y = sourceXY & 0xffff;
                     const uint32_t width = second >> 16, height = second & 0xffff;
                     const uint32_t pitch = values[0x46c];
-                    if (!pitch || pitch > 8192 || x + width > pitch ||
+                    // TileBlt sends every run a whole tile wide and high from the tile offset (200abbd0-200abc3c),
+                    // so with an offset the first column and row of runs read on past the tile's rows.
+                    if (!pitch || pitch > 8192 || (x + width > pitch && !tile) ||
                         x + width > 8191 || y + height > 8191)
                         return A::sideEffect;
                     const uint64_t address = uint64_t(values[0x46b]) + (uint64_t(y) * pitch + x) * 2;
@@ -311,6 +329,12 @@ class Imx1GraphicsCommands {
                     fill.paint = fill.colour;
                     fill.keyEqual = keyEqual;
                     fill.colour = sourceKey;
+                    // A plain copy with a ROP other than cc (rectangle checked it) is a ROP fill.
+                    const uint32_t rop = (values[0x41b] >> 17) & 255;
+                    if (plain && rop != 0xcc) {
+                        fill.invert = true;
+                        fill.colour = rop << 16 | fill.paint;
+                    }
                     // Overlapping pixels need direction rules that this producer has not qualified. Rectangles
                     // side by side on one surface share no byte and are drawn.
                     const Area from{address, uint64_t(pitch) * 2, uint64_t(width) * 2, height};
@@ -336,7 +360,9 @@ class Imx1GraphicsCommands {
                         const uint32_t dx = first >> 16, dy = first & 0xffff;
                         if (dx + width > stretchLimit || dy + height > stretchLimit) return refuse("stretch-run-bounds", copy / 3);
                         if (covered.empty()) covered.resize(size_t(stretchLimit) * stretchLimit);
-                        for (uint32_t row = dy; row < dy + height; ++row)
+                        // ASSUMPTION "TileBlt runs draw in order": with a tile offset the runs of the first column and
+                        // row reach under the next ones (see above), which the driver expects to draw over them.
+                        for (uint32_t row = dy; row < dy + height && !tile; ++row)
                             for (uint32_t column = dx; column < dx + width; ++column) {
                                 if (covered[size_t(row) * stretchLimit + column]) return refuse("stretch-runs-overlap", copy / 3);
                                 covered[size_t(row) * stretchLimit + column] = true;
@@ -503,6 +529,7 @@ class Imx1GraphicsCommands {
     static bool gpuFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, const Imx1GraphicsMemory& memory,
                         const Fill& fill, Imx1GpuFill& out) {
         if (!gpuFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
+            maskFill(fill) || ropFill(fill) ||
             ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             (fill.a4 && fill.pixels.empty()) || transformed(fill) ||
             (fill.doubled && (ratioX(fill) != 0x80 || ratioY(fill) != 0x80)) ||
@@ -510,6 +537,8 @@ class Imx1GraphicsCommands {
             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
         const bool copy = fill.keyed || fill.plain, source = copy || fill.a4;
         if (source && ((fill.sourceBase | fill.sourcePitch) & 1)) return false;
+        // TileBlt's runs that read on past the tile's rows stay on the CPU.
+        if (fill.plain && !fill.doubled && fill.height > 1 && fill.sourcePitch < fill.width * 2) return false;
         const uint64_t length = uint64_t(fill.height - 1) * fill.pitch + fill.width * 2;
         if (!memory.contains(configuration, eim, fill.base, length, &out.bank, &out.base)) return false;
         out.pitch = fill.pitch;
@@ -545,9 +574,11 @@ class Imx1GraphicsCommands {
         if (idctFill(fill)) return completeIdctFill(configuration, eim, memory, fill);
         if (smoothFill(fill)) return completeSmoothFill(configuration, eim, memory, fill);
         if (fastFill(configuration, eim, memory, fill)) return A::ok;
+        const bool masked = maskFill(fill), rop = ropFill(fill);
         for (uint32_t y = 0; y < fill.height; ++y)
             for (uint32_t x = 0; x < fill.width; ++x) {
                 uint32_t colour = fill.pixels.empty() ? fill.colour : fill.pixels[size_t(y) * fill.width + x];
+                if (masked && !colour) continue;
                 if (fill.keyed || fill.plain) {
                     // A stretch source steps from the unclipped origin at the ratios.
                     const uint32_t at = fill.doubled ?
@@ -564,7 +595,7 @@ class Imx1GraphicsCommands {
                     uint32_t destination = 0;
                     if (memory.accessGpu(configuration, eim, fill.base + y * fill.pitch + x * 2,
                                          2, false, destination) != A::ok) return A::sequence;
-                    colour = (destination ^ colour) & 0xffff;
+                    colour = rop ? rop3(fill.colour >> 16, fill.colour, colour, destination) : (destination ^ colour) & 0xffff;
                 }
                 if (fill.a4) {
                     uint32_t source = 0, destination = 0;
@@ -642,6 +673,7 @@ class Imx1GraphicsCommands {
     static bool fastFill(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
                          const Fill& fill) {
         if (!directFills || !fill.width || !fill.height || planeFill(fill) || idctFill(fill) || smoothFill(fill) ||
+            maskFill(fill) || ropFill(fill) ||
             ((fill.base | fill.pitch) & 1) || (fill.a4 && fill.doubled) ||
             transformed(fill) ||
             (!fill.pixels.empty() && fill.pixels.size() != size_t(fill.width) * fill.height)) return false;
@@ -737,6 +769,25 @@ class Imx1GraphicsCommands {
     // A smooth stretch (stretchBlit with 488 02020008): plain, doubled and painted, which no other fill is
     // (only keyed copies are painted).
     static bool smoothFill(const Fill& fill) { return fill.plain && fill.doubled && fill.painted && !fill.keyed && !fill.a4; }
+    // A plain copy with a ROP other than cc: invert set, the ROP in colour bits 16-23 and the solid brush colour in
+    // 0-15. No other plain copy sets invert.
+    static bool ropFill(const Fill& fill) {
+        return fill.plain && fill.invert && !fill.keyed && !fill.a4 && !fill.doubled && !fill.keyEqual;
+    }
+    // TwGfxMaskBlt's copy: a plain copy with pixels, 1 where the source is drawn and 0 where the destination stays.
+    // No other plain copy carries pixels.
+    static bool maskFill(const Fill& fill) {
+        return fill.plain && !fill.pixels.empty() && !fill.keyed && !fill.a4 && !fill.doubled && !fill.keyEqual && !fill.invert;
+    }
+    // ROP3 on 16 bits: bit i of rop is the result for pattern bit i >> 2, source bit (i >> 1) & 1 and destination
+    // bit i & 1.
+    static uint32_t rop3(uint32_t rop, uint32_t pattern, uint32_t source, uint32_t destination) {
+        uint32_t result = 0;
+        for (unsigned i = 0; i < 8; ++i)
+            if ((rop >> i) & 1)
+                result |= ((i & 4) ? pattern : ~pattern) & ((i & 2) ? source : ~source) & ((i & 1) ? destination : ~destination);
+        return result & 0xffff;
+    }
     // A transform's source step for one destination column (colour) or row (sourcePitch), signed.
     static int64_t signedStep(uint32_t step) { return int64_t(int32_t(step)); }
     // Where the bytes a fill reads begin: sourceBase, or for a transform the lowest pixel it reaches.
@@ -839,6 +890,95 @@ class Imx1GraphicsCommands {
         const Area to{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height};
         return from.overlaps(to) ? refuse("blend-overlap", values[0x416]) : A::ok;
     }
+    // TwGfxMaskBlt (200aaff8, from 2009aae4): a copy from source 1 (46b, 46c, 464 as x << 16 | y) to the destination
+    // rectangle 465, 466 through a 1bpp mask sent as host words, in bands of rows the ring holds, each its own batch.
+    // The producer turns the TwGfx mask's bits over (mvn, 200aa97c) and the ROP4 is ccaa.
+    // ASSUMPTION "mask blt ROP4 as Windows MaskBlt": a mask bit of 1 takes DP_MIX bits 16-23 (aa, the destination
+    // stays) and 0 bits 0-7 (cc, the source), so a TwGfx mask bit of 1 draws the source. The bits are in
+    // virtualPackedMonoMsbFirst order, as the TwGfx mask holds them: the producer copies aligned rows as they are and
+    // shifts the others big-endian (byte swaps around its shifts, 200aaa90 on). ASSUMPTION "mask byte order": with GMC
+    // bit 15 clear the chip reads the mask bytes MSB first.
+    template <class Take>
+    Imx1BootstrapAccess maskBlit(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
+                                 const Imx1GraphicsMemory& memory, uint32_t count, Take& take, const uint32_t& left,
+                                 std::vector<Fill>& fills) {
+        using A = Imx1BootstrapAccess;
+        if (!fills.empty() || !known[0x464] || !known[0x465] || !known[0x466]) return refuse("mask-batch", count);
+        const uint32_t wh = values[0x466], width = wh >> 16, height = wh & 0xffff;
+        if (!width || !height || count != (uint64_t(width) * height + 31) / 32) return refuse("mask-packet", count);
+        if (count > left) return A::sequence;
+        if (count != left || !known[0x48f] || values[0x48f] != 0xffffffff) return A::sideEffect;
+        Fill fill{};
+        const auto status = rectangle(configuration, eim, memory, values[0x465], wh, fill, false, true, false, true, false, false, true);
+        if (status != A::ok) return status;
+        const uint32_t sx = values[0x464] >> 16, sy = values[0x464] & 0xffff, pitch = values[0x46c];
+        if (!pitch || pitch > 8192 || sx + width > pitch || sx + width > 8191 || sy + height > 8191)
+            return refuse("mask-geometry", values[0x464]);
+        const uint64_t address = uint64_t(values[0x46b]) + (uint64_t(sy) * pitch + sx) * 2;
+        const uint64_t length = (uint64_t(height - 1) * pitch + width) * 2;
+        if (address > 0xffffffffu || (address & 1) || !memory.contains(configuration, eim, uint32_t(address), length))
+            return A::sequence;
+        fill.plain = true;
+        fill.sourcePitch = pitch * 2;
+        fill.sourceBase = uint32_t(address + uint64_t(fill.sourceY) * fill.sourcePitch + fill.sourceX * 2);
+        fill.paint = fill.colour;
+        fill.colour = 0;
+        if (Area{fill.sourceBase, fill.sourcePitch, uint64_t(fill.width) * 2, fill.height}.overlaps(
+                Area{fill.base, fill.pitch, uint64_t(fill.width) * 2, fill.height})) return refuse("mask-overlap", values[0x464]);
+        fill.pixels.reserve(size_t(fill.width) * fill.height);
+        for (uint32_t word = 0; word < count; ++word) {
+            uint32_t bits;
+            if (!take(bits)) return A::sequence;
+            for (uint32_t sample = 0; sample < 32; ++sample) {
+                const uint64_t index = uint64_t(word) * 32 + sample;
+                if (index >= uint64_t(width) * height) break;
+                const uint32_t y = uint32_t(index / width), x = uint32_t(index % width);
+                if (y >= fill.sourceY && y - fill.sourceY < fill.height && x >= fill.sourceX && x - fill.sourceX < fill.width)
+                    fill.pixels.push_back(virtualPackedMonoBit(bits, sample) ? 0 : 1);
+            }
+        }
+        ticks += uint64_t(fill.width) * fill.height;
+        fills.push_back(std::move(fill));
+        return A::ok;
+    }
+    // The 8x8 mono brush the brush upload (200aedd0) put at 423: a row in the low byte of each of 8 words
+    // (200af0d0-200af1fc). The newest queued upload to it, else memory, as the chip finds it once the queued
+    // batches are done. False if a queued fill other than an upload writes there, or 41d isn't 0.
+    bool brushPattern(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim, Imx1GraphicsMemory& memory,
+                      uint8_t* pattern) const {
+        // The pattern setter (2009c540) passes no origin, so the upload always writes 41d 0 (200aef18-200aef4c).
+        const uint32_t base = values[0x423];
+        if (values[0x41d] || (base & 3)) return false;
+        for (auto batch = batches.rbegin(); batch != batches.rend(); ++batch)
+            for (auto fill = batch->fills.rbegin(); fill != batch->fills.rend(); ++fill) {
+                if (!fill->width || !fill->height || fill->base >= base + 32 ||
+                    uint64_t(fill->base) + uint64_t(fill->height - 1) * fill->pitch + fill->width * 2 <= base) continue;
+                if (fill->base != base || fill->height != 1 || fill->width != 16 || fill->pixels.size() != 16 ||
+                    fill->keyed || fill->plain || fill->a4 || fill->invert) return false;
+                for (unsigned row = 0; row < 8; ++row) pattern[row] = uint8_t(fill->pixels[row * 2]);
+                return true;
+            }
+        for (unsigned row = 0; row < 8; ++row) {
+            uint32_t word = 0;
+            if (memory.accessGpu(configuration, eim, base + row * 4, 4, false, word) != Imx1BootstrapAccess::ok) return false;
+            pattern[row] = uint8_t(word);
+        }
+        return true;
+    }
+    // A fill's pixels from the 8x8 mono brush: set bits take 41f, clear ones 41e (brush type 0, foreground and
+    // background).
+    // ASSUMPTION "pattern anchored at the surface origin": pixel x, y of the destination surface takes row y & 7 and
+    // column x & 7, as Palm OS lines up patterns on the screen, with 41d 0.
+    // ASSUMPTION "brush rows MSB first": column 0 is bit 7 of the row, as Palm OS patterns are and as
+    // virtualPackedMonoMsbFirst.
+    void patternPixels(const uint8_t* pattern, uint32_t xy, Fill& fill) const {
+        const uint32_t left = (xy >> 16) + fill.sourceX, top = (xy & 0xffff) + fill.sourceY;
+        fill.pixels.resize(size_t(fill.width) * fill.height);
+        for (uint32_t y = 0; y < fill.height; ++y)
+            for (uint32_t x = 0; x < fill.width; ++x)
+                fill.pixels[size_t(y) * fill.width + x] = uint16_t(values[((pattern[(top + y) & 7] >> (7 - ((left + x) & 7))) & 1) ?
+                                                                         0x41f : 0x41e]);
+    }
     Imx1BootstrapAccess a4Source(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                const Imx1GraphicsMemory& memory, uint32_t xy,
                                uint32_t width, uint32_t height, Fill& fill) const {
@@ -869,7 +1009,7 @@ class Imx1GraphicsCommands {
         return A::ok;
     }
     Imx1BootstrapAccess rectangle(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
-                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false, bool mono = false, bool blend = false) const {
+                                   const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false, bool mono = false, bool blend = false, bool mask = false) const {
         using A = Imx1BootstrapAccess;
         for (auto reg : registers) if (reg != 0x48f && reg != 0x422 && (reg < 0x410 || reg > 0x412) && (reg < 0x464 || reg > 0x466) &&
             (a4 || blend || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)) && !known[reg]) return A::sequence;
@@ -887,9 +1027,16 @@ class Imx1GraphicsCommands {
         // A keyed copy keeps the ROP that was set: cc, or f0 with the solid brush (200aa2e4-200aa2f4).
         const bool keyedPaint = copy && !plain && gmc == 0x45e0b4df && values[0x4b2] == 0x00f00a00;
         if (copy && !plain && gmc != 0x4598b4df && !keyedPaint) return refuse("keyed-copy-41b", gmc);
-        // The bitmap routine's invert and paint inverse copies (ROP 99 and 33, 2008a7b8) are not drawn.
-        if (copy && plain && gmc != 0x5598b4df) return refuse("plain-copy-41b", gmc);
-        if (copy && !keyedPaint && values[0x4b2] != 0x00cc0a00) return A::sideEffect;
+        // A plain copy takes any ROP3. The ROP setter (200af9e4) writes only GMC bits 17-24 and DP_MIX 16-23 (and
+        // 0-7 with bit 25 for a ROP4), both sent; the copy helper then leaves DP_MIX's ROP as it is (200a9d1c, shadow
+        // only). The bitmap routine sets 99 for winInvert and 33 for winPaintInverse (2008a744-2008a77c).
+        // TwGfxMaskBlt's ROP4 is ccaa (2009aaa0): GMC 555434df, DP_MIX 0eaa0acc after its producer (200ab02c-200ab0ac).
+        // GMC bit 15 is clear: 200afa74 clears it before the producer (2009aac4) and sets it again after (2009aaf0).
+        const uint32_t copyRop = (gmc >> 17) & 255;
+        if (copy && plain && (mask ? gmc != 0x555434df : (gmc & ~0x01fe0000u) != 0x5400b4dfu))
+            return refuse(mask ? "mask-blt-41b" : "plain-copy-41b", gmc);
+        if (copy && !keyedPaint && values[0x4b2] != (mask ? 0x0eaa0accu : plain ? 0x00000a00u | copyRop << 16 : 0x00cc0a00u))
+            return mask ? refuse("mask-blt-mix", values[0x4b2]) : A::sideEffect;
         // A copy may also find 4b1 with source type 0, left by the stretch restore as for the host upload above
         // (seen keyed, in Date Book's Delete Event dialog). The copy GMCs checked above carry source type 3.
         if (copy && (
@@ -907,9 +1054,14 @@ class Imx1GraphicsCommands {
             values[0x472] != 0x3f || values[0x471] != 0x1fff1fff || values[0x488] != 4 || !known[0x48f] ||
             values[0x48f] != 0xffffffff || values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20 ||
             (values[0x484] & ~0x000f0f0fu))) return refuse("blend-state", gmc);
-        if (!host && !copy && !blend && (((gmc >> 4) & 15) != 13 || ((gmc >> 8) & 15) != 4 ||
+        // Brush 13 is the solid colour, 0 the 8x8 mono pattern (brushPattern); 4b1 bits 8-11 name the same type.
+        // The pattern fill (2008a154) clears GMC bit 15 and 4b1 bit 30 through 200afa74 first (2008a170), so
+        // those two bits are set for the solid brush and clear for the pattern.
+        const uint32_t brush = (gmc >> 4) & 15;
+        const bool msbOrder = brush == 0;
+        if (!host && !copy && !blend && ((brush != 13 && brush != 0) || ((gmc >> 8) & 15) != 4 ||
             (rop != 0xf0 && rop != 0x5a) || !(gmc & (1u << 28)) ||
-            !(gmc & (1u << 30)) || !(gmc & (1u << 15)) || (gmc & 0x80000000u) || values[0x488] != 4 ||
+            !(gmc & (1u << 30)) || bool(gmc & (1u << 15)) == msbOrder || (gmc & 0x80000000u) || values[0x488] != 4 ||
             (gmc & (1u << 16)) || !(gmc & 2) || values[0x4a1] || values[0x4a0])) return A::sideEffect;
         if (values[0x488] != (a4 ? 0x00080004u : 4u) || values[0x4a1] || values[0x4a0]) return A::sideEffect;
         // The A4 producer never sends 490 or 491. The policy composes source2 through the mask and reads neither.
@@ -920,7 +1072,8 @@ class Imx1GraphicsCommands {
             !known[0x48f] || values[0x48f] != 0xffffffff ||
             values[0x4b3] != 0xffffffff || values[0x41d] || values[0x30f] != 0x20)) return A::sideEffect;
         const auto datatype = values[0x4b1], mix = values[0x4b2], direction = values[0x472];
-        if (!host && !copy && !blend && ((datatype & 15) != 4 || ((datatype >> 8) & 15) != 13 || !(datatype & (1u << 30)) ||
+        if (!host && !copy && !blend && ((datatype & 15) != 4 || ((datatype >> 8) & 15) != brush ||
+            bool(datatype & (1u << 30)) == msbOrder ||
             (datatype & ~0x4007ff0fu) || ((mix >> 16) & 255) != rop || (mix & ~0x00ff3f00u) ||
             (direction & 3) != 3 || (direction & ~0x3fu))) return A::sideEffect;
         for (auto reg : {0x42e,0x42f,0x430,0x431,0x432,0x433}) if (values[reg]) return A::sideEffect;
@@ -976,6 +1129,7 @@ class Imx1GraphicsCommands {
                              const Imx1GraphicsMemory& memory, uint32_t start, uint32_t end, std::vector<Fill>& fills) {
         using A = Imx1BootstrapAccess;
         if (((values[0x41b] >> 17) & 255) != 0xf0) return refuse("line-rop", (values[0x41b] >> 17) & 255);
+        if (((values[0x41b] >> 4) & 15) != 13) return refuse("pattern-brush", (values[0x41b] >> 4) & 15);
         const int32_t x0 = start & 0xffff, y0 = start >> 16, x1 = end & 0xffff, y1 = end >> 16;
         if (x0 > 8191 || y0 > 8191 || x1 > 8191 || y1 > 8191) return refuse("line-points", end);
         const int32_t dx = x1 - x0, dy = y1 - y0;

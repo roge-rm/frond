@@ -312,8 +312,12 @@ void keyedModes() {
     }
     keyed[17] = 0x01000005; keyed[3] = 0x45b4b4df;
     assert(f.append(keyed,0x200aa504) == A::sideEffect && refused(f,"keyed-copy-41b",0x45b4b4df));
-    auto p = packet(); p[1] = 0x5532b4df;
-    assert(f.append(p) == A::sideEffect && refused(f,"plain-copy-41b",0x5532b4df));
+    // A plain copy GMC other than the copy helper's outside the ROP field stops by name; a ROP the DP_MIX doesn't
+    // carry too (ropCopies has the drawn ones).
+    auto p = packet(); p[1] = 0x5598b4d3;
+    assert(f.append(p) == A::sideEffect && refused(f,"plain-copy-41b",0x5598b4d3));
+    p = packet(); p[1] = 0x5532b4df;
+    assert(f.append(p) == A::sideEffect);
     // The line packet's third point must repeat its end (lines() has the rest).
     assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200affe4) == A::sideEffect && refused(f,"line-points",0));
     assert(f.append({0xc0021500,0x00010001,0x00050005,0},0x200b0200) == A::sideEffect);
@@ -334,8 +338,9 @@ void brushUpload() {
         for (unsigned i = 0; i < 8; ++i) assert(f.read(brush+i*4,1) == rows[i]);
         assert(f.read(brush,4) == d0 && f.read(brush+12,4) == d0>>24 && f.read(brush+28,4) == d1>>24);
         assert(f.read(brush-1,1) == 0xee && f.read(brush+32,1) == 0xee);
-        // The driver puts the surface back and fills with brush type 0 or 1: a stop that names the type.
-        for (uint32_t type : {0u,1u,6u,7u,10u}) {
+        // The driver puts the surface back and fills with brush type 0 or 1: a stop that names the type, except 0
+        // (patternFill).
+        for (uint32_t type : {1u,6u,7u,10u}) {
             const uint32_t gmc = 0x55e0340f | type << 4;
             assert(f.append({0x401,destination,0x402,13,0x4b2,0x00f00a00,0x41b,gmc,0x4b1,0x00030004u|type<<8,
                 0xc0011a00,0x00010001,0x00020002},0x200b0200) == A::sideEffect && refused(f,"pattern-brush",type));
@@ -1372,9 +1377,210 @@ void transformSaved() {
     assert(changed == 12);
     std::puts("PASS: a queued rotate and mirror blit saves, loads and finishes the same");
 }
+
+// ROP3 per bit: pattern p, source s, destination d.
+uint32_t ropOracle(uint32_t rop, uint32_t p, uint32_t s, uint32_t d) {
+    uint32_t r = 0;
+    for (unsigned bit = 0; bit < 16; ++bit) {
+        const unsigned i = ((p >> bit) & 1) << 2 | ((s >> bit) & 1) << 1 | ((d >> bit) & 1);
+        r |= ((rop >> i) & 1) << bit;
+    }
+    return r;
+}
+// The copy helper with the ROP setter's GMC and DP_MIX for any ROP3 (99 winInvert, 33 winPaintInverse from the
+// bitmap routine) draws each pixel through it, with the solid brush colour 41f as the pattern. Saved mid-batch it
+// loads and finishes the same.
+void ropCopies() {
+    for (uint32_t rop : {0x99u,0x33u,0x66u,0xeeu,0x88u,0xb8u,0x00u,0xffu,0xf0u,0x5au}) {
+        Fixture f; planes(f);
+        for (unsigned i = 0; i < 13*8; ++i) f.write(destination+i*2,0xa55a ^ i * 0x0101);
+        auto p = packet(); p[1] = 0x5400b4df | rop << 17; p[3] = 0x00000a00 | rop << 16;
+        change(p,0x41f,0x3c5a);
+        assert(f.append(p) == A::ok);
+        Fixture g; planes(g);
+        for (unsigned i = 0; i < 13*8; ++i) g.write(destination+i*2,0xa55a ^ i * 0x0101);
+        assert(g.append(p) == A::ok);
+        f.finish();
+        for (unsigned i = 0; i < 13*8; ++i) {
+            const uint32_t d = 0xa55a ^ i * 0x0101;
+            uint32_t expected = d;
+            for (auto at : {std::pair<unsigned,unsigned>{44,11},{45,12},{46,13},{57,20},{58,21},{59,22}}) {
+                const uint32_t values[]{0,0xf800,0x1234,0,0,0,0,0,0,0x5678,0xffff,0xabcd};
+                if (at.first == i) expected = ropOracle(rop,0x3c5a,values[at.second-11],d);
+            }
+            assert(f.read(destination+i*2) == expected);
+        }
+        std::vector<uint8_t> bytes[2];
+        StateWriter configurationOut(bytes[0]); g.state.state(configurationOut);
+        StateWriter commandsOut(bytes[1]); g.commands.state(commandsOut);
+        Fixture loaded; planes(loaded);
+        for (unsigned i = 0; i < 13*8; ++i) loaded.write(destination+i*2,0xa55a ^ i * 0x0101);
+        StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+        StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+        assert(configurationIn.complete() && commandsIn.complete());
+        loaded.finish();
+        for (unsigned i = 0; i < 13*8; ++i) assert(loaded.read(destination+i*2) == f.read(destination+i*2));
+    }
+    // GMC and DP_MIX must carry the same ROP.
+    Fixture f;
+    auto p = packet(); p[1] = 0x5532b4df; p[3] = 0x00330a00;
+    assert(f.append(p) == A::sideEffect);
+    std::puts("PASS: plain copies through any ROP3 with the brush colour, both ROP fields agreeing, saved mid-batch");
+}
+// TwGfxMaskBlt: 464 to 466 and the mask as host words to 4f0, drawn where the mask bit is 0 (the TwGfx mask's 1).
+constexpr uint32_t maskWidth = 7, maskHeight = 5;
+bool maskBit(unsigned x, unsigned y) { return (x * 3 + y * 5 + x * y) % 4 < 2; }
+std::vector<uint32_t> maskBatch(uint32_t sxy = 0x00020001, uint32_t dxy = 0x00030002) {
+    std::vector<uint32_t> b{0x41b,0x555434df,0x4b2,0x0eaa0acc,0x401,destination,0x402,13,0x46b,source,0x46c,9,
+        0x46f,0,0x470,0x0014000d,0x00020464,sxy,dxy,maskWidth << 16 | maskHeight,0x000184f0};
+    uint32_t words[2]{};
+    for (unsigned i = 0; i < maskWidth * maskHeight; ++i)
+        if (maskBit(i % maskWidth, i / maskWidth)) words[i / 32] |= 1u << ((i % 32 & ~7u) + 7 - i % 8);
+    b.push_back(words[0]); b.push_back(words[1]);
+    return b;
+}
+void maskSource(Fixture& f) {
+    for (unsigned i = 0; i < 13*8; ++i) f.write(destination+i*2,0xa55a);
+    for (unsigned i = 0; i < 9*7; ++i) f.write(source+i*2,0x1000 + i);
+}
+void maskBlt() {
+    {
+        Fixture f; maskSource(f);
+        assert(f.append(maskBatch(),0x200ab294) == A::ok); f.finish();
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) {
+                uint32_t expected = 0xa55a;
+                if (x >= 3 && x < 3 + maskWidth && y >= 2 && y < 2 + maskHeight && !maskBit(x - 3, y - 2))
+                    expected = 0x1000 + (y - 2 + 1) * 9 + (x - 3 + 2);
+                assert(f.read(destination+(y*13+x)*2) == expected);
+            }
+    }
+    {
+        // The scissor trims the rectangle and the mask moves with it; saved mid-batch it finishes the same.
+        Fixture f; maskSource(f);
+        auto b = maskBatch(); b[13] = 0x00030004; b[15] = 0x00050007;
+        assert(f.append(b,0x200ab294) == A::ok);
+        std::vector<uint8_t> bytes[2];
+        StateWriter configurationOut(bytes[0]); f.state.state(configurationOut);
+        StateWriter commandsOut(bytes[1]); f.commands.state(commandsOut);
+        f.finish();
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) {
+                uint32_t expected = 0xa55a;
+                if (x >= 4 && x < 7 && y >= 3 && y < 5 && !maskBit(x - 3, y - 2))
+                    expected = 0x1000 + (y - 2 + 1) * 9 + (x - 3 + 2);
+                assert(f.read(destination+(y*13+x)*2) == expected);
+            }
+        Fixture loaded; maskSource(loaded);
+        StateReader configurationIn(bytes[0].data(),bytes[0].size()); loaded.state.state(configurationIn);
+        StateReader commandsIn(bytes[1].data(),bytes[1].size()); loaded.commands.state(commandsIn);
+        assert(configurationIn.complete() && commandsIn.complete());
+        loaded.finish();
+        for (unsigned i = 0; i < 13*8; ++i) assert(loaded.read(destination+i*2) == f.read(destination+i*2));
+    }
+    Fixture f; maskSource(f);
+    // Other ROP words, a mask of the wrong length, a second band in one batch, the source over the destination and
+    // other producers stop.
+    auto b = maskBatch(); b[1] = 0x5598b4df;
+    assert(f.append(b,0x200ab294) == A::sideEffect && refused(f,"mask-blt-41b",0x5598b4df));
+    b = maskBatch(); b[3] = 0x02aa0acc;
+    assert(f.append(b,0x200ab294) == A::sideEffect && refused(f,"mask-blt-mix",0x02aa0acc));
+    b = maskBatch(); b[20] = 0x000284f0; b.push_back(0);
+    assert(f.append(b,0x200ab294) == A::sideEffect && refused(f,"mask-packet",3));
+    b = maskBatch(); b.push_back(0);
+    assert(f.append(b,0x200ab294) == A::sideEffect);
+    b = maskBatch(); auto again = maskBatch(); b.insert(b.end(),again.begin()+16,again.end());
+    assert(f.append(b,0x200ab294) == A::sideEffect);
+    b = maskBatch(); b[9] = destination;
+    assert(f.append(b,0x200ab294) == A::sideEffect && refused(f,"mask-overlap",0x00020001));
+    assert(f.append(maskBatch(),0x200a9ed4) == A::sideEffect && f.append(maskBatch(),0x200b0b14) != A::ok);
+    std::puts("PASS: TwGfxMaskBlt copies where its mask bit is clear, scissor, saved mid-batch, state and packet guards");
+}
+// TileBlt sends plain copy packets of up to 64 runs from 200abb98 and the last from 200abd88.
+void tileBlt() {
+    for (uint32_t pc : {0x200abb98u,0x200abd88u}) {
+        Fixture f; maskSource(f);
+        // A 3 by 2 tile from source 1,1 over destination 1,1 to 8,5 in four pieces.
+        const std::vector<uint32_t> b{0x41b,0x5598b4df,0x4b2,0x00cc0a00,0x401,destination,0x402,13,0x46b,source,0x46c,9,
+            0x46f,0,0x470,0x0014000d,0xc00b1b00,0x00010001,0x00010001,0x00030002,0x00010001,0x00040001,0x00030002,
+            0x00010001,0x00010003,0x00030002,0x00010001,0x00040003,0x00030002};
+        assert(f.append(b,pc) == A::ok); f.finish();
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) {
+                const bool inside = x >= 1 && x < 7 && y >= 1 && y < 5;
+                const uint32_t expected = inside ? 0x1000 + ((y - 1) % 2 + 1) * 9 + (x - 1) % 3 + 1 : 0xa55a;
+                assert(f.read(destination+(y*13+x)*2) == expected);
+            }
+        // With a tile offset the first run is a whole tile wide from the offset, reading on past the source row,
+        // and the next run draws over its end.
+        Fixture g; maskSource(g);
+        std::vector<uint32_t> offset(b.begin(), b.begin() + 16);
+        offset.insert(offset.end(),{0xc0051b00,0x00070001,0x00010001,0x00030001,0x00010001,0x00030001,0x00030001});
+        assert(g.append(offset,pc) == A::ok); g.finish();
+        for (unsigned x = 0; x < 13; ++x) {
+            const uint32_t expected = x == 1 ? 0x1000 + 9 + 7 : x == 2 ? 0x1000 + 9 + 8 : x >= 3 && x < 6 ? 0x1000 + 9 + x - 2 : 0xa55a;
+            assert(g.read(destination+(13+x)*2) == expected);
+        }
+        // The stretch's runs may do neither.
+        Fixture h; maskSource(h);
+        assert(h.append(offset,0x200b1568) == A::sideEffect);
+        auto overlap = b; overlap[21] = 0x00030001;
+        assert(h.append(overlap,0x200b1568) == A::sideEffect && refused(h,"stretch-runs-overlap",1));
+    }
+    std::puts("PASS: TileBlt's copy packets of several tiles from both submit sites, overlapping runs drawn in order");
+}
+// The 8x8 mono brush (type 0) fills with 41f where a bit is set and 41e where clear, row y & 7 and column x & 7
+// of the surface, bit 7 first; from a queued upload or from memory, ROP f0 and 5a.
+void patternFill() {
+    const uint32_t brush = 0xe05000;
+    const uint8_t rows[8]{0xaa,0x55,0x88,0x22,0xdd,0x77,0x01,0x80};
+    const uint32_t d0 = rows[0]|rows[1]<<8|rows[2]<<16|uint32_t(rows[3])<<24, d1 = rows[4]|rows[5]<<8|rows[6]<<16|uint32_t(rows[7])<<24;
+    const std::vector<uint32_t> mono{0x423,brush,0x401,brush,0x402,0x10,0x4b2,0x00cc0b00,0x41b,0x5798b303,0x4b1,0x40036003,
+        0xc0011a00,0,0x00100001,0x000704f0,d0,d0>>8,d0>>16,d0>>24,d1,d1>>8,d1>>16,d1>>24};
+    const std::vector<uint32_t> fill{0x401,destination,0x402,13,0x46f,0,0x470,0x0014000d,0x41f,0x07e0,0x41e,0xf800,
+        0x4b2,0x00f00a00,0x41b,0x55e0340f,0x4b1,0x00030004,0xc0011a00,0x00020001,0x000a0006};
+    for (bool queued : {true,false}) {
+        Fixture f; planes(f);
+        assert(f.append(mono,0x200af1fc) == A::ok);
+        if (!queued) f.finish();
+        assert(f.append(fill,0x200b0200) == A::ok);
+        assert(f.state.advanceCpuCycles(4000) && f.commands.complete(f.state,f.eim,f.memory) == A::ok);
+        for (unsigned y = 0; y < 8; ++y)
+            for (unsigned x = 0; x < 13; ++x) {
+                const bool inside = x >= 2 && x < 12 && y >= 1 && y < 7;
+                const uint32_t expected = !inside ? 0xa55a : ((rows[y & 7] >> (7 - (x & 7))) & 1) ? 0x07e0 : 0xf800;
+                assert(f.read(destination+(y*13+x)*2) == expected);
+            }
+        // 5a: destination xor the pattern colours.
+        auto invert = fill; invert[13] = 0x005a0a00; invert[15] = 0x54b4340f;
+        assert(f.append(invert,0x200b0200) == A::ok); f.finish();
+        for (unsigned y = 1; y < 7; ++y)
+            for (unsigned x = 2; x < 12; ++x) assert(f.read(destination+(y*13+x)*2) == 0);
+    }
+    Fixture f; planes(f);
+    assert(f.append(mono,0x200af1fc) == A::ok);
+    // A queued write over the brush that isn't an upload, an origin, a line with the pattern, and 4b1 naming
+    // another type stop.
+    assert(f.append({0x401,brush,0x402,0x10,0x41b,0x55e0b4df,0x4b1,0x40030d04,0xc0011a00,0x00020000,0x00010001},0x200b0200) == A::ok);
+    assert(f.append(fill,0x200b0200) == A::sideEffect && refused(f,"pattern-brush-data",brush));
+    assert(f.state.advanceCpuCycles(4000) && f.commands.complete(f.state,f.eim,f.memory) == A::ok);
+    auto origin = fill; origin.insert(origin.begin(),{0x41d,0x00000001});
+    assert(f.append(origin,0x200b0200) == A::sideEffect && refused(f,"pattern-brush-data",brush));
+    auto line = fill; line.resize(18); line.insert(line.end(),{0x41d,0,0xc0021500,0x00010001,0x00050005,0x00050005});
+    assert(f.append(line,0x200affe4) == A::sideEffect && refused(f,"pattern-brush",0));
+    auto typed = fill; typed[17] = 0x00030d04;
+    assert(f.append(typed,0x200b0200) == A::sideEffect);
+    // The pattern comes with GMC bit 15 and 4b1 bit 30 clear (200afa74 from 2008a170); either one set stops.
+    auto order = fill; order[15] = 0x55e0b40f;
+    assert(f.append(order,0x200b0200) == A::sideEffect);
+    order = fill; order[17] = 0x40030004;
+    assert(f.append(order,0x200b0200) == A::sideEffect);
+    std::puts("PASS: 8x8 mono pattern fills from a queued or finished upload, f0 and 5a, anchored at the surface origin");
+}
 int main() {
     hostSourceType();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
     stretchStaleGmc(); stretchRatios(); smoothStretch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
+    ropCopies(); maskBlt(); tileBlt(); patternFill();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }

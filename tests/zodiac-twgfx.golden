@@ -75,8 +75,8 @@ exact 36 transparent-blt key-000000: ok
 fast 36 transparent-blt key-000000: ok
 exact 37 transparent-blt key-ff00ff: ok
 fast 37 transparent-blt key-ff00ff: ok
-exact 38 mask-blt 1bpp: refused: unsupported-peripheral (external-input-unavailable) at pc 200ab294, address 16010220
-fast 38 mask-blt 1bpp: refused: unsupported-peripheral (external-input-unavailable) at pc 200ab294, address 16010220
+exact 38 mask-blt 1bpp: ok
+fast 38 mask-blt 1bpp: ok
 exact 39 blend-blt alpha-000000: ok
 fast 39 blend-blt alpha-000000: ok
 exact 40 blend-blt alpha-808080: ok
@@ -121,10 +121,10 @@ exact 59 stretch-blt2 uneven flags-4: ok
 fast 59 stretch-blt2 uneven flags-4: ok
 exact 60 stretch-blt2 uneven flags-5: ok
 fast 60 stretch-blt2 uneven flags-5: ok
-exact 61 tile-blt: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
-fast 61 tile-blt: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
-exact 62 tile-blt aligned-5-3: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
-fast 62 tile-blt aligned-5-3: refused: unsupported-peripheral (external-input-unavailable) at pc 200abd88, address 16010220
+exact 61 tile-blt: ok
+fast 61 tile-blt: ok
+exact 62 tile-blt aligned-5-3: ok
+fast 62 tile-blt aligned-5-3: ok
 exact 63 transform-blt rot-0 mirror-0: ok
 fast 63 transform-blt rot-0 mirror-0: ok
 exact 64 transform-blt rot-0 mirror-1: ok
@@ -225,14 +225,14 @@ exact 111 win-pattern black: ok
 fast 111 win-pattern black: ok
 exact 112 win-pattern white: ok
 fast 112 win-pattern white: ok
-exact 113 win-pattern gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
-fast 113 win-pattern gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+exact 113 win-pattern gray: ok
+fast 113 win-pattern gray: ok
 exact 114 win-pattern custom: ok
 fast 114 win-pattern custom: ok
-exact 115 win-pattern light-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
-fast 115 win-pattern light-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
-exact 116 win-pattern dark-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
-fast 116 win-pattern dark-gray: refused: unsupported-peripheral (unsupported-side-effect) at pc 200b0200, address 16010220, pattern-brush 00000000
+exact 115 win-pattern light-gray: ok
+fast 115 win-pattern light-gray: ok
+exact 116 win-pattern dark-gray: ok
+fast 116 win-pattern dark-gray: ok
 exact 117 win-paint-line paint: ok
 fast 117 win-paint-line paint: ok
 exact 118 win-paint-line invert: ok
@@ -253,8 +253,8 @@ exact 125 win-paint-bitmap 8bpp erase: ok
 fast 125 win-paint-bitmap 8bpp erase: ok
 exact 126 win-paint-bitmap 8bpp mask: ok
 fast 126 win-paint-bitmap 8bpp mask: ok
-exact 127 win-paint-bitmap 8bpp invert: refused: unsupported-peripheral (unsupported-side-effect) at pc 200a9ed4, address 16010220, plain-copy-41b 5532b4df
-fast 127 win-paint-bitmap 8bpp invert: refused: unsupported-peripheral (unsupported-side-effect) at pc 200a9ed4, address 16010220, plain-copy-41b 5532b4df
+exact 127 win-paint-bitmap 8bpp invert: ok
+fast 127 win-paint-bitmap 8bpp invert: ok
 exact 128 win-paint-bitmap 8bpp overlay: ok
 fast 128 win-paint-bitmap 8bpp overlay: ok
 exact 129 win-paint-bitmap 8bpp paint-inverse: ok
