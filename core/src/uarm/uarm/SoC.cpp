@@ -29,6 +29,11 @@ namespace {
 
 void SoC::SetEventClock(uint64_t (*clock)()) { eventClock = clock; }
 
+void SoC::SetFollowCoreClock(bool follow) {
+    followCoreClock = follow;
+    if (cpu) cpuSetJitMemoryCost(cpu, follow);
+}
+
 SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
 SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1, .hostMsec = hostMsecNow()}; }
 

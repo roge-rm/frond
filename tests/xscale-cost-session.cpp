@@ -3,6 +3,8 @@
 // cache, loaded into a new machine and run on: every batch then charges what the run that never saved
 // charges. A session without the cache section (as older Frond versions save) loads with an empty cache
 // and runs. Each batch also stays inside cpuMaxOvershootCycles, and peepholes charge their routines.
+// Fast at Original (cpuSetJitMemoryCost) charges the same copy within 2% of Exact's clocks per pass;
+// Fast without it (Uncapped) charges the table only.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -69,9 +71,26 @@ const std::vector<uint32_t> kProgram = {
     0xeafffff4,  // b outer
 };
 
-Machine makeMachine(bool costMemory) {
+// kProgram with r3 counting the inner loop's passes.
+const std::vector<uint32_t> kCounted = [] {
+    std::vector<uint32_t> p(kProgram.begin(), kProgram.begin() + 17);
+    p.push_back(0xe2833001);  // add r3, r3, #1
+    p.push_back(0xe2522020);  // subs r2, r2, #32
+    p.push_back(0x1afffff8);  // bne inner
+    p.push_back(0xeafffff3);  // b outer
+    return p;
+}();
+
+Machine makeMachine(bool costMemory, bool fast = false, const std::vector<uint32_t>& program = kProgram) {
     unsetenv("FROND_JIT");
-    cpuSetFastEngine(false);
+    if (fast) {
+        setenv("FROND_JIT_HOT", "1", 1);
+        cpuSetJitSync(true);
+    }
+    if (!cpuSetFastEngine(fast)) {
+        printf("FAIL: this core has no Fast engine\n");
+        exit(1);
+    }
     Machine m;
     ArmMem* mem = memInit();
     MemoryBuffer buf{};
@@ -91,7 +110,7 @@ Machine makeMachine(bool costMemory) {
         const uint32_t entry = (s << 20) | 0xc0e;  // section, AP 3, C, B
         memcpy(m.ram + kL1 + 4 * s, &entry, 4);
     }
-    memcpy(m.ram + kCode, kProgram.data(), kProgram.size() * 4);
+    memcpy(m.ram + kCode, program.data(), program.size() * 4);
     for (uint32_t i = 0; i < 0x10000; i += 4) {
         const uint32_t v = i * 2654435761u;
         memcpy(m.ram + 0x200000 + i, &v, 4);
@@ -257,11 +276,39 @@ void testPeepholeRoutines() {
     }
 }
 
+// Clocks per inner pass of kCounted over 3000 batches, after 500 to warm up.
+double clocksPerPass(Machine& m) {
+    for (uint32_t i = 0; i < 500; i++) runBatch(m);
+    const uint32_t from = cpuGetRegisters(m.cpu)[3];
+    uint64_t clocks = 0;
+    for (uint32_t i = 0; i < 3000; i++) clocks += runBatch(m);
+    const uint32_t passes = cpuGetRegisters(m.cpu)[3] - from;
+    return passes ? double(clocks) / passes : 0;
+}
+
+void testFastCharges() {
+    Machine exact = makeMachine(true, false, kCounted);
+    const double e = clocksPerPass(exact);
+    Machine original = makeMachine(true, true, kCounted);
+    cpuSetJitMemoryCost(original.cpu, true);
+    const double o = clocksPerPass(original);
+    Machine uncapped = makeMachine(true, true, kCounted);
+    const double u = clocksPerPass(uncapped);
+    printf("clocks per pass: exact %.2f, fast original %.2f, fast uncapped %.2f\n", e, o, u);
+    check(e > 0 && o > e * 0.98 && o < e * 1.02, "Fast at Original charges what Exact charges");
+    check(u > 0 && u < e * 0.8, "Fast without memory charges is cheaper");
+    check(!memcmp(exact.ram + 0x28a000, original.ram + 0x28a000, 0xc000), "Fast at Original copies the same data");
+    cpuSetFastEngine(false);
+    unsetenv("FROND_JIT_HOT");
+    cpuSetJitSync(false);
+}
+
 }  // namespace
 
 int main() {
     testPeepholeRoutines();
     testSaveLoad();
+    testFastCharges();
     if (failures) {
         printf("%d failures\n", failures);
         return 1;

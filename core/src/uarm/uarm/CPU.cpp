@@ -203,6 +203,9 @@ struct ArmCpu {
     // loop adds them to the count; costClock is every finished batch's clocks, the base of the data cache
     // model's bus time. regionCharge and cacheCosts are in core clocks at costClocks. paceCost is a 68k op.
     bool costMemory;
+    bool costMemoryAsked;  // cpuSetCostModel's memory
+    bool costJitMemory;    // Fast charges memory too (Original speed, cpuSetJitMemoryCost)
+    bool costInJitRun;     // a JIT run is in progress: the data cache model's time adds jitRanNow
     uint8_t costCore;
     uint32_t paceCost;
     uint32_t pendingCharge;
@@ -391,7 +394,10 @@ static __attribute__((noinline)) void cpuPrvCostAccess(struct ArmCpu *cpu, uint3
         const struct ArmMmu *mmu = cpu->memorySystem.mmu;
         const cost::Policy p = cost::policyOf(core, mmu->transTablPA != MMU_DISABLED_TTP, mmu->dcOn, info & 1,
                                               info & 2, info & 4);
-        const uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+        uint64_t now = cpu->costClock + *cpu->cyclesInProgress + cpu->pendingCharge;
+#ifdef FROND_DYNARMIC
+        if (cpu->costInJitRun) now += jitRanNow(cpu->jit);
+#endif
         const cost::CacheEvents e = cost::dataCacheAccessHinted(cpu->dcache, core, va, p, write, now, cpu->dcacheHint);
         if (!(e.fills | e.writebacks | e.buffered | e.uncachedLoads | e.uncachedStores)) return;
         const unsigned k = region == cost::sram ? 1 : region == cost::flash ? 2 : 0;
@@ -1270,13 +1276,13 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         if constexpr (write) {
             const struct HostTlbEntry &e = hostTlb.write[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
             if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
-                if (!jit && cpu->costMemory) cpuPrvCostHostHit<size, true>(cpu, vaddr);
+                if (cpu->costMemory) cpuPrvCostHostHit<size, true>(cpu, vaddr);
                 return ramAccessInline<size, true>(hostTlb.ram, vaddr + uint32_t(e.addend), buf);
             }
         } else {
             const struct HostTlbEntry &e = hostTlb.read[(vaddr >> 12) & (HOST_TLB_SIZE - 1)];
             if (likely(e.key == hostTlbKey(hostTlb.gen, vaddr, priviledged))) {
-                if (!jit && cpu->costMemory) cpuPrvCostHostHit<size, false>(cpu, vaddr);
+                if (cpu->costMemory) cpuPrvCostHostHit<size, false>(cpu, vaddr);
                 cpuPrvHostRead<size>((const uint8_t *)(e.addend + vaddr), buf);
                 return true;
             }
@@ -1306,7 +1312,7 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
                                   MMU_TRANSLATE_RESULT_XSCALE_X(translateResult), cost::pxaRegion(pa));
 #ifndef __EMSCRIPTEN__
         // Before the access, so a device read sees its own charge.
-        if constexpr (!arm920 && !jit) {
+        if constexpr (!arm920) {
             if (cpu->costMemory) {
                 cpuPrvCostAccess(cpu, vaddr, costInfo, write);
                 if constexpr (size == 8) cpuPrvCostAccess(cpu, vaddr + 4, costInfo, write);
@@ -1502,10 +1508,13 @@ uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu) {
         // cpuPrvCycleJit: a run passes its budget by at most L x the largest cost - 1 (every link
         // checks, no block is longer than L instructions, a Thumb pair counting one and costing
         // less than the largest), then a run that stopped for the interpreter runs one more
-        // instruction before the budget check.
+        // instruction before the budget check. With memory charges (Fast at Original) a block's
+        // accesses are charged as they happen and end the run at the next link once they pass what
+        // was left, so the largest cost takes the memory charge too.
         const uint32_t l = jitMaxUnchecked(cpu->jit);
         if (!l) return UINT32_MAX;
-        const uint32_t most = cpu->ic->costOn ? cost::maxInstructionCost(cost::Core(cpu->costCore)) : 1;
+        const uint32_t most = cpu->costMemory ? instruction
+                              : cpu->ic->costOn ? cost::maxInstructionCost(cost::Core(cpu->costCore)) : 1;
         return std::max(l * most - 1 + instruction, interpreter);
     }
 #endif
@@ -1534,18 +1543,39 @@ void cpuSetCostSdramWidth(struct ArmCpu *cpu, bool sdram16) {
     cpuSetCostClocks(cpu, cpu->costClocks.core, cpu->costClocks.bus, cpu->costClocks.memory);
 }
 
-void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
-    cpu->costCore = core;
-    // Fast charges the table only, in its generated code and the instructions it interprets alike, so the
-    // two always agree; the data cache and region charges are Exact's.
+// Exact always charges the data cache and region model. Fast charges it only at Original
+// (cpuSetJitMemoryCost), from its memory callbacks and in the instructions it interprets alike;
+// Uncapped Fast charges the table only.
+static bool cpuPrvCostMemory(const struct ArmCpu *cpu) {
     bool fast = false;
 #ifdef FROND_DYNARMIC
     fast = cpu->jit && !cpu->jitLoopOnly;
 #endif
-    cpu->costMemory = on && memory && !fast && cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
-                      cpu->model != ArmCpuModel::arm920t;
+    return cpu->ic->costOn && cpu->costMemoryAsked && (!fast || cpu->costJitMemory) &&
+           cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU && cpu->model != ArmCpuModel::arm920t;
+}
+
+void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on) {
+    cpu->costJitMemory = on;
+    const bool was = cpu->costMemory;
+    cpu->costMemory = cpuPrvCostMemory(cpu);
+    if (cpu->costMemory && !was) {
+        // The model wasn't kept while off: it starts empty.
+        cost::dataCacheReset(cpu->dcache, cost::Core(cpu->costCore));
+        std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
+    }
+}
+
+bool cpuJitMemoryCost(const struct ArmCpu *cpu) { return cpu->costMemory; }
+
+uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu) { return cpu->pendingCharge; }
+
+void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory) {
+    cpu->costCore = core;
+    cpu->costMemoryAsked = memory;
     cpu->paceCost = on ? cost::paceOpCost(cost::Core(core)) : 20;
     icacheSetCost(cpu->ic, on, core);
+    cpu->costMemory = cpuPrvCostMemory(cpu);
     cost::dataCacheReset(cpu->dcache, cost::Core(core));
     std::memset(cpu->dcacheHint, 0, sizeof(cpu->dcacheHint));
     cpu->costClock = 0;
@@ -5706,6 +5736,15 @@ static FORCE_INLINE int cpuPrvJitIo(ArmCpu *cpu, uint32_t va, unsigned size, voi
     if (e.key != hostTlbKey(t.gen, va, cpu->privileged)) return 0;
     const uint32_t pa = va + e.delta;
     if (pa < e.pa || uint64_t(pa) + size > e.ub) return 0;
+    if (cpu->costMemory) {
+        // Fast at Original: the region charge, before the access as in cpuPrvMemOpExModel. A cached
+        // region needs the page's C and B bits, which only the full path has.
+        const cost::Region region = cost::pxaRegion(pa);
+        if (cost::regionCached(region)) return 0;
+        const uint8_t info = cpuPrvCostInfo(false, false, false, region);
+        cpuPrvCostAccess(cpu, va, info, write);
+        if (size == 8) cpuPrvCostAccess(cpu, va + 4, info, write);
+    }
     *ok = e.aF(e.uD, pa, size, write, buf);
     return cpuPrvJitPageGen(cpu) == gen ? 1 : 2;
 }
@@ -6389,7 +6428,12 @@ static uint32_t cpuPrvCycleJit(struct ArmCpu *cpu, uint32_t cycles) {
         uint32_t cpsr = cpuPrvMaterializeCPSR(cpu);
         int stop;
         const uint32_t runStart = acc;
+        cpu->costInJitRun = true;
         acc += jitRun(cpu->jit, cpu->regs, cpsr, cycles - acc, stop);
+        cpu->costInJitRun = false;
+        // The run's memory charges (Fast at Original).
+        acc += cpu->pendingCharge;
+        cpu->pendingCharge = 0;
         cpu->flags = cpsr & 0xf0000000UL;
         cpu->Q = !!(cpsr & ARM_SR_Q);
         cpu->T = !!(cpsr & ARM_SR_T);

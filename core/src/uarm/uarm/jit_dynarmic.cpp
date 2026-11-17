@@ -193,6 +193,9 @@ constexpr HaltReason kCold = HaltReason::UserDefined4;
 constexpr HaltReason kPrivilege = HaltReason::UserDefined5;
 // A SWI from generated code: the run ends at the vector.
 constexpr HaltReason kSwi = HaltReason::UserDefined6;
+// Memory charges (Fast at Original) used up what was left of the budget: the run ends at the next
+// link, as when the cycles run out.
+constexpr HaltReason kCharged = HaltReason::UserDefined7;
 
 // The instructions the p15 slot runs (jitCp15SlotWord). Each ends its block, so a user
 // mode one can be undone and handed to the interpreter, which raises the undefined
@@ -684,6 +687,16 @@ struct Env final : public A32::UserCallbacks {
         if (cpuJitSlowPath(cpu)) jit->HaltExecution(kSlowPath);
     }
 
+    // Fast at Original (cpuJitMemoryCost): every load and store comes to the callbacks, which
+    // charge the data cache and region model, so the page table is left empty. The charges wait
+    // in the CPU's pendingCharge until the run ends; once they reach what's left of the budget
+    // (as of the last block end), the run ends at the next link.
+    bool memoryCost = false;
+
+    void Charged() {
+        if (int64_t(cpuJitPendingCharge(cpu)) >= jit->TicksRemainingNow()) jit->HaltExecution(kCharged);
+    }
+
     template <typename T>
     T Read(A32::VAddr va) {
         T v{};
@@ -698,6 +711,7 @@ struct Env final : public A32::UserCallbacks {
             }
             if (io == 2) GenChanged(cpuJitPageGen(cpu));
             AfterIo();
+            if (memoryCost) Charged();
             return v;
         }
         // The ARM920T's lean path refuses without setting fsr: that's an exit, not a guest abort.
@@ -708,6 +722,11 @@ struct Env final : public A32::UserCallbacks {
         }
         // Only aligned reads land here for pages the table could hold; fill it.
         CheckGen();
+        if (memoryCost) {
+            AfterIo();
+            Charged();
+            return v;
+        }
         const uint32_t page = va >> 12;
         if (!(*pages)[page]) {
             uint8_t *host = cpuJitReadPage(cpu, va);
@@ -734,6 +753,7 @@ struct Env final : public A32::UserCallbacks {
             }
             if (io == 2) GenChanged(cpuJitPageGen(cpu));
             AfterIo();
+            if (memoryCost) Charged();
             return;
         }
         uint_fast8_t fsr = 0;
@@ -744,6 +764,11 @@ struct Env final : public A32::UserCallbacks {
         // A RAM page the guest may store to in this mode: map it writable. Unaligned stores
         // also land here for pages that already are.
         CheckGen();
+        if (memoryCost) {
+            AfterIo();
+            Charged();
+            return;
+        }
         const uint32_t page = va >> 12;
         uint8_t *const entry = (*pages)[page];
         if (!entry || (uintptr_t(entry) & 1)) {
@@ -1624,6 +1649,10 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
     e.model = jitPrvTickModel(j->cpu);
+    if (const bool m = cpuJitMemoryCost(j->cpu); m != e.memoryCost) {
+        e.memoryCost = m;
+        if (m) e.ClearPages();
+    }
     // ARM920T ticks hold the clocks above bit 32 (TickModel); dynarmic's tick count is signed.
     e.budget = e.model.shift ? std::min<uint64_t>(cycles, INT32_MAX) << e.model.shift : cycles;
     e.ran = 0;
@@ -1632,7 +1661,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     j->running = &e;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
-    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi);
+    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi | kCharged);
     if (e.rewindPc != ~0u) {
         jit.Regs()[15] = e.rewindPc;
         e.rewindPc = ~0u;

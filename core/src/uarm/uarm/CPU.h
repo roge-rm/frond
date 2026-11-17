@@ -175,6 +175,13 @@ bool cpuJitCostCore(const struct ArmCpu *cpu, uint8_t *core);
 // Cost model (xscale_cost.h): on charges core's (cost::Core) table per instruction and a PACE op, memory
 // adds the region and data cache charges (XScale only). Off: 1 per instruction, 20 per PACE op.
 void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory);
+// Fast: the data cache and region charges too (Original speed). Off, Fast charges the table only (Uncapped).
+// Exact always charges them.
+void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on);
+// Whether loads and stores are charged now (Fast: its callbacks take every access then).
+bool cpuJitMemoryCost(const struct ArmCpu *cpu);
+// Memory charges since the batch's count was last brought up to date.
+uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu);
 // The clocks the region and data cache charges are worked out from, in kHz.
 void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz);
 // The SDRAM bus width the data cache charges use: 16 bits (MDCNFG DWID0 set) or 32.

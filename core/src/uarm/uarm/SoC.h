@@ -71,7 +71,8 @@ class SoC {
     // Original speed: a run call whose cyclesPerSecond is at least CoreHz() runs at CoreHz() as it
     // changes, on the instruction that changes it. maxCycles stays in cyclesPerSecond units, and so does
     // what the call returns. A slower cyclesPerSecond (a host that can't keep up) runs at that rate.
-    void SetFollowCoreClock(bool follow) { followCoreClock = follow; }
+    // Fast charges the data cache and region model at Original only (cpuSetJitMemoryCost).
+    void SetFollowCoreClock(bool follow);
     bool FollowsCoreClock() const { return followCoreClock; }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
