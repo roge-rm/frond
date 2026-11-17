@@ -65,6 +65,7 @@
 #include <QtPrintSupport/QPrinter>
 #include <QVBoxLayout>
 #include "DanaCardsDialog.h"
+#include "SecondCardDialog.h"
 #include <functional>
 
 // The Camera list, read again each time it opens so a webcam plugged in later shows up.
@@ -290,6 +291,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     linkedInsert = button(tr("Insert"), "linkedInsert", true);
     linkedRow->addWidget(linkedState); linkedRow->addWidget(linkedInsert); linkedRow->addStretch();
     cardLayout->addLayout(linkedRow);
+    secondCard = button(tr("SD card 2…"), "secondCard", true);
+    cardLayout->addWidget(secondCard);
+    connect(secondCard, &QPushButton::clicked, this, [this] { SecondCardDialog dialog(client, runningDevice, this); dialog.exec(); });
     connect(cardPick, &QPushButton::clicked, this, &MainWindow::pickCard);
     connect(linkedInsert, &QPushButton::clicked, this, [this] {
         const auto slot = frondCards::readSlot(runningMachineDir());
@@ -1188,6 +1192,9 @@ void MainWindow::refresh() {
     printerPanel->setEnabled(running && !stopping);
     irPrint.panel->setEnabled(running && !stopping);
     danaCards->setEnabled(linkedCards && client.available() && !busy && !stopping);
+    const bool second = !frondFirmware::runs68k(currentDevice()) && deviceProfileCardSlotCount5(frondFirmware::profile(currentDevice())) > 1;
+    secondCard->setVisible(second);
+    secondCard->setEnabled(second && running && client.available() && !busy && !stopping);
     const bool linkedStick = linkedCards && deviceProfileLinkedStick5(frondFirmware::profile(currentDevice()));
     stickFiles->setVisible(linkedStick);
     stickFiles->setEnabled(linkedStick && client.available() && !busy && !stopping && !stickDialog);

@@ -325,6 +325,54 @@ class SessionsLayoutTest {
         assertFalse(saveTempName("sd.frondsd.journal-4"))
     }
 
+    // The Zodiac's second SD card is media kind 5 in sd2.frondsd.
+    @Test fun secondSdCardIsKindFive() {
+        val session = v8WithSd(3).also {
+            it[92] = 5
+            val name = "sd2.frondsd".toByteArray(Charsets.US_ASCII).copyOf(32)
+            name.copyInto(it, 96)
+        }
+        val dir = tmp.newFolder("zodiac2")
+        val frond = File(dir, "session.frond").also { it.writeBytes(session) }
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        File(dir, "sd.frondsd").delete()
+        File(dir, "sd2.frondsd").writeBytes(tinyFrondsdV2(3))
+        assertNull(checkImportedSiblings(dir, frond))
+        File(dir, "sd2.frondsd").writeBytes(tinyFrondsdV2(2))
+        assertEquals("That session's card files don't match.", checkImportedSiblings(dir, frond))
+        assertTrue(packableName("sd2.frondsd"))
+        assertTrue(ignoredName("sd2.frondsd.journal-4"))
+        assertEquals(3L to 5L, sdCardOf(frond, second = true))
+        assertEquals(0L to 1L, sdCardOf(frond))
+        assertEquals("sd2.frondsd", sdSettleOf(dir, frond, second = true).sibling)
+    }
+
+    // A copy without the card leaves slot 2's card file out too, and a full copy takes it.
+    @Test fun copyWithoutCardLeavesSecondSlotOut() {
+        val dir = tmp.newFolder("zodiac-copy")
+        File(dir, "session.frond").writeBytes(v8WithSd(3))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3))
+        File(dir, "sd2.frondsd").writeBytes(tinyFrondsdV2(3))
+        val bare = File(tmp.root, "zodiac-bare")
+        assertNull(copyMachine(dir, bare, Long.MAX_VALUE, copyCard = false))
+        assertTrue(File(bare, "session.frond").isFile())
+        assertFalse(File(bare, "sd.frondsd").exists())
+        assertFalse(File(bare, "sd2.frondsd").exists())
+        val full = File(tmp.root, "zodiac-full")
+        assertNull(copyMachine(dir, full, Long.MAX_VALUE, copyCard = true))
+        assertTrue(File(full, "sd.frondsd").isFile() && File(full, "sd2.frondsd").isFile())
+    }
+
+    @Test fun zodiacHasTwoCardSlots() {
+        val zodiac = Device.byId(Device.ZODIAC_ID)!!
+        assertEquals(listOf(0, 2), zodiac.storageSlots.map { it.id })
+        assertEquals(listOf(1, 2), zodiac.storageSlots.map { it.label })
+        assertFalse(zodiac.linkedCards)
+        assertTrue(zodiac.storageSlots[1].families.first().sizes.isNotEmpty())
+    }
+
     // A journal from `from` to from + 1 over a 512-byte card: one record, then the new table.
     private fun journalTo(from: Long, offset: Long, data: ByteArray, newPayload: ByteArray, version: Long = 1): ByteArray {
         val body = "FRONDJNL".toByteArray(Charsets.US_ASCII) + put32(version) + put32(0) + put64(512) + put64(from) +

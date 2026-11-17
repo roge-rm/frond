@@ -317,6 +317,7 @@ class MainWindow : public QMainWindow {
     bool holdKnown{false}, holdOn{false};
     QLabel *sdStatus, *storageHeading;
     QPushButton* danaCards;
+    QPushButton* secondCard;
     // Files… on a 68k device's linked Memory Stick (the T415): eject, take it out of the core, save,
     // edit its dana-cards/ file in place, then put it back in (ejected again if it was out).
     QPushButton* stickFiles;

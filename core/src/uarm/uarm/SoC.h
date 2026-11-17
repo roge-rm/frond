@@ -129,6 +129,12 @@ class SoC {
     bool SdRemount();
     void SdEject();
     bool SdInserted() { return cardInserted; }
+    // A second SD slot, the Zodiac's only, with its card in sdCardStore(1). Sd2Insert puts that card
+    // in and is false when it can't go in.
+    virtual bool HasSecondSdSlot() const { return false; }
+    virtual bool Sd2Insert() { return false; }
+    virtual void Sd2Eject() {}
+    virtual bool Sd2Inserted() const { return false; }
 
     virtual void DumpMMU() = 0;
 

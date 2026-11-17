@@ -77,7 +77,10 @@ class DeviceDataTest(unittest.TestCase):
         wireless = next(p for p in profiles if p['name'] == 'alphasmart-dana-wireless')
         self.assertEqual(wireless['storage_slots'], dana['storage_slots'])
         for p in profiles:
-            if p is not dana and p is not wireless:
+            if p['name'] == 'tapwave-zodiac-2':
+                # The Zodiac's second slot is native: no linked card files.
+                self.assertEqual([s['id'] for s in p['storage_slots']], [0, 2])
+            elif p is not dana and p is not wireless:
                 self.assertNotIn(2, [s['id'] for s in p['storage_slots']])
 
     def test_dana_frontend_uses_independent_storage_metadata(self):

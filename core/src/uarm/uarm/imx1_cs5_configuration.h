@@ -223,6 +223,18 @@ class Imx1Cs5Configuration {
     bool setAcquisitionMode1Input(uint32_t sample) { return acquisition.setMode1Input(sample); }
     const Imx1GraphicsAcquisition& acquisitionState() const { return acquisition; }
     const Imx1GraphicsSd& sdState() const { return sd; }
+    Imx1GraphicsSd& sdSlot() { return sd; }
+    // Slot 2's card in or out; an event the SD block latches raises the chip's SD interrupt.
+    void attachSdCard(VSD* card) { if (sd.attachCard(card)) interrupts.raiseSd(); }
+    // After a state load, see reattachCard; a latched event raises the chip's SD interrupt.
+    bool reattachSdCard(VSD* card, const std::vector<uint8_t>* resume) {
+        bool event = false;
+        const bool resumed = sd.reattachCard(card, resume, &event);
+        if (event) interrupts.raiseSd();
+        return resumed;
+    }
+    // The card work the SD block left, run on the committed configuration only.
+    void runSdCardWork() { if (sd.cardWorkPending()) sd.runCardWork(); }
     const Imx1GraphicsClocks& clockState() const { return clocks; }
     Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
     bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && (interfaceControl & ~0xe00u) == 0x0c000000; }
@@ -250,7 +262,7 @@ class Imx1Cs5Configuration {
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
-        if (virtualProfile() && Imx1GraphicsSd::owns(address)) {
+        if (virtualProfile() && (Imx1GraphicsSd::owns(address) || Imx1GraphicsSd::ownsHandlerRead(pc, address))) {
             if (!memoryReady(eim) || !clocks.programmed()) return Imx1BootstrapAccess::sequence;
             const auto window = windows.aperture2();
             if (address >= 0x16200000 && (!window.known || address - 0x16000000 < window.first ||
@@ -416,7 +428,9 @@ class Imx1Cs5Configuration {
                pc == 0x204d218e || pc == 0x204d22f4 || pc == 0x204d2314 || pc == 0x204d231c ||
                pc == 0x204d3652 || pc == 0x204d2742 || pc == 0x204d247e || pc == 0x204d2522 ||
                pc == 0x204d2534 || pc == 0x204d2574 || pc == 0x204d2586 || pc == 0x204d277a ||
-               pc == 0x204d22ae)));
+               pc == 0x204d22ae ||
+               // The SD driver's bus flush reads anywhere in it once slot 2 has had a card.
+               (sd.cardUsed() && pc >= 0x204d2140 && pc < 0x204d3b20))));
         if (!virtualProfile() || write || (!controllerIdentity &&
             pc != (address == 0x16010000 ? 0x200bac00u : 0x200bac28u)))
             return Imx1BootstrapAccess::externalInput;
@@ -538,7 +552,7 @@ class Imx1Cs5Configuration {
     uint8_t defaults = 0, interfaceMode = 0;
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Cs5Configuration) == 5136, "update state() and stateVersion");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes == 5136, "update state() and stateVersion");
 #endif
 
 struct Imx1ProbeCs5ConfigurationEvent {

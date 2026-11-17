@@ -190,6 +190,10 @@ While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card s
 
 SDHC isn't supported, so 2 GB is the top. A new 2 GB card is 1886 MB, like a real one, and Palm OS formats it. New cards are blank, so let Palm OS format them. On the TG50 a blank stick gets Palm OS's Unrecognized Format prompt, and a Pro stick needs a saved machine.
 
+### Zodiac second card
+
+The Zodiac has two SD slots. Slot 1 works like the other devices' card. Slot 2 has its own SD card 2 button on desktop and SD card 2 rows on Android, with New card, Insert image, Eject, Insert and Export image. Its card stays in the machine and is saved and copied with it, as `sd2.frondsd`. It can't go in the Cards drawer yet. Sizes are 32 MB to 2 GB.
+
 ### Dana cards
 
 While Dana runs, open Cards 1 and 2 on desktop, or the Card 1 and Card 2 rows on

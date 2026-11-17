@@ -441,6 +441,27 @@ class SessionStoreTest : public QObject {
         QVERIFY(ignoredName("nand.frondnand.journal-3") && ignoredName(".x.frondnand.tmp-abc"));
         QVERIFY(!packableName("nand.frondnand.journal-3.full"));
     }
+    // A Zodiac session's second SD card (kind 5, sd2.frondsd) imports with its file, and only with it.
+    void secondSdCard() {
+        const auto outside = directory.filePath("sd2");
+        auto session = v8WithSd(3);
+        session.replace(92, 4, QByteArray("\x05\0\0\0", 4));
+        session.replace(96, 32, QByteArray("sd2.frondsd").leftJustified(32, '\0', true));
+        write(outside + "/a/a.frond", session);
+        write(outside + "/a/sd2.frondsd", tinyFrondsdV2(3));
+        QString name;
+        QVERIFY(importFile(folder(), outside + "/a", &name).isEmpty());
+        write(outside + "/b/b.frond", session);
+        write(outside + "/b/sd.frondsd", tinyFrondsdV2(3));
+        QVERIFY(!importFile(folder(), outside + "/b").isEmpty());
+        write(outside + "/c/c.frond", session);
+        QVERIFY(!importFile(folder(), outside + "/c").isEmpty());
+        QVERIFY(packableName("sd2.frondsd") && machineFileName("sd2.frondsd"));
+        QVERIFY(ignoredName("sd2.frondsd.journal-3") && ignoredName(".x.frondsd.tmp-abc"));
+        QVERIFY(!packableName("sd2.frondsd.journal-3.full"));
+        QCOMPARE(sdGenerationOf(outside + "/a/a.frond", nullptr, false, true), quint64(3));
+        QCOMPARE(sdGenerationOf(outside + "/a/a.frond"), quint64(0));
+    }
     // An export carries the NAND packed; importing it unpacks and checks it.
     void exportPacksNand() {
         const auto outside = directory.filePath("packed");

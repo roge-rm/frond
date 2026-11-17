@@ -251,6 +251,7 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
             )
         }
     }
+    if (device.storageSlots.size > 1) SecondCardRows(model)
     Header("Internal", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
     SheetAction("Files…", R.drawable.ic_folder) { model.openInternal() }
     if (confirmEject || confirmFiles) CardEjectDialog(model, confirmFiles) { confirmEject = false; confirmFiles = false }
@@ -347,3 +348,67 @@ private fun ConnItem(title: String, usable: Boolean, text: String?, onClick: () 
     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
     modifier = if (usable) Modifier.clickableRow(onClick = onClick) else Modifier,
 )
+
+// The Zodiac's second SD slot, the same rows as the first through the core's sd2- commands.
+@Composable
+private fun SecondCardRows(model: RunningModel) {
+    var choosingSize by remember { mutableStateOf(false) }
+    var confirmEject by remember { mutableStateOf(false) }
+    val insertImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.job("Inserting", "Couldn't insert the card", cancellable = true) { it.secondInsert(uri) }
+    }
+    val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) model.job("Copying", "Couldn't export the image", cancellable = true) {
+            it.secondExport(uri)
+            model.note = "Card image exported"
+        }
+    }
+    val state = model.secondState
+    Header("SD card 2", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    ListItem(
+        headlineContent = { Text(when (state) { SdCard.State.UNKNOWN -> "Not known"; SdCard.State.NONE -> "No card"; else -> "SD card" }) },
+        supportingContent = if (state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
+        leadingContent = { Marker(if (state == SdCard.State.INSERTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+    when (state) {
+        SdCard.State.NONE -> {
+            SheetAction("New card", R.drawable.ic_card_in) { choosingSize = true }
+            SheetAction("Insert image", R.drawable.ic_card_in) { insertImage.launch(arrayOf("*/*")) }
+        }
+        SdCard.State.INSERTED -> SheetAction("Eject", R.drawable.ic_card_ejected) { confirmEject = true }
+        SdCard.State.EJECTED -> {
+            SheetAction("Insert", R.drawable.ic_card_in) { model.job("Inserting", "Couldn't insert the card") { it.secondReinsert() } }
+            SheetAction("Export image", R.drawable.ic_export) { saveImage.launch("SD card 2.img") }
+        }
+        SdCard.State.UNKNOWN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
+    }
+    if (choosingSize) {
+        val sizes = model.device.storageSlots.getOrNull(1)?.families?.firstOrNull()?.sizes.orEmpty()
+        AlertDialog(
+            onDismissRequest = { choosingSize = false },
+            title = { Text("New card") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    for (size in sizes) TextButton(onClick = {
+                        choosingSize = false
+                        model.job("Making the card", "Couldn't make the card", cancellable = true) { it.secondCreate(size) }
+                    }) { Text("$size MB") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosingSize = false }) { Text("Cancel") } },
+        )
+    }
+    if (confirmEject) AlertDialog(
+        onDismissRequest = { confirmEject = false },
+        title = { Text("Eject the card?") },
+        text = { Text("Close any files open on the Palm first.") },
+        confirmButton = {
+            TextButton(onClick = {
+                confirmEject = false
+                model.job("Ejecting", "Couldn't eject the card") { it.secondEject() }
+            }) { Text("Eject") }
+        },
+        dismissButton = { TextButton(onClick = { confirmEject = false }) { Text("Cancel") } },
+    )
+}

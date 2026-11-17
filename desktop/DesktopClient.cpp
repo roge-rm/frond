@@ -89,7 +89,7 @@ bool DesktopClient::requestBackground(const QString& command) {
     return true;
 }
 bool DesktopClient::cancelFiles() {
-    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
+    if (!socket || !QStringList({"sd-create", "sd-insert", "sd-export", "sd2-create", "sd2-insert", "sd2-export", "ms-create", "ms-insert", "ms-export"}).contains(pending)) return false;
     const auto line = QByteArray("0\tcancel-files\t") + QByteArray::number(serial).toHex() + '\n';
     return socket->write(line) == line.size();
 }
