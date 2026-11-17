@@ -893,10 +893,11 @@ internal const val COPY_PART = ".copy.part"
 // message, or null; `dest` is removed on any failure or cancel (COPY_CANCELLED). `free` is the room left on the disk.
 internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean = true, cancelled: () -> Boolean = { false }): String? {
     if (dest.exists()) return "Couldn't duplicate the session."
-    val settles = listOfNotNull(if (copyCard) sdSettleOf(from) else null, sdSettleOf(from, nand = true), sdSettleOf(from, second = true))
+    val settles = listOfNotNull(if (copyCard) sdSettleOf(from) else null, sdSettleOf(from, nand = true),
+        if (copyCard) sdSettleOf(from, second = true) else null)
     // slot.json is written by the duplicate; card files only when the card is copied.
     val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" &&
-        (copyCard || it.name !in Cards.cardFiles) }.orEmpty()
+        (copyCard || (it.name !in Cards.cardFiles && it.name != "sd2.frondsd")) }.orEmpty()
     val frond = sessionFile(from)
     val entries = (files.map { file ->
         val source = settles.firstOrNull { it.full != null && file.name == it.sibling }?.full ?: file

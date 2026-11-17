@@ -349,6 +349,22 @@ class SessionsLayoutTest {
         assertEquals("sd2.frondsd", sdSettleOf(dir, frond, second = true).sibling)
     }
 
+    // A copy without the card leaves slot 2's card file out too, and a full copy takes it.
+    @Test fun copyWithoutCardLeavesSecondSlotOut() {
+        val dir = tmp.newFolder("zodiac-copy")
+        File(dir, "session.frond").writeBytes(v8WithSd(3))
+        File(dir, "sd.frondsd").writeBytes(tinyFrondsdV2(3))
+        File(dir, "sd2.frondsd").writeBytes(tinyFrondsdV2(3))
+        val bare = File(tmp.root, "zodiac-bare")
+        assertNull(copyMachine(dir, bare, Long.MAX_VALUE, copyCard = false))
+        assertTrue(File(bare, "session.frond").isFile())
+        assertFalse(File(bare, "sd.frondsd").exists())
+        assertFalse(File(bare, "sd2.frondsd").exists())
+        val full = File(tmp.root, "zodiac-full")
+        assertNull(copyMachine(dir, full, Long.MAX_VALUE, copyCard = true))
+        assertTrue(File(full, "sd.frondsd").isFile() && File(full, "sd2.frondsd").isFile())
+    }
+
     @Test fun zodiacHasTwoCardSlots() {
         val zodiac = Device.byId(Device.ZODIAC_ID)!!
         assertEquals(listOf(0, 2), zodiac.storageSlots.map { it.id })

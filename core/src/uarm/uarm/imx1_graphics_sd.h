@@ -100,17 +100,26 @@ class Imx1GraphicsSd {
         return true;
     }
     // After a state load: the card in the slot now, with the loaded card section's card bytes (resume) when
-    // the state had one. A card that takes them on carries on; otherwise the transfer and response under
-    // way are dropped and the detect input follows the card, with no event. Returns true when it carried on.
-    bool reattachCard(VSD* in, const std::vector<uint8_t>* resume) {
+    // the state had one. A card that takes them on carries on. Otherwise the transfer and response under
+    // way are dropped with an error the driver sees (status2 bit 15 and status1 bit 2, as the card going
+    // does), and a change of the detect input latches its event like attachCard. Returns true when it
+    // carried on; event, when given, is set when the change latches an event (raise the chip's SD interrupt).
+    bool reattachCard(VSD* in, const std::vector<uint8_t>* resume, bool* event = nullptr) {
+        if (event) *event = false;
         if (in) attachPointers(in);
         card.card = in;
         if (in && resume && card.present && card.load(in, resume->data(), resume->size())) return true;
+        const bool was = card.present;
         card.present = in != nullptr;
         if (in) card.used = true;
         if (card.phase != phaseNone || card.work != workNone) {
-            card.phase = phaseNone; card.work = workNone; card.blockReady = card.stopping = false;
-            card.dataRemaining = 0; card.word = 0; card.blocksLeft = 0;
+            dataError();
+            status1 |= 4;
+            card.work = workNone;
+        }
+        if (was != card.present && cardEventsKnown() && !resetHeld) {
+            const uint32_t bit = card.present ? 0x10 : 0x08;
+            if (!(interruptMask & bit)) { status1 |= bit; if (event) *event = true; }
         }
         return false;
     }

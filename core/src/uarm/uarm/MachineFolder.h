@@ -343,8 +343,9 @@ inline SiblingStatus checkSdSibling(const std::filesystem::path& path, const Med
     return checkSdPayload(path, info, table);
 }
 
+// `loneSd2` allows a second SD card file the saved cards don't list: the card was taken out and stays for sd2-put-in.
 inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const std::vector<Media>& cards,
-                                   bool full = false) {
+                                   bool full = false, bool loneSd2 = false) {
     bool expectSd = false, expectSd2 = false, expectMs = false, expectMsPro = false, expectNand = false;
     for (const auto& card : cards) {
         if (!validMedia(card)) return SiblingStatus::mismatch;
@@ -386,7 +387,7 @@ inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const st
     }
     std::error_code ec;
     if (!expectSd && std::filesystem::is_regular_file(folder / sdSibling, ec)) return SiblingStatus::extra;
-    if (!expectSd2 && std::filesystem::is_regular_file(folder / sd2Sibling, ec)) return SiblingStatus::extra;
+    if (!expectSd2 && !loneSd2 && std::filesystem::is_regular_file(folder / sd2Sibling, ec)) return SiblingStatus::extra;
     if (!expectMs && std::filesystem::is_regular_file(folder / msSibling, ec)) return SiblingStatus::extra;
     if (!expectMsPro && std::filesystem::is_regular_file(folder / msProSibling, ec)) return SiblingStatus::extra;
     if (!expectNand && std::filesystem::is_regular_file(folder / nandSibling, ec)) return SiblingStatus::extra;

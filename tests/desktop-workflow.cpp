@@ -6114,11 +6114,17 @@ for line in s.makefile('rb'):
         QVERIFY(frondCards::launchArguments(cardsSessions(), copyDir).join(' ').contains("--card-identity " + copy.identity.toHex()));
         QCOMPARE(digest(copyDir + "/sd.frondsd"), digest(a + "/sd.frondsd"));
         QCOMPARE(QFile::permissions(frondSessions::sessionFrondIn(copyDir)) & 0x7077, privateMode);
-        // No card.
+        // No card: a Zodiac's slot 2 file stays out of the copy too.
+        {
+            QFile second(a + "/sd2.frondsd");
+            QVERIFY(second.open(QIODevice::WriteOnly) && second.write(QByteArray(4096, 's')) > 0);
+        }
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::none).isEmpty());
+        QVERIFY(!QFileInfo::exists(cardsSessions() + '/' + name + "/sd2.frondsd"));
         auto slot = frondCards::readSlot(cardsSessions() + '/' + name);
         QVERIFY(slot.present && slot.card.isEmpty() && slot.link.isEmpty() && slot.swap);
         QVERIFY(frondCards::cardFileIn(cardsSessions() + '/' + name).isEmpty());
+        QVERIFY(QFile::remove(a + "/sd2.frondsd"));
         // Link: nothing copied, both linked; the original keeps holding it until reconcile frees it.
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::link).isEmpty());
         const auto linked = cardsSessions() + '/' + name;

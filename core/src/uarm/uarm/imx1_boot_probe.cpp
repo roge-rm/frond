@@ -3287,7 +3287,7 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     // Slot 2's card stays in, carrying on from the SD2 section when it takes it.
     VSD* const graphicsSdCard = p->cs5Configuration.sdState().attachedCard();
     p->cs5Configuration = std::move(*staged.graphics);
-    info.graphicsSdResumed = p->cs5Configuration.sdSlot().reattachCard(
+    info.graphicsSdResumed = p->cs5Configuration.reattachSdCard(
         graphicsSdCard, info.graphicsSdSection ? &staged.graphicsSdCard : nullptr);
     p->graphicsCommands = std::move(*staged.commands);
     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);

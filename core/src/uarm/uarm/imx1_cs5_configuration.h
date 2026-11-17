@@ -226,6 +226,13 @@ class Imx1Cs5Configuration {
     Imx1GraphicsSd& sdSlot() { return sd; }
     // Slot 2's card in or out; an event the SD block latches raises the chip's SD interrupt.
     void attachSdCard(VSD* card) { if (sd.attachCard(card)) interrupts.raiseSd(); }
+    // After a state load, see reattachCard; a latched event raises the chip's SD interrupt.
+    bool reattachSdCard(VSD* card, const std::vector<uint8_t>* resume) {
+        bool event = false;
+        const bool resumed = sd.reattachCard(card, resume, &event);
+        if (event) interrupts.raiseSd();
+        return resumed;
+    }
     // The card work the SD block left, run on the committed configuration only.
     void runSdCardWork() { if (sd.cardWorkPending()) sd.runCardWork(); }
     const Imx1GraphicsClocks& clockState() const { return clocks; }

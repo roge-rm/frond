@@ -850,6 +850,8 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
         }
         swapped = true;
         if (!present) continue;
+        // A card file with no saved card there was taken out: the slot loads empty and sd2-put-in brings it back.
+        if (slot == 2 && !saved) continue;
         if (slot == 2) {
             std::cerr << "the second SD card file changed while the machine was off; put it in with sd2-put-in" << std::endl;
             return false;
@@ -896,7 +898,7 @@ inline bool loadV7Bytes(const uint8_t* data, size_t size, const std::filesystem:
     if (!parseFolderSession(data, size, parsed) || !unpackNand(folder, folder, parsed.media)) return false;
     if (swap) {
         if (!resolveCardSwap(folder, parsed, *swap) ||
-            frondMachine::checkSiblings(folder, parsed.media, full) != frondMachine::SiblingStatus::ok)
+            frondMachine::checkSiblings(folder, parsed.media, full, true) != frondMachine::SiblingStatus::ok)
             return false;
         out = std::move(parsed);
         return true;

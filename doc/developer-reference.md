@@ -205,6 +205,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | `mount IMAGE` | Insert an SD card image. The built-in help says "Unmount SD card." |
 | `sd-take-out`, `ms-take-out` | Leave the ejected card or stick settled in the machine folder's card file and empty the slot. Prints its identity and `protected` or `writable`. |
 | `sd-put-in IDENTITY [protected\|writable]`, `ms-put-in ...` | Insert the card file in the machine folder as a new card with that identity. |
+| `sd2-take-out`, `sd2-put-in IDENTITY [protected\|writable]` | The same for the Zodiac's second SD slot. |
 | `unmount` | Eject the SD card. |
 | `reset` | Soft reset. |
 | `reset-no-ext` | Reset with Up held, so extensions don't load. |
@@ -331,6 +332,7 @@ The Zire 72 camera starts on the test pattern each run and goes back to it on a 
 | `sd-export` | file (card must be ejected) | `exported` |
 | `sd-take-out`, `ms-take-out` | | `taken-out`: `IDENTITY protected\|writable`. The ejected card is settled in the machine folder's card file and the slot is empty, so the launcher can move the file |
 | `sd-put-in`, `ms-put-in` | `IDENTITY` (64 hex digits), then `protected` or `writable` | `inserted`: the card file now in the machine folder goes in as a new card |
+| `sd2-state`, `sd2-create`, `sd2-insert`, `sd2-eject`, `sd2-reinsert`, `sd2-export`, `sd2-take-out`, `sd2-put-in` | As the `sd-` ones | The same replies for the Zodiac's second SD slot. `sd2-put-in` takes the same `IDENTITY` and `protected` or `writable`. |
 | `ms-state` | | `card`: `none`, `inserted` or `ejected` |
 | `ms-type` | | `type`: `none`, `classic MB` or `pro MiB` |
 | `ms-protection` | | `protection`: `read-only` or `writable` |
@@ -880,6 +882,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
 | `BENCH_ZODIAC_READY_SKIP` | `0` makes `benchmark-replay` run the YMF768 ready wait's tries one by one on Fast. |
+| `BENCH_ZODIAC_SD2` | An SD image `benchmark-replay` puts in the Zodiac's second slot from the start, in memory. The run's end lists the sectors that differ from the file on stderr. |
 | `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS. |
 | `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty), screen on and off times, and the chip registers at the end. |
 | `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
@@ -1059,7 +1062,8 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-graphics-a4` | Graphics A4 copy packets, with private files from `FROND_ZODIAC_A4_*`. Outside `make test`. |
 | `test-zodiac-graphics-packed-mono` | Packed monochrome graphics through the probe. Outside `make test`. |
 | `test-zodiac-graphics-plain-copy` | Plain graphics copy packets, the stretch blit at every ratio, line packets and the backlight word with drawing queued, with private files from `FROND_ZODIAC_PLAIN_*`. Outside `make test`. |
-| `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it. Outside `make test`. |
+| `test-zodiac-graphics-sd` | The SD slot as the graphics side sees it, with a card: detect, init, PIO reads and writes, errors, and save and load mid-transfer. Outside `make test`. |
+| `test-zodiac-session-cards` | A Zodiac session with a card in each slot saves and loads with both, with slot 2 ejected, with one card, and after slot 2's card was taken out. Outside `make test`. |
 | `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
 | `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |
 | `test-zodiac-wake-fast` | Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try; `--exact` against Exact too. Needs the Zodiac ROM in `FROND_DEVICE_IMAGES`. Outside `make test`. |

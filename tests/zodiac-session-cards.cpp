@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "CardSwap.h"
 #include "MachineSession.h"
 #include "SessionIo.h"
 #include "sdcard.h"
@@ -54,7 +55,8 @@ uint8_t firstByte(SdCardStore& store, uint32_t sector) {
 }
 
 // As the session start does it: the folder's cards opened, slot 2's card put in, then the state loaded.
-void startSession(SocIMX1& soc, const fs::path& folder, frondSession::Contents& contents) {
+void startSession(SocIMX1& soc, const fs::path& folder, frondSession::Contents& contents,
+                  const frondSession::CardSwap* swap = nullptr) {
     soc.SdEject();
     soc.Sd2Eject();
     run(soc);
@@ -62,7 +64,7 @@ void startSession(SocIMX1& soc, const fs::path& folder, frondSession::Contents& 
     sdCardStore(1).reset();
     frondNative::slotCards() = {};
     fs::path loaded;
-    assert(frondSession::loadPath(folder, contents, loaded));
+    assert(frondSession::loadPath(folder, contents, loaded, frondSession::msPhysicalBytes, {}, swap));
     assert(frondNative::attachFolderMedia(contents, loaded));
     bool secondIn = false;
     for (const auto& media : contents.media)
@@ -136,6 +138,27 @@ int main() {
     assert(contents.media.size() == 1 && !second.initialized() && !soc->Sd2Inserted() && !soc->SecondCardAttached());
     assert(soc->SdInserted() && !soc->Halted());
     std::puts("PASS: a session with one card loads with slot 2 empty");
+
+    // Slot 2's card taken out, then saved: sd2.frondsd stays in the folder and the next start loads with slot 2 empty.
+    sdCardInitializeWithBytes(card(0x10), "11111111111111111111111111111111");
+    second.initializeWithBytes(card(0x80), "22222222222222222222222222222222");
+    soc->SdInsert();
+    assert(soc->Sd2Insert());
+    run(*soc);
+    const auto taken = root / "taken";
+    fs::create_directories(taken);
+    assert(frondNative::saveMachine(taken / "taken.frond", *soc));
+    soc->Sd2Eject();
+    run(*soc);
+    frondNative::CardIdentity takenId{};
+    assert(frondNative::takeOutFileCard(taken, frondMachine::kindSd2, false, takenId).ok);
+    assert(frondNative::saveMachine(taken / "taken.frond", *soc));
+    assert(fs::is_regular_file(taken / frondMachine::sd2Sibling));
+    const frondSession::CardSwap swap;
+    startSession(*soc, taken, contents, &swap);
+    run(*soc);
+    assert(contents.media.size() == 1 && !second.initialized() && !soc->Sd2Inserted() && soc->SdInserted() && !soc->Halted());
+    std::puts("PASS: a session saved after slot 2's card was taken out loads with slot 2 empty");
     fs::remove_all(root);
     return 0;
 }

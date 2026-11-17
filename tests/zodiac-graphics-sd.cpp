@@ -360,6 +360,29 @@ static void cardSlot() {
     assert(writer.attachCard(nullptr));
     assert(get(writer,0x204d23c2,0x1620203c,2) & 0x8000);
     waitMultiEnd(writer);
+    // Saved mid-PIO-read, loaded with the card refused (none, or bytes it won't take): the driver sees an error.
+    {
+        Imx1GraphicsSd r; initialisation(r); eventsOn(r);
+        assert(r.attachCard(card));
+        initCard(r);
+        assert(cardCommand(r,0x5c11,3 << 9,1) == 0x80);
+        assert(waitBlock(r,0x100));
+        std::vector<uint8_t> bytes, cardBytes;
+        r.saveCard(cardBytes);
+        StateWriter w(bytes);
+        r.state(w); r.stateCard(w); w.DoVector(cardBytes, 1u << 20);
+        for (int mode = 0; mode < 2; ++mode) {
+            Imx1GraphicsSd l;
+            std::vector<uint8_t> loadedCard;
+            StateReader rd(bytes.data(), bytes.size());
+            l.state(rd); l.stateCard(rd); rd.DoVector(loadedCard, 1u << 20);
+            bool event = false;
+            if (mode == 0) assert(!l.reattachCard(nullptr, &loadedCard, &event) && event && !l.cardPresent());
+            else { loadedCard.resize(loadedCard.size() / 2); assert(!l.reattachCard(card, &loadedCard, &event)); }
+            assert(get(l,0x204d21a2,0x16202038,2) & 4);
+            assert(get(l,0x204d23c2,0x1620203c,2) & 0x8000);
+        }
+    }
     puts("PASS: slot 2 card detect and its interrupt, SD init and identify, PIO single and multi-block read and write, errors, save and load mid-transfer");
 }
 

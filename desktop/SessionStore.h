@@ -1105,9 +1105,11 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         if (!copyCard) settle = {};
         nandSettle = sdSettleOf(fromDir, info.path, true);
         sd2Settle = sdSettleOf(fromDir, info.path, false, true);
+        // Without the card, slot 2's card file stays out too; the copy loads as a swap with slot 2 empty.
+        if (!copyCard) sd2Settle = {};
         for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
             if (!packableName(entry.fileName()) || entry.fileName() == "slot.json") continue;
-            if (frondCards::cardFiles.contains(entry.fileName()) && !copyCard) continue;
+            if ((frondCards::cardFiles.contains(entry.fileName()) || entry.fileName() == "sd2.frondsd") && !copyCard) continue;
             auto source = entry.absoluteFilePath();
             if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
             if (!nandSettle.full.isEmpty() && entry.fileName() == nandSettle.sibling) source = nandSettle.full;
