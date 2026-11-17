@@ -55,45 +55,47 @@ constexpr IdleLoop kIdleLoops[] = {
     {IdleLoopKind::tx, kIdleLoopTx, sizeof(kIdleLoopTx) / 4, 0x66c0, 0x4c, 11},
 };
 
-// What a pass that goes straight to the body costs: its head instructions (each with whether its
-// condition passes), then every word from body to the end and the window's, all passing. The head
-// depends on registers a skipped pass doesn't change. Zire 72: r7 (the threshold) and r6 against the
-// counter c, then r10. T|X: c against 0x27800 and 162500, then r4. Every head here goes to the body.
-// on: the cost model's table for core, otherwise 1 an instruction. Returns 0 for a head that doesn't
-// go to the body.
-inline uint32_t idlePassCost(const IdleLoop &l, uint32_t c, const uint32_t *r, bool on, cost::Core core) {
+// A pass that goes straight to the body runs its head instructions (each with whether its condition
+// passes), then every word from body to the end and the window's, all passing. The head depends on
+// registers a skipped pass doesn't change. Zire 72: r7 (the threshold) and r6 against the counter c,
+// then r10. T|X: c against 0x27800 and 162500, then r4. Each loop's head has three such forms; this
+// gives which one (0 to 2) the registers and counter take, or -1 for a head that doesn't go to the body.
+constexpr unsigned kIdleHeadVariants = 3;
+
+inline int idleHeadVariant(const IdleLoop &l, uint32_t c, const uint32_t *r) {
+    if (l.kind == IdleLoopKind::zire72) {
+        // cmp r7, r0; bls 4; cmp r6, r0; bne body; 4: cmp r10, #0; bne body
+        if (r[7] <= c) return r[10] ? 0 : -1;
+        if (r[6] != c) return 1;
+        return r[10] ? 2 : -1;
+    }
+    // ldr r0, [r5]; subs r12, r0, #0x27800; subscs r12, r12, #0x2c4; cmpcs r4, #0; bne body
+    const bool cs = c >= 0x27800, past = c >= 162500;
+    if (past) return r[4] ? 2 : -1;
+    return cs ? 1 : 0;
+}
+
+// What a pass in head form v (idleHeadVariant) costs. on: the cost model's table for core,
+// otherwise 1 an instruction.
+inline uint32_t idleVariantCost(const IdleLoop &l, int v, bool on, cost::Core core) {
     struct Step {
         uint8_t word;
         bool passes;
     };
-    Step head[6];
-    unsigned n = 0;
-    if (l.kind == IdleLoopKind::zire72) {
-        // cmp r7, r0; bls 4; cmp r6, r0; bne body; 4: cmp r10, #0; bne body
-        head[n++] = {0, true};
-        const bool ls = r[7] <= c;
-        head[n++] = {1, ls};
-        bool body = false;
-        if (!ls) {
-            body = r[6] != c;
-            head[n++] = {2, true};
-            head[n++] = {3, body};
-        }
-        if (!body) {
-            if (!r[10]) return 0;
-            head[n++] = {4, true};
-            head[n++] = {5, true};
-        }
-    } else {
-        // ldr r0, [r5]; subs r12, r0, #0x27800; subscs r12, r12, #0x2c4; cmpcs r4, #0; bne body
-        const bool cs = c >= 0x27800, past = c >= 162500;
-        if (past && !r[4]) return 0;
-        head[n++] = {0, true};
-        head[n++] = {1, true};
-        head[n++] = {2, cs};
-        head[n++] = {3, past};
-        head[n++] = {4, true};
-    }
+    static constexpr Step kZire[3][6] = {
+        {{0, true}, {1, true}, {4, true}, {5, true}},
+        {{0, true}, {1, false}, {2, true}, {3, true}},
+        {{0, true}, {1, false}, {2, true}, {3, false}, {4, true}, {5, true}},
+    };
+    static constexpr unsigned kZireCount[3] = {4, 4, 6};
+    static constexpr Step kTx[3][5] = {
+        {{0, true}, {1, true}, {2, false}, {3, false}, {4, true}},
+        {{0, true}, {1, true}, {2, true}, {3, false}, {4, true}},
+        {{0, true}, {1, true}, {2, true}, {3, true}, {4, true}},
+    };
+    const bool zire = l.kind == IdleLoopKind::zire72;
+    const Step *head = zire ? kZire[v] : kTx[v];
+    const unsigned n = zire ? kZireCount[v] : 5;
     auto charge = [&](uint32_t w, bool passes) -> uint32_t {
         if (!on) return 1;
         return passes ? cost::armCost(w, core) : cost::conditionFailedCost(core);
@@ -103,6 +105,12 @@ inline uint32_t idlePassCost(const IdleLoop &l, uint32_t c, const uint32_t *r, b
     for (uint32_t i = l.body; i < l.count; i++) sum += charge(l.words[i], true);
     for (uint32_t i = 0; i < kIdleWindowCount; i++) sum += charge(kIdleWindowWords[i], true);
     return sum;
+}
+
+// What a pass that goes straight to the body costs, 0 for a head that doesn't go to the body.
+inline uint32_t idlePassCost(const IdleLoop &l, uint32_t c, const uint32_t *r, bool on, cost::Core core) {
+    const int v = idleHeadVariant(l, c, r);
+    return v < 0 ? 0 : idleVariantCost(l, v, on, core);
 }
 
 // The kernel globals' wake word and window byte, from the globals pointer.

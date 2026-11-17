@@ -293,6 +293,18 @@ struct ArmCpu {
     bool modePace;
     // Idle loop heads cpuJitPlain left to the interpreter (Fast idle skip), 0 for none.
     uint32_t idleHeads[2];
+    // The idle loops matched at those heads and their pass costs (cpuPrvIdleLoopAt). Host only, never saved.
+    struct IdleMatch {
+        uint32_t pc;  // 0: empty
+        const struct IdleLoop *loop;
+        uint8_t *pages[4];  // RAM pages holding the loop and window, their lines flagged as code
+        uint32_t pageCount;
+        uint32_t mapGen;
+        uint64_t permContext;
+        bool privileged;
+        uint32_t costKey;  // costOn and costCore the costs are for, plus 1; 0 for none
+        uint32_t cost[3];  // per head form (idleHeadVariant), 0 until worked out
+    } idleMatch[2];
     bool sleeping;
     bool arm920WaitEnabled, arm920Waiting;
 
@@ -362,6 +374,17 @@ struct ArmCpu {
     template <typename T>
     void DoSaveLoad(T &chunkHelper, uint32_t version);
 };
+
+// Drops the idle loop matches (cpuPrvIdleLoopAt): those with a line in the RAM page at host, or all of them
+// for null.
+static void cpuPrvIdleForget(ArmCpu *cpu, const uint8_t *host = nullptr) {
+    for (auto &m : cpu->idleMatch) {
+        if (!m.pc) continue;
+        bool drop = !host;
+        for (uint32_t i = 0; i < m.pageCount && !drop; i++) drop = m.pages[i] == host;
+        if (drop) m.pc = 0;
+    }
+}
 
 enum ImmShiftType {
     shiftTypeNoop,
@@ -4496,6 +4519,7 @@ void cpuReset(struct ArmCpu *cpu, uint32_t pc) {
     cpu->privileged = true;
 
     cpuPrvSetPC(cpu, pc);
+    cpuPrvIdleForget(cpu);
     icacheInval(cpu->ic);
     systemStateSetUiInitialized(cpu->systemState, false);
 
@@ -6082,6 +6106,7 @@ uint64_t cpuJitPermContext(ArmCpu *cpu) {
 // hit. The page's flags are clear by now, so the buffers left are watched again.
 static void cpuPrvJitCodeWritten(void *ctx, uint8_t *page, uint32_t offset, uint32_t size) {
     ArmCpu *cpu = (ArmCpu *)ctx;
+    cpuPrvIdleForget(cpu, page);
     icacheDropFetchedHost(cpu->ic, page + offset, size);
     jitCodeWritten(cpu->jit, page);
     icacheWatchFetchBuffers(cpu->ic);
@@ -6133,6 +6158,8 @@ void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
 }
 
 void cpuJitForgetCode(ArmCpu *cpu) {
+    // The code lines' flags go, so stores to an idle loop's lines would no longer be seen.
+    cpuPrvIdleForget(cpu);
     if (cpu->jitCode) cpu->jitCode->clear();
     memForgetRamCode(cpu->mem);
     icacheWatchFetchBuffers(cpu->ic);
@@ -6350,14 +6377,79 @@ static bool cpuPrvIdleWordsAt(ArmCpu *cpu, uint32_t va, const uint32_t *words, u
     return true;
 }
 
-// The idle loop whose head is at pc (word is its first instruction), or null. PXA Fast only.
-static const IdleLoop *cpuPrvIdleLoopAt(ArmCpu *cpu, uint32_t pc, uint32_t word) {
+// Flags the code lines of [va, va + size) on RAM pages, so a store to them drops m (cpuPrvJitCodeWritten
+// drops the page's matches). ROM needs nothing: it changes only through patches, which invalidate. False
+// for anything else.
+static bool cpuPrvIdleWatch(ArmCpu *cpu, ArmCpu::IdleMatch &m, uint32_t va, uint32_t size) {
+    const struct ArmMemRegion &rom = cpu->mem->regions[REGION_ROM];
+    for (uint32_t at = va, end = va + size; at < end;) {
+        const uint32_t next = std::min(end, (at & ~0xfffu) + 0x1000);
+        const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, at, cpu->privileged);
+        if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
+        const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
+        if (rom.ub && rom.uD && pa >= rom.pa && pa - rom.pa + (next - at) <= rom.ub - rom.pa) {
+            at = next;
+            continue;
+        }
+        uint8_t *lines;
+        uint8_t *page = memWatchRamCode(cpu->mem, pa, cpuPrvJitCodeWritten, cpu, &lines);
+        if (!page) return false;
+        bool flagged = false;
+        for (uint32_t line = (pa & 0xfffu) >> 6; line <= ((pa + (next - at) - 1) & 0xfffu) >> 6; line++)
+            if (!lines[line]) {
+                lines[line] = 1;
+                flagged = true;
+            }
+        if (flagged) jitWriteProtectPage(cpu->jit, page);
+        if (std::find(m.pages, m.pages + m.pageCount, page) == m.pages + m.pageCount) {
+            if (m.pageCount == 4) return false;
+            m.pages[m.pageCount++] = page;
+        }
+        at = next;
+    }
+    return true;
+}
+
+// The idle loop whose head is at pc (word is its first instruction), or null. PXA Fast only. A match is
+// kept per head (cpu->idleMatch) until its code lines are written, code is invalidated or dropped, the
+// mappings change (a TLB flush, domains, S or R) or the privilege changes; *match is it, or null when
+// the loop's pages can't be watched.
+static const IdleLoop *cpuPrvIdleLoopAt(ArmCpu *cpu, uint32_t pc, uint32_t word, ArmCpu::IdleMatch **match = nullptr) {
+    if (match) *match = nullptr;
     if (!cpuPrvIdleSkipOn || cpu->model == ArmCpuModel::arm920t || !cpu->jit || (pc & 3)) return nullptr;
+    const uint32_t mapGen = mmuFlushCount(cpu->memorySystem.mmu);
+    const uint64_t perm = cpuJitPermContext(cpu);
+    for (auto &m : cpu->idleMatch)
+        if (m.pc == pc && word == m.loop->words[0] && m.mapGen == mapGen && m.permContext == perm &&
+            m.privileged == cpu->privileged) {
+            if (match) *match = &m;
+            return m.loop;
+        }
     for (const IdleLoop &l : kIdleLoops) {
         if (word != l.words[0]) continue;
-        if (cpuPrvIdleWordsAt(cpu, pc, l.words, l.count) &&
-            cpuPrvIdleWordsAt(cpu, pc + uint32_t(l.window), kIdleWindowWords, kIdleWindowCount))
-            return &l;
+        if (!cpuPrvIdleWordsAt(cpu, pc, l.words, l.count) ||
+            !cpuPrvIdleWordsAt(cpu, pc + uint32_t(l.window), kIdleWindowWords, kIdleWindowCount))
+            continue;
+        // Kept in the slot already at pc, else an empty one, else one not at a current head.
+        ArmCpu::IdleMatch *slot = &cpu->idleMatch[0];
+        for (auto &m : cpu->idleMatch)
+            if (m.pc == pc) slot = &m;
+        if (slot->pc != pc) {
+            if (cpu->idleMatch[0].pc && (!cpu->idleMatch[1].pc || cpu->idleMatch[0].pc == cpu->idleHeads[0] ||
+                                         cpu->idleMatch[0].pc == cpu->idleHeads[1]))
+                slot = &cpu->idleMatch[1];
+        }
+        *slot = ArmCpu::IdleMatch{};
+        slot->loop = &l;
+        if (cpuPrvIdleWatch(cpu, *slot, pc, 4 * l.count) &&
+            cpuPrvIdleWatch(cpu, *slot, pc + uint32_t(l.window), 4 * kIdleWindowCount)) {
+            slot->pc = pc;
+            slot->mapGen = mapGen;
+            slot->permContext = perm;
+            slot->privileged = cpu->privileged;
+            if (match) *match = slot;
+        }
+        return &l;
     }
     return nullptr;
 }
@@ -6382,7 +6474,8 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
         return 0;
     uint32_t word;
     if (!cpuJitFetch(cpu, pc, &word)) return 0;
-    const IdleLoop *l = cpuPrvIdleLoopAt(cpu, pc, word);
+    ArmCpu::IdleMatch *match;
+    const IdleLoop *l = cpuPrvIdleLoopAt(cpu, pc, word, &match);
     if (!l || r[REG_NO_LR] != pc + l->windowReturn) return 0;
     uint_fast8_t fsr;
     auto read = [&](uint32_t va, uint32_t &v) { return cpuJitRead(cpu, va, 4, &v, &fsr); };
@@ -6407,8 +6500,22 @@ static uint32_t cpuPrvIdleSkip(ArmCpu *cpu, uint32_t left) {
     // A pass that goes straight to the body, as every pass will, and what it costs (the table's cost of
     // each instruction it runs, as Fast charges them).
     if (zire && r[0] != counter) return 0;
-    const uint32_t p = idlePassCost(*l, counter, r, cpu->ic->costOn, cost::Core(cpu->costCore));
-    if (!p) return 0;
+    const int variant = idleHeadVariant(*l, counter, r);
+    if (variant < 0) return 0;
+    const bool on = cpu->ic->costOn;
+    uint32_t p;
+    if (match) {
+        const uint32_t key = ((uint32_t(on) << 8) | cpu->costCore) + 1;
+        if (match->costKey != key) {
+            match->costKey = key;
+            std::fill(std::begin(match->cost), std::end(match->cost), 0u);
+        }
+        uint32_t &cached = match->cost[variant];
+        if (!cached) cached = idleVariantCost(*l, variant, on, cost::Core(cpu->costCore));
+        p = cached;
+    } else {
+        p = idleVariantCost(*l, variant, on, cost::Core(cpu->costCore));
+    }
     const uint32_t passes = (left - 1) / p;
     if (!passes) return 0;
     // Both OSCR reads of each pass.
@@ -6556,6 +6663,8 @@ bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
 
 static void cpuPrvJitInval(void *ctx, uint32_t va, uint32_t size, bool guest) {
     ArmCpu *cpu = (ArmCpu *)ctx;
+    // Host writes (patches, a test's code) don't flag code lines; they invalidate instead.
+    cpuPrvIdleForget(cpu);
     if (size)
         jitInvalidate(cpu->jit, va, size);
     else if (guest)
@@ -7099,6 +7208,7 @@ void cpuLoad(ArmCpu *cpu, T &loader) {
     cpuClearNativeRuntime(cpu);
 #endif
     gdbStubResetPace(cpu->debugStub);
+    cpuPrvIdleForget(cpu);
     icacheInval(cpu->ic);
 
     paceLoad(loader);

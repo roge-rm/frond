@@ -2536,6 +2536,50 @@ bool idleClock(Engines& e) {
     return ok;
 }
 
+// Fast keeps an idle loop's match per head. A store to the loop's code (here a word only past the
+// threshold runs, so the passes run the same) must drop it: the next run makes no skip, and lands
+// where Fast without the skip does.
+bool idleMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const IdleLoopKind kind : {IdleLoopKind::zire72, IdleLoopKind::tx}) {
+        const char* name = kind == IdleLoopKind::zire72 ? "zire 72" : "t|x";
+        const IdleSetup s = idleSetup(name, kind, 1000, false, true);
+        const IdleLoop* l = s.loop;
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetIdleSkip(k == 0);
+            idlePrepare(m, s, 1000);
+            const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // mov r0, #0x12 (Zire 72) or mov r0, #0xc (T|X) before the clock routine call, rewritten.
+                    const uint32_t i = kind == IdleLoopKind::zire72 ? 6 : 5, word = l->words[i] + 1;
+                    memAccess(m.mem, s.head + 4 * i, 4, true, (void*)&word);
+                }
+                uint64_t s0, c0, s1, c1, ran = 0;
+                cpuJitIdleSkips(&s0, &c0);
+                while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+                cpuJitIdleSkips(&s1, &c1);
+                skipped[k][run] = s1 - s0;
+            }
+            states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+        }
+        cpuSetIdleSkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("idle match dropped, %s: 1 skip before the store, none after\n", name);
+            continue;
+        }
+        printf("FAIL idle match dropped, %s: skips %" PRIu64 " before the store, %" PRIu64 " after (want 1, 0)\n",
+               name, skipped[0][0], skipped[0][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
 // The XScale fetch buffers when the guest rewrites code without invalidating. The
 // interpreter fills a buffer at A (an MCR the JIT hands back), the code at Y then rewrites
 // A+8, and the guest later jumps back to A+8 with no invalidation. An XScale (Exact) runs
@@ -3161,6 +3205,7 @@ int main(int argc, char** argv) {
         ok = fallbackTicks(e) && ok;
         ok = idleSkip(e) && ok;
         ok = idleClock(e) && ok;
+        ok = idleMatchDropped(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
