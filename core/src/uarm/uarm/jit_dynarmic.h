@@ -48,6 +48,8 @@ const FrondJitAbort &jitLastAbort(const FrondJit *jit);
 uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
 // The instructions the last jitRun ran, a Thumb pair counted 2 (ARM920T); its clocks elsewhere.
 uint32_t jitLastInstructions(const FrondJit *jit);
+// ARM920T: FCSE PID tags handed out since the last restart, and the restarts (every tag taken, code dropped).
+unsigned jitPidTags(const FrondJit *jit, uint64_t *restarts);
 // Most instructions generated code runs between two budget checks: no block is longer and
 // every link checks. 0 means no limit (FROND_JIT_MAX_UNCHECKED=0, for measuring only).
 uint32_t jitMaxUnchecked(const FrondJit *jit);

@@ -1,7 +1,8 @@
 // The ARM920T's FCSE on the interpreter (Exact): a nonzero PID moves VAs below 32 MB to VA | PID for
 // fetches and data, aborts report the MVA in FAR, VAs from 32 MB up stay as they are, and the I-cache and
 // D-cache hold MVAs, so a PID change never hits another process's lines. Fast (translated blocks and the
-// lean path) gives the same registers and memory at the same instruction counts across PID changes.
+// lean path) gives the same registers and memory at the same instruction counts across PID changes, and so
+// does the single-step JIT.
 
 #include <cassert>
 #include <cstdint>
@@ -182,8 +183,9 @@ int main() {
         return 0;
     }
     cpuSetJitSync(true);
-    Machine exact(false), fast(false);  // Fast blocks go on a CPU made without the single-step JIT
-    for (Machine* m : {&exact, &fast}) {
+    // Fast blocks go on a CPU made without the single-step JIT; single has it (the probe's diagnostic mode).
+    Machine exact(false), fast(false), single(true);
+    for (Machine* m : {&exact, &fast, &single}) {
         m->prepare(slot1);
         m->word(0x204, movPc(10));
         m->word(0x101000, 0xe2822001);  // ADD r2, r2, #1
@@ -236,7 +238,12 @@ int main() {
     };
     for (unsigned round = 0; round < 40; ++round) {
         const uint64_t count = 37 + round * 11;
-        for (uint64_t i = 0; i < count; ++i) exact.step();
+        for (uint64_t i = 0; i < count; ++i) {
+            exact.step();
+            single.step();
+            for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == single.reg(r));
+        }
+        assert(cpuGetPid(exact.cpu) == cpuGetPid(single.cpu));
         runFast(count);
         for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
         assert(cpuGetRegExternal(exact.cpu, ARM_REG_NUM_CPSR) == cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR));
@@ -253,6 +260,8 @@ int main() {
         assert(stored != 0);
     }
     assert((fast.reg(2) & 0xffff) > 100 && (fast.reg(2) >> 16) > 100);
+    cpuArm920LeanReset(single.cpu);
+    for (const uint32_t pa : {0x103000u, 0x203000u}) assert(std::memcmp(exact.bytes + pa, single.bytes + pa, 4) == 0);
     std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
 
     std::printf("PASS: ARM920T FCSE remap, abort FAR, MVA keyed caches across PID changes\n");

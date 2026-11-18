@@ -507,8 +507,16 @@ int main(int argc, char** argv) {
         } else if (c == "fork") {
             // A checkpoint: the copy goes on with the commands and its quit comes back here, to the machine
             // as it was at the fork. The copy never writes the NAND store back.
+            // The Fast engine's JIT goes first, as its compile thread wouldn't be in the copy, and each side
+            // makes a new one.
             std::fflush(nullptr);
+            const bool wasFast = machine->fastEngine();
+            if (wasFast) {
+                machine->setFastEngine(false);
+                cpuArm920DropJit(machine->cpu());
+            }
             const pid_t child = fork();
+            if (wasFast && !machine->setFastEngine(true)) std::fprintf(stderr, "fork: Fast engine not back on\n");
             if (child < 0) { std::printf("error: fork failed\n"); continue; }
             if (child == 0) {
                 nandPath = nullptr;
@@ -557,8 +565,12 @@ int main(int argc, char** argv) {
         std::printf("engine %s: %.1f s wall, %.1f M instructions a second", machine->fastEngine() ? "fast" : "exact", wall,
                     wall > 0 ? machine->retired() / wall / 1e6 : 0.0);
         if (machine->fastEngine())
-            std::printf("; translated %" PRIu64 ", lean %" PRIu64 ", interpreter %" PRIu64, machine->jitRetired(),
-                        machine->leanRetired(), machine->stepRetired());
+        {
+            uint64_t restarts = 0;
+            const unsigned tags = cpuArm920JitPidTags(machine->cpu(), &restarts);
+            std::printf("; translated %" PRIu64 ", lean %" PRIu64 ", interpreter %" PRIu64 "; PID tags %u, %" PRIu64 " restarts",
+                        machine->jitRetired(), machine->leanRetired(), machine->stepRetired(), tags, restarts);
+        }
         std::printf("\n");
     }
     std::printf("NAND: %" PRIu64 " page programs, %" PRIu64 " block erases; VFP probes %" PRIu64 ", breakpoints %" PRIu64 "\n",

@@ -542,7 +542,9 @@ void A32AddressSpace::EmitPrelude() {
         }
 
         code.LDR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
-        code.AND(Wscratch0, Wscratch0, 0xffff0000);
+        // Frond: FPSCR Len and Stride (bits 16-21) have no meaning in the host FPCR and read back as 0 on cores
+        // without AArch32, so they stay out of it and the compare below can match.
+        code.AND(Wscratch0, Wscratch0, 0xffc00000);
         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
         {
@@ -591,7 +593,9 @@ void A32AddressSpace::EmitPrelude() {
         }
 
         code.LDR(Wscratch0, Xstate, offsetof(A32JitState, upper_location_descriptor));
-        code.AND(Wscratch0, Wscratch0, 0xffff0000);
+        // Frond: FPSCR Len and Stride (bits 16-21) have no meaning in the host FPCR and read back as 0 on cores
+        // without AArch32, so they stay out of it and the compare below can match.
+        code.AND(Wscratch0, Wscratch0, 0xffc00000);
         code.MRS(Xscratch1, oaknut::SystemReg::FPCR);
         code.STR(Wscratch1, SP, offsetof(StackLayout, save_host_fpcr));
         {

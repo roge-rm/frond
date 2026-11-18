@@ -956,8 +956,9 @@ struct Env final : public A32::UserCallbacks {
     // the block is dropped. Otherwise they are noted as code, as MemoryReadCode does.
     bool CodeUnchanged(A32::CodeSnapshot &snapshot) override {
         auto &s = static_cast<Snapshot &>(snapshot);
-        // Fetched under another PID: the words below would be another address space's.
-        if (arm920 && s.pid != cpuGetPid(cpu)) return false;
+        // Fetched under another PID: words below 32 MB would be another address space's. Code from 32 MB up
+        // reads the same under every PID; its block keeps the tag it was compiled under.
+        if (arm920 && s.pid != cpuGetPid(cpu) && s.base < 0x02000000u) return false;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
             uint32_t w = 0;
@@ -1445,16 +1446,15 @@ struct FrondJit {
     // reassignment, then 1 to kPidTags - 1 in the order PIDs first run.
     uint8_t pidTags[128] = {};
     uint8_t nextTag = 1;
+    uint64_t tagRestarts = 0;
 };
 
-// Tags ride in FPSCR bits that only VFP and half-precision code reads, which the ARM920T has none of: Len
-// (16-18), Stride (20-21) and AHP (26). The rounding mode and FZ/DN bits stay 0, as dynarmic sets the host's
-// MXCSR from them.
-constexpr unsigned kPidTags = 64;
-constexpr uint32_t jitPrvTagFpscr(unsigned tag) {
-    return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20) | (((tag >> 5) & 1u) << 26);
-}
-static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x04370000);
+// Tags ride in FPSCR bits that only VFP vector code reads, which the ARM920T has none of: Len (16-18) and
+// Stride (20-21). Neither reaches the host (MXCSR on x64; the arm64 prelude masks them out of FPCR). AHP,
+// rounding mode, FZ and DN stay 0, as they would reach the host's FP state.
+constexpr unsigned kPidTags = 32;
+constexpr uint32_t jitPrvTagFpscr(unsigned tag) { return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20); }
+static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x00370000);
 
 
 const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
@@ -1672,8 +1672,15 @@ uint64_t jitCacheClears(const FrondJit *j) {
 void jitInvalidate(FrondJit *j, uint32_t va, uint32_t size) {
     stats.invalRange++;
     jitPrvEach(j, [&](Env &e) {
-        if (e.lineBound) e.jit->InvalidateCacheRange(va, size);
-        else if (!e.arm920 && !e.unwatched.empty())
+        if (e.lineBound) {
+            // va is an MVA (I-cache lines are by MVA). Blocks run at VAs, so a tagged slot's code below
+            // 32 MB goes too.
+            e.jit->InvalidateCacheRange(va, size);
+            if (e.arm920 && va >= 0x02000000u && j->pidTags[va >> 25]) {
+                if ((va ^ (va + size - 1)) >> 25) e.jit->ClearCache();
+                else e.jit->InvalidateCacheRange(va & 0x01ffffffu, size);
+            }
+        } else if (!e.arm920 && !e.unwatched.empty())
             e.DropUnwatched(va >> 12, uint32_t((uint64_t(va) + size - 1) >> 12));
     });
 }
@@ -1802,6 +1809,7 @@ static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
         if (j->nextTag == kPidTags) {
             std::fill(std::begin(j->pidTags), std::end(j->pidTags), 0);
             j->nextTag = 1;
+            j->tagRestarts++;
             jitPrvEach(j, [](Env &level) { level.ClearCode(); });
         }
         tag = j->pidTags[index] = j->nextTag++;
@@ -1825,7 +1833,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         jit.ClearCache();  // Reset drops the pending cache clear's halt flag
         e.tag = 0;  // Reset sets FPSCR to 0
     }
-    if (e.arm920 && !e.lineBound) jitPrvSetTag(j, e, jit);
+    if (e.arm920) jitPrvSetTag(j, e, jit);
     e.CheckGen();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;
@@ -1887,6 +1895,11 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
 }
 
 uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
+
+unsigned jitPidTags(const FrondJit *j, uint64_t *restarts) {
+    if (restarts) *restarts = j->tagRestarts;
+    return j->nextTag - 1u;
+}
 
 uint64_t jitFaultExits() { return stats.fault; }
 

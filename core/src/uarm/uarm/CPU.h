@@ -402,10 +402,13 @@ uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t*
 // CPU has the single-step diagnostic JIT. Turning it on again drops translated code.
 bool cpuArm920SetJit(ArmCpu*, bool on);
 bool cpuArm920JitOn(const ArmCpu*);
-// Frees the Fast blocks JIT, for a CPU that won't run again.
+// Frees the Fast blocks JIT and its compile thread: for a CPU that won't run again, or before a fork(), after
+// which cpuArm920SetJit makes a new one.
 void cpuArm920DropJit(ArmCpu*);
 // Most instructions a JIT run can pass its budget by, plus one.
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu*);
+// Fast blocks' FCSE PID tags in use and the restarts so far (jitPidTags), 0 without the JIT.
+unsigned cpuArm920JitPidTags(const ArmCpu*, uint64_t* restarts);
 // Fast blocks, from a lean write hook: the pc of the marked access-pc instruction making the access (0 if none).
 uint32_t cpuArm920TakeJitAccessPc(ArmCpu*);
 // Fast blocks, from an access hook: the board charged cycles of the run (the hook's ran) before the access, and

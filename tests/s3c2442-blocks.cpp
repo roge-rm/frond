@@ -224,6 +224,11 @@ static void rtcTests() {
     rx.reset(rx1950RtcStart);
     assert(get(rx, 0x88) + 1950 == 2006 && get(rx, 0x84) == 0x01 && get(rx, 0x7c) == 0x01);
     assert(get(rx, 0x80) - 1 == 0 && get(rx, 0x78) == 0x12 && get(rx, 0x74) == 0 && get(rx, 0x70) == 0);
+    // A year byte that isn't BCD (2010 is 60, 0x3c) stays as it is while the seconds count; a minute on is 12:01.
+    S3cRtc rx2010;
+    rx2010.reset({rx1950RtcYear(2010), 1, 1, 6, 12, 0, 0});
+    rx2010.advance(61 * 32768, intc);
+    assert(get(rx2010, 0x88) == 0x3c && get(rx2010, 0x78) == 0x12 && get(rx2010, 0x74) == 0x01 && get(rx2010, 0x70) == 0x01);
     // Writes need RTCEN.
     rtc.write(0x70, 0x30);
     assert(get(rtc, 0x70) == 0x00);

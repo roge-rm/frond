@@ -83,10 +83,14 @@ void S3cRtc::secondPassed(S3cIntc& intc) {
     if (h >= 24) {
         h = 0;
         wd = wd >= 7 ? 1 : wd + 1;
-        if (++d > daysIn(mo, y)) { d = 1; if (++mo > 12) { mo = 1; y = (y + 1) % 100; } }
+        if (++d > daysIn(mo, y)) {
+            d = 1;
+            // The year byte is only written when it counts on, so a board that keeps it binary keeps its value.
+            if (++mo > 12) { mo = 1; bcd[year] = toBcd((y + 1) % 100); }
+        }
     }
     bcd[sec] = toBcd(s); bcd[min] = toBcd(m); bcd[hour] = toBcd(h);
-    bcd[date] = toBcd(d); bcd[mon] = toBcd(mo); bcd[year] = toBcd(y); bcd[day] = wd;
+    bcd[date] = toBcd(d); bcd[mon] = toBcd(mo); bcd[day] = wd;
     // The alarm needs ALMEN and every field it has turned on to match.
     if (rtcalm & 0x40 && rtcalm & 0x3f) {
         static const int fields[6] = {sec, min, hour, date, mon, year};

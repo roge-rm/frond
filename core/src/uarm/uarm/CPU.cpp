@@ -7223,6 +7223,14 @@ void cpuArm920DropJit(ArmCpu *cpu) {
 
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *cpu) { return cpu->jit ? jitMaxUnchecked(cpu->jit) : 0; }
 
+unsigned cpuArm920JitPidTags(const ArmCpu *cpu, uint64_t *restarts) {
+    if (!cpu->jit) {
+        if (restarts) *restarts = 0;
+        return 0;
+    }
+    return jitPidTags(cpu->jit, restarts);
+}
+
 // Slow path reasons cpuArm920RunJit clears before it runs: none of them needs the step.
 static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE |
                                                      SLOW_PATH_REASON_RESCHEDULE | SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
@@ -7281,6 +7289,10 @@ bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
+unsigned cpuArm920JitPidTags(const ArmCpu *, uint64_t *restarts) {
+    if (restarts) *restarts = 0;
+    return 0;
+}
 bool cpuArm920JitCanRun(const ArmCpu *) { return false; }
 uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t, uint32_t *instructions) {
     *stop = arm920JitExit;
