@@ -237,13 +237,13 @@ uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     uint64_t cycles = 0;
     // Following the core clock: the rate is the clock as it is now, and cycles count in cyclesPerSecond
     // units, with the remainder carried, so the call covers the same guest time whatever the clock does.
-    const uint64_t startHz = followCoreClock ? this->CoreHz() : 0;
+    const uint64_t startHz = followCoreClock ? this->FollowHz() : 0;
     const bool follow = startHz && cyclesPerSecond >= startHz;
     uint64_t rate = cyclesPerSecond, unitRemainder = 0;
 
     while (cycles < maxCycles) {
         if (follow) {
-            const uint64_t hz = this->CoreHz();
+            const uint64_t hz = this->FollowHz();
             if (hz) rate = hz;
             runningCyclesPerSecond = rate;
         }

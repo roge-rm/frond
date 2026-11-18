@@ -444,7 +444,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -933,6 +933,14 @@ class DesktopControl {
                           static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()));
             if (!ctx.speedDetail.empty()) return {true, "speed", std::string(text) + "; " + ctx.speedDetail};
             return {true, "speed", text};
+        }
+        if (command == "speed") {
+            if (path.empty()) return {true, "speed", ctx.mainLoop.GetSpeed().Name()};
+            SpeedSetting5 speed;
+            if (!SpeedSetting5::Parse(path, speed))
+                return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x, 8x or uncapped."};
+            ctx.mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(ctx.soc->GetDeviceType()));
+            return {true, "speed", speed.Name()};
         }
         if (command == "microphone-epoch") return {true, "microphone", ctx.microphone ? std::to_string(ctx.microphone->Epoch()) : "0"};
         if (command == "microphone-state") return {true, "microphone", ctx.microphone ? ctx.microphone->State() : "off"};

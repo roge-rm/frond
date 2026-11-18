@@ -212,6 +212,9 @@ Imx1MachineCheapStatus imx1MachineGetStatus(const Imx1Machine*);
 // switching to it cleans the data cache to memory and empties both. False inside a run or after a stop.
 bool imx1MachineSetFastEngine(Imx1Machine*, bool fast);
 bool imx1MachineFastEngine(const Imx1Machine*);
+// Faster speed between runs: the CPU's FCLK at num / den times the MCU PLL's (Imx1Bootstrap::setCpuClockMultiplier).
+// 1 / 1 is Original. Not saved in the state; a state load keeps the one set. False inside a run.
+bool imx1MachineSetCpuClockMultiplier(Imx1Machine*, uint32_t num, uint32_t den);
 // Whether Fast runs Dynarmic blocks before the lean path (on by default). Off gives the lean-only Fast engine,
 // for tests and measuring. False inside bounds or after a stop.
 bool imx1MachineSetFastBlocks(Imx1Machine*, bool blocks);

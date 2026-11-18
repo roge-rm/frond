@@ -16,8 +16,8 @@ void Imx1Bootstrap::advanceCpuCycles(uint32_t cycles, uint32_t mode, bool assume
         settleSystemStop(cycles);
         return;
     }
-    const auto mcu = cgm.mcuPllTargetRatio();
-    // A 32-bit charge times denominator (<= 16384) and PRESC (<= 2) fits uint64_t.
+    const auto mcu = cpuMcuRatio();
+    // A 32-bit charge times denominator (<= 16384, times the Faster multiplier's) and PRESC (<= 2) fits uint64_t.
     uint64_t units = uint64_t(cycles) * mcu.denominator * cgm.mcuPrescaler();
     if (!referenceChargeSupported(units, mcu.numerator)) { referenceOverflow = true; return; }
     asynchronousUsed = true;
@@ -53,7 +53,7 @@ bool Imx1Bootstrap::timerCountAfter(uint32_t address, uint32_t size, uint64_t cy
     // Mode 3: system clocks = (cycles * a + systemPllPhase) / d, and the most cycles the overflow check takes.
     uint64_t a = 0, d = 0, most = UINT32_MAX;
     if (mode == 3) {
-        const auto mcu = cgm.mcuPllTargetRatio();
+        const auto mcu = cpuMcuRatio();
         const auto system = cgm.systemPllActiveRatio();
         const uint64_t units = cycles * mcu.denominator * cgm.mcuPrescaler();
         const uint64_t limit = (std::numeric_limits<uint64_t>::max() - systemPllPhase) / system.numerator;

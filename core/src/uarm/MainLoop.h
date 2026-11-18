@@ -5,6 +5,7 @@
 
 #include "Average.h"
 #include "SoC.h"
+#include "speed_setting5.h"
 
 #define MAIN_LOOP_FPS 60
 
@@ -29,6 +30,12 @@ class MainLoop {
     // Original speed: the limit is the SoC's own core clock, as the guest changes it, where it has one;
     // the limit set above is the fallback. Off runs at the fixed limit.
     void SetFollowCoreClock(bool follow);
+    // The machine's speed setting. Original and Faster follow the core clock, Faster with the SoC's clock
+    // multiplier, and take originalHz as the limit where the SoC has no clock to follow. Uncapped is the
+    // fixed UNCAPPED_MHZ.
+    void SetSpeed(const SpeedSetting5& speed, uint32_t originalHz);
+    const SpeedSetting5& GetSpeed() const { return speed; }
+    static constexpr uint32_t UNCAPPED_MHZ = 3000;
     void SetEmulatedTime(bool emulatedTime) { this->emulatedTime = emulatedTime; }
 
    private:
@@ -54,6 +61,7 @@ class MainLoop {
     uint32_t cyclesPerSecondLimit{0};
     bool emulatedTime{false};
     bool followCoreClock{false};
+    SpeedSetting5 speed{};
 };
 
 #endif  // _MAIN_LOOP_H_

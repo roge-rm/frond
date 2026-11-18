@@ -90,6 +90,17 @@ class SoC {
     // Fast charges the data cache and region model at Original only (cpuSetJitMemoryCost).
     void SetFollowCoreClock(bool follow);
     bool FollowsCoreClock() const { return followCoreClock; }
+    // Faster speed: the CPU runs num / den times the core clock (CoreHz on PXA, FCLK on the Zodiac), with guest
+    // time, timers and the cost model's charges as at Original. 1 / 1 is Original.
+    virtual void SetClockMultiplier(uint32_t num, uint32_t den);
+    uint32_t ClockMultiplierNum() const { return clockMultiplierNum; }
+    uint32_t ClockMultiplierDen() const { return clockMultiplierDen; }
+    // The rate a following run takes: CoreHz times the clock multiplier, 0 where there is no clock to follow.
+    uint64_t FollowHz() const {
+        const uint64_t hz = CoreHz();
+        if (clockMultiplierNum == clockMultiplierDen) return hz;
+        return uint64_t(__uint128_t(hz) * clockMultiplierNum / clockMultiplierDen);
+    }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
 #ifndef __EMSCRIPTEN__
@@ -280,6 +291,7 @@ class SoC {
     bool sleeping{false};
     uint64_t runInstructions{0};
     bool followCoreClock{false};
+    uint32_t clockMultiplierNum{1}, clockMultiplierDen{1};
     bool powerOnReset{false};
     BatteryPower battery{};
     bool framebufferDirty{true};

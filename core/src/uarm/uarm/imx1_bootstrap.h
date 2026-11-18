@@ -326,7 +326,28 @@ class Imx1Bootstrap {
             referenceRatioSupported(cgm.systemPllActiveRatio().numerator);
         if (mode != 3 || !cgm.mcuClockReady(assumeSettled)) return false;
         return asynchronousRatioSupported(cgm.systemPllActiveRatio()) &&
-            referenceRatioSupported(cgm.mcuPllTargetRatio().numerator);
+            referenceRatioSupported(cpuMcuRatio().numerator);
+    }
+    // Faster speed: in clock mode 3 the CPU's FCLK runs num / den times the MCU PLL's, so it retires that many
+    // times the instructions per guest second while HCLK, the PERCLKs, the timers and every bus wait keep their
+    // own rates. FastBus (mode 0) runs the CPU on BCLK, the bus clock itself, and stays as it is. While a System
+    // PLL restart is pending the charge goes in at the MCU PLL's own rate, which the restart count is kept in.
+    // Not session state: the run sets it.
+    void setCpuClockMultiplier(uint32_t num, uint32_t den) {
+        if (!num || !den) num = den = 1;
+        const uint64_t g = imx1Gcd(num, den);
+        cpuClockNum = uint32_t(num / g);
+        cpuClockDen = uint32_t(den / g);
+    }
+    uint32_t cpuClockMultiplierNum() const { return cpuClockNum; }
+    uint32_t cpuClockMultiplierDen() const { return cpuClockDen; }
+    // The CPU's clock in mode 3 as a ratio of the reference: the MCU PLL's times the multiplier.
+    Imx1PllRatio cpuMcuRatio() const {
+        const auto rate = cgm.mcuPllTargetRatio();
+        if (cpuClockNum == cpuClockDen || cgm.systemRestartRemaining()) return rate;
+        uint64_t numerator = rate.numerator * cpuClockNum, denominator = uint64_t(rate.denominator) * cpuClockDen;
+        const uint64_t g = imx1Gcd(numerator, denominator);
+        return {numerator / g, uint32_t(denominator / g)};
     }
     bool asynchronousRatioSupported(Imx1PllRatio system) const {
         return asynchronousRatioSupported(cgm, system);
@@ -338,7 +359,7 @@ class Imx1Bootstrap {
                system.numerator * pll.denominator * clocks.mcuPrescaler();
     }
     Imx1PllRatio cpuReferencePeriod(uint32_t mode) const {
-        const auto rate = mode == 3 ? cgm.mcuPllTargetRatio() : cgm.systemPllActiveRatio();
+        const auto rate = mode == 3 ? cpuMcuRatio() : cgm.systemPllActiveRatio();
         return {uint64_t(rate.denominator) * (mode == 3 ? cgm.mcuPrescaler() : cgm.busDivider()),
                 uint32_t(rate.numerator)};
     }
@@ -529,6 +550,7 @@ class Imx1Bootstrap {
     Imx1Mmcsd mmcsd;
     uint32_t perclk1Phase = 0;
     uint64_t systemPllPhase = 0;
+    uint32_t cpuClockNum = 1, cpuClockDen = 1;
     void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
     bool asynchronousUsed = false, mcuRetuneScenario = false;
     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
@@ -673,7 +695,7 @@ class Imx1Bootstrap {
    public:
     static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
                                            Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t) +
-                                           sizeof(LazyReference);
+                                           sizeof(LazyReference) + 2 * sizeof(uint32_t);
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)

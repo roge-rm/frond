@@ -2192,6 +2192,15 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
 
 bool imx1MachineFastEngine(const Imx1Machine* machine) { return machine->probe->fastEngine; }
 
+bool imx1MachineSetCpuClockMultiplier(Imx1Machine* machine, uint32_t num, uint32_t den) {
+    auto* p = machine->probe;
+    // Between runs every cycle is charged (runSlice ends with chargeDeferred), so the next charge is the first
+    // at the new rate.
+    if (p->bounds || deferredCycles || deferredHclk) return false;
+    p->peripherals.setCpuClockMultiplier(num, den);
+    return true;
+}
+
 uint64_t imx1MachineLeanRetired(const Imx1Machine*) { return leanRetired; }
 
 uint64_t imx1MachineJitRetired(const Imx1Machine*) { return jitRetired; }
@@ -3264,6 +3273,8 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     VSD* const card = p->peripherals.mmcsdCard();
     staged.board->takePcmOutput(p->peripherals);
     if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768(staged.ymfSection);
+    // The Faster multiplier belongs to the run, not the state.
+    staged.board->setCpuClockMultiplier(p->peripherals.cpuClockMultiplierNum(), p->peripherals.cpuClockMultiplierDen());
     p->peripherals = std::move(*staged.board);
     p->peripherals.setI2cBus(p->options.i2cBus);
     p->peripherals.setI2cObserver(Probe::i2cEvent, p);

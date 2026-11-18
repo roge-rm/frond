@@ -127,9 +127,22 @@ void MainLoop::SetFollowCoreClock(bool follow) {
     soc->SetFollowCoreClock(follow);
 }
 
+void MainLoop::SetSpeed(const SpeedSetting5& speed, uint32_t originalHz) {
+    this->speed = speed;
+    if (speed.kind == SpeedSetting5::Kind::uncapped) {
+        soc->SetClockMultiplier(1, 1);
+        SetCyclesPerSecondLimit(UNCAPPED_MHZ * 1000000);
+        SetFollowCoreClock(false);
+        return;
+    }
+    soc->SetClockMultiplier(speed.num, speed.den);
+    SetCyclesPerSecondLimit(originalHz);
+    SetFollowCoreClock(true);
+}
+
 uint64_t MainLoop::CurrentLimit() const {
     if (followCoreClock) {
-        const uint64_t hz = soc->CoreHz();
+        const uint64_t hz = soc->FollowHz();
         if (hz) return hz;
     }
     return cyclesPerSecondLimit;
