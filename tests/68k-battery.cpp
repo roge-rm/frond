@@ -1,9 +1,16 @@
 // The 68k battery hooks: the ADS784x battery count on the ROM's sysBatteryData curve for the battery setting's
-// level, and the m500 family's AC_PWR# line for its Charging switch.
+// level, the m500 family's AC_PWR# line and the CLIE DC_IN lines for its Charging switch, and which devices
+// can take Charging at all.
 #include <cstdio>
 #include <cstdlib>
 
 #include "EmBattery.h"
+#include "EmDevice.h"
+#include "EmRegsMB86189.h"
+#include "EmRegsSZNaples.h"
+#include "EmRegsSZRedwood.h"
+#include "EmRegsSonyDSP.h"
+#include "EmRegsVZPegVenice.h"
 #include "EmRegsVZPalmM500.h"
 #include "EmSPISlaveADS784x.h"
 
@@ -18,6 +25,25 @@ class M500 : public EmRegsVZPalmM500 {
    public:
     uint8 PortK() { return GetPortInputValue('K'); }
 };
+
+template <class Board, class Chip>
+class Exposed : public Board {
+   public:
+    explicit Exposed(Chip& chip) : Board(chip) {}
+    uint8 Port(int port) { return this->GetPortInputValue(port); }
+};
+
+// DC_IN is active low: high on battery, low on the charger (ROM HwrDockStatus on Venice and Redwood).
+template <class Board, class Chip>
+static void dcIn(Chip& chip, int port, uint8 bit, const char* what) {
+    Exposed<Board, Chip> board(chip);
+    gBattery = BatteryPower{};
+    check(board.Port(port) & bit, what);
+    check(BatteryPower::Parse("max charging", gBattery), "parse");
+    check(!(board.Port(port) & bit), what);
+    gBattery = BatteryPower{};
+    check(board.Port(port) & bit, what);
+}
 
 int main() {
     // A lithium-ion style table, 2.9 V at 0% to 4.2 V at 100%, with 4096 steps per 5 V.
@@ -48,6 +74,18 @@ int main() {
     check(!(board.PortK() & 0x04), "AC_PWR# low on external power");
     check(BatteryPower::Parse("level 30 battery", gBattery), "parse");
     check(board.PortK() & 0x04, "AC_PWR# high again");
+
+    EmRegsMB86189 mb86189(0x10800000);
+    EmRegsSonyDSP dsp(0x11000000);
+    dcIn<EmRegsVzPegVenice>(mb86189, 'J', 0x04, "Venice PJ2 DC_IN");
+    dcIn<EmRegsSzRedwood>(dsp, 'P', 0x80, "Redwood PP7 DC_IN");
+    dcIn<EmRegsSzNaples>(dsp, 'P', 0x80, "Naples PP7 DC_IN");
+
+    // Charging reaches the guest through the dock status patch or a modelled input, and nowhere else.
+    for (const char* id : {"PalmIIIx", "PalmV", "PalmM125", "PEG-N700C/N710C"})
+        check(!EmDevice(id).BatteryChargingSupported(), id);
+    for (const char* id : {"PalmM500", "PalmM130", "PEG-T400", "NR70", "YSX1230"})
+        check(EmDevice(id).BatteryChargingSupported(), id);
 
     std::puts("68k battery: ok");
     return 0;

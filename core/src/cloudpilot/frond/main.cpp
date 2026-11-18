@@ -950,6 +950,10 @@ class Runner {
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
+        if (gBattery.charging && !BatteryChargingSupported()) {
+            cerr << "this device's charging can't be set yet, it stays on battery" << endl;
+            gBattery.charging = false;
+        }
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
         SetSpeed(options.speed);
@@ -2633,7 +2637,11 @@ class Runner {
         if (command == "battery-state") return {true, "battery", BatteryState()};
         if (command == "battery") {
             string error;
-            if (!SetBattery(argument, error)) return {false, BatterySupported() ? "argument" : "unsupported", error};
+            if (!SetBattery(argument, error)) {
+                BatteryPower parsed;
+                const bool unsupported = !BatterySupported() || (BatteryPower::Parse(argument, parsed) && parsed.charging);
+                return {false, unsupported ? "unsupported" : "argument", error};
+            }
             return {true, "battery", BatteryState()};
         }
         if (command == "keyboard-state") return {true, "keyboard", "detached"};
@@ -2710,11 +2718,20 @@ class Runner {
 
     // The Dana's battery and supply inputs have no known count-to-voltage map yet, so it keeps today's full battery.
     bool BatterySupported() const { return !deviceTypeIsDana5(profile->deviceType); }
-    string BatteryState() const { return BatterySupported() ? gBattery.Describe() : "unavailable"; }
+    // Whether Charging reaches the guest. Where the ROM reads its own dock status from a board input Frond
+    // doesn't model, it stays off and battery-state ends with "no-charging".
+    bool BatteryChargingSupported() const { return gSession && gSession->GetDevice().BatteryChargingSupported(); }
+    string BatteryState() const {
+        if (!BatterySupported()) return "unavailable";
+        return gBattery.Describe() + (BatteryChargingSupported() ? "" : " no-charging");
+    }
     // Applies live: the patches and board inputs read gBattery each time the guest asks.
     bool SetBattery(const string& spec, string& error) {
         if (!BatterySupported()) return error = "This device's battery can't be set yet.", false;
-        if (!BatteryPower::Parse(spec, gBattery)) return error = "Use max, level N or host N (0-100), then charging or battery.", false;
+        BatteryPower parsed;
+        if (!BatteryPower::Parse(spec, parsed)) return error = "Use max, level N or host N (0-100), then charging or battery.", false;
+        if (parsed.charging && !BatteryChargingSupported()) return error = "This device's charging can't be set yet.", false;
+        gBattery = parsed;
         return true;
     }
 

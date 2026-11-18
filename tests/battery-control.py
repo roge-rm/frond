@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The battery control command on out/frond-68k (an EZ ROM, palm-iiix) and out/frond (a Zire 72 or T|X smoke
-machine): battery-state answers Maximum and not charging by default, battery sets each mode live, bad arguments
+machine): battery-state answers Maximum and not charging by default (with no-charging where the board can't take it), battery sets each mode live, bad arguments
 are refused, --battery sets it at start, and the setting isn't saved with the session.
 
 Private firmware and sessions: --rom, else the generic OS 3.5 EZ ROM in the firmware folder; --arm-session, else
@@ -29,27 +29,34 @@ def state(c, want, command='battery-state', argument=''):
     assert got == want, f'{command} {argument!r}: {got!r}, wanted {want!r}'
 
 
-def check_commands(c):
-    state(c, 'max 100 battery')
-    state(c, 'level 20 charging', 'battery', 'level 20 charging')
-    state(c, 'level 20 charging')
-    state(c, 'host 57 battery', 'battery', 'host 57')
-    state(c, 'level 3 battery', 'battery', 'level 3')
+def check_commands(c, charging=True):
+    """charging False: a board whose ROM reads its own dock status from an input Frond doesn't model."""
+    tail = '' if charging else ' no-charging'
+    state(c, 'max 100 battery' + tail)
+    if charging:
+        state(c, 'level 20 charging', 'battery', 'level 20 charging')
+        state(c, 'level 20 charging')
+    else:
+        c.fails('battery', 'level 20 charging', code='unsupported')
+        state(c, 'max 100 battery' + tail)
+    state(c, 'host 57 battery' + tail, 'battery', 'host 57')
+    state(c, 'level 3 battery' + tail, 'battery', 'level 3')
     for bad in ('', 'level', 'level 101', 'max 50', 'low', 'level 5 maybe'):
         c.fails('battery', bad, code='argument')
-    state(c, 'level 3 battery')
-    state(c, 'max 100 battery', 'battery', 'max')
+    state(c, 'level 3 battery' + tail)
+    state(c, 'max 100 battery' + tail, 'battery', 'max')
 
 
 def check_68k(core, rom, root):
+    # The IIIx's ROM reads its own dock status from the board, which Frond doesn't model: no Charging there.
     c = Client(core, [rom, '--device', 'palm-iiix'], root, 'iiix')
     try:
-        check_commands(c)
+        check_commands(c, charging=False)
     finally:
         c.quit()
     c = Client(core, [rom, '--device', 'palm-iiix', '--battery', 'level 40 charging'], root, 'iiix-start')
     try:
-        state(c, 'level 40 charging')
+        state(c, 'level 40 battery no-charging')
     finally:
         c.quit()
 

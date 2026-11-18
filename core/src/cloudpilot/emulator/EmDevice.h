@@ -79,6 +79,9 @@ class EmDevice {
     bool IsClie() const;
     bool NeedsBatteryPatch() const;
     bool NeedsBatteryGlobalsHack() const;
+    // Whether the battery setting's Charging switch reaches the guest: the HwrDockStatus patch, or a board
+    // input the ROM reads for it.
+    bool BatteryChargingSupported() const;
     bool BuggySleep() const;
     bool SupportsHardBtnCradle() const;
     void DigitizerScale(uint32& num, uint32& den) const;

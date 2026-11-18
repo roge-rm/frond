@@ -1,5 +1,6 @@
 #include "EmRegsSZNaples.h"
 
+#include "EmBattery.h"
 #include "EmBankRegs.h"  // EmBankRegs::InvalidAccess
 #include "EmCommon.h"
 #include "EmMemory.h"
@@ -118,7 +119,8 @@ uint8 EmRegsSzNaples::GetPortInputValue(int port) {
             return 0xff;
 
         case 'P':
-            return 0x0a | hwrSZNaplesPortPDC_IN;
+            // DC_IN is low on the charger, as on Redwood (same code; not checked in a Naples ROM).
+            return gBattery.charging ? 0x0a : 0x0a | hwrSZNaplesPortPDC_IN;
 
         default:
             return 0;
