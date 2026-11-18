@@ -213,7 +213,37 @@ void pinWakes() {
     }
 }
 }
+// Charges left to the lazy sum save the same bytes as charging every model each time. A zero CPU charge
+// right after a watchdog reload, then HCLK charges whose denominator divides the CPU's, is the case where
+// they could differ. The MCU PLL at exactly 6000 CLK32 periods (MFI 5, MFN 55, MFD 63) gives that.
+void lazyMatchesEager() {
+    constexpr uint32_t wdog = 0x201000;
+    auto lazy = powerOn();
+    assert(lazy.setRtcInitialTime({1, 12, 34, 56}));
+    w(lazy, cgm, 0x57000003); w(lazy, cgm + 4, 0x003f1437); w(lazy, cgm, 0x57200003);
+    lazy.advanceFastBusCycles(6000); lazy.advanceCpuCycles(56, 3, true);
+    w(lazy, cgm, run);
+    assert(lazy.cpuClockModeSupported(3, true) && !lazy.cpuClockHeld(3));
+    w(lazy, wdog, 0x7f02, 3); w(lazy, wdog, 0x7f03, 3);
+    lazy.advanceCpuCycles(1000, 3, true); lazy.advanceHclkCycles(7);
+    auto eager = lazy;
+    auto bytes = [](Imx1Bootstrap& b) { std::vector<uint8_t> out; StateWriter s(out); b.state(s); return out; };
+    // Saving a copy leaves the lazy board's sum as it is.
+    auto both = [&](auto charge) {
+        charge(lazy); charge(eager);
+        auto saved = lazy;
+        assert(bytes(saved) == bytes(eager));
+    };
+    for (unsigned i = 0; i < 3; ++i) {
+        both([](Imx1Bootstrap& b) { w(b, wdog + 4, 0x5555, 3); w(b, wdog + 4, 0xaaaa, 3); });
+        both([](Imx1Bootstrap& b) { b.advanceCpuCycles(0, 3, true); });
+        both([](Imx1Bootstrap& b) { b.advanceHclkCycles(5); });
+        both([](Imx1Bootstrap& b) { b.advanceHclkCycles(3); });
+        both([](Imx1Bootstrap& b) { b.advanceCpuCycles(13, 3, true); });
+        both([](Imx1Bootstrap& b) { b.advanceHclkCycles(2); });
+    }
+}
 int main() {
-    entryRules(); rtcKeepsTime(); pinWakes(); savedAsleep(); resetAsleep();
-    std::puts("Zodiac stop mode: entry rules, CLK32 only time, wake on A10, A7, D22, B14, A14 and RTC, saved asleep, Reset asleep: PASS");
+    entryRules(); rtcKeepsTime(); pinWakes(); savedAsleep(); resetAsleep(); lazyMatchesEager();
+    std::puts("Zodiac stop mode: entry rules, CLK32 only time, wake on A10, A7, D22, B14, A14 and RTC, saved asleep, Reset asleep, lazy catch-up saves as eager: PASS");
 }

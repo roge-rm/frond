@@ -19,6 +19,9 @@ class Imx1Rtc {
     void advanceReference(uint64_t numerator, uint64_t denominator);
     // Steps of numerator/denominator CLK32 periods until a status bit can next be set.
     uint64_t idleQuietSteps(uint64_t numerator, uint64_t denominator) const;
+    // The next event idleQuietSteps looks for, as the CLK32 phase/den and the whole periods to it. False with
+    // none; a target of 0 when it can't be worked out ahead.
+    bool referenceEvent(uint64_t& phase, uint64_t& den, uint64_t& target) const;
     static constexpr uint64_t interruptSources = (uint64_t(1) << 17) | (uint64_t(1) << 18);
     uint64_t assertedInterrupts() const;
     uint64_t futureInterrupts() const {
