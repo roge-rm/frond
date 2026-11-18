@@ -35,6 +35,10 @@ bool tg50BoardIrPowerEnabled(Tg50Board *);
 void tg50BoardSetUsbCable(Tg50Board *, bool connected);
 // AD7873 AUX in mV, the connector accessory's ID resistor.
 void tg50BoardSetAccessoryAux(Tg50Board *, uint16_t mV);
+// Nothing on the connector: AUX at full scale.
+void tg50BoardSetConnectorEmpty(Tg50Board *);
+// The AUX conversion result, 12 bits.
+uint16_t tg50BoardAccessoryAuxCode(Tg50Board *);
 bool tg50BoardUsbCableAttached(Tg50Board *);
 bool tg50BoardUsbListening(Tg50Board *);
 void tg50BoardSetTransportObserver(Tg50Board *, void (*)(void *), void *);

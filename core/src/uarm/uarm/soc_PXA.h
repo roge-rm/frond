@@ -143,6 +143,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool SetUsbTestCable(bool connected);
     bool UsbBoardListening();
     bool UsbTestCableAttached();
+    // TG50: the connector's AUX conversion result (12 bits), the accessory's ID.
+    uint16_t Tg50ConnectorAux();
     // A USB host on emulated time (UsbHostBridge). `tick` runs in the peripheral batch
     // (about every 10 us) once the time `wake` asks for has come, except during a serial
     // checkpoint; `replaced` runs on a reset or after a load succeeds, but not for a

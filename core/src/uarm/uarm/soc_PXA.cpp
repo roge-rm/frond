@@ -655,6 +655,8 @@ static int UsbDetectPin(DeviceType5 type) {
     return type==deviceTypeTX ? 13 : deviceProfileIsE2Board5(type) ? 35 : type==deviceTypeZire72 ? 15 : -1;
 }
 
+uint16_t SocPXA::Tg50ConnectorAux() { return deviceTg50AccessoryAuxCode(dev); }
+
 bool SocPXA::SetUsbTestCable(bool connected) {
     if (GetDeviceType() == deviceTypeTG50) {
         // One accessory on the connector: the pad's ID resistor stays while it's in.
@@ -830,7 +832,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
         fprintf(stderr, "game controller: the connector is in use, loaded without the pad\n");
         gamepad.Detach();
         if (GetDeviceType() == deviceTypeTG50) {
-            deviceTg50SetAccessoryAux(dev, 0);
+            deviceTg50SetConnectorEmpty(dev);
             pxaGpioSetState(gpio, 3, true);
         }
     }
@@ -1453,7 +1455,7 @@ bool SocPXA::AttachGamepad(bool attach, bool identify) {
         gamepad.Detach();
         SyncGamepadLine();
         serialHostHooks = {};
-        deviceTg50SetAccessoryAux(dev, 0);
+        deviceTg50SetConnectorEmpty(dev);
         return true;
     }
     if (gamepad.Attached()) return true;

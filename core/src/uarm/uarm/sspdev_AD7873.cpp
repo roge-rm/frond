@@ -125,7 +125,8 @@ void ad7873setVbatt(struct Ad7873 *ad, uint16_t mV)	//Vref is 2.5V
 
 void ad7873setVaux(struct Ad7873 *ad, uint16_t mV)
 {
-	ad->vAuxAdcVal = mV * 4096 / 2500;
+	const uint32_t code = uint32_t(mV) * 4096 / 2500;
+	ad->vAuxAdcVal = code > 4095 ? 4095 : code;  // 12 bits, full scale at the 2.5 V reference
 }
 
 
