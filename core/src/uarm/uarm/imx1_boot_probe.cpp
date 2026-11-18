@@ -1398,7 +1398,11 @@ bool armMode(uint32_t mode) {
     return mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 ||
            mode == 0x17 || mode == 0x1b || mode == 0x1f;
 }
-bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr) {
+// alignmentFaults: CP15 c1 A is set and the guest takes aborts. A misaligned word or halfword load or store
+// then takes an alignment data abort on the ARM920T (DDI0151C 3.6), which the CPU model raises, so it runs.
+// With A clear the ARMv4 result of a misaligned halfword is unpredictable and stays refused.
+bool bootstrapInstructionChecked(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr,
+                                 bool alignmentFaults) {
     if (i >> 28 == 15) return false;
     if (softwareInterrupt(i, false)) return true;
     if ((i & 0x0ffffff0) == 0x012fff10) return true;  // BX
@@ -1469,7 +1473,7 @@ bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, 
         const uint32_t offset = immediate ? ((i >> 4) & 0xf0) | (i & 15) : registers[rm];
         uint32_t address = registers[base] + (base == 15 ? 8 : 0);
         if (pre) address += (i & 0x00800000) ? offset : -offset;
-        return !(i & 0x20) || !(address & 1);
+        return !(i & 0x20) || !(address & 1) || alignmentFaults;
     }
     if (((i >> 12) & 15) == 15) {
         // DDI0100I A2.6/A4.1.35: unshifted MOVS pc,Rm restores the saved context.
@@ -1523,7 +1527,10 @@ bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, 
     return (i & 0x02000000) || !(i & 0x10) || !(i & 0x80);
 }
 // ARM DDI0100I A6/A7: ordinary ARMv4T forms, with aligned memory operands.
-bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
+bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr) {
+    return bootstrapInstructionChecked(i, registers, cpsr, spsr, false);
+}
+bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix, bool alignmentFaults = false) {
     if (i < 0x4000) return true;  // Shifts, add/subtract and immediate arithmetic.
     if ((i & 0xfc00) == 0x4000) {
         // DDI0100I A7.1.45: equal encoded MUL operands are unpredictable before ARMv6.
@@ -1553,13 +1560,15 @@ bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
     if ((i & 0xf000) == 0x5000) {
         const unsigned op = (i >> 9) & 7;
         const uint32_t address = r[(i >> 3) & 7] + r[(i >> 6) & 7];
-        if (op == 0 || op == 4) return !(address & 3);
-        if (op == 1 || op == 5 || op == 7) return !(address & 1);
+        if (op == 0 || op == 4) return !(address & 3) || alignmentFaults;
+        if (op == 1 || op == 5 || op == 7) return !(address & 1) || alignmentFaults;
         return true;
     }
-    if ((i & 0xe000) == 0x6000) return (i & 0x1000) || !(r[(i >> 3) & 7] & 3);
-    if ((i & 0xf000) == 0x8000) return !(r[(i >> 3) & 7] & 1);
-    if ((i & 0xf000) == 0x9000) return !(r[13] & 3);
+    // Single loads and stores: see bootstrapInstructionChecked for alignmentFaults. LDM, STM, PUSH and POP
+    // with a misaligned base stay refused.
+    if ((i & 0xe000) == 0x6000) return (i & 0x1000) || !(r[(i >> 3) & 7] & 3) || alignmentFaults;
+    if ((i & 0xf000) == 0x8000) return !(r[(i >> 3) & 7] & 1) || alignmentFaults;
+    if ((i & 0xf000) == 0x9000) return !(r[13] & 3) || alignmentFaults;
     if ((i & 0xf000) == 0xa000 || (i & 0xff00) == 0xb000) return true;
     if ((i & 0xf600) == 0xb400) return (i & 0x1ff) && !(r[13] & 3); // PUSH/POP.
     if ((i & 0xf000) == 0xc000) {
@@ -1871,12 +1880,15 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     if (p->observer) p->observer(p->observerContext, t);
     const bool thumb = t.instructionSize == 2;
+    const bool alignmentFaults = p->guestExceptions && cpuArm920AlignmentFaults(p->cpu);
     const bool refused = !fetchAbort && (p->prefixCapacityExceeded ||
         (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
-        (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc) :
+        (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc,
+                                 alignmentFaults) :
          t.instruction >> 28 == 15 ||
-         (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
-                                                                        cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR)))));
+         (condition(t.instruction, t.cpsr) &&
+          !bootstrapInstructionChecked(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
+                                       cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR), alignmentFaults))));
     // A refused ARM instruction passed its condition, so an undefined one here takes the exception.
     const bool undefined = refused && p->guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
                            undefinedInstruction(t.instruction, thumb);

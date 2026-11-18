@@ -5875,6 +5875,10 @@ uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint3
     return done;
 }
 
+bool cpuArm920AlignmentFaults(const ArmCpu *cpu) {
+    return cpu->model == ArmCpuModel::arm920t && cp15MMUAlignmentEnabled(cpu->cp15.cp15mmu);
+}
+
 void cpuArm920SetLean(ArmCpu *cpu, Arm920LeanPage page, Arm920LeanGuard guard, void *context) {
     if (cpu->model != ArmCpuModel::arm920t) return;
     cpu->leanPage = page;

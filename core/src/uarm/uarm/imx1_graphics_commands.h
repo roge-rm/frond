@@ -712,13 +712,19 @@ class Imx1GraphicsCommands {
         return true;
     }
     // A plain copy whose source and destination share pixels, as pieces that don't, in an order where no piece
-    // reads what an earlier one wrote. A move with a row part goes in pieces of that many whole rows, last rows
+    // reads what an earlier one wrote, or whole when it doesn't move. A move with a row part goes in pieces of that many whole rows, last rows
     // first when moving down; one along a row goes in pieces of that many columns, last columns first when moving
     // right. A move that isn't whole rows needs both rectangles inside the rows of the surface at surface.
     static bool splitOverlap(const Fill& fill, uint32_t surface, std::vector<Fill>& out) {
         const int64_t pitch = fill.pitch, width = fill.width, height = fill.height;
         const int64_t move = int64_t(fill.base) - int64_t(fill.sourceBase);
         if (!width || !height || pitch != int64_t(fill.sourcePitch) || width * 2 > pitch || (move & 1)) return false;
+        // A copy onto the very same pixels writes back what it reads, in any order (MicroQuad copies the whole
+        // 320x320 screen onto itself). Each pixel is read before it is written, so it goes as one piece.
+        if (!move) {
+            out.push_back(fill);
+            return true;
+        }
         int64_t rowMove = move / pitch, columnMove = 0;
         if (move % pitch) {
             auto inRow = [&](uint32_t at) { return at >= surface && (at - surface) % pitch + width * 2 <= pitch; };

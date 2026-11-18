@@ -580,7 +580,9 @@ void overlapMoves() {
                              // 1 row down cut to 3 rows, and 2 columns right cut on both sides.
                              Move{1,0,1,1,4,5,0,2,13,5}, Move{0,1,2,1,8,3,3,0,9,20},
                              // Diagonal with the scissor's top left inside the copy.
-                             Move{1,1,2,2,5,4,3,3,13,20}}) {
+                             Move{1,1,2,2,5,4,3,3,13,20},
+                             // Onto itself without moving (MicroQuad's whole screen), whole and clipped.
+                             Move{0,0,0,0,13,8}, Move{2,1,2,1,5,4,3,0,6,3}}) {
             Fixture f; planes(f);
             uint32_t model[13*8];
             for (unsigned i = 0; i < 13*8; ++i) { model[i] = 0x100 + i; f.write(destination+i*2,model[i]); }
