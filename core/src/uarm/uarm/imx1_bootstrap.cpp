@@ -111,14 +111,9 @@ uint64_t Imx1Bootstrap::idleQuietHclk() const {
     const uint64_t numerator = period.numerator, denominator = period.denominator;
     const uint64_t bus = cgm.busDivider();
     uint64_t quiet = cgm.idleQuietSteps(numerator, denominator);
-    quiet = std::min(quiet, rtc.idleQuietSteps(numerator, denominator));
-    quiet = std::min(quiet, watchdog.idleQuietSteps(numerator, denominator));
-    if (systemStopped()) {
-        if (pwm.usesReference()) quiet = std::min(quiet, pwm.idleQuietReferenceSteps(numerator, denominator));
-        return quiet ? quiet : 1;
-    }
-    if (pwm.usesReference()) quiet = std::min(quiet, pwm.idleQuietReferenceSteps(numerator, denominator));
-    else if (pwm.enabled())
+    quiet = std::min(quiet, referenceQuietSteps(numerator, denominator));
+    if (systemStopped()) return quiet ? quiet : 1;
+    if (!pwm.usesReference() && pwm.enabled())
         quiet = std::min(quiet, imx1StepsUntilDivided(pwm.idleQuietCycles(), cgm.perclk1Divider(), perclk1Phase, bus));
     quiet = std::min(quiet, i2c.idleQuietHclk());
     if (const auto cycles = asp.idleQuietPerclk2())
@@ -142,6 +137,85 @@ uint64_t Imx1Bootstrap::idleQuietHclk() const {
         if (const auto cycles = uart->idleQuietCycles())
             quiet = std::min(quiet, imx1StepsUntilDivided(cycles, cgm.perclk1Divider(), perclk1Phase, bus));
     return quiet ? quiet : 1;
+}
+
+bool Imx1Bootstrap::chargeLazyReference(uint64_t numerator, uint64_t denominator) {
+    auto& lazy = lazyReference;
+    uint64_t units;
+    if (denominator == lazy.denominator) units = numerator;
+    else if (lazy.denominator % denominator == 0) {
+        if (__builtin_mul_overflow(numerator, lazy.denominator / denominator, &units)) return false;
+    } else {
+        // A new common denominator: the sum so far scaled up and the limit worked out again over it. Only once
+        // every model the charge reaches has had one of this denominator, so their own denominators (which
+        // referenceRatioSupported looks at) stay as the single charges would leave them.
+        uint64_t phase, den, target;
+        if ((rtc.referenceEvent(phase, den, target) && den % denominator) ||
+            (watchdog.referenceEvent(phase, den, target) && den % denominator) ||
+            (pwm.referenceEvent(phase, den, target) && den % denominator))
+            return false;
+        uint64_t common, scaled;
+        if (__builtin_mul_overflow(lazy.denominator, denominator / imx1Gcd(lazy.denominator, denominator), &common) ||
+            __builtin_mul_overflow(lazy.units, common / lazy.denominator, &scaled) ||
+            __builtin_mul_overflow(numerator, common / denominator, &units))
+            return false;
+        LazyReference next;
+        if (!referenceLimit(common, next)) return false;
+        next.units = scaled;
+        lazy = next;
+    }
+    if (lazy.units >= lazy.limit || lazy.limit - lazy.units <= units) return false;
+    lazy.units += units;
+    return true;
+}
+
+bool Imx1Bootstrap::referenceLimit(uint64_t denominator, LazyReference& lazy) const {
+    lazy = {0, UINT64_MAX, denominator, 0, 0};
+    uint64_t phase, den, target;
+    auto take = [&](bool found) {
+        if (!found) return true;
+        if (!target || !den || phase >= den) return false;
+        uint64_t scale, whole;
+        if (__builtin_mul_overflow(den, denominator / imx1Gcd(den, denominator), &scale) ||
+            __builtin_mul_overflow(target, scale, &whole))
+            return false;
+        // phase < den, so this is less than scale and at most whole - 1.
+        const uint64_t event = whole - phase * (scale / den);
+        if (!lazy.eventScale || __uint128_t(event) * lazy.eventScale < __uint128_t(lazy.event) * scale) {
+            lazy.event = event;
+            lazy.eventScale = scale;
+        }
+        return true;
+    };
+    if (!take(rtc.referenceEvent(phase, den, target)) || !take(watchdog.referenceEvent(phase, den, target)) ||
+        !take(pwm.referenceEvent(phase, den, target)))
+        return false;
+    if (lazy.eventScale) {
+        // The smallest sum over denominator that reaches event/eventScale.
+        const __uint128_t product = __uint128_t(lazy.event) * denominator;
+        const __uint128_t limit = product / lazy.eventScale + (product % lazy.eventScale != 0);
+        if (limit > UINT64_MAX - 1) return false;
+        lazy.limit = uint64_t(limit);
+    }
+    return true;
+}
+
+uint64_t Imx1Bootstrap::referenceQuietSteps(uint64_t numerator, uint64_t denominator) const {
+    const auto& lazy = lazyReference;
+    if (!lazy.units) {
+        uint64_t quiet = std::min(rtc.idleQuietSteps(numerator, denominator), watchdog.idleQuietSteps(numerator, denominator));
+        if (pwm.usesReference()) quiet = std::min(quiet, pwm.idleQuietReferenceSteps(numerator, denominator));
+        return quiet;
+    }
+    if (lazy.limit == UINT64_MAX) return UINT64_MAX;
+    // Charged with the sum, the model with the first event has denominator eventScale and event - charged CLK32
+    // periods to go, in eventScale units; the others have more. These are imx1StepsUntil's sums for it, exact
+    // as every product fits 128 bits.
+    if (!numerator || !denominator) return 1;
+    const __uint128_t left = __uint128_t(lazy.event) - __uint128_t(lazy.units) * (lazy.eventScale / lazy.denominator);
+    const __uint128_t scaled = left * denominator, divisor = __uint128_t(lazy.eventScale) * numerator;
+    const __uint128_t steps = scaled / divisor + (scaled % divisor != 0);
+    return steps > UINT64_MAX ? UINT64_MAX : steps ? uint64_t(steps) : 1;
 }
 
 // HCLK periods up to and including the one where the PCM DMA can reach the end of its buffer,
@@ -794,6 +868,8 @@ const char* Imx1Bootstrap::registerName(uint32_t address) {
 
 Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool write, uint32_t& value, uint32_t cpuClockMode) {
     SourceChange change(*this);
+    if (Imx1Rtc::registerName(address) || Imx1Watchdog::registerName(address) || Imx1Pwm::registerName(address))
+        syncReference();
     if (address >= 0x00218000 && address < 0x0021802c) {
         if (size != 4 || (address & 3)) return Imx1BootstrapAccess::width;
         if (address == 0x00218000) {

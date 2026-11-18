@@ -42,6 +42,13 @@ class Imx1Pwm {
     uint64_t idleQuietReferenceSteps(uint64_t numerator, uint64_t denominator) const {
         return imx1StepsUntil(referencePhase, referenceDenominator, numerator, denominator, idleQuietCycles());
     }
+    // On the CLK32 source, the end of the period idleQuietReferenceSteps looks for, as the phase/den and the whole
+    // periods to it. False off it.
+    bool referenceEvent(uint64_t& phase, uint64_t& den, uint64_t& target) const {
+        if (!usesReference()) return false;
+        phase = referencePhase; den = referenceDenominator; target = idleQuietCycles();
+        return true;
+    }
     // -1 means the active sample has not been supplied.
     int output() const;
     static constexpr uint32_t stateVersion = 1;

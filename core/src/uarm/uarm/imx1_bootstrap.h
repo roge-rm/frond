@@ -136,7 +136,7 @@ class Imx1Bootstrap {
     uint32_t gpioRegister(unsigned port, unsigned index) const { return gpio.registerValue(port, index); }
     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
     uint32_t lcdcContrastPhase() const { return contrastPhase; }
-    bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); return rtc.initialise(time); }
+    bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); syncReference(); return rtc.initialise(time); }
     void setI2cScenario(bool enabled) { SourceChange change(*this); i2c.setSingleMasterScenario(enabled); }
     void setI2cBus(Imx1I2cBus* bus) { SourceChange change(*this); i2c.setBus(bus); }
     void setI2cObserver(Imx1I2cObserver observer, void* context) { SourceChange change(*this); i2c.setObserver(observer, context); }
@@ -366,6 +366,7 @@ class Imx1Bootstrap {
     template <class A> void state(A& a) {
         SourceChange change(*this);
         runCache.driveSettled = false;
+        syncReference();
         a.Do64(elapsedReference.ticks).Do64(elapsedReference.numerator).Do64(elapsedReference.denominator);
         a.Require(elapsedReference.valid(), "reference time");
         a.DoBool(referenceOverflow).FixedBool(cpuInterruptsConnected);
@@ -434,6 +435,8 @@ class Imx1Bootstrap {
             to.control = from.control; to.controlKnown = from.controlKnown;
             to.precharged = from.precharged; to.modeSet = from.modeSet; to.refreshes = from.refreshes;
         }
+        other.syncReference();
+        syncReference();
         rtc.keepTime(other.rtc);
         reset.set(Imx1ResetSource::external);
     }
@@ -451,15 +454,41 @@ class Imx1Bootstrap {
                pwm.referenceRatioSupported(denominator);
     }
     Imx1ReferenceTime elapsedReference;
+    // The RTC, the watchdog and the PWM on CLK32 are charged lazily. Charges add up in lazyReference, over a
+    // common denominator, until they would reach the first event of the three (a status bit, the timeout bound,
+    // the end of a PWM period), one of their registers is accessed or the state is saved. Up to there one charge
+    // of the sum gives the state the single charges would, and nothing they show (status, interrupt lines,
+    // possibleTimeout, the duty) changes. units is the sum in 1/denominator periods, denominator 0 is off.
+    // limit is the units that reach the first event, UINT64_MAX with none; event/eventScale is the time to it
+    // in CLK32 periods from the models as they are, with eventScale a multiple of denominator.
+    struct LazyReference { uint64_t units = 0, limit = 0, denominator = 0, event = 0, eventScale = 0; } lazyReference;
     bool referenceOverflow = false;
     bool advanceReference(uint64_t numerator, uint64_t denominator) {
         if (!elapsedReference.add(numerator, denominator)) { referenceOverflow = true; return false; }
         cgm.advanceMcuReference(numerator, denominator);
+        if (lazyReference.denominator && chargeLazyReference(numerator, denominator)) return true;
+        syncReference();
         rtc.advanceReference(numerator, denominator);
         watchdog.advanceReference(numerator, denominator);
         pwm.advanceReference(numerator, denominator);
+        if (!referenceLimit(denominator, lazyReference)) lazyReference = {};
         return true;
     }
+    bool chargeLazyReference(uint64_t numerator, uint64_t denominator);
+    // The limit, event and eventScale for sums over denominator, from the models as they are. False when they
+    // can't be worked out in 64 bits.
+    bool referenceLimit(uint64_t denominator, LazyReference& lazy) const;
+    void syncReference() {
+        if (lazyReference.units) {
+            rtc.advanceReference(lazyReference.units, lazyReference.denominator);
+            watchdog.advanceReference(lazyReference.units, lazyReference.denominator);
+            pwm.advanceReference(lazyReference.units, lazyReference.denominator);
+        }
+        lazyReference = {};
+    }
+    // Steps of numerator/denominator until the first event of the RTC, the watchdog or the PWM on CLK32, as
+    // their idleQuietSteps would give it with the sum charged.
+    uint64_t referenceQuietSteps(uint64_t numerator, uint64_t denominator) const;
     // AITC sources of modules that have no model and stay in reset: UART3, SSI2, SPI2, SPI1 and USBD.
     static constexpr uint64_t resetStateSourcesLow = 0x1f | (uint64_t(7) << 36) | (uint64_t(3) << 40) | (uint64_t(0xff) << 47);
     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
@@ -640,7 +669,8 @@ class Imx1Bootstrap {
 
    public:
     static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
-                                           Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t);
+                                           Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t) +
+                                           sizeof(LazyReference);
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)
