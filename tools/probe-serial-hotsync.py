@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""HotSync a private E2 or TX session copy over the serial port with pilot-link.
+"""HotSync a private E2, TX or Zodiac session copy over the serial port with pilot-link.
 
 The core runs with --serial pty, or tcp:PORT with a PTY relayed to it here. A replay presses the connector's
 HotSync button (key hotsync) once per step; each step runs one
 pilot-link command on the endpoint: list, fetch MemoDB, install a PRC, list again
 and a few pilot-dlpsh commands, and with --only backup a full backup. Needs pilot-xfer and pilot-dlpsh on PATH.
+The Zodiac has no HotSync key and no app launch: give it a session showing the HotSync app with Cradle/Cable
+and no cradle attached (that's the serial port; the cradle makes it USB), with --resume-app --tap --button 160,165.
 """
 import argparse
 import importlib.util
@@ -146,7 +148,7 @@ class Pilot(threading.Thread):
 def main():
     global BUTTON, STEP_MS
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--session', type=Path, required=True, help='user-supplied ready E2 or TX session')
+    p.add_argument('--session', type=Path, required=True, help='user-supplied ready E2, TX or Zodiac session')
     p.add_argument('--core', type=Path, default=ROOT / 'out/frond')
     p.add_argument('--install', type=Path, required=True, help='small PRC to install')
     p.add_argument('--endpoint', choices=['pty', 'tcp'], default='pty')

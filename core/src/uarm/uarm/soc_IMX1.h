@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "SoC.h"
+#include "UsbDevicePort.h"
+#include "UsbHostHooks.h"
 #include "guest_orientation.h"
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
@@ -74,6 +76,33 @@ class SocIMX1 : public SoC {
     bool CradleButtonSupported() const override { return true; }
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
+    // The cradle: A11 (attach detect) and A1 high and the accessory ID line at the bottom of its ADC range.
+    // It's in while the user put it in or the USB bridge's cable is in; each takes out only its own.
+    bool CradleSupported() const override { return true; }
+    bool CradleAttached() const override { return cradle || usbCable; }
+    bool SetCradle(bool attached) override;
+    // The USB bridge's cable, which comes in through the cradle.
+    bool UsbCableAttached() const { return usbCable; }
+    bool SetUsbCable(bool attached);
+    // The accessory inputs the machine has now, for tests: A11 and A1 high and the aux ADC sample.
+    bool AccessoryPinsHigh() const { return (imx1MachineGpioInput(machine, 0) & 0x802) == 0x802; }
+    uint32_t AccessorySample() const { return imx1MachineGraphicsAux(machine); }
+    // Holds D22 for 500 ms of guest time. The awake ROM only takes it with the cradle attached.
+    bool PressHotSync() override;
+    // Asleep is the i.MX1 in stop mode; a wake is leaving it, as Run sees it.
+    bool PowerSleeping() const override { return imx1MachineSystemStopped(machine); }
+    uint64_t PowerWakes() const override { return wakes; }
+    // UART1 is the connector's serial port, UART2 the infrared port (ROM uMX1 driver, IREN on unit 1
+    // only). With no peer both see RTS inactive.
+    HostUartPort* SerialHostPort() override;
+    HostInfraredPort* InfraredHostPort() override;
+    // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
+    // bridge's cable puts the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
+    // the host has work due, an idle guest's clock runs on to it instead of waiting.
+    UsbDevicePort GetUsbPort();
+    void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
+    bool UsbHostIoPaused() const { return halted || PowerSleeping(); }
+    ~SocIMX1();
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
@@ -135,10 +164,25 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
-    // Puts the battery, headphone and cradle button settings on the machine's inputs.
+    // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();
     bool ApplyHeadphones();
-    bool headphones{false}, cradleDown{false};
+    bool ApplyCradle();
+    bool SetCradleInputs(bool& setting, bool attached);
+    bool headphones{false}, cradleDown{false}, cradle{false}, usbCable{false};
+    // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
+    uint64_t hotSyncTicks{0};
+    UsbHostHooks usbHostHooks{};
+    void TickUsbHost();
+    bool UsbHostEventPending();
+    bool wasStopped{false};
+    uint64_t wakes{0};
+    struct SerialPort;
+    struct InfraredPort;
+    std::unique_ptr<SerialPort> serialPort;
+    std::unique_ptr<InfraredPort> infraredPort;
+    // Puts the UARTs' RTS inputs and host peers back on the machine after it was made, loaded or reset.
+    void ApplyUartLines();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.

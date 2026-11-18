@@ -6,10 +6,11 @@
 #include <memory>
 #include <string>
 
+#include "HostUartPort.h"
 #include "SerialHostRoute.h"
 struct PxaUart;
 
-// Connects the TX FFUART to a host PTY, a TCP listener on 127.0.0.1 or a Unix socket listener. A worker
+// Connects a board's serial UART (HostUartPort) to a host PTY, a TCP listener on 127.0.0.1 or a Unix socket listener. A worker
 // thread owns the descriptors and moves bytes through two bounded queues; it never
 // touches the UART. Every method runs on the emulator thread. Nothing here is
 // session state: a load or reset detaches, and Service attaches again once the UART
@@ -37,8 +38,14 @@ class HostSerial {
     HostSerial(const HostSerial&) = delete;
     HostSerial& operator=(const HostSerial&) = delete;
 
-    // Opens the endpoint and starts the worker. Off is accepted and opens nothing.
+    // Opens the endpoint and starts the worker. Off is accepted and opens nothing. The port outlives
+    // the endpoint or Stop runs first.
+    bool Start(HostUartPort* port, const Config& config, std::string& error, SerialHostRoute route = {});
+    // The same on a PXA UART.
     bool Start(PxaUart* uart, const Config& config, std::string& error, SerialHostRoute route = {});
+    bool Start(std::nullptr_t, const Config& config, std::string& error, SerialHostRoute route = {}) {
+        return Start(static_cast<HostUartPort*>(nullptr), config, error, route);
+    }
     // Detaches from the UART, stops the worker and closes every descriptor.
     void Stop();
     // Call between emulation slices: attaches when the UART is idle, updates

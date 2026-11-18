@@ -12,6 +12,7 @@
 #include "UsbBusHost.h"
 
 class SocPXA;
+class SoC;
 
 // Connects the TX or E2 USB port to a host PTY or a TCP listener on 127.0.0.1 through
 // UsbBusHost: plugs the cable in (TX GPIO13, E2 GPIO35), enumerates the device and moves the bytes of its
@@ -41,6 +42,8 @@ class UsbHostBridge {
     UsbHostBridge& operator=(const UsbHostBridge&) = delete;
 
     bool Start(SocPXA* soc, const Config& config, std::string& error);
+    // The TX, E2, Zire 72 and TG50 as above, or the Zodiac's W4200 USB function through its cradle.
+    bool Start(SoC* soc, const Config& config, std::string& error);
     void Stop();  // unplugs the cable and closes the endpoint
     // Like Stop, but the host endpoint (a PTY's path, a TCP port) stays open for a Start with
     // the same transport.

@@ -20,6 +20,7 @@ class HostSerial;
 class HostInfrared;
 class UsbHostBridge;
 struct PxaUart;
+class HostUartPort;
 
 namespace commands {
     struct Context {
@@ -44,6 +45,7 @@ namespace commands {
         HostSerial* serial{nullptr};      // live host endpoint, never session state
         SerialHostRoute serialRoute{};
         PxaUart* serialUart{nullptr};     // TX FFUART for serial-mode changes
+        HostUartPort* serialPort{nullptr};  // the board's serial port where it gives one (SoC::SerialHostPort)
         std::string serialError{};        // why the last endpoint could not open
         UsbHostBridge* usb{nullptr};      // live USB host bridge, never session state
         std::string usbError{};           // why the last USB endpoint could not open

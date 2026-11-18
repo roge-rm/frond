@@ -152,6 +152,22 @@ class Imx1Bootstrap {
         return unit == 1 ? uart1 : uart2;
     }
     const Imx1Uart& uartState(unsigned unit) const { return unit == 1 ? uart1 : uart2; }
+    // Host wiring between runs, without uart()'s shared mode: the RTS input level (low is active), and
+    // a peer that takes the characters sent and sends its own (Imx1Uart::setSource). unit is 1 or 2.
+    void setUartRts(unsigned unit, bool low) { SourceChange change(*this); (unit == 1 ? uart1 : uart2).setRts(low); }
+    void setUartPeer(unsigned unit, Imx1UartTransmit transmit, Imx1UartPending pending, Imx1UartTake take, void* context) {
+        SourceChange change(*this);
+        auto& port = unit == 1 ? uart1 : uart2;
+        port.setPeer(transmit, context);
+        port.setSource(pending, take, context);
+    }
+    // The bit rate from the System PLL as it runs, PERCLK1's divider and the UART's own, 0 when the PLL has none.
+    uint64_t uartBitsPerSecond(unsigned unit) const {
+        const auto pll = cgm.systemPllActiveRatio();
+        if (!pll.denominator) return 0;
+        const uint64_t perclk1 = uint64_t(32768) * pll.numerator / pll.denominator / cgm.perclk1Divider();
+        return uartState(unit).bitsPerSecond(perclk1);
+    }
     uint32_t dmaResetRemainingHclk() const { return dmaResetClocks; }
     uint32_t pcmDmaRemaining() const { return dmaPcmActive ? dmaChannels[10][2] - dmaPcmCount : 0; }
     uint64_t pcmTransmittedWords() const { return ssi1Transmitted; }
@@ -696,7 +712,8 @@ class Imx1Bootstrap {
    public:
     static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
                                            Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t) +
-                                           sizeof(LazyReference) + 2 * sizeof(uint32_t) + Imx1Cgm::unsavedBytes;
+                                           sizeof(LazyReference) + 2 * sizeof(uint32_t) + Imx1Cgm::unsavedBytes +
+                                           2 * Imx1Uart::unsavedBytes;
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)

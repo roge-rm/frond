@@ -9,13 +9,48 @@
 #include "ir/IrPrinterControl.h"
 #include "modem/PppServer.h"
 #include "net/SlirpIp.h"
+namespace {
+class PxaInfraredPort final : public HostInfraredPort {
+ public:
+    explicit PxaInfraredPort(SocPXA* soc):soc(soc){}
+    uint64_t Time() override {return soc->GetTime();}
+    bool SetHooks(const SerialHostHooks* hooks) override {return soc->SetIrHostHooks(hooks);}
+    bool PowerEnabled() override {return soc->IrPowerEnabled();}
+    bool ReceiveEnabled() override {return pxaUartIrReceiveEnabled(soc->GetIrUart());}
+    HostUartMode Mode() override {
+        const auto state=pxaUartIrState(soc->GetIrUart());
+        return {state.baud,uint32_t(state.lcr&0x3f),state.receive,state.transmit};
+    }
+    void Kick() override {pxaUartKick(soc->GetIrUart());}
+    bool HostIoPaused() override {return soc->HostIoPaused();}
+    bool Sleeping() override {return soc->PowerSleeping();}
+    bool KeyboardAttached() override {return soc->KeyboardAttached();}
+ private:
+    SocPXA* soc;
+};
+}
 struct HostInfrared::Impl {
     struct Phone {
         frondNet::SlirpIp network;
         frondModem::PppServer ppp{network};
         frondIr::IrPhone ir{ppp};
     };
-    SocPXA* soc{};
+    HostInfraredPort* soc{};
+    // The adapter the SocPXA forms made, and its SoC.
+    std::unique_ptr<HostInfraredPort> pxaPort;
+    SocPXA* pxaSoc{};
+    // The adapter for soc: the one kept when it's the same SoC, else a new one in spare.
+    HostInfraredPort* PxaPort(SocPXA* machine,std::unique_ptr<HostInfraredPort>& spare) {
+        if (!machine) return nullptr;
+        if (pxaPort && pxaSoc==machine) return pxaPort.get();
+        spare=std::make_unique<PxaInfraredPort>(machine);
+        return spare.get();
+    }
+    // After a start: keep spare when it's in use, or the old adapter has gone out of use.
+    void KeepPxaPort(SocPXA* machine,std::unique_ptr<HostInfraredPort>& spare) {
+        if (!spare || (pxaPort && soc==pxaPort.get())) return;
+        pxaPort=std::move(spare);pxaSoc=machine;
+    }
     std::unique_ptr<Phone> phone;
     std::unique_ptr<frondIr::IrPrinter> printer;
     frondIr::IrPrinterControl printerControl;
@@ -24,7 +59,7 @@ struct HostInfrared::Impl {
     // Guest nanoseconds for the phone, carried on across a load that moves the clock back.
     uint64_t clock{},clockMark{};
     uint64_t Now() {
-        const uint64_t t=soc?soc->GetTime():0;
+        const uint64_t t=soc?soc->Time():0;
         if(t>clockMark)clock+=t-clockMark;
         clockMark=t;
         return clock;
@@ -81,9 +116,9 @@ struct HostInfrared::Impl {
     }
     static void ModeChanged(void* context) {
         auto& s=*static_cast<Impl*>(context);if (!s.soc || s.phone || s.printer) return;
-        const auto state=pxaUartIrState(s.soc->GetIrUart());
-        const uint64_t tag=(uint64_t(state.baud)<<8)|(state.lcr&0x3f);
-        s.link.SetReceiveWindow(s.soc->IrPowerEnabled() && state.receive,tag);
+        const auto state=s.soc->Mode();
+        const uint64_t tag=(uint64_t(state.baud)<<16)|state.format;
+        s.link.SetReceiveWindow(s.soc->PowerEnabled() && state.receive,tag);
     }
     static void Replaced(void* context) {
         auto& s=*static_cast<Impl*>(context);
@@ -98,7 +133,26 @@ struct HostInfrared::Impl {
 };
 HostInfrared::HostInfrared():impl(std::make_unique<Impl>()){}
 HostInfrared::~HostInfrared(){Stop();}
-bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::string& error) {
+bool HostInfrared::Start(SocPXA* machine,const HostSerial::Config& config,std::string& error) {
+    std::unique_ptr<HostInfraredPort> spare;
+    const bool ok=Start(impl->PxaPort(machine,spare),config,error);
+    impl->KeepPxaPort(machine,spare);
+    return ok;
+}
+bool HostInfrared::StartPhone(SocPXA* machine,std::string& error) {
+    std::unique_ptr<HostInfraredPort> spare;
+    const bool ok=StartPhone(impl->PxaPort(machine,spare),error);
+    impl->KeepPxaPort(machine,spare);
+    return ok;
+}
+bool HostInfrared::StartPrinter(SocPXA* machine,std::string& error) {
+    std::unique_ptr<HostInfraredPort> spare;
+    const bool ok=StartPrinter(impl->PxaPort(machine,spare),error);
+    impl->KeepPxaPort(machine,spare);
+    return ok;
+}
+HostInfraredPort* HostInfrared::Port() const {return impl->soc;}
+bool HostInfrared::Start(HostInfraredPort* soc,const HostSerial::Config& config,std::string& error) {
     // Another endpoint while one is on keeps the UART hooks: bytes the UART holds came from the
     // old peer and stay the guest's, as when a load replaces the peer. Taking the hooks again
     // would be refused until the guest had read them.
@@ -113,9 +167,9 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
     }
     Stop();error.clear();impl->dropped=impl->discarded=0;
     if (config.kind==HostSerial::Kind::off) return true;
-    if (!soc) {error="Infrared needs a Palm TX or Tungsten E2.";return false;}
+    if (!soc) {error="This device has no infrared port.";return false;}
     IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
-    if (!soc->SetIrHostHooks(&hooks)) {
+    if (!soc->SetHooks(&hooks)) {
         error="Infrared UART is busy; detach the keyboard, or wait for the Palm to finish sending.";return false;
     }
     impl->soc=soc;
@@ -124,9 +178,9 @@ bool HostInfrared::Start(SocPXA* soc,const HostSerial::Config& config,std::strin
     impl->config=impl->link.GetConfig();
     return true;
 }
-bool HostInfrared::StartPhone(SocPXA* soc,std::string& error) {
+bool HostInfrared::StartPhone(HostInfraredPort* soc,std::string& error) {
     error.clear();
-    if (!soc) {error="Infrared needs a Palm TX or Tungsten E2.";return false;}
+    if (!soc) {error="This device has no infrared port.";return false;}
     auto phone=std::make_unique<Impl::Phone>();
     if (!phone->network.Valid()) {error="slirp did not start";return false;}
     if (impl->phone && impl->soc==soc) return true;
@@ -138,19 +192,19 @@ bool HostInfrared::StartPhone(SocPXA* soc,std::string& error) {
     } else {
         Stop();impl->dropped=impl->discarded=0;
         IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
-        if (!soc->SetIrHostHooks(&hooks)) {
+        if (!soc->SetHooks(&hooks)) {
             error="Infrared UART is busy; detach the keyboard, or wait for the Palm to finish sending.";return false;
         }
         impl->soc=soc;
     }
-    impl->clockMark=soc->GetTime();
+    impl->clockMark=soc->Time();
     impl->phoneHeard=false;
     impl->phone=std::move(phone);
     return true;
 }
-bool HostInfrared::StartPrinter(SocPXA* soc,std::string& error) {
+bool HostInfrared::StartPrinter(HostInfraredPort* soc,std::string& error) {
     error.clear();
-    if (!soc) {error="Infrared needs a Palm TX or Tungsten E2.";return false;}
+    if (!soc) {error="This device has no infrared port.";return false;}
     if (impl->printer && impl->soc==soc) return true;
     impl->phone.reset();
     if (impl->soc==soc) {
@@ -159,12 +213,12 @@ bool HostInfrared::StartPrinter(SocPXA* soc,std::string& error) {
     } else {
         Stop();impl->dropped=impl->discarded=0;
         IrHostHooks hooks{impl.get(),Impl::Read,Impl::Write,Impl::Pending,Impl::Replaced,Impl::ModeChanged};
-        if (!soc->SetIrHostHooks(&hooks)) {
+        if (!soc->SetHooks(&hooks)) {
             error="Infrared UART is busy; detach the keyboard, or wait for the Palm to finish sending.";return false;
         }
         impl->soc=soc;
     }
-    impl->clockMark=soc->GetTime();
+    impl->clockMark=soc->Time();
     impl->phoneHeard=false;
     impl->printer=std::make_unique<frondIr::IrPrinter>();
     impl->printerControl.Reset();
@@ -185,14 +239,14 @@ std::string HostInfrared::PhoneStats() const {
         " resent="+std::to_string(s.resent)+" timeouts="+std::to_string(s.timeouts);
 }
 void HostInfrared::Stop() {
-    if (impl->soc) impl->soc->SetIrHostHooks(nullptr);
+    if (impl->soc) impl->soc->SetHooks(nullptr);
     impl->phone.reset();impl->printer.reset();
     impl->link.Close();impl->transmit.clear();impl->soc=nullptr;impl->config={};impl->restart=false;impl->error.clear();
 }
 void HostInfrared::Service() {
     auto* soc=impl->soc;
     if (!soc || soc->HostIoPaused()) return;
-    if (soc->PowerSleeping()) {
+    if (soc->Sleeping()) {
         if (!impl->phone && !impl->printer && impl->link.IsOpen()) Impl::Replaced(impl.get());
         return;
     }
@@ -201,26 +255,26 @@ void HostInfrared::Service() {
         // A transceiver turned off leaves the link to the guest's disconnect time, as on frond-68k.
         impl->printer->Service(now);
         impl->printerControl.Observe(impl->printer.get());
-        if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->printer->Available(now))
-            pxaUartKick(soc->GetIrUart());
+        if (soc->PowerEnabled() && soc->ReceiveEnabled() && impl->printer->Available(now))
+            soc->Kick();
         return;
     }
     if (impl->phone) {
         const uint64_t now=impl->Now();
         // A transceiver turned off (IR closed, or a reset) ends the link and drops unread answers.
-        const bool heard=soc->IrPowerEnabled();
+        const bool heard=soc->PowerEnabled();
         if (impl->phoneHeard && !heard) impl->phone->ir.Drop(now);
         impl->phoneHeard=heard;
         impl->phone->ir.Service(now);
         // Wake the UART once an answer's turnaround time has passed.
-        if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->phone->ir.Available(now))
-            pxaUartKick(soc->GetIrUart());
+        if (soc->PowerEnabled() && soc->ReceiveEnabled() && impl->phone->ir.Available(now))
+            soc->Kick();
         return;
     }
     if (impl->restart) {
         impl->restart=false;
         if (soc->KeyboardAttached()) {
-            soc->SetIrHostHooks(nullptr);impl->soc=nullptr;impl->config={};
+            soc->SetHooks(nullptr);impl->soc=nullptr;impl->config={};
             impl->error="Restored keyboard owns the infrared UART.";
             return;
         }
@@ -231,8 +285,8 @@ void HostInfrared::Service() {
     // Register transitions update the receive generation immediately. The
     // worker samples arrivals; OS-buffered unsampled bytes have no optical time.
     Impl::ModeChanged(impl.get());
-    if (soc->IrPowerEnabled() && pxaUartIrReceiveEnabled(soc->GetIrUart()) && impl->link.PendingReceive())
-        pxaUartKick(soc->GetIrUart());
+    if (soc->PowerEnabled() && soc->ReceiveEnabled() && impl->link.PendingReceive())
+        soc->Kick();
 }
 HostSerial::Config HostInfrared::GetConfig() const {return impl->config;}
 std::string HostInfrared::Endpoint() const {return impl->link.Endpoint();}

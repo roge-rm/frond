@@ -178,6 +178,8 @@ struct Probe {
     }
     Imx1ProbeObserver observer = nullptr;
     void* observerContext = nullptr;
+    // The USB host has work due (imx1MachineSetUsbHostPending). Host side, not saved.
+    bool usbHostPending = false;
     bool blPrefix = false;
     uint32_t blNextPc = 0;
     struct InterruptedPrefix { uint32_t pc, cpsr, mode, lr, sp; };
@@ -408,7 +410,7 @@ struct Probe {
         return false;
     }
     bool idleWakePossible() const {
-        if (peripherals.idleWakePossible()) return true;
+        if (usbHostPending || peripherals.idleWakePossible()) return true;
         // Preview the connected display request through GPIO and AITC without driving a pin.
         return options.graphicsIrqA13 && cs5Configuration.clockState().programmed() &&
             cs5Configuration.displayState().lcdEnabled() &&
@@ -2405,8 +2407,42 @@ Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine* machine, uint16_t word)
     p->peripherals.setAspUInput(word);
     return Imx1BootstrapAccess::ok;
 }
+bool imx1MachineSystemStopped(const Imx1Machine* machine) {
+    return machine && machine->probe->options.bootstrapPeripherals && machine->probe->peripherals.systemStopped();
+}
 uint32_t imx1MachineGpioInput(const Imx1Machine* machine, unsigned port) {
     return machine ? machine->probe->peripherals.gpioInputSample(port) : 0;
+}
+Imx1MachineUartLine imx1MachineUartLine(const Imx1Machine* machine, unsigned unit) {
+    if (!machine || (unit != 1 && unit != 2) || !machine->probe->options.bootstrapPeripherals) return {};
+    const auto& board = machine->probe->peripherals;
+    const auto& uart = board.uartState(unit);
+    Imx1MachineUartLine line;
+    line.enabled = uart.enabled();
+    line.receiverOn = uart.receiverOn();
+    line.infrared = uart.infrared();
+    line.ctsLow = uart.ctsLow();
+    line.rtsLow = uart.rtsInputLow();
+    line.format = uart.frameFormat();
+    line.bitsPerSecond = line.enabled ? board.uartBitsPerSecond(unit) : 0;
+    return line;
+}
+Imx1BootstrapAccess imx1MachineSetUartRts(Imx1Machine* machine, unsigned unit, bool low) {
+    if (!machine || (unit != 1 && unit != 2)) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+    p->peripherals.setUartRts(unit, low);
+    return Imx1BootstrapAccess::ok;
+}
+Imx1BootstrapAccess imx1MachineSetUartPeer(Imx1Machine* machine, unsigned unit, Imx1UartTransmit transmit,
+                                          Imx1UartPending pending, Imx1UartTake take, void* context) {
+    if (!machine || (unit != 1 && unit != 2)) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (!p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+    // Detaching always works, so a stopped machine lets go of its host.
+    if ((transmit || take) && (p->stopped || p->terminal)) return Imx1BootstrapAccess::sequence;
+    p->peripherals.setUartPeer(unit, transmit, pending, take, context);
+    return Imx1BootstrapAccess::ok;
 }
 uint16_t imx1MachineAspUInput(const Imx1Machine* machine) {
     return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspUInput() : 0;
@@ -2460,6 +2496,63 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine* machine, uint32_
     if (first > 1023 || second > 1023) return Imx1BootstrapAccess::sideEffect;
     if (commit) p->cs5Configuration.setAcquisitionInput(first, second);
     return Imx1BootstrapAccess::ok;
+}
+
+Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine* machine, uint32_t sample, bool commit) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawAuxKnown)
+        return Imx1BootstrapAccess::sequence;
+    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    if (commit) p->cs5Configuration.setAcquisitionAuxInput(sample);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGraphicsAux(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.acquisitionState().auxSample() : 0;
+}
+
+Imx1UsbFunctionState imx1MachineUsbState(const Imx1Machine* machine) {
+    if (!machine) return {};
+    const auto& usb = machine->probe->cs5Configuration.usbState();
+    return {usb.listening(), usb.enableCount(), usb.address()};
+}
+// A host change on a copy of the chip, kept when the interrupt line it drives is accepted.
+template <class R, class Change> static R usbHostChange(Imx1Machine* machine, R refused, Change change) {
+    if (!machine) return refused;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->cs5Configuration.virtualProfile())
+        return refused;
+    auto candidate = p->cs5Configuration;
+    const R result = candidate.usbHost(change);
+    if (p->acceptGraphics(candidate, true) != Imx1BootstrapAccess::ok) return refused;
+    return result;
+}
+bool imx1MachineUsbBusReset(Imx1Machine* machine) {
+    return usbHostChange(machine, false, [](Imx1GraphicsUsb& usb) { return usb.busReset(); });
+}
+UsbPacketResult imx1MachineUsbSetup(Imx1Machine* machine, const uint8_t* data) {
+    return usbHostChange(machine, UsbPacketResult::Timeout, [data](Imx1GraphicsUsb& usb) { return usb.setup(data); });
+}
+UsbPacketResult imx1MachineUsbOut(Imx1Machine* machine, uint8_t endpoint, const uint8_t* data, unsigned size) {
+    return usbHostChange(machine, UsbPacketResult::Timeout, [&](Imx1GraphicsUsb& usb) {
+        return endpoint ? usb.endpointOut(endpoint, data, size) : usb.ep0Out(data, size);
+    });
+}
+UsbPacketResult imx1MachineUsbIn(Imx1Machine* machine, uint8_t endpoint, uint8_t* data, unsigned* size, bool take) {
+    if (!take) {
+        if (!machine) return UsbPacketResult::Timeout;
+        auto copy = machine->probe->cs5Configuration.usbState();
+        return endpoint ? copy.endpointIn(endpoint, nullptr, size, false) : copy.ep0In(nullptr, size, false);
+    }
+    return usbHostChange(machine, UsbPacketResult::Timeout, [&](Imx1GraphicsUsb& usb) {
+        return endpoint ? usb.endpointIn(endpoint, data, size, true) : usb.ep0In(data, size, true);
+    });
+}
+void imx1MachineSetUsbHostPending(Imx1Machine* machine, bool pending) {
+    if (machine) machine->probe->usbHostPending = pending;
+}
+bool imx1MachineUsbOutReady(const Imx1Machine* machine, uint8_t endpoint) {
+    return machine && machine->probe->cs5Configuration.usbState().endpointOutReady(endpoint);
 }
 
 Imx1BootstrapAccess imx1MachineSetZodiacControl(Imx1Machine* machine, Imx1ZodiacControl control, bool pressed, bool commit) {
@@ -2679,7 +2772,7 @@ struct ProbeState {
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields, stateIdentityVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes - Imx1Cs5Configuration::unsavedBytes - sizeof(Imx1GraphicsLookup) +
               Imx1GraphicsLookup::layoutBytes() == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1ProbeResult) == 352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Arm920SavedState) == 43328, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2692,7 +2785,7 @@ static_assert(sizeof(Imx1Timer) == 28, "update its stateVersion and the size in 
 static_assert(sizeof(Imx1Sysctrl) == 12, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Reset) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Bta) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Uart) == 264, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Uart) - Imx1Uart::unsavedBytes == 264, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Mmcsd) - Imx1Mmcsd::unsavedBytes == 96, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1I2c) == 64, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Asp) == 100, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2701,7 +2794,7 @@ static_assert(sizeof(Imx1Watchdog) == 40, "update its stateVersion and the size 
 static_assert(sizeof(Imx1Rtc) == 48, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs4Capture) == 1040, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs5Reset) == 8, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - Imx1Cs5Configuration::unsavedBytes - sizeof(Imx1GraphicsLookup) +
               Imx1GraphicsLookup::layoutBytes() == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsGpio) == 36, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsWindows) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -3073,6 +3166,11 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
         if (!finish(a)) return info;
         info.graphicsSdSection = true;
     } else if (info.status != S::ok) return info;
+    // The USB function, only in states saved after its driver first touched it.
+    if (open("USBF", Imx1GraphicsUsb::stateVersion, false, a)) {
+        staged.graphics->usbWritable().state(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     staged.commands = std::make_unique<Imx1GraphicsCommands>();
     if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
     staged.commands->state(a);
@@ -3220,6 +3318,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
         auto a = file.begin(stateFourcc("SD2 "), stateGraphicsSdVersion);
         p->cs5Configuration.sdSlot().stateCard(a);
         a.DoVector(card, 1u << 20);
+        file.end();
+    }
+    if (p->cs5Configuration.usbState().used()) {
+        auto a = file.begin(stateFourcc("USBF"), Imx1GraphicsUsb::stateVersion);
+        p->cs5Configuration.usbWritable().state(a);
         file.end();
     }
     { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
