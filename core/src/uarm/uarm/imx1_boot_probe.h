@@ -382,6 +382,8 @@ UsbPacketResult imx1MachineUsbSetup(Imx1Machine*, const uint8_t* data);
 UsbPacketResult imx1MachineUsbOut(Imx1Machine*, uint8_t endpoint, const uint8_t* data, unsigned size);
 UsbPacketResult imx1MachineUsbIn(Imx1Machine*, uint8_t endpoint, uint8_t* data, unsigned* size, bool take);
 bool imx1MachineUsbOutReady(const Imx1Machine*, uint8_t endpoint);
+// The USB host has a tick due: a waiting guest's clock runs on to the bound instead of waiting.
+void imx1MachineSetUsbHostPending(Imx1Machine*, bool pending);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,

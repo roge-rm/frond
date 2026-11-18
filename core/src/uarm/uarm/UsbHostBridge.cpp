@@ -26,11 +26,12 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
     if (auto* pxa = dynamic_cast<SocPXA*>(soc)) return Start(pxa, config, error);
     auto* zodiac = dynamic_cast<SocIMX1*>(soc);
     if (!zodiac) return Start(Backend{}, config, error);
-    // The Zodiac's USB comes through the cradle: the cable is the cradle, off leaves it out.
+    // The Zodiac's USB comes through the cradle: the cable puts the cradle in, off takes out only that, so a
+    // cradle the user put in stays through loads, resets and usb-mode off.
     Backend backend{
         [zodiac] { return zodiac->GetUsbPort(); },
-        [zodiac](bool attached) { zodiac->SetCradle(attached); },
-        [zodiac] { return zodiac->CradleAttached(); },
+        [zodiac](bool attached) { zodiac->SetUsbCable(attached); },
+        [zodiac] { return zodiac->UsbCableAttached(); },
         [] { return false; },
         [zodiac] { return zodiac->UsbHostIoPaused(); },
         [zodiac] { return zodiac->GetTime(); },

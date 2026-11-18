@@ -77,9 +77,13 @@ class SocIMX1 : public SoC {
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
     // The cradle: A11 (attach detect) and A1 high and the accessory ID line at the bottom of its ADC range.
+    // It's in while the user put it in or the USB bridge's cable is in; each takes out only its own.
     bool CradleSupported() const override { return true; }
-    bool CradleAttached() const override { return cradle; }
+    bool CradleAttached() const override { return cradle || usbCable; }
     bool SetCradle(bool attached) override;
+    // The USB bridge's cable, which comes in through the cradle.
+    bool UsbCableAttached() const { return usbCable; }
+    bool SetUsbCable(bool attached);
     // The accessory inputs the machine has now, for tests: A11 and A1 high and the aux ADC sample.
     bool AccessoryPinsHigh() const { return (imx1MachineGpioInput(machine, 0) & 0x802) == 0x802; }
     uint32_t AccessorySample() const { return imx1MachineGraphicsAux(machine); }
@@ -93,7 +97,8 @@ class SocIMX1 : public SoC {
     HostUartPort* SerialHostPort() override;
     HostInfraredPort* InfraredHostPort() override;
     // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
-    // bridge's cable is the cradle (SetCradle). Hooks tick between run slices on GetTime's clock.
+    // bridge's cable puts the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
+    // the host has work due, an idle guest's clock runs on to it instead of waiting.
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool UsbHostIoPaused() const { return halted || PowerSleeping(); }
@@ -163,11 +168,13 @@ class SocIMX1 : public SoC {
     bool ApplyBattery();
     bool ApplyHeadphones();
     bool ApplyCradle();
-    bool headphones{false}, cradleDown{false}, cradle{false};
+    bool SetCradleInputs(bool& setting, bool attached);
+    bool headphones{false}, cradleDown{false}, cradle{false}, usbCable{false};
     // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
     uint64_t hotSyncTicks{0};
     UsbHostHooks usbHostHooks{};
     void TickUsbHost();
+    bool UsbHostEventPending();
     bool wasStopped{false};
     uint64_t wakes{0};
     struct SerialPort;

@@ -974,7 +974,7 @@ zodiac-boot-probe: build/zodiac-boot-probe
 # Kept in every state the probe saves: the commit and a + for uncommitted changes.
 ZODIAC_STATE_BUILD_NOTE = $(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo +)
 build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp tools/zodiac-state-file.h
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-core.rsp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' ! -name 'UsbHostBridge.o' > build/zodiac-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_STATE_BUILD_NOTE='"$(ZODIAC_STATE_BUILD_NOTE)"' \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tools/zodiac-boot-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
@@ -1032,7 +1032,8 @@ test-zodiac-usb-function:
 
 .PHONY: test-zodiac-battery
 test: test-zodiac-battery
-# The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.
+# The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, the cradle and the
+# USB bridge's cable through it, made-up ROM.
 test-zodiac-battery: out/frond
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-battery-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
@@ -1041,6 +1042,7 @@ test-zodiac-battery: out/frond
 		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-battery
 	./build/test-zodiac-battery
 	./build/test-zodiac-battery halted
+	./build/test-zodiac-battery waiting
 
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
@@ -1075,7 +1077,7 @@ ifeq ($(FROND_FAST),1)
 test: test-zodiac-jit
 endif
 build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' > build/zodiac-jit-core.rsp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' ! -name 'UsbHostBridge.o' > build/zodiac-jit-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-jit.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
@@ -2402,7 +2404,7 @@ test-zodiac-cs5-reset: build/zodiac-boot-probe
 .PHONY: test-zodiac-cs5-configuration
 test-zodiac-cs5-configuration: build/zodiac-boot-probe
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
-		-Icore/src/uarm/uarm tests/zodiac-cs5-configuration.cpp \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-cs5-configuration.cpp \
 		core/src/uarm/uarm/imx1_eim.cpp -o build/test-zodiac-cs5-configuration
 	./build/test-zodiac-cs5-configuration
 

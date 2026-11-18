@@ -429,6 +429,13 @@ void SocIMX1::TickUsbHost() {
         usbHostHooks.tick(usbHostHooks.context, GetTime());
 }
 
+// The host has a tick due (a plug-in, a packet, a retry). Nothing in the machine would wake an idle guest
+// for it, so this counts as an event and the guest's clock runs on to the slice end, where the host ticks.
+bool SocIMX1::UsbHostEventPending() {
+    if (!usbHostHooks.tick || UsbHostIoPaused()) return false;
+    return !usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) != UINT64_MAX;
+}
+
 // Loads the power-on state as a reset through RESET_IN, which keeps RAM, the clock controller and
 // the RTC's time. Every button is released in that state.
 // ASSUMPTION "Zodiac reset button": the button on the back is taken to pull the i.MX1's RESET_IN,
@@ -610,10 +617,11 @@ bool SocIMX1::SetHeadphones(bool in) {
 // sets the ID before A11, detaching drops A11 first, so the ROM never reads the ID of the other state.
 bool SocIMX1::ApplyCradle() {
     if (halted) return false;
-    const uint32_t sample = cradle ? accessorySampleCradle : accessorySampleNone;
+    const bool in = CradleAttached();
+    const uint32_t sample = in ? accessorySampleCradle : accessorySampleNone;
     uint32_t values[4]{}, masks[4]{};
     masks[0] = accessoryPinsA;
-    values[0] = cradle ? accessoryPinsA : 0;
+    values[0] = in ? accessoryPinsA : 0;
     const bool pinsSet = (imx1MachineGpioInput(machine, 0) & accessoryPinsA) == values[0];
     const bool sampleSet = imx1MachineGraphicsAux(machine) == sample;
     if (pinsSet && sampleSet) return true;
@@ -621,18 +629,21 @@ bool SocIMX1::ApplyCradle() {
         return sampleSet || (imx1MachineSetGraphicsAux(machine, sample, false) == Imx1BootstrapAccess::ok &&
                              imx1MachineSetGraphicsAux(machine, sample, true) == Imx1BootstrapAccess::ok);
     };
-    const bool ok = cradle ? setSample() && (pinsSet || replaceGpioInputs(machine, values, masks))
-                           : (pinsSet || replaceGpioInputs(machine, values, masks)) && setSample();
+    const bool ok = in ? setSample() && (pinsSet || replaceGpioInputs(machine, values, masks))
+                       : (pinsSet || replaceGpioInputs(machine, values, masks)) && setSample();
     if (!ok) std::cerr << "zodiac: the cradle inputs could not be set" << std::endl;
     return ok;
 }
 
-bool SocIMX1::SetCradle(bool attached) {
+bool SocIMX1::SetCradle(bool attached) { return SetCradleInputs(cradle, attached); }
+bool SocIMX1::SetUsbCable(bool attached) { return SetCradleInputs(usbCable, attached); }
+
+bool SocIMX1::SetCradleInputs(bool& setting, bool attached) {
     if (halted) return false;
-    const bool before = cradle;
-    cradle = attached;
+    const bool before = setting;
+    setting = attached;
     if (ApplyCradle()) return true;
-    cradle = before;
+    setting = before;
     ApplyCradle();
     return false;
 }
@@ -791,6 +802,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         // The time asked for is checked between slices. The time bound keeps slices short in stop mode,
         // where each idle period is a CLK32 tick, so input reaches a sleeping guest promptly.
         bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
+        imx1MachineSetUsbHostPending(machine, UsbHostEventPending());
         const auto run = imx1MachineRunBounded(machine, bounds);
         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
             run.reason == Imx1MachineYield::invalidBounds) {

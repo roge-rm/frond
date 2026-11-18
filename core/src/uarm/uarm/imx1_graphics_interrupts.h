@@ -76,7 +76,13 @@ class Imx1GraphicsInterrupts {
                 if (pc != 0x20086970 && pc != 0x20086c06 && pc != 0x20086e08 && pc != 0x20087702) return A::externalInput;
                 if ((pc == 0x20086970 || pc == 0x20086c06) && value != 0) return A::sideEffect;
                 if (value & ~nativeMask) return A::reservedBits;
-                if (value & ~(displayMask | (emptySdCardEventsKnown ? 0x02000000u : 0u))) return A::externalInput;
+                // 20086dea (store 20086e08) and 200876ee (store 20087702) read the enable, set or clear one group
+                // (0: 0x50, 1: 0x02000000, 2: bit 0) and write it back. The wake set-up (20086e0c) sets group 0
+                // while the USB driver's handler is registered (DAL globals +0x12c), and the USB driver's bit 6
+                // stays on through either (a sleep and wake during a USB HotSync). Nothing raises bit 4.
+                const uint32_t usbGroup = pc == 0x20086e08 || pc == 0x20087702 ? 0x50u : 0;
+                if (value & ~(displayMask | usbGroup | (emptySdCardEventsKnown ? 0x02000000u : 0u)))
+                    return A::externalInput;
                 if (value & ~known) return A::externalInput;
                 enabled = value;
             }

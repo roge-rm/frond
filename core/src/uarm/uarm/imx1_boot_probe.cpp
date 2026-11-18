@@ -178,6 +178,8 @@ struct Probe {
     }
     Imx1ProbeObserver observer = nullptr;
     void* observerContext = nullptr;
+    // The USB host has work due (imx1MachineSetUsbHostPending). Host side, not saved.
+    bool usbHostPending = false;
     bool blPrefix = false;
     uint32_t blNextPc = 0;
     struct InterruptedPrefix { uint32_t pc, cpsr, mode, lr, sp; };
@@ -408,7 +410,7 @@ struct Probe {
         return false;
     }
     bool idleWakePossible() const {
-        if (peripherals.idleWakePossible()) return true;
+        if (usbHostPending || peripherals.idleWakePossible()) return true;
         // Preview the connected display request through GPIO and AITC without driving a pin.
         return options.graphicsIrqA13 && cs5Configuration.clockState().programmed() &&
             cs5Configuration.displayState().lcdEnabled() &&
@@ -2545,6 +2547,9 @@ UsbPacketResult imx1MachineUsbIn(Imx1Machine* machine, uint8_t endpoint, uint8_t
     return usbHostChange(machine, UsbPacketResult::Timeout, [&](Imx1GraphicsUsb& usb) {
         return endpoint ? usb.endpointIn(endpoint, data, size, true) : usb.ep0In(data, size, true);
     });
+}
+void imx1MachineSetUsbHostPending(Imx1Machine* machine, bool pending) {
+    if (machine) machine->probe->usbHostPending = pending;
 }
 bool imx1MachineUsbOutReady(const Imx1Machine* machine, uint8_t endpoint) {
     return machine && machine->probe->cs5Configuration.usbState().endpointOutReady(endpoint);
