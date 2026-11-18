@@ -542,10 +542,8 @@ bool gFastEngineMissing = false;
         }
         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
         // The desktop passes saved serial settings; unsupported devices skip them.
-        if (options.desktopSocket && !isTx && !deviceProfileIsE2Board5(deviceType) && deviceType != deviceTypeTG50) {
+        if (options.desktopSocket && !(deviceProfile5(deviceType) && deviceProfile5(deviceType)->capabilities.serial))
             serialConfig = HostSerial::Config{};
-
-        }
         if (options.experimentalFastAudio) {
             const auto digest=md5(static_cast<uint8_t*>(nor.data),nor.size);
             const auto* audioProfile = deviceProfile5(deviceType);
