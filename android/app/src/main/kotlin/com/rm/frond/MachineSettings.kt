@@ -32,11 +32,25 @@ enum class Engine(val label: String, val arg: String) {
     FAST("Fast", "fast"),
 }
 
-// A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock (an ARM device follows the clock its guest sets), Uncapped as fast as the host can; on ARM that is a high --mips (MHz).
+// A device's speed; arg is the saved name and both cores' --speed value. Original runs at the real
+// clock (an ARM device follows the clock its guest sets), a multiplier at that many times it, Uncapped
+// as fast as the host can. An older Frond reads a multiplier as Original.
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
-    UNCAPPED("Uncapped", "uncapped"),
+    X1_5("1.5x", "1.5x"),
+    X2("2x", "2x"),
+    X3("3x", "3x"),
+    X4("4x", "4x"),
+    X8("8x", "8x"),
+    UNCAPPED("Uncapped", "uncapped");
+
+    companion object {
+        // The 68k core has no 8x; its Uncapped is the same speed.
+        fun options(m68k: Boolean) = entries.filter { !(m68k && it == X8) }
+
+        // What the core is given for this device.
+        fun forCore(speed: CpuSpeed, m68k: Boolean) = if (m68k && speed == X8) UNCAPPED else speed
+    }
 }
 
 // Android: whether the bar over the running machine hides by itself over the Palm or takes its own space.
@@ -75,7 +89,7 @@ data class MachineSettings(
     val jogLandscape: JogLandscape = JogLandscape.BESIDE,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
-    // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
+    // 68k devices: LCD contrast 0 to 100. Speed is for every device and applies at once.
     val contrast: Int = DEFAULT_CONTRAST,
     // False until a contrast is chosen, so a session's own saved contrast stays.
     val contrastSet: Boolean = false,
@@ -116,7 +130,7 @@ data class MachineSettings(
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
-    // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
+    // m68k: frond-68k's arguments, with contrast and speed and no engine. both: --speed unless Original.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
                   jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): List<String> = buildList {
@@ -129,11 +143,8 @@ data class MachineSettings(
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
-            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
-        } else {
-            if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
-            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--mips", UNCAPPED_MIPS.toString()))
-        }
+        } else if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
+        if (speed != CpuSpeed.ORIGINAL) addAll(listOf("--speed", CpuSpeed.forCore(speed, m68k).arg))
     }
 
     // Audio arguments: the host period always, so low-latency limits are sized for Android's
@@ -172,9 +183,6 @@ data class MachineSettings(
 
         // A new machine's settings for a device.
         fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
-        // The --mips (MHz) an ARM device gets when Uncapped; the core runs at what the host manages. Well past
-        // the fastest clock, as an instruction takes several clocks.
-        const val UNCAPPED_MIPS = 3000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =

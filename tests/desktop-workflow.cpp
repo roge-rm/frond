@@ -1865,7 +1865,7 @@ for line in s.makefile('rb'):
                 QCOMPARE(settings->contrast->value(), 50);
                 settings->windowScale->setValue(6);
                 settings->contrast->setValue(30);
-                settings->speed->setCurrentIndex(settings->speed->findData(true));
+                settings->speed->setCurrentIndex(settings->speed->findData("uncapped"));
                 firmware->findChild<QPushButton*>("import")->click();
             });
             poll.start();
@@ -2394,15 +2394,27 @@ for line in s.makefile('rb'):
                                static_cast<QWidget*>(c->jogControls)})
                 QVERIFY(!w->isVisibleTo(&dialog));
             QVERIFY(c->audio->isEnabled());
-            QCOMPARE(c->contrast->value(), 20); QVERIFY(c->speed->currentData().toBool());
-            c->contrast->setValue(65); c->speed->setCurrentIndex(c->speed->findData(false));
+            QCOMPARE(c->contrast->value(), 20); QCOMPARE(c->speed->currentData().toString(), QString("uncapped"));
+            // A IIIx has no 8x; the other devices do.
+            QVERIFY(c->speed->findData("8x") < 0 && c->speed->findData("4x") >= 0 && c->speed->findData("1.5x") >= 0);
+            c->contrast->setValue(65); c->speed->setCurrentIndex(c->speed->findData("original"));
             const auto values = c->values();
-            QCOMPARE(values.contrast, 65); QVERIFY(!values.uncapped);
+            QCOMPARE(values.contrast, 65); QVERIFY(!values.uncapped && values.multiplier.isEmpty());
+            c->speed->setCurrentIndex(c->speed->findData("3x"));
+            QCOMPARE(c->values().multiplier, QString("3x")); QVERIFY(!c->values().uncapped);
         }
         {
             MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
             QVERIFY(dialog.controls->engine->isVisibleTo(&dialog));
             QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && dialog.controls->speed->isVisibleTo(&dialog));
+            // 8x chosen, then a 68k device, then ARM again: 8x comes back.
+            auto* speed = dialog.controls->speed;
+            speed->setCurrentIndex(speed->findData("8x"));
+            dialog.controls->setDevice(iiix);
+            QVERIFY(speed->findData("8x") < 0);
+            QCOMPARE(speed->currentData().toString(), QString("uncapped"));
+            dialog.controls->setDevice(frondFirmware::Device::tx);
+            QCOMPARE(speed->currentData().toString(), QString("8x"));
         }
         {
             MachineSettingsDialog iiixDialog(iiix, prefs); iiixDialog.show();
@@ -3281,7 +3293,7 @@ for line in s.makefile('rb'):
             QVERIFY(!window.findChild<QSlider*>("runningSize")->isVisibleTo(&window));
             QVERIFY(window.findChild<QCheckBox*>("runningSmooth")->isVisibleTo(&window));
             QVERIFY(!window.findChild<QCheckBox*>("runningShowKeyboard")->isVisibleTo(&window));
-            QVERIFY(!window.findChild<QComboBox*>("runningSpeed")->isVisibleTo(&window));
+            QVERIFY(window.findChild<QComboBox*>("runningSpeed")->isVisibleTo(&window));
             panels->open(-1);
             window.findChild<QAction*>("machineSaveStop")->trigger();
             QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
@@ -3535,6 +3547,39 @@ for line in s.makefile('rb'):
         frondSessions::Preferences kept;
         QVERIFY(frondSessions::readPreferences(managedSession("Jog"), &kept));
         QVERIFY(kept.jogLandscape == frondSessions::JogLandscape::under);
+    }
+    // Speed: started with the saved multiplier, changed live from the Display panel, sent as the core's name and saved.
+    void speedLive() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Speed", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        frondSessions::Preferences prefs;
+        frondSessions::setSpeed(&prefs, "2x");
+        QVERIFY(frondSessions::writePreferences(managedSession("Speed"), prefs).isEmpty());
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Speed"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        QFile f(files.path() + "/args"); QVERIFY(f.open(QIODevice::ReadOnly));
+        QVERIFY(QString::fromUtf8(f.readAll()).contains("--speed\n2x\n"));
+        window.findChild<PanelHost*>("panelHost")->open(2);
+        auto* box = window.findChild<QComboBox*>("runningSpeed");
+        QVERIFY(box && !box->isHidden());
+        QCOMPARE(box->currentText(), QString("2x"));
+        QVERIFY(box->findData("8x") >= 0);
+        QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 4000);
+        box->setCurrentIndex(box->findData("1.5x"));
+        emit box->activated(box->currentIndex());
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("speed 1.5x"), 4000);
+        frondSessions::Preferences kept;
+        QVERIFY(frondSessions::readPreferences(managedSession("Speed"), &kept));
+        QCOMPARE(frondSessions::speedName(kept), QString("1.5x"));
     }
     void clieGamepadSwitch() {
         QSettings().clear(); QSettings().setValue("resume", false);
@@ -4168,7 +4213,7 @@ for line in s.makefile('rb'):
             QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(one).canonicalFilePath());
         }
         {
-            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core follows the device's own clock.
+            // An ARM device's speed goes to the core as --speed; Original passes none, so the core follows the device's own clock.
             frondSessions::Preferences uncapped;
             QVERIFY(frondSessions::readPreferences(two, &uncapped)); uncapped.uncapped = true;
             QVERIFY(frondSessions::writePreferences(two, uncapped).isEmpty());
@@ -4177,7 +4222,7 @@ for line in s.makefile('rb'):
             QVERIFY(read(".args").contains("--window-scale\n1"));
             QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
             QVERIFY(!read(".args").contains("--low-latency-queue"));
-            QVERIFY(read(".args").contains("--mips\n3000\n"));
+            QVERIFY(read(".args").contains("--speed\nuncapped\n") && !read(".args").contains("--mips"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);

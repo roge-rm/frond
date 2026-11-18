@@ -561,7 +561,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard})
         jogBox->addItem(frondSessions::jogControlsLabel(jog, false), int(jog));
     displayGrid->addWidget(jogBox, 6, 1, 1, 2);
-    // Row 7 is shared with Speed, which only the 68k Palms show.
+    // Row 7 is only for the jog landscape choice.
     jogLandscapeLabel = label(tr("Jog in landscape"), 7, displayGrid);
     jogLandscapeBox = new QComboBox(root);
     jogLandscapeBox->setObjectName("runningJogLandscape");
@@ -569,12 +569,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
                      frondSessions::JogLandscape::under, frondSessions::JogLandscape::over})
         jogLandscapeBox->addItem(frondSessions::jogLandscapeLabel(jog), int(jog));
     displayGrid->addWidget(jogLandscapeBox, 7, 1, 1, 2);
-    speedLabel = label(tr("Speed"), 7, displayGrid);
+    speedLabel = label(tr("Speed"), 13, displayGrid);
     speedBox = new QComboBox(root);
     speedBox->setObjectName("runningSpeed");
-    speedBox->addItem(tr("Original"), false);
-    speedBox->addItem(tr("Uncapped"), true);
-    displayGrid->addWidget(speedBox, 7, 1, 1, 2);
+    fillSpeedBox(speedBox, false, "original");
+    displayGrid->addWidget(speedBox, 13, 1, 1, 2);
     batteryLabel = label(tr("Battery"), 10, displayGrid);
     batteryBox = new QComboBox(root);
     batteryBox->setObjectName("runningBattery");
@@ -1316,7 +1315,10 @@ void MainWindow::refresh() {
     shown(frondSessions::jogLandscapeShown(jogFrontend), {jogLandscapeLabel, jogLandscapeBox});
     jogBox->setItemText(jogBox->findData(int(frondSessions::JogControls::keyboard)),
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(jogFrontend)));
-    shown(m68k, {speedLabel, speedBox});
+    shown(true, {speedLabel, speedBox});
+    // Refilled only when the device family changes, so an open list isn't rebuilt by a later refresh.
+    if (speedBox->count() != frondSessions::speedChoices(m68k).size())
+        fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
     liveDisplay({});
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
@@ -1605,7 +1607,8 @@ void MainWindow::liveDisplay(const QString& what) {
         keyboardShow->setChecked(runningPreferences.showKeyboard);
         jogBox->setCurrentIndex(std::max(0, jogBox->findData(int(runningPreferences.jogControls))));
         jogLandscapeBox->setCurrentIndex(std::max(0, jogLandscapeBox->findData(int(runningPreferences.jogLandscape))));
-        speedBox->setCurrentIndex(runningPreferences.uncapped ? 1 : 0);
+        speedBox->setCurrentIndex(std::max(0, speedBox->findData(frondSessions::speedForCore(
+            runningPreferences, frondFirmware::runs68k(currentDevice())))));
         return;
     }
     auto prefs = runningPreferences;
@@ -1628,8 +1631,8 @@ void MainWindow::liveDisplay(const QString& what) {
         prefs.jogLandscape = frondSessions::JogLandscape(jogLandscapeBox->currentData().toInt());
         argument = "jog-landscape=" + frondSessions::jogLandscapeName(prefs.jogLandscape);
     } else if (what == "speed") {
-        prefs.uncapped = speedBox->currentData().toBool();
-        command = "speed"; argument = prefs.uncapped ? "uncapped" : "original";
+        frondSessions::setSpeed(&prefs, speedBox->currentData().toString());
+        command = "speed"; argument = frondSessions::speedName(prefs);
     }
     if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { liveDisplay({}); return failure(error); }
     const int oldScale = runningPreferences.scale;
@@ -2403,11 +2406,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (m68k) {
         if (runningPreferences.contrastSet && frondFirmware::lcdContrast(startDevice))
             arguments << "--contrast" << QString::number(runningPreferences.contrast);
-        if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
-    } else {
-        if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
-        if (runningPreferences.uncapped) arguments << "--mips" << "3000";
-    }
+    } else if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
+    if (const auto speed = frondSessions::speedForCore(runningPreferences, m68k); speed != "original") arguments << "--speed" << speed;
     {
         const QSignalBlocker blocked(contrast);
         contrast->setValue(runningPreferences.contrast);

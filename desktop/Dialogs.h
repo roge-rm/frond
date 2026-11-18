@@ -15,6 +15,9 @@ class DanaViewControls;
 // Window scale in quarters that fits the screen, from the layout the core draws for the device.
 int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
 
+// Fills a speed combo with the choices for the device family (data is the core's name), keeping name selected.
+void fillSpeedBox(QComboBox* box, bool m68k, const QString& name);
+
 class MachineSettings : public QWidget {
     Q_OBJECT
  public:
@@ -39,6 +42,8 @@ class MachineSettings : public QWidget {
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
+    // What the user chose, kept while a 68k device hides 8x.
+    QString chosenSpeed;
     // Infrared, Serial and Bluetooth: the local choices and the connections. Shown once showPeripherals() is called.
     QComboBox* infrared;
     QSpinBox* infraredPort;

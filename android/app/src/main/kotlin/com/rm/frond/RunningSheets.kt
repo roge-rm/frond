@@ -88,7 +88,7 @@ object RunningSheets {
         if (device.id == "sony-clie-tg50") rows += DisplayRow.SHOW_KEYBOARD
         if (device.jogControls) rows += DisplayRow.JOG
         if (!device.runs68k) rows += DisplayRow.ROTATE
-        if (device.runs68k) rows += DisplayRow.SPEED
+        rows += DisplayRow.SPEED
         if (device.camera) rows += DisplayRow.CAMERA
         return rows
     }

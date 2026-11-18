@@ -872,10 +872,9 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
-    // Sends a 68k machine's saved Speed to the core, which changes it at once.
+    // Sends the machine's saved Speed to the core, which changes it at once.
     fun applySpeed() {
-        if (!launchDevice().runs68k) return
-        val wanted = (Sessions.forPath(this, sessionPath)?.settings ?: return).speed.arg
+        val wanted = CpuSpeed.forCore((Sessions.forPath(this, sessionPath)?.settings ?: return).speed, launchDevice().runs68k).arg
         Thread({
             val reply = link.request("speed", wanted, timeoutSeconds = 10)
             if (!reply.ok) Log.w(TAG, "speed: ${reply.code} ${reply.message}")

@@ -1047,6 +1047,26 @@ class SessionStoreTest : public QObject {
         write(preferencesPath(copy), R"({"version":1,"scale":6,"smooth":false,"audio":true,"fastAudio":false})");
         QVERIFY(readPreferences(copy, &loaded));
         QCOMPARE(loaded.contrast, 50); QVERIFY(!loaded.uncapped); QVERIFY(!loaded.contrastSet);
+        // A multiplier is saved beside "speed": "original", so earlier versions read Original. Uncapped wins over it.
+        QCOMPARE(speedName(loaded), QString("original"));
+        for (const char* name : {"1.5x", "2x", "3x", "4x", "8x", "uncapped", "original"}) {
+            Preferences chosen; setSpeed(&chosen, name);
+            QVERIFY(writePreferences(copy, chosen).isEmpty());
+            QVERIFY(readPreferences(copy, &loaded));
+            QCOMPARE(speedName(loaded), QString(name));
+            QFile saved(preferencesPath(copy)); QVERIFY(saved.open(QIODevice::ReadOnly));
+            const auto json = saved.readAll();
+            const bool multiplied = QString(name).endsWith('x');
+            const QByteArray expected = multiplied ? QByteArray("\"speed\":\"original\"") : QByteArray("\"speed\":\"") + name + '"';
+            QVERIFY(json.contains(expected));
+            QCOMPARE(json.contains("speedMultiplier"), multiplied);
+        }
+        setSpeed(&loaded, "5x"); QCOMPARE(speedName(loaded), QString("original"));
+        write(preferencesPath(copy), R"({"version":1,"scale":6,"smooth":false,"audio":true,"fastAudio":false,"speed":"uncapped","speedMultiplier":"2x"})");
+        QVERIFY(readPreferences(copy, &loaded)); QCOMPARE(speedName(loaded), QString("uncapped"));
+        QCOMPARE(speedChoices(true), QStringList({"original", "1.5x", "2x", "3x", "4x", "uncapped"}));
+        QCOMPARE(speedChoices(false).size(), 7);
+        setSpeed(&loaded, "8x"); QCOMPARE(speedForCore(loaded, true), QString("uncapped")); QCOMPARE(speedForCore(loaded, false), QString("8x"));
     }
     void machinePreferences() {
         const auto one = filePath(folder(), "One"), two = filePath(folder(), "Two");

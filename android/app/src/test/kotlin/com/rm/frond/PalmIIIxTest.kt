@@ -226,8 +226,8 @@ class PalmIIIxTest {
         // Without a chosen contrast the session's own stays.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments(m68k = true))
         assertFalse("contrast" in MachineSettings().json().keys().asSequence().toList())
-        assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--mips", "3000"), s.arguments())
-        // Original passes no --mips, so the core follows the device's own clock.
+        assertEquals(listOf("--window-fit", "fit", "--engine", "fast", "--speed", "uncapped"), s.arguments())
+        // Original passes no --speed, so the core follows the device's own clock.
         assertEquals(listOf("--window-fit", "fit"), MachineSettings().arguments())
         assertEquals("fit=fit smooth=off contrast=30", s.displayArgument(m68k = true))
         assertEquals("fit=fit smooth=off", s.displayArgument())
@@ -240,6 +240,26 @@ class PalmIIIxTest {
         assertFalse(old.contrastSet)
         assertEquals(CpuSpeed.ORIGINAL, old.speed)
         assertEquals(100, MachineSettings.from(s.json().put("contrast", 400)).contrast)
+    }
+
+    @Test fun multipliersAreSavedAndPassedToTheCore() {
+        assertEquals(listOf("original", "1.5x", "2x", "3x", "4x", "8x", "uncapped"), CpuSpeed.options(false).map { it.arg })
+        assertEquals(listOf("original", "1.5x", "2x", "3x", "4x", "uncapped"), CpuSpeed.options(true).map { it.arg })
+        assertEquals(listOf("Original", "1.5x", "2x", "3x", "4x", "8x", "Uncapped"), CpuSpeed.options(false).map { it.label })
+        for (speed in CpuSpeed.entries) {
+            val s = MachineSettings(speed = speed)
+            assertEquals(speed, MachineSettings.from(s.json()).speed)
+            assertEquals(speed.arg, s.json().getString("speed"))
+        }
+        val double = MachineSettings(speed = CpuSpeed.X2)
+        assertEquals(listOf("--window-fit", "fit", "--speed", "2x"), double.arguments())
+        assertEquals(listOf("--window-fit", "fit", "--speed", "2x"), double.arguments(m68k = true))
+        // The 68k core refuses 8x; its Uncapped is the same speed.
+        val eight = MachineSettings(speed = CpuSpeed.X8)
+        assertEquals(listOf("--window-fit", "fit", "--speed", "8x"), eight.arguments())
+        assertEquals(listOf("--window-fit", "fit", "--speed", "uncapped"), eight.arguments(m68k = true))
+        // A name from a later version reads as Original.
+        assertEquals(CpuSpeed.ORIGINAL, MachineSettings.from(double.json().put("speed", "16x")).speed)
     }
 
     @Test fun the68kCoreRunsInItsOwnProcess() {
