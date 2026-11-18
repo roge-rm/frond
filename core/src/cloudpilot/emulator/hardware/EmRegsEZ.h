@@ -71,6 +71,7 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    void FlushTimers(double scale) override;
     virtual void ScaleCycles(uint32 factor);
     void Cycle(uint64 systemCycles, Bool sleeping);
 
@@ -102,6 +103,7 @@ class EmRegsEZ : public EmRegs, public EmHALHandler {
     void portDIntReqEnWrite(emuptr address, int size, uint32 value);
     void tmr1StatusWrite(emuptr address, int size, uint32 value);
     void spiMasterControlWrite(emuptr address, int size, uint32 value);
+    void UpdateSpimInterrupt();
     void uartWrite(emuptr address, int size, uint32 value);
     void lcdRegisterWrite(emuptr address, int size, uint32 value);
     void pllRegisterWrite(emuptr address, int size, uint32 value);

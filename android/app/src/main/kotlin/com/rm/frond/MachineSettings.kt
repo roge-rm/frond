@@ -16,6 +16,15 @@ enum class JogControls(val label: String, val arg: String) {
     fun label(besideButtons: Boolean) = if (this == KEYBOARD && besideButtons) "Beside the buttons" else label
 }
 
+// Where the CLIE jog controls go in landscape with the game controller; arg is the saved name and
+// the core's --jog-controls-landscape value.
+enum class JogLandscape(val label: String, val arg: String) {
+    HIDDEN("Hidden", "hidden"),
+    BESIDE("Left of controller", "beside"),
+    UNDER("Under screen", "under"),
+    OVER("Over screen", "over"),
+}
+
 // CPU engine; arg is the saved name and the core's --engine value. Fast falls back to Exact
 // where the core has no JIT.
 enum class Engine(val label: String, val arg: String) {
@@ -24,7 +33,7 @@ enum class Engine(val label: String, val arg: String) {
 }
 
 // A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock (an ARM device at its profile's MIPS), Uncapped as fast as the host can; on ARM that is a high --mips.
+// clock (an ARM device follows the clock its guest sets), Uncapped as fast as the host can; on ARM that is a high --mips (MHz).
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
     UNCAPPED("Uncapped", "uncapped"),
@@ -54,7 +63,7 @@ data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Bo
 data class MachineSettings(
     val size: ScreenSize = ScreenSize.FIT,
     val smoothing: Boolean = false,
-    // ARM devices: a MIPS readout in the corner of the screen.
+    // ARM devices: a speed readout in the corner of the screen.
     val showMips: Boolean = false,
     val sound: Boolean = true,
     val fastAudio: Boolean = false,
@@ -62,6 +71,8 @@ data class MachineSettings(
     val showKeyboard: Boolean = true,
     // New machines put the jog controls left of the keyboard.
     val jogControls: JogControls = JogControls.KEYBOARD,
+    // CLIE with the game controller: the jog controls in landscape.
+    val jogLandscape: JogLandscape = JogLandscape.BESIDE,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
     // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
@@ -83,23 +94,29 @@ data class MachineSettings(
     val usbPort: String = UsbPort.OFF,
     // Dana Wireless: the built-in Wi-Fi module's radio (applied at every start).
     val wifiModule: Boolean = true,
+    // Zodiac: its rumble motor drives the controller's or the phone's vibrator.
+    val rumble: Boolean = true,
+    // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
+    val gamepad: Boolean? = null,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
-        .put("showJogControls", jogControls != JogControls.HIDDEN)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).also { if (contrastSet) it.put("contrast", contrast) }
+        .put("showJogControls", jogControls != JogControls.HIDDEN).put("jogControlsLandscape", jogLandscape.arg)
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) } }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
     // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                  jogControls: Boolean = tg50Controls): List<String> = buildList {
+                  jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): List<String> = buildList {
         addAll(listOf("--window-fit", this@MachineSettings.size.arg))
+        if (gamepadSupported) this@MachineSettings.gamepad?.let { addAll(listOf("--gamepad", if (it) "on" else "off")) }
         if (smoothing) add("--smooth-lcd")
         if (tg50Controls && !showKeyboard) add("--hide-keyboard")
         if (jogControls) addAll(listOf("--jog-controls", this@MachineSettings.jogControls.arg))
+        if (gamepadSupported) addAll(listOf("--jog-controls-landscape", jogLandscape.arg))
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
@@ -120,11 +137,20 @@ data class MachineSettings(
 
     // The core's display command argument, for changing these while it runs.
     fun displayArgument(tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
-                        jogControls: Boolean = tg50Controls): String = buildString {
+                        jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): String = buildString {
         append("fit=${this@MachineSettings.size.arg} smooth=${if (smoothing) "on" else "off"}")
         if (tg50Controls) append(" keyboard=${if (showKeyboard) "on" else "off"}")
         if (jogControls) append(" jog=${this@MachineSettings.jogControls.arg}")
+        if (gamepadSupported) append(" jog-landscape=${jogLandscape.arg}")
         if (m68k && !colourLcd) append(" contrast=$contrast")
+    }
+
+    // The pad state the core reports, as the setting, so a session loaded with its own state starts
+    // with it next time, as on the desktop. Null when nothing changes: busy or unknown, or the setting
+    // already matches.
+    fun gamepadFromCore(state: String?): MachineSettings? {
+        val attached = when (state) { "attached" -> true; "detached" -> false; else -> return null }
+        return if (gamepad == attached) null else copy(gamepad = attached)
     }
 
     // The same settings for another device: an engine left at the old device's default takes the new one's.
@@ -136,8 +162,9 @@ data class MachineSettings(
 
         // A new machine's settings for a device.
         fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
-        // The --mips an ARM device gets when Uncapped; the core runs at what the host manages.
-        const val UNCAPPED_MIPS = 1000
+        // The --mips (MHz) an ARM device gets when Uncapped; the core runs at what the host manages. Well past
+        // the fastest clock, as an instruction takes several clocks.
+        const val UNCAPPED_MIPS = 3000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =
@@ -155,6 +182,7 @@ data class MachineSettings(
                 microphone = json.optBoolean("microphone", fallback.microphone),
                 showKeyboard = json.optBoolean("showKeyboard", true),
                 jogControls = jogControls(json),
+                jogLandscape = JogLandscape.entries.firstOrNull { it.arg == json.optString("jogControlsLandscape") } ?: fallback.jogLandscape,
                 engine = Engine.entries.firstOrNull { it.arg == json.optString("engine") } ?: fallback.engine,
                 contrast = json.optInt("contrast", fallback.contrast).coerceIn(0, 100),
                 contrastSet = json.has("contrast") || fallback.contrastSet,
@@ -168,6 +196,8 @@ data class MachineSettings(
                 usbPort = if (json.has("usbPort")) UsbPort.normalise(json.optString("usbPort"))
                     else if (json.has("usbPrinter")) UsbPort.normalise(null, json.optBoolean("usbPrinter")) else fallback.usbPort,
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
+                rumble = json.optBoolean("rumble", fallback.rumble),
+                gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
             )
         }
     }

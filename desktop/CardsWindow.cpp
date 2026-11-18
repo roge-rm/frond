@@ -1,3 +1,4 @@
+#include "DimText.h"
 #include "CardsWindow.h"
 #include "CardFilesWindow.h"
 #include <QApplication>
@@ -380,7 +381,7 @@ CardsWindow::CardsWindow(const QString& sessions, QWidget* parent) : QDialog(par
     };
     auto empty = [&](const QString& text) {
         auto* label = new QLabel(text, this);
-        label->setForegroundRole(QPalette::PlaceholderText);
+        frondDimText::dim(label);
         layout->addWidget(label);
         return label;
     };
@@ -450,7 +451,7 @@ void CardsWindow::refresh() {
         name->setFont(font);
         auto* detail = new QLabel(frondCards::cardSizeText(r.card) + QStringLiteral(" · ") + frondCards::statusText(r), line);
         detail->setObjectName("cardDetail");
-        detail->setForegroundRole(QPalette::PlaceholderText);
+        frondDimText::dim(detail);
         // A linked card lists every machine, so the line wraps rather than being cut off.
         detail->setWordWrap(true);
         text->addWidget(name);

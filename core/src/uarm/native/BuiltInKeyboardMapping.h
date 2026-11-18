@@ -2,6 +2,25 @@
 #define FROND_BUILT_IN_KEYBOARD_MAPPING_H
 #include "DeviceControls.h"
 
+// The game controller covers the TG50's keyboard while attached, so host keys go to the pad:
+// arrows, Z/X for A/B, A/S for X/Y, Q Home, W Menu, H the Hold slide.
+inline KeyId clieGamepadHostKey(SDL_Scancode scan) {
+    switch (scan) {
+        case SDL_SCANCODE_UP: return keyIdPadUp;
+        case SDL_SCANCODE_DOWN: return keyIdPadDown;
+        case SDL_SCANCODE_LEFT: return keyIdPadLeft;
+        case SDL_SCANCODE_RIGHT: return keyIdPadRight;
+        case SDL_SCANCODE_Z: return keyIdPadA;
+        case SDL_SCANCODE_X: return keyIdPadB;
+        case SDL_SCANCODE_A: return keyIdPadX;
+        case SDL_SCANCODE_S: return keyIdPadY;
+        case SDL_SCANCODE_Q: return keyIdPadHome;
+        case SDL_SCANCODE_W: return keyIdPadMenu;
+        case SDL_SCANCODE_H: return keyIdPadHold;
+        default: return keyInvalid;
+    }
+}
+
 inline KeyId builtInKeyboardKey(const DeviceControlProfile& profile, SDL_Scancode scan) {
     if (profile.style != DeviceControlStyle::tg50) return keyInvalid;
     switch (scan) {

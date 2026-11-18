@@ -634,6 +634,8 @@ void EmRegsVZ::Load(SavestateLoader<ChunkType>& loader) {
 
     LoadChunkHelper helper(*chunk);
     DoSaveLoad(helper, version);
+    // Older sessions can hold a stale SPIM pending bit.
+    UpdateSpimInterrupt();
 
     Bool sendTxData = false;
     EmRegsVZ::UARTStateChanged(sendTxData, 0);
@@ -2123,16 +2125,29 @@ void EmRegsVZ::spiMasterControlWrite(emuptr address, int size, uint32 value) {
         spiMasterControl &= ~hwrVZ328SPIMControlExchange;
 
         WRITE_REGISTER(spiMasterControl, spiMasterControl);
-
-        // If hwrVZ328SPIMControlIntEnable is set, trigger an interrupt.
-
-        if ((spiMasterControl & hwrVZ328SPIMControlIntEnable) != 0) {
-            uint16 intPendingLo = READ_REGISTER(intPendingLo);
-            intPendingLo |= hwrVZ328IntLoSPIM;
-            WRITE_REGISTER(intPendingLo, intPendingLo);
-            this->UpdateInterrupts();
-        }
     }
+
+    UpdateSpimInterrupt();
+}
+
+// ---------------------------------------------------------------------------
+//		� EmRegsVZ::UpdateSpimInterrupt
+// ---------------------------------------------------------------------------
+// The SPIM interrupt is the control register's IRQ bit ANDed with IRQEN, so the
+// pending bit drops as soon as the guest clears either one.
+
+void EmRegsVZ::UpdateSpimInterrupt() {
+    const uint16 spiMasterControl = READ_REGISTER(spiMasterControl);
+    const bool asserted = (spiMasterControl & hwrVZ328SPIMControlIntStatus) &&
+                          (spiMasterControl & hwrVZ328SPIMControlIntEnable);
+
+    const uint16 intPendingLo = READ_REGISTER(intPendingLo);
+    const uint16 newPendingLo = asserted ? (intPendingLo | hwrVZ328IntLoSPIM)
+                                         : (intPendingLo & ~hwrVZ328IntLoSPIM);
+    if (newPendingLo == intPendingLo) return;
+
+    WRITE_REGISTER(intPendingLo, newPendingLo);
+    this->UpdateInterrupts();
 }
 
 // ---------------------------------------------------------------------------
@@ -3120,6 +3135,16 @@ void EmRegsVZ::ScaleCycles(uint32 factor) {
     UpdateTimers();
     UpdateBusTiming();
     EmHALHandler::ScaleCycles(factor);
+}
+
+void EmRegsVZ::FlushTimers(double scale) {
+    systemCycles = gSession->GetSystemCycles();
+    if (scale != 1) {
+        tmr1LastProcessedSystemCycles = systemCycles - (systemCycles - tmr1LastProcessedSystemCycles) * scale;
+        tmr2LastProcessedSystemCycles = systemCycles - (systemCycles - tmr2LastProcessedSystemCycles) * scale;
+    }
+    UpdateTimers();
+    EmHALHandler::FlushTimers(scale);
 }
 
 uint32 EmRegsVZ::CyclesToNextInterrupt(uint64 systemCycles) {

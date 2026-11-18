@@ -51,6 +51,7 @@ inline void settleEject(SoC& soc, uint64_t delay = 500000000, uint64_t limit = 5
 
 inline bool insertsCard(const std::string& command) {
     return command == "sd-insert" || command == "sd-create" || command == "sd-put-in" || command == "sd-reinsert" ||
+           command == "sd2-insert" || command == "sd2-create" || command == "sd2-put-in" || command == "sd2-reinsert" ||
            command == "ms-insert" || command == "ms-create" || command == "ms-put-in" || command == "ms-reinsert";
 }
 

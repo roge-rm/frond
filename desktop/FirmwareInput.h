@@ -59,9 +59,10 @@ inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfil
 inline bool guestServices(Device device) {
     return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
 }
-// New machines of these devices start on the Fast engine: the Zodiac, where only Fast reaches its real speed.
+// New machines of these devices start on the Fast engine: the Zodiac, T|X and Zire 72, which fall behind Original speed on Exact.
 inline bool fastByDefault(Device device) {
-    return device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac;
+    return device == Device::tx || device == Device::zire72 ||
+           (device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac);
 }
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.

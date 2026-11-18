@@ -1,6 +1,7 @@
 // The Zodiac's view, pen, stick and EEPROM identity as the normal runtime works them out, its input
 // holds and releases, and SocIMX1 on made-up ROMs: the buttons from reset, a pen held over a save, the sound
-// queue emptied on a load and a reset, a stopped machine.
+// queue emptied on a load and a reset, a stopped machine, the card back in after a load
+// and a card response read after one, a card taken out mid-command.
 #include <chrono>
 #include <thread>
 #include <array>
@@ -8,11 +9,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 #include <vector>
 
 #include <string>
 
 #include "audio_queue.h"
+#include "sdcard.h"
 #include "soc_IMX1.h"
 #include "zodiac_input.h"
 #include "zodiac_panel.h"
@@ -105,12 +108,12 @@ struct FakePort : ZodiacInputPort {
     bool setStick(int x, int y) override { if (refuse) return false; stickX = x; stickY = y; return true; }
 };
 
-// Each shared key id reaches its own pin, and a key the Zodiac doesn't have reaches none.
+// Each shared key id reaches its own pin (Action top D10, right D9, bottom D8, left D14), and a key the Zodiac doesn't have reaches none.
 void keyPins() {
     struct { KeyId key; uint8_t port, pin; } const expected[] = {
         {keyIdHome, 0, 7}, {keyIdTriggerLeft, 0, 8}, {keyIdTriggerRight, 0, 9}, {keyIdPower, 0, 10}, {keyIdStickPress, 3, 7},
-        {keyIdHard2, 3, 8}, {keyIdHard4, 3, 9}, {keyIdHard3, 3, 10}, {keyIdFunction, 3, 12}, {keyIdBluetooth, 3, 13},
-        {keyIdHard1, 3, 14}};
+        {keyIdHard2, 3, 9}, {keyIdHard4, 3, 10}, {keyIdHard3, 3, 14}, {keyIdFunction, 3, 12}, {keyIdBluetooth, 3, 13},
+        {keyIdHard1, 3, 8}};
     unsigned mapped = 0;
     for (unsigned key = 0; key < keyIdCount; ++key) {
         const int control = zodiacControlFor(KeyId(key));
@@ -301,6 +304,95 @@ void buttonsFromReset() {
     for (const auto& pin : imx1ZodiacControlPins) assert((pin.port == 0 ? o.gpioAInput : o.gpioDInput) >> pin.pin & 1);
 }
 
+// A session saved with its card in loads with the card back in the slot, taking on the state's card
+// section, as the session start finds it: the card in the card store and not yet in the SoC. A state
+// saved with the slot empty still loads with the card out.
+void cardThroughLoad(SocIMX1& soc) {
+    auto save = [&] {
+        assert(soc.Save());
+        const auto saved = soc.GetSavestate();
+        return std::vector<uint8_t>(static_cast<const uint8_t*>(saved.data),
+                                    static_cast<const uint8_t*>(saved.data) + saved.size);
+    };
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-card-test");
+    soc.SdInsert();
+    run(soc, 1);
+    assert(soc.SdInserted() && soc.CardAttached() && !soc.Halted());
+    auto withCard = save();
+    soc.SdEject();
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached());
+    auto withoutCard = save();
+    assert(soc.Load(withCard.size(), withCard.data()));
+    assert(soc.SdInserted() && soc.CardAttached());
+    // The session start's remount keeps it in.
+    assert(soc.SdRemount() && soc.CardAttached());
+    run(soc, 1);
+    assert(soc.CardAttached() && !soc.Halted());
+    soc.SdEject();
+    run(soc, 1);
+    assert(soc.Load(withoutCard.size(), withoutCard.data()));
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted() && !soc.CardSwappedOnLoad());
+    // Another card in the store is a swap: it stays out, for the session start to put in as new.
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-other-card");
+    assert(soc.Load(withCard.size(), withCard.data()));
+    assert(!soc.SdInserted() && !soc.CardAttached() && soc.CardSwappedOnLoad());
+    soc.SdInsert();
+    run(soc, 1);
+    assert(soc.SdInserted() && soc.CardAttached() && !soc.Halted());
+    // The same with that card in the slot at the load: out as a swap.
+    assert(soc.Load(withCard.size(), withCard.data()));
+    assert(!soc.SdInserted() && !soc.CardAttached() && soc.CardSwappedOnLoad());
+    run(soc, 1);
+    assert(!soc.Halted());
+    // No card in the store: the slot stays empty.
+    sdCardReset();
+    assert(soc.Load(withCard.size(), withCard.data()));
+    run(soc, 1);
+    assert(!soc.SdInserted() && !soc.CardAttached() && !soc.Halted() && !soc.CardSwappedOnLoad());
+    std::puts("PASS: a Zodiac state saved with its card in loads with the card in, one saved without it or with "
+              "another card in the store with the card out");
+}
+
+// The guest sends CMD55 and the session is saved before it reads the response. Loaded as a session
+// start finds it (the card in the store, not in the SoC), the guest reads the response from the card
+// section: 0x3700 first, APP_CMD in the last halfword. A wrong word runs an undefined instruction.
+void cardCommandThroughLoad() {
+    static constexpr uint32_t program[]{
+        0xe3a00821, 0xe3a01b31, 0xe5801000, 0xe59f107c,  // AIPI2 PSR0 and PSR1: MMCSD on a 32-bit bus
+        0xe5801004, 0xe3a00985, 0xe3a01008, 0xe5801000,  // MMCSD reset
+        0xe3a0100d, 0xe5801000, 0xe3a01005, 0xe3a02008,
+        0xe5801000, 0xe2522001, 0x1afffffc, 0xe3a01037,  // 8 recovery writes, CMD 55
+        0xe5801028, 0xe3a01000, 0xe580102c, 0xe5801030,  // ARGH, ARGL 0
+        0xe3a01001, 0xe580100c, 0xe3a01006, 0xe5801000,  // R1, start
+        0xe3a02902, 0xe2522001, 0x1afffffd, 0xe5903034,  // 0x64: wait 32768 turns, then RES_FIFO three times
+        0xe5904034, 0xe5905034, 0xe3530c37, 0x1a000002,
+        0xe3150a02, 0x0a000000, 0xeafffffe, 0xe7f000f0,  // 0x88: done, 0x8c: wrong word
+        0x0000fbff};
+    // The ROM runs at its CS0 address.
+    constexpr uint32_t romBase = 0x10000000;
+    auto image = rom();
+    for (size_t i = 0; i < std::size(program); ++i) put32le(image, 4 * i, program[i]);
+    std::string error;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
+    assert(soc && error.empty());
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-card-test");
+    soc->SdInsert();
+    soc->Run(200000, 100000000);
+    assert(!soc->Halted() && soc->CardAttached() && soc->Status().pc >= romBase + 0x64 && soc->Status().pc < romBase + 0x6c);
+    assert(soc->Save());
+    const auto saved = soc->GetSavestate();
+    std::vector<uint8_t> state(static_cast<const uint8_t*>(saved.data), static_cast<const uint8_t*>(saved.data) + saved.size);
+    soc->SdEject();
+    assert(soc->Load(state.size(), state.data()));
+    const bool remounted = soc->SdRemount();
+    for (int i = 0; i < 2000 && !soc->Halted() && soc->Status().pc != romBase + 0x88; ++i) soc->Run(1000000, 100000000);
+    assert(!soc->Halted() && soc->Status().pc == romBase + 0x88);
+    assert(remounted && soc->CardAttached());
+    std::puts("PASS: a Zodiac session saved before the guest read a card response loads with the response there");
+}
+
 void machine() {
     std::string error;
     // A process has one machine, so the stop case is a second run of this test. Its ROM starts with
@@ -390,6 +482,21 @@ void machine() {
     assert(onExact > onFast && soc->SetFastEngine(true) && soc->FastEngine());
     run(*soc, 1);
     assert(soc->Status().retired > onExact && !soc->Halted());
+    // In this loop Run stops only where the retired or work count is a whole multiple of the engine's
+    // slice size or the time a whole sliceTicks, and gives at least the guest time asked for, however
+    // little. A long ask can end early on host time.
+    for (const bool fast : {false, true}) {
+        assert(soc->SetFastEngine(fast));
+        const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+        for (const uint64_t asked : {1, 7, 4000, 1000000}) {
+            const auto from = soc->Status();
+            const uint64_t credit = soc->Run(asked, 100000000);
+            const auto to = soc->Status();
+            const uint64_t ticks = std::max<uint64_t>(1, asked * 32768 / 100000000);
+            assert(to.retired % sliceRetired == 0 || to.work % sliceWork == 0 || to.time.ticks % 32 == 0);
+            assert((asked == 1000000 || to.time.ticks - from.time.ticks >= ticks) && credit > 0 && !soc->Halted());
+        }
+    }
     // The sound path: a load and a reset empty the queue and start the stream again.
     auto* queue = audioQueueCreate(64);
     soc->SetAudioQueue(queue);
@@ -421,10 +528,147 @@ void machine() {
     soc->Reset();
     assert(audioQueuePendingSamples(queue) == 0 && sink.sound.currentGain() == 0);
     std::puts("PASS: Zodiac input from the first instruction, the pen lifted after a load, Reset, the redraw flag, the engine and the sound queue");
+    cardThroughLoad(*soc);
 }
 }  // namespace
 
+// The card taken out while CMD55 is on the wire: the guest waits for END_CMD_RESP, finds TIME_OUT_RESP
+// with it and reads 0 from RES_FIFO, and the machine runs on. Anything else runs an undefined instruction.
+void cardPulledMidCommand() {
+    static constexpr uint32_t program[]{
+        0xe3a00821, 0xe3a01b31, 0xe5801000, 0xe59f1074,  // AIPI2 PSR0 and PSR1, MMCSD reset as above
+        0xe5801004, 0xe3a00985, 0xe3a01008, 0xe5801000,
+        0xe3a0100d, 0xe5801000, 0xe3a01005, 0xe3a02008,
+        0xe5801000, 0xe2522001, 0x1afffffc, 0xe3a01037,
+        0xe5801028, 0xe3a01000, 0xe580102c, 0xe5801030,
+        0xe3a01001, 0xe580100c, 0xe3a01006, 0xe5801000,  // CMD55, R1, start
+        0xe5903004, 0xe3130a02, 0x0afffffc, 0xe3130002,  // 0x60: wait for END_CMD_RESP, TIME_OUT_RESP set
+        0x0a000003, 0xe5904034, 0xe3540000, 0x1a000000,  // RES_FIFO reads 0
+        0xeafffffe, 0xe7f000f0, 0x0000fbff};             // 0x80: done, 0x84: wrong
+    constexpr uint32_t romBase = 0x10000000;
+    auto image = rom();
+    for (size_t i = 0; i < std::size(program); ++i) put32le(image, 4 * i, program[i]);
+    std::string error;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
+    assert(soc && error.empty());
+    sdCardInitializeWithBytes(std::vector<uint8_t>(1u << 20), "zodiac-card-test");
+    soc->SdInsert();
+    soc->Run(5000, 100000000);
+    assert(!soc->Halted() && soc->Status().pc >= romBase + 0x60 && soc->Status().pc < romBase + 0x6c);
+    soc->SdEject();
+    for (int i = 0; i < 2000 && !soc->Halted() && soc->Status().pc != romBase + 0x80; ++i) soc->Run(1000000, 100000000);
+    assert(!soc->Halted() && soc->Status().pc == romBase + 0x80 && !soc->CardAttached());
+    // The taken-out slot goes through a save and a load.
+    assert(soc->Save());
+    const auto saved = soc->GetSavestate();
+    std::vector<uint8_t> state(static_cast<const uint8_t*>(saved.data), static_cast<const uint8_t*>(saved.data) + saved.size);
+    assert(std::string(state.begin(), state.end()).find("SDPL") != std::string::npos);
+    assert(soc->Load(state.size(), state.data()));
+    soc->Run(1000000, 100000000);
+    assert(!soc->Halted() && soc->Status().pc == romBase + 0x80);
+    std::puts("PASS: a Zodiac card taken out mid-command times out its response and the machine runs on");
+}
+
+// A guest that waits on Timer2 with WFI, arms the power key (A10) as a low level interrupt and goes into
+// stop mode. Run's slices: ended by work in the wait, at most sliceTicks of guest time in stop mode, the
+// credit always the guest time that passed, and the wake from a power press prompt and the same in guest
+// time however the calls are cut, in Exact and Fast.
+void sleepAndWake() {
+    std::vector<uint32_t> v;
+    auto lit = [&](unsigned reg, uint32_t value) { v.insert(v.end(), {0xe59f0000 | reg << 12, 0xea000000, value}); };
+    lit(0, 0x21b000);  // the clock module: MCU PLL programmed and restarted, then the CPU on FCLK
+    lit(1, 0x57000003); v.push_back(0xe5801000);
+    lit(1, 0x03e717bf); v.push_back(0xe5801004);
+    lit(1, 0x57200003); v.push_back(0xe5801000);
+    v.insert(v.end(), {0xe5902000, 0xe3120602, 0x1afffffc});
+    lit(1, 0xc0000078); v.push_back(0xee011f10);
+    for (int i = 0; i < 60; ++i) v.push_back(0xe1a03003);
+    lit(2, 0x223000); lit(1, 0x04000000); v.push_back(0xe5821010);  // Timer2's interrupt enabled
+    lit(2, 0x203000); lit(1, 200000); v.push_back(0xe5821008); lit(1, 0x113); v.push_back(0xe5821000);
+    const uint32_t wfi = 4 * uint32_t(v.size());
+    v.push_back(0xee070f90);
+    v.insert(v.end(), {0xe3a01000, 0xe5821000, 0xe5821014});  // Timer2 off and acknowledged
+    lit(4, 0x21c000);  // A10 in use, low level, unmasked; port A's interrupt enabled
+    v.insert(v.end(), {0xe5941020, 0xe3811b01, 0xe5841020, 0xe5941028, 0xe3811603, 0xe5841028, 0xe3a01b01, 0xe5841030});
+    lit(2, 0x223008); v.insert(v.end(), {0xe3a0100b, 0xe5821000});
+    lit(1, 0x57003c03); v.push_back(0xe5801000);
+    lit(1, 0x57003c00); v.push_back(0xe5801000);  // stop
+    const uint32_t woken = 4 * uint32_t(v.size());
+    v.insert(v.end(), {0xe3a05055, 0xeafffffe});
+    constexpr uint32_t romBase = 0x10000000;
+    constexpr uint64_t cps = 32768, sliceTicks = 32;
+    auto image = rom();
+    for (size_t i = 0; i < v.size(); ++i) put32le(image, 4 * i, v[i]);
+    std::string error;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), error);
+    assert(soc && error.empty());
+    // One call: the credit, at 32768 cycles a second, is the ticks that passed. A long ask can end
+    // early on host time.
+    auto step = [&](uint64_t asked) {
+        const auto from = soc->Status();
+        const uint64_t credit = soc->Run(asked, cps);
+        const auto to = soc->Status();
+        assert(!soc->Halted() && credit == to.time.ticks - from.time.ticks);
+        return to;
+    };
+    for (int i = 0; i < 100000 && soc->Status().pc != romBase + wfi + 4; ++i) step(1);
+    assert(soc->Status().pc == romBase + wfi + 4);
+    unsigned byWork = 0;
+    for (int i = 0; i < 100000 && soc->Status().pc == romBase + wfi + 4; ++i) {
+        const auto to = step(1);
+        byWork += to.work % 20000 == 0 && (to.time.ticks % sliceTicks || to.time.numerator);
+    }
+    assert(byWork > 0);
+    for (int i = 0; i < 100000 && soc->Status().pc != romBase + woken; ++i) step(1);
+    assert(soc->Status().pc == romBase + woken);
+    // Asleep, a slice is at most sliceTicks. The state is saved on Exact.
+    assert(!soc->FastEngine());
+    for (int i = 0; i < 20; ++i) {
+        const uint64_t from = soc->Status().time.ticks;
+        assert(step(1).time.ticks - from <= sliceTicks && soc->Status().pc == romBase + woken);
+    }
+    assert(soc->Save());
+    const auto saved = soc->GetSavestate();
+    std::vector<uint8_t> asleep(static_cast<const uint8_t*>(saved.data), static_cast<const uint8_t*>(saved.data) + saved.size);
+    for (const bool fast : {false, true}) {
+        assert(soc->SetFastEngine(fast));
+        std::vector<uint8_t> first;
+        for (const uint64_t asked : {1, 1000}) {
+            // A load keeps the machine's own engine, on Fast too with the state saved on Exact.
+            assert(soc->Load(asleep.size(), asleep.data()) && soc->FastEngine() == fast);
+            const uint64_t pressed = soc->Status().time.ticks, end = pressed + 1000;
+            soc->KeyDown(keyIdPower);
+            uint64_t awake = 0;
+            while (soc->Status().time.ticks < end) {
+                step(std::min(asked, end - soc->Status().time.ticks));
+                if (!awake && soc->Status().pc != romBase + woken) awake = soc->Status().time.ticks;
+            }
+            // The press is seen within a slice, and the MCU PLL locks in nine CLK32 periods.
+            if (asked == 1) assert(awake && awake - pressed <= sliceTicks + 12);
+            assert(soc->Status().pc == romBase + woken + 4 && soc->Save());
+            const auto state = soc->GetSavestate();
+            std::vector<uint8_t> bytes(static_cast<const uint8_t*>(state.data), static_cast<const uint8_t*>(state.data) + state.size);
+            if (first.empty()) first = bytes;
+            else assert(bytes == first);
+        }
+    }
+    std::puts("PASS: Zodiac slices end by work in a wait and within a millisecond asleep, the credit is the guest time, and a power press wakes the same however the runs are cut");
+}
+
 int main() {
+    // One machine a process: each card guest is a run of its own.
+    if (std::getenv("ZODIAC_TEST_CARD")) {
+        cardCommandThroughLoad();
+        return 0;
+    }
+    if (std::getenv("ZODIAC_TEST_SLEEP")) {
+        sleepAndWake();
+        return 0;
+    }
+    if (std::getenv("ZODIAC_TEST_PULL")) {
+        cardPulledMidCommand();
+        return 0;
+    }
     rotation();
     pen();
     stick();

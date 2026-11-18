@@ -21,6 +21,8 @@
 // packable names at the archive or destination root.
 namespace frondMachine {
 constexpr const char* sdSibling = "sd.frondsd";
+// The Zodiac's second SD slot (the W4200's), in its own card store.
+constexpr const char* sd2Sibling = "sd2.frondsd";
 constexpr const char* msSibling = "ms.frondms";
 // A Memory Stick Pro: flat sectors in the .frondsd format, saved like an SD card.
 constexpr const char* msProSibling = "ms.frondmsp";
@@ -29,12 +31,13 @@ constexpr const char* nandSibling = "nand.frondnand";
 constexpr const char* androidSession = "session.frond";
 // Which card the frontend's slot holds; packed with the machine, never read by the core.
 constexpr const char* slotFile = "slot.json";
-constexpr uint32_t kindSd = 1, kindMs = 2, kindMsPro = 3, kindNand = 4;
+constexpr uint32_t kindSd = 1, kindMs = 2, kindMsPro = 3, kindNand = 4, kindSd2 = 5;
 constexpr size_t nameBytes = 32, identityBytes = 32;
 // v7 descriptors are 92 bytes; v8 adds the SD content generation as a u64 at 92, which for a classic
 // Memory Stick is its change counter.
 constexpr size_t descriptorBytesV7 = 92, descriptorBytes = 100;
 constexpr const char* sdJournalPrefix = "sd.frondsd.journal-";
+constexpr const char* sd2JournalPrefix = "sd2.frondsd.journal-";
 constexpr const char* msProJournalPrefix = "ms.frondmsp.journal-";
 constexpr const char* msJournalPrefix = "ms.frondms.journal-";
 constexpr const char* nandJournalPrefix = "nand.frondnand.journal-";
@@ -45,19 +48,21 @@ inline bool validNandBytes(uint64_t raw) { return raw && raw % nandUnitBytes == 
 inline uint64_t nandMainBytes(uint64_t raw) { return raw / nandUnitBytes * nandUnitMainBytes; }
 inline uint64_t nandSpareBytes(uint64_t raw) { return raw / nandUnitBytes * nandUnitSpareBytes; }
 // Cards kept as .frondsd sidecars with journals and generations: SD cards and Memory Stick Pros.
-inline bool fileCardKind(uint32_t kind) { return kind == kindSd || kind == kindMsPro; }
+inline bool fileCardKind(uint32_t kind) { return kind == kindSd || kind == kindSd2 || kind == kindMsPro; }
 // Cards in the card store (sdcard.h), saved through the same journals: those, and a classic
 // Memory Stick in a v2 .frondms.
 inline bool storeCardKind(uint32_t kind) { return fileCardKind(kind) || kind == kindMs; }
 // Every medium kept in a container with journals: the card store's, and internal NAND.
 inline bool journalledKind(uint32_t kind) { return storeCardKind(kind) || kind == kindNand; }
 inline const char* fileCardSibling(uint32_t kind) {
-    return kind == kindNand ? nandSibling : kind == kindMsPro ? msProSibling : kind == kindMs ? msSibling : sdSibling;
+    return kind == kindNand ? nandSibling : kind == kindMsPro ? msProSibling : kind == kindMs ? msSibling
+           : kind == kindSd2 ? sd2Sibling : sdSibling;
 }
 inline const char* fileCardJournalPrefix(uint32_t kind) {
     return kind == kindNand    ? nandJournalPrefix
            : kind == kindMsPro ? msProJournalPrefix
            : kind == kindMs    ? msJournalPrefix
+           : kind == kindSd2   ? sd2JournalPrefix
                                : sdJournalPrefix;
 }
 // The 128 MB stick, the only size before v7 sessions and the one v6 sessions embed.
@@ -83,7 +88,7 @@ inline bool endsWith(std::string_view name, std::string_view suffix) {
 
 inline bool packableName(std::string_view name) {
     if (ignoredName(name)) return false;
-    if (name == sdSibling || name == msSibling || name == msProSibling || name == nandSibling || name == slotFile)
+    if (name == sdSibling || name == sd2Sibling || name == msSibling || name == msProSibling || name == nandSibling || name == slotFile)
         return true;
     // An exported session's NAND, packed (storage/Packed.h); a load unpacks it.
     if (name == std::string(nandSibling) + ".gz") return true;
@@ -125,8 +130,8 @@ inline uint64_t containerPayload(const Media& media) {
 }
 
 inline bool validMedia(const Media& media) {
-    if (media.kind == kindSd)
-        return media.name == sdSibling && media.logicalSize == media.physicalSize &&
+    if (media.kind == kindSd || media.kind == kindSd2)
+        return media.name == fileCardSibling(media.kind) && media.logicalSize == media.physicalSize &&
                frondSdFile::validPayloadSize(media.physicalSize);
     if (media.kind == kindMsPro)
         return media.name == msProSibling && media.logicalSize == media.physicalSize &&
@@ -338,9 +343,10 @@ inline SiblingStatus checkSdSibling(const std::filesystem::path& path, const Med
     return checkSdPayload(path, info, table);
 }
 
+// `loneSd2` allows a second SD card file the saved cards don't list: the card was taken out and stays for sd2-put-in.
 inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const std::vector<Media>& cards,
-                                   bool full = false) {
-    bool expectSd = false, expectMs = false, expectMsPro = false, expectNand = false;
+                                   bool full = false, bool loneSd2 = false) {
+    bool expectSd = false, expectSd2 = false, expectMs = false, expectMsPro = false, expectNand = false;
     for (const auto& card : cards) {
         if (!validMedia(card)) return SiblingStatus::mismatch;
         if (card.kind == kindNand) {
@@ -352,7 +358,7 @@ inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const st
             const auto status = checkSdSibling(path, card, full);
             if (status != SiblingStatus::ok) return status;
         } else if (fileCardKind(card.kind)) {
-            bool& expect = card.kind == kindSd ? expectSd : expectMsPro;
+            bool& expect = card.kind == kindSd ? expectSd : card.kind == kindSd2 ? expectSd2 : expectMsPro;
             if (expect) return SiblingStatus::mismatch;
             expect = true;
             const auto path = folder / fileCardSibling(card.kind);
@@ -381,6 +387,7 @@ inline SiblingStatus checkSiblings(const std::filesystem::path& folder, const st
     }
     std::error_code ec;
     if (!expectSd && std::filesystem::is_regular_file(folder / sdSibling, ec)) return SiblingStatus::extra;
+    if (!expectSd2 && !loneSd2 && std::filesystem::is_regular_file(folder / sd2Sibling, ec)) return SiblingStatus::extra;
     if (!expectMs && std::filesystem::is_regular_file(folder / msSibling, ec)) return SiblingStatus::extra;
     if (!expectMsPro && std::filesystem::is_regular_file(folder / msProSibling, ec)) return SiblingStatus::extra;
     if (!expectNand && std::filesystem::is_regular_file(folder / nandSibling, ec)) return SiblingStatus::extra;

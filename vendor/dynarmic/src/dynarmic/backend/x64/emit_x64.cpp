@@ -273,8 +273,14 @@ void EmitX64::EmitNZCVFromPackedFlags(EmitContext& ctx, IR::Inst* inst) {
 }
 
 void EmitX64::EmitAddCycles(size_t cycles) {
-    ASSERT(cycles < std::numeric_limits<s32>::max());
-    code.sub(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], static_cast<u32>(cycles));
+    // Frond: ticks may carry a count above bit 32 (the ARM920T's clocks); that part comes off the high
+    // dword, the rest off the whole qword.
+    const u64 high = u64(cycles) >> 32, low = u64(cycles) & 0xffffffff;
+    ASSERT(low < std::numeric_limits<s32>::max() && high < std::numeric_limits<s32>::max());
+    code.sub(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], static_cast<u32>(low));
+    if (high) {
+        code.sub(dword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining) + 4], static_cast<u32>(high));
+    }
 }
 
 Xbyak::Label EmitX64::EmitCond(IR::Cond cond) {

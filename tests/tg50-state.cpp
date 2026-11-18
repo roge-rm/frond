@@ -401,7 +401,43 @@ static void memoryStickDma() {
     }
     puts("TG50 observed external WIDTH00 descriptor, pending reload and scoped DMA rejection passed");
 }
+// The connector's AUX: full scale with nothing plugged in (SonySys reads code >> 4 at 0xF3 or more as no
+// accessory; 0 V would be its serial-ID class 0x200), the USB cable's band, the pad's ID and back. An older
+// session's 0 V loads as the empty connector; a saved cable stays.
+static void connectorAux() {
+    std::vector<uint8_t> rom(4096);
+    SocPXA soc(deviceTypeTG50, 16u << 20, rom.data(), rom.size(), nullptr, 0, -1, 0);
+    assert(soc.Tg50ConnectorAux() == 4095);
+    soc.Reset();
+    assert(soc.Tg50ConnectorAux() == 4095);
+    assert(soc.SetUsbTestCable(true) && soc.UsbTestCableAttached() && soc.Tg50ConnectorAux() == 3276);
+    assert(soc.SetUsbTestCable(false) && !soc.UsbTestCableAttached() && soc.Tg50ConnectorAux() == 4095);
+    assert(soc.AttachGamepad(true, false) && soc.Tg50ConnectorAux() == 127);
+    assert(soc.AttachGamepad(false) && soc.Tg50ConnectorAux() == 4095);
+
+    auto old = state(soc);
+    const auto *words = reinterpret_cast<const uint32_t *>(old.data());
+    size_t offset = 1 + 2 * words[0], at = 0;
+    for (unsigned i = 0; i < words[0]; ++i) {
+        if (words[1 + 2 * i] == 0x01c0) {  // sonyTg50Touch: AUX is its last field
+            for (size_t b = offset * 4; b + 2 <= (offset + words[2 + 2 * i]) * 4; b += 2)
+                if (old[b] == 0xff && old[b + 1] == 0x0f) at = b;
+        }
+        offset += words[2 + 2 * i];
+    }
+    assert(at);
+    old[at] = old[at + 1] = 0;
+    assert(soc.SetUsbTestCable(true));
+    assert(soc.Load(old.size(), old.data()) && soc.Tg50ConnectorAux() == 4095);
+    assert(soc.SetUsbTestCable(true));
+    auto cable = state(soc);
+    assert(soc.SetUsbTestCable(false));
+    assert(soc.Load(cable.size(), cable.data()) && soc.Tg50ConnectorAux() == 3276);
+    std::puts("TG50 connector AUX: empty at full scale, cable, pad, old sessions");
+}
+
 int main() {
+    connectorAux();
     memoryStickDma();
     controls();
     holdAndPanel();

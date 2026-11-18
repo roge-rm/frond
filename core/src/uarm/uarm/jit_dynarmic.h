@@ -42,9 +42,12 @@ void jitExecutionCounts(const FrondJit* jit, uint64_t* blocks, uint64_t* instruc
 void jitSetExecutionCounts(FrondJit* jit, uint64_t blocks, uint64_t instructions);
 void jitDestroy(FrondJit *jit);
 const FrondJitAbort &jitLastAbort(const FrondJit *jit);
-// Runs up to about cycles instructions. Returns how many ran, at most
-// cycles - 1 + jitMaxUnchecked(jit) for cycles >= 1.
+// Runs up to about cycles clocks, each instruction charged its cost model cost (1 with the model
+// off, 1 when its condition fails). Returns the clocks run, at most
+// cycles - 1 + jitMaxUnchecked(jit) x the largest instruction cost for cycles >= 1.
 uint32_t jitRun(FrondJit *jit, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop);
+// The instructions the last jitRun ran, a Thumb pair counted 2 (ARM920T); its clocks elsewhere.
+uint32_t jitLastInstructions(const FrondJit *jit);
 // Most instructions generated code runs between two budget checks: no block is longer and
 // every link checks. 0 means no limit (FROND_JIT_MAX_UNCHECKED=0, for measuring only).
 uint32_t jitMaxUnchecked(const FrondJit *jit);
@@ -54,6 +57,17 @@ uint32_t jitRanNow(const FrondJit *jit);
 // MRC and MCR p15 c3 (domain access control) run in privileged mode from generated code, in
 // every JIT so far (tests).
 uint64_t jitDomainCalls();
+// MSR CPSRs the in-place check sent to the interpreter, in every JIT so far (tests).
+uint64_t jitPsrInterprets();
+// Runs that left a block at a failed access (a guest abort or a refused access), all JITs.
+uint64_t jitFaultExits();
+// Blocks translated so far, every JIT in the process.
+uint64_t jitTranslated();
+// Memory read and write callbacks, all JITs (tests).
+uint64_t jitMemoryCallbacks();
+// Whether JITs made from now on check the data cache hint (cpuJitCostHint) when memory is charged.
+// Without it every load and store goes to the callbacks then (tests). On by default.
+void jitSetCostHint(bool on);
 // Compile thread counts (A32::Jit::GetCompileStats): stale, ahead compiled, ahead used.
 void jitCompileCounts(const FrondJit *jit, uint64_t *stale, uint64_t *aheadCompiled, uint64_t *aheadUsed);
 // Code cache size in bytes for JITs made after this (tests); 0 for the default.
@@ -74,10 +88,13 @@ void jitCparWritten(FrondJit *jit, bool changed);
 // For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR,
 // MRRC, LDC or STC on coprocessor 0 or 1), as it would when dynarmic compiles it.
 bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
-// The first write to a watched RAM line since code was translated from it.
-void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
-// ARM920T Fast blocks: a store to the RAM page at pa, which code was translated from.
-void jitCodeWrittenPa(FrondJit *jit, uint32_t pa);
+// A store to [offset, offset + size) of a flagged line of the RAM page at hostPage: drops the blocks
+// whose code it overlaps. The page's flags are set again from the code left before the next run
+// (cpuJitSetCodeLines). False if the JIT holds no code from the page.
+bool jitCodeWritten(FrondJit *jit, uint8_t *hostPage, uint32_t offset, uint32_t size);
+// ARM920T Fast blocks: a store to [pa, pa + size) on a marked line of a RAM page code was translated
+// from. The same, by physical page.
+void jitCodeWrittenPa(FrondJit *jit, uint32_t pa, uint32_t size);
 // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
 void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
 // The same for the one RAM page at hostPage, after a line of it was flagged.
@@ -88,6 +105,11 @@ void jitWriteProtectPage(FrondJit *jit, uint8_t *hostPage);
 // refused without trying it, with *fsr 0, for the interpreter.
 bool cpuJitRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, uint_fast8_t *fsr);
 bool cpuJitWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, uint_fast8_t *fsr);
+// A device page noted by an earlier callback: the access goes straight to its handler, with its
+// result in *ok. 1 if it did, 2 if it did and cpuJitPageGen no longer gives gen, 0 for anything
+// else, which takes cpuJitRead or cpuJitWrite.
+int cpuJitIoRead(ArmCpu *cpu, uint32_t va, unsigned size, void *buf, bool *ok, uint64_t gen);
+int cpuJitIoWrite(ArmCpu *cpu, uint32_t va, unsigned size, const void *buf, bool *ok, uint64_t gen);
 bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word);
 // While on, cpuJitFetch reads only RAM and ROM; a fetch from anything else fails and is
 // noted for cpuJitRefused (turning it on clears that). For code compiled ahead, which the
@@ -113,6 +135,15 @@ uint64_t cpuJitPermContext(ArmCpu *cpu);
 // RAM, *lines gets the page's code flags, one per 64 bytes: set one and the first write to
 // that line comes back through jitCodeWritten. Null for ROM.
 uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines);
+// ARM920T Fast blocks: translation read the code word at pa, in a page cpuJitWatchCode marked. A store to its
+// 64-byte line drops the page's code; stores to the page's other lines don't.
+void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa);
+// After a store dropped code from a page, its marks become what the JIT's live blocks still hold code
+// from. ARM920T Fast blocks: the page at pa, words a bit per 4-byte word (16 of them; none unmarks the
+// page). Otherwise the RAM page's line flags at hostPage, lines a bit per 64-byte line, after which the
+// fetch buffers are watched again and the idle, delay and poll matches on the page are dropped.
+void cpuJitSetArm920CodeWords(ArmCpu *cpu, uint32_t pa, const uint64_t *words);
+void cpuJitSetCodeLines(ArmCpu *cpu, uint8_t *hostPage, uint8_t *flags, uint64_t lines);
 // Stops watching every RAM page.
 void cpuJitForgetCode(ArmCpu *cpu);
 // Moves on with every TLB flush, which every mapping change goes through.
@@ -136,6 +167,11 @@ uint32_t *cpuJitSpsr(ArmCpu *cpu);
 uint32_t *cpuJitAccessPcSlot(ArmCpu *cpu);
 bool cpuJitAccessPcMarked(const ArmCpu *cpu, uint32_t pc);
 uint32_t cpuJitSetCpsr(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t mask, uint32_t value);
+// For the fork's in-place MSR CPSR (psr_inline_interrupt_mask): the waiting IRQ and FIQ
+// counts as one word, 0 when none is waiting, and the word whose bytes 2 and 3 are the
+// CPU's I and F (generated code writes them so cpuIrq sees the masks mid-run).
+uint32_t *cpuJitWaitingWord(ArmCpu *cpu);
+uint32_t *cpuJitInterruptMaskWord(ArmCpu *cpu);
 // MOVS PC or SUBS PC: CPSR = SPSR in any mode and PC = target, as in the interpreter.
 uint32_t cpuJitExceptionReturn(ArmCpu *cpu, uint32_t *regs, uint32_t cpsr, uint32_t target);
 bool cpuJitPrivileged(ArmCpu *cpu);

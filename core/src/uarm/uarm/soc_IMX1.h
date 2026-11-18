@@ -1,6 +1,7 @@
 #ifndef FROND_SOC_IMX1_H
 #define FROND_SOC_IMX1_H
 
+#include <atomic>
 #include <array>
 #include <memory>
 #include <string>
@@ -30,9 +31,12 @@ class SocIMX1 : public SoC {
 
     void Reset() override;
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Faster: FCLK times the multiplier in the machine's clock model; guest time still comes from its own clock.
+    void SetClockMultiplier(uint32_t num, uint32_t den) override;
     bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
     bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
     void AnalogStick(float x, float y) override;
+    void SetStickHostTurns(int turns) override;
     bool Save() override;
     bool Load(size_t savestateSize, void* savestateData) override;
     // A state file from the bring-up driver (gzip or plain), made with its boot pin levels.
@@ -49,10 +53,17 @@ class SocIMX1 : public SoC {
     void ResetPendingFrame() override { framePending = false; }
     bool FrameQuarterTurn() const override { return true; }
     unsigned GuestOrientation() override;
+    Attention GuestAttention() override;
     DeviceType5 GetDeviceType() override { return deviceTypeZodiac2; }
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
     bool LcdEnabled() override;
+    // The battery level reaches the guest through the ASP's U input, set again after every load and reset.
+    bool BatterySupported() const override { return true; }
+    bool SetBattery(const BatteryPower& value) override;
+    // The battery inputs the machine has now, for tests: the ASP U word and GPIO B14 (low on the charger).
+    uint16_t BatterySample() const { return imx1MachineAspUInput(machine); }
+    bool ChargerInputLow() const { return !(imx1MachineGpioInput(machine, 1) & (1u << 14)); }
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
@@ -62,10 +73,38 @@ class SocIMX1 : public SoC {
     // Instructions retired and idle clocks skipped so far, for speed readouts.
     Imx1MachineCheapStatus Status() const { return imx1MachineGetStatus(machine); }
     bool Halted() const { return halted; }
+    // Instructions the Fast engine ran in Dynarmic blocks so far.
+    uint64_t JitRetired() const { return imx1MachineJitRetired(machine); }
+    uint64_t JitRuns() const { return imx1MachineJitRuns(machine); }
+    uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
+    uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
+    uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }
+    // The guest time of the last of them in ns, on GetTime's clock, for tests.
+    uint64_t YmfLastReadyReadNs() const;
+    // The RAM and graphics memory hashed, for comparing where two runs end.
+    uint64_t MemoryHash() const { return imx1MachineMemoryHash(machine); }
+    uint64_t PcmUnderrunWords() const { return imx1MachinePcmUnderrunWords(machine); }
+    // The sound and graphics chips' registers as text (imx1MachineChipSummary).
+    std::string ChipSummary() const { return imx1MachineChipSummary(machine); }
+    // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps
+    // up. Off, a run always reaches its guest time and runs repeat however busy the host is (tools).
+    void SetHostTimeLimit(bool on) { hostTimeLimit = on; }
     // Whether a redraw of the frame the machine already has is still owed.
     bool RedrawPending() const { return redraw; }
     // The sound path, for tests.
     ZodiacPcmSink& PcmSink() { return pcm; }
+    // The last load found another card in the card store than the one saved in the slot, and left
+    // it out. The session start puts it in as a new card.
+    bool CardSwappedOnLoad() const { return cardSwapped; }
+    // Whether slot 1 has the card attached, for tests.
+    bool CardAttached() const { return imx1MachineMmcsdCard(machine) != nullptr; }
+    // Slot 2, the W4200's SD slot, holds sdCardStore(1)'s card (Sd2Insert). Whether the machine has it
+    // attached, for tests.
+    bool SecondCardAttached() const { return imx1MachineGraphicsSdCard(machine) != nullptr; }
+    bool HasSecondSdSlot() const override { return true; }
+    bool Sd2Insert() override;
+    void Sd2Eject() override;
+    bool Sd2Inserted() const override { return card2In; }
     // Whether the machine has the pen down just now.
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
@@ -86,21 +125,34 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
+    // Puts the battery setting on the machine's inputs.
+    void ApplyBattery();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
     void SyncCard();
+    // The same for slot 2, card2In and vsd2.
+    void SyncSecondCard();
 
     std::vector<uint8_t> rom, saved, powerOn;
+    // Slot 2's card on sdCardStore(1), made at its first insert.
+    VSD* vsd2{nullptr};
+    bool card2In{false}, card2Sync{false};
     std::unique_ptr<Imx1I2cReadWindow> eeprom;
     Imx1Machine* machine{nullptr};
     bool halted{false};
+    bool hostTimeLimit{true};
 
     // The panel frame handed to the frontend, a copy, so the machine's frame is acknowledged at
     // once. The frontend turns it on the GPU.
     std::vector<uint32_t> view = std::vector<uint32_t>(size_t(zodiacPanelWidth) * zodiacPanelHeight);
     bool framePending{false}, redraw{true};
     GuestOrientationTracker orientationTracker;
+    // The stick as the host pushed it, and the quarter turns the guest's screen has: the guest gets the
+    // stick turned to match what the player sees.
+    std::atomic<float> stickHostX{0}, stickHostY{0};
+    std::atomic<int> stickTurns{0}, stickHostTurns{0};
+    void PushStick();
 
     // Guest time in CLK32 ticks (32768 a second) that Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};
@@ -112,7 +164,7 @@ class SocIMX1 : public SoC {
 
     // The SD card in slot 1 over the shared card store. The ROM speaks SD 1.x only, so cards stay at 2 GB.
     struct VSD* vsd{nullptr};
-    bool cardIn{false}, cardSync{false};
+    bool cardIn{false}, cardSync{false}, cardSwapped{false};
 };
 
 #endif

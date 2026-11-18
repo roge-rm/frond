@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "CPU.h"
+#include "ClieGamepad.h"
 #include "IrKeyboard.h"
 #include <string>
 #include "fast_audio.h"
@@ -69,6 +70,7 @@ class SocPXA : public SocGeneric<SocPXA> {
            uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev);
 
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    uint64_t CoreHz() const override;
     uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) override;
     void ResetPendingFrame() override;
     DeviceType5 GetDeviceType() override;
@@ -76,6 +78,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     void SuspendTimerInterrupts(bool suspendInterrupts) override;
     bool LcdEnabled() override;
     bool HoldSwitchSupported() const override;
+    bool BatterySupported() const override;
+    bool SetBattery(const BatteryPower&) override;
     bool HoldSwitchOn() const override;
     bool SetHoldSwitch(bool on) override;
     bool PowerButtonSupported() const override { return !disableSleep; }
@@ -97,6 +101,14 @@ class SocPXA : public SocGeneric<SocPXA> {
     void AttachKeyboard(bool value) override;
     bool KeyboardKey(uint8_t code, bool down) override;
     void ReleaseKeyboard() override;
+
+    // PEGA-GC10 on the TG50 connector: owns the FFUART hooks, AUX and GPIO3 while attached.
+    bool GamepadSupported() const override;
+    bool GamepadAttached() const override { return gamepad.Attached(); }
+    bool AttachGamepad(bool attach, bool identify = true) override;
+    std::string GamepadState() const override;
+    bool GamepadHold() const override { return gamepad.Attached() && gamepad.HoldOn(); }
+    const ClieGamepad& Gamepad() const { return gamepad; }
 
     // One infrared accessory at a time. Hook ownership is host-only and is not
     // serialized. Reset/accepted load invalidate the peer; checkpoints do not.
@@ -129,10 +141,12 @@ class SocPXA : public SocGeneric<SocPXA> {
             [](void* context) { return static_cast<SocPXA*>(context)->UsbBoardListening(); }, this);
         return {};
     }
-    bool UsbDefaultCableAttached() { return GetDeviceType()==deviceTypeTX; }
+    bool UsbDefaultCableAttached() { return false; }
     bool SetUsbTestCable(bool connected);
     bool UsbBoardListening();
     bool UsbTestCableAttached();
+    // TG50: the connector's AUX conversion result (12 bits), the accessory's ID.
+    uint16_t Tg50ConnectorAux();
     // A USB host on emulated time (UsbHostBridge). `tick` runs in the peripheral batch
     // (about every 10 us) once the time `wake` asks for has come, except during a serial
     // checkpoint; `replaced` runs on a reset or after a load succeeds, but not for a
@@ -208,10 +222,19 @@ class SocPXA : public SocGeneric<SocPXA> {
 #ifndef __EMSCRIPTEN__
     static uint32_t TimerElapsedCB(void* ctx);
     static void TimerRescheduleCB(void* ctx);
+    static bool OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr);
+    static bool GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value);
+    uint32_t TimerElapsedAt(uint32_t cycles) const;
 #endif
 
    private:
     IrKeyboard irKeyboard;
+    ClieGamepad gamepad;
+    bool gamepadLineLow{};  // GPIO3 as the pad last drove it; wiring, follows the loaded pad
+    void SyncGamepadLine();
+    bool GamepadPortReady();
+    void InstallGamepadHooks();
+    bool GamepadConnectorBusy() const;
     SerialHostHooks serialHostHooks{};
     IrHostHooks irHostHooks{};
     unsigned irReplacementDepth{};

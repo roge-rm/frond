@@ -208,7 +208,9 @@ void patchDispatchAddPatch(struct PatchDispatch* pd, uint32_t syscall, Headpatch
 }
 
 bool patchDispatchHasPatch(struct PatchDispatch* pd, uint32_t table, uint32_t offset) {
-    if (table < 4 || table > 12 || (table & 3) || offset > 0xfff || (offset & 3)) return true;
+    // The dispatch only takes tables 4, 8 and 12 and aligned offsets (patchDispatchOnLoadR12FromR9 and
+    // patchDispatchOnLoadPcFromR12), so any other pair never reaches a patch.
+    if (table < 4 || table > 12 || (table & 3) || offset > 0xfff || (offset & 3)) return false;
     return pd->patchTable[(((table >> 2) - 1) << 10) | (offset >> 2)] != 0xff;
 }
 

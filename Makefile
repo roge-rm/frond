@@ -20,6 +20,40 @@ endif
 
 all: out/frond desktop
 
+# Every test target runs under a time limit: each recipe line goes through tests/timed-shell.sh,
+# which kills the line's process group and fails with a TEST TIMEOUT line naming the target.
+# Change the limit for one target with `test-foo: export TEST_TIMEOUT = 900`, or for a run with
+# `make TEST_TIMEOUT=600 test`. The builds the tests depend on keep the normal shell.
+TEST_TIMEOUT ?= 300
+TEST_KILL_GRACE ?= 10
+export TEST_KILL_GRACE
+test: SHELL = $(CURDIR)/tests/timed-shell.sh
+test-%: SHELL = $(CURDIR)/tests/timed-shell.sh
+test: export TEST_TIMEOUT
+test-%: export TEST_TIMEOUT
+test: export TEST_NAME = $@
+test-%: export TEST_NAME = $@
+# make recheck-list shows which checks need running (changed paths, failed, never passed),
+# make recheck runs them one by one; both read tests/check-paths.tsv and build/check-passes.tsv.
+# CHECKS="test-zodiac-* test-cpu" limits them. Run it as `heavy build make recheck`.
+.PHONY: recheck recheck-list
+recheck-list:
+	@python3 tools/check-record.py list $(CHECKS)
+recheck:
+	@python3 tools/check-record.py recheck $(CHECKS)
+prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin/sh
+out/% build/% core/% vendor/%: SHELL = /bin/sh
+test-desktop: export TEST_TIMEOUT = 3600
+# These two run for several minutes on their own and longer under make -j.
+test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
+# The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
+# 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
+test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
+    test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
+    test-frond-arm-install test-device-profiles test-frond-68k-auto-off: export TEST_TIMEOUT = 1800
+test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
+
+
 .PHONY: test-memory-stick-media
 test: test-memory-stick-controller test-memory-stick-media
 test-memory-stick-media: prepare
@@ -162,21 +196,37 @@ out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
 	cp core/src/cloudpilot/frond-68k out/frond-68k.new
 	mv -f out/frond-68k.new out/frond-68k
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-pxa-faster test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
+
+# The checks that used to be recipe lines of test: itself, each a target so it is recorded.
+.PHONY: test-battery-power test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
+test-audio-metrics: prepare
 	python3 tests/audio-metrics.py
+test-audio-timing: prepare
 	python3 tests/audio-timing.py
+test-tx-baseline: prepare
 	python3 tests/tx-baseline.py
+test-menu-response: prepare
 	python3 tests/menu-response.py
+test-wm9712-irq: prepare
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/wm9712-irq.cpp core/src/uarm/uarm/ac97dev_WM9712L.cpp \
 		-Wl,--gc-sections -o build/test-wm9712-irq
 	./build/test-wm9712-irq
+test-battery-power: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/battery-power.cpp core/src/uarm/uarm/ac97dev_WM9712L.cpp core/src/uarm/uarm/sspdev_AD7873.cpp \
+		-Wl,--gc-sections -o build/test-battery-power
+	./build/test-battery-power
+test-pxa-ac97-irq: prepare
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/pxa-ac97-irq.cpp core/src/uarm/uarm/pxa_AC97.cpp \
 		-Wl,--gc-sections -o build/test-pxa-ac97-irq
 	./build/test-pxa-ac97-irq
+test-pace-patch: prepare
 	$(CXX) -std=c++17 -O1 -g \
 		-Icore/src/uarm/uarm -Icore/src/uarm \
 		tests/pace-patch.cpp core/src/uarm/uarm/pace_patch.cpp \
@@ -244,9 +294,9 @@ test-sdl-audio: out/frond
 test: test-dana-keyboard-art
 DANA_ART_SOURCE ?= core
 DANA_ART_BUILD ?= build
-# Any other source folder is a copy of core/ made first.
+# Any other source folder is a copy of core/ made first. The : keeps the line count fixed for check-record.py.
 test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
-	$(if $(filter-out core,$(DANA_ART_SOURCE)),python3 tools/copy-core.py $(DANA_ART_SOURCE))
+	$(if $(filter-out core,$(DANA_ART_SOURCE)),python3 tools/copy-core.py $(DANA_ART_SOURCE),:)
 	mkdir -p $(DANA_ART_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_ART_SOURCE)/src/uarm/native -I$(DANA_ART_SOURCE)/src/uarm/uarm \
@@ -259,9 +309,9 @@ test-dana-keyboard-art: $(if $(filter core,$(DANA_ART_SOURCE)),prepare)
 test: test-dana-view
 DANA_VIEW_SOURCE ?= core
 DANA_VIEW_BUILD ?= build
-# Any other source folder is a copy of core/ made first.
+# Any other source folder is a copy of core/ made first. The : keeps the line count fixed for check-record.py.
 test-dana-view: $(if $(filter core,$(DANA_VIEW_SOURCE)),prepare)
-	$(if $(filter-out core,$(DANA_VIEW_SOURCE)),python3 tools/copy-core.py $(DANA_VIEW_SOURCE))
+	$(if $(filter-out core,$(DANA_VIEW_SOURCE)),python3 tools/copy-core.py $(DANA_VIEW_SOURCE),:)
 	mkdir -p $(DANA_VIEW_BUILD)
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra $(shell pkg-config --cflags sdl2 SDL2_image) \
 		-I$(DANA_VIEW_SOURCE)/src/uarm/native -I$(DANA_VIEW_SOURCE)/src/uarm/uarm \
@@ -689,6 +739,35 @@ test-pxa-power: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-pxa-power
 	./build/test-pxa-power
 
+test-pxa-clock: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/clock-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-clock.cpp @build/clock-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-clock
+	./build/test-pxa-clock
+
+# Faster speed on the PXA: the core clock times the multiplier, guest time on the guest's clock, Original as
+# before, the speed setting's names and MainLoop's switch.
+.PHONY: test-pxa-faster
+test-pxa-faster: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/faster-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-faster.cpp @build/faster-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-faster
+	./build/test-pxa-faster
+
+# The ARM runner's --speed and control socket speed command on a T|X smoke session (FROND_ARM_SESSION, skips
+# without one).
+.PHONY: test-arm-speed
+test-arm-speed: out/frond
+	python3 tests/arm-speed.py
+
+# Faster speed on frond-68k (IIIx ROM, skips without it): N times the cycles a guest second, the speed
+# command and option.
+.PHONY: test-frond-68k-speed
+test-frond-68k-speed: out/frond-68k
+	python3 tests/frond-68k-speed.py
+
 .PHONY: test-pace-debug
 test-pace-debug: build/test-gdbstub-target
 	python3 tests/pace-debug.py
@@ -719,6 +798,16 @@ test-xscale-stale-dcache: out/frond
 		tests/xscale-stale-dcache.cpp @build/stale-dcache-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-xscale-stale-dcache
 	./build/test-xscale-stale-dcache 2>build/xscale-stale-dcache.err
+
+# The cost model's data cache in sessions: a warm cache saved mid-run gives the same Exact counts.
+.PHONY: test-xscale-cost-session
+test: test-xscale-cost-session
+test-xscale-cost-session: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/cost-session-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/xscale-cost-session.cpp @build/cost-session-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-xscale-cost-session
+	./build/test-xscale-cost-session
 
 .PHONY: test-mem-region-bounds
 test-mem-region-bounds: out/frond
@@ -756,6 +845,12 @@ test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	./build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
 
+# Left idle after a cold boot, the private IIIx and m515 ROMs turn off at the OS's 2 minute auto-off.
+# Needs FROND_DEVICE_IMAGES.
+.PHONY: test-frond-68k-auto-off
+test-frond-68k-auto-off: out/frond-68k
+	python3 tests/frond-68k-auto-off.py
+
 # Console database commands while a guest app is busy for 45 s on the private IIIx 3.1 ROM: they
 # wait for its event loop or fail with an error, and the core runs on. Skips without the ROM, or
 # m68k-palmos-gcc and the 3.5 SDK in ../palm-os-sdk.
@@ -776,6 +871,15 @@ test-frond-68k-install: out/frond-68k
 test-frond-arm-install: out/frond
 	python3 tests/frond-arm-install.py
 
+.PHONY: test-native-budget
+test-native-budget:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/native-budget.cpp -o build/test-native-budget
+	./build/test-native-budget
+
+.PHONY: test-frond-arm-big-install
+test-frond-arm-big-install: out/frond
+	python3 tests/frond-arm-big-install.py
+
 # A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
 # wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
 .PHONY: test-host-call-wake
@@ -792,6 +896,11 @@ test-patched-traps: out/frond
 .PHONY: test-session-folder-card
 test-session-folder-card: out/frond
 	python3 tests/session-folder-card.py
+
+# The battery command on both runners; needs FROND_DEVICE_IMAGES and an ARM smoke machine, else that side is skipped.
+.PHONY: test-battery-control
+test-battery-control: out/frond out/frond-68k
+	python3 tests/battery-control.py
 
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
@@ -898,7 +1007,42 @@ test-zodiac-normal-runtime: out/frond
 		tests/zodiac-normal-runtime.cpp @build/zodiac-runtime-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-normal-runtime
 	./build/test-zodiac-normal-runtime
-	ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
+	FROND_ZODIAC_STOP_ON_EXCEPTION=1 ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
+	ZODIAC_TEST_CARD=1 ./build/test-zodiac-normal-runtime
+	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
+	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
+
+.PHONY: test-pxa-battery-pins
+test: test-pxa-battery-pins
+# The Charging switch on the TX, E2 and TG50 power inputs, firmware-free.
+test-pxa-battery-pins: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/pxa-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-battery-pins.cpp @build/pxa-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-battery-pins
+	./build/test-pxa-battery-pins
+
+.PHONY: test-zodiac-battery
+test: test-zodiac-battery
+# The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.
+test-zodiac-battery: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-battery.cpp @build/zodiac-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-battery
+	./build/test-zodiac-battery
+	./build/test-zodiac-battery halted
+
+.PHONY: test-zodiac-session-cards
+# A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
+test-zodiac-session-cards: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-session-cards-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-session-cards.cpp @build/zodiac-session-cards-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-session-cards
+	./build/test-zodiac-session-cards
 
 .PHONY: test-zodiac-machine
 # Reuse qualified generated guests, comparing one-shot and sliced execution.
@@ -1033,6 +1177,20 @@ test: test-tg50-voicerec
 test-tg50-voicerec: out/frond
 	python3 tests/tg50-voicerec.py
 
+# CLIÉ game controller: the pad model alone, then on the TG50: plug-in ID, buttons, Hold, live detach and re-attach, save and reload;
+# skips without the TG50 smoke session (tests/clie-gamepad.py).
+.PHONY: test-clie-gamepad
+test: test-clie-gamepad
+test-clie-gamepad: out/frond
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/clie-gamepad-model.cpp core/src/common/libcommon.a -o build/test-clie-gamepad-model
+	./build/test-clie-gamepad-model
+ifeq ($(FROND_TG50_SESSION),)
+	@echo "test-clie-gamepad: TG50 session part skipped, no FROND_TG50_SESSION"
+else
+	python3 tests/clie-gamepad.py
+endif
+
 # TG50 USB HotSync over a PTY with pilot-link; skips without the TG50 session (make smoke-sessions) or pilot-link.
 .PHONY: test-tg50-usb-hotsync
 test-tg50-usb-hotsync: out/frond
@@ -1145,6 +1303,13 @@ test-tx-lifecycle-rom: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-tx-lifecycle-rom
 
 .PHONY: test-host-serial
+test: test-xscale-cost
+.PHONY: test-xscale-cost
+test-xscale-cost:
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Icore/src/uarm/uarm tests/xscale-cost.cpp -o build/test-xscale-cost
+	./build/test-xscale-cost
+
 test: test-host-serial
 test-host-serial: prepare core/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -1352,6 +1517,42 @@ $(FRONDBENCH_DIR)/FrondBench.prc: $(FRONDBENCH_SRC)/frondbench.c $(FRONDBENCH_SR
 	m68k-palmos-gcc -L$(PALM_SDK)/lib/m68k-palmos-coff $(FRONDBENCH_DIR)/frondbench.o -o $(FRONDBENCH_DIR)/frondbench
 	cd $(FRONDBENCH_SRC) && pilrc -q -ro frondbench.rcp $(CURDIR)/$(FRONDBENCH_DIR)/frondbench.ro
 	build-prc -o $@ $(FRONDBENCH_SRC)/frondbench.def $(FRONDBENCH_DIR)/frondbench $(FRONDBENCH_DIR)/frondbench.ro
+	python3 $(FRONDBENCH_SRC)/fixdates.py $@
+
+# The committed tools/frondbench/FrondBench.prc is what the apps ship. This rebuilds it and compares;
+# it is skipped with a message when the Palm tools are missing.
+.PHONY: check-frondbench
+check-frondbench:
+	@if ! command -v m68k-palmos-gcc >/dev/null || ! command -v pilrc >/dev/null || ! command -v build-prc >/dev/null || [ ! -d "$(PALM_SDK)/include" ]; then \
+		echo "check-frondbench: skipped, needs m68k-palmos-gcc, pilrc, build-prc and PALM_SDK"; \
+	else \
+		$(MAKE) -B frondbench && cmp $(FRONDBENCH_DIR)/FrondBench.prc $(FRONDBENCH_SRC)/FrondBench.prc \
+			&& echo "check-frondbench: ok, $$(sha256sum $(FRONDBENCH_SRC)/FrondBench.prc | cut -c1-16)"; \
+	fi
+
+# Zodiac TwGfx test program (tools/zodiac-twgfx): every TwGfx call and option, and the Window Manager's drawing
+# modes and patterns, run headless through benchmark-replay on Fast and Exact. The table (ok, the ROM's error,
+# refused with Frond's stop text, or crashed) is checked against tests/zodiac-twgfx.golden; pass
+# ZODIAC_TWGFX_ARGS=--update to rewrite it, or --engines fast for Fast only. Needs arm-palmos-gcc,
+# m68k-palmos-gcc, build-prc, mtools and the Zodiac 1.1 ROM (ZODIAC_ROM, or under FROND_DEVICE_IMAGES);
+# skipped without them. The PRC, card, states and table go in build/zodiac-twgfx.
+ZODIAC_TWGFX_DIR := build/zodiac-twgfx
+ZODIAC_ROM ?= $(if $(FROND_DEVICE_IMAGES),$(FROND_DEVICE_IMAGES)/Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom)
+ZODIAC_TWGFX_ARGS ?=
+.PHONY: zodiac-twgfx test-zodiac-twgfx
+# About 5 minutes for both engines.
+test-zodiac-twgfx: export TEST_TIMEOUT = 1200
+zodiac-twgfx:
+	python3 tools/zodiac-twgfx/build.py $(ZODIAC_TWGFX_DIR)
+test-zodiac-twgfx:
+	@if ! command -v arm-palmos-gcc >/dev/null || ! command -v m68k-palmos-gcc >/dev/null || ! command -v build-prc >/dev/null \
+		|| ! command -v mformat >/dev/null || [ ! -f "$(ZODIAC_ROM)" ]; then \
+		echo "test-zodiac-twgfx: skipped, needs arm-palmos-gcc, m68k-palmos-gcc, build-prc, mtools and ZODIAC_ROM"; \
+	else \
+		$(MAKE) benchmark-replay zodiac-twgfx && python3 tools/zodiac-twgfx/run.py --bench build/benchmark-replay \
+			--rom "$(ZODIAC_ROM)" --fixture tests/fixtures/zodiac-doom2.replay --prc $(ZODIAC_TWGFX_DIR)/TwGfxTest.prc \
+			--work $(ZODIAC_TWGFX_DIR) --golden tests/zodiac-twgfx.golden $(ZODIAC_TWGFX_ARGS); \
+	fi
 
 # Emulation speed: Bike or Die replay and FrondBench through benchmark-replay.
 # BIKE_SESSION and FRONDBENCH_SESSION are session files you supply; a workload without one is skipped.
@@ -1363,6 +1564,13 @@ SPEED_HOST ?=
 .PHONY: speed-check
 speed-check: benchmark-replay
 	BIKE_SESSION=$(BIKE_SESSION) FRONDBENCH_SESSION=$(FRONDBENCH_SESSION) SPEED_MIPS=$(SPEED_MIPS) SPEED_HOST=$(SPEED_HOST) SPEED_BENCH=$(SPEED_BENCH) SPEED_SSH_KEY=$(SPEED_SSH_KEY) SPEED_REAL_MS=$(SPEED_REAL_MS) python3 tools/speed-check.py
+
+# Guest instruction, cycle and frame counts and hashes against tools/speed-baseline.json, one run each.
+# Wall-clock rounds only for recipes whose counts moved. COUNT_ARGS adds options (--only, --update, --against).
+COUNT_ARGS ?=
+.PHONY: count-check
+count-check: benchmark-replay
+	python3 tools/speed-check.py --counts $(COUNT_ARGS)
 
 # Dynarmic for the Fast engine. FROND_JIT=1 or 0 picks the engine at run time over --engine.
 # Its source, with Frond's changes, is in vendor/dynarmic. Ninja runs every time so edits there
@@ -1741,6 +1949,18 @@ test-zodiac-ldm-return: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-ldm-return
 	./build/test-zodiac-ldm-return
 
+# The TwGlue log on a small ARM program.
+.PHONY: test-zodiac-twglue-log
+test-zodiac-twglue-log: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-twglue-log.cpp core/src/uarm/uarm/imx1_boot_probe.cpp \
+		core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp \
+		core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp \
+		core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-twglue-log
+	./build/test-zodiac-twglue-log
+
 # ARM920 word stores of PC, base-restored abort and interpreter fallback.
 .PHONY: test-zodiac-store-pc
 test-zodiac-store-pc: build/zodiac-boot-probe
@@ -1810,6 +2030,22 @@ test-zodiac-sound: build/zodiac-boot-probe
 		tests/zodiac-sound.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-sound
 	./build/test-zodiac-sound
+
+# The stick turned to the guest's frame for each screen orientation.
+.PHONY: test-zodiac-stick-view
+test-zodiac-stick-view:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm \
+		tests/zodiac-stick-view.cpp -o build/test-zodiac-stick-view
+	./build/test-zodiac-stick-view
+
+# The Zodiac's rumble motor and LED on the YMF768's bank 1 register 48, on the model and through the machine.
+.PHONY: test-zodiac-rumble
+test-zodiac-rumble: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-rumble.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-rumble
+	./build/test-zodiac-rumble
 
 # The Zodiac's YMF768 on CS4: register answers, FIFO and interrupt, pitch, a stored note sequence, FM on guest
 # time, saves that change nothing, bad states refused, Exact and Fast alike with a save mid-note, a guest run by
@@ -2274,8 +2510,11 @@ test-zodiac-graphics-interrupts: zodiac-boot-probe prepare
 
 .PHONY: test-zodiac-graphics-acquisition
 .PHONY: test-zodiac-graphics-sd
-test-zodiac-graphics-sd: prepare
-	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/zodiac-graphics-sd.cpp -o build/test-zodiac-graphics-sd
+# Slot 2 (the W4200 SD block): the empty slot's answers, then a card: detect and its interrupt, init, PIO
+# transfers, errors and a state saved mid-transfer.
+test-zodiac-graphics-sd: prepare core/src/common/libcommon.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-graphics-sd.cpp core/src/uarm/uarm/vSD.cpp core/src/common/libcommon.a -o build/test-zodiac-graphics-sd
 	./build/test-zodiac-graphics-sd
 
 test-zodiac-graphics-acquisition: zodiac-boot-probe prepare test-zodiac-live-controls
@@ -2385,6 +2624,12 @@ test-zodiac-machine-state: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
 	./build/test-zodiac-machine-state
 
+.PHONY: test-zodiac-ymf-ready
+# The Zodiac boot's chip power cycle, sleep and wake end their YMF768 power waits in a few tries, alike in Exact and
+# Fast and through a load mid-wait. Needs the Zodiac ROM in FROND_DEVICE_IMAGES, else skipped (minutes in Exact).
+test-zodiac-ymf-ready: benchmark-replay
+	python3 tests/zodiac-ymf-ready.py
+
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.
 test-zodiac-fast-lean: build/zodiac-boot-probe
@@ -2393,6 +2638,14 @@ test-zodiac-fast-lean: build/zodiac-boot-probe
 		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-fast-lean
 	./build/test-zodiac-fast-lean
+
+.PHONY: test-zodiac-guest-exceptions
+test-zodiac-guest-exceptions: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-guest-exceptions.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-guest-exceptions
+	./build/test-zodiac-guest-exceptions
 
 .PHONY: test-zodiac-state-fingerprint
 # Compiles imx1_boot_probe.cpp for Android (libc++, arm64 and x86_64) with the NDK, whose static_assert checks the
@@ -2428,10 +2681,19 @@ test-zodiac-bounded: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-bounded
 	./build/test-zodiac-bounded
 
+# Faster speed on the Zodiac: FCLK times the multiplier in the clock model and on a running machine.
+.PHONY: test-zodiac-faster
+test-zodiac-faster: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/zodiac-faster.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-faster
+	./build/test-zodiac-faster
+
 # The Zodiac checks not listed elsewhere in the suite. Left out for time: arm-add-pc, ldm-return and fast-lean;
 # cs4-capture is a diagnostic kept outside make test.
 .PHONY: test-zodiac
-test-zodiac: test-zodiac-armv4-probe test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
+test-zodiac: test-zodiac-armv4-probe test-zodiac-faster test-zodiac-asp-input test-zodiac-asp-pen test-zodiac-boot-probe test-zodiac-bounded test-zodiac-cs5-bus test-zodiac-cs5-configuration test-zodiac-cs5-reset test-zodiac-cscr-ssi-clocks test-zodiac-dcache test-zodiac-dma-channel test-zodiac-dma-startup test-zodiac-exception test-zodiac-gpio-event test-zodiac-gpio-input test-zodiac-guest-exceptions test-zodiac-graphics-a4 test-zodiac-graphics-acquisition test-zodiac-graphics-clocks test-zodiac-graphics-commands test-zodiac-graphics-controller test-zodiac-graphics-display test-zodiac-graphics-engine test-zodiac-graphics-gpio test-zodiac-graphics-gpu test-zodiac-graphics-interrupts test-zodiac-graphics-memory test-zodiac-graphics-packed-mono test-zodiac-graphics-plain-copy test-zodiac-graphics-sd test-zodiac-i2c-image test-zodiac-idle-wake test-zodiac-irq test-zodiac-lcdc-contrast test-zodiac-live-controls test-zodiac-machine test-zodiac-machine-state test-zodiac-machine-state-cli test-zodiac-machine-state-reject test-zodiac-mmcsd-empty test-zodiac-mmio test-zodiac-mmu test-zodiac-multiply test-zodiac-normal-runtime test-zodiac-pcm-transport test-zodiac-rtc-input test-zodiac-rumble test-zodiac-session-cards test-zodiac-stick-view test-zodiac-sound test-zodiac-ssi-startup test-zodiac-stop-mode test-zodiac-store-pc test-zodiac-swap test-zodiac-thumb-add-pc test-zodiac-thumb-probe test-zodiac-timer-probe test-zodiac-trace-window test-zodiac-uart-startup test-zodiac-user-bank test-zodiac-video test-zodiac-virtual-graphics test-zodiac-ymf768
 test: test-zodiac
 
 # The 68k tests link from cloudpilot's .build-frond objects. out/frond-68k builds them once first,
@@ -2441,6 +2703,24 @@ test: test-68k-vz-registers
 test-68k-vz-registers: prepare out/frond-68k
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
+
+.PHONY: test-68k-battery
+test: test-68k-battery
+test-68k-battery: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-battery.mk FROND_TEST_ROOT=$(CURDIR) battery-test
+
+.PHONY: test-68k-ez-uart-spi
+test: test-68k-ez-uart-spi
+test-68k-ez-uart-spi: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-ez-uart-spi.mk FROND_TEST_ROOT=$(CURDIR) ez-uart-spi-test
+
+.PHONY: test-68k-host-transport
+test: test-68k-host-transport
+test-68k-host-transport: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-host-transport.mk FROND_TEST_ROOT=$(CURDIR) host-transport-test
 
 .PHONY: test-68k-dana
 test: test-68k-dana

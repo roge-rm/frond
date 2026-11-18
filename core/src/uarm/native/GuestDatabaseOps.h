@@ -16,11 +16,43 @@
 #include "native_boundary.h"
 
 // Shared desktop/console workflow. Native preparation makes no guest calls and no guest writes;
-// all calls and allocations run under a recoverable whole-guest transaction. Host calls wake an idle
-// UI task, once (Prepare on the T|X, else the 68k preparation); Ready is a look and never does.
+// all calls and allocations run under a recoverable whole-guest transaction. Host calls wake a
+// sleeping Palm (Wake) and an idle UI task, once (Prepare on the T|X, else the 68k preparation);
+// Ready is a look and never does either.
 namespace GuestDatabaseOps {
 inline bool Ready(SoC& soc) {
     return NativeBoundary::Prepare(soc, false) || syscallDispatchPrepare(soc.GetSyscallDispatch(), SYSCALL_PREPARE_LOOK);
+}
+
+// Host calls the user starts (install, launch, delete, export, card files) wake a sleeping Palm
+// first with a power button press, as a person would; lists and other looks don't. No press is
+// added while one from the host is held or still queued, as the two would put it back to sleep. The
+// press and release go through the key queue like the frontend's (the PXA holds a short press for
+// 250 ms so the DAL stays up), then the guest runs until it's awake, past that hold and at a point
+// that takes host calls, or awake for 3 s (a 68k app waiting with no timeout never shows Ready),
+// kWakeSeconds of guest time at most. The T|X ignores power presses for about 2.6 s after any wake,
+// a power-key one too, so a press right after the call can be lost. False when it's still asleep.
+// Cycles are counted at 100 MHz, like settleEject.
+inline bool Wake(SoC& soc) {
+    if (!frondNative::guestAsleep(soc)) return true;
+    if (!soc.PowerButtonSupported()) return false;
+    if (!soc.PowerKeyPending()) {
+        soc.KeyDown(keyIdPower);
+        soc.KeyUp(keyIdPower);
+    }
+    constexpr uint64_t cyclesPerSecond = 100000000, slice = 2000000;  // 20 ms
+    constexpr uint64_t kWakeSeconds = 5000000000, hold = 300000000, settle = 3000000000;  // ns
+    const uint64_t start = soc.GetTime();
+    uint64_t awake = 0;
+    while (soc.GetTime() - start < kWakeSeconds) {
+        if (awake >= settle || (awake && soc.GetTime() - start >= hold && Ready(soc))) break;
+        const uint64_t before = soc.GetTime();
+        soc.Run(slice, cyclesPerSecond);
+        const uint64_t after = soc.GetTime();
+        if (after == before) break;
+        if (!frondNative::guestAsleep(soc)) awake += after - before;
+    }
+    return !frondNative::guestAsleep(soc);
 }
 
 // After a failed NativeBoundary::Prepare: the T|X has already woken the UI task there.
@@ -69,6 +101,7 @@ inline void SettleBeforeReset(SoC& soc, uint64_t delay = 3000000000, uint64_t li
 }
 
 inline int InstallNow(SoC& soc, size_t size, void* data) {
+    if (!Wake(soc)) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
     if (!NativeBoundary::Prepare(soc)) {
         if (!syscallDispatchM68kSupport(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
@@ -123,6 +156,7 @@ inline int Install(SoC& soc, size_t size, void* data) {
 
 enum class LaunchResult { notReady, failed, launched };
 inline LaunchResult Launch(SoC& soc, const std::string& name) {
+    if (!Wake(soc)) return LaunchResult::notReady;
     if (!NativeBoundary::Prepare(soc)) {
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return LaunchResult::notReady;
         ReadOnlyGuest transaction(soc);
@@ -144,6 +178,7 @@ inline LaunchResult Launch(SoC& soc, const std::string& name) {
 // an application then relaunches the launcher in its own transaction: if that fails, the guest goes
 // back to just after the delete, which still succeeded.
 inline std::optional<DeleteDbResult> DeleteNow(SoC& soc, const std::string& name) {
+    if (!Wake(soc)) return std::nullopt;
     bool application = false;
     DeleteDbResult result;
     if (!NativeBoundary::Prepare(soc)) {
@@ -195,9 +230,11 @@ inline std::optional<DeleteDbResult> Delete(SoC& soc, const std::string& name) {
     return result;
 }
 
-// The RAM databases' directory entries, without serialising any database. Read-only: the guest
+// The RAM databases' directory entries, without serialising any database. Only wakes a sleeping
+// Palm with wake (a lookup for a delete the user asked for). Read-only: the guest
 // is rolled back afterwards like Export. Returns false only when no supported boundary is available.
-inline bool List(SoC& soc, DbMetadataList& list) {
+inline bool List(SoC& soc, DbMetadataList& list, bool wake = false) {
+    if (wake ? !Wake(soc) : frondNative::guestAsleep(soc)) return false;
     if (NativeBoundary::Prepare(soc)) {
         ReadOnlyGuest transaction(soc);
         NativeBoundary::Session session(soc);
@@ -223,6 +260,7 @@ inline bool List(SoC& soc, DbMetadataList& list) {
 // the caller publishes output only after this function's rollback completes.
 inline bool Export(SoC& soc, const std::string& name, std::vector<uint8_t>& bytes,
                    int backupType = DbBackup::BACKUP_TYPE_RAM) {
+    if (!Wake(soc)) return false;
     if (backupType == DbBackup::BACKUP_TYPE_RAM && NativeBoundary::Prepare(soc)) {
         ReadOnlyGuest transaction(soc);
         NativeBoundary::Session session(soc);

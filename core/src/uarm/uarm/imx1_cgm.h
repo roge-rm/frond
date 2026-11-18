@@ -1,6 +1,7 @@
 #ifndef FROND_IMX1_CGM_H
 #define FROND_IMX1_CGM_H
 
+#include <cstddef>
 #include <cstdint>
 #include "imx1_reference_time.h"
 
@@ -21,6 +22,10 @@ class Imx1Cgm {
     void setSystemPllScenario(bool enabled) { nominalSystemPll = enabled; }
     void setMcuRetuneScenario(bool enabled) { nominalMcuRetune = enabled; }
     void qualifyMcuOutput() { mcuOutputQualified = true; }
+    // Faster speed: the CPU's FCLK is the MCU PLL's times num / den. The 56 FCLK an MPCTL0 rewrite waits are
+    // counted in that clock, so a guest's delay loop still covers them. Not session state: the run sets it.
+    void setFclkMultiplier(uint32_t num, uint32_t den) { fclkNum = num; fclkDen = den; }
+    static constexpr size_t unsavedBytes = 2 * sizeof(uint32_t);
     bool mcuReferenceSupported(uint64_t denominator) const;
     void advanceMcuReference(uint64_t numerator, uint64_t denominator);
     Imx1PllRatio systemPllTargetRatio() const;
@@ -95,9 +100,12 @@ class Imx1Cgm {
     // No MCU lock flag or qualified settling interval is available after programming.
     bool mcuTimingUnknown = false;
     bool mcuRestartComplete = false;
+    uint32_t fclkNum = 1, fclkDen = 1;
+    // The FCLK the MPCTL0 write delay counts, to CLK32.
+    Imx1PllRatio writeDelayRatio() const;
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Cgm) == 128, "update state() and stateVersion");
+static_assert(sizeof(Imx1Cgm) - Imx1Cgm::unsavedBytes == 128, "update state() and stateVersion");
 #endif
 
 #endif

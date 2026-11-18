@@ -1,6 +1,6 @@
 // The i.MX1 MMCSD with a card in the virtual slot: commands and their responses on the card clock,
 // block reads and writes through a card DMA channel, card errors, the guarded edges and saved states
-// taken mid-transfer.
+// taken mid-transfer, and the card taken out mid-command.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -334,5 +334,70 @@ int main() {
     soc.attachMmcsdCard(nullptr);
     assert(!soc.mmcsdCard());
     write(ch9+0xc,0x829,A::sideEffect);
+    // A card taken out with a command on the wire: no response, TIME_OUT_RESP, and RES_FIFO reads 0.
+    // ASSUMPTION "empty response FIFO reads 0", as in imx1_mmcsd.h.
+    auto pulled = [&] {
+        soc.attachMmcsdCard(nullptr);
+        assert(!soc.mmcsdCard() && soc.mmcsdCardPulled());
+    };
+    soc.attachMmcsdCard(card);
+    assert(!soc.mmcsdCardPulled());
+    write(mmc,8); write(mmc,0xd);
+    for (unsigned i = 0; i < 8; ++i) write(mmc,5);
+    write(mmc+8,0); write(mmc+0x10,0x40); write(mmc+0x14,0xffff); write(mmc+0x24,0x7f);
+    write(mmc+0x28,13); write(mmc+0x2c,rca); write(mmc+0x30,0); write(mmc+0xc,1); write(mmc,6);
+    soc.advanceHclkCycles(20);
+    pulled();
+    // 48 + RES_TO clocks from the start, not the 48+2+48 of the answer.
+    soc.advanceHclkCycles(48+0x40-20-1);
+    expect(mmc+4,0x100);
+    soc.advanceHclkCycles(1);
+    expect(mmc+4,0x2102);
+    expect(mmc+0x34,0); expect(mmc+0x34,0);
+    stop();
+    // A response already in stays to be read; past it the FIFO reads 0.
+    soc.attachMmcsdCard(card);
+    assert(command(13,rca << 16,1,48+2+48) == 0x2100);
+    pulled();
+    assert((read(mmc+0x34) >> 8) == 13);
+    read(mmc+0x34); read(mmc+0x34);
+    expect(mmc+0x34,0);
+    stop();
+    // A block read cut short: DATA_TRANS_DONE and TIME_OUT_READ after READ_TO x 256 clocks.
+    soc.attachMmcsdCard(card);
+    write(mmc+0x14,4); write(mmc+0x18,512); write(mmc+0x1c,1);
+    assert(command(17,10*512,9,48+2+48) == 0x2100);
+    soc.advanceHclkCycles(100);
+    pulled();
+    expect(mmc+4,0x2100);
+    soc.advanceHclkCycles(4*256-1);
+    expect(mmc+4,0x2100);
+    soc.advanceHclkCycles(1);
+    expect(mmc+4,0x2901);
+    stop();
+    // A block write cut short: CRC_WRITE_ERR with WR_CRC_ERROR_CODE 10, no CRC response, once the
+    // block's clocks have passed.
+    // The card is put back: CMD12 ends the read it was left in.
+    soc.attachMmcsdCard(card);
+    assert(command(12,0,1,48+2+48) == 0x2100);
+    stop();
+    assert(command(24,10*512,0x19,48+2+48) == 0x2100);
+    soc.advanceHclkCycles(100);
+    pulled();
+    expect(mmc+4,0x2100);
+    soc.advanceHclkCycles(2 + 512*8 + 18 + 16);
+    expect(mmc+4,0x2d04);
+    stop();
+    // A clock stop ends a time-out still under way.
+    soc.attachMmcsdCard(card);
+    assert(command(12,0,1,48+2+48) == 0x2100);
+    stop();
+    assert(command(17,10*512,9,48+2+48) == 0x2100);
+    pulled();
+    stop();
+    // Commands after that go out and time out, so the guest can find the slot empty.
+    assert(command(13,rca << 16,1,48+0x40) == 0x2102);
+    expect(mmc+0x34,0);
+    stop();
     puts("i.MX1 MMCSD card commands, responses, block DMA and errors: PASS");
 }

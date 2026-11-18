@@ -19,6 +19,12 @@ class Imx1Watchdog {
         if (!enabled() || uncertain) return UINT64_MAX;
         return imx1StepsUntil(referencePhase, referenceDenominator, numerator, denominator, remainingTicks);
     }
+    // The timeout bound idleQuietSteps looks for, as the CLK32 phase/den and the whole periods to it. False with none.
+    bool referenceEvent(uint64_t& phase, uint64_t& den, uint64_t& target) const {
+        if (!enabled() || uncertain) return false;
+        phase = referencePhase; den = referenceDenominator; target = remainingTicks;
+        return true;
+    }
     static const char* registerName(uint32_t address);
     static constexpr uint64_t interruptSource = uint64_t(1) << 63;
     static constexpr uint32_t stateVersion = 1;

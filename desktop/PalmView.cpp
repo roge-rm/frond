@@ -64,6 +64,13 @@ PalmHolder::PalmHolder(QWidget* parent) : QWidget(parent) {
     mips->setAlignment(Qt::AlignCenter);
     mips->setStyleSheet("QLabel { color: white; background: rgba(0, 0, 0, 150); padding: 0px 4px; font-size: 10px; }");
     mips->hide();
+    rumble = new QLabel(tr("Rumble"), this);
+    rumble->setObjectName("rumbleCue");
+    rumble->setAttribute(Qt::WA_NativeWindow);
+    rumble->setAttribute(Qt::WA_TransparentForMouseEvents);
+    rumble->setAlignment(Qt::AlignCenter);
+    rumble->setStyleSheet("QLabel { color: white; background: rgba(0, 0, 0, 150); padding: 0px 4px; font-size: 10px; }");
+    rumble->hide();
     qApp->installEventFilter(this);
 }
 
@@ -117,6 +124,8 @@ bool PalmHolder::embed(quint64 id) {
 
 void PalmHolder::release() {
     mips->hide();
+    rumble->hide();
+    rumbleOn = false;
     pollTimer->stop();
     if (container) delete container.data();
     container.clear();
@@ -129,14 +138,26 @@ void PalmHolder::release() {
 }
 
 void PalmHolder::setMips(const QString& reply) {
-    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*MIPS)");
-    const auto match = figure.match(reply);
-    if (!container || !match.hasMatch()) { mips->hide(); return; }
-    mips->setText(tr("%1 MIPS").arg(qRound(match.captured(1).toDouble())));
+    const auto figure = runningRules::speedFigure(reply);
+    if (!container || figure.isEmpty()) { mips->hide(); return; }
+    mips->setText(figure);
     mips->adjustSize();
     placeMips();
     mips->show();
     if (auto* handle = mips->windowHandle()) {
+        handle->setFlag(Qt::WindowTransparentForInput, true);
+        handle->raise();
+    }
+}
+
+// The Zodiac's rumble with no game controller to play it: a small tag in the Palm's bottom left corner.
+void PalmHolder::setRumble(bool on) {
+    rumbleOn = on;
+    if (!container || !on) { rumble->hide(); return; }
+    rumble->adjustSize();
+    placeMips();
+    rumble->show();
+    if (auto* handle = rumble->windowHandle()) {
         handle->setFlag(Qt::WindowTransparentForInput, true);
         handle->raise();
     }
@@ -153,11 +174,14 @@ void PalmHolder::placeMips() {
     }
     const auto corner = area.bottomRight();
     mips->move(corner.x() + 1 - mips->width(), corner.y() + 1 - mips->height());
+    rumble->move(area.left(), corner.y() + 1 - rumble->height());
 }
 
 void PalmHolder::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
-    if (mips->isVisible()) { placeMips(); if (auto* handle = mips->windowHandle()) handle->raise(); }
+    if (mips->isVisible() || rumble->isVisible()) placeMips();
+    if (mips->isVisible()) if (auto* handle = mips->windowHandle()) handle->raise();
+    if (rumble->isVisible()) if (auto* handle = rumble->windowHandle()) handle->raise();
 }
 
 void PalmHolder::setPalmSize(QSize size) {
@@ -289,4 +313,5 @@ bool PalmHolder::eventFilter(QObject* watched, QEvent* event) {
 void PalmHolder::raisePalm() {
     if (palm) palm->raise();
     if (mips->isVisible()) if (auto* handle = mips->windowHandle()) handle->raise();
+    if (rumble->isVisible()) if (auto* handle = rumble->windowHandle()) handle->raise();
 }

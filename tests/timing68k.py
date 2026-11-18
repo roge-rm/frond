@@ -22,7 +22,7 @@ import zlib
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import palm_boot  # noqa: E402
 
-RESULTS = re.compile(rb'FrondBench 1\.0\n[^\0]{0,380}?Checksum [0-9A-Fa-f]+\n')
+RESULTS = re.compile(rb'FrondBench \d+\.\d+\n[^\0]{0,470}?Checksum [0-9A-Fa-f]+\n')
 MAGIC = struct.pack('>4I', 0x46723638, 0x54494d45, 0x5749544e, 0x45535331)
 
 # name, then bus cycles per pass from program space in RAM, data in RAM, data in ROM and data in
@@ -172,6 +172,12 @@ def run_frondbench(core, args):
         core.send(f'save-session "{session}"', 'wrote session')
         text = frondbench_results(session)
         if text:
+            # The text must also be in a Memo record, not only left on the guest's stack.
+            memo = args.output / 'MemoDB.pdb'
+            core.send(f'db-export-db MemoDB "{memo.resolve()}"', 'export', 20)
+            found = RESULTS.search(memo.read_bytes())
+            if not found or found.group().decode('latin-1') != text:
+                raise SystemExit('FrondBench left no matching Memo record')
             return text
     raise SystemExit('FrondBench did not finish')
 

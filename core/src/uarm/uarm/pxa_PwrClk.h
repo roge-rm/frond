@@ -19,6 +19,8 @@ void pxaPwrClkReset(struct PxaPwrClk* pc);
 // Replaces RCSR after a host reset; 8 is GPR, the reset pin.
 void pxaPwrClkSetResetCause(PxaPwrClk* pc, uint32_t rcsr);
 void pxaPwrClkConnectWakeSources(PxaPwrClk* pc, PxaGpio* gpio, PxaRtc* rtc, PxaKpc* kpc);
+// The core clock in Hz from CCCR and CLKCFG, as of the last CLKCFG write, reset or load; 0 before any.
+uint64_t pxaPwrClkCoreHz(const PxaPwrClk* pc);
 bool pxaPwrClkSleeping(const PxaPwrClk* pc);
 bool pxaPwrClkWakePending(PxaPwrClk* pc);
 uint32_t pxaPwrClkSleepRetention(const PxaPwrClk* pc);

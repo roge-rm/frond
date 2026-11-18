@@ -259,6 +259,54 @@ std::pair<oaknut::XReg, oaknut::XReg> InlinePageTableEmitVAddrLookup(oaknut::Cod
 
     EmitDetectMisalignedVAddr<bitsize>(code, ctx, Xaddr, fallback);
 
+    // Frond: the data cache hint (A32::UserConfig::frond_cost_hint).
+    if (ctx.conf.frond_cost_hint && ctx.conf.frond_cost_hint_on && *ctx.conf.frond_cost_hint_on && ctx.conf.enable_cycle_counting) {
+        code.MOV(Xscratch1, mcl::bit_cast<u64>(ctx.conf.frond_cost_hint));
+        oaknut::Label left;
+        code.LDR(Wscratch0, Xscratch1, 3072 * 4);
+        code.CMP(Xticks, Xscratch0);
+        code.B(GT, left);
+        code.LDR(Wscratch0, Xscratch1, 12296);
+        code.CBZ(Wscratch0, *fallback);
+        code.l(left);
+        if constexpr (write) {
+            // A store: a dirty half (store) or a write buffer entry it joins (join, joinStart[i] at or after
+            // its clock runBase - Xticks + pending, with Xticks at most budget). Xscratch2 is free here.
+            oaknut::Label hit;
+            code.UBFX(Wscratch0, Xaddr.toW(), 4, 11);
+            code.ADD(Wscratch0, Wscratch0, 1024);
+            code.LDR(Wscratch0, Xscratch1, Xscratch0, LSL, 2);
+            code.EOR(Wscratch0, Wscratch0, Xaddr.toW());
+            code.CMP(Wscratch0, 15);
+            code.B(LS, hit);
+            code.UBFX(Wscratch0, Xaddr.toW(), 4, 11);
+            code.ADD(Wscratch0, Wscratch0, 12320 / 4);
+            code.LDR(Wscratch0, Xscratch1, Xscratch0, LSL, 2);
+            code.EOR(Wscratch0, Wscratch0, Xaddr.toW());
+            code.CMP(Wscratch0, 15);
+            code.B(HI, *fallback);
+            code.UBFX(Wscratch0, Xaddr.toW(), 4, 11);
+            code.ADD(Wscratch0, Wscratch0, 20512 / 8);
+            code.LDR(Xscratch0, Xscratch1, Xscratch0, LSL, 3);
+            code.ADD(Xscratch0, Xscratch0, Xticks);
+            code.LDR(Xscratch2, Xscratch1, 12288);
+            code.SUB(Xscratch0, Xscratch0, Xscratch2);
+            code.LDR(Xscratch2, Xscratch1, 12304);
+            code.CMP(Xscratch0, Xscratch2);
+            code.B(LT, *fallback);
+            code.LDR(Xscratch2, Xscratch1, 12312);
+            code.CMP(Xticks, Xscratch2);
+            code.B(GT, *fallback);
+            code.l(hit);
+        } else {
+            code.UBFX(Wscratch0, Xaddr.toW(), 5, 10);
+            code.LDR(Wscratch0, Xscratch1, Xscratch0, LSL, 2);
+            code.EOR(Wscratch0, Wscratch0, Xaddr.toW());
+            code.CMP(Wscratch0, 31);
+            code.B(HI, *fallback);
+        }
+    }
+
     if (ctx.conf.silently_mirror_page_table || unused_top_bits == 0) {
         code.UBFX(Xscratch0, Xaddr, page_bits, valid_page_index_bits);
     } else {

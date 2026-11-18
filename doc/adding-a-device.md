@@ -35,6 +35,7 @@ First check the existing profiles, board dispatch and ROM detection. A device ma
 4. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
 5. Add the PACE and API bridge, so install, launch and export work.
 6. Check the Fast engine runs the device (Fast engine requirements).
+   For an ARM device, also go through the speed skips below.
 7. Add each peripheral and set its capability flag when it works.
 8. Add the button bar and silkscreen art.
 9. Fill in the frontend fields, run `make generate-device-data` and set `available`.
@@ -218,6 +219,16 @@ The Fast engine is a JIT (Dynarmic). A new board runs in it when these hold:
 - Run `make test-jit-differential` after any CPU change. It compares the JIT with the interpreter on random machine states and blocks. `make test-jit-overshoot` checks how far a run can pass its cycle budget.
 - Smoke the device in Fast (`FROND_CORE=build/frond-jit tests/smoke.py run DEVICE`, see Smoke and setup).
 
+### Speed skips (every ARM device)
+
+Check each new ARM device's firmware for the loops Frond skips instead of running, and add the ones it has:
+- The idle loop, through the idle skip and its match cache.
+- Timer delay loops that poll OSCR until a count passes.
+- Flash and NAND ready waits.
+- Any other hot loop the cost model's profile ranks high.
+
+Find their addresses with a profiled run or REA, and add each with the focused test showing a code write drops it. Exact counts move only in an Exact batch. See [performance.md](performance.md).
+
 ## Peripherals and capability flags
 
 List every control and port the real device has: keyboard, jog controls, storage, sound, power and sleep, USB, serial, infrared, Bluetooth and radios. Qualify each by itself, including reset, sleep and wake, and save and reload where state persists. Set its capability flag only when it works. The frontends grey out the rest.
@@ -266,7 +277,7 @@ The bar should be a recognisable approximation of the real one, not a close copy
 - The jog dial on the TG50 is the `keyIdJogUp`, `keyIdJogPress`, `keyIdJogDown` and `keyIdBack` keys on the side panel. `JogPlacement` puts it hidden, left of the LCD or left of the keyboard. On a CLIÉ without a keyboard, like the T415, the keyboard placement puts it beside the silkscreen and button bar, which are drawn narrower so the LCD keeps the full width; the front end draws the silkscreen into `deviceSilkscreenRect` and maps taps on it with `deviceSilkscreenPoint`.
 - Every CLIÉ shares one jog panel: `clieJogKey` gives its keys, `clieJogTab` the tab and `paintClieJog` draws it with one look. A new CLIÉ reuses them as they are and sets only the tab's top and height.
 - The Zodiac (`zodiac` art) has two arrangements in `DeviceControlView::arrangement`: `below`, a 480x200 strip under the screen scaled to the shown screen's width, and `around`, a 150-unit panel either side of it as on the real device, with nothing under it. Each key is listed once per arrangement, in the `below` or `around` section. `around` keys are authored in a 320-tall panel; right panel keys are authored from x 150 and move past the screen (`deviceAroundOffset`). At 90 and 270 the panels are 480 tall: the triggers stay at the top and the rest are centred. A fitted window puts the controls around when it's landscape or square and below when it's portrait (`deviceControlViewForWindow`); a fixed window stays around.
-- Zodiac keys: the four Action keys are `keyIdHard1` to `keyIdHard4` (bottom, right, left, top), with tooltips by position, as which Action key is which isn't known yet. Their `shape` is the round recess they sit in, and each hits in its own quarter of it outside a small dead middle (`deviceClusterKeyAt`). Also `keyIdPower`, `keyIdHome`, `keyIdFunction`, the two triggers and `keyIdStickPress`. The analogue stick is a `stick` entry carrying `keyIdStickPress`. A finger or the pointer on its well holds it until let go, sending `SoC::AnalogStick` with each axis from -1 to 1, and the arrow keys stand in for it. A tap on the knob that doesn't move sends the press down and up; holding it in needs F10. F7 to F10 are Function, the left and right triggers and stick press, on devices that have them.
+- Zodiac keys: the four Action keys are `keyIdHard1` to `keyIdHard4` (bottom, right, left, top), with tooltips by position. Their `shape` is the round recess they sit in, and each hits in its own quarter of it outside a small dead middle (`deviceClusterKeyAt`). Also `keyIdPower`, `keyIdHome`, `keyIdFunction`, the two triggers and `keyIdStickPress`. The analogue stick is a `stick` entry carrying `keyIdStickPress`. A finger or the pointer on its well holds it until let go, sending `SoC::AnalogStick` with each axis from -1 to 1, and the arrow keys stand in for it. A tap on the knob that doesn't move sends the press down and up; holding it in needs F10. F7 to F10 are Function, the left and right triggers and stick press, on devices that have them.
 
 ### Drawing (DeviceControls.cpp)
 

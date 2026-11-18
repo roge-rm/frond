@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/frondbench">
+    <file alias="FrondBench.prc">../tools/frondbench/FrondBench.prc</file>
+  </qresource>
+</RCC>

@@ -1,0 +1,557 @@
+{
+  "note": "Recipes for tools/speed-check.py --counts. A recipe runs in benchmark-replay, or in frond-68k with runner frond-68k; engines limits the engines it runs in. A cold boot without nand gets a blank NAND where the device has one. rom is under FROND_DEVICE_IMAGES, card (a Zodiac SD image) under ZODIAC_CARDS, session names the variable holding a session path, replay is in tests/fixtures. results are per engine; input is the start of the SHA-256 of the ROM or session they came from. Refresh with --update after a change that's meant to move them. A recipe with measure set runs and prints what it read (read: speedy takes Speedy 7.1's detail form from RAM) but has no results to compare.",
+  "recipes": {
+    "tg50-boot": {
+      "rom": "Sony/CLIE-TG50/Sony-Clie-TG50-nor.bin",
+      "device": "sony-clie-tg50",
+      "ms": 13000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 13000453798,
+          "cycles": 2475688027,
+          "instructions": 323891344,
+          "jit_instructions": 0,
+          "lcd_frames": 61,
+          "changed_frames": 53,
+          "pcm_frames": 573319,
+          "frame_sequence_hash": "dff87ce141a2ea1d",
+          "pcm_hash": "4d87a3d64d53d9d5",
+          "input": "c6d5985cf183bae9"
+        },
+        "fast": {
+          "guest_ns": 13000966509,
+          "cycles": 2476798373,
+          "instructions": 323912422,
+          "jit_instructions": 223062679,
+          "lcd_frames": 61,
+          "changed_frames": 53,
+          "pcm_frames": 573342,
+          "frame_sequence_hash": "611bb2569fdc2392",
+          "pcm_hash": "5cc9c998b8e00285",
+          "input": "c6d5985cf183bae9"
+        }
+      }
+    },
+    "e2-boot": {
+      "rom": "Palm/Tungsten-E2/Palm-Tungsten-E2-nor.bin",
+      "device": "palm-e2",
+      "ms": 13000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 13000282524,
+          "cycles": 2584481728,
+          "instructions": 2584577019,
+          "jit_instructions": 0,
+          "lcd_frames": 4,
+          "changed_frames": 4,
+          "pcm_frames": 575922,
+          "frame_sequence_hash": "a5839c8e44e71026",
+          "pcm_hash": "fc0c2b45b094c0c5",
+          "input": "9537b1caa0d657e3"
+        },
+        "fast": {
+          "guest_ns": 13000620814,
+          "cycles": 2584459072,
+          "instructions": 2584554378,
+          "jit_instructions": 312062790,
+          "lcd_frames": 4,
+          "changed_frames": 4,
+          "pcm_frames": 575937,
+          "frame_sequence_hash": "2495bd5612b2e094",
+          "pcm_hash": "5d223bdf127e5ff5",
+          "input": "9537b1caa0d657e3"
+        }
+      }
+    },
+    "zire72-boot": {
+      "rom": "Palm/Zire-72/Palm-Zire72-nor.bin",
+      "device": "palm-zire-72",
+      "ms": 13000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 13000215069,
+          "cycles": 2825397092,
+          "instructions": 2826310087,
+          "jit_instructions": 0,
+          "lcd_frames": 84,
+          "changed_frames": 81,
+          "pcm_frames": 575919,
+          "frame_sequence_hash": "67550e6e22645587",
+          "pcm_hash": "f801f52df0fa11f9",
+          "input": "f44dd41217682740"
+        },
+        "fast": {
+          "guest_ns": 13000988514,
+          "cycles": 2826458922,
+          "instructions": 2826015132,
+          "jit_instructions": 633014652,
+          "lcd_frames": 84,
+          "changed_frames": 81,
+          "pcm_frames": 575953,
+          "frame_sequence_hash": "cc343a734188316b",
+          "pcm_hash": "815d1d917ff72299",
+          "input": "f44dd41217682740"
+        }
+      }
+    },
+    "zodiac-boot": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "ms": 1000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 1000000000,
+          "cycles": 100000000,
+          "instructions": 115040451,
+          "jit_instructions": 0,
+          "lcd_frames": 8,
+          "changed_frames": 4,
+          "pcm_frames": 18156,
+          "frame_sequence_hash": "9e0aabe5b6d42bfe",
+          "pcm_hash": "d2b55b52ff4ebce5",
+          "input": "2207a735e812299b"
+        },
+        "fast": {
+          "guest_ns": 1000000000,
+          "cycles": 100000000,
+          "instructions": 91064507,
+          "jit_instructions": 88109409,
+          "lcd_frames": 8,
+          "changed_frames": 4,
+          "pcm_frames": 18156,
+          "frame_sequence_hash": "9e0aabe5b6d42bfe",
+          "pcm_hash": "d2b55b52ff4ebce5",
+          "input": "2207a735e812299b"
+        }
+      }
+    },
+    "zodiac-doom2": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/doom2.img",
+      "replay": "zodiac-doom2.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 124000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 124000000000,
+          "cycles": 12400000000,
+          "instructions": 2289733466,
+          "jit_instructions": 2257528287,
+          "lcd_frames": 633,
+          "changed_frames": 198,
+          "pcm_frames": 5243228,
+          "frame_sequence_hash": "7ecdb02ebf3f64a4",
+          "pcm_hash": "127c1bd1ff765fe5",
+          "input": "50629746ed5a9b4d"
+        }
+      }
+    },
+    "zodiac-zuma": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s1/zuma.img",
+      "replay": "zodiac-zuma.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 112000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 112000000000,
+          "cycles": 11200000000,
+          "instructions": 2279857657,
+          "jit_instructions": 2253006951,
+          "lcd_frames": 926,
+          "changed_frames": 786,
+          "pcm_frames": 4714029,
+          "frame_sequence_hash": "ccd21dbcad237cd7",
+          "pcm_hash": "e1b0b44b537b2db5",
+          "input": "61439da03b3a48a5"
+        }
+      }
+    },
+    "zodiac-origo": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/origo.img",
+      "replay": "zodiac-origo.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 135000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 135000000000,
+          "cycles": 13500000000,
+          "instructions": 4368080534,
+          "jit_instructions": 4308895357,
+          "lcd_frames": 1766,
+          "changed_frames": 149,
+          "pcm_frames": 5728328,
+          "frame_sequence_hash": "d007be6d409aea8d",
+          "pcm_hash": "f5aeb91abc9f09a5",
+          "input": "bfe0084c852e07f2"
+        }
+      }
+    },
+    "zodiac-dudes": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/animated-dudes.img",
+      "replay": "zodiac-dudes.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 170000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 170000000000,
+          "cycles": 17000000000,
+          "instructions": 5166133530,
+          "jit_instructions": 3318684845,
+          "lcd_frames": 4152,
+          "changed_frames": 914,
+          "pcm_frames": 7271829,
+          "frame_sequence_hash": "bd3773997ae54f64",
+          "pcm_hash": "61d68b695dc33635",
+          "input": "3ee3771c3485f9d7"
+        }
+      }
+    },
+    "zodiac-mtx": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/mtx-mototrax.img",
+      "replay": "zodiac-mtx.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 160000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 160000000000,
+          "cycles": 16000000000,
+          "instructions": 5779982754,
+          "jit_instructions": 5056849418,
+          "lcd_frames": 2770,
+          "changed_frames": 1680,
+          "pcm_frames": 6830829,
+          "frame_sequence_hash": "26e1d60bbd07e27",
+          "pcm_hash": "85eb516f620269b5",
+          "input": "3fd73abe78f92c90"
+        }
+      }
+    },
+    "zodiac-firehammer": {
+      "rom": "Tapwave/Zodiac-2/Tapwave-Zodiac-2-v1.1.rom",
+      "device": "tapwave-zodiac-2",
+      "card": "s2/firehammer.img",
+      "replay": "zodiac-firehammer.replay",
+      "engines": [
+        "fast"
+      ],
+      "ms": 136000,
+      "mips": "original",
+      "results": {
+        "fast": {
+          "guest_ns": 136000000000,
+          "cycles": 13600000000,
+          "instructions": 2758654710,
+          "jit_instructions": 2718979461,
+          "lcd_frames": 1039,
+          "changed_frames": 803,
+          "pcm_frames": 5772429,
+          "frame_sequence_hash": "d00c05c38b87eac9",
+          "pcm_hash": "3d3762512dc4cbb5",
+          "input": "73072af5d72fe69c"
+        }
+      }
+    },
+    "m515-boot": {
+      "rom": "Palm/m515/Palm-m515-4.1-en.rom",
+      "device": "palm-m515",
+      "runner": "frond-68k",
+      "engines": [
+        "exact"
+      ],
+      "ms": 13000,
+      "results": {
+        "exact": {
+          "guest_ns": 13003200000,
+          "cycles": 431200670,
+          "frame_sequence_hash": "f702a2f185d840d9",
+          "pcm_hash": "fad0f80296068f9d",
+          "input": "47bb591f77390eae"
+        }
+      }
+    },
+    "bike": {
+      "session": "BIKE_SESSION",
+      "replay": "bike-level1.replay",
+      "ms": 10000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 10000038640,
+          "cycles": 3004941286,
+          "instructions": 3004936481,
+          "jit_instructions": 0,
+          "lcd_frames": 530,
+          "changed_frames": 528,
+          "pcm_frames": 443008,
+          "frame_sequence_hash": "18bd877946778dde",
+          "pcm_hash": "bf904534a501add",
+          "input": "1bdf595bf4e7e93e"
+        },
+        "fast": {
+          "guest_ns": 10000863669,
+          "cycles": 3019583015,
+          "instructions": 3019541947,
+          "jit_instructions": 1822595346,
+          "lcd_frames": 539,
+          "changed_frames": 538,
+          "pcm_frames": 443045,
+          "frame_sequence_hash": "d5192b846f9d4fda",
+          "pcm_hash": "cc3eca0a88946765",
+          "input": "1bdf595bf4e7e93e"
+        }
+      }
+    },
+    "frondbench": {
+      "session": "FRONDBENCH_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 40000376911,
+          "cycles": 11114033513,
+          "instructions": 11113925542,
+          "jit_instructions": 0,
+          "lcd_frames": 384,
+          "changed_frames": 384,
+          "pcm_frames": 1772045,
+          "frame_sequence_hash": "b3de2a3abae395e",
+          "pcm_hash": "2f76ee2be66542d9",
+          "input": "439c03b839f6c9df"
+        },
+        "fast": {
+          "guest_ns": 40000304399,
+          "cycles": 11112925121,
+          "instructions": 11112975533,
+          "jit_instructions": 3071770811,
+          "lcd_frames": 384,
+          "changed_frames": 384,
+          "pcm_frames": 1772042,
+          "frame_sequence_hash": "770ee63b540ae113",
+          "pcm_hash": "47a3e52e12ea7429",
+          "input": "439c03b839f6c9df"
+        }
+      }
+    },
+    "e2-busy": {
+      "session": "E2_SESSION",
+      "replay": "e2-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000662609,
+          "cycles": 3981959547,
+          "instructions": 449826204,
+          "jit_instructions": 0,
+          "lcd_frames": 58,
+          "changed_frames": 53,
+          "pcm_frames": 886044,
+          "frame_sequence_hash": "67fa8af2e2df7b19",
+          "pcm_hash": "8f2127724c4e4ab5",
+          "input": "629661b856909601"
+        },
+        "fast": {
+          "guest_ns": 20000858250,
+          "cycles": 3981798825,
+          "instructions": 448896130,
+          "jit_instructions": 182395890,
+          "lcd_frames": 59,
+          "changed_frames": 55,
+          "pcm_frames": 886053,
+          "frame_sequence_hash": "f59bae2c157d19c",
+          "pcm_hash": "fb52134d63de2ac5",
+          "input": "629661b856909601"
+        }
+      }
+    },
+    "tx-media": {
+      "session": "TX_SESSION",
+      "replay": "tx-media.replay",
+      "ms": 46000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 46000588303,
+          "cycles": 12012293495,
+          "instructions": 12012128725,
+          "jit_instructions": 0,
+          "lcd_frames": 1387,
+          "changed_frames": 460,
+          "pcm_frames": 2037859,
+          "frame_sequence_hash": "562c6fe479ce921f",
+          "pcm_hash": "63320dfb66ec43a5",
+          "input": "b8bcd22055d58b85"
+        },
+        "fast": {
+          "guest_ns": 46000299468,
+          "cycles": 12000577714,
+          "instructions": 12001087678,
+          "jit_instructions": 5638545878,
+          "lcd_frames": 1384,
+          "changed_frames": 451,
+          "pcm_frames": 2037846,
+          "frame_sequence_hash": "49f0c0dc09f21c99",
+          "pcm_hash": "5de59d9ae918c515",
+          "input": "b8bcd22055d58b85"
+        }
+      }
+    },
+    "zire72-busy": {
+      "session": "ZIRE72_SESSION",
+      "replay": "e2-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000334874,
+          "cycles": 4240642032,
+          "instructions": 4240977203,
+          "jit_instructions": 0,
+          "lcd_frames": 38,
+          "changed_frames": 33,
+          "pcm_frames": 886030,
+          "frame_sequence_hash": "e936d837b7e950e5",
+          "pcm_hash": "7e7ef420219b295",
+          "input": "438f1504dcbdceb5"
+        },
+        "fast": {
+          "guest_ns": 20000773320,
+          "cycles": 4240332489,
+          "instructions": 4240944251,
+          "jit_instructions": 455806075,
+          "lcd_frames": 40,
+          "changed_frames": 34,
+          "pcm_frames": 886049,
+          "frame_sequence_hash": "ea6fbf6463ee0455",
+          "pcm_hash": "75863cd0c04deb05",
+          "input": "438f1504dcbdceb5"
+        }
+      }
+    },
+    "tg50-busy": {
+      "session": "TG50_SESSION",
+      "replay": "tg50-busy.replay",
+      "ms": 20000,
+      "mips": "original",
+      "results": {
+        "exact": {
+          "guest_ns": 20000753303,
+          "cycles": 3981954923,
+          "instructions": 639368580,
+          "jit_instructions": 0,
+          "lcd_frames": 129,
+          "changed_frames": 123,
+          "pcm_frames": 882033,
+          "frame_sequence_hash": "f5f37b5dc09a60f2",
+          "pcm_hash": "1b39874402688ef5",
+          "input": "9d81106953ec3596"
+        },
+        "fast": {
+          "guest_ns": 20000354387,
+          "cycles": 3981783711,
+          "instructions": 637685187,
+          "jit_instructions": 367090953,
+          "lcd_frames": 129,
+          "changed_frames": 123,
+          "pcm_frames": 882015,
+          "frame_sequence_hash": "bfb38f68a111bdcc",
+          "pcm_hash": "d96b4561f5bd8355",
+          "input": "9d81106953ec3596"
+        }
+      }
+    },
+    "zquake-tx": {
+      "session": "ZQUAKE_TX_SESSION",
+      "replay": "zquake-timedemo.replay",
+      "ms": 130000,
+      "mips": "original",
+      "measure": true,
+      "read": "zquake"
+    },
+    "speedy-tx": {
+      "session": "SPEEDY_TX_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-zire72": {
+      "session": "SPEEDY_ZIRE72_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-e2": {
+      "session": "SPEEDY_E2_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "speedy-tg50": {
+      "session": "SPEEDY_TG50_SESSION",
+      "replay": "speedy-run.replay",
+      "ms": 27000,
+      "mips": "original",
+      "measure": true,
+      "read": "speedy"
+    },
+    "frondbench-zire72": {
+      "session": "FRONDBENCH_ZIRE72_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
+    },
+    "frondbench-e2": {
+      "session": "FRONDBENCH_E2_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
+    },
+    "frondbench-tg50": {
+      "session": "FRONDBENCH_TG50_SESSION",
+      "replay": "frondbench-run-tx0414.replay",
+      "ms": 40000,
+      "mips": "original",
+      "measure": true,
+      "read": "frondbench"
+    }
+  }
+}

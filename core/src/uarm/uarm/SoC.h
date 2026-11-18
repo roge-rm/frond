@@ -5,7 +5,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 
+#include "BatteryPower.h"
 #include "NetworkSimulation.h"
 #include "LibertasCF.h"
 #include "buffer.h"
@@ -51,6 +53,11 @@ class SoC {
         SoC& soc;
         bool active{true};
     };
+    // The battery setting (machine setting, never saved with the session); see BatteryPower.h. Runs on the SoC's
+    // thread. False where the board has no battery input modelled yet, which keeps its fixed full battery.
+    virtual bool BatterySupported() const { return false; }
+    virtual bool SetBattery(const BatteryPower&) { return false; }
+    const BatteryPower& Battery() const { return battery; }
     virtual bool HoldSwitchSupported() const { return false; }
     virtual bool HoldSwitchOn() const { return false; }
     virtual bool SetHoldSwitch(bool) { return false; }
@@ -58,6 +65,15 @@ class SoC {
     virtual void AttachKeyboard(bool) {}
     virtual bool KeyboardKey(uint8_t, bool) { return false; }
     virtual void ReleaseKeyboard() {}
+    // The CLIÉ game controller on the interface connector (TG50 only). Attach and detach run on
+    // the SoC's thread while it runs, like plugging the pad in; identify false skips the plug-in
+    // handshake (the pad then identifies on its first press). False if the connector is taken.
+    virtual bool GamepadSupported() const { return false; }
+    virtual bool GamepadAttached() const { return false; }
+    virtual bool AttachGamepad(bool, bool = true) { return false; }
+    virtual std::string GamepadState() const { return "unavailable"; }
+    // The pad's Hold slide is on (attached only).
+    virtual bool GamepadHold() const { return false; }
     virtual void Reset();
     // Next Reset() is a power-on reset; the Zire uses it for a hard reset (clean boot).
     void RequestPowerOnReset() { powerOnReset = true; }
@@ -66,6 +82,25 @@ class SoC {
     void HardReset();
 
     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
+    // The core clock in Hz as the guest has set it, 0 where the board has none to follow.
+    virtual uint64_t CoreHz() const { return 0; }
+    // Original speed: a run call whose cyclesPerSecond is at least CoreHz() runs at CoreHz() as it
+    // changes, on the instruction that changes it. maxCycles stays in cyclesPerSecond units, and so does
+    // what the call returns. A slower cyclesPerSecond (a host that can't keep up) runs at that rate.
+    // Fast charges the data cache and region model at Original only (cpuSetJitMemoryCost).
+    void SetFollowCoreClock(bool follow);
+    bool FollowsCoreClock() const { return followCoreClock; }
+    // Faster speed: the CPU runs num / den times the core clock (CoreHz on PXA, FCLK on the Zodiac), with guest
+    // time, timers and the cost model's charges as at Original. 1 / 1 is Original.
+    virtual void SetClockMultiplier(uint32_t num, uint32_t den);
+    uint32_t ClockMultiplierNum() const { return clockMultiplierNum; }
+    uint32_t ClockMultiplierDen() const { return clockMultiplierDen; }
+    // The rate a following run takes: CoreHz times the clock multiplier, 0 where there is no clock to follow.
+    uint64_t FollowHz() const {
+        const uint64_t hz = CoreHz();
+        if (clockMultiplierNum == clockMultiplierDen) return hz;
+        return uint64_t(__uint128_t(hz) * clockMultiplierNum / clockMultiplierDen);
+    }
     virtual bool RunToPaceSyscall(uint16_t syscall, uint64_t maxCycles,
                                   uint64_t cyclesPerSecond) = 0;
 #ifndef __EMSCRIPTEN__
@@ -87,12 +122,19 @@ class SoC {
     virtual bool HardResetSupported() const { return true; }
     void KeyDown(enum KeyId key);
     void KeyUp(enum KeyId key);
+    // A power press from the host the guest may not have had yet: held, queued or jammed.
+    bool PowerKeyPending();
     void PenDown(int x, int y);
     void PenUp();
+    // The clock key and pen events are stamped with, in milliseconds; null is the host's steady clock.
+    // A headless replay passes guest time so the holds the Zodiac times from it repeat.
+    static void SetEventClock(uint64_t (*clock)());
     // Analogue stick from the frontend, on the thread that owns the SoC: each axis -1 to 1 with
     // right and down positive, and 0,0 when let go. A board with a stick maps it to its own
     // hardware; others ignore it.
     virtual void AnalogStick(float, float) {}
+    // Quarter turns the host shows the view by, on top of the guest's own; the stick follows the total.
+    virtual void SetStickHostTurns(int) {}
 
     void SetFramebufferDirty(uint32_t pa = 0, uint32_t size = ~0u);
     bool SetFramebuffer(uint32_t start, uint32_t size);
@@ -124,10 +166,19 @@ class SoC {
     bool SdRemount();
     void SdEject();
     bool SdInserted() { return cardInserted; }
+    // A second SD slot, the Zodiac's only, with its card in sdCardStore(1). Sd2Insert puts that card
+    // in and is false when it can't go in.
+    virtual bool HasSecondSdSlot() const { return false; }
+    virtual bool Sd2Insert() { return false; }
+    virtual void Sd2Eject() {}
+    virtual bool Sd2Inserted() const { return false; }
 
     virtual void DumpMMU() = 0;
 
     struct ArmCpu *GetCpu() { return cpu; }
+    // Cycles the CPU ran in the run calls, sleep left out: one per guest instruction on the ARM
+    // cores. A counter for tools like benchmark-replay, not saved.
+    uint64_t GetRunInstructions() const { return runInstructions; }
     struct SyscallDispatch *GetSyscallDispatch() { return syscallDispatch; };
     uint32_t GetRamSize() { return ramSize; };
     struct NAND *GetNand() { return nand; };
@@ -151,6 +202,14 @@ class SoC {
     // 2 landscape, 3 reverse portrait, 4 reverse landscape), or 0 when unknown or the device has none.
     // Guest thread only.
     virtual unsigned GuestOrientation() { return 0; }
+    // The alarm LED and vibrate motor as the guest drives them, on or off; the guest steps any pattern
+    // itself. Both off on a device without them. Guest thread only.
+    struct Attention {
+        bool led = false, vibrate = false;
+        bool operator==(const Attention& o) const { return led == o.led && vibrate == o.vibrate; }
+        bool operator!=(const Attention& o) const { return !(*this == o); }
+    };
+    virtual Attention GuestAttention() { return {}; }
     virtual void ResetPendingFrame() = 0;
     virtual DeviceType5 GetDeviceType() = 0;
     virtual DisplayMode GetDisplayMode() = 0;
@@ -230,7 +289,11 @@ class SoC {
     struct AudioQueue *audioQueue;
 
     bool sleeping{false};
+    uint64_t runInstructions{0};
+    bool followCoreClock{false};
+    uint32_t clockMultiplierNum{1}, clockMultiplierDen{1};
     bool powerOnReset{false};
+    BatteryPower battery{};
     bool framebufferDirty{true};
     bool pcmEnabled{false};
     bool pcmSuspended{false};
@@ -240,6 +303,9 @@ class SoC {
 
     uint64_t eventQueueTicks{0};
     uint64_t eventQueueTicksAtPenDown{0};
+    bool powerPopped{false};  // a power event reached the guest; powerPoppedAt is its time
+    uint64_t powerPoppedAt{0};
+    bool powerHeld{false};  // the host holds power, from KeyDown to KeyUp
     KeyId jammedKey{keyInvalid};
     uint64_t releaseJammedKeyAt{0};
     // Time of the last JamKey; only a key jammed right before Reset() (no emulated time between)

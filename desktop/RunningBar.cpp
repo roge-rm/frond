@@ -86,7 +86,7 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     machineMenu = new QMenu(tr("&Machine"), this);
     machineMenu->setObjectName("machineMenu");
     static const std::pair<Id, const char*> names[] = {
-        {Id::Hold, "machineHold"}, {Id::Keyboard, "machineKeyboard"}, {Id::Microphone, "machineMicrophone"},
+        {Id::Hold, "machineHold"}, {Id::Keyboard, "machineKeyboard"}, {Id::Gamepad, "machineGamepad"}, {Id::Microphone, "machineMicrophone"},
         {Id::Network, "machineNetwork"}, {Id::Display, "machineDisplay"}, {Id::Connections, "machineConnections"},
         {Id::Screenshot, "machineScreenshot"}, {Id::HideBar, "machineHideBar"}, {Id::FullScreen, "machineFullScreen"},
         {Id::Save, "machineSave"}, {Id::SaveCopy, "machineSaveCopy"}, {Id::Log, "machineLog"},
@@ -94,7 +94,7 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
     int group = 0;
     // Every row is made here; apply() shows the ones a device has.
     runningRules::Traits all;
-    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = true;
+    all.holdPresent = all.holdSupported = all.keyboard = all.microphone = all.network = all.gamepad = true;
     for (const auto& row : runningRules::rows(all, {})) {
         if (row.group != group) { machineMenu->addSeparator(); group = row.group; }
         QAction* action;
@@ -119,7 +119,7 @@ RunningBar::RunningBar(QWidget* parent) : QToolBar(parent) {
         if (!keyText[row.id].isEmpty() && row.id != Id::Network) action->setText(row.label + '\t' + keyText[row.id]);
         actions[row.id] = action;
     }
-    for (auto id : {Id::Hold, Id::Keyboard, Id::Microphone}) actions[id]->setCheckable(true);
+    for (auto id : {Id::Hold, Id::Keyboard, Id::Gamepad, Id::Microphone}) actions[id]->setCheckable(true);
 
     auto button = [this](const QString& icon, const QString& name, const QString& tip, Button which) {
         auto* action = addAction(frondIcons::icon(icon), tip);

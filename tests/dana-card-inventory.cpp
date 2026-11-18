@@ -29,6 +29,13 @@ int main() {
     for (const auto& other : deviceProfiles5) if(other.deviceType!=p.deviceType) {
         // The Dana Wireless has the Dana's two SD slots.
         if (deviceTypeIsDana5(other.deviceType)) { assert(deviceProfileCardSlotCount5(other)==2); continue; }
+        // The Zodiac has two native SD slots.
+        if (other.board==DeviceBoard5::imx1Zodiac) {
+            assert(deviceProfileCardSlotCount5(other)==2 && !deviceProfileLinkedCards5(other));
+            assert(deviceProfileCardSizeValid5(other.deviceType,DeviceCardSlot5::sd2,DeviceCardFamily5::sdsc,32*MiB));
+            assert(deviceProfileCardSizeValid5(other.deviceType,DeviceCardSlot5::sd0,DeviceCardFamily5::sdsc,32*MiB));
+            continue;
+        }
         // The VZ Palms have one slot of the same SD/MMC card.
         if (deviceProfileLinkedCards5(other)) {
             assert(deviceProfileCardSlotCount5(other)==1);

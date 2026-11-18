@@ -2,7 +2,7 @@ package com.rm.frond
 
 // The rows of the running bar's menu for a device, and their states. A 68k device lists only the hardware it has, the others grey out what isn't done yet.
 object RunningMenu {
-    enum class Id { HOLD, KEYBOARD, MICROPHONE, NETWORK, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
+    enum class Id { HOLD, KEYBOARD, GAMEPAD, MICROPHONE, NETWORK, DISPLAY, CONNECTIONS, SCREENSHOT, HIDE_BAR, SAVE_COPY, LOG, RESET, HARD_RESET }
 
     // value is the state shown at the row's end; group sets where the dividers go.
     data class Row(
@@ -22,6 +22,8 @@ object RunningMenu {
         val microphone: String = "off",
         val network: NetworkMode? = null,
         val busy: Boolean = false,
+        // The CLIE game controller: "attached", "detached", "busy" (the connector is in use) or null until the core says.
+        val gamepad: String? = null,
     )
 
     fun rows(device: Device, s: State): List<Row> {
@@ -32,6 +34,7 @@ object RunningMenu {
         if (device.holdPresent) rows += Row(Id.HOLD, "Hold", onOff(s.hold), enabled = device.holdSupported && s.hold != null && !s.busy)
         // The keyboard and beaming share the Palm's infrared port.
         if (has(device.keyboard)) rows += Row(Id.KEYBOARD, "Infrared keyboard", onOff(s.keyboard), enabled = device.keyboard && s.keyboard != null && s.beamOff)
+        if (device.clieGamepad) rows += gamepadRow(s)
         if (has(device.microphone)) rows += Row(Id.MICROPHONE, "Microphone", microphoneValue(s.microphone), enabled = device.microphone)
         if (has(device.network)) rows += Row(Id.NETWORK, "Network", s.network?.label, enabled = device.network && s.network != null)
         rows += Row(Id.DISPLAY, "Display…", group = 1)
@@ -45,6 +48,12 @@ object RunningMenu {
         return rows
     }
 
+    private fun gamepadRow(s: State): Row = when (s.gamepad) {
+        "busy" -> Row(Id.GAMEPAD, "Game controller (connector in use)", enabled = false)
+        else -> Row(Id.GAMEPAD, "Game controller", when (s.gamepad) { "attached" -> "On"; "detached" -> "Off"; else -> null },
+            enabled = s.gamepad != null && !s.busy)
+    }
+
     // "off Permission denied" says why the microphone is off.
     fun microphoneValue(state: String) = when {
         state == "on" || state == "pending" -> "On"
@@ -55,4 +64,12 @@ object RunningMenu {
     // The file name of a screenshot, from the machine's name and the time as yyyyMMdd-HHmmss.
     fun screenshotName(machine: String, stamp: String) =
         "Frond ${machine.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().ifEmpty { "Palm" }} $stamp.png"
+
+    // The core's gamepad-state reply as a menu state: "attached", "detached", "busy", or null when the device has no pad.
+    fun gamepadState(reply: String): String? = when {
+        reply.startsWith("attached") -> "attached"
+        reply.startsWith("detached busy") -> "busy"
+        reply.startsWith("detached") -> "detached"
+        else -> null
+    }
 }

@@ -7,22 +7,31 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 #include "device_configuration.h"
 #include "imx1_bootstrap.h"
 #include "sdcard.h"
 #include "vSD.h"
+#include "zodiac_battery.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
-    // Host time one Run call may take, so input and frames are served while the guest is busy.
+    // The longest slice in guest time, CLK32 ticks (about 1 ms).
+    constexpr uint64_t sliceTicks = 32;
+    // Host time one Run call may take, so input and frames are served while the guest is busy. Run
+    // stops for it only at a slice end, where stopping changes nothing in the machine.
     constexpr auto runHostLimit = std::chrono::milliseconds(12);
     // Every button pin, ports A and D. They read high while released.
     constexpr uint32_t buttonPinsA = 0x780, buttonPinsD = 0x7780;
-    // ASSUMPTION "cradle line D22 idles high": the sleep path arms D22 as a low level interrupt with the
-    // other wake lines (cradle or cable detect by the ROM's use), so off the cradle it has to read high.
+    // D22 is the cradle's HotSync button, low while pressed (ROM key scan 20084af4 sets keyBitCradle on D22
+    // low with the cradle attached; the sleep path arms it as a low level wake interrupt), so it idles high.
     constexpr uint32_t cradlePinD = 0x00400000;
+    // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
+    // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
+    constexpr uint32_t chargerPinB = 0x00004000;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
@@ -101,6 +110,9 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         return nullptr;
     }
     imx1MachineEnableYmf768(soc->machine);
+    // Aborts and undefined instructions go to the guest's own handlers, as on a real Zodiac.
+    // FROND_ZODIAC_STOP_ON_EXCEPTION stops the machine on them instead, for debugging.
+    imx1MachineSetGuestExceptions(soc->machine, !std::getenv("FROND_ZODIAC_STOP_ON_EXCEPTION"));
     // The state before the first instruction, which Reset loads again.
     if (imx1MachineSaveState(soc->machine, soc->powerOn, "power-on") != Imx1StateStatus::ok) {
         error = "the i.MX1 machine's power-on state could not be kept";
@@ -110,6 +122,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
     soc->ramSize = 128u << 20;
+    soc->ApplyBattery();
     soc->StateChanged();
     // The owner keeps it for the life of the process, like the machine inside.
     return soc.release();
@@ -148,7 +161,41 @@ void SocIMX1::SyncCard() {
     VSD* const card = cardIn ? vsd : nullptr;
     if (imx1MachineSetMmcsdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
         imx1MachineSetMmcsdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
+    imx1MachineSetMmcsdCardId(machine, card ? sdCardGetId() : nullptr);
     cardSync = false;
+}
+
+bool SocIMX1::Sd2Insert() {
+    auto& store = sdCardStore(1);
+    if (card2In) return true;
+    if (!store.initialized()) return false;
+    const size_t sectors = store.sectorCount();
+    if (sectors > zodiacCardSectors) {
+        std::cerr << "zodiac: the second card is over 2 GB, which the Zodiac can't use; left out" << std::endl;
+        return false;
+    }
+    if (!vsd2) vsd2 = vsdInit(sdCardStore1Read, sdCardStore1Write, 0);
+    vsdReset(vsd2, uint32_t(sectors));
+    card2In = true;
+    card2Sync = true;
+    SyncSecondCard();
+    return true;
+}
+
+void SocIMX1::Sd2Eject() {
+    if (!card2In) return;
+    card2In = false;
+    card2Sync = true;
+    SyncSecondCard();
+    if (vsd2) vsdReset(vsd2, 0);
+}
+
+void SocIMX1::SyncSecondCard() {
+    if (!card2Sync || halted) return;
+    VSD* const card = card2In ? vsd2 : nullptr;
+    if (imx1MachineSetGraphicsSdCard(machine, card, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineSetGraphicsSdCard(machine, card, true) != Imx1BootstrapAccess::ok) return;
+    card2Sync = false;
 }
 
 void SocIMX1::StateChanged() {
@@ -166,6 +213,12 @@ void SocIMX1::StateChanged() {
 // ASSUMPTION "Zodiac reset button": the button on the back is taken to pull the i.MX1's RESET_IN,
 // the one reset the manual says keeps the SDRAM (24.6.3.1). The board's wiring is not in the manual
 // or the ROM.
+void SocIMX1::SetClockMultiplier(uint32_t num, uint32_t den) {
+    SoC::SetClockMultiplier(num, den);
+    // Run calls hand back with every cycle charged, so this only fails while one runs, which it never is here.
+    if (machine) imx1MachineSetCpuClockMultiplier(machine, ClockMultiplierNum(), ClockMultiplierDen());
+}
+
 void SocIMX1::Reset() {
     SoC::Reset();
     const auto info = imx1MachineLoadState(machine, powerOn.data(), powerOn.size(), imx1StateExternalReset, "power-on");
@@ -173,13 +226,32 @@ void SocIMX1::Reset() {
         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
     orientationTracker.Restart(imx1MachineStartups(machine));
     StateChanged();
+    // After StateChanged, which works out halted again for the loaded state.
+    ApplyBattery();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
+    if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
+    card2Sync = true;
+    SyncSecondCard();
 }
 
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
 unsigned SocIMX1::GuestOrientation() {
-    return orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    const unsigned orientation = orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));
+    // SysGetOrientation's numbers: landscape 2 is no turn, portrait 1 one, reverse landscape 4 two, reverse portrait 3 three.
+    static constexpr int turnsFor[] = {-1, 1, 0, 3, 2};
+    const int turns = orientation < 5 ? turnsFor[orientation] : -1;
+    if (turns >= 0 && turns != stickTurns) {
+        stickTurns = turns;
+        PushStick();
+    }
+    return orientation;
+}
+
+// The YMF768's LED and rumble motor.
+SoC::Attention SocIMX1::GuestAttention() {
+    const auto outputs = imx1MachineAttention(machine);
+    return {outputs.led, outputs.motor};
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -206,13 +278,42 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
-    // A card in carries on from the state's card section, or starts idle without one. With no card in, a
-    // card section waits for OnSdInsert, which a session start calls next; the next Run takes the card out.
+    ApplyBattery();
+    // A card in carries on from the state's card section, or starts idle without one. With no card in,
+    // a card section puts the card store's card back in when it's the saved card (a session saved with
+    // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the
+    // saved card taken out, and the card goes in later as a new one. A state without a card id takes
+    // the store's card as the saved one.
     cardSync = true;
-    if (cardIn) {
+    cardSwapped = false;
+    if (cardIn && info.cardSection && info.cardIdKnown &&
+        std::strncmp(info.cardId, sdCardGetId(), SD_CARD_ID_MAX_LEN) != 0) {
+        // The card in isn't the saved one, though it took on its card section: out as a swap, and
+        // in again later as a new card.
+        SdEject();
+        cardSwapped = sdCardInitialized();
+    } else if (cardIn) {
         if (!info.cardResumed) vsdReset(vsd, uint32_t(sdCardSectorCount()));
         SyncCard();
+    } else {
+        const bool stored = info.cardSection && !cardInserted && sdCardInitialized();
+        if (stored && (!info.cardIdKnown || std::strncmp(info.cardId, sdCardGetId(), SD_CARD_ID_MAX_LEN) == 0)) {
+            // It takes on the card section, a command or transfer under way included. The id keeps it
+            // in through the session start's SdRemount.
+            std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
+            cardId[sizeof(cardId) - 1] = '\0';
+            SdInsert();
+        } else {
+            cardSwapped = stored;
+            // The slot stays empty, which drops a card section no card took.
+            SyncCard();
+        }
     }
+    // Slot 2's card stays in through the load (imx1MachineLoadState); this puts in or takes out the one asked for.
+    // A card that didn't carry on from the state's SD2 section starts idle.
+    if (card2In && !info.graphicsSdResumed) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
+    card2Sync = true;
+    SyncSecondCard();
     return true;
 }
 
@@ -237,9 +338,35 @@ bool SocIMX1::LoadBringUpState(const uint8_t* data, size_t size) {
     return LoadState(data, size, imx1StateAllowBootInputs);
 }
 
+bool SocIMX1::SetBattery(const BatteryPower& value) {
+    battery = value;
+    ApplyBattery();
+    return true;
+}
+
+// The level as the ASP U word the DAL's battery read takes (zodiac_battery.h); Maximum is the fixed 0x9b00
+// every Zodiac state was made with. Charging pulls B14 low.
+void SocIMX1::ApplyBattery() {
+    if (halted) return;
+    if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the battery level could not be set" << std::endl;
+    uint32_t values[4]{}, masks[4]{};
+    masks[1] = chargerPinB;
+    values[1] = battery.charging ? 0 : chargerPinB;
+    if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the charger input could not be set" << std::endl;
+}
+
 uint64_t SocIMX1::GetTime() {
     const auto time = imx1MachineGetStatus(machine).time;
     return uint64_t(__uint128_t(time.ticks) * 1000000000 / ticksPerSecond);
+}
+
+uint64_t SocIMX1::YmfLastReadyReadNs() const {
+    const auto time = imx1MachineYmfLastReadyRead(machine);
+    return uint64_t((__uint128_t(time.ticks) * time.denominator + time.numerator) * 1000000000 /
+                    (__uint128_t(ticksPerSecond) * time.denominator));
 }
 
 bool SocIMX1::LcdEnabled() {
@@ -269,7 +396,24 @@ uint32_t* SocIMX1::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirty
     return view.data();
 }
 
-void SocIMX1::AnalogStick(float x, float y) { input.stick(zodiacStickOffset(x), zodiacStickOffset(y)); }
+void SocIMX1::AnalogStick(float x, float y) {
+    stickHostX = x;
+    stickHostY = y;
+    PushStick();
+}
+
+void SocIMX1::SetStickHostTurns(int turns) {
+    turns &= 3;
+    if (turns == stickHostTurns) return;
+    stickHostTurns = turns;
+    PushStick();
+}
+
+void SocIMX1::PushStick() {
+    float x = stickHostX, y = stickHostY;
+    zodiacStickForView(x, y, zodiacStickTotalTurns(stickTurns, stickHostTurns), x, y);
+    input.stick(zodiacStickOffset(x), zodiacStickOffset(y));
+}
 
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
@@ -316,8 +460,14 @@ std::string SocIMX1::StopText() const {
     return text;
 }
 
-// Runs the guest up to maxCycles / cyclesPerSecond of its own time, or for a short stretch of host time
-// when it can't keep up, and returns the guest time that passed in the same cycle units.
+// Runs the guest for at least maxCycles / cyclesPerSecond of its own time, or for a short stretch of host
+// time when it can't keep up, and returns the guest time that passed in the same cycle units.
+// Each slice's bounds come from the machine's own counts where it starts: retired and work up to their next
+// whole multiple of the slice size, and the time up to the next whole sliceTicks. A slice starts where the
+// last one ended, so every slice end, and the board charge it makes, is set by the guest alone. An instruction,
+// a CS5 wait, a PLL stall or a delay skip can carry a slice a little past its bound. Run only stops at a slice
+// end, so where the calls are cut and how busy the host is change nothing in the machine. A run can pass the
+// time asked for by up to sliceTicks (about 1 ms) and that carry; the time returned counts it.
 uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (halted || !cyclesPerSecond) {
         keyEventQueue->Clear();
@@ -326,17 +476,23 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     }
     const auto before = imx1MachineGetStatus(machine);
     SyncCard();
+    SyncSecondCard();
     PumpInput();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
-    Imx1MachineBounds bounds;
-    // Fast runs longer slices: each slice end charges the whole board, and the deadline still ends the call on time.
+    const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};
+    // Fast runs longer slices: each slice end charges the whole board.
     const bool fast = imx1MachineFastEngine(machine);
-    bounds.retired = fast ? 8000 : 4000;
-    bounds.work = fast ? 40000 : 20000;
-    bounds.deadline = {before.time.ticks + wanted, 0, 1};
+    const uint64_t sliceRetired = fast ? 8000 : 4000, sliceWork = fast ? 40000 : 20000;
+    Imx1MachineBounds bounds;
     const auto started = std::chrono::steady_clock::now();
     bool waiting = false;
+    auto now = before;
     for (;;) {
+        bounds.retired = uint32_t(sliceRetired - now.retired % sliceRetired);
+        bounds.work = sliceWork - now.work % sliceWork;
+        // The time asked for is checked between slices. The time bound keeps slices short in stop mode,
+        // where each idle period is a CLK32 tick, so input reaches a sleeping guest promptly.
+        bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
         const auto run = imx1MachineRunBounded(machine, bounds);
         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
             run.reason == Imx1MachineYield::invalidBounds) {
@@ -346,8 +502,9 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
             break;
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
-        if (run.reason == Imx1MachineYield::deadline) break;
-        if (std::chrono::steady_clock::now() - started >= runHostLimit) break;
+        now = run.total;
+        if (now.time.compare(until) >= 0) break;
+        if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
     const uint64_t elapsed = imx1MachineGetStatus(machine).time.ticks - before.time.ticks;
     // Nothing can wake a waiting guest but input, so host time just passes. Its own clock stands

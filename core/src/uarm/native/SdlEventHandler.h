@@ -35,6 +35,10 @@ class SdlEventHandler {
     DeviceKeyMask PressedButtons() const;
     // Where the analogue stick is held, for drawing; centred when let go.
     DeviceStick Stick() const { return stick; }
+    // Rumbles every open game controller while on, as the guest's vibrate motor (the Zodiac's rumble).
+    // Call it once a slice with the motor's state; nowUsec is host time.
+    // Returns whether a game controller is open.
+    bool Rumble(bool on, uint64_t nowUsec);
     bool RedrawRequested() const;
     bool QuitRequested() const;
     void ClearQuitRequested() { quitRequested = false; }
@@ -43,6 +47,7 @@ class SdlEventHandler {
     void SetShortcutSink(std::function<void(const std::string&)> sink) { shortcutSink = std::move(sink); }
 
     void SetRotation(Rotation rotation);
+    Rotation DrawnRotation() const { return rotation; }
     // A new set of shown controls and window scale; releases pointers and touches held on
     // the old ones. A SetLayout with the new layout follows.
     void SetView(DeviceControlView controlView, float scale);
@@ -98,13 +103,17 @@ class SdlEventHandler {
         SDL_TouchID touch{};
         SDL_FingerID id{};
         KeyId key{keyInvalid};
+        // A second key held by the same finger: the pad arrow's neighbour on a diagonal.
+        KeyId also{keyInvalid};
         DeviceStick position{};
         // Put down on the knob and not yet moved, in window pixels.
         bool pressPending{false};
         float downX{0}, downY{0};
     };
     std::array<Finger,16> fingers{};
-    const DeviceControlProfile& controls;
+    // The shown profile; one made from the device follows the view's game controller.
+    const DeviceControlProfile* shownControls;
+    bool followsDevice{false};
     DeviceControlView controlView;
     KeyId pointerKey{keyInvalid};
     // The pointer holding the stick, and arrow keys standing in for it (up, down, left, right).
@@ -118,6 +127,9 @@ class SdlEventHandler {
     std::map<SDL_JoystickID, GamepadState> pads;
     SDL_JoystickID lastStickPad{-1};
     bool padFocused{true};
+    // The rumble is on, and when it was last sent; SDL stops it after rumbleMs unless sent again.
+    bool rumbling{false};
+    uint64_t rumbleSentUsec{0};
     DeviceKeyMask padKeys{0};
     DeviceStick padStick{};
     DeviceStick stick{};

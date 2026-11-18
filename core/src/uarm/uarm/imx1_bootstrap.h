@@ -53,6 +53,9 @@ class Imx1Bootstrap {
     Imx1BootstrapAccess replaceAspPenInputs(const Imx1AspPenInputs& inputs, bool commit = true);
     bool aspPenWakePossible(const Imx1AspPenInputs& inputs) const;
     const Imx1AspPenInputs& aspPenInputs() const { return asp.currentPenInputs(); }
+    void setAspUInput(uint16_t word) { asp.setUInput(word); }
+    uint16_t aspUInput() const { return asp.currentUInput(); }
+    uint32_t gpioInputSample(unsigned port) const { return gpio.inputSample(port); }
     void setMmcsdEmptySlot(bool enabled) { SourceChange change(*this); mmcsd.setEmptySlot(enabled); }
     // The card in the MMCSD slot, or null. Card detect is a GPIO input the caller drives. The card already
     // in, or a card a loaded state's card section resumes (stateCard), keeps its transfer and DMA. Returns
@@ -64,6 +67,8 @@ class Imx1Bootstrap {
         return false;
     }
     VSD* mmcsdCard() const { return mmcsd.card(); }
+    uint32_t mmcsdCardPulled() const { return mmcsd.cardPulled(); }
+    void setMmcsdCardPulled(uint32_t pulled) { mmcsd.setCardPulled(pulled); }
     // The card section: saved only while a card is in, so a state with the slot empty keeps the BOOT layout.
     static constexpr uint32_t cardStateVersion = Imx1Mmcsd::cardStateVersion;
     template <class A> void stateCard(A& a) {
@@ -111,12 +116,19 @@ class Imx1Bootstrap {
         if (size != 1) return Imx1BootstrapAccess::width;
         SourceChange change(*this);
         if (write) ymf.write(address & 1, uint8_t(value));
-        else value = ymf.read(address & 1);
+        else {
+            const uint64_t reads = ymf.readyRegisterReads();
+            value = ymf.read(address & 1);
+            if (ymf.readyRegisterReads() != reads) ymf.noteReadyRead(elapsedReference);
+        }
         if (!ymfDriveLine()) return Imx1BootstrapAccess::sideEffect;
         return Imx1BootstrapAccess::ok;
     }
     static constexpr uint32_t ymf768StateVersion = Imx1Ymf768::stateVersion;
     template <class A> void stateYmf768(A& a) { ymf.state(a); }
+    // The chip's power steps under way, saved after stateYmf768 only while ymf768().readyBusy().
+    static constexpr uint32_t ymf768ReadyStateVersion = Imx1Ymf768::readyStateVersion;
+    template <class A> void stateYmf768Ready(A& a) { ymf.stateReady(a); }
     const Imx1Ymf768& ymf768() const { return ymf; }
     // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
     // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.
@@ -127,7 +139,7 @@ class Imx1Bootstrap {
     uint32_t gpioRegister(unsigned port, unsigned index) const { return gpio.registerValue(port, index); }
     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
     uint32_t lcdcContrastPhase() const { return contrastPhase; }
-    bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); return rtc.initialise(time); }
+    bool setRtcInitialTime(Imx1RtcTime time) { SourceChange change(*this); syncReference(); return rtc.initialise(time); }
     void setI2cScenario(bool enabled) { SourceChange change(*this); i2c.setSingleMasterScenario(enabled); }
     void setI2cBus(Imx1I2cBus* bus) { SourceChange change(*this); i2c.setBus(bus); }
     void setI2cObserver(Imx1I2cObserver observer, void* context) { SourceChange change(*this); i2c.setObserver(observer, context); }
@@ -172,20 +184,26 @@ class Imx1Bootstrap {
     // What a read of timer 1 or 2's counter gives after cycles more CPU cycles in this clock mode, then hclk
     // HCLK cycles (bus wait clocks, charged after the CPU cycles), with nothing charged. Only for cycles in which
     // no timer reaches its compare value. False for any other access, or when the sum is too big to work out in
-    // one piece.
+    // one piece. With sameUntil, also the most cycles (at least cycles) that give the same count and that this
+    // call would take; the result holds for those until the board changes (changeCount).
     bool timerCountAfter(uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode, uint32_t& value,
-                         uint64_t hclk = 0) const;
+                         uint64_t hclk = 0, uint64_t* sameUntil = nullptr) const;
+    // Moves on whenever the board's state can have changed, and is never the same for two boards.
+    uint64_t changeCount() const { return runCache.changes; }
     static bool timerCountAddress(uint32_t address) { return address == 0x00202010 || address == 0x00203010; }
     // Registers whose reads change nothing access commits but the GPIO port's accessed mark, and read the same
-    // anywhere in a span where no interrupt line or input changes: the ASP status, GPIO and AITC.
+    // anywhere in a span where no interrupt line or input changes: the ASP status and FIFO pointers, GPIO and AITC.
+    // The ASP's write pointer moves only where a slot completes, which ends the span.
     // Also CGM CSCR, the timers' control, prescaler, compare, capture and status (the count has its own path) and DMA
     // DISR and DIMR: reads that change nothing but a timer's status-read flag, which a charge in between leaves as is.
     // And the RTC's registers: reads only mark it used, and the span ends at its next second or sampling period.
+    // And DMA's error registers DBTOSR, DRTOSR, DSESR and DBOSR (0x0020900c-18), which read 0 and change nothing.
+    // And MMCSD STATUS: a read changes nothing, and the span ends where the clock stop or command in progress does.
     static bool quietReadAddress(uint32_t address) {
         const uint32_t timer = address & ~0x1000u;
-        return address == 0x0021501c || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
+        return address == 0x0021501c || address == 0x00215034 || address == 0x00214004 || Imx1Gpio::registerName(address) || Imx1Aitc::registerName(address) ||
                address == 0x0021b000 || (timer >= 0x00202000 && timer <= 0x00202014 && timer != 0x00202010 && !(timer & 3)) ||
-               address == 0x00209004 || address == 0x00209008 || (Imx1Rtc::registerName(address) && !(address & 3));
+               address == 0x00209004 || address == 0x00209008 || (address >= 0x0020900c && address <= 0x00209018 && !(address & 3)) || (Imx1Rtc::registerName(address) && !(address & 3));
     }
     Imx1BootstrapAccess clockStatus() const;
     const Imx1ReferenceTime& referenceTime() const { return elapsedReference; }
@@ -226,6 +244,7 @@ class Imx1Bootstrap {
         const auto lines = interruptLines();
         const bool asserted = lines.irq == Imx1AitcLine::asserted || lines.fiq == Imx1AitcLine::asserted;
         if (!asserted) return false;
+        runCache.changes = RunCache::nextChange();
         if (systemStop == stopStopped) { cgm.wakePlls(); systemStop = stopWaking; }
         else if (systemStop == stopArmed) { cgm.wakePlls(); systemStop = stopRunning; }
         else cgm.wakeMcuPll();
@@ -307,7 +326,30 @@ class Imx1Bootstrap {
             referenceRatioSupported(cgm.systemPllActiveRatio().numerator);
         if (mode != 3 || !cgm.mcuClockReady(assumeSettled)) return false;
         return asynchronousRatioSupported(cgm.systemPllActiveRatio()) &&
-            referenceRatioSupported(cgm.mcuPllTargetRatio().numerator);
+            referenceRatioSupported(cpuMcuRatio().numerator);
+    }
+    // Faster speed: in clock mode 3 the CPU's FCLK runs num / den times the MCU PLL's, so it retires that many
+    // times the instructions per guest second while HCLK, the PERCLKs, the timers and every bus wait keep their
+    // own rates. FastBus (mode 0) runs the CPU on BCLK, the bus clock itself, and stays as it is. While a System
+    // PLL restart is pending the charge goes in at the MCU PLL's own rate, which the restart count is kept in.
+    // Not session state: the run sets it.
+    void setCpuClockMultiplier(uint32_t num, uint32_t den) {
+        if (!num || !den) num = den = 1;
+        const uint64_t g = imx1Gcd(num, den);
+        cpuClockNum = uint32_t(num / g);
+        cpuClockDen = uint32_t(den / g);
+        cgm.setFclkMultiplier(cpuClockNum, cpuClockDen);
+    }
+    uint32_t cpuClockMultiplierNum() const { return cpuClockNum; }
+    uint32_t cpuClockMultiplierDen() const { return cpuClockDen; }
+    // The CPU's clock in mode 3 as a ratio of the reference: the MCU PLL's times the multiplier.
+    Imx1PllRatio cpuMcuRatio() const { return cpuMcuRatio(cgm); }
+    Imx1PllRatio cpuMcuRatio(const Imx1Cgm& clocks) const {
+        const auto rate = clocks.mcuPllTargetRatio();
+        if (cpuClockNum == cpuClockDen || clocks.systemRestartRemaining()) return rate;
+        uint64_t numerator = rate.numerator * cpuClockNum, denominator = uint64_t(rate.denominator) * cpuClockDen;
+        const uint64_t g = imx1Gcd(numerator, denominator);
+        return {numerator / g, uint32_t(denominator / g)};
     }
     bool asynchronousRatioSupported(Imx1PllRatio system) const {
         return asynchronousRatioSupported(cgm, system);
@@ -319,7 +361,7 @@ class Imx1Bootstrap {
                system.numerator * pll.denominator * clocks.mcuPrescaler();
     }
     Imx1PllRatio cpuReferencePeriod(uint32_t mode) const {
-        const auto rate = mode == 3 ? cgm.mcuPllTargetRatio() : cgm.systemPllActiveRatio();
+        const auto rate = mode == 3 ? cpuMcuRatio() : cgm.systemPllActiveRatio();
         return {uint64_t(rate.denominator) * (mode == 3 ? cgm.mcuPrescaler() : cgm.busDivider()),
                 uint32_t(rate.numerator)};
     }
@@ -350,6 +392,7 @@ class Imx1Bootstrap {
     template <class A> void state(A& a) {
         SourceChange change(*this);
         runCache.driveSettled = false;
+        syncReference();
         a.Do64(elapsedReference.ticks).Do64(elapsedReference.numerator).Do64(elapsedReference.denominator);
         a.Require(elapsedReference.valid(), "reference time");
         a.DoBool(referenceOverflow).FixedBool(cpuInterruptsConnected);
@@ -418,6 +461,8 @@ class Imx1Bootstrap {
             to.control = from.control; to.controlKnown = from.controlKnown;
             to.precharged = from.precharged; to.modeSet = from.modeSet; to.refreshes = from.refreshes;
         }
+        other.syncReference();
+        syncReference();
         rtc.keepTime(other.rtc);
         reset.set(Imx1ResetSource::external);
     }
@@ -435,15 +480,41 @@ class Imx1Bootstrap {
                pwm.referenceRatioSupported(denominator);
     }
     Imx1ReferenceTime elapsedReference;
+    // The RTC, the watchdog and the PWM on CLK32 are charged lazily. Charges add up in lazyReference, over a
+    // common denominator, until they would reach the first event of the three (a status bit, the timeout bound,
+    // the end of a PWM period), one of their registers is accessed or the state is saved. Up to there one charge
+    // of the sum gives the state the single charges would, and nothing they show (status, interrupt lines,
+    // possibleTimeout, the duty) changes. units is the sum in 1/denominator periods, denominator 0 is off.
+    // limit is the units that reach the first event, UINT64_MAX with none; event/eventScale is the time to it
+    // in CLK32 periods from the models as they are, with eventScale a multiple of denominator.
+    struct LazyReference { uint64_t units = 0, limit = 0, denominator = 0, event = 0, eventScale = 0; } lazyReference;
     bool referenceOverflow = false;
     bool advanceReference(uint64_t numerator, uint64_t denominator) {
         if (!elapsedReference.add(numerator, denominator)) { referenceOverflow = true; return false; }
         cgm.advanceMcuReference(numerator, denominator);
+        if (lazyReference.denominator && chargeLazyReference(numerator, denominator)) return true;
+        syncReference();
         rtc.advanceReference(numerator, denominator);
         watchdog.advanceReference(numerator, denominator);
         pwm.advanceReference(numerator, denominator);
+        if (!numerator || !referenceLimit(denominator, lazyReference)) lazyReference = {};
         return true;
     }
+    bool chargeLazyReference(uint64_t numerator, uint64_t denominator);
+    // The limit, event and eventScale for sums over denominator, from the models as they are. False when they
+    // can't be worked out in 64 bits.
+    bool referenceLimit(uint64_t denominator, LazyReference& lazy) const;
+    void syncReference() {
+        if (lazyReference.units) {
+            rtc.advanceReference(lazyReference.units, lazyReference.denominator);
+            watchdog.advanceReference(lazyReference.units, lazyReference.denominator);
+            pwm.advanceReference(lazyReference.units, lazyReference.denominator);
+        }
+        lazyReference = {};
+    }
+    // Steps of numerator/denominator until the first event of the RTC, the watchdog or the PWM on CLK32, as
+    // their idleQuietSteps would give it with the sum charged.
+    uint64_t referenceQuietSteps(uint64_t numerator, uint64_t denominator) const;
     // AITC sources of modules that have no model and stay in reset: UART3, SSI2, SPI2, SPI1 and USBD.
     static constexpr uint64_t resetStateSourcesLow = 0x1f | (uint64_t(7) << 36) | (uint64_t(3) << 40) | (uint64_t(0xff) << 47);
     void setInterruptInputs(Imx1Aitc& controller, const Imx1I2c& state, const Imx1Rtc& clock,
@@ -481,6 +552,7 @@ class Imx1Bootstrap {
     Imx1Mmcsd mmcsd;
     uint32_t perclk1Phase = 0;
     uint64_t systemPllPhase = 0;
+    uint32_t cpuClockNum = 1, cpuClockDen = 1;
     void advanceSystemOutput(uint64_t clocks, bool wholeWritePeriods = true);
     bool asynchronousUsed = false, mcuRetuneScenario = false;
     std::vector<uint8_t> sram = std::vector<uint8_t>(0x20000);
@@ -549,8 +621,17 @@ class Imx1Bootstrap {
         // Whether the other level of the settled drive keeps the GPIO outputs known. Worked out from the GPIO
         // alone, so it holds until the next committed drive.
         bool otherValid = false, otherAccepted = false;
+        uint64_t changes = nextChange();
+        static uint64_t nextChange() {
+            static uint64_t count = 0;
+            return ++count;
+        }
         RunCache() = default;
-        RunCache(const RunCache&) = default;
+        RunCache(const RunCache& other)
+            : asserted(other.asserted), known(other.known), driveValue(other.driveValue), driveKnown(other.driveKnown),
+              changing(other.changing), drivePort(other.drivePort), sourcesValid(other.sourcesValid),
+              driveSettled(other.driveSettled), uartShared(other.uartShared), otherValid(other.otherValid),
+              otherAccepted(other.otherAccepted) {}
         // Once uart() has handed out a reference the flag stays, whatever is assigned onto the board.
         RunCache& operator=(const RunCache& other) {
             asserted = other.asserted; known = other.known;
@@ -559,6 +640,7 @@ class Imx1Bootstrap {
             sourcesValid = other.sourcesValid; driveSettled = other.driveSettled;
             otherValid = other.otherValid; otherAccepted = other.otherAccepted;
             uartShared = uartShared || other.uartShared;
+            changes = nextChange();
             return *this;
         }
     };
@@ -600,6 +682,7 @@ class Imx1Bootstrap {
     struct SourceChange {
         const Imx1Bootstrap& board;
         explicit SourceChange(const Imx1Bootstrap& board) : board(board) {
+            board.runCache.changes = RunCache::nextChange();
             board.runCache.sourcesValid = false;
             ++board.runCache.changing;
         }
@@ -613,7 +696,8 @@ class Imx1Bootstrap {
 
    public:
     static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
-                                           Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t);
+                                           Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t) +
+                                           sizeof(LazyReference) + 2 * sizeof(uint32_t) + Imx1Cgm::unsavedBytes;
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)

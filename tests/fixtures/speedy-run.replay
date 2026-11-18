@@ -1,0 +1,6 @@
+# Speedy 7.1 from its advertisement screen: OK starts the benchmark, the [now] bar opens the detail form with the three times
+500 pen-down 60 295
+600 pen-up
+25000 pen-down 40 237
+25100 pen-up
+26500 snapshot "detail.png"

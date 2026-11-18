@@ -74,8 +74,9 @@ double MainLoop::Cycle(uint64_t now, bool paused) {
     realTimeUsec = now;
 
     // With emulated time the lag handling above only paces the loop; the guest always gets the limit.
-    double cyclesPerSecond = emulatedTime ? double(cyclesPerSecondLimit) : CalculateCyclesPerSecond(
-        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad);
+    const uint64_t limit = CurrentLimit();
+    double cyclesPerSecond = emulatedTime ? double(limit) : CalculateCyclesPerSecond(
+        deltaUsec >= lagCatchup ? (maxLoad - MAX_LOAD_CATCHUP_MARGIN) : maxLoad, limit);
 #ifdef __EMSCRIPTEN__
     const double runUsec = deltaUsec;
 #else
@@ -104,7 +105,7 @@ int64_t MainLoop::GetSuggestedDelayUsec(uint64_t now) const {
     return std::clamp<double>(timesliceUsec - (double(now) - virtualTimeUsec), 0, timesliceUsec);
 }
 
-uint32_t MainLoop::GetCurrentIps() const { return currentIps; }
+uint64_t MainLoop::GetCurrentIps() const { return currentIps; }
 
 uint64_t MainLoop::GetCurrentIpsMax() const { return currentIpsMax; }
 
@@ -121,14 +122,52 @@ void MainLoop::SetCyclesPerSecondLimit(uint32_t cyclesPerSecondLimit) {
     this->cyclesPerSecondLimit = cyclesPerSecondLimit;
 }
 
-uint64_t MainLoop::CalculateCyclesPerSecond(uint64_t safetyMargin) {
+void MainLoop::SetFollowCoreClock(bool follow) {
+    followCoreClock = follow;
+    soc->SetFollowCoreClock(follow);
+}
+
+void MainLoop::SetFixedMips(uint32_t mips) {
+    fixedMips = mips;
+    soc->SetClockMultiplier(1, 1);
+    SetFollowCoreClock(false);
+    SetCyclesPerSecondLimit(uint32_t(std::min<uint64_t>(uint64_t(mips) * 1000000, UINT32_MAX)));
+}
+
+std::string MainLoop::SpeedName() const {
+    return fixedMips ? "fixed " + std::to_string(fixedMips) + " MIPS" : speed.Name();
+}
+
+void MainLoop::SetSpeed(const SpeedSetting5& speed, uint32_t originalHz) {
+    this->speed = speed;
+    fixedMips = 0;
+    if (speed.kind == SpeedSetting5::Kind::uncapped) {
+        soc->SetClockMultiplier(1, 1);
+        SetCyclesPerSecondLimit(UNCAPPED_MHZ * 1000000);
+        SetFollowCoreClock(false);
+        return;
+    }
+    soc->SetClockMultiplier(speed.num, speed.den);
+    SetCyclesPerSecondLimit(originalHz);
+    SetFollowCoreClock(true);
+}
+
+uint64_t MainLoop::CurrentLimit() const {
+    if (followCoreClock) {
+        const uint64_t hz = soc->FollowHz();
+        if (hz) return hz;
+    }
+    return cyclesPerSecondLimit;
+}
+
+uint64_t MainLoop::CalculateCyclesPerSecond(uint64_t safetyMargin, uint64_t limit) {
     const uint64_t avg = (cyclesPerSecondAverage.Calculate() * safetyMargin) / 100;
     const uint64_t avgBinned = max((avg / BIN_SIZE) * BIN_SIZE, static_cast<uint64_t>(BIN_SIZE));
 
     if (avgBinned < lastCyclesPerSecond || avg > lastCyclesPerSecond + BIN_SIZE + BIN_SIZE / 2)
         lastCyclesPerSecond = avgBinned;
 
-    if (lastCyclesPerSecond > cyclesPerSecondLimit) lastCyclesPerSecond = cyclesPerSecondLimit;
+    if (lastCyclesPerSecond > limit) lastCyclesPerSecond = limit;
 
     return lastCyclesPerSecond;
 }

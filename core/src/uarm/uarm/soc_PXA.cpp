@@ -6,6 +6,7 @@
 // clang-format on
 
 #include "soc_PXA.h"
+#include "xscale_cost.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -105,6 +106,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
                   socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
 
+    // XScale cost model: the table, region and data cache charges; PwrClk sets the clocks.
+    cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
+
 #ifndef __EMSCRIPTEN__
     cpuSetDebugSoc(cpu,this);
     cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
@@ -180,6 +184,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // The OS timer runs in batches up to its next match, synchronised on register access,
     // so the CPU runs longer stretches between scheduler updates. Every PXA device does this.
     pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
+    cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
+    // GPIO levels change only at scheduler events, for the Fast poll skip.
+    cpuSetPollPeek(cpu, GpioPeekCB, this);
 #endif
     rtc = pxaRtcInit(mem, ic);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
@@ -216,7 +223,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     }
 
     i2c = pxaI2cInit(mem, ic, dma, PXA_I2C_BASE, PXA_I_I2C);
-    memCtrl = pxaMemCtrlrInit(mem, socRev);
+    memCtrl = pxaMemCtrlrInit(mem, cpu, socRev);
     ac97 = pxaAC97Init(mem, ic, dma);
 
     // SSP/SSP1
@@ -364,6 +371,12 @@ bool SocPXA::PressHotSync() {
     return true;
 }
 bool SocPXA::HoldSwitchOn() const { return deviceHoldSwitchOn(dev); }
+bool SocPXA::BatterySupported() const { return deviceBatterySupported(dev); }
+bool SocPXA::SetBattery(const BatteryPower& value) {
+    if (!deviceSetBattery(dev, value)) return false;
+    battery = value;
+    return true;
+}
 bool SocPXA::SetHoldSwitch(bool on) {
     if (!HoldSwitchSupported()) return false;
     // Host commands run on the owning SoC thread; this is a persistent external switch.
@@ -648,8 +661,15 @@ static int UsbDetectPin(DeviceType5 type) {
     return type==deviceTypeTX ? 13 : deviceProfileIsE2Board5(type) ? 35 : type==deviceTypeZire72 ? 15 : -1;
 }
 
+uint16_t SocPXA::Tg50ConnectorAux() { return deviceTg50AccessoryAuxCode(dev); }
+
 bool SocPXA::SetUsbTestCable(bool connected) {
-    if (GetDeviceType() == deviceTypeTG50) { deviceTg50SetUsbCable(dev, connected); return true; }
+    if (GetDeviceType() == deviceTypeTG50) {
+        // One accessory on the connector: the pad's ID resistor stays while it's in.
+        if (gamepad.Attached()) return !connected;
+        deviceTg50SetUsbCable(dev, connected);
+        return true;
+    }
     const int pin=UsbDetectPin(GetDeviceType());
     if(pin<0)return false;
     pxaGpioSetState(gpio, pin, GetDeviceType()==deviceTypeZire72 ? connected : !connected);
@@ -687,6 +707,12 @@ bool SocPXA::HoldKeyEvent(const KeyEvent& event) {
 }
 
 void SocPXA::OnEngageKey(KeyId key, bool down) {
+    if (key >= keyIdPadUp && key <= keyIdPadHold) {
+        // The pad's buttons only reach the guest through the pad.
+        if (gamepad.Key(key, down, GetTime())) RescheduleCB(this, RESCHEDULE_TASK_UART);
+        SyncGamepadLine();
+        return;
+    }
     if (key == keyIdPower && down) powerKeyDownAt = GetTime();
     deviceKey(dev, key, down);
     keypadKeyEvt(kp, key, down);
@@ -761,6 +787,7 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (socRev != 2) pxaUartLoad(hwUart, loader, 1);
     pxaUartLoad(stUart, loader, 2);
     irKeyboard.Load(loader);
+    gamepad.Load(loader);
     pxaUartLoad(btUart, loader, 3);
 
     pxaSspLoad(ssp[0], loader, 0);
@@ -804,6 +831,20 @@ void SocPXA::OnLoad(SavestateLoader<ChunkType> &loader) {
     if (pxaI2sHasCodec(i2s))
         pxaI2sSetClockEnabled(i2s, pxaPwrClkI2sClock(pwrClk), false);
     deviceLoad(dev, loader, RestoringCheckpoint());
+    // The loaded GPIO and AUX already match the loaded pad. The hooks are wiring: the pad takes them
+    // unless a host endpoint holds the line, which leaves the connector empty instead.
+    if (gamepad.Attached() && (!GamepadSupported() || (serialHostHooks.context && serialHostHooks.context != this) ||
+                               irHostHooks.context || irKeyboard.Attached())) {
+        fprintf(stderr, "game controller: the connector is in use, loaded without the pad\n");
+        gamepad.Detach();
+        if (GetDeviceType() == deviceTypeTG50) {
+            deviceTg50SetConnectorEmpty(dev);
+            pxaGpioSetState(gpio, 3, true);
+        }
+    }
+    if (gamepad.Attached()) InstallGamepadHooks();
+    else if (serialHostHooks.context == this) serialHostHooks = {};
+    gamepadLineLow = gamepad.LineLow();
     if (pxaI2sHasCodec(i2s)) {
         if (!pxaI2sClockStateValid(i2s)) loader.NotifyError();
         pxaI2sRefresh(i2s);
@@ -862,6 +903,7 @@ void SocPXA::OnSave(T &savestate) {
     if (socRev != 2) pxaUartSave(hwUart, savestate, 1);
     pxaUartSave(stUart, savestate, 2);
     irKeyboard.Save(savestate);
+    gamepad.Save(savestate);
     pxaUartSave(btUart, savestate, 3);
 
     pxaSspSave(ssp[0], savestate, 0);
@@ -1080,6 +1122,8 @@ void SocPXA::EndSerialCheckpoint() {
     RefreshIrMode(this);
 }
 
+uint64_t SocPXA::CoreHz() const { return pxaPwrClkCoreHz(pwrClk); }
+
 uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     // Releasing a host guard does not alter the restored guest's scheduler/CPU.
     // Deliver the host notification when execution resumes, including new peer data.
@@ -1104,6 +1148,10 @@ void SocPXA::CycleBatch0() {
     if (usbHostHooks.tick && !usbHostPaused &&
         (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime()))
         usbHostHooks.tick(usbHostHooks.context, GetTime());
+    if (gamepad.Attached() && !usbHostPaused) {
+        gamepad.Tick(GetTime(), GamepadPortReady());
+        SyncGamepadLine();
+    }
 }
 
 bool SocPXA::Batch0Required() {
@@ -1129,8 +1177,8 @@ bool SocPXA::Batch0Required() {
 // host can sleep, else 0.
 uint32_t SocPXA::Batch0Ticks() {
     if (Batch0Required()) return 1;
-    if (!usbHostHooks.wake || usbHostPaused) return 0;
-    const uint64_t wake = usbHostHooks.wake(usbHostHooks.context);
+    uint64_t wake = usbHostHooks.wake && !usbHostPaused ? usbHostHooks.wake(usbHostHooks.context) : UINT64_MAX;
+    if (gamepad.Attached() && !usbHostPaused) wake = std::min(wake, gamepad.Wake(GetTime()));
     if (wake == UINT64_MAX) return 0;
     const uint64_t now = GetTime(), period = 36_sec / 3686400ULL;
     if (wake <= now + period) return 1;
@@ -1159,12 +1207,24 @@ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
 }
 
 #ifndef __EMSCRIPTEN__
+// OS timer ticks elapsed in this batch with that many cycles in progress.
+uint32_t SocPXA::TimerElapsedAt(uint32_t cycles) const {
+    if (PowerSleeping() && sleeping) return 0;
+    const uint64_t extra = runningCyclesPerSecond ? uint64_t(cycles) * 1_sec / runningCyclesPerSecond : 0;
+    return scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+}
 uint32_t SocPXA::TimerElapsedCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);
-    if (self->PowerSleeping() && self->sleeping) return 0;
-    const uint64_t extra = self->runningCyclesPerSecond
-        ? uint64_t(cpuCyclesInProgress(self->cpu)) * 1_sec / self->runningCyclesPerSecond : 0;
-    return self->scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+    return self->TimerElapsedAt(cpuCyclesInProgress(self->cpu));
+}
+// The Fast delay skip's look at OSCR (cpuSetDelayTimer).
+bool SocPXA::OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr) {
+    auto* self = static_cast<SocPXA*>(ctx);
+    return pxaTimrPeek(self->tmr, self->TimerElapsedAt(cycles), oscr);
+}
+// The Fast poll skip's look at a GPIO level register (cpuSetPollPeek).
+bool SocPXA::GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value) {
+    return pxaGpioPeekLevel(static_cast<SocPXA*>(ctx)->gpio, pa, value);
 }
 void SocPXA::TimerRescheduleCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);
@@ -1348,14 +1408,81 @@ SerialHostRoute SocPXA::GetSerialRoute() {
     return {this,[](void* p,const SerialHostHooks* h){return static_cast<SocPXA*>(p)->SetSerialHostHooks(h);},
         [](void* p){return static_cast<SocPXA*>(p)->SerialEnabled();},
         [](void* p){auto* s=static_cast<SocPXA*>(p);return s->HostIoPaused() || s->irReplacementDepth!=0 || s->PowerSleeping();},
-        [](void* p){auto* s=static_cast<SocPXA*>(p);return !s->KeyboardAttached() && !s->irKeyboard.Pending() && !s->IrHostAttached();}};
+        [](void* p){auto* s=static_cast<SocPXA*>(p);return !s->KeyboardAttached() && !s->irKeyboard.Pending() && !s->IrHostAttached() && !s->gamepad.Attached();}};
 }
 bool SocPXA::SetSerialHostHooks(const SerialHostHooks* hooks) {
+    // The game controller holds the line until it's detached.
+    if (serialHostHooks.context == this) return false;
     if (hooks && (GetDeviceType()!=deviceTypeTG50 || !hooks->context || !hooks->read || !hooks->write ||
         !hooks->pending || !hooks->replaced || !hooks->modeChanged || serialHostHooks.context ||
         irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() || !pxaUartIrState(ffUart).idle)) return false;
     serialHostHooks=hooks?*hooks:SerialHostHooks{};
     return true;
+}
+
+bool SocPXA::GamepadSupported() const { return const_cast<SocPXA*>(this)->GetDeviceType() == deviceTypeTG50; }
+
+bool SocPXA::GamepadPortReady() { return SerialEnabled() && pxaUartReceiverEnabled(ffUart); }
+
+void SocPXA::SyncGamepadLine() {
+    // GPIO3 is the connector's HotSync line, active low, held high with nothing on it.
+    const bool low = gamepad.LineLow();
+    if (low == gamepadLineLow) return;
+    gamepadLineLow = low;
+    pxaGpioSetState(gpio, 3, !low);
+}
+
+void SocPXA::InstallGamepadHooks() {
+    serialHostHooks = {this,
+        [](void* p) -> uint_fast16_t { auto* s = static_cast<SocPXA*>(p); return s->gamepad.Read(s->GetTime()); },
+        // Runs inside the UART batch, which keeps going while Pending() holds.
+        [](uint_fast16_t value, void* p) { auto* s = static_cast<SocPXA*>(p); s->gamepad.Write(uint8_t(value), s->GetTime()); },
+        [](void* p) { return static_cast<SocPXA*>(p)->gamepad.Pending(); },
+        [](void* p) {
+            // Sleep: the ROM's driver drops the pad on 'slp!', so it identifies again on its next press.
+            auto* s = static_cast<SocPXA*>(p);
+            if (s->PowerSleeping()) { s->gamepad.Forget(); s->SyncGamepadLine(); }
+        },
+        // The pad polls the port while it waits on it (ClieGamepad::Wake), so a mode change needs nothing.
+        [](void*) {}};
+}
+
+// Host serial, infrared, the infrared keyboard or the USB cable has the connector's line.
+bool SocPXA::GamepadConnectorBusy() const {
+    return serialHostHooks.context || irHostHooks.context || irKeyboard.Attached() || irKeyboard.Pending() ||
+           deviceTg50UsbCableAttached(dev);
+}
+
+bool SocPXA::AttachGamepad(bool attach, bool identify) {
+    if (!GamepadSupported()) return false;
+    if (!attach) {
+        if (!gamepad.Attached()) return true;
+        // Unplugged: bytes on the way are lost and the driver keeps a held key until its 30 s drop.
+        gamepad.Detach();
+        SyncGamepadLine();
+        serialHostHooks = {};
+        deviceTg50SetConnectorEmpty(dev);
+        return true;
+    }
+    if (gamepad.Attached()) return true;
+    if (GamepadConnectorBusy()) return false;
+    // AUX about 78 mV (code 0x7f, >> 4 = 7): SonySys's serial-ID accessory class 0x200. The real
+    // resistor isn't known; this class gets no 'A' prompt, which the pad ignores anyway.
+    deviceTg50SetAccessoryAux(dev, 78);
+    InstallGamepadHooks();
+    gamepad.Attach(GetTime(), identify);
+    SyncGamepadLine();
+    RescheduleCB(this, RESCHEDULE_TASK_UART);
+    return true;
+}
+
+std::string SocPXA::GamepadState() const {
+    if (!GamepadSupported()) return "unavailable";
+    if (!gamepad.Attached()) return GamepadConnectorBusy() ? "detached busy" : "detached";
+    static const char* phases[] = {"waiting", "plugging", "identifying", "identified"};
+    return std::string("attached ") + phases[int(gamepad.GetPhase())] + (gamepad.HoldOn() ? " hold" : "") +
+           " ids=" + std::to_string(gamepad.IdsSent()) + " replies=" + std::to_string(gamepad.Replies()) +
+           " sent=" + std::to_string(gamepad.BytesSent());
 }
 
 // Not while a byte is still going out. A received byte the guest hasn't read yet stays the

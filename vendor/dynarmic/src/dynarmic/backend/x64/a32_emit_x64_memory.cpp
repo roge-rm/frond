@@ -14,6 +14,7 @@
 #include <xbyak/xbyak.h>
 
 #include "dynarmic/backend/x64/a32_emit_x64.h"
+#include "dynarmic/ir/basic_block.h"
 #include "dynarmic/backend/x64/abi.h"
 #include "dynarmic/backend/x64/devirtualize.h"
 #include "dynarmic/backend/x64/emit_x64_memory.h"
@@ -260,6 +261,12 @@ void A32EmitX64::EmitCheckMemoryAbortAt(A32EmitContext& ctx, const A32::Location
     }
     EmitSetUpperLocationDescriptor(current_location, ctx.Location());
     code.mov(dword[r15 + offsetof(A32JitState, Reg) + sizeof(u32) * 15], current_location.PC());
+    // Frond: the block's instructions before this one ran; the interpreter charges this one.
+    if (conf.enable_cycle_counting) {
+        if (const size_t before = ctx.block.FrondCyclesBefore(current_location.PC())) {
+            EmitAddCycles(before);
+        }
+    }
     code.ForceReturnFromRunCode();
     code.L(skip);
 }

@@ -1,3 +1,4 @@
+#include "EmBattery.h"
 #include "BackgroundJob.h"
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
@@ -62,6 +63,7 @@
 #include "DebugSupport.h"
 #include "Debugger.h"
 #include "EmCommon.h"
+#include "Platform.h"
 #include "EmCPU68K.h"
 #include "EmDevice.h"
 #include "EmHAL.h"
@@ -88,6 +90,7 @@
 #include "RawFingers.h"
 #include "Touch.h"
 #include "device_profile5.h"
+#include "speed_setting5.h"
 #include "session/session_file5.h"
 
 using namespace std;
@@ -140,10 +143,27 @@ void IgnoreGoneXWindows() {}
 // session from another pin is refused rather than half loaded.
 constexpr const char* kSessionFormat = "frond-68k 1";
 constexpr const char* kCloudpilotPin = "cloudpilot 064d5d5";
-// Uncapped runs the CPU this many times faster than the real clock, with timers on real time.
+// Uncapped runs the CPU this many times faster than the real clock, with timers on real time. Faster runs it
+// its multiplier times faster the same way, up to kMaxFasterFactor; 8x would be the same as Uncapped.
 constexpr double kUncappedFactor = 8;
+constexpr double kMaxFasterFactor = 4;
 
-enum class Speed { original, uncapped };
+using Speed = SpeedSetting5;
+
+// The 68k's speed settings: SpeedSetting5's without 8x, which is Uncapped's speed here.
+constexpr const char* kSpeedChoices68k = "original|1.5x|2x|3x|4x|uncapped";
+constexpr const char* kSpeed8x68k = "8x is Uncapped's speed on the 68k; use uncapped";
+bool ParseSpeed68k(const string& text, Speed& out) {
+    Speed parsed;
+    if (!Speed::Parse(text, parsed)) return false;
+    if (parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor) return false;
+    out = parsed;
+    return true;
+}
+bool IsSpeed8x(const string& text) {
+    Speed parsed;
+    return Speed::Parse(text, parsed) && parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor;
+}
 
 struct Options {
     string image;
@@ -154,7 +174,7 @@ struct Options {
     double runFor{0};
     optional<string> framebufferOutput;
     optional<string> inputReplay;
-    Speed speed{Speed::original};
+    Speed speed{};
     optional<int> contrast;
     float windowScale{2};
     bool sound{true};
@@ -183,13 +203,14 @@ struct Options {
 
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
-            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
+            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+            "                 [--battery \"max|level N|host N [charging|battery]\"]\n"
             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
             "The desktop's ARM-only options are taken and ignored."
          << endl;
@@ -680,7 +701,16 @@ class Console {
                 lock_guard<mutex> lock(guard);
                 lines.push_back(line);
             }
+            // A piped stdin (a test or script driving the core) closing means nobody is left to
+            // send quit; a terminal's EOF (Ctrl-D) keeps the window running.
+            if (!isatty(STDIN_FILENO)) closed = true;
         }).detach();
+    }
+    // True once stdin has closed and every line it sent has been handled.
+    bool Finished() {
+        if (!closed) return false;
+        lock_guard<mutex> lock(guard);
+        return lines.empty();
     }
     bool Next(string& line) {
         lock_guard<mutex> lock(guard);
@@ -693,6 +723,7 @@ class Console {
    private:
     mutex guard;
     deque<string> lines;
+    atomic<bool> closed{false};
 };
 
 // Hard keys by replay name: the IIIx's, and the T415's Jog Dial turns, push and Back.
@@ -924,6 +955,12 @@ string exportDatabaseZip(const string& name, vector<uint8_t>& out) {
     return "missing";
 }
 
+// Headless runs read the guest clock instead of the host's, so they repeat: 2026-10-26 00:00:00
+// UTC (as in benchmark-replay) plus the guest seconds run so far.
+constexpr int64_t kHeadlessEpoch = 1792972800;
+const double* headlessGuestSeconds = nullptr;
+int64 HeadlessClock() { return kHeadlessEpoch + (headlessGuestSeconds ? int64_t(*headlessGuestSeconds) : 0); }
+
 class Runner {
    public:
     Runner(const Options& options, const DeviceProfile5& profile, const SessionMetadata& metadata)
@@ -931,6 +968,10 @@ class Runner {
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
+        if (gBattery.charging && !BatteryChargingSupported()) {
+            cerr << "this device's charging can't be set yet, it stays on battery" << endl;
+            gBattery.charging = false;
+        }
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
         SetSpeed(options.speed);
@@ -989,6 +1030,7 @@ class Runner {
 
     // Headless: runs for options.runFor guest seconds as fast as the host can.
     int RunHeadless() {
+        headlessGuestSeconds = &guestSeconds;
         for (unsigned n=0; n<2; ++n) if (!options.sdAttach[n].empty()) {
             const auto reply=runtimeCards.Command(n,"attach",options.sdAttach[n]);
             cout << "card: " << reply << endl;
@@ -1035,6 +1077,7 @@ class Runner {
         speedMark = {wallMs(), double(gSession->GetSystemCycles())};
         while (!quit) {
             string line;
+            if (!desktop && !guestCall && console.Finished()) break;
             // A command waiting for the guest's event loop holds back the ones after it.
             while (!quit && !desktop && !guestCall && console.Next(line)) Command(line);
             if (window) PollWindow();
@@ -1089,18 +1132,32 @@ class Runner {
     // Host commands that call into Palm OS (install, launch, database lists and exports) wait for
     // the guest's event loop, where no app or system call is half done, and run there inside the
     // emulation. One waits at a time; it fails with a reason after kGuestCallSeconds of guest time,
-    // or at once while asleep or stopped in the debugger.
+    // or at once when stopped in the debugger. With wake (the commands you start, not lists) a
+    // sleeping Palm is woken first with a power button press, as a person would; one still asleep
+    // kWakeSeconds later, or that falls asleep while the call waits, refuses it. Without wake a
+    // sleeping Palm refuses it at once.
     static constexpr double kGuestCallSeconds = 30;
+    static constexpr double kWakeSeconds = 5;
     struct GuestCall {
         function<void()> run;
         function<void(const string&)> refuse;
         double deadline;
+        double wakeDeadline;  // guest seconds; 0 when the Palm was awake
     };
     optional<GuestCall> guestCall;
 
-    void Guest(function<void()> run, function<void(const string&)> refuse) {
+    static constexpr const char* kAsleep = "the Palm is asleep";
+
+    void Guest(function<void()> run, function<void(const string&)> refuse, bool wake = true) {
         if (!gSystemState.IsUIInitialized()) return refuse("Palm OS hasn't finished starting");
-        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds};
+        if (!wake && !gSession->IsPowerOn()) return refuse(kAsleep);
+        double wakeDeadline = 0;
+        if (!gSession->IsPowerOn() && !gDebugger.IsStopped()) {
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::press));
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::release));
+            wakeDeadline = guestSeconds + kWakeSeconds;
+        }
+        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds, wakeDeadline};
         EmPalmOS::RequestSafePoint();
     }
 
@@ -1147,8 +1204,10 @@ class Runner {
         if (!guestCall) return;
         string why;
         if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
-        else if (!gSession->IsPowerOn()) why = "the Palm is asleep";
-        else if (guestSeconds >= guestCall->deadline)
+        else if (!gSession->IsPowerOn()) {
+            if (guestSeconds < guestCall->wakeDeadline) return;
+            why = kAsleep;
+        } else if (guestSeconds >= guestCall->deadline)
             why = "Palm OS is busy, its event loop didn't run in " + to_string(int(kGuestCallSeconds)) + " s";
         else return;
         GuestCall call = std::move(*guestCall);
@@ -1660,7 +1719,7 @@ class Runner {
 
     void SetSpeed(Speed value) {
         speed = value;
-        gSession->SetClockFactor(speed == Speed::original ? 1 : kUncappedFactor);
+        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? kUncappedFactor : speed.Multiplier());
     }
 
     // Measured over about a second of wall time; one cycle is one 68000 clock.
@@ -1676,7 +1735,7 @@ class Runner {
         const double limit = gSession->GetClocksPerSecond();
         snprintf(text, sizeof(text), "%.2f MHz, limit %.2f MHz, %u%%, %s", measuredHz / 1e6, limit / 1e6,
                  limit > 0 ? unsigned(100 * measuredHz / limit + 0.5) : 0u,
-                 speed == Speed::original ? "original" : "uncapped");
+                 speed.Name().c_str());
         return text;
     }
 
@@ -2009,6 +2068,12 @@ class Runner {
             cout << "backlight: " << (gSession->IsPowerOn() && EmHAL::GetLCDBacklightOn() ? "on" : "off") << endl;
         } else if (command == "speed-state") {
             cout << "speed: " << SpeedState() << endl;
+        } else if (command == "battery" || command == "battery-state") {
+            string spec;
+            getline(words, spec);
+            string error;
+            if (command == "battery" && !SetBattery(spec, error)) return void(cout << "battery refused: " << error << endl);
+            cout << "battery: " << BatteryState() << endl;
         } else if (command == "bus-wait") {
             // Wait states per byte/word bus cycle, from the chip selects as the guest set them.
             const EmAddressBank& rom = EmMemGetBank(EmBankROM::GetMemoryStart());
@@ -2059,9 +2124,12 @@ class Runner {
         } else if (command == "speed") {
             string value;
             words >> value;
-            if (value != "original" && value != "uncapped") return void(cout << "usage: speed original|uncapped" << endl);
-            SetSpeed(value == "original" ? Speed::original : Speed::uncapped);
-            cout << "speed: " << value << endl;
+            if (value.empty()) return void(cout << "speed: " << speed.Name() << endl);
+            Speed parsed;
+            if (IsSpeed8x(value)) return void(cout << "usage: speed " << kSpeedChoices68k << " (" << kSpeed8x68k << ")" << endl);
+            if (!ParseSpeed68k(value, parsed)) return void(cout << "usage: speed " << kSpeedChoices68k << endl);
+            SetSpeed(parsed);
+            cout << "speed: " << speed.Name() << endl;
         } else if (command == "display") {
             Display(words);
         } else if (command == "launch") {
@@ -2084,7 +2152,7 @@ class Runner {
                     cout << fields << printable(database.dbName, sizeof(database.dbName)) << endl;
                 }
                 cout << "db-list: " << databases.size() << " RAM databases" << endl;
-            }, [](const string& why) { cout << "db-list: " << why << endl; });
+            }, [](const string& why) { cout << "db-list: " << why << endl; }, false);
         } else if (command == "db-export" || command == "db-export-all") {
             // A zip of the RAM databases, with the ROM ones too for db-export-all.
             if (!argument(path)) return void(cout << "usage: " << command << " <zip file>" << endl);
@@ -2172,8 +2240,9 @@ class Runner {
                         }
                         desktop->Reply(request.id, result.ok, result.code, result.message);
                     }, [this, id = request.id](const string& why) {
-                        desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
-                    });
+                        if (why == kAsleep) desktop->Reply(id, false, "asleep", "The Palm is asleep. Turn it on and try again.");
+                        else desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
+                    }, request.command != "db-list" || request.argument == "wake");
                     break;
                 }
                 Reply result;
@@ -2344,9 +2413,9 @@ class Runner {
             return {false,"unsupported",refusal};
         static const char* const fileCommands[] = {"save", "install", "export", "export-db", "input-replay"};
         static const char* const argumentCommands[] = {
-            "launch-app",  "delete-db", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
+            "launch-app",  "delete-db", "db-list", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
-            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter"};
+            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery"};
         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
             const auto result=DanaInputCommand(command,argument);
@@ -2431,6 +2500,8 @@ class Runner {
         }
         if (command == "db-list") {
             // One line per RAM database: type, creator and attributes in hex, then the hex name.
+            // wake (a lookup for a delete) wakes a sleeping Palm first, in Guest.
+            if (!argument.empty() && argument != "wake") return {false, "argument", "db-list takes only wake."};
             DatabaseInfoList databases;
             if (!ready || !GetDatabases(databases, GetDatabaseFlags::kOnlyRamDatabases)) return notReady;
             string text;
@@ -2536,9 +2607,12 @@ class Runner {
         }
         if (command == "speed-state") return {true, "speed", SpeedState()};
         if (command == "speed") {
-            if (argument != "original" && argument != "uncapped") return {false, "argument", "Use original or uncapped."};
-            SetSpeed(argument == "original" ? Speed::original : Speed::uncapped);
-            return {true, "speed", argument};
+            if (argument.empty()) return {true, "speed", speed.Name()};
+            Speed parsed;
+            if (IsSpeed8x(argument)) return {false, "argument", "8x is Uncapped's speed on the 68k. Use uncapped."};
+            if (!ParseSpeed68k(argument, parsed)) return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x or uncapped."};
+            SetSpeed(parsed);
+            return {true, "speed", speed.Name()};
         }
         if (command == "display") {
             string error;
@@ -2584,6 +2658,16 @@ class Runner {
         // State queries the desktop asks every device, answered as absent.
         if (command == "network-state") return {true, "network", NetworkState()};
         if (command == "hold-state") return {true, "hold", "unavailable"};
+        if (command == "battery-state") return {true, "battery", BatteryState()};
+        if (command == "battery") {
+            string error;
+            if (!SetBattery(argument, error)) {
+                BatteryPower parsed;
+                const bool unsupported = !BatterySupported() || (BatteryPower::Parse(argument, parsed) && parsed.charging);
+                return {false, unsupported ? "unsupported" : "argument", error};
+            }
+            return {true, "battery", BatteryState()};
+        }
         if (command == "keyboard-state") return {true, "keyboard", "detached"};
         if (command == "irprinter") {
             if (!profile->capabilities.infrared) return {false,"unsupported","This device has no infrared port."};
@@ -2654,6 +2738,24 @@ class Runner {
         if (command.rfind("sd-", 0) == 0) return {false, "unsupported", "This device has no SD slot."};
         if (command.rfind("ms-", 0) == 0) return {false, "unsupported", "This device has no Memory Stick slot."};
         return {false, "command", "Unknown desktop command."};
+    }
+
+    bool BatterySupported() const { return true; }
+    // Whether Charging reaches the guest. Where the ROM reads its own dock status from a board input Frond
+    // doesn't model, it stays off and battery-state ends with "no-charging".
+    bool BatteryChargingSupported() const { return gSession && gSession->GetDevice().BatteryChargingSupported(); }
+    string BatteryState() const {
+        if (!BatterySupported()) return "unavailable";
+        return gBattery.Describe() + (BatteryChargingSupported() ? "" : " no-charging");
+    }
+    // Applies live: the patches and board inputs read gBattery each time the guest asks.
+    bool SetBattery(const string& spec, string& error) {
+        if (!BatterySupported()) return error = "This device's battery can't be set yet.", false;
+        BatteryPower parsed;
+        if (!BatteryPower::Parse(spec, parsed)) return error = "Use max, level N or host N (0-100), then charging or battery.", false;
+        if (parsed.charging && !BatteryChargingSupported()) return error = "This device's charging can't be set yet.", false;
+        gBattery = parsed;
+        return true;
     }
 
     // contrast=0..100, smooth=on|off, fit= and jog=hidden|screen|keyboard for a device with a jog panel.
@@ -3412,7 +3514,7 @@ class Runner {
     Lcd68k lcd;
     Replay replay;
     Console console;
-    Speed speed{Speed::original};
+    Speed speed{};
     double guestSeconds{0};
     double measuredHz{0};
     pair<double, double> speedMark{0, 0};
@@ -3530,10 +3632,13 @@ bool parseOptions(int argc, char** argv, Options& options) {
             const char* v = value();
             if (!v) return false;
             options.inputReplay = v;
+        } else if (arg == "--battery") {
+            const char* v = value();
+            if (!v || !BatteryPower::Parse(v, gBattery)) return false;
         } else if (arg == "--speed") {
             const char* v = value();
-            if (!v || (strcmp(v, "original") && strcmp(v, "uncapped"))) return false;
-            options.speed = strcmp(v, "original") ? Speed::uncapped : Speed::original;
+            if (v && IsSpeed8x(v)) cerr << "--speed " << kSpeed8x68k << endl;
+            if (!v || !ParseSpeed68k(v, options.speed)) return false;
         } else if (arg == "--contrast") {
             if (!number(0, 100, n) || n != int(n)) return false;
             options.contrast = int(n);
@@ -3631,7 +3736,7 @@ int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);
 #endif
     MemoryStickBackend::factory = [] { return make_unique<FrondMsBackend>(); };
-    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.16.0" << endl, 0;
+    if (argc == 2 && string(argv[1]) == "--version") return cout << "frond-68k 0.17.0" << endl, 0;
     Options options;
     if (!parseOptions(argc, argv, options)) {
         if (options.refused.empty()) return usage(), 2;
@@ -3642,6 +3747,7 @@ int main(int argc, char** argv) {
         cerr << "--desktop-socket cannot be combined with --run-for or --check-rom" << endl;
         return 2;
     }
+    if (options.runFor > 0) Platform::SetClock(HeadlessClock);
     if (options.saveOnDisconnect && !options.desktopSocket) {
         cerr << "--save-on-disconnect needs --desktop-socket" << endl;
         return 2;
@@ -3730,6 +3836,7 @@ int main(int argc, char** argv) {
             cerr << error.what() << endl;
             status = 1;
         }
+        headlessGuestSeconds = nullptr;
     }
     runtimeCards.Install(RuntimeCards::Pair{});
     cout.flush();

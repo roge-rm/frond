@@ -826,18 +826,14 @@ bool TranslatorVisitor::arm_STRH_reg(Cond cond, bool P, bool U, bool W, Reg n, R
 
 // Frond: the base (loaded or written back) is set after the last access, so a transfer that
 // faults leaves it as it was for the interpreter to run the instruction again. The other
-// registers are set as they load, as in the interpreter. DA and DB go from the highest
-// register down, as the interpreter does, so a fault part-way loads the same registers.
-static bool LDMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address, bool descending = false) {
-    const u32 count = static_cast<u32>(mcl::bit::count_ones(list));
+// registers are set as they load, as in the interpreter. Every mode goes from the lowest
+// register at the lowest address up, as the ARM920T and XScale do and the interpreter does,
+// so a fault part-way loads the same registers.
+static bool LDMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address) {
     IR::U32 address = start_address;
-    if (descending) {
-        address = ir.Add(start_address, ir.Imm32(4 * (count - 1)));
-    }
     std::optional<IR::U32> base_data;
     std::optional<IR::U32> pc_data;
-    for (size_t k = 0; k <= 15; k++) {
-        const size_t i = descending ? 15 - k : k;
+    for (size_t i = 0; i <= 15; i++) {
         if (mcl::bit::get_bit(i, list)) {
             const auto data = ir.ReadMemory32(address, IR::AccType::ATOMIC);
             if (i == 15) {
@@ -847,11 +843,7 @@ static bool LDMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 s
             } else {
                 ir.SetRegister(static_cast<Reg>(i), data);
             }
-            if (descending) {
-                address = ir.Sub(address, ir.Imm32(4));
-            } else {
-                address = ir.Add(address, ir.Imm32(4));
-            }
+            address = ir.Add(address, ir.Imm32(4));
         }
     }
     if (base_data) {
@@ -904,7 +896,7 @@ bool TranslatorVisitor::arm_LDMDA(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list) - 4)));
     const auto writeback_address = ir.Sub(start_address, ir.Imm32(4));
-    return LDMHelper(ir, W, n, list, start_address, writeback_address, true);
+    return LDMHelper(ir, W, n, list, start_address, writeback_address);
 }
 
 // LDMDB <Rn>{!}, <reg_list>
@@ -922,7 +914,7 @@ bool TranslatorVisitor::arm_LDMDB(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list))));
     const auto writeback_address = start_address;
-    return LDMHelper(ir, W, n, list, start_address, writeback_address, true);
+    return LDMHelper(ir, W, n, list, start_address, writeback_address);
 }
 
 // LDMIB <Rn>{!}, <reg_list>
@@ -951,24 +943,15 @@ bool TranslatorVisitor::arm_LDM_eret() {
     return InterpretThisInstruction();
 }
 
-// Frond: written back after the last store, so a store that faults leaves the base. DA and
-// DB store from the highest register down, as the interpreter does.
-static bool STMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address, bool descending = false) {
-    const u32 count = static_cast<u32>(mcl::bit::count_ones(list));
+// Frond: written back after the last store, so a store that faults leaves the base. Every
+// mode stores from the lowest register at the lowest address up, as the interpreter does.
+static bool STMHelper(A32::IREmitter& ir, bool W, Reg n, RegList list, IR::U32 start_address, IR::U32 writeback_address) {
     IR::U32 address = start_address;
-    if (descending) {
-        address = ir.Add(start_address, ir.Imm32(4 * (count - 1)));
-    }
-    for (size_t k = 0; k <= 15; k++) {
-        const size_t i = descending ? 15 - k : k;
+    for (size_t i = 0; i <= 15; i++) {
         if (mcl::bit::get_bit(i, list)) {
             const auto value = i == 15 ? ir.Imm32(ir.PC()) : ir.GetRegister(static_cast<Reg>(i));
             ir.WriteMemory32(address, value, IR::AccType::ATOMIC);
-            if (descending) {
-                address = ir.Sub(address, ir.Imm32(4));
-            } else {
-                address = ir.Add(address, ir.Imm32(4));
-            }
+            address = ir.Add(address, ir.Imm32(4));
         }
     }
     if (W) {
@@ -1004,7 +987,7 @@ bool TranslatorVisitor::arm_STMDA(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list) - 4)));
     const auto writeback_address = ir.Sub(start_address, ir.Imm32(4));
-    return STMHelper(ir, W, n, list, start_address, writeback_address, true);
+    return STMHelper(ir, W, n, list, start_address, writeback_address);
 }
 
 // STMDB <Rn>{!}, <reg_list>
@@ -1019,7 +1002,7 @@ bool TranslatorVisitor::arm_STMDB(Cond cond, bool W, Reg n, RegList list) {
 
     const auto start_address = ir.Sub(ir.GetRegister(n), ir.Imm32(u32(4 * mcl::bit::count_ones(list))));
     const auto writeback_address = start_address;
-    return STMHelper(ir, W, n, list, start_address, writeback_address, true);
+    return STMHelper(ir, W, n, list, start_address, writeback_address);
 }
 
 // STMIB <Rn>{!}, <reg_list>

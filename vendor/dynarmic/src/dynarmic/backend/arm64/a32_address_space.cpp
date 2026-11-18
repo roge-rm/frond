@@ -208,7 +208,7 @@ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
 }
 
 IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor, A32::TranslateCallbacks* tcb) const {
-    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets});
+    IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, tcb, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions, conf.psr_coprocessor, conf.max_unchecked_instructions, conf.coprocessor_unscaled_offsets, conf.psr_inline_interrupt_mask});
 
     Optimization::PolyfillPass(ir_block, {});
     Optimization::NamingPass(ir_block);
@@ -237,6 +237,16 @@ void A32AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u32>&
     }
 }
 
+bool A32AddressSpace::HasCodeIn(u32 first, u32 last) {
+    std::lock_guard lock{code_mutex};
+    return block_ranges.Overlaps(boost::icl::discrete_interval<u32>::closed(first, last));
+}
+
+void A32AddressSpace::CodeWords(u32 page_base, u64* words) {
+    std::lock_guard lock{code_mutex};
+    block_ranges.Words(page_base, words);
+}
+
 void A32AddressSpace::ClearCacheLocked() {
     std::lock_guard lock{code_mutex};
     ClearCacheHeld();
@@ -244,6 +254,7 @@ void A32AddressSpace::ClearCacheLocked() {
 
 void A32AddressSpace::ClearCacheHeld() {
     ClearCache();
+    block_ranges.ClearCache();
     if (compile_thread) {
         compile_thread->Cleared();
     }
@@ -712,6 +723,8 @@ EmitConfig A32AddressSpace::GetEmitConfig() {
         .page_table_address_space_bits = 32,
         .page_table_pointer_mask_bits = conf.page_table_pointer_mask_bits,
         .page_table_write_protect_bit = conf.page_table_write_protect_bit,
+        .frond_cost_hint = conf.frond_cost_hint,
+        .frond_cost_hint_on = conf.frond_cost_hint_on,
         .silently_mirror_page_table = true,
         .absolute_offset_page_table = conf.absolute_offset_page_table,
         .detect_misaligned_access_via_page_table = conf.detect_misaligned_access_via_page_table,

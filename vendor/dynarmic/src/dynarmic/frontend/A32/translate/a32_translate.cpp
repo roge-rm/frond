@@ -12,6 +12,7 @@
 #include "dynarmic/frontend/A32/decoder/thumb32.h"
 #include "dynarmic/frontend/A32/decoder/vfp.h"
 #include "dynarmic/frontend/A32/translate/impl/a32_translate_impl.h"
+#include "dynarmic/frontend/A32/translate/translate_callbacks.h"
 #include "dynarmic/ir/basic_block.h"
 
 namespace Dynarmic::A32 {
@@ -20,7 +21,9 @@ IR::Block TranslateArm(LocationDescriptor descriptor, TranslateCallbacks* tcb, c
 IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb, const TranslationOptions& options);
 
 IR::Block Translate(LocationDescriptor descriptor, TranslateCallbacks* tcb, const TranslationOptions& options) {
-    return (descriptor.TFlag() ? TranslateThumb : TranslateArm)(descriptor, tcb, options);
+    TranslationOptions o = options;
+    o.condition_failed_ticks = tcb->GetTicksForConditionFailed();
+    return (descriptor.TFlag() ? TranslateThumb : TranslateArm)(descriptor, tcb, o);
 }
 
 bool TranslateSingleArmInstruction(IR::Block& block, LocationDescriptor descriptor, u32 instruction);

@@ -23,7 +23,7 @@ struct ZodiacInputPort {
 
 // The machine's control for a shared key id, -1 for a key the Zodiac doesn't have. The numbers are
 // Imx1ZodiacControl's, in the order of its pin table: Home A7, the triggers A8 and A9, power A10,
-// stick click D7, Action right D8, up D9, left D10, Function D12, Bluetooth D13, Action down D14.
+// stick click D7, Action right D9, up D10, left D14, Function D12, Bluetooth D13, Action down D8.
 constexpr int zodiacControlFor(KeyId key) {
     switch (key) {
         case keyIdHome: return 0;

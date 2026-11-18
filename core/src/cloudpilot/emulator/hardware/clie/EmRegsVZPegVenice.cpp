@@ -1,5 +1,6 @@
 #include "EmRegsVZPegVenice.h"
 
+#include "EmBattery.h"
 #include "EmBankRegs.h"  // EmBankRegs::InvalidAccess
 #include "EmCommon.h"
 #include "EmMemory.h"
@@ -130,7 +131,8 @@ uint8 EmRegsVzPegVenice::GetPortInputValue(int port) {
         result |= 0x00;
     }
 
-    if (port == 'J') {
+    // DC_IN is low on the charger (ROM HwrDockStatus 0x88390 reads PJ2 low as charging).
+    if (port == 'J' && !gBattery.charging) {
         result |= hwrVZVenicePortJDC_IN;
     }
 

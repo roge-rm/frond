@@ -42,6 +42,7 @@ enum class ChunkType : uint32_t {
     bluetoothAddress = 0x0250,
     ov9640 = 0x0260,
     pxa27xQci = 0x0270,
+    sonyTg50Gamepad = 0x0280,
 
     pvIc = 0x1000,
     pvTimer = 0x1010,
@@ -66,6 +67,7 @@ enum class ChunkType : uint32_t {
     irKeyboard = 0x100c0,
     libertasCF = 0x100d0,
     xscaleDcache = 0x100e0,
+    costDataCache = 0x100f0,
 };
 
 inline ChunkType operator+(ChunkType chunkType, uint32_t index) {

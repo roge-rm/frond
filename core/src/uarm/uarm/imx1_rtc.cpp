@@ -57,6 +57,20 @@ uint64_t Imx1Rtc::idleQuietSteps(uint64_t numerator, uint64_t denominator) const
     }
     return imx1StepsUntil(referencePhase, referenceDenominator, numerator, denominator, ticks);
 }
+bool Imx1Rtc::referenceEvent(uint64_t& phase, uint64_t& den, uint64_t& target) const {
+    if (!known) return false;
+    phase = referencePhase;
+    den = referenceDenominator;
+    target = 0;
+    if (prescaler >= divisor()) return true;
+    uint64_t ticks = divisor() - prescaler;
+    for (unsigned bit = 8; bit < 16; ++bit) {
+        const uint32_t period = 1u << (21 - bit);
+        if ((enable & (1u << bit)) && period - samplingPhase % period < ticks) ticks = period - samplingPhase % period;
+    }
+    target = ticks;
+    return true;
+}
 void Imx1Rtc::advanceTicks(uint64_t ticks) {
     if (!ticks) return;
     for (unsigned bit = 8; bit < 16; ++bit) {

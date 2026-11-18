@@ -4,6 +4,7 @@
 #include "arm_diagnostic.h"
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "imx1_bootstrap.h"
 #include "imx1_cs4_capture.h"
@@ -23,6 +24,9 @@ struct Imx1ProbeTrace {
     uint64_t step;
     uint32_t pc, instruction, cpsr, operand;
     uint32_t instructionSize;
+    // False when the fetch at pc aborted: no instruction was fetched and instruction is 0. Sits in the padding,
+    // so the struct's size doesn't change, and isn't saved in states (a load sets it true).
+    bool fetched = true;
 };
 struct Imx1ProbeAccess {
     uint64_t step;
@@ -208,6 +212,9 @@ Imx1MachineCheapStatus imx1MachineGetStatus(const Imx1Machine*);
 // switching to it cleans the data cache to memory and empties both. False inside a run or after a stop.
 bool imx1MachineSetFastEngine(Imx1Machine*, bool fast);
 bool imx1MachineFastEngine(const Imx1Machine*);
+// Faster speed between runs: the CPU's FCLK at num / den times the MCU PLL's (Imx1Bootstrap::setCpuClockMultiplier).
+// 1 / 1 is Original. Not saved in the state; a state load keeps the one set. False inside a run.
+bool imx1MachineSetCpuClockMultiplier(Imx1Machine*, uint32_t num, uint32_t den);
 // Whether Fast runs Dynarmic blocks before the lean path (on by default). Off gives the lean-only Fast engine,
 // for tests and measuring. False inside bounds or after a stop.
 bool imx1MachineSetFastBlocks(Imx1Machine*, bool blocks);
@@ -221,13 +228,35 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*);
 uint64_t imx1MachineJitReads(const Imx1Machine*);
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*);
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*);
+// Ring pointer writes Fast blocks took in generated code with the run's cycles charged first (jitChargedWrite).
+uint64_t imx1MachineJitChargedWrites(const Imx1Machine*);
 uint64_t imx1MachineDelaySkips(const Imx1Machine*);
+// Of those, the ones at the start of a run a delay loop's timer read ended (the ROM's loops at 2009f678 and 2008492c).
+uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*);
 uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*);
 // The vertical wait's scan status polls Fast blocks passed at once, since the process started: the times and the
 // rounds. imx1SetScanPollSkip(false) turns the skip off, for tests.
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*);
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
+// Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
+uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
+// Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
+// ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
+// Execution thread, between runs; false inside a bounded run or after stop.
+bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on);
+bool imx1MachineGuestExceptions(const Imx1Machine* machine);
+// The graphics FIFO wait's rounds Fast blocks passed at once, since the process started: the times and the rounds.
+// imx1SetFifoWaitSkip(false) turns the skip off, for tests.
+uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);
+uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
+void imx1SetFifoWaitSkip(bool skip);
+// CPU reads of the YMF768's ready register (bank 1 38) since the machine was made or loaded, for tests.
+uint64_t imx1MachineYmfReadyReads(const Imx1Machine*);
+// The board time of the last of those reads, for tests (not saved).
+Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine*);
+// SSI1 words sent again from an empty FIFO since the process started (every machine, not saved), for tools.
+uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.
@@ -240,6 +269,9 @@ uint64_t imx1MachineLeanCs5Reads(const Imx1Machine*);
 uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*);
 // ASP status, GPIO and AITC reads the Fast engine answered on its lean path.
 uint64_t imx1MachineLeanBoardReads(const Imx1Machine*);
+// The YMF768's selected bank, index and registers and the graphics chip's clock registers as text, for comparing
+// where two runs end.
+std::string imx1MachineChipSummary(const Imx1Machine*);
 // A hash of SRAM, SDRAM and graphics memory as they are in memory (cache contents left out), for tests.
 uint64_t imx1MachineMemoryHash(const Imx1Machine*);
 // Times the Fast engine dropped its decoded code for a store to a page it came from.
@@ -277,12 +309,22 @@ void imx1MachineAcknowledgeFrame(Imx1Machine*);
 // 1 portrait (as wired), 2 landscape, 3 reverse portrait, 4 reverse landscape, the SysGetOrientation
 // numbers. 0 while the display is off or not set up.
 unsigned imx1MachineScanOrientation(const Imx1Machine*);
+// The YMF768's LED and rumble motor outputs as the guest last set them, false while the chip is off. Reads
+// only; for the frontends.
+struct Imx1MachineAttention { bool led = false, motor = false; };
+Imx1MachineAttention imx1MachineAttention(const Imx1Machine*);
 // How many times the guest has started up from the ROM's entry, by its first register write. Counts a guest
 // reset and a power-on, not sleep and wake.
 uint32_t imx1MachineStartups(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine*, const Imx1AspPenInputs&, bool commit = true);
 // The pen inputs the machine has now, as the options or the last replace left them.
 Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
+// The ASP's U input word (the Zodiac's battery), for the next U conversion. Not saved with the state: a load
+// or a fresh machine starts from aspUSample again. Needs aspUSampleKnown.
+Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
+uint16_t imx1MachineAspUInput(const Imx1Machine*);
+// A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
+uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
 // Execution-thread raw physical inputs. Preview validates without changing guest state.
 // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],
@@ -295,13 +337,25 @@ Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&
 inline constexpr uint32_t imx1MmcsdCardDetectPin = 1u << 20;
 Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine*, VSD* card, bool commit = true);
 VSD* imx1MachineMmcsdCard(const Imx1Machine*);
+// The id of the card in the slot, saved with its card section so a load can tell it's the same card.
+// Null or empty for none.
+constexpr size_t imx1CardIdBytes = 32;
+void imx1MachineSetMmcsdCardId(Imx1Machine*, const char* id);
+// The card in the W4200's own SD slot (slot 2, Zodiac only), or null to take it out. The slot's card detect
+// (16010910 bit 2) follows it, and with the driver's card events on an insert or remove raises the chip's SD
+// interrupt. Needs the virtual graphics profile. A state saved once the slot has had a card keeps the slot's
+// registers, the transfer under way and the card's own state in its SD2 section. Setting the card already in
+// changes nothing.
+Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine*, VSD* card, bool commit = true);
+VSD* imx1MachineGraphicsSdCard(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
-// buttons. ASSUMPTION "Zodiac button sides": which trigger is left and where each action button sits.
+// buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
+// and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
 // ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
-// Not wired: D22 (cradle or HotSync, active high) and B23 (the scan's other stick click input).
+// Not wired: D22 (the cradle's HotSync button, active low, idle high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,
     actionDown, count
@@ -309,8 +363,8 @@ enum class Imx1ZodiacControl {
 struct Imx1ZodiacControlPin { const char* name; uint8_t port, pin; }; // port 0 is A, 3 is D
 inline constexpr Imx1ZodiacControlPin imx1ZodiacControlPins[] = {
     {"home", 0, 7}, {"trigger-left", 0, 8}, {"trigger-right", 0, 9}, {"power", 0, 10}, {"stick-click", 3, 7},
-    {"action-right", 3, 8}, {"action-up", 3, 9}, {"action-left", 3, 10}, {"function", 3, 12}, {"bluetooth", 3, 13},
-    {"action-down", 3, 14}};
+    {"action-right", 3, 9}, {"action-up", 3, 10}, {"action-left", 3, 14}, {"function", 3, 12}, {"bluetooth", 3, 13},
+    {"action-down", 3, 8}};
 static_assert(sizeof imx1ZodiacControlPins / sizeof *imx1ZodiacControlPins == size_t(Imx1ZodiacControl::count));
 Imx1BootstrapAccess imx1MachineSetZodiacControl(Imx1Machine*, Imx1ZodiacControl, bool pressed, bool commit = true);
 // Stick offsets from rest, right and down positive, -511..511. This is a fixed virtual stick: rest is raw
@@ -332,7 +386,9 @@ void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
 // and that machine then continues the way the saved one did. Observers, contexts, the idle
 // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
 // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
-// Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+// The app refuses a state from another core revision (imx1StateAllowCoreRevision aside), so a bump stops every
+// saved session from loading. Bump it only when an old state can't carry on correctly at all. A state() list
+// change is caught by the layout fingerprint and section versions; behaviour changes leave the revision as is.
 inline constexpr uint32_t imx1MachineStateCoreRevision = 760;
 enum class Imx1StateStatus {
     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,
@@ -365,6 +421,13 @@ struct Imx1StateInfo {
     // another size, the slot starts again with no transfer and the caller resets the card. With no card
     // in, the section waits for the next imx1MachineSetMmcsdCard.
     bool cardResumed = false;
+    // The state has a card section: it was saved with a card in the slot.
+    bool cardSection = false;
+    // The saved card's id, when the state has it.
+    bool cardIdKnown = false;
+    char cardId[imx1CardIdBytes + 1]{};
+    // Slot 2: the state has an SD2 section, and (load only) the card in slot 2 took on its card state.
+    bool graphicsSdSection = false, graphicsSdResumed = false;
 };
 // An attached I2C bus is saved through its stateIdentity, saveState and loadState; one with identity 0
 // returns unsupportedConfiguration, and a state from another bus busMismatch. A frame from AcquireFrame is

@@ -18,9 +18,14 @@ struct Imx1AspPenInputs {
 class Imx1Asp {
    public:
     explicit Imx1Asp(bool px1HighFromReset = false, bool uSampleKnown = false, uint16_t uSample = 0)
-        : px1HighFromReset(px1HighFromReset), uSampleKnown(uSampleKnown), uSample(uSample) {
+        : px1HighFromReset(px1HighFromReset), uSampleKnown(uSampleKnown), uSample(uSample), uInput(uSample) {
         penInputs.contactKnown = px1HighFromReset;
     }
+    // The word the next U conversion takes (the Zodiac's battery), uSample until set. It's a live input
+    // like the pen and isn't saved: the saved uSample stays the fixed one, so the owner sets it again after
+    // every load. A slot already converting keeps the word it captured.
+    void setUInput(uint16_t word) { uInput = word; }
+    uint16_t currentUInput() const { return uInput; }
     // Execution-thread transaction. In-flight slots keep their captured input.
     Imx1AspAccess replacePenInputs(const Imx1AspPenInputs& inputs);
     const Imx1AspPenInputs& currentPenInputs() const { return penInputs; }
@@ -78,6 +83,8 @@ class Imx1Asp {
     bool idle = false, capturedUp = false;
     unsigned slot = 0;
     uint16_t captured = 0;
+    // Not saved, see setUInput. It sits in the padding after captured, so the size doesn't change.
+    uint16_t uInput;
     uint32_t remaining = 0;
     unsigned phase = 0;
     bool qualifiedU(uint32_t nextControl, uint32_t nextRate) const {

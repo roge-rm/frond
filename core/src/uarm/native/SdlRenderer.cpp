@@ -57,10 +57,10 @@ SdlRenderer::SdlRenderer(SDL_Window* window, SoC* soc, float scale,
     if (fit != WindowFit::none) {
         const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
         const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
-        const int deviceWidth = deviceControlsWidth(deviceControls(deviceType),
+        const int deviceWidth = deviceControlsWidth(deviceControls(deviceType,controlView),
             landscape ? screenHeight : displayConfiguration.width, controlView);
         const int deviceHeight = (landscape ? displayConfiguration.width : screenHeight) +
-                                 deviceControlsHeight(deviceControls(deviceType),landscape ? screenHeight : displayConfiguration.width,controlView);
+                                 deviceControlsHeight(deviceControls(deviceType,controlView),landscape ? screenHeight : displayConfiguration.width,controlView);
         layout = fitWindowLayout(fit, deviceWidth, deviceHeight, windowWidth, windowHeight);
 
         // The viewport is in output pixels while the scale is 1, then the scale maps device
@@ -208,8 +208,10 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     DrawSilkscreen();
 
     if (frameTextureValid && lcdEnabled) {
-        SDL_Rect dest = {.x = int(scale * deviceScreenLeft(deviceControls(deviceType),controlView)),
-                         .y = 0,
+        // The jog tab turned over the screen moves it down; that only comes with the upright frame.
+        const int top = int(scale * deviceScreenTop(deviceControls(deviceType,controlView),controlView));
+        SDL_Rect dest = {.x = int(scale * deviceScreenLeft(deviceControls(deviceType,controlView),controlView)),
+                         .y = top,
                          .w = int(scale * displayConfiguration.width),
                          .h = int(scale * displayConfiguration.height)};
 
@@ -255,7 +257,7 @@ void SdlRenderer::Render(const uint32_t* frame, uint32_t firstDirtyLine, uint32_
     const bool landscape=rotation==Rotation::landscape_90 || rotation==Rotation::landscape_270;
     const int screenWidth=landscape ? displayConfiguration.height+displayConfiguration.graffitiHeight : displayConfiguration.width;
     const int screenHeight=landscape ? displayConfiguration.width : displayConfiguration.height+displayConfiguration.graffitiHeight;
-    const auto& controls=deviceControls(deviceType);
+    const auto& controls=deviceControls(deviceType,controlView);
     if(controls.count) {
         // Controls all beside the screen leave nothing to draw under it.
         if(!deviceControlsUnits(controls,controlView)) {
@@ -303,7 +305,8 @@ void SdlRenderer::ClearWindow() {
     SDL_RenderClear(renderer);
     const bool landscape = rotation == Rotation::landscape_90 || rotation == Rotation::landscape_270;
     const int screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight;
-    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType),controlView), 0, landscape ? screenHeight : displayConfiguration.width,
+    const SDL_Rect screen{deviceScreenLeft(deviceControls(deviceType,controlView),controlView),
+                          deviceScreenTop(deviceControls(deviceType,controlView),controlView), landscape ? screenHeight : displayConfiguration.width,
                           landscape ? displayConfiguration.width : screenHeight};
     const uint8_t panel = lcdEnabled ? 0xff : 0;
     SDL_SetRenderDrawColor(renderer, panel, panel, panel, 0xff);

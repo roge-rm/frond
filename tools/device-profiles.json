@@ -19,7 +19,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 312000000,
-      "original_mips": 150,
+      "original_hz": 312000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -86,6 +86,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -106,7 +107,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 200000000,
-      "original_mips": 96,
+      "original_hz": 200000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -173,6 +174,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": [
         {
           "id": "e2-denvfs",
@@ -206,7 +208,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 200000000,
-      "original_mips": 96,
+      "original_hz": 200000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -273,6 +275,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -293,7 +296,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": false,
       "storage_slot": "none",
       "storage_slots": [],
@@ -342,6 +345,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -362,7 +366,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 312000000,
-      "original_mips": 150,
+      "original_hz": 312000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -429,6 +433,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -449,7 +454,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 200000000,
-      "original_mips": 96,
+      "original_hz": 200000000,
       "sound": true,
       "storage_slot": "memory-stick",
       "storage_slots": [
@@ -515,6 +520,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": true,
       "firmware_variants": []
     },
     {
@@ -535,7 +541,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -584,6 +590,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -604,7 +611,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -653,6 +660,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -673,7 +681,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -722,6 +730,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -742,7 +751,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -791,6 +800,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -811,7 +821,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 20250624,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -860,6 +870,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -880,7 +891,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -929,6 +940,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -949,7 +961,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 16580608,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -998,6 +1010,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1018,7 +1031,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": false,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1104,6 +1117,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1124,7 +1138,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": false,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1210,6 +1224,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1230,7 +1245,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": false,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1316,6 +1331,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1336,7 +1352,7 @@
       "pending_usb": "",
       "colour_lcd": true,
       "cpu_hz": 20250624,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "none",
       "storage_slots": [],
@@ -1385,6 +1401,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1405,7 +1422,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": true,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1491,6 +1508,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1511,7 +1529,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": true,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1597,6 +1615,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1617,7 +1636,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": true,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1703,6 +1722,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1723,7 +1743,7 @@
       "pending_usb": "USB HotSync",
       "colour_lcd": true,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1809,6 +1829,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1829,7 +1850,7 @@
       "pending_usb": "USB computer",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -1951,6 +1972,7 @@
       "usb_printer": true,
       "usb_wifi": true,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -1971,7 +1993,7 @@
       "pending_usb": "USB computer",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
@@ -2093,6 +2115,7 @@
       "usb_printer": true,
       "usb_wifi": false,
       "built_in_wifi": true,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2113,13 +2136,30 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "sd",
       "storage_slots": [
         {
           "id": 0,
           "label": 1,
+          "kind": "sd",
+          "media_families": [
+            {
+              "family": "sdsc",
+              "csd_format": "sd-v1",
+              "min_bytes": 33554432,
+              "max_bytes": 2147483648,
+              "block_bytes": 512,
+              "size_rule": "legacy-profile-aligned-512",
+              "runtime_sizes_bytes": [],
+              "guest_qualified_sizes_bytes": []
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "label": 2,
           "kind": "sd",
           "media_families": [
             {
@@ -2180,6 +2220,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2200,7 +2241,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 33161216,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": true,
       "storage_slot": "memory-stick",
       "storage_slots": [
@@ -2266,6 +2307,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2286,7 +2328,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": false,
       "storage_slot": "none",
       "storage_slots": [],
@@ -2335,6 +2377,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2355,7 +2398,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": false,
       "storage_slot": "none",
       "storage_slots": [],
@@ -2404,6 +2447,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     },
     {
@@ -2424,7 +2468,7 @@
       "pending_usb": "",
       "colour_lcd": false,
       "cpu_hz": 0,
-      "original_mips": 100,
+      "original_hz": 100000000,
       "sound": false,
       "storage_slot": "none",
       "storage_slots": [],
@@ -2473,6 +2517,7 @@
       "usb_printer": false,
       "usb_wifi": false,
       "built_in_wifi": false,
+      "clie_gamepad": false,
       "firmware_variants": []
     }
   ]

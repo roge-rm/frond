@@ -59,6 +59,10 @@ class EmSPISlaveADS784x : public EmSPISlave {
     // Not saved: whoever owns the cradle sets it again after a load.
     void SetDockLevel(uint16 level) { fDockLevel = level; }
 
+    // The battery channel's 12-bit count for percent on the ROM's sysBatteryData curve (11 entries, 0% to 100%).
+    static uint16 BatteryCount(const uint16_t (&curve)[11], UInt16 sysBattStepsPerVolt,
+                               Int16 sysBattVoltageStepOffset, unsigned percent, bool ads7846);
+
    protected:
     virtual uint16 ReadVirtualInput(unsigned channel) const { return 0; }
     void ProcessCommand(uint8);

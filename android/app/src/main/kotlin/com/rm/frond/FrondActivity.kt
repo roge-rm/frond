@@ -201,6 +201,7 @@ open class FrondActivity : SDLActivity() {
     private var controller = ControllerInput(ControllerMap(emptyMap())) { _, _ -> }
     // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
     private var zodiacPad: ZodiacPad? = null
+    private var rumble: Rumble? = null
     lateinit var runningDevice: Device
         private set
 
@@ -220,7 +221,7 @@ open class FrondActivity : SDLActivity() {
         runningDevice = device.unresolvedFirmware()
         settings = machineSettings.applyTo(Settings.from(this, intent))
         sound = launchDevice().sound && settings.sound
-        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        display = machineSettings.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         requestedOrientation = orientationRequest()
         File(filesDir, START_ERROR).delete()
         link = ControlLink(File(filesDir, controlSocket)) { name, state ->
@@ -340,7 +341,7 @@ open class FrondActivity : SDLActivity() {
             cardArguments()
         }
         arguments += machineSettings.arguments(soundSupported = launchDevice().sound,
-            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+            tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
@@ -499,6 +500,15 @@ open class FrondActivity : SDLActivity() {
         if (followsProgram()) requestedOrientation = orientationRequest()
     }
 
+    // The guest's alarm LED or vibrate motor changed (the Zodiac's rumble). The LED isn't shown yet.
+    @Suppress("UNUSED_PARAMETER")
+    // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
+    private var guestVibrate = false
+    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread {
+        guestVibrate = vibrate
+        if (!leaving && foreground) rumble?.set(vibrate)
+    }
+
     @Deprecated("Back before Android 13")
     override fun onBackPressed() = back()
 
@@ -513,6 +523,7 @@ open class FrondActivity : SDLActivity() {
             val pad = zodiacPad
             when (event.action) {
                 android.view.KeyEvent.ACTION_DOWN -> if (event.repeatCount == 0 && !leaving) {
+                    rumble?.controller = event.deviceId
                     if (pad != null) pad.key(event.deviceId, event.keyCode, true) else controller.key(event.deviceId, event.keyCode, true)
                 }
                 android.view.KeyEvent.ACTION_UP ->
@@ -527,6 +538,7 @@ open class FrondActivity : SDLActivity() {
         if (event.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK) && event.action == android.view.MotionEvent.ACTION_MOVE) {
             val pad = zodiacPad
             if (!leaving && pad != null) {
+                rumble?.controller = event.deviceId
                 pad.axes(
                     event.deviceId,
                     event.getAxisValue(android.view.MotionEvent.AXIS_X),
@@ -566,16 +578,55 @@ open class FrondActivity : SDLActivity() {
         }, "FrondFirmware").apply { isDaemon = true }.start()
     }
 
+    private var palmButtons: PalmButtons? = null
+    private var padAttached = false
+
+    // The CLIE game controller went in or out; held controller keys let go first.
+    fun gamepadAttached(on: Boolean) {
+        runOnUiThread {
+            if (padAttached == on) return@runOnUiThread
+            controller.releaseAll()
+            padAttached = on
+            palmButtons?.padAttached = on
+        }
+    }
+
+    // The pad state the core reports (RunningMenu.gamepadState): the buttons follow it, and an
+    // attached or detached state becomes the machine's setting, so a session loaded with its own
+    // state keeps it on the next start. A busy connector leaves the setting.
+    fun gamepadStateRead(state: String?) {
+        gamepadAttached(state == "attached")
+        runOnUiThread {
+            val next = machineSettings.gamepadFromCore(state) ?: return@runOnUiThread
+            machineSettings = next
+            val attached = next.gamepad ?: return@runOnUiThread
+            val path = sessionPath
+            Thread({
+                try {
+                    val id = Sessions.forPath(applicationContext, path)?.id ?: return@Thread
+                    Sessions.updateSettings(applicationContext, id) { it.copy(gamepad = attached) }
+                } catch (e: Exception) {
+                    Log.w(TAG, "game controller setting: ${e.message}")
+                }
+            }, "FrondGamepadSetting").apply { isDaemon = true }.start()
+        }
+    }
+
     private fun configureController(device: Device) {
         controller.releaseAll()
         val buttons = PalmButtons(device, link, cacheDir)
+        buttons.padAttached = padAttached
+        palmButtons = buttons
         controller = ControllerInput(ControllerMap.load(this, device), buttons::press)
     }
 
     // Controller mapping for this device from Settings, and releases when a controller goes away.
     private fun addController() {
         configureController(runningDevice)
-        if (launchDevice().zodiac) zodiacPad = ZodiacPad(ZodiacPad::push)
+        if (launchDevice().zodiac) {
+            zodiacPad = ZodiacPad(ControllerMap.load(this, launchDevice()), ZodiacPad::push)
+            rumble = Rumble(this).also { it.enabled = machineSettings.rumble }
+        }
         inputDevices = getSystemService(InputManager::class.java)
         inputListener = object : InputManager.InputDeviceListener {
             override fun onInputDeviceAdded(deviceId: Int) = updateDanaEnvironment()
@@ -583,6 +634,7 @@ open class FrondActivity : SDLActivity() {
             override fun onInputDeviceRemoved(deviceId: Int) {
                 controller.release(deviceId)
                 zodiacPad?.release(deviceId)
+                rumble?.forget(deviceId)
                 updateDanaEnvironment()
             }
         }
@@ -615,6 +667,7 @@ open class FrondActivity : SDLActivity() {
         }
         controller.releaseAll()
         zodiacPad?.releaseAll()
+        rumble?.stop()
         // The menu and sheets live in this activity, so they pause with it: a waiting microphone request
         // is dropped and the Bluetooth read stops until the Connections sheet is in front again.
         menuModel?.cancelMicrophoneRequest()
@@ -795,7 +848,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana() && saved.danaView != (danaState?.view ?: machineSettings.danaView)) {
             changeDanaView(saved.danaView) { _, error -> if (error != null) Log.w(TAG, "dana-view: $error") }
         }
-        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
+        val wanted = saved.displayArgument(tg50Controls = launchDevice().id == "sony-clie-tg50", jogControls = launchDevice().jogControls, gamepadSupported = launchDevice().clieGamepad, m68k = launchDevice().runs68k, colourLcd = launchDevice().colourLcd)
         if (wanted == display) return
         display = wanted
         link.whenConnected {
@@ -901,6 +954,10 @@ open class FrondActivity : SDLActivity() {
             return
         }
         Thread({
+            if (launchDevice().clieGamepad) {
+                val pad = link.request("gamepad-state", timeoutSeconds = 60)
+                if (pad.ok) gamepadStateRead(RunningMenu.gamepadState(pad.message))
+            }
             val reply = link.request("keyboard-state", timeoutSeconds = 60)
             if (!reply.ok) return@Thread
             val attached = reply.message == "attached"
@@ -916,6 +973,7 @@ open class FrondActivity : SDLActivity() {
     override fun onResume() {
         super.onResume()
         foreground = true
+        if (!leaving) rumble?.set(guestVibrate)
         startPendingMicrophone()
         if (!leaving) readKeyboard()
         if (!leaving) applySound()
@@ -995,6 +1053,7 @@ open class FrondActivity : SDLActivity() {
         val model = menuModel ?: return
         model.readKeyboard()
         model.readHold()
+        model.readGamepad()
         model.readNetwork()
         model.readMicrophone()
         model.readCard()
@@ -1013,6 +1072,7 @@ open class FrondActivity : SDLActivity() {
         when (id) {
             RunningMenu.Id.HOLD -> model.changeHold(model.hold != true)
             RunningMenu.Id.KEYBOARD -> model.attachKeyboard(model.keyboard != true)
+            RunningMenu.Id.GAMEPAD -> model.changeGamepad(model.gamepad != "attached")
             RunningMenu.Id.MICROPHONE -> toggleMicrophone(model)
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS -> openSheet(RunningSheets.menuSheet(id))
             RunningMenu.Id.SCREENSHOT -> takeScreenshot()
@@ -1128,6 +1188,14 @@ open class FrondActivity : SDLActivity() {
     }
 
     // The bar's mode changed in the Display sheet.
+    fun applyRumble() {
+        val on = Sessions.forPath(this, sessionPath)?.settings?.rumble ?: return
+        runOnUiThread {
+            machineSettings = machineSettings.copy(rumble = on)
+            rumble?.enabled = on
+        }
+    }
+
     fun applyBarMode() {
         val mode = Sessions.forPath(this, sessionPath)?.settings?.barMode ?: return
         runOnUiThread {
@@ -1294,7 +1362,7 @@ open class FrondActivity : SDLActivity() {
         savingNote = note
     }
 
-    // A small MIPS readout at the bottom right of the Palm as the core draws it, for ARM devices. It
+    // A small speed readout at the bottom right of the Palm as the core draws it, for ARM devices. It
     // stays hidden until the first figure arrives.
     private fun addMipsNote() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
@@ -1347,12 +1415,13 @@ open class FrondActivity : SDLActivity() {
                     val speed = link.request("speed-state", timeoutSeconds = 5)
                     if (speed.code == "closed") break
                     val mips = if (speed.ok) MipsReadout.parseMips(speed.message) else null
+                    val unit = if (speed.ok) MipsReadout.unit(speed.message) else "MHz"
                     val palm = link.request("window-layout", timeoutSeconds = 5).takeIf { it.ok }?.let { MipsReadout.parseLayout(it.message) }
                     if (mips != null && mipsGeneration.get() == generation) runOnUiThread {
                         if (mipsGeneration.get() != generation) return@runOnUiThread
                         if (palm != null) mipsLayout = palm
                         mipsNote?.let { note ->
-                            note.text = "$mips MIPS"
+                            note.text = "$mips $unit"
                             note.visibility = if (mipsLayout != null && bar.sheet == null) View.VISIBLE else View.GONE
                             placeMips()
                             note.bringToFront()
@@ -1458,6 +1527,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        rumble?.stop()
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()
         stopCameraFeed()

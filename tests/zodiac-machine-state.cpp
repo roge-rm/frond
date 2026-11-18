@@ -335,11 +335,12 @@ void controlsWait(bool fast) {
 bool blPrefix(const Record& r) {
     return r.run.result.trace.instructionSize == 2 && (r.run.result.trace.instruction & 0xf800) == 0xf000;
 }
+// The timer compare puts the interrupt between the BL prefix and its suffix at the ARM920T cost table's rates.
 void thumbBl(bool fast, bool ldmReturn, bool useBounded) {
     Guest g{ldmReturn ? "Thumb BL prefix, LDM return" : "Thumb BL prefix", setup(), {}};
     auto& words = g.words;
     load(words, 0, 0x00223000); store(words, 0, 8, 58);
-    load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+    load(words, 0, 0x00203000); store(words, 0, 8, 12); store(words, 0, 0, 0x13);
     words.push_back(0xe321f013);
     const uint32_t thumbPc = words.size() * 4 + 16;
     load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);
@@ -657,8 +658,9 @@ struct GraphicsGuest {
         return graphics(pc, 0x220, ring);
     }
     uint64_t busy() { return op(0xb8cb0, 0x16010140, false, 0); }
-    // A white 96x64 fill over the display's memory, 6193 ticks of engine work.
-    uint64_t fill() {
+    // A white 96x64 fill over the display's memory, 6193 ticks of engine work, times times in one batch, submitted
+    // from producer pc.
+    uint64_t fill(unsigned times = 1, uint32_t pc = 0xa9ed4) {
         const uint32_t regs[]{0x4a1, 0x41b, 0x41f, 0x472, 0x4b2, 0x4b1, 0x490, 0x491, 0x46f, 0x470, 0x401, 0x402, 0x46b, 0x46c, 0x41e,
             0x488, 0x484, 0x471, 0x423, 0x41d, 0x4b3, 0x30f, 0x42e, 0x42f, 0x430, 0x431, 0x432, 0x433, 0x48f, 0x4a0};
         const uint32_t values[]{0, 0x55e0b4df, 0xffff, 0x3f, 0xf00a00, 0x40030d04, 0xffffffff, 0, 0, 0x1e00140, 0x800000, 0x140,
@@ -667,7 +669,9 @@ struct GraphicsGuest {
         for (unsigned i = 0; i < 30; i += 2)
             for (auto value : {0x40000000 | regs[i] | (regs[i + 1] << 11), values[i], values[i + 1]}) batch.push_back(value);
         for (auto value : {0xc0011a00u, 0u, 0x00400060u}) batch.push_back(value);
-        return submit(0xa9ed4, batch);
+        const size_t one = batch.size();
+        for (unsigned i = 1; i < times; ++i) batch.insert(batch.end(), batch.begin(), batch.begin() + one);
+        return submit(pc, batch);
     }
     // Host pixels over the display's first row: 32x32 RGB565, or 64x32 packed 1bpp with the packed mono policy.
     uint64_t hostData(bool mono) {

@@ -8,7 +8,9 @@
 
 #include "dynarmic/backend/x64/a32_emit_x64.h"
 #include "dynarmic/backend/x64/a64_emit_x64.h"
+#include "dynarmic/backend/x64/abi.h"
 #include "dynarmic/backend/x64/exclusive_monitor_friend.h"
+#include "dynarmic/backend/x64/stack_layout.h"
 #include "dynarmic/common/spin_lock_x64.h"
 #include "dynarmic/interface/exclusive_monitor.h"
 #include "dynarmic/ir/acc_type.h"
@@ -79,6 +81,58 @@ template<>
     const Xbyak::Reg32 tmp = ctx.conf.absolute_offset_page_table ? page.cvt32() : ctx.reg_alloc.ScratchGpr().cvt32();
 
     EmitDetectMisalignedVAddr(code, ctx, bitsize, abort, vaddr, tmp.cvt64());
+
+    // Frond: the data cache hint (A32::UserConfig::frond_cost_hint), in page and t.
+    if (ctx.conf.frond_cost_hint && ctx.conf.frond_cost_hint_on && *ctx.conf.frond_cost_hint_on && ctx.conf.enable_cycle_counting) {
+        const Xbyak::Reg32 t = ctx.conf.absolute_offset_page_table ? ctx.reg_alloc.ScratchGpr().cvt32() : tmp;
+        code.mov(page, mcl::bit_cast<u64>(ctx.conf.frond_cost_hint));
+        Xbyak::Label left;
+        code.mov(t, dword[page + 3072 * 4]);
+        code.cmp(qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)], t.cvt64());
+        code.jg(left);
+        code.cmp(dword[page + 12296], 0);
+        code.je(abort, code.T_NEAR);
+        code.L(left);
+        code.mov(t, vaddr.cvt32());
+        if (write) {
+            // A store: a dirty half (store) or a write buffer entry it joins (join, joinStart[i] at or after
+            // its clock runBase - cycles_remaining + pending, with cycles_remaining at most budget).
+            const auto remaining = qword[rsp + ABI_SHADOW_SPACE + offsetof(StackLayout, cycles_remaining)];
+            Xbyak::Label hit;
+            code.shr(t, 2);
+            code.and_(t, 0x1ffc);
+            code.mov(t, dword[page + t.cvt64() + 1024 * 4]);
+            code.xor_(t, vaddr.cvt32());
+            code.cmp(t, 15);
+            code.jbe(hit, code.T_NEAR);
+            code.mov(t, vaddr.cvt32());
+            code.shr(t, 2);
+            code.and_(t, 0x1ffc);
+            code.mov(t, dword[page + t.cvt64() + 12320]);
+            code.xor_(t, vaddr.cvt32());
+            code.cmp(t, 15);
+            code.ja(abort, code.T_NEAR);
+            code.mov(t, vaddr.cvt32());
+            code.shr(t, 1);
+            code.and_(t, 0x3ff8);
+            code.mov(t.cvt64(), qword[page + t.cvt64() + 20512]);
+            code.add(t.cvt64(), remaining);
+            code.sub(t.cvt64(), qword[page + 12288]);
+            code.cmp(t.cvt64(), qword[page + 12304]);
+            code.jl(abort, code.T_NEAR);
+            code.mov(t.cvt64(), remaining);
+            code.cmp(t.cvt64(), qword[page + 12312]);
+            code.jg(abort, code.T_NEAR);
+            code.L(hit);
+        } else {
+            code.shr(t, 3);
+            code.and_(t, 0xffc);
+            code.mov(t, dword[page + t.cvt64()]);
+            code.xor_(t, vaddr.cvt32());
+            code.cmp(t, 31);
+            code.ja(abort, code.T_NEAR);
+        }
+    }
 
     // TODO: This code assumes vaddr has been zext from 32-bits to 64-bits.
 

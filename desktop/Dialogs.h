@@ -23,10 +23,13 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device);
     QSlider* windowScale;
     QLabel* scaleLabel;
-    QCheckBox *smoothLcd, *showMips, *audio, *fastAudio, *showKeyboard;
+    QCheckBox *smoothLcd, *showMips, *audio, *fastAudio, *rumble, *showKeyboard;
     DanaViewControls* danaView;
     QComboBox* jogControls;
     QLabel* jogControlsLabel;
+    // TG50: the jog controls in landscape with the game controller.
+    QComboBox* jogLandscape;
+    QLabel* jogLandscapeLabel;
     // Never shown for 68k devices.
     QComboBox* engine;
     // 68k devices only.

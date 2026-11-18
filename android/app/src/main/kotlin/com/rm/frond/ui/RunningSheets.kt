@@ -21,7 +21,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -40,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -94,7 +97,14 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
 
 @Composable
 private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
-    LaunchedEffect(Unit) { model.loadApps() }
+    // While the list says the Palm is asleep, ask again every 2 s (a plain list never wakes it).
+    LaunchedEffect(Unit) {
+        model.loadApps()
+        while (true) {
+            delay(2000)
+            if (model.appsNote != null) model.loadApps()
+        }
+    }
     var exportName by rememberSaveable { mutableStateOf<String?>(null) }
     var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.install(uris) }
@@ -108,7 +118,7 @@ private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
     }
     val apps = model.apps
     if (apps == null) Progress()
-    else if (apps.isEmpty()) EmptyNote("No applications")
+    else if (apps.isEmpty()) EmptyNote(model.appsNote ?: "No applications")
     for (app in apps.orEmpty()) {
         ListItem(
             headlineContent = { Text(app.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -131,6 +141,7 @@ private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
     }
+    FrondBenchRows(enabled = model.canInstallFrondBench, onInstall = { model.installFrondBench() })
     deleting?.let { name ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -162,6 +173,7 @@ private fun OtherDatabaseDialog(model: RunningModel, onLaunch: (String) -> Unit,
             Column {
                 OutlinedTextField(name, { name = it }, label = { Text("Database name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 if (model.listing) Progress()
+                else if (shown.isEmpty() && model.foundNote != null) EmptyNote(model.foundNote!!)
                 else if (shown.isNotEmpty()) {
                     LazyColumn(Modifier.padding(top = 8.dp).heightIn(max = 240.dp)) {
                         items(shown, key = { it.name }) { db ->
@@ -215,7 +227,7 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
                 },
                 supportingContent = if (model.state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
                 leadingContent = {
-                    Icon(painterResource(cardIconRes(RunningSheets.cardIcon(model.state, shown.linked != null))), contentDescription = null)
+                    Marker(if (model.state == SdCard.State.INSERTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
                 },
                 colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
                 modifier = if (usable) Modifier.clickableRow { model.openPicker() } else Modifier,
@@ -225,19 +237,20 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
             headlineContent = { Text(if (shown.linkedHolder == null) "${shown.linked} is free" else "${shown.linked} is in ${shown.linkedHolder}") },
             colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         )
-        CardRow.INSERT_LINKED -> SheetAction("Insert") { model.insertLinked() }
-        CardRow.FILES -> SheetAction("Files…") { if (model.state == SdCard.State.INSERTED) confirmFiles = true else model.openFiles() }
-        CardRow.EJECT -> SheetAction("Eject") { confirmEject = true }
-        CardRow.INSERT -> SheetAction("Insert") { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
-        CardRow.EXPORT_IMAGE -> SheetAction("Export image") {
+        CardRow.INSERT_LINKED -> SheetAction("Insert", R.drawable.ic_card_in) { model.insertLinked() }
+        CardRow.FILES -> SheetAction("Files…", R.drawable.ic_folder) { if (model.state == SdCard.State.INSERTED) confirmFiles = true else model.openFiles() }
+        CardRow.EJECT -> SheetAction("Eject", R.drawable.ic_card_ejected) { confirmEject = true }
+        CardRow.INSERT -> SheetAction("Insert", R.drawable.ic_card_in) { model.job("Inserting", "Couldn't insert the card") { it.reinsert() } }
+        CardRow.EXPORT_IMAGE -> SheetAction("Export image", R.drawable.ic_export) {
             saveImage.launch(if (model.memoryStickPro) "Memory Stick Pro.img" else if (device.memoryStick) "Memory Stick.frondms" else "SD card.img")
         }
-        CardRow.TRY_AGAIN -> SheetAction("Try again") { model.refresh() }
+        CardRow.TRY_AGAIN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
         CardRow.WRITE_PROTECT -> {
             val on = model.writeProtected
             val usable = on != null && model.busy == null && model.state == SdCard.State.EJECTED
             ListItem(
                 headlineContent = { Text("Write protected") },
+                leadingContent = { Icon(Icons.Default.Lock, contentDescription = null) },
                 trailingContent = {
                     Switch(checked = on == true, enabled = usable, onCheckedChange = { value ->
                         model.job("Changing protection", "Couldn't change write protection") { it.protect(value) }
@@ -247,8 +260,9 @@ private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
             )
         }
     }
+    if (device.storageSlots.size > 1) SecondCardRows(model)
     Header("Internal", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
-    SheetAction("Files…") { model.openInternal() }
+    SheetAction("Files…", R.drawable.ic_folder) { model.openInternal() }
     if (confirmEject || confirmFiles) CardEjectDialog(model, confirmFiles) { confirmEject = false; confirmFiles = false }
 }
 
@@ -266,6 +280,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
         AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
         AudioRow.MICROPHONE -> MicrophoneRow(model)
         AudioRow.AUDIO_PREVIEW -> MachineAudioPreviewRow(device, model.settings, true, APPLIES_AT_NEXT_START) { model.changeSettings(it) }
+        AudioRow.RUMBLE -> MachineRumbleRow(model.settings, true) { model.changeSettings(it) }
     }
 }
 
@@ -315,9 +330,14 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
 }
 
 @Composable
-private fun SheetAction(label: String, onClick: () -> Unit) {
+private fun SheetAction(label: String, iconRes: Int? = null, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, onClick: () -> Unit) {
     ListItem(
         headlineContent = { Text(label) },
+        leadingContent = when {
+            iconRes != null -> ({ Icon(painterResource(iconRes), contentDescription = null) })
+            icon != null -> ({ Icon(icon, contentDescription = null) })
+            else -> null
+        },
         colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickableRow(onClick = onClick),
     )
@@ -337,3 +357,67 @@ private fun ConnItem(title: String, usable: Boolean, text: String?, onClick: () 
     colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
     modifier = if (usable) Modifier.clickableRow(onClick = onClick) else Modifier,
 )
+
+// The Zodiac's second SD slot, the same rows as the first through the core's sd2- commands.
+@Composable
+private fun SecondCardRows(model: RunningModel) {
+    var choosingSize by remember { mutableStateOf(false) }
+    var confirmEject by remember { mutableStateOf(false) }
+    val insertImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) model.job("Inserting", "Couldn't insert the card", cancellable = true) { it.secondInsert(uri) }
+    }
+    val saveImage = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        if (uri != null) model.job("Copying", "Couldn't export the image", cancellable = true) {
+            it.secondExport(uri)
+            model.note = "Card image exported"
+        }
+    }
+    val state = model.secondState
+    Header("SD card 2", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    ListItem(
+        headlineContent = { Text(when (state) { SdCard.State.UNKNOWN -> "Not known"; SdCard.State.NONE -> "No card"; else -> "SD card" }) },
+        supportingContent = if (state == SdCard.State.EJECTED) ({ Text("Ejected") }) else null,
+        leadingContent = { Marker(if (state == SdCard.State.INSERTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant) },
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+    )
+    when (state) {
+        SdCard.State.NONE -> {
+            SheetAction("New card", R.drawable.ic_card_in) { choosingSize = true }
+            SheetAction("Insert image", R.drawable.ic_card_in) { insertImage.launch(arrayOf("*/*")) }
+        }
+        SdCard.State.INSERTED -> SheetAction("Eject", R.drawable.ic_card_ejected) { confirmEject = true }
+        SdCard.State.EJECTED -> {
+            SheetAction("Insert", R.drawable.ic_card_in) { model.job("Inserting", "Couldn't insert the card") { it.secondReinsert() } }
+            SheetAction("Export image", R.drawable.ic_export) { saveImage.launch("SD card 2.img") }
+        }
+        SdCard.State.UNKNOWN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
+    }
+    if (choosingSize) {
+        val sizes = model.device.storageSlots.getOrNull(1)?.families?.firstOrNull()?.sizes.orEmpty()
+        AlertDialog(
+            onDismissRequest = { choosingSize = false },
+            title = { Text("New card") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    for (size in sizes) TextButton(onClick = {
+                        choosingSize = false
+                        model.job("Making the card", "Couldn't make the card", cancellable = true) { it.secondCreate(size) }
+                    }) { Text("$size MB") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { choosingSize = false }) { Text("Cancel") } },
+        )
+    }
+    if (confirmEject) AlertDialog(
+        onDismissRequest = { confirmEject = false },
+        title = { Text("Eject the card?") },
+        text = { Text("Close any files open on the Palm first.") },
+        confirmButton = {
+            TextButton(onClick = {
+                confirmEject = false
+                model.job("Ejecting", "Couldn't eject the card") { it.secondEject() }
+            }) { Text("Eject") }
+        },
+        dismissButton = { TextButton(onClick = { confirmEject = false }) { Text("Cancel") } },
+    )
+}

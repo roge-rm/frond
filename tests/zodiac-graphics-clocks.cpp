@@ -262,6 +262,43 @@ int main() {
         Imx1GraphicsFraction big; uint64_t t=0;
         assert(!big.addWhole(uint64_t(1)<<40,uint64_t(1)<<30,1,t) && !t);
     }
+    {
+        // Two prepared rates on one fraction give the ticks of the two adds, with one division.
+        uint64_t seed=0x5851f42d4c957f2du;
+        const uint64_t ds[]{64,128,6400,25000000,64*3,7};
+        Imx1GraphicsRate first, second;
+        unsigned used=0;
+        for (int i=0;i<20000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            Imx1GraphicsFraction a;
+            a.add((seed>>11)&0xffff,ds[(seed>>40)%std::size(ds)]);
+            a.add((seed>>27)&0xffff,ds[(seed>>45)%std::size(ds)]);
+            const uint64_t d1=ds[(seed>>50)%std::size(ds)], d2=ds[(seed>>54)%std::size(ds)];
+            const uint64_t s1=(seed>>7)%3?64*390625:1+((seed>>23)&0x3ffffff), s2=1+((seed>>17)&0xffffff);
+            const uint64_t u1=(seed>>3)&0xfffff, u2=(seed>>29)&0x3ff;
+            const bool ready=first.ready(a,s1,d1) & second.ready(a,s2,d2);
+            assert(ready==(a.denominator%d1==0 && a.denominator%d2==0));
+            if (!ready) continue;
+            uint64_t t1, r1, t2, r2;
+            assert(first.split(u1,t1,r1) && second.split(u2,t2,r2));
+            const uint64_t rest=a.phase+r1+r2, quick=t1+t2+rest/a.denominator;
+            uint64_t ticks=0;
+            assert(a.addWhole(u1,s1,d1,ticks) && a.addWhole(u2,s2,d2,ticks));
+            assert(quick==ticks && rest%a.denominator==a.phase);
+            ++used;
+        }
+        assert(used>1000);
+        // The reciprocal's quotient against division, small and large denominators.
+        for (int i=0;i<20000;++i) {
+            seed=seed*6364136223846793005u+1442695040888963407u;
+            Imx1GraphicsFraction f; f.denominator=i%7==0?1:i%3?1+((seed>>(seed&31))>>2):(uint64_t(1)<<63)-1-(seed&0xff);
+            Imx1GraphicsRate q; assert(q.ready(f,1,1));
+            const uint64_t x=i&1?seed:seed>>(seed>>58);
+            assert(q.quotient(x)==x/f.denominator && q.quotient(x-x%f.denominator)==x/f.denominator);
+        }
+        Imx1GraphicsRate wide; Imx1GraphicsFraction one; uint64_t t1, r1;
+        assert(wide.ready(one,uint64_t(1)<<30,1) && !wide.split(uint64_t(1)<<40,t1,r1));
+    }
     uint32_t pclk=0;
     assert(c.access(0x200c54a8,0x16010090,4,false,pclk)==A::ok && pclk==0x20);
     put(c,0x200c54c0,0x90,0x21);

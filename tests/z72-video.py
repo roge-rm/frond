@@ -154,7 +154,7 @@ def start(args, name, source, replay=None):
     # A saved session keeps its card in sd.frondsd beside it.
     for card in source.parent.glob('*.frondsd'):
         shutil.copy(card, machine / card.name)
-    # Emulated time runs the Zire at its full 150 MIPS of guest time, slower than real time on most
+    # Emulated time runs the Zire at its full clock (312 MHz in turbo), slower than real time on most
     # hosts, so the waits get longer.
     extra = ['--emulated-time']
     if replay:

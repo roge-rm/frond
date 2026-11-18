@@ -1,11 +1,13 @@
 #include "imx1_boot_probe.h"
 #include "imx1_cs5_bus.h"
+#include "xscale_cost.h"
 
 #include <algorithm>
 #include <cassert>
 #include <cstring>
 #include <memory>
 #include <string>
+#include "twglue_log.h"
 #include "imx1_graphics_frame.h"
 #include "imx1_graphics_commands.h"
 #include "imx1_graphics_gpu_gles.h"
@@ -57,12 +59,51 @@ LeanCs5 leanCs5{};
 // Fast blocks: set while cpuArm920RunJit runs, with its budget; jitHalt when a board write asked it to stop at its
 // next block (SLOW_PATH_REASON_RESCHEDULE, cleared after the run).
 bool inJit = false, jitHalt = false;
+// Fast blocks: a timer count read by a delay loop's load (delayLoopPc) ends the run, and the next run starts with
+// skipDelay (delayHalted). delayHaltOff stops that until the next step once a skip found nothing to pass. After a
+// skip that passed cycles (delayPassed), the next run's first such read doesn't end it: it sees the wait over.
+bool delayHalted = false, delayHaltOff = false, delayPassed = false;
+// The ROM's delay loop loads: ARM at 2009f678, Thumb at 2008492c. Both are marked access pcs.
+static bool delayLoopPc(uint32_t pc) { return pc == 0x2009f678 || pc == 0x2008492c; }
 uint32_t jitBudget = 0;
-uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0, delaySkipCycles = 0;  // for tests
-uint64_t scanPollSkips = 0, scanPollRounds = 0;  // for tests
-bool scanPollSkip = true;
+uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0, delaySkipCycles = 0, delayHaltSkips = 0;  // for tests
+uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
+uint64_t jitChargedWrites = 0;  // for tests
+bool scanPollSkip = true, fifoWaitSkip = true;
+// Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
+// the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
+// the next step once a skip after such a halt passed nothing.
+bool scanHalted = false, scanHaltOff = false;
+uint64_t scanHalts = 0;  // for tests
+// The shortest timer count, in CPU cycles, for which skipFifoWait passes FIFO wait rounds. A round's work in the
+// JIT, its 50-odd instructions and the pointer read with its CS5 wait clocks, ends about 55 cycles into a count in
+// Origo (200 cycles each). The skip also wants the current round to have read its count in the count's first half,
+// which measures that work, wait clocks included.
+constexpr uint64_t fifoRoundMost = 128;
 // Spans shorter than this are left to the step.
 constexpr uint64_t leanMinimumSpan = 8;
+// The last timer count worked out, kept for the cycles that read the same while the board doesn't change: a
+// polling loop reads the count many times between two of its ticks.
+struct TimerCountMemo {
+    const Imx1Bootstrap* board;
+    uint64_t changes, hclk, from, until;
+    uint32_t address, mode, value;
+};
+TimerCountMemo timerCountMemo{};
+// Imx1Bootstrap::timerCountAfter, through timerCountMemo.
+bool timerCountAfter(const Imx1Bootstrap& board, uint32_t address, uint32_t size, uint64_t cycles, uint32_t mode,
+                     uint32_t& value, uint64_t hclk = 0) {
+    auto& m = timerCountMemo;
+    if (m.board == &board && m.changes == board.changeCount() && m.address == address && size == 4 && m.mode == mode &&
+        m.hclk == hclk && cycles >= m.from && cycles <= m.until) {
+        value = m.value;
+        return true;
+    }
+    uint64_t until;
+    if (!board.timerCountAfter(address, size, cycles, mode, value, hclk, &until)) return false;
+    m = {&board, board.changeCount(), hclk, cycles, until, address, mode, value};
+    return true;
+}
 
 struct Probe {
     explicit Probe(const Imx1ProbeOptions& config)
@@ -148,6 +189,8 @@ struct Probe {
     ArmMem* mem = nullptr;
     Imx1ProbeOptions options{};
     Imx1Bootstrap peripherals;
+    // The id of the card in the slot, saved with the card section.
+    std::string mmcsdCardId;
     Imx1Cs4Capture cs4Capture;
     Imx1Cs5Reset cs5Reset;
     Imx1Cs5Configuration cs5Configuration;
@@ -182,8 +225,11 @@ struct Probe {
         }
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
-    // graphicsGpu and graphicsDma, left out of the saved layout's size.
-    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma);
+    // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
+    // mmcsdCardId, saved in a section of its own, and slot 2's card part, saved in its SD2 section.
+    static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
+                                           sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
+                                           Imx1GraphicsSd::unsavedBytes;
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -213,6 +259,8 @@ struct Probe {
     }
     // What the command decoder said about the batch it last refused. For the stop text, not saved.
     Imx1GraphicsCommands::Refusal graphicsRefusal;
+    // What a graphics submission keeps to undo its batch (Imx1GraphicsCommands::keep). Not saved.
+    Imx1GraphicsCommands::Undo graphicsUndo;
     uint32_t graphicsSampledPin = 32, graphicsSampleOffset = 0;
     uint64_t i2cIssueStep = 0;
     uint32_t i2cIssuePc = 0;
@@ -221,6 +269,10 @@ struct Probe {
     // fastJit: Dynarmic blocks run there first (cpuArm920RunJit), falling back to the lean path and the step.
     // fastBlocks is whether Fast may use them (on by default, off for lean-only runs).
     bool fastEngine = false, fastJit = false, fastBlocks = fastBlocksDefault;
+    // Data and prefetch aborts and undefined instructions go to the guest's vectors, as on the ARM920T. Off, the
+    // machine stops on them (cpu-exception, unsupported-instruction). Off for the probe and its tests; SocIMX1
+    // turns it on unless FROND_ZODIAC_STOP_ON_EXCEPTION is set (imx1MachineSetGuestExceptions). Not saved.
+    bool guestExceptions = false;
     Imx1BootstrapAccess driveGraphicsLine(const Imx1Cs5Configuration& candidate, bool commit) {
         if (!options.graphicsIrqA13) return Imx1BootstrapAccess::ok;
         const auto line = candidate.interruptState().interruptOutput();
@@ -231,6 +283,8 @@ struct Probe {
     }
     // What follows a committed graphics state.
     Imx1BootstrapAccess graphicsCommitted() {
+        // Slot 2's card work runs once, on the configuration that stays.
+        cs5Configuration.runSdCardWork();
         if (!cs5Configuration.engineState().ringBytes()) graphicsCommands.reset();
         if (graphicsMemory && cs5Configuration.engineState().completed())
             return graphicsCommands.complete(cs5Configuration,peripherals.eimState(),*graphicsMemory);
@@ -515,6 +569,20 @@ struct Probe {
         *counted = page != nullptr;
         return page;
     }
+    // ROM, SRAM and SDRAM in normal mode read with no time and no side effect, for the TwGlue log. Stays within
+    // one 4 KiB page.
+    static bool peekPhysical(void* context, uint32_t pa, void* data, uint32_t size) {
+        auto& p = *static_cast<Probe*>(context);
+        if (const auto* rom = p.resolve(pa, size)) {
+            std::memcpy(data, rom, size);
+            return true;
+        }
+        if ((pa & 0xfff) + size > 0x1000 || !p.options.bootstrapPeripherals) return false;
+        const uint8_t* page = p.peripherals.plainPage(pa & ~0xfffu, false);
+        if (!page) return false;
+        std::memcpy(data, page + (pa & 0xfff), size);
+        return true;
+    }
     // A timer count read on the lean path, answered as access answers it inside the quiet cycles: the
     // instructions the run finished are cycles still to charge, and no charge is needed. A CS5 register read
     // (single loads only) goes to leanRegisterRead.
@@ -538,9 +606,17 @@ struct Probe {
         // Wait clocks still deferred (graphics accesses answered earlier) count after the CPU cycles, as
         // chargeDeferred charges them; the span has to hold their cost too.
         if (quietCycles <= uint64_t(ran) + leanCs5.waitCost || p.failed || p.graphicsWireStatus != Imx1BootstrapAccess::ok ||
-            !p.peripherals.timerCountAfter(pa, size, deferredCycles + ran, quietMode, *value,
+            !timerCountAfter(p.peripherals, pa, size, deferredCycles + ran, quietMode, *value,
                                            deferredHclk + leanCs5.waitClocks)) return false;
         ++leanTimerReads;
+        if (inJit && delayLoopPc(pc) && !delayHaltOff && !jitHalt) {
+            if (delayPassed) {
+                delayPassed = false;
+            } else {
+                jitHalt = delayHalted = true;
+                cpuSetSlowPath(p.cpu, SLOW_PATH_REASON_RESCHEDULE);
+            }
+        }
         return true;
     }
     // Wait clocks of a CS5 access now, as cs5Wait works them out inside a quiet span, with nothing charged. False
@@ -620,6 +696,8 @@ struct Probe {
     // The GPIO side of a CS5 register read: the acquisition source the port B pins select and the settled A13
     // drive. Neither the pins nor the graphics state change in a run except through a board write, which clears
     // leanCs5, so the first read of a run works them out for the rest.
+    // The graphics time and pixel rates of lean CS5 register reads (Imx1GraphicsRate), kept across reads, not saved.
+    Imx1GraphicsRate leanCpuRate, leanBusRate, leanScanRate;
     __attribute__((noinline)) bool leanRegisterReady() {
         if (leanCs5.registerChecked) return leanCs5.registerUsable;
         leanCs5.registerChecked = true;
@@ -653,11 +731,19 @@ struct Probe {
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady())
             return false;
         uint64_t ticks = 0;
-        if (!cs5Configuration.ticksAfter(deferredCycles + ran, peripherals.cpuReferencePeriod(quietMode),
-                                         deferredHclk + leanCs5.waitClocks + leanCs5.clocks, peripherals.busReferencePeriod(),
-                                         ticks) ||
-            !cs5Configuration.quietRegisterRead(peripherals.eimState(), pc, pa, ticks, value))
+        const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
+        const auto busPeriod = peripherals.busReferencePeriod();
+        const uint64_t cycles = deferredCycles + ran, clocks = deferredHclk + leanCs5.waitClocks + leanCs5.clocks;
+        if (!cs5Configuration.ticksAfterQuick(cycles, cpuPeriod, clocks, busPeriod, leanCpuRate, leanBusRate, ticks) &&
+            !cs5Configuration.ticksAfter(cycles, cpuPeriod, clocks, busPeriod, ticks))
             return false;
+        if (!cs5Configuration.quietRegisterRead(peripherals.eimState(), pc, pa, ticks, value, &leanScanRate)) return false;
+        if (inJit && scanPollSkip && !scanHaltOff && !jitHalt && (pc == 0x200adb08 || pc == 0x200adb14) &&
+            value == (pc == 0x200adb08 ? 0u : 0x400u)) {
+            jitHalt = scanHalted = true;
+            ++scanHalts;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
         leanCs5.waitClocks += leanCs5.clocks;
         leanCs5.waitCost += leanCs5.cost;
         ++leanCs5Reads;
@@ -670,6 +756,14 @@ struct Probe {
                           uint32_t* cost) {
         auto& p = *static_cast<Probe*>(context);
         if (inJit && jitBoardWriteAddress(pa)) return size == 4 && p.jitBoardWrite(pa, value);
+        // The graphics ring pointer writes of the ROM's two batch producers (Origo submits about 90000 a second).
+        // Both are unconditional ARM stores (str r0, [r1, #0x220]); a marked pc must be, since its slot is set even when the condition fails.
+        if (pa == 0x16010220 && inJit) {
+            const uint32_t pc = cpuArm920TakeJitAccessPc(p.cpu);
+            return size == 4 && (pc == 0x200aa504 || pc == 0x200a9ed4) && p.graphicsMemory &&
+                   p.cs5Configuration.virtualProfile() && !p.options.cs5ConfigurationObserver &&
+                   p.jitChargedWrite(pa, 4, value, ran, pc);
+        }
         if (!p.graphicsMemory || !p.cs5Configuration.virtualProfile() || !Imx1GraphicsMemory::owns(pa) ||
             p.options.cs5ConfigurationObserver || p.failed || quietCycles <= ran)
             return false;
@@ -692,6 +786,39 @@ struct Probe {
         if ((pa & ~0x3ffu) == 0x0021c000) return offset == 0x30 || offset == 0x34;
         if ((pa & ~0xffu) == 0x00223000) return offset == 0x04 || offset == 0x08 || offset == 0x0c;
         return pa == 0x00202014 || pa == 0x00203014 || pa == 0x00201004 || pa == 0x00209004;
+    }
+    // A write from generated code that needs the board at its own time: the cycles before the run and the run's
+    // finished blocks (ran) are charged first, then access takes it as the step does with pc as the instruction's.
+    // The block the write is in is charged at the run's end, so the write lands up to one block early. The quiet
+    // span is worked out again, and the run stops at its next block if the span now ends before its budget.
+    __attribute__((noinline)) bool jitChargedWrite(uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t pc) {
+        if (failed || graphicsWireStatus != Imx1BootstrapAccess::ok || options.busObserver) return false;
+        deferredHclk += leanCs5.waitClocks;
+        result.cs5WaitClocks += leanCs5.waitClocks;
+        work += leanCs5.waitClocks;
+        leanCs5 = {};
+        deferredCycles += ran;
+        cpuArm920JitCharge(cpu, ran, 0);
+        if (!chargeDeferred()) return false;
+        auto& t = result.trace;
+        const auto saved = t;
+        t.pc = pc;
+        t.cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        graphicsSampledPin = 32;
+        graphicsSampleOffset = 0;
+        uint32_t datum = value;
+        const bool ok = access(this, pa, uint_fast8_t(size), true, &datum);
+        t = saved;
+        if (!ok) return false;
+        ++jitChargedWrites;
+        updateInterrupts();
+        quietCycles = boundaryStatus() == Imx1BootstrapAccess::ok ? quietCpuCycles(quietMode) : 0;
+        cpuArm920JitCharge(cpu, 0, uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+        if (cpuArm920JitCharged(cpu) + quietCycles + cpuArm920JitMaxUnchecked(cpu) < jitBudget) {
+            jitHalt = true;
+            cpuSetSlowPath(cpu, SLOW_PATH_REASON_RESCHEDULE);
+        }
+        return true;
     }
     // A board write from generated code, taken as the step takes it after charging the cycles before the run. The
     // run's own cycles are charged at its end, so the write lands up to one run early. The interrupt lines follow
@@ -717,51 +844,112 @@ struct Probe {
         }
         return true;
     }
-    // Fast blocks: the ROM's timer delay loop (ldr rT, [rB, #16]; sub rT, rT, rS; cmp rT, #n; bcc back, as at
-    // 2009f678) waits for timer count - rS to reach n. When the CPU is in one on the timer count, the cycles up to the
-    // first count that ends it, within the quiet span, pass at once without running the loop.
-    void skipDelay() {
-        const uint32_t* r = cpuGetRegisters(cpu);
-        if (cpuIsThumb(cpu) || quietCycles < leanMinimumSpan) return;
+    // The registers of a timer delay loop the CPU is in (ldr rT, [rB, #16]; sub rT, rT, rS; cmp rT, #n; bcc back, as
+    // at 2009f678): the base and start registers and the wait.
+    bool armDelayLoop(const uint32_t* r, unsigned& b, unsigned& sreg, uint32_t& wait) const {
         uint32_t w[4], pa;
         uint32_t start = r[15];
-        if (!cpuArm920PeekWord(cpu, start, &w[0], &pa)) return;
+        if (!cpuArm920PeekWord(cpu, start, &w[0], &pa)) return false;
         // pc is on one of the loop's four words; find the load.
         for (unsigned back = 0; back < 4 && (w[0] & 0xfff00fffu) != 0xe5900010u; ++back) {
             start -= 4;
-            if (back == 3 || !cpuArm920PeekWord(cpu, start, &w[0], &pa)) return;
+            if (back == 3 || !cpuArm920PeekWord(cpu, start, &w[0], &pa)) return false;
         }
         for (unsigned i = 1; i < 4; ++i)
-            if (!cpuArm920PeekWord(cpu, start + 4 * i, &w[i], &pa)) return;
-        const unsigned t = (w[0] >> 12) & 15, b = (w[0] >> 16) & 15, sreg = w[1] & 15;
+            if (!cpuArm920PeekWord(cpu, start + 4 * i, &w[i], &pa)) return false;
+        const unsigned t = (w[0] >> 12) & 15;
+        b = (w[0] >> 16) & 15;
+        sreg = w[1] & 15;
         if (t == 15 || b == 15 || sreg == 15 || sreg == t || t == b ||
             (w[1] & 0xfffffff0u) != (0xe0400000u | (t << 16) | (t << 12)) ||
-            (w[2] & 0xffff0f00u) != (0xe3500000u | (t << 16)) || w[3] != 0x3afffffbu) return;
+            (w[2] & 0xffff0f00u) != (0xe3500000u | (t << 16)) || w[3] != 0x3afffffbu) return false;
+        wait = w[2] & 0xff;
+        return true;
+    }
+    // The same in Thumb with the wait in a register (ldr rT, [rB, #16]; subs rT, rT, rS; cmp rT, rW; bcc back, as at
+    // 2008492c).
+    bool thumbDelayLoop(const uint32_t* r, unsigned& b, unsigned& sreg, uint32_t& wait) const {
+        auto half = [&](uint32_t va, uint16_t& h) {
+            uint32_t word, pa;
+            if (!cpuArm920PeekWord(cpu, va, &word, &pa)) return false;
+            h = uint16_t((va & 2) ? word >> 16 : word);
+            return true;
+        };
+        uint16_t h[4];
+        uint32_t start = r[15] & ~1u;
+        if (!half(start, h[0])) return false;
+        for (unsigned back = 0; back < 4 && (h[0] & 0xffc0u) != 0x6900u; ++back) {
+            start -= 2;
+            if (back == 3 || !half(start, h[0])) return false;
+        }
+        for (unsigned i = 1; i < 4; ++i)
+            if (!half(start + 2 * i, h[i])) return false;
+        const unsigned t = h[0] & 7, wreg = (h[2] >> 3) & 7;
+        b = (h[0] >> 3) & 7;
+        sreg = (h[1] >> 6) & 7;
+        if (t == b || sreg == t || wreg == t || (h[1] & 0xfe3fu) != (0x1a00u | (t << 3) | t) ||
+            (h[2] & 0xffc7u) != (0x4280u | t) || h[3] != 0xd3fbu) return false;
+        wait = r[wreg];
+        return true;
+    }
+    // Fast blocks: a timer delay loop waits for timer count - rS to reach the wait. When the CPU is in one on the
+    // timer count, the cycles up to the first count that ends it, within the quiet span, pass at once without running
+    // the loop.
+    // 0 where the CPU isn't in a delay loop or its wait is over, 1 where the wait couldn't be passed, 2 where it was.
+    int skipDelay() {
+        const uint32_t* r = cpuGetRegisters(cpu);
+        if (quietCycles < leanMinimumSpan) return 1;
+        unsigned b = 0, sreg = 0;
+        uint32_t wait = 0;
+        if (!(cpuIsThumb(cpu) ? thumbDelayLoop(r, b, sreg, wait) : armDelayLoop(r, b, sreg, wait))) return 0;
         uint32_t timer;
         if (!cpuArm920PeekWord(cpu, r[b] + 16, nullptr, &timer) || !Imx1Bootstrap::timerCountAddress(timer) ||
-            failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return;
-        const uint32_t base = r[sreg], wait = w[2] & 0xff;
+            failed || graphicsWireStatus != Imx1BootstrapAccess::ok) return 0;
+        const uint32_t base = r[sreg];
         auto done = [&](uint64_t cycles, bool& known) {
             uint32_t count;
             // Wait clocks still deferred count after the cycles, as chargeDeferred charges them.
-            known = peripherals.timerCountAfter(timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
+            known = timerCountAfter(peripherals, timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
             return known && count - base >= wait;
         };
         bool known;
-        if (done(0, known) || !known) return;
+        if (done(0, known)) return 0;
+        if (!known) return 1;
         // The last cycle of the span stays for the loop to see; a wait past the span passes all the rest of it.
         uint64_t low = 0, high = quietCycles - 1;
+        // The skip counts as work, so it stops short of the slice's work bound, like the lean path.
+        if (bounds) {
+            const uint64_t used = work - sliceWorkStart;
+            if (used + 1 >= bounds->work) return 1;
+            high = std::min(high, bounds->work - used - 1);
+        }
+        if (!high) return 1;
         const bool reached = done(high, known);
-        if (!known) return;
+        if (!known) return 1;
+        // From one reading to the next with the cycles each lasts (sameUntil), the first that ends the wait is found
+        // in a few steps where it's near; bisection does the rest.
+        for (unsigned i = 0; reached && i < 16 && high - low > 1; ++i) {
+            uint32_t count;
+            uint64_t until;
+            if (!peripherals.timerCountAfter(timer, 4, deferredCycles + low, quietMode, count, deferredHclk, &until) ||
+                until < deferredCycles + low)
+                break;
+            if (until >= deferredCycles + high - 1) { low = high - 1; break; }
+            const uint64_t next = until - deferredCycles + 1;
+            if (done(next, known)) { high = next; low = next - 1; break; }
+            if (!known) return 1;
+            low = next;
+        }
         while (reached && high - low > 1) {
             const uint64_t mid = low + (high - low) / 2;
-            if (done(mid, known)) high = mid; else if (known) low = mid; else return;
+            if (done(mid, known)) high = mid; else if (known) low = mid; else return 1;
         }
         deferredCycles += high;
         quietCycles -= high;
         work += high;
         ++delaySkips;
         delaySkipCycles += high;
+        return 2;
     }
     // Fast blocks: the ROM's vertical wait polls the scan status, ldr r1, [r0, #0x54c]; tst r1, #0x400 and beq back at
     // 200adb08 (for the status rows), bne back at 200adb14 (for their end). At a JIT run's start on one of the loads,
@@ -793,7 +981,11 @@ struct Probe {
             return 0;
         const bool user = (cpsr & 31) == ARM_SR_MODE_USR;
         if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok || !leanRegisterReady()) return 0;
-        const uint64_t clocks = leanCs5.clocks, round = 3 + uint64_t(leanCs5.cost);
+        // A round's cost model clocks: the load, the test and the taken branch.
+        constexpr uint64_t roundClocks = cost::armCost(0xe590154cu, cost::Core::arm920t) +
+                                         cost::armCost(0xe3110e40u, cost::Core::arm920t) +
+                                         cost::armCost(0x0afffffcu, cost::Core::arm920t);
+        const uint64_t clocks = leanCs5.clocks, round = roundClocks + uint64_t(leanCs5.cost);
         // The span keeps room for the JIT's last rounds; the slice for the work the rounds add.
         const uint64_t keep = leanMinimumSpan + 4 * round;
         if (quietCycles <= keep) return 0;
@@ -802,14 +994,15 @@ struct Probe {
         const auto cpuPeriod = peripherals.cpuReferencePeriod(quietMode);
         const auto busPeriod = peripherals.busReferencePeriod();
         unsigned first = 0;
-        // Round i reads after 3 i cycles and i + 1 reads' wait clocks.
+        // Round i reads after roundClocks i cycles and i + 1 reads' wait clocks.
         auto same = [&](uint64_t i, unsigned* region) {
             uint64_t ticks;
             uint32_t value;
             unsigned at;
-            if (!cs5Configuration.ticksAfter(deferredCycles + 3 * i, cpuPeriod, deferredHclk + (i + 1) * clocks, busPeriod,
-                                             ticks) ||
-                !cs5Configuration.quietScanStatus(peripherals.eimState(), pc, ticks, value, at))
+            const uint64_t cycles = deferredCycles + roundClocks * i, hclk = deferredHclk + (i + 1) * clocks;
+            if ((!cs5Configuration.ticksAfterQuick(cycles, cpuPeriod, hclk, busPeriod, leanCpuRate, leanBusRate, ticks) &&
+                 !cs5Configuration.ticksAfter(cycles, cpuPeriod, hclk, busPeriod, ticks)) ||
+                !cs5Configuration.quietScanStatus(peripherals.eimState(), pc, ticks, value, at, &leanScanRate))
                 return false;
             if (region) { *region = at; return value == want; }
             return at == first;
@@ -823,7 +1016,7 @@ struct Probe {
         }
         // Rounds 0 to low read want; they pass, round low + 1 on runs.
         const uint64_t n = low + 1 >= most ? most : low + 1;
-        deferredCycles += 3 * n;
+        deferredCycles += roundClocks * n;
         quietCycles -= n * round;
         deferredHclk += n * clocks;
         result.cs5WaitClocks += n * clocks;
@@ -832,6 +1025,102 @@ struct Probe {
         ++scanPollSkips;
         scanPollRounds += n;
         return 3 * n;
+    }
+    // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
+    // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
+    // the reads that saw no change. The pointer moves only when a batch completes, which ends the quiet span, so
+    // inside the span each round reads the same value and ends at the next timer count. At the delay's timer read
+    // (2008492c) the rounds up to the last count that leaves room in the span pass at once: the time goes to the
+    // start of that count, r3 takes it as the round's delay would and r5 counts the rounds passed. Only where a
+    // count lasts well over a round's work, so that each round really starts in the count after the one before.
+    // Returns whether rounds passed.
+    bool skipFifoWait() {
+        const uint32_t* r = cpuGetRegisters(cpu);
+        if (!fifoWaitSkip || r[15] != 0x2008492c || r[14] != 0x200b9018 || r[0] != 1 || r[6] != 1 || r[5] > r[11] ||
+            !cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu))
+            return false;
+        static constexpr uint32_t caller[] = {0xe1a00006u, 0xeb000e28u, 0xe594101cu, 0xe5940014u, 0xe0010198u,
+            0xe0841101u, 0xe2811ca0u, 0xe5911a0cu, 0xe591121cu, 0xe5841014u, 0xe1510000u, 0x1a000002u, 0xe0855006u,
+            0xe155000bu, 0x9a000000u, 0xe3a05000u, 0xe5940008u, 0xe5942010u, 0xe0622120u, 0xe0821001u, 0xe2411001u,
+            0xe08a0120u, 0xe0010000u, 0xe584100cu, 0xe584000cu, 0xe1500007u, 0xbaffffe4u};
+        // 20084910-20084935, the delay from 20084912 (the last word's high half is the next function's).
+        static constexpr uint32_t delay[] = {0x491d4770u, 0xd1002800u, 0x680a2001u, 0xd40405d2u, 0x604a221fu,
+            0x320422ffu, 0x690b600au, 0x1ad2690au, 0xd3fb4282u, 0x00004770u};
+        uint32_t w, pa;
+        for (unsigned i = 0; i < std::size(caller); ++i)
+            if (!cpuArm920PeekWord(cpu, 0x200b9010 + 4 * i, &w, &pa) || w != caller[i]) return false;
+        for (unsigned i = 0; i < std::size(delay); ++i)
+            if (!cpuArm920PeekWord(cpu, 0x20084910 + 4 * i, &w, &pa) ||
+                (i + 1 < std::size(delay) ? w : w & 0xffff) != delay[i])
+                return false;
+        uint32_t timer;
+        if (!cpuArm920PeekWord(cpu, r[1] + 16, nullptr, &timer) || !Imx1Bootstrap::timerCountAddress(timer) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok)
+            return false;
+        // The pointer read as the next round makes it, with the room it leaves (200b9018-200b9078).
+        if (!graphicsMemory || !cs5Configuration.virtualProfile() || options.cs5ConfigurationObserver ||
+            cs5Configuration.engineState().completed() || cs5Configuration.engineState().idleQuietTicks() == UINT64_MAX ||
+            !leanCs5Ready())
+            return false;
+        uint32_t index, chip, last, bytes, producer;
+        if (!cpuArm920PeekWord(cpu, r[4] + 28, &index, &pa) || !cpuArm920PeekWord(cpu, r[4] + 20, &last, &pa) ||
+            !cpuArm920PeekWord(cpu, r[4] + 8, &bytes, &pa) || !cpuArm920PeekWord(cpu, r[4] + 16, &producer, &pa) ||
+            !cpuArm920PeekWord(cpu, r[4] + (index * r[8] << 2) + 0xaa0c, &chip, &pa) ||
+            !cpuArm920PeekWord(cpu, chip + 0x21c, nullptr, &pa) || pa != 0x1601021c)
+            return false;
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const bool user = (cpsr & 31) == ARM_SR_MODE_USR;
+        uint32_t pointer;
+        if (peripherals.eimState().cs5Transfer(pa, 4, false, user) != Imx1EimAccess::ok ||
+            !cs5Configuration.quietRegisterRead(peripherals.eimState(), 0x200b9030, pa, 0, pointer) || pointer != last)
+            return false;
+        const uint32_t room = ((bytes >> 2) - producer + pointer - 1) & (r[10] + (bytes >> 2));
+        if (int32_t(room) >= int32_t(r[7])) return false;
+        // The round's delay started at count r3 and still waits for the next.
+        const uint32_t start = r[3];
+        uint32_t count;
+        auto at = [&](uint64_t cycles) {
+            return timerCountAfter(peripherals, timer, 4, deferredCycles + cycles, quietMode, count, deferredHclk);
+        };
+        // This round's delay read its count in the count's first half, so a round's work fits in one.
+        uint64_t left;
+        if (!peripherals.timerCountAfter(timer, 4, deferredCycles, quietMode, count, deferredHclk, &left) ||
+            count != start || left < deferredCycles)
+            return false;
+        left -= deferredCycles - 1;
+        // Room for the last round and the JIT in the span; the skip counts as work, like skipDelay.
+        const uint64_t keep = leanMinimumSpan + 2 * fifoRoundMost;
+        if (quietCycles <= keep) return false;
+        uint64_t high = quietCycles - keep;
+        if (bounds) {
+            const uint64_t used = work - sliceWorkStart;
+            if (used + keep >= bounds->work) return false;
+            high = std::min(high, bounds->work - used - keep);
+        }
+        if (!at(high)) return false;
+        const uint32_t rounds = count - start;
+        if (rounds < 2 || rounds > (1u << 30)) return false;
+        // The first cycle of count start + rounds.
+        uint64_t low = 0;
+        while (high - low > 1) {
+            const uint64_t mid = low + (high - low) / 2;
+            if (!at(mid)) return false;
+            if (count - start >= rounds) high = mid; else low = mid;
+        }
+        uint32_t value;
+        uint64_t until;
+        if (!peripherals.timerCountAfter(timer, 4, deferredCycles + high, quietMode, value, deferredHclk, &until) ||
+            value != start + rounds || until < deferredCycles + high + fifoRoundMost ||
+            2 * left <= until - deferredCycles - high + 1)
+            return false;
+        deferredCycles += high;
+        quietCycles -= high;
+        work += high;
+        cpuSetReg(cpu, 3, start + rounds);
+        cpuSetReg(cpu, 5, uint32_t((uint64_t(r[5]) + rounds) % (uint64_t(r[11]) + 1)));
+        ++fifoWaitSkips;
+        fifoWaitRounds += rounds;
+        return true;
     }
     // A board register read on the lean path (quietReadAddress): inside the quiet span it reads what the step would
     // after charging, so it needs no charge.
@@ -876,7 +1165,7 @@ struct Probe {
             !(Imx1Bootstrap::isRamAddress(address) && !(write && p.peripherals.pcmDmaReads(address, size))) &&
             !(!write && p.resolve(address, size))) {
             timerCountKnown = !write && quietCycles && !deferredHclk && !p.failed && !memIsInstructionFetch(p.mem) &&
-                p.peripherals.timerCountAfter(address, size, deferredCycles, quietMode, timerCount);
+                timerCountAfter(p.peripherals, address, size, deferredCycles, quietMode, timerCount);
             if (!timerCountKnown) p.chargeDeferred();
         }
         // Further data accesses within one instruction also wait for the nominal bus clock.
@@ -939,7 +1228,23 @@ struct Probe {
                 if (!preview) p.cs5Reset = candidate;
                 return status;
             }
-            auto candidate = p.cs5Configuration;
+            // A preview works on a copy. A commit works on the chip in place and puts the copy back unless
+            // the result is taken (accept), as it would have dropped a refused candidate.
+            Imx1Cs5Configuration saved = p.cs5Configuration;
+            auto& candidate = preview ? saved : p.cs5Configuration;
+            bool kept = preview;
+            struct Restore {
+                bool& kept; Imx1Cs5Configuration& chip; const Imx1Cs5Configuration& saved;
+                ~Restore() { if (!kept) chip = saved; }
+            } restore{kept, p.cs5Configuration, saved};
+            // acceptGraphics(candidate, !preview), with the commit already in place.
+            auto accept = [&] {
+                if (preview) return p.acceptGraphics(candidate, false);
+                const auto drive = p.driveGraphicsLine(candidate, true);
+                if (drive != Imx1BootstrapAccess::ok) return drive;
+                kept = true;
+                return p.graphicsCommitted();
+            };
             // Alternate-board mode 2 requires the native B22 output selector as well as the axis mux.
             const bool stick = p.peripherals.gpioOutputPattern(1,0,0,0x00400000);
             const bool aux = p.peripherals.gpioOutputPattern(1,0,0x00400000,0);
@@ -959,21 +1264,33 @@ struct Probe {
             if (status == Imx1BootstrapAccess::ok && write && address == 0x16010220 &&
                 (p.result.trace.pc == 0x200a9ed4 || p.result.trace.pc == 0x200b0200 ||
                  p.result.trace.pc == 0x200ac300 || p.result.trace.pc == 0x200aa504 ||
-                 p.result.trace.pc == 0x200a9a9c || p.result.trace.pc == 0x200b1568 ||
-                 p.result.trace.pc == 0x200b1790 || Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
+                 p.result.trace.pc == 0x200a9a9c || Imx1GraphicsEngine::stretchProducer(p.result.trace.pc) ||
+                 Imx1GraphicsEngine::otherProducer(p.result.trace.pc) || player) &&
                 p.graphicsMemory) {
-                auto commands = p.graphicsCommands;
+                // The batch is decoded in place and undone where it's dropped, so the queued batches aren't copied.
+                auto& commands = p.graphicsCommands;
+                commands.keep(p.graphicsUndo);
                 const auto prepared = commands.prepareCopy(candidate,p.peripherals.eimState(),*p.graphicsMemory);
                 if (prepared != Imx1BootstrapAccess::ok) {
                     p.graphicsRefusal = commands.refusal();
+                    commands.undo(p.graphicsUndo);
                     return prepared;
                 }
                 candidate.startEngine(commands.duration());
-                const auto accepted = p.acceptGraphics(candidate,!preview);
-                if (accepted == Imx1BootstrapAccess::ok && !preview) p.graphicsCommands = std::move(commands);
+                // acceptGraphics runs graphicsCommitted on the commands from before the batch, which changes them
+                // only with the ring off or a batch done. Where either holds, the new commands wait in a copy.
+                if (!candidate.engineState().ringBytes() || candidate.engineState().completed()) {
+                    auto decoded = commands;
+                    commands.undo(p.graphicsUndo);
+                    const auto accepted = accept();
+                    if (accepted == Imx1BootstrapAccess::ok && !preview) p.graphicsCommands = std::move(decoded);
+                    return accepted;
+                }
+                const auto accepted = accept();
+                if (accepted != Imx1BootstrapAccess::ok || preview) commands.undo(p.graphicsUndo);
                 return accepted;
             }
-            return status == Imx1BootstrapAccess::ok ? p.acceptGraphics(candidate, !preview) : status;
+            return status == Imx1BootstrapAccess::ok ? accept() : status;
         };
         Imx1BootstrapAccess status;
         if (diagnosticCs5 && p.cs5Configuration.virtualProfile()) {
@@ -1021,9 +1338,9 @@ struct Probe {
             // Probe RAM has no ArmRam write watches. Retain guest I-cache words.
             if (write && status == Imx1BootstrapAccess::ok &&
                 Imx1Bootstrap::isRamAddress(address)) {
-                // Fast blocks drop only the code translated from this page (cpuArm920LeanStored).
+                // Fast drops code only when the store lands on one of its lines (cpuArm920LeanStoredBytes).
                 if (!p.fastJit) cpuDropTranslatedCode(p.cpu);
-                if (p.fastEngine) cpuArm920LeanStored(p.cpu, address);
+                if (p.fastEngine) cpuArm920LeanStoredBytes(p.cpu, address, size);
             }
             if (!write) std::memcpy(data, &value, size);
             return true;
@@ -1059,11 +1376,33 @@ bool condition(uint32_t instruction, uint32_t cpsr) {
 bool softwareInterrupt(uint32_t i, bool thumb) {
     return thumb ? (i & 0xff00) == 0xdf00 : (i & 0x0f000000) == 0x0f000000;
 }
+// Undefined on the ARM920T (ARMv4T, ARM DDI0100I A3.16 and A6.2): the ARM undefined space and Thumb's undefined
+// conditional branch. The core raises the undefined instruction exception for both.
+bool undefinedInstruction(uint32_t i, bool thumb) {
+    return thumb ? (i & 0xff00) == 0xde00 : i >> 28 != 15 && (i & 0x0e000010) == 0x06000010;
+}
+// An abort or undefined instruction entry as the ARM920T takes it (ARM DDI0100I A2.6): the vector, abort or
+// undefined mode, I set, F kept, ARM state, SPSR the old CPSR, and the link: the next instruction for undefined,
+// the aborted instruction + 4 for a prefetch abort and + 8 for a data abort, in both states.
+bool guestEntry(ArmCpu* cpu, const Imx1ProbeTrace& t, uint64_t before, bool undefined, bool fetchAbort) {
+    if (cpuExceptionSequence(cpu) != before + 1) return false;
+    const auto* r = cpuGetRegisters(cpu);
+    const uint32_t vector = r[15] >= 0xffff0000 ? r[15] - 0xffff0000 : r[15];
+    const uint32_t mode = undefined ? 0x1b : 0x17;
+    const uint32_t want = undefined ? 0x04 : fetchAbort ? 0x0c : 0x10;
+    const uint32_t link = t.pc + (undefined ? t.instructionSize : fetchAbort ? 4 : 8);
+    return vector == want && r[14] == link && cpuGetRegExternal(cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
+           cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x80 | mode);
+}
 bool armMode(uint32_t mode) {
     return mode == 0x10 || mode == 0x11 || mode == 0x12 || mode == 0x13 ||
            mode == 0x17 || mode == 0x1b || mode == 0x1f;
 }
-bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr) {
+// alignmentFaults: CP15 c1 A is set and the guest takes aborts. A misaligned word or halfword load or store
+// then takes an alignment data abort on the ARM920T (DDI0151C 3.6), which the CPU model raises, so it runs.
+// With A clear the ARMv4 result of a misaligned halfword is unpredictable and stays refused.
+bool bootstrapInstructionChecked(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr,
+                                 bool alignmentFaults) {
     if (i >> 28 == 15) return false;
     if (softwareInterrupt(i, false)) return true;
     if ((i & 0x0ffffff0) == 0x012fff10) return true;  // BX
@@ -1134,7 +1473,7 @@ bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, 
         const uint32_t offset = immediate ? ((i >> 4) & 0xf0) | (i & 15) : registers[rm];
         uint32_t address = registers[base] + (base == 15 ? 8 : 0);
         if (pre) address += (i & 0x00800000) ? offset : -offset;
-        return !(i & 0x20) || !(address & 1);
+        return !(i & 0x20) || !(address & 1) || alignmentFaults;
     }
     if (((i >> 12) & 15) == 15) {
         // DDI0100I A2.6/A4.1.35: unshifted MOVS pc,Rm restores the saved context.
@@ -1188,7 +1527,10 @@ bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, 
     return (i & 0x02000000) || !(i & 0x10) || !(i & 0x80);
 }
 // ARM DDI0100I A6/A7: ordinary ARMv4T forms, with aligned memory operands.
-bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
+bool bootstrapInstruction(uint32_t i, const uint32_t* registers, uint32_t cpsr, uint32_t spsr) {
+    return bootstrapInstructionChecked(i, registers, cpsr, spsr, false);
+}
+bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix, bool alignmentFaults = false) {
     if (i < 0x4000) return true;  // Shifts, add/subtract and immediate arithmetic.
     if ((i & 0xfc00) == 0x4000) {
         // DDI0100I A7.1.45: equal encoded MUL operands are unpredictable before ARMv6.
@@ -1218,13 +1560,15 @@ bool bootstrapThumb(uint16_t i, const uint32_t* r, bool blPrefix) {
     if ((i & 0xf000) == 0x5000) {
         const unsigned op = (i >> 9) & 7;
         const uint32_t address = r[(i >> 3) & 7] + r[(i >> 6) & 7];
-        if (op == 0 || op == 4) return !(address & 3);
-        if (op == 1 || op == 5 || op == 7) return !(address & 1);
+        if (op == 0 || op == 4) return !(address & 3) || alignmentFaults;
+        if (op == 1 || op == 5 || op == 7) return !(address & 1) || alignmentFaults;
         return true;
     }
-    if ((i & 0xe000) == 0x6000) return (i & 0x1000) || !(r[(i >> 3) & 7] & 3);
-    if ((i & 0xf000) == 0x8000) return !(r[(i >> 3) & 7] & 1);
-    if ((i & 0xf000) == 0x9000) return !(r[13] & 3);
+    // Single loads and stores: see bootstrapInstructionChecked for alignmentFaults. LDM, STM, PUSH and POP
+    // with a misaligned base stay refused.
+    if ((i & 0xe000) == 0x6000) return (i & 0x1000) || !(r[(i >> 3) & 7] & 3) || alignmentFaults;
+    if ((i & 0xf000) == 0x8000) return !(r[(i >> 3) & 7] & 1) || alignmentFaults;
+    if ((i & 0xf000) == 0x9000) return !(r[13] & 3) || alignmentFaults;
     if ((i & 0xf000) == 0xa000 || (i & 0xff00) == 0xb000) return true;
     if ((i & 0xf600) == 0xb400) return (i & 0x1ff) && !(r[13] & 3); // PUSH/POP.
     if ((i & 0xf000) == 0xc000) {
@@ -1309,6 +1653,7 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     leanCs5Reads = 0;
     leanCs5MemoryReads = 0;
     leanBoardReads = 0;
+    jitChargedWrites = 0;
     deferredHclk = 0;
     // The core has process lifetime, as in the existing standalone CPU diagnostics.
     auto* p = new Probe(options ? *options : Imx1ProbeOptions{});
@@ -1351,12 +1696,21 @@ Imx1Machine* imx1MachineCreate(const uint8_t* rom, uint32_t size, Imx1ProbeEntry
     p->cpu = cpuInit(p->alias, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0,
                      patches, pace, createSystemState(), ArmCpuModel::arm920t, true);
     patchDispatchSetCpu(patches, p->cpu);
+    // ARM920T cost table only: the board's own bus, CS5 and cache models time its memory.
+    cpuSetCostModel(p->cpu, true, uint8_t(cost::Core::arm920t), false);
     if (p->options.bootstrapPeripherals) cpuArm920EnableWait(p->cpu);
     cpuArm920SetMemoryCheck(p->cpu, Probe::cacheMemoryCheck, p);
     cpuArm920SetIcacheIndexCompatibility(p->cpu, p->options.arm920IcacheIndexCompatibility);
     p->result.stop = Imx1ProbeStop::budget;
     p->observer = observer;
     p->observerContext = context;
+    if (observer) {
+        if (std::getenv("FROND_TWGLUE_LOG"))
+            std::fprintf(stderr, "FROND_TWGLUE_LOG: this run has its own observer, so the TwGlue log is off.\n");
+    } else if (auto* log = twGlueLogCreate(p->cpu, &p->peripherals.referenceTime(), Probe::peekPhysical, p)) {
+            p->observer = twGlueLogObserve;
+            p->observerContext = log;
+        }
     activeMachine = new Imx1Machine{p, 0};
     return activeMachine;
 }
@@ -1505,26 +1859,40 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     t = {step, cpuGetRegisters(p->cpu)[15], 0,
          cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR), 0, cpuIsThumb(p->cpu) ? 2u : 4u};
     uint_fast8_t fsr = 0;
+    // A fetch that aborts goes to the prefetch abort vector in the step below, outside a Thumb BL pair.
+    bool fetchAbort = false;
     if (!cpuFetchInstruction(p->cpu, t.pc, &t.instruction, &fsr)) {
-        if (!p->failed) {
+        t.instruction = 0;
+        t.fetched = false;
+        if (p->failed) return false;
+        if (!p->guestExceptions || p->blPrefix) {
             p->result.stop = Imx1ProbeStop::exception;
             p->result.address = t.pc;
             p->result.value = fsr;
             p->result.size = t.instructionSize;
+            return false;
         }
-        return false;
+        fetchAbort = true;
     }
-    if (t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
+    if (!fetchAbort && t.instructionSize == 4 && (t.instruction & 0x0f100f10) == 0x0e000f10) {
         const unsigned source = (t.instruction >> 12) & 15;
         t.operand = source == 15 ? t.pc + 8 : cpuGetRegisters(p->cpu)[source];
     }
     if (p->observer) p->observer(p->observerContext, t);
     const bool thumb = t.instructionSize == 2;
-    if (p->prefixCapacityExceeded || (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
-        (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc) :
+    const bool alignmentFaults = p->guestExceptions && cpuArm920AlignmentFaults(p->cpu);
+    const bool refused = !fetchAbort && (p->prefixCapacityExceeded ||
+        (p->blPrefix && (!thumb || t.pc != p->blNextPc || (t.instruction & 0xf800) != 0xf800)) ||
+        (thumb ? !bootstrapThumb(t.instruction, cpuGetRegisters(p->cpu), p->blPrefix && t.pc == p->blNextPc,
+                                 alignmentFaults) :
          t.instruction >> 28 == 15 ||
-         (condition(t.instruction, t.cpsr) && !bootstrapInstruction(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
-                                                                        cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR))))) {
+         (condition(t.instruction, t.cpsr) &&
+          !bootstrapInstructionChecked(t.instruction, cpuGetRegisters(p->cpu), t.cpsr,
+                                       cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR), alignmentFaults))));
+    // A refused ARM instruction passed its condition, so an undefined one here takes the exception.
+    const bool undefined = refused && p->guestExceptions && !p->prefixCapacityExceeded && !p->blPrefix &&
+                           undefinedInstruction(t.instruction, thumb);
+    if (refused && !undefined) {
         p->result.stop = Imx1ProbeStop::unsupportedInstruction;
         return false;
     }
@@ -1564,14 +1932,21 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     }
     const bool softwareEntry = softwareInterrupt(t.instruction, thumb) &&
                                (thumb || condition(t.instruction, t.cpsr));
-    if (cpuExceptionSequence(p->cpu) != exceptions &&
-        !(softwareEntry && cpuExceptionSequence(p->cpu) == exceptions + 1 &&
-          (cpuGetRegisters(p->cpu)[15] == 8 || cpuGetRegisters(p->cpu)[15] == 0xffff0008) &&
-          cpuGetRegisters(p->cpu)[14] == t.pc + t.instructionSize &&
-          cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
-          cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x93))) {
-        p->result.stop = !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10 ?
+    const bool entered = cpuExceptionSequence(p->cpu) != exceptions;
+    const bool guestTaken = entered && p->guestExceptions &&
+                            !(!fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10) &&
+                            guestEntry(p->cpu, t, exceptions, undefined, fetchAbort);
+    if ((entered && !guestTaken &&
+         !(softwareEntry && cpuExceptionSequence(p->cpu) == exceptions + 1 &&
+           (cpuGetRegisters(p->cpu)[15] == 8 || cpuGetRegisters(p->cpu)[15] == 0xffff0008) &&
+           cpuGetRegisters(p->cpu)[14] == t.pc + t.instructionSize &&
+           cpuGetRegExternal(p->cpu, ARM_REG_NUM_SPSR) == t.cpsr &&
+           cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR) == ((t.cpsr & ~0xbfu) | 0x93))) ||
+        ((undefined || fetchAbort) && !guestTaken)) {
+        p->result.stop = undefined ? Imx1ProbeStop::unsupportedInstruction :
+                         !fetchAbort && !thumb && (t.instruction & 0x0f000f10) == 0x0e000f10 ?
                          Imx1ProbeStop::unsupportedCp15 : Imx1ProbeStop::exception;
+        if (fetchAbort) { p->result.address = t.pc; p->result.value = fsr; p->result.size = t.instructionSize; }
         return false;
     }
     if (p->options.diagnosticSnapshot) {
@@ -1651,7 +2026,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             if (!runStep(p, idleHclkLimit)) break;
     } else {
         // Fast: after each step, the rest of a quiet span runs in the JIT and on the lean path. Their instructions
-        // are charged one cycle each through the deferred charge, and they stop before anything the step has
+        // are charged their cost model clocks through the deferred charge, as the step charges them, and they stop before anything the step has
         // to see (MMIO, CP15, faults, a guard refusal), which the next step runs. The JIT may pass the span by
         // up to its block length (the charge then comes a little late); the slice, the bounds and the GPIO
         // event it never passes. The last instruction before the slice's retired or work limit is left to the
@@ -1660,6 +2035,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
         for (uint32_t slice = 0; slice < retiredBudget;) {
             if (!runStep(p, idleHclkLimit)) break;
             ++slice;
+            delayHalted = delayHaltOff = delayPassed = false;
+            scanHalted = scanHaltOff = false;
             for (;;) {
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
                     cpuArm920ClockMode(p->cpu) != quietMode) break;
@@ -1674,20 +2051,36 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 uint32_t leanCount = UINT32_MAX;
                 // An exception return to an interrupted Thumb BL suffix goes through the step.
                 if (p->fastJit && jitSlack && hard >= jitSlack && !p->interruptedPrefixCount) {
+                    if (delayHalted) {
+                        delayHalted = false;
+                        const bool rounds = p->skipFifoWait();
+                        const int skipped = p->skipDelay();
+                        delayHaltOff = skipped == 1;
+                        delayPassed = skipped == 2;
+                        delayHaltSkips += skipped == 2;
+                        // A skip counts as work: the slice's limits are worked out again before anything runs.
+                        if (rounds || skipped == 2) continue;
+                    }
+                    const bool halted = std::exchange(scanHalted, false);
                     if (const uint64_t passed = p->skipScanPoll(hard - jitSlack)) {
                         slice += uint32_t(passed);
                         leanCs5 = {};
                         continue;
                     }
+                    scanHaltOff |= halted;
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
                     leanCs5 = {};
                     inJit = true;
                     // The slice limits instructions, the quiet span instructions and wait clocks together: the
                     // run's graphics accesses are checked against the span alone.
+                    // ran is the run's cost model clocks, instructions what it retired (fewer or as many).
+                    uint32_t instructions = 0;
                     const uint32_t ran = cpuArm920RunJit(p->cpu, jitBudget, &stop,
-                                                         uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)));
+                                                         uint32_t(std::min<uint64_t>(quietCycles, UINT32_MAX)),
+                                                         &instructions);
                     inJit = false;
+                    delayPassed = false;
                     if (jitHalt) {
                         jitHalt = false;
                         if (!cpuArm920Waiting(p->cpu)) cpuClearSlowPath(p->cpu, SLOW_PATH_REASON_RESCHEDULE);
@@ -1700,16 +2093,18 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     leanCs5 = {};
                     ++jitRuns;
                     if (ran) {
-                        deferredCycles += ran;
-                        quietCycles = ran < quietCycles ? quietCycles - ran : 0;
-                        p->retired += ran;
-                        jitRetired += ran;
-                        p->work += ran;
-                        slice += ran;
+                        // Cycles a charged write took already (jitChargedWrite) aren't deferred again.
+                        const uint32_t left = ran - std::min(ran, cpuArm920JitCharged(p->cpu));
+                        deferredCycles += left;
+                        quietCycles = left < quietCycles ? quietCycles - left : 0;
+                        p->retired += instructions;
+                        jitRetired += instructions;
+                        p->work += instructions;
+                        slice += instructions;
                         p->blPrefix = false;  // a Thumb BL pair runs whole in the JIT
                     }
                     if (stop == arm920JitBudget) {
-                        p->skipDelay();
+                        delayPassed = p->skipDelay() == 2;
                         if (ran) continue;
                         break;
                     }
@@ -1722,7 +2117,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                     }
                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
-                    leanCount = stop == arm920JitCold || ran < 4 ? 32 : 1;
+                    leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;
                 }
                 if (quietCycles < leanMinimumSpan || slice + 1 >= retiredBudget) break;
                 uint64_t budget = std::min<uint64_t>(quietCycles, retiredBudget - slice - 1);
@@ -1736,7 +2131,11 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 uint32_t blNext;
                 uint64_t busAccesses;
                 leanCs5 = {};
-                const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses);
+                delayPassed = false;
+                // budget is in cost model clocks, and bounds the instructions too (each costs 1 at least).
+                uint32_t clocks = 0;
+                const uint32_t ran = cpuArm920RunLeanFor(p->cpu, uint32_t(budget), leanCount, &blNext, &busAccesses,
+                                                         &clocks);
                 p->result.busAccesses += busAccesses;
                 // Graphics memory writes add their wait clocks to the work and the deferred charge, and their
                 // cost to the span used, as cs5Wait would.
@@ -1746,8 +2145,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                 quietCycles -= leanCs5.waitCost;
                 leanCs5 = {};
                 if (!ran) break;
-                deferredCycles += ran;
-                quietCycles -= ran;
+                deferredCycles += clocks;
+                quietCycles -= clocks;
                 p->retired += ran;
                 leanRetired += ran;
                 p->work += ran;
@@ -1777,9 +2176,11 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
     cpuArm920SetLeanRead(p->cpu, fast ? Probe::leanRead : nullptr);
     cpuArm920SetLeanWrite(p->cpu, fast ? Probe::leanWrite : nullptr);
     // The register reads the graphics model answers by pc that Fast blocks take in generated code: the identity
-    // read in the register read helper, the scan status reads and the engine's ring pointer polls.
+    // read in the register read helper, the scan status reads and the engine's ring pointer polls. And the delay
+    // loops' timer reads (delayLoopPc), and the batch producers' ring pointer writes (jitChargedWrite).
     static constexpr uint32_t accessPcs[] = {0x200871dc, 0x200adb08, 0x200adb14, 0x200ad7b0,
-                                             0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030};
+                                             0x200b8c64, 0x200b8c70, 0x200b8cb0, 0x200b8fcc, 0x200b9030,
+                                             0x2009f678, 0x2008492c, 0x200aa504, 0x200a9ed4};
     cpuArm920SetJitAccessPcs(p->cpu, accessPcs, sizeof accessPcs / sizeof accessPcs[0]);
     p->fastJit = fast && p->fastBlocks && p->options.bootstrapPeripherals && cpuArm920SetJit(p->cpu, true);
     if (!p->fastJit) cpuArm920SetJit(p->cpu, false);
@@ -1791,6 +2192,15 @@ bool imx1MachineSetFastEngine(Imx1Machine* machine, bool fast) {
 
 bool imx1MachineFastEngine(const Imx1Machine* machine) { return machine->probe->fastEngine; }
 
+bool imx1MachineSetCpuClockMultiplier(Imx1Machine* machine, uint32_t num, uint32_t den) {
+    auto* p = machine->probe;
+    // Between runs every cycle is charged (runSlice ends with chargeDeferred), so the next charge is the first
+    // at the new rate.
+    if (p->bounds || deferredCycles || deferredHclk) return false;
+    p->peripherals.setCpuClockMultiplier(num, den);
+    return true;
+}
+
 uint64_t imx1MachineLeanRetired(const Imx1Machine*) { return leanRetired; }
 
 uint64_t imx1MachineJitRetired(const Imx1Machine*) { return jitRetired; }
@@ -1799,11 +2209,31 @@ uint64_t imx1MachineJitRuns(const Imx1Machine*) { return jitRuns; }
 uint64_t imx1MachineJitReads(const Imx1Machine*) { return jitReads; }
 uint64_t imx1MachineJitRegisterReads(const Imx1Machine*) { return jitRegisterReads; }
 uint64_t imx1MachineJitBoardWrites(const Imx1Machine*) { return jitBoardWrites; }
+uint64_t imx1MachineJitChargedWrites(const Imx1Machine*) { return jitChargedWrites; }
 uint64_t imx1MachineDelaySkips(const Imx1Machine*) { return delaySkips; }
+uint64_t imx1MachineDelayHaltSkips(const Imx1Machine*) { return delayHaltSkips; }
 uint64_t imx1MachineDelaySkipCycles(const Imx1Machine*) { return delaySkipCycles; }
 uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
+uint64_t imx1MachineScanHalts(const Imx1Machine*) { return scanHalts; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
+bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
+    auto* p = machine->probe;
+    if (p->bounds || p->stopped) return false;
+    p->guestExceptions = on;
+    return true;
+}
+bool imx1MachineGuestExceptions(const Imx1Machine* machine) { return machine->probe->guestExceptions; }
+uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*) { return fifoWaitSkips; }
+uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*) { return fifoWaitRounds; }
+void imx1SetFifoWaitSkip(bool skip) { fifoWaitSkip = skip; }
+uint64_t imx1MachineYmfReadyReads(const Imx1Machine* machine) {
+    return machine->probe->peripherals.ymf768().readyRegisterReads();
+}
+
+Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine* machine) {
+    return machine->probe->peripherals.ymf768().lastReadyRead();
+}
 
 void imx1SetFastBlocksDefault(bool blocks) { fastBlocksDefault = blocks; }
 
@@ -1821,6 +2251,31 @@ uint64_t imx1MachineLeanCs5Writes(const Imx1Machine*) { return leanCs5Writes; }
 uint64_t imx1MachineLeanCs5Reads(const Imx1Machine*) { return leanCs5Reads; }
 uint64_t imx1MachineLeanCs5MemoryReads(const Imx1Machine*) { return leanCs5MemoryReads; }
 uint64_t imx1MachineLeanBoardReads(const Imx1Machine*) { return leanBoardReads; }
+
+std::string imx1MachineChipSummary(const Imx1Machine* machine) {
+    const auto* p = machine->probe;
+    std::string out;
+    char text[64];
+    const auto& ymf = p->peripherals.ymf768();
+    std::snprintf(text, sizeof text, "ymf768 %s bank %u index %02x", p->peripherals.ymf768Enabled() ? "on" : "off",
+                  ymf.selectedBank(), ymf.selectedIndex());
+    out += text;
+    for (unsigned bank = 0; bank < 2; ++bank) {
+        std::snprintf(text, sizeof text, "\nymf768 bank %u", bank);
+        out += text;
+        for (unsigned i = 0; i < 256; ++i) {
+            std::snprintf(text, sizeof text, "%s%02x", i % 32 ? "" : " ", ymf.readRegister(bank, i));
+            out += text;
+        }
+    }
+    const auto& clocks = p->cs5Configuration.clockState();
+    out += "\ngraphics clocks";
+    for (uint32_t offset = 0x80; offset <= 0xb0; offset += 4) {
+        std::snprintf(text, sizeof text, " %08x", clocks.word(offset));
+        out += text;
+    }
+    return out;
+}
 
 uint64_t imx1MachineMemoryHash(const Imx1Machine* machine) {
     const auto* p = machine->probe;
@@ -1844,6 +2299,9 @@ void imx1MachineEnableYmf768(Imx1Machine* machine) { machine->probe->peripherals
 void imx1MachineSetPcmOutput(Imx1Machine* machine, void (*hook)(void*, uint16_t, unsigned), void* context) {
     machine->probe->peripherals.setPcmOutput(hook, context);
 }
+
+extern uint64_t imx1PcmUnderrunWords;
+uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*) { return imx1PcmUnderrunWords; }
 
 Imx1MachineAudio imx1MachineAudio(const Imx1Machine* machine) {
     const auto& board = machine->probe->peripherals;
@@ -1919,6 +2377,11 @@ unsigned imx1MachineScanOrientation(const Imx1Machine* machine) {
     static const unsigned orientations[] = {1, 4, 2, 3};
     return orientations[(display.activeWord(0x414) >> 3) & 3];
 }
+Imx1MachineAttention imx1MachineAttention(const Imx1Machine* machine) {
+    if (!machine || !machine->probe->peripherals.ymf768Enabled()) return {};
+    const auto& ymf = machine->probe->peripherals.ymf768();
+    return {ymf.led(), ymf.motor()};
+}
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
     auto* p = machine->probe;
     if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
@@ -1927,6 +2390,20 @@ Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1
 Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine* machine) {
     return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspPenInputs()
                                                                    : Imx1AspPenInputs{};
+}
+Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine* machine, uint16_t word) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.aspUSampleKnown)
+        return Imx1BootstrapAccess::sequence;
+    p->peripherals.setAspUInput(word);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGpioInput(const Imx1Machine* machine, unsigned port) {
+    return machine ? machine->probe->peripherals.gpioInputSample(port) : 0;
+}
+uint16_t imx1MachineAspUInput(const Imx1Machine* machine) {
+    return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspUInput() : 0;
 }
 
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine* machine, const uint32_t (&values)[4],
@@ -1949,8 +2426,24 @@ Imx1BootstrapAccess imx1MachineSetMmcsdCard(Imx1Machine* machine, VSD* card, boo
     p->peripherals.attachMmcsdCard(card);
     return p->peripherals.transitionGpioInputs(values, masks, true);
 }
+void imx1MachineSetMmcsdCardId(Imx1Machine* machine, const char* id) {
+    if (machine) machine->probe->mmcsdCardId.assign(id ? id : "", id ? strnlen(id, imx1CardIdBytes) : 0);
+}
 VSD* imx1MachineMmcsdCard(const Imx1Machine* machine) {
     return machine ? machine->probe->peripherals.mmcsdCard() : nullptr;
+}
+Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine* machine, VSD* card, bool commit) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (card == p->cs5Configuration.sdState().attachedCard()) return Imx1BootstrapAccess::ok;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->cs5Configuration.virtualProfile())
+        return Imx1BootstrapAccess::sequence;
+    auto candidate = p->cs5Configuration;
+    candidate.attachSdCard(card);
+    return p->acceptGraphics(candidate, commit);
+}
+VSD* imx1MachineGraphicsSdCard(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.sdState().attachedCard() : nullptr;
 }
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine* machine, uint32_t first, uint32_t second, bool commit) {
     if (!machine) return Imx1BootstrapAccess::sequence;
@@ -2099,7 +2592,9 @@ const char* imx1ProbeStopName(Imx1ProbeStop stop) {
 namespace {
 constexpr uint32_t stateFlagFast = 1, stateFlagRing = 2, stateFlagTerminal = 4;
 constexpr uint32_t stateIdentityVersion = 1, stateMemoryVersion = 1, stateRingVersion = 1, stateJitVersion = 1;
-constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1;
+constexpr uint32_t stateGraphicsMemoryVersion = 1, stateBusVersion = 1, stateCardIdVersion = 1, stateCardPulledVersion = 1;
+// Slot 2's section: Imx1GraphicsSd::stateCard and the card's own bytes.
+constexpr uint32_t stateGraphicsSdVersion = Imx1GraphicsSd::cardStateVersion;
 constexpr uint32_t stateRingEntries = 4096;
 constexpr uint32_t stateMaxNoteBytes = 4096;
 
@@ -2178,12 +2673,13 @@ struct ProbeState {
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
 static_assert(sizeof(Imx1ProbeOptions) == 1352, "update stateOptionFields, stateIdentityVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Probe) - Imx1Bootstrap::unsavedBytes - Probe::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 26080, "update ProbeState, its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1ProbeResult) == 352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Arm920SavedState) == 43328, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Bootstrap) - Imx1Bootstrap::unsavedBytes == 2344, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Aitc) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cgm) == 128, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Cgm) - Imx1Cgm::unsavedBytes == 128, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Gpio) == 416, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Eim) == 56, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Timer) == 28, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2199,16 +2695,17 @@ static_assert(sizeof(Imx1Watchdog) == 40, "update its stateVersion and the size 
 static_assert(sizeof(Imx1Rtc) == 48, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs4Capture) == 1040, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Cs5Reset) == 8, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cs5Configuration) == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 5136, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsGpio) == 36, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsWindows) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsLookup) == 3080, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(Imx1GraphicsLookup::layoutBytes() == 3080, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsController) == 32, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsEngine) == 96, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsDisplay) == 1504, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsInterrupts) == 12, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsAcquisition) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1GraphicsSd) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1GraphicsSd) - Imx1GraphicsSd::unsavedBytes == 80, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsClocks) == 104, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsCommands) == 10352, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1GraphicsMemory) - Imx1GraphicsMemory::unsavedBytes == 248, "update its stateVersion and the size in stateLayoutFingerprint");
@@ -2376,6 +2873,8 @@ struct StagedState {
     bool ring = false, jit = false;
     // An older state without a YMF section keeps B15 as it was saved.
     bool ymfSection = false;
+    // Slot 2's card bytes from the SD2 section, for the card in the slot after the load.
+    std::vector<uint8_t> graphicsSdCard;
     std::vector<Probe::Recent> recent;
     uint32_t recentNext = 0, recentCount = 0;
     uint64_t jitBlocks = 0, jitInstructions = 0;
@@ -2501,6 +3000,22 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (open("SDCD", Imx1Bootstrap::cardStateVersion, false, a)) {
         staged.board->stateCard(a);
         if (!finish(a)) return info;
+        info.cardSection = true;
+    } else if (info.status != S::ok) return info;
+    // In states saved after a card was taken out of the slot in use.
+    if (open("SDPL", stateCardPulledVersion, false, a)) {
+        uint32_t pulled = 0;
+        a.Do32(pulled).Require(pulled >= Imx1Mmcsd::pulledIdle && pulled <= Imx1Mmcsd::pulledWrite, "card pulled");
+        if (!finish(a)) return info;
+        staged.board->setMmcsdCardPulled(pulled);
+    } else if (info.status != S::ok) return info;
+    // The card's id, in states saved with a known card in.
+    if (open("SDID", stateCardIdVersion, false, a)) {
+        std::string id;
+        if (!info.cardSection || !stateText(a, id, imx1CardIdBytes) || !finish(a))
+            return fail(S::invalidValue, stateFourcc("SDID"), "card id");
+        std::memcpy(info.cardId, id.data(), id.size());
+        info.cardIdKnown = true;
     } else if (info.status != S::ok) return info;
     // The memory DMA section, only in states saved with a memory-to-memory transfer under way.
     if (open("MDMA", Imx1Bootstrap::memoryDmaStateVersion, false, a)) {
@@ -2512,6 +3027,12 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     staged.ymfSection = open("YMF ", Imx1Bootstrap::ymf768StateVersion, false, a);
     if (staged.ymfSection) {
         staged.board->stateYmf768(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
+    // The YMF768's power steps, only in states saved while one was under way.
+    if (open("YMFR", Imx1Bootstrap::ymf768ReadyStateVersion, false, a)) {
+        if (!staged.ymfSection) return fail(S::invalidValue, stateFourcc("YMFR"), "ready steps without the chip");
+        staged.board->stateYmf768Ready(a);
         if (!finish(a)) return info;
     } else if (info.status != S::ok) return info;
     if (!open("SRAM", stateMemoryVersion, true, a)) return info;
@@ -2539,10 +3060,22 @@ Imx1StateInfo decodeState(const Probe& p, const uint8_t* data, size_t size, uint
     if (!open("CS5C", Imx1Cs5Configuration::stateVersion, true, a)) return info;
     staged.graphics->state(a);
     if (!finish(a)) return info;
+    // Slot 2, only in states saved once it has had a card.
+    if (open("SD2 ", stateGraphicsSdVersion, false, a)) {
+        staged.graphics->sdSlot().stateCard(a);
+        a.DoVector(staged.graphicsSdCard, 1u << 20);
+        if (!finish(a)) return info;
+        info.graphicsSdSection = true;
+    } else if (info.status != S::ok) return info;
     staged.commands = std::make_unique<Imx1GraphicsCommands>();
     if (!open("GCMD", Imx1GraphicsCommands::stateVersion, true, a)) return info;
     staged.commands->state(a);
     if (!finish(a)) return info;
+    // The last keyed copy's colour compare, in states saved after one. Without it none has been seen.
+    if (open("GCMP", Imx1GraphicsCommands::compareStateVersion, false, a)) {
+        staged.commands->stateCompare(a);
+        if (!finish(a)) return info;
+    } else if (info.status != S::ok) return info;
     if (p.graphicsMemory) {
         staged.graphicsMemory = std::make_unique<Imx1GraphicsMemory>();
         if (!open("GMEM", Imx1GraphicsMemory::stateVersion, true, a)) return info;
@@ -2639,6 +3172,17 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
         auto a = file.begin(stateFourcc("SDCD"), Imx1Bootstrap::cardStateVersion);
         p->peripherals.stateCard(a);
         file.end();
+        if (!p->mmcsdCardId.empty()) {
+            auto id = file.begin(stateFourcc("SDID"), stateCardIdVersion);
+            stateText(id, p->mmcsdCardId.c_str());
+            file.end();
+        }
+    }
+    if (p->peripherals.mmcsdCardPulled()) {
+        auto a = file.begin(stateFourcc("SDPL"), stateCardPulledVersion);
+        uint32_t pulled = p->peripherals.mmcsdCardPulled();
+        a.Do32(pulled);
+        file.end();
     }
     if (p->peripherals.memoryDmaBusy()) {
         auto a = file.begin(stateFourcc("MDMA"), Imx1Bootstrap::memoryDmaStateVersion);
@@ -2649,6 +3193,11 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
         auto a = file.begin(stateFourcc("YMF "), Imx1Bootstrap::ymf768StateVersion);
         p->peripherals.stateYmf768(a);
         file.end();
+        if (p->peripherals.ymf768().readyBusy()) {
+            auto r = file.begin(stateFourcc("YMFR"), Imx1Bootstrap::ymf768ReadyStateVersion);
+            p->peripherals.stateYmf768Ready(r);
+            file.end();
+        }
     }
     { auto a = file.begin(stateFourcc("SRAM"), stateMemoryVersion); p->peripherals.stateSram(a); file.end(); }
     for (unsigned bank = 0; bank < 2; ++bank) {
@@ -2659,7 +3208,20 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     { auto a = file.begin(stateFourcc("CS4 "), Imx1Cs4Capture::stateVersion); p->cs4Capture.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("CS5R"), Imx1Cs5Reset::stateVersion); p->cs5Reset.state(a); file.end(); }
     { auto a = file.begin(stateFourcc("CS5C"), Imx1Cs5Configuration::stateVersion); p->cs5Configuration.state(a); file.end(); }
+    if (p->cs5Configuration.sdState().cardUsed()) {
+        std::vector<uint8_t> card;
+        p->cs5Configuration.sdState().saveCard(card);
+        auto a = file.begin(stateFourcc("SD2 "), stateGraphicsSdVersion);
+        p->cs5Configuration.sdSlot().stateCard(a);
+        a.DoVector(card, 1u << 20);
+        file.end();
+    }
     { auto a = file.begin(stateFourcc("GCMD"), Imx1GraphicsCommands::stateVersion); p->graphicsCommands.state(a); file.end(); }
+    if (p->graphicsCommands.compareSeen()) {
+        auto a = file.begin(stateFourcc("GCMP"), Imx1GraphicsCommands::compareStateVersion);
+        p->graphicsCommands.stateCompare(a);
+        file.end();
+    }
     if (p->graphicsMemory) {
         { auto a = file.begin(stateFourcc("GMEM"), Imx1GraphicsMemory::stateVersion); p->graphicsMemory->state(a); file.end(); }
         for (unsigned bank = 0; bank < 2; ++bank) {
@@ -2711,6 +3273,8 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     VSD* const card = p->peripherals.mmcsdCard();
     staged.board->takePcmOutput(p->peripherals);
     if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768(staged.ymfSection);
+    // The Faster multiplier belongs to the run, not the state.
+    staged.board->setCpuClockMultiplier(p->peripherals.cpuClockMultiplierNum(), p->peripherals.cpuClockMultiplierDen());
     p->peripherals = std::move(*staged.board);
     p->peripherals.setI2cBus(p->options.i2cBus);
     p->peripherals.setI2cObserver(Probe::i2cEvent, p);
@@ -2719,7 +3283,11 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     info.cardResumed = card && p->peripherals.attachMmcsdCard(card);
     p->cs4Capture = *staged.cs4;
     p->cs5Reset = *staged.cs5Reset;
+    // Slot 2's card stays in, carrying on from the SD2 section when it takes it.
+    VSD* const graphicsSdCard = p->cs5Configuration.sdState().attachedCard();
     p->cs5Configuration = std::move(*staged.graphics);
+    info.graphicsSdResumed = p->cs5Configuration.reattachSdCard(
+        graphicsSdCard, info.graphicsSdSection ? &staged.graphicsSdCard : nullptr);
     p->graphicsCommands = std::move(*staged.commands);
     if (p->graphicsMemory) p->graphicsMemory.swap(staged.graphicsMemory);
     if (p->graphicsGpu.gpu) p->graphicsGpu.gpu->attach(p->graphicsMemory.get());

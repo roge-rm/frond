@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
 from guest_process import run_guest
 from palm_boot import Core, png_rows, date_time_prefs, palm_images, zire_setup
+import boot_fixture
 CORE = ROOT / 'out/frond'
 # FROND_DEVICE_IMAGES is the firmware folder (deviceimages/palm); without it the firmware tests skip.
 PALM = palm_images()
@@ -49,22 +50,35 @@ def session_file(path):
 
 
 def boot_to_launcher(root):
-    """Cold boots the real NOR through calibration and setup and saves a session at the launcher.
+    """A copy in root of a session at the launcher, cold booted from the real NOR through calibration and setup.
 
+    The session is a boot-once fixture (tests/boot_fixture.py), made again only for a new core, NOR or script.
     Each tap waits for its screen: the red target under the pen for calibration, then a new title that has
     stopped changing. With the console running, guest time drifts from host time too much for fixed times.
     """
-    session = root / 'launcher.session'
-    core = Core([ZIRE], root / 'boot.log')
+    def build(session, logs):
+        logs.mkdir()
+        core = Core([ZIRE], logs / 'boot.log')
+        try:
+            zire_setup(core, logs)
+            # The key tests compare against launcher.png, so it has to be the launcher once every icon is drawn.
+            seen = []
 
-    try:
-        zire_setup(core, root)
-        time.sleep(1)
-        core.send(f'save-session "{session}"', 'wrote session')
-    finally:
-        core.close()
+            def settled(rows):
+                seen.append(None if rows is None else rows[30:])
+                return rows is not None and len(seen) > 1 and seen[-1] == seen[-2]
+            core.wait_frame(logs / 'launcher.png', settled, 60)
+            time.sleep(1)
+            core.send(f'save-session "{session}"', 'wrote session')
+        finally:
+            core.close()
+
+    fixture = boot_fixture.fixture('zire72-rom', CORE, [ZIRE], build, tag='launcher', sources=[Path(__file__)])
+    fixture.copy_logs(root)
+    session = fixture.copy_to(root / 'launcher.session')
     assert session_file(session).is_file(), 'launcher session not saved'
     return session
+
 
 @unittest.skipUnless(ZIRE.is_file() and CORE.is_file(), 'private Zire 72 firmware or core missing')
 class Zire72RomTest(unittest.TestCase):

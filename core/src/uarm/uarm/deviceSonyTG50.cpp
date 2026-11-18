@@ -133,6 +133,7 @@ Tg50Board *tg50BoardSetup(SocPeriphs *sp, Keypad *kp,Reschedule reschedule,GetEm
     board->ssp = sp->ssp;
     board->i2c = sp->i2c;
     board->touch = ad7873Init(board->ssp, board->gpio, 9);
+    tg50BoardSetConnectorEmpty(board);
     board->codec = ak4534Init(board->i2c, sp->i2s, board->gpio);
     ak4534SetOutput(board->codec, board, tg50AudioDac, tg50AudioBoundary);
     pxaPwmSetObserver(board->pwm, board, tg50AudioRegisters);
@@ -283,6 +284,8 @@ template <typename T> bool tg50BoardLoad(Tg50Board *board, T &loader, bool prese
         !ak4534Load(board->codec, loader, preserveInput) ||
         !an32502aLoad(board->pmic, loader, preserveInput) ||
         !(board->restoringReset ? (msCtrlrReset(board->ms),true) : msCtrlrLoad(board->ms, loader, preserveInput))) return false;
+    // Older sessions saved 0 V for the empty connector; 0 V is no accessory Frond plugs in.
+    if (tg50BoardAccessoryAuxCode(board) == 0) tg50BoardSetConnectorEmpty(board);
     csr::BcspTransport::Bytes radioState;
     if(loader.GetChunk(ChunkType::sonyTg50Bluetooth)){
         auto* radioChunk=loader.GetChunkOrFail(ChunkType::sonyTg50Bluetooth,0,"TG50 Bluetooth");
@@ -386,8 +389,19 @@ void tg50BoardSetTransportObserver(Tg50Board *board, void (*observer)(void *), v
 
 void tg50BoardSetUsbCable(Tg50Board *board, bool connected) {
     // AD7873 AUX, 2.5 V reference: 2000 mV gives code3276 in the USB accessory band.
-    ad7873setVaux(board->touch, connected ? 2000 : 0);
+    if (connected) ad7873setVaux(board->touch, 2000);
+    else tg50BoardSetConnectorEmpty(board);
 }
+void tg50BoardSetAccessoryAux(Tg50Board *board, uint16_t mV) { ad7873setVaux(board->touch, mV); }
+// Nothing plugged in: AUX reads full scale, which SonySys takes as no accessory (code >> 4 at
+// 0xF3 or more). 0 V would be its serial-ID accessory class 0x200.
+void tg50BoardSetConnectorEmpty(Tg50Board *board) { ad7873setVaux(board->touch, 2500); }
+void tg50BoardSetBatteryMilliVolts(Tg50Board *board, uint16_t mV) { ad7873setVbatt(board->touch, mV); }
+void tg50BoardSetCharging(Tg50Board *board, bool charging) {
+    tg50ucGpioSetInState(board->uc, 0, 13, !charging);
+    tg50ucGpioSetInState(board->uc, 0, 14, !charging);
+}
+uint16_t tg50BoardAccessoryAuxCode(Tg50Board *board) { return ad7873getVaux(board->touch); }
 bool tg50BoardUsbCableAttached(Tg50Board *board) {
     const auto code = ad7873getVaux(board->touch);
     return code >= 3152 && code <= 3535;

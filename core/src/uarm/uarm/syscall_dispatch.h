@@ -65,6 +65,7 @@ uint16_t syscall_FtrSet(struct SyscallDispatch* sd, uint32_t flags, uint32_t cre
 uint32_t syscall68k_SysGetOsVersionString(struct SyscallDispatch* sd, uint32_t flags);
 uint32_t syscall68k_MemPtrNew(struct SyscallDispatch* sd, uint32_t flags, uint32_t size);
 uint16_t syscall68k_MemPtrFree(struct SyscallDispatch* sd, uint32_t flags, uint32_t memPtr);
+uint16_t syscall68k_SysSetAutoOffTime(struct SyscallDispatch* sd, uint32_t flags, uint16_t seconds);
 uint16_t syscall68k_MemNumCards(struct SyscallDispatch* sd, uint32_t flags);
 uint16_t syscall68k_ExgDBRead(struct SyscallDispatch* sd, uint32_t flags, uint32_t readProcP,
                               uint32_t deleteProcP, uint32_t userDataP, uint32_t dbIDP,

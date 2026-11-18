@@ -47,7 +47,7 @@ int main() {
                   << ",\"pending_usb\":" << std::quoted(deviceProfilePendingUsb5(p.deviceType))
                   << ",\"colour_lcd\":" << (deviceProfileColourLcd5(p.deviceType) ? "true" : "false")
                   << ",\"cpu_hz\":" << p.cpuHz
-                  << ",\"original_mips\":" << deviceProfileOriginalMips5(p.deviceType)
+                  << ",\"original_hz\":" << deviceProfileOriginalHz5(p.deviceType)
                   << ",\"sound\":" << (p.capabilities.sound ? "true" : "false")
                   << ",\"storage_slot\":" << std::quoted(deviceProfileStorageSlot5(p) == DeviceStorageSlot5::memoryStick ? "memory-stick"
                         : deviceProfileStorageSlot5(p) == DeviceStorageSlot5::sd ? "sd" : "none");
@@ -123,6 +123,7 @@ int main() {
                   << ",\"usb_printer\":" << (p.capabilities.usbPrinter ? "true" : "false")
                   << ",\"usb_wifi\":" << (p.capabilities.usbWifi ? "true" : "false")
                   << ",\"built_in_wifi\":" << (p.capabilities.builtInWifi ? "true" : "false")
+                  << ",\"clie_gamepad\":" << (f.clieGamepad ? "true" : "false")
                   << ",\"firmware_variants\":[";
         bool firstVariant = true;
         for (const auto& v : deviceFirmwareVariants5) {

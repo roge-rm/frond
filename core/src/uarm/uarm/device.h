@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 
+#include "BatteryPower.h"
 #include "SoC.h"
 #include "device_type5.h"
 #include "get_emu_time.h"
@@ -111,6 +112,13 @@ void deviceSetAudioQueue(struct Device *dev, struct AudioQueue *audioQueue);
 bool deviceI2sConnected();
 bool deviceTg50IrPowerEnabled(Device *);
 void deviceTg50SetUsbCable(Device *, bool connected);
+void deviceTg50SetAccessoryAux(Device *, uint16_t mV);
+void deviceTg50SetConnectorEmpty(Device *);
+// The battery setting (a machine setting, not saved with the session). Applies now and again after every
+// load and reset. False on a board with no battery input modelled yet.
+bool deviceSetBattery(Device *, const BatteryPower &);
+bool deviceBatterySupported(Device *);
+uint16_t deviceTg50AccessoryAuxCode(Device *);
 bool deviceTg50UsbCableAttached(Device *);
 bool deviceTg50UsbListening(Device *);
 void deviceSetTransportObserver(Device *, void (*)(void *), void *);

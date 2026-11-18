@@ -36,6 +36,8 @@ class DesktopClient : public QObject {
     void usbState(const QString& state);
     void infraredState(const QString& state);
     void bluetoothState(const QString& state);
+    // The Zodiac's rumble is on and no game controller plays it.
+    void rumbleState(bool on);
     void sdProgress(qint64 done, qint64 total);  // SD create, import and export
     void danaViewState(const QString& state);
     void cardState(const QString& state);  // a card put in while the machine was off went in

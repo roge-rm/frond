@@ -37,6 +37,23 @@ The Fast engine builds Dynarmic from `vendor/dynarmic` (needs Ninja and Boost). 
 - `make check-device-data` checks the generated per-device data against the profiles.
 - `make test-compatibility` runs synthetic 68k and ARM/Thumb programs through the core: mixed-width memory, branches, returns, traps, faults and an ARM to Thumb to ARM call chain. These are bounded checks, not ISA conformance tests.
 
+## Rerunning only what changed
+
+Every `make test-NAME` records its result in `build/check-passes.tsv` (name, commit, time, pass, fail or skip, tree state, seconds). `make recheck-list` shows the checks that need running and why: never passed, failed or skipped last time, or a file they cover changed since the commit they passed at. `make recheck` runs those one by one and records them. Run it as `heavy build make recheck`, and limit it with `CHECKS="test-zodiac-* test-cpu"`.
+
+- Uncommitted and untracked files count as changed. A pass on a dirty tree only counts while the tree stays exactly as it was, so commit before checking if you want the pass to last.
+- `tests/check-paths.tsv` maps checks to the paths they cover: the first rule that fits a check gives its paths, and `*` rules are added to all. A check with no rule reruns every time. The Makefile, `core/src/common/`, `tests/`, `tools/` and `vendor/` are in every check's paths, so a change there reruns everything. When you add a device or a shared folder, add it there, then run `python3 tools/check-record.py audit`: it lists files a check's recipe names, or that its sources or its device family's sources `#include`, which the map doesn't cover, and should say 0.
+- A check that prints SKIP or SKIPPED, or a status like `NAME: skipped, no ROM` (no firmware, no session, no tool), records skip and reruns like one that never passed. A target counts as passed only when its last recipe line passes after all the others did, in the same make run; a failing line records the failure at once.
+- `tests/timed-shell.sh` stops whatever a test line left running (even in a session of its own) when the line times out or is interrupted, and waits at most 5 s for the line's output to close.
+
+## Binaries per commit
+
+`tools/commit-build.sh` builds `frond`, `frond-68k` and `benchmark-replay` once for the commit you're on and keeps them in `build/out-<10 hex of the commit>/` of the main checkout, so every worktree and agent testing that commit uses the same folder. It prints the folder; a second call finds it and builds nothing. It builds in a fresh detached worktree of the commit, `~/.worktrees/frond/commit-build-<hash>`, removed afterwards. Two callers for one commit take a lock, and the folder is renamed into place when it's whole. A tree with uncommitted changes is built in the normal places, with a message, and shares nothing.
+
+- `tools/commit-build.sh tinydeck` copies the folder to `/var/lib/lab/frond-speed/out-<hash>/` once (after checking the SSD is mounted) and prints that path; a second call, or one waiting on the same copy, does nothing.
+- `tools/commit-build.sh list` shows the folders on both sides, and `prune N [--tinydeck] [--dry-run]` keeps the newest N plus the current commit's, removes temporary folders over an hour old from a stopped build or copy, and skips any folder a process has open. Nothing is deleted without it.
+- `tools/speed-check.py` uses the folder for the current commit when the tree is clean and it exists.
+
 ## Real-firmware checks
 
 All of these use your own firmware and a ready session, and say what they skipped. Palm OS SDK, `pilrc` and the m68k and ARM toolchains are needed to build the probe apps (`python3 tools/build-palm-probe.py --probe NAME --sdk DIR`, probes are listed in its `--help`). Probe apps and sessions stay under `build/` and are never committed.
@@ -50,6 +67,7 @@ Smoke (`tests/smoke.py`):
 Other checks:
 - Boot check: run `./out/frond` with the device's firmware, `--no-sound --run-for 60 --framebuffer-output FILE` and `SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy`, then look at the picture. A zero exit status only means the run finished, so check that the guest reached a usable screen (a fresh TX shows Date & Time setup). Boot time depends on the host.
 - `tests/device-rom.py --device NAME --nor FILE [--nand FILE] [--launcher] [--resets]` checks detection, rejection, boot and (with `--launcher`) setup and a saved-session restore in a new process. `--synthetic-rejection` needs no firmware. `tests/zire72-rom.py` does the Zire 72, and `tests/e2-rom.py --rom NOR --nand NAND --output NEWDIR` boots an E2 for 60 seconds, saves, restores in a new process and saves again, with optional `--input-replay`.
+- `device-rom.py --launcher`, `zire72-rom.py` and `frond-68k-peripherals.py` boot each device to the launcher once per core build and keep the session in `build/fixtures/` (`tests/boot_fixture.py`). It's made again when the core, the firmware or the setup scripts change, or when its file doesn't match its manifest. `test_boot` stays a cold boot; delete `build/fixtures/` to make the setup run again.
 - Developer-runner checks (`tests/developer-run.py` is firmware-free, the runner itself is `tools/frond-run.py`): install, launch, replay, screenshot and named log export in a private session copy.
 - SDK compatibility probe: `make test-compatibility` then `python3 tools/build-palm-probe.py --probe compatibility --sdk DIR` and `python3 tools/check-compatibility.py --session READY --output NEWDIR`. It runs twice, the second time from the first run's saved session, and checks memory, databases, preferences, ticks, drawing, native ARM and Thumb calls, the event queue and a real pen tap on a control. Logs carry a unique token so an old log can't pass. `--nor` and `--nand` cold boot the first run.
 - App matrix: `python3 tools/app-compatibility.py --device NAME --manifest PRIVATE.json --output NEWDIR`. The manifest pins the core, fixtures, installs and replays by SHA-256 (`--help` shows the format). Stages are cold-boot, launch, interaction, persistence and restore, each with assertions (`database-records`, exact record hashes) or `visual-review` (always ends as `needs-review`). `execution_status` and `coverage_status` are separate, and skipped or blocked stages are never passes.

@@ -436,6 +436,15 @@ bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin) {
     return pin < gpio->nGpios && (gpio->inputs[pin / 32] & (1u << (pin % 32)));
 }
 
+bool pxaGpioPeekLevel(const PxaGpio* gpio, uint32_t pa, uint32_t* value) {
+    // GPLR0-2 at +0, +4 and +8, and GPLR3 at +0x100, as a read of them gives.
+    const uint32_t at = pa - PXA_GPIO_BASE;
+    if (at == 0x100) *value = gpio->levels[3];
+    else if (at <= 8 && !(at & 3)) *value = gpio->levels[at >> 2];
+    else return false;
+    return true;
+}
+
 unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin) {
     return pin < gpio->nGpios ? (gpio->AFRs[pin / 16] >> (2 * (pin % 16))) & 3 : 0;
 }

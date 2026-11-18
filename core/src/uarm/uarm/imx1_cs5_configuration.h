@@ -100,7 +100,15 @@ class Imx1Cs5Configuration {
     // CPU cycles of this period that advanceCpuCycles can take in one call or in any split with the same
     // result, as no graphics model changes state within them. 0 when a change is due or can't be worked out.
     uint64_t quietCpuCycles(Imx1PllRatio period) const {
-        if (!clocks.programmed() || controller.delayRunning()) return 0;
+        if (controller.delayRunning()) return 0;
+        if (!clocks.programmed()) {
+            // Before the clocks are programmed every CPU cycle is one tick of the models (advanceDisplay), and an
+            // idle HCLK moves none of them.
+            uint64_t ticks = std::min(engine.idleQuietTicks(), sd.idleQuietTicks());
+            ticks = std::min(ticks, display.idleQuietTicks());
+            if (acquisition.deadlineRemaining()) ticks = std::min(ticks, acquisition.deadlineRemaining());
+            return ticks == UINT64_MAX ? UINT64_MAX : ticks ? ticks - 1 : 0;
+        }
         const uint64_t steps = idleQuietSteps(period.numerator, period.denominator);
         return steps == UINT64_MAX ? UINT64_MAX : steps - 1;
     }
@@ -133,10 +141,28 @@ class Imx1Cs5Configuration {
         }
         return true;
     }
+    // ticksAfter with rates prepared for the fraction's denominator (Imx1GraphicsRate): the same ticks in a few
+    // multiplications and at most one division. False where ticksAfter has to decide (a period that doesn't divide
+    // the denominator or an overflow on the way).
+    bool ticksAfterQuick(uint64_t cycles, Imx1PllRatio cpu, uint64_t busClocks, Imx1PllRatio bus, Imx1GraphicsRate& cpuRate,
+                         Imx1GraphicsRate& busRate, uint64_t& ticks) const {
+        if (!clocks.programmed() ||
+            !cpuRate.ready(timeFraction, uint64_t(cpu.numerator) * 390625, uint64_t(cpu.denominator) * 64) ||
+            !busRate.ready(timeFraction, uint64_t(bus.numerator) * 390625, uint64_t(bus.denominator) * 64))
+            return false;
+        uint64_t cpuTicks, cpuRest, busTicks, busRest, rest;
+        if (!cpuRate.split(cycles, cpuTicks, cpuRest) || !busRate.split(busClocks, busTicks, busRest) ||
+            __builtin_add_overflow(cpuRest, busRest, &rest) || __builtin_add_overflow(rest, timeFraction.phase, &rest) ||
+            __builtin_add_overflow(cpuTicks, busTicks, &ticks))
+            return false;
+        return !__builtin_add_overflow(ticks, rest < timeFraction.denominator ? 0 : cpuRate.quotient(rest), &ticks);
+    }
     // A register read that changes nothing, as access answers it after ticks more of graphics time with no
     // change due: the scan status (54c), the acquisition registers but the FIFO and the engine's ring pointer
     // polls. False for anything else and wherever access would refuse it.
-    bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value) const {
+    // scanRate (when given) keeps the display's pixel rate prepared (Imx1GraphicsDisplay::scanStatusAfter).
+    bool quietRegisterRead(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint64_t ticks, uint32_t& value,
+                           Imx1GraphicsRate* scanRate = nullptr) const {
         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address)) return false;
         if (address == 0x16010000 && pc == 0x200871dc) return quietIdentityRead(eim, value);
         if (Imx1GraphicsAcquisition::owns(address))
@@ -148,18 +174,19 @@ class Imx1Cs5Configuration {
             return false;
         const bool scanStatus = (pc == 0x200adb08 || pc == 0x200adb14) && !engine.completed();
         if (!memoryReady(eim) || (!engine.emptyRing() && !scanStatus)) return false;
-        return display.scanStatusAfter(pc, ticks, value);
+        return display.scanStatusAfter(pc, ticks, value, nullptr, scanRate);
     }
     // The scan status read by the vertical wait (200adb08 or 200adb14) as quietRegisterRead answers it after ticks
     // more, with the display's region (Imx1GraphicsDisplay::scanStatusAfter), which only grows with ticks.
-    bool quietScanStatus(const Imx1Eim& eim, uint32_t pc, uint64_t ticks, uint32_t& value, unsigned& region) const {
+    bool quietScanStatus(const Imx1Eim& eim, uint32_t pc, uint64_t ticks, uint32_t& value, unsigned& region,
+                         Imx1GraphicsRate* scanRate = nullptr) const {
         constexpr uint32_t address = 0x1601054c;
         if (!imx1GraphicsProfileValid(profile) || !virtualProfile() || Imx1GraphicsSd::owns(address) ||
             Imx1GraphicsAcquisition::owns(address) || Imx1GraphicsEngine::owns(address) ||
             Imx1GraphicsInterrupts::owns(address) || Imx1GraphicsClocks::owns(address) ||
             (pc != 0x200adb08 && pc != 0x200adb14) || engine.completed() || !memoryReady(eim))
             return false;
-        return display.scanStatusAfter(pc, ticks, value, &region);
+        return display.scanStatusAfter(pc, ticks, value, &region, scanRate);
     }
     // The identity read in the register read helper (200871dc) as access answers it, changing nothing. No other
     // model owns 0x16010000, so access reaches its identity case.
@@ -196,6 +223,18 @@ class Imx1Cs5Configuration {
     bool setAcquisitionMode1Input(uint32_t sample) { return acquisition.setMode1Input(sample); }
     const Imx1GraphicsAcquisition& acquisitionState() const { return acquisition; }
     const Imx1GraphicsSd& sdState() const { return sd; }
+    Imx1GraphicsSd& sdSlot() { return sd; }
+    // Slot 2's card in or out; an event the SD block latches raises the chip's SD interrupt.
+    void attachSdCard(VSD* card) { if (sd.attachCard(card)) interrupts.raiseSd(); }
+    // After a state load, see reattachCard; a latched event raises the chip's SD interrupt.
+    bool reattachSdCard(VSD* card, const std::vector<uint8_t>* resume) {
+        bool event = false;
+        const bool resumed = sd.reattachCard(card, resume, &event);
+        if (event) interrupts.raiseSd();
+        return resumed;
+    }
+    // The card work the SD block left, run on the committed configuration only.
+    void runSdCardWork() { if (sd.cardWorkPending()) sd.runCardWork(); }
     const Imx1GraphicsClocks& clockState() const { return clocks; }
     Imx1GraphicsLookup::Entry lookupEntry(unsigned index) const { return lookup.entry(index); }
     bool memoryInterfaceReady() const { return programmed && interfaceMode == 0x11 && (interfaceControl & ~0xe00u) == 0x0c000000; }
@@ -223,7 +262,7 @@ class Imx1Cs5Configuration {
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
-        if (virtualProfile() && Imx1GraphicsSd::owns(address)) {
+        if (virtualProfile() && (Imx1GraphicsSd::owns(address) || Imx1GraphicsSd::ownsHandlerRead(pc, address))) {
             if (!memoryReady(eim) || !clocks.programmed()) return Imx1BootstrapAccess::sequence;
             const auto window = windows.aperture2();
             if (address >= 0x16200000 && (!window.known || address - 0x16000000 < window.first ||
@@ -389,7 +428,9 @@ class Imx1Cs5Configuration {
                pc == 0x204d218e || pc == 0x204d22f4 || pc == 0x204d2314 || pc == 0x204d231c ||
                pc == 0x204d3652 || pc == 0x204d2742 || pc == 0x204d247e || pc == 0x204d2522 ||
                pc == 0x204d2534 || pc == 0x204d2574 || pc == 0x204d2586 || pc == 0x204d277a ||
-               pc == 0x204d22ae)));
+               pc == 0x204d22ae ||
+               // The SD driver's bus flush reads anywhere in it once slot 2 has had a card.
+               (sd.cardUsed() && pc >= 0x204d2140 && pc < 0x204d3b20))));
         if (!virtualProfile() || write || (!controllerIdentity &&
             pc != (address == 0x16010000 ? 0x200bac00u : 0x200bac28u)))
             return Imx1BootstrapAccess::externalInput;
@@ -511,7 +552,8 @@ class Imx1Cs5Configuration {
     uint8_t defaults = 0, interfaceMode = 0;
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Cs5Configuration) == 5136, "update state() and stateVersion");
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+              Imx1GraphicsLookup::layoutBytes() == 5136, "update state() and stateVersion");
 #endif
 
 struct Imx1ProbeCs5ConfigurationEvent {

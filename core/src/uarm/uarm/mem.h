@@ -27,7 +27,7 @@ bool memRamHeld(const struct ArmMem* mem);
 // in *lines the page's code flags, one per 64 bytes. A CPU, DMA or ramMarkDirty write to a
 // line whose flag is set clears the page's flags and calls written(context, page, offset,
 // size). memForgetRamCode clears every flag.
-uint8_t* memWatchRamCode(struct ArmMem* mem, uint32_t pa, void (*written)(void*, uint8_t*, uint32_t, uint32_t), void* context,
+uint8_t* memWatchRamCode(struct ArmMem* mem, uint32_t pa, void (*written)(void*, uint8_t*, uint8_t*, uint32_t, uint32_t), void* context,
                          uint8_t** lines);
 void memForgetRamCode(struct ArmMem* mem);
 

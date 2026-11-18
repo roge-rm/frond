@@ -91,6 +91,43 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
 
+    // The Zodiac's second SD slot, through the core's sd2- commands. Its card stays in the session's
+    // sd2.frondsd.
+    fun secondState(): State {
+        val reply = link.request("sd2-state", timeoutSeconds = 30)
+        return if (!reply.ok) State.UNKNOWN else when (reply.message) {
+            "inserted" -> State.INSERTED
+            "ejected" -> State.EJECTED
+            "none" -> State.NONE
+            else -> State.UNKNOWN
+        }
+    }
+    fun secondEject() = run("sd2-eject")
+    fun secondReinsert() = run("sd2-reinsert")
+    fun secondCreate(megabytes: Int) = run("sd2-create", megabytes.toString())
+    fun secondInsert(from: Uri) {
+        folder.mkdirs()
+        val image = File(folder, "insert2.img")
+        try {
+            val limit = device.storageSlots.getOrNull(1)?.families?.firstOrNull()?.maxBytes ?: 0L
+            if (!copyIn(from, image, limit)) throw Failed("That image is too big for this slot.")
+            run("sd2-insert", image.path)
+        } finally {
+            image.delete()
+        }
+    }
+    fun secondExport(to: Uri) {
+        folder.mkdirs()
+        val image = File(folder, "export2.img")
+        try {
+            run("sd2-export", image.path)
+            val output = context.contentResolver.openOutputStream(to, "wt") ?: throw Failed("Couldn't write there.")
+            output.use { o -> image.inputStream().use { it.copyTo(o, 1 shl 20) } }
+        } finally {
+            image.delete()
+        }
+    }
+
     // Settles the ejected card in the machine folder's file and empties the slot. Returns the
     // card's serial (64 hex digits) and whether it's write protected, as the core reports them.
     fun takeOut(): Pair<String?, Boolean> {

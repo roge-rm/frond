@@ -1,3 +1,4 @@
+#include "DimText.h"
 #include "CardFilesWindow.h"
 #include "CardsWindow.h"
 #include <QApplication>
@@ -164,7 +165,7 @@ void CardFilesWindow::build(const QString& title) {
 
     header = new QLabel(this);
     header->setObjectName("filesHeader");
-    header->setForegroundRole(QPalette::PlaceholderText);
+    frondDimText::dim(header);
     shortcuts = new QHBoxLayout;
     auto* headerRow = new QHBoxLayout;
     headerRow->addWidget(header, 1);

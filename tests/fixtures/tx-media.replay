@@ -1,0 +1,13 @@
+# T|X Media demo clip from the smoke session's launcher (as B8b/media.py): Home twice, Media, the clip
+200 key-down home
+300 key-up home
+2500 key-down home
+2600 key-up home
+4500 pen-down 160 212
+4600 pen-up
+8000 pen-down 40 75
+8100 pen-up
+9000 snapshot "s.png"
+25000 snapshot "s.png"
+35000 snapshot "s.png"
+44000 snapshot "s.png"

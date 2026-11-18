@@ -44,6 +44,10 @@
 #include "memory_buffer.h"
 #include "patch_dispatch.h"
 #include "jit_dynarmic.h"
+#include "idle_loops.h"
+#include "delay_loops.h"
+#include "poll_loops.h"
+#include "xscale_cost.h"
 #include "pxa270_WMMX.h"
 #include "savestate/savestateAll.h"
 #include "system_state.h"
@@ -109,15 +113,28 @@ struct WmmxSaver {
 // A device page at kDevice (mapped at virtual 0x2f000, 0x30000 unmapped) that
 // counts the accesses it takes, as a FIFO or doorbell register would see them. Reads return
 // the count so far. Offsets 0x800-0x80f refuse every access (a bus error, no side effect).
+// With interrupt lines on (directed cases only), a write to 0x900 raises the IRQ, 0x904
+// lowers it, and 0x908 and 0x90c do the same for the FIQ.
 constexpr uint32_t kDevice = 0x40000000;
 struct Device {
     uint32_t reads = 0, writes = 0;
+    ArmCpu* cpu = nullptr;
+    bool lines = false;
+    uint32_t irqs = 0, fiqs = 0;  // raised and not lowered
 };
 
 bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
     Device& d = *static_cast<Device*>(userData);
     const uint32_t off = pa - kDevice;
     if (off >= 0x800 && off < 0x810) return false;
+    if (write && d.lines && off >= 0x900 && off < 0x910) {
+        const bool fiq = off >= 0x908, raise = !(off & 4);
+        uint32_t& n = fiq ? d.fiqs : d.irqs;
+        if (raise || n) {
+            cpuIrq(d.cpu, fiq, raise);
+            n += raise ? 1 : -1;
+        }
+    }
     if (write) {
         d.writes++;
     } else {
@@ -128,6 +145,56 @@ bool deviceAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, vo
     return true;
 }
 
+// A stand-in OS timer for the delay skip (delay_loops.h): a page at kTimer (mapped at virtual 0x2e000 in
+// cases that ask for it) whose OSCR (+0x10) reads start plus one tick every period cycles, counting the
+// cycles of the calls before (base, kept by the test) and the one in progress. From tick match on, peek
+// says a load would reach a timer match.
+constexpr uint32_t kTimer = 0x40a00000, kTimerVa = 0x2e000;
+struct TestTimer {
+    ArmCpu* cpu = nullptr;
+    uint64_t base = 0;
+    uint32_t start = 0, period = 1, match = 0;
+    uint32_t at(uint32_t cycles) const { return start + uint32_t((base + cycles) / period); }
+};
+
+bool timerAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    const TestTimer& t = *static_cast<TestTimer*>(userData);
+    if (!write) {
+        const uint32_t v = pa - kTimer == 0x10 ? t.at(cpuCyclesInProgress(t.cpu)) : 0;
+        memcpy(buf, &v, size < 4 ? size : 4);
+    }
+    return true;
+}
+
+bool timerPeek(void* context, uint32_t cycles, uint32_t* oscr) {
+    const TestTimer& t = *static_cast<TestTimer*>(context);
+    *oscr = t.at(cycles);
+    return !t.match || *oscr - t.start < t.match - t.start;
+}
+
+// A stand-in GPIO level page for the poll skip (poll_loops.h): a page at kLevels (mapped at virtual
+// 0x2a000 in cases that ask for it) whose words read level[0-3]. The test changes them only between
+// cpuCycle calls, as scheduler events would. Peek answers for the third word (GPLR2) only.
+constexpr uint32_t kLevels = 0x40e00000, kLevelsVa = 0x2a000;
+struct TestLevels {
+    uint32_t level[4] = {};
+};
+
+bool levelsAccess(void* userData, uint32_t pa, uint_fast8_t size, bool write, void* buf) {
+    const TestLevels& t = *static_cast<TestLevels*>(userData);
+    if (!write) {
+        const uint32_t at = pa - kLevels, v = at < 16 ? t.level[at >> 2] : 0;
+        memcpy(buf, &v, size < 4 ? size : 4);
+    }
+    return true;
+}
+
+bool levelsPeek(void* context, uint32_t pa, uint32_t* value) {
+    if (pa != kLevels + 8) return false;
+    *value = static_cast<TestLevels*>(context)->level[2];
+    return true;
+}
+
 struct Machine {
     bool fast = false;
     ArmCpu* cpu = nullptr;
@@ -135,6 +202,9 @@ struct Machine {
     Pxa270wmmx* wmmx = nullptr;
     ArmMem* mem = nullptr;
     Device* device = nullptr;
+    PatchDispatch* patches = nullptr;
+    TestTimer* timer = nullptr;
+    TestLevels* levels = nullptr;
 };
 
 Machine makeMachine(bool fast) {
@@ -157,9 +227,20 @@ Machine makeMachine(bool fast) {
     m.cpu = cpuInit(kSetup, mem, ARM_MEMORY_SYSTEM_MMU, true, false, -1, 0x69054114, 0x0b16a16a, pd, &pace,
                     createSystemState());
     patchDispatchSetCpu(pd, m.cpu);
+    // The XScale table, as on a PXA27x: both engines charge each instruction its cost.
+    cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), false);
+    m.patches = pd;
     m.wmmx = pxa270wmmxInit(m.cpu);
     m.device = new Device;
+    m.device->cpu = m.cpu;
     if (!memRegionAdd(mem, kDevice, 0x1000, deviceAccess, m.device)) abort();
+    m.timer = new TestTimer;
+    m.timer->cpu = m.cpu;
+    if (!memRegionAdd(mem, kTimer, 0x1000, timerAccess, m.timer)) abort();
+    cpuSetDelayTimer(m.cpu, kTimer + 0x10, timerPeek, m.timer);
+    m.levels = new TestLevels;
+    if (!memRegionAdd(mem, kLevels, 0x1000, levelsAccess, m.levels)) abort();
+    cpuSetPollPeek(m.cpu, levelsPeek, m.levels);
     return m;
 }
 
@@ -184,13 +265,14 @@ bool gThread = false;  // --thread: Fast compiles on the compile thread
 
 struct RunResult {
     bool stopped = false;
-    uint64_t ran = 0;        // instructions run, for Exact (which steps one at a time)
+    uint64_t ran = 0;        // cycles charged, for Exact (which steps one at a time)
     uint32_t worstOver = 0;  // most a cpuCycle call ran past its budget
 };
 
-// Exact steps one instruction at a time, so ran counts the instructions to the stop. Fast
-// runs budgets from the schedule, so runs start and end in the middle of blocks.
-RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit) {
+// Exact steps one instruction at a time, so ran counts the cycles to the stop. Fast runs
+// budgets from the schedule, so runs start and end in the middle of blocks; with oneBlock
+// every call has a budget of 1 and runs a block (or an interpreted instruction).
+RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit, bool oneBlock = false) {
     RunResult r;
     Rng s(scheduleSeed);
     while (r.ran < limit) {
@@ -199,7 +281,7 @@ RunResult run(Machine& m, uint64_t scheduleSeed, uint64_t limit) {
             return r;
         }
         uint32_t b = 1;
-        if (m.fast) {
+        if (m.fast && !oneBlock) {
             const uint32_t k = s.below(100);
             b = k < 10 ? 1 : k < 30 ? 2 + s.below(19) : k < 70 ? 21 + s.below(180) : k < 95 ? 201 + s.below(1800) : 5000;
         }
@@ -411,6 +493,9 @@ struct Case {
     std::vector<uint32_t> swiHandler;  // replaces the SWI vector's movs pc, lr when not empty
     // Maps the page tables at 0x8000 (privileged only), so a case can remap pages.
     bool tablesPage = false;
+    bool interruptLines = false;  // the device page's IRQ and FIQ registers
+    bool timerPage = false;       // the test timer at 0x2e000
+    bool levelsPage = false;      // the test GPIO levels at 0x2a000
 };
 
 struct Assembled {
@@ -503,6 +588,8 @@ Assembled assemble(const Case& c) {
     page(0x2c000, 0, true);  // read-only
     page(0x2d000, 3, true);
     if (c.devicePage) put32(kL2a + 0x2f * 4, ptePage(kDevice, 3, false));  // 0x30000 stays unmapped
+    if (c.timerPage) put32(kL2a + (kTimerVa >> 12) * 4, ptePage(kTimer, 3, false));
+    if (c.levelsPage) put32(kL2a + (kLevelsVa >> 12) * 4, ptePage(kLevels, 3, false));
     if (c.tablesPage) page(kL2a, 1, false);
     for (uint32_t i = 0; i < 16; ++i) put32(kL2b + i * 4, ptePage(0x20000 + i * 0x1000, 3, true));
     memcpy(&a.image[0x20000], c.data.data(), c.data.size());
@@ -1521,7 +1608,9 @@ constexpr uint64_t kLimit = 20000;
 
 void prepare(Machine& m, const Case& c, const Assembled& a) {
     memcpy(m.ram, a.image.data(), kRamSize);
-    *m.device = Device{};
+    for (; m.device->irqs; --m.device->irqs) cpuIrq(m.cpu, false, false);
+    for (; m.device->fiqs; --m.device->fiqs) cpuIrq(m.cpu, true, false);
+    *m.device = Device{0, 0, m.cpu, c.interruptLines};
     cpuInvalidateCodeCache(m.cpu);
     cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, SVC | 0xc0);
     cpuSetReg(m.cpu, 15, kSetup);
@@ -1541,7 +1630,29 @@ struct Engines {
     Machine exact, fast;
     uint32_t bound = 0;
     uint32_t worstOver = 0;  // most any Fast call ran past its budget
+    // Cycle checks made, and of those, the ones where a Fast run left a block at a failed access.
+    uint64_t cycleChecks = 0, cycleFaults = 0;
 };
+
+// The cycles the JIT charges equal the interpreter's: Fast again, one block a call, so it
+// stops at the spin, having run it once more than Exact when the spin ends the last block.
+std::string cycleCheck(Engines& e, const Case& c, const Assembled& a, uint64_t exactCycles) {
+    prepare(e.fast, c, a);
+    const uint64_t faults = jitFaultExits();
+    const RunResult f = run(e.fast, c.seed * 31 + 7, kLimit * 4, true);
+    if (!f.stopped) return "fast did not stop running one block a call";
+    e.cycleChecks++;
+    if (jitFaultExits() != faults) e.cycleFaults++;
+    const uint64_t spin = a.thumb ? cost::thumbCost(kSpinThumb, cost::Core::pxa27x)
+                                  : cost::armCost(kSpinArm, cost::Core::pxa27x);
+    // The spin's mode may differ from the start's; either cost is allowed.
+    const uint64_t spinOther = a.thumb ? cost::armCost(kSpinArm, cost::Core::pxa27x)
+                                       : cost::thumbCost(kSpinThumb, cost::Core::pxa27x);
+    if (f.ran == exactCycles || f.ran == exactCycles + spin || f.ran == exactCycles + spinOther) return "";
+    char line[120];
+    snprintf(line, sizeof(line), "cycles: exact %" PRIu64 ", fast %" PRIu64, exactCycles, f.ran);
+    return line;
+}
 
 Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* exactState = nullptr) {
     Outcome o;
@@ -1563,9 +1674,14 @@ Outcome runAssembled(Engines& e, const Case& c, const Assembled& a, Snapshot* ex
         snprintf(line, sizeof(line), "fast overshoot %u past the bound %u", f.worstOver, e.bound);
         o.diffs.push_back(line);
     }
-    if (x.worstOver) {
+    // Exact steps one instruction a call, so it passes a budget of 1 by its cost - 1.
+    if (x.worstOver > cpuMaxOvershootCycles(e.exact.cpu)) {
         snprintf(line, sizeof(line), "exact overshoot %u", x.worstOver);
         o.diffs.push_back(line);
+    }
+    if (o.diffs.empty() && x.stopped) {
+        const std::string d = cycleCheck(e, c, a, x.ran);
+        if (!d.empty()) o.diffs.push_back(d);
     }
     o.ok = o.diffs.empty();
     return o;
@@ -1627,16 +1743,19 @@ void trace(Engines& e, const Case& c) {
     const Assembled a = assemble(c);
     prepare(e.exact, c, a);
     prepare(e.fast, c, a);
+    uint32_t xc = 0, fc = 0;  // the cycles each engine's last call charged
     for (int i = 0; i < 400; ++i) {
         const uint32_t* x = cpuGetRegisters(e.exact.cpu);
         const uint32_t* f = cpuGetRegisters(e.fast.cpu);
-        printf("  step %2d: exact pc %08x cpsr %08x | fast pc %08x cpsr %08x\n", i, x[15],
-               cpuGetRegExternal(e.exact.cpu, ARM_REG_NUM_CPSR), f[15], cpuGetRegExternal(e.fast.cpu, ARM_REG_NUM_CPSR));
+        printf("  step %2d: exact pc %08x cpsr %08x +%u | fast pc %08x cpsr %08x +%u\n", i, x[15],
+               cpuGetRegExternal(e.exact.cpu, ARM_REG_NUM_CPSR), xc, f[15], cpuGetRegExternal(e.fast.cpu, ARM_REG_NUM_CPSR),
+               fc);
+        xc = fc = 0;
         for (int r = 0; r < 15; ++r)
             if (x[r] != f[r]) printf("           r%d exact %08x fast %08x\n", r, x[r], f[r]);
         if (atSpin(e.exact) && atSpin(e.fast)) break;
-        if (!atSpin(e.exact)) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
-        if (!atSpin(e.fast)) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
+        if (!atSpin(e.exact)) xc = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        if (!atSpin(e.fast)) fc = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
     }
 }
 
@@ -1680,6 +1799,9 @@ struct Directed {
     uint32_t dacr = 1;    // domain 0 client, domain 1 no access
     std::vector<uint32_t> swiHandler;
     bool tablesPage = false;
+    bool interruptLines = false;
+    bool timerPage = false;
+    bool levelsPage = false;
 };
 
 // Where the setup table holds r8-r14 of a mode: FIQ r8-r14, then r13 and r14 (and an SPSR)
@@ -1733,6 +1855,9 @@ Case directedCase(const Directed& d, uint64_t seed) {
     c.dacr = d.dacr;
     c.swiHandler = d.swiHandler;
     c.tablesPage = d.tablesPage;
+    c.interruptLines = d.interruptLines;
+    c.timerPage = d.timerPage;
+    c.levelsPage = d.levelsPage;
     c.table[2] = d.dacr;
     c.alignCheck = false;
     c.devicePage = true;
@@ -1779,6 +1904,9 @@ bool directed(Engines& e) {
         {"str r0, [r1], #-4 user store to read-only", {0xe4010004}, false, USR, {{1, 0x29010}}},
         {"stmia r1!, {r2, pc} faulting on pc", {0xe8a18004}, false, USR, {{1, 0x29ffc}}},
         {"stmdb r1!, {r2-r5} crossing into a hole", {0xe921003c}, false, SVC, {{1, 0x2b008}}},
+        // XScale stores PC as the instruction's address plus 8 (the ARM920T's plus 12 is test-zodiac-store-pc).
+        {"stmia r1, {r2, pc} and str pc, [r1, #8]", {0xe8818004, 0xe581f008}, false, SVC, {{1, 0x20100}},
+         {{Expect::MEM, 0x20104, kCode + 8}, {Expect::MEM, 0x20108, kCode + 12}}},
         {"thumb ldmia r0!, {r0, r1, r2}", {0xc807}, true, USR, {{0, 0x29ff8}}},
         {"thumb pop {r0, pc} faulting on pc", {0xbd01}, true, USR, {{13, 0x29ffc}}},
         {"sys ldmia r4, {r4-r6, r9, r12, sp} domain fault", {0xe8943270}, false, SYS, {{4, 0x101044}}},
@@ -2097,6 +2225,68 @@ bool directed(Engines& e) {
          {0xe3a04001, 0xee0f4f11, 0xedd10100, 0xedd20000, 0xe3a07000, 0xe321f0db, 0xe1a0700e, 0xe321f0d3},
          false, SVC, {{1, 0x20100}, {2, 0x20200}},
          {{Expect::REG, 7, 0x1000c}}},
+        // MSR CPSR_c that only changes I and F runs in place in Fast when no interrupt is
+        // waiting; one that changes the mode, or with an interrupt waiting, calls back. On
+        // the PXA cores a waiting interrupt stops the run whenever F is clear. Each starts
+        // in SVC with I and F set; r4 is the device page.
+        {"msr cpsr_c in place, unmask and mask I and F",
+         {0xe321f013, 0xe2811001, 0xe321f053, 0xe2811001, 0xe321f093, 0xe2811001, 0xe321f0d3, 0xe10f3000,
+          0xe2811001},
+         false, SVC, {{1, 0}}, {{Expect::REG, 1, 4}, {Expect::REG, 3, 0xd3, 0xff}, {Expect::CPSR, 0, 0xd3, 0xff}}},
+        {"irq raised while masked, taken at the msr that unmasks I",
+         {0xe5840900, 0xe2811001, 0xe321f093, 0xe2811001, 0xe321f013, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0x92, 0xff}, {Expect::REG, 14, kCode + 0x18}}, 0x200, 1, {}, false,
+         true},
+        {"fiq raised while masked, taken at the msr that unmasks F",
+         {0xe5840908, 0xe2811001, 0xe321f053, 0xe2811001, 0xe321f013, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0xd1, 0xff}, {Expect::REG, 14, kCode + 0x18}}, 0x200, 1, {}, false,
+         true},
+        // Fast notices an interrupt a store raised when the run next leaves generated code,
+        // here at the BKPT, which goes to the interpreter: the store has to see the new masks.
+        {"irq raised by a store after an in-place unmask",
+         {0xe321f013, 0xe2811001, 0xe5840900, 0xe1200070, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 1}, {Expect::CPSR, 0, 0x92, 0xff}, {Expect::REG, 14, kCode + 0x10}}, 0x200, 1, {}, false,
+         true},
+        {"fiq raised by a store after an in-place unmask of F",
+         {0xe321f093, 0xe2811001, 0xe5840908, 0xe1200070, 0xe2811001}, false, SVC, {{1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 1}, {Expect::CPSR, 0, 0xd1, 0xff}, {Expect::REG, 14, kCode + 0x10}}, 0x200, 1, {}, false,
+         true},
+        {"msr cpsr_c with a masked irq waiting, then lowered and unmasked",
+         {0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f0d3, 0xe5840904, 0xe321f013, 0xe2811001, 0xe321f0d3},
+         false, SVC, {{1, 0}, {4, 0x2f000}}, {{Expect::REG, 1, 2}, {Expect::CPSR, 0, 0xd3, 0xff}}, 0x200, 1, {}, false,
+         true},
+        {"msr cpsr_c mode changes go to the interpreter",
+         {0xe321f0df, 0xe3a0d005, 0xe321f0d2, 0xe3a0d007, 0xe321f013, 0xe2811001, 0xe321f0d3, 0xe2811001},
+         false, SVC, {{1, 0}, {13, 0x123}},
+         {{Expect::REG, 1, 2}, {Expect::REG, 13, 0x123}, {Expect::CPSR, 0, 0xd3, 0xff}}},
+        {"msr cpsr_fc in place with the flags",
+         {0xe129f000, 0x03a01007, 0x13a01009, 0xe10f3000, 0xe321f0d3}, false, SVC, {{0, 0x60000013}},
+         {{Expect::REG, 1, 7}, {Expect::REG, 3, 0x60000013, 0xf80000ff}, {Expect::CPSR, 0, 0x600000d3, 0xf00000ff}}},
+        // The syscall dispatch pair LDR R12, [R9, #-table] then LDR PC, [R12, #offset]. The table is the
+        // word at kCode + 12 (kCode), and its entry at kCode + 0x20 is the B . at kCode + 8.
+        {"syscall pair, table 16",
+         {0xe519c010, 0xe59cf020, kSpinArm, kCode, 0xe1a00000, 0xe1a00000, 0xe1a00000, 0xe1a00000, kCode + 8},
+         false, SVC, {{9, kCode + 0x1c}}, {{Expect::REG, 12, kCode}}},
+        {"syscall pair, table 4",
+         {0xe519c004, 0xe59cf020, kSpinArm, kCode, 0xe1a00000, 0xe1a00000, 0xe1a00000, 0xe1a00000, kCode + 8},
+         false, SVC, {{9, kCode + 0x10}}, {{Expect::REG, 12, kCode}}},
+        {"conditional msr cpsr_c, in place and with an irq waiting",
+         {0xe3500000, 0x0321f013, 0x1321f093, 0xe10f3000, 0xe321f0d3, 0xe5840900, 0x0321f093, 0x1321f013,
+          0xe2811001, 0xe5840904, 0xe321f013, 0xe2811001},
+         false, SVC, {{0, 0}, {1, 0}, {4, 0x2f000}},
+         {{Expect::REG, 1, 2}, {Expect::REG, 3, 0x13, 0xff}, {Expect::CPSR, 0, 0x13, 0xff}}, 0x200, 1, {}, false, true},
+        // Cycle checks (cycleCheck runs on every case; these aim at the charges). Conditions that
+        // fail at a block's start (after the BEQ) and inside one, and a failing BNE.
+        {"cycles: failed conditions", {0xe3b00000, 0x0a000000, 0xe1a00000, 0x12811001, 0x13a02005, 0x02833001,
+                                        0x1a000000, 0xe2811001},
+         false, SVC, {{1, 0}, {3, 0}}, {{Expect::REG, 1, 1}, {Expect::REG, 3, 1}}},
+        // Thumb: a BL pair, a failing BNE inside a block and one at a block's start (after the BEQ).
+        {"cycles: thumb bl and failing bne", {0xf000, 0xf800, 0x2000, 0xd100, 0x3101, 0x2000, 0xd000, 0x3101, 0xd100,
+                                              0x3201},
+         true, SVC, {{1, 0}, {2, 0}}, {{Expect::REG, 1, 1}, {Expect::REG, 2, 1}}},
+        // STMIA and LDMIA r12 of 1 to 14 registers, then STMs of 15 and 16.
+        {"cycles: ldm and stm of every count", {0xe88c0001, 0xe89c0001, 0xe88c0003, 0xe89c0003, 0xe88c0007, 0xe89c0007, 0xe88c000f, 0xe89c000f, 0xe88c001f, 0xe89c001f, 0xe88c003f, 0xe89c003f, 0xe88c007f, 0xe89c007f, 0xe88c00ff, 0xe89c00ff, 0xe88c01ff, 0xe89c01ff, 0xe88c03ff, 0xe89c03ff, 0xe88c07ff, 0xe89c07ff, 0xe88c0fff, 0xe89c0fff, 0xe88c2fff, 0xe89c2fff, 0xe88c6fff, 0xe89c6fff, 0xe88c7fff, 0xe88cffff},
+         false, SVC, {{12, 0x24000}}},
     };
     for (const auto& d : tests) {
         for (uint64_t seed = 1; seed <= 4; ++seed) {
@@ -2114,6 +2304,940 @@ bool directed(Engines& e) {
             ok = false;
             break;
         }
+    }
+    return ok;
+}
+
+// The syscall dispatch pair goes to the JIT unless the patch dispatch could take it to a patch:
+// tables other than 4, 8 and 12 and unaligned offsets never can, table 12 offset 0x55c can
+// once it's patched. A machine of its own, as the patch stays.
+bool syscallPlain() {
+    Machine m = makeMachine(true);
+    struct Want {
+        const char* name;
+        uint32_t load, jump;
+        bool plain;
+    };
+    auto check = [&](const Want& w) {
+        memcpy(m.ram + kCode, &w.load, 4);
+        memcpy(m.ram + kCode + 4, &w.jump, 4);
+        const bool load = cpuJitPlain(m.cpu, kCode, w.load, false), jump = cpuJitPlain(m.cpu, kCode + 4, w.jump, false);
+        if (load == w.plain && jump == w.plain) return true;
+        printf("FAIL syscall pair %s: load %s, jump %s, want %s\n", w.name, load ? "plain" : "interpreted",
+               jump ? "plain" : "interpreted", w.plain ? "plain" : "interpreted");
+        return false;
+    };
+    const Want before[] = {
+        {"table 16", 0xe519c010, 0xe59cf0a8, true},
+        {"table 4", 0xe519c004, 0xe59cf320, true},
+        {"table 12 offset 0x55c, no patch", 0xe519c00c, 0xe59cf55c, true},
+        {"table 14", 0xe519c00e, 0xe59cf020, true},
+        {"table 0", 0xe519c000, 0xe59cf020, true},
+    };
+    const Want after[] = {
+        {"table 12 offset 0x55c, patched", 0xe519c00c, 0xe59cf55c, false},
+        {"table 12 offset 0x55e", 0xe519c00c, 0xe59cf55e, true},
+        {"table 16 offset 0x55c", 0xe519c010, 0xe59cf55c, true},
+    };
+    bool ok = true;
+    for (const Want& w : before) ok = check(w) && ok;
+    patchDispatchAddPatch(m.patches, 0xc55c, nullptr, [](void*, uint32_t, const uint32_t*, uint32_t*) {}, nullptr);
+    for (const Want& w : after) ok = check(w) && ok;
+    return ok;
+}
+
+// MSR CPSR_c changing only I and F, with nothing waiting, runs in Fast's generated code:
+// a block of four, run in one budget, sends none to the interpreter and makes no
+// cpuJitSetCpsr call. A mode change, or any MSR CPSR with an interrupt waiting (even a
+// masked one), goes to the interpreter once each.
+bool inPlaceMsr(Engines& e) {
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+        uint64_t interprets;
+    };
+    const Want wants[] = {
+        {"in place", {0xe321f013, 0xe321f053, 0xe321f093, 0xe321f0d3, 0xe2811001}, 0},
+        {"mode changes", {0xe321f0d2, 0xe2811001, 0xe321f0d3, 0xe2811001}, 2},
+        {"masked irq waiting", {0xe5840900, 0xe321f0d3, 0xe5840904, 0xe321f0d3, 0xe2811001}, 1},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        prepare(e.fast, c, assemble(c));
+        const uint64_t writes = cpuJitCpsrWrites(), interprets = cpuJitCpsrInterprets();
+        for (int i = 0; i < 4 && !atSpin(e.fast); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 5000);
+        const uint64_t calls = cpuJitCpsrWrites() - writes, sent = cpuJitCpsrInterprets() - interprets;
+        if (atSpin(e.fast) && !calls && sent == w.interprets) continue;
+        printf("FAIL msr cpsr %s: %" PRIu64 " to the interpreter (want %" PRIu64 "), %" PRIu64
+               " cpuJitSetCpsr calls%s\n",
+               w.name, sent, w.interprets, calls, atSpin(e.fast) ? "" : ", did not stop");
+        ok = false;
+    }
+    return ok;
+}
+
+// Fast counts the same ticks as Exact across instructions it hands to the interpreter: an
+// MSR CPSR that couldn't run in place (its tick is taken back) and an STM^ the JIT never
+// translates. Exact steps to the stop to count them, and Fast's calls must add up to the
+// same.
+bool fallbackTicks(Engines& e) {
+    struct Want {
+        const char* name;
+        std::vector<uint32_t> code;
+    };
+    const Want wants[] = {
+        {"msr cpsr_c mode changes",
+         {0xe2811001, 0xe321f0d2, 0xe2811001, 0xe2811001, 0xe321f0d3, 0xe2811001, 0xe321f0d2, 0xe321f0d3, 0xe2811001}},
+        {"msr cpsr_c with a masked irq waiting",
+         {0xe2811001, 0xe5840900, 0xe321f0d3, 0xe2811001, 0xe321f093, 0xe2811001, 0xe5840904,
+          0xe321f0d3, 0xe2811001}},
+        {"stm^", {0xe2811001, 0xe8c40001, 0xe2811001, 0xe8c40002, 0xe2811001, 0xe2811001}},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        Directed d{w.name, w.code, false, SVC, {{1, 0}, {4, 0x2f000}}, {}};
+        d.interruptLines = true;
+        const Case c = directedCase(d, 1);
+        const Assembled a = assemble(c);
+        prepare(e.exact, c, a);
+        uint32_t ticks = 0;
+        for (int i = 0; i < 200 && !atSpin(e.exact); ++i) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        // Each Fast call runs at least to a block's end and returns all its ticks. Each case
+        // ends with an ADD, so Fast's last block runs the spin branch once too: Exact does the same.
+        if (atSpin(e.exact)) ticks += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.exact.cpu, 1);
+        prepare(e.fast, c, a);
+        uint32_t fast = 0;
+        for (int i = 0; i < 200 && !atSpin(e.fast); ++i) fast += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(e.fast.cpu, 1);
+        if (atSpin(e.exact) && atSpin(e.fast) && fast == ticks) {
+            printf("fallback ticks, %s: %u in both engines\n", w.name, ticks);
+            continue;
+        }
+        printf("FAIL fallback ticks, %s: exact %u ticks%s, fast %u%s\n", w.name, ticks,
+               atSpin(e.exact) ? "" : " (did not stop)", fast, atSpin(e.fast) ? "" : " (did not stop)");
+        ok = false;
+    }
+    return ok;
+}
+
+// The kernel wait loops (idle_loops.h), placed near kCode + 0x1000 with their IRQ window, and
+// the Zire 72 and T|X register roles: globals at 0x22000 (pointer at 0x23000), the counter at
+// 0x23010, OSCR a RAM word at 0x23110, the window's ICCR a RAM word at 0x23200, SP 0x26000.
+// The clock routine is a B . here.
+constexpr uint32_t kIdleGlobals = 0x22000, kIdlePointer = 0x23000, kIdleCounter = 0x23010;
+constexpr uint32_t kIdleTimer = 0x23100, kIdleIccr = 0x23200, kIdleSp = 0x26000;
+
+struct IdleSetup {
+    const IdleLoop* loop = nullptr;
+    uint32_t head = 0;
+    Case c;
+    Assembled a;
+};
+
+IdleSetup idleSetup(const char* name, IdleLoopKind kind, uint32_t counter, bool past, bool afterPass,
+                    uint32_t page = kCode + 0x1000) {
+    IdleSetup s;
+    for (const IdleLoop& x : kIdleLoops)
+        if (x.kind == kind) s.loop = &x;
+    const bool zire = kind == IdleLoopKind::zire72;
+    // Each ROM's head and window sit at these offsets in a 32-byte line.
+    s.head = page + (zire ? 0x10 : 0x14);
+    std::vector<std::pair<int, uint32_t>> regs;
+    if (zire)
+        regs = {{0, counter}, {4, kIdleTimer}, {5, kIdlePointer}, {6, 0xffffffff}, {7, 162500}, {8, kIdleCounter}, {10, past}};
+    else
+        regs = {{4, past}, {5, kIdleCounter}, {7, kIdleTimer}, {8, kIdlePointer - 20}, {10, 0}};
+    regs.push_back({13, kIdleSp});
+    regs.push_back({14, afterPass ? s.head + s.loop->windowReturn : 0x11800});
+    Directed d{name, {0xe1a00000}, false, SVC, regs, {}};
+    s.c = directedCase(d, 7);
+    s.a = assemble(s.c);
+    return s;
+}
+
+void idlePrepare(Machine& m, const IdleSetup& s, uint32_t counter) {
+    const IdleLoop* l = s.loop;
+    const uint32_t head = s.head;
+    prepare(m, s.c, s.a);
+    auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
+    for (uint32_t i = 0; i < l->count; ++i) put(head + 4 * i, l->words[i]);
+    for (uint32_t i = 0; i < kIdleWindowCount; ++i) put(head + l->window + 4 * i, kIdleWindowWords[i]);
+    put(head + l->window + kIdleWindowLiteral, kIdleIccr);
+    put(head + (l->kind == IdleLoopKind::zire72 ? 0x4b4 : 0x5ab4), kSpinArm);  // the clock routine
+    put(kIdlePointer, kIdleGlobals);
+    put(kIdleCounter, counter);
+    put(kIdleGlobals + kIdleWakeWord, 0);
+    m.ram[kIdleGlobals + kIdleWindowByte] = 0x84;
+    put(kIdleTimer + 16, 0x12345678);
+    cpuInvalidateCodeCache(m.cpu);
+    cpuSetReg(m.cpu, 15, head);
+    // The kernel waits with FIQs unmasked.
+    cpuSetReg(m.cpu, ARM_REG_NUM_CPSR, cpuGetRegExternal(m.cpu, ARM_REG_NUM_CPSR) & ~0x40u);
+}
+
+// Exact steps the loop for whole passes; Fast with the skip and Fast without it must land in
+// the same state (OSCR stands still here, as it does in a Fast run). With an IRQ waiting all
+// three take it in the window; at the 50 ms threshold all three call the clock routine. Each
+// case says how many skips Fast must make.
+bool idleSkip(Engines& e) {
+    struct Want {
+        const char* name;
+        IdleLoopKind kind;
+        uint32_t counter;
+        bool past, afterPass, irq;
+        uint32_t passes;  // 0: run to the B .
+        uint64_t skips;
+    };
+    const Want wants[] = {
+        {"zire 72", IdleLoopKind::zire72, 1000, false, true, false, 40, 1},
+        {"zire 72 entered", IdleLoopKind::zire72, 1000, false, false, false, 40, 1},
+        {"zire 72 past the threshold", IdleLoopKind::zire72, 200000, true, true, false, 40, 1},
+        {"zire 72 irq waiting", IdleLoopKind::zire72, 1000, false, true, true, 0, 0},
+        {"zire 72 at the threshold", IdleLoopKind::zire72, 162500, false, true, false, 0, 0},
+        {"t|x", IdleLoopKind::tx, 1000, false, true, false, 40, 1},
+        {"t|x entered", IdleLoopKind::tx, 0x27800, false, false, false, 40, 1},
+        {"t|x past the threshold", IdleLoopKind::tx, 0xffffffff, true, true, false, 40, 1},
+        {"t|x irq waiting", IdleLoopKind::tx, 1000, false, true, true, 0, 0},
+        {"t|x at the threshold", IdleLoopKind::tx, 162500, false, true, false, 0, 0},
+    };
+    bool ok = true;
+    for (const auto& w : wants) {
+        const IdleSetup s = idleSetup(w.name, w.kind, w.counter, w.past, w.afterPass);
+        const IdleLoop* l = s.loop;
+        Snapshot states[3];
+        uint64_t skipped[3] = {};
+        bool stopped[3] = {};
+        // 0 Exact, 1 Fast, 2 Fast without the skip.
+        for (int k = 0; k < 3; ++k) {
+            Machine& m = k ? e.fast : e.exact;
+            cpuSetIdleSkip(k != 2);
+            idlePrepare(m, s, w.counter);
+            if (w.irq) {
+                cpuIrq(m.cpu, false, true);
+                m.device->irqs++;
+            }
+            uint64_t s0, c0, s1, c1;
+            cpuJitIdleSkips(&s0, &c0);
+            if (w.passes) {
+                // Whole passes, in cycles: Exact steps them, Fast gets them as one budget.
+                uint64_t ran = 0;
+                const uint64_t want = uint64_t(w.passes) * idlePassCost(*l, w.counter, cpuGetRegisters(m.cpu), true,
+                                                                        cost::Core::pxa27x);
+                if (!k)
+                    while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 1);
+                else
+                    while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+                if (ran != want) {
+                    printf("FAIL idle skip, %s: engine %d ran %" PRIu64 " cycles, not %" PRIu64 "\n", w.name, k,
+                           ran, want);
+                    ok = false;
+                }
+                stopped[k] = cpuGetRegisters(m.cpu)[15] == s.head;
+            } else {
+                for (int i = 0; i < 400 && !atSpin(m); ++i) cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, k ? 50 : 1);
+                stopped[k] = atSpin(m);
+            }
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k] = s1 - s0;
+            states[k] = snapshot(m, stopped[k]);
+        }
+        cpuSetIdleSkip(true);
+        std::vector<std::string> diffs = differences(states[0], states[1]);
+        for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
+        if (diffs.empty() && stopped[0] && skipped[1] == w.skips && !skipped[2]) {
+            printf("idle skip, %s: same in all three, %" PRIu64 " skips\n", w.name, skipped[1]);
+            continue;
+        }
+        printf("FAIL idle skip, %s: %" PRIu64 " skips (want %" PRIu64 "), %" PRIu64 " without%s\n", w.name,
+               skipped[1], w.skips, skipped[2], stopped[0] ? "" : ", exact did not stop where expected");
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
+// A long idle: OSCR moves between calls, as at a scheduler event, and the counter grows when a
+// call ends between a pass's two OSCR reads, until the 50 ms threshold sends the loop to the
+// clock routine. Calls of 1000 cycles (not a whole number of passes, a call's overshoot taken
+// off the next) with OSCR 5000 ticks on after each. Fast with the skip must reach the clock
+// routine after as many calls as Fast without it, having skipped, and on the Zire 72 Exact and
+// Fast must both reach it. A T|X Fast run that ends at the loop's last branch, after both
+// reads, adds nothing, so on the T|X the Fast count isn't checked against 0.
+bool idleClock(Engines& e) {
+    constexpr uint32_t budget = 1000, step = 5000, limit = 2000;
+    bool ok = true;
+    for (const IdleLoopKind kind : {IdleLoopKind::zire72, IdleLoopKind::tx}) {
+        const char* name = kind == IdleLoopKind::zire72 ? "zire 72" : "t|x";
+        const IdleSetup s = idleSetup(name, kind, 0, false, true);
+        uint32_t calls[3] = {};
+        uint64_t skipped[3] = {};
+        for (int k = 0; k < 3; ++k) {
+            Machine& m = k ? e.fast : e.exact;
+            cpuSetIdleSkip(k != 2);
+            idlePrepare(m, s, 0);
+            uint64_t s0, c0, s1, c1;
+            cpuJitIdleSkips(&s0, &c0);
+            uint32_t oscr = 0x12345678, debt = 0;
+            for (; calls[k] < limit && !atSpin(m); ++calls[k]) {
+                // What a call runs past its budget comes off the next one, as the scheduler does.
+                const uint32_t want = budget - std::min(debt, budget - 1);
+                uint32_t ran = 0;
+                while (ran < want && !atSpin(m)) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, want - ran);
+                debt = debt - (budget - want) + (ran > want ? ran - want : 0);
+                oscr += step;
+                memcpy(m.ram + kIdleTimer + 16, &oscr, 4);
+            }
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k] = s1 - s0;
+            if (!atSpin(m)) calls[k] = 0;
+        }
+        cpuSetIdleSkip(true);
+        const bool reached = kind == IdleLoopKind::tx || (calls[0] && calls[1]);
+        if (reached && calls[1] == calls[2] && skipped[1] && !skipped[2]) {
+            printf("idle clock, %s: calls to the clock routine (0: never) Exact %u, Fast %u (%" PRIu64
+                   " skips), without the skip %u\n",
+                   name, calls[0], calls[1], skipped[1], calls[2]);
+            continue;
+        }
+        printf("FAIL idle clock, %s: calls to the clock routine (0: never) Exact %u, Fast %u (%" PRIu64
+               " skips), without the skip %u\n",
+               name, calls[0], calls[1], skipped[1], calls[2]);
+        ok = false;
+    }
+    return ok;
+}
+
+// Fast keeps an idle loop's match per head. A store to the loop's code (here a word only past the
+// threshold runs, so the passes run the same) must drop it: the next run makes no skip, and lands
+// where Fast without the skip does.
+bool idleMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const IdleLoopKind kind : {IdleLoopKind::zire72, IdleLoopKind::tx}) {
+        const char* name = kind == IdleLoopKind::zire72 ? "zire 72" : "t|x";
+        const IdleSetup s = idleSetup(name, kind, 1000, false, true);
+        const IdleLoop* l = s.loop;
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetIdleSkip(k == 0);
+            idlePrepare(m, s, 1000);
+            const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // mov r0, #0x12 (Zire 72) or mov r0, #0xc (T|X) before the clock routine call, rewritten.
+                    const uint32_t i = kind == IdleLoopKind::zire72 ? 6 : 5, word = l->words[i] + 1;
+                    memAccess(m.mem, s.head + 4 * i, 4, true, (void*)&word);
+                }
+                uint64_t s0, c0, s1, c1, ran = 0;
+                cpuJitIdleSkips(&s0, &c0);
+                while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+                cpuJitIdleSkips(&s1, &c1);
+                skipped[k][run] = s1 - s0;
+            }
+            states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+        }
+        cpuSetIdleSkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("idle match dropped, %s: 1 skip before the store, none after\n", name);
+            continue;
+        }
+        printf("FAIL idle match dropped, %s: skips %" PRIu64 " before the store, %" PRIu64 " after (want 1, 0)\n",
+               name, skipped[0][0], skipped[0][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
+// A store to a flagged line drops only the blocks whose code it overlaps (Fast). Blocks A at P, B at
+// P + 0x100 and R at P + 0x200 share one page. A store to a word in A's line past A's end keeps A and B;
+// one into B drops B only, which then runs its new word; R rewrites its own next pass while it runs, and
+// that pass runs the new word. Fast only. 0: as expected, -1: not.
+int codeRanges(Engines& e) {
+    const char* name = "code ranges";
+    Machine& m = e.fast;
+    Case c = generate(98);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    // P is a writable page (kCode is read-only to the guest), so R can store to its own code.
+    const uint32_t P = 0x24000, A = P, B = P + 0x100, R = P + 0x200, S = kCode + 0x3000;
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    auto branch = [](uint32_t from, uint32_t to) { return 0xea000000u | (((to - from - 8) >> 2) & 0xffffff); };
+    put(A, 0xe3a05001);       // mov r5, #1
+    put(A + 4, branch(A + 4, S));
+    put(A + 0x10, 0);         // data in A's line
+    put(B, 0xe3a06001);       // mov r6, #1 (rewritten to mov r6, #2)
+    put(B + 4, branch(B + 4, S));
+    put(R, 0xe2877001);       // add r7, r7, #1
+    put(R + 4, 0xe3a05001);   // mov r5, #1, rewritten by the str below to mov r5, #2
+    put(R + 8, 0xe5821000);   // str r1, [r2]
+    put(R + 12, 0xe3570002);  // cmp r7, #2
+    put(R + 16, 0x1a000000 | (((R - (R + 16) - 8) >> 2) & 0xffffff));  // bne R
+    put(R + 20, branch(R + 20, S));
+    put(S, kSpinArm);
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S;
+    };
+    auto compiled = [] { return jitTranslated(); };
+    bool ok = true;
+    for (int i = 0; i < 3; ++i) ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t before = compiled();
+    const uint32_t data = 0x1234;
+    memAccess(m.mem, A + 0x10, 4, true, (void*)&data);
+    ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t afterData = compiled() - before;
+    const uint32_t word = 0xe3a06002;
+    memAccess(m.mem, B, 4, true, (void*)&word);
+    cpuSetReg(m.cpu, 5, 0);
+    cpuSetReg(m.cpu, 6, 0);
+    ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t afterB = compiled() - before - afterData;
+    const uint32_t r5 = cpuGetRegExternal(m.cpu, 5), r6 = cpuGetRegExternal(m.cpu, 6);
+    // R's second pass may still run the old word (the run ends at its next halt check); the next run
+    // from R has to run the new one.
+    cpuSetReg(m.cpu, 1, 0xe3a05002);
+    cpuSetReg(m.cpu, 2, R + 4);
+    cpuSetReg(m.cpu, 7, 0);
+    ok = runFrom(R) && ok;
+    const uint32_t r7 = cpuGetRegExternal(m.cpu, 7);
+    cpuSetReg(m.cpu, 5, 0);
+    cpuSetReg(m.cpu, 7, 1);
+    ok = runFrom(R) && ok;
+    const uint32_t r5R = cpuGetRegExternal(m.cpu, 5);
+    printf("%s: %" PRIu64 " compiles after a store next to A, %" PRIu64 " after a store into B, r5 %u r6 %u, "
+           "block that rewrote itself while running: %u passes, then r5 %u\n",
+           name, afterData, afterB, r5, r6, r7, r5R);
+    if (!ok || afterData != 0 || afterB != 1 || r5 != 1 || r6 != 2 || r5R != 2 || r7 != 2) {
+        printf("FAIL %s: want 0 compiles, then 1 (B), r5 1 r6 2, and r5 2 after the block rewrote itself\n", name);
+        return -1;
+    }
+    return 0;
+}
+
+// The idle match made again while a store's line flags are still waiting to be set from the code left:
+// setting them drops the match too, so a later change to its window (which no block holds) still ends
+// the skips. Same checks as idleMatchDropped.
+bool idleMatchRemask(Engines& e) {
+    const IdleSetup s = idleSetup("t|x", IdleLoopKind::tx, 1000, false, true);
+    const IdleLoop* l = s.loop;
+    Snapshot states[2];
+    uint64_t skipped[2][3] = {};
+    for (int k = 0; k < 2; ++k) {
+        Machine& m = e.fast;
+        cpuSetIdleSkip(k == 0);
+        idlePrepare(m, s, 1000);
+        const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+        for (int run = 0; run < 3; ++run) {
+            if (run == 1) {
+                // The loop's first word written with itself: its blocks drop, the match goes and comes back.
+                const uint32_t word = l->words[0];
+                memAccess(m.mem, s.head, 4, true, (void*)&word);
+            } else if (run == 2) {
+                const uint32_t word = kIdleWindowWords[1] + 1;
+                memAccess(m.mem, s.head + l->window + 4, 4, true, (void*)&word);
+            }
+            uint64_t s0, c0, s1, c1, ran = 0;
+            cpuJitIdleSkips(&s0, &c0);
+            while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k][run] = s1 - s0;
+        }
+        states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+    }
+    cpuSetIdleSkip(true);
+    const std::vector<std::string> diffs = differences(states[0], states[1]);
+    if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 1 && skipped[0][2] == 0 && !skipped[1][0]) {
+        printf("idle match after a code write: skips 1, 1 after the rewrite, none after the window store\n");
+        return true;
+    }
+    printf("FAIL idle match after a code write: skips %" PRIu64 ", %" PRIu64 ", %" PRIu64 " (want 1, 1, 0)\n",
+           skipped[0][0], skipped[0][1], skipped[0][2]);
+    for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+    return false;
+}
+
+// The idle match made again before the line flags of a page a run's store dropped code from are set
+// from the code left: setting them must drop the match, as the window's lines lose their flags. The
+// Zire 72 loop at 0x24110 puts its window on the guest-writable page 0x23000. After a skip, a stub
+// right before the head stores each window word back (its blocks drop). Dropping code halts the run at
+// the stub's block end, the head, so the head is reached in the same run as the stores; the call's budget
+// leaves one cycle there (the stub's cycles are measured on a first go), so the head matches again with
+// no pass to skip before the next run sets the flags (none left on the page) and stops before the window. A host store then changes the window, which no flag watches now: the match must be
+// gone, so the next run makes no skip and lands where Fast without the skip does. (A skip on the old
+// match would store 1 to ICCR.)
+bool idleMatchRemaskInRun(Engines& e) {
+    const IdleSetup s = idleSetup("zire 72 writable", IdleLoopKind::zire72, 1000, false, true, 0x24100);
+    const IdleLoop* l = s.loop;
+    // The stub: each window word loaded and stored back, straight into the head.
+    const uint32_t window = s.head + uint32_t(l->window), S = s.head - 8 * kIdleWindowCount;
+    Snapshot states[2];
+    uint64_t skipped[2][2] = {}, stub[2] = {};
+    bool stepped[2] = {};
+    for (int k = 0; k < 2; ++k) {
+        Machine& m = e.fast;
+        cpuSetIdleSkip(k == 0);
+        auto step = [&](uint32_t cycles) { return cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, cycles); };
+        auto run = [&](uint64_t cycles) {
+            uint64_t s0, c0, s1, c1, ran = 0;
+            cpuJitIdleSkips(&s0, &c0);
+            while (ran < cycles) ran += step(uint32_t(cycles - ran));
+            cpuJitIdleSkips(&s1, &c1);
+            return s1 - s0;
+        };
+        // Cycles a call at a time to the head, 0 if it isn't reached.
+        auto toHead = [&] {
+            uint64_t ran = 0;
+            for (int i = 0; i < 1000; ++i) {
+                if (cpuGetRegisters(m.cpu)[15] == s.head) return ran ? ran : 1;
+                ran += step(1);
+            }
+            return uint64_t(0);
+        };
+        // A skip, then to the head between passes, then the stub set up.
+        auto start = [&] {
+            idlePrepare(m, s, 1000);
+            auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
+            for (uint32_t i = 0; i < kIdleWindowCount; ++i) {
+                put(S + 8 * i, 0xe59c9000 | 4 * i);      // ldr r9, [r12, #4i]
+                put(S + 8 * i + 4, 0xe58c9000 | 4 * i);  // str r9, [r12, #4i]
+            }
+            cpuInvalidateCodeCache(m.cpu);
+            const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+            const uint64_t skips = run(want);
+            const bool ok = toHead() != 0;
+            cpuSetReg(m.cpu, 12, window);
+            cpuSetReg(m.cpu, 15, S);
+            return std::make_pair(ok ? skips : ~uint64_t(0), want);
+        };
+        start();
+        stub[k] = toHead();
+        const auto [skips, want] = start();
+        skipped[k][0] = skips;
+        // The stub, then the head with one cycle left: the match, no pass.
+        if (stub[k]) step(uint32_t(stub[k] + 1));
+        step(1);  // the flags set, then the head's next block
+        const uint32_t pc = cpuGetRegisters(m.cpu)[15];
+        stepped[k] = stub[k] && pc > s.head && pc < s.head + 4 * 19;  // before the window call
+        // mov r1, #1 becomes mov r1, #0x40000000: the window still returns, and stores that to ICCR.
+        const uint32_t word = 0xe3a01101;
+        memAccess(m.mem, window + 12, 4, true, (void*)&word);
+        skipped[k][1] = run(want);
+        states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+    }
+    cpuSetIdleSkip(true);
+    const std::vector<std::string> diffs = differences(states[0], states[1]);
+    if (diffs.empty() && stepped[0] && stepped[1] && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0]) {
+        printf("idle match made again before a run's code write is remasked: 1 skip, none after the window store "
+               "(stub %" PRIu64 " cycles)\n",
+               stub[0]);
+        return true;
+    }
+    printf("FAIL idle match made again before a remask: skips %" PRIu64 ", %" PRIu64 " (want 1, 0), stub %" PRIu64
+           " %" PRIu64 " cycles, stopped before the window %d %d\n",
+           skipped[0][0], skipped[0][1], stub[0], stub[1], stepped[0], stepped[1]);
+    for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+    return false;
+}
+
+// The ROM OSCR delay loops (delay_loops.h) at kCode with a B . after them, the timer base register at
+// kTimerVa (OSCR at +0x10). r3 holds the target too, for delayMatchDropped.
+struct DelaySetup {
+    const DelayLoop* loop = nullptr;
+    Case c;
+    Assembled a;
+};
+
+const char* delayName(DelayLoopKind kind) {
+    return kind == DelayLoopKind::e2 ? "e2" : kind == DelayLoopKind::tg50 ? "tg50" : "zire 72";
+}
+
+DelaySetup delaySetup(const char* name, DelayLoopKind kind, uint32_t target, uint32_t low) {
+    DelaySetup s;
+    for (const DelayLoop& x : kDelayLoops)
+        if (x.kind == kind) s.loop = &x;
+    const DelayLoop& l = *s.loop;
+    std::vector<std::pair<int, uint32_t>> regs = {{l.base, kTimerVa}, {l.target, target}, {3, target}};
+    if (l.low != kNoLow) regs.push_back({l.low, low});
+    Directed d{name, std::vector<uint32_t>(l.code, l.code + l.count), l.thumb, SVC, regs, {}};
+    d.timerPage = true;
+    s.c = directedCase(d, 11);
+    s.a = assemble(s.c);
+    return s;
+}
+
+void delayPrepare(Machine& m, const DelaySetup& s, uint32_t start, uint32_t period, uint32_t match) {
+    prepare(m, s.c, s.a);
+    *m.timer = TestTimer{m.cpu, 0, start, period, match};
+}
+
+// Runs want cycles: Exact one instruction a call, Fast in as few calls as it takes, each call's cycles
+// added to the timer's base. Returns the cycles run.
+uint64_t delayRun(Machine& m, bool exact, uint64_t want) {
+    uint64_t ran = 0;
+    while (ran < want) {
+        const uint32_t r = cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, exact ? 1 : uint32_t(want - ran));
+        ran += r;
+        m.timer->base += r;
+    }
+    return ran;
+}
+
+uint64_t delaySkipCount() {
+    uint64_t skips, cycles;
+    cpuJitDelaySkips(&skips, &cycles);
+    return skips;
+}
+
+// Exact steps the loop one instruction at a time, its OSCR moving with every cycle; Fast with the skip must
+// land in the same state after the same cycles: leaving on the same pass, or at the end of its budget with
+// the same OSCR loaded and flags. With OSCR standing still Fast without the skip must too. Each case says
+// how many skips Fast must make (at least, when it leaves).
+bool delaySkip(Engines& e) {
+    struct Want {
+        const char* what;
+        uint32_t ticks;   // target - start
+        uint32_t period;  // cycles per tick
+        uint32_t low;     // TG50's low bound, from start
+        uint32_t match;   // ticks to a timer match, 0 for none
+        bool leaves;      // runs until past the B .; otherwise 40 passes
+        uint64_t skips;
+        bool tg50Only;
+        bool memory = false;  // memory charges in both engines (Fast at Original), at the T|X's clocks
+        uint32_t sweep = 1;   // runs with ticks, ticks + 1, ... (so some leave right at a tick)
+    };
+    const uint32_t start = 1000;
+    const Want wants[] = {
+        {"leaves", 300, 3, 0, 0, true, 1, false},
+        {"budget", 1000000, 3, 0, 0, false, 1, false},
+        {"leaves, a tick a cycle", 300, 1, 0, 0, true, 1, false, false, 16},
+        {"budget, a tick a cycle", 1000000, 1, 0, 0, false, 1, false},
+        {"oscr standing still", 10, 1u << 30, 0, 0, false, 1, false},
+        {"at a match", 300, 3, 0, 100, true, 1, false},
+        {"already past", 0xffffffff, 3, 0, 0, true, 0, false},
+        {"below the low bound", 300, 3, 5, 0, true, 0, true},
+        {"leaves, memory charges", 300, 3, 0, 0, true, 1, false, true},
+        {"budget, memory charges", 1000000, 3, 0, 0, false, 1, false, true},
+        {"budget, memory charges, a tick a cycle", 1000000, 1, 0, 0, false, 1, false, true},
+        {"leaves, memory charges, a tick a cycle", 300, 1, 0, 0, true, 1, false, true, 16},
+    };
+    auto memory = [&](Machine& m, bool on) {
+        cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), on);
+        cpuSetCostClocks(m.cpu, cost::kClocksTx.core, cost::kClocksTx.bus, cost::kClocksTx.memory);
+        if (m.fast) cpuSetJitMemoryCost(m.cpu, on);
+    };
+    bool ok = true;
+    for (const DelayLoop& l : kDelayLoops) {
+        for (const auto& w : wants) for (uint32_t i = 0; i < w.sweep; ++i) {
+            if (w.tg50Only && l.kind != DelayLoopKind::tg50) continue;
+            char name[96];
+            if (w.sweep > 1) snprintf(name, sizeof(name), "%s %s, %u ticks", delayName(l.kind), w.what, w.ticks + i);
+            else snprintf(name, sizeof(name), "%s %s", delayName(l.kind), w.what);
+            const uint32_t target = start + w.ticks + i, low = l.low == kNoLow ? 0 : start + w.low;
+            const DelaySetup s = delaySetup(name, l.kind, target, low);
+            const bool frozen = w.period >= (1u << 30);
+            uint32_t load;
+            uint32_t pass = delayPassCost(l, true, cost::Core::pxa27x, &load);
+            if (w.memory)
+                pass += cost::regionCost(cost::Core::pxa27x, cost::device, false, cost::kClocksTx);
+            const uint32_t spin = l.thumb ? cost::thumbCost(kSpinThumb, cost::Core::pxa27x)
+                                          : cost::armCost(kSpinArm, cost::Core::pxa27x);
+            Snapshot states[3];
+            uint64_t skipped[3] = {}, ran[3] = {}, want = uint64_t(40) * pass;
+            bool stopped[3] = {};
+            // 0 Exact, 1 Fast, 2 Fast without the skip.
+            for (int k = 0; k < (frozen ? 3 : 2); ++k) {
+                Machine& m = k ? e.fast : e.exact;
+                cpuSetDelaySkip(k != 2);
+                if (w.memory) memory(m, true);
+                delayPrepare(m, s, start, w.period, w.match ? start + w.match : 0);
+                const uint64_t s0 = delaySkipCount();
+                if (w.leaves && !k) {
+                    // Exact to the B ., then four of its passes.
+                    uint64_t at = 0;
+                    for (int i = 0; i < 100000 && !atSpin(m); ++i) at += delayRun(m, true, 1);
+                    want = at + 4 * spin;
+                    ran[k] = at + delayRun(m, true, 4 * spin);
+                } else {
+                    ran[k] = delayRun(m, !k, want);
+                }
+                stopped[k] = w.leaves ? atSpin(m) : (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode;
+                skipped[k] = delaySkipCount() - s0;
+                states[k] = snapshot(m, stopped[k]);
+                if (w.memory) memory(m, false);
+            }
+            cpuSetDelaySkip(true);
+            std::vector<std::string> diffs = differences(states[0], states[1]);
+            if (frozen)
+                for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
+            const bool skipsOk = w.leaves && w.skips ? skipped[1] >= w.skips : skipped[1] == w.skips;
+            if (diffs.empty() && stopped[0] && ran[0] == want && ran[1] == want && skipsOk && !skipped[2]) {
+                printf("delay skip, %s: same in %s, %" PRIu64 " skips, %" PRIu64 " cycles\n", name,
+                       frozen ? "all three" : "both", skipped[1], want);
+                continue;
+            }
+            printf("FAIL delay skip, %s: %" PRIu64 " skips (want %s%" PRIu64 "), cycles exact %" PRIu64 " fast %" PRIu64
+                   " (want %" PRIu64 ")%s\n",
+                   name, skipped[1], w.leaves && w.skips ? "at least " : "", w.skips, ran[0], ran[1], want,
+                   stopped[0] ? "" : ", exact did not stop where expected");
+            for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Fast keeps a delay loop's match per head. A store to the loop's code (cmp against r3, which holds the
+// target too, so the passes run the same) must drop it: the next run makes no skip, and lands where Fast
+// without the skip does. OSCR stands still, so both run the same passes.
+bool delayMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const DelayLoop& l : kDelayLoops) {
+        const char* name = delayName(l.kind);
+        const uint32_t start = 1000, target = start + 10;
+        const DelaySetup s = delaySetup(name, l.kind, target, l.low == kNoLow ? 0 : start);
+        uint32_t load;
+        const uint64_t want = 40ull * delayPassCost(l, true, cost::Core::pxa27x, &load);
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetDelaySkip(k == 0);
+            delayPrepare(m, s, start, 1u << 30, 0);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // The compare with the target: cmp r1, r3 (E2, TG50) or cmp r0, r3 (Zire 72).
+                    const uint32_t at = kCode + (l.thumb ? 2 : 4);
+                    if (l.thumb) {
+                        const uint16_t h = 0x4299;
+                        memAccess(m.mem, at, 2, true, (void*)&h);
+                    } else {
+                        const uint32_t word = (l.code[1] & ~15u) | 3;
+                        memAccess(m.mem, at, 4, true, (void*)&word);
+                    }
+                }
+                const uint64_t s0 = delaySkipCount();
+                delayRun(m, false, want);
+                skipped[k][run] = delaySkipCount() - s0;
+            }
+            states[k] = snapshot(m, (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode);
+        }
+        cpuSetDelaySkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("delay match dropped, %s: 1 skip before the store, none after\n", name);
+            continue;
+        }
+        printf("FAIL delay match dropped, %s: skips %" PRIu64 " before the store, %" PRIu64 " after (want 1, 0)\n",
+               name, skipped[0][0], skipped[0][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
+    }
+    return ok;
+}
+
+// The ROM GPIO level polls (poll_loops.h) at kCode with a B . after them, the address register at GPLR2
+// of the test levels page. r3 holds the tested bit too, for pollMatchDropped.
+struct PollSetup {
+    const PollLoop* loop = nullptr;
+    Case c;
+    Assembled a;
+};
+
+const char* pollName(PollLoopKind kind) { return kind == PollLoopKind::e2NandReady ? "e2 nand ready" : "e2 nand busy"; }
+
+PollSetup pollSetup(const char* name, PollLoopKind kind, uint32_t counter) {
+    PollSetup s;
+    for (const PollLoop& x : kPollLoops)
+        if (x.kind == kind) s.loop = &x;
+    const PollLoop& l = *s.loop;
+    std::vector<std::pair<int, uint32_t>> regs = {{l.base, kLevelsVa + 8}, {3, l.mask}};
+    if (l.counter != kNoCounter) regs.push_back({l.counter, counter});
+    Directed d{name, std::vector<uint32_t>(l.code, l.code + l.count), false, SVC, regs, {}};
+    d.levelsPage = true;
+    s.c = directedCase(d, 12);
+    s.a = assemble(s.c);
+    return s;
+}
+
+// GPLR2 with the tested bit as a pass that stays (or leaves) sees it, other bits set too.
+uint32_t pollLevel(const PollLoop& l, bool stays) { return stays == l.staysSet ? 0x12340000u | l.mask : 0x12340000u; }
+
+uint64_t pollSkipCount() {
+    uint64_t skips, cycles;
+    cpuJitPollSkips(&skips, &cycles);
+    return skips;
+}
+
+// Exact steps the loop one instruction at a time, Fast with and without the skip in as few calls as it
+// takes; the level changes only between calls, as at a scheduler event. All three must land in the same
+// state after the same cycles: at the end of the first budget still in the loop, then (when the level
+// flips, or the counter runs out) leaving on the same pass. A budget ending mid-pass lets each engine
+// end at an instruction of its own (Fast's JIT may run one more than Exact): there Fast must land
+// where Exact or Fast without the skip does, state and cycles. With memory charges Fast without the skip runs past its budget by its charges, so it isn't
+// compared.
+bool pollSkip(Engines& e) {
+    struct Want {
+        const char* what;
+        bool stays;        // the level the loop starts with
+        uint32_t passes;   // the first budget, in passes
+        bool flip;         // then the level changes and the loop runs until it leaves
+        uint32_t counter;  // the counter's start (counting loops only)
+        uint64_t skips;    // Fast's skips (at least, when leaving)
+        bool countOnly;    // counting loops only
+        bool memory = false;
+        uint32_t sweep = 1;  // first budgets of passes, passes + 1 cycle, ...
+    };
+    const Want wants[] = {
+        {"steady", true, 40, false, 0, 1, false},
+        {"steady, budget mid-pass", true, 40, false, 0, 1, false, false, 8},
+        {"leaves after the event", true, 40, true, 0, 1, false},
+        {"already leaving", false, 0, true, 0, 0, false},
+        {"steady, memory charges", true, 40, false, 0, 1, false, true},
+        {"leaves after the event, memory charges", true, 40, true, 0, 1, false, true},
+        {"counter from 0 runs out", true, 0, true, 0, 1, true},
+        {"counter from 495 runs out", true, 0, true, 495, 1, true},
+        {"counter from 498 runs out", true, 0, true, 498, 1, true},
+        {"counter from 499 runs out", true, 0, true, 499, 0, true},
+        {"counter runs out, memory charges", true, 0, true, 0, 1, true, true},
+    };
+    auto memory = [&](Machine& m, bool on) {
+        cpuSetCostModel(m.cpu, true, uint8_t(cost::Core::pxa27x), on);
+        cpuSetCostClocks(m.cpu, cost::kClocksTx.core, cost::kClocksTx.bus, cost::kClocksTx.memory);
+        if (m.fast) cpuSetJitMemoryCost(m.cpu, on);
+    };
+    bool ok = true;
+    for (const PollLoop& l : kPollLoops) {
+        for (const auto& w : wants) for (uint32_t i = 0; i < w.sweep; ++i) {
+            const bool counting = l.counter != kNoCounter;
+            if (w.countOnly && !counting) continue;
+            char name[96];
+            if (w.sweep > 1) snprintf(name, sizeof(name), "%s %s, +%u", pollName(l.kind), w.what, i);
+            else snprintf(name, sizeof(name), "%s %s", pollName(l.kind), w.what);
+            const PollSetup s = pollSetup(name, l.kind, w.counter);
+            uint32_t load;
+            uint32_t pass = pollPassCost(l, true, cost::Core::pxa27x, &load);
+            if (w.memory) pass += cost::regionCost(cost::Core::pxa27x, cost::device, false, cost::kClocksTx);
+            const uint32_t spin = cost::armCost(kSpinArm, cost::Core::pxa27x);
+            const uint64_t first = uint64_t(w.passes) * pass + i;
+            Snapshot states[3];
+            uint64_t skipped[3] = {}, ran[3] = {}, want = first;
+            bool stopped[3] = {};
+            // 0 Exact, 1 Fast, 2 Fast without the skip.
+            const bool without = !w.memory;
+            for (int k = 0; k < (without ? 3 : 2); ++k) {
+                Machine& m = k ? e.fast : e.exact;
+                cpuSetPollSkip(k != 2);
+                if (w.memory) memory(m, true);
+                prepare(m, s.c, s.a);
+                *m.levels = TestLevels{};
+                m.levels->level[2] = pollLevel(l, w.stays);
+                const uint64_t s0 = pollSkipCount();
+                ran[k] = first ? delayRun(m, !k, first) : 0;
+                if (w.flip) {
+                    if (w.passes) m.levels->level[2] = pollLevel(l, false);
+                    if (!k) {
+                        // Exact to the B ., then four of its passes.
+                        uint64_t at = 0;
+                        for (int j = 0; j < 100000 && !atSpin(m); ++j) at += delayRun(m, true, 1);
+                        want = ran[0] + at + 4 * spin;
+                        ran[k] += at + delayRun(m, true, 4 * spin);
+                    } else {
+                        ran[k] += delayRun(m, false, want - ran[k]);
+                    }
+                }
+                const uint32_t pc = cpuGetRegisters(m.cpu)[15] & ~1u;
+                stopped[k] = w.flip ? atSpin(m) : i ? pc >= kCode && pc < kCode + 4 * l.count : pc == kCode;
+                skipped[k] = pollSkipCount() - s0;
+                states[k] = snapshot(m, stopped[k]);
+                if (w.memory) memory(m, false);
+            }
+            cpuSetPollSkip(true);
+            std::vector<std::string> diffs = differences(states[0], states[1]);
+            bool cyclesOk = ran[0] == want && ran[1] == want && (!without || ran[2] == want);
+            if (i) {
+                // Mid-pass: as Exact, or as Fast without the skip.
+                const std::vector<std::string> other = differences(states[2], states[1]);
+                cyclesOk = (diffs.empty() && ran[1] == ran[0]) || (other.empty() && ran[1] == ran[2]);
+                if (cyclesOk) diffs.clear();
+                else for (const std::string& d : other) diffs.push_back("against without the skip, " + d);
+            } else if (without) {
+                for (const std::string& d : differences(states[0], states[2])) diffs.push_back("without the skip, " + d);
+            }
+            const bool skipsOk = w.flip && w.skips ? skipped[1] >= w.skips : skipped[1] == w.skips;
+            if (diffs.empty() && stopped[0] && cyclesOk && skipsOk && !skipped[2]) {
+                printf("poll skip, %s: same in %s, %" PRIu64 " skips, %" PRIu64 " cycles\n", name,
+                       without ? "all three" : "both", skipped[1], ran[1]);
+                continue;
+            }
+            printf("FAIL poll skip, %s: %" PRIu64 " skips (want %s%" PRIu64 "), cycles exact %" PRIu64 " fast %" PRIu64
+                   " without %" PRIu64 " (want %" PRIu64 ")%s\n",
+                   name, skipped[1], w.flip && w.skips ? "at least " : "", w.skips, ran[0], ran[1], ran[2], want,
+                   stopped[0] ? "" : ", exact did not stop where expected");
+            for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+// Fast keeps a poll loop's match per head. A store to the loop's code (the bit test against r3, which
+// holds the bit too, so the passes run the same) must drop it: the next run makes no skip, and lands
+// where Fast without the skip does.
+bool pollMatchDropped(Engines& e) {
+    bool ok = true;
+    for (const PollLoop& l : kPollLoops) {
+        const char* name = pollName(l.kind);
+        const PollSetup s = pollSetup(name, l.kind, 0);
+        uint32_t load;
+        const uint64_t want = 40ull * pollPassCost(l, true, cost::Core::pxa27x, &load);
+        Snapshot states[2];
+        uint64_t skipped[2][2] = {};
+        for (int k = 0; k < 2; ++k) {
+            Machine& m = e.fast;
+            cpuSetPollSkip(k == 0);
+            prepare(m, s.c, s.a);
+            *m.levels = TestLevels{};
+            m.levels->level[2] = pollLevel(l, true);
+            for (int run = 0; run < 2; ++run) {
+                if (run) {
+                    // tst r0, r3 (ready) or and r1, r1, r3 (busy).
+                    const uint32_t word = l.kind == PollLoopKind::e2NandReady ? 0xe1100003u : 0xe0011003u;
+                    memAccess(m.mem, kCode + 4, 4, true, (void*)&word);
+                }
+                const uint64_t s0 = pollSkipCount();
+                delayRun(m, false, want);
+                skipped[k][run] = pollSkipCount() - s0;
+            }
+            states[k] = snapshot(m, (cpuGetRegisters(m.cpu)[15] & ~1u) == kCode);
+        }
+        cpuSetPollSkip(true);
+        const std::vector<std::string> diffs = differences(states[0], states[1]);
+        if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0] && !skipped[1][1]) {
+            printf("poll match dropped, %s: no skip after the store, same as without the skip\n", name);
+            continue;
+        }
+        printf("FAIL poll match dropped, %s: skips %" PRIu64 " then %" PRIu64 " (want 1 then 0), without %" PRIu64
+               " %" PRIu64 "\n",
+               name, skipped[0][0], skipped[0][1], skipped[1][0], skipped[1][1]);
+        for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+        ok = false;
     }
     return ok;
 }
@@ -2716,7 +3840,7 @@ int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IOLBF, 0);
     Engines e{makeMachine(false), makeMachine(true)};
     e.bound = cpuMaxOvershootCycles(e.fast.cpu);
-    if (cpuMaxOvershootCycles(e.exact.cpu) != 19 || e.bound <= 19 || e.bound == UINT32_MAX) {
+    if (cpuMaxOvershootCycles(e.exact.cpu) != 53 || e.bound <= 53 || e.bound == UINT32_MAX) {
         fprintf(stderr, "unexpected bounds: exact %u fast %u\n", cpuMaxOvershootCycles(e.exact.cpu), e.bound);
         return 1;
     }
@@ -2738,6 +3862,19 @@ int main(int argc, char** argv) {
     if (runDirected && !single) {
         ok = directed(e) && ok;
         ok = privilegeSwitch(e) && ok;
+        ok = inPlaceMsr(e) && ok;
+        ok = syscallPlain() && ok;
+        ok = fallbackTicks(e) && ok;
+        ok = idleSkip(e) && ok;
+        ok = idleClock(e) && ok;
+        ok = idleMatchDropped(e) && ok;
+        ok = idleMatchRemask(e) && ok;
+        ok = idleMatchRemaskInRun(e) && ok;
+        ok = codeRanges(e) == 0 && ok;
+        ok = delaySkip(e) && ok;
+        ok = delayMatchDropped(e) && ok;
+        ok = pollSkip(e) && ok;
+        ok = pollMatchDropped(e) && ok;
         ok = wmmxCompiles(e) && ok;
         ok = fetchBuffer(e, true) == 0 && ok;
         ok = fetchBuffer(e, false) == 0 && ok;
@@ -2777,8 +3914,10 @@ int main(int argc, char** argv) {
         }
     }
     printf("jit-differential: %" PRIu64 " cases (seeds %" PRIu64 " to %" PRIu64 "), %" PRIu64
-           " instructions, %" PRIu64 " did not stop, %" PRIu64 " failures, %.1f s, bound %u, worst overshoot %u\n",
+           " cycles, %" PRIu64 " did not stop, %" PRIu64 " failures, %.1f s, bound %u, worst overshoot %u\n",
            cases, first, first + cases - 1, instructions, unstopped, failures, elapsed(), e.bound, e.worstOver);
+    printf("jit-differential: %" PRIu64 " cycle checks, %" PRIu64 " with a block left at a failed access\n",
+           e.cycleChecks, e.cycleFaults);
     printf(ok ? "jit-differential: ok\n" : "jit-differential: FAILED\n");
     return ok ? 0 : 1;
 }

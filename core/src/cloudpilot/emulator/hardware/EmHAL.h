@@ -101,6 +101,10 @@ class EmHAL {
     static void WakeAt(uint64 systemCycles, uint64 now);
     // Multiplies every saved cycle stamp after the session's counter changed units.
     static void ScaleCycles(uint32 factor);
+    // Brings every timer up to the session's cycle counter at the current clocks per second and schedules its
+    // next event from there. After a clock factor change, scale (new clocks per second over old) first turns
+    // the cycles not yet counted into the same guest time at the new rate, so the change shifts no guest time.
+    static void FlushTimers(double scale = 1);
     static bool EnableRAM();
 
     static void AddCycleConsumer(CycleHandler handler, void* context);
@@ -177,6 +181,7 @@ class EmHALHandler {
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
     virtual void ScaleCycles(uint32 factor);
+    virtual void FlushTimers(double scale);
     virtual bool EnableRAM();
 
     virtual bool SupportsImageInSlot(EmHAL::Slot slot, uint32 blocksTotal);

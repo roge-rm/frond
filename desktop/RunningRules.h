@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include <QRect>
+#include <QRegularExpression>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -17,6 +18,8 @@ namespace runningRules {
 struct Traits {
     bool runs68k{false}, holdPresent{false}, holdSupported{false}, keyboard{false}, microphone{false},
         network{false}, sound{false}, powerKey{false}, cardSlot{false}, guestServices{true};
+    // Takes the CLIÉ game controller on its connector.
+    bool gamepad{false};
 };
 
 inline Traits traitsFor(frondFirmware::Device device) {
@@ -33,10 +36,11 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.guestServices = frondFirmware::guestServices(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
+    t.gamepad = profile.frontend.clieGamepad;
     return t;
 }
 
-enum class Id { Hold, Keyboard, Microphone, Network, Display, Connections, Screenshot, HideBar, FullScreen,
+enum class Id { Hold, Keyboard, Gamepad, Microphone, Network, Display, Connections, Screenshot, HideBar, FullScreen,
                 Save, SaveCopy, Log, Reset, HardReset, SaveStop };
 
 struct Row {
@@ -54,6 +58,9 @@ struct State {
     bool running{true};
     std::optional<bool> hold;
     bool keyboardAttached{false}, beamOff{true};
+    // The game controller: unset until the core says; busy while serial, infrared or USB has the connector.
+    std::optional<bool> gamepad;
+    bool gamepadBusy{false};
     QString microphone{"off"};  // on, off, or "off <reason>"
     QString network;            // the current mode, empty before it is known
     bool barShown{true};
@@ -75,6 +82,9 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     // The keyboard and beaming share the Palm's infrared port.
     if (has(t.keyboard)) out.push_back({Id::Keyboard, QObject::tr("Infrared keyboard"), s.keyboardAttached, {},
                                         ready && t.keyboard && s.beamOff, false, 0});
+    // The game controller and serial, infrared or USB share the connector's line.
+    if (t.gamepad) out.push_back({Id::Gamepad, s.gamepadBusy ? QObject::tr("Game controller (connector in use)") : QObject::tr("Game controller"),
+                                  s.gamepad.value_or(false), {}, ready && s.gamepad.has_value() && !s.gamepadBusy, false, 0});
     if (has(t.microphone)) out.push_back({Id::Microphone, QObject::tr("Microphone"), microphoneValue(s.microphone) == "On",
                                           microphoneValue(s.microphone) == "On" || microphoneValue(s.microphone) == "Off" ? QString() : microphoneValue(s.microphone),
                                           ready && t.microphone, false, 0});
@@ -247,9 +257,22 @@ inline QString machineStopText(const QString& log) {
     return {};
 }
 
-// The line under the machine's name: the engine on ARM devices, else the device.
-inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
-    return t.runs68k ? deviceName : fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
+// The figure in speed-state's reply ("312.00 MHz, limit ..." or "250.00 MIPS ...") as "312 MHz" or
+// "250 MIPS"; empty when the reply has none.
+inline QString speedFigure(const QString& reply) {
+    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|MIPS))");
+    const auto match = figure.match(reply);
+    if (!match.hasMatch()) return {};
+    const auto value = qRound(match.captured(1).toDouble());
+    return match.captured(2) == "MHz" ? QObject::tr("%1 MHz").arg(value) : QObject::tr("%1 MIPS").arg(value);
+}
+
+// The line under the machine's name: the engine on ARM devices, else the device. A speed figure
+// follows the engine when the readout is on and the Palm isn't embedded in the window.
+inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName, const QString& speed = {}) {
+    if (t.runs68k) return deviceName;
+    const auto engine = fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
+    return speed.isEmpty() ? engine : engine + QStringLiteral(" \u00b7 ") + speed;
 }
 
 // "Frond NAME STAMP.png" with the characters a file name can't have replaced.

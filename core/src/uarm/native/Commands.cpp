@@ -62,7 +62,24 @@ namespace {
             return;
         }
 
-        static_cast<commands::Context*>(context)->mainLoop.SetCyclesPerSecondLimit(mips * 1000000);
+        auto& mainLoop = static_cast<commands::Context*>(context)->mainLoop;
+        mainLoop.SetFixedMips(mips);
+    }
+
+    void CmdSpeed(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() > 1) return env.PrintUsage();
+        auto& ctx = *static_cast<commands::Context*>(context);
+        if (args.empty()) {
+            cout << "speed: " << ctx.mainLoop.SpeedName() << endl;
+            return;
+        }
+        SpeedSetting5 speed;
+        if (!SpeedSetting5::Parse(args[0], speed)) {
+            cout << "usage: speed " << SpeedSetting5::Choices() << endl;
+            return;
+        }
+        ctx.mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(ctx.soc->GetDeviceType()));
+        cout << "speed: " << speed.Name() << endl;
     }
 
     void CmdEnableAudio(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -157,6 +174,41 @@ namespace {
         } else {
             result = frondNative::putInSd(ctx->sessionFolder, device, identity, protect);
             if (result.ok) ctx->soc->SdInsert();
+        }
+        if (!result.ok) cout << result.message << endl;
+    }
+
+    // The second SD slot's card, the Zodiac's, in sdCardStore(1).
+    void CmdSd2TakeOut(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (!args.empty()) return env.PrintUsage();
+        auto ctx = reinterpret_cast<commands::Context*>(context);
+        frondNative::CardIdentity identity{};
+        const bool protect = frondNative::slotCards().sd2Protected;
+        frondNative::SdResult result;
+        if (!ctx->soc->HasSecondSdSlot()) {
+            result = frondSdCandidate::fail("unsupported", "This device has no second SD slot.");
+        } else if (ctx->soc->Sd2Inserted()) {
+            result = frondSdCandidate::fail("busy", "Eject the card before taking it out.");
+        } else {
+            result = frondNative::takeOutFileCard(ctx->sessionFolder, frondMachine::kindSd2, protect, identity);
+            if (result.ok) frondNative::slotCards().sd2Protected = false;
+        }
+        cout << (result.ok ? frondNative::takenOutReply(identity, protect) : result.message) << endl;
+    }
+
+    void CmdSd2PutIn(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        frondNative::CardIdentity identity{};
+        bool protect = false;
+        if (args.empty() || args.size() > 2 ||
+            !frondNative::parsePutIn(args.size() == 2 ? args[0] + " " + args[1] : args[0], identity, protect))
+            return env.PrintUsage();
+        auto ctx = reinterpret_cast<commands::Context*>(context);
+        frondNative::SdResult result;
+        if (!ctx->soc->HasSecondSdSlot()) {
+            result = frondSdCandidate::fail("unsupported", "This device has no second SD slot.");
+        } else {
+            result = frondNative::putInSd2(ctx->sessionFolder, ctx->soc->GetDeviceType(), identity, protect);
+            if (result.ok && !ctx->soc->Sd2Insert()) result = frondSdCandidate::fail("size", "The second slot can't take this card.");
         }
         if (!result.ok) cout << result.message << endl;
     }
@@ -264,6 +316,10 @@ namespace {
             return;
         }
 
+        if (frondNative::guestAsleep(*ctx->soc)) {
+            cout << "OS version failed: the Palm is asleep" << endl;
+            return;
+        }
         try {
             GuestExport guest(*ctx->soc);
             if (!guest.Ready()) {
@@ -290,7 +346,7 @@ namespace {
         if (args.size() != 1) return env.PrintUsage();
 
         uint32_t timeout;
-        if (!(istringstream(args[0]) >> timeout)) {
+        if (!(istringstream(args[0]) >> timeout) || timeout > 0xffff) {
             cout << "invalid timeout" << endl;
             return env.PrintUsage();
         }
@@ -311,12 +367,32 @@ namespace {
             return;
         }
 
+        if (!GuestDatabaseOps::Wake(*ctx->soc)) {
+            cout << "set-auto-off failed: the Palm is asleep" << endl;
+            return;
+        }
         if (!syscallDispatchPrepare(sd)) {
-            cout << "unable to prepare save environment for syscalls" << endl;
+            cout << "Palm OS is not ready for set-auto-off" << endl;
             return;
         }
 
-        syscall_SysSetAutoOffTime(sd, SC_EXECUTE_PURE, timeout);
+        // The 68k trap goes through PACE to the OS's own SysSetAutoOffTime. The ARM call by
+        // table offset read a bad address on the T|X and reset it. The second call returns what
+        // the first left in place, which the no-sleep patch holds at 0.
+        try {
+            ReadOnlyGuest transaction(*ctx->soc);
+            syscall68k_SysSetAutoOffTime(sd, SC_EXECUTE_FULL, timeout);
+            const uint16_t now = syscall68k_SysSetAutoOffTime(sd, SC_EXECUTE_FULL, timeout);
+            transaction.Commit();
+            if (now == timeout)
+                cout << "auto-off set to " << timeout << " s" << endl;
+            else if (now == 0)
+                cout << "auto-off stays off: this firmware's no-sleep patch holds it" << endl;
+            else
+                cout << "auto-off is " << now << " s" << endl;
+        } catch (const std::exception& error) {
+            cout << "set-auto-off failed: " << error.what() << "; guest restored" << endl;
+        }
     }
 
     void CmdInstall(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -369,7 +445,10 @@ namespace {
                 break;
 
             case DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE:
-                cout << "db installation not currently possible" << endl;
+                if (frondNative::guestAsleep(*ctx->soc))
+                    cout << "installation failed: the Palm is asleep" << endl;
+                else
+                    cout << "db installation not currently possible" << endl;
                 break;
 
             case DB_INSTALL_RESULT_ERR_UNKNOWN:
@@ -387,6 +466,10 @@ namespace {
             return;
         }
 
+        if (frondNative::guestAsleep(*ctx->soc)) {
+            cout << "database list failed: the Palm is asleep" << endl;
+            return;
+        }
         DbMetadataList metadataList;
         std::unique_ptr<GuestExport> guest;
         try {
@@ -427,7 +510,10 @@ namespace {
         try {
             std::vector<uint8_t> archive;
             if (!GuestDatabaseOps::Export(*ctx->soc, "", archive, type)) {
-                cout << "Palm OS is not ready for database export; try again" << endl;
+                if (frondNative::guestAsleep(*ctx->soc))
+                    cout << "export failed: the Palm is asleep" << endl;
+                else
+                    cout << "Palm OS is not ready for database export; try again" << endl;
                 return;
             }
             if (util::WriteFile(args[0], archive.data(), archive.size()))
@@ -460,7 +546,10 @@ namespace {
 
         auto ctx = reinterpret_cast<commands::Context*>(context);
         try {
-            if (GuestDatabaseOps::Launch(*ctx->soc, args[0]) != GuestDatabaseOps::LaunchResult::launched)
+            const auto result = GuestDatabaseOps::Launch(*ctx->soc, args[0]);
+            if (result == GuestDatabaseOps::LaunchResult::notReady && frondNative::guestAsleep(*ctx->soc))
+                cout << "application could not be launched: the Palm is asleep" << endl;
+            else if (result != GuestDatabaseOps::LaunchResult::launched)
                 cout << "application could not be launched at this time" << endl;
         } catch (const std::exception& error) { cout << "launch failed: " << error.what() << endl; }
     }
@@ -505,8 +594,12 @@ namespace {
     const vector<cli::Command> commandList(
         {{.name = "set-mips",
           .usage = "set-mips <mips>",
-          .description = "Set target MIPS.",
+          .description = "Set a fixed core clock in MHz.",
           .cmd = CmdSetMips},
+         {.name = "speed",
+          .usage = "speed [original|1.5x|2x|3x|4x|8x|uncapped]",
+          .description = "Show or set the speed: the device's own clock, that clock times a multiplier, or uncapped.",
+          .cmd = CmdSpeed},
          {.name = "input-replay",
           .usage = "input-replay <file>",
           .description = "Load pen/key/snapshot events relative to now.",
@@ -531,6 +624,13 @@ namespace {
           .usage = "sd-put-in <identity> [protected|writable]",
           .description = "Insert the SD card file in the machine folder.",
           .cmd = CmdSdPutIn},
+         {.name = "sd2-take-out",
+          .description = "Leave the ejected second SD card in the machine folder's sd2.frondsd and empty the slot.",
+          .cmd = CmdSd2TakeOut},
+         {.name = "sd2-put-in",
+          .usage = "sd2-put-in <identity> [protected|writable]",
+          .description = "Insert the second SD card file in the machine folder.",
+          .cmd = CmdSd2PutIn},
          {.name = "ms-take-out",
           .description = "Leave the ejected Memory Stick in the machine folder's card file and empty the slot.",
           .cmd = CmdMsTakeOut},
@@ -556,7 +656,7 @@ namespace {
          {.name = "os-version", .description = "Retrieve OS version. ", .cmd = CmdOsVersion},
          {.name = "set-auto-off",
           .usage = "set-auto-off <timeout>",
-          .description = "Set auto off timeout (warning: wakeup will currently fail). ",
+          .description = "Set the auto-off time in seconds until the next reset, 0 for never.",
           .cmd = CmdSetAutoOff},
          {.name = "install",
           .usage = "install <database>",

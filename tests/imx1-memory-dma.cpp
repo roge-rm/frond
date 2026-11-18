@@ -91,6 +91,11 @@ int main() {
     };
     auto done = [&](Imx1Bootstrap& b, unsigned number) { return (read(b, dma + 4) >> number) & 1; };
     auto pending61 = [&](Imx1Bootstrap& b) { return (b.interruptPending().normal >> 61) & 1; };
+    // DMA's error registers read 0 and are quiet reads, so the ROM's block wait loop stays on the lean path.
+    for (uint32_t address = dma + 0xc; address <= dma + 0x18; address += 4) {
+        assert(Imx1Bootstrap::quietReadAddress(address) && read(soc, address) == 0);
+    }
+    assert(!Imx1Bootstrap::quietReadAddress(dma) && !Imx1Bootstrap::quietReadAddress(dma + 0x1c));
     uint8_t* source = soc.plainPage(sram, true);
     for (unsigned i = 0; i < 0x1000; ++i) source[i] = uint8_t(i * 13 + 7);
     write(soc, dma, 1);

@@ -35,6 +35,8 @@ void pxaGpioSetInputObserver(PxaGpio* gpio, GpioChangedNotifF callback, void* co
 bool pxaGpioIsInput(const PxaGpio* gpio, unsigned pin);
 bool pxaGpioInputLevel(const PxaGpio* gpio, unsigned pin);
 unsigned pxaGpioAlternateFunction(const PxaGpio* gpio, unsigned pin);
+// What a read of a level register (GPLR) at pa gives, without side effects; false for other addresses.
+bool pxaGpioPeekLevel(const PxaGpio* gpio, uint32_t pa, uint32_t* value);
 void pxaGpioHoldSleepOutputs(PxaGpio* gpio, const uint32_t* levels);
 void pxaGpioReleaseSleepOutputs(PxaGpio* gpio);
 void pxaGpioSleepReset(PxaGpio* gpio);

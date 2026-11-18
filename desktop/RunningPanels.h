@@ -35,8 +35,9 @@ class AppsPanel : public QWidget {
     Q_OBJECT
  public:
     explicit AppsPanel(QWidget* parent = nullptr);
-    // The RAM databases from `db-list`; only the applications are listed.
-    void setDatabases(const std::vector<runningRules::Database>& all);
+    // The RAM databases from `db-list`; only the applications are listed. An empty list shows
+    // note, or "No applications".
+    void setDatabases(const std::vector<runningRules::Database>& all, const QString& note = {});
     QStringList names() const;
  signals:
     void installRequested();

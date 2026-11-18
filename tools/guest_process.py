@@ -3,6 +3,18 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
+
+
+def _exit_on_signal(number, frame):
+    # SystemExit lets the finally blocks stop the cores before the test dies.
+    raise SystemExit(128 + number)
+
+
+# Any test that starts guests dies by TERM or HUP on a timeout; cleanup has to run then.
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGTERM, _exit_on_signal)
+    signal.signal(signal.SIGHUP, _exit_on_signal)
 
 
 def stop_guest(process, grace=3):

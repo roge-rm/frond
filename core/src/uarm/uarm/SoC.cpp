@@ -19,10 +19,25 @@
 using namespace std;
 
 namespace {
+    uint64_t (*eventClock)() = nullptr;
     uint64_t hostMsecNow() {
+        if (eventClock) return eventClock();
         return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
     }
+}
+
+void SoC::SetEventClock(uint64_t (*clock)()) { eventClock = clock; }
+
+void SoC::SetFollowCoreClock(bool follow) {
+    followCoreClock = follow;
+    if (cpu) cpuSetJitMemoryCost(cpu, follow);
+}
+
+void SoC::SetClockMultiplier(uint32_t num, uint32_t den) {
+    if (!num || !den) num = den = 1;
+    clockMultiplierNum = num;
+    clockMultiplierDen = den;
 }
 
 SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
@@ -45,11 +60,19 @@ SoC::SoC()
 }
 
 void SoC::KeyDown(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = true;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyDown(key));
 }
 
 void SoC::KeyUp(enum KeyId key) {
+    if (key == keyIdPower) powerHeld = false;
     if (key != keyIdPower || PowerButtonSupported()) keyEventQueue->Push(KeyEvent::KeyUp(key));
+}
+
+// A power event popped in the last second still counts: the guest may not have left sleep yet.
+bool SoC::PowerKeyPending() {
+    return powerHeld || jammedKey == keyIdPower || (powerPopped && GetTime() - powerPoppedAt < 1000000000ull) ||
+           keyEventQueue->Any([](const KeyEvent& event) { return event.key == keyIdPower; });
 }
 
 void SoC::PenDown(int x, int y) {
@@ -227,6 +250,7 @@ void SoC::HardReset() {
 void SoC::Reset() {
     penEventQueue->Clear();
     keyEventQueue->Clear();
+    powerPopped = false;
     penDown = false;
     if (audioQueue) audioQueueClear(audioQueue);
     framebufferAccessLowWatermark = 0;

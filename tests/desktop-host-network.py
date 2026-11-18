@@ -20,6 +20,8 @@ import time
 import uuid
 import zipfile
 
+from wait_for import wait_until
+
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument("--core", type=Path, default=Path("out/frond"))
 p.add_argument("--session", type=Path, required=True)
@@ -310,7 +312,6 @@ def emulator(session, label, audio=False):
                     raw = None
 
             request.stop_capture = stop_capture
-            time.sleep(2)
             yield request
             if recorder:
                 recorder.terminate()
@@ -386,7 +387,6 @@ try:
         request("network-mode", profile)
         if a.wireless:
             retry(request, "launch-app", "Preferences")
-            time.sleep(1)
         retry(request, "install", settings)
         retry(request, "install", a.probe.resolve())
         retry(request, "launch-app", "Frond host probe")
@@ -427,7 +427,7 @@ try:
         shot = root / "stage.replay"
         shot.write_text("100 snapshot " + str(root / "stage.png") + "\n")
         request("input-replay", shot)
-        time.sleep(1)
+        wait_until(lambda: (root / "stage.png").is_file(), 10, 0.1, "stage.png from the snapshot replay")
         retry(request, "export", root / "pending.zip")
         rows = records(root / "pending.zip")
         for expected in [
@@ -488,7 +488,6 @@ try:
             request("network-mode", profile)
             if a.wireless:
                 retry(request, "launch-app", "Preferences")
-                time.sleep(1)
             retry(request, "install", a.probe.resolve())
             retry(request, "launch-app", "Frond host probe")
             time.sleep(4)

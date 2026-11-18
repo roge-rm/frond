@@ -3859,6 +3859,16 @@ void EmRegsSZ::UnmarkScreen() {
 
 void EmRegsSZ::MarkScreenDirty() { gSystemState.MarkScreenDirty(); }
 
+void EmRegsSZ::FlushTimers(double scale) {
+    systemCycles = gSession->GetSystemCycles();
+    if (scale != 1) {
+        tmr1LastProcessedSystemCycles = systemCycles - (systemCycles - tmr1LastProcessedSystemCycles) * scale;
+        tmr2LastProcessedSystemCycles = systemCycles - (systemCycles - tmr2LastProcessedSystemCycles) * scale;
+    }
+    UpdateTimers();
+    EmHALHandler::FlushTimers(scale);
+}
+
 uint32 EmRegsSZ::CyclesToNextInterrupt(uint64 systemCycles) {
     this->systemCycles = systemCycles;
 

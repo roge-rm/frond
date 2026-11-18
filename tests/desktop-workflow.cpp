@@ -579,6 +579,7 @@ card='inserted' if any((src.parent/n).exists() for n in cards) else 'none'
 flag=lambda n: pathlib.Path(__file__).with_name(n).exists()
 if card=='inserted' and flag('start-ejected'): card='ejected'
 identity='00'*32
+card2='none'
 for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
@@ -592,6 +593,9 @@ for line in s.makefile('rb'):
     elif cmd=='sd-state': message=card
     elif cmd=='network-state': message='disabled'
     elif cmd=='keyboard-state': message='detached'
+    elif cmd=='sd2-state': message=card2
+    elif cmd in ('sd2-create','sd2-reinsert'): card2='inserted'
+    elif cmd=='sd2-eject': card2='ejected'
     elif cmd=='sd-put-in': card='inserted'; identity=arg.split(' ')[0]
     elif cmd=='sd-eject': card='ejected'
     elif cmd=='sd-take-out': card='none'; message=identity+' writable'
@@ -686,6 +690,43 @@ for line in s.makefile('rb'):
         frondSessions::Preferences prefs;
         QVERIFY(frondSessions::readPreferences(QSettings().value("lastSession").toString(), &prefs));
         QCOMPARE(prefs.scale, 7); QVERIFY(prefs.smooth && prefs.fastAudio);
+        QSettings().clear();
+    }
+    void rumbleSetting() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile source(files.filePath("input.frond"));
+        QVERIFY(source.open(QIODevice::WriteOnly)); source.write("session"); source.close();
+        frondSessions::Preferences saved;
+        saved.rumble = false;
+        QVERIFY(frondSessions::writePreferences(source.fileName(), saved).isEmpty());
+        frondSessions::Preferences loaded;
+        QVERIFY(frondSessions::readPreferences(source.fileName(), &loaded));
+        QVERIFY(!loaded.rumble);
+        QFile core(files.filePath("core")); QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+pathlib.Path(sys.argv[1]+'.args').write_text('\n'.join(sys.argv[1:]))
+s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+s.sendall(b'0\tevent\tfuture-event\t\n')
+s.sendall(b'0\tevent\trumble\t'+b'on'.hex().encode()+b'\n')
+for line in s.makefile('rb'):
+    i,cmd,arg=line.rstrip(b'\n').split(b'\t')
+    message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'sd-state':b'none'}.get(cmd,b'done')
+    if cmd==b'save': pathlib.Path(bytes.fromhex(arg.decode()).decode()).write_text('saved')
+    s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
+    if cmd==b'quit': break
+)PY");
+        core.close(); QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        MainWindow window(core.fileName()); window.show();
+        window.openSession(source.fileName(), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
+        QFile args(source.fileName()+".args"); QVERIFY(args.open(QIODevice::ReadOnly));
+        QVERIFY(args.readAll().contains("--no-rumble"));
+        // The unknown event is skipped and the rumble one reaches the Palm's holder.
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<PalmHolder*>()->rumbleShown(), 5000);
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
         QSettings().clear();
     }
     void serialSetting() {
@@ -2247,11 +2288,11 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
-    // A new Zodiac starts on Fast and other new machines on Exact, until the Engine is changed by hand; an
+    // A new Zodiac starts on Fast and the T|X, Zire 72 too, and other new machines on Exact, until the Engine is changed by hand; an
     // existing Zodiac keeps the engine it has, and Fast starts its core with --engine fast.
     void zodiacEngineDefault() {
         const auto zodiac = frondFirmware::deviceFromId("tapwave-zodiac-2");
-        QVERIFY(frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::tx));
+        QVERIFY(frondFirmware::fastByDefault(frondFirmware::Device::tx) && frondFirmware::fastByDefault(frondFirmware::Device::zire72) && frondFirmware::fastByDefault(zodiac) && !frondFirmware::fastByDefault(frondFirmware::Device::e2));
         const frondSessions::Preferences fresh;
         QTemporaryDir root;
         {
@@ -2261,14 +2302,14 @@ for line in s.makefile('rb'):
             const auto pick = [&](const char* id) { device->setCurrentIndex(device->findData(QString(id))); };
             pick("tapwave-zodiac-2");
             QVERIFY(engine->isEnabled() && engine->currentData().toBool() && dialog.machineSettings->values().fastEngine);
-            pick("palm-tx");
+            pick("palm-e2");
             QVERIFY(!engine->currentData().toBool());
             pick("tapwave-zodiac-2");
             QVERIFY(engine->currentData().toBool());
             // Exact chosen by hand stays when the device changes.
             engine->setCurrentIndex(engine->findData(false));
             emit engine->activated(engine->currentIndex());
-            pick("palm-tx"); pick("tapwave-zodiac-2");
+            pick("palm-e2"); pick("tapwave-zodiac-2");
             QVERIFY(!engine->currentData().toBool() && !dialog.machineSettings->values().fastEngine);
         }
         {
@@ -2278,6 +2319,61 @@ for line in s.makefile('rb'):
             MachineSettingsDialog fastDialog(zodiac, fast);
             QVERIFY(fastDialog.controls->values().fastEngine);
         }
+    }
+    // The Zodiac's second SD slot: its own button and dialog, through the sd2- commands; other devices have no button.
+    void zodiacSecondCard() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = pickerCore(files.path(), "tapwave-zodiac-2");
+        const auto a = cardsMachine("Zodiac", false, "tapwave-zodiac-2");
+        MainWindow window(core);
+        window.show();
+        auto* button = window.findChild<QPushButton*>("secondCard");
+        QVERIFY(button && !button->isEnabled());
+        window.openSession(a + "/Zodiac.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(), 10000);
+        int step = 0;
+        QStringList errors;
+        auto press = [](QWidget* dialog, const QString& text) {
+            for (auto* b : dialog->findChildren<QPushButton*>())
+                if (b->text() == text && b->isVisibleTo(dialog)) { b->click(); return true; }
+            return false;
+        };
+        auto statusIs = [](QWidget* dialog, const QString& text) {
+            for (auto* l : dialog->findChildren<QLabel*>()) if (l->text() == text) return true;
+            return false;
+        };
+        QTimer poll; poll.setInterval(20);
+        connect(&poll, &QTimer::timeout, &window, [&] {
+            for (auto* box : window.findChildren<QMessageBox*>()) {
+                if (!box->isVisible()) continue;
+                if (box->windowTitle().contains("Eject")) box->button(QMessageBox::Yes)->click();
+                else { errors << box->text(); box->done(QMessageBox::Ok); }
+            }
+            QDialog* dialog = nullptr;
+            for (auto* d : window.findChildren<QDialog*>()) if (d->isVisible() && d->windowTitle() == "SD card 2") dialog = d;
+            if (!dialog) return;
+            // The press runs from its own timer, as the Eject question is modal and this one can't fire inside it.
+            auto later = [&, dialog](int next, const char* text) {
+                step = next;
+                QTimer::singleShot(0, &window, [&, dialog, text] { press(dialog, text); });
+            };
+            if (step == 0 && statusIs(dialog, "No card")) later(1, "New card");
+            else if (step == 1 && statusIs(dialog, "Inserted")) later(2, "Eject");
+            else if (step == 2 && statusIs(dialog, "Ejected")) later(3, "Insert");
+            else if (step == 3 && statusIs(dialog, "Inserted")) { step = 4; dialog->reject(); }
+        });
+        poll.start();
+        button->click();
+        QTRY_COMPARE_WITH_TIMEOUT(step, 4, 10000);
+        poll.stop();
+        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(' ')));
+        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+        QStringList got;
+        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts))
+            if (line.startsWith("sd2-") && !line.startsWith("sd2-state")) got << line.trimmed();
+        QCOMPARE(got, QStringList({"sd2-create\t32", "sd2-eject", "sd2-reinsert"}));
     }
     // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
     // the speed too, no contrast, and the Engine.
@@ -2873,6 +2969,11 @@ s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
 s.sendall(b'0\tevent\tready\t\n')
 here=sys.argv[0].rsplit('/',1)[0]
 log=open(here+'/sent','a')
+open(here+'/args','w').write('\n'.join(sys.argv[1:]))
+# The game controller: --gamepad on attaches it at start; a "padbusy" file has serial holding the connector.
+pad=b'attached waiting' if '--gamepad' in sys.argv and sys.argv[sys.argv.index('--gamepad')+1]=='on' else b'detached'
+def padstate():
+    return b'detached busy' if pad==b'detached' and os.path.exists(here+'/padbusy') else pad
 # Lines put in the "emit" file go to the app as shortcut events.
 def emit():
     while True:
@@ -2896,7 +2997,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     text=bytes.fromhex(arg.decode())
     if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
-    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'camera-mode':
@@ -2909,6 +3010,11 @@ for line in s.makefile('rb'):
         s.sendall(i+b'\terror\tunsupported\t'+b'The window is not an X11 window.'.hex().encode()+b'\n'); continue
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'DEVICE',b'sd-state':b'none',b'microphone-state':mic,b'microphone-mode':mic,b'camera-state':cam,b'camera-mode':cam}.get(cmd,b'done')
     if cmd==b'keyboard-attach': message=b'attached'
+    if cmd==b'gamepad':
+        if text==b'on' and padstate()!=b'detached':
+            s.sendall(i+b'\terror\tbusy\t'+b'The connector is in use.'.hex().encode()+b'\n'); continue
+        pad=b'attached waiting' if text==b'on' else b'detached'
+    if cmd in (b'gamepad',b'gamepad-state'): message=padstate()
     s.sendall(i+b'\tok\tresult\t'+message.hex().encode()+b'\n')
     if cmd==b'quit': break
 )PY").replace("DEVICE", device));
@@ -3308,6 +3414,7 @@ for line in s.makefile('rb'):
         auto menuAction = [&](const char* name) { auto* a = window.findChild<QAction*>(name); if (!a) qWarning("no %s", name); return a; };
         // The T|X has no Hold; the rows it has are there and the others are not.
         QVERIFY(!menuAction("machineHold")->isVisible());
+        QVERIFY(!menuAction("machineGamepad")->isVisible());
         QVERIFY(menuAction("machineMicrophone")->isVisible() && !menuAction("machineMicrophone")->isEnabled());
         for (auto* name : {"machineKeyboard", "machineNetwork", "machineScreenshot", "machineSave", "machineReset"})
             QTRY_VERIFY2_WITH_TIMEOUT(menuAction(name)->isVisible() && menuAction(name)->isEnabled(), name, 4000);
@@ -3390,6 +3497,113 @@ for line in s.makefile('rb'):
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
     }
+    // The TG50's Game controller row: attaches and detaches live, greys while the connector is
+    // taken, and is saved for the machine and passed at the next start.
+    // TG50 Jog in landscape: started with the saved choice, changed live from the Display panel and saved.
+    void jogLandscapeLive() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Jog", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        frondSessions::Preferences prefs;
+        prefs.jogLandscape = frondSessions::JogLandscape::over;
+        QVERIFY(frondSessions::writePreferences(managedSession("Jog"), prefs).isEmpty());
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Jog"), true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineSave")->isEnabled(), 5000);
+        QFile f(files.path() + "/args"); QVERIFY(f.open(QIODevice::ReadOnly));
+        const auto arguments = QString::fromUtf8(f.readAll()).split('\n');
+        const auto at = arguments.indexOf("--jog-controls-landscape");
+        QVERIFY(at >= 0 && at + 1 < arguments.size() && arguments.at(at + 1) == "over");
+        window.findChild<PanelHost*>("panelHost")->open(2);
+        auto* box = window.findChild<QComboBox*>("runningJogLandscape");
+        QVERIFY(box && !box->isHidden());
+        QCOMPARE(box->count(), 4);
+        QCOMPARE(box->currentText(), QString("Over screen"));
+        QTRY_VERIFY_WITH_TIMEOUT(box->isEnabled(), 4000);
+        box->setCurrentIndex(box->findData(int(frondSessions::JogLandscape::under)));
+        emit box->activated(box->currentIndex());
+        QTRY_VERIFY_WITH_TIMEOUT(commands().contains("display jog-landscape=under"), 4000);
+        frondSessions::Preferences kept;
+        QVERIFY(frondSessions::readPreferences(managedSession("Jog"), &kept));
+        QVERIFY(kept.jogLandscape == frondSessions::JogLandscape::under);
+    }
+    void clieGamepadSwitch() {
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QDir(managedFolder()).removeRecursively();
+        putSession("Pad", 6, "sony-clie-tg50", 0);
+        QTemporaryDir files;
+        const auto sent = files.path() + "/sent";
+        menuCore(files.path(), "sony-clie-tg50");
+        if (QTest::currentTestFailed()) return;
+        auto commands = [&] {
+            QFile f(sent); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
+        };
+        auto args = [&] {
+            QFile f(files.path() + "/args"); if (!f.open(QIODevice::ReadOnly)) return QStringList();
+            return QString::fromUtf8(f.readAll()).split('\n');
+        };
+        auto saved = [&] {
+            frondSessions::Preferences kept;
+            if (!frondSessions::readPreferences(managedSession("Pad"), &kept)) return QString("none");
+            return kept.gamepadSet ? QString(kept.gamepad ? "on" : "off") : QString("unset");
+        };
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            auto* bar = window.findChild<RunningBar*>("runningBar");
+            QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            // No setting yet: the session's state stays at start.
+            QVERIFY(!args().contains("--gamepad"));
+            auto* row = window.findChild<QAction*>("machineGamepad");
+            QTRY_VERIFY_WITH_TIMEOUT(row->isVisible() && row->isEnabled() && !row->isChecked(), 5000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad on"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("on"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().contains("gamepad off"), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isChecked(), 4000);
+            QCOMPARE(saved(), QString("off"));
+            // Serial takes the connector: the row greys with the reason, found by the poll.
+            { QFile busy(files.path() + "/padbusy"); QVERIFY(busy.open(QIODevice::WriteOnly)); }
+            QTRY_VERIFY_WITH_TIMEOUT(!row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller (connector in use)"));
+            QVERIFY(QFile::remove(files.path() + "/padbusy"));
+            QTRY_VERIFY_WITH_TIMEOUT(row->isEnabled(), 4000);
+            QCOMPARE(row->text(), QString("Game controller"));
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            row->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(row->isChecked(), 4000);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        // The next start passes the machine's choice.
+        QCOMPARE(saved(), QString("on"));
+        {
+            MainWindow window(files.path() + "/core"); window.show(); window.openSession(managedSession("Pad"), true);
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("save")->isEnabled(), 5000);
+            const auto list = args();
+            const auto at = list.indexOf("--gamepad");
+            QVERIFY(at >= 0 && list.value(at + 1) == "on");
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QAction*>("machineGamepad")->isChecked(), 4000);
+            window.findChild<QAction*>("machineSaveStop")->trigger();
+            QTRY_VERIFY_WITH_TIMEOUT(commands().last() == "quit ", 5000);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
+        }
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
     // The Applications panel: the list, Launch, Delete (the app first, then its data), a refusal,
     // Other… and a drop.
     void appsPanel() {
@@ -3412,6 +3626,8 @@ for line in s.makefile('rb'):
     if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state'):
         log.write(cmd.decode()+' '+text+'\n'); log.flush()
     message={b'keyboard-state':b'detached',b'network-state':b'disabled',b'device-state':b'palm-tx',b'sd-state':b'none',b'microphone-state':b'off'}.get(cmd,b'done')
+    if cmd==b'db-list' and text!='wake' and os.path.exists(sys.argv[0].rsplit('/',1)[0]+'/asleep'):
+        s.sendall(i+b'\terror\tasleep\t'+b'The Palm is asleep. Turn it on and try again.'.hex().encode()+b'\n'); continue
     if cmd==b'db-list':
         message='\n'.join(t.encode().hex()+' '+c.encode().hex()+' %08x '%a+n.encode().hex() for t,c,a,n in dbs).encode()
     if cmd==b'delete-db':
@@ -3477,7 +3693,8 @@ for line in s.makefile('rb'):
             // A fresh list first, then the application, then the data with its creator.
             const auto list = commands();
             const int at = int(list.indexOf("delete-db Memos"));
-            QVERIFY(at > 0 && list[at - 1] == "db-list ");
+            // The lookup wakes a sleeping Palm, as the delete would.
+            QVERIFY(at > 0 && list[at - 1] == "db-list wake");
             QCOMPARE(list[at + 1], QString("delete-db Memo Data"));
             QVERIFY(!list.contains("delete-db Notes") && !list.contains("delete-db Other Data"));
         }
@@ -3522,6 +3739,19 @@ for line in s.makefile('rb'):
         window.findChild<QToolButton*>("panelClose")->click();
         QVERIFY(!panels->isVisible() && !window.findChild<QAction*>("barApplications")->isChecked());
         QTRY_COMPARE_WITH_TIMEOUT(window.height(), slim, 2000);
+        // A sleeping Palm: the list says so, with no error box, and the list didn't wake it.
+        QFile(files.filePath("asleep")).open(QIODevice::WriteOnly);
+        press("Ctrl+1");
+        QTRY_COMPARE_WITH_TIMEOUT(apps->names(), QStringList(), 5000);
+        QCOMPARE(apps->findChild<QLabel*>("appsEmpty")->text(), QString("The Palm is asleep"));
+        QVERIFY(apps->findChild<QLabel*>("appsEmpty")->isVisible());
+        QCOMPARE(commands().filter(QRegularExpression("^db-list")).last(), QString("db-list "));
+        for (auto* box : window.findChildren<QMessageBox*>()) QVERIFY(!box->isVisible());
+        // Turned on by hand: the open panel asks again by itself and shows the list.
+        QFile::remove(files.filePath("asleep"));
+        QTRY_VERIFY_WITH_TIMEOUT(!apps->names().isEmpty(), 6000);
+        press("Ctrl+1");
+        QTRY_COMPARE_WITH_TIMEOUT(panels->current(), -1, 2000);
         answer.stop();
         QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("stop")->isEnabled(), 5000);
         window.findChild<QPushButton*>("stop")->click();
@@ -3936,7 +4166,7 @@ for line in s.makefile('rb'):
             QCOMPARE(QSettings().value("lastSession").toString(), QFileInfo(one).canonicalFilePath());
         }
         {
-            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core uses the device's own.
+            // An ARM device's Uncapped speed is a high --mips; Original passes none, so the core follows the device's own clock.
             frondSessions::Preferences uncapped;
             QVERIFY(frondSessions::readPreferences(two, &uncapped)); uncapped.uncapped = true;
             QVERIFY(frondSessions::writePreferences(two, uncapped).isEmpty());
@@ -3945,7 +4175,7 @@ for line in s.makefile('rb'):
             QVERIFY(read(".args").contains("--window-scale\n1"));
             QVERIFY(!read(".args").contains("--no-sound") && !read(".args").contains("--smooth-lcd") && !read(".args").contains("--fast-audio"));
             QVERIFY(!read(".args").contains("--low-latency-queue"));
-            QVERIFY(read(".args").contains("--mips\n1000\n"));
+            QVERIFY(read(".args").contains("--mips\n3000\n"));
             sound->click(); QTRY_VERIFY(read(".commands").contains("audio-off"));
             frondSessions::Preferences prefs;
             QVERIFY(frondSessions::readPreferences(two, &prefs)); QVERIFY(!prefs.audio);
@@ -3980,6 +4210,7 @@ for line in s.makefile('rb'):
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             frondSessions::Preferences prefs;
             prefs.showKeyboard = keyboard; prefs.jogControls = jog; prefs.microphone = true;
+            prefs.jogLandscape = frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4);
             QVERIFY(frondSessions::writePreferences(path, prefs).isEmpty());
             QFile::remove(core.fileName() + ".args");
             MainWindow window(core.fileName()); window.show(); window.openSession(path, true);
@@ -3991,9 +4222,14 @@ for line in s.makefile('rb'):
             QVERIFY(at >= 0 && at + 1 < arguments.size());
             QCOMPARE(QString::fromUtf8(arguments.at(at + 1)), frondSessions::jogControlsName(jog));
             QVERIFY(!arguments.contains("--hide-jog-controls"));
+            const auto landscape = arguments.indexOf("--jog-controls-landscape");
+            QVERIFY(landscape >= 0 && landscape + 1 < arguments.size());
+            QCOMPARE(QString::fromUtf8(arguments.at(landscape + 1)),
+                     frondSessions::jogLandscapeName(frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4)));
             window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 5000);
             QVERIFY(frondSessions::readPreferences(path, &prefs));
             QCOMPARE(prefs.showKeyboard, keyboard); QCOMPARE(prefs.jogControls, jog);
+            QVERIFY(prefs.jogLandscape == frondSessions::JogLandscape((int(jog) + int(keyboard)) % 4));
             QVERIFY(prefs.microphone);
             QCOMPARE(digest(path), guest);
         }
@@ -4014,6 +4250,19 @@ for line in s.makefile('rb'):
         QCOMPARE(controls.jogControls->itemText(2), QString("Left of keyboard"));
         QCOMPARE(controls.jogControls->currentText(), QString("Left of screen"));
         QCOMPARE(MachineSettings(frondSessions::Preferences{}, false).jogControls->currentText(), QString("Left of keyboard"));
+        QVERIFY(!controls.jogLandscape->isHidden() && !controls.jogLandscapeLabel->isHidden());
+        QCOMPARE(controls.jogLandscapeLabel->text(), QString("Jog in landscape"));
+        QCOMPARE(controls.jogLandscape->count(), 4);
+        QCOMPARE(controls.jogLandscape->itemText(0), QString("Hidden"));
+        QCOMPARE(controls.jogLandscape->itemText(1), QString("Left of controller"));
+        QCOMPARE(controls.jogLandscape->itemText(2), QString("Under screen"));
+        QCOMPARE(controls.jogLandscape->itemText(3), QString("Over screen"));
+        QCOMPARE(controls.jogLandscape->currentText(), QString("Left of controller"));
+        for (auto jog : {frondSessions::JogLandscape::hidden, frondSessions::JogLandscape::beside,
+                         frondSessions::JogLandscape::under, frondSessions::JogLandscape::over}) {
+            controls.jogLandscape->setCurrentIndex(int(jog));
+            QVERIFY(controls.values().jogLandscape == jog);
+        }
         for (bool keyboard : {false, true})
         for (auto jog : {frondSessions::JogControls::hidden, frondSessions::JogControls::screen, frondSessions::JogControls::keyboard}) {
             controls.showKeyboard->setChecked(keyboard); controls.jogControls->setCurrentIndex(int(jog));
@@ -4025,6 +4274,7 @@ for line in s.makefile('rb'):
         controls.setDevice(frondFirmware::Device::tx);
         QVERIFY(controls.showKeyboard->isHidden());
         QVERIFY(controls.jogControls->isHidden() && controls.jogControlsLabel->isHidden());
+        QVERIFY(controls.jogLandscape->isHidden() && controls.jogLandscapeLabel->isHidden());
         QVERIFY(controls.values().microphone);
     }
     void legacyTg50KeepsJogBesideScreen() {
@@ -6018,11 +6268,17 @@ for line in s.makefile('rb'):
         QVERIFY(frondCards::launchArguments(cardsSessions(), copyDir).join(' ').contains("--card-identity " + copy.identity.toHex()));
         QCOMPARE(digest(copyDir + "/sd.frondsd"), digest(a + "/sd.frondsd"));
         QCOMPARE(QFile::permissions(frondSessions::sessionFrondIn(copyDir)) & 0x7077, privateMode);
-        // No card.
+        // No card: a Zodiac's slot 2 file stays out of the copy too.
+        {
+            QFile second(a + "/sd2.frondsd");
+            QVERIFY(second.open(QIODevice::WriteOnly) && second.write(QByteArray(4096, 's')) > 0);
+        }
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::none).isEmpty());
+        QVERIFY(!QFileInfo::exists(cardsSessions() + '/' + name + "/sd2.frondsd"));
         auto slot = frondCards::readSlot(cardsSessions() + '/' + name);
         QVERIFY(slot.present && slot.card.isEmpty() && slot.link.isEmpty() && slot.swap);
         QVERIFY(frondCards::cardFileIn(cardsSessions() + '/' + name).isEmpty());
+        QVERIFY(QFile::remove(a + "/sd2.frondsd"));
         // Link: nothing copied, both linked; the original keeps holding it until reconcile frees it.
         QVERIFY(frondSessions::duplicate(cardsSessions(), frondSessions::describe(a), &name, {}, frondSessions::CardChoice::link).isEmpty());
         const auto linked = cardsSessions() + '/' + name;
@@ -6204,6 +6460,48 @@ for line in s.makefile('rb'):
         QVERIFY(text.contains("bad1.prc: Not a Palm database.") && text.contains("bad2.pdb: Not a Palm database."));
         QVERIFY(!text.contains("one.prc") && !text.contains("three.prc"));
         window.findChild<QMessageBox*>()->close();
+        window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        QDir(managedFolder()).removeRecursively();
+        QSettings().clear();
+    }
+    // Help ends with a FrondBench submenu holding Install on This Device and Save FrondBench.prc…; Install sends the bundled PRC through
+    // the normal install path and is greyed out until the device can install.
+    void frondBenchActions() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        const auto core = fakeInstallCore(files.path());
+        const auto machine = cardsMachine("Palm TX", false);
+        MainWindow window(core);
+        window.show();
+        auto* install = window.findChild<QAction*>("installFrondBenchAction");
+        auto* save = window.findChild<QAction*>("saveFrondBenchAction");
+        QVERIFY(install && save);
+        QVERIFY(install->text().contains("Install") && save->text().contains("FrondBench.prc"));
+        auto* menu = window.findChild<QAction*>("frondBenchMenu");
+        QVERIFY(menu && menu->menu() && menu->menu()->actions().contains(install) && menu->menu()->actions().contains(save));
+        QCOMPARE(window.menuBar()->actions().last()->menu()->actions().last(), menu);
+        QVERIFY(!install->isEnabled());
+        window.openSession(machine + "/Palm TX.frond", true);
+        QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("installApp")->isEnabled(), 20000);
+        QTRY_VERIFY(install->isEnabled());
+        QFile bundled(":/frondbench/FrondBench.prc");
+        QVERIFY(bundled.open(QIODevice::ReadOnly));
+        const auto bytes = bundled.readAll();
+        QVERIFY(bytes.size() > 1000);
+        install->trigger();
+        const auto log = files.path() + "/installs";
+        const auto read = [&] { QFile f(log); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts) : QStringList(); };
+        QTRY_COMPARE_WITH_TIMEOUT(read().size(), 1, 5000);
+        QCOMPARE(QFileInfo(read().first()).fileName(), QString("FrondBench.prc"));
+        QFile sent(read().first());
+        QVERIFY(sent.open(QIODevice::ReadOnly));
+        QCOMPARE(sent.readAll(), bytes);
+        const auto saved = files.filePath("saved.prc");
+        QVERIFY(window.saveFrondBench(saved));
+        QFile copy(saved);
+        QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), bytes);
         window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QDir(managedFolder()).removeRecursively();
         QSettings().clear();
@@ -6734,6 +7032,20 @@ for line in s.makefile('rb'):
                    sd->visualItemRect(sd->item(0)).height() >= detail->height();
         }());
         cards->resize(520, cards->height());
+        // A dark theme whose placeholder colour is still dark: the detail line follows the text colour.
+        {
+            const auto saved = QApplication::palette();
+            auto dark = saved;
+            dark.setColor(QPalette::Window, QColor(30, 30, 30));
+            dark.setColor(QPalette::WindowText, QColor(230, 230, 230));
+            dark.setColor(QPalette::PlaceholderText, QColor(60, 60, 60));
+            QApplication::setPalette(dark);
+            auto* detail = sd->itemWidget(sd->item(0))->findChild<QLabel*>("cardDetail");
+            QTRY_VERIFY(detail->palette().color(QPalette::WindowText).lightness() > 120);
+            QApplication::setPalette(saved);
+            QTRY_COMPARE(detail->palette().color(QPalette::WindowText).lightness() > 120,
+                         saved.color(QPalette::WindowText).lightness() > 120);
+        }
         if (kinds.contains("ms")) {
             auto* ms = cards->findChild<QListWidget*>("memorySticks");
             QCOMPARE(ms->count(), 1);

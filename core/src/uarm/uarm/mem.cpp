@@ -43,6 +43,7 @@ static bool memRegionAddFixed(struct ArmMem *mem, uint8_t region, uint32_t pa, u
                               ArmMemAccessF af, void *uD) {
     if (!memRegionFits(pa, sz)) return false;
 
+    hostTlbForgetIo(&mem->hostTlb);
     mem->regions[region].pa = pa;
     mem->regions[region].aF = af;
     mem->regions[region].uD = uD;
@@ -127,6 +128,7 @@ bool memRegionRemove(struct ArmMem *mem, uint32_t pa, uint32_t size, void *conte
     for (unsigned i = REGION_BASE; i < NUM_MEM_REGIONS; ++i) {
         auto &region = mem->regions[i];
         if (region.pa != pa || region.ub != pa + size || region.uD != context) continue;
+        hostTlbForgetIo(&mem->hostTlb);
         region = {};
         return true;
     }
@@ -272,7 +274,7 @@ static void memForEachRam(struct ArmMem *mem, F f) {
     if (mem->heldRam.ub && mem->heldRam.uD) f(mem->heldRam, (struct ArmRam *)mem->heldRam.uD);
 }
 
-uint8_t *memWatchRamCode(struct ArmMem *mem, uint32_t pa, void (*written)(void *, uint8_t *, uint32_t, uint32_t), void *context,
+uint8_t *memWatchRamCode(struct ArmMem *mem, uint32_t pa, void (*written)(void *, uint8_t *, uint8_t *, uint32_t, uint32_t), void *context,
                          uint8_t **lines) {
     struct ArmRam *ram = nullptr;
     memForEachRam(mem, [&](const struct ArmMemRegion &r, struct ArmRam *candidate) {

@@ -5,6 +5,7 @@
 
 #include <mcl/bit/bit_count.hpp>
 
+#include "dynarmic/frontend/A32/translate/conditional_state.h"
 #include "dynarmic/frontend/A32/translate/impl/a32_translate_impl.h"
 #include "dynarmic/interface/A32/config.h"
 
@@ -741,16 +742,15 @@ bool TranslatorVisitor::thumb16_PUSH(bool M, RegList reg_list) {
 
     const u32 num_bytes_to_push = static_cast<u32>(4 * mcl::bit::count_ones(reg_list));
     const auto final_address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(num_bytes_to_push));
-    // Frond: from the highest register down, as the interpreter's STMDB does, so a fault
-    // part-way leaves the same words stored.
-    auto address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(4));
-    for (size_t k = 0; k < 16; k++) {
-        const size_t i = 15 - k;
+    // Frond: from the lowest register up, as the ARM920T and the interpreter's STMDB do, with SP
+    // set after the last store.
+    auto address = final_address;
+    for (size_t i = 0; i < 16; i++) {
         if (mcl::bit::get_bit(i, reg_list)) {
             // TODO: Deal with alignment
             const auto Ri = ir.GetRegister(static_cast<Reg>(i));
             ir.WriteMemory32(address, Ri, IR::AccType::ATOMIC);
-            address = ir.Sub(address, ir.Imm32(4));
+            address = ir.Add(address, ir.Imm32(4));
         }
     }
 
@@ -983,11 +983,16 @@ bool TranslatorVisitor::thumb16_B_t1(Cond cond, Imm<8> imm8) {
         return thumb16_UDF();
     }
 
+    // Frond: as ARM's B<cond>, a block-leading condition, so a failed one is charged the
+    // condition-failed ticks (the block ends before it otherwise).
+    if (!IsConditionPassed(*this, cond)) {
+        return true;
+    }
+
     const s32 imm32 = static_cast<s32>((imm8.SignExtend<u32>() << 1) + 4);
     const auto then_location = ir.current_location.AdvancePC(imm32).AdvanceIT();
-    const auto else_location = ir.current_location.AdvancePC(2).AdvanceIT();
 
-    ir.SetTerm(IR::Term::If{cond, IR::Term::LinkBlock{then_location}, IR::Term::LinkBlock{else_location}});
+    ir.SetTerm(IR::Term::LinkBlock{then_location});
     return false;
 }
 

@@ -358,8 +358,8 @@ struct TG50uc* tg50ucInit(struct ArmMem *physMem, struct PxaGpio *gpio, int8_t g
 	tg50ucReset(uc);
 
 	tg50ucGpioSetInState(uc, 0, 4, true);	//hold switch off
-	tg50ucGpioSetInState(uc, 0, 13, true);	//in cradle
-	tg50ucGpioSetInState(uc, 0, 14, true);	//charging
+	tg50ucGpioSetInState(uc, 0, 13, true);	//not charging (A13 low = charging)
+	tg50ucGpioSetInState(uc, 0, 14, true);	//no external power (A14 and A2 both low = external power)
 	tg50ucGpioSetInState(uc, 0, 15, true);	//headphones removed
 	tg50ucGpioSetInState(uc, 3, 2, true);	//revision 4 (0100)
 
