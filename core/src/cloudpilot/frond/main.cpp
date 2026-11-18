@@ -1108,18 +1108,32 @@ class Runner {
     // Host commands that call into Palm OS (install, launch, database lists and exports) wait for
     // the guest's event loop, where no app or system call is half done, and run there inside the
     // emulation. One waits at a time; it fails with a reason after kGuestCallSeconds of guest time,
-    // or at once while asleep or stopped in the debugger.
+    // or at once when stopped in the debugger. With wake (the commands you start, not lists) a
+    // sleeping Palm is woken first with a power button press, as a person would; one still asleep
+    // kWakeSeconds later, or that falls asleep while the call waits, refuses it. Without wake a
+    // sleeping Palm refuses it at once.
     static constexpr double kGuestCallSeconds = 30;
+    static constexpr double kWakeSeconds = 5;
     struct GuestCall {
         function<void()> run;
         function<void(const string&)> refuse;
         double deadline;
+        double wakeDeadline;  // guest seconds; 0 when the Palm was awake
     };
     optional<GuestCall> guestCall;
 
-    void Guest(function<void()> run, function<void(const string&)> refuse) {
+    static constexpr const char* kAsleep = "the Palm is asleep";
+
+    void Guest(function<void()> run, function<void(const string&)> refuse, bool wake = true) {
         if (!gSystemState.IsUIInitialized()) return refuse("Palm OS hasn't finished starting");
-        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds};
+        if (!wake && !gSession->IsPowerOn()) return refuse(kAsleep);
+        double wakeDeadline = 0;
+        if (!gSession->IsPowerOn() && !gDebugger.IsStopped()) {
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::press));
+            gSession->QueueButtonEvent(ButtonEvent(ButtonEvent::Button::power, ButtonEvent::Type::release));
+            wakeDeadline = guestSeconds + kWakeSeconds;
+        }
+        guestCall = GuestCall{std::move(run), std::move(refuse), guestSeconds + kGuestCallSeconds, wakeDeadline};
         EmPalmOS::RequestSafePoint();
     }
 
@@ -1166,8 +1180,10 @@ class Runner {
         if (!guestCall) return;
         string why;
         if (gDebugger.IsStopped()) why = "the CPU is stopped in the debugger";
-        else if (!gSession->IsPowerOn()) why = "the Palm is asleep";
-        else if (guestSeconds >= guestCall->deadline)
+        else if (!gSession->IsPowerOn()) {
+            if (guestSeconds < guestCall->wakeDeadline) return;
+            why = kAsleep;
+        } else if (guestSeconds >= guestCall->deadline)
             why = "Palm OS is busy, its event loop didn't run in " + to_string(int(kGuestCallSeconds)) + " s";
         else return;
         GuestCall call = std::move(*guestCall);
@@ -2103,7 +2119,7 @@ class Runner {
                     cout << fields << printable(database.dbName, sizeof(database.dbName)) << endl;
                 }
                 cout << "db-list: " << databases.size() << " RAM databases" << endl;
-            }, [](const string& why) { cout << "db-list: " << why << endl; });
+            }, [](const string& why) { cout << "db-list: " << why << endl; }, false);
         } else if (command == "db-export" || command == "db-export-all") {
             // A zip of the RAM databases, with the ROM ones too for db-export-all.
             if (!argument(path)) return void(cout << "usage: " << command << " <zip file>" << endl);
@@ -2191,8 +2207,9 @@ class Runner {
                         }
                         desktop->Reply(request.id, result.ok, result.code, result.message);
                     }, [this, id = request.id](const string& why) {
-                        desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
-                    });
+                        if (why == kAsleep) desktop->Reply(id, false, "asleep", "The Palm is asleep. Turn it on and try again.");
+                        else desktop->Reply(id, false, "not-ready", "Palm OS can't take the call now: " + why + ".");
+                    }, request.command != "db-list" || request.argument == "wake");
                     break;
                 }
                 Reply result;
@@ -2363,7 +2380,7 @@ class Runner {
             return {false,"unsupported",refusal};
         static const char* const fileCommands[] = {"save", "install", "export", "export-db", "input-replay"};
         static const char* const argumentCommands[] = {
-            "launch-app",  "delete-db", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
+            "launch-app",  "delete-db", "db-list", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
             "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter"};
         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
@@ -2450,6 +2467,8 @@ class Runner {
         }
         if (command == "db-list") {
             // One line per RAM database: type, creator and attributes in hex, then the hex name.
+            // wake (a lookup for a delete) wakes a sleeping Palm first, in Guest.
+            if (!argument.empty() && argument != "wake") return {false, "argument", "db-list takes only wake."};
             DatabaseInfoList databases;
             if (!ready || !GetDatabases(databases, GetDatabaseFlags::kOnlyRamDatabases)) return notReady;
             string text;
