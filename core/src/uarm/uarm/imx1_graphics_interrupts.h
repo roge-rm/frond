@@ -23,6 +23,27 @@ class Imx1GraphicsInterrupts {
         if (sourceKnown && event) { pending |= displayMask; known |= displayMask; }
         else if (!sourceKnown && !(pending & known & displayMask)) known &= ~displayMask;
     }
+    // The USB function's group (0x50; the driver uses bit 6) as the USB driver drives it: it sets bit 6 and
+    // clears 0x10, 0x20 and 0x80 (20177eae-20177ec2), clears all four and acknowledges what is pending
+    // among them (20177f20-20177f4a).
+    static constexpr uint32_t usbMask = 0x40;
+    void raiseUsb() { pending |= usbMask; known |= usbMask; }
+    Imx1BootstrapAccess usbAccess(uint32_t address, bool write, uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        if (!write) {
+            if (address == 0x16010204 && known != 0xffffffff) return A::externalInput;
+            value = address == 0x16010200 ? enabled : pending;
+            return A::ok;
+        }
+        if (address == 0x16010200) {
+            if (((value ^ enabled) & ~0xf0u) || (value & 0xb0)) return A::sideEffect;
+            enabled = value;
+        } else {
+            if (value & ~0xf0u) return A::sideEffect;
+            pending &= ~value;
+        }
+        return A::ok;
+    }
     Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value,
                               bool emptySdCardEventsKnown = false) {
         using A = Imx1BootstrapAccess;

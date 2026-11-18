@@ -460,7 +460,7 @@ class DesktopControl {
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
-                                      "guest-orientation", "power-state", "hotsync"})
+                                      "guest-orientation"})
                 if (command == needs) return {false, "unsupported", "This isn't available on this device yet."};
         }
         if (command == "hard-reset" && !ctx.soc->HardResetSupported())
@@ -675,7 +675,7 @@ class DesktopControl {
             if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
             // A new endpoint unplugs the cable first; queued bytes are dropped.
             ctx.usbError.clear();
-            if (!ctx.usb->Start(dynamic_cast<SocPXA*>(ctx.soc), config, ctx.usbError)) return {false, "usb", ctx.usbError};
+            if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
             return {true, "usb", UsbState(ctx)};
         }
         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};

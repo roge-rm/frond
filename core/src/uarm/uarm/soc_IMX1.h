@@ -8,6 +8,8 @@
 #include <vector>
 
 #include "SoC.h"
+#include "UsbDevicePort.h"
+#include "UsbHostHooks.h"
 #include "guest_orientation.h"
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
@@ -90,6 +92,11 @@ class SocIMX1 : public SoC {
     // only). With no peer both see RTS inactive.
     HostUartPort* SerialHostPort() override;
     HostInfraredPort* InfraredHostPort() override;
+    // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
+    // bridge's cable is the cradle (SetCradle). Hooks tick between run slices on GetTime's clock.
+    UsbDevicePort GetUsbPort();
+    void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
+    bool UsbHostIoPaused() const { return halted || PowerSleeping(); }
     ~SocIMX1();
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
@@ -159,6 +166,8 @@ class SocIMX1 : public SoC {
     bool headphones{false}, cradleDown{false}, cradle{false};
     // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
     uint64_t hotSyncTicks{0};
+    UsbHostHooks usbHostHooks{};
+    void TickUsbHost();
     bool wasStopped{false};
     uint64_t wakes{0};
     struct SerialPort;

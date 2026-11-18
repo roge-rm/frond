@@ -11,6 +11,8 @@
 #include "imx1_graphics_interrupts.h"
 #include "imx1_graphics_acquisition.h"
 #include "imx1_graphics_sd.h"
+#include "imx1_graphics_usb.h"
+#include <memory>
 
 enum class Imx1GraphicsProfile { strict, virtual5744Compatible8MiB };
 inline bool imx1GraphicsProfileValid(Imx1GraphicsProfile profile) {
@@ -25,6 +27,8 @@ class Imx1Cs5Configuration {
     static constexpr uint32_t virtualExternalBytes = 8 * 1024 * 1024;
     static constexpr uint32_t virtualInternalBytes = 0x60000;
     static constexpr uint32_t virtualStartupOptionNibble = 0;
+    // The USB function's pointer, saved in its own section (USBF).
+    static constexpr size_t unsavedBytes = sizeof(std::shared_ptr<Imx1GraphicsUsb>);
     explicit Imx1Cs5Configuration(Imx1GraphicsProfile profile = Imx1GraphicsProfile::strict,
                                    bool virtualA4SourceOver = false, bool virtualPackedMono = false)
         : profile(profile), virtualA4SourceOver(virtualA4SourceOver), virtualPackedMono(virtualPackedMono) {}
@@ -44,6 +48,7 @@ class Imx1Cs5Configuration {
         interrupts.reset();
         acquisition.reset();
         sd.reset();
+        usbBlock.reset();
         clocks.reset();
         timeFraction = {};
         waitCpuFraction = {};
@@ -224,6 +229,23 @@ class Imx1Cs5Configuration {
     const Imx1GraphicsAcquisition& acquisitionState() const { return acquisition; }
     const Imx1GraphicsSd& sdState() const { return sd; }
     Imx1GraphicsSd& sdSlot() { return sd; }
+    // The USB function, shared between copies until one changes it (as the probe copies the whole chip on every
+    // CS5 access). None until the driver first touches it; it is saved in a section of its own (USBF).
+    const Imx1GraphicsUsb& usbState() const {
+        static const Imx1GraphicsUsb none{};
+        return usbBlock ? *usbBlock : none;
+    }
+    Imx1GraphicsUsb& usbWritable() {
+        if (!usbBlock) usbBlock = std::make_shared<Imx1GraphicsUsb>();
+        else if (usbBlock.use_count() != 1) usbBlock = std::make_shared<Imx1GraphicsUsb>(*usbBlock);
+        return *usbBlock;
+    }
+    // A host packet or bus change: the chip's interrupt follows the function's line.
+    template <class Change> auto usbHost(Change change) {
+        auto result = change(usbWritable());
+        syncUsbInterrupt();
+        return result;
+    }
     // Slot 2's card in or out; an event the SD block latches raises the chip's SD interrupt.
     void attachSdCard(VSD* card) { if (sd.attachCard(card)) interrupts.raiseSd(); }
     // After a state load, see reattachCard; a latched event raises the chip's SD interrupt.
@@ -262,6 +284,10 @@ class Imx1Cs5Configuration {
     Imx1BootstrapAccess access(const Imx1Eim& eim, uint32_t pc, uint32_t address,
                               uint32_t size, bool write, uint32_t& value, uint32_t sampledPin = 32) {
         if (!imx1GraphicsProfileValid(profile)) return Imx1BootstrapAccess::sequence;
+        if (virtualProfile() && Imx1GraphicsUsb::driverPc(pc)) {
+            const auto status = usbDriverAccess(eim, pc, address, size, write, value);
+            if (status != Imx1BootstrapAccess::unmapped) return status;
+        }
         if (virtualProfile() && (Imx1GraphicsSd::owns(address) || Imx1GraphicsSd::ownsHandlerRead(pc, address))) {
             if (!memoryReady(eim) || !clocks.programmed()) return Imx1BootstrapAccess::sequence;
             const auto window = windows.aperture2();
@@ -275,7 +301,9 @@ class Imx1Cs5Configuration {
         }
         if (virtualProfile() && Imx1GraphicsInterrupts::owns(address)) {
             if (!deviceConfigured(eim) || !memoryInterfaceReady()) return Imx1BootstrapAccess::sequence;
-            return interrupts.access(pc, address, size, write, value, sd.cardEventsKnown());
+            const auto status = interrupts.access(pc, address, size, write, value, sd.cardEventsKnown());
+            if (status == Imx1BootstrapAccess::ok && write && address == 0x16010204) syncUsbInterrupt();
+            return status;
         }
         // The chip interrupt set-up on the way up from sleep (20086e0c) does the same 018 update as the boot's.
         const bool wakeInterface = address == 0x16010018 && (pc == 0x20086e10 || pc == 0x20086e1a);
@@ -372,14 +400,14 @@ class Imx1Cs5Configuration {
         if (virtualProfile() && (address == 0x16010020 || address == 0x16010024 ||
                                  address == 0x16010028 || address == 0x16010018 || address == 0x16010908 || address == 0x1601019c))
             return interfaceAccess(eim, pc, address, size, write, value);
-        // ASSUMPTION "graphics USB function off": b30 reads 0 and takes 0. The ROM's display off code reads it
-        // and writes it back with bit 0 clear (200c5348, 200c537c) and tests nothing. Its reset value and its
-        // other bits are not known, and a write that turns the USB function on (bits 0 and 10) stays a stop.
+        // ASSUMPTION "graphics USB function off": b30 reads 0 until the USB driver sets bits 0 and 10. The ROM's
+        // display off code reads it and writes it back with bit 0 clear (200c5348, 200c537c) and tests nothing.
         if (virtualProfile() && address == 0x16010b30) {
             if (size != 4) return Imx1BootstrapAccess::width;
             if (!programmed || !deviceConfigured(eim)) return Imx1BootstrapAccess::sequence;
-            if (write && value) return Imx1BootstrapAccess::sideEffect;
-            value = 0;
+            if (!write) { value = usbState().displayRead(); return Imx1BootstrapAccess::ok; }
+            if (value == usbState().displayRead()) return Imx1BootstrapAccess::ok;
+            if (!usbBlock || !usbWritable().displayWrite(value)) return Imx1BootstrapAccess::sideEffect;
             return Imx1BootstrapAccess::ok;
         }
         if (virtualProfile() && address == 0x16000014) {
@@ -441,6 +469,29 @@ class Imx1Cs5Configuration {
     }
 
    private:
+    void syncUsbInterrupt() { if (usbState().line()) interrupts.raiseUsb(); }
+    // Everything the USB driver (20177400-20178c00) reaches on the chip; unmapped for what it doesn't own.
+    Imx1BootstrapAccess usbDriverAccess(const Imx1Eim& eim, uint32_t pc, uint32_t address, uint32_t size, bool write,
+                                       uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        const bool block = Imx1GraphicsUsb::owns(address), chip = Imx1GraphicsUsb::chipWord(address);
+        const bool interrupt = Imx1GraphicsInterrupts::owns(address), identity = address == 0x16010000 && !write;
+        if (!block && !chip && !interrupt && !identity) return A::unmapped;
+        if (size != 4) return A::width;
+        if (!memoryReady(eim) || !clocks.programmed()) return A::sequence;
+        if (identity) { value = virtualIdentity; return A::ok; }
+        if (block) {
+            const auto window = windows.aperture2();
+            if (!window.known || address - 0x16000000 < window.first || address - 0x16000000 + 3 > window.last)
+                return A::sequence;
+        }
+        A status;
+        if (interrupt) status = interrupts.usbAccess(address, write, value);
+        else if (chip) status = usbWritable().chipAccess(pc, address, write, value, clocks.word(0xa8));
+        else status = usbWritable().access(pc, address, size, write, value);
+        if (status == A::ok) syncUsbInterrupt();
+        return status;
+    }
     void advanceDisplay(uint64_t ticks) {
         if (!clocks.programmed() || clocks.systemRate().numerator) engine.advance(ticks);
         acquisition.advance(ticks);
@@ -544,6 +595,7 @@ class Imx1Cs5Configuration {
     Imx1GraphicsAcquisition acquisition;
     Imx1GraphicsSd sd;
     Imx1GraphicsClocks clocks;
+    std::shared_ptr<Imx1GraphicsUsb> usbBlock;
     Imx1GraphicsFraction timeFraction, waitCpuFraction;
     // These interface configuration words reset to zero in the virtual profile.
     uint32_t busArbitration = 0;
@@ -552,7 +604,7 @@ class Imx1Cs5Configuration {
     uint8_t defaults = 0, interfaceMode = 0;
 };
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - sizeof(Imx1GraphicsLookup) +
+static_assert(sizeof(Imx1Cs5Configuration) - Imx1GraphicsSd::unsavedBytes - Imx1Cs5Configuration::unsavedBytes - sizeof(Imx1GraphicsLookup) +
               Imx1GraphicsLookup::layoutBytes() == 5136, "update state() and stateVersion");
 #endif
 

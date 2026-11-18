@@ -382,6 +382,51 @@ void SocIMX1::StateChanged() {
     wasStopped = imx1MachineSystemStopped(machine);
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
+    // A USB host on the bus starts again with the new machine.
+    if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+}
+
+UsbDevicePort SocIMX1::GetUsbPort() {
+    using R = UsbPacketResult;
+    static const UsbDevicePort::Operations ops{
+        [](void* p) { return imx1MachineUsbBusReset(static_cast<SocIMX1*>(p)->machine); },
+        [](void*) { return false; },  // no start-of-frame model
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void*) { return false; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).enableCount; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).address; },
+        [](void*, void (*)(void*), void*) {},
+        [](void* p, const uint8_t* data) { return imx1MachineUsbSetup(static_cast<SocIMX1*>(p)->machine, data); },
+        [](void* p, const uint8_t* data, unsigned size) {
+            return imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, 0, data, size);
+        },
+        [](void* p, uint8_t* data, unsigned* size) {
+            return imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, 0, data, size, true);
+        },
+        [](void* p, uint8_t ep, const uint8_t* data, unsigned size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, ep, data, size) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, uint8_t* data, unsigned* size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, data, size, true) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, unsigned* size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, nullptr, size, false) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, unsigned) {
+            ep &= 0x7f;
+            return !ep || imx1MachineUsbOutReady(static_cast<SocIMX1*>(p)->machine, ep);
+        }};
+    return {this, ops};
+}
+
+void SocIMX1::TickUsbHost() {
+    if (!usbHostHooks.tick || UsbHostIoPaused()) return;
+    if (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime())
+        usbHostHooks.tick(usbHostHooks.context, GetTime());
 }
 
 // Loads the power-on state as a reset through RESET_IN, which keeps RAM, the clock controller and
@@ -756,6 +801,8 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
         now = run.total;
+        // The USB host runs at slice ends, on the guest's clock.
+        TickUsbHost();
         if (now.time.compare(until) >= 0) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }

@@ -372,6 +372,16 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
 // On the Zodiac it's the accessory ID line the DAL's 200876b6 reads; the options' graphicsRawAux starts it.
 Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine*, uint32_t sample, bool commit = true);
 uint32_t imx1MachineGraphicsAux(const Imx1Machine*);
+// The W4200's USB function from the host side (Imx1GraphicsUsb), between runs. Each change also drives the
+// chip's interrupt line. A stopped machine or a refused line change answers Timeout (false for the reset).
+struct Imx1UsbFunctionState { bool listening = false; uint32_t enableCount = 0; uint8_t address = 0; };
+Imx1UsbFunctionState imx1MachineUsbState(const Imx1Machine*);
+bool imx1MachineUsbBusReset(Imx1Machine*);
+UsbPacketResult imx1MachineUsbSetup(Imx1Machine*, const uint8_t* data);
+// Endpoint 0 is the control endpoint; take false only peeks at an IN packet and changes nothing.
+UsbPacketResult imx1MachineUsbOut(Imx1Machine*, uint8_t endpoint, const uint8_t* data, unsigned size);
+UsbPacketResult imx1MachineUsbIn(Imx1Machine*, uint8_t endpoint, uint8_t* data, unsigned* size, bool take);
+bool imx1MachineUsbOutReady(const Imx1Machine*, uint8_t endpoint);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,

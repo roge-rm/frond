@@ -1022,6 +1022,14 @@ test-pxa-battery-pins: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-pxa-battery-pins
 	./build/test-pxa-battery-pins
 
+.PHONY: test-zodiac-usb-function
+test: test-zodiac-usb-function
+test-zodiac-usb-function:
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/common tests/zodiac-usb-function.cpp -o build/test-zodiac-usb-function
+	./build/test-zodiac-usb-function
+
 .PHONY: test-zodiac-battery
 test: test-zodiac-battery
 # The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.

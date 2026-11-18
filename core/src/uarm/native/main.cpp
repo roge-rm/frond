@@ -1058,14 +1058,14 @@ bool gFastEngineMissing = false;
         commandContext.usb = &usb;
         if (usbConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.usb) {
-                cerr << "--usb needs a Palm TX, Tungsten E2 or Zire 72" << endl;
+                cerr << "--usb needs a Palm TX, Tungsten E2, Zire 72, TG50 or Zodiac" << endl;
                 return false;
             }
-            if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
+            if (!usb.Start(soc, usbConfig, commandContext.usbError))
                 cerr << "usb: " << commandContext.usbError << endl;
             cout << "usb: " << usb.Describe() << endl;
         } else if (capabilities.usb) {
-            usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+            usb.Start(soc, usbConfig, commandContext.usbError);  // off: cable as without USB
         }
 
         unique_ptr<DesktopControl> desktop;
