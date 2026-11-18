@@ -845,6 +845,7 @@ def check_68k(core, rom, root):
         # The IIIx's own: speed, contrast, backlight, launch. The cradle HotSync button is the row above.
         c.ok('speed', 'uncapped', code='speed')
         assert c.ok('speed-state').endswith('uncapped')
+        assert c.ok('speed', code='speed') == 'uncapped'
         c.ok('speed', 'original', code='speed')
         c.fails('speed', 'fast', code='argument')
         assert c.ok('display', 'contrast=70') == 'contrast 70, smooth on'

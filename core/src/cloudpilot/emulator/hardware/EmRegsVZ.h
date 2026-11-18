@@ -75,6 +75,7 @@ class EmRegsVZ : public EmRegs, public EmHALHandler {
     virtual void GetKeyInfo(int* numRows, int* numCols, uint16* keyMap, Bool* rows) = 0;
 
     virtual uint32 CyclesToNextInterrupt(uint64 systemCycles);
+    void FlushTimers(double scale) override;
     virtual void ScaleCycles(uint32 factor);
     void Cycle(uint64 systemCycles, Bool sleeping);
 

@@ -34,6 +34,12 @@ void SoC::SetFollowCoreClock(bool follow) {
     if (cpu) cpuSetJitMemoryCost(cpu, follow);
 }
 
+void SoC::SetClockMultiplier(uint32_t num, uint32_t den) {
+    if (!num || !den) num = den = 1;
+    clockMultiplierNum = num;
+    clockMultiplierDen = den;
+}
+
 SoC::PenEvent SoC::PenEvent::PenDown(int x, int y) { return {.penDown = true, .x = x, .y = y, .hostMsec = hostMsecNow()}; }
 SoC::PenEvent SoC::PenEvent::PenUp() { return {.penDown = false, .x = -1, .y = -1, .hostMsec = hostMsecNow()}; }
 

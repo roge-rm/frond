@@ -176,8 +176,52 @@ static void CheckTimerLoadClock() {
     puts("VZ load clock, lazy counter and next interrupt continuation passed");
 }
 
+// A live clock factor change (Faster, Uncapped) part way into a tick: the cycles not yet counted keep their
+// guest time and the next timer event moves to the same guest time at the new rate, so ticks keep to real time.
+static void CheckLiveClockFactor() {
+    auto clock = EmHAL::onSystemClockChange.AddHandler([] { gSession->SetClockFactor(1); });
+    for (double factor : {2.0, 3.0, 1.5, 8.0}) {
+        Board board;
+        gSession->SetClockFactor(1);
+        board.Initialize();
+        board.Put(0xfffff200, 2, 0x2483);
+        board.Put(0xfffff202, 2, 0x0347);
+        gSession->SetClockFactor(1);
+        const double base = gSession->GetClocksPerSecond();
+        board.Put(0xfffff600, 2, 0x13);
+        board.Put(0xfffff602, 2, 5);
+        board.Put(0xfffff604, 2, 1000);
+        board.Put(0xfffff608, 2, 7);
+        board.Put(0xfffff306, 2, 0);
+        // 600 clocks since the last count (now is cycle 0): 6 ticks and part of the next at prescaler 6 / 16.
+        board.TimerOrigin(-600);
+        board.Cycle(0, false);
+        assert(board.GetWord(0xfffff608) == 107 && board.NextTimer() == 5358);
+        gSession->SetClockFactor(factor);
+        const double rate = double(gSession->GetClocksPerSecond()) / base, scaled = 5358 * rate;
+        std::fprintf(stderr, "factor %.1f: next timer event at %llu, %.1f expected\n", factor,
+                    (unsigned long long)board.NextTimer(), scaled);
+        // Same count, and the event that many times as many cycles away (to a clock of rounding).
+        assert(board.GetWord(0xfffff608) == 107);
+        assert(double(board.NextTimer()) >= scaled - 1 && double(board.NextTimer()) <= scaled + 2);
+        // The interrupt comes at that event, not a tick before it.
+        const uint64 event = board.NextTimer();
+        board.Cycle(uint64(double(event) - 16 * 6 * rate), false);
+        board.GetWord(0xfffff608);
+        assert(board.Level() != 6);
+        board.Cycle(event + 6, false);
+        board.GetWord(0xfffff608);
+        assert(board.Level() == 6);
+        gSession->SetClockFactor(1);
+        board.Dispose();
+    }
+    EmHAL::onSystemClockChange.RemoveHandler(clock);
+    puts("VZ live clock factor change keeps the timer's guest time");
+}
+
 int main() {
     CheckTimerLoadClock();
+    CheckLiveClockFactor();
     // Drive the VZ registers without running guest firmware.
     Board board;
     board.Put(0xfffff314, 2, 0);

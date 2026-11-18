@@ -213,6 +213,12 @@ void SocIMX1::StateChanged() {
 // ASSUMPTION "Zodiac reset button": the button on the back is taken to pull the i.MX1's RESET_IN,
 // the one reset the manual says keeps the SDRAM (24.6.3.1). The board's wiring is not in the manual
 // or the ROM.
+void SocIMX1::SetClockMultiplier(uint32_t num, uint32_t den) {
+    SoC::SetClockMultiplier(num, den);
+    // Run calls hand back with every cycle charged, so this only fails while one runs, which it never is here.
+    if (machine) imx1MachineSetCpuClockMultiplier(machine, ClockMultiplierNum(), ClockMultiplierDen());
+}
+
 void SocIMX1::Reset() {
     SoC::Reset();
     const auto info = imx1MachineLoadState(machine, powerOn.data(), powerOn.size(), imx1StateExternalReset, "power-on");

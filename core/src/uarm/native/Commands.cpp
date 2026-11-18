@@ -63,8 +63,23 @@ namespace {
         }
 
         auto& mainLoop = static_cast<commands::Context*>(context)->mainLoop;
-        mainLoop.SetFollowCoreClock(false);
-        mainLoop.SetCyclesPerSecondLimit(mips * 1000000);
+        mainLoop.SetFixedMips(mips);
+    }
+
+    void CmdSpeed(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() > 1) return env.PrintUsage();
+        auto& ctx = *static_cast<commands::Context*>(context);
+        if (args.empty()) {
+            cout << "speed: " << ctx.mainLoop.SpeedName() << endl;
+            return;
+        }
+        SpeedSetting5 speed;
+        if (!SpeedSetting5::Parse(args[0], speed)) {
+            cout << "usage: speed " << SpeedSetting5::Choices() << endl;
+            return;
+        }
+        ctx.mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(ctx.soc->GetDeviceType()));
+        cout << "speed: " << speed.Name() << endl;
     }
 
     void CmdEnableAudio(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -581,6 +596,10 @@ namespace {
           .usage = "set-mips <mips>",
           .description = "Set a fixed core clock in MHz.",
           .cmd = CmdSetMips},
+         {.name = "speed",
+          .usage = "speed [original|1.5x|2x|3x|4x|8x|uncapped]",
+          .description = "Show or set the speed: the device's own clock, that clock times a multiplier, or uncapped.",
+          .cmd = CmdSpeed},
          {.name = "input-replay",
           .usage = "input-replay <file>",
           .description = "Load pen/key/snapshot events relative to now.",

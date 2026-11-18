@@ -105,7 +105,7 @@ int64_t MainLoop::GetSuggestedDelayUsec(uint64_t now) const {
     return std::clamp<double>(timesliceUsec - (double(now) - virtualTimeUsec), 0, timesliceUsec);
 }
 
-uint32_t MainLoop::GetCurrentIps() const { return currentIps; }
+uint64_t MainLoop::GetCurrentIps() const { return currentIps; }
 
 uint64_t MainLoop::GetCurrentIpsMax() const { return currentIpsMax; }
 
@@ -127,9 +127,34 @@ void MainLoop::SetFollowCoreClock(bool follow) {
     soc->SetFollowCoreClock(follow);
 }
 
+void MainLoop::SetFixedMips(uint32_t mips) {
+    fixedMips = mips;
+    soc->SetClockMultiplier(1, 1);
+    SetFollowCoreClock(false);
+    SetCyclesPerSecondLimit(uint32_t(std::min<uint64_t>(uint64_t(mips) * 1000000, UINT32_MAX)));
+}
+
+std::string MainLoop::SpeedName() const {
+    return fixedMips ? "fixed " + std::to_string(fixedMips) + " MIPS" : speed.Name();
+}
+
+void MainLoop::SetSpeed(const SpeedSetting5& speed, uint32_t originalHz) {
+    this->speed = speed;
+    fixedMips = 0;
+    if (speed.kind == SpeedSetting5::Kind::uncapped) {
+        soc->SetClockMultiplier(1, 1);
+        SetCyclesPerSecondLimit(UNCAPPED_MHZ * 1000000);
+        SetFollowCoreClock(false);
+        return;
+    }
+    soc->SetClockMultiplier(speed.num, speed.den);
+    SetCyclesPerSecondLimit(originalHz);
+    SetFollowCoreClock(true);
+}
+
 uint64_t MainLoop::CurrentLimit() const {
     if (followCoreClock) {
-        const uint64_t hz = soc->CoreHz();
+        const uint64_t hz = soc->FollowHz();
         if (hz) return hz;
     }
     return cyclesPerSecondLimit;

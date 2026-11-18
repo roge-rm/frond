@@ -90,6 +90,7 @@
 #include "RawFingers.h"
 #include "Touch.h"
 #include "device_profile5.h"
+#include "speed_setting5.h"
 #include "session/session_file5.h"
 
 using namespace std;
@@ -142,10 +143,27 @@ void IgnoreGoneXWindows() {}
 // session from another pin is refused rather than half loaded.
 constexpr const char* kSessionFormat = "frond-68k 1";
 constexpr const char* kCloudpilotPin = "cloudpilot 064d5d5";
-// Uncapped runs the CPU this many times faster than the real clock, with timers on real time.
+// Uncapped runs the CPU this many times faster than the real clock, with timers on real time. Faster runs it
+// its multiplier times faster the same way, up to kMaxFasterFactor; 8x would be the same as Uncapped.
 constexpr double kUncappedFactor = 8;
+constexpr double kMaxFasterFactor = 4;
 
-enum class Speed { original, uncapped };
+using Speed = SpeedSetting5;
+
+// The 68k's speed settings: SpeedSetting5's without 8x, which is Uncapped's speed here.
+constexpr const char* kSpeedChoices68k = "original|1.5x|2x|3x|4x|uncapped";
+constexpr const char* kSpeed8x68k = "8x is Uncapped's speed on the 68k; use uncapped";
+bool ParseSpeed68k(const string& text, Speed& out) {
+    Speed parsed;
+    if (!Speed::Parse(text, parsed)) return false;
+    if (parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor) return false;
+    out = parsed;
+    return true;
+}
+bool IsSpeed8x(const string& text) {
+    Speed parsed;
+    return Speed::Parse(text, parsed) && parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor;
+}
 
 struct Options {
     string image;
@@ -156,7 +174,7 @@ struct Options {
     double runFor{0};
     optional<string> framebufferOutput;
     optional<string> inputReplay;
-    Speed speed{Speed::original};
+    Speed speed{};
     optional<int> contrast;
     float windowScale{2};
     bool sound{true};
@@ -185,7 +203,7 @@ struct Options {
 
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
-            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|uncapped]\n"
+            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
@@ -1701,7 +1719,7 @@ class Runner {
 
     void SetSpeed(Speed value) {
         speed = value;
-        gSession->SetClockFactor(speed == Speed::original ? 1 : kUncappedFactor);
+        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? kUncappedFactor : speed.Multiplier());
     }
 
     // Measured over about a second of wall time; one cycle is one 68000 clock.
@@ -1717,7 +1735,7 @@ class Runner {
         const double limit = gSession->GetClocksPerSecond();
         snprintf(text, sizeof(text), "%.2f MHz, limit %.2f MHz, %u%%, %s", measuredHz / 1e6, limit / 1e6,
                  limit > 0 ? unsigned(100 * measuredHz / limit + 0.5) : 0u,
-                 speed == Speed::original ? "original" : "uncapped");
+                 speed.Name().c_str());
         return text;
     }
 
@@ -2106,9 +2124,12 @@ class Runner {
         } else if (command == "speed") {
             string value;
             words >> value;
-            if (value != "original" && value != "uncapped") return void(cout << "usage: speed original|uncapped" << endl);
-            SetSpeed(value == "original" ? Speed::original : Speed::uncapped);
-            cout << "speed: " << value << endl;
+            if (value.empty()) return void(cout << "speed: " << speed.Name() << endl);
+            Speed parsed;
+            if (IsSpeed8x(value)) return void(cout << "usage: speed " << kSpeedChoices68k << " (" << kSpeed8x68k << ")" << endl);
+            if (!ParseSpeed68k(value, parsed)) return void(cout << "usage: speed " << kSpeedChoices68k << endl);
+            SetSpeed(parsed);
+            cout << "speed: " << speed.Name() << endl;
         } else if (command == "display") {
             Display(words);
         } else if (command == "launch") {
@@ -2586,9 +2607,12 @@ class Runner {
         }
         if (command == "speed-state") return {true, "speed", SpeedState()};
         if (command == "speed") {
-            if (argument != "original" && argument != "uncapped") return {false, "argument", "Use original or uncapped."};
-            SetSpeed(argument == "original" ? Speed::original : Speed::uncapped);
-            return {true, "speed", argument};
+            if (argument.empty()) return {true, "speed", speed.Name()};
+            Speed parsed;
+            if (IsSpeed8x(argument)) return {false, "argument", "8x is Uncapped's speed on the 68k. Use uncapped."};
+            if (!ParseSpeed68k(argument, parsed)) return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x or uncapped."};
+            SetSpeed(parsed);
+            return {true, "speed", speed.Name()};
         }
         if (command == "display") {
             string error;
@@ -3490,7 +3514,7 @@ class Runner {
     Lcd68k lcd;
     Replay replay;
     Console console;
-    Speed speed{Speed::original};
+    Speed speed{};
     double guestSeconds{0};
     double measuredHz{0};
     pair<double, double> speedMark{0, 0};
@@ -3613,8 +3637,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
             if (!v || !BatteryPower::Parse(v, gBattery)) return false;
         } else if (arg == "--speed") {
             const char* v = value();
-            if (!v || (strcmp(v, "original") && strcmp(v, "uncapped"))) return false;
-            options.speed = strcmp(v, "original") ? Speed::uncapped : Speed::original;
+            if (v && IsSpeed8x(v)) cerr << "--speed " << kSpeed8x68k << endl;
+            if (!v || !ParseSpeed68k(v, options.speed)) return false;
         } else if (arg == "--contrast") {
             if (!number(0, 100, n) || n != int(n)) return false;
             options.contrast = int(n);

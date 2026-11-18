@@ -31,6 +31,8 @@ class SocIMX1 : public SoC {
 
     void Reset() override;
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Faster: FCLK times the multiplier in the machine's clock model; guest time still comes from its own clock.
+    void SetClockMultiplier(uint32_t num, uint32_t den) override;
     bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
     bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
     void AnalogStick(float x, float y) override;

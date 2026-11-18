@@ -578,8 +578,13 @@ void EmSession::SetHotsyncUserName(string hotsyncUserName) {
 }
 
 void EmSession::SetClockFactor(double clockFactor) {
+    if (clockFactor == this->clockFactor) return RecalculateClocksPerSecond();
+    // Timers run up to now at the old rate, then count on from now at the new one.
+    EmHAL::FlushTimers();
+    const double old = clocksPerSecond;
     this->clockFactor = clockFactor;
     RecalculateClocksPerSecond();
+    EmHAL::FlushTimers(old > 0 ? double(clocksPerSecond) / old : 1);
 }
 
 void EmSession::RecalculateClocksPerSecond() {

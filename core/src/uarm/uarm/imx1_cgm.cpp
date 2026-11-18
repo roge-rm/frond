@@ -34,6 +34,14 @@ static Imx1PllRatio pllRatioOf(uint32_t control) {
 }
 
 Imx1PllRatio Imx1Cgm::mcuPllTargetRatio() const { return pllRatio(mpctl0); }
+Imx1PllRatio Imx1Cgm::writeDelayRatio() const {
+    const auto rate = mcuPllTargetRatio();
+    // While a System PLL restart is pending the CPU runs at the PLL's own rate (Imx1Bootstrap::cpuMcuRatio).
+    if (fclkNum == fclkDen || systemRestartUnits) return rate;
+    const uint64_t numerator = rate.numerator * fclkNum, denominator = uint64_t(rate.denominator) * fclkDen;
+    const uint64_t g = imx1Gcd(numerator, denominator);
+    return {numerator / g, uint32_t(denominator / g)};
+}
 Imx1PllRatio Imx1Cgm::systemPllTargetRatio() const { return pllRatio(spctl0); }
 Imx1PllRatio Imx1Cgm::systemPllActiveRatio() const { return pllRatio(activeSpctl0); }
 
@@ -45,7 +53,7 @@ bool Imx1Cgm::mcuReferenceSupported(uint64_t denominator) const {
     if (mcuWakeRemaining && !supports(denominator, mcuWakeDenominator)) return false;
     if (mcuReferenceRemaining && !supports(denominator, mcuReferenceDenominator)) return false;
     if (nominalMcuRetune && mcuOutputQualified && mcuWriteDelay) {
-        const auto rate = mcuPllTargetRatio();
+        const auto rate = writeDelayRatio();
         const auto divider = uint64_t(rate.denominator) * mcuPrescaler();
         if (denominator > std::numeric_limits<uint64_t>::max() / std::max(rate.numerator, divider) ||
             !supports(denominator * divider, mcuWriteDenominator)) return false;
@@ -93,7 +101,7 @@ void Imx1Cgm::advanceMcuReference(uint64_t numerator, uint64_t denominator) {
         // Every legal internal-source MCU ratio supplies at least 160 FCLK periods per CLK32.
         if (numerator / denominator) mcuWriteDelay = 0;
         else {
-            const auto rate = mcuPllTargetRatio();
+            const auto rate = writeDelayRatio();
             const auto d = denominator * rate.denominator * mcuPrescaler();
             const auto n = numerator * rate.numerator;
             const auto common = mcuWriteDenominator * (d / imx1Gcd(d, mcuWriteDenominator));

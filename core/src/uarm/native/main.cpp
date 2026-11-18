@@ -82,6 +82,7 @@ struct Options {
     optional<string> sd;
     optional<unsigned int> gdbPort;
     optional<unsigned int> mips; // MHz of the core clock; unset follows the device's own clock (Original).
+    optional<string> speed;      // --speed: original, a Faster multiplier (2x) or uncapped
     bool disableAudio;
     unsigned int audioPeriod;
     optional<string> script;
@@ -489,6 +490,15 @@ bool gFastEngineMissing = false;
             cerr << "MHz must be finite" << endl;
             return false;
         }
+        SpeedSetting5 speed;
+        if (options.speed && !SpeedSetting5::Parse(*options.speed, speed)) {
+            cerr << "--speed must be " << SpeedSetting5::Choices() << endl;
+            return false;
+        }
+        if (options.speed && options.mips) {
+            cerr << "--speed and --mips can't be used together" << endl;
+            return false;
+        }
 
         DeviceType5 requestedDevice = deviceTypeInvalid;
         if (options.device) {
@@ -831,10 +841,13 @@ bool gFastEngineMissing = false;
 
         MainLoop mainLoop(soc);
         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
-        // Original follows the clock the guest sets; --mips is a fixed rate (Uncapped).
-        mainLoop.SetCyclesPerSecondLimit(options.mips ? uint64_t(*options.mips) * 1000000
-                                                      : deviceProfileOriginalHz5(deviceType));
-        mainLoop.SetFollowCoreClock(!options.mips);
+        // Original follows the clock the guest sets, Faster that clock times its multiplier; --mips is a fixed
+        // rate, as is Uncapped.
+        if (options.mips) {
+            mainLoop.SetFixedMips(*options.mips);
+        } else {
+            mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(deviceType));
+        }
         mainLoop.SetEmulatedTime(options.emulatedTime);
 
         Rotation rotation = Rotation::portrait_0;
@@ -1711,6 +1724,10 @@ int main(int argc, char** argv) {
         .metavar("<mhz>")
         .scan<'u', unsigned int>();
 
+    program.add_argument("--speed")
+        .help("original (the device's own clock), 1.5x, 2x, 3x, 4x or 8x that clock (Faster), or uncapped")
+        .metavar("<speed>");
+
     program.add_argument("--small-window")
         .help("use a 1x window (alias for --window-scale 1)")
         .default_value(false)
@@ -1849,6 +1866,7 @@ int main(int argc, char** argv) {
                        .sd = program.present("--sd"),
                        .gdbPort = program.present<unsigned int>("--gdb"),
                        .mips = program.present<unsigned int>("--mips"),
+                       .speed = program.present("--speed"),
                        .disableAudio = program.get<bool>("--no-sound"),
                        .audioPeriod = program.get<unsigned int>("--audio-period"),
                        .script = program.present("--script"),
