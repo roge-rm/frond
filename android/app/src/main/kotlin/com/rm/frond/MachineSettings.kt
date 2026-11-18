@@ -89,7 +89,7 @@ data class MachineSettings(
     val jogLandscape: JogLandscape = JogLandscape.BESIDE,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
-    // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
+    // 68k devices: LCD contrast 0 to 100. Speed is for every device and applies at once.
     val contrast: Int = DEFAULT_CONTRAST,
     // False until a contrast is chosen, so a session's own saved contrast stays.
     val contrastSet: Boolean = false,

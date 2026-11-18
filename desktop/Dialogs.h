@@ -42,6 +42,8 @@ class MachineSettings : public QWidget {
     // 68k devices only.
     QSlider* contrast;
     QComboBox* speed;
+    // What the user chose, kept while a 68k device hides 8x.
+    QString chosenSpeed;
     // Infrared, Serial and Bluetooth: the local choices and the connections. Shown once showPeripherals() is called.
     QComboBox* infrared;
     QSpinBox* infraredPort;

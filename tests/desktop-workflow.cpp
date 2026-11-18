@@ -2407,6 +2407,14 @@ for line in s.makefile('rb'):
             MachineSettingsDialog dialog(frondFirmware::Device::tx, prefs); dialog.show();
             QVERIFY(dialog.controls->engine->isVisibleTo(&dialog));
             QVERIFY(!dialog.controls->contrast->isVisibleTo(&dialog) && dialog.controls->speed->isVisibleTo(&dialog));
+            // 8x chosen, then a 68k device, then ARM again: 8x comes back.
+            auto* speed = dialog.controls->speed;
+            speed->setCurrentIndex(speed->findData("8x"));
+            dialog.controls->setDevice(iiix);
+            QVERIFY(speed->findData("8x") < 0);
+            QCOMPARE(speed->currentData().toString(), QString("uncapped"));
+            dialog.controls->setDevice(frondFirmware::Device::tx);
+            QCOMPARE(speed->currentData().toString(), QString("8x"));
         }
         {
             MachineSettingsDialog iiixDialog(iiix, prefs); iiixDialog.show();

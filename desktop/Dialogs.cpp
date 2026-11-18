@@ -224,7 +224,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedLabel = new QLabel(tr("Speed"), speedBox);
     speed = new QComboBox(speedBox);
     speed->setObjectName("speed");
-    fillSpeedBox(speed, false, frondSessions::speedName(prefs));
+    chosenSpeed = frondSessions::speedName(prefs);
+    fillSpeedBox(speed, false, chosenSpeed);
+    connect(speed, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { chosenSpeed = speed->currentData().toString(); });
     speedLabel->setBuddy(speed);
     speedRow->addWidget(speedLabel);
     speedRow->addWidget(speed, 1);
@@ -441,7 +443,7 @@ void MachineSettings::setDevice(Device device) {
     contrast->setVisible(frondFirmware::lcdContrast(device));
     // Speed for every device, without 8x on a 68k; the Engine choice has no JIT to pick on a 68k.
     const bool engineShown = !m68k;
-    fillSpeedBox(speed, m68k, speed->currentData().toString());
+    fillSpeedBox(speed, m68k, chosenSpeed);
     speedLabel->setVisible(true);
     speed->setVisible(true);
     engineLabel->setVisible(engineShown);

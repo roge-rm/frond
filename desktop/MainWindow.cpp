@@ -1316,7 +1316,9 @@ void MainWindow::refresh() {
     jogBox->setItemText(jogBox->findData(int(frondSessions::JogControls::keyboard)),
         frondSessions::jogControlsLabel(frondSessions::JogControls::keyboard, frondSessions::jogBesideButtons(jogFrontend)));
     shown(true, {speedLabel, speedBox});
-    fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
+    // Refilled only when the device family changes, so an open list isn't rebuilt by a later refresh.
+    if (speedBox->count() != frondSessions::speedChoices(m68k).size())
+        fillSpeedBox(speedBox, m68k, frondSessions::speedName(runningPreferences));
     liveDisplay({});
     shown(frondFirmware::hasHotSyncButton(currentDevice()), {hotSyncButton});
     shown(!m68k, {rotateButton});
