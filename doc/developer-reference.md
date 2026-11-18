@@ -915,7 +915,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
 | `SPEED_BENCH` | `benchmark-replay` binary for `tools/speed-check.py`. |
 | `SPEED_68K` | `frond-68k` binary for the 68k recipes of `tools/speed-check.py`. Default the one next to the `benchmark-replay` in use, else `out/frond-68k`. |
-| `SPEED_MIPS` | MIPS setting for `make speed-check`. Default 100. |
+| `SPEED_MIPS` | Clock in MHz, or `original`, for `make speed-check`. Default 100. |
 | `SPEED_HOST` | Run `make speed-check` on another machine: an ssh destination (`user@host`), working in `~/frond-speed/`. |
 | `SPEED_SSH_KEY` | Optional ssh key for `SPEED_HOST`. |
 | `TEST_TIMEOUT` | Seconds each `make test` recipe line may run before it's killed and fails. Default 300; a target can set its own. |

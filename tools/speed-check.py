@@ -8,7 +8,7 @@ session isn't given is skipped.
   BIKE_SESSION, FRONDBENCH_SESSION  session files for the two workloads (no defaults)
   BIKE_REPLAY, FRONDBENCH_REPLAY    another replay for a workload, like frondbench-run.replay for a
                                     core before patch 0414 (T|X touch on the ROM's default calibration)
-  SPEED_MIPS                        MIPS cap, default 100
+  SPEED_MIPS                        guest clock in MHz, or original for the device's own, default 100
   SPEED_BENCH                       another benchmark-replay binary (default: the clean-tree commit build
                                     from tools/commit-build.sh when it exists, else build/benchmark-replay)
   SPEED_68K                         another frond-68k binary for the 68k recipes (default: the one next to
@@ -153,7 +153,7 @@ def frondbench_results(out):
 
 
 def main():
-    mips = int(os.environ.get('SPEED_MIPS', '100'))
+    mips = os.environ.get('SPEED_MIPS', '100')
     host = HOST
     if not BENCH.exists():
         sys.exit('build/benchmark-replay is missing: make benchmark-replay')
@@ -175,7 +175,7 @@ def main():
         lock = remote_lock()
         remote_sync(ws, rdir)
     report = {'mips': mips, 'host': host or 'local', 'skipped': skipped, 'workloads': {}}
-    lines = [f'speed-check at {mips} MIPS on {host or "this machine"}']
+    lines = [f'speed-check at {mips}{"" if mips == "original" else " MHz"} on {host or "this machine"}']
     for w in ws:
         out = base / w['name']
         try:
@@ -187,7 +187,7 @@ def main():
             continue
         wall, guest = s['wall_seconds'], s['guest_ns'] / 1e9
         r = {'wall_seconds': wall, 'guest_seconds': guest, 'host_per_guest_second': wall / guest,
-             'host_mips': s['cycles'] / wall / 1e6, 'cycles': s['cycles'], 'lcd_frames': s['lcd_frames'],
+             'host_mips': s.get('instructions', s['cycles']) / wall / 1e6, 'cycles': s['cycles'], 'lcd_frames': s['lcd_frames'],
              'changed_frames': s['changed_frames'], 'pcm_frames': s['pcm_frames'],
              'frame_sequence_hash': s['frame_sequence_hash'], 'pcm_hash': s['pcm_hash']}
         lines.append(f"{w['name']}: {wall:.2f} s host for {guest:.2f} s guest "

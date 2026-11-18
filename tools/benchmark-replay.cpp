@@ -662,7 +662,7 @@ int main(int argc, char** argv) {
         const uint64_t instructions=soc->GetRunInstructions()-instructionsStart;
         uint64_t jitInstructions=0;
         if (fast && cpuJitExecutionCounts(soc->GetCpu(),&jitBlocks,&jitInstructions)) jitInstructions-=jitStart;
-        const double hostMips=cycles/wall/1e6;
+        const double hostMips=instructions/wall/1e6;  // guest instructions per host second
         std::ofstream result(output/"summary.json");
         result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":" << (coldBoot?"true":"false")
                << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":" << (jitAsync?"true":"false") << ",\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
