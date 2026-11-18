@@ -73,6 +73,10 @@ class SoC {
     virtual bool CradleButtonSupported() const { return false; }
     virtual bool CradleButtonDown() const { return false; }
     virtual bool SetCradleButton(bool) { return false; }
+    // The cradle on the connector, a host setting like the headphones. Runs on the SoC's thread.
+    virtual bool CradleSupported() const { return false; }
+    virtual bool CradleAttached() const { return false; }
+    virtual bool SetCradle(bool) { return false; }
     // A short press of the HotSync button, let go by itself. False without one or while one is held.
     virtual bool PressHotSync() { return false; }
     // Asleep, and the wakes counted since the session started (not saved).

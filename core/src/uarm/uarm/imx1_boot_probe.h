@@ -368,6 +368,10 @@ Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine*, VSD* card, bool c
 VSD* imx1MachineGraphicsSdCard(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
+// The graphics chip's aux ADC input (mode 2 on the default route), 0-1023, saved with the state like the axes.
+// On the Zodiac it's the accessory ID line the DAL's 200876b6 reads; the options' graphicsRawAux starts it.
+Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine*, uint32_t sample, bool commit = true);
+uint32_t imx1MachineGraphicsAux(const Imx1Machine*);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,

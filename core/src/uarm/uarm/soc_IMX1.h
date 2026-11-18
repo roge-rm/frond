@@ -74,6 +74,13 @@ class SocIMX1 : public SoC {
     bool CradleButtonSupported() const override { return true; }
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
+    // The cradle: A11 (attach detect) and A1 high and the accessory ID line at the bottom of its ADC range.
+    bool CradleSupported() const override { return true; }
+    bool CradleAttached() const override { return cradle; }
+    bool SetCradle(bool attached) override;
+    // The accessory inputs the machine has now, for tests: A11 and A1 high and the aux ADC sample.
+    bool AccessoryPinsHigh() const { return (imx1MachineGpioInput(machine, 0) & 0x802) == 0x802; }
+    uint32_t AccessorySample() const { return imx1MachineGraphicsAux(machine); }
     // Holds D22 for 500 ms of guest time. The awake ROM only takes it with the cradle attached.
     bool PressHotSync() override;
     // Asleep is the i.MX1 in stop mode; a wake is leaving it, as Run sees it.
@@ -145,10 +152,11 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
-    // Puts the battery, headphone and cradle button settings on the machine's inputs.
+    // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();
     bool ApplyHeadphones();
-    bool headphones{false}, cradleDown{false};
+    bool ApplyCradle();
+    bool headphones{false}, cradleDown{false}, cradle{false};
     // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
     uint64_t hotSyncTicks{0};
     bool wasStopped{false};

@@ -1,6 +1,6 @@
 // The Zodiac's battery setting: the level as the ASP U word on the ROM's own count-to-voltage chain, Maximum
 // exactly the fixed 0x9b00, Charging on GPIO B14, the setting not saved with the state and put back after every load and reset.
-// Made-up ROM, no firmware.
+// Also the headphones, the cradle button and the cradle. Made-up ROM, no firmware.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -138,6 +138,22 @@ void machine() {
     assert(!soc->CradleButtonDown() && !soc->CradleInputLow() && soc->PressHotSync());
     assert(soc->SetCradleButton(false));
     assert(!soc->PowerSleeping());
+
+    // The cradle: A11 and A1 high and the ID sample 0 while attached, put back after a load and a reset.
+    // Detached is the 900 every state was made with, so a machine with no cradle saves as before.
+    assert(soc->CradleSupported() && !soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+    const auto detached = save(*soc);
+    assert(soc->SetCradle(false) && save(*soc) == detached);
+    assert(soc->SetCradle(true) && soc->CradleAttached() && soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
+    const auto attached = save(*soc);
+    assert(attached != detached);
+    load(*soc, atMaximum);
+    assert(soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
+    soc->Reset();
+    assert(soc->AccessoryPinsHigh() && soc->AccessorySample() == 0 && !soc->HeadphoneInputHigh());
+    assert(soc->SetCradle(false) && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+    load(*soc, attached);
+    assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
 }
 }  // namespace
 
@@ -166,6 +182,7 @@ void halted() {
     assert(!soc->SetHeadphones(true) && !soc->HeadphonesIn());
     assert(!soc->SetCradleButton(true) && !soc->CradleButtonDown());
     assert(!soc->PressHotSync() && !soc->CradleButtonDown());
+    assert(!soc->SetCradle(true) && !soc->CradleAttached());
     assert(soc->SetBattery(battery("level 20 charging")));
     soc->Reset();
     assert(soc->ChargerInputLow());

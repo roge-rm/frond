@@ -2496,6 +2496,19 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine* machine, uint32_
     return Imx1BootstrapAccess::ok;
 }
 
+Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine* machine, uint32_t sample, bool commit) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.graphicsRawAuxKnown)
+        return Imx1BootstrapAccess::sequence;
+    if (sample > 1023) return Imx1BootstrapAccess::sideEffect;
+    if (commit) p->cs5Configuration.setAcquisitionAuxInput(sample);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGraphicsAux(const Imx1Machine* machine) {
+    return machine ? machine->probe->cs5Configuration.acquisitionState().auxSample() : 0;
+}
+
 Imx1BootstrapAccess imx1MachineSetZodiacControl(Imx1Machine* machine, Imx1ZodiacControl control, bool pressed, bool commit) {
     if (unsigned(control) >= unsigned(Imx1ZodiacControl::count)) return Imx1BootstrapAccess::sideEffect;
     const auto& pin = imx1ZodiacControlPins[unsigned(control)];

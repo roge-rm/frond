@@ -456,7 +456,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -615,6 +615,14 @@ class DesktopControl {
             if (!ctx.soc->CradleButtonSupported() || !ctx.soc->SetCradleButton(path == "down"))
                 return {false, "unsupported", "This device has no cradle button that can be pressed."};
             return {true, "cradle-button", ctx.soc->CradleButtonDown() ? "down" : "up"};
+        }
+        if (command == "cradle-state")
+            return {true, "cradle", !ctx.soc->CradleSupported() ? "unavailable" : ctx.soc->CradleAttached() ? "attached" : "detached"};
+        if (command == "cradle") {
+            if (path != "attached" && path != "detached") return {false, "argument", "Use attached or detached."};
+            if (!ctx.soc->CradleSupported() || !ctx.soc->SetCradle(path == "attached"))
+                return {false, "unsupported", "This device has no cradle that can be attached."};
+            return {true, "cradle", ctx.soc->CradleAttached() ? "attached" : "detached"};
         }
         if (command == "gamepad-state") return {true, "gamepad", ctx.soc->GamepadState()};
         if (command == "gamepad") {

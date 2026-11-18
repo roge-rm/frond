@@ -37,6 +37,14 @@ namespace {
     // B16, headphone detect: the DAL (20097d40) reads it high as headphones in, writes YMF768 reg 25 = 0 and
     // turns D27 low and D26 to the headphone bass setting; low (Frond's default) is the speaker.
     constexpr uint32_t headphonePinB = 0x00010000;
+    // A11 is the accessory attach detect (high attached, the DAL's level interrupt at 200899d8), and A1 high with
+    // accessory ID 0x10 makes it the cradle (20089bbc). Both low with nothing attached.
+    constexpr uint32_t accessoryPinsA = 0x00000802;
+    // The accessory ID is the graphics chip's aux ADC sample (200876b6, through the ROM's calibration at chip
+    // globals +0x18c, which turns 900 into 2085 mV and 0 into 12 mV). Over 1796 mV is no accessory, -124 to
+    // 124 mV the cradle. 900 is the sample every Zodiac state was made with.
+    // ASSUMPTION "Zodiac cradle ID": the cradle's ID divider reads the bottom of the range, sample 0.
+    constexpr uint32_t accessorySampleNone = 900, accessorySampleCradle = 0;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
@@ -530,7 +538,8 @@ bool SocIMX1::ApplyBattery() {
     masks[1] = chargerPinB;
     values[1] = battery.charging ? 0 : chargerPinB;
     if (!replaceGpioInputs(machine, values, masks)) std::cerr << "zodiac: the charger input could not be set" << std::endl;
-    return ApplyHeadphones();
+    const bool cradleSet = ApplyCradle();
+    return ApplyHeadphones() && cradleSet;
 }
 
 bool SocIMX1::ApplyHeadphones() {
@@ -549,6 +558,37 @@ bool SocIMX1::SetHeadphones(bool in) {
     headphones = in;
     if (ApplyHeadphones()) return true;
     headphones = before;
+    return false;
+}
+
+// Changes the inputs only where they differ, so a machine with no cradle runs exactly as before. Attaching
+// sets the ID before A11, detaching drops A11 first, so the ROM never reads the ID of the other state.
+bool SocIMX1::ApplyCradle() {
+    if (halted) return false;
+    const uint32_t sample = cradle ? accessorySampleCradle : accessorySampleNone;
+    uint32_t values[4]{}, masks[4]{};
+    masks[0] = accessoryPinsA;
+    values[0] = cradle ? accessoryPinsA : 0;
+    const bool pinsSet = (imx1MachineGpioInput(machine, 0) & accessoryPinsA) == values[0];
+    const bool sampleSet = imx1MachineGraphicsAux(machine) == sample;
+    if (pinsSet && sampleSet) return true;
+    const auto setSample = [&] {
+        return sampleSet || (imx1MachineSetGraphicsAux(machine, sample, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetGraphicsAux(machine, sample, true) == Imx1BootstrapAccess::ok);
+    };
+    const bool ok = cradle ? setSample() && (pinsSet || replaceGpioInputs(machine, values, masks))
+                           : (pinsSet || replaceGpioInputs(machine, values, masks)) && setSample();
+    if (!ok) std::cerr << "zodiac: the cradle inputs could not be set" << std::endl;
+    return ok;
+}
+
+bool SocIMX1::SetCradle(bool attached) {
+    if (halted) return false;
+    const bool before = cradle;
+    cradle = attached;
+    if (ApplyCradle()) return true;
+    cradle = before;
+    ApplyCradle();
     return false;
 }
 
