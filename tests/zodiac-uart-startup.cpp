@@ -41,6 +41,21 @@ int main() {
     state = Imx1Bootstrap{};
     assert(state.access(0x00206080,4,false,value) == A::ok && value == 4);
     assert(state.access(0x00207080,4,false,value) == A::ok && value == 4);
+    // The host's RTS input: unknown until set, so USR1 can't be read; set inactive (no peer) it reads with
+    // RTSS clear, and set active with RTSS set. Each UART has its own.
+    {
+        Imx1Bootstrap board;
+        assert(board.access(0x00206094,4,false,value) == A::externalInput);
+        assert(board.access(0x00207094,4,false,value) == A::externalInput);
+        board.setUartRts(1,false);
+        assert(board.access(0x00206094,4,false,value) == A::ok && !(value & 0x4000));
+        assert(board.access(0x00207094,4,false,value) == A::externalInput);
+        board.setUartRts(2,true);
+        assert(board.access(0x00207094,4,false,value) == A::ok && (value & 0x4000));
+        // Copies keep the host wiring's levels, as the state does.
+        Imx1Bootstrap copy = board;
+        assert(copy.access(0x00206094,4,false,value) == A::ok && !(value & 0x4000));
+    }
     const uint32_t program[]{0xe59f0018,0xe3a01000,0xe5801080,0xe59f0010,
         0xe5801080,0xe5902080,0xe3a01901,0xe5801080,0x00206000,0x00207000};
     std::vector<uint8_t> rom(sizeof(program));
@@ -58,5 +73,5 @@ int main() {
     }
     assert(results[0].cpsr == results[1].cpsr && results[0].busAccesses == results[1].busAccesses);
     assert(!std::memcmp(results[0].registers,results[1].registers,sizeof(results[0].registers)));
-    std::puts("PASS: independent UART control, reset/readback, refused modes and Exact/Fast startup");
+    std::puts("PASS: independent UART control, reset/readback, refused modes, host RTS input and Exact/Fast startup");
 }

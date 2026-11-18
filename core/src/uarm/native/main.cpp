@@ -1000,12 +1000,15 @@ bool gFastEngineMissing = false;
             commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
             commandContext.serialRoute = static_cast<SocPXA*>(soc)->GetSerialRoute();
         }
+        commandContext.serialPort = soc->SerialHostPort();
         if (serialConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.serial) {
                 cerr << "--serial is not available on this device" << endl;
                 return false;
             }
-            if (!serial.Start(commandContext.serialUart, serialConfig, commandContext.serialError, commandContext.serialRoute))
+            if (!(commandContext.serialPort
+                      ? serial.Start(commandContext.serialPort, serialConfig, commandContext.serialError)
+                      : serial.Start(commandContext.serialUart, serialConfig, commandContext.serialError, commandContext.serialRoute)))
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
@@ -1017,21 +1020,27 @@ bool gFastEngineMissing = false;
             cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;
         commandContext.infrared = &infrared;
+        // The board's infrared port where it gives one, else the PXA's IR UART.
+        auto* const infraredPort = soc->InfraredHostPort();
+        auto* const infraredPxa = infraredPort ? nullptr : static_cast<SocPXA*>(soc);
         if (infraredPhone) {
             if (!capabilities.irPhone) commandContext.infraredError = "This device has no infrared phone.";
-            if (!capabilities.irPhone || !infrared.StartPhone(static_cast<SocPXA*>(soc),commandContext.infraredError)) {
+            if (!capabilities.irPhone || !(infraredPort ? infrared.StartPhone(infraredPort,commandContext.infraredError)
+                                                    : infrared.StartPhone(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredPrinter) {
             if (!capabilities.infrared) commandContext.infraredError = "This device has no infrared port.";
-            if (!capabilities.infrared || !infrared.StartPrinter(static_cast<SocPXA*>(soc),commandContext.infraredError)) {
+            if (!capabilities.infrared || !(infraredPort ? infrared.StartPrinter(infraredPort,commandContext.infraredError)
+                                                       : infrared.StartPrinter(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.infrared ||
-                !infrared.Start(static_cast<SocPXA*>(soc),infraredConfig,commandContext.infraredError)) {
+                !(infraredPort ? infrared.Start(infraredPort,infraredConfig,commandContext.infraredError)
+                               : infrared.Start(infraredPxa,infraredConfig,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;

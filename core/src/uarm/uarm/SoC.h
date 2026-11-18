@@ -22,6 +22,8 @@
 #include "sdcard.h"
 
 struct ArmRam;
+class HostUartPort;
+class HostInfraredPort;
 struct ArmRom;
 struct ArmMem;
 struct NAND;
@@ -71,6 +73,10 @@ class SoC {
     virtual bool CradleButtonSupported() const { return false; }
     virtual bool CradleButtonDown() const { return false; }
     virtual bool SetCradleButton(bool) { return false; }
+    // The serial port on the connector and the infrared port for HostSerial and HostInfrared, on the
+    // boards that give them this way (null elsewhere; the PXA boards give their UARTs). Owned by the SoC.
+    virtual HostUartPort* SerialHostPort() { return nullptr; }
+    virtual HostInfraredPort* InfraredHostPort() { return nullptr; }
     virtual bool KeyboardAttached() const { return false; }
     virtual void AttachKeyboard(bool) {}
     virtual bool KeyboardKey(uint8_t, bool) { return false; }

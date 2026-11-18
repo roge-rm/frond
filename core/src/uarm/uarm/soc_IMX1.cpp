@@ -13,6 +13,7 @@
 
 #include "device_configuration.h"
 #include "imx1_bootstrap.h"
+#include "HostUartPort.h"
 #include "sdcard.h"
 #include "vSD.h"
 #include "zodiac_battery.h"
@@ -105,6 +106,156 @@ Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom) {
     return o;
 }
 
+// UART1 on the connector for HostSerial. The UART takes a character from the host each frame time
+// (Imx1Uart::setSource) while the guest's CTS output is low, so Kick has nothing to do.
+struct SocIMX1::SerialPort final : HostUartPort {
+    explicit SerialPort(SocIMX1& soc) : soc(soc) {}
+    SocIMX1& soc;
+    Read read{};
+    Write write{};
+    Active active{};
+    Detached detached{};
+    void* context{};
+    uint32_t disables{0};
+    bool wasOn{false};
+
+    Imx1MachineUartLine Line() const { return imx1MachineUartLine(soc.machine, 1); }
+    bool Attach(Read r, Write w, Active a, Detached d, void* c) override {
+        if (soc.halted) return false;
+        if (imx1MachineSetUartPeer(soc.machine, 1, Transmit, Pending, Take, this) != Imx1BootstrapAccess::ok) return false;
+        read = r; write = w; active = a; detached = d; context = c;
+        wasOn = Line().receiverOn;
+        return true;
+    }
+    void Detach() override {
+        imx1MachineSetUartPeer(soc.machine, 1, nullptr, nullptr, nullptr, nullptr);
+        if (!soc.halted) imx1MachineSetUartRts(soc.machine, 1, false);
+        read = nullptr; write = nullptr; active = nullptr; detached = nullptr; context = nullptr;
+    }
+    // A load or reset made a new board without the peer: the host attaches again.
+    void Replaced() {
+        if (!context) return;
+        const auto notify = detached;
+        void* const host = context;
+        Detach();
+        if (notify) notify(host);
+    }
+    bool SetInputs(uint8_t asserted) override {
+        return !soc.halted && imx1MachineSetUartRts(soc.machine, 1, asserted & hostUartCts) == Imx1BootstrapAccess::ok;
+    }
+    bool WantsInput() const override { return Line().ctsLow; }
+    bool ReceiverEnabled() const override { return Line().receiverOn; }
+    uint32_t DisableCount() const override {
+        auto& self = const_cast<SerialPort&>(*this);
+        const bool on = Line().receiverOn;
+        if (self.wasOn && !on) ++self.disables;
+        self.wasOn = on;
+        return disables;
+    }
+    void Kick() override {}
+    HostUartMode Mode() const override {
+        const auto line = Line();
+        return {uint32_t(line.bitsPerSecond), line.format, line.receiverOn, line.enabled};
+    }
+    static void Transmit(void* c, uint8_t character, bool) {
+        auto& self = *static_cast<SerialPort*>(c);
+        if (self.write) self.write(character, self.context);
+    }
+    static bool Pending(void* c) {
+        auto& self = *static_cast<SerialPort*>(c);
+        return self.active && self.active(self.context) && self.Line().ctsLow;
+    }
+    static bool Take(void* c, uint8_t& character) {
+        auto& self = *static_cast<SerialPort*>(c);
+        if (!self.read) return false;
+        const auto value = self.read(self.context);
+        if (value & ~0xffu) return false;
+        character = uint8_t(value);
+        return true;
+    }
+};
+
+// UART2 in IrDA mode for HostInfrared.
+// ASSUMPTION "Zodiac IR transceiver": powered while UART2 is enabled with IREN set; the ROM's shutdown
+// pin, if it has one, is not modelled. Sleep is left to the guest turning the UART off.
+struct SocIMX1::InfraredPort final : HostInfraredPort {
+    explicit InfraredPort(SocIMX1& soc) : soc(soc) {}
+    SocIMX1& soc;
+    SerialHostHooks hooks{};
+
+    Imx1MachineUartLine Line() const { return imx1MachineUartLine(soc.machine, 2); }
+    uint64_t Time() override { return soc.GetTime(); }
+    bool SetHooks(const SerialHostHooks* next) override {
+        if (!next) {
+            hooks = {};
+            imx1MachineSetUartPeer(soc.machine, 2, nullptr, nullptr, nullptr, nullptr);
+            if (!soc.halted) imx1MachineSetUartRts(soc.machine, 2, false);
+            return true;
+        }
+        if (soc.halted) return false;
+        hooks = *next;
+        return Wire();
+    }
+    // The transceiver has no RTS wire: with a peer the transmitter runs whatever UCR2's IRTS says.
+    bool Wire() {
+        return imx1MachineSetUartPeer(soc.machine, 2, Transmit, Pending, Take, this) == Imx1BootstrapAccess::ok &&
+               imx1MachineSetUartRts(soc.machine, 2, true) == Imx1BootstrapAccess::ok;
+    }
+    void Replaced() {
+        if (!hooks.context) return;
+        if (hooks.replaced) hooks.replaced(hooks.context);
+        if (soc.halted || !Wire()) hooks = {};
+    }
+    bool PowerEnabled() override { const auto line = Line(); return line.enabled && line.infrared; }
+    bool ReceiveEnabled() override { const auto line = Line(); return line.receiverOn && line.infrared; }
+    HostUartMode Mode() override {
+        const auto line = Line();
+        return {uint32_t(line.bitsPerSecond), line.format, line.receiverOn && line.infrared, line.enabled && line.infrared};
+    }
+    void Kick() override {}
+    bool HostIoPaused() override { return false; }
+    bool Sleeping() override { return false; }
+    bool KeyboardAttached() override { return false; }
+    static void Transmit(void* c, uint8_t character, bool infrared) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        if (infrared && self.hooks.write) self.hooks.write(character, self.hooks.context);
+    }
+    static bool Pending(void* c) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        return self.hooks.pending && self.Line().infrared && self.hooks.pending(self.hooks.context);
+    }
+    static bool Take(void* c, uint8_t& character) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        if (!self.hooks.read) return false;
+        const auto value = self.hooks.read(self.hooks.context);
+        if (value & ~0xffu) return false;
+        character = uint8_t(value);
+        return true;
+    }
+};
+
+SocIMX1::~SocIMX1() = default;
+
+HostUartPort* SocIMX1::SerialHostPort() {
+    if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
+    return serialPort.get();
+}
+
+HostInfraredPort* SocIMX1::InfraredHostPort() {
+    if (!infraredPort) infraredPort = std::make_unique<InfraredPort>(*this);
+    return infraredPort.get();
+}
+
+// ASSUMPTION "Zodiac RTS idle": with nothing on the line the RTS inputs read inactive (high), so a
+// send with CTS flow control waits (the ROM's write loop times out) and USR1 reads as on a real port.
+void SocIMX1::ApplyUartLines() {
+    if (halted) return;
+    imx1MachineSetUartRts(machine, 1, false);
+    imx1MachineSetUartRts(machine, 2, false);
+    if (serialPort) serialPort->Replaced();
+    if (infraredPort) infraredPort->Replaced();
+}
+
 SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error) {
     Imx1I2cReadWindow::Image image{};
     if (size > UINT32_MAX || !zodiacEepromIdentity(romData, size, image)) {
@@ -136,6 +287,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     soc->ramSize = 128u << 20;
     soc->ApplyBattery();
     soc->StateChanged();
+    soc->ApplyUartLines();
     // The owner keeps it for the life of the process, like the machine inside.
     return soc.release();
 }
@@ -242,6 +394,7 @@ void SocIMX1::Reset() {
     StateChanged();
     // After StateChanged, which works out halted again for the loaded state.
     ApplyBattery();
+    ApplyUartLines();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
     if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
@@ -298,6 +451,7 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
     ApplyBattery();
+    ApplyUartLines();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
     // a card section puts the card store's card back in when it's the saved card (a session saved with
     // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the

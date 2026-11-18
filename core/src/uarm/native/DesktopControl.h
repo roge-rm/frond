@@ -538,14 +538,15 @@ class DesktopControl {
         if (command == "irda-stats") {
             if (!ctx.infrared || !caps.infrared)
                 return {false,"unsupported","This device has no infrared endpoint."};
-            auto* machine=static_cast<SocPXA*>(ctx.soc);const auto state=pxaUartIrState(machine->GetIrUart());
             if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
+            auto* port=ctx.infrared->Port();
+            const auto state=port?port->Mode():HostUartMode{};
             const auto c=ctx.infrared->GetCounters();
             return {true,"infrared", "rx="+std::to_string(c.received)+" tx="+std::to_string(c.sent)+
                 " rx_drop="+std::to_string(ctx.infrared->DroppedReceive())+" tx_drop="+std::to_string(ctx.infrared->DroppedTransmit())+
                 " pending="+std::to_string(ctx.infrared->PendingReceive())+" baud="+std::to_string(state.baud)+
                 " rx_on="+std::to_string(state.receive)+" tx_on="+std::to_string(state.transmit)+
-                " power="+std::to_string(machine->IrPowerEnabled())+" sleeping="+std::to_string(machine->PowerSleeping())};
+                " power="+std::to_string(port && port->PowerEnabled())+" sleeping="+std::to_string(port && port->Sleeping())};
         }
         if (command == "irda-state") return {true,"infrared",ctx.infrared ? ctx.infrared->Describe() : "off"};
         if (command == "printer") return {false,"unsupported","This device has no USB printer."};
@@ -561,16 +562,19 @@ class DesktopControl {
                 return {false,"unsupported","This device has no infrared port."};
             if (ctx.infrared && path == "phone") {
                 if (!caps.irPhone) return {false,"unsupported","This device has no infrared phone."};
-                const bool ok=ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartPhone(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
             if (ctx.infrared && path == "printer") {
-                const bool ok=ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartPrinter(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
             HostSerial::Config config;
             if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
-            const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
+            const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->Start(ctx.soc->InfraredHostPort(),config,ctx.infraredError):
+                ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError));
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
         }
         if (command == "hotsync") {
@@ -653,7 +657,8 @@ class DesktopControl {
             if (!ctx.serial || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
             // A new endpoint detaches the old one first; queued bytes are dropped.
             ctx.serialError.clear();
-            if (!ctx.serial->Start(ctx.serialUart, config, ctx.serialError, ctx.serialRoute)) return {false, "serial", ctx.serialError};
+            if (!(ctx.serialPort ? ctx.serial->Start(ctx.serialPort, config, ctx.serialError)
+                                : ctx.serial->Start(ctx.serialUart, config, ctx.serialError, ctx.serialRoute))) return {false, "serial", ctx.serialError};
             return {true, "serial", SerialState(ctx)};
         }
         if (command == "usb-state") return {true, "usb", UsbState(ctx)};

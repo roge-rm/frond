@@ -74,6 +74,11 @@ class SocIMX1 : public SoC {
     bool CradleButtonSupported() const override { return true; }
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
+    // UART1 is the connector's serial port, UART2 the infrared port (ROM uMX1 driver, IREN on unit 1
+    // only). With no peer both see RTS inactive.
+    HostUartPort* SerialHostPort() override;
+    HostInfraredPort* InfraredHostPort() override;
+    ~SocIMX1();
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
@@ -139,6 +144,12 @@ class SocIMX1 : public SoC {
     bool ApplyBattery();
     bool ApplyHeadphones();
     bool headphones{false}, cradleDown{false};
+    struct SerialPort;
+    struct InfraredPort;
+    std::unique_ptr<SerialPort> serialPort;
+    std::unique_ptr<InfraredPort> infraredPort;
+    // Puts the UARTs' RTS inputs and host peers back on the machine after it was made, loaded or reset.
+    void ApplyUartLines();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.
