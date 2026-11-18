@@ -89,5 +89,31 @@ int main() {
         m->start(code);
         assert(m->run(1000) == S3c2442Stop::budget);
     }
+    // A real undefined instruction followed by a VFP probe in the same batch still stops, at the first one.
+    // The undefined vector returns to the next instruction.
+    {
+        constexpr uint32_t vfp = 0xeef00a10, returnNext = 0xe1b0f00e;  // fmrx r0, fpsid; movs pc, lr
+        auto m = make({undefined, vfp, loop});
+        std::memcpy(m->steppingstone + 4, &returnNext, 4);
+        assert(m->run(1000) == S3c2442Stop::undefined && m->stopInfo().pc == code);
+        assert(m->vfpProbeCount() == 1);
+        auto n = make({vfp, undefined, loop});
+        std::memcpy(n->steppingstone + 4, &returnNext, 4);
+        assert(n->run(1000) == S3c2442Stop::undefined && n->stopInfo().pc == code + 4);
+    }
+    // Host input: the power key on GPF0 as EINT0 on a falling edge, and the stylus down with the touch
+    // screen waiting for it, each raise their interrupt at once.
+    {
+        auto m = make({loop});
+        m->gpio.write(0x88, 2, m->intc);  // EXTINT0: EINT0 on a falling edge
+        m->gpio.write(0x50, 2, m->intc);  // GPFCON: GPF0 as EINT0
+        m->setPin(S3cGpio::f, 0, false);
+        assert(m->intc.pending() & (1u << s3cIrq::eint0));
+        m->setPin(S3cGpio::f, 0, true);
+        m->adc.write(0x04, 0xd3, m->intc);
+        m->intc.intsubmsk &= ~(1u << s3cSubIrq::tc);
+        m->setStylus(true, 100, 200);
+        assert((m->intc.pending() & (1u << s3cIrq::adc)) && m->adc.stylusDown());
+    }
     std::printf("s3c2442 machine: ok\n");
 }

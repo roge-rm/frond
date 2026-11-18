@@ -370,6 +370,33 @@ static void lcdTests() {
     assert(!(intc.pending() & (1u << s3cIrq::lcd)));
     // The FIFO interrupt isn't modelled.
     assert(lcd.write(0x5c, 0, intc) == S3cAccess::unsupported);
+
+    // The frame: 4 x 2 pixels at 16 bpp 5:6:5 with HWSWP (the first pixel in the low halfword), lines 6
+    // halfwords apart (PAGEWIDTH 4, OFFSIZE 2), from 0x30100000.
+    S3cLcd small;
+    small.reset();
+    small.write(0x04, (1u << 14), intc);
+    small.write(0x08, (3u << 8), intc);
+    small.write(0x10, (1u << 11) | 1, intc);
+    small.write(0x14, 0x30100000 >> 1, intc);
+    small.write(0x1c, (2u << 11) | 4, intc);
+    const uint16_t mem[12] = {0xf800, 0x07e0, 0x001f, 0xffff, 0, 0, 0x0000, 0x8410, 0x0821, 0xf800, 0, 0};
+    auto memory = [&](uint32_t pa, void* out, size_t n) {
+        if (pa < 0x30100000 || pa + n > 0x30100000 + sizeof mem) return false;
+        std::memcpy(out, reinterpret_cast<const uint8_t*>(mem) + (pa - 0x30100000), n);
+        return true;
+    };
+    std::vector<uint32_t> pixels;
+    unsigned w = 0, h = 0;
+    std::string why;
+    assert(!small.frame(memory, pixels, w, h, why) && why.find("off") != std::string::npos);
+    small.write(0x00, (0x3u << 5) | (0xcu << 1) | 1, intc);
+    assert(small.frame(memory, pixels, w, h, why) && w == 4 && h == 2);
+    const uint32_t want[8] = {0xff0000, 0x00ff00, 0x0000ff, 0xffffff, 0x000000, 0x868286, 0x080408, 0xff0000};
+    for (unsigned i = 0; i < 8; ++i) assert(pixels[i] == want[i]);
+    // Without HWSWP the first pixel is the high halfword.
+    small.write(0x10, 1u << 11, intc);
+    assert(small.frame(memory, pixels, w, h, why) && pixels[0] == 0x00ff00 && pixels[1] == 0xff0000);
 }
 
 static void nandTests() {
@@ -391,6 +418,11 @@ static void nandTests() {
     nand.write(0x04, 4, 1 | 0x10, intc);
     nand.write(0x08, 1, 0x00, intc);
     for (uint32_t a : {4u, 33u, 0u, 0u}) nand.write(0x0c, 1, a, intc);
+    nand.read(0x10, 4, v);
+    assert(v == (uint32_t(uint8_t(4 * 7)) | uint32_t(uint8_t(5 * 7)) << 8 | uint32_t(uint8_t(6 * 7)) << 16 | uint32_t(uint8_t(7 * 7)) << 24));
+    // Row bits above the chip's size are ignored, as for program and erase: row 0x20000 + 33 is page 33.
+    nand.write(0x08, 1, 0x00, intc);
+    for (uint32_t a : {4u, 33u, 0u, 2u}) nand.write(0x0c, 1, a, intc);
     nand.read(0x10, 4, v);
     assert(v == (uint32_t(uint8_t(4 * 7)) | uint32_t(uint8_t(5 * 7)) << 8 | uint32_t(uint8_t(6 * 7)) << 16 | uint32_t(uint8_t(7 * 7)) << 24));
     // From column 0 the whole data area gives the ECC that ecc512 works out.
@@ -526,11 +558,6 @@ static void quietBlockTests() {
     uint32_t v;
     assert(usb.read(0x100, v) == S3cAccess::unknown);
 
-    S3cAdc adc;
-    adc.reset();
-    adc.channel[2] = 0x123;
-    adc.write(0x00, 0x4000 | 2 << 3 | 1);
-    assert((get(adc, 0x00) & 0x8001) == 0x8000 && (get(adc, 0x0c) & 0x83ff) == 0x8123 && adc.channelsRead == 4);
 
     S3cDma dma;
     dma.reset();
@@ -561,7 +588,65 @@ static void quietBlockTests() {
     assert(rtc.write(0x6c, 0x9) == S3cAccess::ok && get(rtc, 0x6c) == 0x9);
 }
 
+// The ADC: a normal conversion of a channel takes 5 ADC clocks, then ECFLG and INT_ADC_S; the touch
+// screen's pen-down interrupt in wait-for-interrupt mode and its X and Y conversions.
+static void adcTests() {
+    S3cIntc intc;
+    intc.reset();
+    intc.intmsk &= ~(1u << s3cIrq::adc);
+    intc.intsubmsk &= ~((1u << s3cSubIrq::adc) | (1u << s3cSubIrq::tc));
+    S3cAdc adc;
+    adc.reset();
+    adc.channel[2] = 0x123;
+    // Prescaler 49: 250 PCLK ticks.
+    adc.write(0x00, 0x4000 | 49 << 6 | 2 << 3 | 1, intc);
+    assert((get(adc, 0x00) & 0x8001) == 0 && adc.ticksToEvent() == 250);
+    adc.advance(249, intc);
+    assert(!(get(adc, 0x00) & 0x8000) && !intc.irq());
+    adc.advance(1, intc);
+    assert((get(adc, 0x00) & 0x8000) && (get(adc, 0x0c) & 0x83ff) == 0x8123 && adc.channelsRead == 4);
+    assert(adc.firstChannel == 2 && (intc.subsrcpnd & (1u << s3cSubIrq::adc)) && intc.irq());
+    intc.write(0x18, 1u << s3cSubIrq::adc);
+    intc.write(0x00, 1u << s3cIrq::adc);
+    intc.write(0x10, 1u << s3cIrq::adc);
+    assert(!intc.irq());
+
+    // Waiting for the stylus to go down (0xd3): no interrupt while it's up, one as it goes down.
+    adc.write(0x04, 0xd3, intc);
+    assert(!(intc.subsrcpnd & (1u << s3cSubIrq::tc)));
+    adc.setStylus(true, 0x150, 0x2a0, intc);
+    assert((intc.subsrcpnd & (1u << s3cSubIrq::tc)) && (get(adc, 0x14) & 1) && !(get(adc, 0x0c) & 0x8000));
+    intc.write(0x18, 1u << s3cSubIrq::tc);
+    // Going back to the wait with the stylus still down makes another; moving it while waiting doesn't.
+    adc.write(0x04, 0x0c, intc);  // auto X and Y
+    adc.write(0x04, 0xd3, intc);
+    assert(intc.subsrcpnd & (1u << s3cSubIrq::tc));
+    intc.write(0x18, 1u << s3cSubIrq::tc);
+    adc.setStylus(true, 0x151, 0x2a0, intc);
+    assert(!(intc.subsrcpnd & (1u << s3cSubIrq::tc)));
+    // Auto conversion: ADCDLY then the conversion, X in ADCDAT0 and Y in ADCDAT1.
+    adc.write(0x08, 1000, intc);
+    adc.write(0x04, 0x0c, intc);
+    adc.write(0x00, 0x4000 | 49 << 6 | 7 << 3 | 1, intc);
+    assert(adc.ticksToEvent() == 1250);
+    adc.advance(1250, intc);
+    assert((get(adc, 0x0c) & 0x3ff) == 0x151 && (get(adc, 0x10) & 0x3ff) == 0x2a0 && (get(adc, 0x0c) & 0x4000));
+    // Separate Y.
+    adc.setStylus(true, 0x100, 0x80, intc);
+    adc.write(0x04, 0x6a, intc);
+    adc.write(0x00, 0x4000 | 49 << 6 | 1, intc);
+    adc.advance(2000, intc);
+    assert((get(adc, 0x10) & 0x3ff) == 0x80 && (get(adc, 0x0c) & 0x3ff) == 0x151);
+    // Waiting for up (0x1d3): the interrupt comes as the stylus lifts, with the up history bit.
+    intc.write(0x18, 0x7fff);
+    adc.write(0x04, 0x1d3, intc);
+    assert(!(intc.subsrcpnd & (1u << s3cSubIrq::tc)));
+    adc.setStylus(false, 0, 0, intc);
+    assert((intc.subsrcpnd & (1u << s3cSubIrq::tc)) && (get(adc, 0x14) & 2) && (get(adc, 0x10) & 0x8000));
+}
+
 int main() {
+    adcTests();
     intcTests();
     clockTests();
     pwmTests();

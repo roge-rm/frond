@@ -304,6 +304,9 @@ struct ArmCpu {
     // stop on them (cpuUndefinedTaken).
     uint64_t undefinedCount;
     uint32_t undefinedPc, undefinedInstr;
+    // Called on each one as it's taken, or null (cpuSetUndefinedHook).
+    void (*undefinedHook)(void *context, uint32_t pc, uint32_t instr);
+    void *undefinedHookContext;
 
     uint8_t memorySystemKind;
     union {
@@ -934,6 +937,7 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
         ++cpu->undefinedCount;
         cpu->undefinedPc = cpu->curInstrPC;
         cpu->undefinedInstr = 0;
+        if (cpu->undefinedHook) cpu->undefinedHook(cpu->undefinedHookContext, cpu->curInstrPC, 0);
         cpuPrvException<kind>(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (cpu->T ? 2 : 4),
                         ARM_SR_MODE_UND | ARM_SR_I);
         return;
@@ -2324,6 +2328,7 @@ static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
     ++cpu->undefinedCount;
     cpu->undefinedPc = cpu->curInstrPC;
     cpu->undefinedInstr = instr;
+    if (cpu->undefinedHook) cpu->undefinedHook(cpu->undefinedHookContext, cpu->curInstrPC, instr);
     // A guest whose own handler takes the exception can loop on it, so the log gets the first 16 and then
     // every power of two, with the count.
     static std::atomic<uint64_t> logged{0};
@@ -7510,6 +7515,11 @@ uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *ins
     if (pc) *pc = cpu->undefinedPc;
     if (instr) *instr = cpu->undefinedInstr;
     return cpu->undefinedCount;
+}
+
+void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *, uint32_t, uint32_t), void *context) {
+    cpu->undefinedHook = hook;
+    cpu->undefinedHookContext = context;
 }
 
 void cpuSetSlowPath(struct ArmCpu *cpu, uint32_t reason) { cpu->slowPath |= reason; }

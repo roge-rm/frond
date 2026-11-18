@@ -71,6 +71,7 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
     patchDispatchSetCpu(patches, m->cpuCore);
     cpuArm920EnableWait(m->cpuCore);
     cpuArm920SetMemoryCheck(m->cpuCore, cacheCheck, m.get());
+    cpuSetUndefinedHook(m->cpuCore, undefinedTaken, m.get());
     return m;
 }
 
@@ -112,7 +113,23 @@ bool S3c2442Machine::loadRam(uint32_t physical, const uint8_t* data, size_t size
 void S3c2442Machine::start(uint32_t pc) {
     cpuReset(cpuCore, pc);
     stopped = {};
-    undefinedSeen = cpuUndefinedTaken(cpuCore, nullptr, nullptr);
+    undefinedPending = false;
+}
+
+// An undefined instruction stops the run, as the CPU also takes one for forms it doesn't model. Two are
+// the guest's own and go to its handler, as on the real ARM920T: VFP (coprocessors 10 and 11), which the
+// kernel probes for and the chip doesn't have, and Windows CE's breakpoint 0xe6000010 (DebugBreak), which
+// the kernel takes as a breakpoint exception. The first other one in a batch is the one reported.
+void S3c2442Machine::undefinedTaken(void* context, uint32_t pc, uint32_t instr) {
+    auto& m = *static_cast<S3c2442Machine*>(context);
+    const bool coprocessor = ((instr >> 24) & 0xf) == 0xe || ((instr >> 25) & 7) == 6;
+    const bool vfpProbe = instr && coprocessor && ((instr >> 9) & 7) == 5;
+    if (vfpProbe) { ++m.vfpProbes; return; }
+    if (instr == 0xe6000010) { ++m.breakpoints; return; }
+    if (m.undefinedPending) return;
+    m.undefinedPending = true;
+    m.undefinedStopPc = pc;
+    m.undefinedStopInstr = instr;
 }
 
 uint32_t S3c2442Machine::pc() const { return cpuGetRegisters(cpuCore)[15]; }
@@ -295,14 +312,15 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             break;
         case 0x58000000:
             name = "ADC and touch screen";
-            if (write) result = size == 4 ? adc.write(offset, value) : S3cAccess::unsupported;
+            if (write) result = size == 4 ? adc.write(offset, value, intc) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return adc.read(o, v); });
             break;
         case 0x4b000000:
             name = "DMA";
-            if (write) result = size == 4 ? dma.write(offset, value) : S3cAccess::unsupported;
-            if (result == S3cAccess::unsupported && size == 4) detail = "software-triggered DMA isn't modelled yet";
-            else readWord([&](uint32_t o, uint32_t& v) { return dma.read(o, v); });
+            if (write) {
+                result = size == 4 ? dma.write(offset, value) : S3cAccess::unsupported;
+                if (result == S3cAccess::unsupported && size == 4) detail = "software-triggered DMA isn't modelled yet";
+            } else readWord([&](uint32_t o, uint32_t& v) { return dma.read(o, v); });
             break;
         case 0x54000000:
             name = "IIC";
@@ -345,6 +363,25 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
     return refuse(address, size, write, value, text);
 }
 
+void S3c2442Machine::setPin(S3cGpio::Port port, unsigned bit, bool level) {
+    gpio.setInputs(port, 1u << bit, level ? 1u << bit : 0, intc);
+    updateLines();
+}
+
+void S3c2442Machine::setStylus(bool down, uint16_t x, uint16_t y) {
+    adc.setStylus(down, x, y, intc);
+    updateLines();
+}
+
+bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const {
+    auto memory = [&](uint32_t pa, void* out, size_t n) {
+        if (pa < sdramBase || uint64_t(pa) + n > uint64_t(sdramBase) + options.ramBytes) return false;
+        std::memcpy(out, ramBuffer + (pa - sdramBase), n);
+        return true;
+    };
+    return lcd.frame(memory, pixels, width, height, why);
+}
+
 void S3c2442Machine::updateLines() {
     const bool irq = intc.irq(), fiq = intc.fiq();
     if (irq != irqLine) { cpuIrq(cpuCore, false, irq); irqLine = irq; }
@@ -363,6 +400,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
     if (pclk) {
         pwm.advance(pclk, intc);
         watchdog.advance(pclk, intc);
+        adc.advance(pclk, intc);
     }
     if (hclk) lcd.advance(hclk, intc);
     if (ticks32k) rtc.advance(ticks32k, intc);
@@ -385,7 +423,7 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
         best = std::min(best, std::max<uint64_t>(cycles, 1));
     };
     if (!wakeOnly) {
-        consider(std::min(pwm.ticksToEvent(), watchdog.ticksToEvent()), clock.pclk(), pclkRest);
+        consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
         consider(rtc.ticksToEvent(), 32768, rtcRest);
         return best;
@@ -395,6 +433,7 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     const bool wdtInterrupt = open(s3cIrq::wdtAc97) && !(intc.intsubmsk & (1u << s3cSubIrq::wdt));
     consider(std::min(pwm.ticksToEvent(timers), watchdog.ticksToEvent(wdtInterrupt)), clock.pclk(), pclkRest);
     if (open(s3cIrq::lcd)) consider(lcd.ticksToEvent(true), clock.hclk(), hclkRest);
+    if (open(s3cIrq::adc) && !(intc.intsubmsk & (1u << s3cSubIrq::adc))) consider(adc.ticksToEvent(), clock.pclk(), pclkRest);
     consider(rtc.ticksToEvent(open(s3cIrq::tick), open(s3cIrq::rtc)), 32768, rtcRest);
     return best;
 }
@@ -444,24 +483,12 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             stopped.write = guard.write;
             stopped.pc = cpuGetCurInstrPC(cpuCore);
         }
-        // An undefined instruction stops the run, as the CPU also takes one for forms it doesn't model. Two
-        // are the guest's own and go to its handler, as on the real ARM920T: VFP (coprocessors 10 and 11),
-        // which the kernel probes for and the chip doesn't have, and Windows CE's breakpoint 0xe6000010
-        // (DebugBreak), which the kernel takes as a breakpoint exception.
-        uint32_t undefinedPc = 0, undefinedInstr = 0;
-        const uint64_t taken = cpuUndefinedTaken(cpuCore, &undefinedPc, &undefinedInstr);
-        const bool coprocessor = ((undefinedInstr >> 24) & 0xf) == 0xe || ((undefinedInstr >> 25) & 7) == 6;
-        const bool vfpProbe = undefinedInstr && coprocessor && ((undefinedInstr >> 9) & 7) == 5;
-        if (taken > undefinedSeen && (vfpProbe || undefinedInstr == 0xe6000010)) {
-            undefinedSeen = taken;
-            ++(vfpProbe ? vfpProbes : breakpoints);
-        }
-        if (taken > undefinedSeen && stopped.stop == S3c2442Stop::running) {
-            undefinedSeen = taken;
+        if (undefinedPending && stopped.stop == S3c2442Stop::running) {
             stopped.stop = S3c2442Stop::undefined;
-            stopped.pc = undefinedPc;
-            stopped.value = undefinedInstr;
+            stopped.pc = undefinedStopPc;
+            stopped.value = undefinedStopInstr;
         }
+        undefinedPending = false;
     }
     return stopped.stop;
 }

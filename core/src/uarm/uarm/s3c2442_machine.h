@@ -98,6 +98,13 @@ class S3c2442Machine {
     std::function<void(uint32_t)> stepHook;
     const uint8_t* sdram() const { return ramBuffer; }
 
+    // Host input between runs: a board pin's level (keys, card detect, AC), and the stylus on the touch
+    // panel in raw ADC units. Either can raise an interrupt for the next run.
+    void setPin(S3cGpio::Port port, unsigned bit, bool level);
+    void setStylus(bool down, uint16_t x, uint16_t y);
+    // The screen as the LCD controller scans it out of SDRAM (S3cLcd::frame).
+    bool screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const;
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -140,8 +147,11 @@ class S3c2442Machine {
     ArmRam* ram[4] = {};
     uint8_t* ramBuffer = nullptr;
     MemoryBuffer ramMemory{};
-    // Undefined instruction exceptions already reported or from before start().
-    uint64_t undefinedSeen = 0, vfpProbes = 0, breakpoints = 0;
+    static void undefinedTaken(void* context, uint32_t pc, uint32_t instr);
+    // The first undefined instruction since the last check that isn't the guest's own, to stop on.
+    bool undefinedPending = false;
+    uint32_t undefinedStopPc = 0, undefinedStopInstr = 0;
+    uint64_t vfpProbes = 0, breakpoints = 0;
     bool irqLine = false, fiqLine = false;
     uint64_t retiredCount = 0, cycleCount = 0, idleCount = 0, elapsedNs = 0;
     // Remainders of each clock domain in CPU cycles times the domain's rate.

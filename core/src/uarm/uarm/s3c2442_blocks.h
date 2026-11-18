@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <string>
+#include <vector>
 
 // unknown is a register the block doesn't have, unsupported a known one set to something not modelled.
 enum class S3cAccess : uint8_t { ok, unknown, unsupported };
@@ -159,20 +161,37 @@ private:
     uint32_t regs[0x30];  // 0x140 to 0x1fc, by word
 };
 
-// ADC and touch screen at 0x58000000 (manual chapter 16), with the stylus up. A conversion finishes at
-// once (ECFLG) with the selected channel's value; the conversion and touch interrupts wait for the touch
-// work. ASSUMPTION "rx1950 ADC inputs": every channel reads mid-scale until R4 gives the battery its own.
+// ADC and touch screen at 0x58000000 (manual chapter 16), counted in PCLK ticks. A conversion takes
+// ADCDLY ticks in the touch modes (separate X or Y, auto) and then 5 ADC clocks, then sets ECFLG, the
+// data registers and the ADC sub-interrupt (INT_ADC_S). In wait-for-interrupt mode (XY_PST 3) the touch
+// sub-interrupt (INT_TC) comes when the stylus goes the way UD_SEN waits for, with ADCUPDN's history bit.
+// The stylus comes from the host as a position in the panel's raw ADC units (setStylus).
+// ASSUMPTION "rx1950 ADC inputs": channels 0-7 read channel[] (mid-scale until R4 gives the battery its own).
 class S3cAdc {
 public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
-    S3cAccess write(uint32_t offset, uint32_t value);
+    S3cAccess write(uint32_t offset, uint32_t value, S3cIntc& intc);
+    void advance(uint64_t pclkTicks, S3cIntc& intc);
+    // PCLK ticks until the conversion ends, UINT64_MAX with none running.
+    uint64_t ticksToEvent() const;
+    // The stylus down at raw position x, y (10 bits each), or up.
+    void setStylus(bool down, uint16_t x, uint16_t y, S3cIntc& intc);
+    bool stylusDown() const { return penDown; }
+
     uint16_t channel[8];  // 10-bit inputs AIN0 to AIN7
-    uint64_t conversions = 0;
-    uint32_t channelsRead = 0;  // a bit per channel converted, for traces
+    uint64_t conversions = 0, touchInterrupts = 0;
+    uint32_t channelsRead = 0;  // a bit per channel converted in normal mode, for traces
+    int firstChannel = -1;      // the first channel converted in normal mode
+    uint32_t adccon, adctsc, adcdly, adcdat0, adcdat1, adcupdn;
 
 private:
-    uint32_t adccon, adctsc, adcdly, adcdat0, adcdat1, adcupdn;
+    void start();
+    void finish(S3cIntc& intc);
+    void checkTouch(S3cIntc& intc);
+    uint64_t remaining = 0;  // PCLK ticks left in the conversion, 0 with none running
+    bool penDown = false, touchCondition = false;
+    uint16_t penX = 0, penY = 0;
 };
 
 // DMA at 0x4b000000 (manual chapter 8), four channels of 0x40, registers only: a channel turned on
@@ -293,6 +312,15 @@ class S3cLcd {
     // HCLK ticks in one line and lines in one frame, from the timing registers.
     uint64_t lineTicks() const;
     uint32_t frameLines() const;
+    // The picture the controller scans out, one 0xRRGGBB per pixel, row by row. Width and height come
+    // from HOZVAL and LINEVAL, the frame from LCDSADDR1 and the line stride from LCDSADDR3 (PAGEWIDTH plus
+    // OFFSIZE), and the pixel format from BPPMODE, FRM565, BPP24BL, BSWP and HWSWP. TFT 16 and 24 bpp only.
+    // memory reads n bytes at a physical address, false where there's no memory. False, with why, when
+    // the controller is off or set to something not decoded.
+    bool frame(const std::function<bool(uint32_t, void*, size_t)>& memory, std::vector<uint32_t>& pixels,
+               unsigned& width, unsigned& height, std::string& why) const;
+    // The frame's physical start, from LCDSADDR1.
+    uint32_t frameAddress() const { return (saddr[0] & 0x3fffffff) << 1; }
 
     uint32_t lcdcon[5], saddr[3], redlut, greenlut, bluelut, dithmode, tpal, lcdintpnd, lcdsrcpnd, lcdintmsk, tconsel;
     uint32_t palette[256];

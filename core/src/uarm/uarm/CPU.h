@@ -250,6 +250,9 @@ void cpuSetPid(struct ArmCpu *cpu, uint32_t pid);
 uint32_t cpuGetPid(struct ArmCpu *cpu);
 // How many undefined instruction exceptions the CPU has taken, with the last one's pc and instruction.
 uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *instr);
+// Calls hook with the pc and instruction of every undefined instruction exception as it's taken
+// (instruction 0 for a data cache guard trap). Null turns it off.
+void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *context, uint32_t pc, uint32_t instr), void *context);
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu);
 void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar);

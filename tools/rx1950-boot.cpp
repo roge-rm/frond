@@ -2,6 +2,7 @@
 //
 //   rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N]
 //               [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...
+//               [--seconds S] [--tap T,X,Y[,MS]]... [--key T,NAME[,MS]]... [--shot T]... [--interactive]
 //
 // CEBL.nbf's eboot goes straight into SDRAM at 0x30080000 and runs from there with the MMU off and the
 // PLL set, as the block 0 loader would leave it (that loader isn't in either dump). CEOS.nbf, if given, fills the NAND
@@ -12,10 +13,18 @@
 // --mmio-trace, the last N SFR accesses in mmio.log, and nk.log what the kernel printed. The last line
 // printed says why the run stopped.
 //
+// Input is scripted in guest seconds: --tap puts the stylus on screen pixel X, Y at T for MS milliseconds
+// (150 by default), --key holds a key (rx1950_board.h: power, record, calendar, contacts, inbox,
+// wireless, up, down, left, right, action) for MS (200), and --shot saves the screen at T as
+// screen-T.ppm. --seconds stops the run at that guest time; the instruction budget still applies.
+// screen.ppm is the screen when the run stops. --interactive goes on after --seconds with commands from
+// stdin (see the loop at the end), for stepping through screens without booting again.
+//
 // The retail kernel only sends its debug output to a serial port on the debug board (a Super I/O chip on
 // nGCS5 it probes for). Without one it keeps the text in a 64 KB ring in RAM, which nk.log is, when
 // --debug-messages turns it on in the board settings page (rx1950_nand_image.h).
 
+#include <algorithm>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +37,7 @@
 #include "CPU.h"
 #include "arm920_state.h"
 #include "ZodiacRom.h"
+#include "rx1950_board.h"
 #include "rx1950_nand_image.h"
 #include "s3c2442_machine.h"
 
@@ -36,6 +46,26 @@ namespace {
     // The kernel's debug text ring in the WM5 CEOS.nbf (kernel built Jun 1 2005): 64 KB of text and its
     // read and write indices, found in OEMWriteDebugByte.
     constexpr uint32_t nkRing = 0x802d2b40, nkRingIndices = 0x80292e28, nkRingSize = 0x10000;
+
+    // One scripted input: at ns, the stylus (key null) down at raw x, y or up, or a key pressed or let go.
+    struct Input {
+        uint64_t ns;
+        const Rx1950Key* key;
+        bool down;
+        uint16_t x, y;
+    };
+
+    bool writePpm(const std::string& path, const std::vector<uint32_t>& pixels, unsigned w, unsigned h) {
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return false;
+        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+        for (const uint32_t p : pixels) {
+            const uint8_t rgb[3] = {uint8_t(p >> 16), uint8_t(p >> 8), uint8_t(p)};
+            std::fwrite(rgb, 1, 3, f);
+        }
+        std::fclose(f);
+        return true;
+    }
 
     bool readFile(const char* path, std::vector<uint8_t>& out) {
         std::ifstream in(path, std::ios::binary);
@@ -46,6 +76,7 @@ namespace {
 }
 
 int main(int argc, char** argv) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     const char* cebl = nullptr;
     const char* ceos = nullptr;
     std::string out = ".";
@@ -57,7 +88,11 @@ int main(int argc, char** argv) {
     bool anyFirmware = false;
     std::vector<uint32_t> peeks;  // virtual addresses whose words are printed when the run stops
     std::vector<uint32_t> walks;
-    std::vector<uint32_t> watches;  // SDRAM physical words whose changes are printed (needs --history)  // MVAs whose page table walk is printed when the run stops
+    std::vector<uint32_t> watches;  // SDRAM physical words whose changes are printed (needs --history)
+    std::vector<Input> inputs;
+    std::vector<double> shots;
+    double seconds = 0;
+    bool interactive = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -76,10 +111,37 @@ int main(int argc, char** argv) {
         else if (a == "--peek") peeks.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else if (a == "--watch") watches.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else if (a == "--walk") walks.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
+        else if (a == "--interactive") interactive = true;
+        else if (a == "--seconds") seconds = std::strtod(next(), nullptr);
+        else if (a == "--shot") shots.push_back(std::strtod(next(), nullptr));
+        else if (a == "--tap") {
+            double t = 0;
+            unsigned x = 0, y = 0, ms = 150;
+            if (std::sscanf(next(), "%lf,%u,%u,%u", &t, &x, &y, &ms) < 3 || x >= 240 || y >= 320) {
+                std::fprintf(stderr, "--tap T,X,Y[,MS] with X below 240 and Y below 320\n");
+                return 2;
+            }
+            const uint64_t at = uint64_t(t * 1e9);
+            inputs.push_back({at, nullptr, true, rx1950TouchRawX(x), rx1950TouchRawY(y)});
+            inputs.push_back({at + ms * 1000000ull, nullptr, false, 0, 0});
+        } else if (a == "--key") {
+            double t = 0;
+            char name[32] = {};
+            unsigned ms = 200;
+            const char* v = next();
+            const char* comma = std::strchr(v, ',');
+            t = std::strtod(v, nullptr);
+            if (comma) std::sscanf(comma + 1, "%31[a-z],%u", name, &ms);
+            const Rx1950Key* key = rx1950Key(name);
+            if (!key) { std::fprintf(stderr, "--key T,NAME[,MS]: unknown key %s\n", name); return 2; }
+            const uint64_t at = uint64_t(t * 1e9);
+            inputs.push_back({at, key, true, 0, 0});
+            inputs.push_back({at + ms * 1000000ull, key, false, 0, 0});
+        }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (!cebl) {
-        std::fprintf(stderr, "usage: rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N] [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...\n");
+        std::fprintf(stderr, "usage: rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N] [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]... [--seconds S] [--tap T,X,Y[,MS]]... [--key T,NAME[,MS]]... [--shot T]... [--interactive]\n");
         return 2;
     }
     std::vector<uint8_t> bl;
@@ -137,11 +199,6 @@ int main(int argc, char** argv) {
     struct Access { uint32_t pc, address, value; unsigned size; bool write; };
     std::vector<Access> traced(traceLimit);
     uint64_t tracedCount = 0;
-    if (traceLimit)
-        machine->mmioTrace = [&](uint32_t pc, uint32_t address, unsigned size, bool write, uint32_t value) {
-            traced[tracedCount++ % traceLimit] = {pc, address, value, size, write};
-        };
-
     if (history) machine->keepHistory(history);
     // Watches compare SDRAM and the kernel's cached view (0x80000000 is SDRAM from 0x30100000) after every
     // instruction, so a write held in the D-cache shows apart from its write-back.
@@ -163,8 +220,111 @@ int main(int argc, char** argv) {
             }
         };
     }
+    // For R4: the first ADC conversions in normal mode (battery channels) and reads of the AC and charge
+    // status pins (GPFDAT bits 2 and 3) and the charger controls on port J.
+    struct Seen { uint32_t pc; uint64_t ns; uint32_t value; };
+    std::vector<std::pair<unsigned, Seen>> adcStarts;
+    Seen firstGpf{0, 0, 0}, firstGpj{0, 0, 0};
+    uint64_t gpfReads = 0, gpjReads = 0;
+    auto observe = [&](uint32_t pc, uint32_t address, unsigned, bool write, uint32_t value) {
+        if (write && address == 0x58000000 && (value & 1) && adcStarts.size() < 16 && !(machine->adc.adctsc & 7))
+            adcStarts.push_back({(value >> 3) & 7, {pc, machine->nanoseconds(), value}});
+        if (!write && address == 0x56000054 && !gpfReads++) firstGpf = {pc, machine->nanoseconds(), value};
+        if (!write && address == 0x560000d4 && !gpjReads++) firstGpj = {pc, machine->nanoseconds(), value};
+    };
+    if (traceLimit)
+        machine->mmioTrace = [&, observe](uint32_t pc, uint32_t address, unsigned size, bool write, uint32_t value) {
+            traced[tracedCount++ % traceLimit] = {pc, address, value, size, write};
+            observe(pc, address, size, write, value);
+        };
+    else
+        machine->mmioTrace = observe;
+
+    std::stable_sort(inputs.begin(), inputs.end(), [](const Input& a, const Input& b) { return a.ns < b.ns; });
+    std::sort(shots.begin(), shots.end());
+    size_t nextInput = 0, nextShot = 0;
+    const uint64_t endNs = seconds > 0 ? uint64_t(seconds * 1e9) : UINT64_MAX;
+    auto saveScreen = [&](const std::string& name) {
+        std::vector<uint32_t> pixels;
+        unsigned w = 0, h = 0;
+        std::string why;
+        if (!machine->screen(pixels, w, h, why)) {
+            std::printf("screen at %.3f s: %s\n", machine->nanoseconds() / 1e9, why.c_str());
+            return;
+        }
+        writePpm(out + "/" + name, pixels, w, h);
+        std::printf("screen at %.3f s: %s\n", machine->nanoseconds() / 1e9, name.c_str());
+    };
     machine->start(ebootPhysical);
-    const auto stop = machine->run(instructions);
+    // Runs in slices of about 7 ms of guest time so scripted input lands near its time.
+    constexpr uint64_t slice = 2000000;
+    uint64_t left = instructions;
+    S3c2442Stop stop = S3c2442Stop::budget;
+    auto runUntil = [&](uint64_t untilNs) {
+        while (left) {
+            const uint64_t now = machine->nanoseconds();
+            while (nextInput < inputs.size() && inputs[nextInput].ns <= now) {
+                const Input& in = inputs[nextInput++];
+                if (in.key) machine->setPin(in.key->port, in.key->bit, !in.down);
+                else machine->setStylus(in.down, in.x, in.y);
+                std::printf("input at %.3f s: %s %s\n", now / 1e9, in.key ? in.key->name : "stylus", in.down ? "down" : "up");
+            }
+            while (nextShot < shots.size() && uint64_t(shots[nextShot] * 1e9) <= now) {
+                char name[48];
+                std::snprintf(name, sizeof name, "screen-%07.3f.ppm", shots[nextShot++]);
+                saveScreen(name);
+            }
+            if (now >= untilNs) return true;
+            const uint64_t before = machine->retired() + machine->idleCycles();
+            stop = machine->run(std::min(left, slice));
+            const uint64_t used = machine->retired() + machine->idleCycles() - before;
+            left -= std::min(left, used ? used : 1);
+            if (stop != S3c2442Stop::budget) return false;
+        }
+        return false;
+    };
+    bool going = runUntil(endNs);
+    // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "quit". Each answers with a line starting "ok" or "error".
+    while (going && interactive) {
+        char line[256];
+        if (!std::fgets(line, sizeof line, stdin)) break;
+        char cmd[16] = {}, word[64] = {};
+        double sec = 0;
+        unsigned x = 0, y = 0, ms = 0;
+        const uint64_t now = machine->nanoseconds();
+        if (std::sscanf(line, "%15s", cmd) != 1) continue;
+        const std::string c = cmd;
+        if (c == "quit") break;
+        if (c == "run" && std::sscanf(line, "%*s %lf", &sec) == 1) {
+            going = runUntil(now + uint64_t(sec * 1e9));
+        } else if (c == "tap" && std::sscanf(line, "%*s %u %u %u", &x, &y, &ms) >= 2 && x < 240 && y < 320) {
+            inputs.push_back({now, nullptr, true, rx1950TouchRawX(x), rx1950TouchRawY(y)});
+            inputs.push_back({now + (ms ? ms : 150) * 1000000ull, nullptr, false, 0, 0});
+        } else if (c == "key" && std::sscanf(line, "%*s %63s %u", word, &ms) >= 1 && rx1950Key(word)) {
+            inputs.push_back({now, rx1950Key(word), true, 0, 0});
+            inputs.push_back({now + (ms ? ms : 200) * 1000000ull, rx1950Key(word), false, 0, 0});
+        } else if (c == "peek" && std::sscanf(line, "%*s %63s", word) == 1) {
+            const uint32_t va = uint32_t(std::strtoul(word, nullptr, 0));
+            uint32_t v = 0;
+            if (cpuInspectRead(machine->cpu(), va, &v, 4)) std::printf("peek %08x: %08x\n", va, v);
+            else std::printf("peek %08x: not mapped\n", va);
+        } else if (c == "stat") {
+            const auto& adc = machine->adc;
+            std::printf("stat: pc %08x pid %08x; ADC %" PRIu64 " conversions, %" PRIu64 " touch interrupts, ADCTSC %03x ADCCON %04x "
+                        "stylus %d; SRCPND %08x INTMSK %08x SUBSRCPND %04x INTSUBMSK %04x; timer 3 TCON %08x TCNTB3 %u; idle %" PRIu64 " of %" PRIu64 " cycles\n",
+                        machine->pc(), cpuGetPid(machine->cpu()), adc.conversions, adc.touchInterrupts, adc.adctsc, adc.adccon,
+                        adc.stylusDown() ? 1 : 0, machine->intc.srcpnd, machine->intc.intmsk, machine->intc.subsrcpnd,
+                        machine->intc.intsubmsk, machine->pwm.tcon, machine->pwm.timers[3].buffer, machine->idleCycles(), machine->cycles());
+        } else if (c == "shot" && std::sscanf(line, "%*s %63s", word) == 1) {
+            saveScreen(std::string(word) + ".ppm");
+        } else {
+            std::printf("error: %s", line);
+            continue;
+        }
+        std::stable_sort(inputs.begin() + long(nextInput), inputs.end(), [](const Input& a, const Input& b) { return a.ns < b.ns; });
+        std::printf("ok %s at %.3f s\n", cmd, machine->nanoseconds() / 1e9);
+    }
     for (auto* f : logs) std::fclose(f);
     if (traceLimit) {
         FILE* trace = std::fopen((out + "/mmio.log").c_str(), "w");
@@ -200,27 +360,21 @@ int main(int argc, char** argv) {
         else std::printf("peek %08x: not mapped\n", va);
     }
     {
-        // The screen as the LCD scans it, 16 bits per pixel 5:6:5, to screen.ppm (the rx1950 panel is
-        // 240 x 320). LCDSADDR1 holds A[30:1] of the frame, LCDSADDR2 A[21:1] of its end.
-        const auto& lcd = machine->lcd;
-        const uint32_t start = (lcd.saddr[0] & 0x3fffffff) << 1, width = 240, height = 320;
-        if (lcd.enabled() && start >= 0x30000000 && start + width * height * 2 <= 0x32000000) {
-            std::string ppm = "P6\n240 320\n255\n";
-            for (uint32_t i = 0; i < width * height; ++i) {
-                uint16_t p;
-                std::memcpy(&p, machine->sdram() + (start - 0x30000000) + i * 2, 2);
-                ppm += char((p >> 11) << 3);
-                ppm += char(((p >> 5) & 0x3f) << 2);
-                ppm += char((p & 0x1f) << 3);
-            }
-            if (FILE* f = std::fopen((out + "/screen.ppm").c_str(), "wb")) {
-                std::fwrite(ppm.data(), 1, ppm.size(), f);
-                std::fclose(f);
-            }
-            std::printf("screen: frame at %08x, LCDCON1 %08x, in screen.ppm\n", start, lcd.lcdcon[0]);
-        }
-        std::printf("ADC: %" PRIu64 " conversions, channels %02x; SD commands %" PRIu64 "; Wi-Fi bus accesses %" PRIu64 "\n",
-                    machine->adc.conversions, machine->adc.channelsRead, machine->sdi.commands, machine->wifiAccesses);
+        saveScreen("screen.ppm");
+        std::printf("LCD: frame at %08x, LCDCON1 %08x, LCDCON5 %08x, LCDSADDR3 %08x\n", machine->lcd.frameAddress(),
+                    machine->lcd.lcdcon[0], machine->lcd.lcdcon[4], machine->lcd.saddr[2]);
+        std::printf("ADC: %" PRIu64 " conversions, channels %02x, first %d, %" PRIu64 " touch interrupts, ADCTSC %03x; SD commands %" PRIu64 "; Wi-Fi bus accesses %" PRIu64 "\n",
+                    machine->adc.conversions, machine->adc.channelsRead, machine->adc.firstChannel,
+                    machine->adc.touchInterrupts, machine->adc.adctsc, machine->sdi.commands, machine->wifiAccesses);
+        for (const auto& [mux, seen] : adcStarts)
+            std::printf("ADC start: channel %u at %.3f s pc %08x ADCCON %04x\n", mux, seen.ns / 1e9, seen.pc, seen.value);
+        if (gpfReads)
+            std::printf("GPFDAT: %" PRIu64 " reads, first at %.3f s pc %08x = %02x\n", gpfReads, firstGpf.ns / 1e9, firstGpf.pc, firstGpf.value);
+        if (gpjReads)
+            std::printf("GPJDAT: %" PRIu64 " reads, first at %.3f s pc %08x = %04x\n", gpjReads, firstGpj.ns / 1e9, firstGpj.pc, firstGpj.value);
+        std::printf("EXTINT0 %08x EXTINT1 %08x EXTINT2 %08x EINTMASK %08x GPFCON %08x GPGCON %08x\n",
+                    machine->gpio.extint[0], machine->gpio.extint[1], machine->gpio.extint[2], machine->gpio.eintmask,
+                    machine->gpio.con[S3cGpio::f], machine->gpio.con[S3cGpio::g]);
     }
     if (!walks.empty()) {
         // The kernel's own mappings of SDRAM (OEMAddressTable): 0x8c000000 the first MB, 0x80000000 the rest.

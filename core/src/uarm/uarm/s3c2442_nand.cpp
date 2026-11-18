@@ -114,8 +114,8 @@ uint8_t S3cNand::dataByte() {
                 if (++pageOffset >= pageSize) pageOffset = 0;
                 return byte;
             }
-            if (row >= pages) return 0xff;
-            const size_t at = size_t(row) * pageSize + pageOffset;
+            // The chip ignores row bits above its size, for reads, program and erase alike.
+            const size_t at = size_t(row % pages) * pageSize + pageOffset;
             const uint8_t byte = at < flash.size() ? flash[at] : 0xff;
             if (pageOffset < pageData) addEccByte(byte);
             // Sequential reads run on into the next page.
