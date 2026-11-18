@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "soc_IMX1.h"
@@ -14,7 +16,7 @@ void put32le(std::vector<uint8_t>& rom, size_t at, uint32_t v) { for (int i = 0;
 void put32be(std::vector<uint8_t>& rom, size_t at, uint32_t v) { for (int i = 0; i < 4; ++i) rom[at + i] = uint8_t(v >> (24 - 8 * i)); }
 
 // The made-up ROM of test-zodiac-normal-runtime: the identity layout, and a branch to itself at 0.
-std::vector<uint8_t> rom() {
+std::vector<uint8_t> rom(uint32_t first = 0xeafffffe) {
     constexpr size_t card = 0x20000;
     std::vector<uint8_t> rom(card + 0x1000);
     put32le(rom, card + 0x78, 0x400);
@@ -26,7 +28,7 @@ std::vector<uint8_t> rom() {
         rom[at++] = uint8_t(0x80 | (length - 1));
         for (size_t i = 0; i < length; ++i, ++value) rom[at++] = uint8_t(value * 7 + 3);
     }
-    put32le(rom, 0, 0xeafffffe);
+    put32le(rom, 0, first);
     return rom;
 }
 
@@ -102,7 +104,39 @@ void machine() {
 }
 }  // namespace
 
-int main() {
+// A machine that stops: the first instruction is undefined and FROND_ZODIAC_STOP_ON_EXCEPTION stops on it.
+// A reset and a load start it again, with the setting in place.
+void halted() {
+    setenv("FROND_ZODIAC_STOP_ON_EXCEPTION", "1", 1);
+    auto image = rom(0xe7f000f0);
+    std::string why;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
+    assert(soc);
+    const auto fresh = save(*soc);
+    assert(soc->SetBattery(battery("level 20")));
+    const auto stop = [&] {
+        soc->Run(1000000, 32000000);
+        assert(soc->Halted());
+    };
+    stop();
+    load(*soc, fresh);
+    assert(!soc->Halted() && soc->BatterySample() == zodiacBatterySample(20) && !soc->ChargerInputLow());
+    stop();
+    soc->Reset();
+    assert(!soc->Halted() && soc->BatterySample() == zodiacBatterySample(20) && !soc->ChargerInputLow());
+    stop();
+    assert(soc->SetBattery(battery("level 20 charging")));
+    soc->Reset();
+    assert(soc->ChargerInputLow());
+}
+
+int main(int argc, char** argv) {
+    // One SocIMX1 per process: the halted case runs as its own process.
+    if (argc > 1 && std::string(argv[1]) == "halted") {
+        halted();
+        std::puts("zodiac-battery halted: ok");
+        return 0;
+    }
     curve();
     machine();
     std::puts("zodiac-battery: ok");

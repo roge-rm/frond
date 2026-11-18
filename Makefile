@@ -1010,6 +1010,7 @@ test-zodiac-battery: out/frond
 		tests/zodiac-battery.cpp @build/zodiac-battery-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-battery
 	./build/test-zodiac-battery
+	./build/test-zodiac-battery halted
 
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.

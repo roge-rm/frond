@@ -219,8 +219,9 @@ void SocIMX1::Reset() {
     if (info.status != Imx1StateStatus::ok)
         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
     orientationTracker.Restart(imx1MachineStartups(machine));
-    ApplyBattery();
     StateChanged();
+    // After StateChanged, which works out halted again for the loaded state.
+    ApplyBattery();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
     if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
@@ -268,10 +269,10 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
         return false;
     }
     SoC::Reset();
-    ApplyBattery();
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
+    ApplyBattery();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
     // a card section puts the card store's card back in when it's the saved card (a session saved with
     // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the
