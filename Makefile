@@ -1075,6 +1075,16 @@ build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
 test-zodiac-jit: build/test-zodiac-jit
 	./build/test-zodiac-jit
 
+# The ARM920T's FCSE on the interpreter: the PID remap for fetches and data, FAR, MVA keyed caches.
+.PHONY: test-arm920-fcse
+test: test-arm920-fcse
+build/test-arm920-fcse: out/frond tests/arm920-fcse.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/arm920-fcse-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/arm920-fcse.cpp @build/arm920-fcse-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+test-arm920-fcse: build/test-arm920-fcse
+	./build/test-arm920-fcse
+
 # Every option, command, environment variable, tool and target in the sources is in the developer reference.
 .PHONY: check-docs
 check-docs: prepare

@@ -917,6 +917,11 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
     cpu->regs[REG_NO_PC] = vector_pc;
 }
 
+// The ARM920T's FCSE: a VA below 32 MB is moved to VA | PID, the MVA its caches, TLB and FAR use.
+static FORCE_INLINE uint32_t cpuPrvMva(const struct ArmCpu *cpu, uint32_t va) {
+    return va < 0x02000000u ? va | cpu->pid : va;
+}
+
 // input addr is VA not MVA
 template <int kind = ARM_KIND_ANY>
 static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
@@ -933,11 +938,8 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
                         ARM_SR_MODE_UND | ARM_SR_I);
         return;
     }
-// FCSE
-#ifdef SUPPORT_FCSE
-    if (addr < 0x02000000UL)  // report addr is MVA
-        addr |= cpu->pid;
-#endif
+    // FAR gets the MVA. Only the ARM920T path has the FCSE.
+    if (cpuPrvArm920<kind>(cpu)) addr = cpuPrvMva(cpu, addr);
 
     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
         !(instrFetch && cpuPrvArm920<kind>(cpu))) {
@@ -1510,10 +1512,8 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         }
     }
 
-// FCSE
-#ifdef SUPPORT_FCSE
-    if (vaddr < 0x02000000UL) vaddr |= cpu->pid;
-#endif
+    // The ARM920T's FCSE: the TLB and the D-cache model below are keyed by MVA.
+    if constexpr (arm920) vaddr = cpuPrvMva(cpu, vaddr);
 
 #ifndef __EMSCRIPTEN__
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
@@ -2453,7 +2453,7 @@ static void execFn_swb(struct ArmCpu *cpu, uint32_t instr) {
                 ea &= ~3u;
             }
             for (bool writing : {false, true}) {
-                const auto translation = mmuTranslate(cpu->memorySystem.mmu, ea, cpu->privileged, writing);
+                const auto translation = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, ea), cpu->privileged, writing);
                 if (!MMU_TRANSLATE_RESULT_OK(translation))
                     return cpuPrvHandleMemErr<memorySystemKind>(cpu, ea, writing, false, MMU_TRANSLATE_RESULT_FSR(translation));
                 auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
@@ -4663,6 +4663,7 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
     if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         cpu->memorySystem.mmu = mmuInit(mem, xscale);
         cpu->ic = icacheInit(mem, cpu->memorySystem.mmu);
+        icacheArm920SetFcsePid(cpu->ic, &cpu->pid);
         cpu->cp15.cp15mmu =
             cp15MMUInit(cpu, cpu->memorySystem.mmu, cpu->ic, cpuid, cacheId, xscale, omap);
 
@@ -4769,9 +4770,7 @@ void cpuEndNativeCall(ArmCpu* cpu) {
 // span discontiguous physical pages. MMIO is never read as a side effect.
 static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false, bool privileged = true) {
     if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
-#ifdef SUPPORT_FCSE
-    if (address < 0x02000000u) address |= cpu->pid;
-#endif
+    if (cpu->model == ArmCpuModel::arm920t) address = cpuPrvMva(cpu, address);
     // Inspected reads skip the permission check so the debugger sees every mapped page.
     auto t = inspect ? (write ? mmuTranslateInspectAccess(cpu->memorySystem.mmu,address,privileged,true) :
                                 mmuTranslateInspect(cpu->memorySystem.mmu,address,false)) :
@@ -5868,8 +5867,9 @@ uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint3
     if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK | SLOW_PATH_REASON_INJECTED_CALL_DONE);
+    // A nonzero FCSE PID runs on the interpreter: the lean pages and host TLB are keyed by VA.
     if (cpu->slowPath || cpu->arm920Waiting || cpu->modePace || cpu->nativeCallDepth || cpu->nativePc[0] ||
-        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic))
+        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic) || cpu->pid)
         return 0;
     cpu->leanRun = true;
     cpu->leanExit = false;
@@ -7215,10 +7215,11 @@ static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTIO
                                                      SLOW_PATH_REASON_RESCHEDULE | SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
                                                      SLOW_PATH_REASON_INJECTED_CALL_DONE;
 
+// A nonzero FCSE PID runs on the interpreter, as for the lean run.
 bool cpuArm920JitCanRun(const ArmCpu *cpu) {
     return cpu->jitBlocks && !(cpu->slowPath & ~arm920JitClearedSlowPath) && !cpu->arm920Waiting && !cpu->modePace &&
            !cpu->nativeCallDepth && !cpu->nativePc[0] && !cpu->debugStub &&
-           !icacheArm920ContinuationPending(cpu->ic);
+           !icacheArm920ContinuationPending(cpu->ic) && !cpu->pid;
 }
 
 uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span, uint32_t *instructions) {
@@ -7493,7 +7494,15 @@ void cpuWakeup(struct ArmCpu *cpu) {
     cpuUpdateSlowPath(cpu);
 }
 
-void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) { cpu->pid = pid; }
+void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) {
+    // The ARM920T Fast engine's decode lines and lean host TLB are keyed by VA; Fast never runs with a
+    // nonzero PID, and a change drops them so none outlives the address space it was filled in.
+    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) {
+        icacheArm920DropDecoded(cpu->ic);
+        hostTlbFlush(&cpu->mem->hostTlb);
+    }
+    cpu->pid = pid;
+}
 
 uint32_t cpuGetPid(struct ArmCpu *cpu) { return cpu->pid; }
 

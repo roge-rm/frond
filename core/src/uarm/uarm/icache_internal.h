@@ -85,6 +85,9 @@ struct icache {
     // the model to read it uncached. While set the model fills no lines. Not saved.
     bool (*arm920LeanWord)(void* ctx, uint32_t va, unsigned size, bool privileged, uint32_t* word);
     void* arm920LeanWordCtx;
+    // The CPU's FCSE PID (cpuSetPid), which moves fetches below 32 MB to VA | PID: the ARM920T's lines
+    // hold MVAs. Only the ARM920T's fetch reads it.
+    const uint32_t* fcsePid;
     uint32_t nextFetchBuffer;
     struct {
         uint32_t base;

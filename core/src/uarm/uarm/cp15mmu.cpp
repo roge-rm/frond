@@ -141,8 +141,8 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             }
             if (CRn == 13) {
                 if (read) cpuSetReg(cpu, Rx, cpuGetPid(cpu));
-                else if (val == 0) cpuSetPid(cpu, 0);
-                else return false;  // Nonzero FCSE needs both instruction and data paths.
+                // FCSE PID, bits 31:25; the rest should be zero and is dropped.
+                else cpuSetPid(cpu, val & 0xfe000000u);
                 return true;
             }
         }
