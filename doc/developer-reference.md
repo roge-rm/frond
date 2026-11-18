@@ -831,8 +831,8 @@ A few slots get more fields. Values are signed decimal words unless said:
 
 | Slot | On the `call` line | On the `ret` line |
 | --- | --- | --- |
-| 214 VFSDirEntryEnumerate | `iter=` the iterator at r1 before the call | `iter=BEFORE->AFTER`, then from the FileInfoType at r2 `attr=` and `name="..."` |
-| 241 VFSVolumeEnumerate | `iter=` the iterator at r1 before the call | `iter=BEFORE->AFTER` and `vol=` the UInt16 at r0 |
+| 214 VFSDirEntryEnumerate | `iter=` the iterator at r1 before the call | `iter=BEFORE->AFTER`, then from the FileInfoType at r2 `attr=` and `name="..."`, with `(info unchanged)` when both are as they were before the call |
+| 241 VFSVolumeEnumerate | `iter=` the iterator at r1 before the call | `iter=BEFORE->AFTER` and `vol=BEFORE->AFTER`, the UInt16 at r0 |
 | 333 TwInputSetFormat | `features=[...]`, the r2 bytes at r1 as words | |
 | 336 TwInputPoll | | `n=` the queue's poll count and `buf=[...]`, the r2 bytes at r1 as words. Logged for the first 8 polls of each queue, then only when a word changes that isn't a 294 or 295 (time, sequence) one going by the queue's format, up to 2000 more |
 | 386 TwGfxBlendBlt, 387 TwGfxMaskBlendBlt | `point=[x y]` at r1 and `rect=[...]` the 16 bytes at r3 | |

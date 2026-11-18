@@ -1,6 +1,7 @@
 // The TwGlue log: a small ARM program is run one instruction at a time with the log watching, and the file it
 // writes is checked for the entry, a table call with a string argument, its return, an r9 module call, and the
-// dumps of TwInputSetFormat's features, TwInputPoll's buffer and TwGetDBDataDirectory's results. The MMU
+// dumps of TwInputSetFormat's features, TwInputPoll's buffer, TwGetDBDataDirectory's results and
+// VFSVolumeEnumerate's iterator and volume. The MMU
 // is on with a coarse page table, so the log's own page walk is used for every read.
 #include <cassert>
 #include <cstdint>
@@ -25,6 +26,14 @@ namespace {
 MemoryBuffer backing{};
 void put(uint32_t address, uint32_t value) { std::memcpy(backing.buffer + address, &value, 4); }
 uint32_t bl(uint32_t from, uint32_t to) { return 0xeb000000 | (((to - from - 8) >> 2) & 0xffffff); }
+uint32_t movImm(uint32_t reg, uint32_t value) {  // mov reg,#value for a value an ARM immediate can hold
+    for (uint32_t rot = 0; rot < 16; ++rot) {
+        const uint32_t v = rot ? (value << (2 * rot)) | (value >> (32 - 2 * rot)) : value;
+        if (v < 256) return 0xe3a00000 | reg << 12 | rot << 8 | v;
+    }
+    assert(false);
+    return 0;
+}
 bool physical(void*, uint32_t pa, void* data, uint32_t size) {
     if (uint64_t(pa) + size > 0x20000) return false;
     std::memcpy(data, backing.buffer + pa, size);
@@ -45,14 +54,13 @@ int main() {
     put(at, 0xe3a01a03); at += 4;               // mov r1,#0x3000
     put(at, 0xe1a0e00f); at += 4;               // mov lr,pc
     put(at, 0xe12fff14); at += 4;               // bx r4
-    // TwInputSetFormat(3, 0x3300, 16), TwInputPoll(3, 0x3400, 8), TwGetDBDataDirectory(0, 0x3100, 0x3200, 32)
-    const uint32_t calls[3][5] = {{333 * 4, 3, 0x3300, 16, 0}, {336 * 4, 3, 0x3400, 8, 0}, {472 * 4, 0, 0x3100, 0x3200, 32}};
+    // TwInputSetFormat(3, 0x3300, 16), TwInputPoll(3, 0x3400, 8), TwGetDBDataDirectory(0, 0x3100, 0x3200, 32),
+    // VFSVolumeEnumerate(0x3600, 0x3500)
+    const uint32_t calls[4][5] = {{333, 3, 0x3300, 16, 0}, {336, 3, 0x3400, 8, 0}, {472, 0, 0x3100, 0x3200, 32},
+                                  {241, 0x3600, 0x3500, 0, 0}};
     for (const auto& c : calls) {
-        put(at, 0xe5954000 | c[0]); at += 4;    // ldr r4,[r5,#slot*4]
-        put(at, 0xe3a00000 | c[1]); at += 4;    // mov r0,#a
-        put(at, 0xe3a01c00 | (c[2] >> 8)); at += 4;  // mov r1,#a
-        put(at, c[3] < 256 ? 0xe3a02000 | c[3] : 0xe3a02c00 | (c[3] >> 8)); at += 4;  // mov r2,#a
-        put(at, 0xe3a03000 | c[4]); at += 4;    // mov r3,#a
+        put(at, 0xe5954000 | c[0] * 4); at += 4;  // ldr r4,[r5,#slot*4]
+        for (uint32_t reg = 0; reg < 4; ++reg) { put(at, movImm(reg, c[reg + 1])); at += 4; }
         put(at, 0xe1a0e00f); at += 4;           // mov lr,pc
         put(at, 0xe12fff14); at += 4;           // bx r4
     }
@@ -76,6 +84,12 @@ int main() {
     put(dataDir + 16, 0xe3a03000); put(dataDir + 20, 0xe5c23002);  // mov r3,#0 ; strb r3,[r2,#2]
     put(dataDir + 24, 0xe3a03005); put(dataDir + 28, 0xe1c130b0);  // mov r3,#5 ; strh r3,[r1]
     put(dataDir + 32, 0xe3a00000); put(dataDir + 36, 0xe12fff1e);  // mov r0,#0 ; bx lr
+    constexpr uint32_t volumeEnumerate = 0x2700;
+    put(volumeEnumerate, 0xe3a03002); put(volumeEnumerate + 4, 0xe1c030b0);   // mov r3,#2 ; strh r3,[r0]
+    put(volumeEnumerate + 8, 0xe3e03000); put(volumeEnumerate + 12, 0xe5813000);  // mvn r3,#0 ; str r3,[r1]
+    put(volumeEnumerate + 16, 0xe3a00000); put(volumeEnumerate + 20, 0xe12fff1e);  // mov r0,#0 ; bx lr
+    put(table + 241 * 4, volumeEnumerate);
+    put(0x3600, 7);
     put(table + 333 * 4, setFormat);
     put(table + 336 * 4, poll);
     put(table + 472 * 4, dataDir);
@@ -146,6 +160,8 @@ int main() {
     assert(line("3000 call 1000 Call68KFunc").size());
     assert(line("3000 call 333 TwInputSetFormat_").find(" features=[296 0 297 -1]") != std::string::npos);
     assert(line("3000 ret 336 TwInputPoll_").find(" n=1 buf=[296 -5]") != std::string::npos);
+    assert(line("3000 call 241 VFSVolumeEnumerate_").find(" iter=00000000") != std::string::npos);
+    assert(line("3000 ret 241 VFSVolumeEnumerate_").find(" iter=00000000->ffffffff vol=7->2") != std::string::npos);
     assert(line("3000 ret 472 TwGetDBDataDirectory_").find(" r1.u16=5 r2.buf=\"\" hex=4101") != std::string::npos);
     std::remove(path.c_str());
     std::puts("ok");

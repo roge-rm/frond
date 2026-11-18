@@ -76,7 +76,7 @@ public:
 private:
     static constexpr uint32_t romRegion = 0x20;
     // The call's r0-r3 and first four stack words, and a word read before the call (an iterator).
-    struct Frame { uint32_t lr, sp, index, a[8], before; };
+    struct Frame { uint32_t lr, sp, index, a[8], before; std::string state; };
     // A queue's last poll buffer and how many polls it has had.
     struct Poll { uint32_t count = 0, logged = 0; std::vector<uint32_t> last; };
 
@@ -218,15 +218,16 @@ private:
         std::fprintf(out, "%llu call %s %s", (unsigned long long) ms(), list.c_str(), names.c_str());
         args(r);
         uint32_t before = 0;
-        callExtras(indexes[0], r, before);
+        std::string state;
+        callExtras(indexes[0], r, before, state);
         std::fputc('\n', out);
-        push(r, indexes[0], before);
+        push(r, indexes[0], before, std::move(state));
         flushSometimes();
     }
 
-    void push(const uint32_t* r, uint32_t index, uint32_t before = 0) {
+    void push(const uint32_t* r, uint32_t index, uint32_t before = 0, std::string state = {}) {
         if (frames.size() >= 256) frames.erase(frames.begin());
-        Frame f{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3]}, before};
+        Frame f{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3]}, before, std::move(state)};
         read(r[13], f.a + 4, 16);
         frames.push_back(f);
     }
@@ -267,7 +268,20 @@ private:
     }
 
     // Extra fields on a call line: input arrays, and the iterator an enumerate call starts from.
-    void callExtras(uint32_t index, const uint32_t* r, uint32_t& before) {
+    // The volume an enumerate call's r0 points at, or the FileInfoType at r2, as the ret line prints them.
+    std::string volume(uint32_t address) {
+        uint16_t vol = 0;
+        return address >= 0x1000 && read(address, &vol, 2) ? std::to_string(vol) : "?";
+    }
+    std::string fileInfo(uint32_t address) {
+        uint32_t info[3] = {};
+        if (address < 0x1000 || !read(address, info, 12)) return {};
+        char attr[16];
+        std::snprintf(attr, sizeof attr, "%08x", info[0]);
+        return std::string(" attr=") + attr + " name=" + buffer(info[1], info[2] & 0xffff);
+    }
+
+    void callExtras(uint32_t index, const uint32_t* r, uint32_t& before, std::string& state) {
         switch (index) {
         case twInputSetFormat: {
             std::fprintf(out, " features=%s", words(r[1], r[2]).c_str());
@@ -278,6 +292,7 @@ private:
         }
         case vfsVolumeEnumerate: case vfsDirEntryEnumerate:
             before = word(r[1]);
+            state = index == vfsVolumeEnumerate ? volume(r[0]) : fileInfo(r[2]);
             std::fprintf(out, " iter=%08x", before);
             break;
         case twGfxBlendBlt: case twGfxMaskBlendBlt:
@@ -297,18 +312,13 @@ private:
             std::fprintf(out, " r1.u16=%s r2.buf=%s", volOk ? std::to_string(vol).c_str() : "?", buffer(a[2], a[3] < 0x1000 ? a[3] : 0).c_str());
             break;
         }
-        case vfsVolumeEnumerate: {
-            uint16_t vol = 0;
-            const bool volOk = a[0] >= 0x1000 && read(a[0], &vol, 2);
-            std::fprintf(out, " iter=%08x->%08x vol=%s", f.before, word(a[1]), volOk ? std::to_string(vol).c_str() : "?");
+        case vfsVolumeEnumerate:
+            std::fprintf(out, " iter=%08x->%08x vol=%s->%s", f.before, word(a[1]), f.state.c_str(), volume(a[0]).c_str());
             break;
-        }
         case vfsDirEntryEnumerate: {
             // FileInfoType: UInt32 attributes, Char* nameP, UInt16 nameBufLen.
-            uint32_t info[3] = {};
-            const bool ok = a[2] >= 0x1000 && read(a[2], info, 12);
-            std::fprintf(out, " iter=%08x->%08x", f.before, word(a[1]));
-            if (ok) std::fprintf(out, " attr=%08x name=%s", info[0], buffer(info[1], info[2] & 0xffff).c_str());
+            const std::string info = fileInfo(a[2]);
+            std::fprintf(out, " iter=%08x->%08x%s%s", f.before, word(a[1]), info.c_str(), info == f.state ? " (info unchanged)" : "");
             break;
         }
         case twInputPoll: poll(f); break;
