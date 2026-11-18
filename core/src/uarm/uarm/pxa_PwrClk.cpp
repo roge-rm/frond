@@ -21,9 +21,8 @@
 #define PXA_POWER_MANAGER_BASE 0x40F00000UL
 #define PXA_POWER_MANAGER_SIZE 0x00000180UL
 
-#define SAVESTATE_VERSION 3
-// PXA25x saves stay at version 2; version 3 adds CLKCFG's HT and B on PXA27x.
-#define SAVESTATE_VERSION_PXA25X 2
+// Version 3 adds CLKCFG's HT and B, version 4 the CCCR the clocks were last taken from.
+#define SAVESTATE_VERSION 4
 
 struct PxaPwrClk {
     PxaI2s *i2s;
@@ -39,6 +38,7 @@ struct PxaPwrClk {
     uint32_t PSTR, PVCR, PUCR, PKWR, PKSR, PCMD[32];
     bool turbo, isPXA270;
     uint64_t coreHz;  // the core clock CCCR and CLKCFG gave at the last CLKCFG write, reset, wake or load
+    uint32_t cccrActive;  // the CCCR the cost clocks and coreHz came from; a CCCR write waits for CLKCFG
     uint32_t clkcfgBits;  // CLKCFG HT (bit 2) and B (bit 3) from the last write, PXA27x only
     bool sleeping, wakePending;
     bool restoring;
@@ -67,6 +67,7 @@ struct PxaPwrClk {
                 .DoBuffer32(PCMD, 32);
         if (version >= 2) chunkHelper.DoBool(sleeping).DoBool(wakePending);
         if (version >= 3) chunkHelper.Do32(clkcfgBits);
+        if (version >= 4) chunkHelper.Do32(cccrActive);
     }
 };
 
@@ -90,12 +91,13 @@ static bool pxaPwrClkPrvCoproc7regXferFunc(struct ArmCpu *cpu, void *userData, b
 
 // The cost model's region and data cache charges follow the clocks CCCR and CLKCFG give, from the
 // CLKCFG write (the frequency change sequence), reset and load.
-static void pxaPwrClkPrvSyncCost(struct PxaPwrClk *pc) {
-    const cost::Clocks c = pc->isPXA270 ? cost::pxa27xClocks(pc->CCCR, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
-                                        : cost::pxa25xClocks(pc->CCCR, pc->turbo);
+static void pxaPwrClkPrvSyncCost(struct PxaPwrClk *pc, bool takeCccr = true) {
+    if (takeCccr) pc->cccrActive = pc->CCCR;
+    const cost::Clocks c = pc->isPXA270 ? cost::pxa27xClocks(pc->cccrActive, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
+                                        : cost::pxa25xClocks(pc->cccrActive, pc->turbo);
     cpuSetCostClocks(pc->cpu, c.core, c.bus, c.memory);
-    pc->coreHz = pc->isPXA270 ? cost::pxa27xCoreHz(pc->CCCR, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
-                              : cost::pxa25xCoreHz(pc->CCCR, pc->turbo);
+    pc->coreHz = pc->isPXA270 ? cost::pxa27xCoreHz(pc->cccrActive, (pc->turbo ? 1u : 0u) | pc->clkcfgBits)
+                              : cost::pxa25xCoreHz(pc->cccrActive, pc->turbo);
 }
 
 static bool pxaPwrClkPrvCoproc14regXferFunc(struct ArmCpu *cpu, void *userData, bool two, bool read,
@@ -542,8 +544,8 @@ void pxaPwrClkReset(struct PxaPwrClk *pc) {
 
 template <typename T>
 void pxaPwrClkSave(struct PxaPwrClk *pc, T &savestate) {
-    // PXA25x moved to version 2 with power sleep; older versions still load.
-    const uint32_t version = pc->isPXA270 ? SAVESTATE_VERSION : SAVESTATE_VERSION_PXA25X;
+    // Older versions still load.
+    const uint32_t version = SAVESTATE_VERSION;
     auto chunk = savestate.GetChunk(ChunkType::pxaPwrClk, version);
     if (!chunk) ERR("unable to allocate chunk");
 
@@ -566,9 +568,10 @@ void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
         pc->PSTR = pc->PVCR = pc->PUCR = pc->PKWR = pc->PKSR = 0;
         memset(pc->PCMD, 0, sizeof(pc->PCMD));
     }
+    pc->cccrActive = pc->CCCR;  // before v4 the CCCR in effect is the one saved
     pc->DoSaveLoad(helper, version);
     if (pc->wakePending && !pc->sleeping) loader.NotifyError();
-    pxaPwrClkPrvSyncCost(pc);
+    pxaPwrClkPrvSyncCost(pc, false);
     // The later UDC load refreshes requests from its restored FIFO state.
     pxaPwrClkSyncUdc(pc,false);
 }
