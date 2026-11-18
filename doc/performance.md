@@ -94,9 +94,9 @@ Native audio backpressure pauses the whole guest (timers, DMA and codec) until S
 
 ## Against CloudpilotEmu
 
-Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo.
+Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo. The ARM runs predate [ARM timing](#arm-timing): the guest ran at a fixed 100 million instructions a guest second, one cycle each, so host MIPS there is instructions per host second for both cores.
 
-Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
+Tungsten E2, FrondBench through PACE, at the old fixed 100 million instructions a second, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
 
 | | Host MIPS best / median | Host s per guest s | FrondBench total |
 |---|---|---|---|
@@ -104,7 +104,7 @@ Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND
 | Frond Exact | 182.6 / 179.7 | 0.556 | 30020 ms |
 | Frond Fast | 361.2 / 358.0 | 0.279 | 29960 ms |
 
-Tungsten E2, Bike or Die 2 v2.1b in trial mode, level 1 with the TX's sustained key replay, 100 MIPS, guest 45 to 85 s. The game isn't frame-identical between cores, probably as the clock chip follows host time, but the level, section and input are the same.
+Tungsten E2, Bike or Die 2 v2.1b in trial mode, level 1 with the TX's sustained key replay, at the old fixed 100 million instructions a second, guest 45 to 85 s. The game isn't frame-identical between cores, probably as the clock chip follows host time, but the level, section and input are the same.
 
 | | Host MIPS best / median | Host s per guest s |
 |---|---|---|
@@ -120,7 +120,7 @@ Palm IIIx, FrondBench on the OS 3.5 EZ ROM, from the Run tap until the results a
 | Frond Original | 510.8 | 510460 ms | 8.33 / 8.44 | 0.0165 |
 | Frond Uncapped (8x) | 63.5 | 63170 ms | 8.04 / 8.31 | 0.131 |
 
-- On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike runs at 186 to 200 MIPS in Exact and about 575 in Fast.
+- On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike ran at 186 to 200 host MIPS in Exact and about 575 in Fast.
 - On the IIIx, Frond times the 68000 by the manual's clocks plus the EZ's wait states, LCD DMA and refresh (see [68k timing](#68k-timing)), so the same work takes 1.89x upstream's guest time; upstream runs guest code about 1.9x faster than a real IIIx. The same work takes about 1.58x upstream's host time, a few percent of it the GDB hooks. At real time a IIIx uses under 2% of one core, and Uncapped runs about 4x faster than upstream's default at about the same host cost.
 - E2 only for ARM. CloudpilotEmu normally runs in a browser as WebAssembly, which wasn't measured and would be slower than its native build.
 
