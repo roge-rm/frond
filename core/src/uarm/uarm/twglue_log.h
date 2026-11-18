@@ -22,6 +22,14 @@ class TwGlueLog {
 public:
     static constexpr uint32_t slots = 612;
     static constexpr uint32_t call68kIndex = 1000;
+    // Slots whose arguments or results are dumped (twglue_names.inc order).
+    enum Slot : uint32_t {
+        vfsDirEntryEnumerate = 214, vfsVolumeEnumerate = 241, twInputSetFormat = 333, twInputPoll = 336,
+        twGfxBlendBlt = 386, twGfxMaskBlendBlt = 387, twGetDBDataDirectory = 472,
+    };
+    // Polls logged in full per queue, then only the ones that change a value other than 294/295 (time, sequence),
+    // up to pollChanges.
+    static constexpr uint32_t pollFirst = 8, pollChanges = 2000;
 
     // Reads physical memory with no side effect: false where it isn't plain ROM or RAM.
     using PhysicalRead = bool (*)(void* context, uint32_t pa, void* data, uint32_t size);
@@ -51,15 +59,18 @@ public:
         // r2 = 0. The second call, PilotMain, has emulStateP in r0 and Call68KFunc in r2.
         if (jumped && arm && !(pc & 3) && (pc >> 24) != romRegion && r[0] == 0 && r[1] >= 0x1000 && entryHeader(pc)) {
             const bool table = looksLikeTable(r[1]);
-            if (table && !(r[1] == tableBase && pc == lastEntry)) entry(pc, r);
+            if (table && r[1] == tableBase && pc == lastEntry) restart();  // the same game launched again
+            else if (table) entry(pc, r);
         } else if (jumped && tableBase && pc == lastEntry && r[0]) {
             secondEntry(r);
         }
         if (!tableBase) return;
-        // Only calls from game code: the ROM calls many of the same functions itself.
-        if (pc >= lowest && pc <= highest && (r[14] >> 24) != romRegion) {
+        // Only calls from game code: the ROM calls many of the same functions itself. A call counts on a jump
+        // into the function, once: a branch back to its first instruction or a restart after an interrupt or
+        // abort finds the same call still open.
+        if (jumped && pc >= lowest && pc <= highest && (r[14] >> 24) != romRegion) {
             const auto it = targets.find(pc);
-            if (it != targets.end()) call(it->second, pc, r);
+            if (it != targets.end() && !open(r, it->second[0])) call(it->second, pc, r);
         }
         if (arm && (t.instruction & 0xfff0f000) == 0xe590f000 && ((r[14] >> 24) != romRegion || (pc >> 24) != romRegion))
             moduleCall(t.instruction, r);
@@ -67,7 +78,10 @@ public:
 
 private:
     static constexpr uint32_t romRegion = 0x20;
-    struct Frame { uint32_t lr, sp, index; };
+    // The call's r0-r3 and first four stack words, and a word read before the call (an iterator).
+    struct Frame { uint32_t lr, sp, index, a[8], before; std::string state; };
+    // A queue's last poll buffer and how many polls it has had.
+    struct Poll { uint32_t count = 0, logged = 0; std::vector<uint32_t> last; };
 
     ArmCpu* cpu;
     const Imx1ReferenceTime* time;
@@ -77,6 +91,8 @@ private:
     uint32_t lastEntry = 0, lastPc = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::vector<Frame> frames;
+    std::unordered_map<uint32_t, std::vector<int32_t>> formats;
+    std::unordered_map<uint32_t, Poll> polls;
 
     uint64_t ms() const { return time->ticks * 1000 / 32768; }
     // The page tables are walked here through the physical reader: the Zodiac's memory is one bus callback, so
@@ -162,6 +178,7 @@ private:
         tableBase = r[1];
         lastEntry = pc;
         targets.clear();
+        restart();
         lowest = ~0u;
         highest = 0;
         for (uint32_t i = 0; i < slots; ++i) add(table[i] & ~1u, i);
@@ -170,6 +187,13 @@ private:
                      targets.size(), r[2]);
         std::fflush(out);
         ++entries;
+    }
+
+    // A new launch: calls still open, input formats and poll counts belong to the last one.
+    void restart() {
+        frames.clear();
+        formats.clear();
+        polls.clear();
     }
 
     void secondEntry(const uint32_t* r) {
@@ -185,9 +209,9 @@ private:
         if (target > highest) highest = target;
     }
 
-    void args(const uint32_t* r) {
-        uint32_t s[4] = {};
-        read(r[13], s, sizeof s);
+    // Prints the arguments and fills s with the first four stack words (0 where unreadable).
+    void args(const uint32_t* r, uint32_t* s) {
+        if (!read(r[13], s, 16)) std::memset(s, 0, 16);
         std::fprintf(out, " r0=%08x r1=%08x r2=%08x r3=%08x s0=%08x s1=%08x s2=%08x s3=%08x lr=%08x", r[0], r[1], r[2], r[3], s[0],
                      s[1], s[2], s[3], r[14]);
         const uint32_t v[8] = {r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]};
@@ -203,15 +227,154 @@ private:
         std::string names;
         for (const uint32_t index : indexes) names += (names.empty() ? "" : "|") + std::string(name(index));
         std::fprintf(out, "%llu call %s %s", (unsigned long long) ms(), list.c_str(), names.c_str());
-        args(r);
+        uint32_t s[4];
+        args(r, s);
+        uint32_t before = 0;
+        std::string state;
+        callExtras(indexes[0], r, before, state);
         std::fputc('\n', out);
-        push(r, indexes[0]);
+        push(r, s, indexes[0], before, std::move(state));
         flushSometimes();
     }
 
-    void push(const uint32_t* r, uint32_t index) {
+    // True when this call (same return address, stack and index) is among the newest open calls with that
+    // return address and stack: a table stub and the module call it makes share them.
+    bool open(const uint32_t* r, uint32_t index) const {
+        for (auto f = frames.rbegin(); f != frames.rend() && f->lr == (r[14] & ~1u) && f->sp == r[13]; ++f)
+            if (f->index == index) return true;
+        return false;
+    }
+
+    void push(const uint32_t* r, const uint32_t* s, uint32_t index, uint32_t before = 0, std::string state = {}) {
         if (frames.size() >= 256) frames.erase(frames.begin());
-        frames.push_back({r[14] & ~1u, r[13], index});
+        frames.push_back(Frame{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]}, before, std::move(state)});
+    }
+
+    // Up to max 32-bit words at address as signed decimal, `[1 2 3]`, or nothing when unreadable.
+    std::string words(uint32_t address, uint32_t bytes, uint32_t max = 64) {
+        const uint32_t n = std::min(bytes / 4, max);
+        std::vector<int32_t> w(n);
+        if (address < 0x1000 || (n && !read(address, w.data(), n * 4))) return "?";
+        std::string s = "[";
+        for (uint32_t i = 0; i < n; ++i) s += (i ? " " : "") + std::to_string(w[i]);
+        return s + (bytes / 4 > max ? " ...]" : "]");
+    }
+
+    // A NUL-ended string at address (up to size bytes, at most 256) as `"text"`, with `hex=..` added when it
+    // holds bytes outside printable ASCII. Read in aligned 16-byte pieces up to the NUL, so a string near the end of
+    // mapped memory still reads; `?` when nothing can be read.
+    std::string buffer(uint32_t address, uint32_t size) {
+        const uint32_t n = std::min<uint32_t>(size, 256);
+        if (address < 0x1000) return "?";
+        std::string str;
+        for (uint32_t offset = 0; offset < n;) {
+            char piece[16];
+            const uint32_t count = std::min<uint32_t>(16 - ((address + offset) & 15), n - offset);
+            if (!read(address + offset, piece, count)) {
+                if (!offset) return "?";
+                break;
+            }
+            const char* nul = static_cast<const char*>(std::memchr(piece, 0, count));
+            str.append(piece, nul ? nul - piece : count);
+            if (nul) break;
+            offset += count;
+        }
+        bool printable = true;
+        for (const unsigned char c : str) printable = printable && c >= 32 && c < 127;
+        std::string s = "\"" + (printable ? str : std::string()) + "\"";
+        if (!printable) {
+            s += " hex=";
+            char h[3];
+            for (const unsigned char c : str) { std::snprintf(h, sizeof h, "%02x", c); s += h; }
+        }
+        return s;
+    }
+
+    uint32_t word(uint32_t address) {
+        uint32_t v = 0;
+        if (address >= 0x1000) read(address, &v, 4);
+        return v;
+    }
+
+    // Extra fields on a call line: input arrays, and the iterator an enumerate call starts from.
+    // The volume an enumerate call's r0 points at, or the FileInfoType at r2, as the ret line prints them.
+    std::string volume(uint32_t address) {
+        uint16_t vol = 0;
+        return address >= 0x1000 && read(address, &vol, 2) ? std::to_string(vol) : "?";
+    }
+    std::string fileInfo(uint32_t address) {
+        uint32_t info[3] = {};
+        if (address < 0x1000 || !read(address, info, 12)) return {};
+        char attr[16];
+        std::snprintf(attr, sizeof attr, "%08x", info[0]);
+        return std::string(" attr=") + attr + " name=" + buffer(info[1], info[2] & 0xffff);
+    }
+
+    void callExtras(uint32_t index, const uint32_t* r, uint32_t& before, std::string& state) {
+        switch (index) {
+        case twInputSetFormat: {
+            std::fprintf(out, " features=%s", words(r[1], r[2]).c_str());
+            const uint32_t n = std::min<uint32_t>(r[2] / 4, 64);
+            std::vector<int32_t> f(n);
+            if (r[1] >= 0x1000 && read(r[1], f.data(), n * 4)) formats[r[0]] = f;
+            break;
+        }
+        case vfsVolumeEnumerate: case vfsDirEntryEnumerate:
+            before = word(r[1]);
+            state = index == vfsVolumeEnumerate ? volume(r[0]) : fileInfo(r[2]);
+            std::fprintf(out, " iter=%08x", before);
+            break;
+        case twGfxBlendBlt: case twGfxMaskBlendBlt:
+            std::fprintf(out, " point=%s rect=%s", words(r[1], 8).c_str(), words(r[3], 16).c_str());
+            break;
+        default: break;
+        }
+    }
+
+    // Extra fields on a ret line, read after the call returned.
+    void retExtras(const Frame& f) {
+        const uint32_t* a = f.a;
+        switch (f.index) {
+        case twGetDBDataDirectory: {
+            uint16_t vol = 0;
+            const bool volOk = a[1] >= 0x1000 && read(a[1], &vol, 2);
+            std::fprintf(out, " r1.u16=%s r2.buf=%s", volOk ? std::to_string(vol).c_str() : "?", buffer(a[2], a[3]).c_str());
+            break;
+        }
+        case vfsVolumeEnumerate:
+            std::fprintf(out, " iter=%08x->%08x vol=%s->%s", f.before, word(a[1]), f.state.c_str(), volume(a[0]).c_str());
+            break;
+        case vfsDirEntryEnumerate: {
+            // FileInfoType: UInt32 attributes, Char* nameP, UInt16 nameBufLen.
+            const std::string info = fileInfo(a[2]);
+            std::fprintf(out, " iter=%08x->%08x%s%s", f.before, word(a[1]), info.c_str(), info == f.state ? " (info unchanged)" : "");
+            break;
+        }
+        case twInputPoll: poll(f); break;
+        default: break;
+        }
+    }
+
+    // The poll buffer (r1, r2 bytes): the first pollFirst per queue, then changes outside time and sequence.
+    void poll(const Frame& f) {
+        const uint32_t n = std::min<uint32_t>(f.a[2] / 4, 64);
+        std::vector<uint32_t> b(n);
+        if (f.a[1] < 0x1000 || !read(f.a[1], b.data(), n * 4)) return;
+        Poll& q = polls[f.a[0]];
+        ++q.count;
+        bool changed = q.last.size() != b.size();
+        const auto fmt = formats.find(f.a[0]);
+        for (uint32_t i = 0; !changed && i < n; ++i) {
+            if (b[i] == q.last[i]) continue;
+            const int32_t selector = fmt != formats.end() && i < fmt->second.size() ? fmt->second[i] : 0;
+            changed = selector != 294 && selector != 295;
+        }
+        q.last = b;
+        if (q.count > pollFirst && (!changed || q.logged >= pollFirst + pollChanges)) return;
+        ++q.logged;
+        std::fprintf(out, " n=%u buf=[", q.count);
+        for (uint32_t i = 0; i < n; ++i) std::fprintf(out, "%s%d", i ? " " : "", int32_t(b[i]));
+        std::fputc(']', out);
     }
 
     void moduleCall(uint32_t instruction, const uint32_t* r) {
@@ -222,10 +385,12 @@ private:
             uint32_t table;
             if (!read(r[9] - 4 * (m + 1), &table, 4) || table != base) continue;
             const uint32_t index = (instruction & 0xfff) / 4;
+            if (open(r, 2000 + m * 1000 + index)) return;
             std::fprintf(out, "%llu call %s %u", (unsigned long long) ms(), modules[m], index);
-            args(r);
+            uint32_t s[4];
+            args(r, s);
             std::fputc('\n', out);
-            push(r, 2000 + m * 1000 + index);
+            push(r, s, 2000 + m * 1000 + index);
             flushSometimes();
             return;
         }
@@ -238,7 +403,9 @@ private:
             std::string what;
             if (f.index >= 2000) what = std::string(f.index < 3000 ? "DAL" : f.index < 4000 ? "Boot" : "UI") + " " + std::to_string(f.index % 1000);
             else what = std::to_string(f.index) + " " + name(f.index);
-            std::fprintf(out, "%llu ret %s r0=%08x%s\n", (unsigned long long) ms(), what.c_str(), r[0], text(r[0]).c_str());
+            std::fprintf(out, "%llu ret %s r0=%08x%s", (unsigned long long) ms(), what.c_str(), r[0], text(r[0]).c_str());
+            if (f.index < 2000) retExtras(f);
+            std::fputc('\n', out);
             flushSometimes();
         }
     }
