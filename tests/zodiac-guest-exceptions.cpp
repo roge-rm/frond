@@ -3,8 +3,10 @@
 // state: mode, I set, F kept, ARM state, SPSR, the link for each kind, FSR and FAR for a data abort and both left
 // alone for the others, the prefetch FSR (c5, op2 1) for a prefetch abort only. The data abort handler reads FSR
 // and FAR with CRm 5 and 6, as the Zodiac ROM's does. Data aborts on loads and stores with writeback, and an LDM
-// that loads its base, leave the base as it was (the ARM920T's base restored model). Exact, lean-only Fast and Fast
-// blocks end the same. The observer sees a prefetch abort's step as not fetched. Off, the machine stops on them.
+// that loads its base, leave the base as it was (the ARM920T's base restored model). With CP15 c1 A set, misaligned
+// halfword and word loads and stores (ARM and Thumb, PACE's LDRH of an odd 68k PC among them) take an alignment data
+// abort, FSR 1; with A clear a misaligned halfword stops the machine. Exact, lean-only Fast and Fast blocks end the
+// same. The observer sees a prefetch abort's step as not fetched. Off, the machine stops on them.
 // LDM and STM go from the lowest register and address up in every mode, as the ARM920T does: a DA or DB transfer that
 // straddles the edge stores or loads its word below the edge before the abort.
 #define ZODIAC_STATE_MAIN stateMain
@@ -12,7 +14,12 @@
 
 namespace {
 enum class Kind { dataLoop, dataThumb, prefetch, undefinedArm, undefinedThumb, ldrPre, ldrPost, strPre, ldmWriteback,
-                  ldmBase, stmWriteback, stmdbWriteback, stmdaWriteback, ldmdbWriteback, thumbLdm, thumbStm };
+                  ldmBase, stmWriteback, stmdbWriteback, stmdaWriteback, ldmdbWriteback, thumbLdm, thumbStm, ldrhOdd,
+                  strhOdd, thumbLdrhOdd, thumbLdrWord, ldrhOddNoA };
+bool alignment(Kind k) {
+    return k == Kind::ldrhOdd || k == Kind::strhOdd || k == Kind::thumbLdrhOdd || k == Kind::thumbLdrWord ||
+           k == Kind::ldrhOddNoA;
+}
 const char* kindName(Kind k) {
     switch (k) {
         case Kind::dataLoop: return "data abort loop";
@@ -31,12 +38,17 @@ const char* kindName(Kind k) {
         case Kind::ldmdbWriteback: return "ldmdb writeback";
         case Kind::thumbLdm: return "thumb ldmia";
         case Kind::thumbStm: return "thumb stmia";
+        case Kind::ldrhOdd: return "ldrh odd post-indexed";
+        case Kind::strhOdd: return "strh odd";
+        case Kind::thumbLdrhOdd: return "thumb ldrh odd";
+        case Kind::thumbLdrWord: return "thumb ldr misaligned";
+        case Kind::ldrhOddNoA: return "ldrh odd, alignment checks off";
     }
     return "?";
 }
 constexpr uint32_t handlerBase = 0x100, fsrMark = 0xa, farMark = 0x12345678, ifsrMark = 0xc, unmapped = 0x00400000;
-// The section translation fault in domain 0 (DDI0151C table 3-7).
-constexpr uint32_t sectionFault = 5;
+// The section translation fault in domain 0 and the alignment fault (DDI0151C table 3-7).
+constexpr uint32_t sectionFault = 5, alignmentFault = 1;
 // The writeback cases' boundary: VA section 5 is a coarse table whose last 4 KiB page (0x005ff000) is the
 // top of SRAM, which takes stores, and section 6 is unmapped.
 constexpr uint32_t edge = 0x00600000;
@@ -75,7 +87,8 @@ FaultGuest guest(Kind kind) {
     load(words, 0, 0x00304000);
     words.push_back(0xee020f10);                           // TTB
     load(words, 1, 1); words.push_back(0xee031f10);        // domain 0 client
-    load(words, 1, 0x107d); words.push_back(0xee011f10);   // MMU, D- and I-cache on
+    // MMU, D- and I-cache on, and alignment fault checking (A) for the alignment cases, as the Zodiac ROM sets it.
+    load(words, 1, alignment(kind) && kind != Kind::ldrhOddNoA ? 0x107f : 0x107d); words.push_back(0xee011f10);
     load(words, 1, fsrMark); words.push_back(0xee051f10);  // FSR
     load(words, 1, farMark); words.push_back(0xee061f10);  // FAR
     load(words, 1, ifsrMark); words.push_back(0xee051f30);  // prefetch FSR
@@ -132,6 +145,18 @@ FaultGuest guest(Kind kind) {
         faultAddress = edge;
         thumb(0xc230);  // stmia r2!, {r4, r5}
         break;
+    // Misaligned accesses to SRAM, which is mapped: the fault is the alignment.
+    case Kind::ldrhOdd: case Kind::ldrhOddNoA:
+        arm(0x0030086f, 0xe0d250b2); faultAddress = 0x0030086f; break;  // ldrh r5, [r2], #2
+    case Kind::strhOdd: arm(0x00308001, 0xe1c250b0); faultAddress = 0x00308001; break;  // strh r5, [r2]
+    case Kind::thumbLdrhOdd:
+        load(words, 2, base = faultAddress = 0x00308003);
+        thumb(0x8815);  // ldrh r5, [r2]
+        break;
+    case Kind::thumbLdrWord:
+        load(words, 2, base = faultAddress = 0x00308002);
+        thumb(0x6815);  // ldr r5, [r2]
+        break;
     case Kind::prefetch:
         load(words, 3, 0x00700000);
         words.push_back(0xe1a0f003);  // mov pc, r3
@@ -187,7 +212,7 @@ void print(const char* name, const char* engine, const Outcome& o) {
 void check(Kind kind) {
     const auto g = guest(kind);
     const bool thumb = kind == Kind::dataThumb || kind == Kind::undefinedThumb || kind == Kind::thumbLdm ||
-                       kind == Kind::thumbStm;
+                       kind == Kind::thumbStm || kind == Kind::thumbLdrhOdd || kind == Kind::thumbLdrWord;
     const bool undefined = kind == Kind::undefinedArm || kind == Kind::undefinedThumb;
     const bool prefetch = kind == Kind::prefetch;
     const bool data = !undefined && !prefetch;
@@ -197,7 +222,19 @@ void check(Kind kind) {
         const auto o = run(g.words, fast, false);
         print(kindName(kind), fast ? "off fast" : "off exact", o);
         assert(o.run.status == Imx1MachineStatus::terminal && o.run.result.trace.pc == g.faultPc);
-        assert(o.run.result.stop == (undefined ? Imx1ProbeStop::unsupportedInstruction : Imx1ProbeStop::exception));
+        assert(o.run.result.stop == (undefined || alignment(kind) ? Imx1ProbeStop::unsupportedInstruction :
+                                     Imx1ProbeStop::exception));
+    }
+    if (kind == Kind::ldrhOddNoA) {
+        // A clear: ARMv4 leaves a misaligned halfword unpredictable, so the machine stops before it with the guest's
+        // exceptions on too, with nothing changed.
+        for (bool fast : {false, true}) {
+            const auto o = run(g.words, fast, true);
+            print(kindName(kind), fast ? "fast" : "exact", o);
+            assert(o.run.status == Imx1MachineStatus::terminal && o.run.result.trace.pc == g.faultPc &&
+                   o.run.result.stop == Imx1ProbeStop::unsupportedInstruction && o.run.result.registers[2] == g.base);
+        }
+        return;
     }
     Outcome results[3];
     Unfetched unfetched;
@@ -220,7 +257,8 @@ void check(Kind kind) {
            r.cpsr >> 28 == r.spsr >> 28);
     assert(r.registers[14] == g.faultPc + (undefined ? (thumb ? 2u : 4u) : data ? 8u : 4u));
     if (data) {
-        assert(r.registers[9] == sectionFault && r.registers[10] == g.faultAddress && r.registers[2] == g.base);
+        assert(r.registers[9] == (alignment(kind) ? alignmentFault : sectionFault) &&
+               r.registers[10] == g.faultAddress && r.registers[2] == g.base);
         if (kind == Kind::dataLoop) assert(r.registers[7] == 200 - 62);
         // The transfers that reach the word below the edge first take it before the abort.
         const bool storesBelow = kind == Kind::stmWriteback || kind == Kind::stmdbWriteback ||
@@ -248,9 +286,10 @@ int main() {
     for (auto kind : {Kind::dataLoop, Kind::dataThumb, Kind::prefetch, Kind::undefinedArm, Kind::undefinedThumb,
                       Kind::ldrPre, Kind::ldrPost, Kind::strPre, Kind::ldmWriteback, Kind::ldmBase,
                       Kind::stmWriteback, Kind::stmdbWriteback, Kind::stmdaWriteback, Kind::ldmdbWriteback,
-                      Kind::thumbLdm, Kind::thumbStm})
+                      Kind::thumbLdm, Kind::thumbStm, Kind::ldrhOdd, Kind::strhOdd, Kind::thumbLdrhOdd,
+                      Kind::thumbLdrWord, Kind::ldrhOddNoA})
         check(kind);
     std::puts("PASS: data and prefetch aborts and undefined instructions reach the guest's vectors with the ARM920T's "
-              "entry state and base restored, DA and DB transfers going upward, the same in Exact and Fast, and stop the "
-              "machine with the switch off");
+              "entry state and base restored, DA and DB transfers going upward, misaligned accesses take alignment "
+              "aborts with A set and stop without it, the same in Exact and Fast, and stop the machine with the switch off");
 }
