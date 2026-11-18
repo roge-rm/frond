@@ -15,6 +15,7 @@
 #include "imx1_bootstrap.h"
 #include "sdcard.h"
 #include "vSD.h"
+#include "zodiac_battery.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
@@ -118,6 +119,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
     soc->ramSize = 128u << 20;
+    soc->ApplyBattery();
     soc->StateChanged();
     // The owner keeps it for the life of the process, like the machine inside.
     return soc.release();
@@ -214,6 +216,7 @@ void SocIMX1::Reset() {
     if (info.status != Imx1StateStatus::ok)
         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
     orientationTracker.Restart(imx1MachineStartups(machine));
+    ApplyBattery();
     StateChanged();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
@@ -262,6 +265,7 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
         return false;
     }
     SoC::Reset();
+    ApplyBattery();
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
@@ -322,6 +326,22 @@ bool SocIMX1::LoadBringUpState(const uint8_t* data, size_t size) {
         size = gunzip->GetUncompressedSize();
     }
     return LoadState(data, size, imx1StateAllowBootInputs);
+}
+
+bool SocIMX1::SetBattery(const BatteryPower& value) {
+    battery = value;
+    ApplyBattery();
+    return true;
+}
+
+// The level as the ASP U word the DAL's battery read takes (zodiac_battery.h). Maximum is the fixed
+// 0x9b00 every Zodiac state was made with.
+// The level as the ASP U word the DAL's battery read takes (zodiac_battery.h). Maximum is the fixed 0x9b00
+// every Zodiac state was made with.
+void SocIMX1::ApplyBattery() {
+    if (halted) return;
+    if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the battery level could not be set" << std::endl;
 }
 
 uint64_t SocIMX1::GetTime() {

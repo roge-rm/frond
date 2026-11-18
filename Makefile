@@ -990,6 +990,17 @@ test-zodiac-normal-runtime: out/frond
 	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
 
+.PHONY: test-zodiac-battery
+test: test-zodiac-battery
+# The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.
+test-zodiac-battery: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-battery.cpp @build/zodiac-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-battery
+	./build/test-zodiac-battery
+
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
 test-zodiac-session-cards: out/frond

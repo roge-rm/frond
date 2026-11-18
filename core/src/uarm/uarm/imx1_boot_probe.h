@@ -316,6 +316,12 @@ uint32_t imx1MachineStartups(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine*, const Imx1AspPenInputs&, bool commit = true);
 // The pen inputs the machine has now, as the options or the last replace left them.
 Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
+// The ASP's U input word (the Zodiac's battery), for the next U conversion. Not saved with the state: a load
+// or a fresh machine starts from aspUSample again. Needs aspUSampleKnown.
+Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
+uint16_t imx1MachineAspUInput(const Imx1Machine*);
+// A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
+uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
 // Execution-thread raw physical inputs. Preview validates without changing guest state.
 // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],

@@ -53,6 +53,9 @@ class Imx1Bootstrap {
     Imx1BootstrapAccess replaceAspPenInputs(const Imx1AspPenInputs& inputs, bool commit = true);
     bool aspPenWakePossible(const Imx1AspPenInputs& inputs) const;
     const Imx1AspPenInputs& aspPenInputs() const { return asp.currentPenInputs(); }
+    void setAspUInput(uint16_t word) { asp.setUInput(word); }
+    uint16_t aspUInput() const { return asp.currentUInput(); }
+    uint32_t gpioInputSample(unsigned port) const { return gpio.inputSample(port); }
     void setMmcsdEmptySlot(bool enabled) { SourceChange change(*this); mmcsd.setEmptySlot(enabled); }
     // The card in the MMCSD slot, or null. Card detect is a GPIO input the caller drives. The card already
     // in, or a card a loaded state's card section resumes (stateCard), keeps its transfer and DMA. Returns

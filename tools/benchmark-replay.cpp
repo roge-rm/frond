@@ -285,6 +285,12 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const bool fast=jit && std::string(jit)=="1";
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
     soc->SetHostTimeLimit(false);
+    // BENCH_BATTERY: the battery setting, as --battery takes it (Maximum without).
+    if (const char* spec=std::getenv("BENCH_BATTERY"); spec && *spec) {
+        BatteryPower battery;
+        if (!BatteryPower::Parse(spec,battery)) throw std::runtime_error("BENCH_BATTERY is max, level N or host N, then charging or battery");
+        soc->SetBattery(battery);
+    }
     clockStart=soc->GetTime(); clockSoc=soc.get();
     SoC::SetEventClock(eventMs);
     if (!card.empty()) {

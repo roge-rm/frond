@@ -2382,6 +2382,20 @@ Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine* machine) {
     return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspPenInputs()
                                                                    : Imx1AspPenInputs{};
 }
+Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine* machine, uint16_t word) {
+    if (!machine) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals || !p->options.aspUSampleKnown)
+        return Imx1BootstrapAccess::sequence;
+    p->peripherals.setAspUInput(word);
+    return Imx1BootstrapAccess::ok;
+}
+uint32_t imx1MachineGpioInput(const Imx1Machine* machine, unsigned port) {
+    return machine ? machine->probe->peripherals.gpioInputSample(port) : 0;
+}
+uint16_t imx1MachineAspUInput(const Imx1Machine* machine) {
+    return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspUInput() : 0;
+}
 
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine* machine, const uint32_t (&values)[4],
                                                const uint32_t (&masks)[4], bool commit) {
