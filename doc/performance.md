@@ -118,10 +118,10 @@ Palm IIIx, FrondBench on the OS 3.5 EZ ROM, from the Run tap until the results a
 |---|---|---|---|---|
 | CloudpilotEmu (clock factor 0.5) | 270.0 | 269800 ms | 5.33 / 5.35 | 0.0198 |
 | Frond Original | 510.8 | 510460 ms | 8.33 / 8.44 | 0.0165 |
-| Frond 8x | 63.5 | 63170 ms | 8.04 / 8.31 | 0.131 |
+| Frond Uncapped (8x) | 63.5 | 63170 ms | 8.04 / 8.31 | 0.131 |
 
 - On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike ran at 186 to 200 host MIPS in Exact and about 575 in Fast.
-- On the IIIx, Frond times the 68000 by the manual's clocks plus the EZ's wait states, LCD DMA and refresh (see [68k timing](#68k-timing)), so the same work takes 1.89x upstream's guest time; upstream runs guest code about 1.9x faster than a real IIIx. The same work takes about 1.58x upstream's host time, a few percent of it the GDB hooks. At real time a IIIx uses under 2% of one core, and 8x runs about 4x faster than upstream's default at about the same host cost. Uncapped starts at 8x and moves its factor each second to what keeps the host about 80% busy, up to 64x; headless runs stay at 8x.
+- On the IIIx, Frond times the 68000 by the manual's clocks plus the EZ's wait states, LCD DMA and refresh (see [68k timing](#68k-timing)), so the same work takes 1.89x upstream's guest time; upstream runs guest code about 1.9x faster than a real IIIx. The same work takes about 1.58x upstream's host time, a few percent of it the GDB hooks. At real time a IIIx uses under 2% of one core, and Uncapped runs about 4x faster than upstream's default at about the same host cost.
 - E2 only for ARM. CloudpilotEmu normally runs in a browser as WebAssembly, which wasn't measured and would be slower than its native build.
 
 ## Debug patches

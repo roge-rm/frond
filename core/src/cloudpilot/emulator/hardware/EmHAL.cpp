@@ -477,6 +477,10 @@ void EmHAL::ScaleCycles(uint32 factor) {
     EmHAL::GetRootHandler()->ScaleCycles(factor);
 }
 
+void EmHAL::FlushTimers(double scale) {
+    if (EmHAL::GetRootHandler()) EmHAL::GetRootHandler()->FlushTimers(scale);
+}
+
 bool EmHAL::EnableRAM() {
     EmAssert(EmHAL::GetRootHandler());
     return EmHAL::GetRootHandler()->EnableRAM();
@@ -815,6 +819,10 @@ uint32 EmHALHandler::CyclesToNextInterrupt(uint64 systemCycles) {
 
     EmAssert(this->GetNextHandler());
     return this->GetNextHandler()->CyclesToNextInterrupt(systemCycles);
+}
+
+void EmHALHandler::FlushTimers(double scale) {
+    if (this->GetNextHandler()) this->GetNextHandler()->FlushTimers(scale);
 }
 
 void EmHALHandler::ScaleCycles(uint32 factor) {

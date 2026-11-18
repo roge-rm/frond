@@ -45,8 +45,12 @@ def main():
     bad = subprocess.run([CORE, '--rom', rom, '--device', 'palm-iiix', '--run-for', '1', '--speed', '5x'],
                          capture_output=True, text=True, timeout=60)
     assert bad.returncode != 0
+    # 8x is Uncapped's speed on the 68k, so Faster stops at 4x.
+    eight = subprocess.run([CORE, '--rom', rom, '--device', 'palm-iiix', '--run-for', '1', '--speed', '8x'],
+                           capture_output=True, text=True, timeout=60)
+    assert eight.returncode != 0 and "8x is Uncapped's speed" in eight.stderr, eight.stderr[-500:]
     print(f'original: {base_cycles} cycles in {base_seconds:.3f} guest s at {base_rate:.0f} Hz')
-    for speed, factor in (('1.5x', 1.5), ('2x', 2), ('3x', 3), ('4x', 4), ('8x', 8)):
+    for speed, factor in (('1.5x', 1.5), ('2x', 2), ('3x', 3), ('4x', 4)):
         cycles, seconds, rate = headless(rom, speed)
         ratio = (cycles / seconds) / (base_cycles / base_seconds)
         print(f'{speed}: {cycles} cycles in {seconds:.3f} guest s at {rate:.0f} Hz, {ratio:.4f}x')
@@ -72,13 +76,10 @@ def main():
             assert core.send('speed original', 'speed:').strip() == 'speed: original'
             state = core.send('speed-state', 'speed:').strip()
             assert state.endswith(', original') and f'limit {CLOCK / 1e6:.2f} MHz' in state, state
+            assert "8x is Uncapped's speed" in core.send('speed 8x', 'usage: speed')
             assert core.send('speed uncapped', 'speed:').strip() == 'speed: uncapped'
-            # Uncapped moves its factor each second to what the host manages, from 8x up to at most 64x.
-            time.sleep(4)
             state = core.send('speed-state', 'speed:').strip()
-            print(state)
-            found = re.search(r'limit ([\d.]+) MHz, \d+%, uncapped$', state)
-            assert found and CLOCK / 1e6 * 0.99 <= float(found.group(1)) <= 64 * CLOCK / 1e6 * 1.01, state
+            assert state.endswith(', uncapped') and f'limit {8 * CLOCK / 1e6:.2f} MHz' in state, state
         finally:
             core.close()
     print('PASS: frond-68k Faster speeds, Original unchanged, speed command and option')

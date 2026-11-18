@@ -143,16 +143,27 @@ void IgnoreGoneXWindows() {}
 // session from another pin is refused rather than half loaded.
 constexpr const char* kSessionFormat = "frond-68k 1";
 constexpr const char* kCloudpilotPin = "cloudpilot 064d5d5";
-// Faster runs the CPU its multiplier times faster than the real clock, with timers on real time. Uncapped
-// starts at kUncappedFactor; the paced loop then moves it each second to what keeps the host kUncappedLoad
-// busy, between 1 and kUncappedMaxFactor, rising at most kUncappedRise times a second. Headless runs keep
-// the starting factor.
+// Uncapped runs the CPU this many times faster than the real clock, with timers on real time. Faster runs it
+// its multiplier times faster the same way, up to kMaxFasterFactor; 8x would be the same as Uncapped.
 constexpr double kUncappedFactor = 8;
-constexpr double kUncappedMaxFactor = 64;
-constexpr double kUncappedLoad = 0.8;
-constexpr double kUncappedRise = 1.5;
+constexpr double kMaxFasterFactor = 4;
 
 using Speed = SpeedSetting5;
+
+// The 68k's speed settings: SpeedSetting5's without 8x, which is Uncapped's speed here.
+constexpr const char* kSpeedChoices68k = "original|1.5x|2x|3x|4x|uncapped";
+constexpr const char* kSpeed8x68k = "8x is Uncapped's speed on the 68k; use uncapped";
+bool ParseSpeed68k(const string& text, Speed& out) {
+    Speed parsed;
+    if (!Speed::Parse(text, parsed)) return false;
+    if (parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor) return false;
+    out = parsed;
+    return true;
+}
+bool IsSpeed8x(const string& text) {
+    Speed parsed;
+    return Speed::Parse(text, parsed) && parsed.kind == Speed::Kind::faster && parsed.Multiplier() > kMaxFasterFactor;
+}
 
 struct Options {
     string image;
@@ -192,7 +203,7 @@ struct Options {
 
 void usage() {
     cerr << "usage: frond-68k [--rom] FILE [--device NAME] [--check-rom] [--run-for SECONDS]\n"
-            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|8x|uncapped]\n"
+            "                 [--framebuffer-output PNG] [--input-replay FILE] [--speed original|1.5x|2x|3x|4x|uncapped]\n"
             "                 [--contrast 0-100] [--window-scale 1-4] [--no-sound] [--audio-output WAV]\n"
             "                 [--tone-log] [--serial off|pty|tcp:PORT|unix:PATH|modem] [--usb off|pty|tcp:PORT|unix:PATH]\n"
             "                 [--irda off|pty|tcp:PORT|unix:PATH|phone|printer] [--modem-sync off|pty|tcp:PORT|unix:PATH]\n"
@@ -1097,9 +1108,7 @@ class Runner {
                 const double perMs = gSession->GetClocksPerSecond() / 1000.0;
                 const uint32_t want = uint32_t(min(max((now - emulatedMs) * perMs, 1.0), perMs * 4));
                 const double before = guestSeconds;
-                const double stepStart = wallMs();
                 if (!Step(want)) return 1;
-                busyMs += wallMs() - stepStart;
                 emulatedMs += (guestSeconds - before) * 1000;
                 DispatchReplay();
             }
@@ -1710,24 +1719,15 @@ class Runner {
 
     void SetSpeed(Speed value) {
         speed = value;
-        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? uncappedFactor : speed.Multiplier());
+        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? kUncappedFactor : speed.Multiplier());
     }
 
-    // Measured over about a second of wall time; one cycle is one 68000 clock. At Uncapped this also moves
-    // the clock factor to what the host managed while busy.
+    // Measured over about a second of wall time; one cycle is one 68000 clock.
     void UpdateSpeed(double wallMs) {
         if (wallMs - speedMark.first < 1000) return;
         const double cycles = double(gSession->GetSystemCycles()) - speedMark.second;
         measuredHz = cycles / ((wallMs - speedMark.first) / 1000);
         speedMark = {wallMs, double(gSession->GetSystemCycles())};
-        const double busy = busyMs;
-        busyMs = 0;
-        if (speed.kind != Speed::Kind::uncapped || busy <= 0 || cycles <= 0) return;
-        // Clocks a second at 1x, and the factor that would have used kUncappedLoad of the host.
-        const double base = gSession->GetClocksPerSecond() / uncappedFactor;
-        const double target = cycles / (busy / 1000) * kUncappedLoad / base;
-        uncappedFactor = clamp(min(target, uncappedFactor * kUncappedRise), 1.0, kUncappedMaxFactor);
-        gSession->SetClockFactor(uncappedFactor);
     }
 
     string SpeedState() const {
@@ -2126,7 +2126,8 @@ class Runner {
             words >> value;
             if (value.empty()) return void(cout << "speed: " << speed.Name() << endl);
             Speed parsed;
-            if (!Speed::Parse(value, parsed)) return void(cout << "usage: speed " << Speed::Choices() << endl);
+            if (IsSpeed8x(value)) return void(cout << "usage: speed " << kSpeedChoices68k << " (" << kSpeed8x68k << ")" << endl);
+            if (!ParseSpeed68k(value, parsed)) return void(cout << "usage: speed " << kSpeedChoices68k << endl);
             SetSpeed(parsed);
             cout << "speed: " << speed.Name() << endl;
         } else if (command == "display") {
@@ -2608,7 +2609,8 @@ class Runner {
         if (command == "speed") {
             if (argument.empty()) return {true, "speed", speed.Name()};
             Speed parsed;
-            if (!Speed::Parse(argument, parsed)) return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x, 8x or uncapped."};
+            if (IsSpeed8x(argument)) return {false, "argument", "8x is Uncapped's speed on the 68k. Use uncapped."};
+            if (!ParseSpeed68k(argument, parsed)) return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x or uncapped."};
             SetSpeed(parsed);
             return {true, "speed", speed.Name()};
         }
@@ -3515,9 +3517,6 @@ class Runner {
     Speed speed{};
     double guestSeconds{0};
     double measuredHz{0};
-    // Wall time spent running the guest since the last UpdateSpeed, and Uncapped's clock factor.
-    double busyMs{0};
-    double uncappedFactor{kUncappedFactor};
     pair<double, double> speedMark{0, 0};
     bool quit{false};
     bool smooth{false};
@@ -3638,7 +3637,8 @@ bool parseOptions(int argc, char** argv, Options& options) {
             if (!v || !BatteryPower::Parse(v, gBattery)) return false;
         } else if (arg == "--speed") {
             const char* v = value();
-            if (!v || !Speed::Parse(v, options.speed)) return false;
+            if (v && IsSpeed8x(v)) cerr << "--speed " << kSpeed8x68k << endl;
+            if (!v || !ParseSpeed68k(v, options.speed)) return false;
         } else if (arg == "--contrast") {
             if (!number(0, 100, n) || n != int(n)) return false;
             options.contrast = int(n);

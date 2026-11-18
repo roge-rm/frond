@@ -2650,6 +2650,15 @@ void EmRegsEZ::ScaleCycles(uint32 factor) {
     EmHALHandler::ScaleCycles(factor);
 }
 
+void EmRegsEZ::FlushTimers(double scale) {
+    systemCycles = gSession->GetSystemCycles();
+    if (scale != 1) {
+        lastProcessedSystemCycles = systemCycles - (systemCycles - lastProcessedSystemCycles) * scale;
+    }
+    UpdateTimer();
+    EmHALHandler::FlushTimers(scale);
+}
+
 uint32 EmRegsEZ::CyclesToNextInterrupt(uint64 systemCycles) {
     this->systemCycles = systemCycles;
 
