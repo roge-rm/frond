@@ -820,6 +820,10 @@ test-frond-68k-install: out/frond-68k
 test-frond-arm-install: out/frond
 	python3 tests/frond-arm-install.py
 
+.PHONY: test-frond-arm-big-install
+test-frond-arm-big-install: out/frond
+	python3 tests/frond-arm-big-install.py
+
 # A guest-ready check wakes nothing; a host call wakes the T|X's UI task, and a refused one on the Zire 72
 # wakes it at most once (GDB breakpoint on EvtWakeup). Same sessions as above.
 .PHONY: test-host-call-wake
