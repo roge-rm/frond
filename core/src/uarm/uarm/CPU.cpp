@@ -3176,6 +3176,13 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
     uint_fast8_t reg = (instr >> 16) & 0x0f;
     uint32_t memVal32, sr, ea;
     uint32_t origBaseRegVal = ea = cpuPrvGetRegNotPC(cpu, reg);
+    // Every mode goes from the lowest register at the lowest address up, as the ARM920T and XScale do,
+    // so DA and DB start at the bottom of the block; it matters for which words a transfer across a page
+    // edge takes before the abort.
+    constexpr bool up = mode & ARM_MODE_4_INC;
+    constexpr bool before = up ? (mode & ARM_MODE_4_BFR) : !(mode & ARM_MODE_4_BFR);
+    const uint32_t bottom = origBaseRegVal - 4 * uint32_t(__builtin_popcount(regsList));
+    if (!up) ea = bottom;
 
     if (sBit &&
         !((cpu->M == ARM_SR_MODE_USR) || (cpu->M == ARM_SR_MODE_SYS))) {  // sort out what "S" means
@@ -3187,7 +3194,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
 
 #define LOAD_STORE_MULTI_ITER(idx)                                                                 \
     do {                                                                                           \
-        constexpr uint8_t regNo = (mode & ARM_MODE_4_INC) ? idx : 15 - idx;                        \
+        constexpr uint8_t regNo = idx;                                                             \
         if (!(regsList & (1 << regNo))) continue;                                                  \
                                                                                                    \
         if (!isLoad) {                                                                             \
@@ -3204,7 +3211,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
             }                                                                                      \
         }                                                                                          \
                                                                                                    \
-        if (mode & ARM_MODE_4_BFR) ea += (mode & ARM_MODE_4_INC) ? 4 : -4;                         \
+        if (before) ea += 4;                                                                       \
         ok = cpuPrvMemOp<memorySystemKind, 4, !isLoad>(cpu, &memVal32, ea, cpu->privileged, &fsr); \
         if (!ok) {                                                                                 \
             /* Put a loaded base back before the abort switches mode and bank. */                 \
@@ -3213,7 +3220,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
                                                                                                    \
             return;                                                                                \
         }                                                                                          \
-        if (!(mode & ARM_MODE_4_BFR)) ea += (mode & ARM_MODE_4_INC) ? 4 : -4;                      \
+        if (!before) ea += 4;                                                                      \
                                                                                                    \
         if (isLoad) {                                                                              \
             if (unlikely(userModeRegs)) {                                                          \
@@ -3255,7 +3262,7 @@ static void execFn_memop_load_store_multi(struct ArmCpu *cpu, uint32_t instr) {
 
 #undef LOAD_STORE_MULTI_ITER
 
-    if (mode & ARM_MODE_4_WBK) cpuPrvSetRegNotPC(cpu, reg, ea);
+    if (mode & ARM_MODE_4_WBK) cpuPrvSetRegNotPC(cpu, reg, up ? ea : bottom);
     if (copySPSR) {
         if (armKindIsArm920(memorySystemKind)) icacheArm920BranchInline(cpu->ic);
         sr = cpu->SPSR;

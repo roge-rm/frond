@@ -5,12 +5,14 @@
 // and FAR with CRm 5 and 6, as the Zodiac ROM's does. Data aborts on loads and stores with writeback, and an LDM
 // that loads its base, leave the base as it was (the ARM920T's base restored model). Exact, lean-only Fast and Fast
 // blocks end the same. The observer sees a prefetch abort's step as not fetched. Off, the machine stops on them.
+// LDM and STM go from the lowest register and address up in every mode, as the ARM920T does: a DA or DB transfer that
+// straddles the edge stores or loads its word below the edge before the abort.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
 namespace {
 enum class Kind { dataLoop, dataThumb, prefetch, undefinedArm, undefinedThumb, ldrPre, ldrPost, strPre, ldmWriteback,
-                  ldmBase, stmWriteback, stmdbWriteback, thumbLdm, thumbStm };
+                  ldmBase, stmWriteback, stmdbWriteback, stmdaWriteback, ldmdbWriteback, thumbLdm, thumbStm };
 const char* kindName(Kind k) {
     switch (k) {
         case Kind::dataLoop: return "data abort loop";
@@ -25,6 +27,8 @@ const char* kindName(Kind k) {
         case Kind::ldmBase: return "ldmia loading its base";
         case Kind::stmWriteback: return "stmia writeback";
         case Kind::stmdbWriteback: return "stmdb writeback";
+        case Kind::stmdaWriteback: return "stmda writeback";
+        case Kind::ldmdbWriteback: return "ldmdb writeback";
         case Kind::thumbLdm: return "thumb ldmia";
         case Kind::thumbStm: return "thumb stmia";
     }
@@ -36,14 +40,16 @@ constexpr uint32_t sectionFault = 5;
 // The writeback cases' boundary: VA section 5 is a coarse table whose last 4 KiB page (0x005ff000) is the
 // top of SRAM, which takes stores, and section 6 is unmapped.
 constexpr uint32_t edge = 0x00600000;
+// The word below the edge holds this before the faulting instruction; every handler reads it into r8.
+constexpr uint32_t belowMark = 0x66666666;
 
 // faultAddress: FAR after a data abort; base: r2 after it, the value it had before the faulting instruction.
 struct FaultGuest { std::vector<uint32_t> words; uint32_t faultPc, faultAddress, base; };
 
 // The graphics guest's setup gives quiet spans for the lean path and the JIT. Then sections: VA 0 the ROM (for
 // the vectors), 2 peripherals, 3 SRAM, 5 the edge page (edge) and 0x200 the ROM; 4 and 6 are unmapped. Each handler reads FSR into r9,
-// FAR into r10 and the prefetch FSR into r11, puts its number in r12 (1 undefined, 2 prefetch abort, 3 data abort)
-// and stops on a reserved word.
+// FAR into r10, the prefetch FSR into r11 and the word below the edge into r8 (through r6), puts its number in r12
+// (1 undefined, 2 prefetch abort, 3 data abort) and stops on a reserved word.
 FaultGuest guest(Kind kind) {
     GraphicsGuest g;
     g.setup(); g.display(); g.clocks();
@@ -55,8 +61,9 @@ FaultGuest guest(Kind kind) {
         g.word(at, n == 2 ? 0xee159f15 : 0xee159f10);      // mrc p15, 0, r9, c5, c0 (or c5), 0
         g.word(at + 4, n == 2 ? 0xee16af16 : 0xee16af10);  // mrc p15, 0, r10, c6, c0 (or c6), 0
         g.word(at + 8, 0xee15bf30);  // mrc p15, 0, r11, c5, c0, 1
-        g.word(at + 12, 0xe3a0c001 + n);
-        g.word(at + 16, 0xffffffff);
+        g.word(at + 12, 0xe5968000);  // ldr r8, [r6]
+        g.word(at + 16, 0xe3a0c001 + n);
+        g.word(at + 20, 0xffffffff);
     }
     std::vector<uint32_t> words;
     const auto pc = [&] { return 0x20000000 + g.cursor + uint32_t(words.size()) * 4; };
@@ -73,6 +80,8 @@ FaultGuest guest(Kind kind) {
     load(words, 1, farMark); words.push_back(0xee061f10);  // FAR
     load(words, 1, ifsrMark); words.push_back(0xee051f30);  // prefetch FSR
     load(words, 4, 0x44444444); load(words, 5, 0x55555555);
+    load(words, 0, edge - 0x1000); store(words, 0, 0xffc, belowMark);
+    load(words, 6, edge - 4);
     uint32_t faultPc = 0, faultAddress = unmapped, base = unmapped;
     // One ARM load or store with r2 at value, faulting at edge.
     const auto arm = [&](uint32_t value, uint32_t instruction) {
@@ -110,7 +119,9 @@ FaultGuest guest(Kind kind) {
     case Kind::ldmWriteback: arm(edge - 4, 0xe8b20030); break;    // ldmia r2!, {r4, r5}: r4 loads
     case Kind::ldmBase: arm(edge - 4, 0xe8920024); break;         // ldmia r2, {r2, r5}: r2 loads
     case Kind::stmWriteback: arm(edge - 4, 0xe8a20030); break;    // stmia r2!, {r4, r5}
-    case Kind::stmdbWriteback: arm(edge + 4, 0xe9220030); break;  // stmdb r2!, {r4, r5}
+    case Kind::stmdbWriteback: arm(edge + 4, 0xe9220030); break;  // stmdb r2!, {r4, r5}: r4 stores
+    case Kind::stmdaWriteback: arm(edge, 0xe8220030); break;      // stmda r2!, {r4, r5}: r4 stores
+    case Kind::ldmdbWriteback: arm(edge + 4, 0xe9320030); break;  // ldmdb r2!, {r4, r5}: r4 loads
     case Kind::thumbLdm:
         load(words, 2, base = edge - 4);
         faultAddress = edge;
@@ -200,7 +211,7 @@ void check(Kind kind) {
     const auto& r = results[0].run.result;
     const uint32_t handler = handlerBase + (undefined ? 0 : data ? 0x40 : 0x20);
     assert(results[0].run.status == Imx1MachineStatus::terminal && r.stop == Imx1ProbeStop::unsupportedInstruction);
-    assert(r.trace.pc == handler + 16 && r.trace.instruction == 0xffffffff && r.trace.fetched);
+    assert(r.trace.pc == handler + 20 && r.trace.instruction == 0xffffffff && r.trace.fetched);
     // Only the prefetch abort's step has no instruction.
     assert(unfetched.count == (prefetch ? 1u : 0u));
     if (prefetch) assert(unfetched.last.pc == g.faultPc && unfetched.last.instruction == 0);
@@ -211,6 +222,12 @@ void check(Kind kind) {
     if (data) {
         assert(r.registers[9] == sectionFault && r.registers[10] == g.faultAddress && r.registers[2] == g.base);
         if (kind == Kind::dataLoop) assert(r.registers[7] == 200 - 62);
+        // The transfers that reach the word below the edge first take it before the abort.
+        const bool storesBelow = kind == Kind::stmWriteback || kind == Kind::stmdbWriteback ||
+                                 kind == Kind::stmdaWriteback || kind == Kind::thumbStm;
+        const bool loadsBelow = kind == Kind::ldmWriteback || kind == Kind::ldmdbWriteback || kind == Kind::thumbLdm;
+        assert(r.registers[8] == (storesBelow ? 0x44444444u : belowMark));
+        if (loadsBelow) assert(r.registers[4] == belowMark);
     } else {
         assert(r.registers[9] == fsrMark && r.registers[10] == farMark);
     }
@@ -230,8 +247,10 @@ int main() {
     setenv("FROND_JIT_HOT", "1", 1);
     for (auto kind : {Kind::dataLoop, Kind::dataThumb, Kind::prefetch, Kind::undefinedArm, Kind::undefinedThumb,
                       Kind::ldrPre, Kind::ldrPost, Kind::strPre, Kind::ldmWriteback, Kind::ldmBase,
-                      Kind::stmWriteback, Kind::stmdbWriteback, Kind::thumbLdm, Kind::thumbStm})
+                      Kind::stmWriteback, Kind::stmdbWriteback, Kind::stmdaWriteback, Kind::ldmdbWriteback,
+                      Kind::thumbLdm, Kind::thumbStm})
         check(kind);
     std::puts("PASS: data and prefetch aborts and undefined instructions reach the guest's vectors with the ARM920T's "
-              "entry state and base restored, the same in Exact and Fast, and stop the machine with the switch off");
+              "entry state and base restored, DA and DB transfers going upward, the same in Exact and Fast, and stop the "
+              "machine with the switch off");
 }
