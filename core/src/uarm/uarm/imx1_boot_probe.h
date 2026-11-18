@@ -324,6 +324,8 @@ Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
 uint16_t imx1MachineAspUInput(const Imx1Machine*);
 // A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
+// Whether the system clocks are in stop mode (the guest asleep).
+bool imx1MachineSystemStopped(const Imx1Machine*);
 uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
 // UART1 (unit 1, the connector's serial port) or UART2 (unit 2, infrared) as a host peer sees it.
 struct Imx1MachineUartLine {

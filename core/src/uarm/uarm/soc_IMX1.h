@@ -74,6 +74,11 @@ class SocIMX1 : public SoC {
     bool CradleButtonSupported() const override { return true; }
     bool CradleButtonDown() const override { return cradleDown; }
     bool SetCradleButton(bool down) override;
+    // Holds D22 for 500 ms of guest time. The awake ROM only takes it with the cradle attached.
+    bool PressHotSync() override;
+    // Asleep is the i.MX1 in stop mode; a wake is leaving it, as Run sees it.
+    bool PowerSleeping() const override { return imx1MachineSystemStopped(machine); }
+    uint64_t PowerWakes() const override { return wakes; }
     // UART1 is the connector's serial port, UART2 the infrared port (ROM uMX1 driver, IREN on unit 1
     // only). With no peer both see RTS inactive.
     HostUartPort* SerialHostPort() override;
@@ -144,6 +149,10 @@ class SocIMX1 : public SoC {
     bool ApplyBattery();
     bool ApplyHeadphones();
     bool headphones{false}, cradleDown{false};
+    // CLK32 ticks until a PressHotSync lets go of D22, 0 with none going.
+    uint64_t hotSyncTicks{0};
+    bool wasStopped{false};
+    uint64_t wakes{0};
     struct SerialPort;
     struct InfraredPort;
     std::unique_ptr<SerialPort> serialPort;

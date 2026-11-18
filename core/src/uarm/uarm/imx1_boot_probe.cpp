@@ -2405,6 +2405,9 @@ Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine* machine, uint16_t word)
     p->peripherals.setAspUInput(word);
     return Imx1BootstrapAccess::ok;
 }
+bool imx1MachineSystemStopped(const Imx1Machine* machine) {
+    return machine && machine->probe->options.bootstrapPeripherals && machine->probe->peripherals.systemStopped();
+}
 uint32_t imx1MachineGpioInput(const Imx1Machine* machine, unsigned port) {
     return machine ? machine->probe->peripherals.gpioInputSample(port) : 0;
 }

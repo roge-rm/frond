@@ -514,9 +514,8 @@ class DesktopControl {
         }
         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->name};
         if (command == "power-state") {
-            const auto* machine = static_cast<SocPXA*>(ctx.soc);
-            return {true, "power", std::string(machine->PowerSleeping() ? "asleep" : "awake") +
-                                       " wakes=" + std::to_string(machine->PowerWakes())};
+            return {true, "power", std::string(ctx.soc->PowerSleeping() ? "asleep" : "awake") +
+                                       " wakes=" + std::to_string(ctx.soc->PowerWakes())};
         }
         const auto& caps = capabilities(ctx);
         if (!caps.serial && command == "serial-mode")
@@ -578,7 +577,7 @@ class DesktopControl {
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
         }
         if (command == "hotsync") {
-            if (!static_cast<SocPXA*>(ctx.soc)->PressHotSync())
+            if (!ctx.soc->PressHotSync())
                 return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
             return {true, "hotsync", "HotSync button pressed."};
         }

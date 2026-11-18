@@ -83,9 +83,9 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool HoldSwitchOn() const override;
     bool SetHoldSwitch(bool on) override;
     bool PowerButtonSupported() const override { return !disableSleep; }
-    bool PowerSleeping() const;
+    bool PowerSleeping() const override;
     // Wakes from PXA sleep since the process started, for tests. Not saved.
-    uint64_t PowerWakes() const { return powerWakes; }
+    uint64_t PowerWakes() const override { return powerWakes; }
     void Wakeup(uint8_t wakeupSource) override;
     bool PrepareM68kSupport() override;
     bool PaceHooksInRam() override;
@@ -123,7 +123,7 @@ class SocPXA : public SocGeneric<SocPXA> {
     // Model access for development probes; creates no host connection.
     PxaUart* GetSerialUart() { return (GetDeviceType() == deviceTypeTX || deviceProfileIsE2Board5(GetDeviceType()) || GetDeviceType() == deviceTypeTG50) ? ffUart : nullptr; }
     // Pulls the connector's HotSync line low for a moment; false where there is none or a key is already being held.
-    bool PressHotSync();
+    bool PressHotSync() override;
 
     SerialHostRoute GetSerialRoute();
     bool SetSerialHostHooks(const SerialHostHooks* hooks);

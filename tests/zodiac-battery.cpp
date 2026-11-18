@@ -125,6 +125,19 @@ void machine() {
     soc->Run(1000, 32000000);
     assert(soc->CradleButtonDown() && soc->CradleInputLow());
     assert(soc->SetCradleButton(false) && !soc->CradleInputLow());
+    // A HotSync press holds D22 for half a guest second, then lets go by itself; a load lets go at once.
+    assert(soc->PressHotSync() && soc->CradleButtonDown() && soc->CradleInputLow() && !soc->PressHotSync());
+    soc->Run(100000, 1000000);
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    const uint64_t pressed = soc->GetTime();
+    for (int i = 0; i < 2000 && soc->CradleButtonDown(); ++i) soc->Run(100000, 1000000);
+    assert(soc->GetTime() - pressed >= 300000000 && soc->GetTime() - pressed < 600000000);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->PressHotSync());
+    load(*soc, atMaximum);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow() && soc->PressHotSync());
+    assert(soc->SetCradleButton(false));
+    assert(!soc->PowerSleeping());
 }
 }  // namespace
 
@@ -152,6 +165,7 @@ void halted() {
     // Halted, the headphone and cradle commands report the failure and change nothing.
     assert(!soc->SetHeadphones(true) && !soc->HeadphonesIn());
     assert(!soc->SetCradleButton(true) && !soc->CradleButtonDown());
+    assert(!soc->PressHotSync() && !soc->CradleButtonDown());
     assert(soc->SetBattery(battery("level 20 charging")));
     soc->Reset();
     assert(soc->ChargerInputLow());

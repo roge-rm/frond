@@ -177,7 +177,7 @@ struct SocIMX1::SerialPort final : HostUartPort {
 
 // UART2 in IrDA mode for HostInfrared.
 // ASSUMPTION "Zodiac IR transceiver": powered while UART2 is enabled with IREN set; the ROM's shutdown
-// pin, if it has one, is not modelled. Sleep is left to the guest turning the UART off.
+// pin, if it has one, is not modelled. Asleep is the i.MX1 in stop mode.
 struct SocIMX1::InfraredPort final : HostInfraredPort {
     explicit InfraredPort(SocIMX1& soc) : soc(soc) {}
     SocIMX1& soc;
@@ -214,7 +214,7 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
     void Kick() override {}
     bool HostIoPaused() override { return false; }
-    bool Sleeping() override { return false; }
+    bool Sleeping() override { return soc.PowerSleeping(); }
     bool KeyboardAttached() override { return false; }
     static void Transmit(void* c, uint8_t character, bool infrared) {
         auto& self = *static_cast<InfraredPort*>(c);
@@ -370,6 +370,8 @@ void SocIMX1::StateChanged() {
     redraw = true;
     // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
     cradleDown = false;
+    hotSyncTicks = 0;
+    wasStopped = imx1MachineSystemStopped(machine);
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
 }
@@ -559,6 +561,13 @@ bool SocIMX1::SetCradleButton(bool down) {
     values[3] = down ? 0 : cradlePinD;
     if (!replaceGpioInputs(machine, values, masks)) return false;
     cradleDown = down;
+    hotSyncTicks = 0;
+    return true;
+}
+
+bool SocIMX1::PressHotSync() {
+    if (halted || cradleDown || !SetCradleButton(true)) return false;
+    hotSyncTicks = ticksPerSecond / 2;
     return true;
 }
 
@@ -715,6 +724,15 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     // still then, and the input holds are timed on the time asked for. A running guest's holds are
     // timed on its own clock alone, however slowly it runs.
     input.advance(waiting ? std::max(wanted, elapsed) : elapsed);
+    if (hotSyncTicks) {
+        const uint64_t passed = waiting ? std::max(wanted, elapsed) : elapsed;
+        hotSyncTicks = passed >= hotSyncTicks ? 0 : hotSyncTicks - passed;
+        // A release the machine refuses just now is tried again after the next run.
+        if (!hotSyncTicks && !SetCradleButton(false)) hotSyncTicks = 1;
+    }
+    const bool stopped = imx1MachineSystemStopped(machine);
+    if (wasStopped && !stopped) ++wakes;
+    wasStopped = stopped;
     if (waiting || halted) return maxCycles;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % ticksPerSecond);

@@ -73,6 +73,11 @@ class SoC {
     virtual bool CradleButtonSupported() const { return false; }
     virtual bool CradleButtonDown() const { return false; }
     virtual bool SetCradleButton(bool) { return false; }
+    // A short press of the HotSync button, let go by itself. False without one or while one is held.
+    virtual bool PressHotSync() { return false; }
+    // Asleep, and the wakes counted since the session started (not saved).
+    virtual bool PowerSleeping() const { return false; }
+    virtual uint64_t PowerWakes() const { return 0; }
     // The serial port on the connector and the infrared port for HostSerial and HostInfrared, on the
     // boards that give them this way (null elsewhere; the PXA boards give their UARTs). Owned by the SoC.
     virtual HostUartPort* SerialHostPort() { return nullptr; }
