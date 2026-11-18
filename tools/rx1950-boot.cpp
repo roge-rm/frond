@@ -31,6 +31,8 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <map>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -226,9 +228,23 @@ int main(int argc, char** argv) {
     std::vector<std::pair<unsigned, Seen>> adcStarts;
     Seen firstGpf{0, 0, 0}, firstGpj{0, 0, 0};
     uint64_t gpfReads = 0, gpjReads = 0;
+    // NAND page reads: the total and how often each row was read, to tell new reads from rereads.
+    uint64_t nandReads = 0;
+    std::map<uint32_t, unsigned> nandRows;
+    uint32_t nandCommand = 0xff, nandAddress = 0, nandCycles = 0;
+    // "mmio S": counts of each pc, register, direction and value for a while.
+    std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t>, unsigned>* mmioCounts = nullptr;
     auto observe = [&](uint32_t pc, uint32_t address, unsigned, bool write, uint32_t value) {
         if (write && address == 0x58000000 && (value & 1) && adcStarts.size() < 16 && !(machine->adc.adctsc & 7))
             adcStarts.push_back({(value >> 3) & 7, {pc, machine->nanoseconds(), value}});
+        if (mmioCounts) ++(*mmioCounts)[{pc, address, write, value}];
+        if (write && address == 0x4e000008) {
+            nandCommand = value & 0xff;
+            nandAddress = nandCycles = 0;
+        } else if (write && address == 0x4e00000c && (nandCommand == 0x00 || nandCommand == 0x01 || nandCommand == 0x50)) {
+            if (nandCycles >= 1 && nandCycles <= 3) nandAddress |= (value & 0xff) << (8 * (nandCycles - 1));
+            if (++nandCycles == 4) { ++nandReads; ++nandRows[nandAddress]; }
+        }
         if (!write && address == 0x56000054 && !gpfReads++) firstGpf = {pc, machine->nanoseconds(), value};
         if (!write && address == 0x560000d4 && !gpjReads++) firstGpj = {pc, machine->nanoseconds(), value};
     };
@@ -285,7 +301,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S", "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -309,6 +325,105 @@ int main(int argc, char** argv) {
             uint32_t v = 0;
             if (cpuInspectRead(machine->cpu(), va, &v, 4)) std::printf("peek %08x: %08x\n", va, v);
             else std::printf("peek %08x: not mapped\n", va);
+        } else if (c == "profile" && std::sscanf(line, "%*s %lf", &sec) == 1) {
+            // Samples the pc every 20000 instructions for sec guest seconds: the top 4 KB pages, with the PID.
+            std::map<uint64_t, unsigned> pages;
+            const uint64_t until = now + uint64_t(sec * 1e9);
+            unsigned samples = 0;
+            while (machine->nanoseconds() < until && left) {
+                stop = machine->run(20000);
+                left -= std::min<uint64_t>(left, 20000);
+                ++pages[uint64_t(cpuGetPid(machine->cpu())) << 32 | (machine->pc() & ~0xfffu)];
+                ++samples;
+                if (stop != S3c2442Stop::budget) { going = false; break; }
+            }
+            std::vector<std::pair<unsigned, uint64_t>> top;
+            for (const auto& [k, n] : pages) top.push_back({n, k});
+            std::sort(top.rbegin(), top.rend());
+            std::printf("profile: %u samples\n", samples);
+            for (size_t i = 0; i < top.size() && i < 25; ++i)
+                std::printf("profile %5u pid %08x page %08x\n", top[i].first, uint32_t(top[i].second >> 32), uint32_t(top[i].second));
+        } else if (c == "aborts" && std::sscanf(line, "%*s %u %lf", &x, &sec) == 2) {
+            // Logs up to x aborts within sec guest seconds: the faulting pc, FAR, FSR, DACR and the L1 entry, then
+            // each change the handler makes to that entry and what the L1 entry and TLB hold at the retry.
+            auto physical = [&](uint32_t pa, uint32_t* word) {
+                if (pa >= 0x30000000 && pa < 0x30100000) return cpuInspectRead(machine->cpu(), 0x8c000000 + (pa - 0x30000000), word, 4);
+                if (pa >= 0x30100000 && pa < 0x32000000) return cpuInspectRead(machine->cpu(), 0x80000000 + (pa - 0x30100000), word, 4);
+                return false;
+            };
+            auto tlbFor = [](const Arm920SavedState& st, uint32_t mva) {
+                for (size_t i = 0; i + 1 < st.tlb.size(); i += 2)
+                    if (st.tlb[i] == (mva & ~0xfffu)) return st.tlb[i + 1];
+                return 0xffffffffu;
+            };
+            const bool hadHistory = history != 0;
+            if (!hadHistory) machine->keepHistory(64);
+            unsigned logged = 0;
+            uint32_t prevPc = 0, faultPc = 0, l1At = 0, l1Seen = 0, faultMva = 0;
+            bool pending = false;
+            uint64_t step = 0, faultStep = 0;
+            machine->stepHook = [&](uint32_t pc) {
+                ++step;
+                const bool data = (pc & 0xffff) == 0x0010 && (pc >> 16 == 0xffff || pc >> 16 == 0);
+                const bool prefetch = (pc & 0xffff) == 0x000c && (pc >> 16 == 0xffff || pc >> 16 == 0);
+                if ((data || prefetch) && logged < x) {
+                    Arm920SavedState st;
+                    cpuArm920CaptureState(machine->cpu(), st);
+                    uint32_t l1 = 0;
+                    const uint32_t mva = data ? st.far : (prevPc < 0x02000000 ? prevPc | cpuGetPid(machine->cpu()) : prevPc);
+                    l1At = (st.ttb & ~0x3fffu) + (mva >> 20) * 4;
+                    if (!physical(l1At, &l1)) l1 = 0xdeadbeef;
+                    std::printf("abort %u %s at %.6f s pc %08x pid %08x far %08x fsr %03x dacr %08x L1 %08x tlb %08x\n", logged,
+                                data ? "data" : "prefetch", machine->nanoseconds() / 1e9, prevPc, cpuGetPid(machine->cpu()),
+                                st.far, st.fsr, st.domainCfg, l1, tlbFor(st, mva));
+                    ++logged;
+                    pending = true; faultPc = prevPc; l1Seen = l1; faultMva = mva; faultStep = step;
+                } else if (pending) {
+                    uint32_t l1 = 0;
+                    if (!physical(l1At, &l1)) l1 = 0xdeadbeef;
+                    if (l1 != l1Seen) {
+                        std::printf("  L1 for %08x = %08x at pc %08x, step +%" PRIu64 "\n", faultMva, l1, pc, step - faultStep);
+                        l1Seen = l1;
+                    }
+                    if (pc == faultPc) {
+                        Arm920SavedState st;
+                        cpuArm920CaptureState(machine->cpu(), st);
+                        std::printf("  retry at step +%" PRIu64 " pid %08x dacr %08x ttb %08x L1 %08x tlb %08x\n", step - faultStep,
+                                    cpuGetPid(machine->cpu()), st.domainCfg, st.ttb, l1, tlbFor(st, faultMva));
+                        pending = false;
+                    } else if (step - faultStep > 200000) {
+                        std::printf("  no retry within 200000 steps\n");
+                        pending = false;
+                    }
+                }
+                prevPc = pc;
+            };
+            const uint64_t until = now + uint64_t(sec * 1e9);
+            while (machine->nanoseconds() < until && left && logged < x) {
+                stop = machine->run(100000);
+                left -= std::min<uint64_t>(left, 100000);
+                if (stop != S3c2442Stop::budget) { going = false; break; }
+            }
+            machine->stepHook = nullptr;
+            if (!hadHistory) machine->keepHistory(0);
+        } else if (c == "mmio" && std::sscanf(line, "%*s %lf", &sec) == 1) {
+            std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t>, unsigned> counts;
+            mmioCounts = &counts;
+            going = runUntil(now + uint64_t(sec * 1e9));
+            mmioCounts = nullptr;
+            std::vector<std::pair<unsigned, std::tuple<uint32_t, uint32_t, bool, uint32_t>>> top;
+            for (const auto& [k, n] : counts) top.push_back({n, k});
+            std::sort(top.rbegin(), top.rend());
+            for (size_t i = 0; i < top.size() && i < 40; ++i)
+                std::printf("mmio %7u pc %08x %c %08x %08x\n", top[i].first, std::get<0>(top[i].second), std::get<2>(top[i].second) ? 'W' : 'R',
+                            std::get<1>(top[i].second), std::get<3>(top[i].second));
+        } else if (c == "nand") {
+            unsigned reread = 0;
+            for (const auto& [row, n] : nandRows) reread += n > 1;
+            std::printf("nand: %" PRIu64 " page reads, %zu rows, %u read more than once; %" PRIu64 " programs, %" PRIu64 " erases\n",
+                        nandReads, nandRows.size(), reread, machine->nand.programs, machine->nand.erases);
+            nandReads = 0;
+            nandRows.clear();
         } else if (c == "stat") {
             const auto& adc = machine->adc;
             std::printf("stat: pc %08x pid %08x; ADC %" PRIu64 " conversions, %" PRIu64 " touch interrupts, ADCTSC %03x ADCCON %04x "
