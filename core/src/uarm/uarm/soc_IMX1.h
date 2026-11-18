@@ -56,6 +56,12 @@ class SocIMX1 : public SoC {
     DisplayMode GetDisplayMode() override { return DisplayMode::mode_480x320; }
     void SuspendTimerInterrupts(bool) override {}
     bool LcdEnabled() override;
+    // The battery level reaches the guest through the ASP's U input, set again after every load and reset.
+    bool BatterySupported() const override { return true; }
+    bool SetBattery(const BatteryPower& value) override;
+    // The battery inputs the machine has now, for tests: the ASP U word and GPIO B14 (low on the charger).
+    uint16_t BatterySample() const { return imx1MachineAspUInput(machine); }
+    bool ChargerInputLow() const { return !(imx1MachineGpioInput(machine, 1) & (1u << 14)); }
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
@@ -117,6 +123,8 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
+    // Puts the battery setting on the machine's inputs.
+    void ApplyBattery();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.

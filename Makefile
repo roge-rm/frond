@@ -196,10 +196,10 @@ out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
 	cp core/src/cloudpilot/frond-68k out/frond-68k.new
 	mv -f out/frond-68k.new out/frond-68k
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch test-battery-power
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
-.PHONY: test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
+.PHONY: test-battery-power test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
 test-audio-metrics: prepare
 	python3 tests/audio-metrics.py
 test-audio-timing: prepare
@@ -214,6 +214,12 @@ test-wm9712-irq: prepare
 		tests/wm9712-irq.cpp core/src/uarm/uarm/ac97dev_WM9712L.cpp \
 		-Wl,--gc-sections -o build/test-wm9712-irq
 	./build/test-wm9712-irq
+test-battery-power: prepare
+	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/battery-power.cpp core/src/uarm/uarm/ac97dev_WM9712L.cpp core/src/uarm/uarm/sspdev_AD7873.cpp \
+		-Wl,--gc-sections -o build/test-battery-power
+	./build/test-battery-power
 test-pxa-ac97-irq: prepare
 	$(CXX) -std=c++17 -O1 -g -ffunction-sections -fdata-sections \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -869,6 +875,11 @@ test-patched-traps: out/frond
 test-session-folder-card: out/frond
 	python3 tests/session-folder-card.py
 
+# The battery command on both runners; needs FROND_DEVICE_IMAGES and an ARM smoke machine, else that side is skipped.
+.PHONY: test-battery-control
+test-battery-control: out/frond out/frond-68k
+	python3 tests/battery-control.py
+
 # m68k-palmos-gdb 5.3 and gdb-multiarch on the debug Hello app (build/hello-debug) on the private
 # OS 3.5 ROM; skips without them.
 # The desktop control socket on both runners; needs a private ARM smoke session and IIIx ROM, else
@@ -978,6 +989,28 @@ test-zodiac-normal-runtime: out/frond
 	ZODIAC_TEST_CARD=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
+
+.PHONY: test-pxa-battery-pins
+test: test-pxa-battery-pins
+# The Charging switch on the TX, E2 and TG50 power inputs, firmware-free.
+test-pxa-battery-pins: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/pxa-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-battery-pins.cpp @build/pxa-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-battery-pins
+	./build/test-pxa-battery-pins
+
+.PHONY: test-zodiac-battery
+test: test-zodiac-battery
+# The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.
+test-zodiac-battery: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-battery.cpp @build/zodiac-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-battery
+	./build/test-zodiac-battery
+	./build/test-zodiac-battery halted
 
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
@@ -2639,6 +2672,12 @@ test: test-68k-vz-registers
 test-68k-vz-registers: prepare out/frond-68k
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
 		-f $(CURDIR)/tests/68k-vz-registers.mk FROND_TEST_ROOT=$(CURDIR) vz-register-test
+
+.PHONY: test-68k-battery
+test: test-68k-battery
+test-68k-battery: prepare out/frond-68k
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -f Makefile \
+		-f $(CURDIR)/tests/68k-battery.mk FROND_TEST_ROOT=$(CURDIR) battery-test
 
 .PHONY: test-68k-ez-uart-spi
 test: test-68k-ez-uart-spi

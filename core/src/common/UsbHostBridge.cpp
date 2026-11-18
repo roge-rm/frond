@@ -76,7 +76,7 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         return false;
     }
     // Restore the board's disconnected-host default, also after loading a session
-    // saved with a different cable level: TX GPIO13 low; E2 GPIO35 high.
+    // saved with a different cable level: TX GPIO13 high; E2 GPIO35 high.
     auto off = [&] {
         impl->soc = soc;
         soc.cable(soc.defaultCable());

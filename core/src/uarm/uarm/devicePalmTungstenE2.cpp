@@ -11,6 +11,7 @@
 #include "deviceSonyTG50.h"
 #include "CsrBcspRadio.h"
 #include "device_type5.h"
+#include "device_profile5.h"
 #include "mmiodev_DirectNAND.h"
 #include "savestate/savestateAll.h"
 #include "uartdev_bcm2035.h"
@@ -135,7 +136,36 @@ struct Device {
     // replace it.
     std::array<uint8_t, 6> bluetoothAddress;
     bool resetting;
+    BatteryPower battery;
 };
+
+// The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
+// three) on the E2, TX and Zire 72. The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
+// GPIO99 low (the charging bolt), the TX's GPIO90 high (DAL dock status 0x2009b7d0, palmtx.h POWER_DETECT) and
+// the E2's GPIO9 high (DAL dock status 0x2009c66c).
+static void deviceApplyBattery(Device *dev) {
+    const uint32_t mV = BatteryPower::LiIonMilliVolts(dev->battery.Percent());
+    const bool charging = dev->battery.ExternalPower();
+    if (dev->tg50) {
+        tg50BoardSetBatteryMilliVolts(dev->tg50, uint16_t(mV));
+        tg50BoardSetCharging(dev->tg50, charging);
+        return;
+    }
+    if (!dev->wm9712L) return;
+    wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, mV / 3);
+    if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !charging);
+    else if (dev->type == DeviceType5::deviceTypeTX) pxaGpioSetState(dev->gpio, 90, charging);
+    else if (deviceProfileIsE2Board5(dev->type)) pxaGpioSetState(dev->gpio, 9, charging);
+}
+
+bool deviceBatterySupported(Device *dev) { return dev->tg50 || dev->wm9712L; }
+
+bool deviceSetBattery(Device *dev, const BatteryPower &battery) {
+    if (!deviceBatterySupported(dev)) return false;
+    dev->battery = battery;
+    deviceApplyBattery(dev);
+    return true;
+}
 
 // A random locally administered address, as btvirt gives a controller.
 static std::array<uint8_t, 6> deviceNewBluetoothAddress() {
@@ -209,6 +239,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
     if (!dev) ERR("cannot alloc device");
 
     dev->type = type;
+    dev->battery = BatteryPower{};
 #ifndef __EMSCRIPTEN__
     dev->wifi = nullptr;
 #endif
@@ -254,7 +285,8 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
         if (!keypadAddGpioKey(kp, keyIdHotSync, 10, false)) ERR("cannot initialize TX HotSync line");  // palmtx.h HOTSYNC_BUTTON_N
         pxaGpioSetState(sp->gpio, 14, true);  // SD absent
         pxaGpioSetState(sp->gpio, 37, true);
-        pxaGpioSetState(sp->gpio, 90, true);
+        pxaGpioSetState(sp->gpio, 13, true);  // no USB cable (palmtx.h USB_DETECT_N)
+        // GPIO90, external power, follows the battery setting (deviceApplyBattery).
 #ifndef __EMSCRIPTEN__
         sp->soc->wirelessDevice = std::make_unique<LibertasCF>(
             sp->mem, sp->gpio, reschedule, getTime, &sp->soc->networkSimulation);
@@ -530,7 +562,11 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
             deviceApplyBluetoothAddress(dev);
         }
     }
-    if (dev->tg50) { tg50BoardLoad(dev->tg50, loader, preserveInput); return; }
+    if (dev->tg50) {
+        tg50BoardLoad(dev->tg50, loader, preserveInput);
+        deviceApplyBattery(dev);
+        return;
+    }
     if (dev->type == DeviceType5::deviceTypeTX) {
         auto chunk = loader.GetChunkOrFail(ChunkType::palmTx, 0, "Palm TX board");
         if (!chunk) return;
@@ -551,6 +587,7 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
     if (dev->qci && !pxaQciLoad(dev->qci, loader)) return;
     if (dev->nand) directNandLoad(dev->nand, loader);
     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+    deviceApplyBattery(dev);
 }
 
 template void deviceSave<Savestate<ChunkType>>(Device *dev, Savestate<ChunkType> &savestate);
@@ -597,7 +634,11 @@ void deviceDestroy(Device *dev) {
 }
 
 void deviceBeginReset(Device *dev) { dev->resetting = true; if (dev->tg50) tg50BoardBeginReset(dev->tg50); }
-void deviceEndReset(Device *dev) { dev->resetting = false; if (dev->tg50) tg50BoardEndReset(dev->tg50); }
+void deviceEndReset(Device *dev) {
+    dev->resetting = false;
+    if (dev->tg50) tg50BoardEndReset(dev->tg50);
+    deviceApplyBattery(dev);
+}
 
 void deviceAudioAdvance(Device *dev, uint64_t ns) { if (dev->tg50) tg50BoardAudioAdvance(dev->tg50, ns); }
 

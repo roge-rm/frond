@@ -119,6 +119,7 @@ struct Options {
     bool fastEngine;  // --engine fast
     bool viewFollowsWindow;  // --view-turn window
     bool disableRumble;      // --no-rumble
+    BatteryPower battery;    // --battery
 };
 
 namespace {
@@ -711,6 +712,10 @@ bool gFastEngineMissing = false;
                                                reinterpret_cast<uint8_t*>(nand.data), nand.size,
                                                gdbPort, pxa270 ? 2 : deviceGetSocRev()));
         }
+
+        // Before the load, which applies it again over the session's saved inputs.
+        if (soc->BatterySupported()) soc->SetBattery(options.battery);
+        else if (options.battery != BatteryPower{}) cerr << "this device's battery can't be set yet, it stays full" << endl;
 
         if (auto* chip = soc->GetNand()) {
             if (nandFromMalloc)
@@ -1628,6 +1633,16 @@ int main(int argc, char** argv) {
     program.add_argument("--framebuffer-output")
         .help("save the unrotated LCD framebuffer as PNG at the end of --run-for");
 
+    program.add_argument("--battery")
+        .help("the battery: max, level N or host N (0-100), then charging or battery (not charging)")
+        .metavar("<\"max|level N|host N [charging|battery]\">")
+        .default_value(string("max"))
+        .action([](const string& value) {
+            BatteryPower parsed;
+            if (!BatteryPower::Parse(value, parsed)) throw runtime_error("--battery is max, level N or host N, then charging or battery");
+            return value;
+        });
+
     program.add_argument("--engine")
         .help("CPU engine: exact (the interpreter) or fast (the JIT where it's built in, the Zodiac's own Fast path)")
         .metavar("<exact|fast>")
@@ -1869,6 +1884,7 @@ int main(int argc, char** argv) {
                        .fastEngine = program.get("--engine") == "fast",
                        .viewFollowsWindow = program.get("--view-turn") == "window",
                        .disableRumble = program.get<bool>("--no-rumble")};
+    BatteryPower::Parse(program.get("--battery"), options.battery);
 
     logEnable();
 

@@ -316,6 +316,12 @@ uint32_t imx1MachineStartups(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine*, const Imx1AspPenInputs&, bool commit = true);
 // The pen inputs the machine has now, as the options or the last replace left them.
 Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
+// The ASP's U input word (the Zodiac's battery), for the next U conversion. Not saved with the state: a load
+// or a fresh machine starts from aspUSample again. Needs aspUSampleKnown.
+Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
+uint16_t imx1MachineAspUInput(const Imx1Machine*);
+// A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
+uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
 // Execution-thread raw physical inputs. Preview validates without changing guest state.
 // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],
@@ -346,7 +352,7 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
 // and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
 // ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
-// Not wired: D22 (cradle or HotSync, active high) and B23 (the scan's other stick click input).
+// Not wired: D22 (the cradle's HotSync button, active low, idle high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,
     actionDown, count

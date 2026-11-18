@@ -54,8 +54,10 @@ Imx1AspAccess Imx1Asp::access(uint32_t address, uint32_t size, bool write, uint3
         if (written & (1u << 23)) {
             // Table 15-7 specifies complete reset and self-clear, without a cycle count.
             const auto inputs = penInputs;
+            const auto u = uInput;
             *this = Imx1Asp(px1HighFromReset, uSampleKnown, uSample);
             penInputs = inputs;
+            uInput = u;
             return Imx1AspAccess::ok;
         }
         // PADE must be set after the other control fields (table 15-7).
@@ -120,7 +122,7 @@ uint64_t Imx1Asp::futureInterrupts() const {
 
 void Imx1Asp::startSlot() {
     remaining = 1260u * ((sampleRate & 15) + ((sampleRate >> 12) & 7) + 1);
-    captured = automatic() ? (calibration() ? penInputs.reference[slot] : penInputs.normal[slot]) : uSample;
+    captured = automatic() ? (calibration() ? penInputs.reference[slot] : penInputs.normal[slot]) : uInput;
     capturedUp = automatic() && !calibration() && slot == 3 && !contactDown();
 }
 

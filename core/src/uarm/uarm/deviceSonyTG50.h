@@ -37,6 +37,11 @@ void tg50BoardSetUsbCable(Tg50Board *, bool connected);
 void tg50BoardSetAccessoryAux(Tg50Board *, uint16_t mV);
 // Nothing on the connector: AUX at full scale.
 void tg50BoardSetConnectorEmpty(Tg50Board *);
+// The AD7873 battery input, 4200 mV when full.
+void tg50BoardSetBatteryMilliVolts(Tg50Board *, uint16_t mV);
+// The charger: uc A13 low is charging, A14 low with A2 low external power (DAL 0x24f88 and 0x22abc). A2 always
+// reads low here, so charging pulls A13 and A14 low.
+void tg50BoardSetCharging(Tg50Board *, bool charging);
 // The AUX conversion result, 12 bits.
 uint16_t tg50BoardAccessoryAuxCode(Tg50Board *);
 bool tg50BoardUsbCableAttached(Tg50Board *);

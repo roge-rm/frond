@@ -1,3 +1,4 @@
+#include "EmBattery.h"
 #include "BackgroundJob.h"
 #include "PortablePublication.h"
 #include "EmBankRegs.h"
@@ -191,6 +192,7 @@ void usage() {
             "                 [--gdb PORT] [--smooth-lcd] [--desktop-socket PATH] [--save-on-disconnect FILE]\n"
             "                 [--dana-view \"keyboard=auto zoom=2 pointer=touch\"]\n"
             "                 [--window-fit fit|whole|fill] [--window-background RRGGBB] [--audio-period FRAMES]\n"
+            "                 [--battery \"max|level N|host N [charging|battery]\"]\n"
             "FILE is a ROM or a saved session. --run-for runs headless for that many guest seconds.\n"
             "The desktop's ARM-only options are taken and ignored."
          << endl;
@@ -948,6 +950,10 @@ class Runner {
           lcd(profile.frontend.width, profile.frontend.height, deviceProfileColourLcd5(profile.deviceType),
               profile.deviceType == deviceTypeT415 ? Lcd68k::kT415Panel : Lcd68k::kElPanel) {
         if(deviceTypeIsDana5(profile.deviceType)) EmHAL::ReleaseDanaInput(false);
+        if (gBattery.charging && !BatteryChargingSupported()) {
+            cerr << "this device's charging can't be set yet, it stays on battery" << endl;
+            gBattery.charging = false;
+        }
         lcd.SetContrast(options.contrast.value_or(metadata.contrast));
         this->metadata.contrast = lcd.Contrast();
         SetSpeed(options.speed);
@@ -2044,6 +2050,12 @@ class Runner {
             cout << "backlight: " << (gSession->IsPowerOn() && EmHAL::GetLCDBacklightOn() ? "on" : "off") << endl;
         } else if (command == "speed-state") {
             cout << "speed: " << SpeedState() << endl;
+        } else if (command == "battery" || command == "battery-state") {
+            string spec;
+            getline(words, spec);
+            string error;
+            if (command == "battery" && !SetBattery(spec, error)) return void(cout << "battery refused: " << error << endl);
+            cout << "battery: " << BatteryState() << endl;
         } else if (command == "bus-wait") {
             // Wait states per byte/word bus cycle, from the chip selects as the guest set them.
             const EmAddressBank& rom = EmMemGetBank(EmBankROM::GetMemoryStart());
@@ -2382,7 +2394,7 @@ class Runner {
         static const char* const argumentCommands[] = {
             "launch-app",  "delete-db", "db-list", "serial-mode", "irda-mode", "display",   "hold",           "keyboard-attach",
             "keyboard-key", "network-mode", "sound-mode", "speed", "microphone-mode", "usb-mode",
-            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter"};
+            "bluetooth-mode", "gdb-start", "usb-port", "printer", "irprinter", "battery"};
         const bool card = command.rfind("sd-", 0) == 0 || command.rfind("ms-", 0) == 0;
         if(command=="dana-down" || command=="dana-up" || command=="dana-text") {
             const auto result=DanaInputCommand(command,argument);
@@ -2622,6 +2634,16 @@ class Runner {
         // State queries the desktop asks every device, answered as absent.
         if (command == "network-state") return {true, "network", NetworkState()};
         if (command == "hold-state") return {true, "hold", "unavailable"};
+        if (command == "battery-state") return {true, "battery", BatteryState()};
+        if (command == "battery") {
+            string error;
+            if (!SetBattery(argument, error)) {
+                BatteryPower parsed;
+                const bool unsupported = !BatterySupported() || (BatteryPower::Parse(argument, parsed) && parsed.charging);
+                return {false, unsupported ? "unsupported" : "argument", error};
+            }
+            return {true, "battery", BatteryState()};
+        }
         if (command == "keyboard-state") return {true, "keyboard", "detached"};
         if (command == "irprinter") {
             if (!profile->capabilities.infrared) return {false,"unsupported","This device has no infrared port."};
@@ -2692,6 +2714,24 @@ class Runner {
         if (command.rfind("sd-", 0) == 0) return {false, "unsupported", "This device has no SD slot."};
         if (command.rfind("ms-", 0) == 0) return {false, "unsupported", "This device has no Memory Stick slot."};
         return {false, "command", "Unknown desktop command."};
+    }
+
+    bool BatterySupported() const { return true; }
+    // Whether Charging reaches the guest. Where the ROM reads its own dock status from a board input Frond
+    // doesn't model, it stays off and battery-state ends with "no-charging".
+    bool BatteryChargingSupported() const { return gSession && gSession->GetDevice().BatteryChargingSupported(); }
+    string BatteryState() const {
+        if (!BatterySupported()) return "unavailable";
+        return gBattery.Describe() + (BatteryChargingSupported() ? "" : " no-charging");
+    }
+    // Applies live: the patches and board inputs read gBattery each time the guest asks.
+    bool SetBattery(const string& spec, string& error) {
+        if (!BatterySupported()) return error = "This device's battery can't be set yet.", false;
+        BatteryPower parsed;
+        if (!BatteryPower::Parse(spec, parsed)) return error = "Use max, level N or host N (0-100), then charging or battery.", false;
+        if (parsed.charging && !BatteryChargingSupported()) return error = "This device's charging can't be set yet.", false;
+        gBattery = parsed;
+        return true;
     }
 
     // contrast=0..100, smooth=on|off, fit= and jog=hidden|screen|keyboard for a device with a jog panel.
@@ -3568,6 +3608,9 @@ bool parseOptions(int argc, char** argv, Options& options) {
             const char* v = value();
             if (!v) return false;
             options.inputReplay = v;
+        } else if (arg == "--battery") {
+            const char* v = value();
+            if (!v || !BatteryPower::Parse(v, gBattery)) return false;
         } else if (arg == "--speed") {
             const char* v = value();
             if (!v || (strcmp(v, "original") && strcmp(v, "uncapped"))) return false;

@@ -1776,6 +1776,26 @@ bool EmDevice::IsClie() const {
 
 bool EmDevice::NeedsBatteryPatch() const { return Supports68328() || IsClie(); }
 
+bool EmDevice::BatteryChargingSupported() const {
+    if (!EmulatesDockStatus()) return true;
+
+    switch (fDeviceID) {
+        case kDevicePalmM500:  // AC_PWR#
+        case kDevicePalmM505:
+        case kDevicePalmM515:
+        case kDevicePalmM520:
+        case kDeviceHandEra330:  // CPLD NoExPwrDetect
+        case kDeviceHandEra330c:
+        case kDevicePEGT400:  // DC_IN
+        case kDeviceYSX1100:
+        case kDeviceYSX1230:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
 bool EmDevice::NeedsBatteryGlobalsHack() const {
     switch (fDeviceID) {
         case kDeviceYSX1230:

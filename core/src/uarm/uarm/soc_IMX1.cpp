@@ -15,6 +15,7 @@
 #include "imx1_bootstrap.h"
 #include "sdcard.h"
 #include "vSD.h"
+#include "zodiac_battery.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
@@ -25,9 +26,12 @@ namespace {
     constexpr auto runHostLimit = std::chrono::milliseconds(12);
     // Every button pin, ports A and D. They read high while released.
     constexpr uint32_t buttonPinsA = 0x780, buttonPinsD = 0x7780;
-    // ASSUMPTION "cradle line D22 idles high": the sleep path arms D22 as a low level interrupt with the
-    // other wake lines (cradle or cable detect by the ROM's use), so off the cradle it has to read high.
+    // D22 is the cradle's HotSync button, low while pressed (ROM key scan 20084af4 sets keyBitCradle on D22
+    // low with the cradle attached; the sleep path arms it as a low level wake interrupt), so it idles high.
     constexpr uint32_t cradlePinD = 0x00400000;
+    // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
+    // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
+    constexpr uint32_t chargerPinB = 0x00004000;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
@@ -118,6 +122,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
     soc->ramSize = 128u << 20;
+    soc->ApplyBattery();
     soc->StateChanged();
     // The owner keeps it for the life of the process, like the machine inside.
     return soc.release();
@@ -215,6 +220,8 @@ void SocIMX1::Reset() {
         std::cerr << "zodiac: reset failed: " << imx1StateStatusName(info.status) << std::endl;
     orientationTracker.Restart(imx1MachineStartups(machine));
     StateChanged();
+    // After StateChanged, which works out halted again for the loaded state.
+    ApplyBattery();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
     if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
@@ -265,6 +272,7 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     // A saved machine is taken as past its boot.
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
+    ApplyBattery();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
     // a card section puts the card store's card back in when it's the saved card (a session saved with
     // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the
@@ -322,6 +330,26 @@ bool SocIMX1::LoadBringUpState(const uint8_t* data, size_t size) {
         size = gunzip->GetUncompressedSize();
     }
     return LoadState(data, size, imx1StateAllowBootInputs);
+}
+
+bool SocIMX1::SetBattery(const BatteryPower& value) {
+    battery = value;
+    ApplyBattery();
+    return true;
+}
+
+// The level as the ASP U word the DAL's battery read takes (zodiac_battery.h); Maximum is the fixed 0x9b00
+// every Zodiac state was made with. Charging pulls B14 low.
+void SocIMX1::ApplyBattery() {
+    if (halted) return;
+    if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the battery level could not be set" << std::endl;
+    uint32_t values[4]{}, masks[4]{};
+    masks[1] = chargerPinB;
+    values[1] = battery.charging ? 0 : chargerPinB;
+    if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
+        std::cerr << "zodiac: the charger input could not be set" << std::endl;
 }
 
 uint64_t SocIMX1::GetTime() {

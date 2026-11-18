@@ -1,5 +1,6 @@
 #include "EmRegsSZRedwood.h"
 
+#include "EmBattery.h"
 #include "EmBankRegs.h"  // EmBankRegs::InvalidAccess
 #include "EmCommon.h"
 #include "EmMemory.h"
@@ -120,7 +121,8 @@ uint8 EmRegsSzRedwood::GetPortInputValue(int port) {
             return 0xff;
 
         case 'P':
-            return 0x0a | hwrSZRedwoodPortPDC_IN;
+            // DC_IN is low on the charger (ROM HwrDockStatus at 0x90884 reads PP7 low as charging).
+            return gBattery.charging ? 0x0a : 0x0a | hwrSZRedwoodPortPDC_IN;
 
         default:
             return 0;

@@ -11,6 +11,7 @@
         (at your option) any later version.
 \* ===================================================================== */
 #include "EmRegs330CPLD.h"
+#include "EmBattery.h"
 
 #include "EmCommon.h"
 #include "EmHAL.h"  // EmHAL::LineDriverChanged
@@ -155,7 +156,7 @@ uint32 EmRegs330CPLD::GetWord(emuptr address) {
                 Reg2 &= ~Cpld2NoSdDetect;
             else
                 Reg2 |= Cpld2NoSdDetect;
-            if (fPortMgr->PowerConnected)
+            if (fPortMgr->PowerConnected || gBattery.ExternalPower())
                 Reg2 &= ~Cpld2NoExPwrDetect;
             else
                 Reg2 |= Cpld2NoExPwrDetect;
