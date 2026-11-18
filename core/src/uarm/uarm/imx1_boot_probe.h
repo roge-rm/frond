@@ -325,6 +325,22 @@ Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
 uint16_t imx1MachineAspUInput(const Imx1Machine*);
 // A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
 uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
+// UART1 (unit 1, the connector's serial port) or UART2 (unit 2, infrared) as a host peer sees it.
+struct Imx1MachineUartLine {
+    bool enabled{false};      // UARTEN
+    bool receiverOn{false};   // takes characters now
+    bool infrared{false};     // IREN
+    bool ctsLow{false};       // the CTS output: the guest takes more
+    bool rtsLow{false};       // the RTS input as set
+    uint32_t format{0};       // UCR2 WS, STPB, PROE and PREN
+    uint64_t bitsPerSecond{0};
+};
+Imx1MachineUartLine imx1MachineUartLine(const Imx1Machine*, unsigned unit);
+// Between runs: the RTS input level (low is active), and a peer (Imx1Uart::setPeer and setSource; all
+// null detaches). Refused on a stopped machine.
+Imx1BootstrapAccess imx1MachineSetUartRts(Imx1Machine*, unsigned unit, bool low);
+Imx1BootstrapAccess imx1MachineSetUartPeer(Imx1Machine*, unsigned unit, Imx1UartTransmit transmit,
+                                          Imx1UartPending pending, Imx1UartTake take, void* context);
 // Execution-thread raw physical inputs. Preview validates without changing guest state.
 // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],

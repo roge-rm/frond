@@ -206,9 +206,35 @@ void tcpWorker(std::shared_ptr<Shared> s, int listener) {
 }  // namespace
 
 #ifndef FROND_BYTE_LINK_ONLY
+static_assert(hostUartCts == PXA_UART_CTS && hostUartDsr == PXA_UART_DSR && hostUartRi == PXA_UART_RI &&
+              hostUartDcd == PXA_UART_DCD && hostUartNone == UART_CHAR_NONE);
+namespace {
+class PxaHostUartPort final : public HostUartPort {
+   public:
+    explicit PxaHostUartPort(PxaUart* uart) : uart(uart) {}
+    bool Attach(Read read, Write write, Active active, Detached detached, void* context) override {
+        return pxaUartAttachExternal(uart, read, write, active, nullptr, detached, context);
+    }
+    void Detach() override { pxaUartDetachExternal(uart); }
+    bool SetInputs(uint8_t asserted) override { return pxaUartSetModemInputs(uart, asserted); }
+    bool WantsInput() const override { return pxaUartGetModemOutputs(uart) & PXA_UART_RTS; }
+    bool ReceiverEnabled() const override { return pxaUartReceiverEnabled(uart); }
+    uint32_t DisableCount() const override { return pxaUartDisableCount(uart); }
+    void Kick() override { pxaUartKick(uart); }
+    HostUartMode Mode() const override {
+        const auto state = pxaUartIrState(uart);
+        return {state.baud, uint32_t(state.lcr & 0x3f), state.receive, state.transmit};
+    }
+
+   private:
+    PxaUart* uart;
+};
+}  // namespace
+
 struct HostSerial::Impl {
     Config config;
-    PxaUart* uart{nullptr};
+    HostUartPort* uart{nullptr};
+    std::unique_ptr<HostUartPort> pxaPort;
     SerialHostRoute route{};
     bool restart{}, window{};
     std::string error;
@@ -230,8 +256,7 @@ struct HostSerial::Impl {
         if (!self.shared) return UART_CHAR_NONE;
         auto& s = *self.shared;
         // The peer honours RTS, like a host port with hardware flow control.
-        if (!s.rxSize.load(std::memory_order_relaxed) ||
-            !(pxaUartGetModemOutputs(self.uart) & PXA_UART_RTS))
+        if (!s.rxSize.load(std::memory_order_relaxed) || !self.uart->WantsInput())
             return UART_CHAR_NONE;
         uint8_t byte;
         size_t left;
@@ -279,22 +304,22 @@ struct HostSerial::Impl {
     }
     static void Replaced(void* context) {
         auto& self=*static_cast<Impl*>(context);
-        pxaUartSetModemInputs(self.uart,0);
+        self.uart->SetInputs(0);
         self.CloseEndpoint();self.restart=true;
     }
     static void ModeChanged(void* context) {
         auto& self=*static_cast<Impl*>(context);
         if(!self.shared || self.route.paused(self.route.context))return;
-        const bool enabled=self.route.enabled(self.route.context) && pxaUartReceiverEnabled(self.uart);
-        const auto state=pxaUartIrState(self.uart);
-        const uint64_t tag=(uint64_t(state.baud)<<8)|(state.lcr&0x3f);
+        const bool enabled=self.route.enabled(self.route.context) && self.uart->ReceiverEnabled();
+        const auto state=self.uart->Mode();
+        const uint64_t tag=(uint64_t(state.baud)<<16)|state.format;
         auto& s=*self.shared;
         std::lock_guard lock(s.mutex);
         if(self.window!=enabled || (enabled && tag!=self.receiveTag)) {
             s.receiveEnabled=enabled;s.receiveTag=tag;s.ClearReceive();s.ClearTx();
             self.window=enabled;self.receiveTag=tag;
         }
-        if(!enabled && self.lastInputs!=0 && pxaUartSetModemInputs(self.uart,0)) self.lastInputs=0;
+        if(!enabled && self.lastInputs!=0 && self.uart->SetInputs(0)) self.lastInputs=0;
     }
     static void Detached(void* context) {
         auto& self = *static_cast<Impl*>(context);
@@ -426,6 +451,14 @@ bool openEndpoint(const HostSerial::Config& config, Shared& shared, int& fd, std
 
 #ifndef FROND_BYTE_LINK_ONLY
 bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error, SerialHostRoute route) {
+    if (config.kind == Kind::off || !uart) return Start(static_cast<HostUartPort*>(nullptr), config, error, route);
+    auto port = std::make_unique<PxaHostUartPort>(uart);
+    if (!Start(port.get(), config, error, route)) return false;
+    impl->pxaPort = std::move(port);
+    return true;
+}
+
+bool HostSerial::Start(HostUartPort* uart, const Config& config, std::string& error, SerialHostRoute route) {
     Stop();impl->error.clear();
     if (config.kind == Kind::off) return true;
     if (!uart) {
@@ -467,10 +500,10 @@ bool HostSerial::Start(PxaUart* uart, const Config& config, std::string& error, 
 void HostSerial::Stop() {
     if(impl->route.context) {
         impl->route.setHooks(impl->route.context,nullptr);
-        pxaUartSetModemInputs(impl->uart,0);
-    } else if(impl->shared && impl->attached) pxaUartDetachExternal(impl->uart);
+        impl->uart->SetInputs(0);
+    } else if(impl->shared && impl->attached) impl->uart->Detach();
     impl->CloseEndpoint();
-    impl->route={};impl->restart=false;impl->uart=nullptr;impl->attached=false;
+    impl->route={};impl->restart=false;impl->uart=nullptr;impl->pxaPort.reset();impl->attached=false;
     impl->config={};impl->endpoint.clear();impl->error.clear();
 }
 
@@ -495,21 +528,20 @@ void HostSerial::Service() {
     auto* s = impl->shared.get();
     if (!s) return;
     if (!impl->attached) {
-        if (!pxaUartAttachExternal(impl->uart, Impl::Read, Impl::Write, Impl::Active, nullptr,
-                                   Impl::Detached, impl.get()))
+        if (!impl->uart->Attach(Impl::Read, Impl::Write, Impl::Active, Impl::Detached, impl.get()))
             return;  // busy, frozen or in loopback; try again next time
         impl->attached = true;
         impl->lastInputs = -1;
-        impl->disableCount = pxaUartDisableCount(impl->uart);
+        impl->disableCount = impl->uart->DisableCount();
         impl->receivedAtService = s->received;
     }
     // A closed port has no receiver: bytes from the host are lost, as on a wire.
     // After a close and reopen since the last call, drop the bytes that were
     // already waiting then; later ones may have come after the reopen.
-    const auto disabled = pxaUartDisableCount(impl->uart);
+    const auto disabled = impl->uart->DisableCount();
     const uint64_t waiting = impl->receivedAtService;
     impl->receivedAtService = s->received;
-    if (!impl->route.context && !pxaUartReceiverEnabled(impl->uart))
+    if (!impl->route.context && !impl->uart->ReceiverEnabled())
         impl->DropReceived(SIZE_MAX);
     else if (!impl->route.context && disabled != impl->disableCount && waiting > impl->consumed)
         impl->DropReceived(size_t(waiting - impl->consumed));
@@ -517,10 +549,10 @@ void HostSerial::Service() {
     const size_t pending = s->txSize;
     if (pending >= queueBytes / 2) impl->ctsOpen = false;
     if (pending <= queueBytes / 4) impl->ctsOpen = true;
-    const int inputs = s->connected ? PXA_UART_DSR | PXA_UART_DCD | (impl->ctsOpen ? PXA_UART_CTS : 0) : 0;
-    if (inputs != impl->lastInputs && pxaUartSetModemInputs(impl->uart, uint8_t(inputs)))
+    const int inputs = s->connected ? hostUartDsr | hostUartDcd | (impl->ctsOpen ? hostUartCts : 0) : 0;
+    if (inputs != impl->lastInputs && impl->uart->SetInputs(uint8_t(inputs)))
         impl->lastInputs = inputs;
-    if (s->rxSize) pxaUartKick(impl->uart);
+    if (s->rxSize) impl->uart->Kick();
 }
 
 HostSerial::Config HostSerial::GetConfig() const { return impl->config; }

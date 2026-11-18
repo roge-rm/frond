@@ -2408,6 +2408,37 @@ Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine* machine, uint16_t word)
 uint32_t imx1MachineGpioInput(const Imx1Machine* machine, unsigned port) {
     return machine ? machine->probe->peripherals.gpioInputSample(port) : 0;
 }
+Imx1MachineUartLine imx1MachineUartLine(const Imx1Machine* machine, unsigned unit) {
+    if (!machine || (unit != 1 && unit != 2) || !machine->probe->options.bootstrapPeripherals) return {};
+    const auto& board = machine->probe->peripherals;
+    const auto& uart = board.uartState(unit);
+    Imx1MachineUartLine line;
+    line.enabled = uart.enabled();
+    line.receiverOn = uart.receiverOn();
+    line.infrared = uart.infrared();
+    line.ctsLow = uart.ctsLow();
+    line.rtsLow = uart.rtsInputLow();
+    line.format = uart.frameFormat();
+    line.bitsPerSecond = line.enabled ? board.uartBitsPerSecond(unit) : 0;
+    return line;
+}
+Imx1BootstrapAccess imx1MachineSetUartRts(Imx1Machine* machine, unsigned unit, bool low) {
+    if (!machine || (unit != 1 && unit != 2)) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (p->stopped || p->terminal || !p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+    p->peripherals.setUartRts(unit, low);
+    return Imx1BootstrapAccess::ok;
+}
+Imx1BootstrapAccess imx1MachineSetUartPeer(Imx1Machine* machine, unsigned unit, Imx1UartTransmit transmit,
+                                          Imx1UartPending pending, Imx1UartTake take, void* context) {
+    if (!machine || (unit != 1 && unit != 2)) return Imx1BootstrapAccess::sequence;
+    auto* p = machine->probe;
+    if (!p->options.bootstrapPeripherals) return Imx1BootstrapAccess::sequence;
+    // Detaching always works, so a stopped machine lets go of its host.
+    if ((transmit || take) && (p->stopped || p->terminal)) return Imx1BootstrapAccess::sequence;
+    p->peripherals.setUartPeer(unit, transmit, pending, take, context);
+    return Imx1BootstrapAccess::ok;
+}
 uint16_t imx1MachineAspUInput(const Imx1Machine* machine) {
     return machine && machine->probe->options.bootstrapPeripherals ? machine->probe->peripherals.aspUInput() : 0;
 }
@@ -2692,7 +2723,7 @@ static_assert(sizeof(Imx1Timer) == 28, "update its stateVersion and the size in 
 static_assert(sizeof(Imx1Sysctrl) == 12, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Reset) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Bta) == 4, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Uart) == 264, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Uart) - Imx1Uart::unsavedBytes == 264, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Mmcsd) - Imx1Mmcsd::unsavedBytes == 96, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1I2c) == 64, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Asp) == 100, "update its stateVersion and the size in stateLayoutFingerprint");
