@@ -29,8 +29,10 @@ class BatteryTest {
         // plugged: 0 battery, 1 AC, 2 USB; status 2 charging, 3 discharging, 4 not charging, 5 full.
         assertEquals(HostBattery(50, false), BatteryText.host(50, 100, 0, 3))
         assertEquals(HostBattery(80, true), BatteryText.host(160, 200, 1, 2))
-        assertEquals(HostBattery(33, true), BatteryText.host(33, 100, 0, 2))
-        assertEquals(HostBattery(100, true), BatteryText.host(100, 100, 0, 5))
+        assertEquals(HostBattery(33, false), BatteryText.host(33, 100, 0, 2))
+        // Full a while after unplugging at 100%: not charging.
+        assertEquals(HostBattery(100, false), BatteryText.host(100, 100, 0, 5))
+        assertEquals(HostBattery(100, true), BatteryText.host(100, 100, 1, 5))
         assertEquals(HostBattery(7, true), BatteryText.host(7, 100, 2, 4))
         assertEquals(HostBattery(67, false), BatteryText.host(2, 3, 0, 3))
     }

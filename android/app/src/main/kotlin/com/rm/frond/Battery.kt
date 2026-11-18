@@ -10,6 +10,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 // How the machine's battery follows: Maximum, a set level, or this phone. arg is the saved name.
 enum class BatteryMode(val label: String, val arg: String) {
@@ -43,12 +45,12 @@ object BatteryText {
     }
 
     // The ACTION_BATTERY_CHANGED extras as a host state. A missing level or scale reads as full; plugged (any
-    // source) or a status of charging or full counts as external power. A phone with no battery reads full on power.
-    fun host(level: Int, scale: Int, plugged: Int, status: Int, present: Boolean = true): HostBattery {
+    // source) counts as external power, whatever the status (a phone reports full a while after it is unplugged).
+    // A phone with no battery reads full on power.
+    fun host(level: Int, scale: Int, plugged: Int, @Suppress("UNUSED_PARAMETER") status: Int, present: Boolean = true): HostBattery {
         if (!present) return HostBattery(100, true)
         val percent = if (level < 0 || scale <= 0) 100 else (level * 100.0 / scale).let { Math.round(it).toInt() }.coerceIn(0, 100)
-        val charging = plugged > 0 || status == BatteryManager.BATTERY_STATUS_CHARGING || status == BatteryManager.BATTERY_STATUS_FULL
-        return HostBattery(percent, charging)
+        return HostBattery(percent, plugged > 0)
     }
 
     fun host(intent: Intent?): HostBattery = intent?.let {
@@ -64,8 +66,9 @@ object BatteryText {
 }
 
 // Sends the running machine's Battery setting to the core: once at start after asking battery-state, then on each
-// change of the setting and, in host mode, each time the phone's battery text changes. The setting is read through
-// settings(); nothing here runs on the UI thread's time.
+// change of the setting and, in host mode, each time the phone's battery text changes. The three battery settings
+// are kept here (from launch, then changed()), so a broadcast never reads the disk. All work runs on one background
+// thread.
 class BatteryControl(
     private val context: Context,
     private val link: ControlLink,
@@ -73,7 +76,8 @@ class BatteryControl(
 ) {
     var info by mutableStateOf(BatteryInfo())
         private set
-    private val worker = Executors.newSingleThreadExecutor { Thread(it, "FrondBattery").apply { isDaemon = true } }
+    private val worker = Executors.newSingleThreadScheduledExecutor { Thread(it, "FrondBattery").apply { isDaemon = true } }
+    @Volatile private var wanted = MachineSettings()
     private var host = HostBattery()
     private var sent: String? = null
     private var registered = false
@@ -81,42 +85,55 @@ class BatteryControl(
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val next = BatteryText.host(intent)
-            worker.execute { host = next; send() }
+            post { host = next; send() }
         }
+    }
+
+    // Runs work on the worker unless stopped; a failure is logged and the worker carries on.
+    private fun post(delayMillis: Long = 0, work: () -> Unit) {
+        if (stopped) return
+        try {
+            worker.schedule({
+                if (stopped) return@schedule
+                try { work() } catch (e: Exception) { Log.w(TAG, "battery: ${e.message}") }
+            }, delayMillis, TimeUnit.MILLISECONDS)
+        } catch (_: RejectedExecutionException) {}
     }
 
     // The text the core is told at launch, so the first start already follows the setting.
     fun launchSpec(): String {
-        val saved = settings() ?: MachineSettings()
-        host = if (saved.batteryMode == BatteryMode.HOST) BatteryText.readHost(context) else host
-        sent = BatteryText.spec(saved.batteryMode, saved.batteryLevel, saved.batteryCharging, host)
+        wanted = try { settings() ?: wanted } catch (e: Exception) { Log.w(TAG, "battery settings: ${e.message}"); wanted }
+        if (wanted.batteryMode == BatteryMode.HOST) host = BatteryText.readHost(context)
+        sent = BatteryText.spec(wanted.batteryMode, wanted.batteryLevel, wanted.batteryCharging, host)
         return sent!!
     }
 
     // Once the core answers: asks battery-state, then applies the setting again.
     fun start() {
-        link.whenConnected {
-            if (!link.connectedOnce) return@whenConnected
-            worker.execute {
-                if (stopped) return@execute
-                val reply = link.request("battery-state", timeoutSeconds = 30)
-                if (!reply.ok) { Log.w(TAG, "battery-state: ${reply.code} ${reply.message}"); return@execute }
-                info = BatteryInfo.parse(reply.message)
-                sent = null
-                refresh()
-            }
+        link.whenConnected { if (link.connectedOnce) post { askState() } }
+    }
+
+    // Asks until the core answers; the rows stay greyed meanwhile.
+    private fun askState() {
+        val reply = link.request("battery-state", timeoutSeconds = 30)
+        if (!reply.ok) {
+            Log.w(TAG, "battery-state: ${reply.code} ${reply.message}")
+            if (reply.code != "closed") post(RETRY_MILLIS) { askState() }
+            return
         }
+        info = BatteryInfo.parse(reply.message)
+        sent = null
+        refresh()
     }
 
     // The saved setting changed: watch the phone in host mode, and send the text.
-    fun changed() {
-        worker.execute { refresh() }
+    fun changed(saved: MachineSettings) {
+        wanted = saved
+        post { refresh() }
     }
 
     private fun refresh() {
-        if (stopped) return
-        val saved = settings() ?: return
-        val hostMode = saved.batteryMode == BatteryMode.HOST && info.supported
+        val hostMode = wanted.batteryMode == BatteryMode.HOST && info.supported
         if (hostMode) {
             host = BatteryText.readHost(context)
             if (!registered) {
@@ -128,8 +145,8 @@ class BatteryControl(
     }
 
     private fun send() {
-        if (stopped || !info.known || !info.supported) return
-        val saved = settings() ?: return
+        if (!info.known || !info.supported) return
+        val saved = wanted
         val spec = BatteryText.spec(saved.batteryMode, saved.batteryLevel, saved.batteryCharging, host, info.chargingSupported)
         if (spec == sent) return
         var reply = link.request("battery", spec, timeoutSeconds = 10)
@@ -149,12 +166,14 @@ class BatteryControl(
 
     // The machine stopped: no more reading or sending.
     fun stop() {
+        if (stopped) return
+        try { worker.execute { unregister() } } catch (_: RejectedExecutionException) {}
         stopped = true
-        worker.execute { unregister() }
         worker.shutdown()
     }
 
     companion object {
         private const val TAG = "FrondBattery"
+        private const val RETRY_MILLIS = 3000L
     }
 }

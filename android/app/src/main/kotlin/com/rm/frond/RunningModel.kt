@@ -644,7 +644,7 @@ class RunningModel(
             FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
             FrondActivity.running?.applyRumble()
-            FrondActivity.running?.battery?.changed()
+            FrondActivity.running?.battery?.changed(settings)
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }
