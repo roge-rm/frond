@@ -509,6 +509,58 @@ static void nandImageTests() {
     assert(page(21, 2)[0] == 0xff && page(21, 2)[512] == 0xff);
 }
 
+// The blocks the OS's drivers set up before they're modelled in full: an empty SD slot, no USB cable,
+// the ADC with the stylus up, DMA and IIS registers, IIC with every device answering, and RTCRST.
+static void quietBlockTests() {
+    S3cSdi sdi;
+    sdi.reset();
+    assert(sdi.write(0x08, 0) == S3cAccess::ok && sdi.write(0x0c, 0x140) == S3cAccess::ok);
+    assert(get(sdi, 0x10) == 0x400 && !(get(sdi, 0x0c) & 0x100) && sdi.commands == 1);
+    sdi.write(0x10, 0x400);
+    assert(get(sdi, 0x10) == 0 && get(sdi, 0x14) == 0);
+
+    S3cUsbDevice usb;
+    usb.reset();
+    assert(get(usb, 0x16c) == 0x04 && usb.write(0x15c, 0x3) == S3cAccess::ok && get(usb, 0x15c) == 0x3);
+    assert(get(usb, 0x1c0) == 0);
+    uint32_t v;
+    assert(usb.read(0x100, v) == S3cAccess::unknown);
+
+    S3cAdc adc;
+    adc.reset();
+    adc.channel[2] = 0x123;
+    adc.write(0x00, 0x4000 | 2 << 3 | 1);
+    assert((get(adc, 0x00) & 0x8001) == 0x8000 && (get(adc, 0x0c) & 0x83ff) == 0x8123 && adc.channelsRead == 4);
+
+    S3cDma dma;
+    dma.reset();
+    dma.write(0x80, 0x3000a000);
+    dma.write(0x90, (1u << 23) | 0x400);
+    assert(get(dma, 0x80) == 0x3000a000 && (get(dma, 0x94) & 0xfffff) == 0x400);
+    assert(dma.write(0xa0, 2) == S3cAccess::ok && get(dma, 0xa0) == 2);
+    dma.write(0xd0, 0x10);
+    assert(dma.write(0xe0, 3) == S3cAccess::unsupported);  // software trigger
+
+    S3cIis iis;
+    iis.reset();
+    iis.write(0x04, 0x249);
+    assert(get(iis, 0x04) == 0x249 && (get(iis, 0x0c) & 0xfff) == 0);
+
+    S3cIic iic;
+    iic.reset();
+    iic.write(0x00, 0xaf);
+    iic.write(0x0c, 0x30);
+    iic.write(0x04, 0xf0);  // master transmit start
+    assert((get(iic, 0x00) & 0x10) && !(get(iic, 0x04) & 1));
+    iic.write(0x0c, 0x22);
+    iic.write(0x00, 0xaf & ~0x10);  // the next byte
+    assert((get(iic, 0x00) & 0x10) && iic.bytes == 2);
+
+    S3cRtc rtc;
+    rtc.reset({6, 1, 1, 7, 12, 0, 0});
+    assert(rtc.write(0x6c, 0x9) == S3cAccess::ok && get(rtc, 0x6c) == 0x9);
+}
+
 int main() {
     intcTests();
     clockTests();
@@ -520,6 +572,7 @@ int main() {
     lcdTests();
     nandTests();
     nandImageTests();
+    quietBlockTests();
     std::puts("s3c2442 blocks: ok");
     return 0;
 }

@@ -1,7 +1,7 @@
 // Boots the HP iPAQ rx1950's bootloader on the S3C2442 machine and keeps what its UARTs send.
 //
 //   rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N]
-//               [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]...
+//               [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...
 //
 // CEBL.nbf's eboot goes straight into SDRAM at 0x30080000 and runs from there with the MMU off and the
 // PLL set, as the block 0 loader would leave it (that loader isn't in either dump). CEOS.nbf, if given, fills the NAND
@@ -56,7 +56,8 @@ int main(int argc, char** argv) {
     const char* nandPath = nullptr;
     bool anyFirmware = false;
     std::vector<uint32_t> peeks;  // virtual addresses whose words are printed when the run stops
-    std::vector<uint32_t> walks;  // MVAs whose page table walk is printed when the run stops
+    std::vector<uint32_t> walks;
+    std::vector<uint32_t> watches;  // SDRAM physical words whose changes are printed (needs --history)  // MVAs whose page table walk is printed when the run stops
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -73,11 +74,12 @@ int main(int argc, char** argv) {
         else if (a == "--nand") nandPath = next();
         else if (a == "--any-firmware") anyFirmware = true;
         else if (a == "--peek") peeks.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
+        else if (a == "--watch") watches.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else if (a == "--walk") walks.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (!cebl) {
-        std::fprintf(stderr, "usage: rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N] [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]...\n");
+        std::fprintf(stderr, "usage: rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N] [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...\n");
         return 2;
     }
     std::vector<uint8_t> bl;
@@ -141,6 +143,26 @@ int main(int argc, char** argv) {
         };
 
     if (history) machine->keepHistory(history);
+    // Watches compare SDRAM and the kernel's cached view (0x80000000 is SDRAM from 0x30100000) after every
+    // instruction, so a write held in the D-cache shows apart from its write-back.
+    std::vector<std::pair<uint32_t, uint32_t>> watched(watches.size(), {0, 0});
+    uint64_t steps = 0;
+    if (!watches.empty() && history) {
+        machine->stepHook = [&](uint32_t pc) {
+            ++steps;
+            for (size_t i = 0; i < watches.size(); ++i) {
+                uint32_t ram = 0, cached = 0;
+                std::memcpy(&ram, machine->sdram() + (watches[i] - 0x30000000), 4);
+                const uint32_t va = watches[i] >= 0x30100000 ? 0x80000000 + (watches[i] - 0x30100000) : 0x8c000000 + (watches[i] - 0x30000000);
+                if (!cpuInspectRead(machine->cpu(), va, &cached, 4)) cached = 0xdeadbeef;
+                if (ram != watched[i].first || cached != watched[i].second) {
+                    std::printf("watch %08x at step %" PRIu64 " pc %08x pid %08x: ram %08x cached %08x\n", watches[i], steps, pc,
+                                cpuGetPid(machine->cpu()), ram, cached);
+                    watched[i] = {ram, cached};
+                }
+            }
+        };
+    }
     machine->start(ebootPhysical);
     const auto stop = machine->run(instructions);
     for (auto* f : logs) std::fclose(f);
@@ -176,6 +198,29 @@ int main(int argc, char** argv) {
         uint32_t word = 0;
         if (cpuInspectRead(machine->cpu(), va, &word, 4)) std::printf("peek %08x: %08x\n", va, word);
         else std::printf("peek %08x: not mapped\n", va);
+    }
+    {
+        // The screen as the LCD scans it, 16 bits per pixel 5:6:5, to screen.ppm (the rx1950 panel is
+        // 240 x 320). LCDSADDR1 holds A[30:1] of the frame, LCDSADDR2 A[21:1] of its end.
+        const auto& lcd = machine->lcd;
+        const uint32_t start = (lcd.saddr[0] & 0x3fffffff) << 1, width = 240, height = 320;
+        if (lcd.enabled() && start >= 0x30000000 && start + width * height * 2 <= 0x32000000) {
+            std::string ppm = "P6\n240 320\n255\n";
+            for (uint32_t i = 0; i < width * height; ++i) {
+                uint16_t p;
+                std::memcpy(&p, machine->sdram() + (start - 0x30000000) + i * 2, 2);
+                ppm += char((p >> 11) << 3);
+                ppm += char(((p >> 5) & 0x3f) << 2);
+                ppm += char((p & 0x1f) << 3);
+            }
+            if (FILE* f = std::fopen((out + "/screen.ppm").c_str(), "wb")) {
+                std::fwrite(ppm.data(), 1, ppm.size(), f);
+                std::fclose(f);
+            }
+            std::printf("screen: frame at %08x, LCDCON1 %08x, in screen.ppm\n", start, lcd.lcdcon[0]);
+        }
+        std::printf("ADC: %" PRIu64 " conversions, channels %02x; SD commands %" PRIu64 "; Wi-Fi bus accesses %" PRIu64 "\n",
+                    machine->adc.conversions, machine->adc.channelsRead, machine->sdi.commands, machine->wifiAccesses);
     }
     if (!walks.empty()) {
         // The kernel's own mappings of SDRAM (OEMAddressTable): 0x8c000000 the first MB, 0x80000000 the rest.

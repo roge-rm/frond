@@ -2880,7 +2880,9 @@ test-print-text:
 # boot tool, which runs the bootloader and keeps the UART output.
 S3C2442_SOURCES = core/src/uarm/uarm/s3c2442_intc.cpp core/src/uarm/uarm/s3c2442_clock.cpp \
 	core/src/uarm/uarm/s3c2442_timer.cpp core/src/uarm/uarm/s3c2442_rtc.cpp core/src/uarm/uarm/s3c2442_gpio.cpp \
-	core/src/uarm/uarm/s3c2442_uart.cpp core/src/uarm/uarm/s3c2442_lcd.cpp core/src/uarm/uarm/s3c2442_nand.cpp
+	core/src/uarm/uarm/s3c2442_uart.cpp core/src/uarm/uarm/s3c2442_lcd.cpp core/src/uarm/uarm/s3c2442_nand.cpp \
+	core/src/uarm/uarm/s3c2442_sdi.cpp core/src/uarm/uarm/s3c2442_usbd.cpp \
+	core/src/uarm/uarm/s3c2442_adc.cpp core/src/uarm/uarm/s3c2442_audio_bus.cpp
 S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442_nand.h \
 	core/src/uarm/uarm/s3c2442_machine.h core/src/uarm/uarm/rx1950_nand_image.h
 .PHONY: rx1950-boot test-s3c2442 test-s3c2442-machine test-rx1950-boot

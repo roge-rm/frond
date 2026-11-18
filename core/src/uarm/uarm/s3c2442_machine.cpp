@@ -20,9 +20,8 @@ namespace {
     // SFR blocks the machine doesn't model yet, by base, for the refusal text.
     struct Unmodelled { uint32_t base; const char* name; };
     constexpr Unmodelled unmodelled[] = {
-        {0x49000000, "USB host"}, {0x4b000000, "DMA"}, {0x4f000000, "camera interface"},
-        {0x52000000, "USB device"}, {0x54000000, "IIC"}, {0x55000000, "IIS"}, {0x58000000, "ADC and touch screen"},
-        {0x59000000, "SPI"}, {0x5a000000, "SD interface"}, {0x5b000000, "AC97"},
+        {0x49000000, "USB host"}, {0x4f000000, "camera interface"},
+        {0x59000000, "SPI"}, {0x5b000000, "AC97"},
     };
 
     uint64_t mulDiv(uint64_t a, uint64_t b, uint64_t c, uint64_t& rest) {
@@ -71,6 +70,7 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
     }
     patchDispatchSetCpu(patches, m->cpuCore);
     cpuArm920EnableWait(m->cpuCore);
+    cpuArm920SetMemoryCheck(m->cpuCore, cacheCheck, m.get());
     return m;
 }
 
@@ -81,6 +81,12 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     pwm.reset();
     watchdog.reset();
     rtc.reset(options.rtcStart);
+    sdi.reset();
+    usbDevice.reset();
+    adc.reset();
+    dma.reset();
+    iis.reset();
+    iic.reset();
     gpio.reset(options.chipId, options.resetCause);
     for (unsigned p = 0; p < S3cGpio::ports; ++p) gpio.input[p] = options.pinLevels[p] & S3cGpio::pinMask(S3cGpio::Port(p));
     for (auto& u : uarts) {
@@ -149,13 +155,24 @@ std::string S3c2442Machine::stopText() const {
     return "?";
 }
 
+// What the ARM920T's data cache may fill from or write back to: SDRAM and the steppingstone (an SRAM),
+// never an SFR.
+bool S3c2442Machine::cacheCheck(void* context, uint32_t address, uint32_t size, bool write) {
+    auto& m = *static_cast<S3c2442Machine*>(context);
+    if (address < 0x08000000) return (address & (sizeof m.steppingstone - 1)) + size <= sizeof m.steppingstone;
+    return memIsBufferRange(m.mem, address, size, write);
+}
+
 bool S3c2442Machine::access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data) {
     auto& m = *static_cast<S3c2442Machine*>(context);
-    // The steppingstone, the 4 KB SRAM at 0 when booting from NAND.
-    if (address < sizeof m.steppingstone) {
-        if (address + size > sizeof m.steppingstone) return m.refuse(address, size, write, 0, "steppingstone overrun");
-        if (write) std::memcpy(m.steppingstone + address, data, size);
-        else std::memcpy(data, m.steppingstone + address, size);
+    // The steppingstone, the 4 KB SRAM at 0 when booting from NAND. ASSUMPTION "steppingstone mirrored in
+    // bank 0": it repeats through nGCS0's 128 MB, as the bank decodes only its low 12 address bits. A
+    // driver in device.exe reads a pointer at 0x001ffffc.
+    if (address < 0x08000000) {
+        const uint32_t at = address & (sizeof m.steppingstone - 1);
+        if (at + size > sizeof m.steppingstone) return m.refuse(address, size, write, 0, "steppingstone overrun");
+        if (write) std::memcpy(m.steppingstone + at, data, size);
+        else std::memcpy(data, m.steppingstone + at, size);
         return true;
     }
     if (size != 1 && size != 2 && size != 4)
@@ -195,6 +212,14 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             return refuse(address, size, write, value, "nGCS5 debug board access");
         if (write) debugWriteSeen = true;
         else value = size == 4 ? ~0u : (1u << (8 * size)) - 1;
+        return true;
+    }
+    if ((address & 0xf8000000) == 0x20000000) {
+        // nGCS4, the TI ACX100 Wi-Fi MAC, which isn't modelled yet. ASSUMPTION "Wi-Fi empty bus": reads give
+        // all ones and writes are dropped, so tiacxwln finds no chip.
+        if (!options.wifiBusEmpty) return refuse(address, size, write, value, "nGCS4 Wi-Fi access");
+        ++wifiAccesses;
+        if (!write) value = size == 4 ? ~0u : (1u << (8 * size)) - 1;
         return true;
     }
     switch (base) {
@@ -262,6 +287,37 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             name = "GPIO";
             if (write) result = size == 4 ? gpio.write(offset, value, intc) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return gpio.read(o, v); });
+            break;
+        case 0x52000000:
+            name = "USB device";
+            if (write) result = size == 4 ? usbDevice.write(offset, value) : S3cAccess::unsupported;
+            else readWord([&](uint32_t o, uint32_t& v) { return usbDevice.read(o, v); });
+            break;
+        case 0x58000000:
+            name = "ADC and touch screen";
+            if (write) result = size == 4 ? adc.write(offset, value) : S3cAccess::unsupported;
+            else readWord([&](uint32_t o, uint32_t& v) { return adc.read(o, v); });
+            break;
+        case 0x4b000000:
+            name = "DMA";
+            if (write) result = size == 4 ? dma.write(offset, value) : S3cAccess::unsupported;
+            if (result == S3cAccess::unsupported && size == 4) detail = "software-triggered DMA isn't modelled yet";
+            else readWord([&](uint32_t o, uint32_t& v) { return dma.read(o, v); });
+            break;
+        case 0x54000000:
+            name = "IIC";
+            if (write) result = size == 4 ? iic.write(offset, value) : S3cAccess::unsupported;
+            else readWord([&](uint32_t o, uint32_t& v) { return iic.read(o, v); });
+            break;
+        case 0x55000000:
+            name = "IIS";
+            if (write) result = size == 4 ? iis.write(offset, value) : S3cAccess::unsupported;
+            else readWord([&](uint32_t o, uint32_t& v) { return iis.read(o, v); });
+            break;
+        case 0x5a000000:
+            name = "SD interface";
+            if (write) result = size == 4 ? sdi.write(offset, value) : S3cAccess::unsupported;
+            else readWord([&](uint32_t o, uint32_t& v) { return sdi.read(o, v); });
             break;
         case 0x57000000:
             name = "RTC";
@@ -371,11 +427,13 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             continue;
         }
         const uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - used}) : 1;
+        const uint32_t stepPc = pc();
         if (!history.empty()) {
-            history[historyNext] = pc();
+            history[historyNext] = stepPc;
             historyNext = (historyNext + 1) % history.size();
         }
         const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(cpuCore, uint32_t(std::max<uint64_t>(n, 1)));
+        if (!history.empty() && stepHook) stepHook(stepPc);
         retiredCount += ran;
         advance(ran ? ran : 1);
         const auto guard = cpuArm920DataGuard(cpuCore);

@@ -132,6 +132,88 @@ class S3cWatchdog {
     uint64_t divisor() const;
 };
 
+// SD host interface at 0x5a000000 (manual chapter 19) with no card in the slot: registers keep what's
+// written, and a command that's started times out (SDICSTA CmdTout) as with an empty slot. Data, the
+// FIFO and the interrupt wait for the SD card work.
+class S3cSdi {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+    uint64_t commands = 0;
+
+private:
+    uint32_t regs[17];  // SDICON to SDIDAT, by word
+};
+
+// USB device controller at 0x52000000 (manual chapter 13) with no cable: registers 0x140 to 0x200 keep what's
+// written, the interrupt registers clear by writing one, and the endpoint FIFOs are empty. No host ever
+// resets the bus, so nothing else happens until the USB work.
+class S3cUsbDevice {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+
+private:
+    uint32_t regs[0x30];  // 0x140 to 0x1fc, by word
+};
+
+// ADC and touch screen at 0x58000000 (manual chapter 16), with the stylus up. A conversion finishes at
+// once (ECFLG) with the selected channel's value; the conversion and touch interrupts wait for the touch
+// work. ASSUMPTION "rx1950 ADC inputs": every channel reads mid-scale until R4 gives the battery its own.
+class S3cAdc {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+    uint16_t channel[8];  // 10-bit inputs AIN0 to AIN7
+    uint64_t conversions = 0;
+    uint32_t channelsRead = 0;  // a bit per channel converted, for traces
+
+private:
+    uint32_t adccon, adctsc, adcdly, adcdat0, adcdat1, adcupdn;
+};
+
+// DMA at 0x4b000000 (manual chapter 8), four channels of 0x40, registers only: a channel turned on
+// waits for its hardware request, and the request sources (IIS, UART, SDI, USB) don't make one yet.
+// A software trigger is refused (S3cAccess::unsupported) until transfers are modelled.
+class S3cDma {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+
+private:
+    struct Channel { uint32_t disrc, disrcc, didst, didstc, dcon, dmasktrig; } channel[4];
+};
+
+// IIS at 0x55000000 (manual chapter 21), registers only: the FIFO takes and drops samples, never asks for
+// DMA and reads as empty. Sound waits for the audio work.
+class S3cIis {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+
+private:
+    uint32_t iiscon, iismod, iispsr, iisfcon;
+};
+
+// IIC at 0x54000000 (manual chapter 20) as master with every device answering: a start or a byte sent
+// finishes at once with the interrupt pending bit set and an ACK, and bytes read are 0. Enough for the
+// codec setup writes. ASSUMPTION "IIC devices ACK": no device model behind it yet.
+class S3cIic {
+public:
+    void reset();
+    S3cAccess read(uint32_t offset, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value);
+    uint64_t bytes = 0;
+
+private:
+    uint32_t iiccon, iicstat, iicadd, iicds, iiclc;
+};
+
 // Real time clock at 0x57000000 (manual chapter 17), driven by the 32768 Hz crystal.
 class S3cRtc {
    public:

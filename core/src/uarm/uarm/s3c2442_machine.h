@@ -33,6 +33,9 @@ struct S3c2442Options {
     // nGCS5 (0x28000000, the debug board on a development unit) is an empty bus: writes are dropped and
     // reads give all ones. Off, any access there is refused.
     bool debugBoardEmpty = true;
+    // nGCS4 (the ACX100 Wi-Fi MAC) as an empty bus until the chip is modelled: writes are dropped and reads
+    // give all ones. Off stops the run at the first access.
+    bool wifiBusEmpty = true;
 };
 
 enum class S3c2442Stop : uint8_t {
@@ -76,6 +79,8 @@ class S3c2442Machine {
     // exception without a stop.
     uint64_t vfpProbeCount() const { return vfpProbes; }
     uint64_t breakpointCount() const { return breakpoints; }
+    // Accesses to the empty Wi-Fi bus on nGCS4.
+    uint64_t wifiAccesses = 0;
     // Guest time in CPU clock cycles, idle time included, and in nanoseconds.
     uint64_t cycles() const { return cycleCount; }
     uint64_t idleCycles() const { return idleCount; }
@@ -88,6 +93,11 @@ class S3c2442Machine {
     // Oldest first.
     std::vector<uint32_t> recentPcs() const;
 
+    // Called after each instruction while history is kept: pc of that instruction. For tools that watch
+    // memory.
+    std::function<void(uint32_t)> stepHook;
+    const uint8_t* sdram() const { return ramBuffer; }
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -99,6 +109,12 @@ class S3c2442Machine {
     S3cPwm pwm;
     S3cWatchdog watchdog;
     S3cRtc rtc;
+    S3cSdi sdi;
+    S3cUsbDevice usbDevice;
+    S3cAdc adc;
+    S3cDma dma;
+    S3cIis iis;
+    S3cIic iic;
     S3cGpio gpio;
     S3cUart uarts[3] = {S3cUart(0), S3cUart(1), S3cUart(2)};
     S3cLcd lcd;
@@ -108,6 +124,7 @@ class S3c2442Machine {
    private:
     explicit S3c2442Machine(const S3c2442Options& options);
     static bool access(void* context, uint32_t address, uint_fast8_t size, bool write, void* data);
+    static bool cacheCheck(void* context, uint32_t address, uint32_t size, bool write);
     bool mmio(uint32_t address, unsigned size, bool write, uint32_t& value);
     bool refuse(uint32_t address, unsigned size, bool write, uint32_t value, const std::string& text);
     void advance(uint64_t cpuCycles);
