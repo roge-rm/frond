@@ -11,6 +11,39 @@
 #include "EmLowMem.h"
 #include "EmBankSRAM.h"
 #include "EmMemory.h"
+#include "EmBattery.h"
+#include "EmPalmStructs.h"
+
+// Off: Maximum reads the saved fixed count (3072), as every Dana run has so far.
+static constexpr bool kMaximumOnCurve=false;
+
+uint16 EmRegsVZDana::MainBatteryCount(const uint16_t (&curve)[11], Int16 stepOffset, unsigned percent) {
+    const int counts=(int(BatteryPower::CurveCentivolts(curve,percent))*310+50)/100-10*stepOffset;
+    return uint16(counts<0 ? 0 : counts>4095 ? 4095 : counts);
+}
+
+uint16 EmRegsVZDana::MainBatteryCountNow() {
+    CEnableFullAccess munge;
+    const emuptr data=EmLowMem_GetGlobal(sysBatteryDataP);
+    if(!data) return 0;
+    uint16_t curve[11];
+    Int16 offset=0;
+    EmAliasSysBatteryDataStructV1<PAS> v1(data);
+    if(v1.sysBattDataStructVersion==3) {
+        EmAliasSysBatteryDataStructV3<PAS> v3(data);
+        for(int i=0;i<11;i++) curve[i]=v3.sysBattVoltageCurve[i];
+        offset=v3.sysBattVoltageStepOffset;
+    } else {
+        return 0;
+    }
+    return MainBatteryCount(curve,offset,gBattery.Percent());
+}
+
+uint16 EmRegsVZDana::AnalogueInputs::MainBattery() const {
+    if(mainBatteryFixed || (gBattery.mode==BatteryPower::Mode::maximum && !kMaximumOnCurve)) return mainBattery;
+    const uint16 count=MainBatteryCountNow();
+    return count ? count : mainBattery;
+}
 
 Bool EmRegsVZDana::GetLCDScreenOn() { return (StdRead(0xfffff441,1)&0x80)!=0; }
 bool EmRegsVZDana::CopyLCDFrame(Frame& frame,bool fullRefresh) {

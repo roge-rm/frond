@@ -2716,8 +2716,7 @@ class Runner {
         return {false, "command", "Unknown desktop command."};
     }
 
-    // The Dana's battery and supply inputs have no known count-to-voltage map yet, so it keeps today's full battery.
-    bool BatterySupported() const { return !deviceTypeIsDana5(profile->deviceType); }
+    bool BatterySupported() const { return true; }
     // Whether Charging reaches the guest. Where the ROM reads its own dock status from a board input Frond
     // doesn't model, it stays off and battery-state ends with "no-charging".
     bool BatteryChargingSupported() const { return gSession && gSession->GetDevice().BatteryChargingSupported(); }

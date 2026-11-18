@@ -85,6 +85,14 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
     void StIntControlWrite(emuptr,int,uint32);
     void StIntStatusWrite(emuptr,int,uint32);
     uint8 ReadKeyPacket();
+   public:
+    // The main battery channel's count for the setting's percent: the voltage on the ROM's battery curve at 310
+    // counts per volt less ten counts per step of offset, as PrvBatteryCmdMainRead turns it back into millivolts
+    // (mV = 1000 * (raw + 10 * offset) / 310).
+    static uint16 MainBatteryCount(const uint16_t (&curve)[11], Int16 stepOffset, unsigned percent);
+    // That count for the ROM's current battery data and gBattery, or 0 when the ROM has none yet.
+    static uint16 MainBatteryCountNow();
+   private:
     class AnalogueInputs : public EmSPISlaveADS784x {
       public:
         // Raw 12-bit ADC counts, independent of any physical voltage or divider.
@@ -92,12 +100,17 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
         // Fifty is the lowest virtual disconnected supply without underflow.
         uint16 mainBattery=3072, supply=50;
         bool packDetectHigh=true;
+        // Set by SetVirtualAnalogueInputs: channel 2 reads mainBattery as is. Not saved.
+        bool mainBatteryFixed=false;
         AnalogueInputs() : EmSPISlaveADS784x(kChannelUnused, kChannelPenY,
             kChannelVirtualInput, kChannelUnused, kChannelUnused, kChannelPenX,
             kChannelVirtualInput, kChannelUnused) {}
         uint16 ReadVirtualInput(unsigned channel) const override {
-            return channel==2 ? mainBattery : channel==6 ? supply : 0;
+            return channel==2 ? MainBattery() : channel==6 ? supply : 0;
         }
+        // The battery setting, read live, so it isn't saved and a load keeps the setting. Maximum keeps the
+        // saved fixed count until the battery default lands with an Exact rebaseline.
+        uint16 MainBattery() const;
     } adc;
    protected:
     void MigrateLegacyInput();
@@ -118,7 +131,7 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
     void SetDcIrqPin(bool high) { auto old=dcIrqHigh; dcIrqHigh=high; UpdateIRQ2(old ? 0x20 : 0); }
     bool SetVirtualAnalogueInputs(uint16 mainBattery, uint16 supply, bool packDetectHigh) {
         if(mainBattery>4095 || supply>4095) return false;
-        adc.mainBattery=mainBattery; adc.supply=supply; adc.packDetectHigh=packDetectHigh;
+        adc.mainBattery=mainBattery; adc.supply=supply; adc.packDetectHigh=packDetectHigh; adc.mainBatteryFixed=true;
         return true;
     }
     void CycleSlowly(Bool sleeping) override;

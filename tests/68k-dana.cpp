@@ -17,6 +17,7 @@
 #include "EmBankRegs.h"
 #include "PeripheralGuards.h"
 #include "EmRegsVZDana.h"
+#include "EmBattery.h"
 #include "EmUARTDragonball.h"
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
@@ -1623,6 +1624,32 @@ int main() {
         assert(raw==supply);
         bool external=uint16((raw>>1)-25)>=1000;
         assert(external==(supply<50 || supply>=2050));
+    }
+    {
+        // The battery setting on channel 2: the ROM curve's voltage at 310 counts per volt, as the ROM's main read
+        // turns it back to millivolts. A made-up curve 3.60..4.40 V on the step-19 kinds' offset 0, and the
+        // Li-ion kind's offset 5.
+        const uint16_t curve[11]={360,368,376,384,392,400,408,416,424,432,440};
+        assert(EmRegsVZDana::MainBatteryCount(curve,0,100)==1364);
+        assert(EmRegsVZDana::MainBatteryCount(curve,0,0)==1116);
+        assert(EmRegsVZDana::MainBatteryCount(curve,5,100)==1314);
+        for(Int16 offset: {0,5}) for(unsigned percent=0;percent<=100;percent++) {
+            const unsigned raw=EmRegsVZDana::MainBatteryCount(curve,offset,percent);
+            const unsigned mV=(1000*(raw+10*offset)+155)/310;
+            assert(std::abs(int(mV)-int(BatteryPower::CurveCentivolts(curve,percent))*10)<=2);
+            if(percent) assert(raw>=EmRegsVZDana::MainBatteryCount(curve,offset,percent-1));
+        }
+        // Step 19, offset 0: the level the ROM takes (raw >> 4) reaches the curve's top at 100%.
+        const unsigned level=EmRegsVZDana::MainBatteryCount(curve,0,100)>>4;
+        assert((level*100+19/2)/19>=curve[10]);
+        // With no battery data in RAM (no ROM here) channel 2 keeps its fixed count at any setting.
+        const auto saved=gBattery;
+        BatteryPower low; assert(BatteryPower::Parse("level 20",low)); gBattery=low;
+        assert(st.SetVirtualAnalogueInputs(1000,50,true));
+        adc->DoExchange(7,0xa4);
+        uint16 hi=adc->DoExchange(7,0),lo=adc->DoExchange(7,0);
+        assert(((hi<<8)|lo)==(1000<<3));
+        gBattery=saved;
     }
     assert(st.DispatchScanCode(0x70,true)); assert(st.Byte(0)==0x41); assert(st.Byte(0)==0x70);
     // Real IRQ1 register behaviour for the ST D4 pin, in level and edge modes.

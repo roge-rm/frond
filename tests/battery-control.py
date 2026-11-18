@@ -61,6 +61,15 @@ def check_68k(core, rom, root):
         c.quit()
 
 
+def check_dana(core, rom, root):
+    # The Dana's level is on its main battery channel; its charger isn't modelled.
+    c = Client(core, [rom, '--device', 'alphasmart-dana'], root, 'dana')
+    try:
+        check_commands(c, charging=False)
+    finally:
+        c.quit()
+
+
 def check_arm(core, session, root):
     work = root / 'arm'
     work.mkdir()
@@ -106,7 +115,9 @@ def main():
     (ROOT / 'build').mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='battery-control-', dir=ROOT / 'build') as work:
         root = Path(work).resolve()
+        dana = palm_boot.palm_images() / 'AlphaSmart/Dana/AlphaSmart-Dana-1.5.rom'
         for name, ready, run in (('frond-68k', rom.is_file(), lambda: check_68k(ROOT / 'out/frond-68k', rom, root)),
+                                 ('frond-68k dana', dana.is_file(), lambda: check_dana(ROOT / 'out/frond-68k', dana, root)),
                                  ('frond', session is not None,
                                   lambda: check_arm(ROOT / 'out/frond', session.resolve(), root))):
             if not ready:
