@@ -259,7 +259,11 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         });
     }
     connect(&client, &DesktopClient::backgroundResult, this, [this](const QString& command, bool ok, const QString& message) {
-        if (command == "speed-state" && runningPreferences.showMips) palmHolder->setMips(ok ? message : QString());
+        if (command == "speed-state" && runningPreferences.showMips) {
+            palmHolder->setMips(ok ? message : QString());
+            const auto figure = ok ? runningRules::speedFigure(message) : QString();
+            if (figure != speedText) { speedText = figure; if (!embedded) updateBarMachine(); }
+        }
         if (command == "gamepad-state" && ok) gamepadReply(message);
     });
     mipsTimer = new QTimer(this);
@@ -530,7 +534,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
     smoothToggle->setObjectName("runningSmooth");
     displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
-    mipsToggle = new QCheckBox(tr("Show MHz"), root);
+    mipsToggle = new QCheckBox(tr("Show speed"), root);
     mipsToggle->setObjectName("runningShowMips");
     displayGrid->addWidget(mipsToggle, 8, 0, 1, 3);
     keyboardShow = new QCheckBox(tr("Show keyboard"), root);
@@ -1149,6 +1153,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (settings.value("resume", true).toBool() && QFileInfo::exists(last)) openSession(last, true);
     });
 }
+// The bar's name and subtitle. With the readout on and the Palm not embedded, the speed goes in the subtitle.
+void MainWindow::updateBarMachine() {
+    const auto speed = runningPreferences.showMips && !embedded ? speedText : QString();
+    runningBar->setMachine(client.running() && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : QString(),
+                           runningRules::subtitle(runningRules::traitsFor(currentDevice()), runningPreferences.fastEngine,
+                                                  frondFirmware::deviceName(currentDevice()), speed));
+}
 void MainWindow::refresh() {
     const bool running = client.running();
     danaControls->setVisible(running && frondFirmware::isDana(runningDevice));
@@ -1357,8 +1368,7 @@ void MainWindow::refresh() {
     QList<QPair<QString, QString>> modes;
     for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
     const auto traits = runningRules::traitsFor(currentDevice());
-    runningBar->setMachine(running && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : QString(),
-                           runningRules::subtitle(traits, runningPreferences.fastEngine, frondFirmware::deviceName(currentDevice())));
+    updateBarMachine();
     runningBar->apply(traits, state, runningRules::cardIcon(supported, known, cardPresent, cardInserted),
                       caps.sound && runningPreferences.audio, modes);
     if (fullScreenOn) showOverlayBar(overlayBarShown);
@@ -1594,7 +1604,12 @@ void MainWindow::liveDisplay(const QString& what) {
 // The reply starts "312.00 MHz, limit ...".
 void MainWindow::updateMips() {
     const bool wanted = runningPreferences.showMips && client.running() && !frondFirmware::runs68k(runningDevice);
-    if (!wanted) { mipsTimer->stop(); palmHolder->setMips({}); return; }
+    if (!wanted) {
+        mipsTimer->stop();
+        palmHolder->setMips({});
+        if (!speedText.isEmpty()) { speedText.clear(); updateBarMachine(); }
+        return;
+    }
     if (!mipsTimer->isActive()) { mipsTimer->start(); pollMips(); }
 }
 void MainWindow::pollMips() {

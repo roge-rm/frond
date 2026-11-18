@@ -87,7 +87,7 @@ Set these when you add a machine, or in Edit settings while it's stopped. On And
 | Size (Android) | Fit, Whole steps or Fill. |
 | Top bar (Android) | Auto-hide or Own space. See above. |
 | Smooth pixels | Softens the LCD. Pixels are sharp by default. |
-| Show MHz | Not on the 68k Palms and Dana. Shows the clock in MHz the emulated Palm is running at (the Zodiac shows million instructions a second), in a small box at the bottom right of the Palm, updated every second. Off by default. It is in the Display panel too and is saved with the machine. |
+| Show speed | Not on the 68k Palms and Dana. Shows the clock in MHz the emulated Palm is running at (the Zodiac shows million instructions a second), in a small box at the bottom right of the Palm, updated every second. Where the Palm can't be embedded in the window (Wayland, Windows, macOS) it follows the engine under the machine name instead, like "Fast · 312 MHz". Off by default. It is in the Display panel too and is saved with the machine. |
 | Show keyboard, Jog controls, Jog in landscape | TG50 only. Jog controls are Hidden, Left of screen or Left of keyboard; with the game controller in, Left of keyboard puts them left of the controller. Jog in landscape is where they go once the game controller's grips are either side of the screen: Hidden, Left of controller, Under screen or Over screen. Under and over turn them on their side, with jog up on the left. |
 | Sound | Turns Palm sound on or off. It can also be switched in the Display panel or the bar. |
 | Low-latency audio | Less delay between a tap and the sound. See below. |

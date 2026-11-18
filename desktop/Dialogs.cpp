@@ -127,7 +127,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     windowScale->setToolTip(tr("1× to 2× in 0.25 steps."));
     smoothLcd = new QCheckBox(tr("Smooth pixels"), display);
     smoothLcd->setObjectName("smoothLcd");
-    showMips = new QCheckBox(tr("Show MHz"), display);
+    showMips = new QCheckBox(tr("Show speed"), display);
     showMips->setObjectName("showMips");
     contrastLabel = new QLabel(display);
     contrast = new QSlider(Qt::Horizontal, display);

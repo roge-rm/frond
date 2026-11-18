@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include <QRect>
+#include <QRegularExpression>
 #include <QSize>
 #include <QString>
 #include <QStringList>
@@ -256,9 +257,22 @@ inline QString machineStopText(const QString& log) {
     return {};
 }
 
-// The line under the machine's name: the engine on ARM devices, else the device.
-inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName) {
-    return t.runs68k ? deviceName : fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
+// The figure in speed-state's reply ("312.00 MHz, limit ..." or "250.00 MIPS ...") as "312 MHz" or
+// "250 MIPS"; empty when the reply has none.
+inline QString speedFigure(const QString& reply) {
+    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|MIPS))");
+    const auto match = figure.match(reply);
+    if (!match.hasMatch()) return {};
+    const auto value = qRound(match.captured(1).toDouble());
+    return match.captured(2) == "MHz" ? QObject::tr("%1 MHz").arg(value) : QObject::tr("%1 MIPS").arg(value);
+}
+
+// The line under the machine's name: the engine on ARM devices, else the device. A speed figure
+// follows the engine when the readout is on and the Palm isn't embedded in the window.
+inline QString subtitle(const Traits& t, bool fastEngine, const QString& deviceName, const QString& speed = {}) {
+    if (t.runs68k) return deviceName;
+    const auto engine = fastEngine ? QObject::tr("Fast") : QObject::tr("Exact");
+    return speed.isEmpty() ? engine : engine + QStringLiteral(" \u00b7 ") + speed;
 }
 
 // "Frond NAME STAMP.png" with the characters a file name can't have replaced.
