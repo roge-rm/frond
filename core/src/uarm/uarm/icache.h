@@ -39,6 +39,10 @@ struct Arm920SavedState;
 void icacheArm920Capture(const struct icache*, Arm920SavedState&);
 void icacheArm920Apply(struct icache*, const Arm920SavedState&);
 void icacheSetXscale(struct icache* ic, bool xscale);
+// Cost model: charge the table of core (cost::Core) per instruction, or 1 when off.
+void icacheSetCost(struct icache* ic, bool on, uint8_t core);
+// The charge slot (icache_internal.h icacheCostSlot) of an ARM word or a Thumb halfword.
+uint16_t icacheCostOf(struct icache* ic, uint32_t word, bool thumb);
 void icacheGetFetchState(struct icache* ic, uint32_t* state);
 bool icacheSetFetchState(struct icache* ic, const uint32_t* state);
 void icacheInval(struct icache* ic);

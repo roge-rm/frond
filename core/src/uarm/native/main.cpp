@@ -81,7 +81,7 @@ struct Options {
     optional<string> nand;
     optional<string> sd;
     optional<unsigned int> gdbPort;
-    optional<unsigned int> mips; // Unset runs at the device's Original MIPS.
+    optional<unsigned int> mips; // MHz of the core clock; unset follows the device's own clock (Original).
     bool disableAudio;
     unsigned int audioPeriod;
     optional<string> script;
@@ -485,7 +485,7 @@ bool gFastEngineMissing = false;
             return false;
         }
         if (options.mips && *options.mips == 0) {
-            cerr << "MIPS must be finite" << endl;
+            cerr << "MHz must be finite" << endl;
             return false;
         }
 
@@ -826,7 +826,10 @@ bool gFastEngineMissing = false;
 
         MainLoop mainLoop(soc);
         if (options.experimentalFastAudio) mainLoop.SetTimesliceUsec(1000000 / 120);
-        mainLoop.SetCyclesPerSecondLimit(uint64_t(options.mips.value_or(deviceProfileOriginalMips5(deviceType))) * 1000000);
+        // Original follows the clock the guest sets; --mips is a fixed rate (Uncapped).
+        mainLoop.SetCyclesPerSecondLimit(options.mips ? uint64_t(*options.mips) * 1000000
+                                                      : deviceProfileOriginalHz5(deviceType));
+        mainLoop.SetFollowCoreClock(!options.mips);
         mainLoop.SetEmulatedTime(options.emulatedTime);
 
         Rotation rotation = Rotation::portrait_0;
@@ -1372,8 +1375,8 @@ bool gFastEngineMissing = false;
 
                     ostringstream s;
                     s << "cp-uarm @ " << fixed << setprecision(2)
-                      << static_cast<float>(currentIps) / 1000000 << " MIPS, limit "
-                      << static_cast<float>(currentIpsMax) / 1000000 << " MIPS -> "
+                      << static_cast<float>(currentIps) / 1000000 << " MHz, limit "
+                      << static_cast<float>(currentIpsMax) / 1000000 << " MHz -> "
                       << (100 * currentIps) / currentIpsMax << "%" << endl
                       << flush;
 
@@ -1689,8 +1692,8 @@ int main(int argc, char** argv) {
         .scan<'u', unsigned int>();
 
     program.add_argument("--mips")
-        .help("target speed in MIPS; default: the device's Original speed")
-        .metavar("<mips>")
+        .help("fixed core clock in MHz; default: the device's own clock (Original)")
+        .metavar("<mhz>")
         .scan<'u', unsigned int>();
 
     program.add_argument("--small-window")

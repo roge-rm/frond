@@ -33,7 +33,7 @@ enum class Engine(val label: String, val arg: String) {
 }
 
 // A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock (an ARM device at its profile's MIPS), Uncapped as fast as the host can; on ARM that is a high --mips.
+// clock (an ARM device follows the clock its guest sets), Uncapped as fast as the host can; on ARM that is a high --mips (MHz).
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
     UNCAPPED("Uncapped", "uncapped"),
@@ -63,7 +63,7 @@ data class MachineRows(val contrast: Boolean, val speed: Boolean, val engine: Bo
 data class MachineSettings(
     val size: ScreenSize = ScreenSize.FIT,
     val smoothing: Boolean = false,
-    // ARM devices: a MIPS readout in the corner of the screen.
+    // ARM devices: a speed readout in the corner of the screen.
     val showMips: Boolean = false,
     val sound: Boolean = true,
     val fastAudio: Boolean = false,
@@ -162,8 +162,9 @@ data class MachineSettings(
 
         // A new machine's settings for a device.
         fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
-        // The --mips an ARM device gets when Uncapped; the core runs at what the host manages.
-        const val UNCAPPED_MIPS = 1000
+        // The --mips (MHz) an ARM device gets when Uncapped; the core runs at what the host manages. Well past
+        // the fastest clock, as an instruction takes several clocks.
+        const val UNCAPPED_MIPS = 3000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =

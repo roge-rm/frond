@@ -146,7 +146,8 @@ int main(int argc, char** argv) {
 
     AudioMachine m; setup(m);
     const uint32_t bound = cpuMaxOvershootCycles(m.soc.GetCpu());
-    assert(mode == "fast" ? bound > 19 && bound < UINT32_MAX : bound == 19);
+    // The cost model's largest charge (PACE op, LDM with the PC, cache and bus stalls) sets both.
+    assert(bound > 53 && bound < UINT32_MAX);
     auto* queue = audioQueueCreate(queueFrames);
     attach(m, queue);
     m.soc.Run(100000, frequency);  // past the I2S start, then begin from an empty queue

@@ -530,7 +530,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     smoothToggle = new QCheckBox(tr("Smooth pixels"), root);
     smoothToggle->setObjectName("runningSmooth");
     displayGrid->addWidget(smoothToggle, 4, 0, 1, 3);
-    mipsToggle = new QCheckBox(tr("Show MIPS"), root);
+    mipsToggle = new QCheckBox(tr("Show MHz"), root);
     mipsToggle->setObjectName("runningShowMips");
     displayGrid->addWidget(mipsToggle, 8, 0, 1, 3);
     keyboardShow = new QCheckBox(tr("Show keyboard"), root);
@@ -1590,8 +1590,8 @@ void MainWindow::liveDisplay(const QString& what) {
     }
     send(command, argument);
 }
-// The MIPS readout: polled once a second while it is on, for an ARM device that is up and idle.
-// The reply starts "148.00 MIPS, limit ...".
+// The speed readout: polled once a second while it is on, for an ARM device that is up and idle.
+// The reply starts "312.00 MHz, limit ...".
 void MainWindow::updateMips() {
     const bool wanted = runningPreferences.showMips && client.running() && !frondFirmware::runs68k(runningDevice);
     if (!wanted) { mipsTimer->stop(); palmHolder->setMips({}); return; }
@@ -2285,7 +2285,7 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
         if (runningPreferences.uncapped) arguments << "--speed" << "uncapped";
     } else {
         if (runningPreferences.fastEngine) arguments << "--engine" << "fast";
-        if (runningPreferences.uncapped) arguments << "--mips" << "1000";
+        if (runningPreferences.uncapped) arguments << "--mips" << "3000";
     }
     {
         const QSignalBlocker blocked(contrast);

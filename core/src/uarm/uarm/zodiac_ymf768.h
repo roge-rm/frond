@@ -6,12 +6,15 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#include "imx1_reference_time.h"
 
 // The Zodiac's Yamaha YMF768 on CS4: an index port at 0x15000000 and a data port at 0x15000001, two banks of
 // 256 registers (common register 0f bit 0 picks the bank). There is no register manual; everything here is
 // read from the ROM's driver (DAL 0x200b5c00..0x200c0e40).
 //
-// - Identity: bank 1 0e reads 3, bank 1 38 bit 0 (ready) reads 1, bank 1 00 bit 6 (busy) reads 0.
+// - Identity: bank 1 0e reads 3, bank 1 00 bit 6 (busy) reads 0.
+// - Power: bank 1 30/31 is the power register and 38 bits 0-2 report its steps done (readyBits). The ROM writes
+//   30 with bits 1, 2 and 5-7 always set, so only bits 0, 3 and 4 of 30 change anything here.
 // - Sequencer FIFO: bank 0 register 0 takes 3-byte records. The ROM only ever writes 01 ff 00, a 1 tick wait,
 //   and uses the FIFO as its 10 ms MIDI tick. Bank 1 register 2 low bits pick the tick (code 4 = 10 ms),
 //   bank 0 register 6 bit 0 runs it. Bank 0 08 bit 0 asks for more records while fewer than two are queued,
@@ -42,12 +45,13 @@ class Imx1Ymf768 {
     // One byte access to port 0 (index) or port 1 (data). Port 0 reads give 0; the ROM throws them away.
     uint8_t read(bool dataPort) const {
         if (!dataPort) return 0;
+        if (bank == 1 && index == 0x38) ++readyReads;
         return readRegister(bank, index);
     }
     void write(bool dataPort, uint8_t value);
     uint8_t readRegister(unsigned b, unsigned i) const {
         if (b == 1 && i == 0x0e) return 3;
-        if (b == 1 && i == 0x38) return 1;
+        if (b == 1 && i == 0x38) return readyBits();
         if (b == 1 && i == 0x00) return regs[1][0] & ~0x40;
         if (b == 0 && i == 0x08) return request() ? 1 : 0;
         if (b == 0 && (i == 0x09 || i == 0x00)) return 0;
@@ -70,6 +74,7 @@ class Imx1Ymf768 {
     // 32768 * numerator / denominator Hz. Returns true when the interrupt line changed.
     bool advance(uint64_t clocks, uint64_t numerator, uint64_t denominator) {
         if (!numerator || !denominator) return false;
+        if (readyPending) advanceReady(clocks, numerator, denominator);
         advanceEngine(clocks, numerator, denominator);
         if (!running()) return false;
         const bool before = interrupt();
@@ -124,6 +129,8 @@ class Imx1Ymf768 {
             for (unsigned slot = 0; slot < 32; ++slot) syncOperator(slot, true);
             quietOutput = false;
         }
+        // Done unless the ready section follows.
+        if (A::loading) { readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); readyNumerator = 0; }
     }
 
     // SSI1 word mixing: slot 0 makes a frame and keeps its right half for the slot 1 word.
@@ -135,7 +142,26 @@ class Imx1Ymf768 {
         return uint16_t(int16_t(v));
     }
 
+    // The power steps still under way (readyBits), saved in a section of their own (stateReady) only while there
+    // are any: without one a load finds them all done, as every state saved before the model had them.
+    static constexpr uint32_t readyStateVersion = 2;
+    bool readyBusy() const { return readyPending != 0; }
+    template <class A> void stateReady(A& a) {
+        a.Do8(readyPending);
+        for (auto& v : readyAcc) a.Do64(v);
+        a.Do64(readyNumerator);
+        a.Require(readyPending < 8 && readyPending == (readyPending & readySteady(regs[1][0x30])) &&
+                  readyNumerator < (uint64_t(1) << 32), "ymf768 ready");
+        // Each time stays under its step's period at readyNumerator (advanceReady).
+        for (unsigned n = 0; n < 3; ++n)
+            a.Require((readyPending & (1u << n) || !readyAcc[n]) &&
+                      (!readyAcc[n] || readyAcc[n] < readyPeriod(readyNumerator, n)), "ymf768 ready");
+    }
+
     // For tests.
+    uint64_t readyRegisterReads() const { return readyReads; }
+    const Imx1ReferenceTime& lastReadyRead() const { return readyReadTime; }
+    void noteReadyRead(const Imx1ReferenceTime& now) { readyReadTime = now; }
     unsigned queuedRecords() const { return fifoQueued; }
     uint64_t engineSamples() const { return samples; }
     uint64_t engineQuietSamples() const { return quietSamples; }
@@ -147,6 +173,44 @@ class Imx1Ymf768 {
     static constexpr uint8_t fifoCapacity = 8;
 
     bool running() const { return regs[0][6] & 1; }
+
+    // Bank 1 register 38, ASSUMPTION "YMF768 power steps": the ROM's power routine (200bd468) writes 30/31 and then
+    // waits on one bit of 38 (200bdcfc): bit 0 after clearing 30 bit 0, bit 1 after clearing bits 3 and 4, bit 2
+    // after setting them. So bit 0 is taken as the clock running, bit 1 as powered up and bit 2 as powered down,
+    // each set once its step has had 2, 10 and 2 ms of guest time (advanceReady). The times are a guess the ROM
+    // accepts: it waits at most about 13 ms for bit 0, 0.9 s for bit 1 and 1.3 s for bit 2.
+    static uint8_t readySteady(uint8_t power) {
+        return uint8_t((power & 1 ? 0 : 1) | ((power & 0x18) == 0 ? 2 : 0) | ((power & 0x18) == 0x18 ? 4 : 0));
+    }
+    uint8_t readyBits() const { return readySteady(regs[1][0x30]) & ~readyPending; }
+    void powerWrite(uint8_t before, uint8_t after) {
+        // A step starts when its bit would turn on and stops when it would turn off.
+        const uint8_t was = readySteady(before), now = readySteady(after), started = uint8_t(now & ~was);
+        readyPending = uint8_t((readyPending & now) | started);
+        for (unsigned n = 0; n < 3; ++n)
+            if ((started | ~readyPending) & (1u << n)) readyAcc[n] = 0;
+    }
+    static uint64_t readyPeriod(uint64_t numerator, unsigned n) {
+        static constexpr uint64_t ms[3] = {2, 10, 2};
+        return 32768ull * numerator * ms[n];
+    }
+    void advanceReady(uint64_t clocks, uint64_t numerator, uint64_t denominator) {
+        // Milliseconds as the sequencer tick counts them: system clocks x denominator x 1000 against
+        // 32768 x numerator a millisecond. The times so far are in units of the numerator they were counted
+        // at (readyNumerator), so a new numerator rescales them first, rounding down. A time is under
+        // 32768 x 10 x the old numerator, so neither product overflows.
+        if (readyNumerator && readyNumerator != numerator)
+            for (auto& v : readyAcc)
+                v = v / readyNumerator * numerator + v % readyNumerator * numerator / readyNumerator;
+        readyNumerator = numerator;
+        for (unsigned n = 0; n < 3; ++n) {
+            if (!(readyPending & (1u << n))) continue;
+            const uint64_t period = readyPeriod(numerator, n);
+            // clocks x denominator x 1000 is at least clocks, so a span of period clocks finishes any step.
+            readyAcc[n] = clocks >= period ? period : std::min(readyAcc[n] + clocks * denominator * 1000, period);
+            if (readyAcc[n] >= period) { readyPending &= uint8_t(~(1u << n)); readyAcc[n] = 0; }
+        }
+    }
     bool request() const { return fifoQueued < 2; }
     uint64_t tickPeriod(uint64_t numerator) const {
         // Bank 1 register 2 low bits, ASSUMPTION "YMF768 timebase codes", from the MA-2 family: code 4 is the
@@ -184,6 +248,11 @@ class Imx1Ymf768 {
 
     uint8_t regs[2][256];
     uint8_t index, bank, fifoQueued, fifoPartial, fifoWait;
+    uint8_t readyPending;   // readyBits steps under way
+    uint64_t readyAcc[3];   // their time so far, as advanceReady counts it
+    uint64_t readyNumerator;  // the System PLL numerator readyAcc is counted at, 0 before the first advance
+    mutable uint64_t readyReads = 0;  // not saved, for tests: CPU reads of bank 1 38
+    Imx1ReferenceTime readyReadTime;  // not saved, for tests: the board time of the last one (noteReadyRead)
     uint64_t timerAcc;
     uint64_t engineAcc;     // system clocks x denominator x engineRate since the last sample, of enginePeriod
     uint64_t enginePeriod;  // 32768 x the System PLL numerator at the last advance, 0 before the first

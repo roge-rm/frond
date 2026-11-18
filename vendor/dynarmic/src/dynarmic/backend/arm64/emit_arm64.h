@@ -132,6 +132,9 @@ struct EmitConfig {
     size_t page_table_address_space_bits;
     int page_table_pointer_mask_bits;
     bool page_table_write_protect_bit;
+    // Frond: the data cache hint (A32::UserConfig::frond_cost_hint, A32 only).
+    const u32* frond_cost_hint = nullptr;
+    const bool* frond_cost_hint_on = nullptr;
     bool silently_mirror_page_table;
     bool absolute_offset_page_table;
     u8 detect_misaligned_access_via_page_table;

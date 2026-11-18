@@ -1362,7 +1362,7 @@ open class FrondActivity : SDLActivity() {
         savingNote = note
     }
 
-    // A small MIPS readout at the bottom right of the Palm as the core draws it, for ARM devices. It
+    // A small speed readout at the bottom right of the Palm as the core draws it, for ARM devices. It
     // stays hidden until the first figure arrives.
     private fun addMipsNote() {
         val layout = SDLActivity.getContentView() as? RelativeLayout ?: return
@@ -1415,12 +1415,13 @@ open class FrondActivity : SDLActivity() {
                     val speed = link.request("speed-state", timeoutSeconds = 5)
                     if (speed.code == "closed") break
                     val mips = if (speed.ok) MipsReadout.parseMips(speed.message) else null
+                    val unit = if (speed.ok) MipsReadout.unit(speed.message) else "MHz"
                     val palm = link.request("window-layout", timeoutSeconds = 5).takeIf { it.ok }?.let { MipsReadout.parseLayout(it.message) }
                     if (mips != null && mipsGeneration.get() == generation) runOnUiThread {
                         if (mipsGeneration.get() != generation) return@runOnUiThread
                         if (palm != null) mipsLayout = palm
                         mipsNote?.let { note ->
-                            note.text = "$mips MIPS"
+                            note.text = "$mips $unit"
                             note.visibility = if (mipsLayout != null && bar.sheet == null) View.VISIBLE else View.GONE
                             placeMips()
                             note.bringToFront()

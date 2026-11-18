@@ -26,8 +26,8 @@ The 68k Palms (the Palm IIIx and the rest of the 68k group in the README's Devic
 | `--card-identity HEX` | With `--card-swap`, the identity of a card put in, as 64 hex digits (its 32 descriptor bytes, as in `card.json`). |
 | `--card-protected` | With `--card-swap`, a card put in is write protected. |
 | `--ram-size MB` | RAM size, 16 or 32. |
-| `--mips N` | Target speed in MIPS. Default: the device's Original speed (150 on the T|X and Zire 72, 96 on the E2 and TG50). |
-| `--emulated-time` | Every guest second gets the full `--mips`, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
+| `--mips N` | A fixed core clock in MHz (Uncapped passes 3000). Default: the device's own clock, as the guest sets it (CCCR and CLKCFG on the PXA devices). |
+| `--emulated-time` | Every guest second gets the full clock, however slow the host, and input replay times are guest time. A slow host runs slower in wall time instead of giving the guest fewer cycles. For tests. |
 | `--view-turn program\|window` | What turns the picture of a device whose OS turns its screen (the Zodiac): `program` keeps it upright for the running program, `window` for the window's shape. Default `program`. |
 | `--audio-period FRAMES` | Host audio period, 64 to 8192. Default 512. Low-latency audio sizes its limits from it; Android passes 1024 or more. |
 | `-q`, `--no-sound` | Start with audio off. |
@@ -200,7 +200,7 @@ The core reads these from the terminal and from `--script`. A command with no ar
 | --- | --- |
 | `help` | List the commands. |
 | `quit`, `exit` | Quit. |
-| `set-mips N` | Set the target MIPS. |
+| `set-mips N` | Set a fixed core clock in MHz. |
 | `input-replay FILE` | Load an input replay; its times start now and it replaces any pending replay. A bad file leaves the old one. |
 | `hold-state` | Show the Hold switch. |
 | `hold on\|off` | Set the Hold switch (TG50). |
@@ -276,7 +276,7 @@ Error codes seen across commands: `argument`, `unsupported` (the device lacks it
 | `window-layout` | | `layout`: `x y width height windowWidth windowHeight`, where the fitted device sits in the window and the window's size, both in the window's own units. `unsupported` without a window. Only `frond`. |
 | `power-state` | | `power`: `asleep` or `awake`, then `wakes=N`, the wakes from sleep since the core started. Not on `frond-68k`. |
 | `guest-ready` | | `guest-ready`; `not-ready` until Palm OS is at an application-call boundary |
-| `speed-state` | | `speed`: `N MIPS, limit N MIPS, N%, N underruns` |
+| `speed-state` | | `speed`: `N MHz, limit N MHz, N%, N underruns` (the Zodiac's figures are MIPS) |
 | `guest-orientation` | | `orientation`: `portrait`, `landscape`, `reverse-portrait` or `reverse-landscape` (TX only; `unknown` if unreadable) |
 | `save` | file | `saved` |
 | `install` | file (PRC or PDB) | `installed`, or `needs-reset` (reset to finish). Errors: `corrupt`, `memory`, `open`, `overwrite`, `unsupported`, `not-ready`, `read` |
@@ -906,10 +906,10 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `FROND_TEST_CAMERA_SHOT` | Desktop test: a PNG path to save the Display panel with the Camera row to. |
 | `BENCH_DUMP_RAM` | `1` makes `benchmark-replay` write guest RAM at the start and end. |
 | `BENCH_ZODIAC_LOAD` | A Zodiac state file saved by `BENCH_ZODIAC_SAVE`; `benchmark-replay` loads it and starts there. |
-| `BENCH_ZODIAC_READY_SKIP` | `0` makes `benchmark-replay` run the YMF768 ready wait's tries one by one on Fast. |
 | `BENCH_ZODIAC_SD2` | An SD image `benchmark-replay` puts in the Zodiac's second slot from the start, in memory. The run's end lists the sectors that differ from the file on stderr. |
-| `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS. |
-| `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty), screen on and off times, and the chip registers at the end. |
+| `BENCH_ZODIAC_SAVE` | `MS:FILE` makes `benchmark-replay` save the Zodiac's state to FILE at guest time MS and stop. |
+| `BENCH_ZODIAC_SAVE_CONTINUE` | `1` makes `benchmark-replay` carry on after a `BENCH_ZODIAC_SAVE`. |
+| `BENCH_ZODIAC_TRACE` | Makes `benchmark-replay` print the Zodiac's state every N guest ms (250 when empty) with the YMF768 ready register reads so far, screen on and off times, and at the end the chip registers, the memory and PCM hashes, the guest time of the last ready register read and the ready register reads. |
 | `BENCH_JIT_ASYNC` | Any value but empty or `0` makes `benchmark-replay` compile Fast code on the compile thread, as the app does. |
 | `BIKE_SESSION`, `FRONDBENCH_SESSION` | Session files for `make speed-check`. No default; a workload without one is skipped. |
 | `BIKE_REPLAY`, `FRONDBENCH_REPLAY` | Another replay for a `make speed-check` workload, such as `tests/fixtures/frondbench-run.replay` for a core before the T\|X touch calibration change (0414). |
@@ -1022,7 +1022,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. |
 | `test-zodiac-rumble` | YMF768 bank 1 register 0x48 motor and LED bits reaching the attention path, on the model and through the machine in Exact and Fast. |
 | `test-zodiac-stick-view` | The stick turning with the guest and host orientation. |
-| `test-zodiac-ymf768` | YMF768 register answers, FIFO and interrupt line, A4 pitch and mixing. |
+| `test-zodiac-ymf768` | YMF768 register answers, power steps in the ready register and their save, FIFO and interrupt line, A4 pitch and mixing. |
 | `test-tg50-voicerec` | The TG50 Voice Recorder opens on the ROM PACE. Skips without the TG50 session. |
 | `test-zodiac-dcache` | ARM920 data cache, writeback, aliases, maintenance and instruction/JIT coherence in Exact and Fast. Outside `make test`. |
 | `test-imx1-aitc` | i.MX1 AITC reset, enable/type/force, priority/mask/vector, masked GPIO A/B/C/D requests and transactional bootstrap rejection checks. Outside `make test`. |
@@ -1099,7 +1099,7 @@ All in `tools/`. Most take `--help`.
 | `test-zodiac-session-cards` | A Zodiac session with a card in each slot saves and loads with both, with slot 2 ejected, with one card, and after slot 2's card was taken out. Outside `make test`. |
 | `test-zodiac-idle-wake` | MCU PLL shutdown and qualified WFI wake. Outside `make test`. |
 | `test-zodiac-live-controls` | Live controls (pen, keys, stick) on a running Zodiac machine. Outside `make test`. |
-| `test-zodiac-wake-fast` | Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try; `--exact` against Exact too. Needs the Zodiac ROM in `FROND_DEVICE_IMAGES`. Outside `make test`. |
+| `test-zodiac-ymf-ready` | The Zodiac boot's chip power cycle (35 s and 40 s), sleep and wake end their YMF768 power waits in a few tries, run in Exact and Fast from a state Fast saved just before: screen times, frames and chip registers the same in both. A load from a state saved mid power-up gives the same register reads (within one in Fast) and chip registers. Needs the Zodiac ROM in `FROND_DEVICE_IMAGES`. Outside `make test`. |
 | `test-zodiac-machine` | Qualified generated guests, one-shot against sliced execution. Outside `make test`. |
 | `test-zodiac-machine-state` | Zodiac machine save and load. Outside `make test`. |
 | `test-zodiac-machine-state-cli` | Two probe processes, one saves and the other loads and has to end like an uninterrupted run. Outside `make test`. |

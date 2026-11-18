@@ -104,6 +104,8 @@ def parser():
     p.add_argument('--nand', type=Path, help='NAND paired with --nor (required for TX, optional for E2, absent on Zire)')
     p.add_argument('--output', type=Path, required=True, help='new private result directory')
     p.add_argument('--install', type=Path, action='append', default=[], help='PRC/PDB; repeat in install order')
+    p.add_argument('--reset', action='store_true', help='soft reset the guest after the installs and the card, before the launch')
+    p.add_argument('--sd-insert', type=Path, help='raw SD image to put in the slot after the installs (the card then stays in the saved session)')
     launch = p.add_mutually_exclusive_group(required=True)
     launch.add_argument('--app', help='exact Palm application database name')
     launch.add_argument('--resume-app', action='store_true',
@@ -340,6 +342,8 @@ def run(args):
         origins = [args.session.resolve()] if args.session else [args.nor.resolve(), *([args.nand.resolve()] if args.nand else [])]
         paths = [args.core.resolve(), *origins, *[p.resolve() for p in args.install]]
         install_start = 1 + len(origins)
+        if args.sd_insert:
+            paths.append(args.sd_insert.resolve())
         if args.replay:
             paths.append(args.replay.resolve())
         for path in paths:
@@ -378,6 +382,8 @@ def run(args):
             elif install_start <= index < install_start + len(args.install):
                 copy = root / f'install-{index - install_start + 1:03d}{path.suffix.lower()}'
                 installs.append(copy)
+            elif args.sd_insert and index == install_start + len(args.install):
+                copy = root / 'card.img'
             elif args.replay and index == len(paths) - 1:
                 copy = replay_source = root / 'source.replay'
             else:
@@ -449,6 +455,14 @@ def run(args):
                     if installed['code'] == 'needs-reset':
                         control.require('reset')
                         control.retry_ready('guest-ready', '', args.ready_timeout)
+                if args.sd_insert:
+                    result['stage'] = 'sd-insert'
+                    control.retry_ready('guest-ready', '', args.ready_timeout)
+                    control.require('sd-insert', root / 'card.img')
+                if args.reset:
+                    result['stage'] = 'reset'
+                    control.require('reset')
+                    control.retry_ready('guest-ready', '', args.ready_timeout)
                 result['stage'] = 'launch'
                 if args.app is not None:
                     control.retry_ready('launch-app', args.app, args.ready_timeout)

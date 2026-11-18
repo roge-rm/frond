@@ -27,6 +27,9 @@ public:
     IR::Block GenerateIR(IR::LocationDescriptor) const override;
 
     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+    // Frond: live block code, for A32::Jit::HasCodeIn and CodeWords. Take code_mutex.
+    bool HasCodeIn(u32 first, u32 last);
+    void CodeWords(u32 page_base, u64* words);
 
     // Frond: GetOrEmit, unless the callbacks leave new code to the caller for now (they halt
     // the run); then the dispatcher, which ends the run.

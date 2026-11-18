@@ -219,6 +219,21 @@ struct UserConfig {
     /// (set page_table_pointer_mask_bits to at least 1), stores to such a page go to the
     /// MemoryWrite callbacks. x64 and arm64.
     bool page_table_write_protect_bit = false;
+
+    /// Frond: a data cache hint in front of every page table load and store, emitted while
+    /// *frond_cost_hint_on is set when a block is compiled. frond_cost_hint points at, by
+    /// byte offset: 0, 1024 load entries by VA[14:5] (the entry is va & ~31 when the line
+    /// is known to hit); 4096, 2048 store entries by VA[14:4] (va & ~15 when a store there
+    /// is known to hit a dirty half); 12288, the pending charge (u64); 12296, halted (u32);
+    /// 12304, runBase (s64); 12312, budget (s64); 12320, 2048 join entries by VA[14:4]
+    /// (va & ~15 when a store there joins a write buffer entry); 20512, their drain starts
+    /// (u64). An access goes to its callback when the pending charge has reached the cycles
+    /// left and halted is clear, or when its entry doesn't match. A store whose join entry
+    /// matches stays in generated code when its drain start is at or after
+    /// runBase - cycles left + pending and the cycles left are at most budget.
+    /// Needs enable_cycle_counting. x64 and arm64.
+    const std::uint32_t* frond_cost_hint = nullptr;
+    const bool* frond_cost_hint_on = nullptr;
     /// Masks out the first N bits in host pointers from the page table.
     /// The intention behind this is to allow users of Dynarmic to pack attributes in the
     /// same integer and update the pointer attribute pair atomically.

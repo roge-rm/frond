@@ -155,6 +155,24 @@ uint64_t cpuJitCpsrInterprets();
 void cpuSetIdleSkip(bool on);
 // Skips so far and the cycles they passed, in every CPU (tests).
 void cpuJitIdleSkips(uint64_t *skips, uint64_t *cycles);
+// Fast skip of the ROMs' OSCR delay loops (delay_loops.h), on unless FROND_DELAY_SKIP=0. Code compiled
+// while it was off keeps running the loops.
+void cpuSetDelaySkip(bool on);
+// Skips so far and the cycles they passed, in every CPU (tests).
+void cpuJitDelaySkips(uint64_t *skips, uint64_t *cycles);
+// The OS timer the delay skip reads: OSCR's physical address, and peek, which gives what a load of it
+// would read with that many cycles in progress (cpuCyclesInProgress) without changing anything, and
+// returns false when that load would reach a timer match. Without it there is no delay skip.
+void cpuSetDelayTimer(ArmCpu *cpu, uint32_t oscrPa, bool (*peek)(void *, uint32_t, uint32_t *), void *context);
+// Fast skip of the ROMs' GPIO level polls (poll_loops.h), on unless FROND_POLL_SKIP=0. Code compiled
+// while it was off keeps running the loops.
+void cpuSetPollSkip(bool on);
+// Skips so far and the cycles they passed, in every CPU (tests).
+void cpuJitPollSkips(uint64_t *skips, uint64_t *cycles);
+// What the poll skip reads: peek gives the word a load of physical address pa would read, without
+// changing anything, and returns true only for registers that change only at scheduler events (between
+// cpuCycle runs). Without it there is no poll skip.
+void cpuSetPollPeek(ArmCpu *cpu, bool (*peek)(void *, uint32_t, uint32_t *), void *context);
 // MRC and MCR p15 c3 (domain access control) run in generated code, in every CPU so far (tests).
 uint64_t cpuJitDomainCalls();
 // Translated ordinary blocks and instructions executed in generated code.
@@ -170,6 +188,33 @@ bool cpuJitCacheClears(const struct ArmCpu *cpu, uint64_t *clears);
 // interpreter (PACE charges 20 per operation), more for the Fast engine. UINT32_MAX if
 // generated code runs unchecked (FROND_JIT_MAX_UNCHECKED=0).
 uint32_t cpuMaxOvershootCycles(const struct ArmCpu *cpu);
+// Fast: whether the cost model charges a table, and its cost::Core in core.
+bool cpuJitCostCore(const struct ArmCpu *cpu, uint8_t *core);
+// Cost model (xscale_cost.h): on charges core's (cost::Core) table per instruction and a PACE op, memory
+// adds the region and data cache charges (XScale only). Off: 1 per instruction, 20 per PACE op.
+void cpuSetCostModel(struct ArmCpu *cpu, bool on, uint8_t core, bool memory);
+// Fast: the data cache and region charges too (Original speed). Off, Fast charges the table only (Uncapped).
+// Exact always charges them.
+void cpuSetJitMemoryCost(struct ArmCpu *cpu, bool on);
+// Whether loads and stores are charged now (Fast: its callbacks take every access then).
+bool cpuJitMemoryCost(const struct ArmCpu *cpu);
+// Memory charges since the batch's count was last brought up to date.
+uint32_t cpuJitPendingCharge(const struct ArmCpu *cpu);
+// Fast's data cache hint (A32::UserConfig::frond_cost_hint), at a fixed address for the CPU's life.
+const uint32_t *cpuJitCostHint(struct ArmCpu *cpu);
+// Before a JIT run with memory charges: the run's budget, for the hint's write buffer check (joins: the
+// run counts whole clocks).
+void cpuJitCostRunStart(struct ArmCpu *cpu, uint32_t budget, bool joins);
+// The run is ending for its memory charges (at the next link).
+void cpuJitCostHalted(struct ArmCpu *cpu);
+// Empties the hint (a TLB flush, the page table cleared or the control register's C bit changed).
+void cpuCostHintClear(struct ArmCpu *cpu);
+// The clocks the region and data cache charges are worked out from, in kHz.
+void cpuSetCostClocks(struct ArmCpu *cpu, uint32_t coreKHz, uint32_t busKHz, uint32_t memoryKHz);
+// The SDRAM bus width the data cache charges use: 16 bits (MDCNFG DWID0 set) or 32.
+void cpuSetCostSdramWidth(struct ArmCpu *cpu, bool sdram16);
+// A CP15 c7 write (crm, op2, the register's value) for the data cache model.
+void cpuCostCacheOp(struct ArmCpu *cpu, uint32_t crm, uint32_t op2, uint32_t va);
 // Host checkpoint repair preserves the separately serialized XScale fetch buffers.
 // Caller provides ICACHE_FETCH_STATE_WORDS words (see icache.h).
 void cpuGetInstructionFetchState(ArmCpu*, uint32_t*);
@@ -331,14 +376,17 @@ void cpuArm920LeanStored(ArmCpu*, uint32_t pa);
 // A store the guarded step made to RAM at [pa, pa + size): as cpuArm920LeanStored, only when one of the
 // 64-byte lines it touches held code.
 void cpuArm920LeanStoredBytes(ArmCpu*, uint32_t pa, uint32_t size);
-// Runs at most budget instructions on the lean path and returns how many it retired. It stops before an
+// Runs the lean path while its cost model clocks are under budget (an instruction that would pass it is left
+// for the step) and returns the instructions it retired, with their clocks in clocks. It stops before an
 // instruction or access it can't take as plain (MMIO, faults, misaligned accesses, CP15, SWI, MSR of the
 // control field, exception returns and forms the guard rejects), leaving the CPU at that instruction for
 // the guarded step. blNext is the Thumb BL suffix address after a prefix that ended the run, else ~0.
 // busAccesses gets the data accesses the step would have counted as bus accesses.
-uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses);
+uint32_t cpuArm920RunLean(ArmCpu*, uint32_t budget, uint32_t* blNext, uint64_t* busAccesses,
+                          uint32_t* clocks = nullptr);
 // The same, retiring at most count instructions.
-uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t* blNext, uint64_t* busAccesses);
+uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t* blNext, uint64_t* busAccesses,
+                             uint32_t* clocks = nullptr);
 // ARM920T Fast blocks: Dynarmic in normal blocks over the lean pages, run only through cpuArm920RunJit. On
 // needs cpuArm920SetLean first and makes the JIT on first use; false when there is no JIT in the build or the
 // CPU has the single-step diagnostic JIT. Turning it on again drops translated code.
@@ -355,15 +403,16 @@ uint32_t cpuArm920TakeJitAccessPc(ArmCpu*);
 // run's total, for its end.
 void cpuArm920JitCharge(ArmCpu*, uint32_t cycles, uint32_t span);
 uint32_t cpuArm920JitCharged(const ArmCpu*);
-// Runs about budget instructions in translated code and returns how many ran, at most budget - 1 +
-// cpuArm920JitMaxUnchecked. stop gets arm920JitBudget when the budget ran out (or translated code was
+// Runs about budget cost model clocks in translated code and returns the clocks run, at most budget - 1 +
+// cpuArm920JitMaxUnchecked x the largest instruction cost, with the instructions in instructions (a Thumb
+// pair counts 2). stop gets arm920JitBudget when the budget ran out (or translated code was
 // dropped), arm920JitExit when the CPU is left at an instruction or access the JIT can't take (MMIO, CS5,
 // faults, CP15...) for the lean path or the step, arm920JitCold at code not compiled yet, arm920JitHalt for a
 // slow path reason (an interrupt). The JIT compiles as on the other devices (cpuSetJitSync for runs that
 // repeat). The leanRead and leanWrite hooks get left from span (cycles the run's accesses can take with the
 // instructions, budget when 0) instead of budget, which may count instructions only.
 enum Arm920JitStop { arm920JitBudget, arm920JitExit, arm920JitCold, arm920JitHalt };
-uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop, uint32_t span = 0);
+uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop, uint32_t span = 0, uint32_t* instructions = nullptr);
 // Whether cpuArm920RunJit would run translated code now: false with the JIT off, an interrupt or other slow path
 // reason for the step, a wait for interrupt, mode pacing, a native call, the debug stub or an I-cache continuation.
 bool cpuArm920JitCanRun(const ArmCpu*);

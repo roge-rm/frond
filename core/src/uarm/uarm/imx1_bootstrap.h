@@ -113,12 +113,19 @@ class Imx1Bootstrap {
         if (size != 1) return Imx1BootstrapAccess::width;
         SourceChange change(*this);
         if (write) ymf.write(address & 1, uint8_t(value));
-        else value = ymf.read(address & 1);
+        else {
+            const uint64_t reads = ymf.readyRegisterReads();
+            value = ymf.read(address & 1);
+            if (ymf.readyRegisterReads() != reads) ymf.noteReadyRead(elapsedReference);
+        }
         if (!ymfDriveLine()) return Imx1BootstrapAccess::sideEffect;
         return Imx1BootstrapAccess::ok;
     }
     static constexpr uint32_t ymf768StateVersion = Imx1Ymf768::stateVersion;
     template <class A> void stateYmf768(A& a) { ymf.state(a); }
+    // The chip's power steps under way, saved after stateYmf768 only while ymf768().readyBusy().
+    static constexpr uint32_t ymf768ReadyStateVersion = Imx1Ymf768::readyStateVersion;
+    template <class A> void stateYmf768Ready(A& a) { ymf.stateReady(a); }
     const Imx1Ymf768& ymf768() const { return ymf; }
     // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
     // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.

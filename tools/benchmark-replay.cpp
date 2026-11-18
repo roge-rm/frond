@@ -179,8 +179,16 @@ Machine loadSession(const char* path, const std::vector<uint8_t>& data, const st
     m.memory=std::move(contents.memory); m.savestate=std::move(contents.savestate);
     m.media=std::move(contents.media);
     m.folder=folder;
-    for (const auto& media : m.media)
-        if (media.kind==frondMachine::kindSd) throw std::runtime_error("use a session without an SD card for this benchmark");
+    // A NAND that lives in the machine folder is attached after the SoC is made; the SoC needs a buffer of the right size first.
+    if (m.nand.empty())
+        for (const auto& media : m.media)
+            if (media.kind==frondMachine::kindNand) m.nand.assign(deviceConfigurationGetNandSize(m.device),0xff);
+    // A card the session carries opens in the card store, in the slot as saved. The work copy takes its writes.
+    if (std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; })) {
+        frondSession::Contents card;
+        card.media=m.media;
+        if (!frondNative::attachFolderMedia(card,folder)) throw std::runtime_error("the session's card did not open");
+    }
     if (m.savestate.empty() || m.memory.empty()) throw std::runtime_error("complete RAM and peripheral state required");
     if (m.device==deviceTypeTG50 && m.memory.size()!=tg50RamBackingSize+2*MEMORY_BUFFER_GRANULARITY)
         throw std::runtime_error("TG50 session requires complete RAM and CPU/peripheral state");
@@ -232,7 +240,9 @@ bool savePng(const std::filesystem::path& path, std::vector<uint32_t>& frame, in
 // Dynarmic blocks. Its runs have no host time limit and its input is stamped with guest time, so
 // they repeat. A --sd card runs from memory, so the file is never written.
 // BENCH_ZODIAC_SAVE=MS:FILE saves the machine at the first slice boundary at or after MS into FILE (the
-// guest ns since the start, then the state) and stops there. BENCH_ZODIAC_LOAD=FILE starts from such a file
+// guest ns since the start, then the state) and stops there, or carries on with BENCH_ZODIAC_SAVE_CONTINUE=1.
+// BENCH_ZODIAC_SAVE_CONTINUE=reload carries on from the state it saved, loaded in place, which lets go of the
+// held keys and pen as a load does. BENCH_ZODIAC_LOAD=FILE starts from such a file
 // instead of the cold boot, with the same replay; events before the saved time are skipped and summary
 // counts are from the load. Either engine can load a state the other saved.
 uint64_t eventMs() { return clockSoc ? (clockSoc->GetTime()-clockStart)/1000000 : 0; }
@@ -251,8 +261,8 @@ void listChangedSectors() {
 }
 void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replayArg, uint64_t duration,
                const char* mipsArg, bool sound, const std::filesystem::path& output, const std::string& sdPath) {
-    const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalMips5(device):number(mipsArg,1000);
-    if (!mips) throw std::runtime_error("MIPS must be positive");
+    const uint64_t mips=std::string(mipsArg)=="original"?deviceProfileOriginalHz5(device)/1000000:number(mipsArg,3000);
+    if (!mips) throw std::runtime_error("MHz must be positive");
     const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
     const auto events=replay(replayArg,duration,display.width,display.height,true);
     const bool cardLater=std::any_of(events.begin(),events.end(),[](const Event& e) { return e.kind=="card-insert"; });
@@ -274,8 +284,6 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const char* jit=std::getenv("FROND_JIT");
     const bool fast=jit && std::string(jit)=="1";
     if (fast && !soc->SetFastEngine(true)) throw std::runtime_error("the Zodiac's Fast engine isn't available");
-    // BENCH_ZODIAC_READY_SKIP=0 runs the YMF768 ready wait's tries one by one on Fast, for tests.
-    if (const char* ready=std::getenv("BENCH_ZODIAC_READY_SKIP")) imx1SetReadyWaitSkip(std::string(ready)!="0");
     soc->SetHostTimeLimit(false);
     clockStart=soc->GetTime(); clockSoc=soc.get();
     SoC::SetEventClock(eventMs);
@@ -300,6 +308,9 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         if (colon==std::string::npos || colon+1==text.size()) throw std::runtime_error("BENCH_ZODIAC_SAVE needs MS:FILE");
         saveAt=number(text.substr(0,colon).c_str(),UINT32_MAX)*1000000; savePath=text.substr(colon+1);
     }
+    const char* goOn=std::getenv("BENCH_ZODIAC_SAVE_CONTINUE");
+    const bool reloadAfterSave=goOn && std::string(goOn)=="reload";
+    const bool continueAfterSave=goOn && (std::string(goOn)=="1" || reloadAfterSave);
     if (const char* load=std::getenv("BENCH_ZODIAC_LOAD")) {
         auto state=readFile(load);
         uint64_t savedNs=0;
@@ -374,8 +385,16 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
             out.write(reinterpret_cast<const char*>(&elapsed),sizeof(elapsed));
             out.write(static_cast<const char*>(buffer.data),std::streamsize(buffer.size));
             out.flush(); if (!out) throw std::runtime_error("BENCH_ZODIAC_SAVE: write failed");
-            std::fprintf(stderr,"saved at %.3f s\n",elapsed/1e9);
-            break;
+            std::fprintf(stderr,"saved at %.3f s ready reads %llu\n",elapsed/1e9,(unsigned long long)soc->YmfReadyReads());
+            if (!continueAfterSave) break;
+            saveAt=UINT64_MAX;
+            if (reloadAfterSave) {
+                std::vector<uint8_t> copy(static_cast<const uint8_t*>(buffer.data),static_cast<const uint8_t*>(buffer.data)+buffer.size);
+                if (!soc->Load(copy.size(),copy.data()))
+                    throw std::runtime_error("BENCH_ZODIAC_SAVE_CONTINUE: reload refused");
+                clockStart=soc->GetTime()-elapsed;
+                std::fprintf(stderr,"loaded at %.3f s\n",elapsed/1e9);
+            }
         }
         if (elapsed>=duration*1000000) break;
         cycles+=soc->Run(mips*1000,mips*1000000);
@@ -395,7 +414,7 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
         }
         if (trace && elapsed>=traceNext) {
             const auto st=soc->Status();
-            std::fprintf(stderr,"state %.0f ms pc %08x retired %llu idleHclk %llu wall %.3f jit %llu runs %llu skips %llu haltskips %llu ready %llu\n",elapsed/1e6,st.pc,(unsigned long long)st.retired,(unsigned long long)st.idleHclk,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),(unsigned long long)soc->JitRetired(),(unsigned long long)soc->JitRuns(),(unsigned long long)soc->DelaySkips(),(unsigned long long)soc->DelayHaltSkips(),(unsigned long long)soc->ReadyWaitTries());
+            std::fprintf(stderr,"state %.0f ms pc %08x retired %llu idleHclk %llu wall %.3f jit %llu runs %llu skips %llu haltskips %llu ready reads %llu\n",elapsed/1e6,st.pc,(unsigned long long)st.retired,(unsigned long long)st.idleHclk,std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count(),(unsigned long long)soc->JitRetired(),(unsigned long long)soc->JitRuns(),(unsigned long long)soc->DelaySkips(),(unsigned long long)soc->DelayHaltSkips(),(unsigned long long)soc->YmfReadyReads());
             traceNext=elapsed+traceStepMs*1000000;
         }
     }
@@ -416,7 +435,9 @@ void runZodiac(std::vector<uint8_t>& rom, DeviceType5 device, const char* replay
     const uint64_t jitInstructions=soc->JitRetired()-jitStart;
     if (soc->Halted()) std::fprintf(stderr,"stopped: %s\n",soc->StopText().c_str());
     if (!secondCard.empty()) listChangedSectors();
-    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\n",soc->LcdEnabled()?"on":"off",soc->ChipSummary().c_str());
+    if (trace) std::fprintf(stderr,"lcd %s at the end\n%s\nmemory hash %llx\npcm hash %llx\nready last read at %lld ns\nready reads %llu\n",soc->LcdEnabled()?"on":"off",
+                            soc->ChipSummary().c_str(),(unsigned long long)soc->MemoryHash(),(unsigned long long)pcmHash,
+                            (long long)(soc->YmfLastReadyReadNs()-clockStart),(unsigned long long)soc->YmfReadyReads());
     std::ofstream result(output/"summary.json");
     result << std::setprecision(12) << "{\"version\":1,\"device\":\"" << deviceName5(device) << "\",\"cold_boot\":true"
            << ",\"engine\":\"" << (fast?"fast":"exact") << "\",\"jit_async\":false,\"mips\":" << mips << ",\"sound\":" << (sound?"true":"false")
@@ -467,7 +488,7 @@ int main(int argc, char** argv) {
         char** arg=argv+skip;  // arg[1] is SESSION
         const int count=argc-skip;
         if (count!=7 && count!=8)
-            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] [--sd CARD (Zodiac)] SESSION|NOR REPLAY|- MILLISECONDS MIPS|original on|off NEW-output-dir [palm-epoch-seconds]");
+            throw std::runtime_error("usage: benchmark-replay [--device NAME] [--nand NAND] [--sd CARD (Zodiac)] SESSION|NOR REPLAY|- MILLISECONDS MHZ|original on|off NEW-output-dir [palm-epoch-seconds]");
         const auto duration=number(arg[3],600000);
         if (!duration) throw std::runtime_error("duration must be positive");
         const std::string soundArg=arg[5];
@@ -492,13 +513,13 @@ int main(int argc, char** argv) {
         if (!sdPath.empty()) throw std::runtime_error("--sd is for a Zodiac cold boot only");
         if (coldBoot) { m=loadNor(std::move(data),deviceName,nandPath); data={}; }
         const auto checkInputs=[&](DeviceType5 device) {
-            const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalMips5(device):number(arg[4],1000);
-            if (!mips) throw std::runtime_error("MIPS must be positive");
+            const uint64_t mips=std::string(arg[4])=="original"?deviceProfileOriginalHz5(device)/1000000:number(arg[4],3000);
+            if (!mips) throw std::runtime_error("MHz must be positive");
             const auto display=deviceConfigurationDisplayConfigForDevice(device,deviceConfigurationDefaultDisplayMode(device));
             if (display.width<=0 || display.height<=0) throw std::runtime_error("device has no display");
             return std::make_pair(mips,replay(arg[2],duration,display.width,display.height+display.graffitiHeight));
         };
-        // A cold boot's MIPS and replay are checked before the output directory is made.
+        // A cold boot's MHz and replay are checked before the output directory is made.
         if (coldBoot) checkInputs(m.device);
         // Atomic exclusive mkdir, private from creation (unlike create_directory + chmod).
         if (mkdir(output.c_str(),0700)) throw std::runtime_error("output must be a new directory in an existing parent");
@@ -512,6 +533,8 @@ int main(int argc, char** argv) {
         const bool pxa270=board==DeviceBoard5::pxa270Tx || board==DeviceBoard5::pxa270Zire72;
         auto soc=std::make_unique<SocPXA>(device,m.ramSize,m.nor.data(),m.nor.size(),
                    m.nand.empty()?nullptr:m.nand.data(),m.nand.size(),-1,pxa270?2:deviceGetSocRev());
+        const bool original=std::string(arg[4])=="original";
+        soc->SetFollowCoreClock(original);
         for (const auto& media : m.media)
             if (media.kind==frondMachine::kindNand && !frondNand::attachFile(soc->GetNand(),m.folder,media))
                 throw std::runtime_error("session NAND did not attach");
@@ -537,7 +560,9 @@ int main(int argc, char** argv) {
             if (!m.legacy) soc->ReleaseKeyboard();
             // A Memory Stick device has no SD slot: an SD flag from the shared card store is dropped.
             if (stick) soc->SdEject();
-            if (soc->SdInserted() || soc->networkSimulation.GetMode()!=NetworkSimulation::disabled)
+            const bool hasSd=std::any_of(m.media.begin(),m.media.end(),[](const auto& media) { return media.kind==frondMachine::kindSd; });
+            if (hasSd && soc->SdInserted() && !soc->SdRemount()) throw std::runtime_error("the session and its card image do not match");
+            if ((soc->SdInserted() && !hasSd) || soc->networkSimulation.GetMode()!=NetworkSimulation::disabled)
                 throw std::runtime_error("use an ejected SD and disabled network fixture");
         }
         m.memory={}; m.savestate={};
@@ -610,7 +635,9 @@ int main(int argc, char** argv) {
             }
             if (elapsed>=duration*1000000) break;
             const auto sliceStart=wallNs(); const auto sliceGuest=soc->GetTime();
-            const auto count=soc->Run(mips*1000,mips*1000000); // fixed 1 ms work requests
+            // Fixed 1 ms work requests; Original runs at the guest's own clock as it sets it.
+            const uint64_t hz=original&&soc->CoreHz()?soc->CoreHz():mips*1000000;
+            const auto count=soc->Run(hz/1000,hz);
             if (!count) throw std::runtime_error("guest made no progress");
             slices.push_back({uint64_t(wallNs()-sliceStart),uint64_t(soc->GetTime()-sliceGuest)});
             cycles+=count;

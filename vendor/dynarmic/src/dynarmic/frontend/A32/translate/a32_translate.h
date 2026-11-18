@@ -45,6 +45,10 @@ struct TranslationOptions {
 
     /// Frond: see UserConfig::psr_inline_interrupt_mask.
     bool psr_inline_interrupt_mask = false;
+
+    /// Frond: ticks for an instruction whose condition failed, from
+    /// TranslateCallbacks::GetTicksForConditionFailed (Translate sets it).
+    std::uint64_t condition_failed_ticks = 1;
 };
 
 /**

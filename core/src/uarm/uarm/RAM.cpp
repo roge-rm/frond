@@ -150,10 +150,9 @@ void* ramResolveAddress(struct ArmRam* ram, uint32_t pv, uint32_t size) {
 }
 
 void ramCodeWritten(struct ArmRam* ram, uint32_t offset, uint32_t size) {
-    // The JIT drops every block from the page, so none of its lines hold code now. Cleared
-    // first, so the callback can flag fetch buffer lines it keeps again.
-    memset(ram->codeLines + ((offset & ~0xfffu) >> 6), 0, 0x1000 >> 6);
-    ram->codeWritten(ram->codeContext, ram->buf.buffer + (offset & ~0xfffu), offset & 0xfffu, size);
+    // The callback sets the page's flags (lines) again from what still holds code.
+    ram->codeWritten(ram->codeContext, ram->buf.buffer + (offset & ~0xfffu), ram->codeLines + ((offset & ~0xfffu) >> 6),
+                     offset & 0xfffu, size);
 }
 
 // Lowest offset whose writes can mark the frame buffer dirty: the wider writes start
@@ -207,5 +206,6 @@ void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size) {
                 const uint32_t pageEnd = (at & ~0xfffu) + 0x1000;
                 const uint32_t end = last - ram->adr < pageEnd ? last - ram->adr : pageEnd;
                 ramCodeWritten(ram, at, end - at);
+                line = (pageEnd >> 6) - 1;  // the flags may stay set; the rest of the page is done
             }
 }

@@ -113,6 +113,7 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
     do {
         const u32 arm_pc = visitor.ir.current_location.PC();
         u64 ticks_for_instruction = 1;
+        block.frond_cycles_before.emplace_back(arm_pc, block.CycleCount());
 
         if (!tcb->PreCodeReadHook(true, arm_pc, visitor.ir)) {
             should_continue = false;
@@ -163,7 +164,7 @@ IR::Block TranslateThumb(LocationDescriptor descriptor, TranslateCallbacks* tcb,
         }
 
         visitor.ir.current_location = visitor.ir.current_location.AdvancePC(static_cast<int>(visitor.current_instruction_size)).AdvanceIT();
-        block.CycleCount() += ticks_for_instruction;
+        if (!visitor.frond_interpreted) block.CycleCount() += ticks_for_instruction;
         capped = options.max_instructions && ++instructions >= options.max_instructions;
     } while (should_continue && CondCanContinue(visitor.cond_state, visitor.ir) && !single_step && !capped);
 

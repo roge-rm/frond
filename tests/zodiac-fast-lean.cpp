@@ -1575,7 +1575,8 @@ void fifoWait() {
                 gaps.empty() ? 0 : *std::min_element(gaps.begin(), gaps.end()),
                 gaps.empty() ? 0 : *std::max_element(gaps.begin(), gaps.end()));
     std::fflush(stdout);
-    assert(gaps.size() >= 5 && std::count(gaps.begin(), gaps.end(), gaps[0]) == std::ptrdiff_t(gaps.size()));
+    // 4 with the ARM920T table costs.
+    assert(gaps.size() >= 4 && std::count(gaps.begin(), gaps.end(), gaps[0]) == std::ptrdiff_t(gaps.size()));
     assert(n >= 5 && r >= 500);
 }
 
@@ -2147,10 +2148,10 @@ int main() {
     rtcReads();
     engineSwitch();
     {
-        // 1-400 land in the ring stores before the fill, 3300-3460 around its submission and after it, while
-        // the engine runs.
+        // 1-400 land in the ring stores before the fill, 3440-3600 around its submission and after it, while
+        // the engine runs (the guest's instructions charged their ARM920T table costs).
         unsigned atSubmit = 0, atStore = 0;
-        for (uint32_t comp = 1; comp <= 3460; comp = comp == 400 ? 3300 : comp + 1) {
+        for (uint32_t comp = 1; comp <= 3600; comp = comp == 400 ? 3440 : comp + 1) {
             const auto at = commandFiq(comp);
             atSubmit += at == 1;
             atStore += at == 2;

@@ -23,6 +23,7 @@
 #include "CPU.h"
 #include "MMU.h"
 #include "pxa270_WMMX.h"
+#include "xscale_cost.h"
 #include "dynarmic/frontend/A32/a32_ir_emitter.h"
 #include "dynarmic/interface/A32/a32.h"
 #include "dynarmic/interface/A32/config.h"
@@ -65,6 +66,11 @@ struct Stats {
     std::unordered_map<uint32_t, uint32_t> interpWord;
     std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> invalAllPc;
     std::unordered_map<uint32_t, uint64_t> writtenPage;  // virtual page dropped for a write
+    std::unordered_map<uint32_t, uint64_t> writtenAt;    // virtual address of each write that dropped code
+    // Stores to a flagged line that overlapped no block, and line flag updates after writes (pages
+    // left with code, pages with none left).
+    uint64_t writesMissed = 0, remasks = 0, remaskFreed = 0;
+    std::atomic<uint64_t> translated{0};  // blocks translated, on either thread
     // Callback reads and writes by virtual page (bit 31 of the key set for writes).
     std::unordered_map<uint32_t, uint64_t> callbackPage;
     void NoteCallback(uint32_t va, bool write) {
@@ -157,6 +163,14 @@ struct Stats {
         for (size_t i = 0; i < top.size() && i < 8; i++)
             fprintf(stderr, "jit: written page %08x %llu\n", top[i].second << 12, (unsigned long long)top[i].first);
         top.clear();
+        fprintf(stderr, "jit: translated %llu writesMissed %llu remasks %llu remaskFreed %llu\n",
+                (unsigned long long)translated.load(), (unsigned long long)writesMissed, (unsigned long long)remasks,
+                (unsigned long long)remaskFreed);
+        for (auto &[va, n] : writtenAt) top.push_back({n, va});
+        std::sort(top.rbegin(), top.rend());
+        for (size_t i = 0; i < top.size() && i < 12; i++)
+            fprintf(stderr, "jit: written at %08x %llu\n", top[i].second, (unsigned long long)top[i].first);
+        top.clear();
         for (auto &[key, n] : callbackPage) top.push_back({n, key});
         std::sort(top.rbegin(), top.rend());
         for (size_t i = 0; i < top.size() && i < 16; i++)
@@ -192,6 +206,9 @@ constexpr HaltReason kCold = HaltReason::UserDefined4;
 constexpr HaltReason kPrivilege = HaltReason::UserDefined5;
 // A SWI from generated code: the run ends at the vector.
 constexpr HaltReason kSwi = HaltReason::UserDefined6;
+// Memory charges (Fast at Original) used up what was left of the budget: the run ends at the next
+// link, as when the cycles run out.
+constexpr HaltReason kCharged = HaltReason::UserDefined7;
 
 // The instructions the p15 slot runs (jitCp15SlotWord). Each ends its block, so a user
 // mode one can be undone and handed to the interpreter, which raises the undefined
@@ -258,6 +275,33 @@ bool EndsBlock(uint32_t w, uint32_t pc, bool thumb) {
 // the request, so translation there gives what it would have given in place then.
 // Translation marks the words it reads; before the block is installed they are fetched
 // again and compared (Env::CodeUnchanged).
+// Ticks per instruction from the cost model (xscale_cost.h), as the interpreter charges them: the
+// table's cost when the condition passed, 1 when it failed. On PXA a tick is a core clock. On the
+// ARM920T a tick holds the clocks above bit 32 and the instructions below (a Thumb pair counts 2,
+// as the board steps each half), since its board counts both; budgets there are clocks << 32, so a
+// run still stops once its clocks reach the budget.
+struct TickModel {
+    bool on = false;
+    uint8_t core = 0;
+    unsigned shift = 0;
+
+    uint64_t Ticks(bool thumb, uint32_t instruction) const {
+        const uint64_t c = on ? cost::jitInstructionCost(thumb, instruction, cost::Core(core)) : 1;
+        if (!shift) return c;
+        return (c << shift) | (thumb && instruction > 0xffff ? 2 : 1);
+    }
+    uint64_t Failed() const { return shift ? (uint64_t(1) << shift) | 1 : 1; }
+};
+
+TickModel jitPrvTickModel(ArmCpu *cpu) {
+    TickModel m;
+    uint8_t core = 0;
+    m.on = cpuJitCostCore(cpu, &core);
+    m.core = core;
+    m.shift = cpuGetModel(cpu) == ArmCpuModel::arm920t ? 32 : 0;
+    return m;
+}
+
 struct Snapshot final : public A32::CodeSnapshot {
     uint32_t base = 0;  // the word holding the first instruction
     std::vector<uint32_t> words;
@@ -266,6 +310,12 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint32_t> marked;  // access pcs among them
     size_t next = 0;
     bool arm920 = false;
+    TickModel model;
+
+    std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
+        return model.Ticks(thumb, instruction);
+    }
+    std::uint64_t GetTicksForConditionFailed() override { return model.Failed(); }
 
     std::optional<std::uint32_t> MemoryReadCode(A32::VAddr va) override {
         const uint32_t i = (va - base) >> 2;
@@ -279,6 +329,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     }
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
+        if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             while (next < plain.size() && plain[next].first != at) next++;
             if (next == plain.size()) {
@@ -422,6 +473,11 @@ struct Env final : public A32::UserCallbacks {
 
     void Drop(uint32_t page) {
         jit->InvalidateCacheRange(page << 12, 4096);
+        Forget(page);
+    }
+
+    // Forgets a code page that holds no code now, so the next compile from it watches it again.
+    void Forget(uint32_t page) {
         const auto it = code.find(page);
         if (it == code.end()) return;
         const auto n = accessPages.find(it->second.access);
@@ -448,29 +504,69 @@ struct Env final : public A32::UserCallbacks {
         }
     }
 
-    void CodeWrittenPa(uint32_t pa) {
-        const auto it = byPa.find(pa);
-        if (it == byPa.end()) return;
-        for (uint32_t page : it->second) {
+    // A store to [offset, offset + size) of a watched code page (by physical page for Fast blocks on the
+    // ARM920T, by host page otherwise): drops only the blocks whose code it overlaps, in each virtual page
+    // mapped there. True if it dropped any. The page's line flags are worked out again from the code left
+    // (CodeLines) before the next run.
+    bool RangeWritten(const std::vector<uint32_t> &pages, uint32_t offset, uint32_t size, bool byPhysical,
+                      uint32_t key, uint8_t *host) {
+        bool dropped = false;
+        for (uint32_t page : pages) {
             const auto c = code.find(page);
-            if (c == code.end() || c->second.pa != pa) continue;
+            if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
+            const uint32_t va = (page << 12) | offset;
+            if (!jit->HasCodeIn(va, size)) continue;
             stats.pagesWritten++;
-            if (stats.on) stats.writtenPage[page]++;
-            Drop(page);
+            if (stats.on) stats.writtenPage[page]++, stats.writtenAt[va]++;
+            jit->InvalidateCacheRange(va, size);
+            dropped = true;
         }
-        byPa.erase(it);
+        if (!dropped) stats.writesMissed++;
+        return dropped;
     }
 
-    void CodeWritten(uint8_t *host) {
+    // known: this level holds code from the page. True if the store dropped any.
+    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size) {
+        const auto it = byPa.find(pa);
+        return it != byPa.end() && RangeWritten(it->second, offset, size, true, pa, nullptr);
+    }
+
+    bool CodeWritten(uint8_t *host, uint32_t offset, uint32_t size, bool &known) {
+        const auto it = byHost.find(host);
+        if (it == byHost.end()) return false;
+        known = true;
+        return RangeWritten(it->second, offset, size, false, 0, host);
+    }
+
+    // ORs into words (16) the 4-byte words of the page that this level's live blocks hold code from, with
+    // any requested invalidation done first. Not while running.
+    void CodeWords(const std::vector<uint32_t> &pages, bool byPhysical, uint32_t key, uint8_t *host, uint64_t *words) {
+        for (uint32_t page : pages) {
+            const auto c = code.find(page);
+            if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
+            jit->CodeWords(page << 12, words);
+        }
+    }
+    void CodeWordsPa(uint32_t pa, uint64_t *words) {
+        if (const auto it = byPa.find(pa); it != byPa.end()) CodeWords(it->second, true, pa, nullptr, words);
+    }
+    void CodeWordsHost(uint8_t *host, uint64_t *words) {
+        if (const auto it = byHost.find(host); it != byHost.end()) CodeWords(it->second, false, 0, host, words);
+    }
+
+    // The page holds no code at either level any more: forget it, so a compile from it watches it again.
+    void ForgetPa(uint32_t pa) {
+        const auto it = byPa.find(pa);
+        if (it == byPa.end()) return;
+        for (uint32_t page : it->second)
+            if (const auto c = code.find(page); c != code.end() && c->second.pa == pa) Forget(page);
+        byPa.erase(it);
+    }
+    void ForgetHost(uint8_t *host) {
         const auto it = byHost.find(host);
         if (it == byHost.end()) return;
-        for (uint32_t page : it->second) {
-            const auto c = code.find(page);
-            if (c == code.end() || c->second.host != host) continue;
-            stats.pagesWritten++;
-            if (stats.on) stats.writtenPage[page]++;
-            Drop(page);
-        }
+        for (uint32_t page : it->second)
+            if (const auto c = code.find(page); c != code.end() && c->second.host == host) Forget(page);
         byHost.erase(it);
     }
 
@@ -535,6 +631,9 @@ struct Env final : public A32::UserCallbacks {
 
     void ClearPages() {
         stats.pageClears++;
+        // The data cache hint is keyed by va alone and assumes the policy each page had when its
+        // entry was noted, so it goes with the mappings.
+        cpuCostHintClear(cpu);
         for (auto &list : filled) {
             for (const Filled &f : list) (*pages)[f.page] = nullptr;
             list.clear();
@@ -650,6 +749,25 @@ struct Env final : public A32::UserCallbacks {
         if (cpuJitSlowPath(cpu)) jit->HaltExecution(kSlowPath);
     }
 
+    // Fast at Original (cpuJitMemoryCost): generated loads and stores check the CPU's data cache
+    // hint (cpuJitCostHint) before the page table, and come to the callbacks unless the hint
+    // says the access hits or joins a write buffer entry, at no charge. The callbacks charge the
+    // data cache and region model. The charges wait in the CPU's pending charge until the run
+    // ends; once they reach what's left of the budget (as of the last block end), the run ends
+    // at the next link. Until a callback has ended it that way, generated code checks that too
+    // before it takes a hit, and leaves it to the callback, so the run ends where it would if
+    // every access came here. Code is compiled with the hint check while this is set
+    // (frond_cost_hint_on).
+    bool memoryCost = false;
+    bool hinted = true;  // without the hint (jitSetCostHint), the page table stays empty while memoryCost is set
+
+    void Charged() {
+        if (int64_t(cpuJitPendingCharge(cpu)) >= jit->TicksRemainingNow()) {
+            jit->HaltExecution(kCharged);
+            cpuJitCostHalted(cpu);
+        }
+    }
+
     template <typename T>
     T Read(A32::VAddr va) {
         T v{};
@@ -664,6 +782,7 @@ struct Env final : public A32::UserCallbacks {
             }
             if (io == 2) GenChanged(cpuJitPageGen(cpu));
             AfterIo();
+            if (memoryCost) Charged();
             return v;
         }
         // The ARM920T's lean path refuses without setting fsr: that's an exit, not a guest abort.
@@ -674,6 +793,11 @@ struct Env final : public A32::UserCallbacks {
         }
         // Only aligned reads land here for pages the table could hold; fill it.
         CheckGen();
+        if (memoryCost) {
+            AfterIo();
+            Charged();
+            if (!hinted) return v;
+        }
         const uint32_t page = va >> 12;
         if (!(*pages)[page]) {
             uint8_t *host = cpuJitReadPage(cpu, va);
@@ -681,7 +805,7 @@ struct Env final : public A32::UserCallbacks {
                 stats.pageFills++;
                 (*pages)[page] = ReadOnly(host);
                 NoteFilled(page);
-            } else {
+            } else if (!memoryCost) {
                 AfterIo();
             }
         }
@@ -700,6 +824,7 @@ struct Env final : public A32::UserCallbacks {
             }
             if (io == 2) GenChanged(cpuJitPageGen(cpu));
             AfterIo();
+            if (memoryCost) Charged();
             return;
         }
         uint_fast8_t fsr = 0;
@@ -710,6 +835,13 @@ struct Env final : public A32::UserCallbacks {
         // A RAM page the guest may store to in this mode: map it writable. Unaligned stores
         // also land here for pages that already are.
         CheckGen();
+        if (memoryCost) {
+            Charged();
+            if (!hinted) {
+                AfterIo();
+                return;
+            }
+        }
         const uint32_t page = va >> 12;
         uint8_t *const entry = (*pages)[page];
         if (!entry || (uintptr_t(entry) & 1)) {
@@ -732,6 +864,7 @@ struct Env final : public A32::UserCallbacks {
     }
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
+        if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
         if (lineBound && (pc & ~31u) != (A32::LocationDescriptor{ir.block.Location()}.PC() & ~31u)) {
             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
             return false;
@@ -755,6 +888,7 @@ struct Env final : public A32::UserCallbacks {
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
+        s->model = model;
         s->base = pc & ~3u;
         auto word = [&](uint32_t va) {
             const uint32_t i = (va - s->base) >> 2;
@@ -827,7 +961,7 @@ struct Env final : public A32::UserCallbacks {
     void Cp15User(uint32_t pc) {
         stats.cp15User++;
         rewindPc = pc;
-        undoTick = true;
+        undo = TicksAt(pc, false);
         jit->HaltExecution(kInterpret);
     }
 
@@ -848,7 +982,7 @@ struct Env final : public A32::UserCallbacks {
             psrInterpret = 0;
             stats.psrInterpret++;
             psrInterprets.fetch_add(1, std::memory_order_relaxed);
-            undoTick = true;
+            undo = TicksAt(pc, jit->Cpsr() & 0x20);
             jit->HaltExecution(kInterpret);
             return;
         }
@@ -865,6 +999,7 @@ struct Env final : public A32::UserCallbacks {
                 else stats.interpWmmx[3]++;
             }
         }
+        // Its block didn't count it (the fork's frond_interpreted); the interpreter charges it.
         jit->HaltExecution(kInterpret);
     }
     // SWI (not the semihosting ones, cpuJitPlain): PC is past it. The run ends at the
@@ -888,9 +1023,10 @@ struct Env final : public A32::UserCallbacks {
 
     // Undefined, unpredictable and no-execute: PC is past the instruction and its tick
     // is counted, so step back and let the interpreter run it.
-    void ExceptionRaised(A32::VAddr pc, A32::Exception) override {
+    void ExceptionRaised(A32::VAddr pc, A32::Exception exception) override {
         jit->Regs()[15] = pc;
-        undoTick = true;
+        // A fetch that failed counted 1 (dynarmic's default).
+        undo = exception == A32::Exception::NoExecuteFault ? 1 : TicksAt(pc, jit->Cpsr() & 0x20);
         jit->HaltExecution(kInterpret);
     }
 
@@ -1088,11 +1224,31 @@ struct Env final : public A32::UserCallbacks {
     }
 
     void AddTicks(std::uint64_t ticks) override { ran += ticks; }
+    std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
+        return model.Ticks(thumb, instruction);
+    }
+    std::uint64_t GetTicksForConditionFailed() override { return model.Failed(); }
     // Called at the start of a run and again after a CallSVC that doesn't halt, once AddTicks has taken the cycles so
     // far: the rest of the run's budget, so a run that goes on past a SWI still ends on time.
     std::uint64_t GetTicksRemaining() override { return budget > ran ? budget - ran : 0; }
 
-    bool undoTick = false;
+    // The ticks of an instruction the run counted and the interpreter runs again, taken off at the end.
+    uint64_t undo = 0;
+    TickModel model;
+
+    // What translation counted for the instruction at pc, read as dynarmic reads it.
+    uint64_t TicksAt(uint32_t pc, bool thumb) {
+        uint32_t w;
+        if (!cpuJitFetch(cpu, pc & ~3u, &w)) return 1;
+        if (!thumb) return model.Ticks(false, w);
+        uint32_t i = (pc & 2) ? w >> 16 : w & 0xffff;
+        if (i >= 0xe800) {
+            const uint32_t next = pc + 2;
+            if (!cpuJitFetch(cpu, next & ~3u, &w)) return 1;
+            i = (i << 16) | ((next & 2) ? w >> 16 : w & 0xffff);
+        }
+        return model.Ticks(true, i);
+    }
 };
 
 
@@ -1260,6 +1416,11 @@ struct FrondJit {
     unsigned ahead = 0;
     FrondJitAbort abort{};  // the last run's, for FROND_JIT_ABORT
     const Env *running = nullptr;  // the level jitRun is in, for jitRanNow
+    // Pages a store dropped code from, whose line flags are worked out again before the next run
+    // (jitPrvRemask): physical pages (ARM920T Fast blocks) and host pages.
+    std::vector<uint32_t> remaskPa;
+    std::vector<uint8_t *> remaskHost;
+    uint32_t lastInstructions = 0;  // the last run's (jitLastInstructions)
 };
 
 const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
@@ -1330,6 +1491,9 @@ static constexpr size_t kUserCodeCache = kCodeCache;
 #endif
 
 static size_t jitPrvCodeCache = 0;
+static bool jitPrvCostHint = true;
+
+void jitSetCostHint(bool on) { jitPrvCostHint = on; }
 
 void jitSetCodeCacheSize(size_t bytes) { jitPrvCodeCache = bytes; }
 
@@ -1353,6 +1517,9 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     conf.page_table = l->pages;
     conf.page_table_writes_via_callbacks = false;
     conf.page_table_write_protect_bit = true;
+    e.hinted = jitPrvCostHint;
+    conf.frond_cost_hint = e.hinted ? cpuJitCostHint(j->cpu) : nullptr;
+    conf.frond_cost_hint_on = &e.memoryCost;
     conf.page_table_pointer_mask_bits = 1;
     conf.check_halt_on_link = true;
     conf.check_halt_on_memory_access = true;
@@ -1376,6 +1543,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     l->jit = std::make_unique<A32::Jit>(conf);
     e.jit = l->jit.get();
     e.maxInstructions = j->maxUnchecked;
+    e.model = jitPrvTickModel(j->cpu);
     l->jit->SetCompileThread(e.lineBound ? A32::Jit::CompileThread::Off : j->mode);
     l->jit->SetCompileAhead(e.lineBound ? 0 : j->ahead);
     if (Level *o = j->level[!privileged].get()) {
@@ -1427,7 +1595,7 @@ uint64_t jitPsrInterprets() { return psrInterprets.load(std::memory_order_relaxe
 uint32_t jitRanNow(const FrondJit *j) {
     const Env *e = j->running;
     if (!e) return 0;
-    const int64_t ran = int64_t(e->budget) - e->jit->TicksRemainingNow();
+    const int64_t ran = (int64_t(e->budget) - e->jit->TicksRemainingNow()) >> e->model.shift;
     return ran <= 0 ? 0 : uint32_t(std::min<int64_t>(ran, UINT32_MAX));
 }
 
@@ -1526,12 +1694,57 @@ bool jitWmmxCompiles(FrondJit *j, uint32_t w) {
     return false;
 }
 
-void jitCodeWritten(FrondJit *j, uint8_t *hostPage) {
-    jitPrvEach(j, [&](Env &e) { e.CodeWritten(hostPage); });
+bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t size) {
+    bool known = false, dropped = false;
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWritten(hostPage, offset, size, known); });
+    if (dropped && std::find(j->remaskHost.begin(), j->remaskHost.end(), hostPage) == j->remaskHost.end())
+        j->remaskHost.push_back(hostPage);
+    return known;
 }
 
-void jitCodeWrittenPa(FrondJit *j, uint32_t pa) {
-    jitPrvEach(j, [&](Env &e) { e.CodeWrittenPa(pa >> 12); });
+void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size) {
+    bool dropped = false;
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size); });
+    if (dropped && std::find(j->remaskPa.begin(), j->remaskPa.end(), pa >> 12) == j->remaskPa.end())
+        j->remaskPa.push_back(pa >> 12);
+}
+
+// Between runs: the code marks of each page a store dropped code from become the words (ARM920T Fast
+// blocks) or lines both levels' live blocks still hold code from. Until then they keep every line flagged before, so no store to code is
+// missed. A page left with no code is forgotten, so its stores go the fast way again.
+static void jitPrvRemask(FrondJit *j) {
+    for (uint32_t pa : j->remaskPa) {
+        uint64_t words[16] = {}, any = 0;
+        jitPrvEach(j, [&](Env &e) { e.CodeWordsPa(pa, words); });
+        for (uint64_t w : words) any |= w;
+        stats.remasks++;
+        if (!any) {
+            stats.remaskFreed++;
+            jitPrvEach(j, [&](Env &e) { e.ForgetPa(pa); });
+        }
+        cpuJitSetArm920CodeWords(j->cpu, pa << 12, words);
+    }
+    j->remaskPa.clear();
+    for (uint8_t *host : j->remaskHost) {
+        uint64_t words[16] = {}, lines = 0;
+        uint8_t *flags = nullptr;
+        jitPrvEach(j, [&](Env &e) {
+            e.CodeWordsHost(host, words);
+            if (const auto it = e.byHost.find(host); it != e.byHost.end())
+                for (uint32_t page : it->second)
+                    if (const auto c = e.code.find(page); c != e.code.end() && c->second.host == host && c->second.lines)
+                        flags = c->second.lines;
+        });
+        for (unsigned line = 0; line < 64; line++)
+            if ((words[line >> 2] >> ((line & 3) * 16)) & 0xffff) lines |= uint64_t(1) << line;
+        stats.remasks++;
+        if (!lines) {
+            stats.remaskFreed++;
+            jitPrvEach(j, [&](Env &e) { e.ForgetHost(host); });
+        }
+        if (flags) cpuJitSetCodeLines(j->cpu, host, flags, lines);
+    }
+    j->remaskHost.clear();
 }
 
 void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
@@ -1562,16 +1775,26 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         e.mapGen = g;
         if (!e.code.empty()) e.CheckMappings();
     }
+    if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
-    e.budget = cycles;
+    e.model = jitPrvTickModel(j->cpu);
+    if (const bool m = cpuJitMemoryCost(j->cpu); m != e.memoryCost) {
+        // Code compiled before has the hint check, or not, for the old setting.
+        e.memoryCost = m;
+        e.ClearPages();
+        if (!e.code.empty()) jit.ClearCache();
+    }
+    // ARM920T ticks hold the clocks above bit 32 (TickModel); dynarmic's tick count is signed.
+    e.budget = e.model.shift ? std::min<uint64_t>(cycles, INT32_MAX) << e.model.shift : cycles;
+    if (e.memoryCost && e.hinted) cpuJitCostRunStart(j->cpu, cycles, !e.model.shift);
     e.ran = 0;
-    e.undoTick = false;
+    e.undo = 0;
     e.dataAbort.set = false;
     j->running = &e;
     const HaltReason hr = jit.Run();
     j->running = nullptr;
-    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi);
+    jit.ClearHalt(kInterpret | kSlowPath | kFault | kCold | kPrivilege | kSwi | kCharged);
     if (e.rewindPc != ~0u) {
         jit.Regs()[15] = e.rewindPc;
         e.rewindPc = ~0u;
@@ -1579,10 +1802,13 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
     std::memcpy(regs, jit.Regs().data(), 16 * sizeof(uint32_t));
     cpsr = jit.Cpsr();
     uint64_t ran = e.ran;
-    if (e.undoTick && ran) ran--;
-    e.instructions += ran;
+    ran -= std::min(ran, e.undo);
+    const uint32_t clocks = uint32_t(ran >> e.model.shift);
+    // PXA ticks are clocks: instructions counts them there.
+    j->lastInstructions = e.model.shift ? uint32_t(ran) : clocks;
+    e.instructions += j->lastInstructions;
     stats.runs++;
-    stats.ran += ran;
+    stats.ran += j->lastInstructions;
     if (Has(hr, kFault)) {
         stats.fault++;
         if (stats.on) stats.faultPc[regs[15]]++;
@@ -1601,5 +1827,13 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         stop = FROND_JIT_COLD;
     else
         stop = FROND_JIT_BUDGET;
-    return uint32_t(ran);
+    return clocks;
 }
+
+uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
+
+uint64_t jitFaultExits() { return stats.fault; }
+
+uint64_t jitTranslated() { return stats.translated.load(); }
+
+uint64_t jitMemoryCallbacks() { return stats.reads + stats.writes; }

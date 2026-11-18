@@ -67,7 +67,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
                                                          bool priviledged, bool write, bool inspect = false,
                                                          bool checkRead = true, uint8_t *access = nullptr,
                                                          bool *uniformP = nullptr) {
-    bool c = false, b = false;
+    bool c = false, b = false, x = false;
     bool section = false, coarse = true, pxa_tex_page = false;
     uint32_t va, paPage = 0, sz, t, pa;
     int_fast16_t i;
@@ -105,6 +105,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
             ap = (t >> 10) & 3;
             c = !!(t & 0x08);
             b = !!(t & 0x04);
+            x = mmu->xscale && (t & 0x1000);
             section = true;
             goto translated;
 
@@ -129,6 +130,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
             return TRANSLATE_RESULT_FAULT(0x07 | (dom << 4));
 
         case 1:  // 64K mapping
+            x = mmu->xscale && (t & 0x1000);
 
             paPage = t & 0xFFFF0000UL;
             va = adr & 0xFFFF0000UL;
@@ -152,6 +154,7 @@ static FORCE_INLINE MMUTranslateResult translateAndCache(struct ArmMmu *mmu, uin
             if (coarse) {
                 if (mmu->xscale) {
                     pxa_tex_page = true;
+                    x = t & 0x40;
                     ap = 0;
                     goto page_size_4k;
                 } else {
@@ -197,6 +200,7 @@ translated:
             tlbEntry->ap = ap;
             tlbEntry->c = c;
             tlbEntry->b = b;
+            tlbEntry->x = x;
             tlbEntry->domain = dom;
             tlbEntry->section = section;
             tlbEntry->pa = (paPage + offset) >> 12;
@@ -218,6 +222,7 @@ translated:
 
     if (c) result |= (1ull << 62);
     if (b) result |= (1ull << 61);
+    if (x) result |= (1ull << 60);
 
     return result;
 }
@@ -239,6 +244,7 @@ MMUTranslateResult mmuTranslate(struct ArmMmu *mmu, uint32_t addr, bool priviled
 
     if (tlbEntry->c) result |= (1ull << 62);
     if (tlbEntry->b) result |= (1ull << 61);
+    if (tlbEntry->x) result |= (1ull << 60);
 
     return result;
 }

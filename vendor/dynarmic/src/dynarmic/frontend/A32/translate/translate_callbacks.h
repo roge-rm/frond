@@ -30,6 +30,9 @@ struct TranslateCallbacks {
 
     // How many ticks should this instruction take to execute?
     virtual std::uint64_t GetTicksForCode(bool is_thumb, VAddr vaddr, std::uint32_t instruction) = 0;
+
+    // Frond: ticks for an instruction whose condition failed.
+    virtual std::uint64_t GetTicksForConditionFailed() { return 1; }
 };
 
 }  // namespace Dynarmic::A32

@@ -167,7 +167,7 @@ static void pxa25xSleep() {
     write(soc, MARK, 0x600df00d);
     assert(read(soc, MARK) == 0x600df00d);
     saved = snapshot(soc);
-    old = legacy(saved, ChunkType::pxaPwrClk, 1, 2);
+    old = legacy(saved, ChunkType::pxaPwrClk, 1, 4);
     old = legacy(old, ChunkType::pxaGpio, 0, 9);
     assert(soc.Load(old.size(), old.data()));
     old = legacy(old, ChunkType::pxaPwrClk, 0, 37);
@@ -217,12 +217,30 @@ static void clocks() {
         coproc(soc, WRITE_CLKCFG, 9);
         // HT and B are saved; a version 2 chunk loads with B set and HT clear.
         auto saved = snapshot(soc);
-        assert(chunkVersion(saved, ChunkType::pxaPwrClk) == 3);
+        assert(chunkVersion(saved, ChunkType::pxaPwrClk) == 4);
         coproc(soc, WRITE_CLKCFG, 0);
         assert(soc.Load(saved.size(), saved.data()) && coproc(soc, READ_CLKCFG) == 9);
         coproc(soc, WRITE_CLKCFG, 5);
-        auto old = legacy(snapshot(soc), ChunkType::pxaPwrClk, 2, 1);
+        auto old = legacy(snapshot(soc), ChunkType::pxaPwrClk, 2, 2);
         assert(soc.Load(old.size(), old.data()) && coproc(soc, READ_CLKCFG) == 9);
+        // A CCCR write takes effect at the next CLKCFG write, so a state saved between them keeps the old clock.
+        coproc(soc, WRITE_CLKCFG, 0xb);
+        const uint64_t hz = soc.CoreHz();
+        write(soc, CCCR, 0x02000210);
+        assert(soc.CoreHz() == hz);
+        saved = snapshot(soc);
+        SocPXA copy(deviceTypeTX, 32u << 20, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
+        assert(copy.Load(saved.size(), saved.data()) && copy.CoreHz() == hz);
+        assert(read(copy, CCCR) == 0x02000210);
+        coproc(soc, WRITE_CLKCFG, 0xb);
+        coproc(copy, WRITE_CLKCFG, 0xb);
+        assert(soc.CoreHz() != hz && copy.CoreHz() == soc.CoreHz());
+        // A version 3 chunk has no active CCCR and loads with the saved one.
+        write(copy, CCCR, 0x190);
+        coproc(copy, WRITE_CLKCFG, 0xb);
+        assert(copy.CoreHz() == hz);
+        old = legacy(saved, ChunkType::pxaPwrClk, 3, 1);
+        assert(copy.Load(old.size(), old.data()) && copy.CoreHz() == soc.CoreHz());
         soc.Reset();
         assert(coproc(soc, READ_CLKCFG) == 0);  // reset clears CLKCFG
         write(soc, CCCR, 0x02000210);
@@ -235,7 +253,7 @@ static void clocks() {
     assert(read(soc, CCCR) == 0x122 && read(soc, CCSR) == 0);
     coproc(soc, WRITE_CLKCFG, 0xf);
     assert(coproc(soc, READ_CLKCFG) == 0);
-    assert(chunkVersion(snapshot(soc), ChunkType::pxaPwrClk) == 2);  // PXA25x saves stay at version 2
+    assert(chunkVersion(snapshot(soc), ChunkType::pxaPwrClk) == 4);
     assert(coproc(soc, READ_CACHE_TYPE) == 0x0b16a16a);
 }
 
@@ -381,7 +399,7 @@ int main() {
     assert(!fresh.PowerSleeping());
     soc.Reset();
     saved = snapshot(soc);
-    auto old = legacy(saved, ChunkType::pxaPwrClk, 1, 3);
+    auto old = legacy(saved, ChunkType::pxaPwrClk, 1, 4);
     old = legacy(old, ChunkType::pxaGpio, 0, 9);
     assert(soc.Load(old.size(), old.data()));
     assert(!soc.PowerSleeping());
@@ -394,7 +412,7 @@ int main() {
     size_t offset = 1 + 2 * words[0];
     for (unsigned i = 0; i < words[0]; ++i) {
         const unsigned size = words[2 + 2 * i];
-        if (words[1 + 2 * i] == uint32_t(ChunkType::pxaPwrClk)) words[offset + size - 2] = 1;  // wakePending, before CLKCFG
+        if (words[1 + 2 * i] == uint32_t(ChunkType::pxaPwrClk)) words[offset + size - 3] = 1;  // wakePending, before CLKCFG and the active CCCR
         offset += size;
     }
     write(soc, PM + 8, 0xcafef00d);

@@ -89,6 +89,45 @@ namespace {
     }
 }  // namespace
 
+namespace {
+    template <size_t a, size_t b>
+    struct Joined {
+        uint32_t words[a + 1 + b];
+        // first, the conditional branch to the division by zero (never taken with a divisor), second.
+        Joined(const uint32_t (&first)[a], const uint32_t (&second)[b]) {
+            memcpy(words, first, sizeof(first));
+            words[a] = 0x2a000000;
+            memcpy(words + a + 1, second, sizeof(second));
+        }
+    };
+}  // namespace
+
+const uint32_t* peepholeRoutine(uint32_t instr, size_t* count) {
+    static const Joined<sizeof(sig_adc_udivmod_first) / 4, sizeof(sig_adc_udivmod_second) / 4> udivmod(
+        sig_adc_udivmod_first, sig_adc_udivmod_second);
+    static const Joined<sizeof(sig_adc_sdivmod_first) / 4, sizeof(sig_adc_sdivmod_second) / 4> sdivmod(
+        sig_adc_sdivmod_first, sig_adc_sdivmod_second);
+    switch (instr) {
+        case INSTR_PEEPHOLE_ADS_UDIVMOD:
+            *count = sizeof(udivmod.words) / 4;
+            return udivmod.words;
+        case INSTR_PEEPHOLE_ADS_SDIVMOD:
+            *count = sizeof(sdivmod.words) / 4;
+            return sdivmod.words;
+        case INSTR_PEEPHOLE_ADS_UDIV10:
+            *count = sizeof(sig_adc_udiv10) / 4;
+            return sig_adc_udiv10;
+        case INSTR_PEEPHOLE_ADS_SDIV10:
+            *count = sizeof(sig_adc_sdiv10) / 4;
+            return sig_adc_sdiv10;
+        case INSTR_PEEPHOLE_ADS_MEMCPY:
+            *count = sizeof(sig_adc_memcpy) / 4;
+            return sig_adc_memcpy;
+    }
+    *count = 0;
+    return nullptr;
+}
+
 void peepholeOptimize(uint32_t* code, size_t size) {
     for (size = size & ~0x03; size > 0; size -= 4, code++) {
         optimizeAt_ADC_udivmod(code, size);

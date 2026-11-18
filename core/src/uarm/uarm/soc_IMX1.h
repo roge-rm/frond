@@ -70,7 +70,11 @@ class SocIMX1 : public SoC {
     uint64_t JitRuns() const { return imx1MachineJitRuns(machine); }
     uint64_t DelaySkips() const { return imx1MachineDelaySkips(machine); }
     uint64_t DelayHaltSkips() const { return imx1MachineDelayHaltSkips(machine); }
-    uint64_t ReadyWaitTries() const { return imx1MachineReadyWaitTries(machine); }
+    uint64_t YmfReadyReads() const { return imx1MachineYmfReadyReads(machine); }
+    // The guest time of the last of them in ns, on GetTime's clock, for tests.
+    uint64_t YmfLastReadyReadNs() const;
+    // The RAM and graphics memory hashed, for comparing where two runs end.
+    uint64_t MemoryHash() const { return imx1MachineMemoryHash(machine); }
     uint64_t PcmUnderrunWords() const { return imx1MachinePcmUnderrunWords(machine); }
     // The sound and graphics chips' registers as text (imx1MachineChipSummary).
     std::string ChipSummary() const { return imx1MachineChipSummary(machine); }

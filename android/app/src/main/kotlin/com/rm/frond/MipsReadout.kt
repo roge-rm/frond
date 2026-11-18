@@ -1,6 +1,6 @@
 package com.rm.frond
 
-// Where the MIPS readout sits: the bottom right corner of the Palm as the core draws it.
+// Where the speed readout sits: the bottom right corner of the Palm as the core draws it.
 object MipsReadout {
     // The core's window-layout reply: the device's rectangle in the window, and the window's size.
     data class Layout(val x: Int, val y: Int, val width: Int, val height: Int, val windowWidth: Int, val windowHeight: Int)
@@ -11,8 +11,15 @@ object MipsReadout {
         return Layout(n[0], n[1], n[2], n[3], n[4], n[5])
     }
 
-    // The figure in a speed-state reply ("148.00 MIPS, limit ..."), rounded; null when it isn't there.
-    fun parseMips(text: String): Long? = text.substringBefore(" MIPS", "").toDoubleOrNull()?.let { Math.round(it) }
+    // The figure in a speed-state reply ("312.00 MHz, limit ..."; the Zodiac's is in MIPS), rounded; null when it isn't there.
+    fun parseMips(text: String): Long? {
+        val head = text.substringBefore(',').trim()
+        if (!head.endsWith(" MHz") && !head.endsWith(" MIPS")) return null
+        return head.substringBefore(' ').toDoubleOrNull()?.let { Math.round(it) }
+    }
+
+    // The unit of that figure: "MHz" for a core clock, "MIPS" where the board reports instructions a second.
+    fun unit(text: String): String = if (text.substringBefore(',').trim().endsWith(" MIPS")) "MIPS" else "MHz"
 
     // Right and bottom margins in the parent, for a view whose surface sits at (left, top) with the given size
     // and shows the core's window scaled to fit it. inset keeps the box off the edge.

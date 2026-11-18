@@ -6,6 +6,7 @@
 // clang-format on
 
 #include "soc_PXA.h"
+#include "xscale_cost.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -105,6 +106,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
                       : socRev ? ((socRev == 1) ? CPUID_PXA260 : CPUID_PXA270) : CPUID_PXA255,
                   socRev == 2 ? 0x0B1AA1AAUL : 0x0B16A16AUL, patchDispatch, pacePatch, systemState);
 
+    // XScale cost model: the table, region and data cache charges; PwrClk sets the clocks.
+    cpuSetCostModel(cpu, true, uint8_t(socRev == 2 ? cost::Core::pxa27x : cost::Core::pxa25x), true);
+
 #ifndef __EMSCRIPTEN__
     cpuSetDebugSoc(cpu,this);
     cpuSetM68kSyscallHandler(cpu, NetworkSimulation::Dispatch, &networkSimulation);
@@ -180,6 +184,9 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     // The OS timer runs in batches up to its next match, synchronised on register access,
     // so the CPU runs longer stretches between scheduler updates. Every PXA device does this.
     pxaTimrEnableBatching(tmr, TimerElapsedCB, TimerRescheduleCB, this);
+    cpuSetDelayTimer(cpu, kPxaTimrOscrPa, OscrPeekCB, this);
+    // GPIO levels change only at scheduler events, for the Fast poll skip.
+    cpuSetPollPeek(cpu, GpioPeekCB, this);
 #endif
     rtc = pxaRtcInit(mem, ic);
     ffUart = pxaUartInit(mem, rescheduleCb, ic, PXA_FFUART_BASE, PXA_I_FFUART, socRev == 2);
@@ -216,7 +223,7 @@ SocPXA::SocPXA(enum DeviceType5 deviceType, uint32_t ramSize, void *romData, con
     }
 
     i2c = pxaI2cInit(mem, ic, dma, PXA_I2C_BASE, PXA_I_I2C);
-    memCtrl = pxaMemCtrlrInit(mem, socRev);
+    memCtrl = pxaMemCtrlrInit(mem, cpu, socRev);
     ac97 = pxaAC97Init(mem, ic, dma);
 
     // SSP/SSP1
@@ -1107,6 +1114,8 @@ void SocPXA::EndSerialCheckpoint() {
     RefreshIrMode(this);
 }
 
+uint64_t SocPXA::CoreHz() const { return pxaPwrClkCoreHz(pwrClk); }
+
 uint64_t SocPXA::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     // Releasing a host guard does not alter the restored guest's scheduler/CPU.
     // Deliver the host notification when execution resumes, including new peer data.
@@ -1190,12 +1199,24 @@ void SocPXA::RescheduleCB(void *ctx, uint32_t task) {
 }
 
 #ifndef __EMSCRIPTEN__
+// OS timer ticks elapsed in this batch with that many cycles in progress.
+uint32_t SocPXA::TimerElapsedAt(uint32_t cycles) const {
+    if (PowerSleeping() && sleeping) return 0;
+    const uint64_t extra = runningCyclesPerSecond ? uint64_t(cycles) * 1_sec / runningCyclesPerSecond : 0;
+    return scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+}
 uint32_t SocPXA::TimerElapsedCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);
-    if (self->PowerSleeping() && self->sleeping) return 0;
-    const uint64_t extra = self->runningCyclesPerSecond
-        ? uint64_t(cpuCyclesInProgress(self->cpu)) * 1_sec / self->runningCyclesPerSecond : 0;
-    return self->scheduler->ElapsedTicks(SCHEDULER_TASK_TIMER, extra);
+    return self->TimerElapsedAt(cpuCyclesInProgress(self->cpu));
+}
+// The Fast delay skip's look at OSCR (cpuSetDelayTimer).
+bool SocPXA::OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr) {
+    auto* self = static_cast<SocPXA*>(ctx);
+    return pxaTimrPeek(self->tmr, self->TimerElapsedAt(cycles), oscr);
+}
+// The Fast poll skip's look at a GPIO level register (cpuSetPollPeek).
+bool SocPXA::GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value) {
+    return pxaGpioPeekLevel(static_cast<SocPXA*>(ctx)->gpio, pa, value);
 }
 void SocPXA::TimerRescheduleCB(void* ctx) {
     auto* self = static_cast<SocPXA*>(ctx);

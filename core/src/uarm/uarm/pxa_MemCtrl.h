@@ -5,11 +5,13 @@
 
 #include <cstdint>
 
+#include "CPU.h"
 #include "mem.h"
 
 struct PxaMemCtrlr;
 
-struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, uint_fast8_t socRev);
+// cpu takes the SDRAM width from MDCNFG for the cost model's data cache charges.
+struct PxaMemCtrlr* pxaMemCtrlrInit(struct ArmMem* physMem, struct ArmCpu* cpu, uint_fast8_t socRev);
 
 // PXA25x sleep exit: RAM is out of the address map until MDCNFG enables SDRAM.
 void pxaMemCtrlrHoldSdram(struct PxaMemCtrlr* mc);

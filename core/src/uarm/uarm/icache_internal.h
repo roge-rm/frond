@@ -41,6 +41,8 @@ struct icacheline {
     uint8_t data[1 << CACHE_LINE_WIDTH_BITS];
     DECODED_INSTRUCTION_TYPE decoded[1 << (CACHE_LINE_WIDTH_BITS - 1)];
     uint32_t translatedThumbInstructions[1 << (CACHE_LINE_WIDTH_BITS - 1)];
+    // Each decoded slot's charge (icacheCostSlot), written with it: read only while decoded is valid.
+    uint16_t cost[1 << (CACHE_LINE_WIDTH_BITS - 1)];
 
     CACHE_TAG_TYPE tag;
     uint32_t revision;
@@ -96,6 +98,16 @@ struct icache {
 #endif
     } fetchBuffers[2];
     struct icacheline cache[1 << CACHE_INDEX_BITS];
+    // Cost model (xscale_cost.h): costOn charges costCore's table, otherwise every instruction costs 1.
+    // lastCost is the charge slot of the instruction icacheFetch returned last. The memo caches armCost
+    // by word for fetches that don't go through a line (the ARM920T's, uncached ones). Not saved.
+    bool costOn;
+    uint8_t costCore;
+    uint16_t lastCost;
+    struct {
+        uint32_t word;
+        uint8_t cost;
+    } armCostMemo[1024];
 #ifdef FROND_DYNARMIC
     // Called on every invalidation; size 0 means everything.
     void (*invalHook)(void* ctx, uint32_t va, uint32_t size, bool guest);
@@ -107,6 +119,11 @@ struct icache {
     bool fetchUnwatched;  // buffers loaded from a save, not watched yet
 #endif
 };
+
+// A decoded slot's charge: the cost when its condition passes in bits 0-7, the condition in bits 8-11
+// (14 when it has none). A failed condition costs 1.
+static constexpr uint16_t icacheCostSlot(uint32_t cost, uint32_t cond) { return uint16_t(cost | (cond << 8)); }
+static constexpr uint16_t ICACHE_COST_ONE = icacheCostSlot(1, 14);
 
 // icacheArm920Branch for the interpreter's hot paths, inline so their callers need no call or stack frame.
 static FORCE_INLINE void icacheArm920BranchInline(struct icache* ic) { ic->arm920ContinuationCount = 0; }
@@ -121,7 +138,7 @@ static inline uint32_t icacheFetchKey(const struct icache* ic, bool privileged) 
 // Not for the ARM920T, which fetches every instruction through icacheFetch.
 template <int size>
 static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint32_t key,
-                                           uint32_t& instr, uint32_t& decoded) {
+                                           uint32_t& instr, uint32_t& decoded, uint32_t& cost) {
     if (va & (size - 1)) return false;
     const auto* line = ic->cache + calculateIndex(va);
     if (line->revision != ic->revision || line->tag != calculateTag(va) || line->fetchKey != key)
@@ -131,6 +148,7 @@ static FORCE_INLINE bool icacheFetchCached(struct icache* ic, uint32_t va, uint3
     constexpr uint32_t kind = size == 4 ? DECODED_BITS_ARM : DECODED_BITS_THUMB;
     if ((cached & DECODED_BITS) != kind) return false;
     decoded = int32_t(cached) >> DECODED_BITS_SHIFT;
+    cost = line->cost[offset >> 1];
     if constexpr (size == 4) std::memcpy(&instr, line->data + offset, sizeof(instr));
     else instr = line->translatedThumbInstructions[offset >> 1];
     return true;

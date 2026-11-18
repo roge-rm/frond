@@ -65,6 +65,9 @@ public:
     void ClearCache() override;
 
     void InvalidateCacheRanges(const boost::icl::interval_set<u32>& ranges);
+    // Frond: live block code, for A32::Jit::HasCodeIn and CodeWords.
+    bool HasCodeIn(u32 first, u32 last) const { return block_ranges.Overlaps(boost::icl::discrete_interval<u32>::closed(first, last)); }
+    void CodeWords(u32 page_base, u64* words) const { block_ranges.Words(page_base, words); }
 
 protected:
     const A32::UserConfig conf;

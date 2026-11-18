@@ -85,6 +85,8 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
     std::memcpy(regs, other.regs, sizeof(regs));
     index = other.index; bank = other.bank; fifoQueued = other.fifoQueued; fifoPartial = other.fifoPartial;
     fifoWait = other.fifoWait; timerAcc = other.timerAcc; engineAcc = other.engineAcc;
+    readyPending = other.readyPending; std::memcpy(readyAcc, other.readyAcc, sizeof(readyAcc));
+    readyNumerator = other.readyNumerator; readyReads = other.readyReads; readyReadTime = other.readyReadTime;
     enginePeriod = other.enginePeriod; samples = other.samples;
     std::memcpy(last, other.last, sizeof(last));
     pendingRight = other.pendingRight;
@@ -100,6 +102,7 @@ Imx1Ymf768& Imx1Ymf768::operator=(const Imx1Ymf768& other) {
 void Imx1Ymf768::reset() {
     std::memset(regs, 0, sizeof(regs));
     index = 0; bank = 0; fifoQueued = 0; fifoPartial = 0; fifoWait = 0;
+    readyPending = 0; std::memset(readyAcc, 0, sizeof(readyAcc)); readyNumerator = 0;
     timerAcc = 0; engineAcc = 0; enginePeriod = 0; samples = 0; pendingRight = 0;
     quietOutput = false; quietSamples = 0;
     for (auto& v : last) v = 0;
@@ -122,6 +125,7 @@ void Imx1Ymf768::write(bool dataPort, uint8_t value) {
     quietOutput = false;
     if (index == 0x0f) { bank = value & 1; regs[0][0x0f] = regs[1][0x0f] = value; return; }
     if (bank == 0 && index == 0x00) { fifoByte(); return; }
+    if (bank == 1 && index == 0x30) powerWrite(regs[1][0x30], value);
     regs[bank][index] = value;
     if (bank != 0) return;
     if (index >= 0x10 && index < 0xb0) {

@@ -47,6 +47,13 @@ public:
      */
     void InvalidateCacheRange(std::uint32_t start_address, std::size_t length);
 
+    /// Frond: whether a compiled block's code overlaps [start_address, start_address + length).
+    bool HasCodeIn(std::uint32_t start_address, std::size_t length);
+
+    /// Frond: ORs into words (16 of them) a bit per 4-byte word of the 4 KiB page at page_base that
+    /// compiled blocks' code covers, after any requested invalidation is done. Not while executing.
+    void CodeWords(std::uint32_t page_base, std::uint64_t* words);
+
     /**
      * Reset CPU state to state at startup. Does not clear code cache.
      * Cannot be called from a callback.

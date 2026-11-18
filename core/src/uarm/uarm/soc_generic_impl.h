@@ -235,11 +235,23 @@ uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     runningCyclesPerSecond = cyclesPerSecond;
     Defer restoreBudget([&] { runningCyclesPerSecond = previousBudget; });
     uint64_t cycles = 0;
+    // Following the core clock: the rate is the clock as it is now, and cycles count in cyclesPerSecond
+    // units, with the remainder carried, so the call covers the same guest time whatever the clock does.
+    const uint64_t startHz = followCoreClock ? this->CoreHz() : 0;
+    const bool follow = startHz && cyclesPerSecond >= startHz;
+    uint64_t rate = cyclesPerSecond, unitRemainder = 0;
 
     while (cycles < maxCycles) {
-        uint64_t cyclesToAdvance = scheduler->CyclesToNextUpdate(cyclesPerSecond);
+        if (follow) {
+            const uint64_t hz = this->CoreHz();
+            if (hz) rate = hz;
+            runningCyclesPerSecond = rate;
+        }
+        uint64_t cyclesToAdvance = scheduler->CyclesToNextUpdate(rate);
+        uint64_t left = maxCycles - cycles;
+        if (rate != cyclesPerSecond) left = std::max<uint64_t>(1, uint64_t(__uint128_t(left) * rate / cyclesPerSecond));
 
-        if (cyclesToAdvance > maxCycles - cycles) cyclesToAdvance = maxCycles - cycles;
+        if (cyclesToAdvance > left) cyclesToAdvance = left;
 
         uint64_t cyclesAdvanced;
 
@@ -250,8 +262,14 @@ uint64_t SocGeneric<T>::RunUntil(uint64_t maxCycles, uint64_t cyclesPerSecond) {
             this->runInstructions += cyclesAdvanced;
         }
 
-        scheduler->Advance(cyclesAdvanced, cyclesPerSecond);
-        cycles += cyclesAdvanced;
+        scheduler->Advance(cyclesAdvanced, rate);
+        if (rate == cyclesPerSecond) {
+            cycles += cyclesAdvanced;
+        } else {
+            const __uint128_t units = __uint128_t(cyclesAdvanced) * cyclesPerSecond + unitRemainder;
+            cycles += uint64_t(units / rate);
+            unitRemainder = uint64_t(units % rate);
+        }
 
         if constexpr (breakReason > 0) {
             if (cpuGetSlowPathReason(cpu) & breakReason) break;

@@ -245,6 +245,8 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
                     }
                     mmuControlWrite(cp15->mmu, (val & 0x00000004UL) != 0,
                                     (tmp & 0x00000001UL) && !(val & 0x00000001UL));
+                    // C (dcOn) moves pages between cached and uncached without a TLB flush.
+                    cpuCostHintClear(cp15->cpu);
                     if (tmp & 0x00000001UL) {  // M bit
 
                         cp15->mmuSwitchCy = 2;
@@ -301,6 +303,7 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             goto success;
 
         case 7:  // cache ops
+            if (!read) cpuCostCacheOp(cpu, CRm, op2, val);
             if ((CRm == 6 || CRm == 7) && op2 == 0) mmuDcacheInvalidate(cp15->mmu);
             if ((CRm == 5 || CRm == 7) && op2 == 0) {
                 icacheInvalGuest(cp15->ic);  // invalidate entire {icache(5) or both i and dcache(7)}

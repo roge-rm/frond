@@ -248,13 +248,12 @@ bool imx1MachineGuestExceptions(const Imx1Machine* machine);
 uint64_t imx1MachineFifoWaitSkips(const Imx1Machine*);
 uint64_t imx1MachineFifoWaitRounds(const Imx1Machine*);
 void imx1SetFifoWaitSkip(bool skip);
-// The YMF768 ready wait's tries Fast blocks passed at once, since the process started: the times and the tries.
-// imx1SetReadyWaitSkip(false) turns the skip off, for tests.
-uint64_t imx1MachineReadyWaitSkips(const Imx1Machine*);
-uint64_t imx1MachineReadyWaitTries(const Imx1Machine*);
+// CPU reads of the YMF768's ready register (bank 1 38) since the machine was made or loaded, for tests.
+uint64_t imx1MachineYmfReadyReads(const Imx1Machine*);
+// The board time of the last of those reads, for tests (not saved).
+Imx1ReferenceTime imx1MachineYmfLastReadyRead(const Imx1Machine*);
 // SSI1 words sent again from an empty FIFO since the process started (every machine, not saved), for tools.
 uint64_t imx1MachinePcmUnderrunWords(const Imx1Machine*);
-void imx1SetReadyWaitSkip(bool skip);
 // Instructions the Fast engine ran on its lean path since the machine was made.
 uint64_t imx1MachineLeanRetired(const Imx1Machine*);
 // Timer count reads the lean path answered, including any in an instruction the step then ran again.
@@ -378,7 +377,9 @@ void imx1MachineEmitDiagnostic(Imx1Machine*, const Imx1MachineDiagnosticSink&);
 // and that machine then continues the way the saved one did. Observers, contexts, the idle
 // budget and idleStepped may differ. A failed check or load leaves the machine as it was.
 // Saving drops translated code, so the saved and the loaded machine also agree on jitBlocks.
-// Bump the revision in any patch that changes guest-visible i.MX1 or ARM920 behaviour or a state() list.
+// The app refuses a state from another core revision (imx1StateAllowCoreRevision aside), so a bump stops every
+// saved session from loading. Bump it only when an old state can't carry on correctly at all. A state() list
+// change is caught by the layout fingerprint and section versions; behaviour changes leave the revision as is.
 inline constexpr uint32_t imx1MachineStateCoreRevision = 760;
 enum class Imx1StateStatus {
     ok, notAtBoundary, unsupportedConfiguration, truncated, badMagic, badFormatVersion, coreRevisionMismatch,

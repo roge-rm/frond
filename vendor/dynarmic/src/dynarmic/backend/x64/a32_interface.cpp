@@ -122,6 +122,18 @@ struct Jit::Impl {
         HaltExecution(HaltReason::CacheInvalidation);
     }
 
+    bool HasCodeIn(std::uint32_t start_address, std::size_t length) {
+        std::lock_guard lock{code_mutex};
+        return emitter.HasCodeIn(start_address, static_cast<u32>(start_address + length - 1));
+    }
+
+    void CodeWords(std::uint32_t page_base, std::uint64_t* words) {
+        ASSERT(!jit_interface->is_executing);
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&jit_state.halt_reason)));
+        std::lock_guard lock{code_mutex};
+        emitter.CodeWords(page_base, words);
+    }
+
     void InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
         std::unique_lock lock{invalidation_mutex};
         invalid_cache_ranges.add(boost::icl::discrete_interval<u32>::closed(start_address, static_cast<u32>(start_address + length - 1)));
@@ -528,6 +540,14 @@ void Jit::ClearCache() {
 
 void Jit::InvalidateCacheRange(std::uint32_t start_address, std::size_t length) {
     impl->InvalidateCacheRange(start_address, length);
+}
+
+bool Jit::HasCodeIn(std::uint32_t start_address, std::size_t length) {
+    return impl->HasCodeIn(start_address, length);
+}
+
+void Jit::CodeWords(std::uint32_t page_base, std::uint64_t* words) {
+    impl->CodeWords(page_base, words);
 }
 
 void Jit::Reset() {

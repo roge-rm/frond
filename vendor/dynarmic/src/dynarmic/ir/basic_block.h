@@ -9,6 +9,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <mcl/container/intrusive_list.hpp>
 #include <mcl/stdint.hpp>
@@ -138,6 +140,15 @@ public:
     size_t& CycleCount();
     /// Gets an immutable reference to the cycle count for this basic block.
     const size_t& CycleCount() const;
+
+    /// Frond: the cycle count before each instruction, by its PC, so a run that leaves at a memory abort
+    /// charges the instructions before it. 0 for a PC not in the block.
+    std::vector<std::pair<u32, size_t>> frond_cycles_before;
+    size_t FrondCyclesBefore(u32 pc) const {
+        for (const auto& [at, cycles] : frond_cycles_before)
+            if (at == pc) return cycles;
+        return 0;
+    }
 
 private:
     /// Description of the starting location of this block

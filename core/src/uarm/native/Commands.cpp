@@ -62,7 +62,9 @@ namespace {
             return;
         }
 
-        static_cast<commands::Context*>(context)->mainLoop.SetCyclesPerSecondLimit(mips * 1000000);
+        auto& mainLoop = static_cast<commands::Context*>(context)->mainLoop;
+        mainLoop.SetFollowCoreClock(false);
+        mainLoop.SetCyclesPerSecondLimit(mips * 1000000);
     }
 
     void CmdEnableAudio(vector<string> args, cli::CommandEnvironment& env, void* context) {
@@ -568,7 +570,7 @@ namespace {
     const vector<cli::Command> commandList(
         {{.name = "set-mips",
           .usage = "set-mips <mips>",
-          .description = "Set target MIPS.",
+          .description = "Set a fixed core clock in MHz.",
           .cmd = CmdSetMips},
          {.name = "input-replay",
           .usage = "input-replay <file>",

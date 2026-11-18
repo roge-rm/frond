@@ -45,7 +45,7 @@ prepare desktop zodiac-boot-probe benchmark-replay device-profiles: SHELL = /bin
 out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
-test-zodiac-machine test-zodiac-fast-lean: export TEST_TIMEOUT = 1800
+test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
@@ -196,7 +196,7 @@ out/frond-68k: core/src/common/libcommon.a core/src/common/libcommon-net.a
 	cp core/src/cloudpilot/frond-68k out/frond-68k.new
 	mv -f out/frond-68k.new out/frond-68k
 
-test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
+test: test-tg50-pwm-audio test-pxa-i2s-audio test-build-tools test-audio-results test-earlier-audio prepare test-pxa255-udc test-pxa270-udc test-usb-host-fixture test-usb-enumeration test-usb-bridge test-usb-bridge-soc test-e2-state test-tg50-state test-device-profiles test-uart-lifecycle test-uart-checkpoint test-uart-flow test-uart-dma-peer test-tx-serial test-gameplay-metrics test-mmu-fast-path test-mem-region-bounds test-pxa-power test-pxa-clock test-compatibility test-developer-run test-xscale-prefetch test-device-controls test-scheduler test-wifi test-host-network test-network-reliability test-keyboard test-network test-sd-image test-sd test-cpu test-arm-conditions test-tx-state test-sdl-audio test-fast-audio test-instruction-cache test-gdbstub test-pace-debug test-pace-step test-pxa-timer test-native-governor test-db-list test-export-checkpoint test-db-backup test-checkpoint-input test-native-database test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
 
 # The checks that used to be recipe lines of test: itself, each a target so it is recorded.
 .PHONY: test-audio-metrics test-audio-timing test-tx-baseline test-menu-response test-wm9712-irq test-pxa-ac97-irq test-pace-patch
@@ -733,6 +733,13 @@ test-pxa-power: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-pxa-power
 	./build/test-pxa-power
 
+test-pxa-clock: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/clock-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-clock.cpp @build/clock-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-clock
+	./build/test-pxa-clock
+
 .PHONY: test-pace-debug
 test-pace-debug: build/test-gdbstub-target
 	python3 tests/pace-debug.py
@@ -763,6 +770,16 @@ test-xscale-stale-dcache: out/frond
 		tests/xscale-stale-dcache.cpp @build/stale-dcache-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -o build/test-xscale-stale-dcache
 	./build/test-xscale-stale-dcache 2>build/xscale-stale-dcache.err
+
+# The cost model's data cache in sessions: a warm cache saved mid-run gives the same Exact counts.
+.PHONY: test-xscale-cost-session
+test: test-xscale-cost-session
+test-xscale-cost-session: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/cost-session-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/xscale-cost-session.cpp @build/cost-session-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-xscale-cost-session
+	./build/test-xscale-cost-session
 
 .PHONY: test-mem-region-bounds
 test-mem-region-bounds: out/frond
@@ -1216,6 +1233,13 @@ test-tx-lifecycle-rom: out/frond
 		$(CPU_TEST_LDLIBS) -o build/test-tx-lifecycle-rom
 
 .PHONY: test-host-serial
+test: test-xscale-cost
+.PHONY: test-xscale-cost
+test-xscale-cost:
+	mkdir -p build
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Icore/src/uarm/uarm tests/xscale-cost.cpp -o build/test-xscale-cost
+	./build/test-xscale-cost
+
 test: test-host-serial
 test-host-serial: prepare core/src/common/libcommon.a
 	$(CXX) -std=c++17 -O1 -g -Wall -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
@@ -2530,11 +2554,11 @@ test-zodiac-machine-state: build/zodiac-boot-probe
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-machine-state
 	./build/test-zodiac-machine-state
 
-.PHONY: test-zodiac-wake-fast
-# Zodiac sleep and wake on Fast with the YMF768 ready wait passed at once, against the wait run try by try. Needs the
-# Zodiac ROM in FROND_DEVICE_IMAGES, else skipped.
-test-zodiac-wake-fast: benchmark-replay
-	python3 tests/zodiac-wake-fast.py
+.PHONY: test-zodiac-ymf-ready
+# The Zodiac boot's chip power cycle, sleep and wake end their YMF768 power waits in a few tries, alike in Exact and
+# Fast and through a load mid-wait. Needs the Zodiac ROM in FROND_DEVICE_IMAGES, else skipped (minutes in Exact).
+test-zodiac-ymf-ready: benchmark-replay
+	python3 tests/zodiac-ymf-ready.py
 
 .PHONY: test-zodiac-fast-lean
 # The Fast engine's lean path against Exact: TLB flush on CP15 writes, the stop pc and an unsupported access.

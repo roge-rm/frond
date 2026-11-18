@@ -70,6 +70,7 @@ class SocPXA : public SocGeneric<SocPXA> {
            uint8_t *nandContent, size_t nandSize, int gdbPort, uint_fast8_t socRev);
 
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    uint64_t CoreHz() const override;
     uint32_t *GetPendingFrame(uint32_t &firstDirtyLine, uint32_t &lastDirtyLine) override;
     void ResetPendingFrame() override;
     DeviceType5 GetDeviceType() override;
@@ -217,6 +218,9 @@ class SocPXA : public SocGeneric<SocPXA> {
 #ifndef __EMSCRIPTEN__
     static uint32_t TimerElapsedCB(void* ctx);
     static void TimerRescheduleCB(void* ctx);
+    static bool OscrPeekCB(void* ctx, uint32_t cycles, uint32_t* oscr);
+    static bool GpioPeekCB(void* ctx, uint32_t pa, uint32_t* value);
+    uint32_t TimerElapsedAt(uint32_t cycles) const;
 #endif
 
    private:
