@@ -11,6 +11,7 @@
 #include "deviceSonyTG50.h"
 #include "CsrBcspRadio.h"
 #include "device_type5.h"
+#include "device_profile5.h"
 #include "mmiodev_DirectNAND.h"
 #include "savestate/savestateAll.h"
 #include "uartdev_bcm2035.h"
@@ -138,19 +139,27 @@ struct Device {
     BatteryPower battery;
 };
 
+// Off the charger the TX's GPIO90 stays high (external power), as every TX read it so far, until the battery
+// default lands with an Exact rebaseline.
+static constexpr bool txPowerHighOffCharger = true;
+
 // The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
-// three) on the E2, TX and Zire 72, and the Zire 72's GPIO99, low on external power (the charging bolt).
-// The TX's and E2's external power inputs and the TG50's cradle and charging pins (uc GPIO A13, A14) stay at
-// their fixed levels until their polarity is known.
+// three) on the E2, TX and Zire 72. The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
+// GPIO99 low (the charging bolt), the TX's GPIO90 high (DAL dock status 0x2009b7d0, palmtx.h POWER_DETECT) and
+// the E2's GPIO9 high (DAL dock status 0x2009c66c).
 static void deviceApplyBattery(Device *dev) {
     const uint32_t mV = BatteryPower::LiIonMilliVolts(dev->battery.Percent());
+    const bool charging = dev->battery.ExternalPower();
     if (dev->tg50) {
         tg50BoardSetBatteryMilliVolts(dev->tg50, uint16_t(mV));
+        tg50BoardSetCharging(dev->tg50, charging);
         return;
     }
     if (!dev->wm9712L) return;
     wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, mV / 3);
-    if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !dev->battery.ExternalPower());
+    if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !charging);
+    else if (dev->type == DeviceType5::deviceTypeTX) pxaGpioSetState(dev->gpio, 90, charging || txPowerHighOffCharger);
+    else if (deviceProfileIsE2Board5(dev->type)) pxaGpioSetState(dev->gpio, 9, charging);
 }
 
 bool deviceBatterySupported(Device *dev) { return dev->tg50 || dev->wm9712L; }

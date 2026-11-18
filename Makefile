@@ -990,6 +990,16 @@ test-zodiac-normal-runtime: out/frond
 	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
 
+.PHONY: test-pxa-battery-pins
+test: test-pxa-battery-pins
+# The Charging switch on the TX, E2 and TG50 power inputs, firmware-free.
+test-pxa-battery-pins: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/pxa-battery-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/pxa-battery-pins.cpp @build/pxa-battery-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -o build/test-pxa-battery-pins
+	./build/test-pxa-battery-pins
+
 .PHONY: test-zodiac-battery
 test: test-zodiac-battery
 # The Zodiac's battery setting on the ASP U input and its charger pin, saved states unchanged, made-up ROM.
