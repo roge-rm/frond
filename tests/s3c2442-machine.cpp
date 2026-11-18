@@ -115,5 +115,16 @@ int main() {
         m->setStylus(true, 100, 200);
         assert((m->intc.pending() & (1u << s3cIrq::adc)) && m->adc.stylusDown());
     }
+    // An SFR write that unmasks a pending interrupt: the CPU runs the next instruction before it takes the
+    // IRQ. UART0's level TX interrupt is pending with INT_UART0 open; the guest unmasks TXD0, then sets r2.
+    {
+        auto m = make({0xe321f013, 0xe3a0044a, 0xe3e01002, 0xe580101c, 0xe3a02001, loop});
+        // msr cpsr_c, #0x13; mov r0, #0x4a000000; mvn r1, #2; str r1, [r0, #0x1c]; mov r2, #1
+        m->uarts[0].write(0x04, (1u << 2) | 0x200, m->intc);
+        m->intc.intmsk &= ~(1u << s3cIrq::uart0);
+        assert(!(m->intc.pending() & (1u << s3cIrq::uart0)));
+        assert(m->run(1000) == S3c2442Stop::budget);
+        assert(mode(*m) == 0x12 && cpuGetRegExternal(m->cpu(), 2) == 1);
+    }
     std::printf("s3c2442 machine: ok\n");
 }

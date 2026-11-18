@@ -138,7 +138,8 @@ class S3c2442Machine {
     // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
     // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
     uint64_t cyclesToEvent(bool wakeOnly = false) const;
-    void updateLines();
+    // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.
+    void updateLines(bool sfrWrite = false);
 
     S3c2442Options options;
     S3c2442StopInfo stopped;
@@ -153,6 +154,9 @@ class S3c2442Machine {
     uint32_t undefinedStopPc = 0, undefinedStopInstr = 0;
     uint64_t vfpProbes = 0, breakpoints = 0;
     bool irqLine = false, fiqLine = false;
+    // An IRQ an SFR write raised, held from the CPU until retiredCount reaches irqHeldUntil.
+    bool irqHeld = false;
+    uint64_t irqHeldUntil = 0;
     uint64_t retiredCount = 0, cycleCount = 0, idleCount = 0, elapsedNs = 0;
     // Remainders of each clock domain in CPU cycles times the domain's rate.
     uint64_t pclkRest = 0, hclkRest = 0, rtcRest = 0, nsRest = 0;

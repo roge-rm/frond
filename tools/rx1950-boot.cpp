@@ -36,6 +36,9 @@
 #include <string>
 #include <vector>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include "CPU.h"
 #include "arm920_state.h"
 #include "ZodiacRom.h"
@@ -164,6 +167,7 @@ int main(int argc, char** argv) {
     auto machine = S3c2442Machine::create(options, error);
     if (!machine) { std::fprintf(stderr, "machine: %s\n", error.c_str()); return 1; }
     machine->loadRam(ebootPhysical, bl.data() + nbfHeader, ebootBytes);
+    for (const auto& in : rx1950AdcInputs) machine->adc.channel[in.channel] = in.value;
     // ASSUMPTION "rx1950 IPL clocks": the block 0 loader sets the PLL before eboot, which never does.
     // 296.35 MHz from the 16.9344 MHz crystal (MDIV 97, PDIV 1, SDIV 2), FCLK:HCLK:PCLK 1:3:6.
     machine->clock.write(0x04, 0x61012);
@@ -234,7 +238,37 @@ int main(int argc, char** argv) {
     uint32_t nandCommand = 0xff, nandAddress = 0, nandCycles = 0;
     // "mmio S": counts of each pc, register, direction and value for a while.
     std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t>, unsigned>* mmioCounts = nullptr;
+    // "intclog N": the last interrupt controller and UART 0/2 events: writes to SRCPND bit 28, SUBSRCPND, INTSUBMSK
+    // (changes only), UART 0 and 2 UCON, UFCON and UTXH, and each time SRCPND bit 28 (INT_UART0)
+    // is seen to change. Repeats of one event in a row are counted, not stored.
+    struct IntcEvent { uint64_t ns; uint32_t pc, address, value, srcpnd, subsrcpnd, intsubmsk, intmsk, ucon0; bool write; unsigned repeats; };
+    std::vector<IntcEvent> intcEvents;
+    bool uart0Pending = false;
+    uint32_t lastSubmsk = 0x7fff;
+    auto intcEvent = [&](uint32_t pc, uint32_t address, bool write, uint32_t value) {
+        const S3cIntc& ic = machine->intc;
+        if (!intcEvents.empty()) {
+            IntcEvent& last = intcEvents.back();
+            if (last.pc == pc && last.address == address && last.write == write && last.value == value &&
+                last.srcpnd == ic.srcpnd && last.subsrcpnd == ic.subsrcpnd && last.intsubmsk == ic.intsubmsk) {
+                ++last.repeats;
+                return;
+            }
+        }
+        if (intcEvents.size() >= 8192) intcEvents.erase(intcEvents.begin(), intcEvents.begin() + 4096);
+        intcEvents.push_back({machine->nanoseconds(), pc, address, value, ic.srcpnd, ic.subsrcpnd, ic.intsubmsk, ic.intmsk, machine->uarts[0].ucon, write, 0});
+    };
     auto observe = [&](uint32_t pc, uint32_t address, unsigned, bool write, uint32_t value) {
+        if (write && ((address == 0x4a000000 && (value & 0x10000000)) || address == 0x4a000018 ||
+                      (address == 0x4a00001c && value != lastSubmsk) ||
+                      ((address & ~0x8000u) >= 0x50000004 && (address & ~0x8000u) <= 0x50000008) ||
+                      (address & ~0x8000u) == 0x50000020))
+            intcEvent(pc, address, write, value);
+        if (write && address == 0x4a00001c) lastSubmsk = value;
+        if (bool(machine->intc.srcpnd & 0x10000000) != uart0Pending) {
+            uart0Pending = !uart0Pending;
+            intcEvent(pc, 0xffffffff, uart0Pending, 0x10000000);
+        }
         if (write && address == 0x58000000 && (value & 1) && adcStarts.size() < 16 && !(machine->adc.adctsc & 7))
             adcStarts.push_back({(value >> 3) & 7, {pc, machine->nanoseconds(), value}});
         if (mmioCounts) ++(*mmioCounts)[{pc, address, write, value}];
@@ -301,7 +335,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S", "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S", "adc CH VALUE" (an ADC input), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -417,6 +451,34 @@ int main(int argc, char** argv) {
             for (size_t i = 0; i < top.size() && i < 40; ++i)
                 std::printf("mmio %7u pc %08x %c %08x %08x\n", top[i].first, std::get<0>(top[i].second), std::get<2>(top[i].second) ? 'W' : 'R',
                             std::get<1>(top[i].second), std::get<3>(top[i].second));
+        } else if (c == "adc" && std::sscanf(line, "%*s %u %u", &x, &y) == 2 && x < 8 && y < 1024) {
+            machine->adc.channel[x] = uint16_t(y);
+        } else if (c == "intclog" && std::sscanf(line, "%*s %u", &x) == 1) {
+            for (size_t i = intcEvents.size() > x ? intcEvents.size() - x : 0; i < intcEvents.size(); ++i) {
+                const IntcEvent& e = intcEvents[i];
+                if (e.address == 0xffffffff)
+                    std::printf("intc %.6f pc %08x INT_UART0 %s", e.ns / 1e9, e.pc, e.write ? "latched" : "cleared");
+                else
+                    std::printf("intc %.6f pc %08x W %08x %08x", e.ns / 1e9, e.pc, e.address, e.value);
+                std::printf("  SRCPND %08x SUBSRCPND %04x INTSUBMSK %04x INTMSK %08x UCON0 %04x", e.srcpnd, e.subsrcpnd, e.intsubmsk, e.intmsk,
+                            e.ucon0);
+                if (e.repeats) std::printf(" x%u", e.repeats + 1);
+                std::printf("\n");
+            }
+        } else if (c == "fork") {
+            // A checkpoint: the copy goes on with the commands and its quit comes back here, to the machine
+            // as it was at the fork. The copy never writes the NAND store back.
+            std::fflush(nullptr);
+            const pid_t child = fork();
+            if (child < 0) { std::printf("error: fork failed\n"); continue; }
+            if (child == 0) {
+                nandPath = nullptr;
+                std::printf("ok fork: in the copy at %.3f s\n", machine->nanoseconds() / 1e9);
+                continue;
+            }
+            int status = 0;
+            waitpid(child, &status, 0);
+            std::printf("checkpoint resumed\n");
         } else if (c == "nand") {
             unsigned reread = 0;
             for (const auto& [row, n] : nandRows) reread += n > 1;

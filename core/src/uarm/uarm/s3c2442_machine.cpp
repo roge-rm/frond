@@ -16,6 +16,12 @@ namespace {
     constexpr uint32_t sdramBase = 0x30000000, bank6Size = 0x08000000;
     // Most instructions one interpreter call runs, so timers and interrupts are seen this often.
     constexpr uint32_t batch = 64;
+    // ASSUMPTION "IRQ after an SFR write": an interrupt that an SFR write raises (an unmask with a request
+    // pending) reaches the CPU at least this many instructions after the write, for the store through the
+    // bus and the interrupt controller's synchronisers; Frond holds it to the end of the batch the write is
+    // in. ser2410 unmasks TXD0 and sets its own transmit flag in the next instruction, and its interrupt
+    // thread sees nothing to do if the IRQ comes in between.
+    constexpr uint64_t irqWriteLatency = 2;
 
     // SFR blocks the machine doesn't model yet, by base, for the refusal text.
     struct Unmodelled { uint32_t base; const char* name; };
@@ -346,7 +352,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
     }
     if (result == S3cAccess::ok) {
         // Reads change levels too, such as URXH draining the receive FIFO.
-        updateLines();
+        updateLines(write);
         return true;
     }
     std::string text;
@@ -382,9 +388,14 @@ bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsi
     return lcd.frame(memory, pixels, width, height, why);
 }
 
-void S3c2442Machine::updateLines() {
+void S3c2442Machine::updateLines(bool sfrWrite) {
     const bool irq = intc.irq(), fiq = intc.fiq();
-    if (irq != irqLine) { cpuIrq(cpuCore, false, irq); irqLine = irq; }
+    if (!irq) irqHeld = false;
+    else if (!irqLine && sfrWrite && !irqHeld) {
+        irqHeld = true;
+        irqHeldUntil = retiredCount + cpuCyclesInProgress(cpuCore) + irqWriteLatency;
+    }
+    if (irq != irqLine && !irqHeld) { cpuIrq(cpuCore, false, irq); irqLine = irq; }
     if (fiq != fiqLine) { cpuIrq(cpuCore, true, fiq); fiqLine = fiq; }
 }
 
@@ -465,7 +476,15 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             advance(skip);
             continue;
         }
-        const uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - used}) : 1;
+        uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - used}) : 1;
+        if (irqHeld) {
+            if (retiredCount >= irqHeldUntil) {
+                irqHeld = false;
+                updateLines();
+            } else {
+                n = std::min(n, irqHeldUntil - retiredCount);
+            }
+        }
         const uint32_t stepPc = pc();
         if (!history.empty()) {
             history[historyNext] = stepPc;
