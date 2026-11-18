@@ -825,7 +825,7 @@ The 68k Palms work as in VS Code, in Eclipse's Terminal view.
 
 ### TwGlue call log
 
-`FROND_TWGLUE_LOG=FILE` writes a text log of what a Tapwave Native Application calls on the Zodiac, from the desktop app or `benchmark-replay`. The log starts when the ROM first calls the game's ARM entry, the TNA header (`ANWT` at +28), with r0 = 0 and the TwGlue table in r1 (the `entry` line); the second call, PilotMain, gives the `entry2` line and Call68KFunc in r2. Only calls made from game code (lr outside the ROM) are logged. Each call to a table entry gives a `call` line with the guest time in ms, the slot index and name, r0 to r3, the first four stack words, lr and any text the values point at. When the function returns, a `ret` line gives r0. Calls through the r9 module tables are logged the same way as `call DAL 146`, `Boot 518` or `UI n`, by module and index only, since the names aren't known. Calls the game makes to Call68KFunc are logged as slot 1000. Only call data is written, nothing from the game.
+`FROND_TWGLUE_LOG=FILE` writes a text log of what a Tapwave Native Application calls on the Zodiac, from the desktop app or `benchmark-replay`. The log starts when the ROM first calls the game's ARM entry, the TNA header (`ANWT` at +28), with r0 = 0 and the TwGlue table in r1 (the `entry` line); the second call, PilotMain, gives the `entry2` line and Call68KFunc in r2. Only calls made from game code (lr outside the ROM) are logged. Each call to a table entry gives a `call` line with the guest time in ms, the slot index and name, r0 to r3, the first four stack words, lr and any text the values point at. When the function returns, a `ret` line gives r0. Calls through the r9 module tables are logged the same way as `call DAL 146`, `Boot 518` or `UI n`, by module and index only, since the names aren't known. Calls the game makes to Call68KFunc are logged as slot 1000. A call is logged once, when the game jumps into the function; coming back to its first instruction while the call is still open (a branch to itself, or a restart after an interrupt or abort) adds nothing. Only call data is written, nothing from the game.
 
 A few slots get more fields. Values are signed decimal words unless said:
 
@@ -836,11 +836,11 @@ A few slots get more fields. Values are signed decimal words unless said:
 | 333 TwInputSetFormat | `features=[...]`, the r2 bytes at r1 as words | |
 | 336 TwInputPoll | | `n=` the queue's poll count and `buf=[...]`, the r2 bytes at r1 as words. Logged for the first 8 polls of each queue, then only when a word changes that isn't a 294 or 295 (time, sequence) one going by the queue's format, up to 2000 more |
 | 386 TwGfxBlendBlt, 387 TwGfxMaskBlendBlt | `point=[x y]` at r1 and `rect=[...]` the 16 bytes at r3 | |
-| 472 TwGetDBDataDirectory | | `r1.u16=` the UInt16 at r1 and `r2.buf="..."`, the string at r2 (up to r3 bytes, 256 at most), with `hex=` added when it isn't printable |
+| 472 TwGetDBDataDirectory | | `r1.u16=` the UInt16 at r1 and `r2.buf="..."`, the string at r2 up to its NUL, reading at most r3 bytes and never more than 256, with `hex=` added when it isn't printable |
 
 Arrays are cut at 64 words. A pointer that can't be read gives `?`.
 
-While it is on the machine runs one instruction at a time on the interpreter, Fast included, so it is much slower than normal. With it off nothing changes. Start it before the game launches, as a state saved after the entry call has no entry to read the table from. The slot names are from Ecliptic's `twglue_names.txt` (MIT). Only unconditional `ldr pc,[rN,#+imm]` r9 module calls are caught. The log keeps its table, entry and open calls across a guest reset or relaunch, so the entry line of a relaunched game can be skipped (no reset hook yet).
+While it is on the machine runs one instruction at a time on the interpreter, Fast included, so it is much slower than normal. With it off nothing changes. Start it before the game launches, as a state saved after the entry call has no entry to read the table from. The slot names are from Ecliptic's `twglue_names.txt` (MIT). Only unconditional `ldr pc,[rN,#+imm]` r9 module calls are caught. Each launch starts over: open calls, input formats and poll counts are dropped. The log keeps its table across a guest reset or relaunch, and a relaunch of the same game at the same table gets no new entry line (no reset hook yet).
 
 ### Tests and tools
 

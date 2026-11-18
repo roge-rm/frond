@@ -1,7 +1,9 @@
 // The TwGlue log: a small ARM program is run one instruction at a time with the log watching, and the file it
 // writes is checked for the entry, a table call with a string argument, its return, an r9 module call, and the
 // dumps of TwInputSetFormat's features, TwInputPoll's buffer, TwGetDBDataDirectory's results and
-// VFSVolumeEnumerate's iterator and volume. The MMU
+// VFSVolumeEnumerate's iterator and volume. Hand-stepped calls after it check that a call restarted or branched
+// back to its first instruction is logged once, the poll rate limit, VFSDirEntryEnumerate's fields, BlendBlt's
+// point and rect, and a TwGetDBDataDirectory string at the end of mapped memory. The MMU
 // is on with a coarse page table, so the log's own page walk is used for every read.
 #include <cassert>
 #include <cstdint>
@@ -93,6 +95,9 @@ int main() {
     put(table + 333 * 4, setFormat);
     put(table + 336 * 4, poll);
     put(table + 472 * 4, dataDir);
+    constexpr uint32_t dirEnumerate = 0x2800, blend = 0x2900;  // only hand-stepped, never run
+    put(table + 214 * 4, dirEnumerate);
+    put(table + 386 * 4, blend);
     put(0x3300, 296); put(0x3304, 0); put(0x3308, 297); put(0x330c, 0xffffffff);
     std::memcpy(backing.buffer + text, "Hello glue", 11);
     constexpr uint32_t ttb = 0x10000, coarse = 0xc000;
@@ -138,6 +143,59 @@ int main() {
         cpuSetReg(cpu, 14, 0x6000);
         log.step({1000, app, 0, 0, 0, 4});
         log.step({1001, 0x2300, 0, 0, 0, 4});
+
+        // Hand-stepped calls: regs set, a step at the target, then a step at lr returns it.
+        uint64_t seq = 2000;
+        auto at = [&](uint32_t pc) { log.step({seq++, pc, 0, 0, 0, 4}); };
+        auto regs = [&](uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3) {
+            const uint32_t v[4] = {r0, r1, r2, r3};
+            for (uint32_t i = 0; i < 4; ++i) cpuSetReg(cpu, i, v[i]);
+            cpuSetReg(cpu, 13, 0x8000);
+            cpuSetReg(cpu, 14, 0x6000);
+        };
+        // 4000 ms: slot 5 entered, interrupted (ROM code), restarted, branches to itself, falls through and returns.
+        time.ticks = 32768 * 4;
+        regs(7, 0x3000, 0, 0);
+        at(fn); at(0x20010000); at(0x20010004); at(fn); at(fn); at(fn + 4); at(0x6000);
+        // 5000 ms: reaching slot 5's first instruction without a jump isn't a call.
+        time.ticks = 32768 * 5;
+        at(fn - 8); at(fn - 4); at(fn); at(fn + 4); at(0x6000);
+        // 6000 ms: queue 4 with format [294 295 256], then 11 polls.
+        time.ticks = 32768 * 6;
+        put(0x3300, 294); put(0x3304, 295); put(0x3308, 256);
+        regs(4, 0x3300, 12, 0);
+        at(setFormat); at(0x6000);
+        for (uint32_t n = 1; n <= 11; ++n) {
+            // 1-8 logged as the first; 9 changes only 294/295 (skipped); 10 changes 256 (logged); 11 changes nothing.
+            put(0x3400, n); put(0x3404, n * 2); put(0x3408, n == 10 ? 77 : 0);
+            if (n == 11) { put(0x3400, 10); put(0x3404, 20); put(0x3408, 77); }
+            regs(4, 0x3400, 12, 0);
+            at(poll); at(0x6000);
+        }
+        // 7000 ms: VFSDirEntryEnumerate(1, &iter, &info), the second time with nothing changed.
+        time.ticks = 32768 * 7;
+        put(0x3700, 0x80);
+        put(0x3710, 0x20); put(0x3714, 0x3720); put(0x3718, 32);
+        std::memcpy(backing.buffer + 0x3720, "A.PRC", 6);
+        regs(1, 0x3700, 0x3710, 0);
+        at(dirEnumerate);
+        put(0x3700, 0xffffffff);
+        std::memcpy(backing.buffer + 0x3720, "B.DAT", 6);
+        at(0x6000);
+        time.ticks = 32768 * 8;
+        regs(1, 0x3700, 0x3710, 0);
+        at(dirEnumerate); at(0x6000);
+        // 9000 ms: TwGfxBlendBlt(dst, &point, src, &rect, alpha).
+        time.ticks = 32768 * 9;
+        put(0x3800, 10); put(0x3804, uint32_t(-2));
+        put(0x3810, 0); put(0x3814, 4); put(0x3818, 16); put(0x381c, 12);
+        regs(0x3900, 0x3800, 0x3a00, 0x3810);
+        at(blend); at(0x6000);
+        // 10000 ms: TwGetDBDataDirectory with its string in the last 24 bytes of mapped memory and r3 = 64.
+        time.ticks = 32768 * 10;
+        std::memcpy(backing.buffer + 0x1ffe8, "/PALM/Programs/Foo-ABCD", 24);
+        regs(0, 0x3100, 0x1ffe8, 64);
+        at(dataDir); at(0x6000);
     }
     std::ifstream in(path);
     std::stringstream all;
@@ -163,6 +221,27 @@ int main() {
     assert(line("3000 call 241 VFSVolumeEnumerate_").find(" iter=00000000") != std::string::npos);
     assert(line("3000 ret 241 VFSVolumeEnumerate_").find(" iter=00000000->ffffffff vol=7->2") != std::string::npos);
     assert(line("3000 ret 472 TwGetDBDataDirectory_").find(" r1.u16=5 r2.buf=\"\" hex=4101") != std::string::npos);
+    auto count = [&](const char* s) {
+        size_t n = 0;
+        for (size_t at = log.find(s); at != std::string::npos; at = log.find(s, at + 1)) ++n;
+        return n;
+    };
+    assert(count("4000 call 5 ") == 1 && count("4000 ret 5 ") == 1);
+    assert(count("5000 call ") == 0);
+    assert(line("6000 call 333 ").find(" features=[294 295 256]") != std::string::npos);
+    for (uint32_t n = 1; n <= 8; ++n) {
+        const std::string want = " n=" + std::to_string(n) + " buf=[" + std::to_string(n) + " " + std::to_string(n * 2) + " 0]";
+        assert(log.find(want) != std::string::npos);
+    }
+    assert(log.find(" n=9 ") == std::string::npos && log.find(" n=11 ") == std::string::npos);
+    assert(log.find(" n=10 buf=[10 20 77]") != std::string::npos);
+    assert(count("6000 ret 336 ") == 11);
+    assert(line("7000 call 214 VFSDirEntryEnumerate_").find(" iter=00000080") != std::string::npos);
+    assert(line("7000 ret 214 ").find(" iter=00000080->ffffffff attr=00000020 name=\"B.DAT\"") != std::string::npos);
+    assert(line("7000 ret 214 ").find("unchanged") == std::string::npos);
+    assert(line("8000 ret 214 ").find(" iter=ffffffff->ffffffff attr=00000020 name=\"B.DAT\" (info unchanged)") != std::string::npos);
+    assert(line("9000 call 386 TwGfxBlendBlt_").find(" point=[10 -2] rect=[0 4 16 12]") != std::string::npos);
+    assert(line("10000 ret 472 ").find(" r2.buf=\"/PALM/Programs/Foo-ABCD\"") != std::string::npos);
     std::remove(path.c_str());
     std::puts("ok");
     return 0;

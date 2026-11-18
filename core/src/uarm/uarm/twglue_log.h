@@ -59,15 +59,18 @@ public:
         // r2 = 0. The second call, PilotMain, has emulStateP in r0 and Call68KFunc in r2.
         if (jumped && arm && !(pc & 3) && (pc >> 24) != romRegion && r[0] == 0 && r[1] >= 0x1000 && entryHeader(pc)) {
             const bool table = looksLikeTable(r[1]);
-            if (table && !(r[1] == tableBase && pc == lastEntry)) entry(pc, r);
+            if (table && r[1] == tableBase && pc == lastEntry) restart();  // the same game launched again
+            else if (table) entry(pc, r);
         } else if (jumped && tableBase && pc == lastEntry && r[0]) {
             secondEntry(r);
         }
         if (!tableBase) return;
-        // Only calls from game code: the ROM calls many of the same functions itself.
-        if (pc >= lowest && pc <= highest && (r[14] >> 24) != romRegion) {
+        // Only calls from game code: the ROM calls many of the same functions itself. A call counts on a jump
+        // into the function, once: a branch back to its first instruction or a restart after an interrupt or
+        // abort finds the same call still open.
+        if (jumped && pc >= lowest && pc <= highest && (r[14] >> 24) != romRegion) {
             const auto it = targets.find(pc);
-            if (it != targets.end()) call(it->second, pc, r);
+            if (it != targets.end() && !open(r, it->second[0])) call(it->second, pc, r);
         }
         if (arm && (t.instruction & 0xfff0f000) == 0xe590f000 && ((r[14] >> 24) != romRegion || (pc >> 24) != romRegion))
             moduleCall(t.instruction, r);
@@ -175,6 +178,7 @@ private:
         tableBase = r[1];
         lastEntry = pc;
         targets.clear();
+        restart();
         lowest = ~0u;
         highest = 0;
         for (uint32_t i = 0; i < slots; ++i) add(table[i] & ~1u, i);
@@ -183,6 +187,13 @@ private:
                      targets.size(), r[2]);
         std::fflush(out);
         ++entries;
+    }
+
+    // A new launch: calls still open, input formats and poll counts belong to the last one.
+    void restart() {
+        frames.clear();
+        formats.clear();
+        polls.clear();
     }
 
     void secondEntry(const uint32_t* r) {
@@ -198,9 +209,9 @@ private:
         if (target > highest) highest = target;
     }
 
-    void args(const uint32_t* r) {
-        uint32_t s[4] = {};
-        read(r[13], s, sizeof s);
+    // Prints the arguments and fills s with the first four stack words (0 where unreadable).
+    void args(const uint32_t* r, uint32_t* s) {
+        if (!read(r[13], s, 16)) std::memset(s, 0, 16);
         std::fprintf(out, " r0=%08x r1=%08x r2=%08x r3=%08x s0=%08x s1=%08x s2=%08x s3=%08x lr=%08x", r[0], r[1], r[2], r[3], s[0],
                      s[1], s[2], s[3], r[14]);
         const uint32_t v[8] = {r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]};
@@ -216,20 +227,27 @@ private:
         std::string names;
         for (const uint32_t index : indexes) names += (names.empty() ? "" : "|") + std::string(name(index));
         std::fprintf(out, "%llu call %s %s", (unsigned long long) ms(), list.c_str(), names.c_str());
-        args(r);
+        uint32_t s[4];
+        args(r, s);
         uint32_t before = 0;
         std::string state;
         callExtras(indexes[0], r, before, state);
         std::fputc('\n', out);
-        push(r, indexes[0], before, std::move(state));
+        push(r, s, indexes[0], before, std::move(state));
         flushSometimes();
     }
 
-    void push(const uint32_t* r, uint32_t index, uint32_t before = 0, std::string state = {}) {
+    // True when this call (same return address, stack and index) is among the newest open calls with that
+    // return address and stack: a table stub and the module call it makes share them.
+    bool open(const uint32_t* r, uint32_t index) const {
+        for (auto f = frames.rbegin(); f != frames.rend() && f->lr == (r[14] & ~1u) && f->sp == r[13]; ++f)
+            if (f->index == index) return true;
+        return false;
+    }
+
+    void push(const uint32_t* r, const uint32_t* s, uint32_t index, uint32_t before = 0, std::string state = {}) {
         if (frames.size() >= 256) frames.erase(frames.begin());
-        Frame f{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3]}, before, std::move(state)};
-        read(r[13], f.a + 4, 16);
-        frames.push_back(f);
+        frames.push_back(Frame{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3], s[0], s[1], s[2], s[3]}, before, std::move(state)});
     }
 
     // Up to max 32-bit words at address as signed decimal, `[1 2 3]`, or nothing when unreadable.
@@ -243,13 +261,24 @@ private:
     }
 
     // A NUL-ended string at address (up to size bytes, at most 256) as `"text"`, with `hex=..` added when it
-    // holds bytes outside printable ASCII.
+    // holds bytes outside printable ASCII. Read in aligned 16-byte pieces up to the NUL, so a string near the end of
+    // mapped memory still reads; `?` when nothing can be read.
     std::string buffer(uint32_t address, uint32_t size) {
-        const uint32_t n = std::min<uint32_t>(size ? size : 256, 256);
-        std::string b(n, '\0');
-        if (address < 0x1000 || !read(address, &b[0], n)) return "?";
-        const size_t end = b.find('\0');
-        const std::string str = b.substr(0, end == std::string::npos ? n : end);
+        const uint32_t n = std::min<uint32_t>(size, 256);
+        if (address < 0x1000) return "?";
+        std::string str;
+        for (uint32_t offset = 0; offset < n;) {
+            char piece[16];
+            const uint32_t count = std::min<uint32_t>(16 - ((address + offset) & 15), n - offset);
+            if (!read(address + offset, piece, count)) {
+                if (!offset) return "?";
+                break;
+            }
+            const char* nul = static_cast<const char*>(std::memchr(piece, 0, count));
+            str.append(piece, nul ? nul - piece : count);
+            if (nul) break;
+            offset += count;
+        }
         bool printable = true;
         for (const unsigned char c : str) printable = printable && c >= 32 && c < 127;
         std::string s = "\"" + (printable ? str : std::string()) + "\"";
@@ -309,7 +338,7 @@ private:
         case twGetDBDataDirectory: {
             uint16_t vol = 0;
             const bool volOk = a[1] >= 0x1000 && read(a[1], &vol, 2);
-            std::fprintf(out, " r1.u16=%s r2.buf=%s", volOk ? std::to_string(vol).c_str() : "?", buffer(a[2], a[3] < 0x1000 ? a[3] : 0).c_str());
+            std::fprintf(out, " r1.u16=%s r2.buf=%s", volOk ? std::to_string(vol).c_str() : "?", buffer(a[2], a[3]).c_str());
             break;
         }
         case vfsVolumeEnumerate:
@@ -356,10 +385,12 @@ private:
             uint32_t table;
             if (!read(r[9] - 4 * (m + 1), &table, 4) || table != base) continue;
             const uint32_t index = (instruction & 0xfff) / 4;
+            if (open(r, 2000 + m * 1000 + index)) return;
             std::fprintf(out, "%llu call %s %u", (unsigned long long) ms(), modules[m], index);
-            args(r);
+            uint32_t s[4];
+            args(r, s);
             std::fputc('\n', out);
-            push(r, 2000 + m * 1000 + index);
+            push(r, s, 2000 + m * 1000 + index);
             flushSometimes();
             return;
         }
