@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "CPU.h"
+#include "rx1950_board.h"
 #include "s3c2442_machine.h"
 
 namespace {
@@ -16,9 +17,9 @@ namespace {
 
     // A machine with the watchdog off (its reset value runs it with the reset on), every interrupt
     // masked and a branch to itself on each vector.
-    std::unique_ptr<S3c2442Machine> make(const std::vector<uint32_t>& program) {
+    std::unique_ptr<S3c2442Machine> make(const std::vector<uint32_t>& program, const S3c2442Options& options = {}) {
         std::string error;
-        auto m = S3c2442Machine::create(S3c2442Options{}, error);
+        auto m = S3c2442Machine::create(options, error);
         assert(m);
         m->watchdog.wtcon = 0;
         for (uint32_t v = 0; v < 0x20; v += 4) std::memcpy(m->steppingstone + v, &loop, 4);
@@ -125,6 +126,37 @@ int main() {
         assert(!(m->intc.pending() & (1u << s3cIrq::uart0)));
         assert(m->run(1000) == S3c2442Stop::budget);
         assert(mode(*m) == 0x12 && cpuGetRegExternal(m->cpu(), 2) == 1);
+    }
+    // The rx1950 with no serial cable reads GPF6 low; every other pin stays high.
+    {
+        S3c2442Options options;
+        options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
+        auto m = make({loop}, options);
+        uint32_t gpf = 0;
+        assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && (gpf & 0xff) == 0xbf);
+    }
+    // Fast against Exact on a WTCNT polling loop (the lean path's SFR read) with the watchdog counting and
+    // its interrupt raised (IRQs stay masked): the same registers, instructions and time at every stop.
+    // mov r0, #0x53000000; ldr r1, [r0, #8]; add r2, r2, r1; add r3, r3, #1; b to the ldr
+    const std::vector<uint32_t> poll{0xe3a00453, 0xe5901008, 0xe0822001, 0xe2833001, 0xeafffffb};
+    {
+        auto exact = make(poll), fast = make(poll);
+        if (fast->setFastEngine(true)) {
+            for (auto* m : {exact.get(), fast.get()}) {
+                m->watchdog.wtdat = m->watchdog.wtcnt = 0x400;
+                m->watchdog.wtcon = 0x0124;  // prescaler 1, divide by 16, counting, interrupt, no reset
+                m->intc.intmsk &= ~(1u << s3cIrq::wdtAc97);
+                m->intc.intsubmsk &= ~(1u << s3cSubIrq::wdt);
+            }
+            for (const uint64_t slice : {1u, 7u, 1000u, 33333u, 250000u, 1000000u}) {
+                exact->run(slice);
+                fast->run(slice);
+                for (unsigned r = 0; r < 16; ++r)
+                    assert(cpuGetRegExternal(exact->cpu(), r) == cpuGetRegExternal(fast->cpu(), r));
+                assert(exact->retired() == fast->retired() && exact->nanoseconds() == fast->nanoseconds());
+            }
+            assert(fast->leanRetired() + fast->jitRetired() > fast->retired() / 2);
+        }
     }
     std::printf("s3c2442 machine: ok\n");
 }

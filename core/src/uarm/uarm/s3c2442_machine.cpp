@@ -16,6 +16,8 @@ namespace {
     constexpr uint32_t sdramBase = 0x30000000, bank6Size = 0x08000000;
     // Most instructions one interpreter call runs, so timers and interrupts are seen this often.
     constexpr uint32_t batch = 64;
+    // Most instructions one Fast span runs between looks at the clocks; events end spans before this.
+    constexpr uint32_t fastSpan = 1u << 22;
     // ASSUMPTION "IRQ after an SFR write": an interrupt that an SFR write raises (an unmask with a request
     // pending) reaches the CPU at least this many instructions after the write, for the store through the
     // bus and the interrupt controller's synchronisers; Frond holds it to the end of the batch the write is
@@ -226,6 +228,12 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
         result = reader(word, got);
         value = size == 4 ? got : (got >> shift) & ((1u << (8 * size)) - 1);
     };
+    // The SFRs see the time at the instruction doing the access, and the run goes on from the instruction
+    // after it, as the access may have moved the next event. Both engines run the same way: Fast's
+    // translated code never makes SFR accesses, the interpreter does them (S3c2442Machine::run).
+    catchUp();
+    cpuSetSlowPath(cpuCore, SLOW_PATH_REASON_RESCHEDULE);
+    sfrAccessed = true;
 
     if ((address & 0xf8000000) == 0x28000000) {
         // nGCS5, the debug board on a development unit (LEDs at 0x28000000, a chip eboot probes at
@@ -388,6 +396,16 @@ bool S3c2442Machine::screen(std::vector<uint32_t>& pixels, unsigned& width, unsi
     return lcd.frame(memory, pixels, width, height, why);
 }
 
+void S3c2442Machine::catchUp() {
+    // The instructions the interpreter call has finished; cpuCyclesInProgress counts the one running too.
+    const uint32_t inProgress = cpuCyclesInProgress(cpuCore);
+    const uint64_t done = inProgress ? inProgress - 1 : 0;
+    if (done > batchAdvanced) {
+        advance(done - batchAdvanced);
+        batchAdvanced = done;
+    }
+}
+
 void S3c2442Machine::updateLines(bool sfrWrite) {
     const bool irq = intc.irq(), fiq = intc.fiq();
     if (!irq) irqHeld = false;
@@ -476,7 +494,8 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             advance(skip);
             continue;
         }
-        uint64_t n = history.empty() ? std::min<uint64_t>({batch, cyclesToEvent(), target - used}) : 1;
+        const bool fast = fastOn && history.empty();
+        uint64_t n = history.empty() ? std::min<uint64_t>({fast ? fastSpan : batch, cyclesToEvent(), target - used}) : 1;
         if (irqHeld) {
             if (retiredCount >= irqHeldUntil) {
                 irqHeld = false;
@@ -485,32 +504,175 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
                 n = std::min(n, irqHeldUntil - retiredCount);
             }
         }
+        if (fast) {
+            runFast(n);
+            continue;
+        }
         const uint32_t stepPc = pc();
         if (!history.empty()) {
             history[historyNext] = stepPc;
             historyNext = (historyNext + 1) % history.size();
         }
-        const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(cpuCore, uint32_t(std::max<uint64_t>(n, 1)));
+        step(n);
         if (!history.empty() && stepHook) stepHook(stepPc);
-        retiredCount += ran;
-        advance(ran ? ran : 1);
-        const auto guard = cpuArm920DataGuard(cpuCore);
-        if (guard.active && stopped.stop == S3c2442Stop::running) {
-            stopped.stop = S3c2442Stop::dataCache;
-            stopped.address = guard.address;
-            stopped.size = uint8_t(guard.size);
-            stopped.write = guard.write;
-            stopped.pc = cpuGetCurInstrPC(cpuCore);
-        }
-        if (undefinedPending && stopped.stop == S3c2442Stop::running) {
-            stopped.stop = S3c2442Stop::undefined;
-            stopped.pc = undefinedStopPc;
-            stopped.value = undefinedStopInstr;
-        }
-        undefinedPending = false;
     }
     return stopped.stop;
 }
+
+// One interpreter call of up to n instructions (it ends early at an SFR access, an interrupt or another slow
+// path), then their time and the stops it may have hit.
+uint32_t S3c2442Machine::step(uint64_t n) {
+    batchAdvanced = 0;
+    const uint32_t ran = cpuCycle<ARM_MEMORY_SYSTEM_ARM920T, false>(cpuCore, uint32_t(std::max<uint64_t>(n, 1)));
+    retiredCount += ran;
+    const uint64_t total = ran ? ran : 1;
+    advance(total - std::min(total, batchAdvanced));
+    batchAdvanced = 0;
+    const auto guard = cpuArm920DataGuard(cpuCore);
+    if (guard.active && stopped.stop == S3c2442Stop::running) {
+        stopped.stop = S3c2442Stop::dataCache;
+        stopped.address = guard.address;
+        stopped.size = uint8_t(guard.size);
+        stopped.write = guard.write;
+        stopped.pc = cpuGetCurInstrPC(cpuCore);
+    }
+    if (undefinedPending && stopped.stop == S3c2442Stop::running) {
+        stopped.stop = S3c2442Stop::undefined;
+        stopped.pc = undefinedStopPc;
+        stopped.value = undefinedStopInstr;
+    }
+    undefinedPending = false;
+    return ran;
+}
+
+// Fast: n instructions with no event due, as Exact runs them. Translated blocks run first, then the lean path,
+// then the interpreter for one instruction where both refuse (SFR accesses, CP15 writes, interrupts, code not
+// compiled yet). Neither makes SFR accesses, so time for what they ran is applied after them; an SFR access in
+// the interpreter ends the span, so the next one is worked out from the events as they are then.
+void S3c2442Machine::runFast(uint64_t n) {
+    uint64_t left = n;
+    const uint32_t slack = cpuArm920JitMaxUnchecked(cpuCore);
+    uint32_t leanCount = UINT32_MAX;
+    bool blPending = false;
+    sfrAccessed = false;
+    while (left && stopped.stop == S3c2442Stop::running && !clock.idle() && !cpuArm920Waiting(cpuCore)) {
+        // A run passes its clock budget by a block at most (slack), and a Thumb BL pair is one clock but two
+        // instructions, so it gets half of what's left less a block.
+        if (leanCount == UINT32_MAX && !blPending && left / 2 > slack && cpuArm920JitCanRun(cpuCore)) {
+            int stop = arm920JitExit;
+            uint32_t instructions = 0;
+            const uint32_t budget = uint32_t(std::min<uint64_t>(left / 2 - slack + 1, UINT32_MAX / 2));
+            cpuArm920RunJit(cpuCore, budget, &stop, budget, &instructions);
+            if (instructions) {
+                retiredCount += instructions;
+                jitRetiredCount += instructions;
+                advance(instructions);
+                left -= std::min<uint64_t>(left, instructions);
+                if (stop == arm920JitBudget || stop == arm920JitHalt) continue;
+            }
+            // Code not compiled yet, a run that keeps stopping straight away or one stopped at a read the lean
+            // path takes (WTCNT) goes to the lean path a while.
+            leanCount = stop == arm920JitCold || instructions < 4 ? 32 : stop == arm920JitExit ? 16 : 1;
+            continue;
+        }
+        if (!blPending) {
+            uint32_t blNext = ~0u, clocks = 0;
+            uint64_t bus = 0;
+            const uint32_t count = uint32_t(std::min<uint64_t>(left, leanCount));
+            leanCount = UINT32_MAX;
+            leanAdvanced = 0;
+            const uint32_t ran = cpuArm920RunLeanFor(cpuCore, count, count, &blNext, &bus, &clocks);
+            if (ran) {
+                retiredCount += ran;
+                leanRetiredCount += ran;
+                advance(ran - std::min(ran, leanAdvanced));
+                left -= std::min<uint64_t>(left, ran);
+                blPending = blNext != ~0u;
+                if (ran == count) continue;
+            }
+            if (!left || blPending) continue;
+        }
+        // A BL suffix after a lean prefix, or an instruction neither the JIT nor the lean path runs.
+        blPending = false;
+        const uint32_t ran = step(1);
+        stepRetiredCount += ran;
+        left -= std::min<uint64_t>(left, ran ? ran : 1);
+        if (sfrAccessed) break;
+    }
+}
+
+bool S3c2442Machine::setFastEngine(bool fast) {
+    if (fast == fastOn) return true;
+    cpuArm920SetLean(cpuCore, fast ? leanPage : nullptr, fast ? leanGuard : nullptr, this);
+    cpuArm920SetLeanRead(cpuCore, fast ? leanRead : nullptr);
+    cpuArm920SetLeanWrite(cpuCore, fast ? leanWrite : nullptr);
+    if (fast && !cpuArm920SetJit(cpuCore, true)) {
+        cpuArm920SetLean(cpuCore, nullptr, nullptr, this);
+        return false;
+    }
+    if (!fast) cpuArm920SetJit(cpuCore, false);
+    // Fast keeps no cache contents: dirty data goes to memory first.
+    cpuArm920LeanReset(cpuCore);
+    fastOn = fast;
+    return true;
+}
+
+// SDRAM (bank 6, repeating) and the steppingstone (bank 0, repeating): plain memory with no time and no side
+// effect, which the Fast engine reads and writes from host memory.
+uint8_t* S3c2442Machine::leanPage(void* context, uint32_t pa, bool, bool* counted) {
+    auto& m = *static_cast<S3c2442Machine*>(context);
+    *counted = true;
+    if (pa < 0x08000000) return m.steppingstone;
+    // The RAM regions create() maps: up to 4 copies of the SDRAM.
+    const uint32_t mapped = std::min<uint32_t>(4, bank6Size / m.options.ramBytes) * m.options.ramBytes;
+    if (pa >= sdramBase && pa - sdramBase < mapped) return m.ramBuffer + ((pa - sdramBase) & (m.options.ramBytes - 1) & ~0xfffu);
+    return nullptr;
+}
+
+// SFR accesses Fast takes without ending its run, as they change nothing but the block's own state: WTCNT
+// reads, which the OS's delay loops poll, and the NAND controller, which has no timing and raises no interrupt.
+// For WTCNT the machine's time is first brought up to the reading instruction, as the interpreter does
+// (mmio); with no event due in the span that changes nothing else. Translated code leaves WTCNT to the lean
+// path, as its ran counts clocks, not instructions.
+bool S3c2442Machine::leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t, bool,
+                              uint32_t* value, uint32_t* cost) {
+    auto& m = *static_cast<S3c2442Machine*>(context);
+    *cost = 0;
+    if ((pa & 0xffffffc0) == 0x4e000000) {
+        // As mmio: the data port at its own width, the other registers as a part of the word.
+        uint32_t got = 0;
+        if ((pa & ~3u) == 0x4e000010) {
+            if (m.nand.read(0x10, size, got) != S3cAccess::ok) return false;
+            *value = got;
+        } else {
+            if (m.nand.read(pa & 0x3c, 4, got) != S3cAccess::ok) return false;
+            *value = size == 4 ? got : (got >> ((pa & 3) * 8)) & ((1u << (8 * size)) - 1);
+        }
+    } else if (pa == 0x53000008 && size == 4 && !cpuArm920LeanInJit(m.cpuCore)) {
+        if (ran > m.leanAdvanced) {
+            m.advance(ran - m.leanAdvanced);
+            m.leanAdvanced = ran;
+        }
+        if (m.watchdog.read(8, *value) != S3cAccess::ok) return false;
+    } else {
+        return false;
+    }
+    if (m.mmioTrace) m.mmioTrace(pc, pa, size, false, *value);
+    return true;
+}
+
+bool S3c2442Machine::leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t, uint32_t,
+                               uint32_t* cost) {
+    auto& m = *static_cast<S3c2442Machine*>(context);
+    *cost = 0;
+    if ((pa & 0xffffffc0) != 0x4e000000 || (pa & 3) || m.nand.write(pa & 0x3c, size, value, m.intc) != S3cAccess::ok)
+        return false;
+    if (m.mmioTrace) m.mmioTrace(cpuGetCurInstrPC(m.cpuCore), pa, size, true, value);
+    return true;
+}
+
+// Every instruction class the lean path asks about runs there as in the interpreter.
+bool S3c2442Machine::leanGuard(uint32_t, const uint32_t*, uint32_t, uint32_t) { return true; }
 
 std::vector<uint32_t> S3c2442Machine::recentPcs() const {
     std::vector<uint32_t> out;

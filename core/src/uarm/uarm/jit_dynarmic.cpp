@@ -310,6 +310,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     std::vector<uint32_t> marked;  // access pcs among them
     size_t next = 0;
     bool arm920 = false;
+    uint32_t pid = 0;  // ARM920T: the FCSE PID the words were fetched under
     TickModel model;
 
     std::uint64_t GetTicksForCode(bool thumb, A32::VAddr, std::uint32_t instruction) override {
@@ -370,6 +371,11 @@ struct Env final : public A32::UserCallbacks {
     // what both get: invalidations, clears, write protection and code writes.
     bool privileged = true;
     Env *other = nullptr;
+    // ARM920T Fast blocks under the FCSE: blocks run at VAs, and below 32 MB the code there depends on the
+    // PID, so each run's PID goes into the blocks' location as a tag (jitRun). Code pages (code, byPa) are
+    // kept by MVA. pidTags is the FrondJit's tag by PID >> 25, 0 for none yet; tag the one this JIT has now.
+    const uint8_t *pidTags = nullptr;
+    uint8_t tag = 0;
 
     // Page table entries with bit 0 set are read-only (the fork's page_table_write_protect_bit):
     // stores to them come to the callbacks. A RAM page is filled read-only and made writable
@@ -427,13 +433,22 @@ struct Env final : public A32::UserCallbacks {
     std::vector<uint32_t> unwatched;
     uint32_t mapGen = 0;
 
+    // The page dynarmic keeps code by (the run's VA) for a code page here (an MVA), and the code page of a VA.
+    // An MVA page past 32 MB whose PID has a tag may also have blocks at its VA below 32 MB under that tag.
+    template <typename F>
+    void PcPages(uint32_t page, F f) const {
+        f(page);
+        if (arm920 && page >= 0x2000 && pidTags && pidTags[page >> 13]) f(page & 0x1fff);
+    }
+    uint32_t CodePageOf(uint32_t va) const { return (arm920 ? cpuJitCodeMva(cpu, va) : va) >> 12; }
+
     uint32_t CodePa(uint32_t page, uint32_t &access) {
         uint32_t pa;
         return cpuJitCodePa(cpu, page << 12, &pa, &access) ? pa >> 12 : ~0u;
     }
 
     void NoteCode(uint32_t va) {
-        const uint32_t page = va >> 12;
+        const uint32_t page = CodePageOf(va);
         auto it = code.find(page);
         if (it == code.end()) it = NotePage(page);
         // Fast blocks: the CPU keeps the 64-byte lines by physical page; a store to one drops the page's code.
@@ -472,7 +487,7 @@ struct Env final : public A32::UserCallbacks {
     }
 
     void Drop(uint32_t page) {
-        jit->InvalidateCacheRange(page << 12, 4096);
+        PcPages(page, [&](uint32_t p) { jit->InvalidateCacheRange(p << 12, 4096); });
         Forget(page);
     }
 
@@ -514,12 +529,14 @@ struct Env final : public A32::UserCallbacks {
         for (uint32_t page : pages) {
             const auto c = code.find(page);
             if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
-            const uint32_t va = (page << 12) | offset;
-            if (!jit->HasCodeIn(va, size)) continue;
-            stats.pagesWritten++;
-            if (stats.on) stats.writtenPage[page]++, stats.writtenAt[va]++;
-            jit->InvalidateCacheRange(va, size);
-            dropped = true;
+            PcPages(page, [&](uint32_t p) {
+                const uint32_t va = (p << 12) | offset;
+                if (!jit->HasCodeIn(va, size)) return;
+                stats.pagesWritten++;
+                if (stats.on) stats.writtenPage[p]++, stats.writtenAt[va]++;
+                jit->InvalidateCacheRange(va, size);
+                dropped = true;
+            });
         }
         if (!dropped) stats.writesMissed++;
         return dropped;
@@ -544,7 +561,7 @@ struct Env final : public A32::UserCallbacks {
         for (uint32_t page : pages) {
             const auto c = code.find(page);
             if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
-            jit->CodeWords(page << 12, words);
+            PcPages(page, [&](uint32_t p) { jit->CodeWords(p << 12, words); });
         }
     }
     void CodeWordsPa(uint32_t pa, uint64_t *words) {
@@ -888,6 +905,7 @@ struct Env final : public A32::UserCallbacks {
     std::unique_ptr<A32::CodeSnapshot> SnapshotCode(A32::VAddr pc, bool thumb, bool whole) override {
         auto s = std::make_unique<Snapshot>();
         s->arm920 = arm920;
+        s->pid = arm920 ? cpuGetPid(cpu) : 0;
         s->model = model;
         s->base = pc & ~3u;
         auto word = [&](uint32_t va) {
@@ -938,6 +956,8 @@ struct Env final : public A32::UserCallbacks {
     // the block is dropped. Otherwise they are noted as code, as MemoryReadCode does.
     bool CodeUnchanged(A32::CodeSnapshot &snapshot) override {
         auto &s = static_cast<Snapshot &>(snapshot);
+        // Fetched under another PID: the words below would be another address space's.
+        if (arm920 && s.pid != cpuGetPid(cpu)) return false;
         for (size_t i = 0; i < s.words.size(); i++) {
             if (!s.read[i]) continue;
             uint32_t w = 0;
@@ -1421,7 +1441,21 @@ struct FrondJit {
     std::vector<uint32_t> remaskPa;
     std::vector<uint8_t *> remaskHost;
     uint32_t lastInstructions = 0;  // the last run's (jitLastInstructions)
+    // ARM920T FCSE tags by PID >> 25 (Env::pidTags): 0 for PID 0 and PIDs not seen since the last
+    // reassignment, then 1 to kPidTags - 1 in the order PIDs first run.
+    uint8_t pidTags[128] = {};
+    uint8_t nextTag = 1;
 };
+
+// Tags ride in FPSCR bits that only VFP and half-precision code reads, which the ARM920T has none of: Len
+// (16-18), Stride (20-21) and AHP (26). The rounding mode and FZ/DN bits stay 0, as dynarmic sets the host's
+// MXCSR from them.
+constexpr unsigned kPidTags = 64;
+constexpr uint32_t jitPrvTagFpscr(unsigned tag) {
+    return ((tag & 7u) << 16) | (((tag >> 3) & 3u) << 20) | (((tag >> 5) & 1u) << 26);
+}
+static_assert(jitPrvTagFpscr(kPidTags - 1) == 0x04370000);
+
 
 const FrondJitAbort &jitLastAbort(const FrondJit *j) { return j->abort; }
 
@@ -1504,6 +1538,7 @@ static Level *jitPrvMakeLevel(FrondJit *j, bool privileged) {
     Env &e = l->env;
     e.cpu = j->cpu;
     e.pages = l->pages;
+    e.pidTags = j->pidTags;
     e.privileged = privileged;
     e.hot = j->hot;
     A32::UserConfig conf;
@@ -1757,6 +1792,25 @@ void jitWriteProtectPage(FrondJit *j, uint8_t *hostPage) {
     jitPrvEach(j, [&](Env &e) { e.ProtectHost(hostPage); });
 }
 
+// ARM920T Fast blocks: the tag for the CPU's PID into the JIT's FPSCR, so its blocks are found and linked
+// only under that PID. The PID only changes between runs (MCR c13 isn't a p15 slot word). Once every tag is
+// taken, both levels drop their code and tags start over.
+static void jitPrvSetTag(FrondJit *j, Env &e, A32::Jit &jit) {
+    const uint32_t index = cpuGetPid(j->cpu) >> 25;
+    uint8_t tag = j->pidTags[index];
+    if (index && !tag) {
+        if (j->nextTag == kPidTags) {
+            std::fill(std::begin(j->pidTags), std::end(j->pidTags), 0);
+            j->nextTag = 1;
+            jitPrvEach(j, [](Env &level) { level.ClearCode(); });
+        }
+        tag = j->pidTags[index] = j->nextTag++;
+    }
+    if (tag == e.tag) return;
+    e.tag = tag;
+    jit.SetFpscr(jitPrvTagFpscr(tag));
+}
+
 // Runs the JIT for the CPU's current privilege level. A privilege change in generated code
 // ends the run as if the budget ran out, and the next run goes to the other level.
 uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, int &stop) {
@@ -1769,7 +1823,9 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         e.resetState = false;
         jit.Reset();
         jit.ClearCache();  // Reset drops the pending cache clear's halt flag
+        e.tag = 0;  // Reset sets FPSCR to 0
     }
+    if (e.arm920 && !e.lineBound) jitPrvSetTag(j, e, jit);
     e.CheckGen();
     if (const uint32_t g = cpuJitMapGen(e.cpu); g != e.mapGen) {
         e.mapGen = g;

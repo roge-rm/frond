@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "s3c2442_blocks.h"
+#include "rx1950_board.h"
 #include "rx1950_nand_image.h"
 #include "s3c2442_nand.h"
 
@@ -218,6 +219,11 @@ static void rtcTests() {
     rtc.advance(2 * 32768, intc);
     assert(get(rtc, 0x70) == 0x00 && get(rtc, 0x74) == 0x00 && get(rtc, 0x78) == 0x00);
     assert(get(rtc, 0x7c) == 0x01 && get(rtc, 0x84) == 0x03 && get(rtc, 0x80) == 4);
+    // The rx1950's start: its OAL reads BCDYEAR + 1950 as the year and BCDDAY - 1 as the day of week.
+    S3cRtc rx;
+    rx.reset(rx1950RtcStart);
+    assert(get(rx, 0x88) + 1950 == 2006 && get(rx, 0x84) == 0x01 && get(rx, 0x7c) == 0x01);
+    assert(get(rx, 0x80) - 1 == 0 && get(rx, 0x78) == 0x12 && get(rx, 0x74) == 0 && get(rx, 0x70) == 0);
     // Writes need RTCEN.
     rtc.write(0x70, 0x30);
     assert(get(rtc, 0x70) == 0x00);

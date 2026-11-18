@@ -1,7 +1,7 @@
 // The ARM920T's FCSE on the interpreter (Exact): a nonzero PID moves VAs below 32 MB to VA | PID for
 // fetches and data, aborts report the MVA in FAR, VAs from 32 MB up stay as they are, and the I-cache and
-// D-cache hold MVAs, so a PID change never hits another process's lines. Fast refuses to run while the
-// PID is nonzero.
+// D-cache hold MVAs, so a PID change never hits another process's lines. Fast (translated blocks and the
+// lean path) gives the same registers and memory at the same instruction counts across PID changes.
 
 #include <cassert>
 #include <cstdint>
@@ -174,21 +174,86 @@ int main() {
     assert(m.reg(2) == 0x11111111 && m.reg(5) == 0x22222222);
     assert(m.reg(4) == 0 && cpuGetPid(m.cpu) == 0);
 
-    // Fast, where it's built, leaves a nonzero PID to the interpreter.
+    // Fast, where it's built: translated blocks and the lean path under nonzero PIDs, against the
+    // interpreter at the same instruction counts. The same VA 0x1000 holds slot 1's and slot 2's code, and
+    // each stores through VA 0x3000 into its own slot, while 0xc0000300 switches the PID between them.
     if (!cpuSetFastEngine(true)) {
         std::printf("PASS: ARM920T FCSE remap, abort FAR, MVA keyed caches across PID changes (no Fast engine)\n");
         return 0;
     }
-    Machine fast(true);
-    fast.prepare(slot1);
-    fast.word(0x101000, movImm(2, 7));
-    fast.word(0x101004, loop);
-    fast.word(0x204, movPc(10));
-    cpuSetReg(fast.cpu, 10, 0x1000);
-    fast.start();
-    assert(!cpuArm920JitCanRun(fast.cpu));
-    fast.runTo(0x1004);
-    assert(fast.reg(2) == 7);
+    cpuSetJitSync(true);
+    Machine exact(false), fast(false);  // Fast blocks go on a CPU made without the single-step JIT
+    for (Machine* m : {&exact, &fast}) {
+        m->prepare(slot1);
+        m->word(0x204, movPc(10));
+        m->word(0x101000, 0xe2822001);  // ADD r2, r2, #1
+        m->word(0x101004, str(2, 12));
+        m->word(0x101008, movPc(8));
+        m->word(0x201000, 0xe2822801);  // ADD r2, r2, #0x10000
+        m->word(0x201004, str(2, 12));
+        m->word(0x201008, movPc(8));
+        m->word(0x300, mcr(13, 9));
+        m->word(0x304, 0xe029900b);  // EOR r9, r9, r11
+        m->word(0x308, movPc(10));
+        cpuSetReg(m->cpu, 8, 0xc0000300);
+        cpuSetReg(m->cpu, 9, slot2);
+        cpuSetReg(m->cpu, 10, 0x1000);
+        cpuSetReg(m->cpu, 11, slot1 ^ slot2);
+        cpuSetReg(m->cpu, 12, 0x3000);
+        m->start();
+    }
+    auto leanPage = [](void* context, uint32_t pa, bool, bool* counted) -> uint8_t* {
+        *counted = true;
+        return pa < ramSize ? static_cast<Machine*>(context)->bytes + (pa & ~0xfffu) : nullptr;
+    };
+    cpuArm920SetLean(fast.cpu, leanPage, [](uint32_t, const uint32_t*, uint32_t, uint32_t) { return true; }, &fast);
+    assert(cpuArm920SetJit(fast.cpu, true));
+    cpuArm920LeanReset(fast.cpu);
+    // Runs exactly count instructions in Fast: blocks with a budget they can't pass, the lean path, then the
+    // interpreter for what both leave (the CP15 PID writes).
+    uint64_t translated = 0;
+    auto runFast = [&](uint64_t count) {
+        const uint32_t slack = cpuArm920JitMaxUnchecked(fast.cpu);
+        while (count) {
+            if (count / 2 > slack && cpuArm920JitCanRun(fast.cpu)) {
+                int stop = arm920JitExit;
+                uint32_t ran = 0;
+                const uint32_t budget = uint32_t(count / 2 - slack + 1);
+                cpuArm920RunJit(fast.cpu, budget, &stop, budget, &ran);
+                translated += ran;
+                count -= ran;
+                if (ran) continue;
+            }
+            uint32_t blNext = ~0u;
+            uint64_t bus = 0;
+            const uint32_t ran = cpuArm920RunLeanFor(fast.cpu, uint32_t(count), uint32_t(count), &blNext, &bus);
+            count -= ran;
+            if (!ran) {
+                fast.step();
+                --count;
+            }
+        }
+    };
+    for (unsigned round = 0; round < 40; ++round) {
+        const uint64_t count = 37 + round * 11;
+        for (uint64_t i = 0; i < count; ++i) exact.step();
+        runFast(count);
+        for (unsigned r = 0; r < 16; ++r) assert(exact.reg(r) == fast.reg(r));
+        assert(cpuGetRegExternal(exact.cpu, ARM_REG_NUM_CPSR) == cpuGetRegExternal(fast.cpu, ARM_REG_NUM_CPSR));
+        assert(cpuGetPid(exact.cpu) == cpuGetPid(fast.cpu));
+    }
+    assert(translated > 0);
+    // Each slot's word is the count at its last store, with the D-cache cleaned.
+    cpuArm920LeanReset(exact.cpu);
+    cpuArm920LeanReset(fast.cpu);
+    for (const uint32_t pa : {0x103000u, 0x203000u}) {
+        assert(std::memcmp(exact.bytes + pa, fast.bytes + pa, 4) == 0);
+        uint32_t stored;
+        std::memcpy(&stored, fast.bytes + pa, 4);
+        assert(stored != 0);
+    }
+    assert((fast.reg(2) & 0xffff) > 100 && (fast.reg(2) >> 16) > 100);
+    std::printf("Fast: %llu of the instructions in translated blocks\n", (unsigned long long)translated);
 
     std::printf("PASS: ARM920T FCSE remap, abort FAR, MVA keyed caches across PID changes\n");
 }

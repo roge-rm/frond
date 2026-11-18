@@ -4,7 +4,8 @@ until the file system has written pages to NAND, and checks nothing stopped the 
 
     tests/rx1950-boot.py build/rx1950-boot
 
-eboot's lines come from UART0 and the kernel's from its debug text ring (nk.log). Skips when the
+eboot's lines come from UART0, with the serial cable attached, and the kernel's from its debug text ring
+(nk.log). Skips when the
 firmware isn't on this machine. Set RX1950_FIRMWARE to the folder with CEBL.nbf and CEOS.nbf and
 RX1950_OUT to keep the logs somewhere else than rx1950-boot-logs next to the tool.
 """
@@ -33,7 +34,7 @@ def main():
     out = os.environ.get("RX1950_OUT") or os.path.join(os.path.dirname(os.path.abspath(tool)), "rx1950-boot-logs")
     os.makedirs(out, mode=0o700, exist_ok=True)
     run = subprocess.run([tool, "--cebl", cebl, "--ceos", ceos, "--out", out, "--instructions", INSTRUCTIONS,
-                          "--debug-messages"],
+                          "--debug-messages", "--serial-cable"],
                          capture_output=True, text=True, timeout=600)
     print(run.stdout.strip())
     missing = []

@@ -372,6 +372,9 @@ void cpuArm920SetLeanRead(ArmCpu*, Arm920LeanRead read);
 using Arm920LeanWrite = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran,
                                  uint32_t left, uint32_t* cost);
 void cpuArm920SetLeanWrite(ArmCpu*, Arm920LeanWrite write);
+// From a read or write hook: whether translated code made the access (ran then counts the JIT's clocks, a
+// Thumb BL pair as one) rather than the lean path (ran counts instructions).
+bool cpuArm920LeanInJit(const ArmCpu*);
 // Cleans dirty D-cache lines to memory, empties both caches and drops the lean TLB and decoded code. For
 // entering Fast and after a load into it.
 void cpuArm920LeanReset(ArmCpu*);

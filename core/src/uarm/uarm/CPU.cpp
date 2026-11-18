@@ -1401,7 +1401,9 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
         return false;
     }
     struct ArmMmu *mmu = cpu->memorySystem.mmu;
-    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, va, privileged);
+    // The FCSE: the MMU sees the MVA. The host TLB stays keyed by VA, as cpuSetPid flushes it on a PID change.
+    const uint32_t mva = cpuPrvMva(cpu, va);
+    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, mva, privileged);
     bool counted = false;
     uint8_t *page = MMU_TRANSLATE_RESULT_OK(r) && cpu->leanPage
                         ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)
@@ -1458,7 +1460,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
     // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
-    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[va >> 12].revision == mmu->revision) &&
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision) &&
         !(uintptr_t(page) & 1) && !codePage) {
         struct HostTlb &t = cpu->mem->hostTlb;
         struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
@@ -5637,6 +5639,7 @@ static void execFn_leanThumbBx(struct ArmCpu *cpu, uint32_t instr) {
 
 // The raw halfword at va if the decode cache holds its line under the current fetch key.
 static bool cpuPrvLeanPeekHalf(const struct ArmCpu *cpu, uint32_t va, uint16_t &half) {
+    va = cpuPrvMva(cpu, va);
     const struct icache *ic = cpu->ic;
     const struct icacheline *line = ic->cache + calculateIndex(va);
     if (line->revision != ic->revision || line->tag != calculateTag(va) ||
@@ -5809,6 +5812,8 @@ static __attribute__((noinline)) bool cpuPrvLeanFetchSlow(struct ArmCpu *cpu, ui
 template <int size>
 static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr, uint32_t &decoded,
                                          uint32_t &cost) {
+    // Lines are by MVA, as the I-cache model keeps them (icacheArm920Word).
+    pc = cpuPrvMva(cpu, pc);
     struct icache *ic = cpu->ic;
     struct icacheline *line = ic->cache + calculateIndex(pc);
     if (likely(!(pc & (size - 1)) && line->revision == ic->revision && line->tag == calculateTag(pc) &&
@@ -5872,9 +5877,8 @@ uint32_t cpuArm920RunLeanFor(ArmCpu *cpu, uint32_t budget, uint32_t count, uint3
     if (cpu->model != ArmCpuModel::arm920t || !cpu->leanPage) return 0;
     cpuClearSlowPath(cpu, SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE | SLOW_PATH_REASON_RESCHEDULE |
                               SLOW_PATH_REASON_PACE_SYSCALL_BREAK | SLOW_PATH_REASON_INJECTED_CALL_DONE);
-    // A nonzero FCSE PID runs on the interpreter: the lean pages and host TLB are keyed by VA.
     if (cpu->slowPath || cpu->arm920Waiting || cpu->modePace || cpu->nativeCallDepth || cpu->nativePc[0] ||
-        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic) || cpu->pid)
+        cpu->debugStub || icacheArm920ContinuationPending(cpu->ic))
         return 0;
     cpu->leanRun = true;
     cpu->leanExit = false;
@@ -5935,6 +5939,8 @@ void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = re
 
 void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
 
+bool cpuArm920LeanInJit(const ArmCpu *cpu) { return cpu->leanJit; }
+
 // A DMA or other write over the whole page at pa.
 void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) { cpuPrvArm920Stored(cpu, pa & ~0xfffu, 0x1000); }
 
@@ -5967,8 +5973,8 @@ void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) 
 }
 
 bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
-    // The lean and JIT loads' translation, with the current mode's permissions.
-    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, va & ~3u, cpu->privileged);
+    // The lean and JIT loads' translation, with the current mode's permissions, of the MVA.
+    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, cpuPrvMva(cpu, va & ~3u), cpu->privileged);
     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
     *pa = MMU_TRANSLATE_RESULT_PA(r);
     if (!word) return true;
@@ -6001,6 +6007,7 @@ void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
 void cpuArm920LeanStoredBytes(ArmCpu *, uint32_t, uint32_t) {}
 void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
 void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
+bool cpuArm920LeanInJit(const ArmCpu *) { return false; }
 uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
 uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
 #endif
@@ -6136,8 +6143,8 @@ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
     va &= ~3u;
     if (cpu->model == ArmCpuModel::arm920t) {
         if (cpu->jitBlocks) {
-            // Plain pages only, straight from memory: Fast keeps no I-cache contents.
-            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, va, cpu->privileged, false);
+            // Plain pages only, straight from memory: Fast keeps no I-cache contents. The MMU sees the MVA.
+            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, va), cpu->privileged, false);
             if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
             bool counted;
             const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
@@ -6274,6 +6281,7 @@ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu)
 uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpuPrvJitPageGen(cpu); }
 
 int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
+    if (cpu->model == ArmCpuModel::arm920t) va = cpuPrvMva(cpu, va);
     return mmuPageClientAccess(cpu->memorySystem.mmu, va, privileged);
 }
 
@@ -7220,11 +7228,10 @@ static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTIO
                                                      SLOW_PATH_REASON_RESCHEDULE | SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
                                                      SLOW_PATH_REASON_INJECTED_CALL_DONE;
 
-// A nonzero FCSE PID runs on the interpreter, as for the lean run.
 bool cpuArm920JitCanRun(const ArmCpu *cpu) {
     return cpu->jitBlocks && !(cpu->slowPath & ~arm920JitClearedSlowPath) && !cpu->arm920Waiting && !cpu->modePace &&
            !cpu->nativeCallDepth && !cpu->nativePc[0] && !cpu->debugStub &&
-           !icacheArm920ContinuationPending(cpu->ic) && !cpu->pid;
+           !icacheArm920ContinuationPending(cpu->ic);
 }
 
 uint32_t cpuArm920RunJit(ArmCpu *cpu, uint32_t budget, int *stop, uint32_t span, uint32_t *instructions) {
@@ -7500,13 +7507,15 @@ void cpuWakeup(struct ArmCpu *cpu) {
 }
 
 void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) {
-    // The ARM920T Fast engine's decode lines and lean host TLB are keyed by VA; Fast never runs with a
-    // nonzero PID, and a change drops them so none outlives the address space it was filled in.
-    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) {
-        icacheArm920DropDecoded(cpu->ic);
-        hostTlbFlush(&cpu->mem->hostTlb);
-    }
+    // The ARM920T Fast engine's lean host TLB and its JIT's page table are keyed by VA: a change flushes
+    // them, so none outlives the address space it was filled in. Decode lines are by MVA and stay; Fast
+    // blocks are keyed by PID (jitRun).
+    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) hostTlbFlush(&cpu->mem->hostTlb);
     cpu->pid = pid;
+}
+
+uint32_t cpuJitCodeMva(const struct ArmCpu *cpu, uint32_t va) {
+    return cpu->model == ArmCpuModel::arm920t ? cpuPrvMva(cpu, va) : va;
 }
 
 uint32_t cpuGetPid(struct ArmCpu *cpu) { return cpu->pid; }

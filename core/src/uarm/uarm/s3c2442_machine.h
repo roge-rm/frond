@@ -75,6 +75,15 @@ class S3c2442Machine {
     std::string stopText() const;
 
     uint64_t retired() const { return retiredCount; }
+    // The Fast engine (Dynarmic blocks, the lean path and the interpreter where they refuse) instead of the
+    // interpreter alone. Both run the same instructions with the same timing. False if it can't be had (no
+    // Dynarmic in this build).
+    bool setFastEngine(bool fast);
+    bool fastEngine() const { return fastOn; }
+    // Fast: instructions run in translated blocks, on the lean path and in the interpreter.
+    uint64_t jitRetired() const { return jitRetiredCount; }
+    uint64_t leanRetired() const { return leanRetiredCount; }
+    uint64_t stepRetired() const { return stepRetiredCount; }
     // VFP instructions and Windows CE breakpoints the guest ran, which take the undefined instruction
     // exception without a stop.
     uint64_t vfpProbeCount() const { return vfpProbes; }
@@ -135,6 +144,17 @@ class S3c2442Machine {
     bool mmio(uint32_t address, unsigned size, bool write, uint32_t& value);
     bool refuse(uint32_t address, unsigned size, bool write, uint32_t value, const std::string& text);
     void advance(uint64_t cpuCycles);
+    // Applies the time of the instructions the running interpreter call has finished (batchAdvanced of them
+    // already), so an SFR access sees the time at its instruction.
+    void catchUp();
+    uint32_t step(uint64_t n);
+    void runFast(uint64_t n);
+    static uint8_t* leanPage(void* context, uint32_t pa, bool write, bool* counted);
+    static bool leanRead(void* context, uint32_t pa, uint32_t size, uint32_t pc, uint32_t ran, uint32_t left, bool single,
+                         uint32_t* value, uint32_t* cost);
+    static bool leanWrite(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran, uint32_t left,
+                          uint32_t* cost);
+    static bool leanGuard(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
     // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
     // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
     uint64_t cyclesToEvent(bool wakeOnly = false) const;
@@ -161,6 +181,11 @@ class S3c2442Machine {
     // Remainders of each clock domain in CPU cycles times the domain's rate.
     uint64_t pclkRest = 0, hclkRest = 0, rtcRest = 0, nsRest = 0;
     bool debugWriteSeen = false;
+    uint64_t batchAdvanced = 0;
+    uint32_t leanAdvanced = 0;  // of the running lean call, by leanRead
+    bool sfrAccessed = false;  // since the Fast span started
+    bool fastOn = false;
+    uint64_t jitRetiredCount = 0, leanRetiredCount = 0, stepRetiredCount = 0;
     std::vector<uint32_t> history;
     size_t historyNext = 0;
 };

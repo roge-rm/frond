@@ -237,7 +237,8 @@ private:
 class S3cRtc {
    public:
     struct Time { uint8_t year, month, date, day, hour, minute, second; };
-    // The time in BCD registers form, year 0-99 from 2000, day of week 1-7.
+    // The start time: decimal fields the registers get in BCD, day of week 1-7, and year the raw BCDYEAR
+    // byte, which the board's OS reads its own way (see rx1950RtcStart).
     void reset(const Time& start);
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);

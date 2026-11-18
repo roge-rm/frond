@@ -42,4 +42,16 @@ constexpr uint16_t rx1950TouchRawY(unsigned y) { return uint16_t(64 + y * 896 / 
 struct Rx1950AdcInput { uint8_t channel; uint16_t value; };
 constexpr Rx1950AdcInput rx1950AdcInputs[] = {{0, 917}, {2, 451}};
 
+// The RTC at boot: Sunday January 1 2006, 12:00. The OAL reads BCDYEAR as a binary count of years from 1950
+// (wYear = BCDYEAR + 1950, nk 0x8004abb0) and BCDDAY as day of week + 1 (Sunday 1); the other fields are BCD.
+constexpr uint8_t rx1950RtcYear(unsigned year) { return uint8_t(year - 1950); }
+constexpr S3cRtc::Time rx1950RtcStart{rx1950RtcYear(2006), 1, 1, 1, 12, 0, 0};
+
+// The serial cable sense on GPF6, high with the cable attached. eboot only sets up its debug serial port then
+// (GPFDAT read at 0x8c0a61cc), and with it the OS's ActiveSync looks for a PC on UART0 every second.
+// ASSUMPTION "rx1950 serial cable sense": high means attached, as eboot and the OS both stay quiet on UART0
+// with it low. The device boots with no cable.
+constexpr S3cGpio::Port rx1950CablePort = S3cGpio::f;
+constexpr unsigned rx1950CableBit = 6;
+
 #endif

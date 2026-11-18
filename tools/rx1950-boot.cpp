@@ -3,6 +3,13 @@
 //   rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--nand FILE] [--out DIR] [--instructions N]
 //               [--mmio-trace N] [--history N] [--debug-messages] [--any-firmware] [--peek VA]... [--walk MVA]... [--watch PA]...
 //               [--seconds S] [--tap T,X,Y[,MS]]... [--key T,NAME[,MS]]... [--shot T]... [--interactive]
+//               [--engine exact|fast] [--digest] [--pin-low PIN]... [--serial-cable]
+//
+// --pin-low holds an input pin such as F6 low from reset; every other input is high. --serial-cable boots
+// with the serial cable attached (rx1950_board.h), which eboot needs to print on UART0.
+// --engine picks the interpreter (exact) or the Fast engine (fast, the default), which run the same
+// instructions with the same timing. --digest prints the registers and hashes of SDRAM (after the data cache
+// is cleaned), the NAND and the SFR state at the end, to compare the engines' runs.
 //
 // CEBL.nbf's eboot goes straight into SDRAM at 0x30080000 and runs from there with the MMU off and the
 // PLL set, as the block 0 loader would leave it (that loader isn't in either dump). CEOS.nbf, if given, fills the NAND
@@ -25,6 +32,7 @@
 // --debug-messages turns it on in the board settings page (rx1950_nand_image.h).
 
 #include <algorithm>
+#include <cctype>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +43,8 @@
 #include <tuple>
 #include <string>
 #include <vector>
+
+#include <chrono>
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -98,6 +108,8 @@ int main(int argc, char** argv) {
     std::vector<double> shots;
     double seconds = 0;
     bool interactive = false;
+    bool fastEngine = true, digest = false, serialCable = false;
+    std::vector<std::pair<unsigned, unsigned>> lowPins;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -117,6 +129,21 @@ int main(int argc, char** argv) {
         else if (a == "--watch") watches.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else if (a == "--walk") walks.push_back(uint32_t(std::strtoul(next(), nullptr, 0)));
         else if (a == "--interactive") interactive = true;
+        else if (a == "--digest") digest = true;
+        else if (a == "--serial-cable") serialCable = true;
+        else if (a == "--pin-low") {
+            const std::string pin = next();
+            static const char ports[] = "ABCDEFGHJ";
+            const char* port = pin.empty() ? nullptr : std::strchr(ports, std::toupper(pin[0]));
+            const unsigned bit = pin.size() > 1 ? unsigned(std::atoi(pin.c_str() + 1)) : 32;
+            if (!port || !*port || bit > 31) { std::fprintf(stderr, "--pin-low takes a pin like F6\n"); return 2; }
+            lowPins.push_back({unsigned(port - ports), bit});
+        }
+        else if (a == "--engine") {
+            const std::string e = next();
+            if (e != "exact" && e != "fast") { std::fprintf(stderr, "--engine is exact or fast\n"); return 2; }
+            fastEngine = e == "fast";
+        }
         else if (a == "--seconds") seconds = std::strtod(next(), nullptr);
         else if (a == "--shot") shots.push_back(std::strtod(next(), nullptr));
         else if (a == "--tap") {
@@ -164,8 +191,12 @@ int main(int argc, char** argv) {
     if (!accepted(rx1950Cebl, bl, cebl)) return 1;
     std::string error;
     S3c2442Options options;
+    options.rtcStart = rx1950RtcStart;
+    if (!serialCable) options.pinLevels[rx1950CablePort] &= ~(1u << rx1950CableBit);
+    for (const auto& [port, bit] : lowPins) options.pinLevels[port] &= ~(1u << bit);
     auto machine = S3c2442Machine::create(options, error);
     if (!machine) { std::fprintf(stderr, "machine: %s\n", error.c_str()); return 1; }
+    if (fastEngine && !machine->setFastEngine(true)) { std::fprintf(stderr, "machine: no Fast engine in this build\n"); return 1; }
     machine->loadRam(ebootPhysical, bl.data() + nbfHeader, ebootBytes);
     for (const auto& in : rx1950AdcInputs) machine->adc.channel[in.channel] = in.value;
     // ASSUMPTION "rx1950 IPL clocks": the block 0 loader sets the PLL before eboot, which never does.
@@ -238,6 +269,7 @@ int main(int argc, char** argv) {
     uint32_t nandCommand = 0xff, nandAddress = 0, nandCycles = 0;
     // "mmio S": counts of each pc, register, direction and value for a while.
     std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t>, unsigned>* mmioCounts = nullptr;
+    uint32_t mmioLow = 0, mmioHigh = 0xffffffff;  // "mmio S LOW HIGH" counts only registers in that range
     // "intclog N": the last interrupt controller and UART 0/2 events: writes to SRCPND bit 28, SUBSRCPND, INTSUBMSK
     // (changes only), UART 0 and 2 UCON, UFCON and UTXH, and each time SRCPND bit 28 (INT_UART0)
     // is seen to change. Repeats of one event in a row are counted, not stored.
@@ -271,7 +303,7 @@ int main(int argc, char** argv) {
         }
         if (write && address == 0x58000000 && (value & 1) && adcStarts.size() < 16 && !(machine->adc.adctsc & 7))
             adcStarts.push_back({(value >> 3) & 7, {pc, machine->nanoseconds(), value}});
-        if (mmioCounts) ++(*mmioCounts)[{pc, address, write, value}];
+        if (mmioCounts && address >= mmioLow && address <= mmioHigh) ++(*mmioCounts)[{pc, address, write, value}];
         if (write && address == 0x4e000008) {
             nandCommand = value & 0xff;
             nandAddress = nandCycles = 0;
@@ -306,6 +338,7 @@ int main(int argc, char** argv) {
         std::printf("screen at %.3f s: %s\n", machine->nanoseconds() / 1e9, name.c_str());
     };
     machine->start(ebootPhysical);
+    const auto wallStart = std::chrono::steady_clock::now();
     // Runs in slices of about 7 ms of guest time so scripted input lands near its time.
     constexpr uint64_t slice = 2000000;
     uint64_t left = instructions;
@@ -335,7 +368,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S", "adc CH VALUE" (an ADC input), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -442,6 +475,12 @@ int main(int argc, char** argv) {
             if (!hadHistory) machine->keepHistory(0);
         } else if (c == "mmio" && std::sscanf(line, "%*s %lf", &sec) == 1) {
             std::map<std::tuple<uint32_t, uint32_t, bool, uint32_t>, unsigned> counts;
+            char low[32] = {}, high[32] = {};
+            mmioLow = 0, mmioHigh = 0xffffffff;
+            if (std::sscanf(line, "%*s %*s %31s %31s", low, high) == 2) {
+                mmioLow = uint32_t(std::strtoul(low, nullptr, 0));
+                mmioHigh = uint32_t(std::strtoul(high, nullptr, 0));
+            }
             mmioCounts = &counts;
             going = runUntil(now + uint64_t(sec * 1e9));
             mmioCounts = nullptr;
@@ -513,6 +552,15 @@ int main(int argc, char** argv) {
     }
     std::printf("%" PRIu64 " instructions, %" PRIu64 " cycles (%" PRIu64 " idle), %.3f s guest time, pc %08x\n",
                 machine->retired(), machine->cycles(), machine->idleCycles(), machine->nanoseconds() / 1e9, machine->pc());
+    {
+        const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+        std::printf("engine %s: %.1f s wall, %.1f M instructions a second", machine->fastEngine() ? "fast" : "exact", wall,
+                    wall > 0 ? machine->retired() / wall / 1e6 : 0.0);
+        if (machine->fastEngine())
+            std::printf("; translated %" PRIu64 ", lean %" PRIu64 ", interpreter %" PRIu64, machine->jitRetired(),
+                        machine->leanRetired(), machine->stepRetired());
+        std::printf("\n");
+    }
     std::printf("NAND: %" PRIu64 " page programs, %" PRIu64 " block erases; VFP probes %" PRIu64 ", breakpoints %" PRIu64 "\n",
                 machine->nand.programs, machine->nand.erases, machine->vfpProbeCount(), machine->breakpointCount());
     if (nandPath && !machine->nand.flash.empty() && !rx1950NandSave(nandPath, machine->nand, error))
@@ -525,6 +573,23 @@ int main(int argc, char** argv) {
         for (unsigned i = 0; i < 16; ++i) std::printf(" r%u=%08x", i, r[i]);
         std::printf(" cpsr=%08x spsr=%08x pid=%08x\n", cpuGetRegExternal(machine->cpu(), ARM_REG_NUM_CPSR),
                     cpuGetRegExternal(machine->cpu(), ARM_REG_NUM_SPSR), cpuGetPid(machine->cpu()));
+    }
+    if (digest) {
+        // FNV-1a over SDRAM with the data cache cleaned to it, the NAND and the SFR blocks' state.
+        auto fnv = [](const void* data, size_t n, uint64_t h = 1469598103934665603ull) {
+            const uint8_t* p = static_cast<const uint8_t*>(data);
+            for (size_t i = 0; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+            return h;
+        };
+        cpuArm920LeanReset(machine->cpu());
+        uint64_t sfr = fnv(&machine->intc, sizeof machine->intc);
+        sfr = fnv(&machine->pwm, sizeof machine->pwm, sfr);
+        sfr = fnv(&machine->rtc, sizeof machine->rtc, sfr);
+        sfr = fnv(machine->steppingstone, sizeof machine->steppingstone, sfr);
+        std::printf("digest: retired %" PRIu64 " cycles %" PRIu64 " idle %" PRIu64 " sdram %016" PRIx64 " nand %016" PRIx64
+                    " sfr %016" PRIx64 "\n",
+                    machine->retired(), machine->cycles(), machine->idleCycles(), fnv(machine->sdram(), 32u << 20),
+                    fnv(machine->nand.flash.data(), machine->nand.flash.size()), sfr);
     }
     if (history) {
         std::printf("last pcs:");

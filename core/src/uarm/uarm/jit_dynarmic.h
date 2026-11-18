@@ -138,6 +138,8 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines);
 // ARM920T Fast blocks: translation read the code word at pa, in a page cpuJitWatchCode marked. A store to its
 // 64-byte line drops the page's code; stores to the page's other lines don't.
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa);
+// ARM920T: the MVA of va under the current FCSE PID (va itself for other cores).
+uint32_t cpuJitCodeMva(const ArmCpu *cpu, uint32_t va);
 // After a store dropped code from a page, its marks become what the JIT's live blocks still hold code
 // from. ARM920T Fast blocks: the page at pa, words a bit per 4-byte word (16 of them; none unmarks the
 // page). Otherwise the RAM page's line flags at hostPage, lines a bit per 64-byte line, after which the

@@ -29,7 +29,7 @@ void S3cRtc::reset(const Time& start) {
     bcd[date] = toBcd(start.date);
     bcd[day] = start.day;
     bcd[mon] = toBcd(start.month);
-    bcd[year] = toBcd(start.year);
+    bcd[year] = start.year;
     secondPhase = tickPhase = 0;
 }
 
