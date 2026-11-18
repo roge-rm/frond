@@ -2679,7 +2679,7 @@ static_assert(sizeof(Imx1ProbeResult) == 352, "update its stateVersion and the s
 static_assert(sizeof(Arm920SavedState) == 43328, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Bootstrap) - Imx1Bootstrap::unsavedBytes == 2344, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Aitc) == 80, "update its stateVersion and the size in stateLayoutFingerprint");
-static_assert(sizeof(Imx1Cgm) == 128, "update its stateVersion and the size in stateLayoutFingerprint");
+static_assert(sizeof(Imx1Cgm) - Imx1Cgm::unsavedBytes == 128, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Gpio) == 416, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Eim) == 56, "update its stateVersion and the size in stateLayoutFingerprint");
 static_assert(sizeof(Imx1Timer) == 28, "update its stateVersion and the size in stateLayoutFingerprint");

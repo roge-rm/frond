@@ -73,6 +73,12 @@ def main():
             state = core.send('speed-state', 'speed:').strip()
             assert state.endswith(', original') and f'limit {CLOCK / 1e6:.2f} MHz' in state, state
             assert core.send('speed uncapped', 'speed:').strip() == 'speed: uncapped'
+            # Uncapped moves its factor each second to what the host manages, from 8x up to at most 64x.
+            time.sleep(4)
+            state = core.send('speed-state', 'speed:').strip()
+            print(state)
+            found = re.search(r'limit ([\d.]+) MHz, \d+%, uncapped$', state)
+            assert found and CLOCK / 1e6 * 0.99 <= float(found.group(1)) <= 64 * CLOCK / 1e6 * 1.01, state
         finally:
             core.close()
     print('PASS: frond-68k Faster speeds, Original unchanged, speed command and option')

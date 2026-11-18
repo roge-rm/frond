@@ -2,6 +2,7 @@
 #define _MAIN_LOOP_H_
 
 #include <cstdint>
+#include <string>
 
 #include "Average.h"
 #include "SoC.h"
@@ -20,7 +21,7 @@ class MainLoop {
     uint64_t GetTimesliceSizeUsec() const;
     int64_t GetSuggestedDelayUsec(uint64_t now) const;
 
-    uint32_t GetCurrentIps() const;
+    uint64_t GetCurrentIps() const;
     uint64_t GetCurrentIpsMax() const;
 
     void SetMaxLoad(uint32_t maxLoad);
@@ -35,6 +36,11 @@ class MainLoop {
     // fixed UNCAPPED_MHZ.
     void SetSpeed(const SpeedSetting5& speed, uint32_t originalHz);
     const SpeedSetting5& GetSpeed() const { return speed; }
+    // A fixed rate (set-mips, --mips) in place of a speed setting: clock multiplier 1, no core clock to
+    // follow. Cleared by the next SetSpeed.
+    void SetFixedMips(uint32_t mips);
+    // The setting's name, or "fixed N MIPS" while a fixed rate is set.
+    std::string SpeedName() const;
     static constexpr uint32_t UNCAPPED_MHZ = 3000;
     void SetEmulatedTime(bool emulatedTime) { this->emulatedTime = emulatedTime; }
 
@@ -52,7 +58,7 @@ class MainLoop {
     double virtualTimeUsec{0};
     double lastDeltaUsec{0};
 
-    uint32_t currentIps{0};
+    uint64_t currentIps{0};
     uint64_t currentIpsMax{0};
 
     Average<uint64_t> cyclesPerSecondAverage;
@@ -62,6 +68,7 @@ class MainLoop {
     bool emulatedTime{false};
     bool followCoreClock{false};
     SpeedSetting5 speed{};
+    uint32_t fixedMips{0};
 };
 
 #endif  // _MAIN_LOOP_H_

@@ -143,9 +143,14 @@ void IgnoreGoneXWindows() {}
 // session from another pin is refused rather than half loaded.
 constexpr const char* kSessionFormat = "frond-68k 1";
 constexpr const char* kCloudpilotPin = "cloudpilot 064d5d5";
-// Uncapped runs the CPU this many times faster than the real clock, with timers on real time. Faster runs it
-// its multiplier times faster the same way.
+// Faster runs the CPU its multiplier times faster than the real clock, with timers on real time. Uncapped
+// starts at kUncappedFactor; the paced loop then moves it each second to what keeps the host kUncappedLoad
+// busy, between 1 and kUncappedMaxFactor, rising at most kUncappedRise times a second. Headless runs keep
+// the starting factor.
 constexpr double kUncappedFactor = 8;
+constexpr double kUncappedMaxFactor = 64;
+constexpr double kUncappedLoad = 0.8;
+constexpr double kUncappedRise = 1.5;
 
 using Speed = SpeedSetting5;
 
@@ -1092,7 +1097,9 @@ class Runner {
                 const double perMs = gSession->GetClocksPerSecond() / 1000.0;
                 const uint32_t want = uint32_t(min(max((now - emulatedMs) * perMs, 1.0), perMs * 4));
                 const double before = guestSeconds;
+                const double stepStart = wallMs();
                 if (!Step(want)) return 1;
+                busyMs += wallMs() - stepStart;
                 emulatedMs += (guestSeconds - before) * 1000;
                 DispatchReplay();
             }
@@ -1703,15 +1710,24 @@ class Runner {
 
     void SetSpeed(Speed value) {
         speed = value;
-        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? kUncappedFactor : speed.Multiplier());
+        gSession->SetClockFactor(speed.kind == Speed::Kind::uncapped ? uncappedFactor : speed.Multiplier());
     }
 
-    // Measured over about a second of wall time; one cycle is one 68000 clock.
+    // Measured over about a second of wall time; one cycle is one 68000 clock. At Uncapped this also moves
+    // the clock factor to what the host managed while busy.
     void UpdateSpeed(double wallMs) {
         if (wallMs - speedMark.first < 1000) return;
         const double cycles = double(gSession->GetSystemCycles()) - speedMark.second;
         measuredHz = cycles / ((wallMs - speedMark.first) / 1000);
         speedMark = {wallMs, double(gSession->GetSystemCycles())};
+        const double busy = busyMs;
+        busyMs = 0;
+        if (speed.kind != Speed::Kind::uncapped || busy <= 0 || cycles <= 0) return;
+        // Clocks a second at 1x, and the factor that would have used kUncappedLoad of the host.
+        const double base = gSession->GetClocksPerSecond() / uncappedFactor;
+        const double target = cycles / (busy / 1000) * kUncappedLoad / base;
+        uncappedFactor = clamp(min(target, uncappedFactor * kUncappedRise), 1.0, kUncappedMaxFactor);
+        gSession->SetClockFactor(uncappedFactor);
     }
 
     string SpeedState() const {
@@ -2590,6 +2606,7 @@ class Runner {
         }
         if (command == "speed-state") return {true, "speed", SpeedState()};
         if (command == "speed") {
+            if (argument.empty()) return {true, "speed", speed.Name()};
             Speed parsed;
             if (!Speed::Parse(argument, parsed)) return {false, "argument", "Use original, 1.5x, 2x, 3x, 4x, 8x or uncapped."};
             SetSpeed(parsed);
@@ -3498,6 +3515,9 @@ class Runner {
     Speed speed{};
     double guestSeconds{0};
     double measuredHz{0};
+    // Wall time spent running the guest since the last UpdateSpeed, and Uncapped's clock factor.
+    double busyMs{0};
+    double uncappedFactor{kUncappedFactor};
     pair<double, double> speedMark{0, 0};
     bool quit{false};
     bool smooth{false};

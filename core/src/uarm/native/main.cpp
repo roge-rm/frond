@@ -844,8 +844,7 @@ bool gFastEngineMissing = false;
         // Original follows the clock the guest sets, Faster that clock times its multiplier; --mips is a fixed
         // rate, as is Uncapped.
         if (options.mips) {
-            mainLoop.SetCyclesPerSecondLimit(uint64_t(*options.mips) * 1000000);
-            mainLoop.SetFollowCoreClock(false);
+            mainLoop.SetFixedMips(*options.mips);
         } else {
             mainLoop.SetSpeed(speed, deviceProfileOriginalHz5(deviceType));
         }

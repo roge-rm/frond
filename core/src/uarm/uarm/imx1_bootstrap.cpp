@@ -1147,7 +1147,7 @@ Imx1BootstrapAccess Imx1Bootstrap::access(uint32_t address, uint32_t size, bool 
         }
         if (result == Imx1CgmAccess::ok && write) {
             const auto referenceDenominator = cpuClockMode == 3 ?
-                next.mcuPllTargetRatio().numerator : next.systemPllActiveRatio().numerator;
+                cpuMcuRatio(next).numerator : next.systemPllActiveRatio().numerator;
             if (!referenceRatioSupported(referenceDenominator) ||
                 !next.mcuReferenceSupported(next.mcuPllTargetRatio().numerator) ||
                 !next.mcuReferenceSupported(next.systemPllActiveRatio().numerator))

@@ -161,6 +161,78 @@ void machine(bool fast) {
         assert(ratio > want * 0.995 && ratio < want * 1.005);
     }
 }
+// With 8x set from the start: the switch to asynchronous mode, then the native helper's MCU PLL retune
+// (FastBus, MPCTL0, restart, poll, back to asynchronous), as in imx1-mpll-retune's whole sequence. Neither
+// mode switch is refused, both MPCTL0 writes go through, and the loop after runs 8 times the instructions.
+struct Writes { unsigned mpctl0 = 0, refused = 0; };
+void countWrites(void* p, const Imx1ProbeAccess& e) {
+    auto* w = static_cast<Writes*>(p);
+    if (e.status != Imx1BootstrapAccess::ok) ++w->refused;
+    if (e.address == cgmBase + 4 && e.write) ++w->mpctl0;
+}
+void literalWord(std::vector<uint32_t>& words, unsigned reg, uint32_t v) {
+    words.push_back(0xe59f0000 | reg << 12); words.push_back(0xea000000); words.push_back(v);
+}
+uint64_t retuneWindow(bool fast, uint32_t num, uint64_t ticks) {
+    std::vector<uint32_t> words;
+    literalWord(words, 0, cgmBase); literalWord(words, 1, 0x57000003); words.push_back(0xe5801000);
+    literalWord(words, 1, 0x03e717bf); words.push_back(0xe5801004);
+    literalWord(words, 1, 0x57200003); words.push_back(0xe5801000);
+    auto poll = [&] { words.push_back(0xe5902000); words.push_back(0xe3120602); words.push_back(0x1afffffc); };
+    poll();
+    literalWord(words, 1, 0xc0000078); words.push_back(0xee011f10);
+    for (unsigned i = 0; i < 60; ++i) words.push_back(0xe1a03003);
+    literalWord(words, 1, 0x78); words.push_back(0xee011f10);
+    literalWord(words, 1, 0x03e717bf); words.push_back(0xe5801004);
+    words.push_back(0xe5901000); words.push_back(0xe3c11c80); words.push_back(0xe5801000);
+    words.push_back(0xe5901000); words.push_back(0xe3811602); words.push_back(0xe5801000);
+    poll();
+    literalWord(words, 1, 0xc0000078); words.push_back(0xee011f10);
+    const uint32_t offset = uint32_t(words.size() * 4), loop = 0x10000000 + offset;  // run from physical flash
+    for (unsigned n = 0; n < 1000; ++n) words.push_back(0xe1a00000);
+    const int32_t back = (int32_t(offset) - int32_t(words.size() * 4) - 8) / 4;
+    words.push_back(0xea000000 | (uint32_t(back) & 0xffffff));
+    Writes writes;
+    Imx1ProbeOptions o; o.bootstrapPeripherals = true; o.rtcInitialTimeKnown = true; o.assumeMpllSettled = true;
+    o.virtualMpllRetune = true; o.busObserver = countWrites; o.busContext = &writes;
+    auto* m = imx1MachineCreate(reinterpret_cast<const uint8_t*>(words.data()), uint32_t(words.size() * 4),
+                                Imx1ProbeEntry::physicalFlash, fast, o);
+    assert(m && imx1MachineSetCpuClockMultiplier(m, num, 1));
+    for (unsigned n = 0;; ++n) {
+        if (n >= 1000) {
+            const auto status = imx1MachineGetStatus(m);
+            std::fprintf(stderr, "%ux: still at %08x after %llu instructions, %u MPCTL0 writes\n", num, status.pc,
+                         (unsigned long long)status.retired, writes.mpctl0);
+            assert(false);
+        }
+        const auto run = imx1MachineRunBounded(m, {5000, {UINT64_MAX, 0, 1}, 10000000});
+        if (run.reason != Imx1MachineYield::retired && run.reason != Imx1MachineYield::work) {
+            std::fprintf(stderr, "%ux: stopped at %08x, %s\n", num, run.total.pc, imx1ProbeStopName(run.total.stop));
+            assert(false);
+        }
+        if (run.total.pc >= loop && run.total.pc <= loop + 4000) break;
+    }
+    assert(writes.mpctl0 == 2 && writes.refused == 0);
+    const auto start = imx1MachineGetStatus(m);
+    const T deadline{start.time.ticks + ticks, 0, 1};
+    for (;;) {
+        const auto run = imx1MachineRunBounded(m, {1000000, deadline, UINT64_MAX / 4});
+        assert(run.reason == Imx1MachineYield::retired || run.reason == Imx1MachineYield::deadline ||
+               run.reason == Imx1MachineYield::work);
+        if (run.reason == Imx1MachineYield::deadline) break;
+    }
+    const auto end = imx1MachineGetStatus(m);
+    assert(end.pc >= loop && end.pc <= loop + 4000);
+    imx1MachineStop(m);
+    return end.retired - start.retired;
+}
+void retune(bool fast) {
+    const uint64_t one = retuneWindow(fast, 1, 1024), eight = retuneWindow(fast, 8, 1024);
+    const double ratio = double(eight) / double(one);
+    std::printf("%s retune at 8x: %llu against %llu instructions, %.4fx\n", fast ? "Fast" : "Exact",
+                (unsigned long long)eight, (unsigned long long)one, ratio);
+    assert(ratio > 8 * 0.99 && ratio < 8 * 1.01);
+}
 }  // namespace
 
 int main() {
@@ -169,5 +241,7 @@ int main() {
     board();
     machine(false);
     machine(true);
+    retune(false);
+    retune(true);
     std::puts("PASS: Zodiac Faster runs FCLK times the multiplier, guest time, HCLK, timers and FastBus as at Original");
 }

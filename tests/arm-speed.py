@@ -111,8 +111,19 @@ def main():
                 assert client.request('speed', '1.5x') == ('speed', '1.5x')
                 assert client.request('speed', 'uncapped') == ('speed', 'uncapped')
                 assert client.request('speed') == ('speed', 'uncapped')
+                assert client.request('speed-state')[1].endswith(' underruns, uncapped')
                 # The rate is what the host managed, so it's only printed; test-pxa-faster checks the clock.
                 print(f'measured {faster:.2f} MHz at 2x, {original:.2f} MHz at original')
+            finally:
+                if client.process.poll() is None:
+                    client.close()
+        # --mips is a fixed rate in place of a setting, until a speed is set.
+        with (root / 'core-mips.log').open('wb') as log:
+            client = Client(session, ['--mips', '100'], log)
+            try:
+                assert client.request('speed') == ('speed', 'fixed 100 MIPS')
+                assert client.request('speed-state')[1].endswith(', fixed 100 MIPS')
+                assert client.request('speed', '2x') == ('speed', '2x')
             finally:
                 if client.process.poll() is None:
                     client.close()

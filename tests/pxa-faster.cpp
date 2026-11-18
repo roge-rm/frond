@@ -165,7 +165,21 @@ static void mainLoop() {
         // 48 ms of host time is 48 ms of guest time at every setting.
         assert(ns >= 47990000 && ns <= 48010000);
         assert(clocks > rate * 0.04799 && clocks < rate * 0.04801);
+        assert(loop.GetCurrentIps() == uint64_t(rate) && loop.SpeedName() == name);
     }
+    // A fixed rate (set-mips, --mips) drops the multiplier and the clock following, and names itself until the
+    // next speed setting.
+    Rig tx(deviceTypeTX, 2);
+    MainLoop loop(tx.soc.get());
+    SpeedSetting5 speed;
+    assert(SpeedSetting5::Parse("8x", speed));
+    loop.SetSpeed(speed, 100000000);
+    loop.SetFixedMips(100);
+    assert(tx.soc->ClockMultiplierNum() == 1 && tx.soc->ClockMultiplierDen() == 1 && !tx.soc->FollowsCoreClock());
+    assert(loop.SpeedName() == "fixed 100 MIPS");
+    assert(SpeedSetting5::Parse("2x", speed));
+    loop.SetSpeed(speed, 100000000);
+    assert(loop.SpeedName() == "2x" && tx.soc->ClockMultiplierNum() == 2 && tx.soc->FollowsCoreClock());
 }
 
 int main() {

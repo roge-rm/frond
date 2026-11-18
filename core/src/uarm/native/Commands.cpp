@@ -63,15 +63,14 @@ namespace {
         }
 
         auto& mainLoop = static_cast<commands::Context*>(context)->mainLoop;
-        mainLoop.SetFollowCoreClock(false);
-        mainLoop.SetCyclesPerSecondLimit(mips * 1000000);
+        mainLoop.SetFixedMips(mips);
     }
 
     void CmdSpeed(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() > 1) return env.PrintUsage();
         auto& ctx = *static_cast<commands::Context*>(context);
         if (args.empty()) {
-            cout << "speed: " << ctx.mainLoop.GetSpeed().Name() << endl;
+            cout << "speed: " << ctx.mainLoop.SpeedName() << endl;
             return;
         }
         SpeedSetting5 speed;

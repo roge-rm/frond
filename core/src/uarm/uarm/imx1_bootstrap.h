@@ -338,13 +338,15 @@ class Imx1Bootstrap {
         const uint64_t g = imx1Gcd(num, den);
         cpuClockNum = uint32_t(num / g);
         cpuClockDen = uint32_t(den / g);
+        cgm.setFclkMultiplier(cpuClockNum, cpuClockDen);
     }
     uint32_t cpuClockMultiplierNum() const { return cpuClockNum; }
     uint32_t cpuClockMultiplierDen() const { return cpuClockDen; }
     // The CPU's clock in mode 3 as a ratio of the reference: the MCU PLL's times the multiplier.
-    Imx1PllRatio cpuMcuRatio() const {
-        const auto rate = cgm.mcuPllTargetRatio();
-        if (cpuClockNum == cpuClockDen || cgm.systemRestartRemaining()) return rate;
+    Imx1PllRatio cpuMcuRatio() const { return cpuMcuRatio(cgm); }
+    Imx1PllRatio cpuMcuRatio(const Imx1Cgm& clocks) const {
+        const auto rate = clocks.mcuPllTargetRatio();
+        if (cpuClockNum == cpuClockDen || clocks.systemRestartRemaining()) return rate;
         uint64_t numerator = rate.numerator * cpuClockNum, denominator = uint64_t(rate.denominator) * cpuClockDen;
         const uint64_t g = imx1Gcd(numerator, denominator);
         return {numerator / g, uint32_t(denominator / g)};
@@ -695,7 +697,7 @@ class Imx1Bootstrap {
    public:
     static constexpr size_t unsavedBytes = sizeof(RunCache) + sizeof(CardDma) + sizeof(MemoryDma) + 5 * sizeof(void*) +
                                            Imx1Mmcsd::unsavedBytes + sizeof(Imx1Ymf768) + sizeof(uint64_t) +
-                                           sizeof(LazyReference) + 2 * sizeof(uint32_t);
+                                           sizeof(LazyReference) + 2 * sizeof(uint32_t) + Imx1Cgm::unsavedBytes;
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)
