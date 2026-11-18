@@ -565,7 +565,77 @@ static void checkDisplay() {
     std::puts("PASS: staged display/latch clocks, RGB565 frame, stride/bounds, independent generations and reset");
 }
 
+// A rotated 5x37 scan read straight from the bank in blocks of 16 rows (16, 16 and a last block of 5) against
+// every pixel through copyGpuRange: the whole frame, then writes that dirty rows 20 to 36 and 0 to 5 only.
+static void checkRotatedBlocks() {
+    Imx1Eim eim;
+    uint32_t value = 0x3e00;
+    assert(eim.access(0x00220028,4,true,value) == Imx1EimAccess::ok);
+    value = 0x11111e01;
+    assert(eim.access(0x0022002c,4,true,value) == Imx1EimAccess::ok);
+    Imx1Cs5Configuration state(Imx1GraphicsProfile::virtual5744Compatible8MiB);
+    configureGraphicsInterface(state,eim);
+    configureGraphicsController(state,eim);
+    engine(state,eim);
+    store(state,eim,0x200b99c4,0x4bc,0xffff1fff);
+    store(state,eim,0x200b9a14,0x4b8,0x01ff0008);
+    mode(state,eim);
+    static Imx1GraphicsMemory direct, copied;
+    uint32_t r = 12345;
+    for (uint32_t i = 0; i < 0x400; i += 2) {
+        r = r * 1103515245 + 12345;
+        uint32_t colour = r >> 16;
+        assert(direct.accessGpu(state,eim,0x800000 + i,2,true,colour) == A::ok);
+        assert(copied.accessGpu(state,eim,0x800000 + i,2,true,colour) == A::ok);
+    }
+    transaction(state,eim,true);
+    store(state,eim,0x200ad65c,0x42c,0x60001);
+    store(state,eim,0x200ad668,0x430,0x260001);
+    store(state,eim,0x200ad2f8,0x420,0x280008);
+    store(state,eim,0x200ad304,0x424,0x60001);
+    store(state,eim,0x200ad310,0x428,0x260001);
+    store(state,eim,0x200ae9a8,0x414,0x1801c16);
+    store(state,eim,0x200ae9b8,0x418,0x800100);
+    store(state,eim,0x200ae9c4,0x41c,80);
+    transaction(state,eim,false);
+    for (unsigned i = 0; i < 64 && state.displayState().latchPending(); ++i) state.advanceCpuCycles(256);
+    assert(!state.displayState().latchPending() && state.displayState().lcdEnabled());
+    Imx1GraphicsFrame fast, slow;
+    const uint64_t period = 8 * 40 * Imx1GraphicsDisplay::pixelCycles;
+    auto compare = [&](uint32_t wantFirst, uint32_t wantLast) {
+        const auto before = Imx1GraphicsFrame::directRowCount;
+        Imx1GraphicsFrame::directRows = true;
+        assert(fast.advance(state,direct,eim));
+        assert(Imx1GraphicsFrame::directRowCount == before + (wantLast - wantFirst + 1));
+        Imx1GraphicsFrame::directRows = false;
+        assert(slow.advance(state,copied,eim));
+        Imx1GraphicsFrame::directRows = true;
+        assert(Imx1GraphicsFrame::directRowCount == before + (wantLast - wantFirst + 1));
+        uint32_t firstA = 99, lastA = 99, firstB = 98, lastB = 98;
+        const uint32_t* a = fast.getPendingFrame(firstA,lastA);
+        const uint32_t* b = slow.getPendingFrame(firstB,lastB);
+        assert(a && b && fast.width() == 5 && fast.height() == 37 && slow.width() == 5 && slow.height() == 37);
+        assert(firstA == wantFirst && lastA == wantLast && firstB == wantFirst && lastB == wantLast);
+        for (unsigned i = 0; i < 5 * 37; ++i) assert(a[i] == b[i]);
+        fast.acknowledgeFrame();
+        slow.acknowledgeFrame();
+    };
+    compare(0, 36);
+    // Pixel x, y is at 800102 + x * 80 - y * 2.
+    auto write = [&](uint32_t x, uint32_t y, uint32_t colour) {
+        state.advanceCpuCycles(period);
+        assert(direct.accessGpu(state,eim,0x800102 + x * 80 - y * 2,2,true,colour) == A::ok);
+        assert(copied.accessGpu(state,eim,0x800102 + x * 80 - y * 2,2,true,colour) == A::ok);
+    };
+    write(0, 20, 0x1234);
+    compare(20, 36);
+    write(4, 5, 0xfedc);
+    compare(0, 5);
+    std::puts("PASS: a rotated scan read in blocks of 16 rows matches the per-pixel reads, whole and in dirty rows");
+}
+
 int main() {
+    checkRotatedBlocks();
     // Frame rows read straight from the bank storage, then every row through copyGpuRange: the same checks pass.
     checkDisplay();
     const auto direct = Imx1GraphicsFrame::directRowCount;

@@ -71,9 +71,10 @@ class Imx1GraphicsFrame {
             return true;
         }
         // Nothing to read and nothing to change: the same frame and revision without the overlay shown last time.
-        // The rest would return here too, or return false with nothing changed where the surface can't be read.
+        // The rest returns true here too: display.surface fails only with the display off, which returned above.
+        // Not with a host GPU, where the overlay planes' gpuSpan below marks their pages read.
         if (valid && enabled && !(lastRevision & overlaidBit) && display.revision() == lastRevision &&
-            display.frameNumber() == lastFrame) return true;
+            display.frameNumber() == lastFrame && !memory.gpuResidency()) return true;
         Imx1GraphicsDisplay::Surface candidate;
         if (!display.surface(candidate)) return false;
         Imx1GraphicsDisplay::Overlay overlay;

@@ -123,7 +123,7 @@ class Imx1GraphicsCommands {
         const uint64_t ringEnd = uint64_t(ringAddress) + uint64_t(words) * 4;
         unsigned ringBank = 0;
         uint32_t ringOffset = 0;
-        const uint8_t* ring = !memory.gpuResidency() && !(ringAddress & 3) &&
+        const uint8_t* ring = directRing && !memory.gpuResidency() && !(ringAddress & 3) &&
             ((ringAddress >= 0x100000 && ringEnd <= 0x160000) || (ringAddress >= 0x800000 && ringEnd <= 0x1000000)) ?
             memory.gpuSpan(configuration, eim, ringAddress, uint64_t(words) * 4, ringBank, ringOffset) : nullptr;
         auto take = [&](uint32_t& word) {
@@ -460,6 +460,8 @@ class Imx1GraphicsCommands {
     // Tests: directFills off makes complete take every fill through accessGpu; directFillCount counts the fills
     // fastFill took.
     static inline bool directFills = true;
+    // Tests: directRing off makes decode read every ring word through accessGpu.
+    static inline bool directRing = true;
     static inline uint64_t directFillCount = 0;
     Imx1BootstrapAccess complete(Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                  Imx1GraphicsMemory& memory) {
