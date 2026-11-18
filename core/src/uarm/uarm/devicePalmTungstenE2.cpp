@@ -135,7 +135,32 @@ struct Device {
     // replace it.
     std::array<uint8_t, 6> bluetoothAddress;
     bool resetting;
+    BatteryPower battery;
 };
+
+// The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
+// three) on the E2, TX and Zire 72, and the Zire 72's GPIO99, low on external power (the charging bolt).
+// The TX's and E2's external power inputs and the TG50's cradle and charging pins (uc GPIO A13, A14) stay at
+// their fixed levels until their polarity is known.
+static void deviceApplyBattery(Device *dev) {
+    const uint32_t mV = BatteryPower::LiIonMilliVolts(dev->battery.Percent());
+    if (dev->tg50) {
+        tg50BoardSetBatteryMilliVolts(dev->tg50, uint16_t(mV));
+        return;
+    }
+    if (!dev->wm9712L) return;
+    wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, mV / 3);
+    if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !dev->battery.ExternalPower());
+}
+
+bool deviceBatterySupported(Device *dev) { return dev->tg50 || dev->wm9712L; }
+
+bool deviceSetBattery(Device *dev, const BatteryPower &battery) {
+    if (!deviceBatterySupported(dev)) return false;
+    dev->battery = battery;
+    deviceApplyBattery(dev);
+    return true;
+}
 
 // A random locally administered address, as btvirt gives a controller.
 static std::array<uint8_t, 6> deviceNewBluetoothAddress() {
@@ -209,6 +234,7 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
     if (!dev) ERR("cannot alloc device");
 
     dev->type = type;
+    dev->battery = BatteryPower{};
 #ifndef __EMSCRIPTEN__
     dev->wifi = nullptr;
 #endif
@@ -530,7 +556,11 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
             deviceApplyBluetoothAddress(dev);
         }
     }
-    if (dev->tg50) { tg50BoardLoad(dev->tg50, loader, preserveInput); return; }
+    if (dev->tg50) {
+        tg50BoardLoad(dev->tg50, loader, preserveInput);
+        deviceApplyBattery(dev);
+        return;
+    }
     if (dev->type == DeviceType5::deviceTypeTX) {
         auto chunk = loader.GetChunkOrFail(ChunkType::palmTx, 0, "Palm TX board");
         if (!chunk) return;
@@ -551,6 +581,7 @@ void deviceLoad(struct Device *dev, T &loader, bool preserveInput) {
     if (dev->qci && !pxaQciLoad(dev->qci, loader)) return;
     if (dev->nand) directNandLoad(dev->nand, loader);
     if (dev->bcm2035) bcm2035Load(dev->bcm2035, loader);
+    deviceApplyBattery(dev);
 }
 
 template void deviceSave<Savestate<ChunkType>>(Device *dev, Savestate<ChunkType> &savestate);
@@ -597,7 +628,11 @@ void deviceDestroy(Device *dev) {
 }
 
 void deviceBeginReset(Device *dev) { dev->resetting = true; if (dev->tg50) tg50BoardBeginReset(dev->tg50); }
-void deviceEndReset(Device *dev) { dev->resetting = false; if (dev->tg50) tg50BoardEndReset(dev->tg50); }
+void deviceEndReset(Device *dev) {
+    dev->resetting = false;
+    if (dev->tg50) tg50BoardEndReset(dev->tg50);
+    deviceApplyBattery(dev);
+}
 
 void deviceAudioAdvance(Device *dev, uint64_t ns) { if (dev->tg50) tg50BoardAudioAdvance(dev->tg50, ns); }
 

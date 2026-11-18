@@ -13,6 +13,7 @@
 
 #include "EmSPISlaveADS784x.h"
 
+#include "EmBattery.h"
 #include "EmCommon.h"
 #include "EmLowMem.h"       // EmLowMem_GetGlobal
 #include "EmMemory.h"       // CEnableFullAccess
@@ -162,6 +163,33 @@ void EmSPISlaveADS784x::DoSaveLoad(T& helper) {
 // ---------------------------------------------------------------------------
 //		� EmSPISlaveADS784x::DoExchange
 // ---------------------------------------------------------------------------
+
+uint16 EmSPISlaveADS784x::BatteryCount(const uint16_t (&curve)[11], UInt16 sysBattStepsPerVolt,
+                                        Int16 sysBattVoltageStepOffset, unsigned percent, bool ads7846) {
+    // The voltage on the ROM's own curve for the level; at 100% that's entry [10] exactly.
+    const UInt16 voltageCurve = BatteryPower::CurveCentivolts(curve, percent);
+
+    PRINTF("voltageCurve = %d", voltageCurve);
+    PRINTF("sysBattStepsPerVolt = %d", sysBattStepsPerVolt);
+    PRINTF("sysBattVoltageStepOffset = %d", sysBattVoltageStepOffset);
+
+    // Determine the result based on the formula in the comments in ProcessCommand.
+
+    uint16 result = (voltageCurve * sysBattStepsPerVolt + 50) / 100 - sysBattVoltageStepOffset;
+
+    // Turn this into a 12 bit result.
+
+    result <<= 4;
+
+    if (ads7846) {
+        result *= 2;  // Account for the fact that the Palm OS battery
+                      // tables assume a 5.0V reference voltage, while
+                      // the 7846 uses 2.5V. (?)
+        result /= 4;  // Account for 1:4 voltage divider
+    }
+
+    return result;
+}
 
 uint16 EmSPISlaveADS784x::DoExchange(uint16 control, uint16 data) {
     PRINTF("");
@@ -338,7 +366,7 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
                 UInt16 sysBattDataStructVersion = sysBatteryData.sysBattDataStructVersion;
 
                 if (sysBattDataStructVersion <= 3) {
-                    UInt16 voltageCurve = 0;
+                    uint16_t curve[11] = {};
                     UInt16 sysBattStepsPerVolt = 0;
                     Int16 sysBattVoltageStepOffset = 0;
 
@@ -348,44 +376,28 @@ void EmSPISlaveADS784x::ProcessCommand(uint8 command) {
                     if (sysBattDataStructVersion == 1) {
                         EmAliasSysBatteryDataStructV1<PAS> sysBatteryDataV1(sysBatteryDataP);
 
-                        voltageCurve = sysBatteryDataV1.sysBattVoltageCurve[10];
+                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV1.sysBattVoltageCurve[i];
                         sysBattStepsPerVolt = sysBatteryDataV1.sysBattStepsPerVolt;
                         sysBattVoltageStepOffset = sysBatteryDataV1.sysBattVoltageStepOffset;
                     } else if (sysBattDataStructVersion == 2) {
                         EmAliasSysBatteryDataStructV2<PAS> sysBatteryDataV2(sysBatteryDataP);
 
-                        voltageCurve = sysBatteryDataV2.sysBattVoltageCurve[10];
+                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV2.sysBattVoltageCurve[i];
                         sysBattStepsPerVolt = sysBatteryDataV2.sysBattStepsPerVolt;
                         sysBattVoltageStepOffset = sysBatteryDataV2.sysBattVoltageStepOffset;
                     } else if (sysBattDataStructVersion == 3) {
                         EmAliasSysBatteryDataStructV3<PAS> sysBatteryDataV3(sysBatteryDataP);
 
-                        voltageCurve = sysBatteryDataV3.sysBattVoltageCurve[10];
+                        for (int i = 0; i < 11; i++) curve[i] = sysBatteryDataV3.sysBattVoltageCurve[i];
                         sysBattStepsPerVolt = sysBatteryDataV3.sysBattStepsPerVolt;
                         sysBattVoltageStepOffset = sysBatteryDataV3.sysBattVoltageStepOffset;
                     } else {
                         EmAssert(false);
                     }
 
-                    PRINTF("voltageCurve = %d", voltageCurve);
-                    PRINTF("sysBattStepsPerVolt = %d", sysBattStepsPerVolt);
-                    PRINTF("sysBattVoltageStepOffset = %d", sysBattVoltageStepOffset);
-
-                    // Determine the result based on the formula in the comments above.
-
-                    result =
-                        (voltageCurve * sysBattStepsPerVolt + 50) / 100 - sysBattVoltageStepOffset;
-
-                    // Turn this into a 12 bit result.
-
-                    result <<= 4;
-
-                    if (fChannelUse[channel] == kChannelBattery7846) {
-                        result *= 2;  // Account for the fact that the Palm OS battery
-                                      // tables assume a 5.0V reference voltage, while
-                                      // the 7846 uses 2.5V. (?)
-                        result /= 4;  // Account for 1:4 voltage divider
-                    }
+                    result = BatteryCount(curve, sysBattStepsPerVolt, sysBattVoltageStepOffset,
+                                          gBattery.Percent(),
+                                          fChannelUse[channel] == kChannelBattery7846);
                 } else {
                     result = 0x0FFF;
                 }

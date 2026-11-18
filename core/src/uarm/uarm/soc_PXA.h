@@ -78,6 +78,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     void SuspendTimerInterrupts(bool suspendInterrupts) override;
     bool LcdEnabled() override;
     bool HoldSwitchSupported() const override;
+    bool BatterySupported() const override;
+    bool SetBattery(const BatteryPower&) override;
     bool HoldSwitchOn() const override;
     bool SetHoldSwitch(bool on) override;
     bool PowerButtonSupported() const override { return !disableSleep; }

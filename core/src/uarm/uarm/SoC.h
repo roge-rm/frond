@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 
+#include "BatteryPower.h"
 #include "NetworkSimulation.h"
 #include "LibertasCF.h"
 #include "buffer.h"
@@ -52,6 +53,11 @@ class SoC {
         SoC& soc;
         bool active{true};
     };
+    // The battery setting (machine setting, never saved with the session); see BatteryPower.h. Runs on the SoC's
+    // thread. False where the board has no battery input modelled yet, which keeps its fixed full battery.
+    virtual bool BatterySupported() const { return false; }
+    virtual bool SetBattery(const BatteryPower&) { return false; }
+    const BatteryPower& Battery() const { return battery; }
     virtual bool HoldSwitchSupported() const { return false; }
     virtual bool HoldSwitchOn() const { return false; }
     virtual bool SetHoldSwitch(bool) { return false; }
@@ -275,6 +281,7 @@ class SoC {
     uint64_t runInstructions{0};
     bool followCoreClock{false};
     bool powerOnReset{false};
+    BatteryPower battery{};
     bool framebufferDirty{true};
     bool pcmEnabled{false};
     bool pcmSuspended{false};

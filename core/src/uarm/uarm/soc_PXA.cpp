@@ -371,6 +371,12 @@ bool SocPXA::PressHotSync() {
     return true;
 }
 bool SocPXA::HoldSwitchOn() const { return deviceHoldSwitchOn(dev); }
+bool SocPXA::BatterySupported() const { return deviceBatterySupported(dev); }
+bool SocPXA::SetBattery(const BatteryPower& value) {
+    if (!deviceSetBattery(dev, value)) return false;
+    battery = value;
+    return true;
+}
 bool SocPXA::SetHoldSwitch(bool on) {
     if (!HoldSwitchSupported()) return false;
     // Host commands run on the owning SoC thread; this is a persistent external switch.

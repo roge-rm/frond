@@ -12,6 +12,7 @@
 \* ===================================================================== */
 
 #include "EmRegsVZPalmM500.h"
+#include "EmBattery.h"
 
 #include "EmCommon.h"
 #include "EmRegsVZPrv.h"
@@ -145,10 +146,11 @@ uint8 EmRegsVZPalmM500::GetPortInputValue(int port) {
     uint8 result = VZ::GetPortInputValue(port);
 
     if (port == 'K') {
-        // Make sure hwrVZPortKAC_PWR_N is set, or the dock-status routines
-        // will report that we're powered (even if we aren't docked!).
-
-        result |= hwrVZPortKAC_PWR_N;
+        // AC_PWR# is low on external power (the battery setting's Charging switch).
+        if (gBattery.ExternalPower())
+            result &= ~hwrVZPortKAC_PWR_N;
+        else
+            result |= hwrVZPortKAC_PWR_N;
     }
 
     return result;

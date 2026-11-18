@@ -2,9 +2,11 @@
 
 #include <memory>
 
+#include "EmBattery.h"
 #include "EmCommon.h"
 #include "EmLowMem.h"
 #include "EmPalmOS.h"
+#include "EmPalmStructs.h"
 #include "EmPatchMgr.h"
 #include "EmSession.h"
 #include "EmSystemState.h"
@@ -152,7 +154,10 @@ namespace {
 #define hwrDockStatusUsingExternalPower 0x0004  // using some type of external power source
 #define hwrDockStatusCharging 0x0008            // internal power cells are recharging
 
-        PUT_RESULT_VAL(UInt16, hwrDockStatusUsingExternalPower);
+        // Not charging still says external power until the battery default lands with an Exact rebaseline.
+        PUT_RESULT_VAL(UInt16, gBattery.charging
+                                   ? UInt16(hwrDockStatusUsingExternalPower | hwrDockStatusCharging)
+                                   : UInt16(hwrDockStatusUsingExternalPower));
 
         return kSkipROM;
     }
@@ -177,6 +182,32 @@ namespace {
         return kSkipROM;
     }
 
+    // The battery setting's level as the 0-255 scale HwrBatteryLevel and HwrBattery's abs use.
+    UInt16 BatteryLevel255() { return UInt16(gBattery.Percent() * 255 / 100); }
+
+    // The battery voltage for the setting's level: the ROM's sysBattVoltageCurve scaled so full is fullMilliVolts,
+    // or 80% of full at empty rising evenly where the ROM has no curve.
+    UInt16 BatteryMilliVolts(UInt16 fullMilliVolts) {
+        const unsigned percent = gBattery.Percent();
+        if (percent == 100) return fullMilliVolts;
+
+        CEnableFullAccess munge;
+        const emuptr data = EmLowMem_GetGlobal(sysBatteryDataP);
+        if (data) {
+            EmAliasSysBatteryDataStructV1<PAS> v1(data);
+            const UInt16 version = v1.sysBattDataStructVersion;
+            uint16_t curve[11] = {};
+            for (int i = 0; i < 11; i++) {
+                if (version == 1) curve[i] = v1.sysBattVoltageCurve[i];
+                else if (version == 2) curve[i] = EmAliasSysBatteryDataStructV2<PAS>(data).sysBattVoltageCurve[i];
+                else if (version == 3) curve[i] = EmAliasSysBatteryDataStructV3<PAS>(data).sysBattVoltageCurve[i];
+            }
+            if (curve[10])
+                return UInt16(uint32_t(fullMilliVolts) * BatteryPower::CurveCentivolts(curve, percent) / curve[10]);
+        }
+        return UInt16(uint32_t(fullMilliVolts) * (400 + percent) / 500);
+    }
+
     CallROMType HeadpatchHwrBatteryLevel(void) {
         EmAssert(gSession);
 
@@ -186,7 +217,7 @@ namespace {
 
         CALLED_SETUP("UInt16", "void");
 
-        PUT_RESULT_VAL(UInt16, 255);  // Hardcode a maximum level
+        PUT_RESULT_VAL(UInt16, BatteryLevel255());
 
         return kSkipROM;
     }
@@ -201,13 +232,10 @@ namespace {
         if (cmd == 2 && gSession->GetDevice().NeedsBatteryPatch()) {
             CALLED_GET_PARAM_REF(HwrBatCmdReadType, cmdP, Marshal::kInOut);
 
-            if (gSession->GetDevice().HardwareID() == 0x0a /*halModelIDVisorPrism*/) {
-                (*cmdP).mVolts = 4000;  // 4.0 volts
-            } else {
-                (*cmdP).mVolts = 2500;  // 2.5 volts
-            }
-
-            (*cmdP).abs = 255;  // Hardcode a maximum level
+            // Full is 4.0 V on the Prism and 2.5 V elsewhere.
+            const bool prism = gSession->GetDevice().HardwareID() == 0x0a /*halModelIDVisorPrism*/;
+            (*cmdP).mVolts = BatteryMilliVolts(prism ? 4000 : 2500);
+            (*cmdP).abs = BatteryLevel255();
 
             cmdP.Put();
 
@@ -223,9 +251,10 @@ namespace {
 
         CEnableFullAccess munge;
 
-        EmLowMem::fgLowMem.globals.hwrBatteryLevel = 0xff;
-        EmLowMem::fgLowMem.globals.hwrBatteryPercent = 100;
-        EmLowMem::fgLowMem.globals.sysBatteryMinThreshold = 0;
+        EmLowMem::fgLowMem.globals.hwrBatteryLevel = BatteryLevel255();
+        EmLowMem::fgLowMem.globals.hwrBatteryPercent = gBattery.Percent();
+        // Below full the ROM's own threshold stays, so a low level warns and turns the Palm off.
+        if (gBattery.Percent() == 100) EmLowMem::fgLowMem.globals.sysBatteryMinThreshold = 0;
     }
 
     CallROMType HeadpatchSysLibLoad(void) {
