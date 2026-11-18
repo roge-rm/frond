@@ -1528,6 +1528,8 @@ for line in s.makefile('rb'):
         continue
     if cmd == b'sd-state':
         s.sendall(i+b'\tok\tcard\t'+b'none'.hex().encode()+b'\n');continue
+    if cmd == b'battery-state':
+        s.sendall(i+b'\tok\tbattery\t'+b'unavailable'.hex().encode()+b'\n');continue
     assert cmd == b'save', 'Closing after a failed save must not send quit'
     s.sendall(i+b'\terror\twrite\t'+b'Disk full'.hex().encode()+b'\n')
 )PY");
@@ -2997,7 +2999,7 @@ for line in s.makefile('rb'):
     i,cmd,arg=line.rstrip(b'\n').split(b'\t')
     text=bytes.fromhex(arg.decode())
     if cmd==b'input-replay': text=open(text,'rb').read().replace(b'\n',b'|')
-    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state'):
+    if cmd not in (b'keyboard-state',b'network-state',b'device-state',b'sd-state',b'microphone-state',b'gamepad-state',b'battery-state'):
         log.write(cmd.decode()+' '+text.decode()+'\n'); log.flush()
     if cmd==b'microphone-mode': mic=text
     if cmd==b'camera-mode':

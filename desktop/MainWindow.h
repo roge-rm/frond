@@ -186,6 +186,11 @@ class MainWindow : public QMainWindow {
     void liveDisplay(const QString& what);
     void updateMips();
     void pollMips();
+    void batteryChanged();
+    void batteryTick();
+    void applyBattery();
+    void showBattery();
+    QString batterySpec() const;
     void listApps();
     void databasesReply(bool ok, const QString& code, const QString& message);
     void deleteApplication(const QString& name);
@@ -290,6 +295,14 @@ class MainWindow : public QMainWindow {
     QTimer* appsRetryTimer{nullptr};   // re-lists a sleeping Palm every 2 s while the Applications panel shows it
     QTimer* printerTimer;
     QTimer* mipsTimer;
+    // Battery: live in the Display panel; the host's battery is read about once a minute.
+    QComboBox* batteryBox{nullptr};
+    QSlider* batteryLevel{nullptr};
+    QLabel *batteryLabel{nullptr}, *batteryLevelLabel{nullptr};
+    QCheckBox* batteryCharging{nullptr};
+    QTimer* batteryTimer{nullptr};
+    QString batterySent;  // the last text the core was given
+    bool batteryKnown{false}, batterySupported{false}, batteryChargingSupported{true};
     QString speedText;
     void updateBarMachine();
     PrintSource usbPrint, irPrint;
