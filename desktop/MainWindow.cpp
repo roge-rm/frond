@@ -1,3 +1,6 @@
+#include "HostBattery.h"
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include "DimText.h"
 #include "MainWindow.h"
 #include "DanaViewControls.h"
@@ -265,6 +268,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (figure != speedText) { speedText = figure; if (!embedded) updateBarMachine(); }
         }
         if (command == "gamepad-state" && ok) gamepadReply(message);
+        if (command == "battery-state" || command == "battery") {
+            if (command == "battery" && !ok) { batterySent.clear(); failure(message); return; }
+            if (!ok) return;
+            batteryKnown = true;
+            batterySupported = message != "unavailable";
+            batteryChargingSupported = !message.endsWith(" no-charging");
+            batteryTimer->start(60000);
+            showBattery();
+            if (runningPreferences.batteryMode == "host") readHostBattery();
+            else applyBattery();
+            refresh();
+        }
     });
     mipsTimer = new QTimer(this);
     mipsTimer->setInterval(1000);
@@ -560,6 +575,34 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     speedBox->addItem(tr("Original"), false);
     speedBox->addItem(tr("Uncapped"), true);
     displayGrid->addWidget(speedBox, 7, 1, 1, 2);
+    batteryLabel = label(tr("Battery"), 10, displayGrid);
+    batteryBox = new QComboBox(root);
+    batteryBox->setObjectName("runningBattery");
+    batteryBox->addItem(tr("Maximum"), "max");
+    batteryBox->addItem(tr("Set level"), "level");
+    batteryBox->addItem(tr("Host battery"), "host");
+    displayGrid->addWidget(batteryBox, 10, 1, 1, 2);
+    batteryLevelLabel = label({}, 11, displayGrid);
+    batteryLevel = new QSlider(Qt::Horizontal, root);
+    batteryLevel->setObjectName("runningBatteryLevel");
+    batteryLevel->setRange(0, 100);
+    batteryLevel->setPageStep(10);
+    batteryLevel->setTracking(false);
+    displayGrid->addWidget(batteryLevel, 11, 1, 1, 2);
+    batteryCharging = new QCheckBox(tr("Charging"), root);
+    batteryCharging->setObjectName("runningBatteryCharging");
+    displayGrid->addWidget(batteryCharging, 12, 0, 1, 3);
+    connect(batteryBox, qOverload<int>(&QComboBox::activated), this, [this] { batteryChanged(); });
+    connect(batteryLevel, &QSlider::valueChanged, this, [this] { batteryChanged(); });
+    connect(batteryLevel, &QSlider::sliderMoved, this, [this](int value) { batteryLevelLabel->setText(tr("Level: %1").arg(value)); });
+    connect(batteryCharging, &QCheckBox::clicked, this, [this] { batteryChanged(); });
+    batteryTimer = new QTimer(this);
+    connect(batteryTimer, &QTimer::timeout, this, [this] { batteryTick(); });
+    hostWatcher = new QFutureWatcher<frondBattery::HostState>(this);
+    connect(hostWatcher, &QFutureWatcher<frondBattery::HostState>::finished, this, [this] {
+        hostBattery = hostWatcher->result();
+        applyBattery();
+    });
     for (auto* w : std::initializer_list<QWidget*>{sizeSlider, smoothToggle, mipsToggle, keyboardShow, jogBox, jogLandscapeBox, speedBox}) runningButtons << w;
     connect(sizeSlider, &QSlider::valueChanged, this, [this](int value) { liveDisplay("size"); (void)value; });
     connect(smoothToggle, &QCheckBox::clicked, this, [this] { liveDisplay("smooth"); });
@@ -777,6 +820,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (cardProgress) { cardProgress->hide(); cardProgress->deleteLater(); cardProgress = nullptr; }
         holdKnown = holdOn = irdaQueued = false; gamepadState.clear(); showCamera("pattern");
         mipsTimer->stop();
+        batteryTimer->stop();
         palmHolder->release(); embedded = embedWanted = embedTried = panelWasOpen = fitOffPending = false;
         appsStale = false; deleteApp = {}; knownDatabases.clear(); appsPanel->setDatabases({});
         if (internalFiles) internalFiles->close();
@@ -1234,6 +1278,7 @@ void MainWindow::refresh() {
     cameraBox->setEnabled(enabled && frondFirmware::profile(currentDevice()).frontend.camera);
     soundToggle->setEnabled(enabled && caps.sound);
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
+    showBattery();
     note(soundToggle, caps.sound, {});
     // A 68k device's missing hardware isn't shown at all; on the others it's greyed.
     const bool m68k = frondFirmware::runs68k(currentDevice());
@@ -1600,6 +1645,59 @@ void MainWindow::liveDisplay(const QString& what) {
     }
     send(command, argument);
 }
+// The Battery setting as the core's text. Host mode uses the last host reading; it never reads the host here.
+QString MainWindow::batterySpec() const {
+    return frondBattery::spec(runningPreferences.batteryMode, runningPreferences.batteryLevel, runningPreferences.batteryCharging,
+                              hostBattery, batteryChargingSupported || !batteryKnown);
+}
+void MainWindow::batteryChanged() {
+    auto prefs = runningPreferences;
+    prefs.batteryMode = batteryBox->currentData().toString();
+    prefs.batteryLevel = batteryLevel->value();
+    // A greyed Charging keeps the saved choice; only the text sent drops it.
+    if (batteryCharging->isEnabled()) prefs.batteryCharging = batteryCharging->isChecked();
+    if (const auto error = frondSessions::writePreferences(sessionPath, prefs); !error.isEmpty()) { showBattery(); return failure(error); }
+    runningPreferences = prefs;
+    showBattery();
+    if (prefs.batteryMode == "host") readHostBattery();
+    else applyBattery();
+}
+// Reads the host's battery on another thread; the reading is sent when it arrives.
+void MainWindow::readHostBattery() {
+    if (hostWatcher->isRunning()) return;
+    hostWatcher->setFuture(QtConcurrent::run([] { return frondBattery::readHost(); }));
+}
+// Sends the battery text when it differs from the last one sent; tries again shortly if the core is busy.
+void MainWindow::applyBattery() {
+    if (!client.running() || stopping || !batterySupported) return;
+    const auto spec = batterySpec();
+    if (spec == batterySent) return;
+    if (client.requestBackground("battery", spec)) { batterySent = spec; return; }
+    if (batteryRetry) return;
+    batteryRetry = true;
+    QTimer::singleShot(500, this, [this] { batteryRetry = false; applyBattery(); });
+}
+void MainWindow::batteryTick() {
+    if (!client.running() || stopping) return;
+    if (!batteryKnown) client.requestBackground("battery-state");
+    else if (runningPreferences.batteryMode == "host") readHostBattery();
+}
+// Shows the setting in the controls.
+void MainWindow::showBattery() {
+    const QSignalBlocker a(batteryBox), b(batteryLevel), c(batteryCharging);
+    const auto& mode = runningPreferences.batteryMode;
+    batteryBox->setCurrentIndex(std::max(0, batteryBox->findData(mode)));
+    batteryLevel->setValue(runningPreferences.batteryLevel);
+    batteryLevelLabel->setText(tr("Level: %1").arg(runningPreferences.batteryLevel));
+    batteryCharging->setChecked(runningPreferences.batteryCharging);
+    const bool level = mode == "level";
+    batteryLevelLabel->setVisible(level);
+    batteryLevel->setVisible(level);
+    batteryCharging->setVisible(mode != "host");
+    const bool on = client.available() && batteryKnown && batterySupported;
+    for (QWidget* w : {static_cast<QWidget*>(batteryBox), static_cast<QWidget*>(batteryLevel)}) w->setEnabled(on);
+    batteryCharging->setEnabled(on && batteryChargingSupported);
+}
 // The speed readout: polled once a second while it is on, for an ARM device that is up and idle.
 // The reply starts "312.00 MHz, limit ...".
 void MainWindow::updateMips() {
@@ -1662,6 +1760,9 @@ void MainWindow::chooseCamera(int index) {
     } else send("camera-mode", "pattern");
 }
 void MainWindow::afterDevice() {
+    // Asks the core what it supports, once a second until it answers, then the host battery once a minute.
+    batteryTimer->start(1000);
+    batteryTick();
     send(frondFirmware::profile(runningDevice).frontend.holdPresent ? "hold-state" :
          storageSupported() ? cardCommand("state") : "network-state");
 }
@@ -2277,6 +2378,11 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     soundToggle->setChecked(caps.sound && runningPreferences.audio);
     if (!caps.sound || !runningPreferences.audio) arguments << "--no-sound";
     if (!runningPreferences.rumble) arguments << "--no-rumble";
+    // Nothing is known about this machine yet; the core's answer to battery-state sets it right.
+    batteryKnown = batterySupported = false;
+    batteryChargingSupported = true;
+    batterySent = batterySpec();
+    arguments << "--battery" << batterySent;
     const auto sourceSession = !arguments.isEmpty() && !arguments.first().startsWith("--") ? arguments.first() : QString();
     if (!m68k && runningPreferences.fastAudio) {
         const auto option = frondAudio::lowLatencyOption(startDevice, sourceSession,

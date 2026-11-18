@@ -80,12 +80,12 @@ bool DesktopClient::request(const QString& command, const QString& argument) {
     deadline.start(120000);
     return true;
 }
-bool DesktopClient::requestBackground(const QString& command) {
+bool DesktopClient::requestBackground(const QString& command, const QString& argument) {
     if (!available() || !socket || backgroundId) return false;
     backgroundId = ++serial;
     backgroundCommand = command;
-    const auto line = QByteArray::number(backgroundId) + '\t' + command.toUtf8() + "\t\n";
-    if (socket->write(line) != line.size()) { backgroundId = 0; return false; }
+    const auto line = QByteArray::number(backgroundId) + '\t' + command.toUtf8() + '\t' + argument.toUtf8().toHex() + '\n';
+    if (line.size() > 32768 || socket->write(line) != line.size()) { backgroundId = 0; return false; }
     return true;
 }
 bool DesktopClient::cancelFiles() {

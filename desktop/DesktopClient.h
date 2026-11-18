@@ -16,7 +16,7 @@ class DesktopClient : public QObject {
     // A read-only query that doesn't take the request slot: available() and the pending command are
     // untouched, and the answer comes as backgroundResult. Sent only when the slot is free and no other
     // background query is out.
-    bool requestBackground(const QString& command);
+    bool requestBackground(const QString& command, const QString& argument = {});
     bool backgroundOut() const { return backgroundId != 0; }
     bool cancelFiles();
     bool running() const { return process.state() != QProcess::NotRunning; }

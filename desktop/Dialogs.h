@@ -23,6 +23,10 @@ class MachineSettings : public QWidget {
     void setDevice(frondFirmware::Device device);
     QSlider* windowScale;
     QLabel* scaleLabel;
+    // Battery: Maximum, Set level or Host battery, its level, and the Charging switch.
+    QComboBox* batteryMode;
+    QSlider* batteryLevel;
+    QCheckBox* batteryCharging;
     QCheckBox *smoothLcd, *showMips, *audio, *fastAudio, *rumble, *showKeyboard;
     DanaViewControls* danaView;
     QComboBox* jogControls;
@@ -47,6 +51,7 @@ class MachineSettings : public QWidget {
     // A new machine: the Engine follows the chosen device's default until it is changed by hand.
     void setNewMachine();
  private:
+    QLabel *batteryLevelLabel;
     QLabel *contrastLabel, *engineLabel, *speedLabel, *infraredLabel, *serialLabel, *bluetoothLabel;
     QGroupBox* peripherals;
     bool peripheralsShown{false};
