@@ -616,6 +616,10 @@ void deviceTg50SetUsbCable(Device *dev, bool connected) {
 void deviceTg50SetAccessoryAux(Device *dev, uint16_t mV) {
     if (dev && dev->tg50) tg50BoardSetAccessoryAux(dev->tg50, mV);
 }
+void deviceTg50SetConnectorEmpty(Device *dev) {
+    if (dev && dev->tg50) tg50BoardSetConnectorEmpty(dev->tg50);
+}
+uint16_t deviceTg50AccessoryAuxCode(Device *dev) { return dev && dev->tg50 ? tg50BoardAccessoryAuxCode(dev->tg50) : 0; }
 bool deviceTg50UsbCableAttached(Device *dev) {
     return dev && dev->tg50 && tg50BoardUsbCableAttached(dev->tg50);
 }

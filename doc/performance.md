@@ -34,14 +34,20 @@ Correctness against the interpreter: `make test-jit-differential` and `make test
 - Original is worked out from the clock and the manual's tables, there was no real IIIx to time it on. The timing probe (`tests/palm/timing68k-probe.c`) runs a dozen short loops (branches, calls, reads, MULU, DIVU, DBRA, shifts, MOVEM, ROM and register work) and `python3 tests/timing68k.py --rom ROM --output DIR` compares each loop's measured clocks with the manual's count plus the wait states and bus time. They agree within 1%, allowing for the 100 Hz tick interrupt. `make test-frond-68k` runs the table test.
 - Host cost: Original is mostly asleep after boot (a few percent of one core); Uncapped is bound by the host. A debugger costs about 3% host time while attached and almost nothing while no gdb is connected. FrondBench runs on the OS 3.5 and 4.1 ROMs (it needs 3.5), at Original and Uncapped; it is Frond's own, so there are no real IIIx scores to compare against.
 
+## ARM timing
+
+The PXA devices (T|X, Zire 72, E2, TG50) run at the clock the guest sets in CCCR and CLKCFG, and Original is that clock. Each instruction costs the XScale's clocks for it (issue and result latency from the core's manual, branches, multiplies, loads and stores, PACE's 68k operations as a fixed cost per op), and memory adds the data cache's misses, line fills and dirty write-backs and the write buffer's drains at the SDRAM width MDCNFG sets. Exact and Fast charge the same, so their counts agree at Original; Uncapped Fast leaves the memory charges out. A cycle is a clock, not an instruction: guest instructions per second are lower than the clock wherever an instruction costs more than one. `make test-xscale-cost` checks the tables and the cache model.
+
+The Tapwave Zodiac 2 has its own clock model (the i.MX1's PLLs, CS5 waits and the ARM920T caches in Exact).
+
 ## Fixed guest-time benchmarks
 
 `make benchmark-replay` builds `build/benchmark-replay`, which restores a session and runs a replay for a fixed amount of guest time with no wall-clock pacing:
 
 ```sh
-./build/benchmark-replay SESSION REPLAY GUEST_MS MIPS on|off NEWDIR [PALM_EPOCH_SECONDS]
-./build/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MIPS on|off NEWDIR
-./build/benchmark-replay --device palm-tx --nand NAND.bin NOR.bin REPLAY GUEST_MS MIPS on|off NEWDIR
+./build/benchmark-replay SESSION REPLAY GUEST_MS MHZ|original on|off NEWDIR [PALM_EPOCH_SECONDS]
+./build/benchmark-replay --device sony-clie-tg50 NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
+./build/benchmark-replay --device palm-tx --nand NAND.bin NOR.bin REPLAY GUEST_MS MHZ|original on|off NEWDIR
 ```
 
 - `MHZ` is the core clock the run is capped at; `original` follows the device's own clock, as its CCCR and CLKCFG set it. `on|off` is PCM scheduling: compare on with on and off with off, because off changes what the guest runs.
@@ -59,7 +65,7 @@ Workloads:
 - `make benchmark-menu` builds `build/benchmark-menu`; `./build/benchmark-menu SESSION [MIPS]` runs 24 guest seconds of a playing SunVox session with the menu closed and reports CPU cost, guest latency and the first menu region's hash.
 - `make benchmark-session` builds `build/benchmark-session`; `./build/benchmark-session SESSION SECONDS MIPS [NEW.raw]` runs a playing session without pacing and drains the codec directly, to compare execution cost apart from SDL starvation. Silence statistics skip the first 132300 frames. It rejects sessions with an embedded card.
 
-`make speed-check` runs both workloads through `benchmark-replay` and prints host time per guest second, host MIPS, frame and PCM hashes and the FrondBench times per test. JSON goes to `build/speed-check/<timestamp>/speed-check.json`. Set `BIKE_SESSION` and `FRONDBENCH_SESSION` to your session files (no defaults; a workload without one is skipped), `SPEED_MIPS` (default 100) and `SPEED_BENCH` (another benchmark binary). `SPEED_HOST=user@host` runs it on another machine over ssh in `~/frond-speed/` (`SPEED_SSH_KEY` picks a key). `SPEED_REAL_MS=Integer=1000,Memory=500,...` adds your real device's FrondBench times and a ratio column. Host time per guest second under 1 means faster than real time at that MIPS.
+`make speed-check` runs both workloads through `benchmark-replay` and prints host time per guest second, host MIPS, frame and PCM hashes and the FrondBench times per test. JSON goes to `build/speed-check/<timestamp>/speed-check.json`. Set `BIKE_SESSION` and `FRONDBENCH_SESSION` to your session files (no defaults; a workload without one is skipped), `SPEED_MIPS` (the clock in MHz, or `original`; default 100) and `SPEED_BENCH` (another benchmark binary). `SPEED_HOST=user@host` runs it on another machine over ssh in `~/frond-speed/` (`SPEED_SSH_KEY` picks a key). `SPEED_REAL_MS=Integer=1000,Memory=500,...` adds your real device's FrondBench times and a ratio column. Host MIPS is guest instructions per host second. Host time per guest second under 1 means faster than real time at that clock.
 
 `make count-check` runs each recipe in `tools/speed-baseline.json` once in Exact and once in Fast and compares guest time, cycles, instructions, JIT instructions, frame and PCM counts and both hashes against the baseline there. It needs no quiet machine, and runs four at once (`--jobs`). Fast compiles where asked for in these runs, so they repeat; async Fast doesn't repeat and is never compared. Only a recipe whose counts moved gets wall-clock rounds (`--rounds N`, default 3; `--against OLD-BENCH` interleaves them with an older binary). `--timing` gives rounds for every recipe, for release-notes figures, and `--async-rounds` times Fast as the app runs it. A recipe with `"runner": "frond-68k"` runs `out/frond-68k --run-for` instead and compares its cycle count and hashes of the last frame and the sound file. The cold-boot recipes need `FROND_DEVICE_IMAGES`; the session recipes take the session variable they name. A Zodiac recipe with a card also needs `ZODIAC_CARDS`: it boots, goes through the setup wizard, puts the card in and starts the game, all from its replay (`benchmark-replay --sd CARD`; the replay takes `stick X Y` and `card-insert` too). The Zodiac game recipes run in Fast only, since Exact takes many minutes for the two minutes of guest time. A recipe whose ROM or session isn't the one the baseline came from is skipped. After a change that's meant to move the counts, `make count-check COUNT_ARGS=--update` writes the new ones. Counts follow what the guest does, so a host-only slowdown leaves them the same: time those with `--timing --against`.
 
@@ -88,9 +94,9 @@ Native audio backpressure pauses the whole guest (timers, DMA and codec) until S
 
 ## Against CloudpilotEmu
 
-Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo.
+Measured 2026-11-04 on a Ryzen 7 5700X, gcc 14.2, `-O2 -g` on both sides: Frond main at 1b9d14d and the IIIx at f550284 against unmodified CloudpilotEmu 2.3.0 (064d5d5). Five runs of each, alternating sides, nothing else running. Upstream's runners open a window and pace to real time, so both sides ran under the same small headless driver linked against each tree's own core, using only its public API (boot, pen taps and keys, install and launch, a free-running loop, a RAM dump for FrondBench's results). Neither core was changed. The driver isn't in the repo. The ARM runs predate [ARM timing](#arm-timing): the guest ran at a fixed 100 million instructions a guest second, one cycle each, so host MIPS there is instructions per host second for both cores.
 
-Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
+Tungsten E2, FrondBench through PACE, at the old fixed 100 million instructions a second, guest 37 to 65 s. Fast is `FROND_JIT=1` with the compile thread on, as the app runs it.
 
 | | Host MIPS best / median | Host s per guest s | FrondBench total |
 |---|---|---|---|
@@ -98,7 +104,7 @@ Tungsten E2, FrondBench through PACE, 100 MIPS, guest 37 to 65 s. Fast is `FROND
 | Frond Exact | 182.6 / 179.7 | 0.556 | 30020 ms |
 | Frond Fast | 361.2 / 358.0 | 0.279 | 29960 ms |
 
-Tungsten E2, Bike or Die 2 v2.1b in trial mode, level 1 with the TX's sustained key replay, 100 MIPS, guest 45 to 85 s. The game isn't frame-identical between cores, probably as the clock chip follows host time, but the level, section and input are the same.
+Tungsten E2, Bike or Die 2 v2.1b in trial mode, level 1 with the TX's sustained key replay, at the old fixed 100 million instructions a second, guest 45 to 85 s. The game isn't frame-identical between cores, probably as the clock chip follows host time, but the level, section and input are the same.
 
 | | Host MIPS best / median | Host s per guest s |
 |---|---|---|
@@ -114,7 +120,7 @@ Palm IIIx, FrondBench on the OS 3.5 EZ ROM, from the Run tap until the results a
 | Frond Original | 510.8 | 510460 ms | 8.33 / 8.44 | 0.0165 |
 | Frond Uncapped (8x) | 63.5 | 63170 ms | 8.04 / 8.31 | 0.131 |
 
-- On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike runs at 186 to 200 MIPS in Exact and about 575 in Fast.
+- On the E2, Exact is about 1.5% faster than upstream on FrondBench and 1.37x on Bike or Die, and Fast about 2x and 2.75x. On the TX on the same machine Bike ran at 186 to 200 host MIPS in Exact and about 575 in Fast.
 - On the IIIx, Frond times the 68000 by the manual's clocks plus the EZ's wait states, LCD DMA and refresh (see [68k timing](#68k-timing)), so the same work takes 1.89x upstream's guest time; upstream runs guest code about 1.9x faster than a real IIIx. The same work takes about 1.58x upstream's host time, a few percent of it the GDB hooks. At real time a IIIx uses under 2% of one core, and Uncapped runs about 4x faster than upstream's default at about the same host cost.
 - E2 only for ARM. CloudpilotEmu normally runs in a browser as WebAssembly, which wasn't measured and would be slower than its native build.
 

@@ -112,6 +112,8 @@ bool deviceI2sConnected();
 bool deviceTg50IrPowerEnabled(Device *);
 void deviceTg50SetUsbCable(Device *, bool connected);
 void deviceTg50SetAccessoryAux(Device *, uint16_t mV);
+void deviceTg50SetConnectorEmpty(Device *);
+uint16_t deviceTg50AccessoryAuxCode(Device *);
 bool deviceTg50UsbCableAttached(Device *);
 bool deviceTg50UsbListening(Device *);
 void deviceSetTransportObserver(Device *, void (*)(void *), void *);

@@ -742,16 +742,15 @@ bool TranslatorVisitor::thumb16_PUSH(bool M, RegList reg_list) {
 
     const u32 num_bytes_to_push = static_cast<u32>(4 * mcl::bit::count_ones(reg_list));
     const auto final_address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(num_bytes_to_push));
-    // Frond: from the highest register down, as the interpreter's STMDB does, so a fault
-    // part-way leaves the same words stored.
-    auto address = ir.Sub(ir.GetRegister(Reg::SP), ir.Imm32(4));
-    for (size_t k = 0; k < 16; k++) {
-        const size_t i = 15 - k;
+    // Frond: from the lowest register up, as the ARM920T and the interpreter's STMDB do, with SP
+    // set after the last store.
+    auto address = final_address;
+    for (size_t i = 0; i < 16; i++) {
         if (mcl::bit::get_bit(i, reg_list)) {
             // TODO: Deal with alignment
             const auto Ri = ir.GetRegister(static_cast<Reg>(i));
             ir.WriteMemory32(address, Ri, IR::AccType::ATOMIC);
-            address = ir.Sub(address, ir.Imm32(4));
+            address = ir.Add(address, ir.Imm32(4));
         }
     }
 

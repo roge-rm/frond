@@ -50,7 +50,7 @@ test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIM
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
     test-tg50-voicerec test-printer-control test-frond-68k-boot-save test-frond-68k-install \
-    test-frond-arm-install test-device-profiles: export TEST_TIMEOUT = 1800
+    test-frond-arm-install test-device-profiles test-frond-68k-auto-off: export TEST_TIMEOUT = 1800
 test-frond-68k-peripherals: export TEST_TIMEOUT = $(shell expr 1800 \* $(or $(words $(filter --rom,$(FROND_68K_ROMS))),1))
 
 
@@ -816,6 +816,12 @@ test-frond-68k: out/frond-68k build/test-cpu68k-timing build/test-frond-68k-soun
 test-frond-68k-peripherals: out/frond-68k build/test-frond-68k-sound
 	./build/test-frond-68k-sound
 	python3 tests/frond-68k-peripherals.py $(FROND_68K_ROMS)
+
+# Left idle after a cold boot, the private IIIx and m515 ROMs turn off at the OS's 2 minute auto-off.
+# Needs FROND_DEVICE_IMAGES.
+.PHONY: test-frond-68k-auto-off
+test-frond-68k-auto-off: out/frond-68k
+	python3 tests/frond-68k-auto-off.py
 
 # Console database commands while a guest app is busy for 45 s on the private IIIx 3.1 ROM: they
 # wait for its event loop or fail with an error, and the core runs on. Skips without the ROM, or
