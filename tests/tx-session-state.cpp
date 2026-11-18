@@ -37,13 +37,13 @@ static uint64_t readWmmx(unsigned reg) {
 }
 struct E2Versions {
     void Load(SavestateLoader<ChunkType>& loader) {
-        // The E2 power manager saves version 2 with PXA25x power sleep, and the batched OS
-        // timer, on every PXA device, saves version 1.
+        // The power manager saves version 4 (with the CCCR the clocks came from) on every PXA
+        // device, the E2 included, and the batched OS timer version 1.
         const struct { ChunkType type; uint32_t version; } chunks[] = {
-            {ChunkType::pxaLcd, 0}, {ChunkType::pxaPwrClk, 2}, {ChunkType::pxaTimr, 1}};
+            {ChunkType::pxaLcd, 0}, {ChunkType::pxaPwrClk, 4}, {ChunkType::pxaTimr, 1}};
         for (auto chunk : chunks) {
             uint32_t version = 99;
-            assert(loader.GetChunkOrFail(chunk.type, 2, "E2 compatibility", version));
+            assert(loader.GetChunkOrFail(chunk.type, 4, "E2 compatibility", version));
             assert(version == chunk.version);
         }
     }
@@ -290,6 +290,6 @@ int main() {
     sdCardReset();
     puts("PASS: TX cold reset preserves inserted/ejected card detect and stored sectors");
     puts("PASS: TX EP0 partial FIFO restore, packet readiness and cold reset through the real SoC");
-    puts("PASS: E2 timer, version-zero LCD and version-two power sessions");
+    puts("PASS: E2 timer, version-zero LCD and version-four power sessions");
     puts("PASS: TX peripheral/WMMX reload, truncated-state rollback and reset without RAM erasure");
 }
