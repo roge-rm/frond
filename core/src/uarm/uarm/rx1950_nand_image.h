@@ -1,22 +1,41 @@
 #ifndef FROND_RX1950_NAND_IMAGE_H
 #define FROND_RX1950_NAND_IMAGE_H
 
-// The rx1950's NAND contents (S3cNand's page layout) made from the bootloader and CEOS.nbf, enough for
-// eboot to find and load the OS. The full flash image, its store and the accepted hashes are R2's.
+// The rx1950's NAND contents (S3cNand's page layout) made from the bootloader and CEOS.nbf, the firmware
+// Frond accepts for it, and the machine's NAND store file.
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
-// Block 0 page 9 holds the board's settings, which eboot copies into the driver globals; neither dump has
-// it, so it reads erased unless debugMessages is set, which clears dwDbgMsgFlags so the kernel keeps its
-// debug text (see tools/rx1950-boot.cpp).
+class S3cNand;
+
+// Block 0 page 9 holds the board's settings, which eboot copies into the driver globals. Neither dump has
+// it; rx1950NandImage writes the values a retail unit is assumed to hold (KITL off, no RUU update pending,
+// the kernel's debug text off). debugMessages turns the debug text on (see tools/rx1950-boot.cpp).
 struct Rx1950NandOptions {
     bool debugMessages = false;
 };
 
 bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf, size_t nbfSize,
                      std::vector<uint8_t>& flash, std::string& error, const Rx1950NandOptions& options = {});
+
+// The firmware Frond runs on the rx1950: HP's WM5 ROM (OS 5.1.1702, ROM 1.01.00 ENG) as the CEBL.nbf
+// bootloader and CEOS.nbf OS pair. Dan's logical store capture has no bootloader, spare data or reserved
+// blocks and holds user data, so it isn't accepted.
+struct Rx1950Firmware {
+    const char* name;
+    size_t bytes;
+    const char* sha256;  // lower case hex
+};
+// The frontends and tools check the hash at import (frondZodiacRom::sha256Hex).
+extern const Rx1950Firmware rx1950Cebl, rx1950Ceos;
+
+// The NAND store file: every page, data then spare, as S3cNand holds it (69 206 016 bytes). Load fails on
+// a missing or wrong sized file. Save writes the whole flash to a new file, or only the dirty blocks into
+// an existing one, then clears the dirty marks.
+bool rx1950NandLoad(const std::string& path, std::vector<uint8_t>& flash, std::string& error);
+bool rx1950NandSave(const std::string& path, S3cNand& nand, std::string& error);
 
 #endif

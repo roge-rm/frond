@@ -1,7 +1,10 @@
 #include "rx1950_nand_image.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 
 #include "s3c2442_nand.h"
 
@@ -47,8 +50,14 @@ bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf,
             if (at < ebootSize) std::memcpy(p, eboot + at, std::min<size_t>(S3cNand::pageData, ebootSize - at));
         }
         // Settings page: bKitlTransport at 0, the RUU signature at 4, dwDbgMsgSignature at 12 and
-        // dwDbgMsgFlags at 16, where bit 1 set turns the kernel's debug text off.
-        if (page == settingsPage && options.debugMessages) std::memset(p + 16, 0, 4);
+        // dwDbgMsgFlags at 16, where bit 1 set turns the kernel's debug text off. ASSUMPTION "rx1950
+        // settings page": transport 0 (eboot's "No Debug"), RUU signature 0 (what eboot writes once an
+        // update is done; anything but "UUR " boots the OS), the debug message signature (0x1a2b3c4d when
+        // set from eboot's menu) left erased and the flags all ones, so a retail kernel keeps no text.
+        if (page == settingsPage) {
+            std::memset(p, 0, 8);
+            if (options.debugMessages) std::memset(p + 16, 0, 4);
+        }
         setSpare(p, reservedInfo);
     }
     for (size_t i = 0; i < sectors; ++i) {
@@ -57,5 +66,41 @@ bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf,
         std::memcpy(p, s, S3cNand::pageData);
         setSpare(p, s + S3cNand::pageData);
     }
+    return true;
+}
+
+const Rx1950Firmware rx1950Cebl{"CEBL.nbf", 264794, "33807007a49ab40e8190f2fdb20080d1d7efe6d3a56a6b551422373271a94b3f"};
+const Rx1950Firmware rx1950Ceos{"CEOS.nbf", 67095130, "764807c7aacd780876462b62a9ca2555226d2f11acccc69e0785fc159be20f6e"};
+
+bool rx1950NandLoad(const std::string& path, std::vector<uint8_t>& flash, std::string& error) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) { error = "can't read " + path; return false; }
+    flash.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    if (flash.size() != size_t(S3cNand::pages) * S3cNand::pageSize) {
+        error = path + " isn't an rx1950 NAND store (wrong size)";
+        flash.clear();
+        return false;
+    }
+    return true;
+}
+
+bool rx1950NandSave(const std::string& path, S3cNand& nand, std::string& error) {
+    const size_t blockBytes = size_t(S3cNand::pagesPerBlock) * S3cNand::pageSize;
+    if (nand.flash.size() != size_t(S3cNand::pages) * S3cNand::pageSize) { error = "no NAND to save"; return false; }
+    FILE* f = std::fopen(path.c_str(), "r+b");
+    const bool whole = !f;
+    if (whole) f = std::fopen(path.c_str(), "wb");
+    if (!f) { error = "can't write " + path; return false; }
+    bool ok = true;
+    if (whole) ok = std::fwrite(nand.flash.data(), 1, nand.flash.size(), f) == nand.flash.size();
+    else
+        for (uint32_t block = 0; ok && block < S3cNand::blocks; ++block) {
+            if (!nand.blockDirty(block)) continue;
+            ok = std::fseek(f, long(block * blockBytes), SEEK_SET) == 0 &&
+                 std::fwrite(&nand.flash[block * blockBytes], 1, blockBytes, f) == blockBytes;
+        }
+    ok = std::fclose(f) == 0 && ok;
+    if (!ok) { error = "writing " + path + " failed"; return false; }
+    nand.clearDirty();
     return true;
 }

@@ -2,9 +2,11 @@
 #define FROND_S3C2442_NAND_H
 
 // The S3C2442's NAND flash controller at 0x4E000000 (manual chapter 6) and a small page NAND chip behind
-// it, the K5D1258KCM's 64 MB part: 4096 blocks of 32 pages, each 512 bytes plus 16 spare. R1 reads only:
-// reset, read ID, status, the three read commands and Samsung's unique ID page, with the main area ECC the
-// controller makes as data passes. Program and erase answer unsupported.
+// it, the K5D1258KCM's 64 MB part: 4096 blocks of 32 pages, each 512 bytes plus 16 spare. Commands: reset,
+// read ID, status, the three reads (A, B and C, which also point programs), page program, block erase and
+// Samsung's unique ID page, with the main area ECC the controller makes as data passes either way. Program
+// and erase are immediate (busy for no time) and never fail; blocks they change are marked dirty for the
+// machine's NAND store file.
 
 #include <cstdint>
 #include <vector>
@@ -19,7 +21,14 @@ class S3cNand {
 
     // image holds every page, data then spare, pages * pageSize bytes. Empty reads as erased.
     void reset();
-    void setImage(std::vector<uint8_t> image) { flash = std::move(image); }
+    void setImage(std::vector<uint8_t> image) {
+        flash = std::move(image);
+        dirty.assign(blocks, false);
+    }
+    // Blocks programmed or erased since the image was set or clearDirty.
+    bool blockDirty(uint32_t block) const { return block < dirty.size() && dirty[block]; }
+    void clearDirty() { dirty.assign(blocks, false); }
+    uint64_t programs = 0, erases = 0;
     S3cAccess read(uint32_t offset, unsigned size, uint32_t& value);
     S3cAccess write(uint32_t offset, unsigned size, uint32_t value, S3cIntc& intc);
     // Why the last unsupported answer was given.
@@ -36,9 +45,14 @@ class S3cNand {
     std::vector<uint8_t> flash;
 
    private:
-    enum class Mode : uint8_t { idle, id, status, read };
+    enum class Mode : uint8_t { idle, id, status, read, program, erase };
     uint8_t dataByte();
     void startRead();
+    // The byte offset in a page the A, B or C pointer starts at, from the column.
+    uint32_t areaOffset() const;
+    void program();
+    void erase();
+    void touch(uint32_t page);
     void addEccByte(uint8_t byte);
     uint8_t uidByte(uint32_t offset) const;
 
@@ -53,6 +67,9 @@ class S3cNand {
     uint32_t eccCount = 0;
     uint8_t eccColumn = 0;
     uint32_t eccLine[2] = {0, 0};
+    // The page register a program fills, all ones where nothing was written.
+    uint8_t pageBuffer[pageSize];
+    std::vector<bool> dirty;
 };
 
 #endif

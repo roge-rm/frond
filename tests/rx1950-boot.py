@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Boots the HP iPAQ rx1950's eboot and OS on the S3C2442 machine to the kernel's first debug lines.
+"""Boots the HP iPAQ rx1950's eboot and OS on the S3C2442 machine past the kernel's first debug lines,
+until the file system has written pages to NAND, and checks nothing stopped the run before its budget.
 
     tests/rx1950-boot.py build/rx1950-boot
 
@@ -8,6 +9,7 @@ firmware isn't on this machine. Set RX1950_FIRMWARE to the folder with CEBL.nbf 
 RX1950_OUT to keep the logs somewhere else than rx1950-boot-logs next to the tool.
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -39,6 +41,11 @@ def main():
         with open(os.path.join(out, name), "rb") as f:
             log = f.read()
         missing += [name + ": " + line.decode() for line in lines if line not in log]
+    programs = re.search(r"NAND: (\d+) page programs", run.stdout)
+    if not programs or int(programs.group(1)) == 0:
+        missing.append("NAND page programs")
+    if "stop: instruction budget reached" not in run.stdout:
+        missing.append("a run to the instruction budget")
     if run.returncode or missing:
         print("rx1950-boot: FAIL" + (", missing: " + ", ".join(missing) if missing else ""))
         print(run.stderr.strip())

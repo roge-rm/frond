@@ -72,6 +72,10 @@ class S3c2442Machine {
     std::string stopText() const;
 
     uint64_t retired() const { return retiredCount; }
+    // VFP instructions and Windows CE breakpoints the guest ran, which take the undefined instruction
+    // exception without a stop.
+    uint64_t vfpProbeCount() const { return vfpProbes; }
+    uint64_t breakpointCount() const { return breakpoints; }
     // Guest time in CPU clock cycles, idle time included, and in nanoseconds.
     uint64_t cycles() const { return cycleCount; }
     uint64_t idleCycles() const { return idleCount; }
@@ -120,7 +124,7 @@ class S3c2442Machine {
     uint8_t* ramBuffer = nullptr;
     MemoryBuffer ramMemory{};
     // Undefined instruction exceptions already reported or from before start().
-    uint64_t undefinedSeen = 0;
+    uint64_t undefinedSeen = 0, vfpProbes = 0, breakpoints = 0;
     bool irqLine = false, fiqLine = false;
     uint64_t retiredCount = 0, cycleCount = 0, idleCount = 0, elapsedNs = 0;
     // Remainders of each clock domain in CPU cycles times the domain's rate.

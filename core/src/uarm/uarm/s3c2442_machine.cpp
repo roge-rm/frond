@@ -386,11 +386,20 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             stopped.write = guard.write;
             stopped.pc = cpuGetCurInstrPC(cpuCore);
         }
-        // Any undefined instruction stops the run: neither eboot nor the kernel take one on purpose, and
-        // the CPU also takes one for coprocessor forms it doesn't model (FCSE, for one).
+        // An undefined instruction stops the run, as the CPU also takes one for forms it doesn't model. Two
+        // are the guest's own and go to its handler, as on the real ARM920T: VFP (coprocessors 10 and 11),
+        // which the kernel probes for and the chip doesn't have, and Windows CE's breakpoint 0xe6000010
+        // (DebugBreak), which the kernel takes as a breakpoint exception.
         uint32_t undefinedPc = 0, undefinedInstr = 0;
-        if (cpuUndefinedTaken(cpuCore, &undefinedPc, &undefinedInstr) > undefinedSeen && stopped.stop == S3c2442Stop::running) {
-            undefinedSeen = cpuUndefinedTaken(cpuCore, nullptr, nullptr);
+        const uint64_t taken = cpuUndefinedTaken(cpuCore, &undefinedPc, &undefinedInstr);
+        const bool coprocessor = ((undefinedInstr >> 24) & 0xf) == 0xe || ((undefinedInstr >> 25) & 7) == 6;
+        const bool vfpProbe = undefinedInstr && coprocessor && ((undefinedInstr >> 9) & 7) == 5;
+        if (taken > undefinedSeen && (vfpProbe || undefinedInstr == 0xe6000010)) {
+            undefinedSeen = taken;
+            ++(vfpProbe ? vfpProbes : breakpoints);
+        }
+        if (taken > undefinedSeen && stopped.stop == S3c2442Stop::running) {
+            undefinedSeen = taken;
             stopped.stop = S3c2442Stop::undefined;
             stopped.pc = undefinedPc;
             stopped.value = undefinedInstr;

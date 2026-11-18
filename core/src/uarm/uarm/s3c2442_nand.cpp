@@ -1,5 +1,7 @@
 #include "s3c2442_nand.h"
 
+#include <cstring>
+
 namespace {
     // K9F1208 class 64 MB small page part inside the K5D1258KCM: Samsung, device 0x76.
     constexpr uint8_t chipId[] = {0xec, 0x76, 0xa5, 0xc0};
@@ -63,11 +65,43 @@ void S3cNand::addEccByte(uint8_t byte) {
     if (eccCount == pageData) mecc0 = packEcc(eccLine[0], eccColumn);
 }
 
+uint32_t S3cNand::areaOffset() const {
+    // Pointer A starts in the first half, B in the second, C in the spare.
+    return area == 0x50 ? pageData + (column & 0xf) : area == 0x01 ? 256 + column : column;
+}
+
 void S3cNand::startRead() {
     mode = Mode::read;
-    // Read A starts in the first half, read B in the second, read C in the spare.
-    pageOffset = area == 0x50 ? pageData + (column & 0xf) : area == 0x01 ? 256 + column : column;
+    pageOffset = areaOffset();
     nfstat |= 0x4;  // RnB went busy and back, which RnB_TransDetect latches
+}
+
+void S3cNand::touch(uint32_t page) {
+    if (flash.empty()) flash.assign(size_t(pages) * pageSize, 0xff);
+    if (dirty.size() != blocks) dirty.assign(blocks, false);
+    dirty[page / pagesPerBlock] = true;
+}
+
+// Programming can only clear bits, so the page register is ANDed in. The B pointer goes back to A after a
+// program; A and C stay.
+void S3cNand::program() {
+    const uint32_t page = row % pages;
+    touch(page);
+    uint8_t* p = &flash[size_t(page) * pageSize];
+    for (uint32_t i = 0; i < pageSize; ++i) p[i] &= pageBuffer[i];
+    ++programs;
+    if (area == 0x01) area = 0x00;
+    mode = Mode::idle;
+    nfstat |= 0x4;
+}
+
+void S3cNand::erase() {
+    const uint32_t block = (row % pages) / pagesPerBlock;
+    touch(block * pagesPerBlock);
+    std::memset(&flash[size_t(block) * pagesPerBlock * pageSize], 0xff, size_t(pagesPerBlock) * pageSize);
+    ++erases;
+    mode = Mode::idle;
+    nfstat |= 0x4;
 }
 
 uint8_t S3cNand::dataByte() {
@@ -125,7 +159,7 @@ S3cAccess S3cNand::read(uint32_t offset, unsigned size, uint32_t& value) {
     return S3cAccess::unknown;
 }
 
-S3cAccess S3cNand::write(uint32_t offset, unsigned, uint32_t value, S3cIntc&) {
+S3cAccess S3cNand::write(uint32_t offset, unsigned size, uint32_t value, S3cIntc&) {
     switch (offset) {
         case 0x00: nfconf = value & 0x777f; return S3cAccess::ok;
         case 0x04:
@@ -154,22 +188,61 @@ S3cAccess S3cNand::write(uint32_t offset, unsigned, uint32_t value, S3cIntc&) {
                 case 0x90: mode = Mode::id; idIndex = 0; addressCycles = 0; break;
                 case 0x70: mode = Mode::status; break;
                 case 0x00: case 0x01: case 0x50: area = command; addressCycles = 0; column = row = 0; mode = Mode::idle; break;
+                case 0x80:
+                    mode = Mode::program;
+                    addressCycles = 0;
+                    column = row = 0;
+                    std::memset(pageBuffer, 0xff, sizeof pageBuffer);
+                    break;
+                case 0x10:
+                    if (mode != Mode::program || addressCycles < 4) {
+                        refusal = "NAND program confirm (10h) without 80h and a full address";
+                        return S3cAccess::unsupported;
+                    }
+                    program();
+                    break;
+                case 0x60: mode = Mode::erase; addressCycles = 0; row = 0; break;
+                case 0xd0:
+                    if (mode != Mode::erase || addressCycles < 3) {
+                        refusal = "NAND erase confirm (D0h) without 60h and a full row address";
+                        return S3cAccess::unsupported;
+                    }
+                    erase();
+                    break;
                 default:
-                    refusal = "NAND command other than reset, read ID, status or read (program and erase are R2)";
+                    refusal = "NAND command the K9F1208 part doesn't have or Frond doesn't model";
                     return S3cAccess::unsupported;
             }
             return S3cAccess::ok;
         case 0x0c:
             if (mode == Mode::id) return S3cAccess::ok;  // read ID takes one address byte, 0
+            // Erase takes the three row bytes only.
+            if (mode == Mode::erase) {
+                if (addressCycles < 3) row |= (value & 0xff) << (8 * addressCycles);
+                ++addressCycles;
+                return S3cAccess::ok;
+            }
             // Small page: one column byte, then three row bytes.
             if (addressCycles == 0) column = value & 0xff;
             else if (addressCycles <= 3) row |= (value & 0xff) << (8 * (addressCycles - 1));
             ++addressCycles;
-            if (addressCycles == 4) startRead();
+            if (addressCycles == 4) {
+                if (mode == Mode::program) pageOffset = areaOffset();
+                else startRead();
+            }
             return S3cAccess::ok;
         case 0x10:
-            refusal = "NAND data write (program is R2)";
-            return S3cAccess::unsupported;
+            if (nfcont & 2) { refusal = "data write with the chip not selected"; return S3cAccess::unsupported; }
+            if (mode != Mode::program || addressCycles < 4) {
+                refusal = "NAND data write outside a page program";
+                return S3cAccess::unsupported;
+            }
+            for (unsigned i = 0; i < size; ++i) {
+                const uint8_t byte = uint8_t(value >> (8 * i));
+                if (pageOffset < pageData) addEccByte(byte);
+                if (pageOffset < pageSize) pageBuffer[pageOffset++] = byte;
+            }
+            return S3cAccess::ok;
         case 0x14: meccd[0] = value; return S3cAccess::ok;
         case 0x18: meccd[1] = value; return S3cAccess::ok;
         case 0x1c: seccd = value; return S3cAccess::ok;

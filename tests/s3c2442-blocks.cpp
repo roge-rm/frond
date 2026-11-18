@@ -431,9 +431,53 @@ static void nandTests() {
     for (uint32_t a : {4u, 33u, 0u, 0u}) nand.write(0x0c, 1, a, intc);
     nand.read(0x10, 1, v);
     assert(v == uint8_t(4 * 7));
-    // 65h on its own and program aren't modelled.
+    // 65h on its own isn't a command, nor is a confirm without its setup.
     assert(nand.write(0x08, 1, 0x65, intc) == S3cAccess::unsupported);
-    assert(nand.write(0x08, 1, 0x80, intc) == S3cAccess::unsupported);
+    assert(nand.write(0x08, 1, 0x10, intc) == S3cAccess::unsupported);
+    assert(nand.write(0x08, 1, 0xd0, intc) == S3cAccess::unsupported);
+    assert(nand.write(0x10, 4, 0, intc) == S3cAccess::unsupported);
+
+    // Program page 70 through pointer A with 32-bit writes: the main area ECC is made as data goes out,
+    // bits only clear, and its block is dirty.
+    nand.clearDirty();
+    std::vector<uint8_t> data(512);
+    for (uint32_t i = 0; i < 512; ++i) data[i] = uint8_t(i * 13 + 1);
+    nand.write(0x08, 1, 0x00, intc);
+    nand.write(0x04, 4, 1 | 0x10, intc);
+    nand.write(0x08, 1, 0x80, intc);
+    for (uint32_t a : {0u, 70u, 0u, 0u}) nand.write(0x0c, 1, a, intc);
+    for (uint32_t i = 0; i < 512; i += 4) {
+        uint32_t w;
+        std::memcpy(&w, &data[i], 4);
+        assert(nand.write(0x10, 4, w, intc) == S3cAccess::ok);
+    }
+    assert(get(nand, 0x2c) == S3cNand::ecc512(data.data()));
+    const uint8_t info[8] = {7, 0, 0, 0, 0xff, 0xff, 0xff, 0xff};
+    for (uint8_t b : info) nand.write(0x10, 1, b, intc);
+    nand.write(0x20, 4, 4, intc);
+    assert(nand.write(0x08, 1, 0x10, intc) == S3cAccess::ok);
+    assert(get(nand, 0x20) & 4);
+    nand.write(0x08, 1, 0x70, intc);
+    nand.read(0x10, 1, v);
+    assert(!(v & 1));
+    assert(!std::memcmp(&nand.flash[size_t(S3cNand::pageSize) * 70], data.data(), 512));
+    assert(!std::memcmp(&nand.flash[size_t(S3cNand::pageSize) * 70 + 512], info, 8));
+    assert(nand.flash[size_t(S3cNand::pageSize) * 70 + 8 + 512] == 0xff);
+    assert(nand.blockDirty(2) && !nand.blockDirty(1) && !nand.blockDirty(3) && nand.programs == 1);
+    // Pointer C programs the spare from its column, ANDed with what's there.
+    nand.write(0x08, 1, 0x50, intc);
+    nand.write(0x08, 1, 0x80, intc);
+    for (uint32_t a : {4u, 70u, 0u, 0u}) nand.write(0x0c, 1, a, intc);
+    nand.write(0x10, 1, 0x0f, intc);
+    nand.write(0x08, 1, 0x10, intc);
+    assert(nand.flash[size_t(S3cNand::pageSize) * 70 + 512 + 4] == 0x0f);
+    assert(nand.flash[size_t(S3cNand::pageSize) * 70 + 512] == 7);
+    // Erase block 2 (pages 64-95) from its row address.
+    nand.write(0x08, 1, 0x60, intc);
+    for (uint32_t a : {70u, 0u, 0u}) nand.write(0x0c, 1, a, intc);
+    assert(nand.write(0x08, 1, 0xd0, intc) == S3cAccess::ok);
+    for (uint32_t i = 64 * S3cNand::pageSize; i < 96 * S3cNand::pageSize; ++i) assert(nand.flash[i] == 0xff);
+    assert(nand.flash[size_t(S3cNand::pageSize) * 33 + 4] == uint8_t(4 * 7) && nand.erases == 1);
 }
 
 static void nandImageTests() {

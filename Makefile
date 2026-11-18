@@ -2886,10 +2886,10 @@ S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442
 .PHONY: rx1950-boot test-s3c2442 test-s3c2442-machine test-rx1950-boot
 rx1950-boot: build/rx1950-boot
 build/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) \
-		core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp
+		core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp zodiac-rom/ZodiacRom.cpp
 	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/rx1950-core.rsp
-	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
-		tools/rx1950-boot.cpp core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp \
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Izodiac-rom \
+		tools/rx1950-boot.cpp core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp zodiac-rom/ZodiacRom.cpp \
 		$(S3C2442_SOURCES) @build/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
 
 # Each block's registers, timer ticks, interrupt priority and sub-source masking, UART output.
