@@ -93,7 +93,9 @@ def check(rom, word, branch, path, bootstrap, profile, expected):
                 assert 'masked GPIO-A input=00000080 mask=ffffdfff' in output
                 outputs.append(re.sub(r'^jit-blocks=.*\n','',re.sub(r'engine=(exact|fast)','engine=checked',output),flags=re.M))
             assert outputs[0] == outputs[1], 'GPU IRQ Exact/Fast complete traces differ'
-    # Divider 1 and a fixed 400-cycle gap place the next scan event inside the 63-HCLK store.
+    # Divider 1 and a fixed 805-NOP gap before the ack place the next vertical blank after the enable store,
+    # inside the 63-HCLK store at 200e1060 (it lands there for gaps of 780 to 835). The gap is set against the
+    # ARM920T cost table: a branch or BX costs 3 cycles, so the setup's cost moves the frame phase at the ack.
     # At the reset divider 12 a transfer exceeds this small synthetic frame.
     rom[:] = wait_base
     setup_words = words + [0xe59f0000,0xea000000,0x0021b000,0xe59f1000,0xea000000,0x57000003,
@@ -104,9 +106,9 @@ def check(rom, word, branch, path, bootstrap, profile, expected):
         (0x86e08,0x16010200,True,1),(0xe1060,0x16800010,True,0x12345678)]
     emit(operations,0xe2000,0x200e3000)
     word(0xe103c,0xe321f013); word(0xe1040,0xe12fff1e)
-    word(0xe2000+10*0x40+0x20,0x200e5000)
-    for i in range(400): word(0xe5000+i*4,0xe1a00000)
-    branch(0xe5000+400*4,0xe2000+11*0x40)
+    word(0xe2000+9*0x40+0x20,0x200e5000)
+    for i in range(805): word(0xe5000+i*4,0xe1a00000)
+    branch(0xe5000+805*4,0xe2000+10*0x40)
     path.write_bytes(rom)
     outputs = []
     for engine in ('exact','fast'):
