@@ -910,6 +910,9 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
         !(instrFetch && cpuPrvArm920<kind>(cpu))) {
         cp15MMUSetFaultStatus(cpu->cp15.cp15mmu, addr, fsr);
+    } else if (instrFetch && cpuPrvArm920<kind>(cpu)) {
+        // The ARM920T keeps a prefetch abort's status in its own FSR and leaves FSR and FAR as they were.
+        cp15MMUSetInstructionFaultStatus(cpu->cp15.cp15mmu, fsr);
     }
 
     if (instrFetch) {
@@ -2284,9 +2287,14 @@ static void execFn_peephole_ADC_memcpy(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT>
 static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
-    fprintf(stderr, "Invalid instr 0x%08lx seen at 0x%08lx with CPSR 0x%08lx\n",
-            (unsigned long)instr, (unsigned long)cpu->curInstrPC,
-            (unsigned long)cpuPrvMaterializeCPSR(cpu));
+    // A guest whose own handler takes the exception can loop on it, so the log gets the first 16 and then
+    // every power of two, with the count.
+    static std::atomic<uint64_t> logged{0};
+    const uint64_t n = logged.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 16 || !(n & (n - 1)))
+        fprintf(stderr, "Invalid instr 0x%08lx seen at 0x%08lx with CPSR 0x%08lx (undefined %llu)\n",
+                (unsigned long)instr, (unsigned long)cpu->curInstrPC,
+                (unsigned long)cpuPrvMaterializeCPSR(cpu), (unsigned long long)n);
 
     cpuPrvException<memorySystemKind>(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (wasT ? 2 : 4),
                     ARM_SR_MODE_UND | ARM_SR_I);

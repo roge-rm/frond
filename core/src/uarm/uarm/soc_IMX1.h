@@ -75,6 +75,7 @@ class SocIMX1 : public SoC {
     uint64_t YmfLastReadyReadNs() const;
     // The RAM and graphics memory hashed, for comparing where two runs end.
     uint64_t MemoryHash() const { return imx1MachineMemoryHash(machine); }
+    uint64_t PcmUnderrunWords() const { return imx1MachinePcmUnderrunWords(machine); }
     // The sound and graphics chips' registers as text (imx1MachineChipSummary).
     std::string ChipSummary() const { return imx1MachineChipSummary(machine); }
     // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps

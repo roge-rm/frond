@@ -47,6 +47,11 @@ static void captureFrame(void* context, uint32_t width, uint32_t height, const u
     frameOutputFailed = !output;
 }
 static void printInstruction(const Imx1ProbeTrace& t) {
+    if (!t.fetched) {
+        std::printf("step=%llu pc=%08x instruction=none cpsr=%08x operand=%08x width=%u\n",
+                    (unsigned long long)t.step, t.pc, t.cpsr, t.operand, t.instructionSize);
+        return;
+    }
     if (t.instructionSize == 2) {
         std::printf("step=%llu pc=%08x instruction=%04x cpsr=%08x operand=%08x width=2\n",
                     (unsigned long long)t.step, t.pc, t.instruction, t.cpsr, t.operand);
@@ -169,12 +174,15 @@ struct StateSave { const char* path; uint64_t after; };
 static std::vector<StateSave> stateSaves;
 static const char* stateLoad = nullptr;
 static bool stateOverwrite = false, stateAnyRevision = false;
+// Aborts and undefined instructions go to the guest's vectors, as frond runs a Zodiac. Off, the probe stops on them.
+static bool guestExceptions = false;
 // Runs to the budget through the machine calls, loading first and saving on the way.
 // The budget counts from reset, so a loaded run ends where an uninterrupted one would.
 static bool runWithStates(const std::vector<uint8_t>& rom, Imx1ProbeEntry entry, uint64_t budget, bool fast,
                           const Imx1ProbeOptions& options, Imx1ProbeResult& result) {
     auto* machine = imx1MachineCreate(rom.data(), uint32_t(rom.size()), entry, fast, options, trace, nullptr, &result);
     if (!machine) return true;
+    if (guestExceptions) imx1MachineSetGuestExceptions(machine, true);
     std::printf("state-build=\"%s\" core-revision=%u\n", zodiac_state::buildNote(), imx1MachineStateCoreRevision);
     bool ok = true;
     if (stateLoad) {
@@ -226,7 +234,7 @@ static bool runWithStates(const std::vector<uint8_t>& rom, Imx1ProbeEntry entry,
 }
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--idle-stepped] [--save-state FILE --save-after N]... [--save-state-overwrite] [--load-state FILE] [--load-state-any-revision] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-virtual-a4-source-over] [--graphics-virtual-packed-mono] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-mode2-route=default-aux|alternate-mux] [--graphics-raw-aux=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
+        std::fprintf(stderr, "Usage: %s ROM [physical|reset|linked] [instruction-budget] [exact|fast] [--bootstrap-peripherals] [--trace=peripherals] [--trace-window=PC/OCCURRENCE] [--idle-hclk-budget=N] [--idle-stepped] [--save-state FILE --save-after N]... [--save-state-overwrite] [--load-state FILE] [--load-state-any-revision] [--guest-exceptions] [--arm920-icache-index-compatibility] [--lcdc-contrast-only] [--imx1-mmcsd-empty-slot] [--frame-output=PATH] [--diagnostic-snapshot=PREFIX] [--assume-mpll-settled] [--virtual-mpll-retune] [--assume-spll-settled] [--assume-i2c-single-master] [--i2c-eeprom-image=PATH] [--asp-px1-input=high] [--asp-u-sample=WORD] [--rtc-initial-time=DAY:HH:MM:SS] [--cs4-port0-input=BYTE] [--cs4-indexed-input=BANK/INDEX/BYTE] [--cs5-reset-status-input=BYTE] [--graphics-profile=virtual5744-compatible-8mib] [--graphics-virtual-a4-source-over] [--graphics-virtual-packed-mono] [--graphics-raw-axes=FIRST/SECOND] [--graphics-raw-mode1=SAMPLE] [--graphics-mode2-route=default-aux|alternate-mux] [--graphics-raw-aux=SAMPLE] [--graphics-irq-connection=virtual-a13] [--gpio-a-input-masked=VALUE/MASK] [--gpio-input-event=N/PORT/VALUE/MASK] [--gpio-a-input=VALUE] [--gpio-b-input=VALUE] [--gpio-d-input=VALUE] [--ram-mib=32|128]\n", argv[0]);
         return 1;
     }
     const char* engine = argc >= 5 ? argv[4] : "exact";
@@ -297,6 +305,7 @@ int main(int argc, char** argv) {
             stateLoad = argv[++i];
         }
         else if (!std::strcmp(argv[i], "--load-state-any-revision")) stateAnyRevision = true;
+        else if (!std::strcmp(argv[i], "--guest-exceptions")) guestExceptions = true;
         else if (!std::strncmp(argv[i], "--idle-hclk-budget=", 19)) {
             const char* text = argv[i] + 19;
             char* end = nullptr;
@@ -598,12 +607,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "GPIO event requires bootstrap, a count below the budget and lanes owned by supplied GPIO baselines\n"); return 1;
     }
     if (windowOccurrence > budget) return 1;
-    const bool states = stateLoad || !stateSaves.empty();
+    // The machine calls run with states and with guest exceptions; imx1BootProbe runs the rest.
+    const bool states = stateLoad || !stateSaves.empty() || guestExceptions;
     if ((stateOverwrite && stateSaves.empty()) || (stateAnyRevision && !stateLoad) ||
         (!stateSaves.empty() && stateSaves.back().after > budget) || (states && diagnostic.prefix)) {
         std::fprintf(stderr, "State flags: --save-after is at most the instruction budget, --save-state-overwrite needs "
-                             "--save-state, --load-state-any-revision needs --load-state, and none of them goes with "
-                             "--diagnostic-snapshot\n");
+                             "--save-state, --load-state-any-revision needs --load-state, and none of them nor --guest-exceptions goes "
+                             "with --diagnostic-snapshot\n");
         return 1;
     }
     // The window counts its PC from reset in this process, a loaded run would miss the earlier ones.
