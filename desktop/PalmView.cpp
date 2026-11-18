@@ -138,11 +138,9 @@ void PalmHolder::release() {
 }
 
 void PalmHolder::setMips(const QString& reply) {
-    static const QRegularExpression figure(R"(^\s*([0-9]+(?:\.[0-9]+)?)\s*(MHz|MIPS))");
-    const auto match = figure.match(reply);
-    if (!container || !match.hasMatch()) { mips->hide(); return; }
-    mips->setText(match.captured(2) == "MHz" ? tr("%1 MHz").arg(qRound(match.captured(1).toDouble()))
-                                              : tr("%1 MIPS").arg(qRound(match.captured(1).toDouble())));
+    const auto figure = runningRules::speedFigure(reply);
+    if (!container || figure.isEmpty()) { mips->hide(); return; }
+    mips->setText(figure);
     mips->adjustSize();
     placeMips();
     mips->show();

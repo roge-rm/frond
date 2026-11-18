@@ -290,6 +290,8 @@ class MainWindow : public QMainWindow {
     QTimer* appsRetryTimer{nullptr};   // re-lists a sleeping Palm every 2 s while the Applications panel shows it
     QTimer* printerTimer;
     QTimer* mipsTimer;
+    QString speedText;
+    void updateBarMachine();
     PrintSource usbPrint, irPrint;
     QLineEdit* bluetoothSocket;
     QComboBox* bluetooth;
