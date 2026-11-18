@@ -820,6 +820,11 @@ test-frond-68k-install: out/frond-68k
 test-frond-arm-install: out/frond
 	python3 tests/frond-arm-install.py
 
+.PHONY: test-native-budget
+test-native-budget:
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm tests/native-budget.cpp -o build/test-native-budget
+	./build/test-native-budget
+
 .PHONY: test-frond-arm-big-install
 test-frond-arm-big-install: out/frond
 	python3 tests/frond-arm-big-install.py

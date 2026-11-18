@@ -16,6 +16,7 @@
 #include "savestate/Savestate.h"
 #include "savestate/SavestateLoader.h"
 #include "syscall_dispatch.h"
+#include "native_budget.h"
 
 namespace NativeBoundary {
 namespace {
@@ -229,14 +230,11 @@ struct Session::Impl {
     uint32_t calls{0}, callbacks{0};
     const std::chrono::steady_clock::time_point started=std::chrono::steady_clock::now();
     uint64_t startedGuest;
-    // Bytes the host passed to or from the guest in callbacks during a call, the database being
-    // installed or exported. The guest's work after the last byte grows with it: a 9.8 MB
-    // resource database on the T|X takes about 100M cycles to pull and 700M more to store.
-    uint64_t moved{0};
-    // Extra 50M-cycle slices for the data moved: 6 per MiB, about 4x that install's rate.
-    uint64_t extraSlices() const { return std::min<uint64_t>(moved * 6 >> 20, 1000); }
+    // Bytes the host passes to or from the guest in callbacks during calls, the database being
+    // installed or exported; the guest's work after the last byte grows with it.
+    NativeBudget moved;
     void budgetCheck() {
-        const uint64_t extra = extraSlices();
+        const uint64_t extra = moved.sessionExtra();
         require(std::chrono::steady_clock::now()-started<std::chrono::seconds(30 + 5 * extra) &&
                 soc.GetInjectedTimeNsec()-startedGuest<(20 + extra) * 1000000000ull,
                 "native session deadline exceeded");
@@ -337,9 +335,14 @@ struct Session::Impl {
         require(cpuStartNativeCall(cpu,entry),"native call nesting rejected");
         Defer finish([&] { cpuEndNativeCall(cpu); });
         // Installs and exports of large databases need more time: record databases near 500 KB
-        // take over 100M cycles to export. They get 10 slices and extraSlices() more for the data
-        // moved so far, so a guest that stops still stops. Deadline checks run between slices.
+        // take over 100M cycles to export. They get the slices NativeBudget gives for the data this
+        // call moved, so a guest that stops still stops. Deadline checks run between slices; the
+        // call's own wall time is held to 30 s plus 5 s per extra slice as well.
         const bool streaming = !boot && (trap == 0x82fc || trap == 0x8304);
+        const bool topLevel = depth == 1;
+        if (topLevel) moved.beginCall();
+        Defer endCall([&] { if (topLevel) moved.endCall(); });
+        const auto callStarted = std::chrono::steady_clock::now();
         bool completed=false;
         if (boot) {
             uint64_t cycles=0;
@@ -353,8 +356,10 @@ struct Session::Impl {
         } else for (uint64_t slice = 0; ; ++slice) {
             completed = soc.ExecuteInjected(budget,budget);
             if (completed || (cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT)) break;
-            if (!streaming || slice + 1 >= 10 + extraSlices()) break;
+            if (!streaming || slice + 1 >= moved.sliceLimit()) break;
             budgetCheck();
+            require(std::chrono::steady_clock::now()-callStarted<std::chrono::seconds(30 + 5 * moved.callExtra()),
+                    "native call deadline exceeded");
         }
         if (callbackError) std::rethrow_exception(callbackError);
         require(!(cpuGetSlowPathReason(cpu)&SLOW_PATH_REASON_NATIVE_FAULT),"native call fault");
@@ -396,12 +401,12 @@ uint32_t Session::Call(uint16_t trap,std::array<uint32_t,4> args,std::vector<uin
 }
 bool Session::Read(uint32_t address,void* dest,uint32_t size) {
     if (impl->closed || impl->failed || !impl->copy(address,dest,size,false)) return false;
-    if (impl->depth) impl->moved += size;
+    if (impl->depth) impl->moved.add(size);
     return true;
 }
 bool Session::Write(uint32_t address,const void* src,uint32_t size) {
     if (impl->closed || impl->failed || !impl->copy(address,const_cast<void*>(src),size,true)) return false;
-    if (impl->depth) impl->moved += size;
+    if (impl->depth) impl->moved.add(size);
     return true;
 }
 void Session::RegisterCallback(uint32_t address,std::function<void(ArmCpu*)> fn) {
