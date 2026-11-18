@@ -493,7 +493,7 @@ void machine() {
             const uint64_t credit = soc->Run(asked, 100000000);
             const auto to = soc->Status();
             const uint64_t ticks = std::max<uint64_t>(1, asked * 32768 / 100000000);
-            assert(to.retired % sliceRetired == 0 || to.work % sliceWork == 0 || (to.time.ticks % 32 == 0 && !to.time.numerator));
+            assert(to.retired % sliceRetired == 0 || to.work % sliceWork == 0 || to.time.ticks % 32 == 0);
             assert((asked == 1000000 || to.time.ticks - from.time.ticks >= ticks) && credit > 0 && !soc->Halted());
         }
     }

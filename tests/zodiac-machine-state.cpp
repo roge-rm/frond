@@ -335,11 +335,12 @@ void controlsWait(bool fast) {
 bool blPrefix(const Record& r) {
     return r.run.result.trace.instructionSize == 2 && (r.run.result.trace.instruction & 0xf800) == 0xf000;
 }
+// The timer compare puts the interrupt between the BL prefix and its suffix at the ARM920T cost table's rates.
 void thumbBl(bool fast, bool ldmReturn, bool useBounded) {
     Guest g{ldmReturn ? "Thumb BL prefix, LDM return" : "Thumb BL prefix", setup(), {}};
     auto& words = g.words;
     load(words, 0, 0x00223000); store(words, 0, 8, 58);
-    load(words, 0, 0x00203000); store(words, 0, 8, 6); store(words, 0, 0, 0x13);
+    load(words, 0, 0x00203000); store(words, 0, 8, 12); store(words, 0, 0, 0x13);
     words.push_back(0xe321f013);
     const uint32_t thumbPc = words.size() * 4 + 16;
     load(words, 2, thumbPc | 1); words.push_back(0xe12fff12);

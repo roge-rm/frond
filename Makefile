@@ -974,7 +974,7 @@ test-zodiac-normal-runtime: out/frond
 		tests/zodiac-normal-runtime.cpp @build/zodiac-runtime-core.rsp core/src/common/libcommon.a \
 		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-normal-runtime
 	./build/test-zodiac-normal-runtime
-	ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
+	FROND_ZODIAC_STOP_ON_EXCEPTION=1 ZODIAC_TEST_STOP=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_CARD=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_PULL=1 ./build/test-zodiac-normal-runtime
 	ZODIAC_TEST_SLEEP=1 ./build/test-zodiac-normal-runtime
