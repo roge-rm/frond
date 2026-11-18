@@ -855,7 +855,7 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
-        SoC::Attention attention{};
+        AttentionThrottle attention;
         // The button bar draws the LED only where the device has one.
         const auto* attentionProfile = deviceProfile5(soc->GetDeviceType());
         const uint8_t ledColours = attentionProfile ? attentionProfile->capabilities.ledColours : 0;
@@ -1334,7 +1334,7 @@ bool gFastEngineMissing = false;
                     // The pad's Hold slide stays over while it's on.
                     if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
                     DeviceStick stick = sdlEventHandler.Stick();
-                    stick.lamp = soc->GuestAttention().ledColour & ledColours;
+                    stick.lamp = attention.Shown().ledColour;
                     stick.lampShown = ledColours != 0;
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
@@ -1364,17 +1364,17 @@ bool gFastEngineMissing = false;
                     // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
                     if (replayPaused) current.vibrate = false;
                     current.ledColour &= ledColours;
+                    bool changed = false;
+                    const SoC::Attention& shown = attention.Update(current, timestampUsec(), changed);
 #ifdef __ANDROID__
-                    if (current != attention) frondGuestAttentionChanged(current.ledColour, current.vibrate, current.led);
-                    attention = current;
+                    if (changed) frondGuestAttentionChanged(shown.ledColour, shown.vibrate, shown.led);
 #else
                     const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
                     const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
                     if (desktop) {
                         desktop->rumbleChanged(on && !controller);
-                        desktop->attentionChanged(current);
+                        if (changed) desktop->attentionChanged(shown);
                     }
-                    attention = current;
 #endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.

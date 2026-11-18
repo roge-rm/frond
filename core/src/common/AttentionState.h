@@ -34,4 +34,29 @@ struct AttentionState {
     }
 };
 
+// Hands a guest's attention on at most once per interval, so a low-battery fade or blink doesn't post an event
+// and a repaint every few slices. A change held back goes out once the interval is over, so the last state always
+// arrives. A vibrate change passes at once, so rumble keeps its timing.
+class AttentionThrottle {
+   public:
+    static constexpr uint64_t intervalUsec = 100000;
+    // The state to report now; changed when it differs from the one returned before.
+    const AttentionState& Update(const AttentionState& latest, uint64_t nowUsec, bool& changed) {
+        changed = false;
+        if (latest == shown) return shown;
+        if (latest.vibrate != shown.vibrate || !started || nowUsec - shownUsec >= intervalUsec) {
+            shown = latest;
+            shownUsec = nowUsec;
+            started = changed = true;
+        }
+        return shown;
+    }
+    const AttentionState& Shown() const { return shown; }
+
+   private:
+    AttentionState shown{};
+    uint64_t shownUsec = 0;
+    bool started = false;
+};
+
 #endif

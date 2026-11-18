@@ -136,7 +136,8 @@ class SocIMX1 : public SoC {
     void PumpInput();
     void StateChanged();
     // Puts the battery, headphone and cradle button settings on the machine's inputs.
-    void ApplyBattery();
+    bool ApplyBattery();
+    bool ApplyHeadphones();
     bool headphones{false}, cradleDown{false};
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the

@@ -4,13 +4,16 @@
 // turning the motor on, then off, as imx1MachineAttention reports it. The power LED (zodiac_led.h): the colour
 // from D18/D19 as driven GPIO outputs while the PWM drives a non-zero sample, through the model and a guest
 // doing the ROM's writes (20097b56 level 3, 2009780e modes 0-3, 20097b3a reset and off).
+#include "uarm/imx1_pwm.h"
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <utility>
 #include <vector>
+#include "AttentionState.h"
 #include "CPU.h"
 #include "imx1_boot_probe.h"
+#include "imx1_pwm.h"
 #include "zodiac_led.h"
 #include "zodiac_ymf768.h"
 
@@ -120,6 +123,37 @@ static void ledModel() {
     assert(zodiacPowerLed(pins, pins, pins, 0x30, true) == zodiacLedGreen);
 }
 
+// The LED follows the sample being output, which a written one becomes only at the next period.
+static void pwmDriving() {
+    Imx1Pwm pwm;
+    uint32_t v = 0x10;
+    assert(pwm.access(0x208000, 4, true, v) == Imx1PwmAccess::ok);
+    v = 2; assert(pwm.access(0x208008, 4, true, v) == Imx1PwmAccess::ok);
+    v = 3; assert(pwm.access(0x208004, 4, true, v) == Imx1PwmAccess::ok);
+    assert(!pwm.driving());
+    pwm.advancePerclk1(16);
+    assert(pwm.driving());
+    v = 0; assert(pwm.access(0x208004, 4, true, v) == Imx1PwmAccess::ok);
+    assert(pwm.driving());
+    pwm.advancePerclk1(64);
+    assert(!pwm.driving());
+}
+
+// At most one LED change per 100 ms reaches the front end, the last one always; vibrate passes at once.
+static void attentionThrottle() {
+    AttentionThrottle t;
+    bool changed = false;
+    AttentionState amber{AttentionState::amber, false, false}, off{}, buzz{0, true, false};
+    assert(t.Update(off, 0, changed) == off && !changed);
+    assert(t.Update(amber, 1000, changed) == amber && changed);
+    assert(t.Update(off, 20000, changed) == amber && !changed);
+    assert(t.Update(amber, 40000, changed) == amber && !changed);
+    assert(t.Update(off, 60000, changed) == amber && !changed);
+    assert(t.Update(off, 101000, changed) == off && changed);
+    assert(t.Update(buzz, 102000, changed) == buzz && changed);
+    assert(t.Update(off, 103000, changed) == off && changed);
+}
+
 static void ledMachine() {
     struct Case { bool d18, d19, lit; uint32_t sample; bool off; uint8_t want; };
     const Case cases[] = {
@@ -146,6 +180,8 @@ int main() {
     model();
     machine();
     ledModel();
+    pwmDriving();
+    attentionThrottle();
     ledMachine();
     printf("zodiac rumble and power LED: ok\n");
 }

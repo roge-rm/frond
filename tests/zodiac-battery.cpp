@@ -120,6 +120,11 @@ void machine() {
     assert(soc->SetCradleButton(true));
     load(*soc, atMaximum);
     assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
+    // Pressed again before the release after a load is pumped: the release leaves D22 low.
+    assert(soc->SetCradleButton(true));
+    soc->Run(1000, 32000000);
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    assert(soc->SetCradleButton(false) && !soc->CradleInputLow());
 }
 }  // namespace
 
@@ -144,6 +149,9 @@ void halted() {
     soc->Reset();
     assert(!soc->Halted() && soc->BatterySample() == zodiacBatterySample(20) && !soc->ChargerInputLow());
     stop();
+    // Halted, the headphone and cradle commands report the failure and change nothing.
+    assert(!soc->SetHeadphones(true) && !soc->HeadphonesIn());
+    assert(!soc->SetCradleButton(true) && !soc->CradleButtonDown());
     assert(soc->SetBattery(battery("level 20 charging")));
     soc->Reset();
     assert(soc->ChargerInputLow());
