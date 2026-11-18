@@ -28,6 +28,8 @@ import com.rm.frond.CpuSpeed
 import com.rm.frond.Device
 import com.rm.frond.Engine
 import com.rm.frond.BarMode
+import com.rm.frond.BatteryInfo
+import com.rm.frond.BatteryMode
 import com.rm.frond.JogControls
 import com.rm.frond.JogLandscape
 import com.rm.frond.MachineSettings
@@ -167,6 +169,52 @@ fun MachineContrastRow(settings: MachineSettings, listStyle: Boolean, onChange: 
     } else {
         Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
             Text("Contrast: ${value.roundToInt()}", style = MaterialTheme.typography.bodyLarge)
+            slider()
+        }
+    }
+}
+
+// The Battery setting: Maximum, Set level with a slider, or Host battery, and Charging for the first two. info is what
+// the core said about the running machine: nothing changes until it answers, and an unavailable battery greys all of
+// it; a machine that can't charge greys Charging, keeping the saved choice. Edit settings passes null.
+@Composable
+fun MachineBatteryRows(settings: MachineSettings, listStyle: Boolean, info: BatteryInfo?, onChange: (MachineSettings) -> Unit) {
+    val usable = info == null || (info.known && info.supported)
+    val faded = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+    if (usable) {
+        MachineChoiceRow("Battery", settings.batteryMode, BatteryMode.entries, { it.label }, listStyle) { onChange(settings.copy(batteryMode = it)) }
+    } else {
+        ListItem(headlineContent = { Text("Battery", color = faded) }, supportingContent = { Text(settings.batteryMode.label, color = faded) })
+    }
+    if (settings.batteryMode == BatteryMode.LEVEL) MachineBatteryLevelRow(settings, listStyle, usable, onChange)
+    if (settings.batteryMode != BatteryMode.HOST) {
+        MachineSwitchRow("Charging", settings.batteryCharging, listStyle, usable && (info?.chargingSupported ?: true)) {
+            onChange(settings.copy(batteryCharging = it))
+        }
+    }
+}
+
+// The battery level, 0 to 100. The change is saved when the slider is let go.
+@Composable
+private fun MachineBatteryLevelRow(settings: MachineSettings, listStyle: Boolean, enabled: Boolean, onChange: (MachineSettings) -> Unit) {
+    var value by remember(settings.batteryLevel) { mutableFloatStateOf(settings.batteryLevel.toFloat()) }
+    val slider = @Composable {
+        Slider(
+            value = value,
+            onValueChange = { value = it },
+            valueRange = 0f..100f,
+            enabled = enabled,
+            onValueChangeFinished = {
+                val next = value.roundToInt()
+                if (next != settings.batteryLevel) onChange(settings.copy(batteryLevel = next))
+            },
+        )
+    }
+    if (listStyle) {
+        ListItem(headlineContent = { Text("Level: ${value.roundToInt()}") }, supportingContent = { slider() })
+    } else {
+        Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Text("Level: ${value.roundToInt()}", style = MaterialTheme.typography.bodyLarge)
             slider()
         }
     }

@@ -50,6 +50,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.rm.frond.BatteryInfo
+import com.rm.frond.FrondActivity
 import com.rm.frond.InfraredChoice
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
@@ -275,6 +277,8 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
     if (DisplayRow.ROTATE in rows) SheetAction("Rotate") { actions.closeSheet(); model.rotate() }
     if (DisplayRow.SPEED in rows) MachineSpeedRow(model.settings, true) { model.changeSettings(it) }
     if (DisplayRow.CAMERA in rows) CameraRow(model)
+    Header("Battery", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
+    MachineBatteryRows(model.settings, true, FrondActivity.running?.battery?.info ?: BatteryInfo()) { model.changeSettings(it) }
     Header("Audio", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
     for (row in RunningSheets.audioRows(device)) when (row) {
         AudioRow.SOUND -> MachineSwitchRow("Sound", device.sound && state.sound, true, enabled = device.sound) { actions.toggleSound() }
