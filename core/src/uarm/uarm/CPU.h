@@ -307,6 +307,8 @@ void cpuArm920ApplyState(ArmCpu*, const Arm920SavedState&);
 using Arm920LeanPage = uint8_t* (*)(void* context, uint32_t pa, bool write, bool* counted);
 using Arm920LeanGuard = bool (*)(uint32_t instruction, const uint32_t* registers, uint32_t cpsr, uint32_t spsr);
 void cpuArm920SetLean(ArmCpu*, Arm920LeanPage page, Arm920LeanGuard guard, void* context);
+// CP15 c1 A (alignment fault checking) on an ARM920T: misaligned word and halfword accesses take a data abort.
+bool cpuArm920AlignmentFaults(const ArmCpu*);
 // read(context, pa, size, pc, ran, left, single, value, cost) may answer a read of up to a word from a page that
 // isn't plain without the step, pc being the instruction's, ran the instructions the lean run finished before this
 // one and single whether the read is the instruction's only data access (a single load). left and cost are as for
