@@ -471,7 +471,7 @@ class Imx1Bootstrap {
         rtc.advanceReference(numerator, denominator);
         watchdog.advanceReference(numerator, denominator);
         pwm.advanceReference(numerator, denominator);
-        if (!referenceLimit(denominator, lazyReference)) lazyReference = {};
+        if (!numerator || !referenceLimit(denominator, lazyReference)) lazyReference = {};
         return true;
     }
     bool chargeLazyReference(uint64_t numerator, uint64_t denominator);

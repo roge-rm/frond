@@ -146,14 +146,8 @@ bool Imx1Bootstrap::chargeLazyReference(uint64_t numerator, uint64_t denominator
     else if (lazy.denominator % denominator == 0) {
         if (__builtin_mul_overflow(numerator, lazy.denominator / denominator, &units)) return false;
     } else {
-        // A new common denominator: the sum so far scaled up and the limit worked out again over it. Only once
-        // every model the charge reaches has had one of this denominator, so their own denominators (which
-        // referenceRatioSupported looks at) stay as the single charges would leave them.
-        uint64_t phase, den, target;
-        if ((rtc.referenceEvent(phase, den, target) && den % denominator) ||
-            (watchdog.referenceEvent(phase, den, target) && den % denominator) ||
-            (pwm.referenceEvent(phase, den, target) && den % denominator))
-            return false;
+        // A new common denominator: the sum so far scaled up and the limit worked out again over it.
+        // referenceLimit turns it down unless every model's denominator is already a multiple of it.
         uint64_t common, scaled;
         if (__builtin_mul_overflow(lazy.denominator, denominator / imx1Gcd(lazy.denominator, denominator), &common) ||
             __builtin_mul_overflow(lazy.units, common / lazy.denominator, &scaled) ||
@@ -174,7 +168,8 @@ bool Imx1Bootstrap::referenceLimit(uint64_t denominator, LazyReference& lazy) co
     uint64_t phase, den, target;
     auto take = [&](bool found) {
         if (!found) return true;
-        if (!target || !den || phase >= den) return false;
+        // Only a model whose denominator is a multiple of the sum's is left with the bytes single charges give.
+        if (!target || !den || phase >= den || den % denominator) return false;
         uint64_t scale, whole;
         if (__builtin_mul_overflow(den, denominator / imx1Gcd(den, denominator), &scale) ||
             __builtin_mul_overflow(target, scale, &whole))
