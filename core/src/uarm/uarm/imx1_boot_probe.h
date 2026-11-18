@@ -352,7 +352,7 @@ Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first,
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,
 // and in landscape the rotation at 20084d26 turns them one place, so top is D10, right D9, bottom D8, left D14.
 // ASSUMPTION "Zodiac Function and Bluetooth pins": D12 and D13 by elimination, the ROM has no key code for them.
-// Not wired: D22 (cradle or HotSync, active high) and B23 (the scan's other stick click input).
+// Not wired: D22 (the cradle's HotSync button, active low, idle high) and B23 (the scan's other stick click input).
 enum class Imx1ZodiacControl {
     home, triggerLeft, triggerRight, power, stickClick, actionRight, actionUp, actionLeft, function, bluetooth,
     actionDown, count

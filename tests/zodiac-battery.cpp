@@ -1,5 +1,5 @@
 // The Zodiac's battery setting: the level as the ASP U word on the ROM's own count-to-voltage chain, Maximum
-// exactly the fixed 0x9b00, the setting not saved with the state and put back after every load and reset.
+// exactly the fixed 0x9b00, Charging on GPIO B14, the setting not saved with the state and put back after every load and reset.
 // Made-up ROM, no firmware.
 #include <cassert>
 #include <cstdint>
@@ -83,6 +83,15 @@ void machine() {
     assert(soc->SetBattery(battery("max")) && soc->BatterySample() == zodiacBatteryFullSample);
     const auto afterReset = save(*soc);
     assert(soc->SetBattery(battery("level 70")) && save(*soc) == afterReset);
+
+    // Charging pulls B14 low, through a load and a reset as well. Off the charger B14 stays low for now.
+    assert(soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("level 40 charging")) && soc->ChargerInputLow());
+    load(*soc, atMaximum);
+    assert(soc->ChargerInputLow());
+    soc->Reset();
+    assert(soc->ChargerInputLow() && soc->BatterySample() == zodiacBatterySample(40));
+    assert(soc->SetBattery(battery("level 40")) && soc->ChargerInputLow());
 
     // A state made at another level carries no level: it loads at the setting the machine has.
     assert(soc->SetBattery(battery("level 5")));
