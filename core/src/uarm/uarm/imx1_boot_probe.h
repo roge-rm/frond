@@ -286,12 +286,10 @@ void imx1MachineSetPcmOutput(Imx1Machine*, void (*hook)(void*, uint16_t word, un
 // in an optional section; a state without one loads with the chip reset.
 void imx1MachineEnableYmf768(Imx1Machine*);
 // What the board's audio output looks like just now: SSI1's frame rate (frames a second as a fraction, zero
-// while it isn't sending), the PWM duty last written and port D's direction, use, data and OCR2 registers.
+// while it isn't sending) and port D's direction, use, data and OCR2 registers.
 // Safe to call from the PCM output hook; apart from the System PLL's ratio these change only at CPU writes.
 struct Imx1MachineAudio {
     uint64_t rateNumerator = 0, rateDenominator = 0;
-    bool pwmKnown = false;
-    uint32_t pwmHigh = 0, pwmPeriod = 0;
     uint32_t gpioDDirection = 0, gpioDInUse = 0, gpioDData = 0, gpioDOutputSelect = 0;
 };
 Imx1MachineAudio imx1MachineAudio(const Imx1Machine*);

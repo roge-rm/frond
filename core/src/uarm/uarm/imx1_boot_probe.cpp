@@ -2307,7 +2307,6 @@ Imx1MachineAudio imx1MachineAudio(const Imx1Machine* machine) {
     const auto& board = machine->probe->peripherals;
     Imx1MachineAudio a;
     board.pcmFrameRate(a.rateNumerator, a.rateDenominator);
-    a.pwmKnown = board.pwmDuty(a.pwmHigh, a.pwmPeriod);
     a.gpioDDirection = board.gpioRegister(3, 0);
     a.gpioDInUse = board.gpioRegister(3, 8);
     a.gpioDData = board.gpioRegister(3, 7);

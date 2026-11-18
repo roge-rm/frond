@@ -10,22 +10,19 @@
 
 // The Zodiac's sound on its way to the host. SSI1 sends two 16-bit signed slots a frame; slot 0 (the frame
 // sync slot) is taken as left (ASSUMPTION "SSI1 slot 0 is left"). Frames are averaged down or up to the
-// host's 44100 Hz (a box filter, as the AK4534 path does) and scaled by the board's volume. Everything is
+// host's 44100 Hz (a box filter, as the AK4534 path does) and gated by the amplifier. Everything is
 // counted in frames, so the same words give the same host frames in Exact and Fast.
 
-// The volume as a 16.16 gain from the board's lines:
-// - the amplifier, GPIO D25. The ROM's audio module (20097dee) drives it high while nothing asks for
-//   mute and low at start-up and while muted (ASSUMPTION "D25 enables the speaker amplifier"). A pin
-//   that isn't a driven GPIO output counts as off.
-// - the PWM duty, the volume level. The ROM's seven levels (20097b56) are 0, 7, 25, 51, 76, 102 and 128
-//   high clocks of 130; the gain follows the duty in a straight line (ASSUMPTION "PWM duty is linear
-//   volume"). PWM off or with no sample yet is silence.
+// The board's gain on the sound as 16.16, from the amplifier, GPIO D25. The ROM's audio module (20097dee)
+// drives it high while nothing asks for mute and low at start-up and while muted (ASSUMPTION "D25 enables the
+// speaker amplifier"). A pin that isn't a driven GPIO output counts as off. The volume itself is the guest's:
+// the YMF768's level registers and the samples it sends. The PWM drives the power LED's brightness (ROM
+// 20097854: level 3 on the charger, off on battery), so it plays no part here.
 // Headphone detect (GPIO B16, read by 20097d40) stays at its fixed level, which leaves the speaker path on.
 inline uint32_t zodiacAudioGain(const Imx1MachineAudio& a) {
     constexpr uint32_t d25 = 1u << 25;
     const bool driven = (a.gpioDDirection & d25) && (a.gpioDInUse & d25) && ((a.gpioDOutputSelect >> 18) & 3) == 3;
-    if (!driven || !(a.gpioDData & d25) || !a.pwmKnown || !a.pwmPeriod) return 0;
-    return uint32_t((uint64_t(a.pwmHigh) << 16) / a.pwmPeriod);
+    return driven && (a.gpioDData & d25) ? 65536 : 0;
 }
 
 class ZodiacAudioOutput {
