@@ -912,6 +912,35 @@ void smoothStretch() {
     }
     std::puts("PASS: smooth stretch 320x200 to 480x320 at 00a000ab, bilinear per 5/6/5 channel, scissor, one column past, saved");
 }
+// ZQuake's full screen stretch: 320x240 (pitch 480) to a 480x320 rectangle with flags 5. The ratio aa is
+// truncated, so the ROM sends a 482 wide output (ceil(320 << 8 / aa)); the scissor (480x320) trims it.
+std::vector<uint32_t> zquakeStretch(uint32_t scissor = 0x014001e0) {
+    return {0x4a1,0,0x41b,0xd598b4df,0x472,0x3f,0x4b2,0x01cc1200,0x4b1,0x40037d04,
+        0x46f,0,0x470,scissor,0x401,hoopsScreen,0x402,0x1e0,0x46b,hoopsSource,0x46c,0x1e0,0x488,0x02020008,
+        0x416,4,0x4020c419,0x1e0,hoopsSource,0x00020410,0x1e3,0x140,0x00c000aa,0x00020420,0x1e3,0x140,0x00c000aa,
+        0x00020464,0,0,0x01e20140};
+}
+void stretchPastPitch() {
+    Fixture f;
+    for (unsigned y = 0; y < 241; ++y) for (unsigned x = 0; x < 480; ++x) f.write(hoopsSource+(y*480+x)*2,hoopsPixel(x,y));
+    for (unsigned i = 0; i < 480*321; ++i) f.write(hoopsScreen+i*2,0xa55a);
+    assert(f.append(zquakeStretch(),0x200b0b14) == A::ok);
+    f.finish();
+    for (unsigned y = 0; y < 320; ++y)
+        for (unsigned x = 0; x < 480; ++x) {
+            const uint32_t expected = smoothOracle(f,hoopsSource,480,x,y,0xaa,0xc0), got = f.read(hoopsScreen+(y*480+x)*2);
+            if (got != expected) {
+                std::fprintf(stderr,"stretch past pitch at %u,%u: %04x, not %04x\n",x,y,got,expected);
+                std::abort();
+            }
+        }
+    // Nothing past the screen's last row.
+    for (unsigned x = 0; x < 480; ++x) assert(f.read(hoopsScreen+(320*480+x)*2) == 0xa55a);
+    // A scissor past the pitch still stops it.
+    Fixture g;
+    assert(g.append(zquakeStretch(0x014001e2),0x200b0b14) == A::sideEffect && refused(g,"stretch-geometry",0x01e20140));
+    std::puts("PASS: smooth stretch 320x240 to 482x320 at 00c000aa (ZQuake), trimmed to 480 by the scissor");
+}
 // Thruster's stretch with the GMC a keyed copy left (bit 28 clear, colour compare on): drawn through the last
 // keyed packet's compare.
 std::vector<uint32_t> staleKeyedStretch() {
@@ -1655,7 +1684,7 @@ void patternSaved() {
 int main() {
     hostSourceType(); hostAfterPattern();
     geometry(); guards(); scissor(); stretchBlit(); keyedModes(); brushUpload(); fills(); stretch(); sideBySide(); overlapMoves(); scanStatus(); executionAndReset(); privateCapture();
-    stretchStaleGmc(); stretchRatios(); smoothStretch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
+    stretchStaleGmc(); stretchRatios(); smoothStretch(); stretchPastPitch(); keyedStretch(); lines(); linesSaved(); clippedPastPitch(); blend(); blendSaved(); transform(); transformSaved();
     ropCopies(); maskBlt(); tileBlt(); patternFill(); patternSaved();
     std::puts("PASS: plain RGB565 copy geometry, bounds, atomic append, queued A4 execution-time source, deadlines, reset and routes");
 }
