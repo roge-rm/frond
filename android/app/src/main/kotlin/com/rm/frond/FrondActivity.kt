@@ -506,11 +506,15 @@ open class FrondActivity : SDLActivity() {
         if (followsProgram()) requestedOrientation = orientationRequest()
     }
 
-    // The guest's alarm LED or vibrate motor changed (the Zodiac's rumble). The LED isn't shown yet.
-    @Suppress("UNUSED_PARAMETER")
+    // The guest's LED or vibrate motor changed (the Zodiac's rumble). ledColour has bits 1 green and 2 red;
+    // the core draws the LED in the button bar, so it is only kept here. lamp is a second lamp output, not shown.
     // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
     private var guestVibrate = false
-    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread {
+    var guestLedColour = 0
+        private set
+    @Suppress("UNUSED_PARAMETER")
+    fun onGuestAttention(ledColour: Int, vibrate: Boolean, lamp: Boolean) = runOnUiThread {
+        guestLedColour = ledColour
         guestVibrate = vibrate
         if (!leaving && foreground) rumble?.set(vibrate)
     }

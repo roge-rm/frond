@@ -16,6 +16,7 @@
 #include "sdcard.h"
 #include "vSD.h"
 #include "zodiac_battery.h"
+#include "zodiac_led.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
@@ -32,6 +33,9 @@ namespace {
     // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
     // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
     constexpr uint32_t chargerPinB = 0x00004000;
+    // B16, headphone detect: the DAL (20097d40) reads it high as headphones in, writes YMF768 reg 25 = 0 and
+    // turns D27 low and D26 to the headphone bass setting; low (Frond's default) is the speaker.
+    constexpr uint32_t headphonePinB = 0x00010000;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
@@ -204,6 +208,8 @@ void SocIMX1::StateChanged() {
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
     redraw = true;
+    // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
+    cradleDown = false;
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
 }
@@ -248,10 +254,15 @@ unsigned SocIMX1::GuestOrientation() {
     return orientation;
 }
 
-// The YMF768's LED and rumble motor.
+// The YMF768's LED and rumble motor, and the power LED's colour (zodiac_led.h).
 SoC::Attention SocIMX1::GuestAttention() {
     const auto outputs = imx1MachineAttention(machine);
-    return {outputs.led, outputs.motor};
+    static_assert(zodiacLedGreen == ledGreen && zodiacLedRed == ledRed);
+    Attention a;
+    a.ledColour = outputs.power;
+    a.vibrate = outputs.motor;
+    a.led = outputs.led;
+    return a;
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -351,11 +362,31 @@ void SocIMX1::ApplyBattery() {
     if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
         std::cerr << "zodiac: the battery level could not be set" << std::endl;
     uint32_t values[4]{}, masks[4]{};
-    masks[1] = chargerPinB;
-    values[1] = battery.charging ? 0 : chargerPinB;
+    masks[1] = chargerPinB | headphonePinB;
+    values[1] = (battery.charging ? 0 : chargerPinB) | (headphones ? headphonePinB : 0);
     if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
         imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
-        std::cerr << "zodiac: the charger input could not be set" << std::endl;
+        std::cerr << "zodiac: the charger and headphone inputs could not be set" << std::endl;
+}
+
+bool SocIMX1::SetHeadphones(bool in) {
+    headphones = in;
+    ApplyBattery();
+    return true;
+}
+
+// D22 low while held. Without the cradle attached (A11 high and the accessory checks of 20089bae/20089bbc)
+// the awake ROM's key scan (20084af4) ignores it; asleep, its low level interrupt wakes the Zodiac.
+bool SocIMX1::SetCradleButton(bool down) {
+    if (halted) return false;
+    uint32_t values[4]{}, masks[4]{};
+    masks[3] = cradlePinD;
+    values[3] = down ? 0 : cradlePinD;
+    if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
+        imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
+        return false;
+    cradleDown = down;
+    return true;
 }
 
 uint64_t SocIMX1::GetTime() {

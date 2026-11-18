@@ -3151,6 +3151,23 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
                 const float ring=arc(x,y,ix,iy+0.6f,5.4f,degrees(-50),degrees(230));
                 return canvas.edge(std::min(ring,segment(x,y,ix,iy-6.4f,ix,iy-0.4f))-0.85f);
             },[&](float,float,Rgb) {return ink;});
+            // The power LED right of the key: green, red or amber with a soft glow, dark grey when off.
+            if(stick.lampShown) {
+                const float lx=cx+28,ly=cy;
+                const bool green=stick.lamp&1,red=stick.lamp&2;
+                const Rgb lamp=green && red ? Rgb{255,170,40} : green ? Rgb{80,232,110} : red ? Rgb{255,72,60} : Rgb{34,35,39};
+                if(stick.lamp) canvas.paint(lx-8,ly-8,lx+8,ly+8,[&](float x,float y) {
+                    return clamp01(1-std::hypot(x-lx,y-ly)/7)*0.4f;
+                },[&](float,float,Rgb) {return lamp;});
+                canvas.paint(lx-5,ly-5,lx+5,ly+5,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-3.6f);},
+                             [](float,float,Rgb) {return Rgb{12,12,14};});
+                canvas.paint(lx-5,ly-5,lx+5,ly+5,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-2.8f);},
+                             [&](float x,float y,Rgb) {
+                    // A small highlight up and to the left.
+                    const float g=clamp01(1-std::hypot(x-lx+0.9f,y-ly+0.9f)/1.6f);
+                    return lamp+Rgb{60,60,60}*(g*g);
+                });
+            }
         }
         if(b.icon==DeviceControlIcon::bluetooth) {
             // A blue lamp in the middle with a soft glow round it.

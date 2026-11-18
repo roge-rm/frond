@@ -19,6 +19,8 @@ class Imx1Pwm {
     void advanceReference(uint64_t numerator, uint64_t denominator);
     bool resetting() const { return resetRemaining != 0; }
     bool enabled() const { return control & 0x10; }
+    // Enabled with a non-zero sample written, so the output isn't held low: the Zodiac's power LED is lit.
+    bool driving() const { return enabled() && sampleKnown && sample != 0; }
     bool usesPerclk1() const { return enabled() && !(control & 0x8000); }
     bool interruptOutput() const { return irq && (control & 0x40); }
     bool usesReference() const { return enabled() && (control & 0x8000); }

@@ -163,15 +163,15 @@ extern "C" JNIEXPORT void JNICALL Java_com_rm_frond_ZodiacPad_pushAxis(JNIEnv*, 
     SDL_PushEvent(&event);
 }
 
-// The core's guest thread, when the guest turns its alarm LED or vibrate motor on or off (the Zodiac's
-// rumble): tells FrondActivity, which drives a controller's or the phone's vibrator.
-void frondGuestAttentionChanged(bool led, bool vibrate) {
+// The core's guest thread, when the guest changes its LED or vibrate motor (AttentionState.h): tells
+// FrondActivity, which drives a controller's or the phone's vibrator. The LED itself is in the core's button bar.
+void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp) {
     auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
     auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
     if (!env || !activity) return;
     jclass type = env->GetObjectClass(activity);
-    jmethodID method = env->GetMethodID(type, "onGuestAttention", "(ZZ)V");
-    if (method) env->CallVoidMethod(activity, method, jboolean(led), jboolean(vibrate));
+    jmethodID method = env->GetMethodID(type, "onGuestAttention", "(IZZ)V");
+    if (method) env->CallVoidMethod(activity, method, jint(ledColour), jboolean(vibrate), jboolean(lamp));
     if (env->ExceptionCheck()) env->ExceptionClear();
     env->DeleteLocalRef(type);
     env->DeleteLocalRef(activity);

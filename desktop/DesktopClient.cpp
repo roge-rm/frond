@@ -105,7 +105,7 @@ void DesktopClient::receive() {
         if (fields[0] == "0" && fields[1] == "event") {
             // An event name from a newer core is skipped; a known one that is malformed or out of order fails.
             static const QList<QByteArray> knownEvents{"ready", "close", "shortcut", "microphone", "camera", "serial", "usb",
-                                                       "infrared", "bluetooth", "dana-view", "card", "rumble", "sd-progress"};
+                                                       "infrared", "bluetooth", "dana-view", "card", "rumble", "sd-progress", "attention"};
             if (!knownEvents.contains(fields[2])) continue;
             if (fields[2] == "ready" && !ready) { ready = true; deadline.stop(); emit started(); }
             else if (fields[2] == "close" && ready) emit closeRequested();
@@ -139,6 +139,9 @@ void DesktopClient::receive() {
             else if (fields[2] == "rumble" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3])
                 emit rumbleState(QString::fromUtf8(QByteArray::fromHex(fields[3])) == "on");
+            else if (fields[2] == "attention" && ready && fields[3].size() % 2 == 0 &&
+                     QByteArray::fromHex(fields[3]).toHex() == fields[3])
+                emit attentionState(QString::fromUtf8(QByteArray::fromHex(fields[3])));
             else if (fields[2] == "sd-progress" && ready && fields[3].size() % 2 == 0 &&
                      QByteArray::fromHex(fields[3]).toHex() == fields[3]) {
                 const auto parts = QString::fromUtf8(QByteArray::fromHex(fields[3])).split(' ');

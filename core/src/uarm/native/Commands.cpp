@@ -231,6 +231,22 @@ namespace {
         else cout << "hold: " << (soc->HoldSwitchOn() ? "on" : "off") << endl;
     }
 
+    // Headphones in the jack and the cradle's HotSync button (the Zodiac).
+    void CmdHeadphones(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() > 1 || (args.size() == 1 && args[0] != "in" && args[0] != "out")) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        if (!soc->HeadphonesSupported() || (args.size() == 1 && !soc->SetHeadphones(args[0] == "in")))
+            cout << "headphones: unavailable" << endl;
+        else cout << "headphones: " << (soc->HeadphonesIn() ? "in" : "out") << endl;
+    }
+    void CmdCradleButton(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() > 1 || (args.size() == 1 && args[0] != "down" && args[0] != "up")) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        if (!soc->CradleButtonSupported() || (args.size() == 1 && !soc->SetCradleButton(args[0] == "down")))
+            cout << "cradle-button: unavailable" << endl;
+        else cout << "cradle-button: " << (soc->CradleButtonDown() ? "down" : "up") << endl;
+    }
+
     void CmdReset(vector<string> args, cli::CommandEnvironment& env, void* context) {
         auto ctx = reinterpret_cast<commands::Context*>(context);
 
@@ -610,6 +626,8 @@ namespace {
           .cmd = CmdSaveNand},
          {.name = "hold-state", .description = "Show the Hold switch.", .cmd = CmdHoldState},
          {.name = "hold", .usage = "hold <on|off>", .description = "Set the Hold switch.", .cmd = CmdHold},
+         {.name = "headphones", .usage = "headphones [in|out]", .description = "Show or set the headphones in the jack.", .cmd = CmdHeadphones},
+         {.name = "cradle-button", .usage = "cradle-button [down|up]", .description = "Show, hold down or let go the cradle's HotSync button.", .cmd = CmdCradleButton},
          {.name = "audio-on", .description = "Enable audio.", .cmd = CmdEnableAudio},
          {.name = "audio-off", .description = "Disable audio.", .cmd = CmdDisableAudio},
          {.name = "unmount", .description = "Unmount SD card.", .cmd = CmdUnmount},

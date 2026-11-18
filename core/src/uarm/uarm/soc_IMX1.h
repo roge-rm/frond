@@ -64,6 +64,16 @@ class SocIMX1 : public SoC {
     // The battery inputs the machine has now, for tests: the ASP U word and GPIO B14 (low on the charger).
     uint16_t BatterySample() const { return imx1MachineAspUInput(machine); }
     bool ChargerInputLow() const { return !(imx1MachineGpioInput(machine, 1) & (1u << 14)); }
+    bool HeadphoneInputHigh() const { return imx1MachineGpioInput(machine, 1) & (1u << 16); }
+    bool CradleInputLow() const { return !(imx1MachineGpioInput(machine, 3) & (1u << 22)); }
+    // Headphones on GPIO B16, high while they are in (the DAL's 20097d40 then mutes the speaker path).
+    bool HeadphonesSupported() const override { return true; }
+    bool HeadphonesIn() const override { return headphones; }
+    bool SetHeadphones(bool in) override;
+    // The cradle's HotSync button on GPIO D22, low while held.
+    bool CradleButtonSupported() const override { return true; }
+    bool CradleButtonDown() const override { return cradleDown; }
+    bool SetCradleButton(bool down) override;
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
     // changes between Run calls only, so always at a slice boundary, and stays through Load and Reset.
@@ -125,8 +135,9 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
-    // Puts the battery setting on the machine's inputs.
+    // Puts the battery, headphone and cradle button settings on the machine's inputs.
     void ApplyBattery();
+    bool headphones{false}, cradleDown{false};
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
     // machine refuses just now is tried again on the next Run.

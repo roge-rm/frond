@@ -7,6 +7,7 @@
 #include <functional>
 #include <string>
 
+#include "AttentionState.h"
 #include "BatteryPower.h"
 #include "NetworkSimulation.h"
 #include "LibertasCF.h"
@@ -61,6 +62,15 @@ class SoC {
     virtual bool HoldSwitchSupported() const { return false; }
     virtual bool HoldSwitchOn() const { return false; }
     virtual bool SetHoldSwitch(bool) { return false; }
+    // Headphones in the jack: a host setting like the battery, put back on the board after every load and
+    // reset, never saved. Runs on the SoC's thread.
+    virtual bool HeadphonesSupported() const { return false; }
+    virtual bool HeadphonesIn() const { return false; }
+    virtual bool SetHeadphones(bool) { return false; }
+    // The cradle's HotSync button, held down or let go. A load or reset lets it go. Runs on the SoC's thread.
+    virtual bool CradleButtonSupported() const { return false; }
+    virtual bool CradleButtonDown() const { return false; }
+    virtual bool SetCradleButton(bool) { return false; }
     virtual bool KeyboardAttached() const { return false; }
     virtual void AttachKeyboard(bool) {}
     virtual bool KeyboardKey(uint8_t, bool) { return false; }
@@ -202,13 +212,10 @@ class SoC {
     // 2 landscape, 3 reverse portrait, 4 reverse landscape), or 0 when unknown or the device has none.
     // Guest thread only.
     virtual unsigned GuestOrientation() { return 0; }
-    // The alarm LED and vibrate motor as the guest drives them, on or off; the guest steps any pattern
-    // itself. Both off on a device without them. Guest thread only.
-    struct Attention {
-        bool led = false, vibrate = false;
-        bool operator==(const Attention& o) const { return led == o.led && vibrate == o.vibrate; }
-        bool operator!=(const Attention& o) const { return !(*this == o); }
-    };
+    // The LED and vibrate motor as the guest drives them (AttentionState.h). All off on a device without them.
+    // Guest thread only.
+    using Attention = AttentionState;
+    static constexpr uint8_t ledGreen = AttentionState::green, ledRed = AttentionState::red;
     virtual Attention GuestAttention() { return {}; }
     virtual void ResetPendingFrame() = 0;
     virtual DeviceType5 GetDeviceType() = 0;

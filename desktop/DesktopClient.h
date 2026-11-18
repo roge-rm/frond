@@ -38,6 +38,9 @@ class DesktopClient : public QObject {
     void bluetoothState(const QString& state);
     // The Zodiac's rumble is on and no game controller plays it.
     void rumbleState(bool on);
+    // The guest's LED and vibrate motor, "led=green vibrate=1" (AttentionState.h). The core draws the LED in
+    // the button bar, so nothing has to act on it.
+    void attentionState(const QString& state);
     void sdProgress(qint64 done, qint64 total);  // SD create, import and export
     void danaViewState(const QString& state);
     void cardState(const QString& state);  // a card put in while the machine was off went in
