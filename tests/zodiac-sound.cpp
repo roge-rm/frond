@@ -1,8 +1,9 @@
 // The Zodiac's PCM sound out: SSI1's words through the machine's PCM output in the same order and values in
 // Exact and Fast, at the frame rate imx1MachineAudio gives, carried on through a state saved mid-stream; the
-// PWM volume and D25 amplifier line as a gain; the host stage's slot pairing, averaging, scaling and gain
-// ramp; and ZodiacPcmSink, what SocIMX1 runs: the same host frames from Exact and Fast through stream start,
-// a volume change and the amplifier going off and on, its gating on PCM output and suspend, and its restart.
+// D25 amplifier line as the gain, with the PWM (the power LED) left out of it on the charger and on battery;
+// the host stage's slot pairing, averaging, scaling and gain ramp; and ZodiacPcmSink, what SocIMX1 runs: the
+// same host frames from Exact and Fast, on the charger and off it, through stream start, an LED change and the
+// amplifier going off and on, its gating on PCM output and suspend, and its restart.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -19,10 +20,11 @@
 #include "zodiac_audio.h"
 
 // A guest that fills 64 bytes of SRAM with a pattern, plays them over and over through DMA channel 10 into
-// SSI1 (the ROM's set-up, in repeat), sets the PWM to the ROM's volume level 3 and port D's D23 to D27 as the
-// ROM's audio module leaves them, with D25 as given, then spins. A scripted guest plays a constant 0x4000 in
-// both slots and, after the set-up, waits, turns the volume up to level 6, waits, turns the amplifier off,
-// waits and turns it on again.
+// SSI1 (the ROM's set-up, in repeat), sets the power LED's PWM as the ROM does (20097854: level 3 while GPIO
+// B14 reads low, on the charger, and reset and off while it reads high, on battery), and port D's D23 to D27
+// as the ROM's audio module leaves them, with D25 as given, then spins. A scripted guest plays a constant
+// 0x4000 in both slots and, after the set-up, waits, writes LED level 6, waits, turns the amplifier off, waits
+// and turns it on again.
 struct Guest {
     static constexpr int16_t constant = 0x4000;
     static constexpr uint32_t waitLoops = 150000;
@@ -41,8 +43,13 @@ struct Guest {
         for (unsigned i = 0; i < 8; ++i) store(ssi, 0);
         store(ch, 0x300000); store(ch + 0xc, 0x208c); store(ch + 0xc, 0x208d);
         store(dma + 4, 0x400); store(ssi + 0xc, 0x2e8); store(ssi + 8, 0x9b00);
-        // PWMC CLK32 / 2 enabled, period 0x80, sample 0x33 (20097b56).
-        store(pwm, 0x8010); store(pwm + 8, 0x80); store(pwm + 4, 0x33);
+        // B14 from port B's sample register: low sets PWMC CLK32 / 2 enabled, period 0x80, sample 0x33
+        // (20097b56), high resets the PWM and turns it off (20097b3a).
+        load(0, 0x21c124);
+        code.push_back(0xe5901000);  // ldr r1, [r0]
+        code.push_back(0xe3110901);  // tst r1, #0x4000
+        store(pwm, 0x8010, eq); store(pwm + 8, 0x80, eq); store(pwm + 4, 0x33, eq);
+        store(pwm, 0x10010, ne); store(pwm, 0, ne);
         // D24, D27 high, D23 and D26 low, D25 as given; all five GPIO outputs from the data register.
         store(portD + 0x1c, (1u << 24) | (1u << 27) | (d25 ? 1u << 25 : 0));
         store(portD + 8, 0x00ffc000); store(portD + 0x20, 0x0f800000); store(portD, 0x0f800000);
@@ -58,7 +65,10 @@ struct Guest {
         }
     }
     void load(unsigned reg, uint32_t value) { literals.emplace_back(code.size(), value); code.push_back(0xe59f0000 | reg << 12); }
-    void store(uint32_t address, uint32_t value) { load(0, address); load(1, value); code.push_back(0xe5801000); }
+    static constexpr uint32_t eq = 0, ne = 1, al = 14;
+    void store(uint32_t address, uint32_t value, uint32_t cond = al) {
+        load(0, address); load(1, value); code.push_back(0x05801000 | cond << 28);
+    }
     void wait() {
         load(2, waitLoops);
         code.push_back(0xe2522001);  // subs r2, r2, #1
@@ -78,9 +88,11 @@ struct Capture {
 };
 
 // Fast is the machine's Fast engine, as SocIMX1's Fast setting turns on.
-static Imx1Machine* create(const Guest& g, bool fast) {
+// B14 reads low on the charger and high on battery, as SocIMX1's battery setting leaves it.
+static Imx1Machine* create(const Guest& g, bool fast, bool charging = true) {
     Imx1ProbeOptions o{};
     o.bootstrapPeripherals = true;
+    o.gpioBInputKnown = true; o.gpioBInput = charging ? 0 : 0x4000;
     auto* m = imx1MachineCreate(g.rom(), g.size(), Imx1ProbeEntry::physicalFlash, false, o);
     assert(m);
     if (fast) assert(imx1MachineSetFastEngine(m, true) && imx1MachineFastEngine(m));
@@ -149,33 +161,30 @@ static void machineStream() {
     assert(streams[0] == streams[1] && resumed[0] == resumed[1]);
 }
 
+// The gain is D25 alone: full while it is driven high, on the charger and on battery alike.
 static void volumeAndAmplifier() {
-    for (bool d25 : {true, false}) {
-        const Guest guest(d25);
-        for (unsigned fast = 0; fast < 2; ++fast) {
-            auto* m = create(guest, fast);
-            // No PWM before the guest sets it up; the duty written counts from the write, before the output
-            // takes it up at its next period boundary.
-            assert(!imx1MachineAudio(m).pwmKnown && !zodiacAudioGain(imx1MachineAudio(m)));
-            run(m, 50000);
-            const auto a = imx1MachineAudio(m);
-            assert(a.pwmKnown && a.pwmHigh == 0x33 && a.pwmPeriod == 0x82);
-            assert((a.gpioDDirection & 0x0f800000) == 0x0f800000 && (a.gpioDInUse & 0x0f800000) == 0x0f800000);
-            assert(((a.gpioDData >> 25) & 1) == d25);
-            assert(zodiacAudioGain(a) == (d25 ? (0x33u << 16) / 0x82 : 0u));
-            imx1MachineStop(m);
+    for (bool charging : {true, false})
+        for (bool d25 : {true, false}) {
+            const Guest guest(d25);
+            for (unsigned fast = 0; fast < 2; ++fast) {
+                auto* m = create(guest, fast, charging);
+                assert(!zodiacAudioGain(imx1MachineAudio(m)));
+                run(m, 50000);
+                const auto a = imx1MachineAudio(m);
+                assert((a.gpioDDirection & 0x0f800000) == 0x0f800000 && (a.gpioDInUse & 0x0f800000) == 0x0f800000);
+                assert(((a.gpioDData >> 25) & 1) == d25);
+                assert(zodiacAudioGain(a) == (d25 ? 65536u : 0u));
+                imx1MachineStop(m);
+            }
         }
-    }
-    // The gain wants D25 driven high as a GPIO output from the data register, and a known PWM duty.
+    // The gain wants D25 driven high as a GPIO output from the data register.
     Imx1MachineAudio a;
-    a.pwmKnown = true; a.pwmHigh = 128; a.pwmPeriod = 130;
     a.gpioDDirection = a.gpioDInUse = a.gpioDData = 1u << 25; a.gpioDOutputSelect = 3u << 18;
-    assert(zodiacAudioGain(a) == (128u << 16) / 130);
+    assert(zodiacAudioGain(a) == 65536);
     auto b = a; b.gpioDDirection = 0; assert(!zodiacAudioGain(b));
     b = a; b.gpioDInUse = 0; assert(!zodiacAudioGain(b));
     b = a; b.gpioDOutputSelect = 1u << 18; assert(!zodiacAudioGain(b));
-    b = a; b.pwmKnown = false; assert(!zodiacAudioGain(b));
-    b = a; b.pwmHigh = 0; assert(!zodiacAudioGain(b));
+    b = a; b.gpioDData = 0; assert(!zodiacAudioGain(b));
 }
 
 using Frames = std::vector<uint32_t>;
@@ -323,11 +332,13 @@ static void sinkGating() {
     assert(pending() == 0);
 }
 
-// The scripted guest through ZodiacPcmSink as SocIMX1 wires it, Exact and Fast in different slice sizes.
+// The scripted guest through ZodiacPcmSink as SocIMX1 wires it, Exact and Fast in different slice sizes, on the
+// charger and on battery: the same sound every way.
 static void sinkStream() {
     const Guest guest(true, true);
-    Frames frames[2];
-    for (unsigned fast = 0; fast < 2; ++fast) {
+    Frames frames[4];
+    for (unsigned run4 = 0; run4 < 4; ++run4) {
+        const bool fast = run4 & 1, charging = run4 < 2;
         struct Tap {
             ZodiacPcmSink sink;
             uint64_t pairs = 0;
@@ -340,7 +351,7 @@ static void sinkStream() {
             }
         } tap;
         auto* queue = audioQueueCreate(1 << 20);
-        auto* m = create(guest, fast);
+        auto* m = create(guest, fast, charging);
         tap.sink.machine = m;
         tap.sink.queue = queue;
         tap.sink.enabled = true;
@@ -348,18 +359,19 @@ static void sinkStream() {
         run(m, 1500000, fast ? 7919 : 5000);
         const auto audio = imx1MachineAudio(m);
         assert(audio.rateNumerator && audio.rateDenominator);
-        frames[fast].resize(audioQueuePendingSamples(queue));
-        audioQueuePopChunk(queue, frames[fast].data(), frames[fast].size());
+        frames[run4].resize(audioQueuePendingSamples(queue));
+        audioQueuePopChunk(queue, frames[run4].data(), frames[run4].size());
         // Every frame from the first one SSI1 sends comes out: none is lost while the rate is unknown.
         const uint64_t common = std::gcd(audio.rateNumerator, audio.rateDenominator);
         const uint64_t expected = tap.pairs * 44100 * (audio.rateDenominator / common) / (audio.rateNumerator / common);
-        fprintf(stderr, "%s: %llu pairs, %zu frames\n", fast ? "fast" : "exact", (unsigned long long)tap.pairs, frames[fast].size());
-        assert(frames[fast].size() == expected && expected > 0);
+        fprintf(stderr, "%s %s: %llu pairs, %zu frames\n", fast ? "fast" : "exact", charging ? "charging" : "battery",
+                (unsigned long long)tap.pairs, frames[run4].size());
+        assert(frames[run4].size() == expected && expected > 0);
         imx1MachineStop(m);
         }
-    assert(frames[0] == frames[1]);
-    // The levels held for a while: level 3, level 6, silence with the amplifier off and level 6 again.
-    const auto level = [](uint32_t high) { return int(int64_t(Guest::constant) * ((uint64_t(high) << 16) / 0x82) / 65536); };
+    assert(frames[0] == frames[1] && frames[0] == frames[2] && frames[0] == frames[3]);
+    // The levels held for a while: full, unchanged by the LED write, silence with the amplifier off and full
+    // again.
     std::vector<int> plateaus;
     const auto& f = frames[0];
     for (size_t i = 0, run = 0; i < f.size(); ++i) {
@@ -370,7 +382,7 @@ static void sinkStream() {
         if (run == 200 && (plateaus.empty() || plateaus.back() != left(f[i]))) plateaus.push_back(left(f[i]));
     }
     for (int p : plateaus) fprintf(stderr, "plateau %d\n", p);
-    assert((plateaus == std::vector<int>{level(0x33), level(0x80), 0, level(0x80)}));
+    assert((plateaus == std::vector<int>{Guest::constant, 0, Guest::constant}));
     // Each change ramps: after the priming zeros, no step bigger than a ramp's share of the largest change for
     // each of the up to two input frames (this guest runs SSI1 at about 64 kHz) an output frame takes in.
     int most = 0;
@@ -379,7 +391,7 @@ static void sinkStream() {
         most = std::max(most, step < 0 ? -step : step);
     }
     fprintf(stderr, "largest step %d\n", most);
-    assert(most <= 2 * level(0x80) / int(ZodiacAudioOutput::rampFrames) + 2);
+    assert(most <= 2 * Guest::constant / int(ZodiacAudioOutput::rampFrames) + 2);
 }
 
 int main() {
@@ -390,5 +402,5 @@ int main() {
     volumeAndAmplifier();
     sinkStream();
     machineStream();
-    std::puts("PASS: Zodiac PCM words Exact and Fast alike, frame rate, saved mid-stream, PWM volume, D25 amplifier, host stage, gain ramp, the sink's gating, restart and Exact == Fast host frames");
+    std::puts("PASS: Zodiac PCM words Exact and Fast alike, frame rate, saved mid-stream, D25 amplifier on the charger and on battery, host stage, gain ramp, the sink's gating, restart and Exact == Fast host frames");
 }

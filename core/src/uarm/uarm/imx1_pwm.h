@@ -22,16 +22,6 @@ class Imx1Pwm {
     bool usesPerclk1() const { return enabled() && !(control & 0x8000); }
     bool interruptOutput() const { return irq && (control & 0x40); }
     bool usesReference() const { return enabled() && (control & 0x8000); }
-    // The duty the CPU last wrote: the last sample's high clocks per period and the period, false while off
-    // or with no sample written. The output takes the sample up at a later period boundary; this follows the
-    // writes only, so it changes at the same guest time however far the board is advanced at once.
-    bool writtenDuty(uint32_t& high, uint32_t& length) const {
-        if (!enabled() || !sampleKnown) return false;
-        length = periodLength();
-        const uint32_t s = (control & 0x20000) ? uint16_t((sample >> 8) | (sample << 8)) : sample;
-        high = s < length ? s : length;
-        return true;
-    }
     // Source clocks until the current period ends, 0 when disabled.
     uint64_t idleQuietCycles() const {
         if (!enabled()) return 0;

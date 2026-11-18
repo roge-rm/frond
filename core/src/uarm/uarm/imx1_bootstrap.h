@@ -133,8 +133,6 @@ class Imx1Bootstrap {
     // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
     // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.
     void pcmFrameRate(uint64_t& numerator, uint64_t& denominator) const;
-    // The PWM duty last written as high clocks of a period, false while it is off or no sample was written.
-    bool pwmDuty(uint32_t& high, uint32_t& period) const { return pwm.writtenDuty(high, period); }
     // A GPIO port's register by index (0 DDIR, 1 OCR1, 7 DR, 8 GIUS, 9 SSR, 14 GPR, ...).
     uint32_t gpioRegister(unsigned port, unsigned index) const { return gpio.registerValue(port, index); }
     void setLcdcContrastOnly(bool enabled) { lcdcContrastOnly = enabled; }
