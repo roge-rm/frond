@@ -208,6 +208,29 @@ namespace {
         return UInt16(uint32_t(fullMilliVolts) * (400 + percent) / 500);
     }
 
+    // The ROM's sysBatteryMinThreshold as SysBattery sets it from its battery data: the shutdown voltage in level
+    // units, centivolts * steps per volt / 100 less the step offset. 0 when the ROM has no battery data.
+    UInt8 RomBatteryMinThreshold() {
+        CEnableFullAccess munge;
+        const emuptr data = EmLowMem_GetGlobal(sysBatteryDataP);
+        if (!data) return 0;
+        int volts = 0, steps = 0, offset = 0;
+        EmAliasSysBatteryDataStructV1<PAS> v1(data);
+        if (v1.sysBattDataStructVersion == 1) {
+            volts = v1.sysBattShutdownEnVoltage; steps = v1.sysBattStepsPerVolt; offset = v1.sysBattVoltageStepOffset;
+        } else if (v1.sysBattDataStructVersion == 2) {
+            EmAliasSysBatteryDataStructV2<PAS> v2(data);
+            volts = v2.sysBattShutdownEnVoltage; steps = v2.sysBattStepsPerVolt; offset = v2.sysBattVoltageStepOffset;
+        } else if (v1.sysBattDataStructVersion == 3) {
+            EmAliasSysBatteryDataStructV3<PAS> v3(data);
+            volts = v3.sysBattShutdownEnVoltage; steps = v3.sysBattStepsPerVolt; offset = v3.sysBattVoltageStepOffset;
+        } else {
+            return 0;
+        }
+        const int level = (volts * steps + 50) / 100 - offset;
+        return UInt8(level < 1 ? 1 : level > 255 ? 255 : level);
+    }
+
     CallROMType HeadpatchHwrBatteryLevel(void) {
         EmAssert(gSession);
 
@@ -253,8 +276,11 @@ namespace {
 
         EmLowMem::fgLowMem.globals.hwrBatteryLevel = BatteryLevel255();
         EmLowMem::fgLowMem.globals.hwrBatteryPercent = gBattery.Percent();
-        // Below full the ROM's own threshold stays, so a low level warns and turns the Palm off.
+        // Full clears the shutdown threshold. Below full a cleared one gets the ROM's value back, so a low level
+        // warns and turns the Palm off.
         if (gBattery.Percent() == 100) EmLowMem::fgLowMem.globals.sysBatteryMinThreshold = 0;
+        else if (!EmLowMem::fgLowMem.globals.sysBatteryMinThreshold)
+            EmLowMem::fgLowMem.globals.sysBatteryMinThreshold = RomBatteryMinThreshold();
     }
 
     CallROMType HeadpatchSysLibLoad(void) {
