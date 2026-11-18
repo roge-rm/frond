@@ -61,6 +61,8 @@ uint64_t jitDomainCalls();
 uint64_t jitPsrInterprets();
 // Runs that left a block at a failed access (a guest abort or a refused access), all JITs.
 uint64_t jitFaultExits();
+// Blocks translated so far, every JIT in the process.
+uint64_t jitTranslated();
 // Memory read and write callbacks, all JITs (tests).
 uint64_t jitMemoryCallbacks();
 // Whether JITs made from now on check the data cache hint (cpuJitCostHint) when memory is charged.
@@ -86,10 +88,13 @@ void jitCparWritten(FrondJit *jit, bool changed);
 // For tests: whether the iWMMXt slot gives a callback for the ARM word (CDP, MCR, MRC, MCRR,
 // MRRC, LDC or STC on coprocessor 0 or 1), as it would when dynarmic compiles it.
 bool jitWmmxCompiles(FrondJit *jit, uint32_t word);
-// The first write to a watched RAM line since code was translated from it.
-void jitCodeWritten(FrondJit *jit, uint8_t *hostPage);
-// ARM920T Fast blocks: a store to the RAM page at pa, which code was translated from.
-void jitCodeWrittenPa(FrondJit *jit, uint32_t pa);
+// A store to [offset, offset + size) of a flagged line of the RAM page at hostPage: drops the blocks
+// whose code it overlaps. The page's flags are set again from the code left before the next run
+// (cpuJitSetCodeLines). False if the JIT holds no code from the page.
+bool jitCodeWritten(FrondJit *jit, uint8_t *hostPage, uint32_t offset, uint32_t size);
+// ARM920T Fast blocks: a store to [pa, pa + size) on a marked line of a RAM page code was translated
+// from. The same, by physical page.
+void jitCodeWrittenPa(FrondJit *jit, uint32_t pa, uint32_t size);
 // Sends stores to the RAM pages in [host, host + size) back through the callbacks.
 void jitWriteProtect(FrondJit *jit, const uint8_t *host, uint32_t size);
 // The same for the one RAM page at hostPage, after a line of it was flagged.
@@ -130,9 +135,15 @@ uint64_t cpuJitPermContext(ArmCpu *cpu);
 // RAM, *lines gets the page's code flags, one per 64 bytes: set one and the first write to
 // that line comes back through jitCodeWritten. Null for ROM.
 uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines);
-// ARM920T Fast blocks: translation read code at pa, in a page cpuJitWatchCode marked. A store to its
+// ARM920T Fast blocks: translation read the code word at pa, in a page cpuJitWatchCode marked. A store to its
 // 64-byte line drops the page's code; stores to the page's other lines don't.
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa);
+// After a store dropped code from a page, its marks become what the JIT's live blocks still hold code
+// from. ARM920T Fast blocks: the page at pa, words a bit per 4-byte word (16 of them; none unmarks the
+// page). Otherwise the RAM page's line flags at hostPage, lines a bit per 64-byte line, after which the
+// fetch buffers are watched again and the idle, delay and poll matches on the page are dropped.
+void cpuJitSetArm920CodeWords(ArmCpu *cpu, uint32_t pa, const uint64_t *words);
+void cpuJitSetCodeLines(ArmCpu *cpu, uint8_t *hostPage, uint8_t *flags, uint64_t lines);
 // Stops watching every RAM page.
 void cpuJitForgetCode(ArmCpu *cpu);
 // Moves on with every TLB flush, which every mapping change goes through.

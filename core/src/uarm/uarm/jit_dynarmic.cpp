@@ -66,6 +66,11 @@ struct Stats {
     std::unordered_map<uint32_t, uint32_t> interpWord;
     std::unordered_map<uint32_t, std::pair<uint64_t, uint32_t>> invalAllPc;
     std::unordered_map<uint32_t, uint64_t> writtenPage;  // virtual page dropped for a write
+    std::unordered_map<uint32_t, uint64_t> writtenAt;    // virtual address of each write that dropped code
+    // Stores to a flagged line that overlapped no block, and line flag updates after writes (pages
+    // left with code, pages with none left).
+    uint64_t writesMissed = 0, remasks = 0, remaskFreed = 0;
+    std::atomic<uint64_t> translated{0};  // blocks translated, on either thread
     // Callback reads and writes by virtual page (bit 31 of the key set for writes).
     std::unordered_map<uint32_t, uint64_t> callbackPage;
     void NoteCallback(uint32_t va, bool write) {
@@ -157,6 +162,14 @@ struct Stats {
         std::sort(top.rbegin(), top.rend());
         for (size_t i = 0; i < top.size() && i < 8; i++)
             fprintf(stderr, "jit: written page %08x %llu\n", top[i].second << 12, (unsigned long long)top[i].first);
+        top.clear();
+        fprintf(stderr, "jit: translated %llu writesMissed %llu remasks %llu remaskFreed %llu\n",
+                (unsigned long long)translated.load(), (unsigned long long)writesMissed, (unsigned long long)remasks,
+                (unsigned long long)remaskFreed);
+        for (auto &[va, n] : writtenAt) top.push_back({n, va});
+        std::sort(top.rbegin(), top.rend());
+        for (size_t i = 0; i < top.size() && i < 12; i++)
+            fprintf(stderr, "jit: written at %08x %llu\n", top[i].second, (unsigned long long)top[i].first);
         top.clear();
         for (auto &[key, n] : callbackPage) top.push_back({n, key});
         std::sort(top.rbegin(), top.rend());
@@ -316,6 +329,7 @@ struct Snapshot final : public A32::CodeSnapshot {
     }
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
+        if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
         const bool ok = CodeReadHook(thumb, arm920, pc, ir, [&](uint32_t at, uint32_t &w) {
             while (next < plain.size() && plain[next].first != at) next++;
             if (next == plain.size()) {
@@ -459,6 +473,11 @@ struct Env final : public A32::UserCallbacks {
 
     void Drop(uint32_t page) {
         jit->InvalidateCacheRange(page << 12, 4096);
+        Forget(page);
+    }
+
+    // Forgets a code page that holds no code now, so the next compile from it watches it again.
+    void Forget(uint32_t page) {
         const auto it = code.find(page);
         if (it == code.end()) return;
         const auto n = accessPages.find(it->second.access);
@@ -485,29 +504,69 @@ struct Env final : public A32::UserCallbacks {
         }
     }
 
-    void CodeWrittenPa(uint32_t pa) {
-        const auto it = byPa.find(pa);
-        if (it == byPa.end()) return;
-        for (uint32_t page : it->second) {
+    // A store to [offset, offset + size) of a watched code page (by physical page for Fast blocks on the
+    // ARM920T, by host page otherwise): drops only the blocks whose code it overlaps, in each virtual page
+    // mapped there. True if it dropped any. The page's line flags are worked out again from the code left
+    // (CodeLines) before the next run.
+    bool RangeWritten(const std::vector<uint32_t> &pages, uint32_t offset, uint32_t size, bool byPhysical,
+                      uint32_t key, uint8_t *host) {
+        bool dropped = false;
+        for (uint32_t page : pages) {
             const auto c = code.find(page);
-            if (c == code.end() || c->second.pa != pa) continue;
+            if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
+            const uint32_t va = (page << 12) | offset;
+            if (!jit->HasCodeIn(va, size)) continue;
             stats.pagesWritten++;
-            if (stats.on) stats.writtenPage[page]++;
-            Drop(page);
+            if (stats.on) stats.writtenPage[page]++, stats.writtenAt[va]++;
+            jit->InvalidateCacheRange(va, size);
+            dropped = true;
         }
-        byPa.erase(it);
+        if (!dropped) stats.writesMissed++;
+        return dropped;
     }
 
-    void CodeWritten(uint8_t *host) {
+    // known: this level holds code from the page. True if the store dropped any.
+    bool CodeWrittenPa(uint32_t pa, uint32_t offset, uint32_t size) {
+        const auto it = byPa.find(pa);
+        return it != byPa.end() && RangeWritten(it->second, offset, size, true, pa, nullptr);
+    }
+
+    bool CodeWritten(uint8_t *host, uint32_t offset, uint32_t size, bool &known) {
+        const auto it = byHost.find(host);
+        if (it == byHost.end()) return false;
+        known = true;
+        return RangeWritten(it->second, offset, size, false, 0, host);
+    }
+
+    // ORs into words (16) the 4-byte words of the page that this level's live blocks hold code from, with
+    // any requested invalidation done first. Not while running.
+    void CodeWords(const std::vector<uint32_t> &pages, bool byPhysical, uint32_t key, uint8_t *host, uint64_t *words) {
+        for (uint32_t page : pages) {
+            const auto c = code.find(page);
+            if (c == code.end() || (byPhysical ? c->second.pa != key : c->second.host != host)) continue;
+            jit->CodeWords(page << 12, words);
+        }
+    }
+    void CodeWordsPa(uint32_t pa, uint64_t *words) {
+        if (const auto it = byPa.find(pa); it != byPa.end()) CodeWords(it->second, true, pa, nullptr, words);
+    }
+    void CodeWordsHost(uint8_t *host, uint64_t *words) {
+        if (const auto it = byHost.find(host); it != byHost.end()) CodeWords(it->second, false, 0, host, words);
+    }
+
+    // The page holds no code at either level any more: forget it, so a compile from it watches it again.
+    void ForgetPa(uint32_t pa) {
+        const auto it = byPa.find(pa);
+        if (it == byPa.end()) return;
+        for (uint32_t page : it->second)
+            if (const auto c = code.find(page); c != code.end() && c->second.pa == pa) Forget(page);
+        byPa.erase(it);
+    }
+    void ForgetHost(uint8_t *host) {
         const auto it = byHost.find(host);
         if (it == byHost.end()) return;
-        for (uint32_t page : it->second) {
-            const auto c = code.find(page);
-            if (c == code.end() || c->second.host != host) continue;
-            stats.pagesWritten++;
-            if (stats.on) stats.writtenPage[page]++;
-            Drop(page);
-        }
+        for (uint32_t page : it->second)
+            if (const auto c = code.find(page); c != code.end() && c->second.host == host) Forget(page);
         byHost.erase(it);
     }
 
@@ -805,6 +864,7 @@ struct Env final : public A32::UserCallbacks {
     }
 
     bool PreCodeReadHook(bool thumb, A32::VAddr pc, A32::IREmitter &ir) override {
+        if (pc == A32::LocationDescriptor{ir.block.Location()}.PC()) stats.translated++;
         if (lineBound && (pc & ~31u) != (A32::LocationDescriptor{ir.block.Location()}.PC() & ~31u)) {
             ir.SetTerm(IR::Term::LinkBlock{ir.current_location});
             return false;
@@ -1356,6 +1416,10 @@ struct FrondJit {
     unsigned ahead = 0;
     FrondJitAbort abort{};  // the last run's, for FROND_JIT_ABORT
     const Env *running = nullptr;  // the level jitRun is in, for jitRanNow
+    // Pages a store dropped code from, whose line flags are worked out again before the next run
+    // (jitPrvRemask): physical pages (ARM920T Fast blocks) and host pages.
+    std::vector<uint32_t> remaskPa;
+    std::vector<uint8_t *> remaskHost;
     uint32_t lastInstructions = 0;  // the last run's (jitLastInstructions)
 };
 
@@ -1630,12 +1694,57 @@ bool jitWmmxCompiles(FrondJit *j, uint32_t w) {
     return false;
 }
 
-void jitCodeWritten(FrondJit *j, uint8_t *hostPage) {
-    jitPrvEach(j, [&](Env &e) { e.CodeWritten(hostPage); });
+bool jitCodeWritten(FrondJit *j, uint8_t *hostPage, uint32_t offset, uint32_t size) {
+    bool known = false, dropped = false;
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWritten(hostPage, offset, size, known); });
+    if (dropped && std::find(j->remaskHost.begin(), j->remaskHost.end(), hostPage) == j->remaskHost.end())
+        j->remaskHost.push_back(hostPage);
+    return known;
 }
 
-void jitCodeWrittenPa(FrondJit *j, uint32_t pa) {
-    jitPrvEach(j, [&](Env &e) { e.CodeWrittenPa(pa >> 12); });
+void jitCodeWrittenPa(FrondJit *j, uint32_t pa, uint32_t size) {
+    bool dropped = false;
+    jitPrvEach(j, [&](Env &e) { dropped |= e.CodeWrittenPa(pa >> 12, pa & 0xfffu, size); });
+    if (dropped && std::find(j->remaskPa.begin(), j->remaskPa.end(), pa >> 12) == j->remaskPa.end())
+        j->remaskPa.push_back(pa >> 12);
+}
+
+// Between runs: the code marks of each page a store dropped code from become the words (ARM920T Fast
+// blocks) or lines both levels' live blocks still hold code from. Until then they keep every line flagged before, so no store to code is
+// missed. A page left with no code is forgotten, so its stores go the fast way again.
+static void jitPrvRemask(FrondJit *j) {
+    for (uint32_t pa : j->remaskPa) {
+        uint64_t words[16] = {}, any = 0;
+        jitPrvEach(j, [&](Env &e) { e.CodeWordsPa(pa, words); });
+        for (uint64_t w : words) any |= w;
+        stats.remasks++;
+        if (!any) {
+            stats.remaskFreed++;
+            jitPrvEach(j, [&](Env &e) { e.ForgetPa(pa); });
+        }
+        cpuJitSetArm920CodeWords(j->cpu, pa << 12, words);
+    }
+    j->remaskPa.clear();
+    for (uint8_t *host : j->remaskHost) {
+        uint64_t words[16] = {}, lines = 0;
+        uint8_t *flags = nullptr;
+        jitPrvEach(j, [&](Env &e) {
+            e.CodeWordsHost(host, words);
+            if (const auto it = e.byHost.find(host); it != e.byHost.end())
+                for (uint32_t page : it->second)
+                    if (const auto c = e.code.find(page); c != e.code.end() && c->second.host == host && c->second.lines)
+                        flags = c->second.lines;
+        });
+        for (unsigned line = 0; line < 64; line++)
+            if ((words[line >> 2] >> ((line & 3) * 16)) & 0xffff) lines |= uint64_t(1) << line;
+        stats.remasks++;
+        if (!lines) {
+            stats.remaskFreed++;
+            jitPrvEach(j, [&](Env &e) { e.ForgetHost(host); });
+        }
+        if (flags) cpuJitSetCodeLines(j->cpu, host, flags, lines);
+    }
+    j->remaskHost.clear();
 }
 
 void jitWriteProtect(FrondJit *j, const uint8_t *host, uint32_t size) {
@@ -1666,6 +1775,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
         e.mapGen = g;
         if (!e.code.empty()) e.CheckMappings();
     }
+    if (!j->remaskPa.empty() || !j->remaskHost.empty()) jitPrvRemask(j);
     std::memcpy(jit.Regs().data(), regs, 16 * sizeof(uint32_t));
     jit.SetCpsr(cpsr);
     e.model = jitPrvTickModel(j->cpu);
@@ -1723,5 +1833,7 @@ uint32_t jitRun(FrondJit *j, uint32_t *regs, uint32_t &cpsr, uint32_t cycles, in
 uint32_t jitLastInstructions(const FrondJit *j) { return j->lastInstructions; }
 
 uint64_t jitFaultExits() { return stats.fault; }
+
+uint64_t jitTranslated() { return stats.translated.load(); }
 
 uint64_t jitMemoryCallbacks() { return stats.reads + stats.writes; }

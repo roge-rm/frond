@@ -25,10 +25,10 @@ void ramSetNoFramebuffer(struct ArmRam* ram);
 
 void* ramResolveAddress(struct ArmRam* ram, uint32_t pa, uint32_t size);
 
-// Called with the host address of the page, on the first write to a flagged line (one the
-// JIT has translated code from, or a watched fetch buffer line), with the written bytes'
-// offset in the page and size. Every flag of the page is clear by then.
-using RamCodeWritten = void (*)(void* context, uint8_t* hostPage, uint32_t offset, uint32_t size);
+// Called with the host address of the page and its 64 line flags, on a write to a flagged line
+// (one the JIT has translated code from, or a watched fetch buffer line), with the written bytes'
+// offset in the page and size. The callback clears or resets the flags.
+using RamCodeWritten = void (*)(void* context, uint8_t* hostPage, uint8_t* lines, uint32_t offset, uint32_t size);
 void ramMarkDirty(struct ArmRam* ram, uint32_t base, uint32_t size);
 // For the JIT's direct stores. Host address of the 4 KiB page at pa, after marking it
 // dirty and, where it overlaps the frame buffer, the frame buffer dirty, as if the whole page

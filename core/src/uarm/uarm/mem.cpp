@@ -274,7 +274,7 @@ static void memForEachRam(struct ArmMem *mem, F f) {
     if (mem->heldRam.ub && mem->heldRam.uD) f(mem->heldRam, (struct ArmRam *)mem->heldRam.uD);
 }
 
-uint8_t *memWatchRamCode(struct ArmMem *mem, uint32_t pa, void (*written)(void *, uint8_t *, uint32_t, uint32_t), void *context,
+uint8_t *memWatchRamCode(struct ArmMem *mem, uint32_t pa, void (*written)(void *, uint8_t *, uint8_t *, uint32_t, uint32_t), void *context,
                          uint8_t **lines) {
     struct ArmRam *ram = nullptr;
     memForEachRam(mem, [&](const struct ArmMemRegion &r, struct ArmRam *candidate) {

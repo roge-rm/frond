@@ -2649,6 +2649,126 @@ bool idleMatchDropped(Engines& e) {
     return ok;
 }
 
+// A store to a flagged line drops only the blocks whose code it overlaps (Fast). Blocks A at P, B at
+// P + 0x100 and R at P + 0x200 share one page. A store to a word in A's line past A's end keeps A and B;
+// one into B drops B only, which then runs its new word; R rewrites its own next pass while it runs, and
+// that pass runs the new word. Fast only. 0: as expected, -1: not.
+int codeRanges(Engines& e) {
+    const char* name = "code ranges";
+    Machine& m = e.fast;
+    Case c = generate(98);
+    c.items.clear();
+    c.codeCacheable = false;
+    Item end;
+    end.kind = "end";
+    end.removable = false;
+    end.ins.push_back({kSpinArm, false});
+    c.items.push_back(end);
+    Assembled a = assemble(c);
+    // P is a writable page (kCode is read-only to the guest), so R can store to its own code.
+    const uint32_t P = 0x24000, A = P, B = P + 0x100, R = P + 0x200, S = kCode + 0x3000;
+    auto put = [&](uint32_t addr, uint32_t v) { memcpy(&a.image[addr], &v, 4); };
+    auto branch = [](uint32_t from, uint32_t to) { return 0xea000000u | (((to - from - 8) >> 2) & 0xffffff); };
+    put(A, 0xe3a05001);       // mov r5, #1
+    put(A + 4, branch(A + 4, S));
+    put(A + 0x10, 0);         // data in A's line
+    put(B, 0xe3a06001);       // mov r6, #1 (rewritten to mov r6, #2)
+    put(B + 4, branch(B + 4, S));
+    put(R, 0xe2877001);       // add r7, r7, #1
+    put(R + 4, 0xe3a05001);   // mov r5, #1, rewritten by the str below to mov r5, #2
+    put(R + 8, 0xe5821000);   // str r1, [r2]
+    put(R + 12, 0xe3570002);  // cmp r7, #2
+    put(R + 16, 0x1a000000 | (((R - (R + 16) - 8) >> 2) & 0xffffff));  // bne R
+    put(R + 20, branch(R + 20, S));
+    put(S, kSpinArm);
+    a.start = A;
+    a.thumb = false;
+    c.cpsr = SVC | 0xc0;
+    prepare(m, c, a);
+    auto runFrom = [&](uint32_t pc) {
+        cpuSetReg(m.cpu, 15, pc);
+        for (int i = 0; i < 100 && !(atSpin(m) && cpuGetRegisters(m.cpu)[15] == S); ++i)
+            cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, 50);
+        return cpuGetRegisters(m.cpu)[15] == S;
+    };
+    auto compiled = [] { return jitTranslated(); };
+    bool ok = true;
+    for (int i = 0; i < 3; ++i) ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t before = compiled();
+    const uint32_t data = 0x1234;
+    memAccess(m.mem, A + 0x10, 4, true, (void*)&data);
+    ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t afterData = compiled() - before;
+    const uint32_t word = 0xe3a06002;
+    memAccess(m.mem, B, 4, true, (void*)&word);
+    cpuSetReg(m.cpu, 5, 0);
+    cpuSetReg(m.cpu, 6, 0);
+    ok = runFrom(A) && runFrom(B) && ok;
+    const uint64_t afterB = compiled() - before - afterData;
+    const uint32_t r5 = cpuGetRegExternal(m.cpu, 5), r6 = cpuGetRegExternal(m.cpu, 6);
+    // R's second pass may still run the old word (the run ends at its next halt check); the next run
+    // from R has to run the new one.
+    cpuSetReg(m.cpu, 1, 0xe3a05002);
+    cpuSetReg(m.cpu, 2, R + 4);
+    cpuSetReg(m.cpu, 7, 0);
+    ok = runFrom(R) && ok;
+    const uint32_t r7 = cpuGetRegExternal(m.cpu, 7);
+    cpuSetReg(m.cpu, 5, 0);
+    cpuSetReg(m.cpu, 7, 1);
+    ok = runFrom(R) && ok;
+    const uint32_t r5R = cpuGetRegExternal(m.cpu, 5);
+    printf("%s: %" PRIu64 " compiles after a store next to A, %" PRIu64 " after a store into B, r5 %u r6 %u, "
+           "block that rewrote itself while running: %u passes, then r5 %u\n",
+           name, afterData, afterB, r5, r6, r7, r5R);
+    if (!ok || afterData != 0 || afterB != 1 || r5 != 1 || r6 != 2 || r5R != 2 || r7 != 2) {
+        printf("FAIL %s: want 0 compiles, then 1 (B), r5 1 r6 2, and r5 2 after the block rewrote itself\n", name);
+        return -1;
+    }
+    return 0;
+}
+
+// The idle match made again while a store's line flags are still waiting to be set from the code left:
+// setting them drops the match too, so a later change to its window (which no block holds) still ends
+// the skips. Same checks as idleMatchDropped.
+bool idleMatchRemask(Engines& e) {
+    const IdleSetup s = idleSetup("t|x", IdleLoopKind::tx, 1000, false, true);
+    const IdleLoop* l = s.loop;
+    Snapshot states[2];
+    uint64_t skipped[2][3] = {};
+    for (int k = 0; k < 2; ++k) {
+        Machine& m = e.fast;
+        cpuSetIdleSkip(k == 0);
+        idlePrepare(m, s, 1000);
+        const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+        for (int run = 0; run < 3; ++run) {
+            if (run == 1) {
+                // The loop's first word written with itself: its blocks drop, the match goes and comes back.
+                const uint32_t word = l->words[0];
+                memAccess(m.mem, s.head, 4, true, (void*)&word);
+            } else if (run == 2) {
+                const uint32_t word = kIdleWindowWords[1] + 1;
+                memAccess(m.mem, s.head + l->window + 4, 4, true, (void*)&word);
+            }
+            uint64_t s0, c0, s1, c1, ran = 0;
+            cpuJitIdleSkips(&s0, &c0);
+            while (ran < want) ran += cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, uint32_t(want - ran));
+            cpuJitIdleSkips(&s1, &c1);
+            skipped[k][run] = s1 - s0;
+        }
+        states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+    }
+    cpuSetIdleSkip(true);
+    const std::vector<std::string> diffs = differences(states[0], states[1]);
+    if (diffs.empty() && skipped[0][0] == 1 && skipped[0][1] == 1 && skipped[0][2] == 0 && !skipped[1][0]) {
+        printf("idle match after a code write: skips 1, 1 after the rewrite, none after the window store\n");
+        return true;
+    }
+    printf("FAIL idle match after a code write: skips %" PRIu64 ", %" PRIu64 ", %" PRIu64 " (want 1, 1, 0)\n",
+           skipped[0][0], skipped[0][1], skipped[0][2]);
+    for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+    return false;
+}
+
 // The ROM OSCR delay loops (delay_loops.h) at kCode with a B . after them, the timer base register at
 // kTimerVa (OSCR at +0x10). r3 holds the target too, for delayMatchDropped.
 struct DelaySetup {
@@ -3661,6 +3781,8 @@ int main(int argc, char** argv) {
         ok = idleSkip(e) && ok;
         ok = idleClock(e) && ok;
         ok = idleMatchDropped(e) && ok;
+        ok = idleMatchRemask(e) && ok;
+        ok = codeRanges(e) == 0 && ok;
         ok = delaySkip(e) && ok;
         ok = delayMatchDropped(e) && ok;
         ok = pollSkip(e) && ok;

@@ -237,6 +237,16 @@ void A32AddressSpace::InvalidateCacheRanges(const boost::icl::interval_set<u32>&
     }
 }
 
+bool A32AddressSpace::HasCodeIn(u32 first, u32 last) {
+    std::lock_guard lock{code_mutex};
+    return block_ranges.Overlaps(boost::icl::discrete_interval<u32>::closed(first, last));
+}
+
+void A32AddressSpace::CodeWords(u32 page_base, u64* words) {
+    std::lock_guard lock{code_mutex};
+    block_ranges.Words(page_base, words);
+}
+
 void A32AddressSpace::ClearCacheLocked() {
     std::lock_guard lock{code_mutex};
     ClearCacheHeld();

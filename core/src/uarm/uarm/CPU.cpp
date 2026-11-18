@@ -131,23 +131,36 @@ struct ArmBankedRegs {
 using M68kTrapHandlerMap = std::unordered_map<uint32_t, M68kTrapHandler>;
 
 // ARM920T Fast: the RAM pages code was decoded or translated from (a bit per 4 KiB page over the 4 GiB
-// physical map), and in each page the 64-byte lines it came from. A store drops code only when it lands
-// on a marked line, so data sharing a page with code leaves the code alone. A marked page has no write
-// entries in the host TLB, so every store to it comes through cpuPrvArm920Stored. Line masks are kept per
-// group of 64 pages and allocated when a group is first used.
+// physical map), and in each page the 64-byte lines it came from (decoded code) or the 4-byte words
+// (translated code). A store drops code only when it lands on a marked line or word, so data sharing a
+// page with code leaves the code alone; translated code loses only the blocks the store overlaps. A
+// marked page has no write entries in the host TLB, so every store to it comes through
+// cpuPrvArm920Stored. Line and word masks are kept per group of 64 pages and allocated when a group is
+// first used.
 struct Arm920CodeMap {
     static constexpr uint32_t kGroups = 1u << 14;
     uint64_t pages[kGroups] = {};
     uint64_t *lines[kGroups] = {};
+    // Fast blocks: a bit per 4-byte word of each page instead (16 per page), with stores checked by word.
+    uint64_t *words[kGroups] = {};
     std::vector<uint16_t> groups;  // groups with page bits set since the last clear, each once
     uint64_t listed[kGroups / 64] = {};
 
     ~Arm920CodeMap() {
         for (uint64_t *l : lines) delete[] l;
+        for (uint64_t *w : words) delete[] w;
     }
     bool page(uint32_t pa) const { return (pages[pa >> 18] >> ((pa >> 12) & 63)) & 1; }
     // Marks the line holding pa in a marked page.
     void noteLine(uint32_t pa) { lines[pa >> 18][(pa >> 12) & 63] |= uint64_t(1) << ((pa >> 6) & 63); }
+    uint64_t *pageWords(uint32_t pa) {
+        uint64_t *&w = words[pa >> 18];
+        if (!w) w = new uint64_t[64 * 16]();
+        return w + ((pa >> 12) & 63) * 16;
+    }
+    // Marks the word holding pa in a marked page.
+    void noteWord(uint32_t pa) { pageWords(pa)[(pa >> 8) & 15] |= uint64_t(1) << ((pa >> 2) & 63); }
+    void setWords(uint32_t pa, const uint64_t *mask) { std::memcpy(pageWords(pa), mask, 16 * sizeof(uint64_t)); }
     // Marks the line holding pa, or only its page; true if the page wasn't marked before.
     bool note(uint32_t pa, bool line = true) {
         const uint32_t g = pa >> 18;
@@ -168,14 +181,25 @@ struct Arm920CodeMap {
         const uint64_t upTo = last == 63 ? ~uint64_t(0) : (uint64_t(1) << (last + 1)) - 1;
         return lines[pa >> 18][(pa >> 12) & 63] & upTo & ~((uint64_t(1) << first) - 1);
     }
+    // The same by word. The page must be marked.
+    bool hitWords(uint32_t pa, uint32_t size) const {
+        const uint64_t *w = words[pa >> 18];
+        if (!w) return false;
+        w += ((pa >> 12) & 63) * 16;
+        for (uint32_t i = (pa >> 2) & 1023, last = ((pa + size - 1) >> 2) & 1023; i <= last; i++)
+            if ((w[i >> 6] >> (i & 63)) & 1) return true;
+        return false;
+    }
     void clearPage(uint32_t pa) {
         pages[pa >> 18] &= ~(uint64_t(1) << ((pa >> 12) & 63));
         lines[pa >> 18][(pa >> 12) & 63] = 0;
+        if (uint64_t *w = words[pa >> 18]) std::memset(w + ((pa >> 12) & 63) * 16, 0, 16 * sizeof(uint64_t));
     }
     void clear() {
         for (uint16_t g : groups) {
             pages[g] = 0;
             std::memset(lines[g], 0, 64 * sizeof(uint64_t));
+            if (words[g]) std::memset(words[g], 0, 64 * 16 * sizeof(uint64_t));
             listed[g >> 6] &= ~(uint64_t(1) << (g & 63));
         }
         groups.clear();
@@ -1323,15 +1347,15 @@ static bool cpuPrvLeanSingleLoad(const struct ArmCpu *cpu) {
     return (i & 0x0c100000) == 0x04100000 || ((i & 0x0e100090) == 0x00100090 && (i & 0x60));
 }
 
-// A store to [pa, pa + size), inside one page. Translated code is dropped by page: the virtual pages it was
-// translated from at pa. Decoded code isn't tied to the physical pages it came from, so a store to any of
-// its lines drops it all. A store to other lines of those pages drops nothing.
+// A store to [pa, pa + size), inside one page. Translated code is dropped by block: those whose code the
+// store overlaps, in the virtual pages translated from pa. Decoded code isn't tied to the physical pages
+// it came from, so a store to any of its lines drops it all. A store to other lines of those pages drops
+// nothing.
 static void cpuPrvArm920Stored(ArmCpu *cpu, uint32_t pa, uint32_t size) {
 #ifdef FROND_DYNARMIC
-    if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hit(pa, size)) {
-        cpu->jitCode->clearPage(pa);
-        jitCodeWrittenPa(cpu->jit, pa);
-    }
+    // The word marks stay until jitRun works them out again from the blocks left.
+    if (cpu->jitCode && unlikely(cpu->jitCode->page(pa)) && cpu->jitCode->hitWords(pa, size))
+        jitCodeWrittenPa(cpu->jit, pa, size);
 #endif
     if (!cpu->leanCode || likely(!cpu->leanCode->page(pa)) || !cpu->leanCode->hit(pa, size)) return;
     cpu->leanCode->clear();
@@ -6132,14 +6156,33 @@ uint64_t cpuJitPermContext(ArmCpu *cpu) {
     return uint64_t(mmuGetDomainCfg(mmu)) | (uint64_t(mmuGetS(mmu)) << 32) | (uint64_t(mmuGetR(mmu)) << 33);
 }
 
-// A store to a flagged RAM line: drop the JIT's code from the page and any fetch buffer it
-// hit. The page's flags are clear by now, so the buffers left are watched again.
-static void cpuPrvJitCodeWritten(void *ctx, uint8_t *page, uint32_t offset, uint32_t size) {
+// A store to a flagged RAM line of the page: drop the JIT's blocks it overlaps, any fetch buffer it hit
+// and the idle, delay and poll matches on the page. With JIT code on the page the flags stay until
+// jitRun sets them from the code left (cpuJitSetCodeLines); otherwise they're cleared now and the fetch
+// buffers left are watched again.
+static void cpuPrvJitCodeWritten(void *ctx, uint8_t *page, uint8_t *flags, uint32_t offset, uint32_t size) {
     ArmCpu *cpu = (ArmCpu *)ctx;
     cpuPrvIdleForget(cpu, page);
     icacheDropFetchedHost(cpu->ic, page + offset, size);
-    jitCodeWritten(cpu->jit, page);
+    if (cpu->jit && jitCodeWritten(cpu->jit, page, offset, size)) return;
+    memset(flags, 0, 0x1000 >> 6);
     icacheWatchFetchBuffers(cpu->ic);
+}
+
+void cpuJitSetCodeLines(ArmCpu *cpu, uint8_t *hostPage, uint8_t *flags, uint64_t lines) {
+    for (unsigned i = 0; i < (0x1000 >> 6); i++) flags[i] = (lines >> i) & 1;
+    // A flag set here may be on a line no compile flagged since the page was last made writable.
+    if (lines) jitWriteProtectPage(cpu->jit, hostPage);
+    cpuPrvIdleForget(cpu, hostPage);
+    icacheWatchFetchBuffers(cpu->ic);
+}
+
+void cpuJitSetArm920CodeWords(ArmCpu *cpu, uint32_t pa, const uint64_t *words) {
+    if (!cpu->jitCode || !cpu->jitCode->page(pa)) return;
+    uint64_t any = 0;
+    for (unsigned i = 0; i < 16; i++) any |= words[i];
+    if (any) cpu->jitCode->setWords(pa, words);
+    else cpu->jitCode->clearPage(pa);
 }
 
 // Fast only. The fetch buffers keep a line's old words until the guest invalidates, as an
@@ -6184,7 +6227,7 @@ uint8_t *cpuJitWatchCode(ArmCpu *cpu, uint32_t pa, uint8_t **lines) {
 }
 
 void cpuJitNoteArm920Code(ArmCpu *cpu, uint32_t pa) {
-    if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteLine(pa);
+    if (cpu->jitCode && cpu->jitCode->page(pa)) cpu->jitCode->noteWord(pa);
 }
 
 void cpuJitForgetCode(ArmCpu *cpu) {
