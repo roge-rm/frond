@@ -51,12 +51,12 @@ struct Guest {
         store(pwm, 0x8010, eq); store(pwm + 8, 0x80, eq); store(pwm + 4, 0x33, eq);
         store(pwm, 0x10010, ne); store(pwm, 0, ne);
         // D24, D27 high, D23 and D26 low, D25 as given; all five GPIO outputs from the data register.
-        store(portD + 0x1c, (1u << 24) | (1u << 27) | (d25 ? 1u << 25 : 0));
+        data((1u << 24) | (1u << 27) | (d25 ? 1u << 25 : 0));
         store(portD + 8, 0x00ffc000); store(portD + 0x20, 0x0f800000); store(portD, 0x0f800000);
         if (scripted) {
             wait(); store(pwm + 4, 0x80);
-            wait(); store(portD + 0x1c, (1u << 24) | (1u << 27));
-            wait(); store(portD + 0x1c, (1u << 24) | (1u << 27) | (1u << 25));
+            wait(); data((1u << 24) | (1u << 27));
+            wait(); data((1u << 24) | (1u << 27) | (1u << 25));
         }
         code.push_back(0xeafffffe);  // b .
         for (const auto& literal : literals) {
@@ -68,6 +68,15 @@ struct Guest {
     static constexpr uint32_t eq = 0, ne = 1, al = 14;
     void store(uint32_t address, uint32_t value, uint32_t cond = al) {
         load(0, address); load(1, value); code.push_back(0x05801000 | cond << 28);
+    }
+    // Port D's data register, with D3 set on the battery branch, so the test can read which way the guest went
+    // (B14 is read again, as the wait loops change the flags).
+    static constexpr uint32_t batteryMarker = 1u << 3;
+    void data(uint32_t value) {
+        load(0, 0x21c124);
+        code.push_back(0xe5901000);  // ldr r1, [r0]
+        code.push_back(0xe3110901);  // tst r1, #0x4000
+        store(0x21c300 + 0x1c, value, eq); store(0x21c300 + 0x1c, value | batteryMarker, ne);
     }
     void wait() {
         load(2, waitLoops);
@@ -174,6 +183,8 @@ static void volumeAndAmplifier() {
                 assert((a.gpioDDirection & 0x0f800000) == 0x0f800000 && (a.gpioDInUse & 0x0f800000) == 0x0f800000);
                 assert(((a.gpioDData >> 25) & 1) == d25);
                 assert(zodiacAudioGain(a) == (d25 ? 65536u : 0u));
+                // The guest saw B14 and took the branch for it.
+                assert(!!(a.gpioDData & Guest::batteryMarker) == !charging);
                 imx1MachineStop(m);
             }
         }
@@ -359,6 +370,7 @@ static void sinkStream() {
         run(m, 1500000, fast ? 7919 : 5000);
         const auto audio = imx1MachineAudio(m);
         assert(audio.rateNumerator && audio.rateDenominator);
+        assert(!!(audio.gpioDData & Guest::batteryMarker) == !charging);
         frames[run4].resize(audioQueuePendingSamples(queue));
         audioQueuePopChunk(queue, frames[run4].data(), frames[run4].size());
         // Every frame from the first one SSI1 sends comes out: none is lost while the rate is unknown.
