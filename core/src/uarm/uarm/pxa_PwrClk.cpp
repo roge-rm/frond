@@ -568,8 +568,8 @@ void pxaPwrClkLoad(struct PxaPwrClk *pc, T &loader) {
         pc->PSTR = pc->PVCR = pc->PUCR = pc->PKWR = pc->PKSR = 0;
         memset(pc->PCMD, 0, sizeof(pc->PCMD));
     }
-    pc->cccrActive = pc->CCCR;  // before v4 the CCCR in effect is the one saved
     pc->DoSaveLoad(helper, version);
+    if (version < 4) pc->cccrActive = pc->CCCR;  // before v4 the CCCR in effect is the one saved
     if (pc->wakePending && !pc->sleeping) loader.NotifyError();
     pxaPwrClkPrvSyncCost(pc, false);
     // The later UDC load refreshes requests from its restored FIFO state.

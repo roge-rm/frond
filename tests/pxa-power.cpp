@@ -236,8 +236,11 @@ static void clocks() {
         coproc(copy, WRITE_CLKCFG, 0xb);
         assert(soc.CoreHz() != hz && copy.CoreHz() == soc.CoreHz());
         // A version 3 chunk has no active CCCR and loads with the saved one.
+        write(copy, CCCR, 0x190);
+        coproc(copy, WRITE_CLKCFG, 0xb);
+        assert(copy.CoreHz() == hz);
         old = legacy(saved, ChunkType::pxaPwrClk, 3, 1);
-        assert(copy.Load(old.size(), old.data()) && copy.CoreHz() != hz);
+        assert(copy.Load(old.size(), old.data()) && copy.CoreHz() == soc.CoreHz());
         soc.Reset();
         assert(coproc(soc, READ_CLKCFG) == 0);  // reset clears CLKCFG
         write(soc, CCCR, 0x02000210);
