@@ -1381,12 +1381,15 @@ class Imx1GraphicsCommands {
         const uint32_t pitch = values[0x402], sourcePitch = values[0x46c];
         const uint32_t sourceWidth = width ? stretchStep(width - 1, ratioX) + 1 : 0;
         const uint32_t sourceHeight = height ? stretchStep(height - 1, ratioY) + 1 : 0;
-        if (!width || !height || !pitch || pitch > 8192 || x + width > pitch || y + height > 8192 ||
-            !configuration.engineState().clipContains(x + width - 1, y + height - 1) ||
+        // The output size is ceil(src << 8 / ratio), so a 320 to 480 stretch at ratio aa is 482 wide (ZQuake): the
+        // bounds apply to what is left after the scissor (always on here), as for the plain copy.
+        if (!width || !height || !pitch || pitch > 8192 || x + width > 8192 || y + height > 8192 ||
             !sourcePitch || sourcePitch > 8192 || sx + sourceWidth > sourcePitch || sy + sourceHeight > 8191)
             return refuse("stretch-geometry", values[0x466]);
         const uint32_t left = std::max(x, values[0x46f] & 0x1fff), top = std::max(y, (values[0x46f] >> 16) & 0x1fff);
         const uint32_t right = std::min(x + width, values[0x470] & 0x1fff), bottom = std::min(y + height, (values[0x470] >> 16) & 0x1fff);
+        if (left < right && top < bottom && (right > pitch || !configuration.engineState().clipContains(right - 1, bottom - 1)))
+            return refuse("stretch-geometry", values[0x466]);
         const uint64_t source = uint64_t(values[0x46b]) + (uint64_t(sy) * sourcePitch + sx) * 2;
         // The smooth filter reads one more column and row, past the rectangle with no clamping, as the plane
         // stretch does (ASSUMPTION "filter reads past the rect"): the column after a row's last is the next
