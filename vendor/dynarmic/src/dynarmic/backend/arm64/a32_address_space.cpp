@@ -254,6 +254,7 @@ void A32AddressSpace::ClearCacheLocked() {
 
 void A32AddressSpace::ClearCacheHeld() {
     ClearCache();
+    block_ranges.ClearCache();
     if (compile_thread) {
         compile_thread->Cleared();
     }
