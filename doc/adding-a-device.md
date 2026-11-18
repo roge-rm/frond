@@ -32,14 +32,14 @@ First check the existing profiles, board dispatch and ROM detection. A device ma
 1. Reserve the fixed name and write the profile (below). Leave `frontend.available` false.
 2. Survey the ROM for hardware (ROM hardware survey, below) and list every peripheral in the profile.
 3. Add detection and rejection, and check wrong files are refused before a machine is made.
-4. Add the board and get a cold boot, setup and launcher, then soft and hard reset.
-5. Add the PACE and API bridge, so install, launch and export work.
-6. Check the Fast engine runs the device (Fast engine requirements).
-   For an ARM device, also go through the speed skips below.
-7. Add each peripheral and set its capability flag when it works.
-8. Add the button bar and silkscreen art.
-9. Fill in the frontend fields, run `make generate-device-data` and set `available`.
-10. Add a smoke entry and a setup recipe.
+4. Add the board and get the first boot running.
+5. For an ARM device, bring in the Fast engine straight away, before the screen, power or peripherals, and make it the device's default (Fast engine requirements). Check Exact and Fast give the same counts on the boot so far, and that count-check moves nothing for the other devices. Then go through the speed skips below.
+6. Finish the cold boot, setup and launcher, then soft and hard reset.
+7. Add the PACE and API bridge, so install, launch and export work.
+8. Add each peripheral and set its capability flag when it works.
+9. Add the button bar and silkscreen art.
+10. Fill in the frontend fields, run `make generate-device-data` and set `available`.
+11. Add a smoke entry and a setup recipe.
 
 Hardware that exists on the real device but isn't done yet stays in the profile and is greyed out in the frontends. Whether a peripheral is present and whether Frond supports it are separate fields, so don't work out one from the other.
 
