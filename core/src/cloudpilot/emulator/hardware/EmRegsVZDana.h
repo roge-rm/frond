@@ -90,7 +90,7 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
     // counts per volt less ten counts per step of offset, as PrvBatteryCmdMainRead turns it back into millivolts
     // (mV = 1000 * (raw + 10 * offset) / 310).
     static uint16 MainBatteryCount(const uint16_t (&curve)[11], Int16 stepOffset, unsigned percent);
-    // That count for the ROM's current battery data and gBattery, or 0 when the ROM has none yet.
+    // That count for the ROM's current battery data and gBattery, or 0 with no session or no battery data yet.
     static uint16 MainBatteryCountNow();
    private:
     class AnalogueInputs : public EmSPISlaveADS784x {
@@ -108,8 +108,8 @@ class EmRegsVZDana : public EmRegsVZ, public EmSPISlave {
         uint16 ReadVirtualInput(unsigned channel) const override {
             return channel==2 ? MainBattery() : channel==6 ? supply : 0;
         }
-        // The battery setting, read live, so it isn't saved and a load keeps the setting. Maximum keeps the
-        // saved fixed count until the battery default lands with an Exact rebaseline.
+        // The battery setting, read live, so it isn't saved and a load keeps the setting. mainBattery (saved,
+        // 3072 in older states) is only read when the ROM has no battery data yet or a test fixed it.
         uint16 MainBattery() const;
     } adc;
    protected:

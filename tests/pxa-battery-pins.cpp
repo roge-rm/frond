@@ -22,14 +22,14 @@ BatteryPower battery(const char* spec) {
     return b;
 }
 
-// Today's levels off the charger: the TX reads external power (GPIO90 high).
-constexpr bool txPowerOffCharger = true;
+// Off the charger the TX's GPIO90 is low.
+constexpr bool txPowerOffCharger = false;
 
 void tx() {
     std::vector<uint8_t> rom(16 * 1024 * 1024);
     std::vector<uint8_t> nand(132 * 1024 * 1024, 0xff);
     SocPXA soc(DeviceType5::deviceTypeTX, 32 * 1024 * 1024, rom.data(), rom.size(), nand.data(), nand.size(), -1, 2);
-    assert(gpio(soc, 90) == txPowerOffCharger);
+    assert(gpio(soc, 90) == txPowerOffCharger && gpio(soc, 13));
     assert(soc.SetBattery(battery("level 50 charging")) && gpio(soc, 90));
     soc.Reset();
     assert(gpio(soc, 90));

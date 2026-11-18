@@ -38,6 +38,7 @@ class EmSession {
 
    public:
     bool Initialize(EmDevice* device, uint8* romImage, size_t romLength);
+    bool IsInitialized() const { return isInitialized; }
 
     bool SaveImage(SessionImage& image);
     bool LoadImage(SessionImage& image);

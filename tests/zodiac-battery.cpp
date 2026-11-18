@@ -84,14 +84,14 @@ void machine() {
     const auto afterReset = save(*soc);
     assert(soc->SetBattery(battery("level 70")) && save(*soc) == afterReset);
 
-    // Charging pulls B14 low, through a load and a reset as well. Off the charger B14 stays low for now.
-    assert(soc->ChargerInputLow());
+    // Charging pulls B14 low, through a load and a reset as well. Off the charger it's high.
+    assert(!soc->ChargerInputLow());
     assert(soc->SetBattery(battery("level 40 charging")) && soc->ChargerInputLow());
     load(*soc, atMaximum);
     assert(soc->ChargerInputLow());
     soc->Reset();
     assert(soc->ChargerInputLow() && soc->BatterySample() == zodiacBatterySample(40));
-    assert(soc->SetBattery(battery("level 40")) && soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("level 40")) && !soc->ChargerInputLow());
 
     // A state made at another level carries no level: it loads at the setting the machine has.
     assert(soc->SetBattery(battery("level 5")));

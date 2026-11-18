@@ -141,7 +141,7 @@ class SocPXA : public SocGeneric<SocPXA> {
             [](void* context) { return static_cast<SocPXA*>(context)->UsbBoardListening(); }, this);
         return {};
     }
-    bool UsbDefaultCableAttached() { return GetDeviceType()==deviceTypeTX; }
+    bool UsbDefaultCableAttached() { return false; }
     bool SetUsbTestCable(bool connected);
     bool UsbBoardListening();
     bool UsbTestCableAttached();

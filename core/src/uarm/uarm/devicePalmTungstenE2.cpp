@@ -139,10 +139,6 @@ struct Device {
     BatteryPower battery;
 };
 
-// Off the charger the TX's GPIO90 stays high (external power), as every TX read it so far, until the battery
-// default lands with an Exact rebaseline.
-static constexpr bool txPowerHighOffCharger = true;
-
 // The battery input on each board: the TG50's AD7873 VBAT, the WM9712L BMON input (behind a divide by
 // three) on the E2, TX and Zire 72. The charger: the TG50's uc A13 and A14 (tg50BoardSetCharging), the Zire 72's
 // GPIO99 low (the charging bolt), the TX's GPIO90 high (DAL dock status 0x2009b7d0, palmtx.h POWER_DETECT) and
@@ -158,7 +154,7 @@ static void deviceApplyBattery(Device *dev) {
     if (!dev->wm9712L) return;
     wm9712LsetAuxVoltage(dev->wm9712L, WM9712LauxPinBmon, mV / 3);
     if (dev->type == DeviceType5::deviceTypeZire72) pxaGpioSetState(dev->gpio, 99, !charging);
-    else if (dev->type == DeviceType5::deviceTypeTX) pxaGpioSetState(dev->gpio, 90, charging || txPowerHighOffCharger);
+    else if (dev->type == DeviceType5::deviceTypeTX) pxaGpioSetState(dev->gpio, 90, charging);
     else if (deviceProfileIsE2Board5(dev->type)) pxaGpioSetState(dev->gpio, 9, charging);
 }
 
@@ -289,7 +285,8 @@ struct Device *deviceSetup(enum DeviceType5 type, struct SocPeriphs *sp,
         if (!keypadAddGpioKey(kp, keyIdHotSync, 10, false)) ERR("cannot initialize TX HotSync line");  // palmtx.h HOTSYNC_BUTTON_N
         pxaGpioSetState(sp->gpio, 14, true);  // SD absent
         pxaGpioSetState(sp->gpio, 37, true);
-        pxaGpioSetState(sp->gpio, 90, true);
+        pxaGpioSetState(sp->gpio, 13, true);  // no USB cable (palmtx.h USB_DETECT_N)
+        // GPIO90, external power, follows the battery setting (deviceApplyBattery).
 #ifndef __EMSCRIPTEN__
         sp->soc->wirelessDevice = std::make_unique<LibertasCF>(
             sp->mem, sp->gpio, reschedule, getTime, &sp->soc->networkSimulation);

@@ -14,15 +14,13 @@
 #include "EmBattery.h"
 #include "EmPalmStructs.h"
 
-// Off: Maximum reads the saved fixed count (3072), as every Dana run has so far.
-static constexpr bool kMaximumOnCurve=false;
-
 uint16 EmRegsVZDana::MainBatteryCount(const uint16_t (&curve)[11], Int16 stepOffset, unsigned percent) {
     const int counts=(int(BatteryPower::CurveCentivolts(curve,percent))*310+50)/100-10*stepOffset;
     return uint16(counts<0 ? 0 : counts>4095 ? 4095 : counts);
 }
 
 uint16 EmRegsVZDana::MainBatteryCountNow() {
+    if(!gSession || !gSession->IsInitialized()) return 0;
     CEnableFullAccess munge;
     const emuptr data=EmLowMem_GetGlobal(sysBatteryDataP);
     if(!data) return 0;
@@ -40,7 +38,7 @@ uint16 EmRegsVZDana::MainBatteryCountNow() {
 }
 
 uint16 EmRegsVZDana::AnalogueInputs::MainBattery() const {
-    if(mainBatteryFixed || (gBattery.mode==BatteryPower::Mode::maximum && !kMaximumOnCurve)) return mainBattery;
+    if(mainBatteryFixed) return mainBattery;
     const uint16 count=MainBatteryCountNow();
     return count ? count : mainBattery;
 }
