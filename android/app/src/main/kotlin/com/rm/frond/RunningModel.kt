@@ -633,6 +633,9 @@ class RunningModel(
                 if (next.barMode != old.barMode) s = s.copy(barMode = next.barMode)
                 if (next.fastAudio != old.fastAudio && device.lowLatencyAudio) s = s.copy(fastAudio = next.fastAudio)
                 if (next.rumble != old.rumble) s = s.copy(rumble = next.rumble)
+                if (next.batteryMode != old.batteryMode) s = s.copy(batteryMode = next.batteryMode)
+                if (next.batteryLevel != old.batteryLevel) s = s.copy(batteryLevel = next.batteryLevel)
+                if (next.batteryCharging != old.batteryCharging) s = s.copy(batteryCharging = next.batteryCharging)
                 s
             }
             settings = machineSettings()
@@ -641,6 +644,7 @@ class RunningModel(
             FrondActivity.running?.applyMips()
             FrondActivity.running?.applyBarMode()
             FrondActivity.running?.applyRumble()
+            FrondActivity.running?.battery?.changed(settings)
         } catch (e: Exception) {
             alert = "Couldn't save settings" to "Couldn't write the machine settings."
         }

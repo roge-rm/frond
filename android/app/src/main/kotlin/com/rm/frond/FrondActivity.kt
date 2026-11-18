@@ -202,6 +202,10 @@ open class FrondActivity : SDLActivity() {
     // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
     private var zodiacPad: ZodiacPad? = null
     private var rumble: Rumble? = null
+    // The Battery setting sent to the core and kept current; read from the saved machine settings.
+    val battery: BatteryControl by lazy {
+        BatteryControl(applicationContext, link) { Sessions.forPath(applicationContext, sessionPath)?.settings ?: machineSettings }
+    }
     lateinit var runningDevice: Device
         private set
 
@@ -304,6 +308,7 @@ open class FrondActivity : SDLActivity() {
                 }, "FrondLinks").apply { isDaemon = true }.start()
             }
         }
+        battery.start()
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
@@ -345,6 +350,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
+        arguments += listOf("--battery", battery.launchSpec())
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
         if (launchDevice().zodiac && !followsProgram()) arguments += listOf("--view-turn", "window")
@@ -1527,6 +1533,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        battery.stop()
         rumble?.stop()
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()

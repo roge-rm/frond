@@ -98,12 +98,21 @@ data class MachineSettings(
     val rumble: Boolean = true,
     // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
     val gamepad: Boolean? = null,
+    // The battery the Palm reads: Maximum, a set level (0 to 100), or this phone's. Charging is the Palm on its charger,
+    // used by Maximum and Set level. Applied live and at every start.
+    val batteryMode: BatteryMode = BatteryMode.MAX,
+    val batteryLevel: Int = DEFAULT_BATTERY_LEVEL,
+    val batteryCharging: Boolean = false,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN).put("jogControlsLandscape", jogLandscape.arg)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) } }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) }
+        // Saved only when not the default.
+        if (batteryMode != BatteryMode.MAX) it.put("batteryMode", batteryMode.arg)
+        if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
+        if (batteryCharging) it.put("batteryCharging", true) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
@@ -159,6 +168,7 @@ data class MachineSettings(
 
     companion object {
         const val DEFAULT_CONTRAST = 50
+        const val DEFAULT_BATTERY_LEVEL = 100
 
         // A new machine's settings for a device.
         fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
@@ -198,6 +208,9 @@ data class MachineSettings(
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
                 rumble = json.optBoolean("rumble", fallback.rumble),
                 gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
+                batteryMode = BatteryMode.entries.firstOrNull { it.arg == json.optString("batteryMode") } ?: BatteryMode.MAX,
+                batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
+                batteryCharging = json.optBoolean("batteryCharging", false),
             )
         }
     }
