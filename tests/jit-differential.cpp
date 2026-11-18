@@ -2433,13 +2433,14 @@ struct IdleSetup {
     Assembled a;
 };
 
-IdleSetup idleSetup(const char* name, IdleLoopKind kind, uint32_t counter, bool past, bool afterPass) {
+IdleSetup idleSetup(const char* name, IdleLoopKind kind, uint32_t counter, bool past, bool afterPass,
+                    uint32_t page = kCode + 0x1000) {
     IdleSetup s;
     for (const IdleLoop& x : kIdleLoops)
         if (x.kind == kind) s.loop = &x;
     const bool zire = kind == IdleLoopKind::zire72;
     // Each ROM's head and window sit at these offsets in a 32-byte line.
-    s.head = kCode + 0x1000 + (zire ? 0x10 : 0x14);
+    s.head = page + (zire ? 0x10 : 0x14);
     std::vector<std::pair<int, uint32_t>> regs;
     if (zire)
         regs = {{0, counter}, {4, kIdleTimer}, {5, kIdlePointer}, {6, 0xffffffff}, {7, 162500}, {8, kIdleCounter}, {10, past}};
@@ -2765,6 +2766,89 @@ bool idleMatchRemask(Engines& e) {
     }
     printf("FAIL idle match after a code write: skips %" PRIu64 ", %" PRIu64 ", %" PRIu64 " (want 1, 1, 0)\n",
            skipped[0][0], skipped[0][1], skipped[0][2]);
+    for (const std::string& d : diffs) printf("  %s\n", d.c_str());
+    return false;
+}
+
+// The idle match made again before the line flags of a page a run's store dropped code from are set
+// from the code left: setting them must drop the match, as the window's lines lose their flags. The
+// Zire 72 loop at 0x24110 puts its window on the guest-writable page 0x23000. After a skip, a stub
+// right before the head stores each window word back (its blocks drop). Dropping code halts the run at
+// the stub's block end, the head, so the head is reached in the same run as the stores; the call's budget
+// leaves one cycle there (the stub's cycles are measured on a first go), so the head matches again with
+// no pass to skip before the next run sets the flags (none left on the page) and stops before the window. A host store then changes the window, which no flag watches now: the match must be
+// gone, so the next run makes no skip and lands where Fast without the skip does. (A skip on the old
+// match would store 1 to ICCR.)
+bool idleMatchRemaskInRun(Engines& e) {
+    const IdleSetup s = idleSetup("zire 72 writable", IdleLoopKind::zire72, 1000, false, true, 0x24100);
+    const IdleLoop* l = s.loop;
+    // The stub: each window word loaded and stored back, straight into the head.
+    const uint32_t window = s.head + uint32_t(l->window), S = s.head - 8 * kIdleWindowCount;
+    Snapshot states[2];
+    uint64_t skipped[2][2] = {}, stub[2] = {};
+    bool stepped[2] = {};
+    for (int k = 0; k < 2; ++k) {
+        Machine& m = e.fast;
+        cpuSetIdleSkip(k == 0);
+        auto step = [&](uint32_t cycles) { return cpuCycle<ARM_MEMORY_SYSTEM_MMU, false>(m.cpu, cycles); };
+        auto run = [&](uint64_t cycles) {
+            uint64_t s0, c0, s1, c1, ran = 0;
+            cpuJitIdleSkips(&s0, &c0);
+            while (ran < cycles) ran += step(uint32_t(cycles - ran));
+            cpuJitIdleSkips(&s1, &c1);
+            return s1 - s0;
+        };
+        // Cycles a call at a time to the head, 0 if it isn't reached.
+        auto toHead = [&] {
+            uint64_t ran = 0;
+            for (int i = 0; i < 1000; ++i) {
+                if (cpuGetRegisters(m.cpu)[15] == s.head) return ran ? ran : 1;
+                ran += step(1);
+            }
+            return uint64_t(0);
+        };
+        // A skip, then to the head between passes, then the stub set up.
+        auto start = [&] {
+            idlePrepare(m, s, 1000);
+            auto put = [&](uint32_t va, uint32_t v) { memcpy(m.ram + va, &v, 4); };
+            for (uint32_t i = 0; i < kIdleWindowCount; ++i) {
+                put(S + 8 * i, 0xe59c9000 | 4 * i);      // ldr r9, [r12, #4i]
+                put(S + 8 * i + 4, 0xe58c9000 | 4 * i);  // str r9, [r12, #4i]
+            }
+            cpuInvalidateCodeCache(m.cpu);
+            const uint64_t want = 40ull * idlePassCost(*l, 1000, cpuGetRegisters(m.cpu), true, cost::Core::pxa27x);
+            const uint64_t skips = run(want);
+            const bool ok = toHead() != 0;
+            cpuSetReg(m.cpu, 12, window);
+            cpuSetReg(m.cpu, 15, S);
+            return std::make_pair(ok ? skips : ~uint64_t(0), want);
+        };
+        start();
+        stub[k] = toHead();
+        const auto [skips, want] = start();
+        skipped[k][0] = skips;
+        // The stub, then the head with one cycle left: the match, no pass.
+        if (stub[k]) step(uint32_t(stub[k] + 1));
+        step(1);  // the flags set, then the head's next block
+        const uint32_t pc = cpuGetRegisters(m.cpu)[15];
+        stepped[k] = stub[k] && pc > s.head && pc < s.head + 4 * 19;  // before the window call
+        // mov r1, #1 becomes mov r1, #0x40000000: the window still returns, and stores that to ICCR.
+        const uint32_t word = 0xe3a01101;
+        memAccess(m.mem, window + 12, 4, true, (void*)&word);
+        skipped[k][1] = run(want);
+        states[k] = snapshot(m, cpuGetRegisters(m.cpu)[15] == s.head);
+    }
+    cpuSetIdleSkip(true);
+    const std::vector<std::string> diffs = differences(states[0], states[1]);
+    if (diffs.empty() && stepped[0] && stepped[1] && skipped[0][0] == 1 && skipped[0][1] == 0 && !skipped[1][0]) {
+        printf("idle match made again before a run's code write is remasked: 1 skip, none after the window store "
+               "(stub %" PRIu64 " cycles)\n",
+               stub[0]);
+        return true;
+    }
+    printf("FAIL idle match made again before a remask: skips %" PRIu64 ", %" PRIu64 " (want 1, 0), stub %" PRIu64
+           " %" PRIu64 " cycles, stopped before the window %d %d\n",
+           skipped[0][0], skipped[0][1], stub[0], stub[1], stepped[0], stepped[1]);
     for (const std::string& d : diffs) printf("  %s\n", d.c_str());
     return false;
 }
@@ -3782,6 +3866,7 @@ int main(int argc, char** argv) {
         ok = idleClock(e) && ok;
         ok = idleMatchDropped(e) && ok;
         ok = idleMatchRemask(e) && ok;
+        ok = idleMatchRemaskInRun(e) && ok;
         ok = codeRanges(e) == 0 && ok;
         ok = delaySkip(e) && ok;
         ok = delayMatchDropped(e) && ok;
