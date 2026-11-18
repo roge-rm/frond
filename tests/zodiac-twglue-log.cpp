@@ -1,5 +1,6 @@
 // The TwGlue log: a small ARM program is run one instruction at a time with the log watching, and the file it
-// writes is checked for the entry, a table call with a string argument, its return, and an r9 module call. The MMU
+// writes is checked for the entry, a table call with a string argument, its return, an r9 module call, and the
+// dumps of TwInputSetFormat's features, TwInputPoll's buffer and TwGetDBDataDirectory's results. The MMU
 // is on with a coarse page table, so the log's own page walk is used for every read.
 #include <cassert>
 #include <cstdint>
@@ -44,6 +45,17 @@ int main() {
     put(at, 0xe3a01a03); at += 4;               // mov r1,#0x3000
     put(at, 0xe1a0e00f); at += 4;               // mov lr,pc
     put(at, 0xe12fff14); at += 4;               // bx r4
+    // TwInputSetFormat(3, 0x3300, 16), TwInputPoll(3, 0x3400, 8), TwGetDBDataDirectory(0, 0x3100, 0x3200, 32)
+    const uint32_t calls[3][5] = {{333 * 4, 3, 0x3300, 16, 0}, {336 * 4, 3, 0x3400, 8, 0}, {472 * 4, 0, 0x3100, 0x3200, 32}};
+    for (const auto& c : calls) {
+        put(at, 0xe5954000 | c[0]); at += 4;    // ldr r4,[r5,#slot*4]
+        put(at, 0xe3a00000 | c[1]); at += 4;    // mov r0,#a
+        put(at, 0xe3a01c00 | (c[2] >> 8)); at += 4;  // mov r1,#a
+        put(at, c[3] < 256 ? 0xe3a02000 | c[3] : 0xe3a02c00 | (c[3] >> 8)); at += 4;  // mov r2,#a
+        put(at, 0xe3a03000 | c[4]); at += 4;    // mov r3,#a
+        put(at, 0xe1a0e00f); at += 4;           // mov lr,pc
+        put(at, 0xe12fff14); at += 4;           // bx r4
+    }
     put(at, 0xe3a09c51); at += 4;               // mov r9,#0x5100
     put(at, bl(at, stub)); at += 4;
     put(end, 0xeafffffe);                       // b .
@@ -54,13 +66,27 @@ int main() {
     put(r9 - 4, module); put(module + 8, moduleFn);
     for (uint32_t i = 0; i < TwGlueLog::slots; ++i) put(table + 4 * i, 0x20000000 + 4 * i);
     put(table + 20, fn);
+    constexpr uint32_t setFormat = 0x2400, poll = 0x2500, dataDir = 0x2600;
+    put(setFormat, 0xe12fff1e);                                    // bx lr
+    put(poll, 0xe3a03f4a); put(poll + 4, 0xe5813000);              // mov r3,#296 ; str r3,[r1]
+    put(poll + 8, 0xe3e03004); put(poll + 12, 0xe5813004);         // mvn r3,#4 ; str r3,[r1,#4]
+    put(poll + 16, 0xe3a00000); put(poll + 20, 0xe12fff1e);        // mov r0,#0 ; bx lr
+    put(dataDir, 0xe3a03041); put(dataDir + 4, 0xe5c23000);        // mov r3,#'A' ; strb r3,[r2]
+    put(dataDir + 8, 0xe3a03001); put(dataDir + 12, 0xe5c23001);   // mov r3,#1 ; strb r3,[r2,#1]
+    put(dataDir + 16, 0xe3a03000); put(dataDir + 20, 0xe5c23002);  // mov r3,#0 ; strb r3,[r2,#2]
+    put(dataDir + 24, 0xe3a03005); put(dataDir + 28, 0xe1c130b0);  // mov r3,#5 ; strh r3,[r1]
+    put(dataDir + 32, 0xe3a00000); put(dataDir + 36, 0xe12fff1e);  // mov r0,#0 ; bx lr
+    put(table + 333 * 4, setFormat);
+    put(table + 336 * 4, poll);
+    put(table + 472 * 4, dataDir);
+    put(0x3300, 296); put(0x3304, 0); put(0x3308, 297); put(0x330c, 0xffffffff);
     std::memcpy(backing.buffer + text, "Hello glue", 11);
     constexpr uint32_t ttb = 0x10000, coarse = 0xc000;
     put(ttb, coarse | 1);
     for (uint32_t i = 0; i < 0x20; ++i) put(coarse + 4 * i, (i << 12) | 0xff2);  // small pages, AP 3, identity
 
     auto* mem = memInit();
-    ramInit(mem, nullptr, 0, 0x20000, &backing, true);
+    ramSetNoFramebuffer(ramInit(mem, nullptr, 0, 0x20000, &backing, true));  // the stubs write RAM
     auto* patches = initPatchDispatch();
     ArmCpu* cpu = cpuInit(app, mem, ARM_MEMORY_SYSTEM_MMU, false, false, -1, 0, 0, patches, new PacePatch{},
                           createSystemState(), ArmCpuModel::arm920t, true);
@@ -83,7 +109,7 @@ int main() {
     assert(out);
     {
         TwGlueLog log(cpu, &time, out, physical, nullptr);
-        for (int n = 0; n < 200; ++n) {
+        for (int n = 0; n < 400; ++n) {
             const uint32_t pc = cpuGetRegisters(cpu)[15];
             if (pc == end) break;
             uint32_t instruction;
@@ -118,6 +144,9 @@ int main() {
     assert(line("3000 call DAL 2 ").size() && line("3000 ret DAL 2 ").find("r0=00000009") != std::string::npos);
     assert(line("3000 entry2 ").find("r0=00000001 r1=") != std::string::npos && line("3000 entry2 ").find(" r2=00002300 ") != std::string::npos);
     assert(line("3000 call 1000 Call68KFunc").size());
+    assert(line("3000 call 333 TwInputSetFormat_").find(" features=[296 0 297 -1]") != std::string::npos);
+    assert(line("3000 ret 336 TwInputPoll_").find(" n=1 buf=[296 -5]") != std::string::npos);
+    assert(line("3000 ret 472 TwGetDBDataDirectory_").find(" r1.u16=5 r2.buf=\"\" hex=4101") != std::string::npos);
     std::remove(path.c_str());
     std::puts("ok");
     return 0;

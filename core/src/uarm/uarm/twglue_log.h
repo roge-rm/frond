@@ -22,6 +22,14 @@ class TwGlueLog {
 public:
     static constexpr uint32_t slots = 612;
     static constexpr uint32_t call68kIndex = 1000;
+    // Slots whose arguments or results are dumped (twglue_names.inc order).
+    enum Slot : uint32_t {
+        vfsDirEntryEnumerate = 214, vfsVolumeEnumerate = 241, twInputSetFormat = 333, twInputPoll = 336,
+        twGfxBlendBlt = 386, twGfxMaskBlendBlt = 387, twGetDBDataDirectory = 472,
+    };
+    // Polls logged in full per queue, then only the ones that change a value other than 294/295 (time, sequence),
+    // up to pollChanges.
+    static constexpr uint32_t pollFirst = 8, pollChanges = 2000;
 
     // Reads physical memory with no side effect: false where it isn't plain ROM or RAM.
     using PhysicalRead = bool (*)(void* context, uint32_t pa, void* data, uint32_t size);
@@ -67,7 +75,10 @@ public:
 
 private:
     static constexpr uint32_t romRegion = 0x20;
-    struct Frame { uint32_t lr, sp, index; };
+    // The call's r0-r3 and first four stack words, and a word read before the call (an iterator).
+    struct Frame { uint32_t lr, sp, index, a[8], before; };
+    // A queue's last poll buffer and how many polls it has had.
+    struct Poll { uint32_t count = 0, logged = 0; std::vector<uint32_t> last; };
 
     ArmCpu* cpu;
     const Imx1ReferenceTime* time;
@@ -77,6 +88,8 @@ private:
     uint32_t lastEntry = 0, lastPc = 0, expectedPc = 0, tableBase = 0, lowest = ~0u, highest = 0, lines = 0, entries = 0;
     std::unordered_map<uint32_t, std::vector<uint32_t>> targets;
     std::vector<Frame> frames;
+    std::unordered_map<uint32_t, std::vector<int32_t>> formats;
+    std::unordered_map<uint32_t, Poll> polls;
 
     uint64_t ms() const { return time->ticks * 1000 / 32768; }
     // The page tables are walked here through the physical reader: the Zodiac's memory is one bus callback, so
@@ -204,14 +217,125 @@ private:
         for (const uint32_t index : indexes) names += (names.empty() ? "" : "|") + std::string(name(index));
         std::fprintf(out, "%llu call %s %s", (unsigned long long) ms(), list.c_str(), names.c_str());
         args(r);
+        uint32_t before = 0;
+        callExtras(indexes[0], r, before);
         std::fputc('\n', out);
-        push(r, indexes[0]);
+        push(r, indexes[0], before);
         flushSometimes();
     }
 
-    void push(const uint32_t* r, uint32_t index) {
+    void push(const uint32_t* r, uint32_t index, uint32_t before = 0) {
         if (frames.size() >= 256) frames.erase(frames.begin());
-        frames.push_back({r[14] & ~1u, r[13], index});
+        Frame f{r[14] & ~1u, r[13], index, {r[0], r[1], r[2], r[3]}, before};
+        read(r[13], f.a + 4, 16);
+        frames.push_back(f);
+    }
+
+    // Up to max 32-bit words at address as signed decimal, `[1 2 3]`, or nothing when unreadable.
+    std::string words(uint32_t address, uint32_t bytes, uint32_t max = 64) {
+        const uint32_t n = std::min(bytes / 4, max);
+        std::vector<int32_t> w(n);
+        if (address < 0x1000 || (n && !read(address, w.data(), n * 4))) return "?";
+        std::string s = "[";
+        for (uint32_t i = 0; i < n; ++i) s += (i ? " " : "") + std::to_string(w[i]);
+        return s + (bytes / 4 > max ? " ...]" : "]");
+    }
+
+    // A NUL-ended string at address (up to size bytes, at most 256) as `"text"`, with `hex=..` added when it
+    // holds bytes outside printable ASCII.
+    std::string buffer(uint32_t address, uint32_t size) {
+        const uint32_t n = std::min<uint32_t>(size ? size : 256, 256);
+        std::string b(n, '\0');
+        if (address < 0x1000 || !read(address, &b[0], n)) return "?";
+        const size_t end = b.find('\0');
+        const std::string str = b.substr(0, end == std::string::npos ? n : end);
+        bool printable = true;
+        for (const unsigned char c : str) printable = printable && c >= 32 && c < 127;
+        std::string s = "\"" + (printable ? str : std::string()) + "\"";
+        if (!printable) {
+            s += " hex=";
+            char h[3];
+            for (const unsigned char c : str) { std::snprintf(h, sizeof h, "%02x", c); s += h; }
+        }
+        return s;
+    }
+
+    uint32_t word(uint32_t address) {
+        uint32_t v = 0;
+        if (address >= 0x1000) read(address, &v, 4);
+        return v;
+    }
+
+    // Extra fields on a call line: input arrays, and the iterator an enumerate call starts from.
+    void callExtras(uint32_t index, const uint32_t* r, uint32_t& before) {
+        switch (index) {
+        case twInputSetFormat: {
+            std::fprintf(out, " features=%s", words(r[1], r[2]).c_str());
+            const uint32_t n = std::min<uint32_t>(r[2] / 4, 64);
+            std::vector<int32_t> f(n);
+            if (r[1] >= 0x1000 && read(r[1], f.data(), n * 4)) formats[r[0]] = f;
+            break;
+        }
+        case vfsVolumeEnumerate: case vfsDirEntryEnumerate:
+            before = word(r[1]);
+            std::fprintf(out, " iter=%08x", before);
+            break;
+        case twGfxBlendBlt: case twGfxMaskBlendBlt:
+            std::fprintf(out, " point=%s rect=%s", words(r[1], 8).c_str(), words(r[3], 16).c_str());
+            break;
+        default: break;
+        }
+    }
+
+    // Extra fields on a ret line, read after the call returned.
+    void retExtras(const Frame& f) {
+        const uint32_t* a = f.a;
+        switch (f.index) {
+        case twGetDBDataDirectory: {
+            uint16_t vol = 0;
+            const bool volOk = a[1] >= 0x1000 && read(a[1], &vol, 2);
+            std::fprintf(out, " r1.u16=%s r2.buf=%s", volOk ? std::to_string(vol).c_str() : "?", buffer(a[2], a[3] < 0x1000 ? a[3] : 0).c_str());
+            break;
+        }
+        case vfsVolumeEnumerate: {
+            uint16_t vol = 0;
+            const bool volOk = a[0] >= 0x1000 && read(a[0], &vol, 2);
+            std::fprintf(out, " iter=%08x->%08x vol=%s", f.before, word(a[1]), volOk ? std::to_string(vol).c_str() : "?");
+            break;
+        }
+        case vfsDirEntryEnumerate: {
+            // FileInfoType: UInt32 attributes, Char* nameP, UInt16 nameBufLen.
+            uint32_t info[3] = {};
+            const bool ok = a[2] >= 0x1000 && read(a[2], info, 12);
+            std::fprintf(out, " iter=%08x->%08x", f.before, word(a[1]));
+            if (ok) std::fprintf(out, " attr=%08x name=%s", info[0], buffer(info[1], info[2] & 0xffff).c_str());
+            break;
+        }
+        case twInputPoll: poll(f); break;
+        default: break;
+        }
+    }
+
+    // The poll buffer (r1, r2 bytes): the first pollFirst per queue, then changes outside time and sequence.
+    void poll(const Frame& f) {
+        const uint32_t n = std::min<uint32_t>(f.a[2] / 4, 64);
+        std::vector<uint32_t> b(n);
+        if (f.a[1] < 0x1000 || !read(f.a[1], b.data(), n * 4)) return;
+        Poll& q = polls[f.a[0]];
+        ++q.count;
+        bool changed = q.last.size() != b.size();
+        const auto fmt = formats.find(f.a[0]);
+        for (uint32_t i = 0; !changed && i < n; ++i) {
+            if (b[i] == q.last[i]) continue;
+            const int32_t selector = fmt != formats.end() && i < fmt->second.size() ? fmt->second[i] : 0;
+            changed = selector != 294 && selector != 295;
+        }
+        q.last = b;
+        if (q.count > pollFirst && (!changed || q.logged >= pollFirst + pollChanges)) return;
+        ++q.logged;
+        std::fprintf(out, " n=%u buf=[", q.count);
+        for (uint32_t i = 0; i < n; ++i) std::fprintf(out, "%s%d", i ? " " : "", int32_t(b[i]));
+        std::fputc(']', out);
     }
 
     void moduleCall(uint32_t instruction, const uint32_t* r) {
@@ -238,7 +362,9 @@ private:
             std::string what;
             if (f.index >= 2000) what = std::string(f.index < 3000 ? "DAL" : f.index < 4000 ? "Boot" : "UI") + " " + std::to_string(f.index % 1000);
             else what = std::to_string(f.index) + " " + name(f.index);
-            std::fprintf(out, "%llu ret %s r0=%08x%s\n", (unsigned long long) ms(), what.c_str(), r[0], text(r[0]).c_str());
+            std::fprintf(out, "%llu ret %s r0=%08x%s", (unsigned long long) ms(), what.c_str(), r[0], text(r[0]).c_str());
+            if (f.index < 2000) retExtras(f);
+            std::fputc('\n', out);
             flushSometimes();
         }
     }
