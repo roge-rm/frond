@@ -8,14 +8,17 @@
 // abort, FSR 1; with A clear a misaligned halfword stops the machine. Exact, lean-only Fast and Fast blocks end the
 // same. The observer sees a prefetch abort's step as not fetched. Off, the machine stops on them.
 // LDM and STM go from the lowest register and address up in every mode, as the ARM920T does: a DA or DB transfer that
-// straddles the edge stores or loads its word below the edge before the abort.
+// straddles the edge stores or loads its word below the edge before the abort. STM and STR of PC store the
+// instruction's address plus 12, as the ARM9TDMI core does.
 #define ZODIAC_STATE_MAIN stateMain
 #include "zodiac-machine-state.cpp"
 
 namespace {
 enum class Kind { dataLoop, dataThumb, prefetch, undefinedArm, undefinedThumb, ldrPre, ldrPost, strPre, ldmWriteback,
                   ldmBase, stmWriteback, stmdbWriteback, stmdaWriteback, ldmdbWriteback, thumbLdm, thumbStm, ldrhOdd,
-                  strhOdd, thumbLdrhOdd, thumbLdrWord, ldrhOddNoA };
+                  strhOdd, thumbLdrhOdd, thumbLdrWord, ldrhOddNoA, stmPc, strPc };
+// Where the stmPc and strPc cases' store of PC is.
+uint32_t pcStoreAt = 0;
 bool alignment(Kind k) {
     return k == Kind::ldrhOdd || k == Kind::strhOdd || k == Kind::thumbLdrhOdd || k == Kind::thumbLdrWord ||
            k == Kind::ldrhOddNoA;
@@ -35,6 +38,8 @@ const char* kindName(Kind k) {
         case Kind::stmWriteback: return "stmia writeback";
         case Kind::stmdbWriteback: return "stmdb writeback";
         case Kind::stmdaWriteback: return "stmda writeback";
+        case Kind::stmPc: return "stmib with pc";
+        case Kind::strPc: return "str pc";
         case Kind::ldmdbWriteback: return "ldmdb writeback";
         case Kind::thumbLdm: return "thumb ldmia";
         case Kind::thumbStm: return "thumb stmia";
@@ -135,6 +140,13 @@ FaultGuest guest(Kind kind) {
     case Kind::stmdbWriteback: arm(edge + 4, 0xe9220030); break;  // stmdb r2!, {r4, r5}: r4 stores
     case Kind::stmdaWriteback: arm(edge, 0xe8220030); break;      // stmda r2!, {r4, r5}: r4 stores
     case Kind::ldmdbWriteback: arm(edge + 4, 0xe9320030); break;  // ldmdb r2!, {r4, r5}: r4 loads
+    // A store of PC to the word below the edge, then a load that aborts, so the handler reads the stored word.
+    case Kind::stmPc: case Kind::strPc:
+        load(words, 2, edge - 12);
+        pcStoreAt = pc();
+        words.push_back(kind == Kind::stmPc ? 0xe9828020 : 0xe582f008);  // stmib r2, {r5, pc} or str pc, [r2, #8]
+        arm(edge, 0xe5925000);                                           // ldr r5, [r2]
+        break;
     case Kind::thumbLdm:
         load(words, 2, base = edge - 4);
         faultAddress = edge;
@@ -264,7 +276,9 @@ void check(Kind kind) {
         const bool storesBelow = kind == Kind::stmWriteback || kind == Kind::stmdbWriteback ||
                                  kind == Kind::stmdaWriteback || kind == Kind::thumbStm;
         const bool loadsBelow = kind == Kind::ldmWriteback || kind == Kind::ldmdbWriteback || kind == Kind::thumbLdm;
-        assert(r.registers[8] == (storesBelow ? 0x44444444u : belowMark));
+        // The ARM920T stores PC as the store's address plus 12.
+        const bool pcBelow = kind == Kind::stmPc || kind == Kind::strPc;
+        assert(r.registers[8] == (pcBelow ? pcStoreAt + 12 : storesBelow ? 0x44444444u : belowMark));
         if (loadsBelow) assert(r.registers[4] == belowMark);
     } else {
         assert(r.registers[9] == fsrMark && r.registers[10] == farMark);
@@ -287,9 +301,9 @@ int main() {
                       Kind::ldrPre, Kind::ldrPost, Kind::strPre, Kind::ldmWriteback, Kind::ldmBase,
                       Kind::stmWriteback, Kind::stmdbWriteback, Kind::stmdaWriteback, Kind::ldmdbWriteback,
                       Kind::thumbLdm, Kind::thumbStm, Kind::ldrhOdd, Kind::strhOdd, Kind::thumbLdrhOdd,
-                      Kind::thumbLdrWord, Kind::ldrhOddNoA})
+                      Kind::thumbLdrWord, Kind::ldrhOddNoA, Kind::stmPc, Kind::strPc})
         check(kind);
     std::puts("PASS: data and prefetch aborts and undefined instructions reach the guest's vectors with the ARM920T's "
-              "entry state and base restored, DA and DB transfers going upward, misaligned accesses take alignment "
+              "entry state and base restored, DA and DB transfers going upward, STM and STR of PC storing PC+12, misaligned accesses take alignment "
               "aborts with A set and stop without it, the same in Exact and Fast, and stop the machine with the switch off");
 }

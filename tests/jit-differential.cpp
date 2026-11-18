@@ -1904,6 +1904,9 @@ bool directed(Engines& e) {
         {"str r0, [r1], #-4 user store to read-only", {0xe4010004}, false, USR, {{1, 0x29010}}},
         {"stmia r1!, {r2, pc} faulting on pc", {0xe8a18004}, false, USR, {{1, 0x29ffc}}},
         {"stmdb r1!, {r2-r5} crossing into a hole", {0xe921003c}, false, SVC, {{1, 0x2b008}}},
+        // XScale stores PC as the instruction's address plus 8 (the ARM920T's plus 12 is test-zodiac-store-pc).
+        {"stmia r1, {r2, pc} and str pc, [r1, #8]", {0xe8818004, 0xe581f008}, false, SVC, {{1, 0x20100}},
+         {{Expect::MEM, 0x20104, kCode + 8}, {Expect::MEM, 0x20108, kCode + 12}}},
         {"thumb ldmia r0!, {r0, r1, r2}", {0xc807}, true, USR, {{0, 0x29ff8}}},
         {"thumb pop {r0, pc} faulting on pc", {0xbd01}, true, USR, {{13, 0x29ffc}}},
         {"sys ldmia r4, {r4-r6, r9, r12, sp} domain fault", {0xe8943270}, false, SYS, {{4, 0x101044}}},
