@@ -184,6 +184,12 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             mmuTlbFlush(cp15->mmu);
             return true;
         }
+        // Single entry by MVA for the I or D TLB (DDI0151C 2.3.9); the model's TLB holds both, so all of it
+        // goes and later walks refill it. Windows CE uses these.
+        if (CRn == 8 && op2 == 1 && (CRm == 5 || CRm == 6)) {
+            mmuTlbFlush(cp15->mmu);
+            return true;
+        }
         return false;
     }
 

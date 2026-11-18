@@ -144,7 +144,7 @@ class S3cRtc {
     // 32 kHz ticks until the next tick interrupt (tick) or alarm check (alarmCheck), UINT64_MAX with none due.
     uint64_t ticksToEvent(bool tick = true, bool alarmCheck = true) const;
 
-    uint32_t rtccon, ticnt, rtcalm, alarm[6], bcd[7];
+    uint32_t rtccon, ticnt, rtcalm, rtcrst, alarm[6], bcd[7];
     uint64_t secondPhase, tickPhase;
 
    private:

@@ -20,6 +20,7 @@ void S3cRtc::reset(const Time& start) {
     rtccon = 0;
     ticnt = 0;
     rtcalm = 0;
+    rtcrst = 0;
     for (auto& a : alarm) a = 0;
     alarm[3] = alarm[4] = 1;  // ALMDATE and ALMMON start at 1
     bcd[sec] = toBcd(start.second);
@@ -38,6 +39,7 @@ S3cAccess S3cRtc::read(uint32_t offset, uint32_t& value) {
         case 0x40: value = rtccon; return S3cAccess::ok;
         case 0x44: value = ticnt; return S3cAccess::ok;
         case 0x50: value = rtcalm; return S3cAccess::ok;
+        case 0x6c: value = rtcrst; return S3cAccess::ok;
     }
     if (offset >= 0x54 && offset <= 0x68) { value = alarm[(offset - 0x54) / 4]; return S3cAccess::ok; }
     if (offset >= 0x70 && offset <= 0x88) { value = bcd[(offset - 0x70) / 4]; return S3cAccess::ok; }
@@ -53,6 +55,8 @@ S3cAccess S3cRtc::write(uint32_t offset, uint32_t value) {
             ticnt = value & 0xff;
             return S3cAccess::ok;
         case 0x50: rtcalm = value & 0x7f; return S3cAccess::ok;
+        // RTCRST, the round boundary reset: kept, but setting SRSTEN doesn't round the seconds yet.
+        case 0x6c: rtcrst = value & 0xf; return S3cAccess::ok;
     }
     if (offset >= 0x54 && offset <= 0x68 && !((offset - 0x54) & 3)) {
         static const uint32_t masks[6] = {0x7f, 0x7f, 0x3f, 0x3f, 0x1f, 0xff};
