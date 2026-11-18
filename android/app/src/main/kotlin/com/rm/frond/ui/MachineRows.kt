@@ -220,10 +220,13 @@ private fun MachineBatteryLevelRow(settings: MachineSettings, listStyle: Boolean
     }
 }
 
-// Original or Uncapped. An ARM device takes it at its next start.
+// Original, a multiplier or Uncapped; 8x isn't offered on a 68k device.
 @Composable
-fun MachineSpeedRow(settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
-    MachineChoiceRow("Speed", settings.speed, CpuSpeed.entries, { it.label }, listStyle) { onChange(settings.copy(speed = it)) }
+fun MachineSpeedRow(device: Device, settings: MachineSettings, listStyle: Boolean, onChange: (MachineSettings) -> Unit) {
+    val m68k = device.runs68k
+    MachineChoiceRow("Speed", CpuSpeed.forCore(settings.speed, m68k), CpuSpeed.options(m68k), { it.label }, listStyle) {
+        onChange(settings.copy(speed = it))
+    }
 }
 
 // Microphone on or off. Turning it on asks for the permission first when it isn't granted.

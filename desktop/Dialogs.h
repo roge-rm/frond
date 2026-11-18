@@ -15,6 +15,9 @@ class DanaViewControls;
 // Window scale in quarters that fits the screen, from the layout the core draws for the device.
 int fittingScaleQuarters(frondFirmware::Device device, bool keyboard, frondSessions::JogControls jog);
 
+// Fills a speed combo with the choices for the device family (data is the core's name), keeping name selected.
+void fillSpeedBox(QComboBox* box, bool m68k, const QString& name);
+
 class MachineSettings : public QWidget {
     Q_OBJECT
  public:

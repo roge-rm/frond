@@ -275,7 +275,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
     val rows = RunningSheets.displayRows(device)
     MachineDisplayRows(device, model.settings, true) { model.changeSettings(it) }
     if (DisplayRow.ROTATE in rows) SheetAction("Rotate") { actions.closeSheet(); model.rotate() }
-    if (DisplayRow.SPEED in rows) MachineSpeedRow(model.settings, true) { model.changeSettings(it) }
+    if (DisplayRow.SPEED in rows) MachineSpeedRow(device, model.settings, true) { model.changeSettings(it) }
     if (DisplayRow.CAMERA in rows) CameraRow(model)
     Header("Battery", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
     MachineBatteryRows(model.settings, true, FrondActivity.running?.battery?.info ?: BatteryInfo()) { model.changeSettings(it) }

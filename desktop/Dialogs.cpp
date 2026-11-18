@@ -224,9 +224,7 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedLabel = new QLabel(tr("Speed"), speedBox);
     speed = new QComboBox(speedBox);
     speed->setObjectName("speed");
-    speed->addItem(tr("Original"), false);
-    speed->addItem(tr("Uncapped"), true);
-    speed->setCurrentIndex(prefs.uncapped ? 1 : 0);
+    fillSpeedBox(speed, false, frondSessions::speedName(prefs));
     speedLabel->setBuddy(speed);
     speedRow->addWidget(speedLabel);
     speedRow->addWidget(speed, 1);
@@ -316,6 +314,13 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
 }
 
+void fillSpeedBox(QComboBox* box, bool m68k, const QString& name) {
+    const QSignalBlocker blocked(box);
+    box->clear();
+    for (const auto& choice : frondSessions::speedChoices(m68k)) box->addItem(frondSessions::speedLabel(choice), choice);
+    box->setCurrentIndex(std::max(0, box->findData(m68k && name == QLatin1String("8x") ? QStringLiteral("uncapped") : name)));
+}
+
 int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
@@ -360,7 +365,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.fastEngine = engine->currentData().toBool();
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
-    prefs.uncapped = speed->currentData().toBool();
+    frondSessions::setSpeed(&prefs, speed->currentData().toString());
     const auto choice = [](QComboBox* combo, QSpinBox* port) {
         const auto mode = combo->currentData().toString();
         return mode == "tcp" ? "tcp:" + QString::number(port->value()) : mode;
@@ -434,8 +439,9 @@ void MachineSettings::setDevice(Device device) {
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));
-    // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
+    // Speed for every device, without 8x on a 68k; the Engine choice has no JIT to pick on a 68k.
     const bool engineShown = !m68k;
+    fillSpeedBox(speed, m68k, speed->currentData().toString());
     speedLabel->setVisible(true);
     speed->setVisible(true);
     engineLabel->setVisible(engineShown);
