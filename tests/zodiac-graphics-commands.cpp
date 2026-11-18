@@ -332,9 +332,12 @@ static void checkFillKinds() {
         const bool invert = kind & 16, a4 = kind & 32, painted = keyed && (kind & 64);
         if ((!copy && (kind & (4 | 8 | 64))) || (a4 && doubled) || (pixels && copy)) continue;
         ++kinds;
-        for (unsigned round = 0; round < 40; ++round) {
+        // From round 40 on the bytes are mostly 0 and keyed copies key on 0, so runs of the key and of other pixels
+        // both come up.
+        for (unsigned round = 0; round < 80; ++round) {
+            const bool keyRuns = round >= 40;
             for (uint32_t i = 0; i < regionBytes; i += 2) {
-                uint32_t word = next(3) ? palette[next(4)] : next(0x10000);
+                uint32_t word = keyRuns ? (next(5) < 3 ? 0 : next(0x10000)) : next(3) ? palette[next(4)] : next(0x10000);
                 assert(fast.accessGpu(state,eim,region + i,2,true,word) == A::ok);
                 assert(slow.accessGpu(state,eim,region + i,2,true,word) == A::ok);
             }
@@ -355,7 +358,7 @@ static void checkFillKinds() {
             f.paint = !doubled ? next(0x10000) : painted || next(2) ? 0 : (0x40 + next(0xc1)) | (0x40 + next(0xc1)) << 16;
             // An A4 fill without pixels is the constant blend, with one alpha for each of blue, green and red.
             const bool a4Pixels = a4 && next(2);
-            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? palette[next(4)] : next(0x10000);
+            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? (keyRuns ? 0 : palette[next(4)]) : next(0x10000);
             if (copy || a4) {
                 f.sourcePitch = f.width * 2 + next(30) * 2;
                 f.sourceX = doubled ? next(5) : 0; f.sourceY = doubled ? next(5) : 0;
