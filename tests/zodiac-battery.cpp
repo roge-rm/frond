@@ -101,6 +101,30 @@ void machine() {
     assert(soc->SetBattery(battery("max")));
     load(*soc, atLevel);
     assert(soc->BatterySample() == zodiacBatteryFullSample);
+
+    // Headphones: B16 high while in, put back after a load and a reset. B14 stays as set.
+    assert(soc->HeadphonesSupported() && !soc->HeadphonesIn() && !soc->HeadphoneInputHigh());
+    assert(soc->SetHeadphones(true) && soc->HeadphonesIn() && soc->HeadphoneInputHigh() && !soc->ChargerInputLow());
+    load(*soc, atMaximum);
+    assert(soc->HeadphoneInputHigh());
+    soc->Reset();
+    assert(soc->HeadphoneInputHigh());
+    assert(soc->SetBattery(battery("max charging")) && soc->HeadphoneInputHigh() && soc->ChargerInputLow());
+    assert(soc->SetHeadphones(false) && !soc->HeadphoneInputHigh() && soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("max")));
+
+    // The cradle button: D22 low while held, let go by a load.
+    assert(soc->CradleButtonSupported() && !soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->SetCradleButton(true) && soc->CradleButtonDown() && soc->CradleInputLow());
+    assert(soc->SetCradleButton(false) && !soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->SetCradleButton(true));
+    load(*soc, atMaximum);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
+    // Pressed again before the release after a load is pumped: the release leaves D22 low.
+    assert(soc->SetCradleButton(true));
+    soc->Run(1000, 32000000);
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    assert(soc->SetCradleButton(false) && !soc->CradleInputLow());
 }
 }  // namespace
 
@@ -125,6 +149,9 @@ void halted() {
     soc->Reset();
     assert(!soc->Halted() && soc->BatterySample() == zodiacBatterySample(20) && !soc->ChargerInputLow());
     stop();
+    // Halted, the headphone and cradle commands report the failure and change nothing.
+    assert(!soc->SetHeadphones(true) && !soc->HeadphonesIn());
+    assert(!soc->SetCradleButton(true) && !soc->CradleButtonDown());
     assert(soc->SetBattery(battery("level 20 charging")));
     soc->Reset();
     assert(soc->ChargerInputLow());

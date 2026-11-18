@@ -130,6 +130,7 @@ class Imx1Bootstrap {
     static constexpr uint32_t ymf768ReadyStateVersion = Imx1Ymf768::readyStateVersion;
     template <class A> void stateYmf768Ready(A& a) { ymf.stateReady(a); }
     const Imx1Ymf768& ymf768() const { return ymf; }
+    bool pwmDriving() const { return pwm.driving(); }
     // The SSI1 frame rate in frames a second as numerator / denominator, 0 when the serial side isn't
     // running in the qualified two-slot internal-clock set-up: the System PLL over PERCLK3 and 128.
     void pcmFrameRate(uint64_t& numerator, uint64_t& denominator) const;

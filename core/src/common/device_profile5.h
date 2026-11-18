@@ -43,6 +43,9 @@ struct DeviceCapabilities5 {
     // builtInWifi: the Dana Wireless's internal 802.11b module (a Prism 2.5 on the ISP1161's second
     // root port, powered by PK0).
     bool builtInWifi{false};
+    // The LED the button bar draws (AttentionState colour bits it can show, 0 for none) and a vibrate motor.
+    uint8_t ledColours{0};
+    bool vibrate{false};
 };
 
 // A device's fixed name is what sessions, settings, the control socket and command line use.
@@ -323,7 +326,8 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // MIDI, vibration) aren't finished, so their capabilities stay off.
     {deviceTypeZodiac2, "tapwave-zodiac-2", "Tapwave Zodiac 2", DeviceCohort5::zodiacNor, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::cardHeader, 0x54707776 /* Tpwv */, 0x4d583161 /* MX1a */,
-     DeviceBoard5::imx1Zodiac, DeviceArt::zodiac, {false, false, false, false, false, false, false, true},
+     DeviceBoard5::imx1Zodiac, DeviceArt::zodiac,
+     {false, false, false, false, false, false, false, true, false, false, false, false, false, false, false, 3, true},
      0x7d0000, 0, 128u << 20, 128u << 20, DisplayMode::mode_480x320, 1u << 10, false,
      DeviceNorLayout5::smallAndBigCards, 0, 0x20000, false, 32u << 20, 2048ull << 20,
      {true, "", 480, 320, 0, 200, "", "app1|app2|app3|app4|home|power", -1, -1, -1, -1, false, true}},

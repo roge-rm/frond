@@ -2,6 +2,7 @@
 #define FROND_DESKTOP_CONTROL_H
 
 #include <algorithm>
+#include "AttentionState.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +85,15 @@ class DesktopControl {
     void rumbleChanged(bool cue) {
         if (cue == lastRumbleCue) return;
         lastRumbleCue = cue; event("rumble", cue ? "on" : "off");
+    }
+
+    // The guest's LED and vibrate motor (AttentionState.h), "led=green vibrate=1", sent on a change only.
+    void attentionChanged(const AttentionState& state) {
+        if (attentionSent && state == lastAttention) return;
+        // Nothing to say until something first lights or buzzes.
+        if (!attentionSent && state == AttentionState{}) return;
+        attentionSent = true; lastAttention = state;
+        event("attention", state.Describe());
     }
 
     void infraredChanged(commands::Context& ctx) {
@@ -180,6 +190,8 @@ class DesktopControl {
     bool flush() { return channel.Flush(); }
 
     bool lastRumbleCue{false};
+    AttentionState lastAttention{};
+    bool attentionSent{false};
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
@@ -444,7 +456,7 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -584,6 +596,22 @@ class DesktopControl {
             if (!ctx.soc->SetHoldSwitch(path == "on"))
                 return {false, "unsupported", "This device has no supported Hold switch."};
             return {true, "hold", ctx.soc->HoldSwitchOn() ? "on" : "off"};
+        }
+        if (command == "headphones-state")
+            return {true, "headphones", !ctx.soc->HeadphonesSupported() ? "unavailable" : ctx.soc->HeadphonesIn() ? "in" : "out"};
+        if (command == "headphones") {
+            if (path != "in" && path != "out") return {false, "argument", "Use in or out."};
+            if (!ctx.soc->HeadphonesSupported() || !ctx.soc->SetHeadphones(path == "in"))
+                return {false, "unsupported", "This device has no headphone jack that can be set."};
+            return {true, "headphones", ctx.soc->HeadphonesIn() ? "in" : "out"};
+        }
+        if (command == "cradle-button-state")
+            return {true, "cradle-button", !ctx.soc->CradleButtonSupported() ? "unavailable" : ctx.soc->CradleButtonDown() ? "down" : "up"};
+        if (command == "cradle-button") {
+            if (path != "down" && path != "up") return {false, "argument", "Use down or up."};
+            if (!ctx.soc->CradleButtonSupported() || !ctx.soc->SetCradleButton(path == "down"))
+                return {false, "unsupported", "This device has no cradle button that can be pressed."};
+            return {true, "cradle-button", ctx.soc->CradleButtonDown() ? "down" : "up"};
         }
         if (command == "gamepad-state") return {true, "gamepad", ctx.soc->GamepadState()};
         if (command == "gamepad") {

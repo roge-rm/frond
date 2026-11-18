@@ -42,7 +42,7 @@
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
 void frondGuestOrientationChanged(int orientation);
 // In the app: the guest's alarm LED or vibrate motor changed. Guest thread.
-void frondGuestAttentionChanged(bool led, bool vibrate);
+void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
 #endif
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
@@ -855,9 +855,10 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
-#ifdef __ANDROID__
-        SoC::Attention attention{};
-#endif
+        AttentionThrottle attention;
+        // The button bar draws the LED only where the device has one.
+        const auto* attentionProfile = deviceProfile5(soc->GetDeviceType());
+        const uint8_t ledColours = attentionProfile ? attentionProfile->capabilities.ledColours : 0;
         int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
@@ -1332,7 +1333,9 @@ bool gFastEngineMissing = false;
                     DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
                     // The pad's Hold slide stays over while it's on.
                     if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
-                    const DeviceStick stick = sdlEventHandler.Stick();
+                    DeviceStick stick = sdlEventHandler.Stick();
+                    stick.lamp = attention.Shown().ledColour;
+                    stick.lampShown = ledColours != 0;
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
                         link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
@@ -1360,13 +1363,18 @@ bool gFastEngineMissing = false;
                     SoC::Attention current = soc->GuestAttention();
                     // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
                     if (replayPaused) current.vibrate = false;
+                    current.ledColour &= ledColours;
+                    bool changed = false;
+                    const SoC::Attention& shown = attention.Update(current, timestampUsec(), changed);
 #ifdef __ANDROID__
-                    if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
-                    attention = current;
+                    if (changed) frondGuestAttentionChanged(shown.ledColour, shown.vibrate, shown.led);
 #else
                     const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
                     const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
-                    if (desktop) desktop->rumbleChanged(on && !controller);
+                    if (desktop) {
+                        desktop->rumbleChanged(on && !controller);
+                        if (changed) desktop->attentionChanged(shown);
+                    }
 #endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.

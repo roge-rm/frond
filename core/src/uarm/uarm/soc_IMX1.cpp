@@ -16,6 +16,7 @@
 #include "sdcard.h"
 #include "vSD.h"
 #include "zodiac_battery.h"
+#include "zodiac_led.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
@@ -32,16 +33,20 @@ namespace {
     // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
     // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
     constexpr uint32_t chargerPinB = 0x00004000;
+    // B16, headphone detect: the DAL (20097d40) reads it high as headphones in, writes YMF768 reg 25 = 0 and
+    // turns D27 low and D26 to the headphone bass setting; low (Frond's default) is the speaker.
+    constexpr uint32_t headphonePinB = 0x00010000;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
-        explicit MachinePort(Imx1Machine* machine) : machine(machine) {}
+        // cradleHeld keeps the release after a load or reset off D22 once the host's cradle button is down again.
+        MachinePort(Imx1Machine* machine, bool cradleHeld) : machine(machine), cradleHeld(cradleHeld) {}
         bool setControl(unsigned control, bool down) override {
             return imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
         }
         bool releaseControls() override {
-            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | cradlePinD};
+            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | (cradleHeld ? 0 : cradlePinD)};
             return imx1MachineReplaceGpioInputs(machine, pins, pins, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineReplaceGpioInputs(machine, pins, pins, true) == Imx1BootstrapAccess::ok;
         }
@@ -61,7 +66,14 @@ namespace {
                    imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
         }
         Imx1Machine* machine;
+        bool cradleHeld;
     };
+
+    // Previews then commits one set of GPIO input pins.
+    bool replaceGpioInputs(Imx1Machine* machine, const uint32_t (&values)[4], const uint32_t (&masks)[4]) {
+        return imx1MachineReplaceGpioInputs(machine, values, masks, false) == Imx1BootstrapAccess::ok &&
+               imx1MachineReplaceGpioInputs(machine, values, masks, true) == Imx1BootstrapAccess::ok;
+    }
 }  // namespace
 
 static_assert(ZodiacInput::controls == unsigned(Imx1ZodiacControl::count));
@@ -204,6 +216,8 @@ void SocIMX1::StateChanged() {
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
     redraw = true;
+    // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
+    cradleDown = false;
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
 }
@@ -248,10 +262,15 @@ unsigned SocIMX1::GuestOrientation() {
     return orientation;
 }
 
-// The YMF768's LED and rumble motor.
+// The YMF768's LED and rumble motor, and the power LED's colour (zodiac_led.h).
 SoC::Attention SocIMX1::GuestAttention() {
     const auto outputs = imx1MachineAttention(machine);
-    return {outputs.led, outputs.motor};
+    static_assert(zodiacLedGreen == ledGreen && zodiacLedRed == ledRed);
+    Attention a;
+    a.ledColour = outputs.power;
+    a.vibrate = outputs.motor;
+    a.led = outputs.led;
+    return a;
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -346,16 +365,47 @@ bool SocIMX1::SetBattery(const BatteryPower& value) {
 
 // The level as the ASP U word the DAL's battery read takes (zodiac_battery.h); Maximum is the fixed 0x9b00
 // every Zodiac state was made with. Charging pulls B14 low.
-void SocIMX1::ApplyBattery() {
-    if (halted) return;
+bool SocIMX1::ApplyBattery() {
+    if (halted) return false;
     if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
         std::cerr << "zodiac: the battery level could not be set" << std::endl;
+    // The charger and the headphones go in separately, so one refused pin doesn't hold back the other.
     uint32_t values[4]{}, masks[4]{};
     masks[1] = chargerPinB;
     values[1] = battery.charging ? 0 : chargerPinB;
-    if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
-        imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
-        std::cerr << "zodiac: the charger input could not be set" << std::endl;
+    if (!replaceGpioInputs(machine, values, masks)) std::cerr << "zodiac: the charger input could not be set" << std::endl;
+    return ApplyHeadphones();
+}
+
+bool SocIMX1::ApplyHeadphones() {
+    if (halted) return false;
+    uint32_t values[4]{}, masks[4]{};
+    masks[1] = headphonePinB;
+    values[1] = headphones ? headphonePinB : 0;
+    if (replaceGpioInputs(machine, values, masks)) return true;
+    std::cerr << "zodiac: the headphone input could not be set" << std::endl;
+    return false;
+}
+
+bool SocIMX1::SetHeadphones(bool in) {
+    if (halted) return false;
+    const bool before = headphones;
+    headphones = in;
+    if (ApplyHeadphones()) return true;
+    headphones = before;
+    return false;
+}
+
+// D22 low while held. Without the cradle attached (A11 high and the accessory checks of 20089bae/20089bbc)
+// the awake ROM's key scan (20084af4) ignores it; asleep, its low level interrupt wakes the Zodiac.
+bool SocIMX1::SetCradleButton(bool down) {
+    if (halted) return false;
+    uint32_t values[4]{}, masks[4]{};
+    masks[3] = cradlePinD;
+    values[3] = down ? 0 : cradlePinD;
+    if (!replaceGpioInputs(machine, values, masks)) return false;
+    cradleDown = down;
+    return true;
 }
 
 uint64_t SocIMX1::GetTime() {
@@ -418,13 +468,13 @@ void SocIMX1::PushStick() {
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
     if (control < 0 || halted) return;
-    MachinePort port(machine);
+    MachinePort port(machine, cradleDown);
     input.jam(port, unsigned(control), durationMsec);
 }
 
 // Hands queued host input to the machine. An input the machine refuses just now stays queued.
 void SocIMX1::PumpInput() {
-    MachinePort port(machine);
+    MachinePort port(machine, cradleDown);
     input.hostTime(uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count()));
     input.pump(port);

@@ -2988,6 +2988,31 @@ static void zodiacControls() {
         draw(0,{1,0,true});const int pushed=brightness(readPixel(surface,kx+off,ky));
         assert(pushed>rest+20);
         draw(deviceKeyBit(keyIdStickPress),{0,0,true});assert(brightness(readPixel(surface,kx,ky+2))<centre);
+        // The power LED right of the power key: only with the profile's LED, dark grey when off, then lit
+        // green, red and amber.
+        {
+            const DeviceButton* power=nullptr;
+            for(size_t i=0;i<p.count;++i) if(p.buttons[i].key==keyIdPower && deviceControlShown(p.buttons[i],view)) power=&p.buttons[i];
+            assert(power);
+            const auto pr=deviceButtonRect(p,*power,sw,sh,view);
+            const float unitScale=float(pr.w)/power->bounds.w;
+            const int lx=int((pr.x+pr.w*0.5f+28*unitScale)*scale),ly=int((pr.y+pr.h*0.5f)*scale);
+            DeviceStick lamp{};
+            draw(0,lamp);const SDL_Color none=readPixel(surface,lx,ly);
+            lamp.lampShown=true;
+            draw(0,lamp);const SDL_Color off=readPixel(surface,lx,ly);
+            assert(brightness(off)<brightness(none) && off.r<60 && off.g<60);
+            lamp.lamp=1;draw(0,lamp);const SDL_Color green=readPixel(surface,lx,ly);
+            assert(green.g>180 && green.r<160);
+            lamp.lamp=2;draw(0,lamp);const SDL_Color red=readPixel(surface,lx,ly);
+            assert(red.r>200 && red.g<140);
+            lamp.lamp=3;draw(0,lamp);const SDL_Color amber=readPixel(surface,lx,ly);
+            assert(amber.r>200 && amber.g>130 && amber.b<120);
+            if(const char* directory=std::getenv("FROND_ZODIAC_SCREENSHOT_DIR")) {
+                const std::string path=std::string(directory)+"/"+name+"-led-amber.png";
+                assert(IMG_SavePNG(surface,path.c_str())==0);
+            }
+        }
         if(const char* directory=std::getenv("FROND_ZODIAC_SCREENSHOT_DIR")) {
             draw(deviceKeyBit(keyIdHard1)|deviceKeyBit(keyIdTriggerRight),{0.7f,-0.7f,true});
             const std::string path=std::string(directory)+"/"+name+"-held.png";

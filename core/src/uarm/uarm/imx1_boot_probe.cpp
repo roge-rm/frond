@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include "twglue_log.h"
+#include "zodiac_led.h"
 #include "imx1_graphics_frame.h"
 #include "imx1_graphics_commands.h"
 #include "imx1_graphics_gpu_gles.h"
@@ -2377,9 +2378,15 @@ unsigned imx1MachineScanOrientation(const Imx1Machine* machine) {
     return orientations[(display.activeWord(0x414) >> 3) & 3];
 }
 Imx1MachineAttention imx1MachineAttention(const Imx1Machine* machine) {
-    if (!machine || !machine->probe->peripherals.ymf768Enabled()) return {};
-    const auto& ymf = machine->probe->peripherals.ymf768();
-    return {ymf.led(), ymf.motor()};
+    if (!machine) return {};
+    const auto& board = machine->probe->peripherals;
+    Imx1MachineAttention a;
+    a.power = zodiacPowerLed(board.gpioRegister(3, 0), board.gpioRegister(3, 8), board.gpioRegister(3, 7),
+                             board.gpioRegister(3, 2), board.pwmDriving());
+    if (!board.ymf768Enabled()) return a;
+    a.led = board.ymf768().led();
+    a.motor = board.ymf768().motor();
+    return a;
 }
 Imx1BootstrapAccess imx1MachineReplacePenInputs(Imx1Machine* machine, const Imx1AspPenInputs& inputs, bool commit) {
     auto* p = machine->probe;
