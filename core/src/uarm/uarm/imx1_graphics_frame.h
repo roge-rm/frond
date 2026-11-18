@@ -70,6 +70,11 @@ class Imx1GraphicsFrame {
             enabled = valid = pending = acquired = false;
             return true;
         }
+        // Nothing to read and nothing to change: the same frame and revision without the overlay shown last time.
+        // The rest returns true here too: display.surface fails only with the display off, which returned above.
+        // Not with a host GPU, where the overlay planes' gpuSpan below marks their pages read.
+        if (valid && enabled && !(lastRevision & overlaidBit) && display.revision() == lastRevision &&
+            display.frameNumber() == lastFrame && !memory.gpuResidency()) return true;
         Imx1GraphicsDisplay::Surface candidate;
         if (!display.surface(candidate)) return false;
         Imx1GraphicsDisplay::Overlay overlay;
@@ -100,9 +105,10 @@ class Imx1GraphicsFrame {
         // A row inside the checked range passes copyGpuRange's own check when the range lies in one bank's mapped
         // addresses, so it is read straight from the bank storage.
         const uint64_t rangeEnd = uint64_t(candidate.rangeBase) + candidate.rangeBytes;
-        const bool direct = directRows && candidate.xStride == 2 && candidate.width &&
+        const bool inBank = directRows && candidate.width &&
             ((candidate.rangeBase >= 0x100000 && rangeEnd <= 0x160000) ||
              (candidate.rangeBase >= 0x800000 && rangeEnd <= 0x1000000));
+        const bool direct = inBank && candidate.xStride == 2;
         enabled = true;
         const auto dirty = memory.dirty(candidate.bank, Imx1GraphicsMemory::Consumer::scanout);
         uint32_t first = candidate.height, last = 0;
@@ -121,7 +127,28 @@ class Imx1GraphicsFrame {
             if (surface.width != candidate.width || surface.height != candidate.height) pending = false;
             if (pixels.size() != candidate.width * candidate.height) pixels.resize(candidate.width * candidate.height);
             row.resize(candidate.width * 2);
-            for (uint32_t y = first; y <= last; ++y) {
+            // A rotated scan with no overlay whose corners lie in the checked range: every pixel is read straight
+            // from the bank storage, in blocks of 16 rows so each read walks along memory.
+            const auto inside = [&](uint32_t x, uint32_t y) {
+                const int64_t at = int64_t(candidate.base) + int64_t(y) * candidate.yStride + int64_t(x) * candidate.xStride;
+                return at >= int64_t(candidate.rangeBase) && at + 2 <= int64_t(rangeEnd);
+            };
+            const bool rotatedDirect = inBank && !overlaid && candidate.xStride != 2 &&
+                inside(0, first) && inside(0, last) && inside(candidate.width - 1, first) && inside(candidate.width - 1, last);
+            for (uint32_t block = first; rotatedDirect && block <= last; block += 16) {
+                const uint32_t blockEnd = std::min(last, block + 15);
+                for (uint32_t x = 0; x < candidate.width; ++x) {
+                    const uint8_t* column = range + (int64_t(candidate.base) + int64_t(x) * candidate.xStride -
+                                                     int64_t(candidate.rangeBase));
+                    for (uint32_t y = block; y <= blockEnd; ++y) {
+                        const uint8_t* at = column + int64_t(y) * candidate.yStride;
+                        pixels[size_t(y) * candidate.width + x] = panelPixel(uint32_t(at[0]) | (uint32_t(at[1]) << 8));
+                    }
+                }
+                directRowCount += blockEnd - block + 1;
+                if (blockEnd == last) break;
+            }
+            for (uint32_t y = first; !rotatedDirect && y <= last; ++y) {
                 const uint32_t start = uint32_t(int64_t(candidate.base) + int64_t(y) * candidate.yStride);
                 const uint8_t* source = row.data();
                 if (direct && start >= candidate.rangeBase && uint64_t(start) + candidate.width * 2 <= rangeEnd) {
@@ -130,17 +157,19 @@ class Imx1GraphicsFrame {
                 } else if (candidate.xStride == 2) {
                     if (!memory.copyGpuRange(configuration, eim, start, candidate.width * 2, row.data())) return false;
                 } else {
-                    for (uint32_t x = 0; x < candidate.width; ++x)
-                        if (!memory.copyGpuRange(configuration, eim, start + x * candidate.xStride,
-                                                  2, row.data() + x * 2)) return false;
+                    // A rotated scan reads a pixel a row apart; each one inside the checked range is read straight
+                    // from the bank storage as for a direct row.
+                    for (uint32_t x = 0; x < candidate.width; ++x) {
+                        const uint32_t at = start + x * candidate.xStride;
+                        if (inBank && at >= candidate.rangeBase && uint64_t(at) + 2 <= rangeEnd) {
+                            std::memcpy(row.data() + x * 2, range + (at - candidate.rangeBase), 2);
+                            ++directRowCount;
+                        } else if (!memory.copyGpuRange(configuration, eim, at, 2, row.data() + x * 2)) return false;
+                    }
                 }
                 uint32_t* out = pixels.data() + size_t(y) * candidate.width;
-                for (uint32_t x = 0; x < candidate.width; ++x) {
-                    const uint32_t rgb = uint32_t(source[x * 2]) | (uint32_t(source[x * 2 + 1]) << 8);
-                    const uint32_t red = (rgb >> 11) & 31, green = (rgb >> 5) & 63, blue = rgb & 31;
-                    out[x] = 0xff000000u |
-                        ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
-                }
+                for (uint32_t x = 0; x < candidate.width; ++x)
+                    out[x] = panelPixel(uint32_t(source[x * 2]) | (uint32_t(source[x * 2 + 1]) << 8));
                 if (overlaid && y >= overlay.y && y < overlay.y + overlay.height)
                     composite(overlay, planes, y - overlay.y, source + overlay.x * 2, out + overlay.x);
             }
@@ -155,6 +184,11 @@ class Imx1GraphicsFrame {
         lastFrame = display.frameNumber();
         valid = true;
         return true;
+    }
+    // An RGB565 pixel as the frame holds it.
+    static uint32_t panelPixel(uint32_t rgb) {
+        const uint32_t red = (rgb >> 11) & 31, green = (rgb >> 5) & 63, blue = rgb & 31;
+        return 0xff000000u | ((blue << 3 | blue >> 2) << 16) | ((green << 2 | green >> 4) << 8) | (red << 3 | red >> 2);
     }
     // YUV to the panel's RGB565 and on to the frame's pixel format.
     // ASSUMPTION "overlay colour": the chip converts BT.601 studio range (Y 16-235), as TCPMP hands it the

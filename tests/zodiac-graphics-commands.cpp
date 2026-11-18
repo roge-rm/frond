@@ -49,9 +49,26 @@ static void checkScanLoad() {
     std::printf("PASS: a saved IDCT scan order past 2 is refused on load\n");
 }
 static unsigned preparedCopies = 0;
+// prepare with the ring read through accessGpu: the same status, refusal and saved state as the direct read.
+static void checkRingRead(const Imx1GraphicsCommands& commands, const Imx1Cs5Configuration& configuration,
+                          const Imx1Eim& eim, Imx1GraphicsMemory& memory, Imx1BootstrapAccess status,
+                          const Imx1GraphicsCommands& direct) {
+    auto slow = commands;
+    Imx1GraphicsCommands::directRing = false;
+    const auto slowStatus = slow.prepare(configuration, eim, memory);
+    Imx1GraphicsCommands::directRing = true;
+    const char* a = slow.refusal().what;
+    const char* b = direct.refusal().what;
+    if (slowStatus != status || (a ? !b || std::string(a) != b : b != nullptr) || slow.refusal().value != direct.refusal().value ||
+        commandsRecord(slow) != commandsRecord(direct)) {
+        std::fprintf(stderr, "FAIL: ring through accessGpu %d, direct %d\n", int(slowStatus), int(status));
+        std::abort();
+    }
+}
 static Imx1BootstrapAccess checkedPrepare(Imx1GraphicsCommands& commands, const Imx1Cs5Configuration& configuration,
                                           const Imx1Eim& eim, Imx1GraphicsMemory& memory) {
     auto copy = commands;
+    const auto before = commands;
     const auto copied = copy.prepareCopy(configuration, eim, memory);
     const auto status = commands.prepare(configuration, eim, memory);
     const char* a = copy.refusal().what;
@@ -62,6 +79,7 @@ static Imx1BootstrapAccess checkedPrepare(Imx1GraphicsCommands& commands, const 
         std::fprintf(stderr, "FAIL: prepareCopy %d, prepare %d\n", int(copied), int(status));
         std::abort();
     }
+    checkRingRead(before, configuration, eim, memory, status, commands);
     ++preparedCopies;
     return status;
 }
@@ -332,9 +350,12 @@ static void checkFillKinds() {
         const bool invert = kind & 16, a4 = kind & 32, painted = keyed && (kind & 64);
         if ((!copy && (kind & (4 | 8 | 64))) || (a4 && doubled) || (pixels && copy)) continue;
         ++kinds;
-        for (unsigned round = 0; round < 40; ++round) {
+        // From round 40 on the bytes are mostly 0 and keyed copies key on 0, so runs of the key and of other pixels
+        // both come up.
+        for (unsigned round = 0; round < 80; ++round) {
+            const bool keyRuns = round >= 40;
             for (uint32_t i = 0; i < regionBytes; i += 2) {
-                uint32_t word = next(3) ? palette[next(4)] : next(0x10000);
+                uint32_t word = keyRuns ? (next(5) < 3 ? 0 : next(0x10000)) : next(3) ? palette[next(4)] : next(0x10000);
                 assert(fast.accessGpu(state,eim,region + i,2,true,word) == A::ok);
                 assert(slow.accessGpu(state,eim,region + i,2,true,word) == A::ok);
             }
@@ -355,7 +376,7 @@ static void checkFillKinds() {
             f.paint = !doubled ? next(0x10000) : painted || next(2) ? 0 : (0x40 + next(0xc1)) | (0x40 + next(0xc1)) << 16;
             // An A4 fill without pixels is the constant blend, with one alpha for each of blue, green and red.
             const bool a4Pixels = a4 && next(2);
-            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? palette[next(4)] : next(0x10000);
+            f.colour = a4Pixels ? next(17) : a4 ? next(16) | next(16) << 8 | next(16) << 16 : keyed ? (keyRuns ? 0 : palette[next(4)]) : next(0x10000);
             if (copy || a4) {
                 f.sourcePitch = f.width * 2 + next(30) * 2;
                 f.sourceX = doubled ? next(5) : 0; f.sourceY = doubled ? next(5) : 0;
@@ -400,8 +421,74 @@ static void checkFillKinds() {
     std::printf("PASS: %u fills of %u kinds straight on the bank storage match the accessGpu loop\n", fills, kinds);
 }
 
+// A 1024-word ring at 150000 that the 47-word boot batch goes round 25 times: batches that wrap past its end
+// decode the same read straight from the bank and through accessGpu.
+static void checkRingWrap() {
+    using A = Imx1BootstrapAccess;
+    Imx1Eim eim;
+    uint32_t value = 0x3e00;
+    assert(eim.access(0x00220028,4,true,value) == Imx1EimAccess::ok);
+    value = 0x11111e01;
+    assert(eim.access(0x0022002c,4,true,value) == Imx1EimAccess::ok);
+    Imx1Cs5Configuration state(Imx1GraphicsProfile::virtual5744Compatible8MiB,false,false);
+    configureGraphicsInterface(state,eim);
+    configureGraphicsController(state,eim);
+    struct Op { uint32_t pc, address, value; bool write; };
+    for (auto op : {Op{0x200acb98,0x160113e8,0,false},
+        {0x200acba8,0x160113e8,0x400,true}, {0x200acbb4,0x16010144,0x2440,true},
+        {0x200acbc4,0x160110a8,0x1fff1fff,true}, {0x200acbd0,0x160104dc,0xc0000,true},
+        {0x200b8e80,0x16010214,0x10150000,true}, {0x200b8e88,0x16010220,0,true},
+        {0x200b8f04,0x16010008,0x00150000,true}, {0x200b8f10,0x16010230,0x80000000,true},
+        {0x200b8f20,0x16010210,0x08000009,true}}) {
+        value = op.value;
+        assert(state.access(eim,op.pc,op.address,4,op.write,value) == A::ok);
+    }
+    assert(state.engineState().ringBytes() == 4096);
+    value = 0;
+    assert(state.access(eim,0x200b02ac,0x16011280,4,false,value) == A::ok);
+    value = 0x10000;
+    assert(state.access(eim,0x200b02fc,0x16011280,4,true,value) == A::ok);
+    const uint32_t regs[]{0x4a1,0x41b,0x41f,0x472,0x4b2,0x4b1,0x490,0x491,0x46f,0x470,
+        0x401,0x402,0x46b,0x46c,0x41e,0x488,0x484,0x471,0x423,0x41d,0x4b3,0x30f,
+        0x42e,0x42f,0x430,0x431,0x432,0x433,0x4a0};
+    const uint32_t words[]{0,0x55e0b4df,0xffff,0x3f,0xf00a00,0x40030d04,0xffffffff,0,0,0x1e00140,
+        0x100000,0x140,0x100000,0x140,0,4,0xf0f0f,0x1fff1fff,0x100000,0,0xffffffff,0x20,
+        0,0,0,0,0,0,0};
+    std::vector<uint32_t> batch;
+    for (unsigned i = 0; i < 28; i += 2) {
+        batch.push_back(0x40000000 | regs[i] | (regs[i+1] << 11));
+        batch.push_back(words[i]); batch.push_back(words[i+1]);
+    }
+    for (auto word : {regs[28],words[28],0xc0011a00u,0u,0x014001e0u}) batch.push_back(word);
+    static Imx1GraphicsMemory memory;
+    Imx1GraphicsCommands commands;
+    uint32_t producer = 0;
+    unsigned wrapped = 0;
+    for (unsigned round = 0; round < 25; ++round) {
+        // The colour changes each round, so a word read from the wrong place shows.
+        batch[4] = 0x1000 + round;
+        for (unsigned i = 0; i < batch.size(); ++i) {
+            value = batch[i];
+            assert(memory.accessGpu(state,eim,0x150000 + ((producer + i) & 1023) * 4,4,true,value) == A::ok);
+        }
+        const uint32_t next = (producer + uint32_t(batch.size())) & 1023;
+        wrapped += next < producer;
+        value = next;
+        assert(state.access(eim,0x200a9ed4,0x16010220,4,true,value) == A::ok);
+        assert(checkedPrepare(commands,state,eim,memory) == A::ok);
+        state.startEngine(commands.duration());
+        assert(state.advanceCpuCycles(uint32_t(commands.duration())) && state.engineState().completed());
+        assert(commands.complete(state,eim,memory) == A::ok && state.engineState().emptyRing());
+        assert(memory.accessGpu(state,eim,0x100000,2,false,value) == A::ok && value == 0x1000 + round);
+        producer = next;
+    }
+    assert(wrapped == 1);
+    std::puts("PASS: batches that wrap the ring decode the same read straight from the bank and through accessGpu");
+}
+
 int main() {
     checkScanLoad();
+    checkRingWrap();
     checkFillKinds();
     checkCommands(false);
     checkCommands(true);

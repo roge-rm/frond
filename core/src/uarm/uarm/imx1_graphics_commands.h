@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <cstring>
 #include <vector>
 #include <deque>
 #include <utility>
@@ -116,9 +117,21 @@ class Imx1GraphicsCommands {
         batch.words = left;
         auto& fills = batch.fills;
         ticks = left + 1;
+        // A ring that lies whole in one bank's mapped addresses is read straight from the bank storage, where every
+        // accessGpu read would pass. Not with a host GPU, whose residency the reads go through.
+        const uint32_t ringAddress = engine.ringAddress();
+        const uint64_t ringEnd = uint64_t(ringAddress) + uint64_t(words) * 4;
+        unsigned ringBank = 0;
+        uint32_t ringOffset = 0;
+        const uint8_t* ring = directRing && !memory.gpuResidency() && !(ringAddress & 3) &&
+            ((ringAddress >= 0x100000 && ringEnd <= 0x160000) || (ringAddress >= 0x800000 && ringEnd <= 0x1000000)) ?
+            memory.gpuSpan(configuration, eim, ringAddress, uint64_t(words) * 4, ringBank, ringOffset) : nullptr;
         auto take = [&](uint32_t& word) {
             if (!left) return false;
-            if (memory.accessGpu(configuration, eim, engine.ringAddress() + cursor * 4, 4, false, word) != A::ok) return false;
+            if (ring) {
+                const uint8_t* at = ring + cursor * 4;
+                word = uint32_t(at[0]) | uint32_t(at[1]) << 8 | uint32_t(at[2]) << 16 | uint32_t(at[3]) << 24;
+            } else if (memory.accessGpu(configuration, eim, ringAddress + cursor * 4, 4, false, word) != A::ok) return false;
             cursor = (cursor + 1) & (words - 1);
             --left;
             return true;
@@ -447,6 +460,8 @@ class Imx1GraphicsCommands {
     // Tests: directFills off makes complete take every fill through accessGpu; directFillCount counts the fills
     // fastFill took.
     static inline bool directFills = true;
+    // Tests: directRing off makes decode read every ring word through accessGpu.
+    static inline bool directRing = true;
     static inline uint64_t directFillCount = 0;
     Imx1BootstrapAccess complete(Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                  Imx1GraphicsMemory& memory) {
@@ -631,45 +646,102 @@ class Imx1GraphicsCommands {
     template <bool kPixels, bool kCopy, bool kKeyed, bool kDoubled, bool kInvert, bool kA4>
     static void fillRows(const Fill& fill, uint8_t* destination, const uint8_t* from, uint32_t offset,
                          uint64_t& writes, uint32_t& first, uint32_t& end) {
-        for (uint32_t y = 0; y < fill.height; ++y) {
-            const uint32_t row = y * fill.pitch;
+        // The fill's fields as locals: the byte stores below may alias them, so the compiler would load them again
+        // for every pixel.
+        const uint32_t width = fill.width, height = fill.height, pitch = fill.pitch, sourcePitch = fill.sourcePitch;
+        const uint32_t fillColour = fill.colour, paint = fill.paint, sourceX = fill.sourceX, sourceY = fill.sourceY;
+        const uint32_t xRatio = ratioX(fill), yRatio = ratioY(fill);
+        const bool painted = fill.painted, keyEqual = fill.keyEqual, inlineAlpha = !fill.pixels.empty();
+        const uint16_t* pixels = fill.pixels.data();
+        // The key four times over as source bytes, for keyed copies whose key fits a pixel.
+        const bool skipKeys = !keyEqual && fillColour <= 0xffff;
+        uint64_t keyFour = 0;
+        {
+            uint8_t bytes[8];
+            for (unsigned i = 0; i < 8; i += 2) { bytes[i] = uint8_t(fillColour); bytes[i + 1] = uint8_t(fillColour >> 8); }
+            std::memcpy(&keyFour, bytes, 8);
+        }
+        uint32_t rowFirst = first, rowEnd = end;
+        uint64_t written = writes;
+        for (uint32_t y = 0; y < height; ++y) {
+            const uint32_t row = y * pitch;
             uint8_t* out = destination + row;
-            const uint16_t* in = kPixels ? fill.pixels.data() + size_t(y) * fill.width : nullptr;
+            const uint16_t* in = kPixels ? pixels + size_t(y) * width : nullptr;
             const uint8_t* source = !kCopy ? nullptr :
-                from + (kDoubled ? stretchStep(fill.sourceY + y, ratioY(fill)) * fill.sourcePitch : y * fill.sourcePitch);
-            const uint8_t* alphaSource = kA4 ? from + y * fill.sourcePitch : nullptr;
+                from + (kDoubled ? stretchStep(sourceY + y, yRatio) * sourcePitch : y * sourcePitch);
+            const uint8_t* alphaSource = kA4 ? from + y * sourcePitch : nullptr;
+            // The source row starts at or after the destination row or shares no byte with it, so a pixel by pixel
+            // copy reads nothing it wrote.
+            const bool moveSafe = kCopy && !painted && (uintptr_t(source) >= uintptr_t(out) ||
+                                                        uintptr_t(source) + uintptr_t(width) * 2 <= uintptr_t(out));
+            // A plain copy row where moveSafe holds is a move.
+            if constexpr (kCopy && !kKeyed && !kDoubled && !kInvert && !kA4) {
+                if (moveSafe) {
+                    std::memmove(out, source, size_t(width) * 2);
+                    written += width;
+                    rowFirst = std::min(rowFirst, offset + row);
+                    rowEnd = std::max(rowEnd, offset + row + width * 2);
+                    continue;
+                }
+            }
             uint32_t low = 0, high = 0;
-            for (uint32_t x = 0; x < fill.width; ++x) {
-                uint32_t colour = kPixels ? in[x] : fill.colour;
+            for (uint32_t x = 0; x < width; ++x) {
+                if constexpr (kKeyed && !kDoubled) {
+                    // Four source pixels that all hold the key are skipped at once: none of them is written, so
+                    // nothing they read can have changed in between. Four that none of them holds are copied at
+                    // once where the row reads nothing it wrote (as for the plain copy's move).
+                    if (skipKeys && !(x & 3) && x + 4 <= width) {
+                        uint64_t four;
+                        std::memcpy(&four, source + x * 2, 8);
+                        const uint64_t lanes = four ^ keyFour;
+                        if (!lanes) {
+                            x += 3;
+                            continue;
+                        }
+                        const bool anyKey = (lanes - 0x0001000100010001ull) & ~lanes & 0x8000800080008000ull;
+                        if (!kInvert && !kA4 && !anyKey && moveSafe) {
+                            std::memcpy(out + x * 2, &four, 8);
+                            if (high == 0) low = x * 2;
+                            high = x * 2 + 8;
+                            written += 4;
+                            x += 3;
+                            continue;
+                        }
+                    }
+                }
+                uint32_t colour = kPixels ? in[x] : fillColour;
                 if constexpr (kCopy) {
-                    colour = read16(source + (kDoubled ? stretchStep(fill.sourceX + x, ratioX(fill)) * 2 : x * 2));
-                    if (kKeyed && (colour == fill.colour) != fill.keyEqual) continue;
-                    if (fill.painted) colour = fill.paint;
+                    colour = read16(source + (kDoubled ? stretchStep(sourceX + x, xRatio) * 2 : x * 2));
+                    if (kKeyed && (colour == fillColour) != keyEqual) continue;
+                    if (painted) colour = paint;
                 }
                 if constexpr (kInvert) colour = (read16(out + x * 2) ^ colour) & 0xffff;
                 if constexpr (kA4) {
                     // Alpha 0 keeps the destination and 15 takes the source, as virtualA4Blend gives.
                     const uint32_t under = read16(out + x * 2), over = read16(alphaSource + x * 2);
-                    if (!fill.pixels.empty()) colour = colour == 0 ? under : colour == 15 ? over : virtualA4Blend(under, over, colour);
-                    else colour = virtualBlend(under, over, fill.colour);
+                    if (inlineAlpha) colour = colour == 0 ? under : colour == 15 ? over : virtualA4Blend(under, over, colour);
+                    else colour = virtualBlend(under, over, fillColour);
                 }
                 out[x * 2] = uint8_t(colour);
                 out[x * 2 + 1] = uint8_t(colour >> 8);
                 if constexpr (kKeyed) {
                     if (high == 0) low = x * 2;
                     high = x * 2 + 2;
-                    ++writes;
+                    ++written;
                 }
             }
             if constexpr (!kKeyed) {
-                high = fill.width * 2;
-                writes += fill.width;
+                high = width * 2;
+                written += width;
             }
             if (high) {
-                first = std::min(first, offset + row + low);
-                end = std::max(end, offset + row + high);
+                rowFirst = std::min(rowFirst, offset + row + low);
+                rowEnd = std::max(rowEnd, offset + row + high);
             }
         }
+        first = rowFirst;
+        end = rowEnd;
+        writes = written;
     }
     template <bool... kFixed>
     static void fillKind(const bool* kinds, const Fill& fill, uint8_t* destination, const uint8_t* from,
@@ -830,8 +902,26 @@ class Imx1GraphicsCommands {
     static constexpr std::array<uint32_t,42> registers{{0x410,0x411,0x412,0x422,0x464,0x465,0x466,0x4a1,0x41b,0x41f,0x472,0x4b2,0x4b1,
         0x490,0x491,0x46f,0x470,0x401,0x402,0x46b,0x46c,0x41e,0x488,0x484,0x471,
         0x423,0x41d,0x4b3,0x30f,0x42e,0x42f,0x430,0x431,0x432,0x433,0x4a0,0x48f,0x418,0x419,0x420,0x421,0x416}};
+    // The registers rectangle needs known, without and with A4 or blend: registers but 48f, 422, 410-412 and 464-466,
+    // and 416, 418-419 and 420-421 only with A4 or blend.
+    struct RectangleKnown { std::array<std::array<uint16_t, registers.size()>, 2> list; std::array<size_t, 2> count; };
+    static constexpr RectangleKnown rectangleKnown = [] {
+        RectangleKnown out{};
+        for (unsigned blend = 0; blend < 2; ++blend)
+            for (auto reg : registers)
+                if (reg != 0x48f && reg != 0x422 && (reg < 0x410 || reg > 0x412) && (reg < 0x464 || reg > 0x466) &&
+                    (blend || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)))
+                    out.list[blend][out.count[blend]++] = uint16_t(reg);
+        return out;
+    }();
+    // registers as a table by number.
+    static constexpr std::array<bool, 0x800> storable = [] {
+        std::array<bool, 0x800> out{};
+        for (auto reg : registers) out[reg] = true;
+        return out;
+    }();
     bool store(uint32_t reg, uint32_t value, bool packedMono) {
-        if (std::find(registers.begin(),registers.end(),reg) == registers.end()) return false;
+        if (reg >= storable.size() || !storable[reg]) return false;
         values[reg] = value;
         known[reg] = true;
         // GMC selects the same source and ROP fields as DP_MIX in the native helpers.
@@ -1091,8 +1181,8 @@ class Imx1GraphicsCommands {
     Imx1BootstrapAccess rectangle(const Imx1Cs5Configuration& configuration, const Imx1Eim& eim,
                                    const Imx1GraphicsMemory& memory, uint32_t xy, uint32_t wh, Fill& fill, bool host, bool copy = false, bool a4 = false, bool plain = false, bool mono = false, bool blend = false, bool mask = false) const {
         using A = Imx1BootstrapAccess;
-        for (auto reg : registers) if (reg != 0x48f && reg != 0x422 && (reg < 0x410 || reg > 0x412) && (reg < 0x464 || reg > 0x466) &&
-            (a4 || blend || (reg != 0x418 && reg != 0x419 && reg != 0x420 && reg != 0x421 && reg != 0x416)) && !known[reg]) return A::sequence;
+        for (size_t i = 0; i < rectangleKnown.count[a4 || blend]; ++i)
+            if (!known[rectangleKnown.list[a4 || blend][i]]) return A::sequence;
         const auto gmc = values[0x41b];
         // Host SRCCOPY is limited to the observed native RGB565 control words.
         // ASSUMPTION "host upload takes its source type from 41b": the ROM sends RGB565 rows with 4b1 source
@@ -1900,9 +1990,18 @@ class Imx1GraphicsCommands {
     uint64_t ticks = 0;
     mutable Refusal refused;
 };
+// decode writes only the registers store() takes, 30e and the IDCT scan slot, so only those are kept.
 struct Imx1GraphicsCommands::Undo {
-    std::array<uint32_t,0x800> values;
-    std::array<bool,0x800> known;
+    static constexpr size_t count = registers.size() + 2;
+    static constexpr std::array<uint32_t, count> kept = [] {
+        std::array<uint32_t, count> out{};
+        for (size_t i = 0; i < registers.size(); ++i) out[i] = registers[i];
+        out[registers.size()] = 0x30e;
+        out[registers.size() + 1] = idctScanSlot;
+        return out;
+    }();
+    std::array<uint32_t, count> values;
+    std::array<bool, count> known;
     size_t batches;
     uint32_t queuedWords;
     bool touched;
@@ -1912,8 +2011,10 @@ struct Imx1GraphicsCommands::Undo {
     Refusal refused;
 };
 inline void Imx1GraphicsCommands::keep(Undo& u) const {
-    u.values = values;
-    u.known = known;
+    for (size_t i = 0; i < Undo::count; ++i) {
+        u.values[i] = values[Undo::kept[i]];
+        u.known[i] = known[Undo::kept[i]];
+    }
     u.batches = batches.size();
     u.queuedWords = queuedWords;
     u.touched = touched;
@@ -1923,8 +2024,10 @@ inline void Imx1GraphicsCommands::keep(Undo& u) const {
     u.refused = refused;
 }
 inline void Imx1GraphicsCommands::undo(const Undo& u) {
-    values = u.values;
-    known = u.known;
+    for (size_t i = 0; i < Undo::count; ++i) {
+        values[Undo::kept[i]] = u.values[i];
+        known[Undo::kept[i]] = u.known[i];
+    }
     batches.resize(u.batches);
     queuedWords = u.queuedWords;
     touched = u.touched;
