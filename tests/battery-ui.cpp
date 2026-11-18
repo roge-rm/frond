@@ -28,6 +28,45 @@ class BatteryUi : public QObject {
         QVERIFY(validMode("host"));
         QVERIFY(!validMode("other"));
     }
+    void noCharging() {
+        // A machine that can't charge is always told battery, in every mode.
+        QCOMPARE(spec("host", 0, true, {63, true}, false), QString("host 63 battery"));
+        QCOMPARE(spec("max", 0, true, {}, false), QString("max battery"));
+        QCOMPARE(spec("level", 20, true, {}, false), QString("level 20 battery"));
+        QCOMPARE(spec("host", 0, false, {63, true}, true), QString("host 63 charging"));
+    }
+    void windowsFlags() {
+        QVERIFY(windowsCharging(1, 0));
+        QVERIFY(!windowsCharging(0, 8));
+        QVERIFY(!windowsCharging(255, 1));
+        QVERIFY(windowsCharging(255, 8));
+    }
+    void sysfsTwoBatteries() {
+        const auto root = QDir::currentPath() + "/battery-ui-test/two";
+        QDir(root).removeRecursively();
+        write(root + "/BAT0/type", "Battery");
+        write(root + "/BAT0/energy_now", "10000000");
+        write(root + "/BAT0/energy_full", "40000000");
+        write(root + "/BAT0/capacity", "25");
+        write(root + "/BAT0/status", "Discharging");
+        write(root + "/BAT1/type", "Battery");
+        write(root + "/BAT1/charge_now", "3000000");
+        write(root + "/BAT1/charge_full", "3000000");
+        write(root + "/BAT1/status", "Discharging");
+        // Energy and charge are summed as numbers, so the big battery weighs most: (10 + 3) / (40 + 3).
+        QCOMPARE(parsePowerSupply(root).percent, 30);
+    }
+    void sysfsCapacityOnlyAverage() {
+        const auto root = QDir::currentPath() + "/battery-ui-test/capacities";
+        QDir(root).removeRecursively();
+        write(root + "/BAT0/type", "Battery");
+        write(root + "/BAT0/capacity", "40");
+        write(root + "/BAT1/type", "Battery");
+        write(root + "/BAT1/capacity", "60");
+        const auto state = parsePowerSupply(root);
+        QCOMPARE(state.percent, 50);
+        QVERIFY(!state.charging);
+    }
     void sysfsLaptop() {
         const auto root = QDir::currentPath() + "/battery-ui-test/laptop";
         QDir(root).removeRecursively();

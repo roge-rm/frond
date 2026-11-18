@@ -1,5 +1,7 @@
 #pragma once
+#include <QFutureWatcher>
 #include <QJsonObject>
+#include "HostBattery.h"
 #include <QMainWindow>
 #include <QSettings>
 #include <QLockFile>
@@ -189,6 +191,7 @@ class MainWindow : public QMainWindow {
     void batteryChanged();
     void batteryTick();
     void applyBattery();
+    void readHostBattery();
     void showBattery();
     QString batterySpec() const;
     void listApps();
@@ -302,6 +305,9 @@ class MainWindow : public QMainWindow {
     QCheckBox* batteryCharging{nullptr};
     QTimer* batteryTimer{nullptr};
     QString batterySent;  // the last text the core was given
+    QFutureWatcher<frondBattery::HostState>* hostWatcher{nullptr};
+    frondBattery::HostState hostBattery;
+    bool batteryRetry{false};
     bool batteryKnown{false}, batterySupported{false}, batteryChargingSupported{true};
     QString speedText;
     void updateBarMachine();

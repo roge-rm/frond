@@ -16,7 +16,7 @@ HostState readHost() {
     if (!GetSystemPowerStatus(&status)) return {};
     // BatteryFlag 128 is no battery, 255 and a percent of 255 are unknown.
     if (status.BatteryFlag == 128 || status.BatteryFlag == 255 || status.BatteryLifePercent > 100) return {};
-    return {status.BatteryLifePercent, status.ACLineStatus != 0};
+    return {status.BatteryLifePercent, windowsCharging(status.ACLineStatus, status.BatteryFlag)};
 #elif defined(Q_OS_MACOS)
     HostState state;
     CFTypeRef info = IOPSCopyPowerSourcesInfo();
