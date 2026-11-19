@@ -76,10 +76,21 @@ void S3cNand::startRead() {
     nfstat |= 0x4;  // RnB went busy and back, which RnB_TransDetect latches
 }
 
+const uint8_t* S3cNand::page(uint32_t page) {
+    if (page != cachedPage) {
+        if (!store->readPage(page, cache)) {
+            ++storeFailures;
+            std::memset(cache, 0xff, sizeof cache);
+        }
+        cachedPage = page;
+    }
+    return cache;
+}
+
 void S3cNand::touch(uint32_t page) {
-    if (flash.empty()) flash.assign(size_t(pages) * pageSize, 0xff);
     if (dirty.size() != blocks) dirty.assign(blocks, false);
     dirty[page / pagesPerBlock] = true;
+    if (store) return;
 }
 
 // Programming can only clear bits, so the page register is ANDed in. The B pointer goes back to A after a
@@ -87,8 +98,19 @@ void S3cNand::touch(uint32_t page) {
 void S3cNand::program() {
     const uint32_t page = row % pages;
     touch(page);
-    uint8_t* p = &flash[size_t(page) * pageSize];
-    for (uint32_t i = 0; i < pageSize; ++i) p[i] &= pageBuffer[i];
+    if (store) {
+        uint8_t bytes[pageSize];
+        std::memcpy(bytes, this->page(page), pageSize);
+        for (uint32_t i = 0; i < pageSize; ++i) bytes[i] &= pageBuffer[i];
+        if (store->writePage(page, bytes)) std::memcpy(cache, bytes, pageSize);
+        else {
+            ++storeFailures;
+            cachedPage = ~0u;
+        }
+    } else {
+        uint8_t* p = &flash[size_t(page) * pageSize];
+        for (uint32_t i = 0; i < pageSize; ++i) p[i] &= pageBuffer[i];
+    }
     ++programs;
     if (area == 0x01) area = 0x00;
     mode = Mode::idle;
@@ -98,7 +120,12 @@ void S3cNand::program() {
 void S3cNand::erase() {
     const uint32_t block = (row % pages) / pagesPerBlock;
     touch(block * pagesPerBlock);
-    std::memset(&flash[size_t(block) * pagesPerBlock * pageSize], 0xff, size_t(pagesPerBlock) * pageSize);
+    if (store) {
+        if (!store->eraseBlock(block * pagesPerBlock, pagesPerBlock)) ++storeFailures;
+        cachedPage = ~0u;
+    } else {
+        std::memset(&flash[size_t(block) * pagesPerBlock * pageSize], 0xff, size_t(pagesPerBlock) * pageSize);
+    }
     ++erases;
     mode = Mode::idle;
     nfstat |= 0x4;
@@ -116,7 +143,7 @@ uint8_t S3cNand::dataByte() {
             }
             // The chip ignores row bits above its size, for reads, program and erase alike.
             const size_t at = size_t(row % pages) * pageSize + pageOffset;
-            const uint8_t byte = at < flash.size() ? flash[at] : 0xff;
+            const uint8_t byte = store ? page(row % pages)[pageOffset] : at < flash.size() ? flash[at] : 0xff;
             if (pageOffset < pageData) addEccByte(byte);
             // Sequential reads run on into the next page.
             if (++pageOffset >= pageSize) {

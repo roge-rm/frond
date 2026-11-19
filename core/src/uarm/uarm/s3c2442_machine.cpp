@@ -6,6 +6,8 @@
 
 #include "CPU.h"
 #include "RAM.h"
+#include "arm920_state.h"
+#include "machine_state_archive.h"
 #include "mem.h"
 #include "memory_buffer.h"
 #include "pace_patch.h"
@@ -420,7 +422,7 @@ void S3c2442Machine::updateLines(bool sfrWrite) {
 
 // Moves every clock domain on by CPU cycles at the CPU clock as it is now.
 void S3c2442Machine::advance(uint64_t cpuCycles) {
-    const uint64_t cpuHz = clock.cpuClock();
+    const uint64_t cpuHz = this->cpuHz();
     if (!cpuHz || !cpuCycles) return;
     cycleCount += cpuCycles;
     elapsedNs += mulDiv(cpuCycles, 1000000000, cpuHz, nsRest);
@@ -443,7 +445,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
 
 // CPU cycles until the next timer, watchdog, frame or RTC event, UINT64_MAX with none due.
 uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
-    const uint64_t cpuHz = clock.cpuClock();
+    const uint64_t cpuHz = this->cpuHz();
     uint64_t best = UINT64_MAX;
     auto consider = [&](uint64_t ticks, uint64_t hz, uint64_t rest) {
         if (ticks == UINT64_MAX || !hz) return;
@@ -475,7 +477,7 @@ uint32_t S3c2442Machine::wakeSources() const {
 
 // Asleep the CPU's clock is off; the cycles are the budget's measure of time at the rate it slept at.
 void S3c2442Machine::sleepAdvance(uint64_t cpuCycles) {
-    const uint64_t cpuHz = clock.cpuClock();
+    const uint64_t cpuHz = this->cpuHz();
     if (!cpuHz || !cpuCycles) return;
     cycleCount += cpuCycles;
     idleCount += cpuCycles;
@@ -563,8 +565,8 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             // Only the RTC alarm can come by itself; pins come from outside between runs.
             uint64_t skip = target - used;
             const uint64_t ticks = rtc.ticksToEvent(false, true);
-            if (ticks != UINT64_MAX && clock.cpuClock()) {
-                const __uint128_t need = __uint128_t(ticks) * clock.cpuClock();
+            if (ticks != UINT64_MAX && cpuHz()) {
+                const __uint128_t need = __uint128_t(ticks) * cpuHz();
                 const uint64_t cycles = need <= rtcRest ? 1 : uint64_t((need - rtcRest + 32767) / 32768);
                 skip = std::min(skip, std::max<uint64_t>(cycles, 1));
             }
@@ -776,4 +778,217 @@ std::vector<uint32_t> S3c2442Machine::recentPcs() const {
     std::vector<uint32_t> out;
     for (size_t i = 0; i < history.size(); ++i) out.push_back(history[(historyNext + i) % history.size()]);
     return out;
+}
+
+// Machine state. The container and visitors are machine_state_archive.h's; the sections are the CPU's (as the
+// Zodiac's machine keeps them), the blocks' state() lists and the machine's own counts below.
+namespace {
+    constexpr uint32_t s3cStateRevision = 1;
+    // Sections: identity, CPU, its instruction and data caches, TLB, memory, blocks, machine.
+    constexpr uint32_t secIdentity = stateFourcc("S3CI"), secCpu = stateFourcc("CPU "), secIcache = stateFourcc("ICAC"),
+                       secDcache = stateFourcc("DCAC"), secTlb = stateFourcc("TLB "), secMemory = stateFourcc("SDRM"),
+                       secBlocks = stateFourcc("BLKS"), secMachine = stateFourcc("MACH");
+    constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
+}
+
+template <class A, class M> static void blockStates(A& a, M& m) {
+    m.intc.state(a);
+    m.clock.state(a);
+    m.memory.state(a);
+    m.pwm.state(a);
+    m.watchdog.state(a);
+    m.rtc.state(a);
+    m.sdi.state(a);
+    m.usbDevice.state(a);
+    m.adc.state(a);
+    m.dma.state(a);
+    m.iis.state(a);
+    m.iic.state(a);
+    m.gpio.state(a);
+    for (auto& u : m.uarts) u.state(a);
+    m.lcd.state(a);
+    m.nand.state(a);
+}
+
+// The blocks as one copy, so a load that fails part way leaves the machine's own alone.
+struct S3cBlockCopy {
+    S3cIntc intc;
+    S3cClock clock;
+    S3cMemoryController memory;
+    S3cPwm pwm;
+    S3cWatchdog watchdog;
+    S3cRtc rtc;
+    S3cSdi sdi;
+    S3cUsbDevice usbDevice;
+    S3cAdc adc;
+    S3cDma dma;
+    S3cIis iis;
+    S3cIic iic;
+    S3cGpio gpio;
+    S3cUart uarts[3];
+    S3cLcd lcd;
+    S3cNand nand;
+    explicit S3cBlockCopy(const S3c2442Machine& m)
+        : intc(m.intc), clock(m.clock), memory(m.memory), pwm(m.pwm), watchdog(m.watchdog), rtc(m.rtc), sdi(m.sdi),
+          usbDevice(m.usbDevice), adc(m.adc), dma(m.dma), iis(m.iis), iic(m.iic), gpio(m.gpio),
+          uarts{m.uarts[0], m.uarts[1], m.uarts[2]}, lcd(m.lcd) {}
+};
+
+template <class A> static void machineCounts(A& a, uint64_t* counts, size_t n, bool* flags, size_t f, uint32_t& lastWake) {
+    for (size_t i = 0; i < n; ++i) a.Do64(counts[i]);
+    for (size_t i = 0; i < f; ++i) a.DoBool(flags[i]);
+    a.Do32(lastWake);
+}
+
+bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
+    if (stopped.stop != S3c2442Stop::running && stopped.stop != S3c2442Stop::budget) {
+        why = "the machine has stopped";
+        return false;
+    }
+    auto cpu = std::make_unique<Arm920SavedState>();
+    if (!cpuArm920CaptureState(cpuCore, *cpu)) {
+        why = "the CPU isn't between instructions";
+        return false;
+    }
+    // A loaded machine starts without translated code, so this one carries on without it too.
+    cpuDropTranslatedCode(cpuCore);
+    StateContainerWriter file(out, s3cStateRevision, s3cLayout, 0);
+    {
+        auto a = file.begin(secIdentity, stateVersion);
+        uint32_t crystal = options.crystal, ram = options.ramBytes, chip = options.chipId;
+        a.Fixed32(crystal).Fixed32(ram).Fixed32(chip);
+        file.end();
+    }
+    { auto a = file.begin(secCpu, Arm920SavedState::stateVersion); cpu->stateCpu(a); file.end(); }
+    { auto a = file.begin(secIcache, Arm920SavedState::stateVersion); cpu->stateIcache(a); file.end(); }
+    { auto a = file.begin(secDcache, Arm920SavedState::stateVersion); cpu->stateDcache(a); file.end(); }
+    { auto a = file.begin(secTlb, Arm920SavedState::stateVersion); cpu->stateTlb(a); file.end(); }
+    {
+        auto a = file.begin(secMemory, stateVersion);
+        a.DoBuffer(ramBuffer, options.ramBytes).DoBuffer(steppingstone, sizeof steppingstone);
+        file.end();
+    }
+    { auto a = file.begin(secBlocks, stateVersion); blockStates(a, *this); file.end(); }
+    {
+        auto a = file.begin(secMachine, stateVersion);
+        uint64_t counts[] = {retiredCount, cycleCount, idleCount, elapsedNs, pclkRest, hclkRest, rtcRest, nsRest,
+                             irqHeldUntil, sleeps, wakes, vfpProbes, breakpoints, wifiAccesses};
+        bool flags[] = {irqLine, fiqLine, irqHeld, sleeping, debugWriteSeen};
+        machineCounts(a, counts, std::size(counts), flags, std::size(flags), lastWake);
+        file.end();
+    }
+    file.finish();
+    return true;
+}
+
+bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& why) {
+    StateContainerReader file;
+    if (file.open(data, size) != StateContainerError::ok) {
+        why = "not a saved S3C2442 machine, or a damaged one";
+        return false;
+    }
+    if (file.coreRevision != s3cStateRevision || file.layoutFingerprint != s3cLayout) {
+        why = "saved by another version of Frond's S3C2442 machine";
+        return false;
+    }
+    auto open = [&](uint32_t fourcc, uint32_t version, StateReader& reader) {
+        const auto* section = file.find(fourcc);
+        if (!section || section->version != version) return false;
+        reader = file.reader(*section);
+        return true;
+    };
+    auto done = [&](StateReader& a, const char* what) {
+        if (a.complete()) return true;
+        why = std::string("the saved ") + what + (a.fixedMismatch() ? " was made for another machine" : " doesn't fit");
+        return false;
+    };
+    StateReader a(nullptr, 0);
+    if (!open(secIdentity, stateVersion, a)) { why = "not a saved S3C2442 machine"; return false; }
+    uint32_t crystal = options.crystal, ram = options.ramBytes, chip = options.chipId;
+    a.Fixed32(crystal).Fixed32(ram).Fixed32(chip);
+    if (!done(a, "machine")) return false;
+
+    auto cpu = std::make_unique<Arm920SavedState>();
+    if (!cpuArm920CaptureState(cpuCore, *cpu)) { why = "the CPU isn't between instructions"; return false; }
+    struct Part { uint32_t fourcc; void (Arm920SavedState::*list)(StateReader&); const char* name; };
+    const Part parts[] = {{secCpu, &Arm920SavedState::stateCpu<StateReader>, "CPU"},
+                          {secIcache, &Arm920SavedState::stateIcache<StateReader>, "instruction cache"},
+                          {secDcache, &Arm920SavedState::stateDcache<StateReader>, "data cache"},
+                          {secTlb, &Arm920SavedState::stateTlb<StateReader>, "TLB"}};
+    for (const auto& part : parts) {
+        if (!open(part.fourcc, Arm920SavedState::stateVersion, a)) { why = std::string("no saved ") + part.name; return false; }
+        ((*cpu).*part.list)(a);
+        if (!done(a, part.name)) return false;
+    }
+    if (!cpuArm920StateFits(cpuCore, *cpu)) { why = "the saved CPU doesn't fit this one"; return false; }
+
+    if (!open(secMemory, stateVersion, a)) { why = "no saved memory"; return false; }
+    std::vector<uint8_t> sdram(options.ramBytes), stone(sizeof steppingstone);
+    a.DoBuffer(sdram.data(), sdram.size()).DoBuffer(stone.data(), stone.size());
+    if (!done(a, "memory")) return false;
+
+    S3cBlockCopy blocks(*this);
+    if (!open(secBlocks, stateVersion, a)) { why = "no saved blocks"; return false; }
+    blockStates(a, blocks);
+    if (!done(a, "blocks")) return false;
+
+    if (!open(secMachine, stateVersion, a)) { why = "no saved machine counts"; return false; }
+    uint64_t counts[14] = {};
+    bool flags[5] = {};
+    uint32_t wake = 0;
+    machineCounts(a, counts, std::size(counts), flags, std::size(flags), wake);
+    if (!done(a, "machine counts")) return false;
+
+    // Nothing from here on can fail. No cpuIrq call, so the restored lines make no new edge.
+    cpuArm920ApplyState(cpuCore, *cpu);
+    std::memcpy(ramBuffer, sdram.data(), sdram.size());
+    std::memcpy(steppingstone, stone.data(), stone.size());
+    intc = blocks.intc;
+    clock.locktime = blocks.clock.locktime; clock.mpllcon = blocks.clock.mpllcon; clock.upllcon = blocks.clock.upllcon;
+    clock.clkcon = blocks.clock.clkcon; clock.clkslow = blocks.clock.clkslow; clock.clkdivn = blocks.clock.clkdivn;
+    clock.camdivn = blocks.clock.camdivn;
+    memory = blocks.memory;
+    pwm = blocks.pwm;
+    watchdog = blocks.watchdog;
+    rtc = blocks.rtc;
+    sdi = blocks.sdi;
+    usbDevice = blocks.usbDevice;
+    adc = blocks.adc;
+    dma = blocks.dma;
+    iis = blocks.iis;
+    iic = blocks.iic;
+    gpio = blocks.gpio;
+    for (unsigned c = 0; c < 3; ++c) {
+        auto sink = uarts[c].sink;
+        uarts[c] = blocks.uarts[c];
+        uarts[c].sink = sink;
+    }
+    lcd = blocks.lcd;
+    // The registers only: the pages, their store and the dirty marks stay this machine's.
+    {
+        std::vector<uint8_t> bytes;
+        StateWriter w(bytes);
+        blocks.nand.state(w);
+        StateReader r(bytes.data(), bytes.size());
+        nand.state(r);
+    }
+    uint64_t* targets[] = {&retiredCount, &cycleCount, &idleCount, &elapsedNs, &pclkRest, &hclkRest, &rtcRest, &nsRest,
+                           &irqHeldUntil, &sleeps, &wakes, &vfpProbes, &breakpoints, &wifiAccesses};
+    for (size_t i = 0; i < std::size(targets); ++i) *targets[i] = counts[i];
+    irqLine = flags[0];
+    fiqLine = flags[1];
+    irqHeld = flags[2];
+    sleeping = flags[3];
+    debugWriteSeen = flags[4];
+    lastWake = wake;
+    stopped = {};
+    undefinedPending = false;
+    batchAdvanced = 0;
+    leanAdvanced = 0;
+    // After the CPU state, so the JIT takes its mapping and permission context from it. Fast starts with its
+    // caches cleaned and emptied, over the loaded memory.
+    cpuDropTranslatedCode(cpuCore);
+    if (fastOn) cpuArm920LeanReset(cpuCore);
+    if (clock.changed) clock.changed();
+    return true;
 }

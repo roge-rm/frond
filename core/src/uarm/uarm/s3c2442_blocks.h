@@ -44,6 +44,11 @@ class S3cIntc {
     uint32_t pending() const { return srcpnd; }
 
     uint32_t srcpnd, intmod, intmsk, priority, intpnd, intoffset, subsrcpnd, intsubmsk;
+    // The saved state's fields (machine_state_archive.h).
+    template <class A> void state(A& a) {
+        a.Do32(srcpnd).Do32(intmod).Do32(intmsk).Do32(priority).Do32(intpnd).Do32(intoffset).Do32(subsrcpnd);
+        a.Do32(intsubmsk).Do32(levels).Do32(subLevels).DoBool(fiqLine);
+    }
 
    private:
     void update();
@@ -76,6 +81,9 @@ class S3cClock {
     std::function<void()> changed;
 
     uint32_t locktime, mpllcon, upllcon, clkcon, clkslow, clkdivn, camdivn;
+    template <class A> void state(A& a) {
+        a.Do32(locktime).Do32(mpllcon).Do32(upllcon).Do32(clkcon).Do32(clkslow).Do32(clkdivn).Do32(camdivn);
+    }
     const uint32_t crystal;
 };
 
@@ -86,6 +94,7 @@ class S3cMemoryController {
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    template <class A> void state(A& a) { a.DoBuffer32(regs, 13); }
     uint32_t regs[13];
 };
 
@@ -107,6 +116,11 @@ class S3cPwm {
         uint64_t phase;
         bool running;
     } timers[5];
+    template <class A> void state(A& a) {
+        a.Do32(tcfg0).Do32(tcfg1).Do32(tcon);
+        for (auto& t : timers)
+            a.Do32(t.buffer).Do32(t.compare).Do32(t.count).Do32(t.compareLatch).Do64(t.phase).DoBool(t.running);
+    }
 
    private:
     uint64_t divisor(unsigned timer) const;
@@ -129,6 +143,7 @@ class S3cWatchdog {
 
     uint32_t wtcon, wtdat, wtcnt;
     uint64_t phase;
+    template <class A> void state(A& a) { a.DoBool(resetRequested).Do32(wtcon).Do32(wtdat).Do32(wtcnt).Do64(phase); }
 
    private:
     uint64_t divisor() const;
@@ -143,6 +158,7 @@ public:
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     uint64_t commands = 0;
+    template <class A> void state(A& a) { a.Do64(commands).DoBuffer32(regs, 17); }
 
 private:
     uint32_t regs[17];  // SDICON to SDIDAT, by word
@@ -156,6 +172,7 @@ public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    template <class A> void state(A& a) { a.DoBuffer32(regs, 0x30); }
 
 private:
     uint32_t regs[0x30];  // 0x140 to 0x1fc, by word
@@ -185,6 +202,14 @@ public:
     uint32_t channelsRead = 0;  // a bit per channel converted in normal mode, for traces
     int firstChannel = -1;      // the first channel converted in normal mode
     uint32_t adccon, adctsc, adcdly, adcdat0, adcdat1, adcupdn;
+    template <class A> void state(A& a) {
+        a.DoBuffer16(channel, 8).Do64(conversions).Do64(touchInterrupts).Do32(channelsRead);
+        uint32_t first = uint32_t(firstChannel);
+        a.Do32(first);
+        firstChannel = int(first);
+        a.Do32(adccon).Do32(adctsc).Do32(adcdly).Do32(adcdat0).Do32(adcdat1).Do32(adcupdn).Do64(remaining);
+        a.DoBool(penDown).DoBool(touchCondition).Do16(penX).Do16(penY);
+    }
 
 private:
     void start();
@@ -203,6 +228,9 @@ public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    template <class A> void state(A& a) {
+        for (auto& c : channel) a.Do32(c.disrc).Do32(c.disrcc).Do32(c.didst).Do32(c.didstc).Do32(c.dcon).Do32(c.dmasktrig);
+    }
 
 private:
     struct Channel { uint32_t disrc, disrcc, didst, didstc, dcon, dmasktrig; } channel[4];
@@ -215,6 +243,7 @@ public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    template <class A> void state(A& a) { a.Do32(iiscon).Do32(iismod).Do32(iispsr).Do32(iisfcon); }
 
 private:
     uint32_t iiscon, iismod, iispsr, iisfcon;
@@ -229,6 +258,7 @@ public:
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
     uint64_t bytes = 0;
+    template <class A> void state(A& a) { a.Do64(bytes).Do32(iiccon).Do32(iicstat).Do32(iicadd).Do32(iicds).Do32(iiclc); }
 
 private:
     uint32_t iiccon, iicstat, iicadd, iicds, iiclc;
@@ -249,6 +279,10 @@ class S3cRtc {
 
     uint32_t rtccon, ticnt, rtcalm, rtcrst, alarm[6], bcd[7];
     uint64_t secondPhase, tickPhase;
+    template <class A> void state(A& a) {
+        a.Do32(rtccon).Do32(ticnt).Do32(rtcalm).Do32(rtcrst).DoBuffer32(alarm, 6).DoBuffer32(bcd, 7);
+        a.Do64(secondPhase).Do64(tickPhase);
+    }
 
    private:
     void secondPassed(S3cIntc& intc);
@@ -271,6 +305,11 @@ class S3cGpio {
 
     uint32_t con[ports], dat[ports], up[ports], input[ports];
     uint32_t misccr, dclkcon, extint[3], eintflt[4], eintmask, eintpend, gstatus[5], dsc[2], mslcon;
+    template <class A> void state(A& a) {
+        a.DoBuffer32(con, ports).DoBuffer32(dat, ports).DoBuffer32(up, ports).DoBuffer32(input, ports);
+        a.Do32(misccr).Do32(dclkcon).DoBuffer32(extint, 3).DoBuffer32(eintflt, 4).Do32(eintmask).Do32(eintpend);
+        a.DoBuffer32(gstatus, 5).DoBuffer32(dsc, 2).Do32(mslcon).Do32(lastEintLevels);
+    }
 
    private:
     // Re-checks every EINT pin against the last levels seen, for edges and held levels.
@@ -294,6 +333,12 @@ class S3cUart {
     uint32_t ulcon, ucon, ufcon, umcon, ubrdiv;
     std::deque<uint8_t> rx;
     unsigned channel;
+    template <class A> void state(A& a) {
+        a.Do32(ulcon).Do32(ucon).Do32(ufcon).Do32(umcon).Do32(ubrdiv);
+        std::vector<uint8_t> bytes(rx.begin(), rx.end());
+        a.DoVector(bytes, 4096);
+        rx.assign(bytes.begin(), bytes.end());
+    }
 
    private:
     void interrupts(S3cIntc& intc, bool sent);
@@ -328,6 +373,10 @@ class S3cLcd {
     uint32_t palette[256];
     // HCLK ticks into the current frame.
     uint64_t phase;
+    template <class A> void state(A& a) {
+        a.DoBuffer32(lcdcon, 5).DoBuffer32(saddr, 3).Do32(redlut).Do32(greenlut).Do32(bluelut).Do32(dithmode);
+        a.Do32(tpal).Do32(lcdintpnd).Do32(lcdsrcpnd).Do32(lcdintmsk).Do32(tconsel).DoBuffer32(palette, 256).Do64(phase);
+    }
 
    private:
     void interrupts(S3cIntc& intc);

@@ -123,6 +123,21 @@ class S3c2442Machine {
     // inverter bit; with GPB0 a plain output, 0 or 1000 from its level. -1 while asleep.
     int backlightLevel() const;
 
+    // Faster speed: the CPU runs num / den times its clock, with the timers, RTC and guest time as at 1 / 1.
+    void setClockMultiplier(uint32_t num, uint32_t den) {
+        multiplierNum = num ? num : 1;
+        multiplierDen = den ? den : 1;
+    }
+
+    // The machine between runs, for sessions: the CPU with its MMU, TLB, caches and FCSE PID, SDRAM, the
+    // steppingstone, every block's registers, the sleep state, the board's pin levels and the time counts.
+    // The NAND's pages aren't in it, as their owner keeps them. A stopped machine isn't saved. loadState takes
+    // a state made by a machine with the same crystal, SDRAM size and chip ID; false, with why, leaves this
+    // machine as it was.
+    bool saveState(std::vector<uint8_t>& out, std::string& why);
+    bool loadState(const uint8_t* data, size_t size, std::string& why);
+    static constexpr uint32_t stateVersion = 1;
+
     // Host input between runs: a board pin's level (keys, card detect, AC), and the stylus on the touch
     // panel in raw ADC units. Either can raise an interrupt for the next run.
     void setPin(S3cGpio::Port port, unsigned bit, bool level);
@@ -160,6 +175,9 @@ class S3c2442Machine {
     bool mmio(uint32_t address, unsigned size, bool write, uint32_t& value);
     bool refuse(uint32_t address, unsigned size, bool write, uint32_t value, const std::string& text);
     void advance(uint64_t cpuCycles);
+    // The CPU's clock times the Faster multiplier: CPU cycles a second of guest time.
+    uint64_t cpuHz() const { return clock.cpuClock() * multiplierNum / multiplierDen; }
+    uint32_t multiplierNum = 1, multiplierDen = 1;
     // Applies the time of the instructions the running interpreter call has finished (batchAdvanced of them
     // already), so an SFR access sees the time at its instruction.
     void catchUp();

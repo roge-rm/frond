@@ -300,5 +300,49 @@ int main() {
         gpa(0x201000 | 0x800, false);  // wireless
         assert(rx1950Leds(*m).blue);
     }
+    // Save and load: a machine loaded from a state runs on exactly as the one saved, with a timer interrupt
+    // and its sleep counts; a damaged state or one from another SDRAM size is refused and changes nothing.
+    {
+        const std::vector<uint32_t> counter = {0xe3a01203, 0xe2811801, 0xe2800001, 0xe5810000, 0xeafffffc};
+        auto a = make(counter);
+        pwmTimer4(*a, 500);
+        a->intc.intmsk &= ~(1u << s3cIrq::timer4);
+        a->rtc.ticnt = 0x81;
+        assert(a->run(300000) == S3c2442Stop::budget);
+        std::vector<uint8_t> saved;
+        std::string why;
+        assert(a->saveState(saved, why));
+        assert(a->run(500000) == S3c2442Stop::budget);
+
+        auto b = make({loop});
+        assert(b->loadState(saved.data(), saved.size(), why));
+        assert(b->run(500000) == S3c2442Stop::budget);
+        for (unsigned r = 0; r < 16; ++r)
+            assert(cpuGetRegExternal(a->cpu(), r) == cpuGetRegExternal(b->cpu(), r));
+        assert(cpuGetRegExternal(a->cpu(), ARM_REG_NUM_CPSR) == cpuGetRegExternal(b->cpu(), ARM_REG_NUM_CPSR));
+        assert(cpuGetRegExternal(a->cpu(), 0) > 1000 && (a->intc.srcpnd & (1u << s3cIrq::timer4)));
+        assert(a->retired() == b->retired() && a->nanoseconds() == b->nanoseconds());
+        assert(a->pwm.ticksToEvent() == b->pwm.ticksToEvent() && a->rtc.ticnt == b->rtc.ticnt);
+        assert(a->intc.srcpnd == b->intc.srcpnd && a->sleepCount() == b->sleepCount());
+
+        auto c = make({loop});
+        const uint32_t before = c->pc();
+        std::vector<uint8_t> broken = saved;
+        broken[broken.size() / 2] ^= 1;
+        assert(!c->loadState(broken.data(), broken.size(), why) && !why.empty());
+        assert(!c->loadState(saved.data(), saved.size() / 2, why));
+        S3c2442Options other;
+        other.ramBytes = 64u << 20;
+        auto d = S3c2442Machine::create(other, why);
+        assert(d && !d->loadState(saved.data(), saved.size(), why) && why.find("another machine") != std::string::npos);
+        assert(c->pc() == before && c->run(1000) == S3c2442Stop::budget && c->pc() == code);
+
+        // Fast picks up from a loaded state too.
+        auto f = make({loop});
+        assert(f->setFastEngine(true));
+        assert(f->loadState(saved.data(), saved.size(), why));
+        assert(f->run(500000) == S3c2442Stop::budget);
+        assert(cpuGetRegExternal(f->cpu(), 0) > cpuGetRegExternal(a->cpu(), 0) / 2);
+    }
     std::printf("s3c2442 machine: ok\n");
 }

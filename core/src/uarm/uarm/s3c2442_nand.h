@@ -19,6 +19,24 @@ class S3cNand {
     static constexpr uint32_t pagesPerBlock = 32, blocks = 4096;
     static constexpr uint32_t pages = pagesPerBlock * blocks;
 
+    // Where the pages are kept when not in flash: the board's NAND file, a page at a time. Erase sets a whole
+    // block to ones.
+    struct Store {
+        virtual ~Store() = default;
+        virtual bool readPage(uint32_t page, uint8_t* out) = 0;
+        virtual bool writePage(uint32_t page, const uint8_t* in) = 0;
+        virtual bool eraseBlock(uint32_t firstPage, uint32_t count) = 0;
+    };
+    // Pages go to store instead of flash from now on; null goes back to flash. The page the chip last read
+    // is kept, so forget it (dropCache) whenever something else changes the store.
+    void setStore(Store* pages) {
+        store = pages;
+        cachedPage = ~0u;
+    }
+    void dropCache() { cachedPage = ~0u; }
+    // A store's read or write failed; the chip then reads ones and programs nothing.
+    uint64_t storeFailures = 0;
+
     // image holds every page, data then spare, pages * pageSize bytes. Empty reads as erased.
     void reset();
     void setImage(std::vector<uint8_t> image) {
@@ -43,6 +61,19 @@ class S3cNand {
 
     uint32_t nfconf, nfcont, nfstat, mecc0, mecc1, secc, meccd[2], seccd, sblk, eblk;
     std::vector<uint8_t> flash;
+
+    // The controller and chip registers for a saved state; the pages are saved by their owner.
+    template <class A> void state(A& a) {
+        a.Do32(nfconf).Do32(nfcont).Do32(nfstat).Do32(mecc0).Do32(mecc1).Do32(secc).DoBuffer32(meccd, 2).Do32(seccd);
+        a.Do32(sblk).Do32(eblk).Do64(programs).Do64(erases).DoBuffer(uid, sizeof uid).DoEnum(mode, 6);
+        a.Do8(command).Do8(area).DoBool(uidPending).DoBool(uidMode);
+        uint32_t cycles = addressCycles;
+        a.Do32(cycles).Do32(column).Do32(row).Do32(idIndex).Do32(pageOffset).Do32(eccCount).Do8(eccColumn);
+        addressCycles = cycles;
+        a.DoBuffer32(eccLine, 2).DoBuffer(pageBuffer, sizeof pageBuffer);
+        a.Require(pageOffset < pageSize && addressCycles < 8, "nand pointer");
+        cachedPage = ~0u;
+    }
 
    private:
     enum class Mode : uint8_t { idle, id, status, read, program, erase };
@@ -70,6 +101,11 @@ class S3cNand {
     // The page register a program fills, all ones where nothing was written.
     uint8_t pageBuffer[pageSize];
     std::vector<bool> dirty;
+    // A page out of the store: the one being read, or programmed.
+    const uint8_t* page(uint32_t page);
+    Store* store = nullptr;
+    uint32_t cachedPage = ~0u;
+    uint8_t cache[pageSize];
 };
 
 #endif
