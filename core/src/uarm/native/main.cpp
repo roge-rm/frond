@@ -756,6 +756,7 @@ bool gFastEngineMissing = false;
                 cerr << "HP iPAQ rx1950: " << why << endl;
                 return false;
             }
+            static_cast<SocS3C2442*>(soc)->SetInputGuestTime(options.emulatedTime);
             if (options.fastEngine && !static_cast<SocS3C2442*>(soc)->SetFastEngine(true))
                 cerr << "HP iPAQ rx1950: the Fast engine is not available here, running Exact" << endl;
         } else {

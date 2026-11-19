@@ -60,6 +60,9 @@ class SocS3C2442 : public SoC {
     bool FastEngine() const { return machine->fastEngine(); }
     // Run stops after about 12 ms of host time even short of the time asked for, so the app keeps up.
     void SetHostTimeLimit(bool on) { hostTimeLimit = on; }
+    // How long the host held the pen or a key is taken from the guest's clock (emulated time, where replays
+    // run in guest time) instead of the host's.
+    void SetInputGuestTime(bool on) { inputGuestTime = on; }
     bool Halted() const { return halted; }
     std::string StopText() const { return halted ? machine->stopText() : std::string(); }
     S3c2442Machine& Machine() { return *machine; }
@@ -87,7 +90,7 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<S3c2442Machine> machine;
     std::unique_ptr<NandPages> pages;
     MemoryBuffer nandPageBuffer{};
-    bool halted{false}, hostTimeLimit{true};
+    bool halted{false}, hostTimeLimit{true}, inputGuestTime{false};
     // Keys held through JamKey, released when the guest's time reaches untilNs.
     struct Jam { KeyId key; uint64_t untilNs; };
     std::vector<Jam> jams;

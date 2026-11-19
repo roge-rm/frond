@@ -493,6 +493,34 @@ int main() {
         assert(seen[3].second - seen[2].second >= S3cPenPacer::holdNs);
         assert(seen[1].second - seen[0].second < S3cPenPacer::holdNs + 5000000);
     }
+    // A host tap: a 1 ms tap, both events taken in one pump, still holds the pen holdNs of guest time (WM5's
+    // alignment needs about 100 ms); a 300 ms host hold is kept as 300 ms of guest time however little guest
+    // time passed meanwhile; a 5 s hold is kept to hostHoldLimitNs.
+    {
+        auto run = [&](uint64_t hostHeldNs) {
+            auto m = make({loop});
+            S3cPenPacer pen;
+            pen.clear(*m);
+            pen.push(true, 300, 400, 7000000000);
+            pen.push(false, 0, 0, 7000000000 + hostHeldNs);
+            uint64_t downAt = 0, upAt = 0;
+            bool was = false;
+            while (m->nanoseconds() < 2000000000 && !upAt) {
+                pen.pump(*m);
+                if (m->adc.stylusDown() != was) {
+                    was = m->adc.stylusDown();
+                    (was ? downAt : upAt) = m->nanoseconds();
+                }
+                m->run(1000000);
+            }
+            assert(upAt > downAt && pen.empty());
+            return upAt - downAt;
+        };
+        const uint64_t tap = run(1000000), held = run(300000000), long_ = run(5000000000);
+        assert(tap >= S3cPenPacer::holdNs && tap >= 100000000 && tap < S3cPenPacer::holdNs + 5000000);
+        assert(held >= 300000000 && held < 305000000);
+        assert(long_ >= S3cPenPacer::hostHoldLimitNs && long_ < S3cPenPacer::hostHoldLimitNs + 5000000);
+    }
     // Key pacing: a key's down and up queued together reach its pin at least holdNs of guest time apart,
     // its next down waits gapNs after the up, and another key's events behind it wait their turn.
     {
@@ -522,6 +550,28 @@ int main() {
         assert(seenG[3].second - seenG[2].second >= S3cKeyPacer::holdNs);
         assert(seenF[0].second >= seenG[3].second);
         assert(seenF[1].second - seenF[0].second >= S3cKeyPacer::holdNs);
+    }
+    // A jam and the host on one key: the pin stays low while either holds it, so the end of a jam doesn't
+    // let go of a key the host still holds, and the host's up doesn't end a jam.
+    {
+        auto m = make({loop});
+        S3cKeyPacer keys;
+        keys.clear();
+        auto low = [&] { return !(m->gpio.input[S3cGpio::g] & 2); };
+        m->run(30000000);  // past gapNs, so the host's first down is due at once
+        keys.jam(*m, S3cGpio::g, 1, true);
+        assert(low());
+        keys.push(S3cGpio::g, 1, true);
+        keys.pump(*m);
+        keys.jam(*m, S3cGpio::g, 1, false);
+        assert(low());
+        m->run(50000000);
+        keys.jam(*m, S3cGpio::g, 1, true);
+        keys.push(S3cGpio::g, 1, false);
+        keys.pump(*m);
+        assert(keys.empty() && low());
+        keys.jam(*m, S3cGpio::g, 1, false);
+        assert(!low());
     }
     std::printf("s3c2442 machine: ok\n");
 }

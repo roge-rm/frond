@@ -235,30 +235,33 @@ uint32_t* SocS3C2442::GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDi
 void SocS3C2442::JamKey(enum KeyId key, uint32_t durationMsec) {
     const auto* k = keyFor(key);
     if (!k || halted) return;
-    machine->setPin(k->port, k->bit, false);
+    keys.jam(*machine, k->port, k->bit, true);
     jams.push_back({key, machine->nanoseconds() + uint64_t(durationMsec) * 1000000});
 }
 
 // Hands queued host input to the machine in the guest's own time: keys pull their pins low through the
 // key pacer, the pen goes to the touch panel through the pen pacer, at most one down or up each call.
+// Events are stamped as they're taken here, which is within a frame of when the host made them.
 void SocS3C2442::PumpInput() {
     const uint64_t now = machine->nanoseconds();
     for (auto it = jams.begin(); it != jams.end();) {
         if (it->untilNs > now) { ++it; continue; }
-        if (const auto* k = keyFor(it->key)) machine->setPin(k->port, k->bit, true);
+        if (const auto* k = keyFor(it->key)) keys.jam(*machine, k->port, k->bit, false);
         it = jams.erase(it);
     }
+    const uint64_t at = inputGuestTime ? now : uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch()).count());
     while (keyEventQueue->GetSize()) {
         const KeyEvent event = keyEventQueue->Peek();
         keyEventQueue->Pop();
-        if (const auto* k = keyFor(event.key)) keys.push(k->port, k->bit, event.keyDown);
+        if (const auto* k = keyFor(event.key)) keys.push(k->port, k->bit, event.keyDown, at);
     }
     while (penEventQueue->GetSize()) {
         const PenEvent event = penEventQueue->Peek();
         penEventQueue->Pop();
         const unsigned x = unsigned(std::clamp(event.x, 0, int(displayConfiguration.width) - 1));
         const unsigned y = unsigned(std::clamp(event.y, 0, int(displayConfiguration.height) - 1));
-        pen.push(event.penDown, rx1950TouchRawX(x), rx1950TouchRawY(y));
+        pen.push(event.penDown, rx1950TouchRawX(x), rx1950TouchRawY(y), at);
     }
     keys.pump(*machine);
     pen.pump(*machine);
