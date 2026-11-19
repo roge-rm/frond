@@ -88,7 +88,10 @@ static QString siblingCore68k(const QString& core) {
     if (core.isEmpty()) return {};
     const QFileInfo info(core);
     const auto name = info.fileName();
-    const auto sibling = name == QLatin1String("frond-core") ? QStringLiteral("frond-68k-core") : name + QStringLiteral("-68k");
+    // A .exe suffix stays at the end: frond.exe gives frond-68k.exe.
+    const auto suffix = name.endsWith(QLatin1String(".exe")) ? QStringLiteral(".exe") : QString();
+    const auto base = name.left(name.size() - suffix.size());
+    const auto sibling = base == QLatin1String("frond-core") ? QStringLiteral("frond-68k-core") : base + QStringLiteral("-68k") + suffix;
     return info.absolutePath() + '/' + sibling;
 }
 
