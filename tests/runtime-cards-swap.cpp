@@ -154,12 +154,32 @@ int main(int argc, char** argv) {
     assert(run("settle-linked " + drawer.string() + " " + key).rfind("ok settled ", 0) == 0);
     assert(generations(other, "sd.frondsd") == 0);
     assert(!std::filesystem::exists(other / ".settled-sd.frondsd.tmp") && !std::filesystem::exists(other / ".settling-sd.frondsd"));
-    // Cut off after the file replaced the card (mark left, no temp): the stale generations go.
+    // Cut off after the file replaced the card (mark naming it left, no temp): the stale
+    // generations, all older than the mark, go.
+    auto stamp = [](const std::filesystem::path& path) {
+        struct stat st{};
+        assert(::stat(path.c_str(), &st) == 0);
+        return std::to_string(uint64_t(st.st_dev)) + ' ' + std::to_string(uint64_t(st.st_ino)) + ' ' +
+               std::to_string(uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec));
+    };
     for (const auto& entry : std::filesystem::directory_iterator(aside)) std::filesystem::copy_file(entry.path(), other / entry.path().filename());
-    { std::ofstream(other / ".settling-sd.frondsd"); }
+    usleep(20000);
+    { std::ofstream(other / ".settling-sd.frondsd") << stamp(drawer) << '\n'; }
     assert(generations(other, "sd.frondsd") > 0);
     assert(run("settle-linked " + drawer.string() + " " + key) == "ok settled 0");
     assert(generations(other, "sd.frondsd") == 0 && !std::filesystem::exists(other / ".settling-sd.frondsd"));
+    // A mark left after the generations went, then a machine took the card and wrote new ones:
+    // those are newer than the mark and stay (the card stays unsettled), and the mark goes.
+    { std::ofstream(other / ".settling-sd.frondsd") << stamp(drawer) << '\n'; }
+    usleep(20000);
+    { std::ofstream(other / ".gen-sd.frondsd-1") << "new"; }
+    assert(run("settle-linked " + drawer.string() + " " + key).rfind("error unsettled", 0) == 0);
+    assert(std::filesystem::exists(other / ".gen-sd.frondsd-1") && !std::filesystem::exists(other / ".settling-sd.frondsd"));
+    // A mark naming another file leaves the generations alone too.
+    { std::ofstream(other / ".settling-sd.frondsd") << "1 2 3\n"; }
+    assert(run("settle-linked " + drawer.string() + " " + key).rfind("error unsettled", 0) == 0);
+    assert(std::filesystem::exists(other / ".gen-sd.frondsd-1"));
+    std::filesystem::remove(other / ".gen-sd.frondsd-1");
     std::filesystem::remove_all(aside);
     {
         frondSdFile::Info info;

@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +24,10 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+#include <cstdlib>
 #include <unistd.h>
 #include <vector>
 
@@ -422,10 +427,26 @@ inline bool linkedUnsettled(const std::filesystem::path& card) {
     return frondStorage::hasChanges(card) || !frondStorage::journalFiles(card).empty();
 }
 
+// "DEV INO MTIME_NS" of a file, as a settle mark records the settled file.
+inline std::string fileStamp(const std::filesystem::path& path) {
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return {};
+    return std::to_string(uint64_t(st.st_dev)) + ' ' + std::to_string(uint64_t(st.st_ino)) + ' ' +
+           std::to_string(uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec));
+}
+// A file's change time in nanoseconds, 0 if it can't be read.
+inline uint64_t changedAt(const std::filesystem::path& path) {
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) return 0;
+    return uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
+}
+
 // A settle-linked cut off part way, finished or undone. The settled file is written to
-// .settled-<file>.tmp, then .settling-<file> marks it complete, then it replaces the card and the
-// generations go. With the mark: the temp still there means the card wasn't replaced (the temp
-// goes, the generations stay); no temp means it was (the generations go). Card lock held.
+// .settled-<file>.tmp, then .settling-<file> marks it complete (with the temp's device, inode and
+// change time), then it replaces the card and the generations go. With the mark: the temp still
+// there means the card wasn't replaced (the temp goes, the generations stay); no temp means it was,
+// and the generations go if the card is still the settled file and none is newer than the mark
+// (newer ones were written after a cut-off settle, by a machine that took the card). Card lock held.
 inline bool finishSettle(const std::filesystem::path& card) {
     auto dir = card.parent_path();
     if (dir.empty()) dir = ".";
@@ -439,7 +460,15 @@ inline bool finishSettle(const std::filesystem::path& card) {
         return true;
     }
     if (written) std::filesystem::remove(temp, ec);
-    else FileCardBacking::DiscardGenerations(card);
+    else {
+        std::string stamp;
+        std::getline(std::ifstream(mark), stamp);
+        const uint64_t markedAt = changedAt(mark);
+        bool stale = !stamp.empty() && stamp == fileStamp(card) && markedAt;
+        for (const auto& path : linkedGenerations(card))
+            if (changedAt(path) > markedAt) stale = false;
+        if (stale) FileCardBacking::DiscardGenerations(card);
+    }
     if (!frondStorage::syncDir(dir)) return false;
     std::filesystem::remove(mark, ec);
     return !ec && frondStorage::syncDir(dir);
@@ -478,18 +507,23 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
     std::array<uint8_t, frondMachine::identityBytes> identity{};
     const auto tag = card.filename().string();
     const auto temp = dir / (".settled-" + tag + ".tmp"), mark = dir / (".settling-" + tag);
+    errno = 0;
     const bool ok = frondSession::writeSdFromReader(
         temp, backing->Size(), [&](uint64_t off, uint64_t n, void* out) { return backing->Read(off, n, out); }, identity, 1,
         info.classic ? frondSession::msShape(size) : frondSession::StoredShape{});
+    const int writeError = errno;
     backing.reset();
     if (!ok || !frondStorage::syncDir(dir)) {
         std::filesystem::remove(temp, ec);
+        if (!ok && (writeError == ENOSPC || writeError == EDQUOT))
+            return fail("space", "Not enough free space to write the card's changes.");
         return fail("write", "Couldn't write the card file.");
     }
     // The mark, then the swap: see finishSettle.
     {
+        const auto stamp = fileStamp(temp) + '\n';
         const int m = ::open(mark.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        const bool made = m >= 0 && ::fsync(m) == 0;
+        const bool made = m >= 0 && stamp.size() > 1 && ::write(m, stamp.data(), stamp.size()) == ssize_t(stamp.size()) && ::fsync(m) == 0;
         if (m >= 0) ::close(m);
         if (!made || !frondStorage::syncDir(dir)) {
             std::filesystem::remove(mark, ec);
@@ -511,6 +545,20 @@ inline bool sameInode(const std::filesystem::path& a, const std::filesystem::pat
     struct stat x{}, y{};
     return ::lstat(a.c_str(), &x) == 0 && ::lstat(b.c_str(), &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
+// Whether renameat2 may be called. Android's app seccomp filter only allows it from Android 11 (API
+// 30); before that the call can kill the app (SIGSYS), so the fallbacks are used.
+inline bool renameNoReplaceAllowed() {
+#if defined(__ANDROID__)
+    static const bool allowed = [] {
+        char value[PROP_VALUE_MAX]{};
+        return __system_property_get("ro.build.version.sdk", value) > 0 && std::atoi(value) >= 30;
+    }();
+    return allowed;
+#else
+    return true;
+#endif
+}
+
 // A rename that never replaces `to`: renameat2 with RENAME_NOREPLACE, or where the kernel or the
 // disk lacks it, a hard link and an unlink, or where there are no hard links either (exFAT), a
 // rename after checking `to` is free (the card lock and the library lock keep others out). A crash
@@ -518,8 +566,10 @@ inline bool sameInode(const std::filesystem::path& a, const std::filesystem::pat
 inline bool moveNoReplace(const std::filesystem::path& from, const std::filesystem::path& to) {
     if (sameInode(from, to)) return ::unlink(from.c_str()) == 0;
 #if defined(SYS_renameat2)
-    if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 1u /* RENAME_NOREPLACE */) == 0) return true;
-    if (errno == EEXIST) return false;
+    if (renameNoReplaceAllowed()) {
+        if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 1u /* RENAME_NOREPLACE */) == 0) return true;
+        if (errno == EEXIST) return false;
+    }
 #endif
     if (::link(from.c_str(), to.c_str()) == 0) return ::unlink(from.c_str()) == 0;
     if (errno == EEXIST) return false;
