@@ -50,23 +50,31 @@ jobs:
           sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
 
       - name: Start the built app
+        timeout-minutes: 5
         run: |
           APP=out/Frond.app/Contents/MacOS
-          # Each program runs for a few seconds and is stopped; a library that fails to load exits at once.
+          # Each program runs for up to 8 seconds and is stopped if still running; a library that fails
+          # to load exits at once with 126 or more.
           run_a_while() {
+            echo "--- $*"
             "$@" > run.out 2>&1 < /dev/null &
             pid=$!
-            sleep 6
-            if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" 2>/dev/null; echo "$1 was still running"; return 0; fi
+            for i in 1 2 3 4 5 6 7 8; do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid"; sleep 1; kill -9 "$pid" 2>/dev/null
+              cat run.out; echo "still running after 8 s"; return 0
+            fi
             wait "$pid"; code=$?
-            cat run.out
-            echo "$1 exited with $code"
+            cat run.out; echo "exited with $code"
             [ "$code" -lt 126 ]
           }
           export QT_QPA_PLATFORM=offscreen
-          "$APP/Frond" --version
-          "$APP/frond-68k" --version
+          run_a_while "$APP/frond-68k" --version
           run_a_while "$APP/frond"
+          run_a_while "$APP/Frond" --version
           run_a_while "$APP/Frond"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
