@@ -3168,13 +3168,17 @@ void MainWindow::otherDatabase() {
     else exportDatabase(value);
 }
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
-    if (client.running() && !installPaths(event->mimeData()).isEmpty()) event->acceptProposedAction();
+    if (installDropAllowed() && !installPaths(event->mimeData()).isEmpty()) event->acceptProposedAction();
 }
 void MainWindow::dropEvent(QDropEvent* event) {
     const auto paths = installPaths(event->mimeData());
-    if (!client.running() || paths.isEmpty()) return;
+    if (!installDropAllowed() || paths.isEmpty()) return;
     event->acceptProposedAction();
     installFiles(paths);
+}
+// Drops install on the same devices Ctrl+I does: Palm OS with guest services.
+bool MainWindow::installDropAllowed() const {
+    return client.running() && frondFirmware::palmOs(currentDevice()) && frondFirmware::guestServices(currentDevice());
 }
 QStringList MainWindow::installPaths(const QMimeData* data) const {
     QStringList out;
