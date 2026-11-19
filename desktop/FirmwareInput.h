@@ -60,11 +60,20 @@ inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfil
 
 // Install, the application list and hard reset. Every Palm OS device has them; callers also check palmOs.
 inline bool guestServices(Device) { return true; }
-// Install, the application list and hard reset are Palm OS guest services: a Windows CE device has none, so
-// they're hidden for it rather than greyed. Callers check this and guestServices.
+// Install, the application list and hard reset are Palm OS guest services. A Windows CE device has its own
+// (installsToCard, ceHardReset) and greys out the rest. Callers check this and guestServices.
 inline bool palmOs(Device device) {
     return device == Device::automatic || deviceProfileOs5(profile(device)) == DeviceOs5::palmOs;
 }
+// Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
+// CAB); the application list stays greyed. The rx1950 only so far.
+inline bool installsToCard(Device device) {
+    return device != Device::automatic && profile(device).board == DeviceBoard5::s3c2442Rx1950;
+}
+// Windows CE hard reset: a clean boot with the user store wiped (the rx1950 only so far).
+inline bool ceHardReset(Device device) { return installsToCard(device); }
+// The device's USB is a network link (RNDIS) with no host endpoint: on or off.
+inline bool usbNetwork(Device device) { return device != Device::automatic && !palmOs(device); }
 // New machines of these devices start on the Fast engine: the Zodiac, rx1950, T|X and Zire 72, which fall behind
 // Original speed on Exact.
 inline bool fastByDefault(Device device) {

@@ -45,6 +45,7 @@
 #include "CardSwap.h"
 #include "CardReinsert.h"
 #include "CardTool.h"
+#include "CardInstall.h"
 
 // Private Unix socket, owned by the launcher; DesktopChannel has the framing. Only the emulation
 // thread dispatches requests.
@@ -457,6 +458,10 @@ class DesktopControl {
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
         if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (command == "install" && ctx.soc->InstallsToCard()) {
+            const auto result = frondNative::installToSdCard(*ctx.soc, ctx.sessionFolder, path);
+            return {result.ok, result.code, result.message};
+        }
         // A board with no guest calls takes none of the commands that need them.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
@@ -672,10 +677,14 @@ class DesktopControl {
         if (command == "usb-mode") {
             if (!caps.usb) return {false,"unsupported","USB is not supported on this device."};
             HostSerial::Config config;
-            if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
+            // The rx1950's USB is a network link: on or off, no endpoint.
+            const bool network = UsbHostBridge::NetworkLink(ctx.soc);
+            if (!ctx.usb || (network && path != "on" && path != "off") || (!network && !HostSerial::Parse(path, config)))
+                return {false, "argument", network ? "Use on or off." : "Use off, pty, tcp:PORT or unix:PATH."};
             // A new endpoint unplugs the cable first; queued bytes are dropped.
             ctx.usbError.clear();
-            if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
+            if (path == "on" ? !ctx.usb->StartCable(ctx.soc, ctx.usbError) : !ctx.usb->Start(ctx.soc, config, ctx.usbError))
+                return {false, "usb", ctx.usbError};
             return {true, "usb", UsbState(ctx)};
         }
         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};

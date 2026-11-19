@@ -539,6 +539,19 @@ static void watchdogHookTests() {
     assert(at[0] == at[1]);
 }
 
+// A power-on reset after a host hard reset: SDRAM cleared, GSTATUS2 PWRST, the RTC's time kept.
+static void powerOnResetTests() {
+    auto m = make({loop});
+    m->rtc.bcd[0] = 0x42;
+    m->gpio.gstatus[2] = 0;
+    assert(m->run(1000) == S3c2442Stop::budget);
+    assert(m->sdram()[code - 0x30000000] != 0);
+    m->powerOnReset();
+    const uint8_t* ram = m->sdram();
+    assert(std::all_of(ram, ram + (1u << 20), [](uint8_t b) { return b == 0; }));
+    assert(m->gpio.gstatus[2] == 1 && m->rtc.bcd[0] == 0x42);
+}
+
 // Only accesses that can change what the host sees poke it: writes, and FIFO accesses that hand a packet over.
 static void usbNotifyTests() {
     S3cUsbDevice d;
@@ -596,6 +609,7 @@ int main() {
     hostServiceSleepTests();
     hostScheduleStateTests();
     watchdogHookTests();
+    powerOnResetTests();
     usbNotifyTests();
     vbusLoadTests();
     uartTests();

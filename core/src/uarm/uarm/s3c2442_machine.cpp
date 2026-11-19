@@ -891,6 +891,14 @@ void S3c2442Machine::wake() {
 // its signatures there, the path it also takes after a watchdog reset.
 void S3c2442Machine::reset() { hardReset(0); }
 
+void S3c2442Machine::powerOnReset() {
+    // Empty the caches first, so no dirty line lands in the cleared SDRAM at the reset's own clean.
+    cpuArm920LeanReset(cpuCore);
+    std::memset(ramBuffer, 0, options.ramBytes);
+    std::memset(steppingstone, 0, sizeof steppingstone);
+    hardReset(options.resetCause);
+}
+
 // The watchdog's reset: as nRESET, with GSTATUS2 WDTRST.
 void S3c2442Machine::watchdogReset() {
     ++watchdogResetCount;

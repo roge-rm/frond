@@ -132,6 +132,20 @@ void S3cNand::erase() {
     nfstat |= 0x4;
 }
 
+bool S3cNand::eraseBlocks(uint32_t first, uint32_t count) {
+    bool ok = true;
+    for (uint32_t block = first; block < blocks && block - first < count; ++block) {
+        touch(block * pagesPerBlock);
+        if (store) {
+            if (!store->eraseBlock(block * pagesPerBlock, pagesPerBlock)) { ++storeFailures; ok = false; }
+        } else {
+            std::memset(&flash[size_t(block) * pagesPerBlock * pageSize], 0xff, size_t(pagesPerBlock) * pageSize);
+        }
+    }
+    cachedPage = ~0u;
+    return ok;
+}
+
 uint8_t S3cNand::dataByte() {
     switch (mode) {
         case Mode::id: return idIndex < sizeof chipId ? chipId[idIndex++] : 0;

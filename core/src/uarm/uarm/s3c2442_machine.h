@@ -130,6 +130,9 @@ class S3c2442Machine {
 
     // The reset button (nRESET): every block but the RTC to its reset state, then resetLoader as at power on.
     void reset();
+    // Power lost and back (a clean boot after the host wiped the user store): SDRAM cleared, every block but
+    // the RTC to its reset state, GSTATUS2 PWRST, then resetLoader. The RTC and the board's pin inputs are kept.
+    void powerOnReset();
     // Watchdog resets so far: as nRESET with GSTATUS2 WDTRST, between instructions in run(). Not saved.
     uint64_t watchdogResets() const { return watchdogResetCount; }
 

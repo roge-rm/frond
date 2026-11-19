@@ -656,6 +656,28 @@ static void lcdTests() {
     assert(small.frame(memory, pixels, w, h, why) && pixels[0] == 0x00ff00 && pixels[1] == 0xff0000);
 }
 
+// The host's erase for a hard reset: whole blocks back to 0xff and marked dirty, the blocks either side kept.
+static void nandEraseBlocksTests() {
+    S3cNand nand;
+    nand.reset();
+    std::vector<uint8_t> flash(size_t(S3cNand::pages) * S3cNand::pageSize, 0x5a);
+    nand.setImage(flash);
+    assert(nand.eraseBlocks(1, 2));
+    assert(!nand.blockDirty(0) && nand.blockDirty(1) && nand.blockDirty(2) && !nand.blockDirty(3));
+    S3cIntc intc;
+    intc.reset();
+    nand.write(0x04, 4, 1, intc);
+    uint32_t v;
+    for (const auto& [page, want] : {std::pair{31u, 0x5au}, {32u, 0xffu}, {95u, 0xffu}, {96u, 0x5au}}) {
+        nand.write(0x08, 1, 0x00, intc);
+        for (uint32_t a : {0u, page & 0xff, page >> 8, 0u}) nand.write(0x0c, 1, a, intc);
+        nand.read(0x10, 1, v);
+        assert(v == want);
+    }
+    // Past the end stops at the last block.
+    assert(nand.eraseBlocks(S3cNand::blocks - 1, 10) && nand.blockDirty(S3cNand::blocks - 1));
+}
+
 static void nandTests() {
     S3cIntc intc;
     intc.reset();
@@ -1320,6 +1342,7 @@ int main() {
     usbDeviceTests();
     lcdTests();
     nandTests();
+    nandEraseBlocksTests();
     nandImageTests();
     quietBlockTests();
     std::puts("s3c2442 blocks: ok");

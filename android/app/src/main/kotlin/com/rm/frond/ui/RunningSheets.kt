@@ -99,6 +99,7 @@ fun BoxScope.SheetLayer(sheet: Sheet, state: RunningBarState, actions: RunningBa
 
 @Composable
 private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
+    if (!model.device.palmOs) { WindowsCeApplications(model); return }
     // While the list says the Palm is asleep, ask again every 2 s (a plain list never wakes it).
     LaunchedEffect(Unit) {
         model.loadApps()
@@ -160,6 +161,18 @@ private fun ApplicationsSheet(model: RunningModel, actions: RunningBarActions) {
             onExport = { name -> model.naming = null; exportName = name; save.launch("$name.zip") },
         )
     }
+}
+
+// Windows CE: Install copies the picked files onto the SD card; the application list isn't done yet.
+@Composable
+private fun WindowsCeApplications(model: RunningModel) {
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> model.install(uris) }
+    Row(Modifier.padding(horizontal = 8.dp)) {
+        TextButton(enabled = model.device.installsToCard, onClick = { pick.launch(arrayOf("*/*")) }) { Text("Install…") }
+        TextButton(enabled = false, onClick = {}) { Text("Export all…") }
+        TextButton(enabled = false, onClick = {}) { Text("Other…") }
+    }
+    EmptyNote("Not available yet")
 }
 
 // Launch or export any RAM database by name, picked from the list or typed.
@@ -321,7 +334,8 @@ private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
             }
             ConnRow.BLUETOOTH -> ConnItem("Bluetooth", device.bluetooth, if (device.bluetooth) bluetoothText(model.bluetooth, model.radio) else null) { choosing = LinkKind.BLUETOOTH }
             ConnRow.SERIAL -> ConnItem("Serial port", device.serialPort, if (device.serialPort) model.serial.text else null) { choosing = LinkKind.SERIAL }
-            ConnRow.USB -> ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
+            ConnRow.USB -> if (device.usbNetwork) ConnItem("USB", device.usb, if (device.usb) (if (model.usbCable) "On" else "Off") else null) { choosing = LinkKind.USB }
+                else ConnItem("USB HotSync", device.usb, if (device.usb) relayText(model.usb) else null) { choosing = LinkKind.USB }
             ConnRow.USB_RETRY -> SheetAction("Connect again") { UsbLink.retry() }
             ConnRow.USB_PORT -> model.printer?.let { PrinterRow(it, device) } ?: ConnItem("USB port", false, null) { }
             ConnRow.WIFI_MODULE -> model.printer?.let { WifiModuleRow(it) } ?: ConnItem("Wi-Fi", false, null) { }

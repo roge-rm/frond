@@ -241,7 +241,11 @@ fun LinkChoiceDialog(kind: LinkKind, model: RunningModel, onDismiss: () -> Unit)
             val choices = remember { InfraredChoice.serialChoices(current, LinkStore.choices(InfraredChoice.folder(context)), model.device.modem) }
             ConnectionChoiceDialog("Serial port", current, onDismiss, choices) { onDismiss(); model.changeSerial(it) }
         }
-        LinkKind.USB -> RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
+        LinkKind.USB -> if (model.device.usbNetwork)
+            ConnectionChoiceDialog("USB", if (model.usbCable) "on" else "off", onDismiss, listOf("off" to "Off", "on" to "On")) {
+                onDismiss(); model.changeUsbCable(it == "on")
+            }
+        else RelayDialog("USB HotSync", listOf("Off", "Wait for a peer", "Connect to an address"), UsbLink,
             model.usb.mode, onDismiss) { onDismiss(); model.changeUsb(it) }
         LinkKind.BLUETOOTH -> {
             val current = model.bluetooth.choice

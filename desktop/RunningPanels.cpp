@@ -82,8 +82,10 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
         return b;
     };
     connect(add(tr("Install…"), "installApp"), &QPushButton::clicked, this, &AppsPanel::installRequested);
-    connect(add(tr("Other…"), "otherApp"), &QPushButton::clicked, this, &AppsPanel::otherRequested);
-    connect(add(tr("Export all…"), "exportRam"), &QPushButton::clicked, this, &AppsPanel::exportAllRequested);
+    otherButton = add(tr("Other…"), "otherApp");
+    connect(otherButton, &QPushButton::clicked, this, &AppsPanel::otherRequested);
+    exportAllButton = add(tr("Export all…"), "exportRam");
+    connect(exportAllButton, &QPushButton::clicked, this, &AppsPanel::exportAllRequested);
     layout->addLayout(buttons);
     list = new QListWidget(this);
     list->setObjectName("appsList");
@@ -96,6 +98,18 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
     empty->setEnabled(false);
     layout->addWidget(empty);
     connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) { emit launchRequested(item->data(Qt::UserRole).toString()); });
+}
+
+void AppsPanel::setInstallOnly(bool on) {
+    if (on == installOnly) return;
+    installOnly = on;
+    otherButton->setEnabled(!on);
+    exportAllButton->setEnabled(!on);
+    list->setEnabled(!on);
+    list->clear();
+    list->setVisible(!on);
+    empty->setText(on ? tr("Not available yet") : tr("No applications"));
+    empty->show();
 }
 
 QStringList AppsPanel::names() const {

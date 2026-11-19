@@ -39,6 +39,8 @@ class AppsPanel : public QWidget {
     // note, or "No applications".
     void setDatabases(const std::vector<runningRules::Database>& all, const QString& note = {});
     QStringList names() const;
+    // Windows CE: only Install works (it copies onto the SD card); the list and the other buttons are greyed.
+    void setInstallOnly(bool on);
  signals:
     void installRequested();
     void otherRequested();
@@ -49,4 +51,6 @@ class AppsPanel : public QWidget {
  private:
     QListWidget* list;
     QLabel* empty;
+    QPushButton *otherButton{}, *exportAllButton{};
+    bool installOnly{false};
 };

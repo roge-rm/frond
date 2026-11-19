@@ -112,7 +112,7 @@ class InternalFiles(
             var last = ""
             val result = InstallBatch.run(sources, { it.name }, { n, all ->
                 if (all > 1) host.runOnUiThread { busy = "Installing $n of $all" }
-            }) { last = d.install(it.open) }
+            }) { last = d.install(open = it.open) }
             result.summary()?.let { throw PalmDatabases.Failed(it) }
             if (sources.size == 1) last else "${sources.size} added"
         }

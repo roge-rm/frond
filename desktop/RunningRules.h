@@ -18,8 +18,12 @@ namespace runningRules {
 struct Traits {
     bool runs68k{false}, holdPresent{false}, holdSupported{false}, keyboard{false}, microphone{false},
         network{false}, sound{false}, powerKey{false}, cardSlot{false}, guestServices{true};
-    // Palm OS: Applications and Hard reset are shown at all (FirmwareInput.h palmOs).
+    // Palm OS (FirmwareInput.h palmOs); off, the Applications list is greyed.
     bool palmOs{true};
+    // Hard reset works: Palm OS with guest services, or a Windows CE clean boot.
+    bool hardReset{true};
+    // Install copies onto the SD card (Windows CE).
+    bool cardInstall{false};
     // Takes the CLIÉ game controller on its connector.
     bool gamepad{false};
 };
@@ -37,6 +41,8 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.sound = caps.sound;
     t.palmOs = frondFirmware::palmOs(device);
     t.guestServices = t.palmOs && frondFirmware::guestServices(device);
+    t.cardInstall = frondFirmware::installsToCard(device);
+    t.hardReset = t.guestServices || frondFirmware::ceHardReset(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     t.gamepad = profile.frontend.clieGamepad;
@@ -103,7 +109,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::Reset, QObject::tr("Reset…"), std::nullopt, {}, ready, false, 3});
-    if (t.palmOs) out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.guestServices, true, 3});
+    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.hardReset, true, 3});
     out.push_back({Id::SaveStop, QObject::tr("Save and Stop"), std::nullopt, {}, s.running && ready, false, 4});
     return out;
 }
@@ -234,7 +240,7 @@ inline Buttons buttons(const Traits& t, const State& s) {
     Buttons b;
     // Storage: the slot where there is one, and Internal on every machine.
     b.card = true;
-    b.applications = t.palmOs;
+    b.applications = true;
     b.power = t.powerKey;
     b.keyboard = s.keyboardAttached;
     b.soundEnabled = s.ready && t.sound;
@@ -244,8 +250,8 @@ inline Buttons buttons(const Traits& t, const State& s) {
 }
 
 // The panel's Hard reset button: off whenever the other running controls are, and on a device
-// without guest calls.
-inline bool hardResetEnabled(bool controlsEnabled, const Traits& t) { return controlsEnabled && t.guestServices; }
+// where it doesn't work yet.
+inline bool hardResetEnabled(bool controlsEnabled, const Traits& t) { return controlsEnabled && t.hardReset; }
 
 // The core's reason when a machine stopped by itself, as the failure's main text. The core's last
 // line like "Tapwave Zodiac 2: the machine stopped: REASON" gives "The Tapwave Zodiac 2 stopped:

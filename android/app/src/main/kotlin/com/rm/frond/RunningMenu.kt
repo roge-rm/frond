@@ -44,7 +44,7 @@ object RunningMenu {
         rows += Row(Id.SAVE_COPY, "Save a copy…", group = 2)
         rows += Row(Id.LOG, "Emulator log", group = 2)
         rows += Row(Id.RESET, "Reset", group = 3)
-        if (device.palmOs) rows += Row(Id.HARD_RESET, "Hard reset…", destructive = true, group = 3)
+        rows += Row(Id.HARD_RESET, "Hard reset…", enabled = device.hardResetWorks, destructive = true, group = 3)
         return rows
     }
 
