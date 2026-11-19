@@ -99,9 +99,13 @@ data class Device internal constructor(
     val pendingUsb: String = "",
     // A colour LCD, shown as the guest draws it: no contrast setting.
     val colourLcd: Boolean = false,
+    // The OS it runs: "palm-os" or "windows-ce".
+    val os: String = "palm-os",
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {
+    // Applications and Hard reset are Palm OS guest services, left out on a Windows CE device.
+    val palmOs: Boolean get() = os == "palm-os"
     // The name in the Add device and Import firmware lists.
     val listLabel: String get() = if (experimental) "$label · Work in progress" else label
 

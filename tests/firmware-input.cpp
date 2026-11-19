@@ -99,7 +99,7 @@ class FirmwareInputTest : public QObject {
                  QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."));
         QVERIFY(!frondFirmware::firmwareFileMatches(ceosPath, rx1950Ceos5));
         QVERIFY(!frondFirmware::firmwareFileMatches(dir.filePath("missing"), rx1950Cebl5));
-        QVERIFY(!frondFirmware::guestServices(rx1950) && frondFirmware::fastByDefault(rx1950));
+        QVERIFY(!frondFirmware::palmOs(rx1950) && frondFirmware::palmOs(Device::tx) && frondFirmware::fastByDefault(rx1950));
     }
     void txFiles() {
         QTemporaryDir dir;

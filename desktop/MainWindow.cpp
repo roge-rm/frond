@@ -1352,12 +1352,14 @@ void MainWindow::refresh() {
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
     panels->setTitle(1, tr("Storage"));
     internalButton->setEnabled(enabled && !internalFiles);
-    const bool guest = frondFirmware::guestServices(currentDevice());
+    const bool palmOs = frondFirmware::palmOs(currentDevice());
+    const bool guest = palmOs && frondFirmware::guestServices(currentDevice());
     appsPanel->setEnabled(enabled && guest);
     appsPanel->setToolTip(guest ? QString() : reason);
     installBenchAction->setEnabled(enabled && guest);
     hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
     hardResetButton->setToolTip(guest ? QString() : reason);
+    hardResetButton->setVisible(palmOs);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -1825,8 +1827,11 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::Save: if (idle) barChosen(runningRules::Id::Save); break;
         case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
         case Shortcut::SaveStop: stopButton->click(); break;
-        case Shortcut::Install: if (idle && frondFirmware::guestServices(currentDevice())) emit appsPanel->installRequested(); break;
-        case Shortcut::Applications: togglePanel(0); break;
+        case Shortcut::Install:
+            if (idle && frondFirmware::palmOs(currentDevice()) && frondFirmware::guestServices(currentDevice()))
+                emit appsPanel->installRequested();
+            break;
+        case Shortcut::Applications: if (frondFirmware::palmOs(currentDevice())) togglePanel(0); break;
         case Shortcut::Card: togglePanel(1); break;
         case Shortcut::Display: togglePanel(2); break;
         case Shortcut::Connections: togglePanel(3); break;
@@ -2955,7 +2960,7 @@ bool MainWindow::confirmReplace(const QString& dest) {
 }
 // Asks the core for the RAM databases when the Applications panel is open and the core is free.
 void MainWindow::listApps() {
-    if (!appsStale || panels->current() != 0 || !frondFirmware::guestServices(currentDevice()) || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
+    if (!appsStale || panels->current() != 0 || !frondFirmware::palmOs(currentDevice()) || !frondFirmware::guestServices(currentDevice()) || !client.available() || busy || stopping || exchangeStage != ExchangeStage::None) return;
     appsStale = false;
     if (client.request("db-list")) { busy = true; refresh(); }
 }

@@ -58,10 +58,14 @@ inline bool linkedCards(Device device) {
 // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
 inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 
-// The Zodiac and the rx1950 run with no guest calls yet: no install, application list or hard reset.
+// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
 inline bool guestServices(Device device) {
-    return device == Device::automatic ||
-           (profile(device).board != DeviceBoard5::imx1Zodiac && profile(device).board != DeviceBoard5::s3c2442Rx1950);
+    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
+}
+// Install, the application list and hard reset are Palm OS guest services: a Windows CE device has none, so
+// they're hidden for it rather than greyed. Callers check this and guestServices.
+inline bool palmOs(Device device) {
+    return device == Device::automatic || deviceProfileOs5(profile(device)) == DeviceOs5::palmOs;
 }
 // New machines of these devices start on the Fast engine: the Zodiac, rx1950, T|X and Zire 72, which fall behind
 // Original speed on Exact.

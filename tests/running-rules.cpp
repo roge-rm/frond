@@ -176,6 +176,14 @@ class RunningRulesTest : public QObject {
         for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot}) QVERIFY(row(t, s, id).enabled);
         QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);
     }
+    // Windows CE has no Palm guest services: no Hard reset row and no Applications button on the rx1950.
+    void windowsCeRows() {
+        const auto t = traitsFor(named("hp-ipaq-rx1950"));
+        State s; s.ready = true; s.network = "off";
+        QVERIFY(!t.palmOs && !t.guestServices && !buttons(t, s).applications);
+        for (const auto& r : rows(t, s)) QVERIFY(r.id != Id::HardReset);
+        QVERIFY(buttons(traitsFor(named("palm-tx")), s).applications);
+    }
     // The panel's Hard reset button goes off with the other running controls, on every device.
     void hardResetButtonFollowsTheControls() {
         for (auto* id : devices()) {

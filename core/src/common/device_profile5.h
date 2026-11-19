@@ -690,6 +690,13 @@ inline bool deviceProfileRunnerEligible5(int32_t deviceType) {
            profile->board != DeviceBoard5::vz328 && profile->board != DeviceBoard5::s3c2442Rx1950;
 }
 
+// The OS a device runs, from its board. Palm OS guest services (installing, the application list, hard reset)
+// only exist on Palm OS.
+enum class DeviceOs5 { palmOs, windowsCe };
+inline DeviceOs5 deviceProfileOs5(const DeviceProfile5& profile) {
+    return profile.board == DeviceBoard5::s3c2442Rx1950 ? DeviceOs5::windowsCe : DeviceOs5::palmOs;
+}
+
 // Devices frond-68k runs instead of frond.
 inline bool deviceProfileRuns68k5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
