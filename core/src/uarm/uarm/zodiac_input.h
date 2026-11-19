@@ -66,7 +66,7 @@ class ZodiacInput {
     void machineChanged() {
         releasePending = liftPending = true;
         pressed.fill(false);
-        jammed = -1;
+        jammed = pendingJam = -1;
         penIsDown = stickSet = false;
     }
 
@@ -88,9 +88,17 @@ class ZodiacInput {
         return true;
     }
 
-    // Sends what is due: the releases after a load or reset, the end of a jam and the stick.
+    // A jam that starts once the releases a load or reset owes are sent, so it holds from the reset on.
+    void jamAfterRelease(unsigned control, uint32_t durationMsec) {
+        pendingJam = control < controls ? int(control) : -1;
+        pendingJamMsec = durationMsec;
+    }
+    bool jamPending() const { return pendingJam >= 0; }
+
+    // Sends what is due: the releases after a load or reset, a jam after them, the end of a jam and the stick.
     void pump(ZodiacInputPort& port) {
         if (releasePending && port.releaseControls()) releasePending = false;
+        if (pendingJam >= 0 && !releasePending && jam(port, unsigned(pendingJam), pendingJamMsec)) pendingJam = -1;
         if (liftPending && port.liftPen()) liftPending = false;
         if (jammed >= 0 && now >= jamUntil && port.setControl(unsigned(jammed), false)) jammed = -1;
         pumpStick(port);
@@ -167,8 +175,9 @@ class ZodiacInput {
     bool releasePending{true}, liftPending{true};
     std::array<bool, controls> pressed{};
     std::array<uint64_t, controls> pressedAt{}, pressedHostAt{}, releaseOwed{};
-    int jammed{-1};
+    int jammed{-1}, pendingJam{-1};
     uint64_t jamUntil{0};
+    uint32_t pendingJamMsec{0};
     bool penIsDown{false};
     uint64_t penDownAt{0}, penDownHostAt{0}, penOwed{0};
     int penX{0}, penY{0};

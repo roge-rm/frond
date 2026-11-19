@@ -151,6 +151,7 @@ SOURCE_CXX =		 					\
 	uarm/cp15mpu.cpp 					\
 	uarm/memcpy.cpp						\
 	uarm/native_boundary.cpp \
+	uarm/zodiac_native.cpp \
 	uarm/syscall_dispatch.cpp			\
 	uarm/db_installer.cpp				\
 	uarm/audio_queue.cpp				\

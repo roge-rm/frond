@@ -189,7 +189,7 @@ struct Imx1MachineBounds {
     Imx1ReferenceTime deadline{};
     uint64_t work = 0;
 };
-enum class Imx1MachineYield { retired, deadline, work, waiting, terminal, stopped, invalidBounds };
+enum class Imx1MachineYield { retired, deadline, work, waiting, terminal, stopped, invalidBounds, pcStop };
 struct Imx1MachineCheapStatus {
     Imx1MachineStatus status;
     Imx1ProbeStop stop;
@@ -241,6 +241,11 @@ uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
 // Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
 uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
+// UART status polls (ldr, tst, branch back) Fast blocks and Exact steps passed at once, since the process started:
+// the times and the rounds. imx1SetUartPollSkip(false) turns the skip off, for tests.
+uint64_t imx1MachineUartPollSkips(const Imx1Machine*);
+uint64_t imx1MachineUartPollRounds(const Imx1Machine*);
+void imx1SetUartPollSkip(bool skip);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
 // Execution thread, between runs; false inside a bounded run or after stop.
@@ -297,6 +302,23 @@ Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine*, const Imx1MachineBound
 // Passes the wait loop has made since create, for tests. With the idle skip one pass covers
 // many idle HCLK periods. It is a host count and no part of the machine's state.
 uint64_t imx1MachineIdleAdvances(const Imx1Machine*);
+// Guest calls, between runs only. Pc stops: while set, bounded runs go instruction by instruction through the
+// step (no JIT or lean spans) and end before the instruction at any of them, in either state, with
+// Imx1MachineYield::pcStop. Setting replaces the ones before. Leave lets the run that starts on one run that
+// instruction first. A machine with none set runs as before. Not saved; a load or reset keeps them.
+inline constexpr unsigned imx1MachineMaximumPcStops = 4;
+bool imx1MachineSetPcStops(Imx1Machine*, const uint32_t* pcs, unsigned count);
+bool imx1MachineSetPcStop(Imx1Machine*, uint32_t pc);
+void imx1MachineClearPcStop(Imx1Machine*);
+void imx1MachineLeavePcStop(Imx1Machine*);
+bool imx1MachineAtPcStop(const Imx1Machine*);
+// The current mode's r0 to r15 (pc with bit 0 set in Thumb) and the CPSR. Setting pc keeps the current state;
+// register 16 is the CPSR, of which only the flags and the interrupt masks are set.
+bool imx1MachineRegisters(const Imx1Machine*, uint32_t (&registers)[16], uint32_t* cpsr = nullptr);
+bool imx1MachineSetRegister(Imx1Machine*, unsigned reg, uint32_t value);
+// Guest virtual memory as the CPU's own loads and stores see it, caches included. RAM only (ROM for reads):
+// false with nothing done for anything else, or an unmapped page.
+bool imx1MachineAccessMemory(Imx1Machine*, uint32_t address, void* data, uint32_t size, bool write);
 
 // Borrowed pixels last until the next execution call. Peek does not acquire/ack.
 const uint32_t* imx1MachinePeekFrame(const Imx1Machine*, uint32_t& width, uint32_t& height);

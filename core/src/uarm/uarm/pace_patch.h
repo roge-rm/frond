@@ -47,6 +47,16 @@ bool pacePatchDiscoverTg50(PacePatch* patch, uint32_t romBase, const void* origi
 bool pacePatchInitTg50(PacePatch* patch, uint32_t romBase, const void* original,
                       void* shadow, size_t size);
 
+// The Zodiac's ROM PACE, found by the TG50's entry pattern and syscall frame and read only: the ROM isn't
+// patched. syscallSite is the frame's bl to the syscall dispatcher (calloutSyscall), with r0 the 68k state
+// and r1 the trap word; syscallReturn the instruction after it. trap0Site is the TRAP #0 frame's bl to the
+// ROM's trap callout, with r0 the 68k state and its pc just past the TRAP; skipping the bl goes on at that
+// pc. rts68k is a 68k RTS opcode in the ROM. False with sites cleared when not found.
+struct ZodiacPaceSites {
+    uint32_t entry, syscallSite, syscallReturn, calloutSyscall, trap0Site, rts68k;
+};
+bool paceDiscoverZodiac(ZodiacPaceSites* sites, uint32_t romBase, const void* rom, size_t size);
+
 #ifndef __EMSCRIPTEN__
 bool pacePatchOriginalTg50EntryForDiagnostic(PacePatch* patch, uint32_t romBase,
                                             const void* original, void* shadow, size_t size);

@@ -432,6 +432,8 @@ uint32_t cpuArm920RunJit(ArmCpu*, uint32_t budget, int* stop, uint32_t span = 0,
 // Whether cpuArm920RunJit would run translated code now: false with the JIT off, an interrupt or other slow path
 // reason for the step, a wait for interrupt, mode pacing, a native call, the debug stub or an I-cache continuation.
 bool cpuArm920JitCanRun(const ArmCpu*);
+// The same checks without the JIT: whether the next instructions run as plain steps, with no slow path reason.
+bool cpuArm920StepSkipAllowed(const ArmCpu*);
 // The lean TLB's generation and the times Fast dropped its decoded code for a store to it, for tests.
 uint32_t cpuArm920LeanGeneration(const ArmCpu*);
 uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);

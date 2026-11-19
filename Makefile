@@ -974,7 +974,7 @@ zodiac-boot-probe: build/zodiac-boot-probe
 # Kept in every state the probe saves: the commit and a + for uncommitted changes.
 ZODIAC_STATE_BUILD_NOTE = $(shell git rev-parse --short HEAD 2>/dev/null)$(shell git diff --quiet HEAD 2>/dev/null || echo +)
 build/zodiac-boot-probe: out/frond tools/zodiac-boot-probe.cpp tools/zodiac-state-file.h
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' ! -name 'UsbHostBridge.o' > build/zodiac-core.rsp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' > build/zodiac-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -DFROND_STATE_BUILD_NOTE='"$(ZODIAC_STATE_BUILD_NOTE)"' \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tools/zodiac-boot-probe.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \
@@ -1044,6 +1044,22 @@ test-zodiac-battery: out/frond
 	./build/test-zodiac-battery halted
 	./build/test-zodiac-battery waiting
 
+.PHONY: test-zodiac-guest-calls
+# Hard reset and guest calls on the real ROM from a bring-up state with a 68k app open (ZODIAC_ROM, ZODIAC_STATE),
+# Exact and Fast: install FrondBench, list it and export it back.
+# Skipped without them.
+ZODIAC_STATE ?=
+test-zodiac-guest-calls: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-guest-calls-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
+		tests/zodiac-guest-calls.cpp @build/zodiac-guest-calls-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-guest-calls
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls hard-reset-yes
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls hard-reset-yes
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls
+
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
 test-zodiac-session-cards: out/frond
@@ -1077,7 +1093,7 @@ ifeq ($(FROND_FAST),1)
 test: test-zodiac-jit
 endif
 build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
-	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' ! -name 'soc_IMX1.o' ! -name 'UsbHostBridge.o' > build/zodiac-jit-core.rsp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 'imx1_*.o' > build/zodiac-jit-core.rsp
 	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
 		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
 		tests/zodiac-jit.cpp core/src/uarm/uarm/imx1_boot_probe.cpp core/src/uarm/uarm/imx1_watchdog.cpp core/src/uarm/uarm/imx1_rtc.cpp core/src/uarm/uarm/imx1_bootstrap.cpp core/src/uarm/uarm/imx1_aitc.cpp core/src/uarm/uarm/imx1_cgm.cpp core/src/uarm/uarm/imx1_gpio.cpp core/src/uarm/uarm/imx1_sysctrl.cpp core/src/uarm/uarm/imx1_eim.cpp core/src/uarm/uarm/imx1_timer.cpp core/src/uarm/uarm/imx1_i2c.cpp core/src/uarm/uarm/imx1_asp.cpp core/src/uarm/uarm/imx1_pwm.cpp \

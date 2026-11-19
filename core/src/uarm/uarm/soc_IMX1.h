@@ -2,6 +2,7 @@
 #define FROND_SOC_IMX1_H
 
 #include <atomic>
+#include <functional>
 #include <array>
 #include <memory>
 #include <string>
@@ -13,6 +14,7 @@
 #include "guest_orientation.h"
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
+#include "pace_patch.h"
 #include "zodiac_audio.h"
 #include "zodiac_input.h"
 #include "zodiac_panel.h"
@@ -26,17 +28,74 @@
 // machine made with these, or with imx1StateAllowBootInputs when only the button levels differ.
 Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom);
 
+// How long a hard reset holds power, in ms of guest time. ROM facts: right after reset the boot ROM (20003948)
+// makes A7, A10 and D12 inputs, waits, then reads Home (A7), power (A10) and Function (D12) in that order, low
+// for pressed; power alone picks boot mode 1. The DAL reads them again at 20085b34 a little later, and once
+// power is let go shows "Erase all data?", Function for yes and Home for no. 500 ms was enough on the 1.1 ROM.
+inline constexpr uint32_t zodiacHardResetHoldMs = 2000;
+
+// The ROM's address in the guest (file offset 0 there).
+inline constexpr uint32_t zodiacRomBase = 0x20000000;
+
+// Where an injected call returns to: never code, as the run stops before fetching it.
+inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
+
 class SocIMX1 : public SoC {
    public:
     // nullptr with the reason in error when the ROM can't run.
     static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error);
 
     void Reset() override;
+    // A reset through RESET_IN with power held from it on for zodiacHardResetHoldMs of guest time.
+    void HardReset() override { HardResetHolding(zodiacHardResetHoldMs); }
+    void HardResetHolding(uint32_t holdMs);
+    // Whether the hard reset's power hold is still to start, for tests.
+    bool HardResetHoldPending() const { return input.jamPending(); }
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     // Faster: FCLK times the multiplier in the machine's clock model; guest time still comes from its own clock.
     void SetClockMultiplier(uint32_t num, uint32_t den) override;
-    bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
-    bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
+    // Guest calls through the ROM PACE (paceDiscoverZodiac), the ROM unchanged. RunToPaceSyscall runs until the
+    // 68k code calls trap and leaves the machine on the syscall site's bl, with r0 the 68k state and r1 the trap.
+    // The machine then stops there again after every injected call, until the next Run lets it go on. While a
+    // call is pending the machine runs step by step; with none, Exact and Fast run as before.
+    bool RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Runs the call set up in the registers (pc the entry, lr zodiacInjectedReturn) until it returns there.
+    // With a TRAP #0 hook set it also stops on the ROM PACE's TRAP #0 frame and calls the hook there.
+    bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Called with the machine on PaceSites().trap0Site (r0 the 68k state) during an injected call. True once it
+    // has run the trap and moved pc past the bl (SkipTrap0Callout); false lets the ROM run it. nullptr for none.
+    void SetTrap0Hook(std::function<bool()> hook) { trap0Hook = std::move(hook); }
+    bool SkipTrap0Callout() { return SetGuestRegister(15, paceSites.trap0Site + 4); }
+    // Wakes the UI task of an idle 68k app, as a nilEvent would: see WakeIdle in soc_IMX1.cpp.
+    bool WakeIdle();
+    // Native guest calls (zodiac_native.cpp). RunToGuestPc runs until the guest is about to run pc (either
+    // state) and leaves it stopped there as a pending call, like RunToPaceSyscall; false with none pending.
+    bool RunToGuestPc(uint32_t pc, uint64_t maxCycles, uint64_t cyclesPerSecond);
+    // Runs the native call set up in the registers (pc the entry, lr zodiacInjectedReturn in either state) until
+    // it returns there. It also stops on the callback addresses (ARM, at most 3) and calls callback with the
+    // address, which must move pc on (ReturnFromCallback). The caller puts the registers back.
+    bool ExecuteNative(uint64_t maxCycles, uint64_t cyclesPerSecond, const uint32_t* callbacks, unsigned count,
+                       const std::function<void(uint32_t)>& callback);
+    // Moves pc to target (bit 0 set for Thumb). A change of state goes through a bx r12 in the ROM, run with
+    // interrupts masked, and r12 and the masks are put back after it.
+    bool JumpGuest(uint32_t target);
+    // From an ARM callback stop: returns to lr through a bx lr in the ROM, as the callback itself would.
+    bool ReturnFromCallback();
+    // The pending call's site, set by RunToGuestPc; the machine stops there again after an ExecuteNative.
+    uint32_t NativeSite() const { return nativeSite; }
+    bool RomHas(uint32_t address, const void* code, size_t size) const;
+    const ZodiacPaceSites& PaceSites() const { return paceSites; }
+    bool GuestCallPending() const { return guestCall; }
+    bool GuestRegisters(uint32_t (&registers)[16], uint32_t* cpsr = nullptr) const {
+        return imx1MachineRegisters(machine, registers, cpsr);
+    }
+    bool SetGuestRegister(unsigned reg, uint32_t value) { return imx1MachineSetRegister(machine, reg, value); }
+    bool ReadGuest(uint32_t address, void* data, uint32_t size) {
+        return imx1MachineAccessMemory(machine, address, data, size, false);
+    }
+    bool WriteGuest(uint32_t address, const void* data, uint32_t size) {
+        return imx1MachineAccessMemory(machine, address, const_cast<void*>(data), size, true);
+    }
     void AnalogStick(float x, float y) override;
     void SetStickHostTurns(int turns) override;
     bool Save() override;
@@ -47,9 +106,10 @@ class SocIMX1 : public SoC {
     Buffer GetSavestate() override { return {.size = saved.size(), .data = saved.data()}; }
     void DumpMMU() override {}
     void JamKey(enum KeyId key, uint32_t durationMsec) override;
-    bool PrepareM68kSupport() override { return false; }
-    bool GuestServicesSupported() const override { return false; }
-    bool HardResetSupported() const override { return false; }
+    // Guest calls go through the ROM PACE, found at create.
+    bool PrepareM68kSupport() override { return paceSites.syscallSite && paceSites.trap0Site; }
+    bool GuestServicesSupported() const override { return paceSites.syscallSite && paceSites.trap0Site; }
+    bool HardResetSupported() const override { return true; }
     uint64_t GetTime() override;
     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
     void ResetPendingFrame() override { framePending = false; }
@@ -96,12 +156,17 @@ class SocIMX1 : public SoC {
     // only). With no peer both see RTS inactive.
     HostUartPort* SerialHostPort() override;
     HostInfraredPort* InfraredHostPort() override;
+    // A guest read (database list, export) runs between these and is rolled back after: the UARTs neither
+    // take the host's characters nor send theirs meanwhile, and the restore keeps the host peers.
+    void BeginSerialCheckpoint() override { ++serialCheckpoints; }
+    void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
     // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
     // bridge's cable puts the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
     // the host has work due, an idle guest's clock runs on to it instead of waiting.
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
-    bool UsbHostIoPaused() const { return halted || PowerSleeping(); }
+    // Also paused while a guest read runs in a checkpoint, as the guest work may be rolled back.
+    bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
     ~SocIMX1();
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
@@ -160,10 +225,22 @@ class SocIMX1 : public SoC {
     void OnSdRemount() override;
     void OnSdEject() override;
 
+   protected:
+    // A checkpoint restore puts back the host's held keys and pen, the cradle button and the sound stream as
+    // they were, and holds the sound output until the checkpoint ends; a real load or reset starts them over.
+    std::function<void()> CapturePeripheralInput() override;
+
    private:
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
+    // Runs until the pc stop or for ticks of guest time. True on the stop.
+    bool RunToStop(uint64_t ticks);
+    void EndGuestCall();
+    ZodiacPaceSites paceSites{};
+    bool guestCall{false};
+    uint32_t nativeSite{0};
+    std::function<bool()> trap0Hook;
     // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();
     bool ApplyHeadphones();
@@ -181,7 +258,9 @@ class SocIMX1 : public SoC {
     struct InfraredPort;
     std::unique_ptr<SerialPort> serialPort;
     std::unique_ptr<InfraredPort> infraredPort;
+    unsigned serialCheckpoints{0};
     // Puts the UARTs' RTS inputs and host peers back on the machine after it was made, loaded or reset.
+    // A checkpoint restore wires the same peers to the loaded UARTs, with the RTS levels the state has.
     void ApplyUartLines();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the

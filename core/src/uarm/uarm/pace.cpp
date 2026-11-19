@@ -57,6 +57,24 @@ namespace {
     bool faultedRestorable = false;
     bool priviledged = false;
 
+    PaceExternalAccess externalAccess = nullptr;
+    void* externalContext = nullptr;
+
+    // Big-endian 68k values in the external memory; false on a fault.
+    bool externalGet(uint32_t addr, uint32_t size, uint32_t& value) {
+        uint8_t bytes[4];
+        if (!externalAccess(externalContext, addr, bytes, size, false)) return false;
+        value = 0;
+        for (uint32_t i = 0; i < size; ++i) value = value << 8 | bytes[i];
+        return true;
+    }
+
+    bool externalPut(uint32_t addr, uint32_t size, uint32_t value) {
+        uint8_t bytes[4];
+        for (uint32_t i = 0; i < size; ++i) bytes[i] = uint8_t(value >> (8 * (size - 1 - i)));
+        return externalAccess(externalContext, addr, bytes, size, true);
+    }
+
     template <int size>
     uint32_t pace_get_le(uint32_t addr) {
         if (fsr != 0) return 0;
@@ -446,6 +464,17 @@ void paceInit(struct ArmMem* _mem, struct ArmMpu* mpu) {
     memorySystem.mpu = mpu;
 }
 
+void paceSetExternalMemory(PaceExternalAccess access, void* context) {
+    externalAccess = access;
+    externalContext = access ? context : nullptr;
+}
+
+void paceReleaseExternalMemory(void* context) {
+    if (externalAccess && externalContext == context) paceSetExternalMemory(nullptr, nullptr);
+}
+
+bool paceExternalMemoryActive() { return externalAccess != nullptr; }
+
 void paceSetStatePtr(uint32_t addr) { statePtr = addr; }
 
 void paceResetFsr() { fsr = 0; }
@@ -455,6 +484,11 @@ uint8_t paceGetFsr() { return fsr; }
 uint16_t paceGetLastOpcode() { return regs.lastOpcode; }
 
 uint8_t paceGet8(uint32_t addr) {
+    if (externalAccess) {
+        uint32_t value;
+        if ((8 > 8 && (addr & 1)) || !externalGet(addr, 1, value)) ERR("m68k read8 failed");
+        return uint8_t(value);
+    }
     fsr = 0;
     uint8_t result = uae_get8(addr);
 
@@ -463,6 +497,11 @@ uint8_t paceGet8(uint32_t addr) {
 }
 
 uint16_t paceGet16(uint32_t addr) {
+    if (externalAccess) {
+        uint32_t value;
+        if ((16 > 8 && (addr & 1)) || !externalGet(addr, 2, value)) ERR("m68k read16 failed");
+        return uint16_t(value);
+    }
     fsr = 0;
     uint16_t result = uae_get16(addr);
 
@@ -471,6 +510,11 @@ uint16_t paceGet16(uint32_t addr) {
 }
 
 uint32_t paceGet32(uint32_t addr) {
+    if (externalAccess) {
+        uint32_t value;
+        if ((32 > 8 && (addr & 1)) || !externalGet(addr, 4, value)) ERR("m68k read32 failed");
+        return uint32_t(value);
+    }
     fsr = 0;
     uint32_t result = uae_get32(addr);
 
@@ -479,6 +523,10 @@ uint32_t paceGet32(uint32_t addr) {
 }
 
 void paceSet8(uint32_t addr, uint8_t value) {
+    if (externalAccess) {
+        if ((8 > 8 && (addr & 1)) || !externalPut(addr, 1, value)) ERR("m68k write8 failed");
+        return;
+    }
     fsr = 0;
     uae_put8(addr, value);
 
@@ -486,6 +534,10 @@ void paceSet8(uint32_t addr, uint8_t value) {
 }
 
 void paceSet16(uint32_t addr, uint16_t value) {
+    if (externalAccess) {
+        if ((16 > 8 && (addr & 1)) || !externalPut(addr, 2, value)) ERR("m68k write16 failed");
+        return;
+    }
     fsr = 0;
     uae_put16(addr, value);
 
@@ -493,6 +545,10 @@ void paceSet16(uint32_t addr, uint16_t value) {
 }
 
 void paceSet32(uint32_t addr, uint32_t value) {
+    if (externalAccess) {
+        if ((32 > 8 && (addr & 1)) || !externalPut(addr, 4, value)) ERR("m68k write32 failed");
+        return;
+    }
     fsr = 0;
     uae_put32(addr, value);
 
@@ -500,6 +556,11 @@ void paceSet32(uint32_t addr, uint32_t value) {
 }
 
 void pacePush8(uint8_t value) {
+    if (externalAccess) {
+        m68k_areg(regs, 7) -= 2;
+        if ((m68k_areg(regs, 7) & 1) || !externalPut(m68k_areg(regs, 7), 1, value)) ERR("m68k push8 failed");
+        return;
+    }
     fsr = 0;
     m68k_areg(regs, 7) -= 2;
     uae_put8(m68k_areg(regs, 7), value);
@@ -508,6 +569,11 @@ void pacePush8(uint8_t value) {
 }
 
 void pacePush16(uint16_t value) {
+    if (externalAccess) {
+        m68k_areg(regs, 7) -= 2;
+        if ((m68k_areg(regs, 7) & 1) || !externalPut(m68k_areg(regs, 7), 2, value)) ERR("m68k push16 failed");
+        return;
+    }
     fsr = 0;
     m68k_areg(regs, 7) -= 2;
     uae_put16(m68k_areg(regs, 7), value);
@@ -516,6 +582,11 @@ void pacePush16(uint16_t value) {
 }
 
 void pacePush32(uint32_t value) {
+    if (externalAccess) {
+        m68k_areg(regs, 7) -= 4;
+        if ((m68k_areg(regs, 7) & 1) || !externalPut(m68k_areg(regs, 7), 4, value)) ERR("m68k push32 failed");
+        return;
+    }
     fsr = 0;
     m68k_areg(regs, 7) -= 4;
     uae_put32(m68k_areg(regs, 7), value);
@@ -532,7 +603,12 @@ bool paceLoad68kState() {
 
     struct MemcpyResult result;
 
-    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+    if (externalAccess) {
+        result.ok = externalAccess(externalContext, statePtr, state, sizeof(stateScratchBuffer), false);
+        result.faultAddr = statePtr;
+        result.fsr = 1;
+        result.wasWrite = false;
+    } else if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         memcpy_armToHost(state, statePtr, sizeof(stateScratchBuffer), priviledged, mem,
                          memorySystem.mmu, &result);
     } else {
@@ -581,7 +657,12 @@ bool paceSave68kState() {
 
     struct MemcpyResult result;
 
-    if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
+    if (externalAccess) {
+        result.ok = externalAccess(externalContext, statePtr, state, sizeof(stateScratchBuffer), true);
+        result.faultAddr = statePtr;
+        result.fsr = 1;
+        result.wasWrite = true;
+    } else if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         memcpy_hostToArm(statePtr, state, sizeof(stateScratchBuffer), priviledged, mem,
                          memorySystem.mmu, &result);
     } else {
@@ -607,6 +688,11 @@ void paceGetMemeryFault(uint32_t* _addr, bool* _wasWrite, uint_fast8_t* _fsr) {
 }
 
 uint16_t paceReadTrapWord() {
+    if (externalAccess) {
+        uint32_t value = 0;
+        fsr = externalGet(regs.pc - 2, 2, value) ? 0 : 1;
+        return uint16_t(value);
+    }
     fsr = 0;
     return uae_get16(regs.pc - 2);
 }

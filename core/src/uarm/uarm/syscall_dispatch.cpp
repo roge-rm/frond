@@ -9,7 +9,9 @@
 #include <memory>
 #ifndef __EMSCRIPTEN__
 #include "native_boundary.h"
+#include "soc_IMX1.h"
 #include "tg50_pace_session.h"
+#include <map>
 #endif
 
 #include "CPU.h"
@@ -94,6 +96,21 @@ struct ScratchState {
     ArmCpu* cpu;
 };
 
+#ifndef __EMSCRIPTEN__
+// A Zodiac guest call's frame: the machine's registers on the PACE site it starts from, the 68k state there and
+// the host-side 68k registers' owner before it (pace.h external memory).
+struct ZodiacFrame {
+    uint32_t registers[16], cpsr, state, paceStatePtr;
+    bool paceLive;
+    uint8_t m68k[0x4c];
+};
+
+static bool zodiacPaceAccess(void* context, uint32_t address, void* data, uint32_t size, bool write) {
+    auto* soc = static_cast<SocIMX1*>(context);
+    return write ? soc->WriteGuest(address, data, size) : soc->ReadGuest(address, data, size);
+}
+#endif
+
 struct SyscallDispatch {
     class SoC* soc;
 
@@ -105,14 +122,36 @@ struct SyscallDispatch {
     bool failed{false};
     std::unique_ptr<Tg50Pace::Session> tg50;
     std::exception_ptr tg50CallbackError;
+    // The Zodiac runs its ROM PACE in the i.MX1 machine: calls go through SocIMX1 and the 68k helpers in
+    // pace.h read its memory. paceLive: those helpers' registers are the current call's or callback's.
+    SocIMX1* zodiac{nullptr};
+    ZodiacFrame zodiacFrames[MAX_NEST_LEVEL];
+    bool zodiacPaceLive{false};
+    std::map<uint32_t, M68kTrapHandler> zodiacStubs;
 #endif
 };
+
+#ifndef __EMSCRIPTEN__
+// The pace.h helpers go to the Zodiac's memory only while its guest work needs them: a recovery scope, a call
+// or a callback registration. Everywhere else they stay on the PXA's own memory, so a PACE exception or a PXA
+// guest call never reaches the Zodiac, and a Zodiac that goes away leaves nothing behind.
+static void zodiacPaceOn(struct SyscallDispatch* sd) { paceSetExternalMemory(zodiacPaceAccess, sd->zodiac); }
+static void zodiacPaceOffWhenIdle(struct SyscallDispatch* sd) {
+    if (sd->recoverable || sd->nestLevel) return;
+    sd->zodiacPaceLive = false;
+    paceReleaseExternalMemory(sd->zodiac);
+}
+#endif
 
 struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
     struct SyscallDispatch* sd = new SyscallDispatch();
 
     sd->soc = soc;
     for (auto& scratchState : sd->scratchStates) scratchState.cpu = soc->GetCpu();
+#ifndef __EMSCRIPTEN__
+    // A PXA SoC calls this mid-construction, before its device is set, so its type can't be asked for.
+    sd->zodiac = dynamic_cast<SocIMX1*>(soc);
+#endif
 
     return sd;
 }
@@ -120,6 +159,7 @@ struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
 #ifndef __EMSCRIPTEN__
 void syscallDispatchBeginRecovery(struct SyscallDispatch* sd) {
     if (sd->nestLevel || sd->recoverable) ERR("nested injected-call recovery scope");
+    if (sd->zodiac) zodiacPaceOn(sd);
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
         sd->tg50 = std::make_unique<Tg50Pace::Session>(*sd->soc);
     sd->recoverable = true;
@@ -145,7 +185,13 @@ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
     if (sd->tg50) sd->tg50->AbortHandlers();
     sd->tg50.reset();
     sd->tg50CallbackError = nullptr;
-    cpuClearNativeRuntime(sd->soc->GetCpu());
+    if (sd->zodiac) {
+        sd->zodiacStubs.clear();
+        sd->zodiac->SetTrap0Hook(nullptr);
+        sd->zodiacPaceLive = false;
+        paceReleaseExternalMemory(sd->zodiac);
+    } else
+        cpuClearNativeRuntime(sd->soc->GetCpu());
     sd->recoverable = false;
     sd->failed = false;
     sd->nestLevel = 0;
@@ -155,7 +201,7 @@ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
 
 static void injectedCallTimeout(struct SyscallDispatch* sd) {
 #ifndef __EMSCRIPTEN__
-    if (sd->recoverable) {
+    if (sd->recoverable || sd->zodiac) {
         sd->failed = true;
         throw InjectedCallError();
     }
@@ -168,6 +214,31 @@ bool syscallDispatchInProgress(struct SyscallDispatch* sd) { return sd->nestLeve
 bool syscallDispatchM68kSupport(struct SyscallDispatch* sd) { return sd->soc->PrepareM68kSupport(); }
 
 bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode) {
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        if (sd->nestLevel || !syscallDispatchM68kSupport(sd)) return false;
+        auto* soc = sd->zodiac;
+        uint32_t registers[16];
+        // Already stopped at the app's EvtGetEvent (a call before this one).
+        bool ready = soc->GuestCallPending() && soc->GuestRegisters(registers) &&
+                     registers[15] == soc->PaceSites().syscallSite &&
+                     (registers[1] & 0xffff) == SYSCALL_68K_EVT_GET_EVENT;
+        if (!ready)
+            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
+                                          PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
+                                          PREPARE_INJECTED_CALL_IPS);
+        // A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself.
+        if (!ready && mode == SYSCALL_PREPARE_WAKE && soc->WakeIdle())
+            ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
+                                          PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
+                                          PREPARE_INJECTED_CALL_IPS);
+        // Inside a recovery scope the helpers stay on the Zodiac; with none (a look that opens no
+        // transaction) they go back, as nothing would turn them off later.
+        if (ready && sd->recoverable) zodiacPaceOn(sd);
+        else zodiacPaceOffWhenIdle(sd);
+        return ready;
+    }
+#endif
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50) {
 #ifndef __EMSCRIPTEN__
         try {
@@ -224,6 +295,15 @@ bool syscallDispatch_strncpy_toHost(struct SyscallDispatch* sd, void* dest, uint
     struct ArmCpu* cpu = sd->soc->GetCpu();
     syscallDispatchValidateMemory(sd, src, maxLen, false);
     memset(dest, 0, maxLen);
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        for (size_t i = 0; i < maxLen; i++) {
+            if (!sd->zodiac->ReadGuest(src + i, static_cast<char*>(dest) + i, 1)) return false;
+            if (static_cast<char*>(dest)[i] == '\0') break;
+        }
+        return true;
+    }
+#endif
 
     for (size_t i = 0; i < maxLen; i++) {
         if (!cpuMemOpExternal(cpu, dest, src, 1, false)) return false;
@@ -242,6 +322,7 @@ bool syscallDispatch_memcpy_fromHost(struct SyscallDispatch* sd, uint32_t dest, 
     MemcpyResult memcpyResult;
     syscallDispatchValidateMemory(sd, dest, size);
 #ifndef __EMSCRIPTEN__
+    if (sd->zodiac) return size > UINT32_MAX ? false : sd->zodiac->WriteGuest(dest, src, uint32_t(size));
     if (sd->tg50) {
         if (!cpuNativeBuffer(cpu, dest, const_cast<void*>(src), size, true, false)) {
             sd->failed = true;
@@ -262,6 +343,7 @@ bool syscallDispatch_memcpy_toHost(struct SyscallDispatch* sd, void* dest, uint3
     MemcpyResult memcpyResult;
     syscallDispatchValidateMemory(sd, src, size, false);
 #ifndef __EMSCRIPTEN__
+    if (sd->zodiac) return size > UINT32_MAX ? false : sd->zodiac->ReadGuest(src, dest, uint32_t(size));
     if (sd->tg50) {
         if (!cpuNativeBuffer(cpu, src, dest, size, false, false)) {
             sd->failed = true;
@@ -289,6 +371,7 @@ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
 #endif
     if (sd->nestLevel >= MAX_NEST_LEVEL) {
 #ifndef __EMSCRIPTEN__
+        if (sd->zodiac) throw std::runtime_error("Zodiac injected call nesting limit exceeded");
         if (sd->tg50) {
             sd->failed = true;
             sd->tg50->Fail();
@@ -298,6 +381,27 @@ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
         ERR("unable to dispatch syscall: max nest level reached\n");
     }
 
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        // From the syscall site, or the TRAP #0 site in a callback: r0 is the 68k state on both.
+        auto& frame = sd->zodiacFrames[sd->nestLevel];
+        auto* soc = sd->zodiac;
+        zodiacPaceOn(sd);
+        if (sd->zodiacPaceLive && !paceSave68kState()) throw std::runtime_error("Zodiac: could not write the 68k state");
+        frame.paceLive = sd->zodiacPaceLive;
+        frame.paceStatePtr = paceGetStatePtr();
+        if (!soc->GuestCallPending() || !soc->GuestRegisters(frame.registers, &frame.cpsr) ||
+            (frame.registers[15] != soc->PaceSites().syscallSite && frame.registers[15] != soc->PaceSites().trap0Site))
+            throw std::runtime_error("Zodiac: a guest call needs the guest on a PACE site");
+        frame.state = frame.registers[0];
+        if (!soc->ReadGuest(frame.state, frame.m68k, sizeof(frame.m68k)))
+            throw std::runtime_error("Zodiac: could not read the 68k state");
+        paceSetStatePtr(frame.state);
+        if (!paceLoad68kState()) throw std::runtime_error("Zodiac: could not read the 68k state");
+        sd->zodiacPaceLive = true;
+        return sd->nestLevel++;
+    }
+#endif
     const uint32_t nestLevel = sd->nestLevel++;
     sd->scratchStates[nestLevel].Save(type);
 
@@ -316,6 +420,23 @@ static void popState(struct SyscallDispatch* sd, size_t nestLevel) {
         ERR("bad nest level\n");
     }
 
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        // The 68k state and registers as they were, and the helpers back on the frame's owner.
+        const auto& frame = sd->zodiacFrames[nestLevel];
+        auto* soc = sd->zodiac;
+        bool ok = soc->WriteGuest(frame.state, frame.m68k, sizeof(frame.m68k));
+        for (unsigned r = 0; ok && r < 15; ++r) ok = soc->SetGuestRegister(r, frame.registers[r]);
+        ok = ok && soc->SetGuestRegister(16, frame.cpsr) && soc->SetGuestRegister(15, frame.registers[15]);
+        paceSetStatePtr(frame.paceStatePtr);
+        sd->zodiacPaceLive = frame.paceLive;
+        if (ok && frame.paceLive) ok = paceLoad68kState();
+        sd->nestLevel--;
+        zodiacPaceOffWhenIdle(sd);
+        if (!ok) throw std::runtime_error("Zodiac: could not put the guest back after a call");
+        return;
+    }
+#endif
     sd->scratchStates[nestLevel].Restore();
     sd->nestLevel--;
 }
@@ -331,6 +452,44 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
 #else
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
         throw std::runtime_error("TG50 guest callbacks are unavailable in this build");
+#endif
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        // The stub runs from the ROM PACE's TRAP #0 frame (SocIMX1::SetTrap0Hook), with the helpers on the
+        // 68k state there. The guest goes on at an RTS in the ROM, past the bl, so the ROM PACE returns
+        // itself: a native caller's return address is a magic one only its RTS knows.
+        sd->zodiacStubs[trampoline] = [=](struct ArmCpu* cpu, uint32_t) -> bool {
+            const uint32_t sp = paceGetAreg(7);
+            stub(cpu, sp + 4, [=]() { sd->deadMansSwitch = true; });
+            paceSetAreg(7, sp);
+            paceSetPC(sd->zodiac->PaceSites().rts68k);
+            return true;
+        };
+        zodiacPaceOn(sd);
+        paceSet16(trampoline, INSTRUCTION_M68K_TRAP0);
+        zodiacPaceOffWhenIdle(sd);
+        sd->zodiac->SetTrap0Hook([sd]() -> bool {
+            auto* soc = sd->zodiac;
+            uint32_t registers[16], pc;
+            if (!soc->GuestRegisters(registers) || !soc->ReadGuest(registers[0] + 0x44, &pc, 4)) return false;
+            const auto stub = sd->zodiacStubs.find(pc - 2);
+            uint8_t opcode[2];
+            if (stub == sd->zodiacStubs.end() || !soc->ReadGuest(pc - 2, opcode, 2) ||
+                (opcode[0] << 8 | opcode[1]) != INSTRUCTION_M68K_TRAP0) return false;
+            const uint32_t ownerState = paceGetStatePtr();
+            const bool ownerLive = sd->zodiacPaceLive;
+            paceSetStatePtr(registers[0]);
+            if (!paceLoad68kState()) throw std::runtime_error("Zodiac: could not read the callback's 68k state");
+            sd->zodiacPaceLive = true;
+            stub->second(nullptr, pc - 2);
+            if (!paceSave68kState() || !soc->SkipTrap0Callout())
+                throw std::runtime_error("Zodiac: could not return from a callback");
+            paceSetStatePtr(ownerState);
+            sd->zodiacPaceLive = ownerLive;
+            return true;
+        });
+        return;
+    }
 #endif
     M68kTrapHandler trapHandler = [=](struct ArmCpu* cpu, uint32_t address) -> bool {
 #ifndef __EMSCRIPTEN__
@@ -369,6 +528,11 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
 
 void syscallDispatchUnregisterM68kStub(struct SyscallDispatch* sd, uint32_t trampoline) {
 #ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        sd->zodiacStubs.erase(trampoline);
+        if (sd->zodiacStubs.empty()) sd->zodiac->SetTrap0Hook(nullptr);
+        return;
+    }
     if (sd->tg50) {
         if (sd->failed || std::uncaught_exceptions()) sd->tg50->Fail();
         sd->tg50->Unregister(trampoline);
@@ -436,6 +600,9 @@ static bool executeInjectedCall(struct SyscallDispatch* sd, uint32_t flags) {
 }
 
 static void rejectTg50NativeCall(struct SyscallDispatch* sd) {
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) throw std::runtime_error("Zodiac native ARM calls aren't available");
+#endif
     if (sd->soc->GetDeviceType() != DeviceType5::deviceTypeTG50) return;
 #ifndef __EMSCRIPTEN__
     if (sd->tg50) sd->tg50->Fail();
@@ -455,6 +622,28 @@ static void executeInjectedSyscall(struct SyscallDispatch* sd, uint32_t flags, u
 
 static void executeInjectedSyscall68k(struct SyscallDispatch* sd, uint32_t flags,
                                       uint16_t syscall) {
+#ifndef __EMSCRIPTEN__
+    if (sd->zodiac) {
+        // Through the ROM's dispatcher from the frame's site, with the arguments pushed on the 68k stack.
+        auto* soc = sd->zodiac;
+        const uint32_t state = sd->zodiacFrames[sd->nestLevel - 1].state;
+        if (!paceSave68kState() || !soc->SetGuestRegister(0, state) || !soc->SetGuestRegister(1, syscall) ||
+            !soc->SetGuestRegister(14, zodiacInjectedReturn) ||
+            !soc->SetGuestRegister(15, soc->PaceSites().calloutSyscall))
+            throw std::runtime_error("Zodiac: could not start a guest call");
+        const bool deadMansSwitchSaved = sd->deadMansSwitch;
+        while (true) {
+            sd->deadMansSwitch = false;
+            if (soc->ExecuteInjected(INJECTED_CALL_TIMEOUT_SEC * INJECTED_CALL_IPS, INJECTED_CALL_IPS)) break;
+            if (sd->deadMansSwitch) continue;
+            injectedCallTimeout(sd);
+        }
+        sd->deadMansSwitch = deadMansSwitchSaved;
+        paceSetStatePtr(state);
+        if (!paceLoad68kState()) throw std::runtime_error("Zodiac: could not read the 68k state after a call");
+        return;
+    }
+#endif
     struct ArmCpu* cpu = sd->soc->GetCpu();
     struct NAND* nand = sd->soc->GetNand();
     bool deadMansSwitchSaved = sd->deadMansSwitch;

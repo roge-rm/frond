@@ -14,14 +14,34 @@
 #include "db_backup.h"
 #include "db_list.h"
 #include "native_boundary.h"
+#include "zodiac_native.h"
+#include <type_traits>
 
 // Shared desktop/console workflow. Native preparation makes no guest calls and no guest writes;
 // all calls and allocations run under a recoverable whole-guest transaction. Host calls wake a
-// sleeping Palm (Wake) and an idle UI task, once (Prepare on the T|X, else the 68k preparation);
+// sleeping Palm (Wake) and an idle UI task, once (NativePrepare on the T|X and Zodiac, else the 68k preparation);
 // Ready is a look and never does either.
 namespace GuestDatabaseOps {
+// The native boundary: the Zodiac's (ZodiacNative) or the T|X's (NativeBoundary).
+inline bool NativePrepare(SoC& soc, bool wake = true) {
+    return ZodiacNative::Applies(soc) ? ZodiacNative::Prepare(soc, wake) : NativeBoundary::Prepare(soc, wake);
+}
+
+// Runs f with the device's native session.
+template <class F>
+auto WithSession(SoC& soc, F&& f) {
+    if (ZodiacNative::Applies(soc)) {
+        ZodiacNative::Session session(soc);
+        return f(session);
+    }
+    NativeBoundary::Session session(soc);
+    return f(session);
+}
+template <class S>
+using DatabaseOf = NativeDatabase<std::decay_t<S>>;
+
 inline bool Ready(SoC& soc) {
-    return NativeBoundary::Prepare(soc, false) || syscallDispatchPrepare(soc.GetSyscallDispatch(), SYSCALL_PREPARE_LOOK);
+    return NativePrepare(soc, false) || syscallDispatchPrepare(soc.GetSyscallDispatch(), SYSCALL_PREPARE_LOOK);
 }
 
 // Host calls the user starts (install, launch, delete, export, card files) wake a sleeping Palm
@@ -55,9 +75,10 @@ inline bool Wake(SoC& soc) {
     return !frondNative::guestAsleep(soc);
 }
 
-// After a failed NativeBoundary::Prepare: the T|X has already woken the UI task there.
+// After a failed NativePrepare: the T|X and the Zodiac have already woken the UI task there.
 inline SyscallPrepareMode FallbackMode(SoC& soc) {
-    return soc.GetDeviceType() == DeviceType5::deviceTypeTX ? SYSCALL_PREPARE_AFTER_NATIVE : SYSCALL_PREPARE_WAKE;
+    return soc.GetDeviceType() == DeviceType5::deviceTypeTX || ZodiacNative::Applies(soc) ? SYSCALL_PREPARE_AFTER_NATIVE
+                                                                                          : SYSCALL_PREPARE_WAKE;
 }
 
 // On a device with its store in internal NAND (NVFS: the T|X and E2), Palm OS writes a changed
@@ -102,7 +123,7 @@ inline void SettleBeforeReset(SoC& soc, uint64_t delay = 3000000000, uint64_t li
 
 inline int InstallNow(SoC& soc, size_t size, void* data) {
     if (!Wake(soc)) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
-    if (!NativeBoundary::Prepare(soc)) {
+    if (!NativePrepare(soc)) {
         if (!syscallDispatchM68kSupport(soc.GetSyscallDispatch())) return DB_INSTALL_RESULT_ERR_NOT_SUPPORTED;
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return DB_INSTALL_RESULT_ERR_NOT_CURRENTLY_POSSIBLE;
         {
@@ -125,22 +146,26 @@ inline int InstallNow(SoC& soc, size_t size, void* data) {
     }
     {
         ReadOnlyGuest transaction(soc);
-        NativeBoundary::Session session(soc);
-        NativeDatabase<NativeBoundary::Session> database(session);
-        const int result = database.Install(static_cast<uint8_t*>(data), size);
+        const int result = WithSession(soc, [&](auto& session) {
+            DatabaseOf<decltype(session)> database(session);
+            const int result = database.Install(static_cast<uint8_t*>(data), size);
+            if (result < 0) return result;
+            database.Finish();
+            session.Close();
+            return result;
+        });
         if (result < 0) return result;
-        database.Finish();
-        session.Close();
         transaction.Commit();
         if (result != DB_INSTALL_RESULT_OK) return result;
     }
     try {
         ReadOnlyGuest transaction(soc);
-        NativeBoundary::Session session(soc);
-        NativeDatabase<NativeBoundary::Session> database(session);
-        database.FinishInstall(static_cast<const uint8_t*>(data), size);
-        database.Finish();
-        session.Close();
+        WithSession(soc, [&](auto& session) {
+            DatabaseOf<decltype(session)> database(session);
+            database.FinishInstall(static_cast<const uint8_t*>(data), size);
+            database.Finish();
+            session.Close();
+        });
         transaction.Commit();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "install: sync notify or launcher relaunch failed, the database is installed: %s\n", error.what());
@@ -157,7 +182,7 @@ inline int Install(SoC& soc, size_t size, void* data) {
 enum class LaunchResult { notReady, failed, launched };
 inline LaunchResult Launch(SoC& soc, const std::string& name) {
     if (!Wake(soc)) return LaunchResult::notReady;
-    if (!NativeBoundary::Prepare(soc)) {
+    if (!NativePrepare(soc)) {
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return LaunchResult::notReady;
         ReadOnlyGuest transaction(soc);
         if (!launchAppByName(soc.GetSyscallDispatch(), name.c_str())) return LaunchResult::failed;
@@ -165,11 +190,14 @@ inline LaunchResult Launch(SoC& soc, const std::string& name) {
         return LaunchResult::launched;
     }
     ReadOnlyGuest transaction(soc);
-    NativeBoundary::Session session(soc);
-    NativeDatabase<NativeBoundary::Session> database(session);
-    if (!database.Launch(name)) return LaunchResult::failed;
-    database.Finish();
-    session.Close();
+    const bool launched = WithSession(soc, [&](auto& session) {
+        DatabaseOf<decltype(session)> database(session);
+        if (!database.Launch(name)) return false;
+        database.Finish();
+        session.Close();
+        return true;
+    });
+    if (!launched) return LaunchResult::failed;
     transaction.Commit();
     return LaunchResult::launched;
 }
@@ -181,7 +209,7 @@ inline std::optional<DeleteDbResult> DeleteNow(SoC& soc, const std::string& name
     if (!Wake(soc)) return std::nullopt;
     bool application = false;
     DeleteDbResult result;
-    if (!NativeBoundary::Prepare(soc)) {
+    if (!NativePrepare(soc)) {
         if (!syscallDispatchPrepare(soc.GetSyscallDispatch(), FallbackMode(soc))) return std::nullopt;
         {
             ReadOnlyGuest transaction(soc);
@@ -201,21 +229,24 @@ inline std::optional<DeleteDbResult> DeleteNow(SoC& soc, const std::string& name
     }
     {
         ReadOnlyGuest transaction(soc);
-        NativeBoundary::Session session(soc);
-        NativeDatabase<NativeBoundary::Session> database(session);
-        result = database.Delete(name, &application);
-        database.Finish();
-        session.Close();
+        result = WithSession(soc, [&](auto& session) {
+            DatabaseOf<decltype(session)> database(session);
+            const DeleteDbResult result = database.Delete(name, &application);
+            database.Finish();
+            session.Close();
+            return result;
+        });
         if (result == DeleteDbResult::deleted) transaction.Commit();
     }
     if (result == DeleteDbResult::deleted && application) {
         try {
             ReadOnlyGuest transaction(soc);
-            NativeBoundary::Session session(soc);
-            NativeDatabase<NativeBoundary::Session> database(session);
-            database.RelaunchLauncher();
-            database.Finish();
-            session.Close();
+            WithSession(soc, [&](auto& session) {
+                DatabaseOf<decltype(session)> database(session);
+                database.RelaunchLauncher();
+                database.Finish();
+                session.Close();
+            });
             transaction.Commit();
         } catch (const std::exception& error) {
             std::fprintf(stderr, "delete: launcher relaunch failed, the database is deleted: %s\n", error.what());
@@ -235,14 +266,15 @@ inline std::optional<DeleteDbResult> Delete(SoC& soc, const std::string& name) {
 // is rolled back afterwards like Export. Returns false only when no supported boundary is available.
 inline bool List(SoC& soc, DbMetadataList& list, bool wake = false) {
     if (wake ? !Wake(soc) : frondNative::guestAsleep(soc)) return false;
-    if (NativeBoundary::Prepare(soc)) {
+    if (NativePrepare(soc)) {
         ReadOnlyGuest transaction(soc);
-        NativeBoundary::Session session(soc);
-        NativeDatabase<NativeBoundary::Session> database(session);
-        auto found = database.List();
-        database.Finish();
-        session.Close();
-        list = std::move(found);
+        list = WithSession(soc, [&](auto& session) {
+            DatabaseOf<decltype(session)> database(session);
+            auto found = database.List();
+            database.Finish();
+            session.Close();
+            return found;
+        });
         return true;
     }
     GuestExport guest(soc, FallbackMode(soc));
@@ -261,14 +293,15 @@ inline bool List(SoC& soc, DbMetadataList& list, bool wake = false) {
 inline bool Export(SoC& soc, const std::string& name, std::vector<uint8_t>& bytes,
                    int backupType = DbBackup::BACKUP_TYPE_RAM) {
     if (!Wake(soc)) return false;
-    if (backupType == DbBackup::BACKUP_TYPE_RAM && NativeBoundary::Prepare(soc)) {
+    if (backupType == DbBackup::BACKUP_TYPE_RAM && NativePrepare(soc)) {
         ReadOnlyGuest transaction(soc);
-        NativeBoundary::Session session(soc);
-        NativeDatabase<NativeBoundary::Session> database(session);
-        auto archive = database.Export(name);
-        database.Finish();
-        session.Close();
-        bytes = std::move(archive);
+        bytes = WithSession(soc, [&](auto& session) {
+            DatabaseOf<decltype(session)> database(session);
+            auto archive = database.Export(name);
+            database.Finish();
+            session.Close();
+            return archive;
+        });
         return true;
     }
     GuestExport guest(soc, backupType == DbBackup::BACKUP_TYPE_RAM ? FallbackMode(soc) : SYSCALL_PREPARE_WAKE);

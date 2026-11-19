@@ -58,10 +58,8 @@ inline bool linkedCards(Device device) {
 // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
 inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 
-// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
-inline bool guestServices(Device device) {
-    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
-}
+// Install, the application list and hard reset. Every Palm OS device has them; callers also check palmOs.
+inline bool guestServices(Device) { return true; }
 // Install, the application list and hard reset are Palm OS guest services: a Windows CE device has none, so
 // they're hidden for it rather than greyed. Callers check this and guestServices.
 inline bool palmOs(Device device) {

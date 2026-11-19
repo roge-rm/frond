@@ -1,5 +1,7 @@
 #include "soc_IMX1.h"
 
+#include "syscall_dispatch.h"
+
 #include <memory>
 
 #include "GunzipContext.h"
@@ -13,6 +15,7 @@
 
 #include "device_configuration.h"
 #include "imx1_bootstrap.h"
+#include "pace.h"
 #include "HostUartPort.h"
 #include "sdcard.h"
 #include "vSD.h"
@@ -135,6 +138,10 @@ struct SocIMX1::SerialPort final : HostUartPort {
         wasOn = Line().receiverOn;
         return true;
     }
+    // The same peer on the UART a checkpoint restore loaded.
+    void Rewire() {
+        if (context) imx1MachineSetUartPeer(soc.machine, 1, Transmit, Pending, Take, this);
+    }
     void Detach() override {
         imx1MachineSetUartPeer(soc.machine, 1, nullptr, nullptr, nullptr, nullptr);
         if (!soc.halted) imx1MachineSetUartRts(soc.machine, 1, false);
@@ -167,11 +174,11 @@ struct SocIMX1::SerialPort final : HostUartPort {
     }
     static void Transmit(void* c, uint8_t character, bool) {
         auto& self = *static_cast<SerialPort*>(c);
-        if (self.write) self.write(character, self.context);
+        if (self.write && !self.soc.serialCheckpoints) self.write(character, self.context);
     }
     static bool Pending(void* c) {
         auto& self = *static_cast<SerialPort*>(c);
-        return self.active && self.active(self.context) && self.Line().ctsLow;
+        return !self.soc.serialCheckpoints && self.active && self.active(self.context) && self.Line().ctsLow;
     }
     static bool Take(void* c, uint8_t& character) {
         auto& self = *static_cast<SerialPort*>(c);
@@ -226,11 +233,12 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     bool KeyboardAttached() override { return false; }
     static void Transmit(void* c, uint8_t character, bool infrared) {
         auto& self = *static_cast<InfraredPort*>(c);
-        if (infrared && self.hooks.write) self.hooks.write(character, self.hooks.context);
+        if (infrared && self.hooks.write && !self.soc.serialCheckpoints) self.hooks.write(character, self.hooks.context);
     }
     static bool Pending(void* c) {
         auto& self = *static_cast<InfraredPort*>(c);
-        return self.hooks.pending && self.Line().infrared && self.hooks.pending(self.hooks.context);
+        return !self.soc.serialCheckpoints && self.hooks.pending && self.Line().infrared &&
+               self.hooks.pending(self.hooks.context);
     }
     static bool Take(void* c, uint8_t& character) {
         auto& self = *static_cast<InfraredPort*>(c);
@@ -242,7 +250,7 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
 };
 
-SocIMX1::~SocIMX1() = default;
+SocIMX1::~SocIMX1() { paceReleaseExternalMemory(this); }
 
 HostUartPort* SocIMX1::SerialHostPort() {
     if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
@@ -258,6 +266,11 @@ HostInfraredPort* SocIMX1::InfraredHostPort() {
 // send with CTS flow control waits (the ROM's write loop times out) and USR1 reads as on a real port.
 void SocIMX1::ApplyUartLines() {
     if (halted) return;
+    if (RestoringCheckpoint()) {
+        if (serialPort) serialPort->Rewire();
+        if (infraredPort && infraredPort->hooks.context && !infraredPort->Wire()) infraredPort->hooks = {};
+        return;
+    }
     imx1MachineSetUartRts(machine, 1, false);
     imx1MachineSetUartRts(machine, 2, false);
     if (serialPort) serialPort->Replaced();
@@ -289,6 +302,9 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         error = "the i.MX1 machine's power-on state could not be kept";
         return nullptr;
     }
+    // Guest calls need the ROM PACE; without it they stay unavailable.
+    paceDiscoverZodiac(&soc->paceSites, zodiacRomBase, soc->rom.data(), soc->rom.size());
+    soc->syscallDispatch = initSyscallDispatch(soc.get());
     soc->pcm.machine = soc->machine;
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
@@ -371,19 +387,42 @@ void SocIMX1::SyncSecondCard() {
 }
 
 void SocIMX1::StateChanged() {
-    pcm.restart();
+    // A load or reset ends a guest call.
+    if (machine) EndGuestCall();
     const auto status = imx1MachineGetStatus(machine);
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
     redraw = true;
+    wasStopped = imx1MachineSystemStopped(machine);
+    // A checkpoint restore has put the host side back already (CapturePeripheralInput).
+    if (RestoringCheckpoint()) return;
+    pcm.restart();
     // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
     cradleDown = false;
     hotSyncTicks = 0;
-    wasStopped = imx1MachineSystemStopped(machine);
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
     // A USB host on the bus starts again with the new machine.
     if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+}
+
+std::function<void()> SocIMX1::CapturePeripheralInput() {
+    // Holds the sound output for as long as the checkpoint can still be restored.
+    struct Fence {
+        SocIMX1& soc;
+        std::weak_ptr<int> lifetime;
+        explicit Fence(SocIMX1& soc) : soc(soc), lifetime(soc.checkpointLifetime) { ++soc.pcm.fenced; }
+        ~Fence() {
+            if (!lifetime.expired() && soc.pcm.fenced) --soc.pcm.fenced;
+        }
+    };
+    auto fence = std::make_shared<Fence>(*this);
+    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound] {
+        this->input = input;
+        this->cradleDown = cradleDown;
+        this->hotSyncTicks = hotSyncTicks;
+        pcm.sound = sound;
+    };
 }
 
 UsbDevicePort SocIMX1::GetUsbPort() {
@@ -462,6 +501,11 @@ void SocIMX1::Reset() {
     if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
     card2Sync = true;
     SyncSecondCard();
+}
+
+void SocIMX1::HardResetHolding(uint32_t holdMs) {
+    Reset();
+    input.jamAfterRelease(unsigned(zodiacControlFor(keyIdPower)), holdMs);
 }
 
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
@@ -777,7 +821,93 @@ std::string SocIMX1::StopText() const {
 // a CS5 wait, a PLL stall or a delay skip can carry a slice a little past its bound. Run only stops at a slice
 // end, so where the calls are cut and how busy the host is change nothing in the machine. A run can pass the
 // time asked for by up to sliceTicks (about 1 ms) and that carry; the time returned counts it.
+bool SocIMX1::RunToStop(uint64_t ticks) {
+    if (halted) return false;
+    PumpInput();
+    const auto start = imx1MachineGetStatus(machine);
+    auto now = start;
+    Imx1MachineBounds bounds;
+    for (;;) {
+        bounds.retired = 4000;
+        bounds.work = 20000;
+        bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
+        const auto run = imx1MachineRunBounded(machine, bounds);
+        now = run.total;
+        if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
+            run.reason == Imx1MachineYield::invalidBounds) {
+            halted = true;
+            std::cerr << "zodiac: the machine stopped in a guest call: " << StopText() << std::endl;
+            break;
+        }
+        if (run.reason == Imx1MachineYield::pcStop || run.reason == Imx1MachineYield::waiting) break;
+        if (now.time.ticks - start.time.ticks >= ticks) break;
+    }
+    input.advance(now.time.ticks - start.time.ticks);
+    return !halted && imx1MachineAtPcStop(machine);
+}
+
+void SocIMX1::EndGuestCall() {
+    imx1MachineClearPcStop(machine);
+    guestCall = false;
+    nativeSite = 0;
+}
+
+bool SocIMX1::RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!paceSites.syscallSite || halted || !cyclesPerSecond) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    if (!imx1MachineSetPcStop(machine, paceSites.syscallSite)) return false;
+    guestCall = true;
+    nativeSite = 0;
+    for (;;) {
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        const uint64_t passed = before - start;
+        if (passed >= ticks) break;
+        if (!RunToStop(ticks - passed)) {
+            // A wait for an interrupt ends the run early; go on while guest time moves.
+            if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+            continue;
+        }
+        uint32_t registers[16];
+        if (GuestRegisters(registers) && (registers[1] & 0xffff) == trap) return true;
+        imx1MachineLeavePcStop(machine);
+    }
+    EndGuestCall();
+    return false;
+}
+
+bool SocIMX1::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!guestCall || halted || !cyclesPerSecond) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    bool returned = false;
+    for (;;) {
+        // A hook may make injected calls of its own, which set the stops for themselves.
+        const uint32_t stops[] = {zodiacInjectedReturn, paceSites.trap0Site};
+        if (!imx1MachineSetPcStops(machine, stops, trap0Hook ? 2 : 1)) break;
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        if (before - start >= ticks) break;
+        if (!RunToStop(ticks - (before - start))) {
+            // A wait for an interrupt ends the run early; go on while guest time moves.
+            if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+            continue;
+        }
+        uint32_t registers[16];
+        if (!GuestRegisters(registers)) break;
+        if (registers[15] == zodiacInjectedReturn) {
+            returned = true;
+            break;
+        }
+        if (!trap0Hook()) imx1MachineLeavePcStop(machine);
+    }
+    // The caller puts the registers back on the syscall site, where the machine stops again.
+    if (!halted) imx1MachineSetPcStop(machine, paceSites.syscallSite);
+    return returned;
+}
+
 uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    // A run after a guest call lets the guest go on from the syscall site.
+    if (guestCall) EndGuestCall();
     if (halted || !cyclesPerSecond) {
         keyEventQueue->Clear();
         penEventQueue->Clear();
@@ -836,4 +966,125 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % ticksPerSecond);
     return uint64_t(std::min<__uint128_t>(credit / ticksPerSecond, UINT64_MAX));
+}
+
+// Facts of the 1.1 ROM: the DAL's doze routine, which the idle loop calls in SVC mode with IRQs off, in Thumb, and
+// EvtWakeup's Boot table glue (entry 0x2e8, as on the T|X and Zire 72) and its Thumb code, which sets the event
+// manager's wake flag and wakes the UI task.
+namespace {
+constexpr uint32_t zodiacDoze = 0x20094534, zodiacEvtWakeupGlue = 0x200706c0, zodiacEvtWakeup = 0x2005d754;
+constexpr uint16_t zodiacDozeCode[] = {0xb570, 0x4c30, 0x2501, 0x4648, 0x6800, 0x6800, 0x4e15, 0x1836};
+constexpr uint32_t zodiacEvtWakeupGlueCode[] = {0xe59fc004, 0xe08cc00f, 0xe12fff1c, 0xfffed089};
+constexpr uint16_t zodiacEvtWakeupCode[] = {0xb580, 0x4649, 0x6809, 0x6849, 0x483f, 0x1840, 0x6bc1, 0x2001,
+                                            0x7008, 0xf017, 0xfd1b, 0xbc80, 0xbc08, 0x4718};
+
+bool romHas(const std::vector<uint8_t>& rom, uint32_t address, const void* code, size_t size) {
+    return address >= zodiacRomBase && address - zodiacRomBase + size <= rom.size() &&
+           !std::memcmp(rom.data() + (address - zodiacRomBase), code, size);
+}
+}  // namespace
+
+// Runs to the idle loop's next doze and calls EvtWakeup there in its place, as an interrupt routine would, so a
+// UI task waiting with no timeout gets a nilEvent. EvtWakeup returns to the doze's caller. At most half a second
+// of guest time; false with nothing changed if the ROM differs or the guest doesn't idle.
+bool SocIMX1::WakeIdle() {
+    if (halted || guestCall || !romHas(rom, zodiacDoze, zodiacDozeCode, sizeof(zodiacDozeCode)) ||
+        !romHas(rom, zodiacEvtWakeupGlue, zodiacEvtWakeupGlueCode, sizeof(zodiacEvtWakeupGlueCode)) ||
+        !romHas(rom, zodiacEvtWakeup, zodiacEvtWakeupCode, sizeof(zodiacEvtWakeupCode)) ||
+        !imx1MachineSetPcStop(machine, zodiacDoze))
+        return false;
+    const bool stopped = RunToStop(ticksPerSecond / 2);
+    imx1MachineClearPcStop(machine);
+    uint32_t registers[16], cpsr, boot = 0, hook = 0;
+    // Thumb, SVC mode, IRQs off, with the system r9: its Boot table holds the glue, unless a patch replaced it,
+    // which is skipped like the T|X's wake does.
+    if (!stopped || !GuestRegisters(registers, &cpsr) || registers[15] != (zodiacDoze | 1) ||
+        (cpsr & 0xbf) != 0xb3 || !ReadGuest(registers[9] - 8, &boot, 4) || !ReadGuest(boot + 0x2e8, &hook, 4))
+        return false;
+    if (hook != zodiacEvtWakeupGlue)
+        std::cerr << "zodiac: EvtWakeup is patched, calling its ROM routine" << std::endl;
+    return SetGuestRegister(15, zodiacEvtWakeup | 1);
+}
+
+// Facts of the 1.1 ROM: a bx r12 in ARM (the EvtWakeup glue's) and in Thumb, and a bx lr in ARM.
+namespace {
+constexpr uint32_t zodiacArmBxR12 = 0x200706c8, zodiacThumbBxR12 = 0x200b3328, zodiacArmBxLr = 0x20077120;
+constexpr uint32_t armBxR12 = 0xe12fff1c, armBxLr = 0xe12fff1e;
+constexpr uint16_t thumbBxR12 = 0x4760;
+}  // namespace
+
+bool SocIMX1::RomHas(uint32_t address, const void* code, size_t size) const { return romHas(rom, address, code, size); }
+
+bool SocIMX1::RunToGuestPc(uint32_t pc, uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (halted || guestCall || !cyclesPerSecond || !imx1MachineSetPcStop(machine, pc)) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    guestCall = true;
+    for (;;) {
+        const uint64_t passed = imx1MachineGetStatus(machine).time.ticks - start;
+        if (passed >= ticks) break;
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        if (RunToStop(ticks - passed)) {
+            nativeSite = pc & ~1u;
+            return true;
+        }
+        // A wait for an interrupt ends the run early; go on while guest time moves.
+        if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+    }
+    EndGuestCall();
+    return false;
+}
+
+bool SocIMX1::JumpGuest(uint32_t target) {
+    uint32_t registers[16], cpsr;
+    if (halted || !GuestRegisters(registers, &cpsr)) return false;
+    const bool thumb = registers[15] & 1;
+    if (thumb == bool(target & 1)) return SetGuestRegister(15, target);
+    if (!(thumb ? RomHas(zodiacThumbBxR12, &thumbBxR12, 2) : RomHas(zodiacArmBxR12, &armBxR12, 4))) return false;
+    // One instruction with IRQ and FIQ masked, so no interrupt or task switch comes between.
+    if (!SetGuestRegister(16, cpsr | 0xc0) || !SetGuestRegister(12, target) ||
+        !SetGuestRegister(15, thumb ? zodiacThumbBxR12 | 1 : zodiacArmBxR12) || !imx1MachineSetPcStop(machine, target))
+        return false;
+    const bool stopped = RunToStop(ticksPerSecond / 100);
+    uint32_t after[16];
+    return stopped && GuestRegisters(after) && after[15] == target && SetGuestRegister(12, registers[12]) &&
+           SetGuestRegister(16, cpsr);
+}
+
+bool SocIMX1::ReturnFromCallback() {
+    uint32_t registers[16];
+    return GuestRegisters(registers) && !(registers[15] & 1) && RomHas(zodiacArmBxLr, &armBxLr, 4) &&
+           SetGuestRegister(15, zodiacArmBxLr);
+}
+
+bool SocIMX1::ExecuteNative(uint64_t maxCycles, uint64_t cyclesPerSecond, const uint32_t* callbacks, unsigned count,
+                            const std::function<void(uint32_t)>& callback) {
+    if (!guestCall || halted || !cyclesPerSecond || count + 1 > imx1MachineMaximumPcStops) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    bool returned = false;
+    for (;;) {
+        // A callback may make calls of its own, which set the stops for themselves.
+        uint32_t stops[imx1MachineMaximumPcStops] = {zodiacInjectedReturn};
+        for (unsigned i = 0; i < count; ++i) stops[i + 1] = callbacks[i];
+        if (!imx1MachineSetPcStops(machine, stops, count + 1)) break;
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        if (before - start >= ticks) break;
+        if (!RunToStop(ticks - (before - start))) {
+            if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+            continue;
+        }
+        uint32_t registers[16];
+        if (!GuestRegisters(registers)) break;
+        const uint32_t pc = registers[15] & ~1u;
+        if (pc == zodiacInjectedReturn) {
+            returned = true;
+            break;
+        }
+        bool hook = false;
+        for (unsigned i = 0; i < count; ++i) hook |= pc == callbacks[i];
+        if (hook) callback(pc);
+        else imx1MachineLeavePcStop(machine);
+    }
+    return returned;
 }

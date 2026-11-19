@@ -102,7 +102,8 @@ class Run:
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(address)
         listener.listen(1)
-        cfg = SMOKE[device]
+        # A device with no smoke entry runs from its session alone.
+        cfg = SMOKE[device] if device in SMOKE or not session else {}
         if session:
             boot = [str(session)] + (['--device', cfg.get('device', device)] if device != 'palm-tx' else [])
         else:
@@ -117,18 +118,50 @@ class Run:
         else:
             command.append('--no-sound')
         self.log = (work / 'core.log').open('ab')
+        self.log_start = self.log.tell()
         self.connection = None
         self.process = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                         env=env, start_new_session=True)
         try:
-            listener.settimeout(300)  # includes waiting for an emulator slot
-            self.connection, _ = listener.accept()
+            # 300 s for the core to connect, counted from when it has an emulator slot: while heavy waits for
+            # one, the wait goes on as long as the process does.
+            listener.settimeout(1)
+            end = time.monotonic() + 300
+            while True:
+                try:
+                    self.connection, _ = listener.accept()
+                    break
+                except socket.timeout:
+                    pass
+                need(self.process.poll() is None, f'the core exited ({self.process.returncode}) before it connected')
+                if self.slot_queued():
+                    end = time.monotonic() + 300
+                need(time.monotonic() < end, 'the core did not connect in 300 s')
+        except BaseException:
+            frond_run.stop(self.process)
+            self.log.close()
+            raise
         finally:
             listener.close()
+        # The run's time limit starts once the core is up.
+        self.deadline = time.monotonic() + timeout
         self.control = frond_run.Control(self.connection, self.process, self.deadline, 60, [])
         need(self.control.line(self.deadline) == ['0', 'event', 'ready', ''], 'no ready event')
         self.boot = SmokeBoot(self.control, work)
         self.tap, self.wait_frame, self.frame = self.boot.tap, self.boot.wait_frame, self.boot.frame
+
+    def slot_queued(self):
+        """Whether heavy is still waiting for an emulator slot: its waiting note and the slot list are all the
+        log has so far."""
+        with (self.work / 'core.log').open('rb') as log:
+            log.seek(self.log_start)
+            lines = log.read().decode(errors='replace').splitlines()
+        return bool(lines) and lines[0].startswith('heavy: all ') and all(
+            line.startswith(('heavy: ', 'emulator ', 'build ')) for line in lines)
+
+    def restart_clock(self, timeout):
+        """The run's time limit starts again from now, for a core that waited while another started."""
+        self.deadline = self.control.deadline = time.monotonic() + timeout
 
     def ready(self, seconds=60):
         self.control.retry_ready('guest-ready', '', seconds)

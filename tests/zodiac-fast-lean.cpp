@@ -435,7 +435,7 @@ struct Lines {
     Outcome out;
     std::vector<Imx1ProbeInterrupt> entries;
 };
-Lines runLines(const std::vector<uint32_t>& words, bool fast, bool stepped) {
+Lines runLines(const std::vector<uint32_t>& words, bool fast, bool stepped, unsigned uartRts = 0) {
     Entries e;
     auto o = graphicsOptions(false);
     o.idleStepped = stepped;
@@ -446,6 +446,7 @@ Lines runLines(const std::vector<uint32_t>& words, bool fast, bool stepped) {
                                        Imx1ProbeEntry::linkedAlias, false, o, nullptr, nullptr, &error);
     assert(m);
     if (fast) assert(imx1MachineSetFastEngine(m, true));
+    if (uartRts) assert(imx1MachineSetUartRts(m, uartRts, true) == Imx1BootstrapAccess::ok);
     const auto out = finish(m);
     return {out, e.all};
 }
@@ -1715,6 +1716,149 @@ void scanPollUser() {
     same(plain, fast);
     same(exact, fast);
 }
+// The ROM serial driver's character loop (204d0ec4-204d0f3c): a character to UTXD, then a poll of USR1 for TRDY
+// (ldr, tst, beq back) until the FIFO takes the next. Here on UART2 at 256 PERCLK1 cycles a bit, 48 characters, then
+// timer 1's count. irqComp, when not 0, also has timer 2 raise an IRQ at that PERCLK1 count. pollPc is the load's.
+struct UartPollGuest {
+    std::vector<uint32_t> words;
+    uint32_t pollPc;
+};
+UartPollGuest uartPollGuest(uint32_t irqComp) {
+    GraphicsGuest g;
+    g.setup(); g.display(); g.clocks();
+    g.store(0x00202004, 15);                              // TPRER1
+    g.store(0x00202000, 0x03);                            // TCTL1: on, PERCLK1
+    g.store(0x00207090, (2u << 10) | (5u << 7) | 1);      // UFCR: TXTL 2, divider 1, RXTL 1
+    g.store(0x002070a4, 0);                               // UBIR
+    g.store(0x002070a8, 15);                              // UBMR: a bit is 16 x 16 PERCLK1 cycles
+    g.store(0x00207080, 5);                               // UCR1: UARTEN, UARTCLKEN
+    g.store(0x00207084, 0x4000 | 0x20 | 4 | 1);           // UCR2: IRTS, 8 bits, TXEN, SRST off
+    if (irqComp) {
+        g.store(0x00223008, 58);                          // AITC: timer 2 on
+        g.word(g.cursor, 0xe321f013); g.cursor += 4; ++g.retired;  // IRQ and FIQ on
+        g.store(0x00203008, irqComp); g.store(0x00203000, 0x13);  // timer 2: PERCLK1, compare IRQ
+    }
+    std::vector<uint32_t> words;
+    load(words, 4, 0x00207000); load(words, 6, 0x00202000); load(words, 7, 48);
+    words.push_back(0xe3a08041);                          // mov r8, #'A'
+    words.push_back(0xe3a09000);                          // mov r9, #0
+    const size_t top = words.size();
+    words.push_back(0xe5848040);                          // loop: str r8, [r4, #0x40] (UTXD)
+    words.push_back(0xe2888001);                          // add r8, r8, #1
+    const size_t poll = words.size();
+    words.push_back(0xe5940094);                          // poll: ldr r0, [r4, #0x94] (USR1)
+    words.push_back(0xe3100d80);                          // tst r0, #0x2000 (TRDY)
+    words.push_back(0x0afffffc);                          // beq poll
+    words.push_back(0xe5961010);                          // ldr r1, [r6, #16] (TCN1)
+    words.push_back(0xe0899001);                          // add r9, r9, r1: the counts each character saw
+    words.push_back(0xe2577001);                          // subs r7, r7, #1
+    words.push_back(0x1a000000 | ((uint32_t(top) - uint32_t(words.size()) - 2) & 0xffffff));  // bne loop
+    const uint32_t base = g.cursor;
+    for (auto w : words) { g.word(g.cursor, w); g.cursor += 4; }
+    g.end();
+    return {g.words, 0x20000000u + base + uint32_t(poll) * 4};
+}
+Outcome uartPollRun(const std::vector<uint32_t>& words, bool fast) {
+    Imx1Machine* m = make(words, fast);
+    assert(imx1MachineSetUartRts(m, 2, true) == Imx1BootstrapAccess::ok);
+    return finish(m);
+}
+// Exact with the skip ends as Exact without it, down to the bus accesses and the memory.
+void sameExact(const Outcome& a, const Outcome& b) {
+    same(a, b);
+    const auto& x = a.run.result;
+    const auto& y = b.run.result;
+    assert(x.busAccesses == y.busAccesses && x.cs5WaitClocks == y.cs5WaitClocks && x.idleHclk == y.idleHclk &&
+           x.irqEntries == y.irqEntries && x.fiqEntries == y.fiqEntries && a.memory == b.memory);
+}
+// Fast with the skip passes most polls at once and ends as Fast without it and as Exact do; Exact with the skip
+// ends as Exact without it.
+void uartPolls() {
+    const auto g = uartPollGuest(0);
+    const uint64_t skips = imx1MachineUartPollSkips(nullptr), rounds = imx1MachineUartPollRounds(nullptr);
+    const auto exact = uartPollRun(g.words, false);
+    const uint64_t en = imx1MachineUartPollSkips(nullptr) - skips, er = imx1MachineUartPollRounds(nullptr) - rounds;
+    const auto fast = uartPollRun(g.words, true);
+    const uint64_t n = imx1MachineUartPollSkips(nullptr) - skips - en, r = imx1MachineUartPollRounds(nullptr) - rounds - er;
+    imx1SetUartPollSkip(false);
+    const auto plain = uartPollRun(g.words, true), exactPlain = uartPollRun(g.words, false);
+    imx1SetUartPollSkip(true);
+    assert(imx1MachineUartPollSkips(nullptr) - skips == n + en);
+    print("uart polls exact", exact); print("uart polls exact no skip", exactPlain);
+    print("uart polls fast", fast); print("uart polls no skip", plain);
+    std::printf("uart polls: fast %llu skips of %llu rounds, exact %llu skips of %llu rounds, timer sum %u fast, "
+                "%u no skip, %u exact, %u exact no skip\n", (unsigned long long)n, (unsigned long long)r,
+                (unsigned long long)en, (unsigned long long)er, fast.run.result.registers[9],
+                plain.run.result.registers[9], exact.run.result.registers[9], exactPlain.run.result.registers[9]);
+    std::fflush(stdout);
+    const auto& e = exact.run.result;
+    assert(e.stop == Imx1ProbeStop::unsupportedInstruction && e.registers[7] == 0 && e.registers[8] == 0x41 + 48);
+    same(plain, fast);
+    same(exact, fast);
+    sameExact(exactPlain, exact);
+    assert(n >= 40 && r >= 10000);
+    assert(en >= 40 && er >= 10000);
+}
+// Timer 2's IRQ lands at counts spread over the 48 characters, most inside a poll span: Exact with the skip takes it
+// at the same step and pc and stops with the same counts as Exact without it.
+void uartPollIrqs() {
+    unsigned inPoll = 0;
+    uint64_t total = 0;
+    for (uint32_t comp = 3000; comp < 3000 + 24 * 4999; comp += 4999) {
+        const auto g = uartPollGuest(comp);
+        const uint64_t before = imx1MachineUartPollSkips(nullptr);
+        const auto with = runLines(g.words, false, false, 2);
+        const uint64_t skips = imx1MachineUartPollSkips(nullptr) - before;
+        imx1SetUartPollSkip(false);
+        const auto without = runLines(g.words, false, false, 2);
+        imx1SetUartPollSkip(true);
+        total += skips;
+        const auto& x = with.out.run.result;
+        const auto& y = without.out.run.result;
+        // A compare past the 48 characters never lands.
+        const bool ok = with.entries.size() == (x.trace.pc == 0x18) && sameLines(with, without) &&
+                        x.busAccesses == y.busAccesses && x.idleHclk == y.idleHclk && with.out.memory == without.out.memory;
+        const uint32_t at = with.entries.empty() ? 0 : with.entries[0].interruptedPc;
+        if (at >= g.pollPc && at <= g.pollPc + 8) ++inPoll;
+        if (!ok) {
+            std::printf("uart poll irq comp %u: %llu skips\n", comp, (unsigned long long)skips);
+            printLines("  skip", with); printLines("  no skip", without);
+        }
+        assert(ok);
+    }
+    std::printf("uart poll irqs: %u of 24 in a poll, %llu skips\n", inPoll, (unsigned long long)total);
+    std::fflush(stdout);
+    assert(inPoll >= 16 && total >= 100);
+}
+uint64_t stateHash(const std::vector<uint8_t>& state) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint8_t b : state) h = (h ^ b) * 1099511628211ull;
+    return h;
+}
+// Saved states every 5 slices of 997 instructions, Exact with and without the skip: the same bytes.
+void uartPollStates() {
+    const auto g = uartPollGuest(0);
+    std::vector<uint64_t> hashes[2];
+    for (int skip = 1; skip >= 0; --skip) {
+        imx1SetUartPollSkip(skip);
+        Imx1Machine* m = make(g.words, false);
+        assert(imx1MachineSetUartRts(m, 2, true) == Imx1BootstrapAccess::ok);
+        for (unsigned n = 1; n < 100000 && running(m); ++n) {
+            imx1MachineRunSlice(m, 997, 0);
+            if (n % 5 || !running(m)) continue;
+            std::vector<uint8_t> state;
+            assert(imx1MachineSaveState(m, state) == Imx1StateStatus::ok);
+            hashes[skip].push_back(stateHash(state));
+        }
+        imx1MachineStop(m);
+    }
+    imx1SetUartPollSkip(true);
+    size_t differ = 0;
+    for (size_t i = 0; i < std::min(hashes[0].size(), hashes[1].size()); ++i) differ += hashes[0][i] != hashes[1][i];
+    std::printf("uart poll states: %zu and %zu states, %zu differ\n", hashes[1].size(), hashes[0].size(), differ);
+    std::fflush(stdout);
+    assert(hashes[1].size() >= 10 && hashes[1] == hashes[0]);
+}
 void scanPollIrqs() {
     unsigned inWait = 0, withSkips = 0;
     uint64_t total = 0;
@@ -2123,6 +2267,9 @@ void jitLong() {
     scanPolls();
     fifoWait();
     scanPollIrqs();
+    uartPolls();
+    uartPollIrqs();
+    uartPollStates();
     jitDomain();
     jitReturns();
     jitSwi();

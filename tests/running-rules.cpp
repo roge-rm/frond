@@ -167,13 +167,13 @@ class RunningRulesTest : public QObject {
         QCOMPARE(speedFigure("85.6 MIPS"), QString("86 MIPS"));
         QCOMPARE(speedFigure("idle"), QString());
     }
-    // The Zodiac's unfinished hardware is listed and greyed, and it has no hard reset yet.
+    // The Zodiac's unfinished hardware is listed and greyed; it has a hard reset.
     void zodiacRows() {
         const auto t = traitsFor(named("tapwave-zodiac-2"));
         State s; s.ready = true; s.network = "off";
-        QVERIFY(!t.runs68k && !t.guestServices && t.cardSlot && t.powerKey);
-        for (Id id : {Id::Keyboard, Id::Microphone, Id::Network, Id::HardReset}) QVERIFY(!row(t, s, id).enabled);
-        for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot}) QVERIFY(row(t, s, id).enabled);
+        QVERIFY(!t.runs68k && t.guestServices && t.cardSlot && t.powerKey);
+        for (Id id : {Id::Keyboard, Id::Microphone, Id::Network}) QVERIFY(!row(t, s, id).enabled);
+        for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot, Id::HardReset}) QVERIFY(row(t, s, id).enabled);
         QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);
     }
     // Windows CE has no Palm guest services: no Hard reset row and no Applications button on the rx1950.
@@ -192,7 +192,7 @@ class RunningRulesTest : public QObject {
             QCOMPARE(hardResetEnabled(true, t), t.guestServices);
         }
         QVERIFY(hardResetEnabled(true, traitsFor(named("palm-tx"))));
-        QVERIFY(!hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));
+        QVERIFY(hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));
     }
     void machineStopIsTheFailureText() {
         QCOMPARE(machineStopText("device: tapwave-zodiac-2\nzodiac: the machine stopped: x, after 5 instructions\n"

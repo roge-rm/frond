@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Infrared between two real T|X cores joined by two link hubs on loopback.
+"""Infrared between two real T|X cores, or a T|X and a Zodiac, joined by two link hubs on loopback.
 
-  tests/link-irda-cores.py [--output DIR] [--probe FrondIRProbe.prc]
+  tests/link-irda-cores.py [--output DIR] [--probe FrondIRProbe.prc] [--zodiac SESSION]
 
 Two hubs (frond-desktop --link-service, each with its own runtime and data folder and an ephemeral
 port, discovery off) pair over their sockets as two windows would. Each T|X runs a copy of the smoke
@@ -9,6 +9,9 @@ session with --irda unix:<its hub's runtime folder>/frond/ir-N.sock and is attac
 IR probe app beams its 4096-byte payload A to B, then B to A, through the guests' own IrLAP, IAS,
 TinyTP and OBEX, checked with tools/check-irda-probe.py. B then sleeps and wakes with the power key:
 A's hub has to see it asleep and running again, and A beams to B once more.
+
+With --zodiac (or FROND_ZODIAC_SESSION), B is a Zodiac run from that session (a machine folder or a .frond
+file) instead of a second T|X.
 
 Sessions: FROND_ARM_SESSIONS/palm-tx, else build/smoke/machines/palm-tx; skipped without one. The
 probe is --probe or FROND_IR_PROBE, else built with tools/build-palm-probe.py (needs pilrc and the
@@ -33,7 +36,9 @@ sys.path.insert(0, str(ROOT / 'tools'))
 import smoke  # noqa: E402
 
 DESKTOP = Path(os.environ.get('FROND_DESKTOP') or ROOT / 'out/frond-desktop').absolute()
-SEND = (40, 132)  # the probe's Send button, in screen pixels
+# The probe's Send button (5, 60, 60 x 16 in Palm coordinates), in each device's screen pixels.
+SEND = {'palm-tx': (40, 132), 'tapwave-zodiac-2': (40, 132)}
+DEVICE_NAMES = {'palm-tx': 'Palm TX', 'tapwave-zodiac-2': 'Tapwave Zodiac 2'}
 
 
 def session():
@@ -164,18 +169,34 @@ def records(path):
 
 
 class Machine:
-    def __init__(self, root, tag, source, hub, peer):
-        self.tag, self.root = tag, root
+    def __init__(self, root, tag, source, hub, peer, device='palm-tx', engine=None):
+        self.tag, self.root, self.device = tag, root, device
         self.folder = root / f'machine-{tag}'
         shutil.copytree(source, self.folder) if source.is_dir() else (
             self.folder.mkdir(), shutil.copy2(source, self.folder / f'{tag}.frond'))
         self.ir = hub.folder / f'ir-{tag}.sock'
         work = root / f'core-{tag}'
         work.mkdir()
-        self.run = smoke.Run('palm-tx', work, self.folder, timeout=1200, extra=['--irda', f'unix:{self.ir}'])
+        self.run = smoke.Run(device, work, self.folder, timeout=1200,
+                             extra=['--irda', f'unix:{self.ir}'] + (['--engine', engine] if engine else []))
         self.link = hub.client(f'ir-{tag}')
-        self.link.send(op='ir-attach', machine=f'Palm {tag.upper()}', device='Palm TX', link=peer, socket=str(self.ir))
+        self.link.send(op='ir-attach', machine=f'Palm {tag.upper()}', device=DEVICE_NAMES[device], link=peer,
+                       socket=str(self.ir))
         self.exports = 0
+
+    def install_and_launch(self, prc):
+        if self.device == 'palm-tx':
+            return self.run.install_and_launch(prc, 'Frond IR probe')
+        # A soft reset first: the IrDA library registers its _beam scheme at reset only once the serial
+        # manager shows an IrDA port, which a session saved before the Zodiac had one never got. The
+        # session opens in an app that waits with no timeout, which only a host call's wake moves on, so
+        # there's no guest-ready look; a launch during the boot is lost, so it waits the boot out.
+        self.run.require('reset')
+        time.sleep(60)
+        installed = self.run.control.retry_ready('install', prc, 120)
+        if installed['code'] == 'needs-reset':
+            self.run.require('reset')
+        self.run.control.retry_ready('launch-app', 'Frond IR probe', 60)
 
     def export(self, name, databases=('FrondIRLog',)):
         """One ZIP holding the named databases, each exported on its own."""
@@ -196,6 +217,20 @@ class Machine:
                 part.unlink()
         return path
 
+    def join(self, seconds=60):
+        """Waits for the hub to show both cores joined with this one's socket open. A Palm that went to sleep
+        while the other core waited for a slot has closed its socket; it's woken."""
+        end = time.monotonic() + seconds
+        while True:
+            try:
+                return self.link.wait(lambda s: s.get('type') == 'ir' and s.get('state') == 'joined' and s.get('core'),
+                                      f'{self.tag} joined', 5)
+            except smoke.Fail:
+                smoke.need(time.monotonic() < end, f'{self.tag}: no {self.tag} joined in {seconds} s')
+                if self.run.require('power-state')['message'].split()[0] == 'asleep':
+                    print(f'{self.tag} asleep, waking it')
+                    self.power(False)
+
     def power(self, asleep):
         """The power key until the core's power-state says asleep (or awake)."""
         for _ in range(3):
@@ -207,6 +242,9 @@ class Machine:
                     return
                 time.sleep(0.5)
         raise smoke.Fail(f'{self.tag}: the Palm did not {"sleep" if asleep else "wake"}')
+
+    def speed(self):
+        return self.run.control.request('speed-state', '').get('message')
 
     def ir_state(self):
         return self.link.last('ir') or {}
@@ -220,16 +258,24 @@ def beam(sender, receiver, name):
     """Taps Send on sender and waits for one more send-complete there and receive-complete on receiver."""
     before = [sender.export(f'{name}-before'), receiver.export(f'{name}-before')]
     sent0, got0 = records(before[0]).count('send-complete'), records(before[1]).count('receive-complete')
-    sender.run.tap(sender.root, *SEND)
+    sender.run.tap(sender.root, *SEND[sender.device])
     end = time.monotonic() + 90
+    speeds = (sender.root / f'{name}-speed.log').open('w')
     while True:
         time.sleep(3)
+        speeds.write(f'{time.monotonic():.1f} {sender.tag} {sender.speed()} | {receiver.tag} {receiver.speed()}\n')
+        speeds.flush()
         after = [sender.export(f'{name}-after'), receiver.export(f'{name}-after')]
         sent, got = records(after[0]), records(after[1])
         if sent.count('send-complete') > sent0 and got.count('receive-complete') > got0:
             after[1] = receiver.export(f'{name}-after', ('FrondIRLog', 'FrondIRReceived'))
             break
-        smoke.need(time.monotonic() < end, f'{name}: no complete beam in 90 s; sender {sent[-4:]}, receiver {got[-4:]}')
+        if time.monotonic() >= end:
+            stats = [m.run.control.request('irda-stats', '').get('message') for m in (sender, receiver)]
+            for m in (sender, receiver):
+                m.run.boot.frame(m.root / f'{name}-fail-{m.tag}.png')
+            smoke.need(False, f'{name}: no complete beam in 90 s; sender {sent[-4:]}, receiver {got[-4:]}; '
+                              f'irda-stats sender {stats[0]}, receiver {stats[1]}')
     check = subprocess.run([sys.executable, str(ROOT / 'tools/check-irda-probe.py'), *map(str, after),
                             '--sender-before', str(before[0]), '--receiver-before', str(before[1])],
                            capture_output=True, text=True)
@@ -242,10 +288,17 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     p.add_argument('--output', type=Path, default=ROOT / f'build/link-irda-cores/{time.strftime("%Y%m%d-%H%M%S")}')
     p.add_argument('--probe', type=Path)
+    p.add_argument('--zodiac', type=Path, default=os.environ.get('FROND_ZODIAC_SESSION') or None,
+                   help='B is a Zodiac from this session')
+    p.add_argument('--zodiac-engine', choices=('exact', 'fast'), default='fast',
+                   help="the Zodiac's engine (Fast, its default in the app)")
     args = p.parse_args()
     source = session()
     if not source:
         print('link IR between cores: SKIP, no T|X smoke session (make smoke-sessions or FROND_ARM_SESSIONS)')
+        return 0
+    if args.zodiac and not Path(args.zodiac).exists():
+        print(f'link IR between cores: SKIP, no Zodiac session at {args.zodiac}')
         return 0
     smoke.need(DESKTOP.is_file() and smoke.CORE.is_file(), f'needs {DESKTOP} and {smoke.CORE}')
     root = args.output.resolve()
@@ -266,13 +319,17 @@ def main():
         print('paired')
         ma = Machine(root, 'a', source, a, b.hello['id'])
         machines.append(ma)
-        mb = Machine(root, 'b', source, b, a.hello['id'])
+        mb = Machine(root, 'b', Path(args.zodiac) if args.zodiac else source, b, a.hello['id'],
+                     'tapwave-zodiac-2' if args.zodiac else 'palm-tx', args.zodiac_engine if args.zodiac else None)
         machines.append(mb)
+        # Each core's time starts once both are up: B may have waited for an emulator slot.
         for m in machines:
-            m.link.wait(lambda s: s.get('type') == 'ir' and s.get('state') == 'joined' and s.get('core'), f'{m.tag} joined', 60)
+            m.run.restart_clock(1200)
+        for m in machines:
+            m.join()
         print('joined')
         for m in machines:
-            m.run.install_and_launch(str(prc), 'Frond IR probe')
+            m.install_and_launch(str(prc))
         time.sleep(3)
         beam(ma, mb, 'a-to-b')
         beam(mb, ma, 'b-to-a')
