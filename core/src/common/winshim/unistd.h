@@ -24,10 +24,6 @@ inline ssize_t pwrite(int fd, const void* buffer, size_t count, off_t offset) {
 }
 inline int fsync(int fd) { return _commit(fd); }
 inline int fchmod(int, unsigned) { return 0; }
-inline char* mkdtemp(char* pattern) {
-    if (_mktemp_s(pattern, strlen(pattern) + 1) != 0) return nullptr;
-    return _mkdir(pattern) == 0 ? pattern : nullptr;
-}
 inline unsigned geteuid() { return 0; }
 extern "C++" {
 inline int unlink(const wchar_t* path) { return _wunlink(path); }
