@@ -475,6 +475,24 @@ namespace {
         c.chip.state(shortReader);
         c.ap.state(shortReader);
         assert(!shortReader.ok());
+        // An RX block count that doesn't match the block vector is refused.
+        std::vector<uint8_t> bad = saved;
+        bool patched = false;
+        for (size_t i = 0; i + 12 <= bad.size() && !patched; ++i) {
+            uint32_t n;
+            uint64_t count;
+            std::memcpy(&n, &bad[i], 4);
+            std::memcpy(&count, &bad[i + 4], 8);
+            if (n < 8 || n > 4096 || count != n) continue;
+            ++n;
+            std::memcpy(&bad[i], &n, 4);
+            patched = true;
+        }
+        assert(patched);
+        Rig d;
+        StateReader badReader(bad.data(), bad.size());
+        d.chip.state(badReader);
+        assert(!badReader.ok());
     }
 }
 

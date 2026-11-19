@@ -80,6 +80,7 @@ class Acx100 {
         a.Require(memory.size() == memoryBytes, "ACX100 memory");
         a.Do32(rxRingStart).Do32(rxNext).Do32(txRingStart).Do32(txNext).Do32(blockSize).Do32(rxPool).Do32(rxBlocks);
         a.DoVector(rxBlockUsed, 4096);
+        a.Require(rxBlockUsed.size() == rxBlocks, "ACX100 RX blocks");
         a.Do32(channel).DoBool(rxOn).DoBool(txOn).DoBool(joined).DoBuffer(bssid, 6);
         a.DoBool(scanning).Do32(scanChannel).Do32(scanLeft).Do64(scanStepAt).Do64(scanDwell).Do32(scanChannelBefore);
         a.DoBool(scanActive).Do32(rxHeaderExtra);
