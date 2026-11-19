@@ -104,7 +104,7 @@ class Imx1Bootstrap {
     // The Zodiac's YMF768 on CS4, off unless enableYmf768 is called. Its FM output is added to SSI1's words on
     // their way to the PCM output, and its interrupt drives GPIO B15 (low while asserted). Saved in its own
     // section (stateYmf768), so a state saved before it existed loads with the chip reset.
-    // driveLine false leaves GPIO B15 where it is, for a state saved without the chip.
+    // driveLine false leaves GPIO B15 where it is, for a state load.
     void enableYmf768(bool driveLine = true) {
         ymfEnabled = true;
         if (driveLine) ymfDriveLine();

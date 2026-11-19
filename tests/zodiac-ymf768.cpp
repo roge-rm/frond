@@ -811,8 +811,9 @@ static void lineRefused() {
 }
 
 // A state saved without the chip (an older session) loads into a machine with it: B15 stays at the state's
-// level (low here) until the guest first touches the chip, then follows the chip. Loading the power-on state,
-// as Reset does, brings B15 high from the start. The note plays both times.
+// level (low here) until the guest first touches the chip, then follows the chip, also over a save and load
+// before that. Loading the power-on state, as Reset does, brings B15 high from the start. The note plays both
+// times.
 static void olderState() {
     const Program guest = noteGuest(true, true);
     Imx1ProbeOptions o{};
@@ -827,6 +828,11 @@ static void olderState() {
     Capture d;
     imx1MachineSetPcmOutput(loaded, Capture::hook, &d);
     assert(imx1MachineLoadState(loaded, state.data(), state.size()).status == Imx1StateStatus::ok);
+    // Saved now, with the chip's section, and loaded again: B15 stays at the older state's level.
+    std::vector<uint8_t> resaved, again;
+    assert(imx1MachineSaveState(loaded, resaved) == Imx1StateStatus::ok);
+    assert(imx1MachineLoadState(loaded, resaved.data(), resaved.size()).status == Imx1StateStatus::ok);
+    assert(imx1MachineSaveState(loaded, again) == Imx1StateStatus::ok && again == resaved);
     auto r = run(loaded, 200000, 5000);
     assert(d.nonzero() > 100 && !(r.result.registers[8] & 0x8000) && (r.result.registers[7] & 0x8000));
     Capture e;
