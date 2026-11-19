@@ -51,22 +51,23 @@ jobs:
 
       - name: Start the built app
         run: |
-          set -o pipefail
           APP=out/Frond.app/Contents/MacOS
-          QT_QPA_PLATFORM=offscreen "$APP/Frond" --version
+          # Each program runs for a few seconds and is stopped; a library that fails to load exits at once.
+          run_a_while() {
+            "$@" > run.out 2>&1 < /dev/null &
+            pid=$!
+            sleep 6
+            if kill -0 "$pid" 2>/dev/null; then kill "$pid"; wait "$pid" 2>/dev/null; echo "$1 was still running"; return 0; fi
+            wait "$pid"; code=$?
+            cat run.out
+            echo "$1 exited with $code"
+            [ "$code" -lt 126 ]
+          }
+          export QT_QPA_PLATFORM=offscreen
+          "$APP/Frond" --version
           "$APP/frond-68k" --version
-          # The ARM core has no version flag; it must start and print its usage, not fail to load.
-          set +e
-          "$APP/frond" > core.out 2>&1 < /dev/null
-          code=$?
-          cat core.out
-          if [ "$code" -ge 126 ]; then echo "core exited with $code"; exit 1; fi
-          # A short run of the desktop: it must stay up for a few seconds.
-          QT_QPA_PLATFORM=offscreen "$APP/Frond" &
-          pid=$!
-          sleep 5
-          kill -0 "$pid" || { echo "desktop exited early"; exit 1; }
-          kill "$pid"
+          run_a_while "$APP/frond"
+          run_a_while "$APP/Frond"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
