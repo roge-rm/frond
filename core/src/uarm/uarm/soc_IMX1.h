@@ -165,7 +165,8 @@ class SocIMX1 : public SoC {
     // the host has work due, an idle guest's clock runs on to it instead of waiting.
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
-    bool UsbHostIoPaused() const { return halted || PowerSleeping(); }
+    // Also paused while a guest read runs in a checkpoint, as the guest work may be rolled back.
+    bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
     ~SocIMX1();
 
     // The engine, Exact (the full step with the cache models) or Fast (the lean path in quiet spans). It
@@ -223,6 +224,11 @@ class SocIMX1 : public SoC {
     void OnSdInsert() override;
     void OnSdRemount() override;
     void OnSdEject() override;
+
+   protected:
+    // A checkpoint restore puts back the host's held keys and pen, the cradle button and the sound stream as
+    // they were, and holds the sound output until the checkpoint ends; a real load or reset starts them over.
+    std::function<void()> CapturePeripheralInput() override;
 
    private:
     SocIMX1() = default;

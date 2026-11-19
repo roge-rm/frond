@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "GuestDatabaseOps.h"
+#include "pace.h"
 #include "soc_IMX1.h"
 #include "zip.h"
 #include "zodiac_panel.h"
@@ -220,11 +221,16 @@ void databases(SocIMX1& soc, const char* prcPath) {
         assert(guest.Ready());
         DbMetadataList all;
         assert(dbListGet(soc.GetSyscallDispatch(), all));
+        assert(paceExternalMemoryActive());
         guest.Finish();
         bool found = false;
         for (const auto& db : all) found |= !std::strcmp(db.name, "FrondBench");
         assert(found);
     }
+    assert(!paceExternalMemoryActive());
+    // The look the guest-ready command and smoke's retry_ready take opens no transaction either.
+    GuestDatabaseOps::Ready(soc);
+    assert(!paceExternalMemoryActive());
     runFor(soc, 1000);
     assert(!soc.Halted());
     // The Tapwave launcher is native ARM: its calls go through the native boundary (ZodiacNative) at its
@@ -258,6 +264,13 @@ void calls(SocIMX1& soc) {
     assert(!soc.GuestCallPending());
     assert(runToEvtGetEvent(soc));
     assert(soc.GuestCallPending());
+    // A preparation with no transaction after it leaves the pace.h helpers on their own memory.
+    assert(!paceExternalMemoryActive());
+    // ROM reads, as strncpy_toHost of a ROM string does them.
+    uint8_t romWord[4];
+    assert(soc.ReadGuest(soc.PaceSites().entry, romWord, sizeof(romWord)));
+    assert(soc.RomHas(soc.PaceSites().entry, romWord, sizeof(romWord)));
+    assert(!soc.WriteGuest(soc.PaceSites().entry, romWord, sizeof(romWord)));
     const Site site = atSite(soc);
     assert((site.registers[1] & 0xffff) == trapEvtGetEvent);
     const uint32_t first = call(soc, site, trapTimGetTicks);

@@ -131,6 +131,18 @@ struct SyscallDispatch {
 #endif
 };
 
+#ifndef __EMSCRIPTEN__
+// The pace.h helpers go to the Zodiac's memory only while its guest work needs them: a recovery scope, a call
+// or a callback registration. Everywhere else they stay on the PXA's own memory, so a PACE exception or a PXA
+// guest call never reaches the Zodiac, and a Zodiac that goes away leaves nothing behind.
+static void zodiacPaceOn(struct SyscallDispatch* sd) { paceSetExternalMemory(zodiacPaceAccess, sd->zodiac); }
+static void zodiacPaceOffWhenIdle(struct SyscallDispatch* sd) {
+    if (sd->recoverable || sd->nestLevel) return;
+    sd->zodiacPaceLive = false;
+    paceReleaseExternalMemory(sd->zodiac);
+}
+#endif
+
 struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
     struct SyscallDispatch* sd = new SyscallDispatch();
 
@@ -147,6 +159,7 @@ struct SyscallDispatch* initSyscallDispatch(SoC* soc) {
 #ifndef __EMSCRIPTEN__
 void syscallDispatchBeginRecovery(struct SyscallDispatch* sd) {
     if (sd->nestLevel || sd->recoverable) ERR("nested injected-call recovery scope");
+    if (sd->zodiac) zodiacPaceOn(sd);
     if (sd->soc->GetDeviceType() == DeviceType5::deviceTypeTG50)
         sd->tg50 = std::make_unique<Tg50Pace::Session>(*sd->soc);
     sd->recoverable = true;
@@ -176,7 +189,7 @@ void syscallDispatchEndRecovery(struct SyscallDispatch* sd) {
         sd->zodiacStubs.clear();
         sd->zodiac->SetTrap0Hook(nullptr);
         sd->zodiacPaceLive = false;
-        paceSetExternalMemory(nullptr, nullptr);
+        paceReleaseExternalMemory(sd->zodiac);
     } else
         cpuClearNativeRuntime(sd->soc->GetCpu());
     sd->recoverable = false;
@@ -219,7 +232,10 @@ bool syscallDispatchPrepare(struct SyscallDispatch* sd, SyscallPrepareMode mode)
             ready = soc->RunToPaceSyscall(SYSCALL_68K_EVT_GET_EVENT,
                                           PREPARE_INJECTED_CALL_TIMEOUT_SEC * PREPARE_INJECTED_CALL_IPS,
                                           PREPARE_INJECTED_CALL_IPS);
-        if (ready) paceSetExternalMemory(zodiacPaceAccess, soc);
+        // Inside a recovery scope the helpers stay on the Zodiac; with none (a look that opens no
+        // transaction) they go back, as nothing would turn them off later.
+        if (ready && sd->recoverable) zodiacPaceOn(sd);
+        else zodiacPaceOffWhenIdle(sd);
         return ready;
     }
 #endif
@@ -370,6 +386,7 @@ static size_t pushState(struct SyscallDispatch* sd, ScratchState::Type type) {
         // From the syscall site, or the TRAP #0 site in a callback: r0 is the 68k state on both.
         auto& frame = sd->zodiacFrames[sd->nestLevel];
         auto* soc = sd->zodiac;
+        zodiacPaceOn(sd);
         if (sd->zodiacPaceLive && !paceSave68kState()) throw std::runtime_error("Zodiac: could not write the 68k state");
         frame.paceLive = sd->zodiacPaceLive;
         frame.paceStatePtr = paceGetStatePtr();
@@ -415,6 +432,7 @@ static void popState(struct SyscallDispatch* sd, size_t nestLevel) {
         sd->zodiacPaceLive = frame.paceLive;
         if (ok && frame.paceLive) ok = paceLoad68kState();
         sd->nestLevel--;
+        zodiacPaceOffWhenIdle(sd);
         if (!ok) throw std::runtime_error("Zodiac: could not put the guest back after a call");
         return;
     }
@@ -447,7 +465,9 @@ void syscallDispatchRegisterM68kStub(struct SyscallDispatch* sd, uint32_t trampo
             paceSetPC(sd->zodiac->PaceSites().rts68k);
             return true;
         };
+        zodiacPaceOn(sd);
         paceSet16(trampoline, INSTRUCTION_M68K_TRAP0);
+        zodiacPaceOffWhenIdle(sd);
         sd->zodiac->SetTrap0Hook([sd]() -> bool {
             auto* soc = sd->zodiac;
             uint32_t registers[16], pc;

@@ -15,6 +15,7 @@
 
 #include "device_configuration.h"
 #include "imx1_bootstrap.h"
+#include "pace.h"
 #include "HostUartPort.h"
 #include "sdcard.h"
 #include "vSD.h"
@@ -249,7 +250,7 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     }
 };
 
-SocIMX1::~SocIMX1() = default;
+SocIMX1::~SocIMX1() { paceReleaseExternalMemory(this); }
 
 HostUartPort* SocIMX1::SerialHostPort() {
     if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
@@ -388,19 +389,40 @@ void SocIMX1::SyncSecondCard() {
 void SocIMX1::StateChanged() {
     // A load or reset ends a guest call.
     if (machine) EndGuestCall();
-    pcm.restart();
     const auto status = imx1MachineGetStatus(machine);
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
     redraw = true;
+    wasStopped = imx1MachineSystemStopped(machine);
+    // A checkpoint restore has put the host side back already (CapturePeripheralInput).
+    if (RestoringCheckpoint()) return;
+    pcm.restart();
     // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
     cradleDown = false;
     hotSyncTicks = 0;
-    wasStopped = imx1MachineSystemStopped(machine);
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
     // A USB host on the bus starts again with the new machine.
     if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+}
+
+std::function<void()> SocIMX1::CapturePeripheralInput() {
+    // Holds the sound output for as long as the checkpoint can still be restored.
+    struct Fence {
+        SocIMX1& soc;
+        std::weak_ptr<int> lifetime;
+        explicit Fence(SocIMX1& soc) : soc(soc), lifetime(soc.checkpointLifetime) { ++soc.pcm.fenced; }
+        ~Fence() {
+            if (!lifetime.expired() && soc.pcm.fenced) --soc.pcm.fenced;
+        }
+    };
+    auto fence = std::make_shared<Fence>(*this);
+    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound] {
+        this->input = input;
+        this->cradleDown = cradleDown;
+        this->hotSyncTicks = hotSyncTicks;
+        pcm.sound = sound;
+    };
 }
 
 UsbDevicePort SocIMX1::GetUsbPort() {
@@ -838,8 +860,14 @@ bool SocIMX1::RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cycle
     guestCall = true;
     nativeSite = 0;
     for (;;) {
-        const uint64_t passed = imx1MachineGetStatus(machine).time.ticks - start;
-        if (passed >= ticks || !RunToStop(ticks - passed)) break;
+        const uint64_t before = imx1MachineGetStatus(machine).time.ticks;
+        const uint64_t passed = before - start;
+        if (passed >= ticks) break;
+        if (!RunToStop(ticks - passed)) {
+            // A wait for an interrupt ends the run early; go on while guest time moves.
+            if (halted || imx1MachineGetStatus(machine).time.ticks == before) break;
+            continue;
+        }
         uint32_t registers[16];
         if (GuestRegisters(registers) && (registers[1] & 0xffff) == trap) return true;
         imx1MachineLeavePcStop(machine);

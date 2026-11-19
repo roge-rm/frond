@@ -123,6 +123,8 @@ struct ZodiacPcmSink {
     const Imx1Machine* machine = nullptr;
     struct AudioQueue* queue = nullptr;
     bool enabled = false, suspended = false;
+    // Checkpointed guest work that may be rolled back runs while this is above 0; its sound isn't played.
+    unsigned fenced = 0;
     ZodiacAudioOutput sound;
 
     static void word(void* context, uint16_t value, unsigned slot) {
@@ -136,7 +138,7 @@ struct ZodiacPcmSink {
     }
     static void push(void* context, uint32_t frame) {
         auto& s = *static_cast<ZodiacPcmSink*>(context);
-        if (s.queue && s.enabled && !s.suspended) audioQueuePush(s.queue, frame);
+        if (s.queue && s.enabled && !s.suspended && !s.fenced) audioQueuePush(s.queue, frame);
     }
     // After a state load or reset: the stream starts again at the new state's next frame.
     void restart() {

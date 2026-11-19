@@ -35,6 +35,9 @@ void paceInit(struct ArmMem* mem, struct ArmMpu* mpu);
 // guest calls use these helpers on the 68k state the ROM keeps in guest memory.
 using PaceExternalAccess = bool (*)(void* context, uint32_t address, void* data, uint32_t size, bool write);
 void paceSetExternalMemory(PaceExternalAccess access, void* context);
+// Back to the paceInit memory if context's memory is the one set; a machine calls it as it goes away.
+void paceReleaseExternalMemory(void* context);
+bool paceExternalMemoryActive();
 
 void paceSetStatePtr(uint32_t addr);
 void paceResetFsr();

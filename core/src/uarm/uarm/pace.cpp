@@ -469,6 +469,12 @@ void paceSetExternalMemory(PaceExternalAccess access, void* context) {
     externalContext = access ? context : nullptr;
 }
 
+void paceReleaseExternalMemory(void* context) {
+    if (externalAccess && externalContext == context) paceSetExternalMemory(nullptr, nullptr);
+}
+
+bool paceExternalMemoryActive() { return externalAccess != nullptr; }
+
 void paceSetStatePtr(uint32_t addr) { statePtr = addr; }
 
 void paceResetFsr() { fsr = 0; }
