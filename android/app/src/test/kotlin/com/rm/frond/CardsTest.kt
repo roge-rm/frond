@@ -49,7 +49,7 @@ class CardsTest {
         out.write(put32(0x19800819) + put32(version) + device.toByteArray(Charsets.US_ASCII).copyOf(32))
         out.write(put32(0) + put32(0) + ByteArray(40) + put32(media.size.toLong()))
         for (m in media) {
-            val name = if (m.kind == 4L) "nand.frondnand" else Cards.cardFiles[(m.kind - 1).toInt()]
+            val name = if (m.kind == 4L) "nand.frondnand" else if (m.kind == 5L) "sd2.frondsd" else Cards.cardFiles[(m.kind - 1).toInt()]
             out.write(put32(m.kind) + name.toByteArray(Charsets.US_ASCII).copyOf(32) + put32(1) + put32(if (m.writeProtected) 1 else 0) +
                 m.identity.toByteArray(Charsets.US_ASCII).copyOf(32) + put64(m.logical) + put64(m.physical) + put64(m.generation))
         }
@@ -154,6 +154,83 @@ class CardsTest {
         assertTrue(org.json.JSONObject(File(m, "slot.json").readText()).isNull("link"))
         assertEquals(32, Cards.newIdentity().size)
         assertTrue(packableName("slot.json"))
+    }
+
+    // ---- The second SD slot ----
+
+    // An old Zodiac folder with sd.frondsd and sd2.frondsd: each moves in as its own card, listed,
+    // linked, taken out and put back by slot, and Delete keeps both.
+    @Test fun secondSlot() {
+        val dir = File(sessions, "zodiac").apply { mkdirs() }
+        File(dir, "zodiac.json").writeText("""{"name":"Zodiac","device":"tapwave-zodiac-2","created":1,"used":0}""")
+        File(dir, "session.frond").writeBytes(frond("tapwave-zodiac-2", listOf(Media(identity = "one".padEnd(32, '#')),
+            Media(kind = 5, identity = "two".padEnd(32, '#')))))
+        File(dir, "sd.frondsd").writeBytes(sdCard(1, ByteArray(512) { 1 }))
+        File(dir, "sd2.frondsd").writeBytes(sdCard(1, ByteArray(512) { 2 }))
+        assertNull(Cards.reconcile(sessions))
+        val first = named("Zodiac card")!!
+        val second = named("Zodiac card 2")!!
+        assertEquals(first.id, Cards.readSlot(dir).card)
+        assertEquals(second.id, Cards.readSlot(dir, 1).card)
+        assertEquals("two".padEnd(32, '#'), String(second.identity, Charsets.US_ASCII))
+        assertTrue(Cards.launchArguments(sessions, dir).isEmpty())
+        assertNull(Cards.reconcile(sessions))
+        assertEquals(2, cards().size)
+        assertTrue(packableName("slot2.json"))
+        val zodiac = Device.byId("tapwave-zodiac-2")!!
+        assertTrue(Cards.hasSlot(zodiac, 1) && !Cards.hasSlot(Device.TX, 1))
+        val rows = CardChoices.rows(sessions).associateBy { it.card.id }
+        assertEquals("In Zodiac · Card 1", CardChoices.statusText(rows[first.id]!!))
+        assertEquals("In Zodiac · Card 2", CardChoices.statusText(rows[second.id]!!))
+        assertEquals(listOf("Zodiac · Card 1", "Zodiac · Card 2"), CardChoices.machines(sessions).map { it.label })
+        assertEquals("Zodiac card and Zodiac card 2", CardChoices.cardNameOf(sessions, dir))
+        // Take card 2 out of the stopped machine: to the drawer as sd.frondsd, slot 2 empty with swap.
+        assertNull(Cards.takeOutStopped(sessions, second.id))
+        assertTrue(inDrawer(second) && !File(dir, "sd2.frondsd").exists() && File(dir, "sd.frondsd").isFile)
+        assertTrue(Cards.readSlot(dir, 1).swap && Cards.readSlot(dir, 1).card == null && !Cards.readSlot(dir).swap)
+        assertEquals(listOf("--card-swap"), Cards.launchArguments(sessions, dir))
+        assertNull(Cards.secondPutIn(sessions, dir))
+        // Its own picker lists it; a stick never goes in slot 2.
+        val stick = drawerCard("Stick", "ms")
+        Cards.LibraryLock(library).use { lock ->
+            assertTrue(lock.ok)
+            assertNotNull(Cards.toMachine(library, stick.id, dir, 1))
+            assertNull(Cards.toMachine(library, second.id, dir, 1))
+        }
+        assertTrue(File(dir, "sd2.frondsd").isFile)
+        assertEquals("${Cards.hex(second.identity.copyOf(32))} writable", Cards.secondPutIn(sessions, dir))
+        // A save before the put-in keeps slot 2's swap; one the .frond describes clears it.
+        File(dir, "session.frond").writeBytes(frond("tapwave-zodiac-2", listOf(Media(identity = "one".padEnd(32, '#')))))
+        Cards.clearSwap(dir)
+        assertTrue(Cards.readSlot(dir, 1).swap)
+        File(dir, "session.frond").writeBytes(frond("tapwave-zodiac-2", listOf(Media(identity = "one".padEnd(32, '#')),
+            Media(kind = 5, identity = "two".padEnd(32, '#')))))
+        Cards.clearSwap(dir)
+        assertFalse(Cards.readSlot(dir, 1).swap)
+        // Links per slot.
+        grow("Zodiac card 2")
+        assertNull(Cards.setLinks(sessions, second.id, listOf(Cards.SlotRef(dir, 1))))
+        assertEquals(second.id, Cards.readSlot(dir, 1).link)
+        assertNull(Cards.readSlot(dir).link)
+        val options = CardChoices.linkOptions(sessions, second.id)
+        assertEquals(listOf("Zodiac · Card 1 · Tapwave Zodiac 2 · Has Zodiac card, take it out first", "Zodiac · Card 2 · Tapwave Zodiac 2"),
+            options.map { it.text })
+        assertEquals(listOf(false, true), options.map { it.checked })
+        // Closing the linked holder: card 2 goes to the drawer, card 1 stays.
+        File(dir, "session.frond").writeBytes(frond("tapwave-zodiac-2", listOf(Media(identity = "one".padEnd(32, '#')),
+            Media(kind = 5, identity = "two".padEnd(32, '#')))))
+        assertNull(Cards.releaseAtClose(sessions, dir))
+        assertTrue(inDrawer(second) && File(dir, "sd.frondsd").isFile)
+        // Add device offers it for either slot; the stick for neither.
+        assertEquals(listOf("No card", "Zodiac card 2 · 32 MB"), CardChoices.startCardChoices(sessions, zodiac, 1).map { it.second })
+        assertEquals(listOf("", second.id), CardChoices.startCardChoices(sessions, zodiac, 0).map { it.first })
+        // At start it comes back into slot 2.
+        Cards.takeAtStart(sessions, dir)
+        assertTrue(File(dir, "sd2.frondsd").isFile)
+        // Delete keeps both.
+        assertNull(deleteMachine(sessions, dir, "Zodiac", keepCard = true))
+        assertFalse(dir.exists())
+        assertTrue(inDrawer(named("Zodiac card")!!) && inDrawer(named("Zodiac card 2")!!))
     }
 
     // ---- Move-in ----

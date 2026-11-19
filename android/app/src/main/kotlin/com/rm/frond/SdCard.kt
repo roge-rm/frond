@@ -12,11 +12,21 @@ import java.security.MessageDigest
 // (CardFile) and puts it back in. Every call blocks; run it off the main thread.
 class SdCard(private val context: Context, private val link: ControlLink, private val session: String? = null,
              private val device: Device = Device.TX) {
-    private val memoryStick = device.storageSlot == "memory-stick"
+    // The slot the calls work on: 0, or 1 for the Zodiac's second SD slot (the core's sd2- commands,
+    // its card in sd2.frondsd). Changed only while no card is out for the file view.
+    @Volatile var slot = 0
+        private set
+    fun select(n: Int): Boolean {
+        if (cardFile != null || identity != null) return n == slot
+        slot = n
+        return true
+    }
+    private val stickDevice = device.storageSlot == "memory-stick"
+    private val memoryStick get() = stickDevice && slot == 0
     // A 68k stick (the T415) is a linked card file in dana-cards/: take-out frees that file for the
     // file view and put-in links it again.
-    private val linkedStick = device.linkedCards && memoryStick
-    private fun command(operation: String) = (if (memoryStick) "ms-" else "sd-") + operation
+    private val linkedStick get() = device.linkedCards && memoryStick
+    private fun command(operation: String, n: Int = slot) = (if (n != 0) "sd2-" else if (stickDevice) "ms-" else "sd-") + operation
     enum class State { NONE, INSERTED, EJECTED, UNKNOWN }
 
     class Failed(message: String, val code: String? = null) : Exception(message)
@@ -67,10 +77,12 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     private var identity: String? = null
     private var protectedCard = false
 
-    fun state(): State {
-        val reply = link.request(command("state"), timeoutSeconds = 30)
+    fun state(): State = stateOf(slot)
+
+    fun stateOf(n: Int): State {
+        val reply = link.request(command("state", n), timeoutSeconds = 30)
         if (!reply.ok) return State.UNKNOWN
-        if (linkedStick && reply.message != "none") {
+        if (n == 0 && device.linkedCards && stickDevice && reply.message != "none") {
             val linked = DanaCardProtocol.state(reply.message) ?: return State.UNKNOWN
             return if (linked.inserted) State.INSERTED else State.EJECTED
         }
@@ -91,41 +103,11 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
 
-    // The Zodiac's second SD slot, through the core's sd2- commands. Its card stays in the session's
-    // sd2.frondsd.
-    fun secondState(): State {
-        val reply = link.request("sd2-state", timeoutSeconds = 30)
-        return if (!reply.ok) State.UNKNOWN else when (reply.message) {
-            "inserted" -> State.INSERTED
-            "ejected" -> State.EJECTED
-            "none" -> State.NONE
-            else -> State.UNKNOWN
-        }
-    }
-    fun secondEject() = run("sd2-eject")
-    fun secondReinsert() = run("sd2-reinsert")
-    fun secondCreate(megabytes: Int) = run("sd2-create", megabytes.toString())
-    fun secondInsert(from: Uri) {
-        folder.mkdirs()
-        val image = File(folder, "insert2.img")
-        try {
-            val limit = device.storageSlots.getOrNull(1)?.families?.firstOrNull()?.maxBytes ?: 0L
-            if (!copyIn(from, image, limit)) throw Failed("That image is too big for this slot.")
-            run("sd2-insert", image.path)
-        } finally {
-            image.delete()
-        }
-    }
-    fun secondExport(to: Uri) {
-        folder.mkdirs()
-        val image = File(folder, "export2.img")
-        try {
-            run("sd2-export", image.path)
-            val output = context.contentResolver.openOutputStream(to, "wt") ?: throw Failed("Couldn't write there.")
-            output.use { o -> image.inputStream().use { it.copyTo(o, 1 shl 20) } }
-        } finally {
-            image.delete()
-        }
+    // Slot 2's library card, which the core leaves out at start when it changed while the machine
+    // was off: `argument` is Cards.secondPutIn's.
+    fun putInSecond(argument: String) {
+        val reply = link.request("sd2-put-in", argument, timeoutSeconds = 120)
+        if (!reply.ok) throw Failed(reply.message, reply.code)
     }
 
     // Settles the ejected card in the machine folder's file and empties the slot. Returns the
@@ -188,7 +170,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun beginEdit() {
         if (linkedStick) return beginLinkedEdit()
         folder.mkdirs()
-        if (pendingFor(context, session) != null && !restorePending(context, link, session)) {
+        if (slot == 0 && pendingFor(context, session) != null && !restorePending(context, link, session)) {
             throw Failed("The last edit of this card wasn't put back in the Palm. Close the emulator and open it again.")
         }
         discard()
@@ -200,9 +182,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             if (inserted) eject()
             val saved = link.request("save", path, timeoutSeconds = 120)
             if (!saved.ok) throw Failed("Couldn't save the machine, so the card wasn't opened. ${saved.message}")
-            val slot = Cards.readSlot(dir)
-            if (!slot.swap && !Cards.writeSlot(dir, slot.copy(swap = true))) throw Failed("Couldn't open the card.")
+            val saved2 = Cards.readSlot(dir, slot)
+            if (!saved2.swap && !Cards.writeSlot(dir, saved2.copy(swap = true), slot)) throw Failed("Couldn't open the card.")
             editing = dir
+            editingSlot = slot
             val (id, prot) = takeOut()
             identity = id
             protectedCard = prot
@@ -212,7 +195,7 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
             throw e
         }
         try {
-            cardFile = CardFile.open(cardFileIn(dir), !protectedCard)
+            cardFile = CardFile.open(cardFileIn(dir, slot), !protectedCard)
             FatImage.over(cardFile!!).use { }
         } catch (e: Exception) {
             // The card goes back in as it was.
@@ -535,12 +518,14 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         const val JOURNAL_ROOM = 1L shl 20
 
         // The card file a take-out left in a machine folder: the SD card, or the classic or Pro stick.
-        fun cardFileIn(dir: File): File = listOf("sd.frondsd", "ms.frondms", "ms.frondmsp").map { File(dir, it) }
-            .firstOrNull { it.isFile } ?: File(dir, "sd.frondsd")
+        fun cardFileIn(dir: File, n: Int = 0): File =
+            if (n != 0) File(dir, "sd2.frondsd")
+            else listOf("sd.frondsd", "ms.frondms", "ms.frondmsp").map { File(dir, it) }.firstOrNull { it.isFile } ?: File(dir, "sd.frondsd")
 
-        // The machine folder whose card is taken out for the file view in this process, or null.
-        // Its slot keeps swap until the card is back, whatever saves happen meanwhile.
+        // The machine folder whose card is taken out for the file view in this process, or null,
+        // and its slot. That slot keeps swap until the card is back, whatever saves happen meanwhile.
         @Volatile var editing: File? = null
+        @Volatile var editingSlot = 0
 
         fun message(e: Exception): String = when (e) {
             is Failed, is FatImage.FatException -> e.message ?: "Something went wrong."

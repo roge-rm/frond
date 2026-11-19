@@ -181,7 +181,7 @@ class CardChoicesTest {
         val running = machine("E TX", tx)
         machine("F Clie", tg50)
         Cards.tryRunLock(running)!!.use {
-            val options = CardChoices.linkOptions(sessions, games.id, tick = tx1)
+            val options = CardChoices.linkOptions(sessions, games.id, tick = Cards.SlotRef(tx1))
             assertEquals(listOf("A TX · Palm TX", "B E2 · Tungsten E2 · Too big for Tungsten E2", "C TX · Palm TX · Has Held, take it out first",
                 "D TX · Palm TX · Linked to Other", "E TX · Palm TX · Running"), options.map { it.text })
             assertEquals(listOf(true, false, false, true, false), options.map { it.enabled })

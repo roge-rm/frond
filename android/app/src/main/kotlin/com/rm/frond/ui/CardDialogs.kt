@@ -131,20 +131,20 @@ fun FolderCardDialog(library: File, draft: CardsModel.FolderDraft, onDismiss: ()
 
 // "Link Games to machines": a checklist of machines with their device; greyed ones keep what they have.
 @Composable
-fun LinkCardsDialog(cardName: String, options: List<CardChoices.LinkOption>, onDismiss: () -> Unit, onLink: (List<File>) -> Unit) {
-    var ticked by remember(options) { mutableStateOf(options.filter { it.checked }.map { it.dir }.toSet()) }
+fun LinkCardsDialog(cardName: String, options: List<CardChoices.LinkOption>, onDismiss: () -> Unit, onLink: (List<Cards.SlotRef>) -> Unit) {
+    var ticked by remember(options) { mutableStateOf(options.filter { it.checked }.map { it.ref }.toSet()) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Link $cardName to machines") },
         text = {
             if (options.isEmpty()) Text("No machine takes this card.")
             else LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                items(options, key = { it.dir.path }) { o ->
-                    val on = o.dir in ticked
+                items(options, key = { "${it.dir.path}#${it.ref.n}" }) { o ->
+                    val on = o.ref in ticked
                     ListItem(
                         headlineContent = { Text(o.text, color = if (o.enabled) Color.Unspecified else Faded) },
                         leadingContent = { Checkbox(checked = on, onCheckedChange = null, enabled = o.enabled) },
-                        modifier = if (o.enabled) Modifier.clickableRow { ticked = if (on) ticked - o.dir else ticked + o.dir } else Modifier,
+                        modifier = if (o.enabled) Modifier.clickableRow { ticked = if (on) ticked - o.ref else ticked + o.ref } else Modifier,
                     )
                 }
             }
@@ -152,7 +152,7 @@ fun LinkCardsDialog(cardName: String, options: List<CardChoices.LinkOption>, onD
         confirmButton = {
             TextButton(onClick = {
                 // A greyed machine keeps the link it has.
-                onLink(options.filter { if (it.enabled) it.dir in ticked else it.checked }.map { it.dir })
+                onLink(options.filter { if (it.enabled) it.ref in ticked else it.checked }.map { it.ref })
             }) { Text("OK") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

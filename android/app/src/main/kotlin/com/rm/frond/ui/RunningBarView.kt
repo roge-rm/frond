@@ -155,6 +155,10 @@ private fun Bar(state: RunningBarState, actions: RunningBarActions) {
                 RunningSheets.Sheet.CARD -> BarButton({ actions.openSheet(sheet) }, button) {
                     val model = state.model
                     val icon = if (!device.cardSupported) RunningSheets.CardIcon.IN
+                    // Slot 1, or slot 2 when slot 1 is empty and slot 2 has a card.
+                    else if (model != null && model.twoSlots && model.state == SdCard.State.NONE &&
+                        (model.secondState == SdCard.State.INSERTED || model.secondState == SdCard.State.EJECTED))
+                        RunningSheets.cardIcon(model.secondState, false)
                     else RunningSheets.cardIcon(model?.state ?: SdCard.State.UNKNOWN, model?.slotShown?.linked != null)
                     Icon(painterResource(cardIconRes(icon)), contentDescription = "Storage")
                 }

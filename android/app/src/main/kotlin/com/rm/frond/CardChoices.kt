@@ -15,10 +15,13 @@ object CardChoices {
 
     // Whether `device` takes the card, and when it doesn't, whether only its size is wrong.
     // Sizes in MiB for SD and Pro, MB for a classic stick.
-    fun fits(device: Device, kind: String, size: Int): Boolean = deviceTakesKind(device, kind) && Cards.deviceTakes(device, kind, size)
+    fun fits(device: Device, kind: String, size: Int, n: Int = 0): Boolean = deviceTakesKind(device, kind, n) && Cards.deviceTakes(device, kind, size, n)
 
-    fun tooBig(device: Device, kind: String, size: Int): Boolean {
-        if (!deviceTakesKind(device, kind) || fits(device, kind, size)) return false
+    // Kinds slot `n` takes: the second slot is SD only.
+    fun deviceTakesKind(device: Device, kind: String, n: Int): Boolean = deviceTakesKind(device, kind) && Cards.hasSlot(device, n) && (n == 0 || kind == "sd")
+
+    fun tooBig(device: Device, kind: String, size: Int, n: Int = 0): Boolean {
+        if (!deviceTakesKind(device, kind, n) || fits(device, kind, size, n)) return false
         return when (kind) {
             "sd" -> (size.toLong() shl 20) > device.sdMax
             "ms" -> size > (device.msSizes.maxOrNull() ?: 0)
@@ -95,27 +98,38 @@ object CardChoices {
 
     // ---- Machines and rows ----
 
-    class Machine(val dir: File, val name: String, val device: Device, val slot: Cards.Slot, val cardFile: String?, val running: Boolean)
+    // One slot of a machine: `n` 0 for the first, 1 for the Zodiac's second SD slot.
+    class Machine(val dir: File, val name: String, val device: Device, val slot: Cards.Slot, val cardFile: String?, val running: Boolean,
+                  val n: Int = 0, val slots: Int = 1) {
+        // "Zodiac · Card 2" on a two-slot machine, else the machine's name.
+        val label: String get() = if (slots > 1) "$name · Card ${n + 1}" else name
+        val ref: Cards.SlotRef get() = Cards.SlotRef(dir, n)
+    }
 
-    // Saved ARM machines with a card slot, by name. `held` is the caller's own machine, which
-    // isn't running elsewhere.
+    fun slotsOf(device: Device) = (0 until Cards.SLOTS).count { Cards.hasSlot(device, it) }
+
+    // Each slot of the saved ARM machines with a card slot, by name. `held` is the caller's own
+    // machine, which isn't running elsewhere.
     fun machines(sessions: File, held: File? = null): List<Machine> =
-        sessions.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty().mapNotNull { dir ->
-            if (sessionFile(dir) == null) return@mapNotNull null
-            val device = Cards.machineDevice(dir) ?: return@mapNotNull null
-            if (listOf("sd", "ms", "ms-pro").none { deviceTakesKind(device, it) }) return@mapNotNull null
+        sessions.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }.orEmpty().flatMap { dir ->
+            if (sessionFile(dir) == null) return@flatMap emptyList()
+            val device = Cards.machineDevice(dir) ?: return@flatMap emptyList()
+            if (listOf("sd", "ms", "ms-pro").none { deviceTakesKind(device, it) }) return@flatMap emptyList()
             val own = held != null && held.canonicalFile == dir.canonicalFile
             val running = !own && (Cards.tryRunLock(dir)?.also { it.close() } == null)
-            Machine(dir, Cards.machineName(dir), device, Cards.readSlot(dir), Cards.cardFileIn(dir), running)
-        }.sortedBy { it.name.lowercase() }
+            val slots = slotsOf(device)
+            val name = Cards.machineName(dir)
+            (0 until slots).map { n -> Machine(dir, name, device, Cards.readSlot(dir, n), Cards.cardFileIn(dir, n), running, n, slots) }
+        }.sortedWith(compareBy({ it.name.lowercase() }, { it.n }))
 
     class Row(
         val card: Cards.Card,
         val inDrawer: Boolean,
-        val holder: String?, // the name of the machine it's in
+        val holder: String?, // the name of the machine it's in, with the slot on a two-slot machine
         val holderDir: File?,
         val holderRunning: Boolean,
         val links: List<String>, // names of the machines linked to it
+        val holderSlot: Int = 0,
     ) {
         val inMachine: Boolean get() = !inDrawer
     }
@@ -124,13 +138,15 @@ object CardChoices {
         val library = Cards.libraryFor(sessions)
         val all = machines(sessions, held)
         return Cards.entries(library).map { e ->
-            val links = all.filter { it.slot.link == e.card.id }.map { it.name }
-            var holder = if (e.inDrawer) null else all.firstOrNull { it.slot.card == e.card.id && it.cardFile == Cards.fileOfKind(e.card.kind) }
+            val links = all.filter { it.slot.link == e.card.id }.map { it.label }
+            val holder = if (e.inDrawer) null
+                else all.firstOrNull { it.slot.card == e.card.id && it.cardFile == Cards.machineFileOf(e.card.kind, it.n) }
             // A machine that isn't saved yet isn't listed but still holds it.
             val hint = if (!e.inDrawer && holder == null) e.card.machine?.let { File(sessions, it) } else null
-            Row(e.card, e.inDrawer, holder?.name ?: hint?.let { Cards.machineName(it) }, holder?.dir ?: hint,
+            val hintSlot = hint?.let { h -> (0 until Cards.SLOTS).firstOrNull { Cards.readSlot(h, it).card == e.card.id } } ?: 0
+            Row(e.card, e.inDrawer, holder?.label ?: hint?.let { Cards.machineName(it) }, holder?.dir ?: hint,
                 holder?.running ?: (hint != null && (held == null || held.canonicalFile != hint.canonicalFile) &&
-                    Cards.tryRunLock(hint)?.also { it.close() } == null), links)
+                    Cards.tryRunLock(hint)?.also { it.close() } == null), links, holder?.n ?: hintSlot)
         }.sortedBy { it.card.name.lowercase() }
     }
 
@@ -150,16 +166,16 @@ object CardChoices {
 
     class Choice(val id: String?, val text: String, val enabled: Boolean)
 
-    // No card, then the cards `device` takes; one in another machine greyed "In X", one too big
-    // greyed "Too big for <device>".
-    fun pickerChoices(sessions: File, machineDir: File, device: Device): List<Choice> {
+    // No card, then the cards slot `n` of `device` takes; one in another machine or slot greyed
+    // "In X", one too big greyed "Too big for <device>".
+    fun pickerChoices(sessions: File, machineDir: File, device: Device, n: Int = 0): List<Choice> {
         val mine = machineDir.canonicalFile
         return listOf(Choice(null, "No card", true)) + rows(sessions, machineDir).mapNotNull { r ->
-            if (!deviceTakesKind(device, r.card.kind)) return@mapNotNull null
+            if (!deviceTakesKind(device, r.card.kind, n)) return@mapNotNull null
             val size = Cards.sizeOf(r.card.kind, r.card.bytes)
-            val ok = fits(device, r.card.kind, size)
-            if (!ok && !tooBig(device, r.card.kind, size)) return@mapNotNull null
-            val here = r.holderDir?.canonicalFile == mine
+            val ok = fits(device, r.card.kind, size, n)
+            if (!ok && !tooBig(device, r.card.kind, size, n)) return@mapNotNull null
+            val here = r.holderDir?.canonicalFile == mine && r.holderSlot == n
             val text = "${r.card.name} · ${sizeText(r.card)}"
             when {
                 !ok -> Choice(r.card.id, "$text · Too big for ${device.label}", false)
@@ -173,22 +189,33 @@ object CardChoices {
     fun pickerStart(choices: List<Choice>, current: String?): String? =
         choices.firstOrNull { it.id == current && it.enabled }?.id
 
+    // ---- Add device ----
+
+    // No card, then the drawer cards slot `n` of `device` takes, by name: (id or "", text).
+    fun startCardChoices(sessions: File, device: Device, n: Int): List<Pair<String, String>> =
+        listOf("" to "No card") + Cards.entries(Cards.libraryFor(sessions)).filter { e ->
+            e.inDrawer && fits(device, e.card.kind, Cards.sizeOf(e.card.kind, e.card.bytes), n)
+        }.sortedBy { it.card.name.lowercase() }.map { it.card.id to "${it.card.name} · ${sizeText(it.card)}" }
+
     // ---- Link dialog ----
 
-    class LinkOption(val dir: File, val text: String, val enabled: Boolean, val checked: Boolean)
+    class LinkOption(val ref: Cards.SlotRef, val text: String, val enabled: Boolean, val checked: Boolean) {
+        val dir: File get() = ref.dir
+    }
 
-    // Machines that take card `id`'s kind, "Name · Device", greyed when too big, when they hold
-    // another card or when they're running. `tick` starts ticked if it can be.
-    fun linkOptions(sessions: File, id: String, held: File? = null, tick: File? = null): List<LinkOption> {
+    // Machine slots that take card `id`'s kind, "Name · Device" ("Name · Card 2 · Device" on a
+    // two-slot machine), greyed when too big, when they hold another card or when they're running.
+    // `tick` starts ticked if it can be.
+    fun linkOptions(sessions: File, id: String, held: File? = null, tick: Cards.SlotRef? = null): List<LinkOption> {
         val library = Cards.libraryFor(sessions)
         val card = Cards.readCard(Cards.entryDir(library, id)) ?: return emptyList()
         val names = Cards.entries(library).associate { it.card.id to it.card.name }
         val size = Cards.sizeOf(card.kind, card.bytes)
         return machines(sessions, held).mapNotNull { m ->
-            if (!deviceTakesKind(m.device, card.kind)) return@mapNotNull null
-            val ok = fits(m.device, card.kind, size)
-            if (!ok && !tooBig(m.device, card.kind, size)) return@mapNotNull null
-            var text = "${m.name} · ${m.device.label}"
+            if (!deviceTakesKind(m.device, card.kind, m.n)) return@mapNotNull null
+            val ok = fits(m.device, card.kind, size, m.n)
+            if (!ok && !tooBig(m.device, card.kind, size, m.n)) return@mapNotNull null
+            var text = "${m.label} · ${m.device.label}"
             var enabled = true
             when {
                 !ok -> { text += " · Too big for ${m.device.label}"; enabled = false }
@@ -199,8 +226,8 @@ object CardChoices {
                 m.running -> { text += " · Running"; enabled = false }
                 m.slot.link != null && m.slot.link != id -> text += " · Linked to ${names[m.slot.link] ?: "another card"}"
             }
-            val ticked = m.slot.link == id || (enabled && tick != null && tick.canonicalFile == m.dir.canonicalFile)
-            LinkOption(m.dir, text, enabled, ticked)
+            val ticked = m.slot.link == id || (enabled && tick != null && tick.key == m.ref.key)
+            LinkOption(m.ref, text, enabled, ticked)
         }
     }
 
@@ -211,23 +238,36 @@ object CardChoices {
     // elsewhere. Link comes first.
     fun duplicateChoices(sessions: File, dir: File): List<CardChoice> {
         val library = Cards.libraryFor(sessions)
-        val slot = Cards.readSlot(dir)
-        val file = Cards.cardFileIn(dir)
-        val holds = file != null && slot.card != null && Cards.readCard(Cards.entryDir(library, slot.card)) != null
+        var holdsAll = true
+        var any = false
+        for (n in 0 until Cards.SLOTS) {
+            val slot = Cards.readSlot(dir, n)
+            val file = Cards.cardFileIn(dir, n)
+            val holds = file != null && slot.card != null && Cards.readCard(Cards.entryDir(library, slot.card)) != null
+            when {
+                holds -> any = true
+                file != null -> return emptyList() // a card not in Cards yet: copied with the machine
+                slot.link != null && Cards.readCard(Cards.entryDir(library, slot.link)) != null -> { any = true; holdsAll = false }
+            }
+        }
         return when {
-            holds -> listOf(CardChoice.LINK, CardChoice.COPY, CardChoice.NONE)
-            file != null -> emptyList() // a card not in Cards yet: copied with the machine
-            slot.link != null && Cards.readCard(Cards.entryDir(library, slot.link)) != null -> listOf(CardChoice.LINK, CardChoice.NONE)
-            else -> emptyList()
+            !any -> emptyList()
+            holdsAll -> listOf(CardChoice.LINK, CardChoice.COPY, CardChoice.NONE)
+            else -> listOf(CardChoice.LINK, CardChoice.NONE)
         }
     }
 
-    // The card Duplicate and Delete name: the one in the machine, else the one it's linked to.
-    fun cardNameOf(sessions: File, dir: File): String? {
+    // The card Duplicate and Delete name: the one in the machine, else the one it's linked to; both
+    // slots' on a two-slot machine, "A and B".
+    fun cardNameOf(sessions: File, dir: File): String? = cardNamesOf(sessions, dir).takeIf { it.isNotEmpty() }?.joinToString(" and ")
+
+    fun cardNamesOf(sessions: File, dir: File): List<String> {
         val library = Cards.libraryFor(sessions)
-        val slot = Cards.readSlot(dir)
-        val id = (if (Cards.cardFileIn(dir) != null) slot.card else null) ?: slot.link ?: return null
-        return Cards.readCard(Cards.entryDir(library, id))?.name
+        return (0 until Cards.SLOTS).mapNotNull { n ->
+            val slot = Cards.readSlot(dir, n)
+            val id = (if (Cards.cardFileIn(dir, n) != null) slot.card else null) ?: slot.link ?: return@mapNotNull null
+            Cards.readCard(Cards.entryDir(library, id))?.name
+        }
     }
 
     fun choiceLabel(choice: CardChoice) = when (choice) {
@@ -239,14 +279,17 @@ object CardChoices {
     // `copyName` is what Copy names the new card ("Games 2").
     fun duplicateClause(choice: CardChoice, card: String, copyName: String, machine: String) = when (choice) {
         CardChoice.LINK -> "The copy shares $card with $machine."
-        CardChoice.COPY -> "The copy gets its own card, $copyName."
+        CardChoice.COPY -> if (copyName.isEmpty()) "The copy gets its own cards." else "The copy gets its own card, $copyName."
         CardChoice.NONE -> "The copy has no card."
     }
 
     // The Delete machine dialog's clause, when the machine holds a library card.
     fun deleteClause(sessions: File, dir: File): String? {
-        if (Cards.cardFileIn(dir) == null) return null
-        val name = Cards.readSlot(dir).card?.let { Cards.readCard(Cards.entryDir(Cards.libraryFor(sessions), it))?.name }
+        val held = (0 until Cards.SLOTS).filter { Cards.cardFileIn(dir, it) != null }
+        if (held.isEmpty()) return null
+        val names = held.map { n -> Cards.readSlot(dir, n).card?.let { Cards.readCard(Cards.entryDir(Cards.libraryFor(sessions), it))?.name } }
+        if (names.size > 1) return if (names.all { it != null }) "Its cards ${names.joinToString(" and ")} stay in Cards." else "Its cards stay in Cards."
+        val name = names[0]
         return if (name == null) "Its card stays in Cards." else "Its card $name stays in Cards."
     }
 }

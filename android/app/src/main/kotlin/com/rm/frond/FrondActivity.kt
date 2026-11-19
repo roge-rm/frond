@@ -392,6 +392,7 @@ open class FrondActivity : SDLActivity() {
         return try {
             val start = Cards.takeAtStart(Sessions.folder(this), folder)
             start.heldBy?.let { Log.i(TAG, "linked card is in $it") }
+            start.heldBy2?.let { Log.i(TAG, "linked card 2 is in $it") }
             start.arguments
         } catch (e: Exception) {
             Log.e(TAG, "card start: ${e.message}")
@@ -403,7 +404,7 @@ open class FrondActivity : SDLActivity() {
     fun savedMachine() {
         if (runLock == null) return
         // Not while the file view has the card out: the slot must load swapped until it's back.
-        machineFolder()?.takeIf { it.canonicalFile != SdCard.editing?.canonicalFile }?.let { Cards.clearSwap(it) }
+        machineFolder()?.let { Cards.clearSwap(it, if (it.canonicalFile == SdCard.editing?.canonicalFile) SdCard.editingSlot else null) }
     }
 
     // The core refuses to start with --fast-audio unless the NOR it runs is the qualified one for its
@@ -1024,6 +1025,8 @@ open class FrondActivity : SDLActivity() {
             device, SdCard(this, link, sessionPath, device), PalmDatabases(this, link), link, session?.name ?: device.label,
         )
         menuModel = model
+        // Once per launch: a recreated activity's intent no longer has them.
+        intent?.getStringArrayExtra(EXTRA_START_CARDS)?.let { model.putInAtStart(it.toList()); intent.removeExtra(EXTRA_START_CARDS) }
         startUsbPort?.let { model.printer?.adopt(it) }
         bar.device = device
         bar.model = model
@@ -1612,6 +1615,8 @@ open class FrondActivity : SDLActivity() {
         const val EXTRA_DEVICE = "device"
         const val EXTRA_NOR = "nor"
         const val EXTRA_NAND = "nand"
+        // A new machine's cards per slot (ids, "" for none), put in once it runs.
+        const val EXTRA_START_CARDS = "start-cards"
         // Written when the core stops without being asked; HomeActivity shows it once.
         const val START_ERROR = "start-error.txt"
         // Around the device and behind the system bars, the dark end of the TX button bar art.

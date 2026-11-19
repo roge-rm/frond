@@ -123,7 +123,7 @@ class CardsModel(private val activity: HomeActivity, private val home: HomeModel
         }
     }
 
-    fun link(card: Cards.Card, machines: List<File>) {
+    fun link(card: Cards.Card, machines: List<Cards.SlotRef>) {
         linking = null
         activity.lifecycleScope.launch {
             val moved = mutableListOf<String>()

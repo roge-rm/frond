@@ -200,7 +200,9 @@ fun HomeScreen(model: HomeModel) {
         val names = produceState<Pair<String, String>?>(null, s.id) {
             value = withContext(Dispatchers.IO) {
                 val sessions = Sessions.folder(context)
-                CardChoices.cardNameOf(sessions, s.folder)?.let { it to Cards.freeCardName(Cards.libraryFor(sessions), it) }
+                // Two cards: the copies' names aren't given.
+                val all = CardChoices.cardNamesOf(sessions, s.folder)
+                all.takeIf { it.isNotEmpty() }?.let { it.joinToString(" and ") to if (it.size > 1) "" else Cards.freeCardName(Cards.libraryFor(sessions), it[0]) }
             }
         }.value
         val duplicate: (CardChoice) -> Unit = { choice ->

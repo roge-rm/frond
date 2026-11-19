@@ -31,12 +31,16 @@ import com.rm.frond.ui.SettingsScreen
 import com.rm.frond.ui.MachineSettingsScreen
 import java.io.File
 
-data class MachineDraft(val device: Device, val settings: MachineSettings = MachineSettings(), val sessionId: String? = null)
+// `cards`: Add device's card per slot of a two-slot machine, a drawer card's id or "" for none.
+data class MachineDraft(val device: Device, val settings: MachineSettings = MachineSettings(), val sessionId: String? = null,
+                        val cards: List<String> = listOf("", ""))
 
 // Import, export and duplicate run here, so a recreated activity doesn't cancel them or leave the
 // Copying dialog up. The state is shared with whichever HomeModel is current.
 internal object HomeWork {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    // Add device: the cards picked per slot for a new session, by its id, until it launches.
+    val startCards = HashMap<String, List<String>>()
     var copying by mutableStateOf(false)
     var cancellable by mutableStateOf(false)
     // What the dialog says, and how far a card job has got, 0 to 1, when known.
@@ -287,7 +291,8 @@ class HomeModel(private val activity: HomeActivity) {
                 .putExtra(FrondActivity.EXTRA_SESSION, session.file.path)
                 .putExtra(FrondActivity.EXTRA_DEVICE, device.id)
                 .putExtra(FrondActivity.EXTRA_NOR, Firmware.nor(activity, device).path)
-                .putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, device).path),
+                .putExtra(FrondActivity.EXTRA_NAND, Firmware.nand(activity, device).path)
+                .apply { HomeWork.startCards.remove(session.id)?.let { putExtra(FrondActivity.EXTRA_START_CARDS, it.toTypedArray()) } },
         )
     }
 
@@ -319,6 +324,11 @@ class HomeModel(private val activity: HomeActivity) {
         machineDraft = machineDraft?.copy(settings = settings)
     }
 
+    // Add device's card for slot `n` ("" for none).
+    fun chooseStartCard(n: Int, id: String) {
+        machineDraft = machineDraft?.let { d -> d.copy(cards = d.cards.toMutableList().also { it[n] = id }) }
+    }
+
     fun edit(session: Session) {
         if (copying || emulatorRunning()) return
         val current = Sessions.read(activity, session.id) ?: return
@@ -347,7 +357,13 @@ class HomeModel(private val activity: HomeActivity) {
             } else if (firmwareReady[draft.device] != true) {
                 openFirmware(draft.device)
             } else {
+                val cards = if (Cards.hasSlot(draft.device, 1)) draft.cards else emptyList()
+                if (cards.size == 2 && cards[0].isNotEmpty() && cards[0] == cards[1]) {
+                    alert = "Cards" to "Pick a different card for each slot."
+                    return
+                }
                 val session = Sessions.create(activity, draft.device, settings = draft.settings)
+                if (cards.any { it.isNotEmpty() }) HomeWork.startCards[session.id] = cards
                 machineDraft = null
                 reload()
                 start(session)
