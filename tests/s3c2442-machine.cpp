@@ -841,6 +841,28 @@ int main() {
             assert(m->adc.read(0x0c, adcdat) == S3cAccess::ok && (adcdat & 0x3ff) == m->adc.channel[0]);
             assert(rx1950BatteryState(b) == b.Describe() && rx1950BatteryState(b).find("no-charging") == std::string::npos);
         }
+        // The USB cable is AC: GPF2 low and the charger on below 100% with the setting on battery, EINT2 on
+        // plugging in and pulling out, and back to the setting's own state after.
+        {
+            BatteryPower b;
+            assert(BatteryPower::Parse("level 60", b));
+            rx1950ApplyBattery(*m, b);
+            m->intc.srcpnd = 0;
+            uint32_t gpf = 0;
+            m->setUsbVbus(true);
+            rx1950ApplyBattery(*m, b);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && !(gpf & 4) && !(gpf & 8));
+            assert(m->intc.srcpnd & (1u << s3cIrq::eint2));
+            m->intc.srcpnd = 0;
+            BatteryPower full;
+            rx1950ApplyBattery(*m, full);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && !(gpf & 4) && (gpf & 8));
+            m->setUsbVbus(false);
+            rx1950ApplyBattery(*m, b);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && (gpf & 4) && (gpf & 8));
+            assert(m->intc.srcpnd & (1u << s3cIrq::eint2));
+            m->intc.srcpnd = 0;
+        }
         // Pack ID 0 (500-700 mV, no 1.3191 divider) and the thermistor at 25 C.
         const unsigned packMv = rx1950PackIdCount * 3300 / 1023;
         assert(packMv >= 500 && packMv <= 700);
