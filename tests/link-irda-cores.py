@@ -169,7 +169,7 @@ def records(path):
 
 
 class Machine:
-    def __init__(self, root, tag, source, hub, peer, device='palm-tx'):
+    def __init__(self, root, tag, source, hub, peer, device='palm-tx', engine=None):
         self.tag, self.root, self.device = tag, root, device
         self.folder = root / f'machine-{tag}'
         shutil.copytree(source, self.folder) if source.is_dir() else (
@@ -177,7 +177,8 @@ class Machine:
         self.ir = hub.folder / f'ir-{tag}.sock'
         work = root / f'core-{tag}'
         work.mkdir()
-        self.run = smoke.Run(device, work, self.folder, timeout=1200, extra=['--irda', f'unix:{self.ir}'])
+        self.run = smoke.Run(device, work, self.folder, timeout=1200,
+                             extra=['--irda', f'unix:{self.ir}'] + (['--engine', engine] if engine else []))
         self.link = hub.client(f'ir-{tag}')
         self.link.send(op='ir-attach', machine=f'Palm {tag.upper()}', device=DEVICE_NAMES[device], link=peer,
                        socket=str(self.ir))
@@ -228,6 +229,9 @@ class Machine:
                 time.sleep(0.5)
         raise smoke.Fail(f'{self.tag}: the Palm did not {"sleep" if asleep else "wake"}')
 
+    def speed(self):
+        return self.run.control.request('speed-state', '').get('message')
+
     def ir_state(self):
         return self.link.last('ir') or {}
 
@@ -242,8 +246,11 @@ def beam(sender, receiver, name):
     sent0, got0 = records(before[0]).count('send-complete'), records(before[1]).count('receive-complete')
     sender.run.tap(sender.root, *SEND[sender.device])
     end = time.monotonic() + 90
+    speeds = (sender.root / f'{name}-speed.log').open('w')
     while True:
         time.sleep(3)
+        speeds.write(f'{time.monotonic():.1f} {sender.tag} {sender.speed()} | {receiver.tag} {receiver.speed()}\n')
+        speeds.flush()
         after = [sender.export(f'{name}-after'), receiver.export(f'{name}-after')]
         sent, got = records(after[0]), records(after[1])
         if sent.count('send-complete') > sent0 and got.count('receive-complete') > got0:
@@ -269,6 +276,8 @@ def main():
     p.add_argument('--probe', type=Path)
     p.add_argument('--zodiac', type=Path, default=os.environ.get('FROND_ZODIAC_SESSION') or None,
                    help='B is a Zodiac from this session')
+    p.add_argument('--zodiac-engine', choices=('exact', 'fast'), default='fast',
+                   help="the Zodiac's engine (Fast, its default in the app)")
     args = p.parse_args()
     source = session()
     if not source:
@@ -297,7 +306,7 @@ def main():
         ma = Machine(root, 'a', source, a, b.hello['id'])
         machines.append(ma)
         mb = Machine(root, 'b', Path(args.zodiac) if args.zodiac else source, b, a.hello['id'],
-                     'tapwave-zodiac-2' if args.zodiac else 'palm-tx')
+                     'tapwave-zodiac-2' if args.zodiac else 'palm-tx', args.zodiac_engine if args.zodiac else None)
         machines.append(mb)
         for m in machines:
             m.link.wait(lambda s: s.get('type') == 'ir' and s.get('state') == 'joined' and s.get('core'), f'{m.tag} joined', 60)

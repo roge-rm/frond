@@ -70,8 +70,9 @@ static bool delayLoopPc(uint32_t pc) { return pc == 0x2009f678 || pc == 0x200849
 uint32_t jitBudget = 0;
 uint64_t jitBoardWrites = 0, jitReads = 0, jitRegisterReads = 0, delaySkips = 0, delaySkipCycles = 0, delayHaltSkips = 0;  // for tests
 uint64_t scanPollSkips = 0, scanPollRounds = 0, fifoWaitSkips = 0, fifoWaitRounds = 0;  // for tests
+uint64_t uartPollSkips = 0, uartPollRounds = 0;  // for tests
 uint64_t jitChargedWrites = 0;  // for tests
-bool scanPollSkip = true, fifoWaitSkip = true;
+bool scanPollSkip = true, fifoWaitSkip = true, uartPollSkip = true;
 // Fast blocks: a vertical wait read (200adb08, 200adb14) that saw the value its loop waits on ends the JIT run, so
 // the next run starts on the load and skipScanPoll can pass the rounds (scanHalted). scanHaltOff stops that until
 // the next step once a skip after such a halt passed nothing.
@@ -1040,6 +1041,65 @@ struct Probe {
         ++scanPollSkips;
         scanPollRounds += n;
         return 3 * n;
+    }
+    // Fast blocks: a UART status poll, ldr rT, [rN, #imm]; tst rT, #mask; beq or bne back to the load, like the ROM
+    // serial driver's wait for TRDY after each character (204d0f24). A status register (USR1, USR2, UTS) changes only
+    // at a UART event or a guest access, so inside the quiet span every round reads what the last one did. At the
+    // load, after a round that read the value the loop goes on with, the rounds up to the span's end pass at once:
+    // 3 instructions and their cost model clocks each, as the JIT takes them with the read on the lean path. The
+    // last rounds of the span run as before and see the change. hard is the most work the slice has left. Returns
+    // the instructions passed.
+    uint64_t skipUartPoll(uint64_t hard) {
+        if (!uartPollSkip || cpuIsThumb(cpu) || !cpuArm920JitCanRun(cpu) || failed ||
+            graphicsWireStatus != Imx1BootstrapAccess::ok)
+            return 0;
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t pc = r[15];
+        uint32_t w[3], pa;
+        for (unsigned i = 0; i < 3; ++i)
+            if (!cpuArm920PeekWord(cpu, pc + 4 * i, &w[i], &pa)) return 0;
+        // Always-executed ldr with an immediate offset and no writeback, tst of the loaded register, branch to the load.
+        if ((w[0] & 0xfff00000u) != 0xe5900000u || (w[1] & 0xfff0f000u) != 0xe3100000u ||
+            (w[2] != 0x0afffffcu && w[2] != 0x1afffffcu))
+            return 0;
+        const unsigned base = (w[0] >> 16) & 15, t = (w[0] >> 12) & 15;
+        if (base == 15 || t == 15 || base == t || ((w[1] >> 16) & 15) != t) return 0;
+        const uint32_t cpsr = cpuGetRegExternal(cpu, ARM_REG_NUM_CPSR);
+        const uint32_t va = r[base] + (w[0] & 0xfff);
+        if ((va & 3) || (cpsr & 31) == ARM_SR_MODE_USR || !cpuArm920PeekWord(cpu, va, nullptr, &pa)) return 0;
+        const uint32_t unit = pa & ~0xfffu, offset = pa & 0xfffu;
+        if ((unit != 0x00206000 && unit != 0x00207000) || (offset != 0x94 && offset != 0x98 && offset != 0xb4)) return 0;
+        uint32_t value;
+        if (peripherals.access(pa, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok) return 0;
+        const unsigned rotate = 2 * ((w[1] >> 8) & 15);
+        const uint32_t mask = rotate ? ((w[1] & 0xff) >> rotate) | ((w[1] & 0xff) << (32 - rotate)) : w[1] & 0xff;
+        const uint32_t result = value & mask;
+        // The round before read the same value: rT holds it, and N, Z and C are what its tst left.
+        uint32_t flags = (result & 0x80000000u) | (result ? 0 : 0x40000000u);
+        flags |= rotate ? (mask & 0x80000000u) >> 2 : cpsr & 0x20000000u;
+        const bool loops = w[2] == 0x0afffffcu ? !result : result != 0;
+        if (!loops || r[t] != value || (cpsr & 0xe0000000u) != flags) return 0;
+        const uint64_t round = cost::armCost(w[0], cost::Core::arm920t) + cost::armCost(w[1], cost::Core::arm920t) +
+                               cost::armCost(w[2], cost::Core::arm920t);
+        // The span keeps room for the last rounds; the slice for the work the rounds add.
+        const uint64_t keep = leanMinimumSpan + 4 * round;
+        if (quietCycles <= keep) return 0;
+        const uint64_t n = std::min((quietCycles - keep) / round, hard / 8);
+        if (!n) return 0;
+        deferredCycles += round * n;
+        quietCycles -= round * n;
+        work += 3 * n;
+        retired += 3 * n;
+        ++uartPollSkips;
+        uartPollRounds += n;
+        return 3 * n;
+    }
+    // Whether pc is at a load skipUartPoll may pass: the JIT stops there, as the read isn't on the lean path.
+    bool atUartPoll() const {
+        if (!uartPollSkip || cpuIsThumb(cpu)) return false;
+        uint32_t w, pa;
+        return cpuArm920PeekWord(cpu, cpuGetRegisters(cpu)[15] + 8, &w, &pa) && (w == 0x0afffffcu || w == 0x1afffffcu) &&
+               cpuArm920PeekWord(cpu, cpuGetRegisters(cpu)[15], &w, &pa) && (w & 0xfff00000u) == 0xe5900000u;
     }
     // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
     // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
@@ -2086,6 +2146,10 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         leanCs5 = {};
                         continue;
                     }
+                    if (const uint64_t passed = p->skipUartPoll(hard - jitSlack)) {
+                        slice += uint32_t(passed);
+                        continue;
+                    }
                     scanHaltOff |= halted;
                     int stop;
                     jitBudget = uint32_t(std::min(quietCycles, hard - jitSlack + 1));
@@ -2134,6 +2198,8 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
                         if (ran) continue;
                         break;
                     }
+                    // A UART status poll's load ends the run; the next try starts with skipUartPoll.
+                    if (ran && p->atUartPoll()) continue;
                     // The instruction the JIT left goes to the lean path, then the JIT again. Code not compiled
                     // yet, or a JIT that keeps stopping straight away, runs on the lean path for a while.
                     leanCount = stop == arm920JitCold || instructions < 4 ? 32 : 1;
@@ -2236,6 +2302,9 @@ uint64_t imx1MachineScanPollSkips(const Imx1Machine*) { return scanPollSkips; }
 uint64_t imx1MachineScanPollRounds(const Imx1Machine*) { return scanPollRounds; }
 uint64_t imx1MachineScanHalts(const Imx1Machine*) { return scanHalts; }
 void imx1SetScanPollSkip(bool skip) { scanPollSkip = skip; }
+uint64_t imx1MachineUartPollSkips(const Imx1Machine*) { return uartPollSkips; }
+uint64_t imx1MachineUartPollRounds(const Imx1Machine*) { return uartPollRounds; }
+void imx1SetUartPollSkip(bool skip) { uartPollSkip = skip; }
 bool imx1MachineSetGuestExceptions(Imx1Machine* machine, bool on) {
     auto* p = machine->probe;
     if (p->bounds || p->stopped) return false;

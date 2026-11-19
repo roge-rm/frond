@@ -241,6 +241,11 @@ uint64_t imx1MachineScanPollRounds(const Imx1Machine*);
 // Fast runs a vertical wait read ended so the next run could skip the polls (scanHalted).
 uint64_t imx1MachineScanHalts(const Imx1Machine*);
 void imx1SetScanPollSkip(bool skip);
+// UART status polls (ldr, tst, branch back) Fast blocks passed at once, since the process started: the times and the
+// rounds. imx1SetUartPollSkip(false) turns the skip off, for tests.
+uint64_t imx1MachineUartPollSkips(const Imx1Machine*);
+uint64_t imx1MachineUartPollRounds(const Imx1Machine*);
+void imx1SetUartPollSkip(bool skip);
 // Whether data and prefetch aborts and undefined instructions go to this machine's guest vectors, as on the
 // ARM920T. Off (the default), the machine stops on them. CP15 refusals still stop. Not saved in states.
 // Execution thread, between runs; false inside a bounded run or after stop.
