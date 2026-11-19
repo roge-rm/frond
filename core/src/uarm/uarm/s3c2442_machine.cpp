@@ -541,8 +541,9 @@ int S3c2442Machine::backlightLevel() const {
     if (mode != 2) return -1;
     const auto& t = pwm.timers[0];
     if (!(pwm.tcon & 1) || !t.buffer) return (pwm.tcon & 4) ? 1000 : 0;
-    // TOUT0 is high from TCMPB0 down to 0 of each TCNTB0 + 1 period; TCON bit 2 inverts it.
-    uint64_t duty = uint64_t(std::min(t.compare, t.buffer) + 1) * 1000 / (uint64_t(t.buffer) + 1);
+    // TOUT0 is high from TCMPB0 down to 0 of each TCNTB0 + 1 period; TCON bit 2 inverts it. With TCMPB0
+    // above TCNTB0 the count never meets the compare, so TOUT0 stays at its idle level.
+    uint64_t duty = t.compare > t.buffer ? 0 : uint64_t(t.compare + 1) * 1000 / (uint64_t(t.buffer) + 1);
     if (pwm.tcon & 4) duty = 1000 - duty;
     return int(duty);
 }

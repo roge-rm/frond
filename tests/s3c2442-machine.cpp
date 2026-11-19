@@ -1,9 +1,11 @@
 // S3C2442 machine checks on the CPU: idle ends or stops, the budget bounds idle time, and start() resets
 // the undefined instruction stop.
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -159,14 +161,23 @@ int main() {
             assert(fast->leanRetired() + fast->jitRetired() > fast->retired() / 2);
         }
     }
-    // The battery setting on the rx1950's inputs: every level reads back through battdrvr's own sums within 1%
-    // (exact at 0, 50 and 100) and stays above its 3300 mV power off; Maximum is 4120 mV.
-    for (unsigned p = 0; p <= 100; ++p) {
-        const unsigned mv = rx1950CountMilliVolts(rx1950BatteryAin0(p));
-        const unsigned got = rx1950GuestPercent(mv);
-        if (got + 1 < p || got > p + 1) std::fprintf(stderr, "battery %u%%: %u mV reads %u%%\n", p, mv, got);
-        assert(got + 1 >= p && got <= p + 1 && mv > 3300);
-        if (p == 0 || p == 50 || p == 100) assert(got == p);
+    // The battery setting on the rx1950's inputs: every level battdrvr can read back reads back exactly through
+    // its own sums; the ones no count gives read the next percent up. All stay above its 3300 mV power off.
+    {
+        bool reachable[101] = {};
+        for (unsigned c = 0; c < 1024; ++c) {
+            const unsigned got = rx1950GuestPercent(rx1950CountMilliVolts(uint16_t(c)));
+            if (got <= 100) reachable[got] = true;
+        }
+        const unsigned unreachable[] = {18, 26, 29, 32, 35, 38, 41, 44, 47};
+        for (unsigned p = 0; p <= 100; ++p) {
+            const bool listed = std::find(std::begin(unreachable), std::end(unreachable), p) != std::end(unreachable);
+            assert(reachable[p] == !listed);
+            const unsigned mv = rx1950CountMilliVolts(rx1950BatteryAin0(p));
+            const unsigned got = rx1950GuestPercent(mv);
+            if (got != p + listed) std::fprintf(stderr, "battery %u%%: %u mV reads %u%%\n", p, mv, got);
+            assert(got == p + listed && mv > 3300);
+        }
     }
     {
         BatteryPower full;
@@ -232,6 +243,17 @@ int main() {
         m->pwm.tcon = 1;
         assert(m->gpio.write(0x10, 2, m->intc) == S3cAccess::ok);  // GPB0 as TOUT0
         assert(m->backlightLevel() == 76 * 1000 / 151);
+        // TCMPB0 above TCNTB0: the count never meets the compare, TOUT0 stays at its idle level (low, or high
+        // with the inverter on).
+        m->pwm.timers[0].compare = 200;
+        assert(m->backlightLevel() == 0);
+        m->pwm.tcon = 1 | 4;
+        assert(m->backlightLevel() == 1000);
+        m->pwm.timers[0].compare = 150;
+        assert(m->backlightLevel() == 0);
+        m->pwm.tcon = 1;
+        assert(m->backlightLevel() == 1000);
+        m->pwm.timers[0].compare = 75;
         assert(m->run(1000) == S3c2442Stop::budget && m->asleep() && m->sleepCount() == 1);
         assert(m->backlightLevel() == -1);
         const uint64_t ns = m->nanoseconds(), retired = m->retired();

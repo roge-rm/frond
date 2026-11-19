@@ -66,12 +66,14 @@ constexpr uint16_t rx1950BatteryCount(unsigned mv) {
 constexpr unsigned rx1950CountMilliVolts(uint16_t count) { return unsigned(uint64_t(count) * 435303 / 102300); }
 
 // AIN0 for percent: the count nearest the middle of its band, moved a count at a time while battdrvr would
-// read another percent (a count is 4.26 mV, more than a percent between 5 and 25%).
+// read another percent. A count is 4.26 mV, more than a percent between 5 and 50%, so some percents have no
+// count (18, 26, 29, 32, 35, 38, 41, 44 and 47); those get the next count up, which reads the percent above.
 constexpr uint16_t rx1950BatteryAin0(unsigned percent) {
     if (percent > 100) percent = 100;
     uint16_t count = rx1950BatteryCount(rx1950BatteryMilliVolts(percent));
     for (unsigned i = 0; i < 4 && rx1950GuestPercent(rx1950CountMilliVolts(count)) < percent; ++i) ++count;
     for (unsigned i = 0; i < 4 && rx1950GuestPercent(rx1950CountMilliVolts(count)) > percent; ++i) --count;
+    if (rx1950GuestPercent(rx1950CountMilliVolts(count)) < percent) ++count;
     return count;
 }
 
