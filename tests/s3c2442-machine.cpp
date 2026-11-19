@@ -14,6 +14,7 @@
 #include "rx1950_power.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
+#include "vSD.h"
 
 namespace {
     constexpr uint32_t code = 0x30000000;
@@ -86,6 +87,117 @@ namespace {
         m.pwm.write(0x08, (1u << 21) | (1u << 22));  // manual update, auto reload
         m.pwm.write(0x08, (1u << 20) | (1u << 22));  // start, auto reload
     }
+}
+
+namespace {
+    // A 32 KB card in RAM, sector n filled with n and its offset.
+    std::vector<uint8_t> disk;
+    bool diskRead(uint32_t sector, void* buf) {
+        if ((sector + 1) * 512 > disk.size()) return false;
+        std::memcpy(buf, disk.data() + sector * 512, 512);
+        return true;
+    }
+    bool diskWrite(uint32_t sector, const void* buf) {
+        if ((sector + 1) * 512 > disk.size()) return false;
+        std::memcpy(disk.data() + sector * 512, buf, 512);
+        return true;
+    }
+    // CMD0, ACMD41 until ready, CMD2, CMD3 (RCA 3), CMD7 and CMD16 512: the card in transfer state.
+    VSD* readyCard() {
+        disk.assign(64 * 512, 0);
+        for (size_t i = 0; i < disk.size(); ++i) disk[i] = uint8_t(i / 512 * 16 + i % 16);
+        VSD* card = vsdInit(diskRead, diskWrite, 64);
+        uint8_t reply[17];
+        vsdCommand(card, 0, 0, reply);
+        for (unsigned i = 0; i < 100; ++i) {
+            vsdCommand(card, 55, 0, reply);
+            vsdCommand(card, 41, 0x00ff8000, reply);
+            if (reply[1] & 0x80) break;
+        }
+        assert(reply[1] & 0x80);
+        assert(vsdCommand(card, 2, 0, reply) == SdReply136bits);
+        assert(vsdCommand(card, 3, 0, reply) == SdReply48bits);
+        assert(vsdCommand(card, 7, 3u << 16, reply) == SdReply48bitsAndBusy);
+        assert(vsdCommand(card, 16, 512, reply) == SdReply48bits);
+        return card;
+    }
+}
+
+// The SD slot through the guest: a DMA read of sector 1 on channel 0 as SDHC_SC2410.dll sets it up (SDIDAT to
+// SDRAM in words, 0x8ae000), a DMA write of SDRAM to sector 2 (0x92f000), DatFin and the DMA interrupt, the
+// card's supply off on GPJ1, and the card section of a saved state.
+static void sdTests() {
+    constexpr uint32_t buffer = 0x3004c000;
+    VSD* card = readyCard();
+    const std::vector<std::pair<uint32_t, uint32_t>> readSector = {
+        {0x5a000038, 0x10000}, {0x5a000034, 0xffffffff}, {0x5a000024, 0x7fffff}, {0x5a000028, 512},
+        {0x4b000000, 0x5a000040}, {0x4b000004, 3}, {0x4b000008, buffer}, {0x4b00000c, 0},
+        {0x4b000010, 0xa2e00000 | 128}, {0x5a00002c, 0x8ae000 | 1}, {0x5a000008, 512}, {0x5a00000c, 0x351},
+        {0x4b000020, 2}};
+    auto m = make(stores(readSector, {loop}));
+    m->setSdCard(card);
+    assert(m->sdCard() == card && m->sdPowered());
+    assert(m->run(10000) == S3c2442Stop::budget);
+    assert(std::memcmp(m->sdram() + (buffer - 0x30000000), disk.data() + 512, 512) == 0);
+    assert((m->intc.pending() & (1u << s3cIrq::dma0)) && !m->dma.on(0) && m->sdi.blocksRead == 1);
+    uint32_t v = 0;
+    assert(m->sdi.read(0x34, 4, v) == S3cAccess::ok && (v & 0x13) == 0x10);
+
+    // SDRAM to sector 2 after CMD24.
+    std::vector<uint8_t> data(512);
+    for (unsigned i = 0; i < 512; ++i) data[i] = uint8_t(0xa5 ^ i);
+    const std::vector<std::pair<uint32_t, uint32_t>> writeSector = {
+        {0x5a00002c, 0}, {0x5a000038, 0x10000}, {0x5a000034, 0xffffffff}, {0x5a000028, 512},
+        {0x4b000000, buffer}, {0x4b000004, 0}, {0x4b000008, 0x5a000040}, {0x4b00000c, 3},
+        {0x4b000010, 0xa2e00000 | 128}, {0x5a00002c, 0x92f000 | 1}, {0x5a000008, 1024}, {0x5a00000c, 0x358},
+        {0x4b000020, 2}};
+    auto w = make(stores(writeSector, {loop}));
+    assert(w->loadRam(buffer, data.data(), data.size()));
+    w->setSdCard(card);
+    assert(w->run(10000) == S3c2442Stop::budget);
+    assert(std::memcmp(disk.data() + 1024, data.data(), 512) == 0 && w->sdi.blocksWritten == 1);
+    assert((w->intc.pending() & (1u << s3cIrq::dma0)) && w->sdi.read(0x34, 4, v) == S3cAccess::ok && (v & 0x13) == 0x10);
+
+    // The saved state keeps the card in, its id and its state; a state's loadedCard says so.
+    w->sdCardId = "card-1";
+    std::vector<uint8_t> saved;
+    std::string why;
+    assert(w->saveState(saved, why));
+    auto n = make({loop});
+    assert(n->loadState(saved.data(), saved.size(), why));
+    assert(n->loadedCard.section && n->loadedCard.in && n->loadedCard.id == "card-1" && !n->loadedCard.card.empty());
+    assert(n->sdi.blocksWritten == 1 && !n->sdCard());
+    // Saved with the slot empty: no card in.
+    w->setSdCard(nullptr);
+    assert(w->saveState(saved, why) && n->loadState(saved.data(), saved.size(), why));
+    assert(n->loadedCard.section && !n->loadedCard.in);
+
+    // GPJ1 an output driven low: the card loses its supply, resets and stops answering; CMD13 times out.
+    const std::vector<std::pair<uint32_t, uint32_t>> powerOff = {
+        {0x560000d4, 0}, {0x560000d0, 1u << 2}, {0x5a000010, 0x1e00}, {0x5a000008, 3u << 16}, {0x5a00000c, 0x34d}};
+    auto p = make(stores(powerOff, {loop}));
+    p->setSdCard(card);
+    assert(p->run(10000) == S3c2442Stop::budget && !p->sdPowered());
+    assert(p->sdi.read(0x10, 4, v) == S3cAccess::ok && (v & 0x600) == 0x400);
+    // Back to idle, so a read command doesn't start a transfer.
+    uint8_t reply[17], sector[512];
+    vsdCommand(card, 17, 0, reply);
+    assert(vsdDataXferBlockFromCard(card, sector, 512) != SdDataOk);
+    p->setSdCard(nullptr);
+    free(card);
+
+    // GPJ1 dropped mid-read: DatTout reaches INT_SDI through SDIIMSK straight away.
+    card = readyCard();
+    const std::vector<std::pair<uint32_t, uint32_t>> dropMidRead = {
+        {0x5a00003c, 1u << 8}, {0x5a000028, 512}, {0x5a00002c, 0xa2000 | 1}, {0x5a000008, 512}, {0x5a00000c, 0x351},
+        {0x560000d4, 0}, {0x560000d0, 1u << 2}};
+    auto q = make(stores(dropMidRead, {loop}));
+    q->setSdCard(card);
+    assert(q->run(10000) == S3c2442Stop::budget && !q->sdPowered() && q->sdi.blocksRead == 1);
+    assert(q->sdi.read(0x34, 4, v) == S3cAccess::ok && (v & 0x21) == 0x20);
+    assert(q->intc.srcpnd & (1u << s3cIrq::sdi));
+    q->setSdCard(nullptr);
+    free(card);
 }
 
 // Sound: IIS playback through DMA, its interrupt and timing in both engines, the board's gain, recording from
@@ -217,6 +329,7 @@ static void audioTests() {
 }
 
 int main() {
+    sdTests();
     audioTests();
     // A masked RTC tick can't end a wait for interrupt.
     {

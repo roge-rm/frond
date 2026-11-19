@@ -68,6 +68,10 @@ class SocS3C2442 : public SoC {
     AudioInputDemand MicrophoneDemand() override { return machine->microphoneDemand(); }
     void SetMicrophoneSource(const AudioInputSource* source) override;
     std::function<void()> CapturePeripheralInput() override;
+    void SetSdWriteProtect(bool on) override;
+    // A load found another card (or none) in the store than the one the state had in: the slot is empty and the
+    // card in the store goes in later as a new one.
+    bool CardSwappedOnLoad() const { return cardSwapped; }
 
     // Exact (the interpreter with the cache models) or Fast (the JIT and lean path). Between Run calls only.
     bool SetFastEngine(bool fast) { return machine->setFastEngine(fast); }
@@ -88,9 +92,9 @@ class SocS3C2442 : public SoC {
     void OnSetAudioQueue(struct AudioQueue*) override {}
     void OnSetPcmOutputEnabled() override {}
     void OnSetPcmSuspended() override {}
-    void OnSdInsert() override {}
+    void OnSdInsert() override;
     void OnSdRemount() override {}
-    void OnSdEject() override {}
+    void OnSdEject() override;
 
    private:
     SocS3C2442() = default;
@@ -129,8 +133,13 @@ class SocS3C2442 : public SoC {
     uint64_t captureFrames{0}, captureLoud{0};
     unsigned capturePeak{0}, captureRawPeak{0};
     uint32_t captureGainPeak{0};
-    // The battery and headphones on the board's pins, after a start, load or reset.
+    // The battery, headphones and SD slot on the board's pins, after a start, load or reset.
     void ApplyHostInputs();
+    void ApplyCardPins();
+    // After a load: the saved card carries on when the store has it, or the slot is left empty.
+    void LoadCard();
+    struct VSD* vsd{nullptr};
+    bool sdProtect{false}, cardSwapped{false};
 };
 
 #endif

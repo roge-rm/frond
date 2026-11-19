@@ -14,6 +14,8 @@
 #include "rx1950_board.h"
 #include "rx1950_nand_image.h"
 #include "rx1950_power.h"
+#include "sdcard.h"
+#include "vSD.h"
 
 namespace {
     // CEBL.nbf: a 0xa5a byte header, then eboot, which the loader copies to SDRAM and starts.
@@ -180,6 +182,66 @@ std::string SocS3C2442::PcmCaptureSummary() const {
 void SocS3C2442::ApplyHostInputs() {
     rx1950ApplyBattery(*machine, battery);
     machine->setHeadphones(headphones);
+    ApplyCardPins();
+}
+
+void SocS3C2442::ApplyCardPins() {
+    const bool in = cardInserted && machine->sdCard();
+    machine->setPin(rx1950CardDetectPort, rx1950CardDetectBit, !in);
+    machine->setPin(rx1950WriteProtectPort, rx1950WriteProtectBit, in && sdProtect);
+}
+
+void SocS3C2442::SetSdWriteProtect(bool on) {
+    sdProtect = on;
+    ApplyCardPins();
+}
+
+void SocS3C2442::OnSdInsert() {
+    const size_t sectors = sdCardSectorCount();
+    if (sectors > rx1950MaxCardSectors) {
+        std::cerr << "rx1950: the card is over 2 GB, which Windows Mobile 5 can't use; left out" << std::endl;
+        cardInserted = false;
+        return;
+    }
+    if (!vsd) vsd = vsdInit(sdCardRead, sdCardWrite, 0);
+    vsdReset(vsd, uint32_t(sectors));
+    std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
+    cardId[sizeof(cardId) - 1] = '\0';
+    machine->sdCardId = cardId;
+    machine->setSdCard(vsd);
+    ApplyCardPins();
+}
+
+void SocS3C2442::OnSdEject() {
+    machine->setSdCard(nullptr);
+    machine->sdCardId.clear();
+    if (vsd) vsdReset(vsd, 0);
+    ApplyCardPins();
+}
+
+void SocS3C2442::LoadCard() {
+    const auto& saved = machine->loadedCard;
+    cardSwapped = false;
+    const size_t sectors = sdCardInitialized() ? sdCardSectorCount() : 0;
+    if (saved.in && sectors && sectors <= rx1950MaxCardSectors && (saved.id.empty() || saved.id == sdCardGetId())) {
+        if (!vsd) vsd = vsdInit(sdCardRead, sdCardWrite, 0);
+        vsdReset(vsd, uint32_t(sectors));
+        // A card mid-command or mid-transfer carries on; one whose state doesn't fit starts idle.
+        if (!saved.card.empty()) vsdMachineLoad(vsd, saved.card.data(), saved.card.size());
+        machine->setSdCard(vsd);
+        std::strncpy(cardId, sdCardGetId(), sizeof(cardId) - 1);
+        cardId[sizeof(cardId) - 1] = '\0';
+        machine->sdCardId = cardId;
+        cardInserted = true;
+        return;
+    }
+    // The saved card isn't in the store: the slot is empty (the guest sees it taken out) and the store's card,
+    // if any, goes in later as a new one.
+    cardSwapped = saved.in && sdCardInitialized();
+    machine->setSdCard(nullptr);
+    machine->sdCardId.clear();
+    if (vsd) vsdReset(vsd, 0);
+    cardInserted = false;
 }
 
 bool SocS3C2442::SetHeadphones(bool in) {
@@ -240,6 +302,7 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
     machine->nand.dropCache();
+    LoadCard();
     if (!RestoringCheckpoint()) DisarmMicrophone();
     // A session saved before sound worked has GPA1 as an address line, as the loader pins left it then; the
     // speaker amplifier needs it as an output (rx1950LoaderPins).

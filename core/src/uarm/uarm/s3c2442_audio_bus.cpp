@@ -68,6 +68,8 @@ int S3cDma::channelFor(S3cDmaRequest request) const {
         const uint32_t source = (dcon >> 24) & 7;
         if (request == S3cDmaRequest::iisOut && ch == 2 && source == 0) return int(ch);
         if (request == S3cDmaRequest::iisIn && ((ch == 1 && source == 2) || (ch == 2 && source == 1))) return int(ch);
+        if (request == S3cDmaRequest::sdi && (((ch == 0 || ch == 2) && source == 2) || (ch == 3 && source == 1)))
+            return int(ch);
     }
     return -1;
 }

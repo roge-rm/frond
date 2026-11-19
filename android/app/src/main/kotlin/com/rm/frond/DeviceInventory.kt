@@ -1468,8 +1468,8 @@ internal val deviceInventory = listOf(
         nandRequired = true,
         fastAudioNorMd5 = null,
         sound = true,
-        storageSlot = "none",
-        sdSlot = false,
+        storageSlot = "sd",
+        sdSlot = true,
         memoryStick = false,
         network = false,
         serialPort = false,
@@ -1505,8 +1505,8 @@ internal val deviceInventory = listOf(
         menuX = -1,
         menuY = -1,
         rotatingStatusBar = false,
-        sdMin = 0L,
-        sdMax = 0L,
+        sdMin = 33554432L,
+        sdMax = 2147483648L,
         msSizes = listOf(),
         msProMax = 0,
         runs68k = false,
@@ -1514,5 +1514,10 @@ internal val deviceInventory = listOf(
         pendingUsb = "",
         colourLcd = false,
         os = "windows-ce",
+        storageSlots = listOf(
+            StorageSlot(0, 1, "sd", listOf(
+                CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
+            )),
+        ),
     ),
 )

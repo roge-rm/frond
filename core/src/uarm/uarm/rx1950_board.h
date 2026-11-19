@@ -50,6 +50,14 @@ inline void rx1950LoaderPins(S3cGpio& gpio) {
 constexpr uint8_t rx1950RtcYear(unsigned year) { return uint8_t(year - 1950); }
 constexpr S3cRtc::Time rx1950RtcStart{rx1950RtcYear(2006), 1, 1, 1, 12, 0, 0};
 
+// The SD slot (SDHC_SC2410.dll's registry and code): card detect on GPF5 (EINT5), low with a card in; write
+// protect on GPH8, which the driver reads as protected when high (as Linux's mach-rx1950.c does).
+// ASSUMPTION "rx1950 SD write protect": GPH8 is high only with a protected card in. ASSUMPTION "rx1950 no
+// SDHC": WM5 5.1.1702's sdbus.dll has no high capacity path, so cards stop at 2 GB.
+constexpr S3cGpio::Port rx1950CardDetectPort = S3cGpio::f, rx1950WriteProtectPort = S3cGpio::h;
+constexpr unsigned rx1950CardDetectBit = 5, rx1950WriteProtectBit = 8;
+constexpr size_t rx1950MaxCardSectors = size_t(2048) << 11;
+
 // The serial cable sense on GPF6, high with the cable attached. eboot only sets up its debug serial port then
 // (GPFDAT read at 0x8c0a61cc), and with it the OS's ActiveSync looks for a PC on UART0 every second.
 // ASSUMPTION "rx1950 serial cable sense": high means attached, as eboot and the OS both stay quiet on UART0

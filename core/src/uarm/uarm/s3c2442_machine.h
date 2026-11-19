@@ -21,6 +21,7 @@
 struct ArmCpu;
 struct ArmMem;
 struct ArmRam;
+struct VSD;
 
 struct S3c2442Options {
     uint32_t crystal = 16934400;
@@ -174,6 +175,23 @@ class S3c2442Machine {
     void setHeadphones(bool in) { setPin(S3cGpio::g, 12, !in); }
     bool headphonesIn() const { return !gpio.pin(S3cGpio::g, 12); }
 
+    // The SD card in the slot (the uARM card on the card store), or nullptr for none. The board's card detect
+    // and write protect pins are the owner's (setPin). ASSUMPTION "rx1950 SD power on GPJ1": the card is
+    // powered unless GPJ1 is an output driven low (the SD driver sets GPJDAT bit 1 when a card goes in and
+    // clears it when it comes out); the change to off resets the card.
+    void setSdCard(VSD* card);
+    VSD* sdCard() const { return sdVsd; }
+    bool sdPowered() const;
+    // The card section of the last loadState: whether the state had one, whether a card was in, its id and
+    // its saved state (vsdMachineLoad). The owner puts the card back, or takes it out, after the load.
+    struct SavedCard {
+        bool section = false, in = false;
+        std::string id;
+        std::vector<uint8_t> card;
+    } loadedCard;
+    // The id saveState keeps with the card, for the owner to tell the same card at a load.
+    std::string sdCardId;
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -240,6 +258,13 @@ class S3c2442Machine {
     void codecPins();
     bool codecResetHigh = false;
     uint64_t iisRest = 0;
+    // After an SDI or DMA access: SDI DMA requests served, INT_SDI's level.
+    void sdiService();
+    // After a GPIO write: the card's supply (GPJ1).
+    void sdPowerPins();
+    VSD* sdVsd = nullptr;
+    std::unique_ptr<S3cSdCard> sdAdapter;
+    bool sdPowerWas = true;
     void hardReset(uint32_t gstatus2);
     void resetBlocks();
     // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.

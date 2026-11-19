@@ -149,19 +149,69 @@ class S3cWatchdog {
     uint64_t divisor() const;
 };
 
-// SD host interface at 0x5a000000 (manual chapter 19) with no card in the slot: registers keep what's
-// written, and a command that's started times out (SDICSTA CmdTout) as with an empty slot. Data, the
-// FIFO and the interrupt wait for the SD card work.
+// The card in the SD slot, as the SD host sees it (the machine wraps the uARM card, vSD.h). command gives the
+// card's response in reply, MSB first as on the wire (17 bytes for a 136-bit one): 0 for none, 48 or 136
+// bits, and busy set for an R1b. The block calls are whole data blocks; false is a card error.
+struct S3cSdCard {
+    virtual ~S3cSdCard() = default;
+    virtual unsigned command(uint8_t index, uint32_t argument, uint8_t reply[17], bool& busy) = 0;
+    virtual bool readBlock(uint8_t* data, uint32_t size) = 0;
+    virtual bool writeBlock(const uint8_t* data, uint32_t size) = 0;
+};
+
+// SD host interface at 0x5a000000 (manual chapter 19), S3C2440 register layout (SDIIMSK at 0x3c, SDIDAT at
+// 0x40). A command runs at once when CmdStart is written: no card or no answer times out (CmdTout) when a
+// response is wanted, and a response sets RspFin and the SDIRSP registers (RSP0 bits 127:96 or 39:8). A data
+// transfer is set by SDIDCON: it starts at once, or after the next command with RACMD, TARSP or BACMD. Data
+// moves a block at a time through the card: the FIFO shows what's left of the block, up to 64 bytes, to the
+// CPU at SDIDAT and to the DMA (dmaWants, fifoRead, fifoWrite), and the last byte of the last block sets
+// DatFin. ASSUMPTION "SDI transfers take no time": the card answers and the FIFO fills or drains at once,
+// with no clock or data timer. ASSUMPTION "SDI start without DTST": a transfer starts with DatMode set
+// whether DTST is set or not, as the WM5 driver's polled path leaves it clear. INT_SDI is a level from the
+// status bits SDIIMSK lets through (irq()).
 class S3cSdi {
 public:
     void reset();
-    S3cAccess read(uint32_t offset, uint32_t& value);
-    S3cAccess write(uint32_t offset, uint32_t value);
-    uint64_t commands = 0;
+    S3cAccess read(uint32_t offset, unsigned size, uint32_t& value);
+    S3cAccess write(uint32_t offset, uint32_t value, unsigned size);
+    // The card, or nullptr for an empty slot. Not saved; the owner puts it back before a load.
+    S3cSdCard* card = nullptr;
+    // The card's supply went off: an unfinished transfer stops.
+    void cardRemoved();
+    bool irq() const;
+    // The DMA's share of SDIDAT: whether a unit of bytes can move now, and the moves.
+    bool dmaWants(unsigned bytes) const;
+    uint32_t fifoRead(unsigned bytes);
+    void fifoWrite(unsigned bytes, uint32_t value);
+    uint64_t commands = 0, blocksRead = 0, blocksWritten = 0, cardErrors = 0;
     template <class A> void state(A& a) { a.Do64(commands).DoBuffer32(regs, 17); }
+    // The transfer under way, kept in the machine's card section.
+    template <class A> void runState(A& a) {
+        a.Do64(blocksRead).Do64(blocksWritten).Do64(cardErrors);
+        a.DoBool(armed).DoBool(active).DoBool(loaded).Do32(blocksLeft).Do32(blockSize).Do32(position);
+        a.DoBuffer(block, sizeof block);
+        a.Require(blockSize <= sizeof block && position <= blockSize, "SDI block");
+    }
+    void clearRun() {
+        armed = active = loaded = false;
+        blocksLeft = blockSize = position = 0;
+        blocksRead = blocksWritten = cardErrors = 0;
+    }
 
 private:
     uint32_t regs[17];  // SDICON to SDIDAT, by word
+    bool armed = false, active = false, loaded = false;
+    uint32_t blocksLeft = 0, blockSize = 0, position = 0;
+    uint8_t block[4096];
+    void command(uint32_t value);
+    void start();
+    void finish();
+    void loadBlock();
+    bool receiving() const;
+    uint32_t available() const;
+    uint32_t fifoStatus() const;
+    uint32_t pop(unsigned bytes);
+    void push(unsigned bytes, uint32_t value);
 };
 
 // USB device controller at 0x52000000 (manual chapter 13) with no cable: registers 0x140 to 0x200 keep what's
@@ -224,9 +274,10 @@ private:
 // destination and count from the initial registers; each hardware request then moves one unit (four with
 // TSZ burst) through bus, counts down and at 0 raises the channel's interrupt (INT) and reloads from the
 // initial registers (auto reload) or turns the channel off (RELOAD set). Requests come from the machine for
-// the IIS (I2SSDO on channel 2 source 0, I2SSDI on channel 1 source 2 and channel 2 source 1); the other
-// sources never ask. A software trigger is refused (S3cAccess::unsupported).
-enum class S3cDmaRequest : uint8_t { iisOut, iisIn };
+// the IIS (I2SSDO on channel 2 source 0, I2SSDI on channel 1 source 2 and channel 2 source 1) and the SDI
+// (channel 0 source 2, channel 2 source 2, channel 3 source 1); the other sources never ask. A software
+// trigger is refused (S3cAccess::unsupported).
+enum class S3cDmaRequest : uint8_t { iisOut, iisIn, sdi };
 class S3cDma {
 public:
     void reset();

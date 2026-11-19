@@ -27,6 +27,12 @@ static uint32_t get(S3cNand& nand, uint32_t offset) {
     return v;
 }
 
+static uint32_t get(S3cSdi& sdi, uint32_t offset, unsigned size = 4) {
+    uint32_t v = 0xdeadbeef;
+    assert(sdi.read(offset, size, v) == S3cAccess::ok);
+    return v;
+}
+
 static void intcTests() {
     S3cIntc intc;
     intc.reset();
@@ -305,10 +311,38 @@ static void gpioTests() {
     gpio.write(0xa8, 1u << 13, intc);
     intc.write(0x00, 1u << 5);
     assert(!(get(gpio, 0xa8) & (1u << 13)) && !(intc.pending() & (1u << 5)));
-    // A pin not set to EINT makes no interrupt.
+    // A GPG pin not set to EINT makes no interrupt.
     gpio.write(0x60, 0, intc);
     gpio.setInputs(S3cGpio::g, 1u << 5, 0, intc);
     assert(!(get(gpio, 0xa8) & (1u << 13)));
+    // EINT5 on GPF5 left as an input, both edges, as the rx1950 OAL sets up SD card detect: the card going in
+    // (low) and out (high) each latch EINTPEND and reach SRCPND bit 4 (EINT4-7). As an output it makes none.
+    intc.write(0x08, ~(1u << 4));
+    gpio.write(0x50, 0x802a, intc);
+    gpio.write(0x88, 6u << 20, intc);
+    gpio.write(0xa4, 0xfffff0 & ~(1u << 5), intc);
+    gpio.write(0xa8, 0xfffff0, intc);
+    gpio.setInputs(S3cGpio::f, 1u << 5, 0, intc);
+    assert((get(gpio, 0xa8) & (1u << 5)) && (intc.pending() & (1u << 4)));
+    gpio.write(0xa8, 1u << 5, intc);
+    intc.write(0x00, 1u << 4); intc.write(0x10, 1u << 4);
+    assert(!(intc.pending() & (1u << 4)));
+    gpio.setInputs(S3cGpio::f, 1u << 5, 1u << 5, intc);
+    assert((get(gpio, 0xa8) & (1u << 5)) && (intc.pending() & (1u << 4)));
+    gpio.write(0xa8, 1u << 5, intc);
+    intc.write(0x00, 1u << 4); intc.write(0x10, 1u << 4);
+    gpio.write(0x50, 0x802a | 1u << 10, intc);
+    gpio.setInputs(S3cGpio::f, 1u << 5, 0, intc);
+    assert(!(get(gpio, 0xa8) & (1u << 5)));
+    // EINT3 on low level with GPF3 left an input (charge done, low while charging, as the rx1950 OAL leaves
+    // it): nothing reaches SRCPND, so it can't wake the chip. Set to EINT it does.
+    intc.write(0x00, 0xf); intc.write(0x10, 0xf);
+    gpio.write(0x50, 0x802a, intc);
+    gpio.write(0x88, 0, intc);
+    gpio.setInputs(S3cGpio::f, 1u << 3, 0, intc);
+    assert(!(intc.srcpnd & (1u << 3)));
+    gpio.write(0x50, 0x802a | 2u << 6, intc);
+    assert(intc.srcpnd & (1u << 3));
 }
 
 static void uartTests() {
@@ -556,11 +590,14 @@ static void nandImageTests() {
 // The blocks the OS's drivers set up before they're modelled in full: an empty SD slot, no USB cable,
 // the ADC with the stylus up, DMA and IIS registers, IIC with every device answering, and RTCRST.
 static void quietBlockTests() {
+    // An empty slot: a command with no response is sent, one that waits for a response times out.
     S3cSdi sdi;
     sdi.reset();
-    assert(sdi.write(0x08, 0) == S3cAccess::ok && sdi.write(0x0c, 0x140) == S3cAccess::ok);
-    assert(get(sdi, 0x10) == 0x400 && !(get(sdi, 0x0c) & 0x100) && sdi.commands == 1);
-    sdi.write(0x10, 0x400);
+    assert(sdi.write(0x08, 0, 4) == S3cAccess::ok && sdi.write(0x0c, 0x140, 4) == S3cAccess::ok);
+    assert(get(sdi, 0x10) == 0x800 && !(get(sdi, 0x0c) & 0x100) && sdi.commands == 1);
+    sdi.write(0x0c, 0x340, 4);
+    assert(get(sdi, 0x10) == 0xc00 && sdi.commands == 2);
+    sdi.write(0x10, 0xc00, 4);
     assert(get(sdi, 0x10) == 0 && get(sdi, 0x14) == 0);
 
     S3cUsbDevice usb;
@@ -728,6 +765,228 @@ static void dmaTests() {
     assert(dma.busErrors == 1 && dma.remaining(2) == 0xc5f);
 }
 
+// A card for the SDI tests: CMD0 has no response, CMD2 a 136-bit one, CMD12 an R1b, others a 48-bit R1 with
+// the argument as the status. Blocks read as their number and offset; written ones are kept.
+struct FakeCard : S3cSdCard {
+    std::vector<uint8_t> written;
+    uint32_t readCount = 0;
+    bool fail = false;
+    unsigned command(uint8_t index, uint32_t argument, uint8_t reply[17], bool& busy) override {
+        if (index == 0) return 0;
+        if (index == 2) {
+            reply[0] = 0x3f;
+            for (unsigned i = 1; i < 17; ++i) reply[i] = uint8_t(i);
+            return 136;
+        }
+        busy = index == 12;
+        reply[0] = index;
+        reply[1] = uint8_t(argument >> 24);
+        reply[2] = uint8_t(argument >> 16);
+        reply[3] = uint8_t(argument >> 8);
+        reply[4] = uint8_t(argument);
+        reply[5] = 0x55;
+        return 48;
+    }
+    bool readBlock(uint8_t* data, uint32_t size) override {
+        if (fail) return false;
+        for (uint32_t i = 0; i < size; ++i) data[i] = uint8_t(readCount * 16 + i);
+        ++readCount;
+        return true;
+    }
+    bool writeBlock(const uint8_t* data, uint32_t size) override {
+        if (fail) return false;
+        written.insert(written.end(), data, data + size);
+        return true;
+    }
+};
+
+// The SDI with a card: responses in RSP0-3, a polled read and write through SDIDAT in bytes and words (type A
+// and B byte order), FIFO flags and counts, RACMD and TARSP starts, a DMA read and write through the FIFO,
+// the busy check, card errors and INT_SDI from SDIIMSK.
+static void sdiTests() {
+    S3cSdi sdi;
+    sdi.reset();
+    FakeCard card;
+    sdi.card = &card;
+    assert(get(sdi, 0x04) == 1 && get(sdi, 0x24) == 0x10000 && get(sdi, 0x38) == 0 && !sdi.irq());
+    // CMD2: RSP0 holds bits 127:96, RSP3 ends with the CRC byte.
+    sdi.write(0x0c, 0x742, 4);
+    assert((get(sdi, 0x10) & 0xe00) == 0xa00 && (get(sdi, 0x10) & 0xff) == 0x3f);
+    assert(get(sdi, 0x14) == 0x01020304 && get(sdi, 0x18) == 0x05060708 && get(sdi, 0x1c) == 0x090a0b0c &&
+           get(sdi, 0x20) == 0x0d0e0f10);
+    sdi.write(0x10, 0x1e00, 4);
+    // CMD13 with argument 0x12345678: R1 in RSP0, the CRC byte at the top of RSP1.
+    sdi.write(0x08, 0x12345678, 4);
+    sdi.write(0x0c, 0x34d, 4);
+    assert((get(sdi, 0x10) & 0xff) == 13 && get(sdi, 0x14) == 0x12345678 && get(sdi, 0x18) == 0x55000000);
+    // CMD0: no response, CmdSent only.
+    sdi.write(0x10, 0x1e00, 4);
+    sdi.write(0x0c, 0x140, 4);
+    assert(get(sdi, 0x10) == 0x800);
+    // INT_SDI follows the status bits SDIIMSK lets through: CmdSent is bit 16.
+    assert(!sdi.irq());
+    sdi.write(0x3c, 1u << 16, 4);
+    assert(sdi.irq());
+    sdi.write(0x10, 0x800, 4);
+    assert(!sdi.irq());
+    sdi.write(0x3c, 0, 4);
+
+    // A polled two-block read of 8-byte blocks, bytes, started by the command (RACMD), as the driver's 0xa2000.
+    sdi.write(0x28, 8, 4);
+    sdi.write(0x2c, 0xa2000 | 2, 4);
+    assert(!(get(sdi, 0x34) & 1) && get(sdi, 0x38) == 0);
+    sdi.write(0x0c, 0x352, 4);  // CMD18
+    assert((get(sdi, 0x34) & 1) && card.readCount == 1);
+    uint32_t f = get(sdi, 0x38);
+    assert((f & 0x7f) == 8 && (f & (1u << 12)) && !(f & (1u << 9)) && get(sdi, 0x30) == (8u << 12 | 2));
+    for (unsigned i = 0; i < 8; ++i) assert(get(sdi, 0x40, 1) == i);
+    f = get(sdi, 0x38);
+    assert((f & 0x7f) == 8 && (f & (1u << 9)) && card.readCount == 2 && get(sdi, 0x30) == (8u << 12 | 1));
+    // Words, type A: the first byte in bits 7:0.
+    assert(get(sdi, 0x40) == 0x13121110);
+    sdi.write(0x00, 1u << 4, 4);  // type B: the first byte at the top
+    assert(get(sdi, 0x40) == 0x14151617);
+    sdi.write(0x00, 0, 4);
+    assert((get(sdi, 0x34) & 0x11) == 0x10 && get(sdi, 0x38) == 0 && get(sdi, 0x30) == 0);
+    // DatFin (SDIIMSK bit 7) raises INT_SDI until it's cleared.
+    sdi.write(0x3c, 1u << 7, 4);
+    assert(sdi.irq());
+    sdi.write(0x34, 0x10, 4);
+    assert(!sdi.irq());
+    sdi.write(0x3c, 0, 4);
+
+    // A polled write of one 4-byte block, started after the response (TARSP), as the driver's 0x123000.
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x28, 4, 4);
+    sdi.write(0x2c, 0x123000 | 1, 4);
+    assert(!(get(sdi, 0x38) & (1u << 13)));
+    sdi.write(0x0c, 0x358, 4);  // CMD24
+    f = get(sdi, 0x38);
+    assert((get(sdi, 0x34) & 2) && (f & (1u << 13)) && (f & (1u << 10)));
+    sdi.write(0x40, 0xaa, 1);
+    sdi.write(0x40, 0xccbb, 2);
+    assert(card.written.empty());
+    sdi.write(0x40, 0xdd, 1);
+    assert(card.written == std::vector<uint8_t>({0xaa, 0xbb, 0xcc, 0xdd}) && sdi.blocksWritten == 1);
+    assert((get(sdi, 0x34) & 0x12) == 0x10);
+    sdi.write(0x34, 0x10, 4);
+
+    // DMA: channel 0 from SDIDAT (APB, fixed) to SDRAM in words, as the driver's 0xa2e00000; the SDI with DMAEn
+    // and words (0x8ae000). Each request the SDI makes moves a word until the count runs out.
+    S3cIntc intc;
+    intc.reset();
+    S3cDma dma;
+    dma.reset();
+    std::vector<uint32_t> ram;
+    dma.bus = [&](uint32_t pa, unsigned size, bool write, uint32_t& value) {
+        assert(size == 4);
+        if ((pa & ~3u) == 0x5a000040) {
+            if (write) sdi.fifoWrite(size, value);
+            else value = sdi.fifoRead(size);
+        } else if (write) {
+            ram.push_back(value);
+        } else {
+            value = 0x01020304u * uint32_t(ram.size() + 1);
+            ram.push_back(value);
+        }
+        return true;
+    };
+    card.readCount = 0;
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x28, 8, 4);
+    dma.write(0x00, 0x5a000040);
+    dma.write(0x04, 3);
+    dma.write(0x08, 0x3004c000);
+    dma.write(0x0c, 0);
+    dma.write(0x10, 0xa2e00000 | 4);
+    dma.write(0x20, 2);
+    assert(dma.channelFor(S3cDmaRequest::sdi) == 0 && dma.transferBytes(0) == 4);
+    sdi.write(0x2c, 0x8ae000 | 2, 4);
+    assert(!sdi.dmaWants(4));
+    sdi.write(0x0c, 0x352, 4);
+    assert(sdi.dmaWants(4));
+    for (unsigned guard = 0; guard < 16 && dma.on(0) && sdi.dmaWants(4); ++guard) dma.service(0, intc);
+    assert(ram.size() == 4 && ram[0] == 0x03020100 && ram[2] == 0x13121110 && !dma.on(0));
+    assert((intc.srcpnd & (1u << s3cIrq::dma0)) && (get(sdi, 0x34) & 0x11) == 0x10);
+    // Clearing DMAEn afterwards (the driver's read-modify-write) starts nothing.
+    sdi.write(0x2c, (0x8ae000 | 2) & ~0x8000u, 4);
+    assert(!(get(sdi, 0x34) & 1) && card.readCount == 2);
+    sdi.write(0x34, 0x10, 4);
+    // The next DMA read of the same size with no 0 written between: only DMAEn turns back on, which starts it.
+    ram.clear();
+    dma.write(0x10, 0xa2e00000 | 4);
+    dma.write(0x20, 2);
+    sdi.write(0x2c, 0x8ae000 | 2, 4);
+    assert(!sdi.dmaWants(4) && !(get(sdi, 0x34) & 1));
+    sdi.write(0x0c, 0x352, 4);
+    for (unsigned guard = 0; guard < 16 && dma.on(0) && sdi.dmaWants(4); ++guard) dma.service(0, intc);
+    assert(ram.size() == 4 && ram[0] == 0x23222120 && card.readCount == 4 && (get(sdi, 0x34) & 0x11) == 0x10);
+    sdi.write(0x2c, (0x8ae000 | 2) & ~0x8000u, 4);
+    sdi.write(0x34, 0x10, 4);
+    // Polled reads repeated with the same SDIDCON value: each write with no transfer running starts one, a
+    // repeat mid-transfer doesn't restart it.
+    sdi.write(0x2c, 0xa2000 | 1, 4);
+    for (unsigned n = 0; n < 2; ++n) {
+        if (n) sdi.write(0x2c, 0xa2000 | 1, 4);
+        sdi.write(0x0c, 0x351, 4);  // CMD17
+        assert((get(sdi, 0x34) & 1) && card.readCount == 5 + n);
+        assert(get(sdi, 0x40) == uint32_t(0x03020100 + 0x10101010 * (4 + n)));
+        sdi.write(0x2c, 0xa2000 | 1, 4);
+        assert((get(sdi, 0x34) & 1) && card.readCount == 5 + n);
+        assert(get(sdi, 0x40) == uint32_t(0x07060504 + 0x10101010 * (4 + n)));
+        assert((get(sdi, 0x34) & 0x11) == 0x10);
+        sdi.write(0x34, 0x10, 4);
+    }
+    // And a DMA write, SDRAM to SDIDAT (0x92f000), one 8-byte block.
+    ram.clear();
+    card.written.clear();
+    sdi.write(0x2c, 0, 4);
+    dma.write(0x00, 0x3004c000);
+    dma.write(0x04, 0);
+    dma.write(0x08, 0x5a000040);
+    dma.write(0x0c, 3);
+    dma.write(0x10, 0xa2e00000 | 2);
+    dma.write(0x20, 2);
+    sdi.write(0x2c, 0x92f000 | 1, 4);
+    sdi.write(0x0c, 0x358, 4);
+    for (unsigned guard = 0; guard < 16 && dma.on(0) && sdi.dmaWants(4); ++guard) dma.service(0, intc);
+    assert(card.written == std::vector<uint8_t>({4, 3, 2, 1, 8, 6, 4, 2}) && (get(sdi, 0x34) & 0x12) == 0x10);
+    sdi.write(0x34, 0x10, 4);
+
+    // Busy check after CMD12 (0x61000): BusyFin and DatFin come with the response.
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x2c, 0x61000, 4);
+    assert(!(get(sdi, 0x34) & 0x18));
+    sdi.write(0x0c, 0x34c, 4);
+    assert((get(sdi, 0x34) & 0x18) == 0x18);
+    sdi.write(0x34, 0x18, 4);
+
+    // A card error: a read times out (DatTout), a write fails its CRC status.
+    card.fail = true;
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x2c, 0xa2000 | 1, 4);
+    sdi.write(0x0c, 0x351, 4);
+    assert((get(sdi, 0x34) & 0x21) == 0x20 && sdi.cardErrors == 1);
+    sdi.write(0x34, 0x20, 4);
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x28, 4, 4);
+    sdi.write(0x2c, 0x123000 | 1, 4);
+    sdi.write(0x0c, 0x358, 4);
+    sdi.write(0x40, 0, 4);
+    assert((get(sdi, 0x34) & 0x82) == 0x80 && sdi.cardErrors == 2);
+    card.fail = false;
+    // The card taken out mid-transfer: DatTout, the transfer stops.
+    sdi.write(0x34, 0xff, 4);
+    sdi.write(0x2c, 0, 4);
+    sdi.write(0x2c, 0x22000 | 1, 4);
+    assert(get(sdi, 0x34) & 1);
+    sdi.cardRemoved();
+    assert((get(sdi, 0x34) & 0x21) == 0x20 && get(sdi, 0x38) == 0);
+    // SDRESET clears the command and data state.
+    sdi.write(0x00, 0x101, 4);
+    assert(get(sdi, 0x00) == 1 && get(sdi, 0x34) == 0 && get(sdi, 0x10) == 0);
+}
+
 // IIS: the FIFOs through IISFIFO and IISFCON's counts, a transmitting frame taking left then right, an
 // underrun, a receiving frame, overrun, and the DMA request flags.
 static void iisTests() {
@@ -835,6 +1094,7 @@ static void codecTests() {
 }
 
 int main() {
+    sdiTests();
     dmaTests();
     iisTests();
     codecTests();
