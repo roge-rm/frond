@@ -36,7 +36,27 @@ class Rx1950FirmwareTest {
         assertEquals("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950.", Firmware.check(rx1950, cebl, null))
         // Right sizes, wrong bytes.
         assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.check(rx1950, cebl, ceos))
-        assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.check(rx1950, ceos, cebl))
+        // The two swapped, or CEOS.nbf alone as the NOR.
+        assertEquals(Firmware.RX1950_SWAPPED, Firmware.check(rx1950, ceos, cebl))
+        assertEquals(Firmware.RX1950_SWAPPED, Firmware.check(rx1950, ceos, null))
+    }
+
+    // The right NOR (by content: the check hashes it) and a wrong NAND reach the NAND's own message.
+    @Test fun rightNorWrongNand() {
+        val bytes = File(tmp.root, "cebl").also { it.writeBytes(ByteArray(Firmware.RX1950_CEBL.bytes.toInt())) }
+        val known = Firmware.RX1950_CEBL.copy(sha256 = Firmware.sha256(bytes)!!)
+        assertTrue(Firmware.matches(bytes, known))
+        val ceos = sized(Firmware.RX1950_CEOS.bytes)
+        assertEquals("The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.checkRx1950(bytes, ceos, known))
+    }
+
+    // Picking CEOS.nbf as the NOR with the rx1950 chosen copies it (check() then names it); past that, and for
+    // the other devices past 32 MiB, the message says what's wrong.
+    @Test fun pickLimitTakesCeosForTheRx1950() {
+        assertTrue(Firmware.pickLimit(rx1950) >= Firmware.RX1950_CEOS.bytes)
+        assertEquals(32L shl 20, Firmware.pickLimit(null))
+        assertEquals(Firmware.NOT_DETECTED, Firmware.tooBig(null))
+        assertEquals("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.", Firmware.tooBig(rx1950))
     }
 
     @Test fun sha256MatchesByContent() {

@@ -32,9 +32,12 @@ object Firmware {
     fun sha256(file: File): String? = digest(file, "SHA-256")
 
     // The rx1950 runs HP's WM5 ROM 1.01.00 ENG only: CEBL.nbf as the NOR and CEOS.nbf as the NAND.
-    private fun checkRx1950(nor: File, nand: File?): String? {
+    // CEOS.nbf picked as the NOR is caught by its size before the NAND is asked for. cebl is for tests, which
+    // have no firmware.
+    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL): String? {
+        if (nor.length() == RX1950_CEOS.bytes) return RX1950_SWAPPED
         if (nand == null) return "Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."
-        if (!matches(nor, RX1950_CEBL)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
+        if (!matches(nor, cebl)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
         if (!matches(nand, RX1950_CEOS)) return "The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG."
         return null
     }
@@ -120,6 +123,7 @@ object Firmware {
     }
 
     const val NOT_DETECTED = "Frond can't tell which device this firmware is for. Choose the device."
+    const val RX1950_SWAPPED = "That's CEOS.nbf, the NAND image. Choose CEBL.nbf as the NOR image for the HP iPAQ rx1950."
 
     // A 68k ROM's big-endian card header, read like common/device_profile5.h's deviceProfileInspect68kRom5:
     // only the header, so frond-68k still checks the ROM properly when it starts.
@@ -233,8 +237,13 @@ object Firmware {
     // A picked NOR is copied here first, so the device can be found before the import.
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
 
-    // Bigger than any NOR the app takes; anything past it is refused while copying.
+    // Bigger than any NOR the app takes; anything past it is refused while copying. With the rx1950 chosen the
+    // limit is CEOS.nbf's size, so CEOS.nbf picked as the NOR gets its own message from check().
     private const val PICK_LIMIT = 32L shl 20
+    internal fun pickLimit(device: Device?) = if (device?.rx1950 == true) maxOf(PICK_LIMIT, RX1950_CEOS.bytes) else PICK_LIMIT
+    // The message for a picked file over pickLimit: the rx1950's NOR is CEBL.nbf, other devices can't be told.
+    internal fun tooBig(device: Device?) =
+        if (device?.rx1950 == true) "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG." else NOT_DETECTED
 
     // Copies a picked NOR into picked(). Returns an error message or null. Runs off the main thread.
     // For the Zodiac (or when `device` is not chosen yet) Tapwave's Zodiac 1.1 update, the zip or the PRC, is
@@ -248,13 +257,14 @@ object Firmware {
                 to.outputStream().use { o ->
                     val buffer = ByteArray(1 shl 20)
                     var total = 0L
+                    val limit = pickLimit(device)
                     while (true) {
                         val n = i.read(buffer)
                         if (n < 0) break
                         total += n
-                        if (total > PICK_LIMIT) {
+                        if (total > limit) {
                             to.delete()
-                            return NOT_DETECTED
+                            return tooBig(device)
                         }
                         o.write(buffer, 0, n)
                     }
