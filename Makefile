@@ -46,6 +46,8 @@ out/% build/% core/% vendor/%: SHELL = /bin/sh
 test-desktop: export TEST_TIMEOUT = 3600
 # These two run for several minutes on their own and longer under make -j.
 test-zodiac-machine test-zodiac-fast-lean test-zodiac-ymf-ready: export TEST_TIMEOUT = 1800
+# Two Zodiacs in Exact for the InkStorm chat.
+test-zodiac-bluetooth: export TEST_TIMEOUT = 2400
 # The limit counts the wait for a `heavy emulator` slot, and the fixture builds that wait up to
 # 900 s for one, so the targets that start cores get more. The peripherals test gets it per --rom.
 test-card-swap test-core-control test-background-save test-frond-68k-busy test-frond-68k-gdb \
@@ -1059,6 +1061,21 @@ test-zodiac-guest-calls: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls hard-reset-yes
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls
+
+.PHONY: test-zodiac-bluetooth
+# The Zodiac's Bluetooth HCI shim on the real ROM from a bring-up state (ZODIAC_ROM, ZODIAC_STATE): radio on and an
+# OPP send to bluetooth-opp-peer through btvirt, Fast then Exact. Skipped without them or the peers.
+build/test-zodiac-bluetooth: out/frond tests/zodiac-bluetooth.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-bluetooth-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
+		tests/zodiac-bluetooth.cpp @build/zodiac-bluetooth-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-bluetooth
+test-zodiac-bluetooth: build/test-zodiac-bluetooth
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 1 \
+		--btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 0 \
+		--btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
 
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
@@ -2674,6 +2691,15 @@ test-zodiac-fast-lean: build/zodiac-boot-probe
 		tests/zodiac-fast-lean.cpp $(ZODIAC_MACHINE_SOURCES) \
 		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-fast-lean
 	./build/test-zodiac-fast-lean
+
+.PHONY: test-zodiac-code-hooks
+# Code hooks on their own: set on cached ARM and Thumb code, every pass stopped, cleared code runs lean and compiled.
+test-zodiac-code-hooks: build/zodiac-boot-probe
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Itests \
+		tests/zodiac-code-hooks.cpp $(ZODIAC_MACHINE_SOURCES) \
+		@build/zodiac-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o build/test-zodiac-code-hooks
+	./build/test-zodiac-code-hooks
 
 .PHONY: test-zodiac-guest-exceptions
 test-zodiac-guest-exceptions: build/zodiac-boot-probe

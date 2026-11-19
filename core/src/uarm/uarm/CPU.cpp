@@ -409,6 +409,10 @@ struct ArmCpu {
     uint32_t jitCharged;
     const uint32_t *jitAccessPcs;
     uint32_t jitAccessPcCount;
+    // Fast: code hooks (cpuArm920SetCodeHooks). The lean path and translated code stop before these pcs and leave
+    // them to the step. Host only, never saved.
+    uint32_t codeHooks[ARM920_MAX_CODE_HOOKS];
+    uint32_t codeHookCount;
     // Most instructions this lean run may retire (cpuArm920RunLeanFor), and whether the JIT's callbacks are
     // using the lean memory path (no read or write answers from the probe there).
     uint32_t leanCount;
@@ -5844,6 +5848,12 @@ static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32
     return cpuPrvLeanFetchSlow<size>(cpu, pc, instr, decoded, cost);
 }
 
+static FORCE_INLINE bool cpuPrvCodeHookAt(const struct ArmCpu *cpu, uint32_t pc) {
+    for (uint32_t i = 0; i < cpu->codeHookCount; ++i)
+        if (cpu->codeHooks[i] == pc) return true;
+    return false;
+}
+
 // Runs while the clocks charged are under the budget and the instructions under the count. An instruction
 // whose charge would pass the budget is left for the step, so the run never passes it.
 template <int size>
@@ -5852,6 +5862,7 @@ static uint32_t cpuPrvLeanLoop(struct ArmCpu *cpu) {
     while (cpu->leanDone < cpu->leanBudget && cpu->leanRetired < cpu->leanCount) {
         const uint32_t pc = cpu->regs[REG_NO_PC];
         uint32_t instr, decoded, cost;
+        if (unlikely(cpu->codeHookCount) && cpuPrvCodeHookAt(cpu, pc)) break;
         cpu->curInstrPC = pc;
         if (!cpuPrvLeanFetch<size>(cpu, pc, instr, decoded, cost)) break;
         const uint32_t charge = cpuPrvSlotCharge(cpu, cost);
@@ -5982,6 +5993,24 @@ void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) 
     cpu->jitAccessPcCount = count;
 }
 
+bool cpuArm920SetCodeHooks(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) {
+    if (cpu->model != ArmCpuModel::arm920t || count > ARM920_MAX_CODE_HOOKS) return false;
+    bool same = count == cpu->codeHookCount;
+    for (uint32_t i = 0; same && i < count; ++i) same = cpu->codeHooks[i] == (pcs[i] & ~1u);
+    if (same) return true;
+    for (uint32_t i = 0; i < count; ++i) cpu->codeHooks[i] = pcs[i] & ~1u;
+    cpu->codeHookCount = count;
+#ifdef FROND_DYNARMIC
+    // Translated code may run through a new hook's pc; it is compiled again with the hooks left out.
+    if (cpu->jit && cpu->jitBlocks) jitClear(cpu->jit);
+#endif
+    return true;
+}
+
+bool cpuArm920CodeHookAt(const ArmCpu *cpu, uint32_t pc) {
+    return cpu->codeHookCount && cpuPrvCodeHookAt(cpu, pc & ~1u);
+}
+
 bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
     // The lean and JIT loads' translation, with the current mode's permissions, of the MVA.
     const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, cpuPrvMva(cpu, va & ~3u), cpu->privileged);
@@ -5996,6 +6025,8 @@ bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
 }
 #else
 void cpuArm920SetJitAccessPcs(ArmCpu *, const uint32_t *, uint32_t) {}
+bool cpuArm920SetCodeHooks(ArmCpu *, const uint32_t *, uint32_t count) { return !count; }
+bool cpuArm920CodeHookAt(const ArmCpu *, uint32_t) { return false; }
 uint32_t cpuArm920TakeJitAccessPc(ArmCpu *) { return 0; }
 void cpuArm920JitCharge(ArmCpu *, uint32_t, uint32_t) {}
 uint32_t cpuArm920JitCharged(const ArmCpu *) { return 0; }
@@ -6930,6 +6961,8 @@ static uint32_t cpuPrvPollSkip(ArmCpu *cpu, uint32_t left) {
 }
 
 bool cpuJitPlain(ArmCpu *cpu, uint32_t pc, uint32_t word, bool thumb) {
+    // A code hook's pc goes to the step.
+    if (unlikely(cpu->codeHookCount) && cpuPrvCodeHookAt(cpu, pc)) return false;
     // A delay loop's head ends a run, for cpuPrvDelaySkip.
     if (cpuPrvDelayFirst(pc, word, thumb) && cpuPrvDelayLoopAt(cpu, pc, thumb)) {
         if (pc != cpu->delayHeads[0] && pc != cpu->delayHeads[1]) {

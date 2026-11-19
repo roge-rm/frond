@@ -2261,7 +2261,7 @@
       "keyboard": false,
       "usb": true,
       "infrared": true,
-      "bluetooth": false,
+      "bluetooth": true,
       "modem": false,
       "ir_phone": false,
       "usb_printer": false,

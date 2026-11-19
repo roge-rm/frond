@@ -6,6 +6,7 @@
 
 #include "GunzipContext.h"
 
+#include <algorithm>
 #include <chrono>
 #include <climits>
 #include <cstdio>
@@ -389,6 +390,15 @@ void SocIMX1::SyncSecondCard() {
 void SocIMX1::StateChanged() {
     // A load or reset ends a guest call.
     if (machine) EndGuestCall();
+    // The guest's Bluetooth starts over; a checkpoint keeps the controller's connection.
+    if (!RestoringCheckpoint()) {
+        bluetooth.backend.Close();
+        bluetooth.started = false;
+        bluetooth.driverR9 = {};
+        bluetooth.lastStart = 0;
+        bluetooth.portShutSince = 0;
+        if (machine) ApplyCodeHooks();
+    }
     const auto status = imx1MachineGetStatus(machine);
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
@@ -417,11 +427,18 @@ std::function<void()> SocIMX1::CapturePeripheralInput() {
         }
     };
     auto fence = std::make_shared<Fence>(*this);
-    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound] {
+    // The Bluetooth shim's guest-time marks go back with the guest; its controller and started state stay the host's.
+    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound,
+            lastDoze = bluetooth.lastDoze, lastStart = bluetooth.lastStart, portShutSince = bluetooth.portShutSince,
+            driverR9 = bluetooth.driverR9] {
         this->input = input;
         this->cradleDown = cradleDown;
         this->hotSyncTicks = hotSyncTicks;
         pcm.sound = sound;
+        bluetooth.lastDoze = lastDoze;
+        bluetooth.lastStart = lastStart;
+        bluetooth.portShutSince = portShutSince;
+        bluetooth.driverR9 = driverR9;
     };
 }
 
@@ -839,6 +856,10 @@ bool SocIMX1::RunToStop(uint64_t ticks) {
             std::cerr << "zodiac: the machine stopped in a guest call: " << StopText() << std::endl;
             break;
         }
+        if (run.reason == Imx1MachineYield::codeHook) {
+            CodeHookHit();
+            now = imx1MachineGetStatus(machine);
+        }
         if (run.reason == Imx1MachineYield::pcStop || run.reason == Imx1MachineYield::waiting) break;
         if (now.time.ticks - start.time.ticks >= ticks) break;
     }
@@ -917,6 +938,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     SyncCard();
     SyncSecondCard();
     PumpInput();
+    PollBluetooth();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
     const Imx1ReferenceTime until{before.time.ticks + wanted, 0, 1};
     // Fast runs longer slices: each slice end charges the whole board.
@@ -942,7 +964,18 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
             break;
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
+        const auto sliceStart = now;
         now = run.total;
+        if (run.reason == Imx1MachineYield::codeHook) {
+            CodeHookHit();
+            if (halted) break;
+            now = imx1MachineGetStatus(machine);
+            // The bounds come from the totals, so the next run ends where this slice would have. The end-of-slice
+            // work runs only once a bound is reached, at the same guest points as with no hooks.
+            if (now.retired - sliceStart.retired < bounds.retired && now.work - sliceStart.work < bounds.work &&
+                now.time.compare(bounds.deadline) < 0)
+                continue;
+        }
         // The USB host runs at slice ends, on the guest's clock.
         TickUsbHost();
         if (now.time.compare(until) >= 0) break;
@@ -966,6 +999,45 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % ticksPerSecond);
     return uint64_t(std::min<__uint128_t>(credit / ticksPerSecond, UINT64_MAX));
+}
+
+void SocIMX1::SetTraceHooks(const std::vector<uint32_t>& pcs) {
+    traceHooks = pcs;
+    ApplyCodeHooks();
+}
+
+void SocIMX1::ApplyCodeHooks() {
+    std::vector<uint32_t> pcs = traceHooks;
+    if (BluetoothHooksOn())
+        pcs.insert(pcs.end(), std::begin(zodiacBluetoothHooks), std::end(zodiacBluetoothHooks));
+    if (pcs.size() > imx1MachineMaximumCodeHooks) pcs.resize(imx1MachineMaximumCodeHooks);
+    if (!imx1MachineSetCodeHooks(machine, pcs.data(), unsigned(pcs.size())))
+        std::cerr << "zodiac: code hooks refused" << std::endl;
+}
+
+void SocIMX1::CodeHookHit() {
+    uint32_t r[16], cpsr = 0;
+    if (!GuestRegisters(r, &cpsr)) return;
+    const uint32_t pc = r[15] & ~1u;
+    if (std::find(traceHooks.begin(), traceHooks.end(), pc) != traceHooks.end()) {
+        char line[200];
+        std::snprintf(line, sizeof line, "hook %08x r0 %08x r1 %08x r2 %08x r3 %08x lr %08x sp %08x cpsr %08x t %.3f",
+                      r[15], r[0], r[1], r[2], r[3], r[14], r[13], cpsr, double(GetTime()) / 1e9);
+        std::cout << line;
+        // r0 as a buffer of r1 bytes, as the write and read calls take.
+        uint8_t bytes[64];
+        const uint32_t n = std::min<uint32_t>(r[1], sizeof bytes);
+        if (r[1] && r[1] <= 0x100 && ReadGuest(r[0], bytes, n)) {
+            std::cout << " :";
+            for (uint32_t i = 0; i < n; ++i) {
+                std::snprintf(line, sizeof line, " %02x", bytes[i]);
+                std::cout << line;
+            }
+        }
+        std::cout << std::endl;
+    }
+    if (BluetoothHooksOn() && BluetoothHook(pc, r)) return;
+    imx1MachineLeaveCodeHook(machine);
 }
 
 // Facts of the 1.1 ROM: the DAL's doze routine, which the idle loop calls in SVC mode with IRQs off, in Thumb, and

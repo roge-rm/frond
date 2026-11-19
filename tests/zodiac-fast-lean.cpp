@@ -2280,7 +2280,10 @@ void jitLong() {
     unsetenv("FROND_JIT_HOT");
 }
 
-int main() {
+#ifndef ZODIAC_FAST_LEAN_MAIN
+#define ZODIAC_FAST_LEAN_MAIN main
+#endif
+int ZODIAC_FAST_LEAN_MAIN() {
     uint32_t stopPc = 0, savePc = 0;
     // Lean-only Fast first, which gives Exact's times as well.
     imx1SetFastBlocksDefault(false);
@@ -2441,4 +2444,5 @@ int main() {
               "changes, rewritten code, new code pages, the shipped compile setup and the PCM DMA buffer page");
     std::puts("PASS: Fast lean ARM and Thumb loops, CP15 TLB and domain changes, SDRAM mode change, save and load, "
               "rewritten code, unsupported access, timer reads, a cacheable timer and the PCM DMA buffer match Exact");
+    return 0;
 }

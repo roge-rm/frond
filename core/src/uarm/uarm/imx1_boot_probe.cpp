@@ -162,6 +162,17 @@ struct Probe {
             return false;
         }
     } pcStop;
+    // Code hooks: runs end before the instruction at any of pcs, in Exact and Fast alike (the lean path and the JIT
+    // leave them to the step), with Imx1MachineYield::codeHook. leave and hit as for pcStop. Host side, not saved.
+    struct CodeHooks {
+        bool leave = false, hit = false;
+        unsigned count = 0;
+        uint32_t pcs[imx1MachineMaximumCodeHooks]{};
+        bool at(uint32_t pc) const {
+            for (unsigned i = 0; i < count; ++i) if (pcs[i] == pc) return true;
+            return false;
+        }
+    } codeHooks;
     // Passes through the wait loop. A host count for tests, the skip makes fewer of them than idle periods.
     uint64_t idleAdvances = 0;
     bool boundReached() {
@@ -255,7 +266,7 @@ struct Probe {
     // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, and the pc stop.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
-                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop);
+                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop) + sizeof(CodeHooks);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -1887,6 +1898,10 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         if (!p->pcStop.leave && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u)) { p->pcStop.hit = true; return false; }
         p->pcStop.leave = false;
     }
+    if (p->codeHooks.count) {
+        if (!p->codeHooks.leave && p->codeHooks.at(cpuGetRegisters(p->cpu)[15] & ~1u)) { p->codeHooks.hit = true; return false; }
+        p->codeHooks.leave = false;
+    }
     const uint64_t step = p->retired;
     const uint64_t workBefore = p->work, busBefore = p->result.busAccesses, cs5Before = p->result.cs5WaitClocks,
                    idleBefore = p->result.idleHclk, entriesBefore = p->result.irqEntries + p->result.fiqEntries;
@@ -2510,6 +2525,7 @@ Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine* machine, const Imx1Mach
     if (!bounds.work) { run.reason = Imx1MachineYield::work; return run; }
     p->bounds = &bounds; p->sliceWorkStart = p->work; p->boundedYield = false;
     p->pcStop.hit = false;
+    p->codeHooks.hit = false;
     runSlice(machine, bounds.retired, UINT64_MAX);
     p->bounds = nullptr; p->boundedYield = false;
     run.total = imx1MachineGetStatus(machine);
@@ -2519,6 +2535,7 @@ Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine* machine, const Imx1Mach
     if (run.workDelta > bounds.work) run.workOvershoot = run.workDelta - bounds.work;
     if (run.total.time.compare(bounds.deadline) > 0) run.timeOvershoot = run.total.time.intervalSince(bounds.deadline);
     run.reason = p->terminal ? Imx1MachineYield::terminal : p->pcStop.hit ? Imx1MachineYield::pcStop :
+        p->codeHooks.hit ? Imx1MachineYield::codeHook :
         run.total.status == Imx1MachineStatus::waiting ? Imx1MachineYield::waiting :
         run.total.time.compare(bounds.deadline) >= 0 ? Imx1MachineYield::deadline :
         run.workDelta >= bounds.work ? Imx1MachineYield::work : Imx1MachineYield::retired;
@@ -2543,6 +2560,35 @@ void imx1MachineLeavePcStop(Imx1Machine* machine) {
 bool imx1MachineAtPcStop(const Imx1Machine* machine) {
     const auto* p = machine->probe;
     return p->pcStop.armed && p->pcStop.hit && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u);
+}
+Imx1MachinePcStops imx1MachineSavePcStops(const Imx1Machine* machine) {
+    const auto& stop = machine->probe->pcStop;
+    Imx1MachinePcStops saved;
+    saved.armed = stop.armed; saved.leave = stop.leave; saved.hit = stop.hit; saved.count = stop.count;
+    std::copy(std::begin(stop.pcs), std::end(stop.pcs), saved.pcs);
+    return saved;
+}
+void imx1MachineRestorePcStops(Imx1Machine* machine, const Imx1MachinePcStops& saved) {
+    auto& stop = machine->probe->pcStop;
+    stop.armed = saved.armed; stop.leave = saved.leave; stop.hit = saved.hit;
+    stop.count = std::min(saved.count, imx1MachineMaximumPcStops);
+    std::copy(std::begin(saved.pcs), std::end(saved.pcs), stop.pcs);
+}
+bool imx1MachineSetCodeHooks(Imx1Machine* machine, const uint32_t* pcs, unsigned count) {
+    auto* p = machine->probe;
+    if (p->bounds || count > imx1MachineMaximumCodeHooks || !cpuArm920SetCodeHooks(p->cpu, pcs, count)) return false;
+    p->codeHooks = {};
+    p->codeHooks.count = count;
+    for (unsigned i = 0; i < count; ++i) p->codeHooks.pcs[i] = pcs[i] & ~1u;
+    return true;
+}
+void imx1MachineLeaveCodeHook(Imx1Machine* machine) {
+    auto* p = machine->probe;
+    p->codeHooks.leave = p->codeHooks.at(cpuGetRegisters(p->cpu)[15] & ~1u);
+}
+bool imx1MachineAtCodeHook(const Imx1Machine* machine) {
+    const auto* p = machine->probe;
+    return p->codeHooks.hit && p->codeHooks.at(cpuGetRegisters(p->cpu)[15] & ~1u);
 }
 bool imx1MachineRegisters(const Imx1Machine* machine, uint32_t (&registers)[16], uint32_t* cpsr) {
     const auto* p = machine->probe;

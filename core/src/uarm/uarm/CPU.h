@@ -440,6 +440,13 @@ uint64_t cpuArm920LeanCodeDrops(const ArmCpu*);
 // Fast blocks: generated code notes the pc of these instructions for the lean read callback's pc, which the
 // graphics model keys some register reads on. The list stays the caller's and is set before the JIT compiles.
 void cpuArm920SetJitAccessPcs(ArmCpu*, const uint32_t* pcs, uint32_t count);
+// Fast: code hooks, pcs (bit 0 ignored) the lean path and translated code never run, so the guarded step runs
+// every instruction at one of them and its caller can act there first. Setting replaces the ones before and drops
+// translated code when they change. False on another model or for more than ARM920_MAX_CODE_HOOKS. None set
+// runs as before.
+#define ARM920_MAX_CODE_HOOKS 16
+bool cpuArm920SetCodeHooks(ArmCpu*, const uint32_t* pcs, uint32_t count);
+bool cpuArm920CodeHookAt(const ArmCpu*, uint32_t pc);
 // Fast: the physical address of va as a load in the current mode would see it, and with word set the word there
 // when it is on a plain page (cpuArm920SetLean). False when the MMU refuses it (translation, domain or permission
 // fault in this mode) or the page isn't plain.

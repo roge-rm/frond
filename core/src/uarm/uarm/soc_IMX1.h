@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "BluetoothBackend.h"
 #include "SoC.h"
 #include "UsbDevicePort.h"
 #include "UsbHostHooks.h"
@@ -39,6 +40,12 @@ inline constexpr uint32_t zodiacRomBase = 0x20000000;
 
 // Where an injected call returns to: never code, as the run stops before fetching it.
 inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
+
+// Facts of the 1.1 ROM for the Bluetooth shim (zodiac_bluetooth.cpp): BtlsLib's start, stop, write and read
+// (ARM), the DAL's doze (Thumb) and the IRQ handler's call of the DAL's interrupt dispatch (ARM, SVC mode), where
+// received bytes are handed to the serial driver, and the receive callback's wait for its port (Thumb).
+inline constexpr uint32_t zodiacBluetoothHooks[] = {0x200f778c, 0x200f77c8, 0x200f77ec, 0x200f7854, 0x20094534,
+                                                    0x200c9ae8, 0x200f6756};
 
 class SocIMX1 : public SoC {
    public:
@@ -213,6 +220,14 @@ class SocIMX1 : public SoC {
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
     std::string StopText() const;
+    // Code hooks for tests: each hit is printed with r0 to r3, lr and sp, and run as is.
+    void SetTraceHooks(const std::vector<uint32_t>& pcs);
+    // Bluetooth: an H4 controller on a Unix socket (BluetoothBackend) in place of the radio, empty for none.
+    // See zodiac_bluetooth.cpp.
+    bool SetBluetooth(const std::string& path, std::string& error) override;
+    std::string BluetoothState() override;
+    // Guest ticks at the Bluetooth driver's last start call, for tests.
+    uint64_t BluetoothLastStart() const { return bluetooth.lastStart; }
 
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
@@ -236,6 +251,47 @@ class SocIMX1 : public SoC {
     void StateChanged();
     // Runs until the pc stop or for ticks of guest time. True on the stop.
     bool RunToStop(uint64_t ticks);
+    // Sets the machine's code hooks: the trace hooks and Bluetooth's.
+    void ApplyCodeHooks();
+    // A run ended on a code hook: Bluetooth takes it, or the instruction runs.
+    void CodeHookHit();
+    std::vector<uint32_t> traceHooks;
+    // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
+    // started: the guest's start went to the backend and no stop came since, so the hooks stay on while it runs
+    // even with no controller set. A started radio whose backend closed is down: its starts are refused until the
+    // guest's stop or its next burst of radio setup. lastStart: guest ticks at the last start call. lastDoze: guest
+    // ticks at the last doze entry. portShutSince: guest ticks at the first delivery ended at the port wait with no
+    // bytes taken since, 0 for none. A checkpoint restore puts these and driverR9 back with the guest. address: the
+    // radio's BD_ADDR (least significant byte first), made once for this machine, so it stays the same over every
+    // stop and start.
+    struct Bluetooth {
+        std::string path, lastError;
+        BluetoothBackend backend;
+        std::array<uint8_t, 6> address{};
+        bool romKnown{false}, started{false}, delivering{false};
+        // The data of the callback a delivery is running, whether it was ended at its wait for the port, its
+        // passes there, the bytes it read since the last one and the bytes the delivery read.
+        uint32_t deliveringData{0}, portWaitHits{0}, readSincePortWait{0}, readInDelivery{0};
+        bool callbackEnded{false};
+        uint64_t lastDoze{0}, lastStart{0}, portShutSince{0};
+        // r9 at the driver's writes and reads, most recent first, which find BtlsLib's globals. The stack calls
+        // the driver from more than one task, each with its own table.
+        std::array<uint32_t, 4> driverR9{};
+    } bluetooth;
+    bool BluetoothHook(uint32_t pc, const uint32_t (&r)[16]);
+    bool BluetoothHooksOn() const { return bluetooth.romKnown && (!bluetooth.path.empty() || bluetooth.started); }
+    // pilb's globals for the registers' r9, 0 when they aren't mapped.
+    uint32_t BluetoothGlobals(uint32_t r9);
+    bool BluetoothRunning(uint32_t r9, uint32_t* globals = nullptr);
+    void BluetoothReturn(uint32_t result);
+    // False, with nothing run, when the r9's callback isn't the driver's.
+    bool BluetoothDeliver(uint32_t globals, uint32_t r9);
+    bool BluetoothPortOpen(uint32_t r9, uint32_t data);
+    // Runs a callback the guest was sent to until it returns to zodiacInjectedReturn. False if it doesn't.
+    bool BluetoothRunCallback();
+    void BluetoothDown(const std::string& why);
+    void BluetoothNoteR9(uint32_t r9);
+    void PollBluetooth();
     void EndGuestCall();
     ZodiacPaceSites paceSites{};
     bool guestCall{false};

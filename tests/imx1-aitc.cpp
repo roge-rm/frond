@@ -34,6 +34,13 @@ void resetAndDecode() {
         value = 0x80000000;
         assert(a.access(base + offset, 4, true, value) == Imx1AitcAccess::reservedBits);
     }
+    // NIMASK takes -1 as 32 bits and as NIVECSR's 16-bit NIPRILVL (no normal interrupt pending); other high bits
+    // are refused.
+    write(a, 4, 5); assert(read(a, 4) == 5);
+    write(a, 4, 0xffff); assert(read(a, 4) == 31);
+    write(a, 4, 5); write(a, 4, 0xffffffff); assert(read(a, 4) == 31);
+    value = 0x7fff;
+    assert(a.access(base + 4, 4, true, value) == Imx1AitcAccess::reservedBits);
     write(a, 0, 0x00180000); assert(read(a, 0) == 0x00180000);
     assert(read(a, 0x10) == 0 && read(a, 0x14) == 0);
     for (unsigned source = 0; source < 64; ++source) {

@@ -1099,12 +1099,12 @@ bool gFastEngineMissing = false;
             const auto& path=*options.bluetooth;
             if (!capabilities.bluetooth ||
                 (path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=string::npos))) {
-                cerr << "--bluetooth needs off or an absolute virtual controller Unix socket path on a TX, E2, Zire 72 or TG50" << endl;return false;
+                cerr << "--bluetooth needs off or an absolute virtual controller Unix socket path on a TX, E2, Zire 72, TG50 or Zodiac" << endl;return false;
             }
-            if (!static_cast<SocPXA*>(soc)->SetBluetooth(path=="off"?string():path,commandContext.bluetoothError)) {
+            if (!soc->SetBluetooth(path=="off"?string():path,commandContext.bluetoothError)) {
                 cerr << "bluetooth: " << commandContext.bluetoothError << endl;return false;
             }
-            cout << "bluetooth: " << static_cast<SocPXA*>(soc)->BluetoothState() << endl;
+            cout << "bluetooth: " << soc->BluetoothState() << endl;
         }
         UsbHostBridge usb;
         commandContext.usb = &usb;

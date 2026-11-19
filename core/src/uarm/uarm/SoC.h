@@ -96,6 +96,12 @@ class SoC {
     // boards that give them this way (null elsewhere; the PXA boards give their UARTs). Owned by the SoC.
     virtual HostUartPort* SerialHostPort() { return nullptr; }
     virtual HostInfraredPort* InfraredHostPort() { return nullptr; }
+    // A virtual Bluetooth controller on a local H4 Unix socket, empty for none.
+    virtual bool SetBluetooth(const std::string &, std::string &error) {
+        error = "No Bluetooth controller on this board.";
+        return false;
+    }
+    virtual std::string BluetoothState() { return "off"; }
     virtual bool KeyboardAttached() const { return false; }
     virtual void AttachKeyboard(bool) {}
     virtual bool KeyboardKey(uint8_t, bool) { return false; }
