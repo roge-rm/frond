@@ -4,7 +4,8 @@ name: Windows
 
 on:
   workflow_dispatch:
-  # push trigger comes back with M3
+  push:
+    branches: [ci/desktop-ports-windows]
 
 permissions:
   contents: read
