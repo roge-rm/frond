@@ -2,6 +2,7 @@
 // ZODIAC_TEST_FAST=1 runs the Fast engine.
 // trace DIR PC...: hard reset kept, Preferences, then the Bluetooth panel's radio on, logging every code hook hit
 // (each one let run) and a frame per step into DIR.
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <thread>
@@ -139,7 +140,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     // steps DIR: hard reset to Preferences with Bluetooth on BT, then STEPS, ';' between them: tap X Y WAIT,
-    // install PATH, launch NAME, wait MS, shot NAME.
+    // power, stroke X1 Y1 X2 Y2, install PATH, launch NAME, wait MS, shot NAME, signal NAME (a file in DIR or
+    // an absolute path), waitfor NAME MS, calls N (database lists through guest calls), export NAME (checks the
+    // probe's received payload).
     if (mode == "steps" && argc > 2) {
         SocIMX1* soc = start(rom);
         const std::string dir = argv[2];
@@ -161,6 +164,16 @@ int main(int argc, char** argv) {
             int x = 0, y = 0, wait = 1500;
             if (std::sscanf(step.c_str(), "tap %d %d %d", &x, &y, &wait) >= 2) {
                 tap(*soc, x, y, uint64_t(wait));
+            } else if (step == "power") {
+                press(*soc, keyIdPower);
+            } else if (int x2 = 0, y2 = 0; std::sscanf(step.c_str(), "stroke %d %d %d %d", &x, &y, &x2, &y2) == 4) {
+                // A pen stroke in 20 moves, 20 ms apart.
+                for (int i = 0; i <= 20; ++i) {
+                    soc->PenDown(x + (x2 - x) * i / 20, y + (y2 - y) * i / 20);
+                    runFor(*soc, 20);
+                }
+                soc->PenUp();
+                runFor(*soc, 300);
             } else if (std::sscanf(step.c_str(), "%31s %255[^;]", what, arg) == 2) {
                 const std::string w = what;
                 if (w == "install") {
@@ -174,6 +187,43 @@ int main(int argc, char** argv) {
                     runFor(*soc, std::strtoull(arg, nullptr, 10));
                 } else if (w == "shot") {
                     writeFrame(*soc, dir + "/" + arg + ".ppm");
+                } else if (w == "signal") {
+                    // A file in DIR (or an absolute path) for the script driving the peer or another machine.
+                    std::ofstream(arg[0] == '/' ? std::string(arg) : dir + "/" + arg).put('\n');
+                } else if (w == "waitfor") {
+                    // Runs until that file is there, at most MS: waitfor NAME MS.
+                    char name[256] = {};
+                    unsigned long ms = 0;
+                    std::sscanf(arg, "%255s %lu", name, &ms);
+                    const std::string path = name[0] == '/' ? std::string(name) : dir + "/" + name;
+                    const uint64_t until = soc->GetTime() + uint64_t(ms) * 1000000;
+                    while (soc->GetTime() < until && !soc->Halted()) {
+                        if (std::ifstream(path).good()) break;
+                        runFor(*soc, 100);
+                    }
+                } else if (w == "calls") {
+                    // Database lists through guest calls, 100 ms of running between them.
+                    const int count = std::atoi(arg);
+                    int listed = 0;
+                    for (int i = 0; i < count && !soc->Halted(); ++i) {
+                        DbMetadataList list;
+                        if (GuestDatabaseOps::List(*soc, list) && !list.empty()) ++listed;
+                        runFor(*soc, 100);
+                    }
+                    std::printf("calls: %d of %d lists\n", listed, count);
+                } else if (w == "export") {
+                    // The probe's received payload: one 4096-byte record made as bluetooth-opp-peer makes it.
+                    std::vector<uint8_t> bytes, payload(4096);
+                    for (size_t at = 0; at < payload.size(); ++at)
+                        payload[at] = uint8_t((at * 73 + 17) ^ ((at >> 8) * 31));
+                    bool found = false;
+                    try {
+                        found = GuestDatabaseOps::Export(*soc, arg, bytes) &&
+                                std::search(bytes.begin(), bytes.end(), payload.begin(), payload.end()) != bytes.end();
+                    } catch (const std::exception& e) {
+                        std::printf("export: %s\n", e.what());
+                    }
+                    std::printf("export %s: %zu bytes, payload %s\n", arg, bytes.size(), found ? "ok" : "missing");
                 }
             }
             std::printf("%s: bluetooth %s, t %.3f\n", step.c_str(), soc->BluetoothState().c_str(),
