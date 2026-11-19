@@ -133,6 +133,11 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
         s->sound.word(uint16_t(left), 0, PushFrame, s);
         s->sound.word(uint16_t(right), 1, PushFrame, s);
     };
+    soc->machine->wifiEthernetOut = [s = soc.get()](const uint8_t* frame, size_t size) {
+        if (s->networkSimulation.Frozen()) return;
+        if (!s->router) s->router = std::make_unique<frondNet::WifiRouter>();
+        s->router->Input(frame, size, s->machine->nanoseconds());
+    };
     soc->BootLoader();
     soc->ApplyHostInputs();
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeRx1950, DisplayMode::mode_240x320);
@@ -276,8 +281,17 @@ uint64_t SocS3C2442::CoreHz() const {
 
 // The reset button. ASSUMPTION "rx1950 reset button": it pulls the S3C2442's nRESET, which keeps the RTC,
 // and the loader and eboot start the OS from flash as after a power on.
+void SocS3C2442::PollNetwork() {
+    if (!router || networkSimulation.Frozen()) return;
+    const uint64_t now = machine->nanoseconds();
+    router->Poll(now);
+    std::vector<uint8_t> frame;
+    for (unsigned n = 0; n < 64 && router->Receive(frame); ++n) machine->wifiEthernetIn(frame.data(), frame.size());
+}
+
 void SocS3C2442::Reset() {
     SoC::Reset();
+    if (!networkSimulation.Frozen()) router.reset();
     DisarmMicrophone();
     machine->reset();
     ApplyHostInputs();
@@ -302,11 +316,17 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
     machine->nand.dropCache();
+    if (!networkSimulation.Frozen()) router.reset();
     LoadCard();
     if (!RestoringCheckpoint()) DisarmMicrophone();
     // A session saved before sound worked has GPA1 as an address line, as the loader pins left it then; the
     // speaker amplifier needs it as an output (rx1950LoaderPins).
     if (!machine->stateHadSound) machine->gpio.con[S3cGpio::a] &= ~2u;
+    // One saved before Wi-Fi has GPC8 and GPC9 as inputs; the loader leaves them outputs (rx1950LoaderPins).
+    if (!machine->stateHadWifi) {
+        machine->gpio.con[S3cGpio::c] = (machine->gpio.con[S3cGpio::c] & ~0xf0000u) | 0x50000;
+        machine->wifiPinsChanged();
+    }
     ApplyHostInputs();
     StateChanged();
     return true;
@@ -443,6 +463,7 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     for (;;) {
         // Input goes in every slice, so pen and key times are kept in guest time.
         PumpInput();
+        machine->setAccessPointOn(networkSimulation.GetMode() == NetworkSimulation::wireless);
         const uint64_t hz = std::max<uint64_t>(CoreHz(), 1000000);
         const uint64_t left = before + wanted - std::min(before + wanted, machine->nanoseconds());
         const uint64_t ns = std::min(sliceNs, std::max<uint64_t>(left, 1));
@@ -453,6 +474,7 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
                       << " instructions" << std::endl;
             break;
         }
+        PollNetwork();
         if (machine->nanoseconds() >= before + wanted) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }

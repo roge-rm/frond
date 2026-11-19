@@ -2480,7 +2480,7 @@
       "sd_slot": true,
       "camera": false,
       "fast_audio_md5": "",
-      "network": false,
+      "network": true,
       "microphone": true,
       "serial": false,
       "keyboard": false,
