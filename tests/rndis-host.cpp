@@ -130,6 +130,21 @@ static void bringUpTests() {
     // Nothing for 5 s: start again.
     w.Response(false, nullptr, 0, 5000 * ms);
     assert(w.GetState() == RndisHost::State::init);
+
+    // Answers that aren't the awaited completion back off like empty ones and time out after 5 s.
+    RndisHost o;
+    o.Start(64, 0);
+    command(o, RndisHost::initMsg, 0);
+    Bytes status;
+    put32(status, 7);
+    put32(status, 12);
+    put32(status, 0x40010000);
+    o.Response(true, status.data(), status.size(), 100 * ms);
+    assert(!o.WantResponse(150 * ms) && o.WantResponse(200 * ms));
+    o.Response(true, late.data(), late.size(), 5000 * ms);
+    assert(o.GetState() == RndisHost::State::init && !o.WantResponse(5100 * ms));
+    Bytes again;
+    assert(o.NextCommand(again, 5000 * ms) && get32(again.data()) == RndisHost::initMsg);
 }
 
 static void keepaliveTests() {
@@ -140,7 +155,24 @@ static void keepaliveTests() {
     now += RndisHost::keepaliveNs;
     const uint32_t id = command(h, RndisHost::keepaliveMsg, now);
     answer(h, completion(8, id, 0), now += ms);
-    assert(h.Up() && h.GetCounters().keepalives == 1);
+    assert(h.Up() && h.GetCounters().keepalives == 1 && h.GetCounters().ups == 1);
+    // Failed keepalives start again from INIT; coming up again clears the count, so failures spread over
+    // a long session never give up.
+    for (int round = 0; round < 5; ++round) {
+        now += RndisHost::keepaliveNs;
+        const uint32_t k = command(h, RndisHost::keepaliveMsg, now);
+        answer(h, completion(8, k, 0xc0000001), now += ms);
+        assert(h.GetState() == RndisHost::State::init);
+        uint32_t i = command(h, RndisHost::initMsg, now);
+        answer(h, initDone(i), now += ms);
+        i = command(h, RndisHost::queryMsg, now);
+        answer(h, queryDone(i, 0, Bytes(mac, mac + 6)), now += ms);
+        i = command(h, RndisHost::queryMsg, now);
+        answer(h, queryDone(i, 0, {0xdc, 0x05, 0, 0}), now += ms);
+        i = command(h, RndisHost::setMsg, now);
+        answer(h, completion(5, i, 0), now += ms);
+        assert(h.Up() && h.GetCounters().ups == uint32_t(round + 2));
+    }
     // The device's own KEEPALIVE gets a KEEPALIVE_CMPLT that waits for nothing.
     Bytes ka;
     put32(ka, 8);

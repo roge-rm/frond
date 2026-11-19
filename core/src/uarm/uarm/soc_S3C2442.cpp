@@ -718,9 +718,13 @@ void SocS3C2442::UsbEthernetOut(const uint8_t* frame, size_t size, uint64_t now)
     if (usbDesktop) usbDesktop->Input(frame, size, now);
 }
 
-void SocS3C2442::UsbEthernetPoll(uint64_t now, const uint8_t* mac) {
+void SocS3C2442::UsbEthernetPoll(uint64_t now, const uint8_t* mac, uint32_t link) {
     if (networkSimulation.Frozen()) return;
-    if (!usbDesktop) usbDesktop = std::make_unique<frondNet::DesktopLink>(mac);
+    // A new RNDIS link (a restart or a replug, maybe with another MAC) gets a new desktop end and DHCP.
+    if (!usbDesktop || link != usbDesktopLink) {
+        usbDesktop = std::make_unique<frondNet::DesktopLink>(mac);
+        usbDesktopLink = link;
+    }
     usbDesktop->Poll(now);
 }
 

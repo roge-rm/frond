@@ -106,7 +106,7 @@ class SocS3C2442 : public SoC {
     // The desktop behind the USB cable's RNDIS link (UsbHostBridge's ethernet hooks, a DesktopLink): made at the
     // first poll, dropped at a reset or load, left alone while the network is frozen for a checkpoint.
     void UsbEthernetOut(const uint8_t* frame, size_t size, uint64_t now);
-    void UsbEthernetPoll(uint64_t now, const uint8_t* mac);
+    void UsbEthernetPoll(uint64_t now, const uint8_t* mac, uint32_t link);
     bool UsbEthernetIn(std::vector<uint8_t>& frame);
 
    protected:
@@ -171,6 +171,7 @@ class SocS3C2442 : public SoC {
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
     std::unique_ptr<frondNet::DesktopLink> usbDesktop;
+    uint32_t usbDesktopLink{0};  // the RNDIS link number usbDesktop was made for
     void PollNetwork();
 
     struct SerialPort;

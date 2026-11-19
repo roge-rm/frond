@@ -5,7 +5,7 @@
 // once the interrupt endpoint says RESPONSE_AVAILABLE, and Ethernet frames go both ways on the bulk
 // endpoints wrapped in REMOTE_NDIS_PACKET_MSG. Bring-up is INIT, the MAC address and maximum frame
 // size queries and the packet filter; a KEEPALIVE goes out after 5 s with nothing from the device,
-// and the device's own KEEPALIVE and RESET are answered. UsbBusHost moves the bytes; this only
+// and the device's own KEEPALIVE is answered. UsbBusHost moves the bytes; this only
 // builds and parses messages. Single-threaded; time is guest nanoseconds. Nothing here is session state.
 #include <cstddef>
 #include <cstdint>
@@ -85,6 +85,7 @@ class RndisHost {
 
     struct Counters {
         uint64_t framesIn{}, framesOut{}, dropped{}, badMessages{}, keepalives{}, commands{}, responses{};
+        uint32_t ups{};  // times the link came up, kept over Stop: a new one means a new link
     };
     const Counters& GetCounters() const { return counters; }
     std::vector<std::string> TakeMessages() { return std::move(messages); }

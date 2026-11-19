@@ -39,7 +39,7 @@ struct UsbHostBridge::Impl {
         self.lastNow = now;
         // RNDIS: frames from the host network enter once a millisecond.
         if (self.host->Rndis() && self.rndis.Up() && self.soc.ethernetPoll && now >= self.netPollAt) {
-            self.soc.ethernetPoll(now, self.rndis.Mac());
+            self.soc.ethernetPoll(now, self.rndis.Mac(), self.rndis.GetCounters().ups);
             std::vector<uint8_t> frame;
             for (unsigned n = 0; n < 64 && self.soc.ethernetIn(frame); ++n) self.rndis.FrameToDevice(frame.data(), frame.size());
             self.netPollAt = (now / netPollNs + 1) * netPollNs;

@@ -191,7 +191,14 @@ void RndisHost::Response(bool ok, const uint8_t* data, size_t size, uint64_t now
         return;
     }
     ++counters.responses;
+    const bool waited = awaiting;
     HandleControl(data, size, now);
+    // Something other than the awaited completion (a device message or a late one): wait before asking
+    // again, and start again once the command has gone unanswered too long.
+    if (waited && awaiting) {
+        if (now >= lastHeard + commandTimeoutNs) Fail("no completion");
+        else sentAt = now;
+    }
 }
 
 void RndisHost::HandleControl(const uint8_t* m, size_t size, uint64_t now) {
@@ -255,6 +262,8 @@ void RndisHost::HandleControl(const uint8_t* m, size_t size, uint64_t now) {
         case setMsg:
             if (step != 3) return;
             state = State::up;
+            attempts = 0;
+            ++counters.ups;
             keepaliveAt = now + keepaliveNs;
             std::snprintf(text, sizeof(text), "up, MAC %02x:%02x:%02x:%02x:%02x:%02x, frames up to %u bytes", mac[0],
                           mac[1], mac[2], mac[3], mac[4], mac[5], maxFrame);

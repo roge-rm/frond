@@ -37,9 +37,10 @@ class UsbHostBridge {
         std::function<bool()> canPlug;  // optional: false while something else holds the connector
         // Optional host network for an RNDIS device (UsbBusHost's RNDIS mode): Ethernet frames from the
         // guest, a poll of the host side at most once a millisecond with the host's MAC address (the one the
-        // device gave as its permanent address), and the frames it has for the guest.
+        // device gave as its permanent address) and a link number that changes each time RNDIS comes up again,
+        // and the frames it has for the guest.
         std::function<void(const uint8_t*, size_t, uint64_t)> ethernetOut;
-        std::function<void(uint64_t, const uint8_t*)> ethernetPoll;
+        std::function<void(uint64_t, const uint8_t*, uint32_t)> ethernetPoll;
         std::function<bool(std::vector<uint8_t>&)> ethernetIn;
     };
     bool Start(Backend backend, const Config& config, std::string& error);

@@ -40,7 +40,7 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
             [] { return true; },
             // WM5 runs ActiveSync over RNDIS: Frond's host network behind it.
             [rx](const uint8_t* frame, size_t size, uint64_t now) { rx->UsbEthernetOut(frame, size, now); },
-            [rx](uint64_t now, const uint8_t* mac) { rx->UsbEthernetPoll(now, mac); },
+            [rx](uint64_t now, const uint8_t* mac, uint32_t link) { rx->UsbEthernetPoll(now, mac, link); },
             [rx](std::vector<uint8_t>& frame) { return rx->UsbEthernetIn(frame); }
         };
         return Start(std::move(backend), config, error);

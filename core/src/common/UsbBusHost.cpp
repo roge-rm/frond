@@ -580,7 +580,7 @@ void UsbBusHost::FinishTransaction() {
         case Token::bulkIn: {
             uint8_t data[64];
             unsigned size = 0;
-            if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack && size > inMps)
+            if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack && (size > inMps || size > sizeof(data)))
                 return Restart("oversized bulk IN packet");
             const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
             if (r == R::Ack) {
@@ -611,6 +611,9 @@ void UsbBusHost::FinishTransaction() {
         case Token::intIn: {
             uint8_t data[64];
             unsigned size = 0;
+            // The packet size is the guest's (up to 120 bytes on the S3C2442): check it before copying.
+            if (addressed && u.PeekIn(inFlightEndpoint, &size) == R::Ack && (size > intMps || size > sizeof(data)))
+                return Restart("oversized interrupt IN packet");
             const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
             if (r == R::Ack) {
                 if (size > intMps) return Restart("oversized interrupt IN packet");
