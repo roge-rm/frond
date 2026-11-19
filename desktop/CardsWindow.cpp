@@ -224,15 +224,17 @@ LinkDialog::LinkDialog(const QString& sessions, const QString& cardId, const QSt
     machines = new QListWidget(this);
     machines->setObjectName("linkMachines");
     layout->addWidget(machines);
-    const auto tickCanon = tick.isEmpty() ? QString() : QFileInfo(tick).canonicalFilePath();
+    // `tick` is a folder, or a folder and "#2" for its second slot.
+    const auto tickKey = tick.isEmpty() ? QString()
+                         : tick.endsWith(QStringLiteral("#2")) ? frondCards::slotKey(tick.chopped(2), 1) : frondCards::slotKey(tick, 0);
     QMap<QString, QString> names;
     for (const auto& e : frondCards::entries(frondCards::libraryFor(sessions))) names[e.card.id] = e.card.name;
     for (const auto& m : frondCards::machineSlots(sessions, held)) {
-        if (!frondCards::deviceTakesKind(m.device, card.kind)) continue;
+        if (!frondCards::deviceTakesKind(m.device, card.kind, m.n)) continue;
         bool tooBig = false;
-        const bool fits = frondCards::deviceTakes(m.device, card.kind, frondCards::sizeOf(card.kind, card.bytes), &tooBig);
+        const bool fits = frondCards::deviceTakes(m.device, card.kind, frondCards::sizeOf(card.kind, card.bytes), &tooBig, m.n);
         if (!fits && !tooBig) continue;
-        QString text = m.name + QStringLiteral(" · ") + frondFirmware::deviceName(m.device);
+        QString text = m.label() + QStringLiteral(" · ") + frondFirmware::deviceName(m.device);
         bool enabled = true;
         if (!fits) { text += tr(" · Too big for %1").arg(frondFirmware::deviceName(m.device)); enabled = false; }
         else if (!m.cardFile.isEmpty() && m.slot.card != cardId) {
@@ -241,8 +243,8 @@ LinkDialog::LinkDialog(const QString& sessions, const QString& cardId, const QSt
         } else if (m.busy) { text += tr(" · Running"); enabled = false; }
         else if (!m.slot.link.isEmpty() && m.slot.link != cardId) text += tr(" · Linked to %1").arg(names.value(m.slot.link));
         auto* item = new QListWidgetItem(text, machines);
-        item->setData(Qt::UserRole, m.dir);
-        const bool on = m.slot.link == cardId || (!tickCanon.isEmpty() && QFileInfo(m.dir).canonicalFilePath() == tickCanon && enabled);
+        item->setData(Qt::UserRole, m.n ? m.dir + QStringLiteral("#2") : m.dir);
+        const bool on = m.slot.link == cardId || (!tickKey.isEmpty() && frondCards::slotKey(m.dir, m.n) == tickKey && enabled);
         item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
         item->setFlags(enabled ? Qt::ItemIsEnabled | Qt::ItemIsUserCheckable : Qt::NoItemFlags);
     }
@@ -263,11 +265,13 @@ QStringList LinkDialog::linked() const {
 }
 
 CardPickerDialog::CardPickerDialog(const QString& sessions, const QString& machineDir, frondFirmware::Device device, const QString& current,
-                                   QWidget* parent)
-    : QDialog(parent), sessions(sessions), machineDir(machineDir), current(current), device(device) {
+                                   QWidget* parent, int slot)
+    : QDialog(parent), sessions(sessions), machineDir(machineDir), current(current), device(device), slot(slot) {
     setObjectName("cardPicker");
     const bool stick = deviceProfileStorageSlot5(frondFirmware::profile(device)) == DeviceStorageSlot5::memoryStick;
-    setWindowTitle((stick ? tr("Memory Stick for %1") : tr("SD card for %1")).arg(QFileInfo(machineDir).fileName()));
+    const auto machine = QFileInfo(machineDir).fileName();
+    setWindowTitle(frondCards::secondSlot(device) ? tr("Card %1 for %2").arg(slot + 1).arg(machine)
+                   : (stick ? tr("Memory Stick for %1") : tr("SD card for %1")).arg(machine));
     auto* layout = new QVBoxLayout(this);
     auto* area = new QScrollArea(this);
     area->setWidgetResizable(true);
@@ -304,7 +308,7 @@ CardPickerDialog::CardPickerDialog(const QString& sessions, const QString& machi
     connect(linkCards, &QPushButton::clicked, this, [this] {
         const auto id = chosen();
         if (id.isEmpty()) return;
-        LinkDialog dialog(this->sessions, id, this->machineDir, this->machineDir, this);
+        LinkDialog dialog(this->sessions, id, this->machineDir, this->slot ? this->machineDir + QStringLiteral("#2") : this->machineDir, this);
         if (dialog.exec() != QDialog::Accepted) return;
         const auto error = frondCards::setLinks(this->sessions, id, dialog.linked(), this->machineDir);
         if (!error.isEmpty()) QMessageBox::warning(this, tr("Link"), error);
@@ -330,15 +334,15 @@ void CardPickerDialog::fill(const QString& select) {
     add(tr("No card"), {}, true);
     const auto mine = QFileInfo(machineDir).canonicalFilePath();
     for (const auto& r : frondCards::rows(sessions, machineDir)) {
-        if (!frondCards::deviceTakesKind(device, r.card.kind)) continue;
+        if (!frondCards::deviceTakesKind(device, r.card.kind, slot)) continue;
         bool tooBig = false;
-        const bool fits = frondCards::deviceTakes(device, r.card.kind, frondCards::sizeOf(r.card.kind, r.card.bytes), &tooBig);
+        const bool fits = frondCards::deviceTakes(device, r.card.kind, frondCards::sizeOf(r.card.kind, r.card.bytes), &tooBig, slot);
         if (!fits && !tooBig) continue;
         auto text = r.card.name + QStringLiteral(" · ") + frondCards::cardSizeText(r.card);
         bool enabled = fits;
-        const bool here = !r.holderDir.isEmpty() && QFileInfo(r.holderDir).canonicalFilePath() == mine;
+        const bool here = !r.holderDir.isEmpty() && QFileInfo(r.holderDir).canonicalFilePath() == mine && r.holderSlot == slot;
         if (!fits) text += tr(" · Too big for %1").arg(frondFirmware::deviceName(device));
-        else if (!r.holder.isEmpty() && !here) { text += tr(" · In %1").arg(r.holder); enabled = false; }
+        else if (!r.holder.isEmpty() && !here) { text += tr(" · In %1").arg(r.holderLabel()); enabled = false; }
         add(text, r.card.id, enabled);
     }
     if (std::none_of(radios.cbegin(), radios.cend(), [](QRadioButton* r) { return r->isChecked(); })) radios.first()->setChecked(true);
@@ -514,7 +518,7 @@ QMenu* CardsWindow::menuFor(const QString& id, QWidget* parent) {
     add(tr("Export image…"), "exportCard", stopped, &CardsWindow::exportImage);
     add(tr("Link to machines…"), "linkCard", true, &CardsWindow::linkCard);
     if (!row.holder.isEmpty())
-        add(tr("Take out of %1").arg(row.holder), "takeOutCard", !row.holderBusy || inRunning, &CardsWindow::takeOut);
+        add(tr("Take out of %1").arg(row.holderLabel()), "takeOutCard", !row.holderBusy || inRunning, &CardsWindow::takeOut);
     add(tr("Delete"), "deleteCard", row.inDrawer, &CardsWindow::deleteCard);
     // An exchange can start after the row was made: checked again each time the menu opens.
     connect(menu, &QMenu::aboutToShow, menu, [this, menu, inRunning] {
@@ -616,21 +620,23 @@ void CardsWindow::exportImage(const QString& id) {
 void CardsWindow::openFiles(const QString& id) {
     if (files) return;
     QString path, holderDir;
+    int holderSlot = 0;
     std::unique_ptr<QLockFile> hold;
     frondCards::Card card;
-    if (const auto error = frondCards::cardSource(sessions, id, &path, &hold, &card, &holderDir); !error.isEmpty()) return failed(error);
-    if (QFileInfo(path).fileName() != frondCards::fileOfKind(card.kind))
+    if (const auto error = frondCards::cardSource(sessions, id, &path, &hold, &card, &holderDir, &holderSlot); !error.isEmpty())
+        return failed(error);
+    if (QFileInfo(path).fileName() != (holderDir.isEmpty() ? frondCards::fileOfKind(card.kind) : frondCards::machineFileOf(card.kind, holderSlot)))
         return failed(tr("Open %1 once to finish its last save.").arg(QFileInfo(holderDir).fileName()));
     std::unique_ptr<frondCardFile::CardFile> opened;
     try {
         opened = frondCardFile::CardFile::open(path, !card.writeProtected);
         // A machine loads the card as changed from the first write on, even after a crash.
         if (!holderDir.isEmpty())
-            opened->beforeFirstWrite = [holderDir] {
-                auto slot = frondCards::readSlot(holderDir);
+            opened->beforeFirstWrite = [holderDir, holderSlot] {
+                auto slot = frondCards::readSlot(holderDir, holderSlot);
                 if (slot.swap) return;
                 slot.swap = true;
-                if (!frondCards::writeSlot(holderDir, slot)) throw frondCardFile::Error(QStringLiteral("Couldn't write the card."));
+                if (!frondCards::writeSlot(holderDir, slot, holderSlot)) throw frondCardFile::Error(QStringLiteral("Couldn't write the card."));
             };
         frondCardFile::FatImage check(*opened);
     } catch (const frondCardFile::Error& e) {

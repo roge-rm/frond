@@ -1,5 +1,6 @@
 // The card library: cards/<id>/card.json for every card, the card file there while it is in the
-// drawer, and <machine>/slot.json for the card a machine's slot holds or is linked to.
+// drawer, and <machine>/slot.json (slot2.json for a second slot) for the card a machine's slot
+// holds or is linked to.
 // Include SessionStore.h, which pulls this in once its own helpers are declared.
 #include "SessionStore.h"
 #include "FolderCard.h"
@@ -38,13 +39,22 @@ inline bool moveFile(const QString& from, const QString& to) {
 
 inline const QStringList cardFiles{QStringLiteral("sd.frondsd"), QStringLiteral("ms.frondms"), QStringLiteral("ms.frondmsp")};
 inline QString kindOfFile(const QString& file) {
-    return file == "sd.frondsd" ? QStringLiteral("sd") : file == "ms.frondms" ? QStringLiteral("ms") : QStringLiteral("ms-pro");
+    return file == "sd.frondsd" || file == "sd2.frondsd" ? QStringLiteral("sd") : file == "ms.frondms" ? QStringLiteral("ms") : QStringLiteral("ms-pro");
 }
 inline QString fileOfKind(const QString& kind) {
     return kind == "sd" ? QStringLiteral("sd.frondsd") : kind == "ms" ? QStringLiteral("ms.frondms") : QStringLiteral("ms.frondmsp");
 }
-// Descriptor kinds in a .frond: 1 SD, 2 classic stick, 3 Pro.
-inline quint32 descriptorKindOf(const QString& file) { return file == "sd.frondsd" ? 1 : file == "ms.frondms" ? 2 : 3; }
+// Descriptor kinds in a .frond: 1 SD, 2 classic stick, 3 Pro, 5 the second SD slot's card.
+inline quint32 descriptorKindOf(const QString& file) {
+    return file == "sd.frondsd" ? 1 : file == "ms.frondms" ? 2 : file == "sd2.frondsd" ? 5 : 3;
+}
+
+// Slot 0 is a machine's first card slot (SD, Memory Stick or Pro), slot 1 the second SD slot of a
+// two-slot machine (the Zodiac's). Each has its own slot file; slot 1's card is sd2.frondsd in the
+// machine and sd.frondsd in the drawer.
+constexpr int slotCount = 2;
+inline QString slotFile(int n) { return n ? QStringLiteral("slot2.json") : QStringLiteral("slot.json"); }
+inline QString machineFileOf(const QString& kind, int n) { return n ? QStringLiteral("sd2.frondsd") : fileOfKind(kind); }
 
 // <data>/cards beside <data>/sessions.
 inline QString libraryFor(const QString& sessions) { return QFileInfo(sessions).absolutePath() + "/cards"; }
@@ -92,19 +102,19 @@ struct Slot {
     QString card, link, name;  // ids, empty for null
     bool swap{false};          // the slot changed since the last save
 };
-inline Slot readSlot(const QString& machineDir) {
+inline Slot readSlot(const QString& machineDir, int n = 0) {
     Slot slot;
-    QFile file(machineDir + "/slot.json");
+    QFile file(machineDir + '/' + slotFile(n));
     if (!file.open(QIODevice::ReadOnly)) return slot;
     const auto o = QJsonDocument::fromJson(file.readAll()).object();
     if (o.value("version").toInt() != 1) return slot;
     slot = {true, o.value("card").toString(), o.value("link").toString(), o.value("name").toString(), o.value("swap").toBool()};
     return slot;
 }
-inline bool writeSlot(const QString& machineDir, const Slot& slot) {
+inline bool writeSlot(const QString& machineDir, const Slot& slot, int n = 0) {
     auto value = [](const QString& s) { return s.isEmpty() ? QJsonValue() : QJsonValue(s); };
     QJsonObject o{{"version", 1}, {"card", value(slot.card)}, {"link", value(slot.link)}, {"name", value(slot.name)}, {"swap", slot.swap}};
-    QSaveFile file(machineDir + "/slot.json");
+    QSaveFile file(machineDir + '/' + slotFile(n));
     const auto bytes = QJsonDocument(o).toJson(QJsonDocument::Compact);
     return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
 }
@@ -118,8 +128,9 @@ inline QByteArray newIdentity() {
     return raw.toHex();
 }
 
-// The card file in a machine folder, or empty.
-inline QString cardFileIn(const QString& dir) {
+// The card file in a machine folder's slot n, or empty.
+inline QString cardFileIn(const QString& dir, int n = 0) {
+    if (n) return QFileInfo(dir + "/sd2.frondsd").isFile() ? QStringLiteral("sd2.frondsd") : QString();
     for (const auto& name : cardFiles)
         if (QFileInfo(dir + '/' + name).isFile()) return name;
     return {};
@@ -270,7 +281,7 @@ struct Machine {
 // card another entry has) the card gets a new serial and the slot swap, so the core loads it as
 // a different card: two cards with one serial would look unchanged to each other's machines.
 inline bool moveIn(const QString& library, const QString& dir, const QString& file, Slot slot, const QString& name, Card* made = nullptr,
-                   bool freshIdentity = false) {
+                   bool freshIdentity = false, int n = 0) {
     Card card;
     card.id = newId();
     card.kind = kindOfFile(file);
@@ -286,7 +297,7 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
     if (freshIdentity) slot.swap = true;
     card.identity = d && !slot.swap ? d->identity : newIdentity();
     card.writeProtected = d && d->writeProtected;
-    card.name = freeCardName(library, name.isEmpty() ? QFileInfo(dir).fileName() + " card" : name);
+    card.name = freeCardName(library, name.isEmpty() ? QFileInfo(dir).fileName() + (n ? " card 2" : " card") : name);
     const auto to = entryDir(library, card.id);
     if (!QDir().mkpath(to) || !writeCard(to, card)) {
         QDir(to).removeRecursively();
@@ -294,7 +305,7 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
     }
     slot.card = card.id;
     slot.name = card.name;
-    if (!writeSlot(dir, slot)) {
+    if (!writeSlot(dir, slot, n)) {
         QDir(to).removeRecursively();
         return false;
     }
@@ -305,36 +316,37 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
 // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
 // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
 // machine lock held.
-inline QString toDrawer(const QString& library, const QString& dir, const QString& id) {
-    const auto file = cardFileIn(dir);
+inline QString toDrawer(const QString& library, const QString& dir, const QString& id, int n = 0) {
+    const auto file = cardFileIn(dir, n);
     Card card;
     if (file.isEmpty() || !readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't move the card.");
     if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
-    auto slot = readSlot(dir);
+    auto slot = readSlot(dir, n);
     slot.present = true; slot.swap = true; slot.card = id;
-    if (!writeSlot(dir, slot)) return QStringLiteral("Couldn't move the card.");
-    if (!moveFile(dir + '/' + file, entryDir(library, id) + '/' + file))
+    if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't move the card.");
+    if (!moveFile(dir + '/' + file, entryDir(library, id) + '/' + fileOfKind(card.kind)))
         return QStringLiteral("Couldn't move the card into Cards. Cards and sessions have to be on the same disk.");
     slot.card.clear();
-    writeSlot(dir, slot);
+    writeSlot(dir, slot, n);
     card.machine.clear();
     writeCard(entryDir(library, id), card);
     return {};
 }
 // A drawer card into an empty slot. Library lock and machine lock held.
-inline QString toMachine(const QString& library, const QString& id, const QString& dir) {
+inline QString toMachine(const QString& library, const QString& id, const QString& dir, int n = 0) {
     Card card;
     if (!readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't find that card.");
     const auto file = fileOfKind(card.kind);
-    if (!cardFileIn(dir).isEmpty()) return QStringLiteral("Take the machine's card out first.");
+    if (n && card.kind != "sd") return QStringLiteral("That slot takes SD cards.");
+    if (!cardFileIn(dir, n).isEmpty()) return QStringLiteral("Take the machine's card out first.");
     if (!QFileInfo(entryDir(library, id) + '/' + file).isFile()) return QStringLiteral("That card is in another machine.");
     if (const auto why = notReady(entryDir(library, id) + '/' + file); !why.isEmpty()) return why;
-    auto slot = readSlot(dir);
+    auto slot = readSlot(dir, n);
     slot.present = true; slot.swap = true; slot.card = id; slot.name = card.name;
-    if (!writeSlot(dir, slot)) return QStringLiteral("Couldn't move the card.");
-    if (!moveFile(entryDir(library, id) + '/' + file, dir + '/' + file)) {
+    if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't move the card.");
+    if (!moveFile(entryDir(library, id) + '/' + file, dir + '/' + machineFileOf(card.kind, n))) {
         slot.card.clear();
-        writeSlot(dir, slot);
+        writeSlot(dir, slot, n);
         return QStringLiteral("Couldn't move the card into the machine. Cards and sessions have to be on the same disk.");
     }
     card.machine = QFileInfo(dir).fileName();
@@ -386,7 +398,7 @@ inline QString settledCopy(const QString& dir, const QString& file, const QStrin
     auto source = dir + '/' + file;
     QString journal;
     if (hasJournals(dir, file) || !settled(dir, file, false)) {
-        const auto settle = frondSessions::sdSettleOf(dir, frondSessions::sessionFrondIn(dir));
+        const auto settle = frondSessions::sdSettleOf(dir, frondSessions::sessionFrondIn(dir), false, file == "sd2.frondsd");
         if (settle.sibling == file && !settle.full.isEmpty()) source = settle.full;
         else if (settle.sibling == file && !settle.journal.isEmpty()) journal = settle.journal;
         else if (hasJournals(dir, file)) return QStringLiteral("unsettled");
@@ -412,9 +424,9 @@ inline QString settledCopy(const QString& dir, const QString& file, const QStrin
     return {};
 }
 
-// Reconcile: makes card.json, slot.json and the machine hints match where the card files are.
-// `held` is a machine folder the caller already holds locked. Machines locked elsewhere are
-// skipped. Library lock held.
+// Reconcile: makes card.json, the slot files and the machine hints match where the card files are,
+// slot by slot. `held` is a machine folder the caller already holds locked. Machines locked
+// elsewhere are skipped. Library lock held.
 inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
     const auto library = libraryFor(sessions);
     const auto heldCanon = held.isEmpty() ? QString() : QFileInfo(held).canonicalFilePath();
@@ -432,8 +444,10 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
             m.lock = std::make_unique<QLockFile>(m.frond + ".lock");
             m.lock->setStaleLockTime(0);
             if (!frondSessions::tryLockSession(*m.lock, m.frond)) {
-                const auto slot = readSlot(m.dir);
-                skippedClaims << slot.card << slot.link;
+                for (int n = 0; n < slotCount; ++n) {
+                    const auto slot = readSlot(m.dir, n);
+                    skippedClaims << slot.card << slot.link;
+                }
                 continue;
             }
         }
@@ -443,7 +457,8 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
     // Files… changes a crash cut off, in the machines held and the drawer. Cards open in Files now
     // are left alone.
     for (const auto& m : machines)
-        if (const auto file = cardFileIn(m.dir); !file.isEmpty()) frondCardFile::settle(m.dir + '/' + file);
+        for (int n = 0; n < slotCount; ++n)
+            if (const auto file = cardFileIn(m.dir, n); !file.isEmpty()) frondCardFile::settle(m.dir + '/' + file);
     for (const auto& e : entries(library))
         if (e.inDrawer) frondCardFile::settle(e.dir + '/' + fileOfKind(e.card.kind));
     auto known = entries(library);
@@ -452,50 +467,54 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
             if (e.card.id == id) return &e;
         return nullptr;
     };
-    // Rules 1 to 4 per machine. Machines the hint names go first, so they keep their card (rule 3).
+    // Rules 1 to 4 per slot. Machines the hint names go first, so they keep their card (rule 3).
     std::stable_sort(machines.begin(), machines.end(), [&](const Machine& a, const Machine& b) {
         auto hinted = [&](const Machine& m) {
-            const auto slot = readSlot(m.dir);
-            const auto* e = find(slot.card);
-            return e && e->card.machine == m.name;
+            for (int n = 0; n < slotCount; ++n) {
+                const auto* e = find(readSlot(m.dir, n).card);
+                if (e && e->card.machine == m.name) return true;
+            }
+            return false;
         };
         return hinted(a) && !hinted(b);
     });
-    QStringList claimed, knownIn;  // knownIn: machines whose slot names the library card they hold
+    QStringList claimed, knownIn;  // knownIn: slots ("dir#n") naming the library card they hold
     for (auto& m : machines) {
         quint32 version = 0;
         descriptorsOf(m.frond, &version);
         if (version < 7) continue;  // a v6 card is inside the .frond until its first run
-        auto slot = readSlot(m.dir);
-        const auto file = cardFileIn(m.dir);
-        auto* e = find(slot.card);
-        if (!file.isEmpty()) {
-            if (e && e->card.kind == kindOfFile(file) && !e->inDrawer && !claimed.contains(e->card.id)) {
-                claimed << e->card.id;  // rule 1
-                if (slot.card == e->card.id) knownIn << m.dir;
-                if (e->card.machine != m.name) {
-                    e->card.machine = m.name;
-                    writeCard(e->dir, e->card);
+        for (int n = 0; n < slotCount; ++n) {
+            auto slot = readSlot(m.dir, n);
+            const auto file = cardFileIn(m.dir, n);
+            auto* e = find(slot.card);
+            if (!file.isEmpty()) {
+                if (e && e->card.kind == kindOfFile(file) && !e->inDrawer && !claimed.contains(e->card.id)) {
+                    claimed << e->card.id;  // rule 1
+                    if (slot.card == e->card.id) knownIn << m.dir + '#' + QString::number(n);
+                    if (e->card.machine != m.name) {
+                        e->card.machine = m.name;
+                        writeCard(e->dir, e->card);
+                    }
+                    continue;
+                }
+                // Rule 2, or rule 3 for a second holder: a new entry, named after the first one's,
+                // with its own serial. The card it holds isn't its link any more.
+                Slot fresh = slot;
+                fresh.present = true;
+                fresh.link.clear();
+                Card made;
+                if (moveIn(library, m.dir, file, fresh, e ? e->card.name : slot.name, &made, e != nullptr, n)) {
+                    claimed << made.id;
+                    known = entries(library);
                 }
                 continue;
             }
-            // Rule 2, or rule 3 for a second holder: a new entry, named after the first one's, with
-            // its own serial. The card it holds isn't its link any more.
-            Slot fresh = slot;
-            fresh.present = true;
-            fresh.link.clear();
-            Card made;
-            if (moveIn(library, m.dir, file, fresh, e ? e->card.name : slot.name, &made, e != nullptr)) {
-                claimed << made.id;
-                known = entries(library);
+            // No card file. Rule 4 (a cut-off move: the drawer wins) or a card that is elsewhere now.
+            if (!slot.card.isEmpty()) {
+                slot.card.clear();
+                slot.swap = true;
+                writeSlot(m.dir, slot, n);
             }
-            continue;
-        }
-        // No card file. Rule 4 (a cut-off move: the drawer wins) or a card that is elsewhere now.
-        if (!slot.card.isEmpty()) {
-            slot.card.clear();
-            slot.swap = true;
-            writeSlot(m.dir, slot);
         }
     }
     // Rule 5: an entry with no file anywhere goes, with links to it. Not while a machine we
@@ -508,38 +527,41 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
             std::none_of(machines.cbegin(), machines.cend(), [&](const Machine& m) { return m.name == e.card.machine; }))
             continue;
         // A machine that isn't saved yet, holding the card it was given while running.
-        if (!e.card.machine.isEmpty() && !QFileInfo(frondSessions::sessionFrondIn(hinted)).isFile() &&
-            QFileInfo(hinted + '/' + fileOfKind(e.card.kind)).isFile() && readSlot(hinted).card == e.card.id)
-            continue;
+        bool unsavedHolder = false;
+        for (int n = 0; n < slotCount; ++n)
+            unsavedHolder |= !e.card.machine.isEmpty() && !QFileInfo(frondSessions::sessionFrondIn(hinted)).isFile() &&
+                             QFileInfo(hinted + '/' + machineFileOf(e.card.kind, n)).isFile() && readSlot(hinted, n).card == e.card.id;
+        if (unsavedHolder) continue;
         QDir(e.dir).removeRecursively();
-        for (auto& m : machines) {
-            auto slot = readSlot(m.dir);
-            if (slot.link == e.card.id) {
-                slot.link.clear();
-                writeSlot(m.dir, slot);
+        for (auto& m : machines)
+            for (int n = 0; n < slotCount; ++n) {
+                auto slot = readSlot(m.dir, n);
+                if (slot.link == e.card.id) {
+                    slot.link.clear();
+                    writeSlot(m.dir, slot, n);
+                }
             }
-        }
     }
     known = entries(library);
-    // Rule 6: a linked card left in a stopped machine by a crash goes back to the drawer once settled.
-    for (auto& m : machines) {
-        const auto slot = readSlot(m.dir);
-        const auto file = cardFileIn(m.dir);
-        if (file.isEmpty() || slot.link.isEmpty() || slot.card != slot.link) continue;
-        if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card);
-    }
-    // Rule 7: a take-out the launcher didn't finish, as when Frond died and the core saved after it.
-    // The slot names the library card, the save has no card there and the slot hasn't changed
-    // since, so the card goes to the drawer.
-    for (auto& m : machines) {
-        const auto slot = readSlot(m.dir);
-        const auto file = cardFileIn(m.dir);
-        if (!knownIn.contains(m.dir) || file.isEmpty() || slot.card.isEmpty() || slot.swap) continue;
-        quint32 version = 0;
-        const auto cards = descriptorsOf(m.frond, &version);
-        if (version < 7 || describedCard(cards, file) || !settled(m.dir, file, false)) continue;
-        toDrawer(library, m.dir, slot.card);
-    }
+    for (auto& m : machines)
+        for (int n = 0; n < slotCount; ++n) {
+            const auto slot = readSlot(m.dir, n);
+            const auto file = cardFileIn(m.dir, n);
+            if (file.isEmpty()) continue;
+            // Rule 6: a linked card left in a stopped machine by a crash goes back to the drawer once settled.
+            if (!slot.link.isEmpty() && slot.card == slot.link) {
+                if (settled(m.dir, file, slot.swap)) toDrawer(library, m.dir, slot.card, n);
+                continue;
+            }
+            // Rule 7: a take-out the launcher didn't finish, as when Frond died and the core saved
+            // after it. The slot names the library card, the save has no card there and the slot
+            // hasn't changed since, so the card goes to the drawer.
+            if (!knownIn.contains(m.dir + '#' + QString::number(n)) || slot.card.isEmpty() || slot.swap) continue;
+            quint32 version = 0;
+            const auto cards = descriptorsOf(m.frond, &version);
+            if (version < 7 || describedCard(cards, file) || !settled(m.dir, file, false)) continue;
+            toDrawer(library, m.dir, slot.card, n);
+        }
     // Hints of drawer cards.
     for (auto& e : entries(library))
         if (e.inDrawer && !e.card.machine.isEmpty()) {
@@ -561,61 +583,88 @@ inline void startUp(const QString& sessions) {
     reconcile(sessions);
 }
 
-// Card flags for the core, from slot.json and card.json. Never for a 68k machine.
+// Card flags for the core, from the slot files and card.json. Never for a 68k machine. A swap in
+// slot 2 needs --card-swap only: the core loads that slot empty when its card changed, and
+// secondPutIn() says what goes in once it runs.
 inline QStringList launchArguments(const QString& sessions, const QString& dir) {
     const auto slot = readSlot(dir);
-    if (!slot.swap) return {};
+    if (!slot.swap && !readSlot(dir, 1).swap) return {};
     QStringList args{QStringLiteral("--card-swap")};
     const auto file = cardFileIn(dir);
     Card card;
-    if (!file.isEmpty() && !slot.card.isEmpty() && readCard(entryDir(libraryFor(sessions), slot.card), &card)) {
+    if (slot.swap && !file.isEmpty() && !slot.card.isEmpty() && readCard(entryDir(libraryFor(sessions), slot.card), &card)) {
         args << QStringLiteral("--card-identity") << QString::fromLatin1(card.identity.toHex());
         if (card.writeProtected) args << QStringLiteral("--card-protected");
     }
     return args;
 }
+// The sd2-put-in argument for slot 2's card ("IDENTITY protected|writable"), when the slot holds a
+// library card the core may have left out at start; empty when nothing goes in.
+inline QString secondPutIn(const QString& sessions, const QString& dir) {
+    const auto slot = readSlot(dir, 1);
+    Card card;
+    if (cardFileIn(dir, 1).isEmpty() || slot.card.isEmpty() || !readCard(entryDir(libraryFor(sessions), slot.card), &card)) return {};
+    return QString::fromLatin1(card.identity.leftJustified(32, '\0', true).toHex()) +
+           (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+}
 
-// Machine start, machine lock held: reconcile, then a linked machine with an empty slot takes
-// its card if it is in the drawer. Returns the flags for the core; `heldBy` gets the holder's
+// Machine start, machine lock held: reconcile, then each linked slot that is empty takes its card
+// if it is in the drawer. Returns the flags for the core; `heldBy` gets, per slot, the holder's
 // name when another machine has the linked card.
-inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr) {
+inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr, QString* heldBy2 = nullptr) {
     const auto library = libraryFor(sessions);
-    // The machine lock is held, so its card can be settled even if the library is busy.
-    if (const auto file = cardFileIn(dir); !file.isEmpty()) frondCardFile::settle(dir + '/' + file);
+    // The machine lock is held, so its cards can be settled even if the library is busy.
+    for (int n = 0; n < slotCount; ++n)
+        if (const auto file = cardFileIn(dir, n); !file.isEmpty()) frondCardFile::settle(dir + '/' + file);
     LibraryLock lock(library);
     if (lock.ok) {
         reconcileLocked(sessions, dir);
-        const auto slot = readSlot(dir);
-        if (!slot.link.isEmpty() && cardFileIn(dir).isEmpty()) {
+        for (int n = 0; n < slotCount; ++n) {
+            const auto slot = readSlot(dir, n);
+            if (slot.link.isEmpty() || !cardFileIn(dir, n).isEmpty()) continue;
             Card card;
             const bool known = readCard(entryDir(library, slot.link), &card);
+            auto* holder = n ? heldBy2 : heldBy;
             if (known && QFileInfo(entryDir(library, slot.link) + '/' + fileOfKind(card.kind)).isFile())
-                toMachine(library, slot.link, dir);
-            else if (known && heldBy)
-                *heldBy = card.machine;
+                toMachine(library, slot.link, dir, n);
+            else if (known && holder)
+                *holder = card.machine;
         }
     }
     return launchArguments(sessions, dir);
 }
 
-// After the final save of a linked holder, machine lock held: the card goes to the drawer.
+// After the final save of a linked holder, machine lock held: each linked card goes to the drawer.
 inline QString releaseAtClose(const QString& sessions, const QString& dir) {
-    const auto slot = readSlot(dir);
-    const auto file = cardFileIn(dir);
-    if (slot.link.isEmpty() || slot.card != slot.link || file.isEmpty()) return {};
-    if (!settled(dir, file, false)) return QStringLiteral("The card stays in the machine: its last save isn't finished.");
     const auto library = libraryFor(sessions);
-    LibraryLock lock(library);
-    if (!lock.ok) return busyMessage();
-    return toDrawer(library, dir, slot.card);
+    QString error;
+    for (int n = 0; n < slotCount; ++n) {
+        const auto slot = readSlot(dir, n);
+        const auto file = cardFileIn(dir, n);
+        if (slot.link.isEmpty() || slot.card != slot.link || file.isEmpty()) continue;
+        if (!settled(dir, file, false)) {
+            error = QStringLiteral("The card stays in the machine: its last save isn't finished.");
+            continue;
+        }
+        LibraryLock lock(library);
+        if (!lock.ok) return busyMessage();
+        if (const auto e = toDrawer(library, dir, slot.card, n); !e.isEmpty()) error = e;
+    }
+    return error;
 }
 
-// After a save that succeeded, machine lock held.
+// After a save that succeeded, machine lock held. Slot 2 keeps its swap while its card file is one
+// the save doesn't list (left out at start and not put in yet), so the next start still loads.
 inline void clearSwap(const QString& dir) {
-    auto slot = readSlot(dir);
-    if (!slot.present || !slot.swap) return;
-    slot.swap = false;
-    writeSlot(dir, slot);
+    for (int n = 0; n < slotCount; ++n) {
+        auto slot = readSlot(dir, n);
+        if (!slot.present || !slot.swap) continue;
+        if (n && !cardFileIn(dir, n).isEmpty() &&
+            !describedCard(descriptorsOf(frondSessions::sessionFrondIn(dir)), QStringLiteral("sd2.frondsd")))
+            continue;
+        slot.swap = false;
+        writeSlot(dir, slot, n);
+    }
 }
 
 // The SD card inside a v6 .frond (the stream after the header and its 32-byte table), written raw
@@ -733,37 +782,32 @@ inline ToolResult runCardTool(const QString& tool, const QStringList& args, cons
     return {false, QStringLiteral("failed"), QStringLiteral("The card tool failed.")};
 }
 
-// Delete: the machine's card goes back to the drawer. Settled, a rename; unsettled, a settled
-// copy into the drawer; a v6 machine's card is taken out of its .frond with the card tool.
-// Machine lock held. Empty on success, then the folder can go.
 inline QString keepV6CardOf(const QString& sessions, const QString& dir, const QString& tool, const frondSessions::CopyProgress& progress);
-inline QString keepCardOf(const QString& sessions, const QString& dir, const frondSessions::CopyProgress& progress = {},
-                          const QString& cancelled = QStringLiteral("Delete cancelled."), const QString& tool = {}) {
+// One slot's card for keepCardOf.
+inline QString keepSlotCardOf(const QString& sessions, const QString& dir, int n, const frondSessions::CopyProgress& progress,
+                              const QString& cancelled) {
     const auto library = libraryFor(sessions);
-    quint32 version = 0;
-    descriptorsOf(frondSessions::sessionFrondIn(dir), &version);
-    if (version == 6) return keepV6CardOf(sessions, dir, tool, progress);
     {
         LibraryLock lock(library);
         if (!lock.ok) return busyMessage();
         // A save that got as far as its full card copy: settle it the way a load does, so the card
         // is moved in rather than lost.
-        if (cardFileIn(dir).isEmpty()) {
-            const auto settle = frondSessions::sdSettleOf(dir, frondSessions::sessionFrondIn(dir));
+        if (cardFileIn(dir, n).isEmpty()) {
+            const auto settle = frondSessions::sdSettleOf(dir, frondSessions::sessionFrondIn(dir), false, n == 1);
             if (!settle.full.isEmpty() && !moveFile(settle.full, dir + '/' + settle.sibling))
                 return QStringLiteral("Couldn't move the card into Cards.");
         }
         reconcileLocked(sessions, dir);
-        const auto slot = readSlot(dir);
-        const auto file = cardFileIn(dir);
+        const auto slot = readSlot(dir, n);
+        const auto file = cardFileIn(dir, n);
         if (file.isEmpty()) return {};
         if (slot.card.isEmpty()) return QStringLiteral("Couldn't move the card into Cards.");
         if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
-        if (settled(dir, file, slot.swap)) return toDrawer(library, dir, slot.card);
+        if (settled(dir, file, slot.swap)) return toDrawer(library, dir, slot.card, n);
     }
     // Copied outside the lock, then renamed in under it.
-    const auto slot = readSlot(dir);
-    const auto file = cardFileIn(dir);
+    const auto slot = readSlot(dir, n);
+    const auto file = cardFileIn(dir, n);
     NewCopy copy(library);
     if (!copy.ok) return QStringLiteral("Couldn't move the card into Cards.");
     const auto error = settledCopy(dir, file, copy.dir + '/' + file, progress);
@@ -774,13 +818,25 @@ inline QString keepCardOf(const QString& sessions, const QString& dir, const fro
     if (!lock.ok) return busyMessage();
     Card card;
     if (!readCard(entryDir(library, slot.card), &card)) return QStringLiteral("Couldn't move the card into Cards.");
-    if (!moveFile(copy.dir + '/' + file, entryDir(library, slot.card) + '/' + file))
+    if (!moveFile(copy.dir + '/' + file, entryDir(library, slot.card) + '/' + fileOfKind(card.kind)))
         return QStringLiteral("Couldn't move the card into Cards.");
     QFile::remove(dir + '/' + file);
     for (const auto& name : QDir(dir).entryList(QDir::Files | QDir::Hidden | QDir::System))
         if (name.startsWith(file + ".journal-")) QFile::remove(dir + '/' + name);
     card.machine.clear();
     writeCard(entryDir(library, slot.card), card);
+    return {};
+}
+// Delete: each card the machine holds goes back to the drawer. Settled, a rename; unsettled, a
+// settled copy into the drawer; a v6 machine's card is taken out of its .frond with the card tool.
+// Machine lock held. Empty on success, then the folder can go.
+inline QString keepCardOf(const QString& sessions, const QString& dir, const frondSessions::CopyProgress& progress = {},
+                          const QString& cancelled = QStringLiteral("Delete cancelled."), const QString& tool = {}) {
+    quint32 version = 0;
+    descriptorsOf(frondSessions::sessionFrondIn(dir), &version);
+    if (version == 6) return keepV6CardOf(sessions, dir, tool, progress);
+    for (int n = 0; n < slotCount; ++n)
+        if (const auto error = keepSlotCardOf(sessions, dir, n, progress, cancelled); !error.isEmpty()) return error;
     return {};
 }
 
@@ -864,8 +920,14 @@ inline QString cardSizeText(const Card& card) {
     const auto size = sizeLabel(sizeOf(card.kind, card.bytes));
     return card.kind == "ms-pro" ? QStringLiteral("Pro · ") + size : size;
 }
-inline bool deviceTakesKind(frondFirmware::Device device, const QString& kind) {
+// Whether an ARM machine has a second SD slot (the Zodiac).
+inline bool secondSlot(frondFirmware::Device device) {
+    return !frondFirmware::runs68k(device) && deviceProfileCardSlotCount5(frondFirmware::profile(device)) > 1;
+}
+inline int slotsOf(frondFirmware::Device device) { return secondSlot(device) ? 2 : 1; }
+inline bool deviceTakesKind(frondFirmware::Device device, const QString& kind, int n = 0) {
     if (frondFirmware::runs68k(device)) return false;
+    if (n && (!secondSlot(device) || kind != "sd")) return false;
     const auto& p = frondFirmware::profile(device);
     const auto slot = deviceProfileStorageSlot5(p);
     if (kind == "sd") return slot == DeviceStorageSlot5::sd && p.frontend.sdSlot;
@@ -873,9 +935,9 @@ inline bool deviceTakesKind(frondFirmware::Device device, const QString& kind) {
     return kind == "ms" ? p.msSizes != 0 : p.msProMaxMib >= 256;
 }
 // Whether the device takes a card of this kind and size; `tooBig` when only the size is wrong.
-inline bool deviceTakes(frondFirmware::Device device, const QString& kind, int size, bool* tooBig = nullptr) {
+inline bool deviceTakes(frondFirmware::Device device, const QString& kind, int size, bool* tooBig = nullptr, int n = 0) {
     if (tooBig) *tooBig = false;
-    if (!deviceTakesKind(device, kind)) return false;
+    if (!deviceTakesKind(device, kind, n)) return false;
     const auto& p = frondFirmware::profile(device);
     bool fits, big;
     if (kind == "sd") {
@@ -919,8 +981,17 @@ struct MachineSlot {
     Slot slot;
     QString cardFile;
     bool busy{false};  // open in another Frond (or another window)
+    int n{0}, slotTotal{1};  // which slot, of how many the machine has
+    // "Zodiac · Card 2" for a two-slot machine, else the machine's name.
+    QString label() const { return slotTotal > 1 ? QStringLiteral("%1 · Card %2").arg(name).arg(n + 1) : name; }
 };
-// Saved ARM machines with a card slot. `held` is the caller's own machine, which isn't busy.
+// "dir" for slot 0, "dir#2" for slot 1, with the folder's canonical path: what setLinks takes.
+inline QString slotKey(const QString& dir, int n) {
+    const auto canon = QFileInfo(dir).canonicalFilePath();
+    return n ? canon + QStringLiteral("#2") : canon;
+}
+// Each card slot of the saved ARM machines, slot 0 then slot 1. `held` is the caller's own
+// machine, which isn't busy.
 inline QList<MachineSlot> machineSlots(const QString& sessions, const QString& held = {}) {
     QList<MachineSlot> result;
     const auto heldCanon = held.isEmpty() ? QString() : QFileInfo(held).canonicalFilePath();
@@ -935,14 +1006,18 @@ inline QList<MachineSlot> machineSlots(const QString& sessions, const QString& h
         if (!frondSessions::openable(header)) continue;
         m.device = frondFirmware::deviceFromId(header.device);
         if (!deviceTakesKind(m.device, "sd") && !deviceTakesKind(m.device, "ms") && !deviceTakesKind(m.device, "ms-pro")) continue;
-        m.slot = readSlot(m.dir);
-        m.cardFile = cardFileIn(m.dir);
+        m.slotTotal = slotsOf(m.device);
         if (heldCanon.isEmpty() || info.canonicalFilePath() != heldCanon) {
             QLockFile lock(frond + ".lock");
             lock.setStaleLockTime(0);
             m.busy = !frondSessions::tryLockSession(lock, frond);
         }
-        result.append(m);
+        for (int n = 0; n < m.slotTotal; ++n) {
+            m.n = n;
+            m.slot = readSlot(m.dir, n);
+            m.cardFile = cardFileIn(m.dir, n);
+            result.append(m);
+        }
     }
     return result;
 }
@@ -952,7 +1027,10 @@ struct Row {
     bool inDrawer{false};
     QString holder, holderDir;  // the machine the card is in
     bool holderBusy{false};
-    QStringList links;          // machines linked to it
+    QStringList links;          // machines linked to it, "Zodiac · Card 2" for a second slot
+    int holderSlot{0}, holderSlots{1};
+    // "Zodiac · Card 2" when the holder has two slots.
+    QString holderLabel() const { return holderSlots > 1 ? QStringLiteral("%1 · Card %2").arg(holder).arg(holderSlot + 1) : holder; }
 };
 inline QList<Row> rows(const QString& sessions, const QString& held = {}) {
     const auto library = libraryFor(sessions);
@@ -961,15 +1039,20 @@ inline QList<Row> rows(const QString& sessions, const QString& held = {}) {
     for (const auto& e : entries(library)) {
         Row row{e.card, e.inDrawer, {}, {}, false, {}};
         for (const auto& m : machines) {
-            if (m.slot.link == e.card.id) row.links << m.name;
-            if (!e.inDrawer && m.slot.card == e.card.id && m.cardFile == fileOfKind(e.card.kind)) {
+            if (m.slot.link == e.card.id) row.links << m.label();
+            if (!e.inDrawer && m.slot.card == e.card.id && m.cardFile == machineFileOf(e.card.kind, m.n)) {
                 row.holder = m.name; row.holderDir = m.dir; row.holderBusy = m.busy;
+                row.holderSlot = m.n; row.holderSlots = m.slotTotal;
             }
         }
         // A machine that isn't saved yet (and so isn't listed) still holds it.
         if (!e.inDrawer && row.holder.isEmpty() && !e.card.machine.isEmpty()) {
             row.holder = e.card.machine;
             row.holderDir = sessions + '/' + e.card.machine;
+            if (e.card.kind == "sd" && readSlot(row.holderDir, 1).card == e.card.id && !cardFileIn(row.holderDir, 1).isEmpty()) {
+                row.holderSlot = 1;
+                row.holderSlots = 2;
+            }
             QLockFile lock(frondSessions::sessionFrondIn(row.holderDir) + ".lock");
             lock.setStaleLockTime(0);
             const bool heldHere = !held.isEmpty() && QFileInfo(held).canonicalFilePath() == QFileInfo(row.holderDir).canonicalFilePath();
@@ -985,7 +1068,7 @@ inline QList<Row> rows(const QString& sessions, const QString& held = {}) {
 }
 // "In Palm TX", "Free" or "Not in a machine", then the machines a linked card goes with.
 inline QString statusText(const Row& row) {
-    QString text = !row.holder.isEmpty() ? QStringLiteral("In %1").arg(row.holder)
+    QString text = !row.holder.isEmpty() ? QStringLiteral("In %1").arg(row.holderLabel())
                    : !row.links.isEmpty() ? QStringLiteral("Free") : QStringLiteral("Not in a machine");
     if (!row.links.isEmpty()) text += QStringLiteral(" · Linked to ") + row.links.join(QStringLiteral(", "));
     return text;
@@ -1133,7 +1216,7 @@ inline QString importFolderCard(const QString& sessions, const QString& folder, 
 // Where a card's file is now, for a copy or an export: the drawer, or a stopped machine (whose
 // lock `hold` then holds). An unfinished save is used as a load would settle it.
 inline QString cardSource(const QString& sessions, const QString& id, QString* path, std::unique_ptr<QLockFile>* hold,
-                          Card* card = nullptr, QString* holderDir = nullptr) {
+                          Card* card = nullptr, QString* holderDir = nullptr, int* holderSlot = nullptr) {
     const auto library = libraryFor(sessions);
     Card c;
     if (!readCard(entryDir(library, id), &c)) return QStringLiteral("Couldn't find that card.");
@@ -1153,18 +1236,20 @@ inline QString cardSource(const QString& sessions, const QString& id, QString* p
                 !frondSessions::tryLockSession(**hold, frondSessions::sessionFrondIn(r.holderDir)))
                 return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             if (holderDir) *holderDir = r.holderDir;
-            if (const auto why = QFileInfo(r.holderDir + '/' + file).isFile() ? notReady(r.holderDir + '/' + file) : QString();
+            if (holderSlot) *holderSlot = r.holderSlot;
+            const auto held = machineFileOf(c.kind, r.holderSlot);
+            if (const auto why = QFileInfo(r.holderDir + '/' + held).isFile() ? notReady(r.holderDir + '/' + held) : QString();
                 !why.isEmpty()) {
                 hold->reset();
                 return why;
             }
-            const auto slot = readSlot(r.holderDir);
-            if (settled(r.holderDir, file, slot.swap)) {
-                *path = r.holderDir + '/' + file;
+            const auto slot = readSlot(r.holderDir, r.holderSlot);
+            if (settled(r.holderDir, held, slot.swap)) {
+                *path = r.holderDir + '/' + held;
                 return {};
             }
-            const auto settle = frondSessions::sdSettleOf(r.holderDir, frondSessions::sessionFrondIn(r.holderDir));
-            if (settle.sibling == file && !settle.full.isEmpty()) {
+            const auto settle = frondSessions::sdSettleOf(r.holderDir, frondSessions::sessionFrondIn(r.holderDir), false, r.holderSlot == 1);
+            if (settle.sibling == held && !settle.full.isEmpty()) {
                 *path = settle.full;
                 return {};
             }
@@ -1184,9 +1269,10 @@ inline QString exportCardImage(const QString& sessions, const QString& id, const
 inline QString duplicateCard(const QString& sessions, const QString& id, const frondSessions::CopyProgress& progress = {}, QString* newId = nullptr) {
     const auto library = libraryFor(sessions);
     QString path, holderDir;
+    int holderSlot = 0;
     std::unique_ptr<QLockFile> hold;
     Card card;
-    if (const auto error = cardSource(sessions, id, &path, &hold, &card, &holderDir); !error.isEmpty()) return error;
+    if (const auto error = cardSource(sessions, id, &path, &hold, &card, &holderDir, &holderSlot); !error.isEmpty()) return error;
     NewCopy copy(library);
     if (!copy.ok) return QStringLiteral("Couldn't copy the card.");
     const auto file = fileOfKind(card.kind);
@@ -1206,7 +1292,7 @@ inline QString duplicateCard(const QString& sessions, const QString& id, const f
         if (!frondSessions::copyChunked(path, copy.dir + '/' + file, &done, total, watch))
             return cancelled ? QStringLiteral("Cancelled.") : QStringLiteral("Couldn't copy the card.");
     } else {
-        error = settledCopy(holderDir, file, copy.dir + '/' + file, progress);
+        error = settledCopy(holderDir, machineFileOf(card.kind, holderSlot), copy.dir + '/' + file, progress);
         if (error == "cancelled") return QStringLiteral("Cancelled.");
         if (error == "unsettled") return QStringLiteral("Open %1 once to finish its last save.").arg(QFileInfo(holderDir).fileName());
         if (!error.isEmpty()) return error;
@@ -1257,7 +1343,7 @@ inline QString deleteCard(const QString& sessions, const QString& id, const QStr
         if (!own && !frondSessions::tryLockSession(mlock, frondSessions::sessionFrondIn(m.dir))) continue;
         auto slot = m.slot;
         slot.link.clear();
-        writeSlot(m.dir, slot);
+        writeSlot(m.dir, slot, m.n);
     }
     return {};
 }
@@ -1265,29 +1351,36 @@ inline QString deleteCard(const QString& sessions, const QString& id, const QStr
 // journal can't be applied. The slot gets `card: null, swap: true`.
 inline QString takeOutStopped(const QString& sessions, const QString& id, const frondSessions::CopyProgress& progress = {}) {
     QString dir;
+    int n = 0;
     for (const auto& r : rows(sessions))
         if (r.card.id == id) {
             if (r.inDrawer) return {};
             if (r.holderBusy) return QStringLiteral("%1 is running. Stop it first.").arg(r.holder);
             dir = r.holderDir;
+            n = r.holderSlot;
         }
     if (dir.isEmpty()) return QStringLiteral("Couldn't find that card.");
     QLockFile lock(frondSessions::sessionFrondIn(dir) + ".lock");
     lock.setStaleLockTime(0);
     if (QFileInfo(frondSessions::sessionFrondIn(dir)).isFile() && !frondSessions::tryLockSession(lock, frondSessions::sessionFrondIn(dir)))
         return QStringLiteral("%1 is running. Stop it first.").arg(QFileInfo(dir).fileName());
-    if (const auto error = keepCardOf(sessions, dir, progress, QStringLiteral("Cancelled.")); !error.isEmpty()) return error;
-    auto slot = readSlot(dir);
-    if (!slot.card.isEmpty() && cardFileIn(dir).isEmpty()) {
+    quint32 version = 0;
+    descriptorsOf(frondSessions::sessionFrondIn(dir), &version);
+    const auto error = version == 6 ? keepCardOf(sessions, dir, progress, QStringLiteral("Cancelled."))
+                                    : keepSlotCardOf(sessions, dir, n, progress, QStringLiteral("Cancelled."));
+    if (!error.isEmpty()) return error;
+    auto slot = readSlot(dir, n);
+    if (!slot.card.isEmpty() && cardFileIn(dir, n).isEmpty()) {
         slot.card.clear();
         slot.swap = true;
-        writeSlot(dir, slot);
+        writeSlot(dir, slot, n);
     }
     return {};
 }
-// Links `id` to the machines in `linked` and unlinks it from the others. A machine linked to
-// another card moves its link (its name goes in `moved`). One holding a different card, or one
-// that doesn't take the card, is left alone. `held` is the caller's running machine.
+// Links `id` to the machine slots in `linked` (folders, or slotKey() for a second slot) and unlinks
+// it from the others. A slot linked to another card moves its link (its label goes in `moved`).
+// One holding a different card, or one that doesn't take the card, is left alone. `held` is the
+// caller's running machine.
 inline QString setLinks(const QString& sessions, const QString& id, const QStringList& linked, const QString& held = {},
                         QStringList* moved = nullptr) {
     const auto library = libraryFor(sessions);
@@ -1296,10 +1389,11 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
     Card card;
     if (!readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't find that card.");
     QStringList wanted;
-    for (const auto& dir : linked) wanted << QFileInfo(dir).canonicalFilePath();
+    for (const auto& key : linked)
+        wanted << (key.endsWith(QStringLiteral("#2")) ? slotKey(key.chopped(2), 1) : slotKey(key, 0));
     QString error;
     for (const auto& m : machineSlots(sessions, held)) {
-        const bool want = wanted.contains(QFileInfo(m.dir).canonicalFilePath());
+        const bool want = wanted.contains(slotKey(m.dir, m.n));
         if (want == (m.slot.link == id)) continue;
         if (m.busy) { error = QStringLiteral("%1 is running. Stop it first.").arg(m.name); continue; }
         QLockFile mlock(frondSessions::sessionFrondIn(m.dir) + ".lock");
@@ -1309,14 +1403,14 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
         auto slot = m.slot;
         slot.present = true;
         if (want) {
-            if (!deviceTakes(m.device, card.kind, sizeOf(card.kind, card.bytes))) continue;
+            if (!deviceTakes(m.device, card.kind, sizeOf(card.kind, card.bytes), nullptr, m.n)) continue;
             if (!m.cardFile.isEmpty() && slot.card != id) continue;
-            if (!slot.link.isEmpty() && moved) *moved << m.name;
+            if (!slot.link.isEmpty() && moved) *moved << m.label();
             slot.link = id;
         } else {
             slot.link.clear();
         }
-        if (!writeSlot(m.dir, slot)) error = QStringLiteral("Couldn't link %1.").arg(m.name);
+        if (!writeSlot(m.dir, slot, m.n)) error = QStringLiteral("Couldn't link %1.").arg(m.label());
     }
     return error;
 }
@@ -1324,16 +1418,19 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
 // Save a Copy: the copy carries the running machine's slot.json, as an export does. Its .frond was
 // just saved with the card it has, so it needs no swap.
 inline QString stageSlot(const QString& machineDir, const QString& copyDir) {
-    auto slot = readSlot(machineDir);
-    if (!slot.present) return {};
-    slot.swap = false;
-    if (cardFileIn(copyDir).isEmpty()) slot.card.clear();
-    return writeSlot(copyDir, slot) ? QString() : QStringLiteral("Couldn't save the session.");
+    for (int n = 0; n < slotCount; ++n) {
+        auto slot = readSlot(machineDir, n);
+        if (!slot.present) continue;
+        slot.swap = false;
+        if (cardFileIn(copyDir, n).isEmpty()) slot.card.clear();
+        if (!writeSlot(copyDir, slot, n)) return QStringLiteral("Couldn't save the session.");
+    }
+    return {};
 }
 
-// The name of the card a machine holds or is linked to, for dialogs.
-inline QString cardNameOf(const QString& sessions, const QString& dir) {
-    const auto slot = readSlot(dir);
+// The name of the card a machine's slot holds or is linked to, for dialogs.
+inline QString cardNameOf(const QString& sessions, const QString& dir, int n = 0) {
+    const auto slot = readSlot(dir, n);
     Card card;
     const auto id = slot.card.isEmpty() ? slot.link : slot.card;
     return !id.isEmpty() && readCard(entryDir(libraryFor(sessions), id), &card) ? card.name : QString();

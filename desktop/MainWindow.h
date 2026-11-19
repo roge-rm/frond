@@ -93,8 +93,10 @@ class MainWindow : public QMainWindow {
     void refresh();
     bool memoryStick() const;
     bool storageSupported() const;
-    QString cardCommand(const char* operation) const;
-    void beginExchange();
+    // The core command for a card operation in slot `n`, or in cardSlot.
+    QString cardCommand(const char* operation, int n) const;
+    QString cardCommand(const char* operation) const { return cardCommand(operation, cardSlot); }
+    void beginExchange(int n = 0);
     void exchangeResult(bool ok, const QString& message);
     void endExchange();
     QString sessionFile() const;
@@ -333,6 +335,9 @@ class MainWindow : public QMainWindow {
     std::unique_ptr<QTemporaryDir> benchDir;  // holds the PRC the core installs from
     QPushButton *cardPick, *sdEject, *sdReinsert, *sdExport, *sdExchange, *sdRetry, *linkedInsert;
     QLabel* linkedState;
+    // The second SD slot (the Zodiac's): the same row as the first.
+    QPushButton *card2Pick, *sd2Eject, *sd2Reinsert, *sd2Export, *sd2Exchange, *sd2Retry, *linked2Insert;
+    QLabel *linked2State, *sd2Status, *storage2Heading;
     QCheckBox *microphoneToggle, *soundToggle, *holdToggle, *cardReadOnly;
     QLabel *serialLabel, *networkLabel, *keyboardLabel, *usbLabel, *bluetoothLabel, *microphoneLabel, *contrastLabel;
     QSlider* contrast;
@@ -344,7 +349,6 @@ class MainWindow : public QMainWindow {
     QString gamepadState;
     QLabel *sdStatus, *storageHeading;
     QPushButton* danaCards;
-    QPushButton* secondCard;
     // Files… on a 68k device's linked Memory Stick (the T415): eject, take it out of the core, save,
     // edit its dana-cards/ file in place, then put it back in (ejected again if it was out).
     QPushButton* stickFiles;
@@ -368,6 +372,14 @@ class MainWindow : public QMainWindow {
     QProgressDialog* cardProgress{nullptr};  // shown while an SD create, import or export runs
     QPointer<QMessageBox> failureBox;  // the error showing now; later errors are added to it
     bool cardPresent{false}, cardInserted{false}, sdKnown{false};
+    bool card2Present{false}, card2Inserted{false}, sd2Known{false};
+    bool present(int n) const { return n ? card2Present : cardPresent; }
+    bool inserted(int n) const { return n ? card2Inserted : cardInserted; }
+    // The slot a card move, Files… or the picker works on; changed only while none is under way.
+    int cardSlot{0};
+    // Start: slot 2's card goes in once the core is up, if the core left it out.
+    bool secondStartPending{false};
+    bool secondSlot() const;
     bool msExportPending{false};
     // The running device selects the available peripheral controls.
     frondFirmware::Device runningDevice{frondFirmware::Device::tx};
@@ -387,8 +399,8 @@ class MainWindow : public QMainWindow {
     // Cards: the final save before quit succeeded, so a linked card can go back to the drawer.
     bool finalSaved{false};
     // A linked card held by another machine while this one runs with an empty slot.
-    std::unique_ptr<frondCards::FreeWatcher> linkedWatcher;
-    QString linkedHolder, linkedWatcherId;
+    std::unique_ptr<frondCards::FreeWatcher> linkedWatcher, linked2Watcher;
+    QString linkedHolder, linkedWatcherId, linked2WatcherId;
     // A card change on the running machine: eject, take out to the drawer, put the next one in.
     struct CardMove {
         enum Stage { None, Eject, TakeOut, PutIn } stage{None};
@@ -396,8 +408,8 @@ class MainWindow : public QMainWindow {
     } cardMove;
     QPointer<CardsWindow> cardsWindow;
     QString runningMachineDir() const;
-    QString runningCardName() const;
-    void pickCard();
+    QString runningCardName(int n = 0) const;
+    void pickCard(int n = 0);
     void changeCard(const QString& in);
     void putInCard(const QString& in);
     bool continueCardMove(const QString& command, const QString& message);

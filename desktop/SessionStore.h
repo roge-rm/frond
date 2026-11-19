@@ -490,7 +490,7 @@ inline bool ignoredName(const QString& name) {
 inline bool packableName(const QString& name) {
     if (ignoredName(name) || name.contains('/')) return false;
     return name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
-           name == "nand.frondnand.gz" || name == "slot.json" ||
+           name == "nand.frondnand.gz" || name == "slot.json" || name == "slot2.json" ||
            name.endsWith(".frond.settings.json") ||
            (name.endsWith(".frond") && !name.endsWith(".frond.new"));
 }
@@ -1145,15 +1145,26 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     const auto library = frondCards::libraryFor(folder);
     if (info.saved)
         if (const auto error = frondCards::reconcile(folder, fromDir); !error.isEmpty()) return error;
-    const auto slot = info.saved ? frondCards::readSlot(fromDir) : frondCards::Slot{};
-    const auto cardFile = info.saved ? frondCards::cardFileIn(fromDir) : QString();
-    frondCards::Card card;
-    const bool holds = !cardFile.isEmpty() && frondCards::readCard(frondCards::entryDir(library, slot.card), &card);
-    if (!cardFile.isEmpty() && !holds) return failed;
-    const auto linkTo = !slot.link.isEmpty() ? slot.link : holds ? slot.card : QString();
-    if (choice == CardChoice::copy && !holds && !linkTo.isEmpty())
-        return QStringLiteral("Its card isn't in it. Link it or leave it out.");
-    const bool hadCard = holds || !linkTo.isEmpty();
+    // Each slot: its card, the card the copy links to, and whether it had one.
+    struct SlotCopy {
+        frondCards::Slot slot;
+        frondCards::Card card;
+        bool holds{false};
+        QString linkTo;
+    };
+    SlotCopy copies[frondCards::slotCount];
+    bool hadCard = false;
+    for (int n = 0; n < frondCards::slotCount; ++n) {
+        auto& c = copies[n];
+        c.slot = info.saved ? frondCards::readSlot(fromDir, n) : frondCards::Slot{};
+        const auto cardFile = info.saved ? frondCards::cardFileIn(fromDir, n) : QString();
+        c.holds = !cardFile.isEmpty() && frondCards::readCard(frondCards::entryDir(library, c.slot.card), &c.card);
+        if (!cardFile.isEmpty() && !c.holds) return failed;
+        c.linkTo = !c.slot.link.isEmpty() ? c.slot.link : c.holds ? c.slot.card : QString();
+        if (choice == CardChoice::copy && !c.holds && !c.linkTo.isEmpty())
+            return QStringLiteral("Its card isn't in it. Link it or leave it out.");
+        hadCard |= c.holds || !c.linkTo.isEmpty();
+    }
     // No library card: copy whatever the folder has, as a load would settle it (a save that only
     // got as far as its full card copy). Reconcile moves the copy's card in.
     if (!hadCard) choice = CardChoice::copy;
@@ -1184,7 +1195,7 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
         // Without the card, slot 2's card file stays out too; the copy loads as a swap with slot 2 empty.
         if (!copyCard) sd2Settle = {};
         for (const auto& entry : QDir(fromDir).entryInfoList(QDir::Files)) {
-            if (!packableName(entry.fileName()) || entry.fileName() == "slot.json") continue;
+            if (!packableName(entry.fileName()) || entry.fileName() == "slot.json" || entry.fileName() == "slot2.json") continue;
             if ((frondCards::cardFiles.contains(entry.fileName()) || entry.fileName() == "sd2.frondsd") && !copyCard) continue;
             auto source = entry.absoluteFilePath();
             if (!settle.full.isEmpty() && entry.fileName() == settle.sibling) source = settle.full;
@@ -1227,44 +1238,58 @@ inline QString duplicate(const QString& folder, const Info& info, QString* newNa
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, dest + '/' + settle.sibling)) return fail(failed);
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, dest + '/' + nandSettle.sibling)) return fail(failed);
     if (!sd2Settle.journal.isEmpty() && !applySdJournalCopy(sd2Settle.journal, dest + '/' + sd2Settle.sibling)) return fail(failed);
-    // The copy's slot: its own new card, the link, or nothing. A card the .frond still describes
-    // and the copy doesn't have loads as a swap.
-    frondCards::Card copy = card;
-    frondCards::Slot copySlot;
-    copySlot.present = true;
-    // A copied card gets its own serial, so the copy loads it as a swap: two cards with one serial
-    // and the same change counter would look unchanged in each other's machines.
-    copySlot.swap = slot.swap || hadCard;
-    if (choice == CardChoice::link) copySlot.link = linkTo;
-    if (info.saved && (slot.present || hadCard) && !frondCards::writeSlot(dest, copySlot)) return fail(failed);
+    // Each slot of the copy: its own new card, the link, or nothing. A card the .frond still
+    // describes and the copy doesn't have loads as a swap.
+    frondCards::Slot copySlots[frondCards::slotCount];
+    QStringList madeEntries;
+    const auto dropEntries = [&] {
+        for (const auto& id : madeEntries) QDir(frondCards::entryDir(library, id)).removeRecursively();
+    };
+    for (int n = 0; n < frondCards::slotCount; ++n) {
+        const auto& c = copies[n];
+        const bool had = c.holds || !c.linkTo.isEmpty();
+        auto& copySlot = copySlots[n];
+        copySlot.present = true;
+        // A copied card gets its own serial, so the copy loads it as a swap: two cards with one
+        // serial and the same change counter would look unchanged in each other's machines.
+        copySlot.swap = c.slot.swap || had;
+        if (choice == CardChoice::link) copySlot.link = c.linkTo;
+        if (info.saved && (c.slot.present || had) && !frondCards::writeSlot(dest, copySlot, n)) return fail(failed);
+    }
     frondCards::LibraryLock libraryLock(library);
     if (!libraryLock.ok) return fail(frondCards::busyMessage());
-    if (copyCard && holds) {
+    for (int n = 0; n < frondCards::slotCount; ++n) {
+        const auto& c = copies[n];
+        if (!copyCard || !c.holds) continue;
+        auto copy = c.card;
         copy.id = frondCards::newId();
         copy.identity = frondCards::newIdentity();
-        copy.name = frondCards::freeCardName(library, card.name);
+        copy.name = frondCards::freeCardName(library, c.card.name);
         copy.created = frondCards::now();
         copy.machine = name;
-        copySlot.card = copy.id;
-        copySlot.name = copy.name;
-        if (!frondCards::writeSlot(dest, copySlot) || !QDir().mkpath(frondCards::entryDir(library, copy.id)) ||
+        copySlots[n].card = copy.id;
+        copySlots[n].name = copy.name;
+        if (!frondCards::writeSlot(dest, copySlots[n], n) || !QDir().mkpath(frondCards::entryDir(library, copy.id)) ||
             !frondCards::writeCard(frondCards::entryDir(library, copy.id), copy)) {
             QDir(frondCards::entryDir(library, copy.id)).removeRecursively();
+            dropEntries();
             return fail(failed);
         }
+        madeEntries << copy.id;
     }
-    const auto dropEntry = [&] { if (copyCard && holds) QDir(frondCards::entryDir(library, copy.id)).removeRecursively(); };
-    if (taken(folder, name)) { dropEntry(); return fail(failed); }
-    if (choice == CardChoice::link && slot.link != linkTo) {
-        auto original = slot;
+    if (taken(folder, name)) { dropEntries(); return fail(failed); }
+    for (int n = 0; n < frondCards::slotCount; ++n) {
+        const auto& c = copies[n];
+        if (choice != CardChoice::link || c.slot.link == c.linkTo) continue;
+        auto original = c.slot;
         original.present = true;
-        original.link = linkTo;
-        if (!frondCards::writeSlot(fromDir, original)) { dropEntry(); return fail(failed); }
+        original.link = c.linkTo;
+        if (!frondCards::writeSlot(fromDir, original, n)) { dropEntries(); return fail(failed); }
     }
     const auto target = machineDir(folder, name);
     hold.unlock();
     if (!QDir().rename(hidden, target)) {
-        dropEntry();
+        dropEntries();
         QDir(dest).removeRecursively(); QFile::remove(hidden + ".lock");
         return failed;
     }
@@ -1280,16 +1305,20 @@ inline QString adoptImportedCard(const QString& folder, const QString& dir) {
     const auto library = frondCards::libraryFor(folder);
     frondCards::LibraryLock lock(library);
     if (!lock.ok) return frondCards::busyMessage();
-    auto slot = frondCards::readSlot(dir);
-    const auto file = frondCards::cardFileIn(dir);
-    if (file.isEmpty()) {
-        if (!slot.present) return {};
-        slot.card.clear(); slot.link.clear();
-        return frondCards::writeSlot(dir, slot) ? QString() : QStringLiteral("Couldn't save the session.");
+    for (int n = 0; n < frondCards::slotCount; ++n) {
+        auto slot = frondCards::readSlot(dir, n);
+        const auto file = frondCards::cardFileIn(dir, n);
+        if (file.isEmpty()) {
+            if (!slot.present) continue;
+            slot.card.clear(); slot.link.clear();
+            if (!frondCards::writeSlot(dir, slot, n)) return QStringLiteral("Couldn't save the session.");
+            continue;
+        }
+        slot.present = true;
+        slot.link.clear();
+        if (!frondCards::moveIn(library, dir, file, slot, slot.name, nullptr, true, n)) return QStringLiteral("Couldn't save the session.");
     }
-    slot.present = true;
-    slot.link.clear();
-    return frondCards::moveIn(library, dir, file, slot, slot.name, nullptr, true) ? QString() : QStringLiteral("Couldn't save the session.");
+    return {};
 }
 
 inline QString importFolder(const QString& folder, const QString& from, QString* newName = nullptr,
@@ -1324,7 +1353,8 @@ inline QString importFolder(const QString& folder, const QString& from, QString*
         QDir(dest).removeRecursively();
         return error;
     }
-    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond", frondCards::readSlot(dest).swap); !error.isEmpty()) {
+    if (const auto error = checkImportedSiblings(dest, dest + '/' + name + ".frond", frondCards::readSlot(dest).swap || frondCards::readSlot(dest, 1).swap);
+        !error.isEmpty()) {
         QDir(dest).removeRecursively();
         return error;
     }
@@ -1391,7 +1421,8 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
     if (!settle.journal.isEmpty() && !applySdJournalCopy(settle.journal, destDir + '/' + settle.sibling)) return fail();
     if (!nandSettle.journal.isEmpty() && !applySdJournalCopy(nandSettle.journal, destDir + '/' + nandSettle.sibling)) return fail();
     if (!sd2Settle.journal.isEmpty() && !applySdJournalCopy(sd2Settle.journal, destDir + '/' + sd2Settle.sibling)) return fail();
-    if (QFileInfo(sourceDir + "/slot.json").isFile() && !QFile::copy(sourceDir + "/slot.json", destDir + "/slot.json")) return fail();
+    for (const auto* slotFile : {"slot.json", "slot2.json"})
+        if (QFileInfo(sourceDir + '/' + slotFile).isFile() && !QFile::copy(sourceDir + '/' + slotFile, destDir + '/' + slotFile)) return fail();
     const CopyProgress unpackWatch = [&](qint64 done, qint64 total) {
         return !progress || progress(copyTotal + done, copyTotal + total);
     };
@@ -1399,7 +1430,8 @@ inline QString importFile(const QString& folder, const QString& from, QString* n
         QDir(destDir).removeRecursively();
         return error;
     }
-    if (const auto error = checkImportedSiblings(destDir, target, frondCards::readSlot(destDir).swap); !error.isEmpty()) {
+    if (const auto error = checkImportedSiblings(destDir, target, frondCards::readSlot(destDir).swap || frondCards::readSlot(destDir, 1).swap);
+        !error.isEmpty()) {
         QDir(destDir).removeRecursively();
         return error;
     }
@@ -1437,7 +1469,7 @@ inline bool isMachineFolder(const QString& dir) {
         if (!entry.isFile() || entry.isSymLink() || !machineFileName(name)) return false;
         if (ignoredName(name) || name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == "nand.frondnand" ||
             name == "nand.frondnand.gz" ||
-            name == "slot.json")
+            name == "slot.json" || name == "slot2.json")
             continue;
         // Every .frond, settings, lock or marker file has to belong to the one session.
         const auto own = stem + ".frond";
