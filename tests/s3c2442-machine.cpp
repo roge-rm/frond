@@ -36,6 +36,51 @@ namespace {
 
     constexpr uint32_t mcr(unsigned crn, unsigned rd) { return 0xee000f10u | crn << 16 | rd << 12; }
 
+    // A program that stores each value at its address (ldr r0, ldr r1 from a literal pool, str r1, [r0]),
+    // then runs tail.
+    std::vector<uint32_t> stores(const std::vector<std::pair<uint32_t, uint32_t>>& writes, const std::vector<uint32_t>& tail) {
+        std::vector<uint32_t> out;
+        const uint32_t pool = uint32_t(writes.size() * 3 + tail.size());
+        for (size_t i = 0; i < writes.size(); ++i) {
+            for (unsigned r = 0; r < 2; ++r) {
+                const uint32_t at = uint32_t(out.size()), literal = pool + uint32_t(i * 2 + r);
+                out.push_back(0xe59f0000u | r << 12 | ((literal - at - 2) * 4));
+            }
+            out.push_back(0xe5801000);  // str r1, [r0]
+        }
+        out.insert(out.end(), tail.begin(), tail.end());
+        for (const auto& w : writes) {
+            out.push_back(w.first);
+            out.push_back(w.second);
+        }
+        return out;
+    }
+
+    struct Frame { int16_t left, right; uint32_t gain; };
+    bool operator==(const Frame& a, const Frame& b) { return a.left == b.left && a.right == b.right && a.gain == b.gain; }
+
+    // Playback as wavedev.dll sets it up: DMA channel 2 from a 32-frame SDRAM buffer (left n, right -n) to
+    // IISFIFO with auto reload and its interrupt, the IIS on MPLLin at 384fs transmitting, the codec playing
+    // and the speaker amplifier (GPA1) on. Then IRQs on and a wait for interrupt.
+    std::unique_ptr<S3c2442Machine> playback(std::vector<Frame>& frames, bool fast) {
+        constexpr uint32_t buffer = 0x30010000;
+        auto m = make(stores({{0x56000000, 0x7ffffd}, {0x56000004, 2},          // GPA1 an output, high
+                              {0x4b000080, buffer}, {0x4b000084, 0}, {0x4b000088, 0x55000010}, {0x4b00008c, 3},
+                              {0x4b000090, 0xa0900000 | 64},
+                              {0x55000004, 0x28d}, {0x55000008, 0x42}, {0x5500000c, 0xa000}, {0x55000000, 0x23},
+                              {0x4b0000a0, 2}, {0x4a000008, ~(1u << 19)}},
+                             {0xe321f013, wfi, loop}));
+        if (fast && !m->setFastEngine(true)) return nullptr;
+        for (uint16_t n = 0; n < 32; ++n) {
+            const int16_t frame[2] = {int16_t(n), int16_t(-n)};
+            assert(m->loadRam(buffer + n * 4, reinterpret_cast<const uint8_t*>(frame), 4));
+        }
+        m->codec.set(0x02, 0x400);
+        m->codec.set(0x13, 0);
+        m->pcmSink = [&frames](int16_t l, int16_t r, uint32_t gain) { frames.push_back({l, r, gain}); };
+        return m;
+    }
+
     void pwmTimer4(S3c2442Machine& m, uint32_t buffer) {
         m.pwm.write(0x3c, buffer);                // TCNTB4
         m.pwm.write(0x08, (1u << 21) | (1u << 22));  // manual update, auto reload
@@ -43,7 +88,136 @@ namespace {
     }
 }
 
+// Sound: IIS playback through DMA, its interrupt and timing in both engines, the board's gain, recording from
+// the microphone into SDRAM, the codec's reset pin, headphones, and a save and load mid-stream.
+static void audioTests() {
+    // Playback. Turning the channel on fills the 32-entry FIFO at once, so its count is 32 of 64; each
+    // 44100 Hz frame then takes two halfwords, so the interrupt comes after 16 frames and the channel reloads.
+    std::vector<Frame> exact;
+    std::vector<uint64_t> irqNs;
+    for (bool fast : {false, true}) {
+        std::vector<Frame> frames;
+        auto m = playback(frames, fast);
+        if (!m) continue;
+        m->run(60);
+        assert(m->iis.transmitting() && m->dma.remaining(2) == 32 && frames.empty());
+        uint64_t rn = 0, rd = 0;
+        m->audioRate(rn, rd);
+        assert(rn == 16934400 && rd == 384);
+        // Until the IRQ: the CPU leaves its wait in IRQ mode.
+        while (mode(*m) != 0x12) m->run(1000);
+        assert(frames.size() == 16 && (m->intc.srcpnd & (1u << 19)) && m->dma.remaining(2) == 64);
+        irqNs.push_back(m->nanoseconds());
+        // 0.1 s of guest time: 4410 frames, the buffer over and over, nothing short.
+        const uint64_t until = m->nanoseconds() + 100000000;
+        while (m->nanoseconds() < until) m->run(100000);
+        const uint64_t expected = m->nanoseconds() * 44100 / 1000000000;
+        assert(frames.size() + 1 >= expected && frames.size() <= expected + 1 && m->iis.underruns == 0);
+        for (size_t i = 0; i < frames.size(); ++i)
+            assert(frames[i].left == int16_t(i % 32) && frames[i].right == -int16_t(i % 32) && frames[i].gain == 65536);
+        if (!fast) exact = frames;
+        else {
+            const size_t n = std::min(exact.size(), frames.size());
+            assert(std::equal(frames.begin(), frames.begin() + n, exact.begin()));
+            assert(irqNs[0] == irqNs[1]);
+        }
+    }
+    // The board's gain: the amplifier off, then headphones in with the codec's headphone driver.
+    {
+        std::vector<Frame> frames;
+        auto m = playback(frames, false);
+        m->run(1000);
+        assert(m->audioGain() == 65536);
+        m->gpio.dat[S3cGpio::a] &= ~2u;
+        assert(m->audioGain() == 0 && !m->headphonesIn());
+        m->setHeadphones(true);
+        assert(m->headphonesIn() && !m->gpio.pin(S3cGpio::g, 12) && m->audioGain() == 0);
+        m->codec.set(0x02, 0x2400);
+        assert(m->audioGain() == 65536);
+        m->codec.set(0x13, 0x4000);  // master mute
+        assert(m->audioGain() == 0);
+        m->codec.set(0x13, 0);
+        // GPJ0 driven low powers the codec off.
+        m->gpio.con[S3cGpio::j] = (m->gpio.con[S3cGpio::j] & ~3u) | 1;
+        m->gpio.dat[S3cGpio::j] &= ~1u;
+        assert(m->audioGain() == 0);
+    }
+    // A save mid-stream (FIFO part full, DMA part way) and a load into another machine play on the same.
+    {
+        std::vector<Frame> a, b;
+        auto m = playback(a, false);
+        m->run(3000000);
+        std::vector<uint8_t> state;
+        std::string why;
+        assert(m->saveState(state, why));
+        auto n = playback(b, false);
+        assert(n->loadState(state.data(), state.size(), why));
+        const size_t before = a.size();
+        m->run(5000000);
+        n->run(5000000);
+        assert(a.size() > before + 100 && b.size() == a.size() - before);
+        assert(std::equal(b.begin(), b.end(), a.begin() + before));
+    }
+    // Recording: DMA channel 1 from IISFIFO into SDRAM for one 32-frame run, the codec's ADC on, the microphone a counter. The
+    // guest pulses the codec's reset (GPD0 high) first, which clears the registers the host set.
+    {
+        constexpr uint32_t buffer = 0x30020000;
+        auto m = make(stores({{0x56000030, 1}, {0x56000034, 1}, {0x56000034, 0},
+                              {0x4b000040, 0x55000010}, {0x4b000044, 3}, {0x4b000048, buffer}, {0x4b00004c, 0},
+                              {0x4b000050, 0xa2d00000 | 64},  // RELOAD: off after one run
+                              {0x55000004, 0x24d}, {0x5500000c, 0x5000}, {0x55000000, 0x13},
+                              {0x4b000060, 2}},
+                             {loop}));
+        m->codec.set(0x02, 0x404);
+        int16_t counter = 0;
+        AudioInputSource mic;
+        mic.context = &counter;
+        mic.pull = [](void* c, AudioInputRoute route, uint32_t n, uint32_t d) {
+            assert(route == AudioInputRoute::internalMic && n == 16934400 && d == 384);
+            return ++*static_cast<int16_t*>(c);
+        };
+        m->microphone = &mic;
+        m->run(40);
+        assert(m->codec.reg(0x02) == 0 && !m->microphoneDemand().active && m->iis.framesReceived == 0);
+        m->codec.set(0x02, 0x404);
+        const auto demand = m->microphoneDemand();
+        assert(demand.active && demand.rateNumerator == 16934400 && demand.rateDenominator == 384);
+        const uint64_t until = m->nanoseconds() + 1000000;
+        while (m->nanoseconds() < until) m->run(10000);
+        assert(counter >= 40 && !m->dma.on(1));
+        std::vector<int16_t> got(64);
+        std::memcpy(got.data(), m->sdram() + (buffer - code), 128);
+        for (int i = 0; i < 32; ++i) assert(got[i * 2] == i + 1 && got[i * 2 + 1] == i + 1);
+        assert(m->intc.srcpnd & (1u << 18));
+    }
+    // The host microphone: a fence reaches the source once for nested fences and shows in the demand, nothing is
+    // pulled while it holds, and a disarm closes the source and lets go of it.
+    {
+        auto m = make({loop});
+        struct Log { int fences = 0, unfences = 0, disarms = 0, pulls = 0; } log;
+        AudioInputSource mic;
+        mic.context = &log;
+        mic.pull = [](void* c, AudioInputRoute, uint32_t, uint32_t) { ++static_cast<Log*>(c)->pulls; return int16_t(1); };
+        mic.fence = [](void* c, bool on) { ++(on ? static_cast<Log*>(c)->fences : static_cast<Log*>(c)->unfences); };
+        mic.disarm = [](void* c) { ++static_cast<Log*>(c)->disarms; };
+        m->microphone = &mic;
+        assert(!m->microphoneDemand().fenced);
+        m->fenceMicrophone(true);
+        m->fenceMicrophone(true);
+        assert(m->microphoneDemand().fenced && log.fences == 1);
+        m->fenceMicrophone(false);
+        assert(m->microphoneDemand().fenced && log.unfences == 0);
+        m->fenceMicrophone(false);
+        assert(!m->microphoneDemand().fenced && log.unfences == 1);
+        m->disarmMicrophone();
+        assert(log.disarms == 1 && !m->microphone);
+        m->disarmMicrophone();
+        assert(log.disarms == 1);
+    }
+}
+
 int main() {
+    audioTests();
     // A masked RTC tick can't end a wait for interrupt.
     {
         auto m = make({wfi, loop});

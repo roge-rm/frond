@@ -4,6 +4,7 @@
 #include "GuestExport.h"
 #include "GuestDatabaseOps.h"
 
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -239,6 +240,45 @@ namespace {
             cout << "headphones: unavailable" << endl;
         else cout << "headphones: " << (soc->HeadphonesIn() ? "in" : "out") << endl;
     }
+    // The board's sound to a raw file (pcm-capture PATH), or the capture stopped with its summary.
+    void CmdPcmCapture(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() != 1) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        const bool off = args[0] == "off";
+        const string summary = off ? soc->PcmCaptureSummary() : string();
+        if (!soc->SetPcmCapture(off ? string() : args[0])) cout << "pcm-capture: unavailable" << endl;
+        else cout << "pcm-capture: " << (off ? "off " + summary : string("on")) << endl;
+    }
+
+    // A sine tone as the microphone, for checks without a capture device: mic-tone HZ, or off.
+    struct MicTone {
+        double hz{0}, phase{0};
+        uint64_t pulled{0};
+        AudioInputSource source{this, [](void *p, AudioInputRoute, uint32_t n, uint32_t d) -> int16_t {
+            auto &t = *static_cast<MicTone *>(p);
+            if (!n || !d) return 0;
+            ++t.pulled;
+            t.phase += t.hz * d / n;
+            t.phase -= std::floor(t.phase);
+            return int16_t(std::lround(8192 * std::sin(2 * 3.141592653589793 * t.phase)));
+        }, nullptr, nullptr};
+    } micTone;
+    void CmdMicTone(vector<string> args, cli::CommandEnvironment& env, void* context) {
+        if (args.size() != 1) return env.PrintUsage();
+        auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
+        if (args[0] == "off") {
+            soc->SetMicrophoneSource(nullptr);
+            cout << "mic-tone: off, " << micTone.pulled << " samples pulled" << endl;
+            return;
+        }
+        micTone.hz = atof(args[0].c_str());
+        micTone.pulled = 0;
+        if (micTone.hz <= 0) return env.PrintUsage();
+        soc->SetMicrophoneSource(&micTone.source);
+        const auto demand = soc->MicrophoneDemand();
+        cout << "mic-tone: " << micTone.hz << " Hz, guest " << (demand.active ? "recording" : "not recording") << endl;
+    }
+
     void CmdCradleButton(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() > 1 || (args.size() == 1 && args[0] != "down" && args[0] != "up")) return env.PrintUsage();
         auto *soc = reinterpret_cast<commands::Context*>(context)->soc;
@@ -635,6 +675,8 @@ namespace {
          {.name = "hold-state", .description = "Show the Hold switch.", .cmd = CmdHoldState},
          {.name = "hold", .usage = "hold <on|off>", .description = "Set the Hold switch.", .cmd = CmdHold},
          {.name = "headphones", .usage = "headphones [in|out]", .description = "Show or set the headphones in the jack.", .cmd = CmdHeadphones},
+         {.name = "pcm-capture", .usage = "pcm-capture PATH|off", .description = "Write the board's sound to a raw 44100 Hz stereo file, or stop and summarise.", .cmd = CmdPcmCapture},
+         {.name = "mic-tone", .usage = "mic-tone HZ|off", .description = "Use a sine tone as the microphone.", .cmd = CmdMicTone},
          {.name = "cradle-button", .usage = "cradle-button [down|up]", .description = "Show, hold down or let go the cradle's HotSync button.", .cmd = CmdCradleButton},
          {.name = "cradle", .usage = "cradle [attached|detached]", .description = "Show, attach or detach the cradle.", .cmd = CmdCradle},
          {.name = "audio-on", .description = "Enable audio.", .cmd = CmdEnableAudio},

@@ -12,9 +12,11 @@
 #include <string>
 #include <vector>
 
+#include "audio_input.h"
 #include "memory_buffer.h"
 #include "s3c2442_blocks.h"
 #include "s3c2442_nand.h"
+#include "uda1380.h"
 
 struct ArmCpu;
 struct ArmMem;
@@ -150,6 +152,28 @@ class S3c2442Machine {
     // The screen as the LCD controller scans it out of SDRAM (S3cLcd::frame).
     bool screen(std::vector<uint32_t>& pixels, unsigned& width, unsigned& height, std::string& why) const;
 
+    // Sound. The IIS runs at the sample rate audioRate() gives (frames a second, numerator / denominator, 0 / 1
+    // while it's off), moving its FIFOs through DMA and the UDA1380. Each frame it sends goes to pcmSink after
+    // the codec's volume, with the board's gain on it as 16.16 (audioGain()), in guest time order.
+    std::function<void(int16_t left, int16_t right, uint32_t gain16)> pcmSink;
+    void audioRate(uint64_t& numerator, uint64_t& denominator) const;
+    // The codec's output reaching the speaker or the headphones: 65536 or 0. The speaker needs its amplifier
+    // (GPA1 driven high), the headphones (in, GPG12 low) need the codec's headphone driver; either needs the
+    // codec powered (GPJ0) and its DAC playing.
+    uint32_t audioGain() const;
+    // The host's microphone for the codec's ADC, pulled one sample a received frame; silence without one.
+    const AudioInputSource* microphone = nullptr;
+    // Fences nest; while any is held the microphone isn't pulled and the demand reads fenced.
+    void fenceMicrophone(bool on);
+    // Closes the host source and lets go of it; a load or reset, a sleep or a new source starts disarmed.
+    void disarmMicrophone();
+    unsigned microphoneFences = 0;
+    // What the guest asks of the microphone now: on while the IIS receives and the codec's ADC is on.
+    AudioInputDemand microphoneDemand() const;
+    // Headphones in the jack: GPG12 (EINT20) low while they're in.
+    void setHeadphones(bool in) { setPin(S3cGpio::g, 12, !in); }
+    bool headphonesIn() const { return !gpio.pin(S3cGpio::g, 12); }
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -167,6 +191,9 @@ class S3c2442Machine {
     S3cDma dma;
     S3cIis iis;
     S3cIic iic;
+    Uda1380 codec;
+    // False after loading a state saved before the machine kept its sound (no "AUDI" section).
+    bool stateHadSound = true;
     S3cGpio gpio;
     S3cUart uarts[3] = {S3cUart(0), S3cUart(1), S3cUart(2)};
     S3cLcd lcd;
@@ -202,6 +229,17 @@ class S3c2442Machine {
     void sleepAdvance(uint64_t cpuCycles);
     void wake();
     void watchdogReset();
+    // IIS frames: each sends, receives and keeps the FIFOs topped up through DMA.
+    void audioFrames(uint64_t frames);
+    void pumpAudioDma();
+    // CPU cycles until a DMA interrupt the IIS's frames bring, UINT64_MAX with none; wakeOnly as cyclesToEvent.
+    uint64_t audioCyclesToEvent(bool wakeOnly) const;
+    uint64_t iisMasterHz() const;
+    bool codecPowered() const;
+    // After a GPIO write: the codec's reset pin (GPD0, high resets it).
+    void codecPins();
+    bool codecResetHigh = false;
+    uint64_t iisRest = 0;
     void hardReset(uint32_t gstatus2);
     void resetBlocks();
     // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.

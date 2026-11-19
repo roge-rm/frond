@@ -26,6 +26,8 @@ namespace {
     // in. ser2410 unmasks TXD0 and sets its own transmit flag in the next instruction, and its interrupt
     // thread sees nothing to do if the IRQ comes in between.
     constexpr uint64_t irqWriteLatency = 2;
+    // CLKCON's IIS clock enable.
+    constexpr uint32_t iisClock = 1u << 17;
 
     // SFR blocks the machine doesn't model yet, by base, for the refusal text.
     struct Unmodelled { uint32_t base; const char* name; };
@@ -109,6 +111,30 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     lcd.reset();
     nand.reset();
     std::memset(steppingstone, 0, sizeof steppingstone);
+    iic.device = &codec;
+    // DMA units: SDRAM (repeating through bank 6) and the IIS FIFO. ASSUMPTION "IIS word DMA": a word to or
+    // from IISFIFO is two halfwords, the low one first.
+    dma.bus = [this](uint32_t pa, unsigned size, bool write, uint32_t& value) {
+        if (pa >= sdramBase && uint64_t(pa) + size <= uint64_t(sdramBase) + bank6Size) {
+            const uint32_t at = (pa - sdramBase) % this->options.ramBytes;
+            if (at + size > this->options.ramBytes) return false;
+            if (write) std::memcpy(ramBuffer + at, &value, size);
+            else {
+                value = 0;
+                std::memcpy(&value, ramBuffer + at, size);
+            }
+            return true;
+        }
+        if ((pa & ~3u) != 0x55000010 || size == 1) return false;
+        if (write) {
+            iis.push(uint16_t(value));
+            if (size == 4) iis.push(uint16_t(value >> 16));
+        } else {
+            value = iis.pop();
+            if (size == 4) value |= uint32_t(iis.pop()) << 16;
+        }
+        return true;
+    };
 }
 
 S3c2442Machine::~S3c2442Machine() {
@@ -323,6 +349,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             name = "GPIO";
             if (write) result = size == 4 ? gpio.write(offset, value, intc) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return gpio.read(o, v); });
+            if (write && result == S3cAccess::ok) codecPins();
             break;
         case 0x52000000:
             name = "USB device";
@@ -340,6 +367,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
                 result = size == 4 ? dma.write(offset, value) : S3cAccess::unsupported;
                 if (result == S3cAccess::unsupported && size == 4) detail = "software-triggered DMA isn't modelled yet";
             } else readWord([&](uint32_t o, uint32_t& v) { return dma.read(o, v); });
+            if (result == S3cAccess::ok && write) pumpAudioDma();
             break;
         case 0x54000000:
             name = "IIC";
@@ -348,8 +376,10 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             break;
         case 0x55000000:
             name = "IIS";
-            if (write) result = size == 4 ? iis.write(offset, value) : S3cAccess::unsupported;
+            // IISFIFO is a halfword register; the others take words.
+            if (write) result = size == 4 || (size == 2 && offset == 0x10) ? iis.write(offset, value) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return iis.read(o, v); });
+            if (result == S3cAccess::ok) pumpAudioDma();
             break;
         case 0x5a000000:
             name = "SD interface";
@@ -438,6 +468,10 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
     }
     if (hclk) lcd.advance(hclk, intc);
     if (ticks32k) rtc.advance(ticks32k, intc);
+    if (iis.enabled() && (clock.clkcon & iisClock)) {
+        const uint64_t frames = mulDiv(cpuCycles, iisMasterHz(), cpuHz * iis.frameDivider(), iisRest);
+        if (frames) audioFrames(frames);
+    }
     // A watchdog reset (watchdog.resetRequested) waits for the run loop, as this runs inside SFR accesses.
     updateLines();
 }
@@ -457,7 +491,7 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
         consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
         consider(rtc.ticksToEvent(), 32768, rtcRest);
-        return best;
+        return std::min(best, audioCyclesToEvent(false));
     }
     auto open = [&](unsigned source) { return !(intc.intmsk & (1u << source)); };
     const uint32_t timers = (~intc.intmsk >> s3cIrq::timer0) & 0x1f;
@@ -466,7 +500,123 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     if (open(s3cIrq::lcd)) consider(lcd.ticksToEvent(true), clock.hclk(), hclkRest);
     if (open(s3cIrq::adc) && !(intc.intsubmsk & (1u << s3cSubIrq::adc))) consider(adc.ticksToEvent(), clock.pclk(), pclkRest);
     consider(rtc.ticksToEvent(open(s3cIrq::tick), open(s3cIrq::rtc)), 32768, rtcRest);
-    return best;
+    return std::min(best, audioCyclesToEvent(true));
+}
+
+// ASSUMPTION "IIS prescaler": the frame clock is the master clock (MPLLin, the crystal, or PCLK) over 384 or
+// 256 with IISPSR not dividing it. wavedev.dll sets MPLLin, 384fs and IISPSR 0x42 and mixes at 44100 Hz,
+// which is 16934400 / 384; the manual's divide by N + 1 would make it 14700 Hz.
+uint64_t S3c2442Machine::iisMasterHz() const { return iis.mpllIn() ? options.crystal : clock.pclk(); }
+
+void S3c2442Machine::audioRate(uint64_t& numerator, uint64_t& denominator) const {
+    if (iis.enabled() && (clock.clkcon & iisClock)) {
+        numerator = iisMasterHz();
+        denominator = iis.frameDivider();
+    } else {
+        numerator = 0;
+        denominator = 1;
+    }
+}
+
+// ASSUMPTION "UDA1380 power on GPJ0": the codec is off only while GPJ0 is an output driven low (wavedev.dll
+// writes GPJDAT bit 0 and nothing seen sets GPJCON).
+bool S3c2442Machine::codecPowered() const {
+    const bool output = (gpio.con[S3cGpio::j] & 3) == 1;
+    return !output || (gpio.dat[S3cGpio::j] & 1);
+}
+
+void S3c2442Machine::codecPins() {
+    const bool high = (gpio.con[S3cGpio::d] & 3) == 1 && (gpio.dat[S3cGpio::d] & 1);
+    if (high && !codecResetHigh) codec.reset();
+    codecResetHigh = high;
+}
+
+// GPA1 drives the speaker amplifier (wavedev.dll sets it with no headphones in and clears it with them).
+uint32_t S3c2442Machine::audioGain() const {
+    if (!codecPowered() || !codec.dacOn()) return 0;
+    const bool amplifier = !(gpio.con[S3cGpio::a] & 2) && (gpio.dat[S3cGpio::a] & 2);
+    const bool phones = headphonesIn() && codec.headphoneDriverOn();
+    return amplifier || phones ? 65536 : 0;
+}
+
+void S3c2442Machine::fenceMicrophone(bool on) {
+    const bool before = microphoneFences != 0;
+    if (on) ++microphoneFences;
+    else if (microphoneFences) --microphoneFences;
+    if ((microphoneFences != 0) != before && microphone && microphone->fence)
+        microphone->fence(microphone->context, microphoneFences != 0);
+}
+
+void S3c2442Machine::disarmMicrophone() {
+    if (microphone && microphone->disarm) microphone->disarm(microphone->context);
+    microphone = nullptr;
+}
+
+AudioInputDemand S3c2442Machine::microphoneDemand() const {
+    AudioInputDemand d;
+    d.fenced = microphoneFences != 0;
+    d.active = iis.receiving() && codecPowered() && codec.adcOn();
+    d.route = AudioInputRoute::internalMic;
+    uint64_t numerator = 0, denominator = 1;
+    audioRate(numerator, denominator);
+    d.rateNumerator = uint32_t(numerator);
+    d.rateDenominator = uint32_t(denominator);
+    return d;
+}
+
+void S3c2442Machine::audioFrames(uint64_t frames) {
+    uint64_t numerator = 0, denominator = 1;
+    audioRate(numerator, denominator);
+    const bool listening = iis.receiving() && codecPowered() && codec.adcOn();
+    for (uint64_t i = 0; i < frames; ++i) {
+        int16_t in[2] = {0, 0}, out[2] = {0, 0};
+        if (listening) {
+            const int16_t sample = microphone && microphone->pull && !microphoneFences
+                ? microphone->pull(microphone->context, AudioInputRoute::internalMic, uint32_t(numerator), uint32_t(denominator))
+                : 0;
+            codec.record(sample, in);
+        }
+        if (iis.frame(out, in)) {
+            codec.play(out[0], out[1]);
+            if (pcmSink) pcmSink(out[0], out[1], audioGain());
+        }
+        pumpAudioDma();
+    }
+}
+
+// Tops the transmit FIFO up and drains the receive FIFO through the channels serving the IIS.
+void S3c2442Machine::pumpAudioDma() {
+    for (unsigned guard = 0; guard < S3cIis::depth && iis.txWantsDma(); ++guard) {
+        const int ch = dma.channelFor(S3cDmaRequest::iisOut);
+        if (ch < 0) break;
+        dma.service(unsigned(ch), intc);
+    }
+    for (unsigned guard = 0; guard < S3cIis::depth && iis.rxWantsDma(); ++guard) {
+        const int ch = dma.channelFor(S3cDmaRequest::iisIn);
+        if (ch < 0) break;
+        dma.service(unsigned(ch), intc);
+    }
+}
+
+uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly) const {
+    if (!iis.enabled() || !(clock.clkcon & iisClock)) return UINT64_MAX;
+    uint64_t frames = UINT64_MAX;
+    auto check = [&](S3cDmaRequest request, bool moving) {
+        if (!moving) return;
+        const int ch = dma.channelFor(request);
+        if (ch < 0 || !dma.interruptAtEnd(unsigned(ch)) || !dma.unitBytes(unsigned(ch))) return;
+        if (wakeOnly && (intc.intmsk & (1u << (s3cIrq::dma0 + unsigned(ch))))) return;
+        // A frame moves four bytes through the FIFO, which the DMA keeps topped up.
+        const uint64_t f = (uint64_t(dma.remaining(unsigned(ch))) * dma.transferBytes(unsigned(ch)) + 3) / 4;
+        frames = std::min(frames, std::max<uint64_t>(f, 1));
+    };
+    check(S3cDmaRequest::iisOut, iis.transmitting() && iis.txDmaOn());
+    check(S3cDmaRequest::iisIn, iis.receiving() && iis.rxDmaOn());
+    const uint64_t hz = iisMasterHz();
+    if (frames == UINT64_MAX || !hz) return UINT64_MAX;
+    // Cycles c with (c * hz + iisRest) / (cpuHz * divider) >= frames.
+    const __uint128_t need = __uint128_t(frames) * cpuHz() * iis.frameDivider();
+    return need <= iisRest ? 1 : std::max<uint64_t>(uint64_t((need - iisRest + hz - 1) / hz), 1);
 }
 
 // EINT0-3 and the RTC alarm by their SRCPND bits, EINT4-15 by EINTPEND where EINTMASK lets them through.
@@ -521,6 +671,9 @@ void S3c2442Machine::watchdogReset() {
 // SDRAM, the RTC and the board's pin inputs are kept; GSTATUS2 is the reset's cause.
 void S3c2442Machine::hardReset(uint32_t cause) {
     resetBlocks();
+    // The codec's power pin goes back to an input with the GPIO block.
+    codec.reset();
+    codecResetHigh = false;
     uint32_t inputs[S3cGpio::ports];
     std::memcpy(inputs, gpio.input, sizeof inputs);
     gpio.reset(options.chipId, options.resetCause);
@@ -558,6 +711,7 @@ void S3c2442Machine::resetBlocks() {
     dma.reset();
     iis.reset();
     iic.reset();
+    iisRest = 0;
     for (auto& u : uarts) u.reset();
     lcd.reset();
     nand.reset();
@@ -827,6 +981,9 @@ namespace {
     constexpr uint32_t secIdentity = stateFourcc("S3CI"), secCpu = stateFourcc("CPU "), secIcache = stateFourcc("ICAC"),
                        secDcache = stateFourcc("DCAC"), secTlb = stateFourcc("TLB "), secMemory = stateFourcc("SDRM"),
                        secBlocks = stateFourcc("BLKS"), secMachine = stateFourcc("MACH");
+    // Sound (DMA current registers, IIS FIFOs, the codec), its own section so states saved before it load:
+    // they start with the FIFOs empty, no DMA run and the codec reset.
+    constexpr uint32_t secAudio = stateFourcc("AUDI"), audioStateVersion = 1;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -909,6 +1066,14 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
     }
     { auto a = file.begin(secBlocks, stateVersion); blockStates(a, *this); file.end(); }
     {
+        auto a = file.begin(secAudio, audioStateVersion);
+        dma.runState(a);
+        iis.runState(a);
+        codec.state(a);
+        a.Do64(iisRest).DoBool(codecResetHigh);
+        file.end();
+    }
+    {
         auto a = file.begin(secMachine, stateVersion);
         uint64_t counts[] = {retiredCount, cycleCount, idleCount, elapsedNs, pclkRest, hclkRest, rtcRest, nsRest,
                              irqHeldUntil, sleeps, wakes, vfpProbes, breakpoints, wifiAccesses};
@@ -971,6 +1136,22 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     blockStates(a, blocks);
     if (!done(a, "blocks")) return false;
 
+    Uda1380 savedCodec;
+    uint64_t savedIisRest = 0;
+    bool savedCodecReset = false;
+    const bool hadSound = file.find(secAudio);
+    if (hadSound) {
+        if (!open(secAudio, audioStateVersion, a)) { why = "the saved sound is from another version"; return false; }
+        blocks.dma.runState(a);
+        blocks.iis.runState(a);
+        savedCodec.state(a);
+        a.Do64(savedIisRest).DoBool(savedCodecReset);
+        if (!done(a, "sound")) return false;
+    } else {
+        blocks.dma.clearRun();
+        blocks.iis.clearRun();
+    }
+
     if (!open(secMachine, stateVersion, a)) { why = "no saved machine counts"; return false; }
     uint64_t counts[14] = {};
     bool flags[5] = {};
@@ -979,6 +1160,7 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     if (!done(a, "machine counts")) return false;
 
     // Nothing from here on can fail. No cpuIrq call, so the restored lines make no new edge.
+    stateHadSound = hadSound;
     cpuArm920ApplyState(cpuCore, *cpu);
     std::memcpy(ramBuffer, sdram.data(), sdram.size());
     std::memcpy(steppingstone, stone.data(), stone.size());
@@ -996,6 +1178,9 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     dma = blocks.dma;
     iis = blocks.iis;
     iic = blocks.iic;
+    codec = savedCodec;
+    iisRest = savedIisRest;
+    codecResetHigh = savedCodecReset;
     gpio = blocks.gpio;
     for (unsigned c = 0; c < 3; ++c) {
         auto sink = uarts[c].sink;

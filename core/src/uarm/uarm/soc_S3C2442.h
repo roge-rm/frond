@@ -1,6 +1,7 @@
 #ifndef FROND_SOC_S3C2442_H
 #define FROND_SOC_S3C2442_H
 
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -8,6 +9,7 @@
 #include "SoC.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
+#include "zodiac_audio.h"
 
 // The HP iPAQ rx1950 in the normal runtime: the S3C2442 machine (s3c2442_machine.h) with the rx1950's
 // board (rx1950_board.h, rx1950_power.h). Windows Mobile, so no PACE or guest calls. The bootloader
@@ -54,6 +56,18 @@ class SocS3C2442 : public SoC {
     // The battery reaches the guest through AIN0 and the AC and charge pins, set again after every load and reset.
     bool BatterySupported() const override { return true; }
     bool SetBattery(const BatteryPower& value) override;
+    // Headphones on GPG12 (EINT20), low while they're in; put back after every load and reset like the battery.
+    bool HeadphonesSupported() const override { return true; }
+    bool HeadphonesIn() const override { return headphones; }
+    bool SetHeadphones(bool in) override;
+    bool SetPcmCapture(const std::string& path) override;
+    std::string PcmCaptureSummary() const override;
+    bool PowerSleeping() const override { return machine->asleep(); }
+    // The microphone feeds the UDA1380's ADC. A sleep, reset or load disarms the source (a fresh load stays
+    // disarmed) and the host re-arms capture from MicrophoneDemand. An InputCheckpoint fences it meanwhile.
+    AudioInputDemand MicrophoneDemand() override { return machine->microphoneDemand(); }
+    void SetMicrophoneSource(const AudioInputSource* source) override;
+    std::function<void()> CapturePeripheralInput() override;
 
     // Exact (the interpreter with the cache models) or Fast (the JIT and lean path). Between Run calls only.
     bool SetFastEngine(bool fast) { return machine->setFastEngine(fast); }
@@ -90,6 +104,10 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<S3c2442Machine> machine;
     std::unique_ptr<NandPages> pages;
     MemoryBuffer nandPageBuffer{};
+    // Disarms now, or when the last checkpoint fence ends.
+    void DisarmMicrophone();
+    unsigned checkpointFenceDepth{0};
+    bool microphoneInvalidatePending{false}, wasAsleep{false};
     bool halted{false}, hostTimeLimit{true}, inputGuestTime{false};
     // Keys held through JamKey, released when the guest's time reaches untilNs.
     struct Jam { KeyId key; uint64_t untilNs; };
@@ -100,6 +118,19 @@ class SocS3C2442 : public SoC {
     bool framePending{false}, redraw{true};
     // Guest ns Run still owes the main loop, as cycles.
     uint64_t creditRemainder{0};
+    bool headphones{false};
+    // The IIS frames as the speaker or headphones play them, to the host's 44100 Hz. Frames are made while
+    // PCM output is off or suspended too, and only the push to the queue is skipped, so the stream is the same
+    // either way.
+    ZodiacAudioOutput sound;
+    static void PushFrame(void* context, uint32_t frame);
+    // pcm-capture: host frames as they're made, with counts for the summary.
+    FILE* capture{nullptr};
+    uint64_t captureFrames{0}, captureLoud{0};
+    unsigned capturePeak{0}, captureRawPeak{0};
+    uint32_t captureGainPeak{0};
+    // The battery and headphones on the board's pins, after a start, load or reset.
+    void ApplyHostInputs();
 };
 
 #endif
