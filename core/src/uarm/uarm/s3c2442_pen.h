@@ -86,11 +86,12 @@ class S3cKeyPacer {
         keys.clear();
     }
 
-    // Holds a key down for a jam, or lets go of the jam; the pin then follows the host's state of the key.
+    // Holds a key down for a jam, or lets go of one jam (jams on one key count, the pin stays low until the last ends); the pin then follows the host's state of the key.
     void jam(S3c2442Machine& m, S3cGpio::Port port, uint8_t bit, bool on) {
         Key& k = keyFor(port, bit, m.nanoseconds());
-        k.jammed = on;
-        m.setPin(port, bit, !(k.down || k.jammed));
+        if (on) ++k.jams;
+        else if (k.jams) --k.jams;
+        m.setPin(port, bit, !(k.down || k.jams));
     }
 
     // Applies every event that's due at the machine's time now, in order.
@@ -105,7 +106,7 @@ class S3cKeyPacer {
                 k.down = e.down;
                 k.changedNs = now;
                 if (e.down) k.downAtNs = e.atNs;
-                m.setPin(e.port, e.bit, !(k.down || k.jammed));
+                m.setPin(e.port, e.bit, !(k.down || k.jams));
             }
             queue.pop_front();
         }
@@ -113,7 +114,7 @@ class S3cKeyPacer {
 
    private:
     struct Event { S3cGpio::Port port; uint8_t bit; bool down; uint64_t atNs; };
-    struct Key { S3cGpio::Port port; uint8_t bit; bool down; uint64_t changedNs; uint64_t downAtNs; bool jammed; };
+    struct Key { S3cGpio::Port port; uint8_t bit; bool down; uint64_t changedNs; uint64_t downAtNs; uint32_t jams; };
     std::deque<Event> queue;
     std::vector<Key> keys;
 
@@ -121,7 +122,7 @@ class S3cKeyPacer {
     Key& keyFor(S3cGpio::Port port, uint8_t bit, uint64_t now) {
         for (auto& k : keys)
             if (k.port == port && k.bit == bit) return k;
-        keys.push_back({port, bit, false, now >= gapNs ? now - gapNs : 0, 0, false});
+        keys.push_back({port, bit, false, now >= gapNs ? now - gapNs : 0, 0, 0});
         return keys.back();
     }
 };

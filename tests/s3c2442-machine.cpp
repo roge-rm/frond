@@ -572,6 +572,13 @@ int main() {
         assert(keys.empty() && low());
         keys.jam(*m, S3cGpio::g, 1, false);
         assert(!low());
+        // Two jams over each other: the first to end leaves the pin down for the second.
+        keys.jam(*m, S3cGpio::g, 1, true);
+        keys.jam(*m, S3cGpio::g, 1, true);
+        keys.jam(*m, S3cGpio::g, 1, false);
+        assert(low());
+        keys.jam(*m, S3cGpio::g, 1, false);
+        assert(!low());
     }
     std::printf("s3c2442 machine: ok\n");
 }
