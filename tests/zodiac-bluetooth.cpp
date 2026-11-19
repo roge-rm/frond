@@ -142,8 +142,8 @@ int main(int argc, char** argv) {
     // steps DIR: hard reset to Preferences with Bluetooth on BT, then STEPS, ';' between them: tap X Y WAIT,
     // power, stroke X1 Y1 X2 Y2, install PATH, launch NAME, wait MS, shot NAME, signal NAME (a file in DIR or
     // an absolute path), waitfor NAME MS, calls N (database lists through guest calls), export NAME (checks the
-    // probe's received payload), relink (the controller set again, so the link drops), save and load (a
-    // session saved and loaded in this process).
+    // probe's received payload), relink (the controller set again, so the link drops), startcall MS (runs until
+    // the driver's next start call), save and load (a session saved and loaded in this process).
     if (mode == "steps" && argc > 2) {
         SocIMX1* soc = start(rom);
         const std::string dir = argv[2];
@@ -174,6 +174,11 @@ int main(int argc, char** argv) {
                 const bool ok = soc->SetBluetooth("", error) && soc->SetBluetooth(bt, error);
                 std::fprintf(stderr, "test relink at %.3f s\n", double(soc->GetTime()) / 1e9);
                 std::printf("relink: %s\n", ok ? "ok" : error.c_str());
+            } else if (std::sscanf(step.c_str(), "startcall %d", &wait) == 1) {
+                // Runs until the Bluetooth driver's next start call, for a relink at a known point of a burst.
+                const uint64_t before = soc->BluetoothLastStart(), until = soc->GetTime() + uint64_t(wait) * 1000000;
+                while (soc->BluetoothLastStart() == before && soc->GetTime() < until && !soc->Halted()) runFor(*soc, 1);
+                std::printf("startcall: %s\n", soc->BluetoothLastStart() == before ? "none" : "seen");
             } else if (step == "save") {
                 std::printf("save: %d\n", soc->Save());
                 const auto buffer = soc->GetSavestate();

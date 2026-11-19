@@ -30,12 +30,12 @@ RECEIVE_STEPS = ('tap 220 15 1500; tap 250 15 1500; tap 213 56 1500; tap 200 76 
 
 
 # Radio on, then Discoverable picked, which sends the radio's setup in a burst (a start before each command, 20 ms
-# apart, from about 170 ms after the pen lifts); the controller set again 200 ms in drops the link mid-burst. Then the
-# radio off and on, a session saved and loaded, and the radio off and on again.
+# apart); the controller set again 30 ms after the burst's first start drops the link mid-burst. Then the radio off
+# and on, a session saved and loaded, and the radio off and on again.
 RADIO_OFF_ON = 'tap 213 56 1500; tap 200 56 4000; tap 213 56 1500; tap 200 76 5000'
 RELINK_STEPS = ('tap 220 15 1500; tap 250 15 1500; tap 213 56 1500; tap 200 76 4000; tap 190 139 1500; '
-                'tap 190 139 0; wait 200; relink; wait 4000; ' + RADIO_OFF_ON + '; save; wait 500; load; wait 1000; ' +
-                RADIO_OFF_ON)
+                'tap 190 139 0; startcall 2000; wait 30; relink; wait 4000; ' + RADIO_OFF_ON +
+                '; save; wait 500; load; wait 1000; ' + RADIO_OFF_ON)
 
 
 def relink(args, engine):

@@ -226,6 +226,8 @@ class SocIMX1 : public SoC {
     // See zodiac_bluetooth.cpp.
     bool SetBluetooth(const std::string& path, std::string& error) override;
     std::string BluetoothState() override;
+    // Guest ticks at the Bluetooth driver's last start call, for tests.
+    uint64_t BluetoothLastStart() const { return bluetooth.lastStart; }
 
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
