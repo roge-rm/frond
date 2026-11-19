@@ -88,6 +88,8 @@ const uint8_t* S3cNand::page(uint32_t page) {
 }
 
 void S3cNand::touch(uint32_t page) {
+    // With no store and no image the chip starts erased.
+    if (!store && flash.empty()) flash.assign(size_t(pages) * pageSize, 0xff);
     if (dirty.size() != blocks) dirty.assign(blocks, false);
     dirty[page / pagesPerBlock] = true;
 }

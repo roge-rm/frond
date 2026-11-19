@@ -21,11 +21,6 @@ namespace {
     // Host time one Run call may take, so input and frames are served while the guest is busy.
     constexpr auto runHostLimit = std::chrono::milliseconds(12);
 
-    uint64_t hostMsec() {
-        return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-    }
-
     // Host keys to the rx1950's keys (rx1950_board.h): the four app keys, the five-way, power and record.
     const Rx1950Key* keyFor(KeyId key) {
         switch (key) {
@@ -54,18 +49,32 @@ bool rx1950IsCeos(const uint8_t* data, size_t size) {
 }
 
 // The machine's NAND pages kept in the uARM NAND, whose file sessions keep crash safe (journal, then a
-// rename over the old one).
+// rename over the old one). Writes mark the chip dirty and its dirty page bits (4224-byte units) as its own
+// program and erase do, so IsNandDirty and GetNandDirtyPages see them.
 struct SocS3C2442::NandPages : S3cNand::Store {
     NAND* chip;
     explicit NandPages(NAND* chip) : chip(chip) {}
     bool readPage(uint32_t page, uint8_t* out) override { return nandReadRawPage(chip, page, out); }
-    bool writePage(uint32_t page, const uint8_t* in) override { return nandWriteRawPage(chip, page, in); }
+    bool writePage(uint32_t page, const uint8_t* in) override {
+        if (!nandWriteRawPage(chip, page, in)) return false;
+        markDirty(page, 1);
+        return true;
+    }
     bool eraseBlock(uint32_t firstPage, uint32_t count) override {
         uint8_t ones[S3cNand::pageSize];
         std::memset(ones, 0xff, sizeof ones);
         for (uint32_t p = 0; p < count; ++p)
             if (!nandWriteRawPage(chip, firstPage + p, ones)) return false;
+        markDirty(firstPage, count);
         return true;
+    }
+    void markDirty(uint32_t firstPage, uint32_t count) {
+        const Buffer bits = nandGetDirtyPages(chip);
+        auto* words = static_cast<uint32_t*>(bits.data);
+        const size_t first = size_t(firstPage) * S3cNand::pageSize / 4224;
+        const size_t last = (size_t(firstPage + count) * S3cNand::pageSize - 1) / 4224;
+        for (size_t unit = first; unit <= last && unit / 32 < bits.size / 4; ++unit) words[unit / 32] |= 1u << (unit % 32);
+        nandSetDirty(chip, true);
     }
 };
 
@@ -133,7 +142,7 @@ void SocS3C2442::StateChanged() {
     jams.clear();
     // The host's keys and pen are up now.
     for (const auto& k : rx1950Keys) machine->setPin(k.port, k.bit, true);
-    machine->setStylus(false, 0, 0);
+    pen.clear(*machine);
 }
 
 void SocS3C2442::SetClockMultiplier(uint32_t num, uint32_t den) {
@@ -219,14 +228,15 @@ void SocS3C2442::JamKey(enum KeyId key, uint32_t durationMsec) {
     const auto* k = keyFor(key);
     if (!k || halted) return;
     machine->setPin(k->port, k->bit, false);
-    jams.push_back({key, hostMsec() + durationMsec});
+    jams.push_back({key, machine->nanoseconds() + uint64_t(durationMsec) * 1000000});
 }
 
-// Hands queued host input to the machine: keys pull their pins low, the pen goes to the touch panel.
+// Hands queued host input to the machine: keys pull their pins low, the pen goes to the touch panel
+// through the pacer, which gives the guest at most one down or up each call, in its own time.
 void SocS3C2442::PumpInput() {
-    const uint64_t now = hostMsec();
+    const uint64_t now = machine->nanoseconds();
     for (auto it = jams.begin(); it != jams.end();) {
-        if (it->untilMsec > now) { ++it; continue; }
+        if (it->untilNs > now) { ++it; continue; }
         if (const auto* k = keyFor(it->key)) machine->setPin(k->port, k->bit, true);
         it = jams.erase(it);
     }
@@ -240,8 +250,9 @@ void SocS3C2442::PumpInput() {
         penEventQueue->Pop();
         const unsigned x = unsigned(std::clamp(event.x, 0, int(displayConfiguration.width) - 1));
         const unsigned y = unsigned(std::clamp(event.y, 0, int(displayConfiguration.height) - 1));
-        machine->setStylus(event.penDown, rx1950TouchRawX(x), rx1950TouchRawY(y));
+        pen.push(event.penDown, rx1950TouchRawX(x), rx1950TouchRawY(y));
     }
+    pen.pump(*machine);
 }
 
 // Runs the guest for at least maxCycles / cyclesPerSecond of its own time, or for a short stretch of host
@@ -253,11 +264,12 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         penEventQueue->Clear();
         return maxCycles;
     }
-    PumpInput();
-    const uint64_t before = machine->nanoseconds();
+    const uint64_t before = machine->nanoseconds(), resets = machine->watchdogResets();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * 1000000000 / cyclesPerSecond));
     const auto started = std::chrono::steady_clock::now();
     for (;;) {
+        // Input goes in every slice, so pen and key times are kept in guest time.
+        PumpInput();
         const uint64_t hz = std::max<uint64_t>(CoreHz(), 1000000);
         const uint64_t left = before + wanted - std::min(before + wanted, machine->nanoseconds());
         const uint64_t ns = std::min(sliceNs, std::max<uint64_t>(left, 1));
@@ -273,6 +285,11 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     }
     runInstructions = machine->retired();
     if (halted) return maxCycles;
+    // The guest reset itself through the watchdog: the board's inputs as after any reset.
+    if (machine->watchdogResets() != resets) {
+        rx1950ApplyBattery(*machine, battery);
+        StateChanged();
+    }
     const uint64_t elapsed = machine->nanoseconds() - before;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % 1000000000);

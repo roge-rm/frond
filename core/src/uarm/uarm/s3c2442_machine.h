@@ -42,7 +42,7 @@ enum class S3c2442Stop : uint8_t {
     running,
     budget,         // the instruction budget ran out
     refused,        // an access the machine doesn't model
-    watchdogReset,  // the watchdog ran out with its reset on
+    watchdogReset,  // unused: the watchdog's reset restarts the machine (watchdogResets())
     powerOff,       // unused: CLKCON POWER_OFF puts the machine to sleep (asleep())
     idleNoWake,     // idle with no interrupt that can come
     dataCache,      // a cacheable access to something that isn't memory
@@ -125,6 +125,8 @@ class S3c2442Machine {
 
     // The reset button (nRESET): every block but the RTC to its reset state, then resetLoader as at power on.
     void reset();
+    // Watchdog resets so far: as nRESET with GSTATUS2 WDTRST, between instructions in run(). Not saved.
+    uint64_t watchdogResets() const { return watchdogResetCount; }
 
     // Faster speed: the CPU runs num / den times its clock, with the timers, RTC and guest time as at 1 / 1.
     void setClockMultiplier(uint32_t num, uint32_t den) {
@@ -199,6 +201,8 @@ class S3c2442Machine {
     uint32_t wakeSources() const;
     void sleepAdvance(uint64_t cpuCycles);
     void wake();
+    void watchdogReset();
+    void hardReset(uint32_t gstatus2);
     void resetBlocks();
     // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.
     void updateLines(bool sfrWrite = false);
@@ -224,7 +228,7 @@ class S3c2442Machine {
     uint64_t pclkRest = 0, hclkRest = 0, rtcRest = 0, nsRest = 0;
     bool debugWriteSeen = false;
     bool sleeping = false;
-    uint64_t sleeps = 0, wakes = 0;
+    uint64_t sleeps = 0, wakes = 0, watchdogResetCount = 0;
     uint32_t lastWake = 0;
     uint64_t batchAdvanced = 0;
     uint32_t leanAdvanced = 0;  // of the running lean call, by leanRead

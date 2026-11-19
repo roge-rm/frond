@@ -13,6 +13,7 @@
 #include "rx1950_board.h"
 #include "rx1950_power.h"
 #include "s3c2442_machine.h"
+#include "s3c2442_pen.h"
 
 namespace {
     constexpr uint32_t code = 0x30000000;
@@ -32,6 +33,8 @@ namespace {
     }
 
     unsigned mode(S3c2442Machine& m) { return cpuGetRegExternal(m.cpu(), ARM_REG_NUM_CPSR) & 0x1f; }
+
+    constexpr uint32_t mcr(unsigned crn, unsigned rd) { return 0xee000f10u | crn << 16 | rd << 12; }
 
     void pwmTimer4(S3c2442Machine& m, uint32_t buffer) {
         m.pwm.write(0x3c, buffer);                // TCNTB4
@@ -235,7 +238,8 @@ int main() {
         auto m = make(program);
         if (fast && !m->setFastEngine(true)) continue;
         unsigned loads = 0;
-        m->resetLoader = [&] { ++loads; m->start(code + 0x100); };
+        // The loader stand-in turns the watchdog off, so its reset value doesn't reset the loop.
+        m->resetLoader = [&] { ++loads; m->watchdog.wtcon = 0; m->start(code + 0x100); };
         assert(m->gpio.write(0x50, 2, m->intc) == S3cAccess::ok);  // GPF0 as EINT0
         assert(m->gpio.write(0x88, 2, m->intc) == S3cAccess::ok);  // falling edge
         m->pwm.timers[0].buffer = 150;
@@ -300,8 +304,7 @@ int main() {
         gpa(0x201000 | 0x800, false);  // wireless
         assert(rx1950Leds(*m).blue);
     }
-    // Save and load: a machine loaded from a state runs on exactly as the one saved, with a timer interrupt
-    // and its sleep counts; a damaged state or one from another SDRAM size is refused and changes nothing.
+    // Save and load: a machine loaded from a state runs on exactly as the one saved, with a timer interrupt; a damaged state or one from another SDRAM size is refused and changes nothing.
     {
         const std::vector<uint32_t> counter = {0xe3a01203, 0xe2811801, 0xe2800001, 0xe5810000, 0xeafffffc};
         auto a = make(counter);
@@ -343,6 +346,142 @@ int main() {
         assert(f->loadState(saved.data(), saved.size(), why));
         assert(f->run(500000) == S3c2442Stop::budget);
         assert(cpuGetRegExternal(f->cpu(), 0) > cpuGetRegExternal(a->cpu(), 0) / 2);
+    }
+    // Save while asleep, as quitting does, and load it back: the copy is asleep with the same counts, and the
+    // power key wakes both the same way.
+    {
+        std::vector<uint32_t> program{0xe3a0044c, 0xe3a01008, 0xe580100c, loop};
+        program.resize(0x100 / 4 + 1, 0);
+        program.back() = loop;
+        auto a = make(program), b = make({loop});
+        for (auto* m : {a.get(), b.get()}) m->resetLoader = [m] { m->watchdog.wtcon = 0; m->start(code + 0x100); };
+        assert(a->gpio.write(0x50, 2, a->intc) == S3cAccess::ok && a->gpio.write(0x88, 2, a->intc) == S3cAccess::ok);
+        assert(a->run(1000) == S3c2442Stop::budget && a->asleep());
+        assert(a->run(30000000) == S3c2442Stop::budget);
+        std::vector<uint8_t> saved;
+        std::string why;
+        assert(a->saveState(saved, why));
+        assert(b->loadState(saved.data(), saved.size(), why));
+        assert(b->asleep() && b->sleepCount() == 1 && b->nanoseconds() == a->nanoseconds());
+        for (auto* m : {a.get(), b.get()}) {
+            assert(m->run(30000000) == S3c2442Stop::budget && m->asleep());
+            m->setPin(S3cGpio::f, 0, false);
+            m->run(1000);
+        }
+        assert(!a->asleep() && !b->asleep() && a->wakeCount() == 1 && b->wakeCount() == 1);
+        assert(a->pc() == b->pc() && a->pc() == code + 0x100 && b->gpio.gstatus[2] == 2);
+        assert(a->nanoseconds() == b->nanoseconds() && a->rtc.bcd[0] == b->rtc.bcd[0]);
+    }
+    // Save with the MMU, FCSE PID and D-cache on and a dirty line, and with a NAND page program half written:
+    // the copy runs on to the same registers, SDRAM and NAND page. Exact, which keeps cache contents.
+    {
+        // TTB r4, DACR r5, PID r3, control r6; a read of r1 to bring its line in (the cache allocates on
+        // reads only); then r0 += 1, stored at r1 (VA 0x30010000, write-back, so the line stays dirty) and r2
+        // (VA 0x10000, PID 3: MVA 0x06010000, phys 0x30210000).
+        const std::vector<uint32_t> program{mcr(2, 4), mcr(3, 5), mcr(13, 3), mcr(1, 6), 0xe5917000,
+                                            0xe2800001, 0xe5810000, 0xe5820000, 0xeafffffb};
+        auto setUp = [&](S3c2442Machine& m) {
+            const uint32_t ttb = 0x30004000;
+            auto section = [&](uint32_t va, uint32_t pa, bool cached) {
+                const uint32_t entry = pa | 0xc00 | (cached ? 0xc : 0) | 2;
+                assert(m.loadRam(ttb + (va >> 20) * 4, reinterpret_cast<const uint8_t*>(&entry), 4));
+            };
+            section(0x00000000, 0x00000000, false);
+            section(0x30000000, 0x30000000, true);
+            section(0x06000000, 0x30200000, true);
+            cpuSetReg(m.cpu(), 1, 0x30010000);
+            cpuSetReg(m.cpu(), 2, 0x00010000);
+            cpuSetReg(m.cpu(), 3, 3u << 25);
+            cpuSetReg(m.cpu(), 4, ttb);
+            cpuSetReg(m.cpu(), 5, 0xffffffff);
+            cpuSetReg(m.cpu(), 6, 0x78 | 0x1 | 0x4 | 0x1000);
+        };
+        auto a = make(program);
+        setUp(*a);
+        assert(a->run(100003) == S3c2442Stop::budget);
+        const uint32_t count = cpuGetRegExternal(a->cpu(), 0);
+        uint32_t inRam = 0;
+        std::memcpy(&inRam, a->sdram() + 0x10000, 4);
+        assert(count > 1000 && inRam != count);  // the line is dirty in the D-cache
+        // NAND: page program of page 5, 16 bytes in.
+        const uint32_t page = 5;
+        assert(a->nand.write(0x04, 4, 0x381, a->intc) == S3cAccess::ok);  // controller on, chip selected
+        assert(a->nand.write(0x08, 1, 0x80, a->intc) == S3cAccess::ok);
+        for (const uint32_t byte : {0u, page & 0xff, (page >> 8) & 0xff, page >> 16})
+            assert(a->nand.write(0x0c, 1, byte, a->intc) == S3cAccess::ok);
+        for (uint32_t i = 0; i < 4; ++i) assert(a->nand.write(0x10, 4, 0x11223344u + i, a->intc) == S3cAccess::ok);
+        std::vector<uint8_t> saved;
+        std::string why;
+        assert(a->saveState(saved, why));
+        auto b = make({loop});
+        assert(b->loadState(saved.data(), saved.size(), why));
+        assert(cpuGetPid(b->cpu()) == 3u << 25);
+        for (auto* m : {a.get(), b.get()}) {
+            for (uint32_t i = 0; i < 4; ++i) assert(m->nand.write(0x10, 4, 0x55667788u + i, m->intc) == S3cAccess::ok);
+            assert(m->nand.write(0x08, 1, 0x10, m->intc) == S3cAccess::ok);
+            assert(m->run(200000) == S3c2442Stop::budget);
+        }
+        for (unsigned r = 0; r < 16; ++r) assert(cpuGetRegExternal(a->cpu(), r) == cpuGetRegExternal(b->cpu(), r));
+        assert(a->retired() == b->retired() && std::memcmp(a->sdram(), b->sdram(), 32u << 20) == 0);
+        // No store and no image: the program made the flash, erased, and wrote the page into it.
+        assert(a->nand.flash.size() == size_t(S3cNand::pages) * S3cNand::pageSize && a->nand.flash == b->nand.flash);
+        const uint8_t* p = &b->nand.flash[size_t(page) * S3cNand::pageSize];
+        assert(p[0] == 0x44 && p[16] == 0x88 && p[32] == 0xff && a->nand.flash[0] == 0xff && b->nand.programs == 1);
+    }
+    // The watchdog's reset restarts the machine through resetLoader with GSTATUS2 WDTRST, keeping SDRAM, the
+    // RTC's time and the board's pins. Both engines.
+    for (const bool fast : {false, true}) {
+        std::vector<uint32_t> program{0xe2800001, loop - 1};  // add r0, r0, #1; b to the add
+        program.resize(0x100 / 4 + 1, 0);
+        program.back() = loop;
+        auto m = make(program);
+        if (fast && !m->setFastEngine(true)) continue;
+        unsigned loads = 0;
+        m->resetLoader = [&] { ++loads; m->start(code + 0x100); };
+        const uint32_t marker = 0x5eed1950;
+        assert(m->loadRam(code + 0x200000, reinterpret_cast<const uint8_t*>(&marker), 4));
+        m->setPin(S3cGpio::g, 1, false);
+        m->rtc.bcd[6] = 0x26;  // a year the RTC's reset wouldn't give
+        m->gpio.gstatus[2] = 0;
+        // Prescaler 0, divide by 16, counting, reset on: 0x100 counts are 4096 PCLK ticks.
+        m->watchdog.wtcnt = m->watchdog.wtdat = 0x100;
+        m->watchdog.wtcon = 0x0021;
+        assert(m->run(100000) == S3c2442Stop::budget);
+        assert(m->watchdogResets() == 1 && loads == 1 && m->gpio.gstatus[2] == 4 && m->pc() == code + 0x100);
+        assert(m->watchdog.wtcon == 0x8021 && !m->watchdog.resetRequested && m->intc.intmsk == 0xffffffff);
+        uint32_t kept = 0;
+        std::memcpy(&kept, m->sdram() + 0x200000, 4);
+        assert(kept == marker && m->rtc.bcd[6] == 0x26 && !(m->gpio.input[S3cGpio::g] & 2));
+        // nRESET gives no reset bit.
+        m->reset();
+        assert(m->gpio.gstatus[2] == 0 && loads == 2 && m->watchdogResets() == 1);
+    }
+    // Pen pacing: a down and an up queued together reach the touch panel at least holdNs of guest time
+    // apart, and a second tap waits gapNs after the up.
+    {
+        auto m = make({loop});
+        S3cPenPacer pen;
+        pen.clear(*m);
+        pen.push(true, 300, 400);
+        pen.push(false, 0, 0);
+        pen.push(true, 310, 410);
+        pen.push(false, 0, 0);
+        std::vector<std::pair<bool, uint64_t>> seen;
+        bool was = false;
+        while (m->nanoseconds() < 500000000) {
+            pen.pump(*m);
+            if (m->adc.stylusDown() != was) {
+                was = m->adc.stylusDown();
+                seen.push_back({was, m->nanoseconds()});
+            }
+            m->run(1000000);  // about 1 ms at the reset clock
+        }
+        assert(seen.size() == 4 && pen.empty());
+        assert(seen[0].first && !seen[1].first && seen[2].first && !seen[3].first);
+        assert(seen[1].second - seen[0].second >= S3cPenPacer::holdNs);
+        assert(seen[2].second - seen[1].second >= S3cPenPacer::gapNs);
+        assert(seen[3].second - seen[2].second >= S3cPenPacer::holdNs);
+        assert(seen[1].second - seen[0].second < S3cPenPacer::holdNs + 5000000);
     }
     std::printf("s3c2442 machine: ok\n");
 }

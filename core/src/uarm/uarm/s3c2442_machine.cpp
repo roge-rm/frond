@@ -170,7 +170,7 @@ std::string S3c2442Machine::stopText() const {
                           stopped.write ? (" of " + [&] { char v[16]; std::snprintf(v, sizeof v, "%08x", stopped.value); return std::string(v); }()).c_str() : "",
                           stopped.pc);
             return line + stopped.text;
-        case S3c2442Stop::watchdogReset: return "the watchdog ran out with its reset on (resets aren't modelled yet)";
+        case S3c2442Stop::watchdogReset: return "the watchdog ran out with its reset on";
         case S3c2442Stop::powerOff: return "CLKCON POWER_OFF set";
         case S3c2442Stop::idleNoWake: return "idle with no interrupt that can come";
         case S3c2442Stop::undefined:
@@ -438,10 +438,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
     }
     if (hclk) lcd.advance(hclk, intc);
     if (ticks32k) rtc.advance(ticks32k, intc);
-    if (watchdog.resetRequested && stopped.stop == S3c2442Stop::running) {
-        stopped.stop = S3c2442Stop::watchdogReset;
-        stopped.pc = pc();
-    }
+    // A watchdog reset (watchdog.resetRequested) waits for the run loop, as this runs inside SFR accesses.
     updateLines();
 }
 
@@ -510,11 +507,24 @@ void S3c2442Machine::wake() {
 }
 
 // nRESET (the reset button): as power on, but the RTC keeps its time and the board's pin levels stay.
-void S3c2442Machine::reset() {
+// ASSUMPTION "nRESET GSTATUS2": no reset bit is set, so GSTATUS2 reads 0 once the OS has cleared its PWRST
+// (nk writes back what it reads at boot). eboot takes PWRST clear as a reset with SDRAM kept and looks for
+// its signatures there, the path it also takes after a watchdog reset.
+void S3c2442Machine::reset() { hardReset(0); }
+
+// The watchdog's reset: as nRESET, with GSTATUS2 WDTRST.
+void S3c2442Machine::watchdogReset() {
+    ++watchdogResetCount;
+    hardReset(4);
+}
+
+// SDRAM, the RTC and the board's pin inputs are kept; GSTATUS2 is the reset's cause.
+void S3c2442Machine::hardReset(uint32_t cause) {
     resetBlocks();
     uint32_t inputs[S3cGpio::ports];
     std::memcpy(inputs, gpio.input, sizeof inputs);
     gpio.reset(options.chipId, options.resetCause);
+    gpio.gstatus[2] = cause;
     std::memcpy(gpio.input, inputs, sizeof inputs);
     stopped = {};
     undefinedPending = false;
@@ -579,6 +589,11 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
     const uint64_t target = retiredCount + idleCount + instructions;
     while (stopped.stop == S3c2442Stop::running) {
         const uint64_t used = retiredCount + idleCount;
+        // The watchdog ran out with its reset on: the reset happens here, between instructions.
+        if (watchdog.resetRequested) {
+            watchdogReset();
+            continue;
+        }
         if (sleeping) {
             if (wakeSources()) {
                 wake();
@@ -678,7 +693,8 @@ void S3c2442Machine::runFast(uint64_t n) {
     uint32_t leanCount = UINT32_MAX;
     bool blPending = false;
     sfrAccessed = false;
-    while (left && stopped.stop == S3c2442Stop::running && !clock.idle() && !cpuArm920Waiting(cpuCore)) {
+    while (left && stopped.stop == S3c2442Stop::running && !watchdog.resetRequested && !clock.idle() &&
+           !cpuArm920Waiting(cpuCore)) {
         // A run passes its clock budget by a block at most (slack), and a Thumb BL pair is one clock but two
         // instructions, so it gets half of what's left less a block.
         if (leanCount == UINT32_MAX && !blPending && left / 2 > slack && cpuArm920JitCanRun(cpuCore)) {

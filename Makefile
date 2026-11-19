@@ -2885,7 +2885,7 @@ S3C2442_SOURCES = core/src/uarm/uarm/s3c2442_intc.cpp core/src/uarm/uarm/s3c2442
 	core/src/uarm/uarm/s3c2442_adc.cpp core/src/uarm/uarm/s3c2442_audio_bus.cpp
 S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442_nand.h \
 	core/src/uarm/uarm/s3c2442_machine.h core/src/uarm/uarm/rx1950_nand_image.h core/src/uarm/uarm/rx1950_board.h \
-	core/src/uarm/uarm/rx1950_power.h
+	core/src/uarm/uarm/rx1950_power.h core/src/uarm/uarm/s3c2442_pen.h
 .PHONY: rx1950-boot test-s3c2442 test-s3c2442-machine test-rx1950-boot
 rx1950-boot: build/rx1950-boot
 build/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) \

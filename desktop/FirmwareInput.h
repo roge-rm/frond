@@ -2,8 +2,10 @@
 #define FROND_FIRMWARE_INPUT_H
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QString>
 #include <vector>
 #include "device_profile5.h"
@@ -68,12 +70,24 @@ inline bool fastByDefault(Device device) {
            (device != Device::automatic && (profile(device).board == DeviceBoard5::imx1Zodiac ||
                                             profile(device).board == DeviceBoard5::s3c2442Rx1950));
 }
-// Whether the file at path is the firmware file by size and SHA-256.
+// Whether the file at path is the firmware file by size and SHA-256. The hash of a file is kept by path,
+// size and modified time, so checking the 67 MB CEOS.nbf again (each time the dialog validates) is free.
+// UI thread only.
 inline bool firmwareFileMatches(const QString& path, const DeviceFirmwareFile5& expected) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly) || file.size() != qint64(expected.bytes)) return false;
-    QCryptographicHash hash(QCryptographicHash::Sha256);
-    return hash.addData(&file) && hash.result().toHex() == QByteArray(expected.sha256);
+    const QFileInfo info(path);
+    if (!info.isFile() || info.size() != qint64(expected.bytes)) return false;
+    struct Hashed { qint64 size; QDateTime modified; QByteArray sha256; };
+    static QHash<QString, Hashed> hashes;
+    const QString key = info.absoluteFilePath();
+    const QDateTime modified = info.lastModified();
+    auto it = hashes.constFind(key);
+    if (it == hashes.constEnd() || it->size != info.size() || it->modified != modified) {
+        QFile file(path);
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return false;
+        it = hashes.insert(key, {info.size(), modified, hash.result().toHex()});
+    }
+    return it->sha256 == QByteArray(expected.sha256);
 }
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.

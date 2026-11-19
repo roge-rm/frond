@@ -7,6 +7,7 @@
 
 #include "SoC.h"
 #include "s3c2442_machine.h"
+#include "s3c2442_pen.h"
 
 // The HP iPAQ rx1950 in the normal runtime: the S3C2442 machine (s3c2442_machine.h) with the rx1950's
 // board (rx1950_board.h, rx1950_power.h). Windows Mobile, so no PACE or guest calls. The bootloader
@@ -85,9 +86,10 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<NandPages> pages;
     MemoryBuffer nandPageBuffer{};
     bool halted{false}, hostTimeLimit{true};
-    // Keys held through JamKey, released when their host time is up.
-    struct Jam { KeyId key; uint64_t untilMsec; };
+    // Keys held through JamKey, released when the guest's time reaches untilNs.
+    struct Jam { KeyId key; uint64_t untilNs; };
     std::vector<Jam> jams;
+    S3cPenPacer pen;
     std::vector<uint32_t> view, scan;
     bool framePending{false}, redraw{true};
     // Guest ns Run still owes the main loop, as cycles.

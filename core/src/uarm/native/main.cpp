@@ -660,7 +660,8 @@ bool gFastEngineMissing = false;
             return false;
         }
 
-        if (!deviceProfileRunnerEligible5(deviceType)) {
+        // The rx1950 runs here but isn't a runner device (frond-run, recipes and count-check are Palm OS only).
+        if (!deviceProfileRunnerEligible5(deviceType) && !rx1950) {
             cerr << deviceName5(deviceType) << ": native board is not implemented" << endl;
             return false;
         }
@@ -997,6 +998,7 @@ bool gFastEngineMissing = false;
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
         const uint64_t startedAt = timestampUsec();
         auto* const zodiac = dynamic_cast<SocIMX1*>(soc);
+        auto* const rx1950Soc = dynamic_cast<SocS3C2442*>(soc);
         const Imx1MachineCheapStatus zodiacStart = zodiac ? zodiac->Status() : Imx1MachineCheapStatus{};
         // The Zodiac's speed figures over 5 s windows, made here on the SDL thread.
         std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000) : nullptr;
@@ -1256,10 +1258,12 @@ bool gFastEngineMissing = false;
                     break;
                 }
 
-                // A stopped Zodiac machine can't go on. It ends the run like any other fatal error,
+                // A stopped Zodiac or rx1950 machine can't go on. It ends the run like any other fatal error,
                 // and nothing is saved over the session.
                 if (zodiac && zodiac->Halted())
                     throw runtime_error("Tapwave Zodiac 2: the machine stopped: " + zodiac->StopText());
+                if (rx1950Soc && rx1950Soc->Halted())
+                    throw runtime_error("HP iPAQ rx1950: the machine stopped: " + rx1950Soc->StopText());
 
                 link.TakeInputs(inputs);
                 for (const auto& input : inputs) {
