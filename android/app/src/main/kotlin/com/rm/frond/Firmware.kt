@@ -12,10 +12,31 @@ object Firmware {
     fun nor(context: Context, device: Device) = File(folder(context, device), "nor.bin")
     fun nand(context: Context, device: Device) = File(folder(context, device), "nand.bin")
 
+    // The rx1950's files are checked by SHA-256 at import only; here by size, and the core checks their CRC-32 at start.
     fun ready(context: Context, device: Device): Boolean {
         val nor = nor(context, device)
         val nand = nand(context, device)
+        if (device.rx1950) return nor.length() == RX1950_CEBL.bytes && nand.length() == RX1950_CEOS.bytes
         return nor.isFile && (nand.isFile || !device.nandRequired) && check(device, nor, nand.takeIf { it.isFile }) == null
+    }
+
+    // A firmware file Frond takes only as it is, by size and SHA-256 (core/src/common/device_profile5.h).
+    data class KnownFile(val name: String, val bytes: Long, val sha256: String)
+
+    val RX1950_CEBL = KnownFile("CEBL.nbf", 264794L, "33807007a49ab40e8190f2fdb20080d1d7efe6d3a56a6b551422373271a94b3f")
+    val RX1950_CEOS = KnownFile("CEOS.nbf", 67095130L, "764807c7aacd780876462b62a9ca2555226d2f11acccc69e0785fc159be20f6e")
+
+    fun matches(file: File, expected: KnownFile): Boolean =
+        file.length() == expected.bytes && sha256(file) == expected.sha256
+
+    fun sha256(file: File): String? = digest(file, "SHA-256")
+
+    // The rx1950 runs HP's WM5 ROM 1.01.00 ENG only: CEBL.nbf as the NOR and CEOS.nbf as the NAND.
+    private fun checkRx1950(nor: File, nand: File?): String? {
+        if (nand == null) return "Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."
+        if (!matches(nor, RX1950_CEBL)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
+        if (!matches(nand, RX1950_CEOS)) return "The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG."
+        return null
     }
 
     // What the NOR's Palm card header says, found the way the core looks for it: every 32 KiB.
@@ -268,6 +289,7 @@ object Firmware {
     fun check(device: Device, nor: File, nand: File?): String? {
         if (device.runs68k) return checkRom68k(device, nor, nand)
         if (!nor.canRead()) return "Couldn't read the NOR image."
+        if (device.rx1950) return checkRx1950(nor, nand)
         val rom = try { inspectRom68k(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         if (rom.device != null) return "This is a ${rom.device.label} ROM. Choose ${rom.device.label}."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
@@ -445,8 +467,10 @@ object Firmware {
         return md5 != null && md5 in fingerprints
     }
 
-    fun md5(file: File): String? = try {
-        val digest = java.security.MessageDigest.getInstance("MD5")
+    fun md5(file: File): String? = digest(file, "MD5")
+
+    private fun digest(file: File, algorithm: String): String? = try {
+        val digest = java.security.MessageDigest.getInstance(algorithm)
         file.inputStream().use { input ->
             val buffer = ByteArray(1 shl 20)
             while (true) {

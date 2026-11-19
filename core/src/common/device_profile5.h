@@ -354,7 +354,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      264794, 69206016, 32u << 20, 32u << 20, DisplayMode::mode_240x320, 1u << 4, true,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
      {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",
-      "app1|app2|app3|app4|up|down|left|right|select|power", -1, -1, -1, -1, false, false},
+      "app1|app2|app3|app4|up|down|left|right|centre|power", -1, -1, -1, -1, false, false},
      0, 0, 296352000},
     {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqH4350, {},

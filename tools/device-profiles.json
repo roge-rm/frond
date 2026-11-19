@@ -2421,7 +2421,7 @@
       "silkscreen_height": 0,
       "strip_height": 89,
       "app_names": "Calendar|Contacts|Inbox|Wireless",
-      "buttons": "app1|app2|app3|app4|up|down|left|right|select|power",
+      "buttons": "app1|app2|app3|app4|up|down|left|right|centre|power",
       "memory_stick_supported": false,
       "hold_present": false,
       "hold_supported": false,
