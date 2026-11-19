@@ -833,6 +833,7 @@ static void olderState() {
     assert(imx1MachineSaveState(loaded, resaved) == Imx1StateStatus::ok);
     assert(imx1MachineLoadState(loaded, resaved.data(), resaved.size()).status == Imx1StateStatus::ok);
     assert(imx1MachineSaveState(loaded, again) == Imx1StateStatus::ok && again == resaved);
+    assert(!(imx1MachineGpioInput(loaded, 1) & 0x8000));
     auto r = run(loaded, 200000, 5000);
     assert(d.nonzero() > 100 && !(r.result.registers[8] & 0x8000) && (r.result.registers[7] & 0x8000));
     Capture e;
