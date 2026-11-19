@@ -167,7 +167,7 @@ std::string S3c2442Machine::stopText() const {
                           stopped.pc);
             return line + stopped.text;
         case S3c2442Stop::watchdogReset: return "the watchdog ran out with its reset on (resets aren't modelled yet)";
-        case S3c2442Stop::powerOff: return "CLKCON POWER_OFF set, sleep mode isn't modelled yet";
+        case S3c2442Stop::powerOff: return "CLKCON POWER_OFF set";
         case S3c2442Stop::idleNoWake: return "idle with no interrupt that can come";
         case S3c2442Stop::undefined:
             std::snprintf(line, sizeof line, "undefined instruction %08x at %08x (or a form the CPU doesn't model)",
@@ -269,8 +269,9 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             if (write) result = size == 4 ? clock.write(offset, value) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return clock.read(o, v); });
             if (write && result == S3cAccess::ok && clock.powerOff()) {
-                stopped.stop = S3c2442Stop::powerOff;
-                stopped.pc = cpuGetCurInstrPC(cpuCore);
+                // Sleep mode from the next instruction: the interpreter call ends here (RESCHEDULE above).
+                sleeping = true;
+                ++sleeps;
             }
             break;
         case 0x4d000000:
@@ -467,12 +468,108 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     return best;
 }
 
+// EINT0-3 and the RTC alarm by their SRCPND bits, EINT4-15 by EINTPEND where EINTMASK lets them through.
+uint32_t S3c2442Machine::wakeSources() const {
+    return (intc.srcpnd & (0xfu | (1u << s3cIrq::rtc))) | (gpio.eintpend & ~gpio.eintmask & 0xfff0);
+}
+
+// Asleep the CPU's clock is off; the cycles are the budget's measure of time at the rate it slept at.
+void S3c2442Machine::sleepAdvance(uint64_t cpuCycles) {
+    const uint64_t cpuHz = clock.cpuClock();
+    if (!cpuHz || !cpuCycles) return;
+    cycleCount += cpuCycles;
+    idleCount += cpuCycles;
+    elapsedNs += mulDiv(cpuCycles, 1000000000, cpuHz, nsRest);
+    const uint64_t ticks32k = mulDiv(cpuCycles, 32768, cpuHz, rtcRest);
+    if (ticks32k) rtc.advance(ticks32k, intc);
+}
+
+// The wake-up reset (manual 7, "Power management"). The RTC, the GPIO block with EINTPEND and GSTATUS3-4
+// are in the alive part and keep their state; ASSUMPTION "GPIO kept in sleep": the port registers too (the
+// rx1950's OAL sets its own sleep pin table and restores the ones it saved). SDRAM held itself in self refresh, so it's kept; the data cache is cleaned to it
+// first, as the OAL cleans it before sleeping. Every other block is reset. The sources that woke it stay
+// pending for the OAL to read.
+void S3c2442Machine::wake() {
+    const uint32_t sources = intc.srcpnd & (0xfu | (1u << s3cIrq::rtc));
+    lastWake = wakeSources();
+    sleeping = false;
+    ++wakes;
+    cpuArm920LeanReset(cpuCore);
+    if (fastOn) {
+        // The loader writes SDRAM behind the CPU's back, so translated code goes.
+        setFastEngine(false);
+        cpuArm920DropJit(cpuCore);
+        setFastEngine(true);
+    }
+    intc.reset();
+    clock.reset();
+    memory.reset();
+    pwm.reset();
+    watchdog.reset();
+    sdi.reset();
+    usbDevice.reset();
+    uint16_t inputs[8];  // the board's inputs stay, as does the stylus
+    std::memcpy(inputs, adc.channel, sizeof inputs);
+    adc.reset();
+    std::memcpy(adc.channel, inputs, sizeof inputs);
+    dma.reset();
+    iis.reset();
+    iic.reset();
+    for (auto& u : uarts) u.reset();
+    lcd.reset();
+    nand.reset();
+    gpio.gstatus[2] = 2;  // OFFRST
+    for (unsigned n = 0; n < 32; ++n)
+        if (sources & (1u << n)) intc.pulse(n);
+    const uint32_t live = gpio.eintpend & ~gpio.eintmask;
+    intc.level(s3cIrq::eint4to7, live & 0xf0);
+    intc.level(s3cIrq::eint8to23, live & 0xffff00);
+    irqHeld = false;
+    batchAdvanced = 0;
+    if (irqLine) cpuIrq(cpuCore, false, false);
+    if (fiqLine) cpuIrq(cpuCore, true, false);
+    irqLine = fiqLine = false;
+    if (resetLoader) resetLoader();
+    else start(0);
+    updateLines();
+}
+
+int S3c2442Machine::backlightLevel() const {
+    if (sleeping) return -1;
+    const unsigned mode = gpio.con[S3cGpio::b] & 3;
+    if (mode == 1) return (gpio.dat[S3cGpio::b] & 1) ? 1000 : 0;
+    if (mode != 2) return -1;
+    const auto& t = pwm.timers[0];
+    if (!(pwm.tcon & 1) || !t.buffer) return (pwm.tcon & 4) ? 1000 : 0;
+    // TOUT0 is high from TCMPB0 down to 0 of each TCNTB0 + 1 period; TCON bit 2 inverts it.
+    uint64_t duty = uint64_t(std::min(t.compare, t.buffer) + 1) * 1000 / (uint64_t(t.buffer) + 1);
+    if (pwm.tcon & 4) duty = 1000 - duty;
+    return int(duty);
+}
+
 S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
     if (stopped.stop == S3c2442Stop::budget) stopped.stop = S3c2442Stop::running;
     if (stopped.stop != S3c2442Stop::running) return stopped.stop;
     const uint64_t target = retiredCount + idleCount + instructions;
     while (stopped.stop == S3c2442Stop::running) {
         const uint64_t used = retiredCount + idleCount;
+        if (sleeping) {
+            if (wakeSources()) {
+                wake();
+                continue;
+            }
+            if (used >= target) { stopped.stop = S3c2442Stop::budget; break; }
+            // Only the RTC alarm can come by itself; pins come from outside between runs.
+            uint64_t skip = target - used;
+            const uint64_t ticks = rtc.ticksToEvent(false, true);
+            if (ticks != UINT64_MAX && clock.cpuClock()) {
+                const __uint128_t need = __uint128_t(ticks) * clock.cpuClock();
+                const uint64_t cycles = need <= rtcRest ? 1 : uint64_t((need - rtcRest + 32767) / 32768);
+                skip = std::min(skip, std::max<uint64_t>(cycles, 1));
+            }
+            sleepAdvance(skip);
+            continue;
+        }
         if (used >= target) { stopped.stop = S3c2442Stop::budget; break; }
         // IDLE in CLKCON or the ARM920T's wait for interrupt: time goes on to the next event.
         if (clock.idle() || cpuArm920Waiting(cpuCore)) {

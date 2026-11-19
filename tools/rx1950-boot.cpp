@@ -214,6 +214,16 @@ int main(int argc, char** argv) {
     // 296.35 MHz from the 16.9344 MHz crystal (MDIV 97, PDIV 1, SDIV 2), FCLK:HCLK:PCLK 1:3:6.
     machine->clock.write(0x04, 0x61012);
     machine->clock.write(0x14, 0x7);
+    rx1950LoaderPins(machine->gpio);
+    // A wake from sleep starts as power on does: the loader copies eboot from NAND again and sets the clocks.
+    // eboot sees OFFRST in GSTATUS2 and goes to the kernel, which resumes from its sleep data.
+    machine->resetLoader = [&] {
+        machine->loadRam(ebootPhysical, bl.data() + nbfHeader, ebootBytes);
+        machine->clock.write(0x04, 0x61012);
+        machine->clock.write(0x14, 0x7);
+        rx1950LoaderPins(machine->gpio);
+        machine->start(ebootPhysical);
+    };
     std::vector<uint8_t> flash;
     bool nandNew = true;
     if (nandPath && std::ifstream(nandPath).good()) {
@@ -379,7 +389,7 @@ int main(int argc, char** argv) {
     };
     bool going = runUntil(endNs);
     // --interactive: then commands from stdin, one a line, times from now: "run S", "tap X Y [MS]",
-    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
+    // "key NAME [MS]", "shot NAME" (NAME.ppm), "peek VA", "stat", "profile S", "aborts N S", "nand" (page reads since the last one), "mmio S [LOW HIGH]", "adc CH VALUE" (an ADC input), "battery SPEC" (as --battery), "battery-state", "power" (sleep, backlight and LEDs), "intclog N", "fork" (a checkpoint; quit in the copy returns to it), "quit". Each answers with a line starting "ok" or "error".
     while (going && interactive) {
         char line[256];
         if (!std::fgets(line, sizeof line, stdin)) break;
@@ -503,6 +513,16 @@ int main(int argc, char** argv) {
                             std::get<1>(top[i].second), std::get<3>(top[i].second));
         } else if (c == "adc" && std::sscanf(line, "%*s %u %u", &x, &y) == 2 && x < 8 && y < 1024) {
             machine->adc.channel[x] = uint16_t(y);
+        } else if (c == "power") {
+            const auto leds = rx1950Leds(*machine);
+            std::printf("power: %s, %" PRIu64 " sleeps, %" PRIu64 " wakes (last by %08x), GSTATUS2 %x, backlight %d/1000, LEDs green %d red %d blue %d blinking %d notification %d"
+                        " (GPACON %07x GPADAT %07x GPBCON %06x GPBDAT %03x GPJDAT %04x TCON %06x TCNTB0 %u TCMPB0 %u)\n",
+                        machine->asleep() ? "asleep" : "awake", machine->sleepCount(), machine->wakeCount(), machine->lastWakeSources(),
+                        machine->gpio.gstatus[2], machine->backlightLevel(), leds.green, leds.red, leds.blue, leds.blinking,
+                        rx1950NotificationLed(*machine),
+                        machine->gpio.con[S3cGpio::a], machine->gpio.dat[S3cGpio::a], machine->gpio.con[S3cGpio::b],
+                        machine->gpio.dat[S3cGpio::b], machine->gpio.dat[S3cGpio::j], machine->pwm.tcon,
+                        machine->pwm.timers[0].buffer, machine->pwm.timers[0].compare);
         } else if (c == "battery-state") {
             std::printf("battery %s\n", rx1950BatteryState(battery).c_str());
         } else if (c == "battery") {

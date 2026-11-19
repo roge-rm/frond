@@ -43,7 +43,7 @@ enum class S3c2442Stop : uint8_t {
     budget,         // the instruction budget ran out
     refused,        // an access the machine doesn't model
     watchdogReset,  // the watchdog ran out with its reset on
-    powerOff,       // CLKCON POWER_OFF, sleep mode
+    powerOff,       // unused: CLKCON POWER_OFF puts the machine to sleep (asleep())
     idleNoWake,     // idle with no interrupt that can come
     dataCache,      // a cacheable access to something that isn't memory
     undefined,      // the CPU took the undefined instruction exception
@@ -107,6 +107,22 @@ class S3c2442Machine {
     std::function<void(uint32_t)> stepHook;
     const uint8_t* sdram() const { return ramBuffer; }
 
+    // Sleep mode: CLKCON POWER_OFF stops the CPU and every clock but the RTC's. A wake source (EINT0-3, EINT4-15
+    // that EINTMASK lets through, the RTC alarm) ends it with the wake-up reset: the blocks outside the
+    // alive part go back to their reset values, GSTATUS2 reads OFFRST, the CPU resets and resetLoader runs.
+    // run() goes on while asleep, the budget counting sleep time as idle cycles at the clock it slept at.
+    bool asleep() const { return sleeping; }
+    uint64_t sleepCount() const { return sleeps; }
+    uint64_t wakeCount() const { return wakes; }
+    // What ended the last sleep: SRCPND bits (EINT0-3, RTC alarm) with EINTPEND's EINT4-15.
+    uint32_t lastWakeSources() const { return lastWake; }
+    // The board's stand-in for the steppingstone loader at a wake from sleep: puts the boot code in SDRAM
+    // and calls start(). Unset, the CPU starts at 0 (the steppingstone).
+    std::function<void()> resetLoader;
+    // The backlight, PWM timer 0 on TOUT0 (GPB0): its duty, 0 to 1000, from TCMPB0 against TCNTB0 and the
+    // inverter bit; with GPB0 a plain output, 0 or 1000 from its level. -1 while asleep.
+    int backlightLevel() const;
+
     // Host input between runs: a board pin's level (keys, card detect, AC), and the stylus on the touch
     // panel in raw ADC units. Either can raise an interrupt for the next run.
     void setPin(S3cGpio::Port port, unsigned bit, bool level);
@@ -158,6 +174,10 @@ class S3c2442Machine {
     // CPU cycles to the next event; with wakeOnly, only events that can wake an idle CPU: interrupts
     // INTMSK (and INTSUBMSK, LCDINTMSK) let through, and a watchdog reset.
     uint64_t cyclesToEvent(bool wakeOnly = false) const;
+    // Sleep: the sources that wake it, pending now; time asleep, which moves only the RTC.
+    uint32_t wakeSources() const;
+    void sleepAdvance(uint64_t cpuCycles);
+    void wake();
     // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.
     void updateLines(bool sfrWrite = false);
 
@@ -181,6 +201,9 @@ class S3c2442Machine {
     // Remainders of each clock domain in CPU cycles times the domain's rate.
     uint64_t pclkRest = 0, hclkRest = 0, rtcRest = 0, nsRest = 0;
     bool debugWriteSeen = false;
+    bool sleeping = false;
+    uint64_t sleeps = 0, wakes = 0;
+    uint32_t lastWake = 0;
     uint64_t batchAdvanced = 0;
     uint32_t leanAdvanced = 0;  // of the running lean call, by leanRead
     bool sfrAccessed = false;  // since the Fast span started

@@ -109,6 +109,29 @@ inline void rx1950ApplyBattery(S3c2442Machine& machine, const BatteryPower& batt
     machine.setPin(rx1950AcPort, rx1950AcBit, !in.acLow);
 }
 
+// The LEDs (the OAL's LED call, nk 0x800529c8): GPA6 and GPA7 together are the solid "charged" light; GPA3
+// and GPA4 with GPJ6 pick the hardware blinker, GPA3 + GPA4 while charging and GPA4 alone for a notification;
+// GPA11 is the blue (wireless) LED. ASSUMPTION "rx1950 LED colours": GPA6 and GPA4 green, GPA7 and GPA3 red
+// (amber with both), all active high as in Linux mach-rx1950.c. The pins keep their level asleep.
+struct Rx1950Leds {
+    bool green, red, blue, blinking;
+    bool any() const { return green || red || blue; }
+};
+
+inline Rx1950Leds rx1950Leds(const S3c2442Machine& machine) {
+    const uint32_t a = machine.gpio.dat[S3cGpio::a] & ~machine.gpio.con[S3cGpio::a];
+    const bool blink = machine.gpio.dat[S3cGpio::j] & (1u << 6);
+    const bool green = (a & (1u << 6)) || (blink && (a & (1u << 4)));
+    const bool red = (a & (1u << 7)) || (blink && (a & (1u << 3)));
+    return {green, red, bool(a & (1u << 11)), blink && (a & 0x18)};
+}
+
+// SoC::Attention's alarm LED: the notification blink (GPA4 alone with GPJ6). No vibrate motor.
+inline bool rx1950NotificationLed(const S3c2442Machine& machine) {
+    const uint32_t a = machine.gpio.dat[S3cGpio::a] & ~machine.gpio.con[S3cGpio::a];
+    return (machine.gpio.dat[S3cGpio::j] & (1u << 6)) && (a & 0x18) == 0x10;
+}
+
 // The battery-state reply: the rx1950 takes charging, so no " no-charging".
 inline std::string rx1950BatteryState(const BatteryPower& battery) { return battery.Describe(); }
 

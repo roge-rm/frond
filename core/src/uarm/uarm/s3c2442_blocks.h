@@ -166,7 +166,8 @@ private:
 // data registers and the ADC sub-interrupt (INT_ADC_S). In wait-for-interrupt mode (XY_PST 3) the touch
 // sub-interrupt (INT_TC) comes when the stylus goes the way UD_SEN waits for, with ADCUPDN's history bit.
 // The stylus comes from the host as a position in the panel's raw ADC units (setStylus).
-// ASSUMPTION "rx1950 ADC inputs": channels 0-7 read channel[] (mid-scale until R4 gives the battery its own).
+// Channels 0-7 read channel[]: mid-scale after reset; the rx1950's battery inputs (AIN0-3) come from
+// rx1950_power.h.
 class S3cAdc {
 public:
     void reset();

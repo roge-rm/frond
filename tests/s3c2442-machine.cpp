@@ -213,5 +213,70 @@ int main() {
         const unsigned packMv = rx1950PackIdCount * 3300 / 1023;
         assert(packMv >= 500 && packMv <= 700);
     }
+    // Sleep: CLKCON POWER_OFF stops the CPU, time goes on for the RTC only, and the power key (EINT0 on a
+    // falling edge) wakes it with the wake-up reset: GSTATUS2 OFFRST, the source pending, blocks reset, the
+    // resetLoader's start, the GPIO block kept. Then the RTC alarm wakes it on its own.
+    // mov r0, #0x4c000000; mov r1, #8; str r1, [r0, #0xc] (CLKCON POWER_OFF); b .
+    for (const bool fast : {false, true}) {
+        std::vector<uint32_t> program{0xe3a0044c, 0xe3a01008, 0xe580100c, loop};
+        program.resize(0x100 / 4 + 1, 0);
+        program.back() = loop;  // where the loader starts
+        auto m = make(program);
+        if (fast && !m->setFastEngine(true)) continue;
+        unsigned loads = 0;
+        m->resetLoader = [&] { ++loads; m->start(code + 0x100); };
+        assert(m->gpio.write(0x50, 2, m->intc) == S3cAccess::ok);  // GPF0 as EINT0
+        assert(m->gpio.write(0x88, 2, m->intc) == S3cAccess::ok);  // falling edge
+        m->pwm.timers[0].buffer = 150;
+        m->pwm.timers[0].compare = 75;
+        m->pwm.tcon = 1;
+        assert(m->gpio.write(0x10, 2, m->intc) == S3cAccess::ok);  // GPB0 as TOUT0
+        assert(m->backlightLevel() == 76 * 1000 / 151);
+        assert(m->run(1000) == S3c2442Stop::budget && m->asleep() && m->sleepCount() == 1);
+        assert(m->backlightLevel() == -1);
+        const uint64_t ns = m->nanoseconds(), retired = m->retired();
+        assert(m->run(50000000) == S3c2442Stop::budget && m->asleep() && m->retired() == retired && m->nanoseconds() > ns);
+        assert(m->pwm.tcon == 1);  // nothing but the RTC moves asleep
+        m->setPin(S3cGpio::f, 0, false);
+        m->run(10);
+        assert(!m->asleep() && m->wakeCount() == 1 && loads == 1 && m->gpio.gstatus[2] == 2 && m->lastWakeSources() == 1);
+        assert((m->intc.srcpnd & 1) && m->intc.intmsk == 0xffffffff && m->pwm.tcon == 0 && !m->clock.powerOff());
+        assert(m->gpio.con[S3cGpio::f] == 2 && m->pc() == code + 0x100);
+        m->setPin(S3cGpio::f, 0, true);
+        // Asleep again (from the start of the program), then the alarm two seconds on.
+        m->start(code);
+        m->rtc.rtcalm = 0x41;  // ALMEN, seconds
+        const unsigned second = ((m->rtc.bcd[0] >> 4) * 10 + (m->rtc.bcd[0] & 0xf) + 2) % 60;
+        m->rtc.alarm[0] = (second / 10) << 4 | second % 10;
+        m->intc.srcpnd = 0;
+        assert(m->run(1000) == S3c2442Stop::budget && m->asleep());
+        m->run(4000000000ull);
+        assert(!m->asleep() && m->wakeCount() == 2 && (m->intc.srcpnd & (1u << s3cIrq::rtc)));
+        assert(m->lastWakeSources() == 1u << s3cIrq::rtc);
+    }
+    // The LEDs from the OAL's LED states (nk 0x800529c8) once the loader has made their pins outputs.
+    {
+        auto m = make({loop});
+        rx1950LoaderPins(m->gpio);
+        assert((m->gpio.con[S3cGpio::b] & 3) == 2);
+        auto gpa = [&](uint32_t v, bool gpj6) {
+            m->gpio.dat[S3cGpio::a] = v;
+            m->gpio.dat[S3cGpio::j] = gpj6 ? 0x40 : 0;
+        };
+        gpa(0x201000, false);  // all off
+        auto l = rx1950Leds(*m);
+        assert(!l.any() && !rx1950NotificationLed(*m));
+        gpa(0x201000 | 0x18, true);  // charging: amber blinking
+        l = rx1950Leds(*m);
+        assert(l.green && l.red && l.blinking && !l.blue && !rx1950NotificationLed(*m));
+        gpa(0x201000 | 0xc0, false);  // charged
+        l = rx1950Leds(*m);
+        assert(l.green && l.red && !l.blinking);
+        gpa(0x201000 | 0x10, true);  // notification
+        l = rx1950Leds(*m);
+        assert(l.green && !l.red && l.blinking && rx1950NotificationLed(*m));
+        gpa(0x201000 | 0x800, false);  // wireless
+        assert(rx1950Leds(*m).blue);
+    }
     std::printf("s3c2442 machine: ok\n");
 }
