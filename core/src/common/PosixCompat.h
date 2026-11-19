@@ -19,7 +19,17 @@
 #define POLLRDHUP 0  // no peer-close event here; POLLHUP and a zero-length read show it
 #endif
 
+#ifdef _WIN32
+#include <filesystem>
+#include <string>
+#endif
+
 namespace frondPosix {
+
+#ifdef _WIN32
+// A std::filesystem path's c_str() is wchar_t here; this is it for the APIs that take char*.
+inline std::string Narrow(const wchar_t* path) { return std::filesystem::path(path).string(); }
+#endif
 
 #if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
 inline constexpr int kCloexec = SOCK_CLOEXEC;
@@ -70,7 +80,7 @@ inline uint64_t MtimeNs(const struct stat& st) {
 // number where the file system can't (the caller then writes the bytes).
 inline int Preallocate(int fd, uint64_t length) {
 #if defined(_WIN32)
-    return _chsize_s(fd, __int64(length));
+    return _chsize_s(fd, static_cast<long long>(length));
 #elif defined(__APPLE__)
     fstore_t store{F_ALLOCATEALL | F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, off_t(length), 0};
     if (fcntl(fd, F_PREALLOCATE, &store) == -1) {

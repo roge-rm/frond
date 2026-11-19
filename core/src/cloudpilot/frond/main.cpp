@@ -8,7 +8,9 @@
 #include "UsbWifiRuntime.h"
 #include "dana_wireless5.h"
 #include "UsbHostBridge.h"
+#ifndef _WIN32
 #include <sys/syscall.h>
+#endif
 // frond-68k: the runner for DragonBall (68k) devices, built on Cloudpilot's core. It checks a ROM,
 // runs a ROM or saved session in a window with the LCD, silkscreen and button bar, or headless for
 // a set number of guest seconds, and takes console commands on stdin, or the desktop's commands on

@@ -1,4 +1,6 @@
 #pragma once
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#define poll(fds, count, timeout) WSAPoll((fds), (count), (timeout))
+#ifdef __cplusplus
+inline int poll(WSAPOLLFD* fds, unsigned long count, int timeout) { return WSAPoll(fds, count, timeout); }
+#endif

@@ -242,7 +242,11 @@ inline bool openCandidate(const std::filesystem::path& folder, Candidate& out) {
         if (fd < 0) return false;
         if (beforeLockHook()) beforeLockHook()(name);
         struct stat mine {}, named {};
+#ifdef _WIN32
+        if (fstat(fd, &mine) < 0) {
+#else
         if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0 || fstat(fd, &mine) < 0) {
+#endif
             ::close(fd);
             unlink(name.c_str());
             return false;
