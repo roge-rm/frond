@@ -26,7 +26,9 @@ inline int renameWide(const Wide& from, const Wide& to) {
     return -1;
 }
 }  // namespace frondWin
+extern "C++" {
 inline int rename(const wchar_t* from, const wchar_t* to) { return frondWin::renameWide(from, to); }
 inline int rename(const char* from, const wchar_t* to) { return frondWin::renameWide(from, to); }
 inline int rename(const wchar_t* from, const char* to) { return frondWin::renameWide(from, to); }
+}
 #endif

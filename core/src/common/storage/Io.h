@@ -80,8 +80,12 @@ inline void removePath(const std::filesystem::path& p) {
 }
 
 inline int64_t sizeOf(int fd) {
+#ifdef _WIN32
+    return int64_t(_filelengthi64(fd));
+#else
     struct stat st {};
     return fstat(fd, &st) == 0 ? int64_t(st.st_size) : -1;
+#endif
 }
 
 // An open file description lock on the whole file, as the apps hold on a card open in Files.
