@@ -706,12 +706,12 @@ static void dmaTests() {
     dma.service(2, intc);
     dma.service(2, intc);
     assert(!dma.on(2) && dma.channelFor(S3cDmaRequest::iisOut) == -1 && (get(dma, 0x94) & 0xfffff) == 0);
-    // A burst moves four units a request.
+    // A burst moves four units a request and takes one off the count (bytes = DSZ x TSZ x TC).
     dma.write(0x90, 0xb0900000 | 8);
     dma.write(0xa0, 2);
     moved.clear();
     dma.service(2, intc);
-    assert(moved.size() == 4 && dma.remaining(2) == 4);
+    assert(moved.size() == 4 && dma.remaining(2) == 7 && dma.transferBytes(2) == 8);
     dma.write(0xa0, 4);  // stop
     assert(!dma.on(2));
     // Channel 1 source 2 and channel 2 source 1 are I2SSDI.
@@ -797,12 +797,12 @@ static void codecTests() {
     int16_t l = 1000, r = -1000;
     codec.play(l, r);
     assert(l == 1000 && r == -1000);
-    // 24 steps of 0.25 dB halve it; left is the high byte.
-    send({0x34, 0x10, 24, 48});
+    // 24 steps of 0.25 dB halve it; left is the low byte.
+    send({0x34, 0x10, 48, 24});
     l = 1000, r = 1000;
     codec.play(l, r);
     assert(l == 500 && r == 250);
-    send({0x34, 0x10, 0xfc, 0});
+    send({0x34, 0x10, 0, 0xfc});
     l = 1000;
     codec.play(l, r);
     assert(l == 0);
@@ -822,7 +822,7 @@ static void codecTests() {
     assert(!codec.adcOn());
     send({0x34, 0x02, 0x04, 0x04});
     assert(codec.adcOn());
-    send({0x34, 0x20, 12, 0});
+    send({0x34, 0x20, 0, 12});
     int16_t rec[2];
     codec.record(1000, rec);
     assert(rec[0] == 2000 && rec[1] == 1000);

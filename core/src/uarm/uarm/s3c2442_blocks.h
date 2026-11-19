@@ -240,6 +240,8 @@ public:
     uint32_t remaining(unsigned ch) const { return on(ch) ? current[ch].count : 0; }
     // Bytes a unit moves (DSZ), 0 for the reserved size.
     uint32_t unitBytes(unsigned ch) const;
+    // Bytes one count (an atomic transfer) moves: the unit, or four of them with TSZ set.
+    uint32_t transferBytes(unsigned ch) const { return unitBytes(ch) * ((channel[ch].dcon & (1u << 28)) ? 4 : 1); }
     bool interruptAtEnd(unsigned ch) const { return channel[ch].dcon & (1u << 29); }
     bool on(unsigned ch) const { return channel[ch].dmasktrig & 2; }
     // A unit's move: physical address, size in bytes, write, the value. False where there's nothing there,

@@ -78,6 +78,8 @@ void S3cDma::service(unsigned ch, S3cIntc& intc) {
     auto& cur = current[ch];
     const uint32_t size = unitBytes(ch);
     const unsigned n = (c.dcon & (1u << 28)) ? 4 : 1;  // TSZ: a burst of four
+    // TC counts atomic transfers (bytes = DSZ x TSZ x TC): a burst's units are one count.
+    // ASSUMPTION "DMA whole service": DCON bit 27 isn't modelled, every request moves one atomic transfer.
     for (unsigned i = 0; i < n && cur.count; ++i) {
         uint32_t value = 0;
         bool ok = size && bus && bus(cur.src, size, false, value);
@@ -90,8 +92,8 @@ void S3cDma::service(unsigned ch, S3cIntc& intc) {
         // INC: 0 steps the address by the unit, 1 keeps it fixed (a FIFO).
         if (!(c.disrcc & 1)) cur.src += size;
         if (!(c.didstc & 1)) cur.dst += size;
-        --cur.count;
     }
+    if (cur.count) --cur.count;
     if (cur.count) return;
     if (c.dcon & (1u << 29)) intc.pulse(s3cIrq::dma0 + ch);
     // RELOAD set turns the channel off at the end; clear starts the next run from the initial registers.
