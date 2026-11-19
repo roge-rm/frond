@@ -7,7 +7,9 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "RndisHost.h"
@@ -319,34 +321,53 @@ static uint16_t freeUdpPort() {
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t n = sizeof(a);
-    assert(fd >= 0 && bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0);
-    assert(getsockname(fd, reinterpret_cast<sockaddr*>(&a), &n) == 0);
+    assert(fd >= 0);
+    const int bound = bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    assert(bound == 0);
+    const int named = getsockname(fd, reinterpret_cast<sockaddr*>(&a), &n);
+    assert(named == 0);
+    (void)bound, (void)named;
     close(fd);
     return ntohs(a.sin_port);
 }
 
 // The desktop's connect request: one UDP byte to the host port reaches the handheld's 5679 from 169.254.2.2.
 static void connectRequestTests() {
-    const uint16_t port = freeUdpPort();
-    frondNet::DesktopLink link(mac, port);
+    // Another program can take the free port before slirp binds it, so try a few.
+    std::unique_ptr<frondNet::DesktopLink> bound;
+    uint16_t port = 0;
     Bytes f, request;
-    link.Poll(0);
-    assert(link.Receive(f));
-    link.Input(dhcpAnswer(f, 2).data(), 342, ms);
-    assert(link.Receive(request));
-    link.Input(dhcpAnswer(request, 5).data(), 342, 2 * ms);
-    assert(link.Address() == 0xa9fe0202);
+    for (int attempt = 0; attempt < 5 && !bound; ++attempt) {
+        port = freeUdpPort();
+        auto link = std::make_unique<frondNet::DesktopLink>(mac, port);
+        link->Poll(0);
+        assert(link->Receive(f));
+        link->Input(dhcpAnswer(f, 2).data(), 342, ms);
+        assert(link->Receive(request));
+        link->Input(dhcpAnswer(request, 5).data(), 342, 2 * ms);
+        assert(link->Address() == 0xa9fe0202);
+        if (link->ConnectForward()) bound = std::move(link);
+    }
+    if (!bound) {
+        std::fprintf(stderr, "rndis-host: no free UDP port could be forwarded in 5 tries\n");
+        std::abort();
+    }
+    frondNet::DesktopLink& link = *bound;
     // The port is taken now.
     const int busy = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in a{};
     a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     a.sin_port = htons(port);
-    assert(bind(busy, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0);
+    const int taken = bind(busy, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    assert(taken != 0);
+    (void)taken;
     close(busy);
     const int fd = socket(AF_INET, SOCK_DGRAM, 0);
     const uint8_t knock = 0x7f;
-    assert(sendto(fd, &knock, 1, 0, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 1);
+    const ssize_t sent = sendto(fd, &knock, 1, 0, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+    assert(sent == 1);
+    (void)sent;
     close(fd);
     const uint8_t device[6] = {0x82, 0x00, 0x60, 0x0f, 0xe8, 0x00};
     bool got = false;

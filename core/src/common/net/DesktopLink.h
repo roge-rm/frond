@@ -42,6 +42,8 @@ class DesktopLink {
     // The address the handheld gave the desktop, and the handheld's (its DHCP server), 0 until then.
     uint32_t Address() const { return address; }
     uint32_t Server() const { return server; }
+    // True once the host's connect request port is forwarded to the handheld.
+    bool ConnectForward() const { return forwarding; }
 
     // DHCP frames, public for tests: a DISCOVER or REQUEST from mac, and the type (2 OFFER, 5 ACK, 6 NAK, 0 none)
     // of a frame that answers xid for mac, with its yiaddr, server ID and netmask.
@@ -60,6 +62,7 @@ class DesktopLink {
     uint32_t xid{0x46726e64}, offered{0}, offerServer{0}, address{0}, server{0}, netmask{0};
     uint64_t retryAt{0};
     uint16_t hostConnectPort{0};
+    bool forwarding{false};
     std::deque<std::vector<uint8_t>> outgoing;
     std::unique_ptr<WifiRouter> router;
     uint8_t mac[6]{};

@@ -1,7 +1,9 @@
 #include "DesktopLink.h"
 #ifndef __EMSCRIPTEN__
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 
 #include "WifiRouter.h"
 
@@ -133,9 +135,15 @@ void DesktopLink::Bind(uint32_t desktop, uint32_t handheld, uint32_t mask) {
     router = std::make_unique<WifiRouter>(layout);
     state = State::bound;
     // Another Frond on this host may hold the port; the link works without it, the desktop just can't ask.
-    if (hostConnectPort && !router->AddUdpForward(hostConnectPort, server, connectPort))
+    if (!hostConnectPort) return;
+    const int error = router->AddUdpForward(hostConnectPort, server, connectPort);
+    forwarding = error == 0;
+    if (error == EADDRINUSE)
         fprintf(stderr, "USB network: UDP port %u on 127.0.0.1 is taken, the desktop can't ask for a connection\n",
                 unsigned(hostConnectPort));
+    else if (error)
+        fprintf(stderr, "USB network: can't forward UDP port %u on 127.0.0.1 (%s), the desktop can't ask for a connection\n",
+                unsigned(hostConnectPort), strerror(error));
 }
 
 void DesktopLink::Poll(uint64_t now) {
