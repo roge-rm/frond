@@ -1,3 +1,4 @@
+#include "PosixCompat.h"
 #include "HostLink.h"
 
 #include "UnixListener.h"
@@ -77,7 +78,7 @@ bool HostLink68k::Open(Kind newKind, uint16_t newPort, std::string& error, const
         // A new PTY has no slave open yet; the first open isn't reported, so count it as there.
         hung = false;
     } else {
-        fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        fd = frondPosix::Socket(AF_INET, SOCK_STREAM | frondPosix::kNonblock | frondPosix::kCloexec, 0);
         const int on = 1;
         sockaddr_in address{};
         address.sin_family = AF_INET;

@@ -1,4 +1,5 @@
 #pragma once
+#include "PosixCompat.h"
 #include <chrono>
 #include "ExternalStorage.h"
 #include "device_profile5.h"
@@ -80,7 +81,7 @@ class RuntimeCards {
             stat(path.c_str(), &named) || !S_ISREG(mine.st_mode) || mine.st_dev != named.st_dev || mine.st_ino != named.st_ino)
             return fail("error: cannot lock card file");
         next->baseDev=mine.st_dev; next->baseIno=mine.st_ino;
-        next->baseMtime=uint64_t(mine.st_mtim.tv_sec)*1000000000ull+mine.st_mtim.tv_nsec;
+        next->baseMtime=frondPosix::MtimeNs(mine);
         frondSdFile::Info info;
         std::vector<uint32_t> table;
         if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok ||
@@ -113,7 +114,7 @@ class RuntimeCards {
             stat(path.c_str(), &named) || !S_ISREG(mine.st_mode) || mine.st_dev != named.st_dev || mine.st_ino != named.st_ino)
             return fail("error: cannot lock card file");
         next->baseDev=mine.st_dev; next->baseIno=mine.st_ino;
-        next->baseMtime=uint64_t(mine.st_mtim.tv_sec)*1000000000ull+mine.st_mtim.tv_nsec;
+        next->baseMtime=frondPosix::MtimeNs(mine);
         frondSdFile::Info info;
         std::vector<uint32_t> table;
         if (frondMachine::readSdHeader(path, info, &table) != frondMachine::SiblingStatus::ok || !info.classic ||
@@ -168,7 +169,7 @@ class RuntimeCards {
         size_t count=0;
         for(const auto& c:{cards[0],cards[1],stick}) if(c) {
             struct stat st{};
-            if(fstat(c->fd,&st) || uint64_t(st.st_mtim.tv_sec)*1000000000ull+st.st_mtim.tv_nsec!=c->baseMtime)
+            if(fstat(c->fd,&st) || frondPosix::MtimeNs(st)!=c->baseMtime)
                 return false;
             if(c->failed || !c->backing->DurableIs(c->path) || gExternalStorage.GetImage(c->key)!=c->image.get()) return false;
             ++count;
@@ -240,7 +241,7 @@ class RuntimeCards {
                 return "invalid portable media header or checksum";
             out << id << " sd " << std::quoted(path.string()) << " " << key << " " << serial << " "
                 << size << " " << protect << " " << insert << " " << st.st_dev << " " << st.st_ino << " "
-                << uint64_t(st.st_mtim.tv_sec)*1000000000ull+st.st_mtim.tv_nsec << " " << protocol << " 0\n";
+                << frondPosix::MtimeNs(st) << " " << protocol << " 0\n";
         }
         if(!seen) return "empty portable manifest";
         linked=out.str(); return "";

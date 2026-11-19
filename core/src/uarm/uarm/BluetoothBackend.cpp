@@ -1,3 +1,4 @@
+#include "PosixCompat.h"
 #include "BluetoothBackend.h"
 #include <algorithm>
 #include <cerrno>
@@ -16,7 +17,7 @@ bool BluetoothBackend::Open(const std::string& path,std::string& error) {
     if(path.empty() || path[0]!='/' || path.find('\0')!=std::string::npos || path.size()>=sizeof(sockaddr_un::sun_path)) {
         error="Choose an absolute Unix socket path shorter than 108 bytes.";return false;
     }
-    const int candidate=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
+    const int candidate=frondPosix::Socket(AF_UNIX,SOCK_STREAM|frondPosix::kCloexec,0);
     if(candidate<0){error=std::strerror(errno);return false;}
     sockaddr_un address{};address.sun_family=AF_UNIX;
     std::memcpy(address.sun_path,path.c_str(),path.size()+1);

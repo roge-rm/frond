@@ -1,3 +1,4 @@
+#include "PosixCompat.h"
 #include "HostNetwork.h"
 #ifndef __EMSCRIPTEN__
 #include <arpa/inet.h>
@@ -199,7 +200,7 @@ HostNetwork::Result HostNetwork::Open(unsigned index, unsigned type, int protoco
     Close(index);
     auto& s = impl->sockets[index];
     s.fd =
-        socket(AF_INET, (type == 1 ? SOCK_STREAM : SOCK_DGRAM) | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        frondPosix::Socket(AF_INET, (type == 1 ? SOCK_STREAM : SOCK_DGRAM) | frondPosix::kNonblock | frondPosix::kCloexec, 0);
     s.type = type;
     return s.fd < 0 ? Result{-1, palmError(errno)} : Result{int32_t(index + 4)};
 }

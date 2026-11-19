@@ -4,6 +4,7 @@
 // A listening Unix stream socket for the host serial and infrared endpoints. The socket's folder
 // must already exist, be owned by the user and have mode 0700, so no other user can connect.
 
+#include "PosixCompat.h"
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -52,7 +53,7 @@ inline int Listen(const std::string& path, std::string& error, ino_t& inode) {
             return -1;
         }
         // A socket someone still listens on is not stale.
-        const int probe = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        const int probe = frondPosix::Socket(AF_UNIX, SOCK_STREAM | frondPosix::kCloexec, 0);
         address.sun_family = AF_UNIX;
         memcpy(address.sun_path, path.c_str(), path.size() + 1);
         const bool live = probe >= 0 && connect(probe, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0;
@@ -69,7 +70,7 @@ inline int Listen(const std::string& path, std::string& error, ino_t& inode) {
         error = path + ": " + strerror(errno);
         return -1;
     }
-    const int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    const int fd = frondPosix::Socket(AF_UNIX, SOCK_STREAM | frondPosix::kNonblock | frondPosix::kCloexec, 0);
     address = {};
     address.sun_family = AF_UNIX;
     memcpy(address.sun_path, path.c_str(), path.size() + 1);

@@ -1,6 +1,7 @@
 #ifndef FROND_SD_CANDIDATE_H
 #define FROND_SD_CANDIDATE_H
 
+#include "PosixCompat.h"
 #include "CardBacking.h"
 #include "FileCardBacking.h"
 #include "FrondSdImage.h"
@@ -269,7 +270,7 @@ inline Result create(const std::filesystem::path& folder, uint64_t payloadBytes,
         return fail(code, message);
     };
     const uint64_t total = frondSdFile::headerBytes + payloadBytes;
-    const int allocated = posix_fallocate(candidate.fd, 0, off_t(total));
+    const int allocated = frondPosix::Preallocate(candidate.fd, total);
     if (allocated == ENOSPC) return abandon("space", "There isn't enough free space for the card.");
     uint32_t crc = 0;
     uint64_t at = 0;

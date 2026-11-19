@@ -8,6 +8,7 @@
 // (cancel-files, panel-visible) get no reply.
 // Not thread safe: only the emulation thread uses it.
 
+#include "PosixCompat.h"
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -51,7 +52,7 @@ class DesktopChannel {
         address.sun_family = AF_UNIX;
         if (path.size() >= sizeof(address.sun_path)) throw std::runtime_error("desktop socket path too long");
         std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
-        fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        fd = frondPosix::Socket(AF_UNIX, SOCK_STREAM | frondPosix::kCloexec, 0);
         if (fd < 0) throw std::runtime_error("cannot create desktop socket");
         if (connect(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
             fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
