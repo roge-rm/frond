@@ -303,6 +303,16 @@ int main() {
         assert(l.green && !l.red && l.blinking && rx1950NotificationLed(*m));
         gpa(0x201000 | 0x800, false);  // wireless
         assert(rx1950Leds(*m).blue);
+        // SoC::Attention's colour: blinked pins only in the lit half of each second, solid ones always.
+        gpa(0x201000 | 0x18, true);
+        assert(rx1950LedColour(*m, 0) == 3 && rx1950LedColour(*m, 499999999) == 3 && rx1950LedColour(*m, 500000000) == 0);
+        assert(rx1950LedColour(*m, 1000000000) == 3);
+        gpa(0x201000 | 0xc0, false);
+        assert(rx1950LedColour(*m, 0) == 3 && rx1950LedColour(*m, 700000000) == 3);
+        gpa(0x201000 | 0x10, true);
+        assert(rx1950LedColour(*m, 100) == 1 && rx1950LedColour(*m, 600000000) == 0);
+        gpa(0x201000 | 0x800, false);
+        assert(rx1950LedColour(*m, 0) == 0);
     }
     // Save and load: a machine loaded from a state runs on exactly as the one saved, with a timer interrupt; a damaged state or one from another SDRAM size is refused and changes nothing.
     {

@@ -751,7 +751,7 @@ bool gFastEngineMissing = false;
             cpuSetFastEngine(false);
             string why;
             soc = SocS3C2442::Create(static_cast<const uint8_t*>(nor.data), nor.size,
-                                     static_cast<uint8_t*>(nand.data), nand.size, why);
+                                     static_cast<uint8_t*>(nand.data), nand.size, why, options.battery);
             if (!soc) {
                 cerr << "HP iPAQ rx1950: " << why << endl;
                 return false;

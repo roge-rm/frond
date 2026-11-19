@@ -1011,6 +1011,8 @@ static void rx1950() {
     const auto& c = p->capabilities;
     assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && !c.sound &&
            !c.microphone && !c.builtInWifi && !c.usbWifi);
+    // The charge LED in green, red or amber (AttentionState's bits); no vibrate motor.
+    assert(c.ledColours == 3 && !c.vibrate);
     assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes, p->nandSize, false, true) ==
            DeviceFirmwareError5::none);
     assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes, p->nandSize, false, false) ==

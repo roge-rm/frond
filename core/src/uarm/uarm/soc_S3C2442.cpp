@@ -78,13 +78,15 @@ struct SocS3C2442::NandPages : S3cNand::Store {
     }
 };
 
-SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error) {
+SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error,
+                               const BatteryPower& battery) {
     if (!rx1950IsCebl(cebl, size)) {
         error = "not the rx1950's CEBL.nbf that Frond runs (HP's WM5 ROM 1.01.00 ENG)";
         return nullptr;
     }
     std::unique_ptr<SocS3C2442> soc(new SocS3C2442());
     soc->rom.assign(cebl, cebl + size);
+    soc->battery = battery;
     S3c2442Options options;
     options.rtcStart = rx1950RtcStart;
     // No serial cable.
@@ -193,7 +195,12 @@ bool SocS3C2442::SetBattery(const BatteryPower& value) {
     return true;
 }
 
-SoC::Attention SocS3C2442::GuestAttention() { return {rx1950NotificationLed(*machine), false}; }
+// The charge and notification LED, stepped by the board's blinker in guest time. No vibrate motor.
+SoC::Attention SocS3C2442::GuestAttention() {
+    Attention attention;
+    attention.ledColour = rx1950LedColour(*machine, machine->nanoseconds());
+    return attention;
+}
 
 bool SocS3C2442::LcdEnabled() { return !machine->asleep() && machine->lcd.enabled(); }
 

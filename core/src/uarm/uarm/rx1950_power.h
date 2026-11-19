@@ -128,10 +128,23 @@ inline Rx1950Leds rx1950Leds(const S3c2442Machine& machine) {
     return {green, red, bool(a & (1u << 11)), blink && (a & 0x18)};
 }
 
-// SoC::Attention's alarm LED: the notification blink (GPA4 alone with GPJ6). No vibrate motor.
+// The notification blink (GPA4 alone with GPJ6).
 inline bool rx1950NotificationLed(const S3c2442Machine& machine) {
     const uint32_t a = machine.gpio.dat[S3cGpio::a] & ~machine.gpio.con[S3cGpio::a];
     return (machine.gpio.dat[S3cGpio::j] & (1u << 6)) && (a & 0x18) == 0x10;
+}
+
+// The hardware blinker's period and lit part in guest ns. ASSUMPTION "rx1950 LED blink": 1 s, lit half of it.
+inline constexpr uint64_t rx1950BlinkPeriodNs = 1000000000, rx1950BlinkLitNs = 500000000;
+
+// The charge and notification LED as SoC::Attention's colour bits (1 green, 2 red) at guest time ns: the solid
+// pins always, the blinked ones in the lit part of each period. The blue LED isn't part of it.
+inline uint8_t rx1950LedColour(const S3c2442Machine& machine, uint64_t ns) {
+    const uint32_t a = machine.gpio.dat[S3cGpio::a] & ~machine.gpio.con[S3cGpio::a];
+    uint8_t colour = (a & (1u << 6) ? 1 : 0) | (a & (1u << 7) ? 2 : 0);
+    if ((machine.gpio.dat[S3cGpio::j] & (1u << 6)) && ns % rx1950BlinkPeriodNs < rx1950BlinkLitNs)
+        colour |= (a & (1u << 4) ? 1 : 0) | (a & (1u << 3) ? 2 : 0);
+    return colour;
 }
 
 // The battery-state reply: the rx1950 takes charging, so no " no-charging".

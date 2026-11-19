@@ -23,8 +23,10 @@ class SocS3C2442 : public SoC {
    public:
     // cebl is CEBL.nbf. flash is the whole NAND, data then spare per page (rx1950NandImage), taken over
     // and given back with delete[]; null when a session's NAND file is attached after (frondNand::attachFile).
+    // battery sets the AC and charge pins before the machine starts, so a start on the charger raises no EINT2.
     // nullptr with the reason in error when it can't run.
-    static SocS3C2442* Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error);
+    static SocS3C2442* Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error,
+                              const BatteryPower& battery = {});
 
     void Reset() override;
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;

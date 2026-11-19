@@ -2325,6 +2325,25 @@ void paintT415BesideTab(Canvas& canvas, const DeviceControlProfile& profile, Dev
 // round off into the window background.
 const Rgb ipaqBackground{18,19,22};
 // The shade runs from top to bottom over span units, the body's height unless given.
+// A round LED: green, red or amber (SoC::Attention colour bits) with a soft glow, dark grey when off. size
+// scales it for strips with more units per pixel.
+void paintLedLamp(Canvas& canvas, float lx, float ly, uint8_t colour, float size) {
+    const bool green=colour&1,red=colour&2;
+    const Rgb lamp=green && red ? Rgb{255,170,40} : green ? Rgb{80,232,110} : red ? Rgb{255,72,60} : Rgb{34,35,39};
+    const float k=size;
+    if(colour) canvas.paint(lx-8*k,ly-8*k,lx+8*k,ly+8*k,[&](float x,float y) {
+        return clamp01(1-std::hypot(x-lx,y-ly)/(7*k))*0.4f;
+    },[&](float,float,Rgb) {return lamp;});
+    canvas.paint(lx-5*k,ly-5*k,lx+5*k,ly+5*k,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-3.6f*k);},
+                 [](float,float,Rgb) {return Rgb{12,12,14};});
+    canvas.paint(lx-5*k,ly-5*k,lx+5*k,ly+5*k,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-2.8f*k);},
+                 [&](float x,float y,Rgb) {
+        // A small highlight up and to the left.
+        const float g=clamp01(1-std::hypot(x-lx+0.9f*k,y-ly+0.9f*k)/(1.6f*k));
+        return lamp+Rgb{60,60,60}*(g*g);
+    });
+}
+
 void paintIpaqBody(Canvas& canvas, float width, float H, float corner, Rgb top, Rgb bottom, float grain, float span=0) {
     if(span<=0)span=H;
     const SDL_Rect body{0,-int(corner)-2,int(width),int(H+corner)+2};
@@ -2426,7 +2445,9 @@ void paintIpaqChromeNavigator(Canvas& canvas, const DeviceControlProfile& profil
 }
 
 // iPAQ rx1950: satin silver, round dark keys in bright rings close round a chrome five-way.
-void paintRx1950Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed) {
+// The charge LED sits above the Wireless key, where the front's top right corner would be.
+void paintRx1950Controls(Canvas& canvas, const DeviceControlProfile& profile, int width, DeviceKeyMask pressed,
+                         DeviceStick stick) {
     const float H=profile.height;
     const int ox=(width-profile.width)/2;
     auto down=[&](KeyId key) {return (pressed&deviceKeyBit(key))!=0;};
@@ -2442,6 +2463,7 @@ void paintRx1950Controls(Canvas& canvas, const DeviceControlProfile& profile, in
         paintIpaqRoundKey(canvas,r,down(b.key),b.icon,1.35f);
     }
     paintIpaqChromeNavigator(canvas,profile,ox,pressed);
+    if(stick.lampShown) paintLedLamp(canvas,float(ox+438),26,stick.lamp,2);
 }
 
 // What's printed on each h4350 keyboard key, in h4350Key order: the black face, the blue
@@ -3152,22 +3174,7 @@ void paintZodiacControls(Canvas& canvas, const DeviceControlProfile& profile, De
                 return canvas.edge(std::min(ring,segment(x,y,ix,iy-6.4f,ix,iy-0.4f))-0.85f);
             },[&](float,float,Rgb) {return ink;});
             // The power LED right of the key: green, red or amber with a soft glow, dark grey when off.
-            if(stick.lampShown) {
-                const float lx=cx+28,ly=cy;
-                const bool green=stick.lamp&1,red=stick.lamp&2;
-                const Rgb lamp=green && red ? Rgb{255,170,40} : green ? Rgb{80,232,110} : red ? Rgb{255,72,60} : Rgb{34,35,39};
-                if(stick.lamp) canvas.paint(lx-8,ly-8,lx+8,ly+8,[&](float x,float y) {
-                    return clamp01(1-std::hypot(x-lx,y-ly)/7)*0.4f;
-                },[&](float,float,Rgb) {return lamp;});
-                canvas.paint(lx-5,ly-5,lx+5,ly+5,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-3.6f);},
-                             [](float,float,Rgb) {return Rgb{12,12,14};});
-                canvas.paint(lx-5,ly-5,lx+5,ly+5,[&](float x,float y) {return canvas.edge(std::hypot(x-lx,y-ly)-2.8f);},
-                             [&](float x,float y,Rgb) {
-                    // A small highlight up and to the left.
-                    const float g=clamp01(1-std::hypot(x-lx+0.9f,y-ly+0.9f)/1.6f);
-                    return lamp+Rgb{60,60,60}*(g*g);
-                });
-            }
+            if(stick.lampShown) paintLedLamp(canvas,cx+28,cy,stick.lamp,1);
         }
         if(b.icon==DeviceControlIcon::bluetooth) {
             // A blue lamp in the middle with a soft glow round it.
@@ -3232,7 +3239,7 @@ void drawDeviceControls(SDL_Renderer* renderer, const DeviceControlProfile& prof
             paintZodiacControls(canvas,profile,pressed,stick,DeviceControlSection::below,0,float(profile.width),profile.height);
             break;
         case DeviceControlStyle::ipaq210: paintIpaq210Controls(canvas,profile,width*u,pressed);break;
-        case DeviceControlStyle::rx1950: paintRx1950Controls(canvas,profile,width*u,pressed);break;
+        case DeviceControlStyle::rx1950: paintRx1950Controls(canvas,profile,width*u,pressed,stick);break;
         case DeviceControlStyle::h4350: paintH4350Controls(canvas,profile,width*u,pressed,view);break;
         case DeviceControlStyle::t415: paintT415Controls(canvas,profile,beside ? profile.width : width*u,pressed,false,beside);break;
         default: paintTxControls(canvas,profile,width*u,pressed);

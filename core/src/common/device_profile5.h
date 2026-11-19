@@ -351,10 +351,12 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
      0, 0, 0, 0, DisplayMode::mode_480x640, 0, false},
     // HP iPAQ rx1950 (Windows Mobile 5): a Samsung S3C2442 (ARM920T) at 300 MHz, 32 MB of SDRAM, 64 MB of NAND,
     // a 240x320 colour panel, an SD slot, 802.11b Wi-Fi, IrDA, USB (device), serial on the connector and
-    // sound with a microphone. Sound, SD, Wi-Fi, IrDA, USB and serial are greyed out until done. The NOR is
-    // HP's bootloader (CEBL.nbf) and the NAND the flash made from it and CEOS.nbf at import.
+    // sound with a microphone. Sound, SD, Wi-Fi, IrDA, USB and serial are greyed out until done. The charge LED
+    // shows green, red or amber. The NOR is HP's bootloader (CEBL.nbf) and the NAND the flash made from it and
+    // CEOS.nbf at import.
     {deviceTypeRx1950, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::rx1950Nand, DeviceSupport5::experimentalDesktop,
-     DeviceDetect5::norSize, 0, 0, DeviceBoard5::s3c2442Rx1950, DeviceArt::hpIpaqRx1950, {},
+     DeviceDetect5::norSize, 0, 0, DeviceBoard5::s3c2442Rx1950, DeviceArt::hpIpaqRx1950,
+     {false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, 3},
      264794, 69206016, 32u << 20, 32u << 20, DisplayMode::mode_240x320, 1u << 4, true,
      DeviceNorLayout5::any, 0, 0, false, 0, 0,
      {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",
