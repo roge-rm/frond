@@ -9,6 +9,7 @@
 #include <mutex>
 #include <string.h>
 #include <direct.h>
+extern "C++" {
 // pread and pwrite as a seek and a read under one lock; every positional access goes through these.
 inline std::mutex& frondWinIoLock() { static std::mutex lock; return lock; }
 inline ssize_t pread(int fd, void* buffer, size_t count, off_t offset) {
@@ -28,6 +29,9 @@ inline char* mkdtemp(char* pattern) {
     return _mkdir(pattern) == 0 ? pattern : nullptr;
 }
 inline unsigned geteuid() { return 0; }
+extern "C++" {
 inline int unlink(const wchar_t* path) { return _wunlink(path); }
 inline int rmdir(const wchar_t* path) { return _wrmdir(path); }
+}
+}
 #endif

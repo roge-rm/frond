@@ -28,7 +28,7 @@ inline const int binaryMode = (_set_fmode(_O_BINARY), 0);
 extern "C++" void* __stdcall createFile(const wchar_t*, unsigned long, unsigned long, void*, unsigned long, unsigned long,
                                         void*) __asm__("CreateFileW");
 }
-inline int open(const wchar_t* path, int flags, int mode = 0) {
+extern "C++" inline int open(const wchar_t* path, int flags, int mode = 0) {
     (void)mode;
     const int access = flags & (_O_RDONLY | _O_WRONLY | _O_RDWR);
     unsigned long rights = access == _O_RDONLY ? 0x80000000ul : access == _O_WRONLY ? 0x40000000ul : 0xC0000000ul;
