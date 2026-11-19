@@ -115,8 +115,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool SetIrHostHooks(const IrHostHooks* hooks);
     bool IrHostAttached() const { return irHostHooks.context != nullptr; }
     bool IrPowerEnabled();
-    bool SetBluetooth(const std::string& path,std::string& error);
-    std::string BluetoothState();
+    bool SetBluetooth(const std::string& path,std::string& error) override;
+    std::string BluetoothState() override;
     bool HostIoPaused() const { return usbHostPaused != 0; }
     PxaUart* GetIrUart() { return irUart; }
 

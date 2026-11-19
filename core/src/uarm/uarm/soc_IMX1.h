@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "BluetoothBackend.h"
 #include "SoC.h"
 #include "UsbDevicePort.h"
 #include "UsbHostHooks.h"
@@ -39,6 +40,10 @@ inline constexpr uint32_t zodiacRomBase = 0x20000000;
 
 // Where an injected call returns to: never code, as the run stops before fetching it.
 inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
+
+// Facts of the 1.1 ROM for the Bluetooth shim (zodiac_bluetooth.cpp): BtlsLib's start, stop, write and read
+// (ARM) and the DAL's doze (Thumb), where received bytes are handed to the serial driver.
+inline constexpr uint32_t zodiacBluetoothHooks[] = {0x200f778c, 0x200f77c8, 0x200f77ec, 0x200f7854, 0x20094534};
 
 class SocIMX1 : public SoC {
    public:
@@ -213,6 +218,12 @@ class SocIMX1 : public SoC {
     bool PenContact() const { return imx1MachinePenInputs(machine).contactDown; }
     // Why a halted machine stopped, in one line. Empty while it runs.
     std::string StopText() const;
+    // Code hooks for tests: each hit is printed with r0 to r3, lr and sp, and run as is.
+    void SetTraceHooks(const std::vector<uint32_t>& pcs);
+    // Bluetooth: an H4 controller on a Unix socket (BluetoothBackend) in place of the radio, empty for none.
+    // See zodiac_bluetooth.cpp.
+    bool SetBluetooth(const std::string& path, std::string& error) override;
+    std::string BluetoothState() override;
 
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
@@ -236,6 +247,24 @@ class SocIMX1 : public SoC {
     void StateChanged();
     // Runs until the pc stop or for ticks of guest time. True on the stop.
     bool RunToStop(uint64_t ticks);
+    // Sets the machine's code hooks: the trace hooks and Bluetooth's.
+    void ApplyCodeHooks();
+    // A run ended on a code hook: Bluetooth takes it, or the instruction runs.
+    void CodeHookHit();
+    std::vector<uint32_t> traceHooks;
+    // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
+    struct Bluetooth {
+        std::string path, lastError;
+        BluetoothBackend backend;
+        bool romKnown{false}, delivering{false};
+    } bluetooth;
+    bool BluetoothHook(uint32_t pc, const uint32_t (&r)[16]);
+    // pilb's globals for the registers' r9, 0 when they aren't mapped.
+    uint32_t BluetoothGlobals(uint32_t r9);
+    bool BluetoothOpen();
+    void BluetoothReturn(uint32_t result);
+    void BluetoothDeliver(uint32_t globals);
+    void PollBluetooth();
     void EndGuestCall();
     ZodiacPaceSites paceSites{};
     bool guestCall{false};

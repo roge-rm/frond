@@ -49,6 +49,7 @@ SOURCE_CXX =		 					\
 	uarm/soc_PXA.cpp					\
 	uarm/soc_pv.cpp						\
 	uarm/soc_IMX1.cpp					\
+	uarm/zodiac_bluetooth.cpp			\
 	uarm/imx1_boot_probe.cpp			\
 	uarm/imx1_bootstrap.cpp				\
 	uarm/imx1_watchdog.cpp				\

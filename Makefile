@@ -1060,6 +1060,21 @@ test-zodiac-guest-calls: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls
 
+.PHONY: test-zodiac-bluetooth
+# The Zodiac's Bluetooth HCI shim on the real ROM from a bring-up state (ZODIAC_ROM, ZODIAC_STATE): radio on and an
+# OPP send to bluetooth-opp-peer through btvirt, Fast then Exact. Skipped without them or the peers.
+build/test-zodiac-bluetooth: out/frond tests/zodiac-bluetooth.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-bluetooth-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common -Icore/src/common/zip \
+		tests/zodiac-bluetooth.cpp @build/zodiac-bluetooth-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-bluetooth
+test-zodiac-bluetooth: build/test-zodiac-bluetooth
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 1 \
+		--btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" python3 tests/zodiac-bluetooth.py --fast 0 \
+		--btvirt $(BLUETOOTH_PROVIDER)/emulator/btvirt
+
 .PHONY: test-zodiac-session-cards
 # A Zodiac session with a card in each slot saved and loaded natively, on a made-up ROM.
 test-zodiac-session-cards: out/frond

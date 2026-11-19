@@ -108,7 +108,7 @@ class DesktopControl {
 
     void bluetoothChanged(commands::Context& ctx) {
         if(!capabilities(ctx).bluetooth)return;
-        const auto state=static_cast<SocPXA*>(ctx.soc)->BluetoothState();
+        const auto state=ctx.soc->BluetoothState();
         if(state==lastBluetooth || (state=="off" && lastBluetooth.empty()))return;
         lastBluetooth=state;event("bluetooth",state);
     }
@@ -525,7 +525,7 @@ class DesktopControl {
         if(command=="bluetooth-state" || command=="bluetooth-mode") {
             if(!caps.bluetooth)
                 return {false,"unsupported","This device has no Bluetooth radio."};
-            auto* machine=static_cast<SocPXA*>(ctx.soc);
+            auto* machine=ctx.soc;
             if(command=="bluetooth-mode") {
                 if(path!="off" && (path.empty() || path.front()!='/' || path.find(char(0))!=std::string::npos))
                     return {false,"argument","Use off or an absolute virtual controller Unix socket path."};

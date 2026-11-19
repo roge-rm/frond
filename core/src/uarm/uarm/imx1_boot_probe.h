@@ -189,7 +189,7 @@ struct Imx1MachineBounds {
     Imx1ReferenceTime deadline{};
     uint64_t work = 0;
 };
-enum class Imx1MachineYield { retired, deadline, work, waiting, terminal, stopped, invalidBounds, pcStop };
+enum class Imx1MachineYield { retired, deadline, work, waiting, terminal, stopped, invalidBounds, pcStop, codeHook };
 struct Imx1MachineCheapStatus {
     Imx1MachineStatus status;
     Imx1ProbeStop stop;
@@ -312,6 +312,14 @@ bool imx1MachineSetPcStop(Imx1Machine*, uint32_t pc);
 void imx1MachineClearPcStop(Imx1Machine*);
 void imx1MachineLeavePcStop(Imx1Machine*);
 bool imx1MachineAtPcStop(const Imx1Machine*);
+// Code hooks, between runs only: bounded runs end before the instruction at any of pcs, in either state, with
+// Imx1MachineYield::codeHook, in Exact and Fast alike; unlike pc stops they leave Fast its lean path and JIT, which
+// stop short of the hooks. Leave lets the next run run the instruction at the hook first. Setting replaces the
+// ones before (none: count 0). Not saved; a load or reset keeps them. None set runs as before.
+inline constexpr unsigned imx1MachineMaximumCodeHooks = 16;
+bool imx1MachineSetCodeHooks(Imx1Machine*, const uint32_t* pcs, unsigned count);
+void imx1MachineLeaveCodeHook(Imx1Machine*);
+bool imx1MachineAtCodeHook(const Imx1Machine*);
 // The current mode's r0 to r15 (pc with bit 0 set in Thumb) and the CPSR. Setting pc keeps the current state;
 // register 16 is the CPSR, of which only the flags and the interrupt masks are set.
 bool imx1MachineRegisters(const Imx1Machine*, uint32_t (&registers)[16], uint32_t* cpsr = nullptr);
