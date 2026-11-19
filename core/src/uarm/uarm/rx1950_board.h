@@ -39,10 +39,12 @@ constexpr uint16_t rx1950TouchRawY(unsigned y) { return uint16_t(64 + y * 896 / 
 // sleep. ASSUMPTION "rx1950 loader pins": the LED pins GPA3, GPA4, GPA6, GPA7 and GPA11 and the speaker
 // amplifier's GPA1 are outputs (the OAL's LED code and wavedev.dll only write GPADAT, and eboot's own pin table
 // and the OAL's sleep table both have GPACON 0x5f8724) and GPB0 is TOUT0, the backlight PWM (the OAL's resume
-// sets it so; nothing does at boot).
+// sets it so; nothing does at boot). GPC8 and GPC9, the Wi-Fi power switches, are outputs: tiacxwln.dll and
+// eboot only write GPCDAT to power the chip, and the OAL's sleep table has GPCCON 0x55555555.
 inline void rx1950LoaderPins(S3cGpio& gpio) {
     gpio.con[S3cGpio::a] &= ~((1u << 1) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 11));
     gpio.con[S3cGpio::b] = (gpio.con[S3cGpio::b] & ~3u) | 2;
+    gpio.con[S3cGpio::c] = (gpio.con[S3cGpio::c] & ~0xf0000u) | 0x50000;
 }
 
 // The RTC at boot: Sunday January 1 2006, 12:00. The OAL reads BCDYEAR as a binary count of years from 1950

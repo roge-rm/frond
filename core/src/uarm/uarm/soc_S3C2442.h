@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "SoC.h"
+#include "net/WifiRouter.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
 #include "zodiac_audio.h"
@@ -140,6 +141,11 @@ class SocS3C2442 : public SoC {
     void LoadCard();
     struct VSD* vsd{nullptr};
     bool sdProtect{false}, cardSwapped{false};
+    // Frond's host network behind the emulated access point (machine->accessPoint): made on the first frame out,
+    // polled after every slice, dropped at a reset or load. Left alone while the network is frozen for a
+    // checkpoint.
+    std::unique_ptr<frondNet::WifiRouter> router;
+    void PollNetwork();
 };
 
 #endif

@@ -328,9 +328,51 @@ static void audioTests() {
     }
 }
 
+// The Wi-Fi chip on nGCS4: the bus reads all ones until GPC8 and GPC9 power it, then the chip ID comes back
+// through the indirect register pair; its interrupt pulls GPG8 low.
+static void wifiTests() {
+    const std::vector<uint32_t> readId = {0xe5902004, loop};  // ldr r2, [r0, #4] after the last store, then loop
+    {
+        auto m = make(stores({{0x20000004, 0x900}}, readId));
+        assert(!m->wifiLive());
+        assert(m->run(10000) == S3c2442Stop::budget);
+        assert(cpuGetRegExternal(m->cpu(), 2) == 0xffffffffu);
+    }
+    {
+        // A byte read of the chip ID register (0x04) powered gives its byte lane, not 0xff.
+        const std::vector<uint32_t> readByte = {0xe5d02005, loop};  // ldrb r2, [r0, #5]
+        auto m = make(stores({{0x56000020, 0x50000}, {0x56000024, 0x300}, {0x20000004, 0x900}}, readByte));
+        assert(m->run(10000) == S3c2442Stop::budget);
+        assert(m->wifiLive());
+        assert(cpuGetRegExternal(m->cpu(), 2) == ((Acx100::chipId >> 8) & 0xff));
+    }
+    {
+        auto m = make(stores({{0x56000020, 0x50000}, {0x56000024, 0x300}, {0x20000004, 0x900}}, readId));
+        assert(m->run(10000) == S3c2442Stop::budget);
+        assert(m->wifiLive());
+        assert(cpuGetRegExternal(m->cpu(), 2) == Acx100::chipId);
+        assert(m->gpio.input[S3cGpio::g] & (1u << 8));
+        // Unmask the started interrupt and let the firmware start: GPG8 goes low.
+        m->wifi.write(0x14, 4, 0, 0);
+        m->wifi.write(0x18, 4, 0x12345678, 0);
+        m->wifi.write(0x04, 4, 0x98, 0);
+        m->wifi.write(0x08, 4, ~Acx100::irqStarted, 0);
+        m->wifi.write(0x04, 4, 0x2d8, 0);
+        m->wifi.write(0x08, 4, 0, m->nanoseconds());
+        m->wifiPinsChanged();
+        assert(m->run(5000000) == S3c2442Stop::budget);
+        assert(m->wifi.running() && !(m->gpio.input[S3cGpio::g] & (1u << 8)));
+        // Power off: the chip resets and the line goes back up.
+        m->gpio.dat[S3cGpio::c] &= ~0x100u;
+        m->wifiPinsChanged();
+        assert(!m->wifiLive() && !m->wifi.running() && (m->gpio.input[S3cGpio::g] & (1u << 8)));
+    }
+}
+
 int main() {
     sdTests();
     audioTests();
+    wifiTests();
     // A masked RTC tick can't end a wait for interrupt.
     {
         auto m = make({wfi, loop});

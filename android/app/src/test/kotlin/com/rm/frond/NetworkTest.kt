@@ -22,6 +22,14 @@ class NetworkTest {
     }
 
     @Test
+    fun wifiOnlyDevicesOfferTwoModes() {
+        assertEquals(listOf(NetworkMode.DISABLED, NetworkMode.WIRELESS), NetworkMode.offered(true))
+        assertEquals(NetworkMode.entries, NetworkMode.offered(false))
+        assertTrue(Device.entries.first { it.rx1950 }.wifiOnlyNetwork)
+        assertFalse(Device.TX.wifiOnlyNetwork)
+    }
+
+    @Test
     fun onlyTheTxHasNetwork() {
         assertTrue(Device.TX.network)
         assertFalse(Device.E2.network)
