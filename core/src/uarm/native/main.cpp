@@ -1661,6 +1661,7 @@ bool gFastEngineMissing = false;
         microphone.CloseOnDeviceThread();
         if (hasMicrophone) soc->SetMicrophoneSource(nullptr);
         if (hasCamera) static_cast<SocPXA*>(soc)->SetCameraSource(nullptr);
+        soc->SetPcmCapture(string());  // closes a pcm-capture file left open
         if (renderError) rethrow_exception(renderError);
         if (guestError) rethrow_exception(guestError);
         // The last frame the guest thread published, as the one-thread loop drew it.
