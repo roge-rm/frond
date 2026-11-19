@@ -91,8 +91,8 @@ class SocPXA : public SocGeneric<SocPXA> {
     bool PaceHooksInRam() override;
 
     // Current-session host source, never armed by loading portable state.
-    AudioInputDemand MicrophoneDemand();
-    void SetMicrophoneSource(const AudioInputSource *source);
+    AudioInputDemand MicrophoneDemand() override;
+    void SetMicrophoneSource(const AudioInputSource *source) override;
     // The camera's host picture source (Zire 72), same lifetime as the microphone's.
     void SetCameraSource(const CameraSource *source);
     uint32_t DispatchTicks(uint32_t clientType, uint32_t batchedTicks);

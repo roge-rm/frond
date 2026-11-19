@@ -220,43 +220,116 @@ private:
     uint16_t penX = 0, penY = 0;
 };
 
-// DMA at 0x4b000000 (manual chapter 8), four channels of 0x40, registers only: a channel turned on
-// waits for its hardware request, and the request sources (IIS, UART, SDI, USB) don't make one yet.
-// A software trigger is refused (S3cAccess::unsupported) until transfers are modelled.
+// DMA at 0x4b000000 (manual chapter 8), four channels of 0x40. Turning a channel on loads its current source,
+// destination and count from the initial registers; each hardware request then moves one unit (four with
+// TSZ burst) through bus, counts down and at 0 raises the channel's interrupt (INT) and reloads from the
+// initial registers (auto reload) or turns the channel off (RELOAD set). Requests come from the machine for
+// the IIS (I2SSDO on channel 2 source 0, I2SSDI on channel 1 source 2 and channel 2 source 1); the other
+// sources never ask. A software trigger is refused (S3cAccess::unsupported).
+enum class S3cDmaRequest : uint8_t { iisOut, iisIn };
 class S3cDma {
 public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    // The channel on and set to hardware requests from the source, -1 with none.
+    int channelFor(S3cDmaRequest request) const;
+    // One service of a hardware request on channel ch.
+    void service(unsigned ch, S3cIntc& intc);
+    // Units left in the channel's current count, 0 when it's off.
+    uint32_t remaining(unsigned ch) const { return on(ch) ? current[ch].count : 0; }
+    // Bytes a unit moves (DSZ), 0 for the reserved size.
+    uint32_t unitBytes(unsigned ch) const;
+    bool interruptAtEnd(unsigned ch) const { return channel[ch].dcon & (1u << 29); }
+    bool on(unsigned ch) const { return channel[ch].dmasktrig & 2; }
+    // A unit's move: physical address, size in bytes, write, the value. False where there's nothing there,
+    // and the unit is dropped (counted in busErrors).
+    std::function<bool(uint32_t, unsigned, bool, uint32_t&)> bus;
+    uint64_t units = 0, busErrors = 0;
+    uint32_t lastBusError = 0;
     template <class A> void state(A& a) {
         for (auto& c : channel) a.Do32(c.disrc).Do32(c.disrcc).Do32(c.didst).Do32(c.didstc).Do32(c.dcon).Do32(c.dmasktrig);
+    }
+    // The current registers and counts, kept in the machine's audio section.
+    template <class A> void runState(A& a) {
+        for (auto& c : current) a.Do32(c.src).Do32(c.dst).Do32(c.count);
+        a.Do64(units).Do64(busErrors).Do32(lastBusError);
+    }
+    // For a state saved without them: no channel mid-run.
+    void clearRun() {
+        for (auto& c : current) c = {};
+        units = busErrors = 0;
+        lastBusError = 0;
     }
 
 private:
     struct Channel { uint32_t disrc, disrcc, didst, didstc, dcon, dmasktrig; } channel[4];
+    struct Current { uint32_t src, dst, count; } current[4];
+    void load(unsigned ch);
 };
 
-// IIS at 0x55000000 (manual chapter 21), registers only: the FIFO takes and drops samples, never asks for
-// DMA and reads as empty. Sound waits for the audio work.
+// IIS at 0x55000000 (manual chapter 21) with its two 32-entry 16-bit FIFOs. The machine calls frame() at the
+// sample rate (frameDivider() master clocks a frame): a transmitting interface takes the left and right
+// samples from the transmit FIFO (silence and an underrun when it's short), a receiving one puts the codec's
+// two samples in the receive FIFO (dropped and an overrun when it's full). The CPU reaches the FIFOs through
+// IISFIFO, the DMA through the same address; the machine asks for DMA while the FIFOs want it (txWantsDma,
+// rxWantsDma).
 class S3cIis {
 public:
+    static constexpr unsigned depth = 32;
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    // A halfword in or out of IISFIFO (the CPU's or the DMA's access).
+    void push(uint16_t value);
+    uint16_t pop();
+    bool enabled() const { return iiscon & 1; }
+    bool transmitting() const { return enabled() && (iismod & 0x80) && !(iiscon & 8); }
+    bool receiving() const { return enabled() && (iismod & 0x40) && !(iiscon & 4); }
+    bool txDmaOn() const { return (iiscon & 0x20) && (iisfcon & 0x8000); }
+    bool rxDmaOn() const { return (iiscon & 0x10) && (iisfcon & 0x4000); }
+    bool txWantsDma() const { return (iiscon & 0x20) && (iisfcon & 0x8000) && (iisfcon & 0x2000) && txCount < depth; }
+    bool rxWantsDma() const { return (iiscon & 0x10) && (iisfcon & 0x4000) && (iisfcon & 0x1000) && rxCount > 0; }
+    // IISMOD MPLLin (true) or PCLK as the master clock.
+    bool mpllIn() const { return iismod & 0x200; }
+    // Master clocks a frame: 384 or 256 (IISMOD bit 2).
+    uint32_t frameDivider() const { return (iismod & 4) ? 384 : 256; }
+    // One frame: out gets the transmitted samples when transmitting (false otherwise), in the received ones.
+    bool frame(int16_t out[2], const int16_t in[2]);
+    uint64_t framesSent = 0, framesReceived = 0, underruns = 0, overruns = 0;
     template <class A> void state(A& a) { a.Do32(iiscon).Do32(iismod).Do32(iispsr).Do32(iisfcon); }
+    template <class A> void runState(A& a) {
+        a.DoBuffer16(tx, depth).DoBuffer16(rx, depth).Do32(txHead).Do32(txCount).Do32(rxHead).Do32(rxCount);
+        a.Do64(framesSent).Do64(framesReceived).Do64(underruns).Do64(overruns);
+    }
+    void clearRun() {
+        txHead = txCount = rxHead = rxCount = 0;
+        framesSent = framesReceived = underruns = overruns = 0;
+    }
 
 private:
     uint32_t iiscon, iismod, iispsr, iisfcon;
+    uint16_t tx[depth], rx[depth];
+    uint32_t txHead, txCount, rxHead, rxCount;
 };
 
-// IIC at 0x54000000 (manual chapter 20) as master with every device answering: a start or a byte sent
-// finishes at once with the interrupt pending bit set and an ACK, and bytes read are 0. Enough for the
-// codec setup writes. ASSUMPTION "IIC devices ACK": no device model behind it yet.
+// IIC at 0x54000000 (manual chapter 20) as master. A start or a byte finishes at once with the interrupt
+// pending bit set. The board's devices answer through device: start gets the address byte, a byte sent goes
+// to write, a byte read comes from read, and stop ends the transfer. ASSUMPTION "IIC devices ACK": every byte
+// is acknowledged, with or without a device there.
+struct S3cIicDevice {
+    virtual ~S3cIicDevice() = default;
+    virtual void start(uint8_t addressByte) = 0;
+    virtual void write(uint8_t byte) = 0;
+    virtual uint8_t read() = 0;
+    virtual void stop() = 0;
+};
 class S3cIic {
 public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    S3cIicDevice* device = nullptr;
     uint64_t bytes = 0;
     template <class A> void state(A& a) { a.Do64(bytes).Do32(iiccon).Do32(iicstat).Do32(iicadd).Do32(iicds).Do32(iiclc); }
 

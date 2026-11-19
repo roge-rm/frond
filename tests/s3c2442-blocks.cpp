@@ -12,6 +12,7 @@
 #include "rx1950_board.h"
 #include "rx1950_nand_image.h"
 #include "s3c2442_nand.h"
+#include "uda1380.h"
 
 template <class Block>
 static uint32_t get(Block& b, uint32_t offset) {
@@ -574,8 +575,10 @@ static void quietBlockTests() {
     dma.reset();
     dma.write(0x80, 0x3000a000);
     dma.write(0x90, (1u << 23) | 0x400);
-    assert(get(dma, 0x80) == 0x3000a000 && (get(dma, 0x94) & 0xfffff) == 0x400);
+    assert(get(dma, 0x80) == 0x3000a000 && (get(dma, 0x94) & 0xfffff) == 0);
+    // Turning it on loads the current count and source.
     assert(dma.write(0xa0, 2) == S3cAccess::ok && get(dma, 0xa0) == 2);
+    assert((get(dma, 0x94) & 0xfffff) == 0x400 && get(dma, 0x98) == 0x3000a000);
     dma.write(0xd0, 0x10);
     assert(dma.write(0xe0, 3) == S3cAccess::unsupported);  // software trigger
 
@@ -656,7 +659,185 @@ static void adcTests() {
     assert((intc.subsrcpnd & (1u << s3cSubIrq::tc)) && (get(adc, 0x14) & 2) && (get(adc, 0x10) & 0x8000));
 }
 
+// DMA transfers: hardware requests move units through the bus, the count runs down, the interrupt and an
+// auto reload at the end, RELOAD turning the channel off, bursts, and the IIS request routing.
+static void dmaTests() {
+    S3cIntc intc;
+    intc.reset();
+    S3cDma dma;
+    dma.reset();
+    std::vector<uint32_t> moved;
+    uint32_t reads = 0;
+    dma.bus = [&](uint32_t pa, unsigned size, bool write, uint32_t& value) {
+        if (!write) {
+            assert(size == 2);
+            value = pa & 0xffff;
+            ++reads;
+            return true;
+        }
+        assert(pa == 0x55000010);
+        moved.push_back(value);
+        return true;
+    };
+    // Channel 2 as wavedev.dll sets it for playback: SDRAM (AHB, increment) to IISFIFO (APB, fixed), HW
+    // source I2SSDO, halfwords, interrupt at the end, auto reload, count 3.
+    dma.write(0x80, 0x3000a000);
+    dma.write(0x84, 0);
+    dma.write(0x88, 0x55000010);
+    dma.write(0x8c, 3);
+    dma.write(0x90, 0xa0900000 | 3);
+    assert(dma.channelFor(S3cDmaRequest::iisOut) == -1);
+    dma.write(0xa0, 2);
+    assert(dma.channelFor(S3cDmaRequest::iisOut) == 2 && dma.channelFor(S3cDmaRequest::iisIn) == -1);
+    assert(dma.unitBytes(2) == 2 && dma.remaining(2) == 3);
+    // The next run starts elsewhere, as the driver flips its buffers.
+    dma.write(0x80, 0x3000b8c0);
+    dma.service(2, intc);
+    dma.service(2, intc);
+    assert(moved.size() == 2 && moved[0] == 0xa000 && moved[1] == 0xa002 && get(dma, 0x98) == 0x3000a004);
+    assert(!(intc.srcpnd & (1u << 19)));
+    dma.service(2, intc);
+    assert((intc.srcpnd & (1u << 19)) && dma.on(2) && dma.remaining(2) == 3 && get(dma, 0x98) == 0x3000b8c0);
+    dma.service(2, intc);
+    assert(moved.back() == 0xb8c0);
+    // RELOAD: the channel goes off at the end, keeping its count of 0.
+    dma.write(0x90, 0xa0d00000 | 1);
+    dma.service(2, intc);
+    dma.service(2, intc);
+    dma.service(2, intc);
+    assert(!dma.on(2) && dma.channelFor(S3cDmaRequest::iisOut) == -1 && (get(dma, 0x94) & 0xfffff) == 0);
+    // A burst moves four units a request.
+    dma.write(0x90, 0xb0900000 | 8);
+    dma.write(0xa0, 2);
+    moved.clear();
+    dma.service(2, intc);
+    assert(moved.size() == 4 && dma.remaining(2) == 4);
+    dma.write(0xa0, 4);  // stop
+    assert(!dma.on(2));
+    // Channel 1 source 2 and channel 2 source 1 are I2SSDI.
+    dma.write(0x50, 0xa2900c60);
+    dma.write(0x60, 2);
+    assert(dma.channelFor(S3cDmaRequest::iisIn) == 1);
+    dma.write(0x60, 4);
+    dma.write(0x90, 0xa1900c60);
+    dma.write(0xa0, 2);
+    assert(dma.channelFor(S3cDmaRequest::iisIn) == 2);
+    // A unit nothing answers is dropped and counted.
+    dma.bus = [](uint32_t, unsigned, bool, uint32_t&) { return false; };
+    dma.service(2, intc);
+    assert(dma.busErrors == 1 && dma.remaining(2) == 0xc5f);
+}
+
+// IIS: the FIFOs through IISFIFO and IISFCON's counts, a transmitting frame taking left then right, an
+// underrun, a receiving frame, overrun, and the DMA request flags.
+static void iisTests() {
+    S3cIis iis;
+    iis.reset();
+    // wavedev.dll's set-up: MPLLin, 16 bits, 384fs, 32fs bit clock.
+    iis.write(0x04, 0x20d);
+    assert(iis.mpllIn() && iis.frameDivider() == 384);
+    iis.push(1);  // FIFO off: dropped
+    assert((get(iis, 0x0c) & 0xfff) == 0);
+    iis.write(0x0c, 0xa000);  // transmit FIFO on, DMA access
+    iis.write(0x00, 0x21);
+    assert(iis.txDmaOn() && iis.txWantsDma() && !iis.transmitting());
+    iis.write(0x04, 0x20d | 0x80);
+    assert(iis.transmitting());
+    for (uint16_t v = 1; v <= 32; ++v) iis.push(v);
+    assert(((get(iis, 0x0c) >> 6) & 0x3f) == 32 && !iis.txWantsDma() && !(get(iis, 0x00) & 0x80));
+    int16_t out[2], in[2] = {7, -7};
+    assert(iis.frame(out, in) && out[0] == 1 && out[1] == 2 && ((get(iis, 0x0c) >> 6) & 0x3f) == 30);
+    for (int i = 0; i < 15; ++i) iis.frame(out, in);
+    assert(out[0] == 31 && out[1] == 32 && iis.underruns == 0);
+    assert(iis.frame(out, in) && out[0] == 0 && out[1] == 0 && iis.underruns == 1);
+    // TX idle holds the transmitter.
+    iis.write(0x00, 0x29);
+    assert(!iis.transmitting() && !iis.frame(out, in));
+    // Receive: the codec's samples go in the receive FIFO, which IISFIFO and DMA drain.
+    iis.write(0x0c, 0x5000);
+    iis.write(0x00, 0x11);
+    iis.write(0x04, 0x20d | 0x40);
+    assert(iis.receiving() && !iis.rxWantsDma());
+    assert(!iis.frame(out, in) && iis.framesReceived == 1 && iis.rxWantsDma() && (get(iis, 0x00) & 0x40));
+    assert(get(iis, 0x10) == 7 && get(iis, 0x10) == 0xfff9 && !iis.rxWantsDma());
+    for (int i = 0; i < 17; ++i) iis.frame(out, in);
+    assert((get(iis, 0x0c) & 0x3f) == 32 && iis.overruns == 1);
+    // A FIFO turned off empties.
+    iis.write(0x0c, 0x4000);
+    assert((get(iis, 0x0c) & 0x3f) == 0);
+}
+
+// The UDA1380 over IIC: wavedev.dll's register writes (address 0x34, register, high, low), the next register
+// following on, reads, the reset register, and the DAC and ADC paths with their volume and mutes.
+static void codecTests() {
+    Uda1380 codec;
+    S3cIic iic;
+    iic.reset();
+    iic.device = &codec;
+    auto send = [&](std::initializer_list<uint8_t> bytes) {
+        bool first = true;
+        for (uint8_t b : bytes) {
+            iic.write(0x0c, b);
+            if (first) iic.write(0x04, 0xf0);  // start with the address byte
+            else iic.write(0x00, 0xaf & ~0x10);
+            first = false;
+        }
+        iic.write(0x04, 0xd0);  // stop
+    };
+    send({0x34, 0x02, 0x04, 0x00});
+    assert(codec.reg(0x02) == 0x400 && codec.writes == 1);
+    send({0x34, 0x10, 0x00, 0x00, 0xff, 0x00});  // master volume, then mixer volume
+    assert(codec.reg(0x10) == 0 && codec.reg(0x11) == 0xff00 && codec.writes == 3);
+    send({0x36, 0x02, 0x00, 0x00});  // another address
+    assert(codec.reg(0x02) == 0x400);
+    // Muted at reset (MTM, MT1): the DAC path needs both cleared.
+    assert(!codec.dacOn());
+    send({0x34, 0x13, 0x08, 0x00});
+    assert(codec.dacOn());
+    int16_t l = 1000, r = -1000;
+    codec.play(l, r);
+    assert(l == 1000 && r == -1000);
+    // 24 steps of 0.25 dB halve it; left is the high byte.
+    send({0x34, 0x10, 24, 48});
+    l = 1000, r = 1000;
+    codec.play(l, r);
+    assert(l == 500 && r == 250);
+    send({0x34, 0x10, 0xfc, 0});
+    l = 1000;
+    codec.play(l, r);
+    assert(l == 0);
+    // A read: register pointer written, then a repeated start in master receive.
+    iic.write(0x0c, 0x34);
+    iic.write(0x04, 0xf0);
+    iic.write(0x0c, 0x02);
+    iic.write(0x00, 0xaf & ~0x10);
+    iic.write(0x0c, 0x35);
+    iic.write(0x04, 0xb0);
+    iic.write(0x00, 0xaf & ~0x10);
+    const uint32_t high = get(iic, 0x0c);
+    iic.write(0x00, 0xaf & ~0x10);
+    assert(high == 0x04 && get(iic, 0x0c) == 0x00);
+    iic.write(0x04, 0x90);
+    // ADC: powered left and unmuted; the decimator volume, +6 dB doubling.
+    assert(!codec.adcOn());
+    send({0x34, 0x02, 0x04, 0x04});
+    assert(codec.adcOn());
+    send({0x34, 0x20, 12, 0});
+    int16_t rec[2];
+    codec.record(1000, rec);
+    assert(rec[0] == 2000 && rec[1] == 1000);
+    codec.record(30000, rec);
+    assert(rec[0] == 32767);
+    send({0x34, 0x21, 0x80, 0x00});
+    assert(!codec.adcOn());
+    send({0x34, 0x7f, 0x00, 0x00});
+    assert(codec.reg(0x02) == 0 && codec.reg(0x13) == 0x4808);
+}
+
 int main() {
+    dmaTests();
+    iisTests();
+    codecTests();
     adcTests();
     intcTests();
     clockTests();

@@ -362,7 +362,8 @@ int main() {
     }
 
     for (const auto& p : deviceProfiles5)
-        assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZire72));
+        assert(p.capabilities.microphone == (p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZire72 ||
+                                             p.deviceType == deviceTypeRx1950));
     for (const auto& p : deviceProfiles5) assert(p.capabilities.backgroundPanel == (p.deviceType == deviceTypeTG50));
     // The snap-on modem: the III series and the V series connectors; the m100 series and the T415 (USB cradle) have none.
     for (const auto& p : deviceProfiles5)
@@ -995,7 +996,7 @@ static void vzProfiles() {
 }
 
 // HP iPAQ rx1950: the S3C2442 board, told by its bootloader's size, CEOS.nbf made into the 64 MB NAND, 32 MB of
-// SDRAM, 240x320 and every peripheral greyed out for now.
+// SDRAM, 240x320, sound with a microphone and the other peripherals greyed out for now.
 static void rx1950() {
     const auto* p = deviceProfileNamed5("hp-ipaq-rx1950");
     assert(p && p->deviceType == deviceTypeRx1950 && int(deviceTypeRx1950) == 25 && deviceProfile5(25) == p);
@@ -1009,8 +1010,8 @@ static void rx1950() {
     assert(p->frontend.width == 240 && p->frontend.height == 320 && !p->frontend.silkscreenHeight &&
            p->frontend.stripHeight == 89 && !p->frontend.sdSlot && p->frontend.available);
     const auto& c = p->capabilities;
-    assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && !c.sound &&
-           !c.microphone && !c.builtInWifi && !c.usbWifi);
+    assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && c.sound &&
+           c.microphone && !c.builtInWifi && !c.usbWifi);
     // The charge LED in green, red or amber (AttentionState's bits); no vibrate motor.
     assert(c.ledColours == 3 && !c.vibrate);
     // Windows CE, so no Palm guest services.

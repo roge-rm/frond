@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 
 #include "CPCrc.h"
+#include "audio_queue.h"
 #include "device_configuration.h"
 #include "device_profile5.h"
 #include "nand.h"
@@ -117,8 +119,20 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
     soc->machine->nand.setStore(soc->pages.get());
 
     soc->machine->resetLoader = [s = soc.get()] { s->BootLoader(); };
+    soc->machine->pcmSink = [s = soc.get()](int16_t left, int16_t right, uint32_t gain) {
+        uint64_t numerator = 0, denominator = 1;
+        s->machine->audioRate(numerator, denominator);
+        s->sound.setRate(numerator, denominator);
+        s->sound.setGain(gain);
+        if (s->capture) {
+            s->captureRawPeak = std::max<unsigned>(s->captureRawPeak, unsigned(std::max(std::abs(int(left)), std::abs(int(right)))));
+            s->captureGainPeak = std::max(s->captureGainPeak, gain);
+        }
+        s->sound.word(uint16_t(left), 0, PushFrame, s);
+        s->sound.word(uint16_t(right), 1, PushFrame, s);
+    };
     soc->BootLoader();
-    rx1950ApplyBattery(*soc->machine, soc->battery);
+    soc->ApplyHostInputs();
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeRx1950, DisplayMode::mode_240x320);
     soc->ramSize = options.ramBytes;
     soc->StateChanged();
@@ -136,6 +150,44 @@ void SocS3C2442::BootLoader() {
     machine->start(ebootPhysical);
 }
 
+void SocS3C2442::PushFrame(void* context, uint32_t frame) {
+    auto& s = *static_cast<SocS3C2442*>(context);
+    if (s.audioQueue && s.pcmEnabled && !s.pcmSuspended) audioQueuePush(s.audioQueue, frame);
+    if (s.capture) {
+        std::fwrite(&frame, 4, 1, s.capture);
+        ++s.captureFrames;
+        const int l = int16_t(frame), r = int16_t(frame >> 16);
+        const unsigned peak = unsigned(std::max(std::abs(l), std::abs(r)));
+        if (peak) ++s.captureLoud;
+        s.capturePeak = std::max(s.capturePeak, peak);
+    }
+}
+
+bool SocS3C2442::SetPcmCapture(const std::string& path) {
+    if (capture) std::fclose(capture);
+    capture = path.empty() ? nullptr : std::fopen(path.c_str(), "wb");
+    captureFrames = captureLoud = 0;
+    capturePeak = captureRawPeak = captureGainPeak = 0;
+    return path.empty() || capture;
+}
+
+std::string SocS3C2442::PcmCaptureSummary() const {
+    return std::to_string(captureFrames) + " frames, " + std::to_string(captureLoud) + " not silent, peak " +
+           std::to_string(capturePeak) + " (IIS peak " + std::to_string(captureRawPeak) + ", gain peak " +
+           std::to_string(captureGainPeak) + "/65536)";
+}
+
+void SocS3C2442::ApplyHostInputs() {
+    rx1950ApplyBattery(*machine, battery);
+    machine->setHeadphones(headphones);
+}
+
+bool SocS3C2442::SetHeadphones(bool in) {
+    headphones = in;
+    machine->setHeadphones(in);
+    return true;
+}
+
 void SocS3C2442::StateChanged() {
     const auto stop = machine->stopInfo().stop;
     halted = stop != S3c2442Stop::running && stop != S3c2442Stop::budget;
@@ -146,6 +198,9 @@ void SocS3C2442::StateChanged() {
     // The host's keys and pen are up now.
     for (const auto& k : rx1950Keys) machine->setPin(k.port, k.bit, true);
     pen.clear(*machine);
+    // The sound starts again from the new state's next frame.
+    sound.restart();
+    if (audioQueue) audioQueueClear(audioQueue);
 }
 
 void SocS3C2442::SetClockMultiplier(uint32_t num, uint32_t den) {
@@ -162,7 +217,7 @@ uint64_t SocS3C2442::CoreHz() const {
 void SocS3C2442::Reset() {
     SoC::Reset();
     machine->reset();
-    rx1950ApplyBattery(*machine, battery);
+    ApplyHostInputs();
     StateChanged();
 }
 
@@ -184,7 +239,10 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
     machine->nand.dropCache();
-    rx1950ApplyBattery(*machine, battery);
+    // A session saved before sound worked has GPA1 as an address line, as the loader pins left it then; the
+    // speaker amplifier needs it as an output (rx1950LoaderPins).
+    if (!machine->stateHadSound) machine->gpio.con[S3cGpio::a] &= ~2u;
+    ApplyHostInputs();
     StateChanged();
     return true;
 }
@@ -299,7 +357,7 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     if (halted) return maxCycles;
     // The guest reset itself through the watchdog: the board's inputs as after any reset.
     if (machine->watchdogResets() != resets) {
-        rx1950ApplyBattery(*machine, battery);
+        ApplyHostInputs();
         StateChanged();
     }
     const uint64_t elapsed = machine->nanoseconds() - before;

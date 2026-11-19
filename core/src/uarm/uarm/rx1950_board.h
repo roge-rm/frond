@@ -36,11 +36,12 @@ constexpr uint16_t rx1950TouchRawX(unsigned x) { return uint16_t(64 + x * 896 / 
 constexpr uint16_t rx1950TouchRawY(unsigned y) { return uint16_t(64 + y * 896 / 320); }
 
 // What the steppingstone loader (block 0, not dumped) leaves in the pin setup, at power on and at a wake from
-// sleep. ASSUMPTION "rx1950 loader pins": the LED pins GPA3, GPA4, GPA6, GPA7 and GPA11 are outputs (the OAL's
-// LED code only writes GPADAT, and eboot's own pin table and the OAL's sleep table both have GPACON 0x5f8724)
-// and GPB0 is TOUT0, the backlight PWM (the OAL's resume sets it so; nothing does at boot).
+// sleep. ASSUMPTION "rx1950 loader pins": the LED pins GPA3, GPA4, GPA6, GPA7 and GPA11 and the speaker
+// amplifier's GPA1 are outputs (the OAL's LED code and wavedev.dll only write GPADAT, and eboot's own pin table
+// and the OAL's sleep table both have GPACON 0x5f8724) and GPB0 is TOUT0, the backlight PWM (the OAL's resume
+// sets it so; nothing does at boot).
 inline void rx1950LoaderPins(S3cGpio& gpio) {
-    gpio.con[S3cGpio::a] &= ~((1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 11));
+    gpio.con[S3cGpio::a] &= ~((1u << 1) | (1u << 3) | (1u << 4) | (1u << 6) | (1u << 7) | (1u << 11));
     gpio.con[S3cGpio::b] = (gpio.con[S3cGpio::b] & ~3u) | 2;
 }
 

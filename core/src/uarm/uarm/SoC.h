@@ -8,6 +8,7 @@
 #include <string>
 
 #include "AttentionState.h"
+#include "audio_input.h"
 #include "BatteryPower.h"
 #include "NetworkSimulation.h"
 #include "LibertasCF.h"
@@ -81,6 +82,15 @@ class SoC {
     virtual bool PressHotSync() { return false; }
     // Asleep, and the wakes counted since the session started (not saved).
     virtual bool PowerSleeping() const { return false; }
+    // The host's microphone for boards with one: what the guest asks of it now, and the source it pulls from
+    // (nullptr to detach). Current-session only, never armed by loading portable state.
+    virtual AudioInputDemand MicrophoneDemand() { return {}; }
+    virtual void SetMicrophoneSource(const AudioInputSource *) {}
+    // Every host frame the board's sound makes (44100 Hz, stereo, signed 16-bit) to a raw file, whether PCM
+    // output is on or not, for checks; an empty path stops it. False where the board has no capture.
+    virtual bool SetPcmCapture(const std::string &) { return false; }
+    // Frames, frames that weren't silent and the peak since the capture started.
+    virtual std::string PcmCaptureSummary() const { return ""; }
     virtual uint64_t PowerWakes() const { return 0; }
     // The serial port on the connector and the infrared port for HostSerial and HostInfrared, on the
     // boards that give them this way (null elsewhere; the PXA boards give their UARTs). Owned by the SoC.
