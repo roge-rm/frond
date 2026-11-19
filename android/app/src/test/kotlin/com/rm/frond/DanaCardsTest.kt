@@ -362,6 +362,24 @@ class DanaCardsTest {
         // A save outside the sessions folder that links it loads with the slot empty too.
         val outside = File(tmp.root, "outside.frond")
         fixture("frond-linked-sd 3\n" + row(0, card, key), into = outside)
-        assertEquals(listOf("--card-swap"), Cards.outsideArguments(outside))
+        assertEquals(listOf("--card-swap"), Cards.outsideArguments(outside, sessions, old))
+        // A card gone from somewhere else and not in Cards keeps the refusal.
+        val away = File(tmp.root, "away/$second.frondsd")
+        val third = machine("Dana 3", rows = row(0, away, second))
+        assertEquals(0, Cards.moveLinkedIn(sessions, third, old))
+        assertFalse(Cards.readSlot(third).swap)
+        val outsideAway = File(tmp.root, "away.frond")
+        fixture("frond-linked-sd 3\n" + row(0, away, second), into = outsideAway)
+        assertEquals(emptyList<String>(), Cards.outsideArguments(outsideAway, sessions, old))
+    }
+
+    @Test fun cutOffSettleIsFinishedAtStart() {
+        val file = File(sessions, "Dana/sd.frondsd")
+        val dir = machine("Dana", rows = row(0, file, key))
+        file.writeBytes(sdCard())
+        File(dir, ".settling-sd.frondsd").writeText("1 2 3\n")
+        Cards.takeAtStart(sessions, dir, true)
+        assertEquals("settle-linked", toolCalls.first()[0]); assertEquals(file.path, toolCalls.first()[1])
+        assertTrue(file.isFile)
     }
 }

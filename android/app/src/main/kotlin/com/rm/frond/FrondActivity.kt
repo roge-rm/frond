@@ -392,7 +392,7 @@ open class FrondActivity : SDLActivity() {
     private fun cardArguments(): List<String> {
         val device = launchDevice()
         val folder = machineFolder() ?: return if (device.runs68k && device.linkedCards)
-            sessionPath?.let { Cards.outsideArguments(File(it)) }.orEmpty() else emptyList()
+            sessionPath?.let { Sessions.folder(this).let { sessions -> Cards.outsideArguments(File(it), sessions, Cards.oldCardsFor(sessions)) } }.orEmpty() else emptyList()
         if ((device.runs68k && !device.linkedCards) || runLock == null) return emptyList()
         return try {
             if (device.runs68k) {

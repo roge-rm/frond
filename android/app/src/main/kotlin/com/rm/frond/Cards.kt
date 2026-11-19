@@ -445,6 +445,17 @@ object Cards {
         return if (r.ok) null else r.message
     }
 
+    // A settle-linked cut off beside slot n's card (its .settling-<file> mark is there) is finished
+    // before frond-68k sees the card, so the card isn't left out of its slot. Machine held.
+    fun finishCutOffSettle(library: File, dir: File, n: Int) {
+        val file = cardFileIn(dir, n) ?: return
+        if (!File(dir, ".settling-$file").exists()) return
+        if (hasGenerations(dir, file) && settleGenerations(library, dir, n) == null) return
+        // No saved changes left: the tool only clears the mark, and the key isn't used.
+        val key = readSlot(dir, n).card?.let { readCard(entryDir(library, it)) }?.key?.takeIf { validKey(it) } ?: "0".repeat(32)
+        runTool(arrayOf("settle-linked", File(dir, file).path, key))
+    }
+
     // A drawer card into an empty slot. Library lock and machine held.
     fun toMachine(library: File, id: String, dir: File, n: Int = 0): String? {
         val card = readCard(entryDir(library, id)) ?: return "Couldn't find that card."
@@ -698,11 +709,17 @@ object Cards {
     // and takes it with sd2-put-in (secondPutIn). frond-68k (`m68k`) only takes --card-swap: it
     // loads a slot whose saved card isn't in the machine folder empty, and attachArgument() says
     // what goes in.
-    // A frond-68k save outside the sessions folder: --card-swap when a card it links is gone (moved
-    // into Cards at start-up), so it loads with that slot empty instead of refusing. Under swap its
-    // other cards load empty too, as they aren't in its folder.
-    fun outsideArguments(frond: File): List<String> =
-        if (linkedRows(frond).any { !File(it.path).exists() }) listOf("--card-swap") else emptyList()
+    // A frond-68k save outside the sessions folder: --card-swap when a card it links is gone into
+    // Cards (it was in `oldRoot`, dana-cards/, or Cards has its key), so it loads with that slot
+    // empty instead of refusing. A card gone elsewhere keeps the refusal. Under swap its other cards
+    // load empty too, as they aren't in its folder.
+    fun outsideArguments(frond: File, sessions: File, oldRoot: File): List<String> {
+        val root = oldRoot.absoluteFile.normalize()
+        val keys = entries(libraryFor(sessions)).mapNotNull { it.card.key }.toSet()
+        return if (linkedRows(frond).any { row ->
+                !File(row.path).exists() && (File(row.path).absoluteFile.parentFile?.normalize() == root || row.key in keys)
+            }) listOf("--card-swap") else emptyList()
+    }
 
     fun launchArguments(sessions: File, dir: File, m68k: Boolean = false): List<String> {
         val slot = readSlot(dir)
@@ -759,6 +776,7 @@ object Cards {
         val heldBy = arrayOfNulls<String>(SLOTS)
         // The run lock is held, so this machine's cards can be settled even if the library is busy.
         for (n in 0 until SLOTS) cardFileIn(dir, n)?.let { CardFile.settle(File(dir, it)) }
+        if (m68k) for (n in 0 until SLOTS) finishCutOffSettle(library, dir, n)
         LibraryLock(library).use { lock ->
             if (lock.ok) {
                 reconcileLocked(sessions, dir)
@@ -1407,10 +1425,12 @@ object Cards {
                 // A move cut off after the card tool: the card is in the folder, its entry not made yet.
                 val resumed = old && !there && target.isFile && readSlot(dir, row.n).card == null && meta.isFile
                 if (!there && !resumed && cardFileIn(dir, row.n) == null) {
+                    // Only a card that went into Cards: one elsewhere (a drive not plugged in) keeps
+                    // the save refusing, so it isn't dropped from it.
                     val slot = readSlot(dir, row.n)
-                    if (!slot.swap) {
+                    val where = entries(library).lastOrNull { it.card.key == row.key }?.card?.name
+                    if (!slot.swap && (old || where != null)) {
                         writeSlot(dir, slot.copy(present = true, swap = true), row.n)
-                        val where = entries(library).lastOrNull { it.card.key == row.key }?.card?.name
                         logMove(dir, if (where == null) "${row.key} isn't at ${row.path}, its slot loads empty"
                             else "${row.key} isn't at ${row.path}, it is in Cards as $where, its slot loads empty")
                     }
