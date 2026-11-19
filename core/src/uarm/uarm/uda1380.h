@@ -11,7 +11,7 @@
 //   0x7f any write resets the registers
 // ASSUMPTION "UDA1380 registers": bit positions and volume steps from the UDA1380 data sheet as remembered,
 // checked only against what wavedev.dll writes (its init table matches the reset values below); left is the
-// high byte of the volume registers. Volume steps are taken as 6 dB per 24 (0.25 dB) or 12 (0.5 dB) steps,
+// low byte of the volume registers (the Linux uda1380 driver's SOC_DOUBLE shifts 0 and 8). Volume steps are taken as 6 dB per 24 (0.25 dB) or 12 (0.5 dB) steps,
 // so the gains are exact halvings and the same on every host.
 
 #include <cstdint>
@@ -81,15 +81,15 @@ class Uda1380 : public S3cIicDevice {
     bool adcOn() const { return (regs[0x02] & 5) && !(regs[0x21] & 0x8000); }
     // One IIS frame through the DAC's digital volume, master then mixer channel 1.
     void play(int16_t& left, int16_t& right) const {
-        left = scale(left, attenuation(regs[0x10] >> 8) * uint64_t(attenuation(regs[0x11] & 0xff)) >> 16);
-        right = scale(right, attenuation(regs[0x10] & 0xff) * uint64_t(attenuation(regs[0x11] & 0xff)) >> 16);
+        left = scale(left, attenuation(regs[0x10] & 0xff) * uint64_t(attenuation(regs[0x11] & 0xff)) >> 16);
+        right = scale(right, attenuation(regs[0x10] >> 8) * uint64_t(attenuation(regs[0x11] & 0xff)) >> 16);
     }
-    // A microphone sample through the decimator volume, left from the high byte. ASSUMPTION "rx1950 mic
+    // A microphone sample through the decimator volume, left from the low byte. ASSUMPTION "rx1950 mic
     // level": the host's full scale stands for the ADC's full scale after the LNA and VGA, so their gains
     // aren't applied again. ASSUMPTION "mic on both channels": the mic feeds the left and right samples.
     void record(int16_t sample, int16_t out[2]) const {
-        out[0] = scale(sample, boost(int8_t(regs[0x20] >> 8)));
-        out[1] = scale(sample, boost(int8_t(regs[0x20] & 0xff)));
+        out[0] = scale(sample, boost(int8_t(regs[0x20] & 0xff)));
+        out[1] = scale(sample, boost(int8_t(regs[0x20] >> 8)));
     }
 
     uint64_t writes = 0;
