@@ -7203,7 +7203,11 @@ static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTIO
                                                      SLOW_PATH_REASON_INJECTED_CALL_DONE;
 
 bool cpuArm920JitCanRun(const ArmCpu *cpu) {
-    return cpu->jitBlocks && !(cpu->slowPath & ~arm920JitClearedSlowPath) && !cpu->arm920Waiting && !cpu->modePace &&
+    return cpu->jitBlocks && cpuArm920StepSkipAllowed(cpu);
+}
+
+bool cpuArm920StepSkipAllowed(const ArmCpu *cpu) {
+    return !(cpu->slowPath & ~arm920JitClearedSlowPath) && !cpu->arm920Waiting && !cpu->modePace &&
            !cpu->nativeCallDepth && !cpu->nativePc[0] && !cpu->debugStub &&
            !icacheArm920ContinuationPending(cpu->ic);
 }
@@ -7256,6 +7260,7 @@ bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
 bool cpuArm920JitCanRun(const ArmCpu *) { return false; }
+bool cpuArm920StepSkipAllowed(const ArmCpu *) { return false; }
 uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t, uint32_t *instructions) {
     *stop = arm920JitExit;
     if (instructions) *instructions = 0;

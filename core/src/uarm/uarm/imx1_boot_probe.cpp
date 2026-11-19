@@ -38,6 +38,16 @@ uint64_t deferredHclk = 0;
 // Set when an instruction that charged opened a new quiet span itself: the next step still looks at the interrupt
 // lines, as it would after charging that instruction alone.
 bool linesPending = false;
+// Exact: the last three instructions the step retired in this slice, at step % 3, for skipUartPollStepped. plain is
+// a step that did one unit of work, took no interrupt or exception and waited no clocks; bus is its board accesses,
+// address the last one's.
+struct SteppedInstruction {
+    uint64_t step;
+    uint32_t pc, instruction, cycles, bus, address;
+    bool plain;
+};
+SteppedInstruction stepped[3]{};
+uint32_t lastBusAddress = 0;
 uint64_t leanRetired = 0;  // instructions the Fast engine ran on the lean path since the machine was made
 uint64_t leanTimerReads = 0;  // timer count reads answered on the lean path, for tests
 uint64_t jitRetired = 0, jitRuns = 0;
@@ -1101,6 +1111,56 @@ struct Probe {
         return cpuArm920PeekWord(cpu, cpuGetRegisters(cpu)[15] + 8, &w, &pa) && (w == 0x0afffffcu || w == 0x1afffffcu) &&
                cpuArm920PeekWord(cpu, cpuGetRegisters(cpu)[15], &w, &pa) && (w & 0xfff00000u) == 0xe5900000u;
     }
+    // Exact: the same UART status poll, passed after the step ran one whole round of it (stepped). Inside the quiet
+    // span every round reads the value the last one did, takes the branch back and costs what the last one did, so
+    // the rounds up to the span's end (less a few) add the round's instructions, work, bus accesses and cycles at
+    // once; the cycles wait in deferredCycles as the step's own do. The last rounds of the span run as steps and see
+    // the change. hard is the most instructions the slice has left. Returns the instructions passed.
+    uint64_t skipUartPollStepped(uint64_t hard) {
+        if (!uartPollSkip || failed || graphicsWireStatus != Imx1BootstrapAccess::ok || blPrefix || pcStop.armed ||
+            !quietCycles || linesPending || deferredHclk || cpuIsThumb(cpu) || cpuArm920ClockMode(cpu) != quietMode ||
+            !cpuArm920StepSkipAllowed(cpu) || retired < 3)
+            return 0;
+        const uint32_t* r = cpuGetRegisters(cpu);
+        const uint32_t pc = r[15];
+        const SteppedInstruction& load = stepped[(retired - 3) % 3];
+        const SteppedInstruction& test = stepped[(retired - 2) % 3];
+        const SteppedInstruction& branch = stepped[(retired - 1) % 3];
+        if (load.step != retired - 3 || test.step != retired - 2 || branch.step != retired - 1 || !load.plain ||
+            !test.plain || !branch.plain || load.pc != pc || test.pc != pc + 4 || branch.pc != pc + 8 ||
+            load.bus != 1 || test.bus || branch.bus)
+            return 0;
+        // As skipUartPoll: ldr with an immediate offset and no writeback, tst of the loaded register, branch back.
+        const uint32_t w0 = load.instruction, w1 = test.instruction, w2 = branch.instruction;
+        if ((w0 & 0xfff00000u) != 0xe5900000u || (w1 & 0xfff0f000u) != 0xe3100000u ||
+            (w2 != 0x0afffffcu && w2 != 0x1afffffcu))
+            return 0;
+        const unsigned base = (w0 >> 16) & 15, t = (w0 >> 12) & 15;
+        if (base == 15 || t == 15 || base == t || ((w1 >> 16) & 15) != t) return 0;
+        // The load read a UART status register (USR1, USR2, UTS of either UART).
+        const uint32_t unit = load.address & ~0xfffu, offset = load.address & 0xfffu;
+        if ((unit != 0x00206000 && unit != 0x00207000) || (offset != 0x94 && offset != 0x98 && offset != 0xb4)) return 0;
+        // A charge after the load (the span ended at the tst or the branch) can have changed the status: the board
+        // as charged has to still read what rT holds. A status read changes nothing.
+        uint32_t value;
+        if (peripherals.access(load.address, 4, false, value, cpuArm920ClockMode(cpu)) != Imx1BootstrapAccess::ok ||
+            value != r[t])
+            return 0;
+        const uint64_t round = uint64_t(load.cycles) + test.cycles + branch.cycles;
+        if (!round) return 0;
+        const uint64_t keep = leanMinimumSpan + 4 * round;
+        if (quietCycles <= keep) return 0;
+        const uint64_t n = std::min((quietCycles - keep) / round, hard / 3);
+        if (!n) return 0;
+        deferredCycles += round * n;
+        quietCycles -= round * n;
+        work += 3 * n;
+        retired += 3 * n;
+        result.busAccesses += n;
+        ++uartPollSkips;
+        uartPollRounds += n;
+        return 3 * n;
+    }
     // Fast blocks: the ROM's graphics FIFO wait (200b9010-200b9078) calls the Thumb delay at 20084912 for one timer
     // count, reads the engine's read pointer (1601021c) and loops while the ring has too little room, r5 counting
     // the reads that saw no change. The pointer moves only when a batch completes, which ends the quiet span, so
@@ -1404,6 +1464,7 @@ struct Probe {
             p.i2cIssuePc = previousIssuePc;
         }
         ++p.result.busAccesses;
+        lastBusAddress = address;
         if (write && address == 0x00205034 && (p.result.trace.pc & 0x00ffffff) == 0x3b8 && status == Imx1BootstrapAccess::ok)
             imx1NoteStartup(&p);
         if (p.options.busObserver)
@@ -1827,6 +1888,8 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         p->pcStop.leave = false;
     }
     const uint64_t step = p->retired;
+    const uint64_t workBefore = p->work, busBefore = p->result.busAccesses, cs5Before = p->result.cs5WaitClocks,
+                   idleBefore = p->result.idleHclk, entriesBefore = p->result.irqEntries + p->result.fiqEntries;
     if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions && step == p->options.gpioEventAfterInstructions) {
         if (!p->chargeDeferred()) { p->clockBoundary(); return false; }
         const auto status = p->peripherals.transitionGpioInputs(p->options.gpioEventValues, p->options.gpioEventMasks);
@@ -2055,6 +2118,10 @@ static bool runStep(Probe* p, uint64_t idleHclkLimit) {
         }
     }
     ++p->retired;
+    stepped[step % 3] = {step, t.pc, t.instruction, cycles, uint32_t(p->result.busAccesses - busBefore), lastBusAddress,
+                         !thumb && !entered && !fetchAbort && p->work == workBefore + 1 &&
+                             p->result.cs5WaitClocks == cs5Before && p->result.idleHclk == idleBefore &&
+                             p->result.irqEntries + p->result.fiqEntries == entriesBefore};
     if (p->options.bootstrapPeripherals && quietCycles && cycles <= quietCycles &&
         cpuArm920ClockMode(p->cpu) == quietMode) {
         deferredCycles += cycles;
@@ -2099,10 +2166,26 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
         return;
     }
     p->result.stop = Imx1ProbeStop::budget;
+    // A round seen in an earlier slice may be from before a state load.
+    for (auto& e : stepped) e.step = UINT64_MAX;
     if (!p->fastEngine || !p->options.bootstrapPeripherals || p->observer || p->options.diagnosticSnapshot ||
         p->options.busObserver) {
-        for (uint32_t slice = 0; slice < retiredBudget; ++slice)
+        // Exact: UART status polls pass at once (skipUartPollStepped). Not with an observer, which sees every step.
+        const bool pollSkip = !p->fastEngine && p->options.bootstrapPeripherals && !p->observer &&
+                              !p->options.diagnosticSnapshot && !p->options.busObserver;
+        for (uint32_t slice = 0; slice < retiredBudget; ++slice) {
             if (!runStep(p, idleHclkLimit)) break;
+            if (!pollSkip || slice + 2 >= retiredBudget) continue;
+            // The slice always ends on a step.
+            uint64_t hard = retiredBudget - slice - 2;
+            if (p->bounds) {
+                const uint64_t used = p->work - p->sliceWorkStart;
+                hard = used + 1 >= p->bounds->work ? 0 : std::min(hard, p->bounds->work - used - 1);
+            }
+            if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions > p->retired)
+                hard = std::min(hard, p->options.gpioEventAfterInstructions - p->retired);
+            slice += uint32_t(p->skipUartPollStepped(hard));
+        }
     } else {
         // Fast: after each step, the rest of a quiet span runs in the JIT and on the lean path. Their instructions
         // are charged their cost model clocks through the deferred charge, as the step charges them, and they stop before anything the step has

@@ -217,6 +217,20 @@ class Machine:
                 part.unlink()
         return path
 
+    def join(self, seconds=60):
+        """Waits for the hub to show both cores joined with this one's socket open. A Palm that went to sleep
+        while the other core waited for a slot has closed its socket; it's woken."""
+        end = time.monotonic() + seconds
+        while True:
+            try:
+                return self.link.wait(lambda s: s.get('type') == 'ir' and s.get('state') == 'joined' and s.get('core'),
+                                      f'{self.tag} joined', 5)
+            except smoke.Fail:
+                smoke.need(time.monotonic() < end, f'{self.tag}: no {self.tag} joined in {seconds} s')
+                if self.run.require('power-state')['message'].split()[0] == 'asleep':
+                    print(f'{self.tag} asleep, waking it')
+                    self.power(False)
+
     def power(self, asleep):
         """The power key until the core's power-state says asleep (or awake)."""
         for _ in range(3):
@@ -308,8 +322,11 @@ def main():
         mb = Machine(root, 'b', Path(args.zodiac) if args.zodiac else source, b, a.hello['id'],
                      'tapwave-zodiac-2' if args.zodiac else 'palm-tx', args.zodiac_engine if args.zodiac else None)
         machines.append(mb)
+        # Each core's time starts once both are up: B may have waited for an emulator slot.
         for m in machines:
-            m.link.wait(lambda s: s.get('type') == 'ir' and s.get('state') == 'joined' and s.get('core'), f'{m.tag} joined', 60)
+            m.run.restart_clock(1200)
+        for m in machines:
+            m.join()
         print('joined')
         for m in machines:
             m.install_and_launch(str(prc))
