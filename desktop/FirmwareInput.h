@@ -50,7 +50,7 @@ inline bool infraredKeyboard(Device device) { return capabilities(device).keyboa
 // DragonBall devices run in frond-68k. Their capabilities list all the hardware they have, so
 // controls for anything else are hidden rather than greyed.
 inline bool runs68k(Device device) { return device != Device::automatic && deviceProfileRuns68k5(int(device)); }
-// A 68k device whose slots take linked card files through frond-68k's sd- and sd2- commands (DanaCardsDialog):
+// A 68k device whose slots take linked card files through frond-68k's sd-, sd2- and ms- commands:
 // the Dana's two slots and a VZ Palm's one.
 inline bool linkedCards(Device device) {
     return runs68k(device) && (deviceProfileLinkedCards5(profile(device)) || deviceProfileLinkedStick5(profile(device)));

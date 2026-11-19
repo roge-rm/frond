@@ -2432,6 +2432,98 @@ for line in s.makefile('rb'):
         }
         QSettings().clear();
     }
+    // The Dana's two slots on the shared rows: library cards go in by path after start, with a key
+    // and their type, and come out through take-out into the drawer.
+    void danaLibraryCards() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile core(files.filePath("dana-core"));
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+here=pathlib.Path(__file__)
+here.with_name('args').write_text('\n'.join(sys.argv[1:]))
+trace=here.with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+slots={'sd':None,'sd2':None}
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    ok,message='ok','done'
+    slot,_,op=cmd.partition('-')
+    if cmd=='device-state': message='alphasmart-dana'
+    elif cmd=='network-state': message='disabled'
+    elif slot in slots:
+        card=slots[slot]
+        if op=='state': message='none' if not card else card['state']+' '+card['key']+' writable'+(' mmc' if card['mmc'] else '')
+        elif op=='attach':
+            words=arg.rsplit(' ',3); slots[slot]={'state':'inserted','key':words[1],'mmc':words[3]=='mmc'}; message='inserted'
+        elif op=='eject': card['state']='ejected'; message='ejected'
+        elif op=='insert': card['state']='inserted'; message='inserted'
+        elif op=='take-out': slots[slot]=None; message='taken-out'
+    elif cmd in ('hold-state','rotate'): ok,message='error','unsupported'
+    s.sendall(i+b'\t'+ok.encode()+b'\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto a = cardsMachine("Dana", false, "alphasmart-dana");
+        QString notes, old;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Notes", "sd", 32, {}, &notes).isEmpty());
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Old", "mmc", 64, {}, &old).isEmpty());
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(lock.ok && frondCards::toMachine(cardsLibrary(), notes, a, 0).isEmpty() && frondCards::toMachine(cardsLibrary(), old, a, 1).isEmpty());
+        }
+        auto read = [&](const QString& name) { QFile f(files.filePath(name)); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString(); };
+        {
+            MainWindow window(core.fileName(), core.fileName());
+            window.show();
+            window.openSession(a + "/Dana.frond", true);
+            auto* pick = window.findChild<QPushButton*>("cardPick");
+            auto* pick2 = window.findChild<QPushButton*>("card2Pick");
+            QTRY_COMPARE_WITH_TIMEOUT(pick2->text(), QString("Old"), 10000);
+            QCOMPARE(pick->text(), QString("Notes"));
+            QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Card 1"));
+            const auto args = read("args").split('\n');
+            QVERIFY(args.contains("--card-swap") && !args.contains("--card-identity"));
+            frondCards::Card n1, n2;
+            QVERIFY(frondCards::readCard(cardsLibrary() + '/' + notes, &n1) && frondCards::readCard(cardsLibrary() + '/' + old, &n2));
+            QVERIFY(frondCards::validKey(n1.key) && frondCards::validKey(n2.key) && n1.key.left(8) != n2.key.left(8));
+            const auto commands = read("commands");
+            const auto real = QFileInfo(a).canonicalFilePath();
+            QVERIFY2(commands.contains("sd-attach\t\"" + real + "/sd.frondsd\" " + n1.key + " writable sd\n"), qPrintable(commands));
+            QVERIFY2(commands.contains("sd2-attach\t\"" + real + "/sd2.frondsd\" " + n2.key + " writable mmc\n"), qPrintable(commands));
+            QVERIFY(commands.indexOf("sd2-attach\t") < commands.indexOf("network-state\t"));
+            // No card in slot 2: eject after the confirmation, take out, to the drawer.
+            showCardPanel(pick2); QTRY_VERIFY(pick2->isVisible() && pick2->isEnabled());
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                    if (r->property("cardId").toString().isEmpty()) r->setChecked(true);
+                QTimer::singleShot(0, d, &QDialog::accept);
+                answerYes();
+            });
+            QTimer::singleShot(0, pick2, &QPushButton::click);
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(cardsLibrary() + '/' + old + "/sd.frondsd").isFile(), 10000);
+            QTRY_COMPARE(pick2->text(), QString("No card"));
+            QVERIFY(frondCards::cardFileIn(a, 1).isEmpty() && frondCards::readSlot(a, 1).swap);
+            const auto after = read("commands");
+            QVERIFY(after.contains("sd2-eject\t\n") && after.contains("sd2-take-out\t\n"));
+            // And back in by path from the picker.
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                    if (r->property("cardId").toString() == old) r->setChecked(true);
+                d->accept();
+            });
+            QTimer::singleShot(0, pick2, &QPushButton::click);
+            QTRY_COMPARE_WITH_TIMEOUT(pick2->text(), QString("Old"), 10000);
+            QCOMPARE(read("commands").count("sd2-attach\t"), 2);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        QSettings().clear();
+    }
     // Add device offers a drawer card per slot for a two-slot machine, and none for others.
     void addDeviceCardChoice() {
         cardsReset();
@@ -2454,6 +2546,16 @@ for line in s.makefile('rb'):
         QCOMPARE(dialog.chosenCards(), QStringList({QString(), QString()}));
         two->setCurrentIndex(1);
         QCOMPARE(dialog.chosenCards(), QStringList({QString(), games}));
+        // The Dana: both slots, SD and MMC cards that fit it.
+        QString notes;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Notes", "mmc", 32, {}, &notes).isEmpty());
+        device->setCurrentIndex(device->findData(QString("alphasmart-dana")));
+        QVERIFY(one->isVisible() && two->isVisible());
+        for (auto* box : {one, two}) {
+            texts.clear();
+            for (int i = 0; i < box->count(); ++i) texts << box->itemText(i);
+            QCOMPARE(texts, QStringList({"No card", "Games · 64 MB", "Notes · MMC · 32 MB"}));
+        }
         device->setCurrentIndex(device->findData(QString("palm-tx")));
         QVERIFY(!one->isVisible() && !two->isVisible() && dialog.chosenCards().isEmpty());
     }

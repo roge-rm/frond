@@ -348,15 +348,8 @@ class MainWindow : public QMainWindow {
     // The CLIÉ game controller as the core last said: empty unknown, attached, detached or busy.
     QString gamepadState;
     QLabel *sdStatus, *storageHeading;
-    QPushButton* danaCards;
-    // Files… on a 68k device's linked Memory Stick (the T415): eject, take it out of the core, save,
-    // edit its dana-cards/ file in place, then put it back in (ejected again if it was out).
-    QPushButton* stickFiles;
-    QPointer<CardFilesWindow> stickDialog;
-    QString stickIdentity;
-    bool stickProtected{false}, stickWasInserted{false}, stickFlow{false};
-    void openStickFiles();
-    void stickFilesClosed();
+    // A Dana or VZ Palm's portable folder: the session with copies of its cards.
+    QPushButton* portableExport;
     // Files… on the running machine's SD card: eject, save, take the card out into the machine
     // folder's sd.frondsd, edit it there in place, then put it back in (ejected again if it was out).
     enum class ExchangeStage { None, Eject, Save, TakeOut, Open, PutIn, EjectAgain };
@@ -377,8 +370,12 @@ class MainWindow : public QMainWindow {
     bool inserted(int n) const { return n ? card2Inserted : cardInserted; }
     // The slot a card move, Files… or the picker works on; changed only while none is under way.
     int cardSlot{0};
-    // Start: slot 2's card goes in once the core is up, if the core left it out.
-    bool secondStartPending{false};
+    // Start: slot 2's card goes in once the core is up, if the core left it out; on a 68k device
+    // slot 1's too (firstStartPending), as frond-68k takes its cards by path after start.
+    bool secondStartPending{false}, firstStartPending{false};
+    // The core's put-in for slot n: put-in with the serial, or on a 68k device an attach of the
+    // slot's card file by path with its key.
+    QString putInArgument(int n, const QString& identity, bool protect) const;
     // Add device: the cards picked per slot, put in once the new machine runs; empty when none.
     QStringList startCards;
     bool putInStartCard();

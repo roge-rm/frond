@@ -67,7 +67,7 @@
 #include <QtPrintSupport/QPrintDialog>
 #include <QtPrintSupport/QPrinter>
 #include <QVBoxLayout>
-#include "DanaCardsDialog.h"
+#include "LinkedCards.h"
 #include <functional>
 
 // The Camera list, read again each time it opens so a webcam plugged in later shows up.
@@ -213,12 +213,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     storageHeading = new QLabel(tr("SD card"), root);
     storageHeading->setObjectName("storageHeading");
     cardLayout->addWidget(storageHeading);
-    danaCards = button(tr("Cards 1 and 2…"), "danaCards", true);
-    cardLayout->addWidget(danaCards);
-    connect(danaCards,&QPushButton::clicked,this,[this] { DanaCardsDialog dialog(client,this->core,runningDevice,this); dialog.exec(); });
-    stickFiles = button(tr("Files…"), "stickFiles", true);
-    cardLayout->addWidget(stickFiles);
-    connect(stickFiles, &QPushButton::clicked, this, &MainWindow::openStickFiles);
     printerPanel = new PrinterPanel(root);
     connectionsLayout->addWidget(printerPanel);
     connect(printerPanel, &PrinterPanel::portChosen, this, [this](const QString& port) {
@@ -351,10 +345,24 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         connect(n ? sd2Retry : sdRetry, &QPushButton::clicked, this, [this, n] { send(cardCommand("state", n)); });
     }
     connect(sd2Export, &QPushButton::clicked, this, [this] {
-        const auto file = outputFile(tr("Export image"), tr("SD images (*.img)"), "SD card 2.img");
-        if (!file.isEmpty()) send("sd2-export", file);
+        const bool m68k = frondFirmware::runs68k(runningDevice);
+        const auto file = outputFile(tr("Export image"), m68k ? tr("Frond SD cards (*.frondsd)") : tr("SD images (*.img)"),
+                                     m68k ? "SD card 2.frondsd" : "SD card 2.img");
+        if (file.isEmpty()) return;
+        if (!m68k) { send("sd2-export", file); return; }
+        if (const auto problem = frondDanaCards::exportProblem(file); !problem.isEmpty()) return failure(problem);
+        send("sd2-export", frondCards::quotePath(file));
     });
     connect(sdExport, &QPushButton::clicked, this, [this] {
+        // frond-68k exports a card file, which it won't write over.
+        if (frondFirmware::runs68k(runningDevice)) {
+            const auto file = outputFile(tr("Export image"), memoryStick() ? tr("Memory Stick images (*.frondms)") : tr("Frond SD cards (*.frondsd)"),
+                                         memoryStick() ? "Memory Stick.frondms" : "SD card.frondsd");
+            if (file.isEmpty()) return;
+            if (const auto problem = frondDanaCards::exportProblem(file); !problem.isEmpty()) return failure(problem);
+            send(cardCommand("export", 0), frondCards::quotePath(file));
+            return;
+        }
         // A Memory Stick Pro exports as a raw image; ask the core which kind is in the slot.
         if (memoryStick()) { msExportPending = true; send("ms-type"); return; }
         const auto file = outputFile(tr("Export image"), memoryStick() ? tr("Memory Stick images (*.frondms)") : tr("SD images (*.img)"),
@@ -365,6 +373,13 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     cardReadOnly = new QCheckBox(tr("Write protected"), root);
     cardReadOnly->setObjectName("cardReadOnly");
     cardLayout->addWidget(cardReadOnly);
+    portableExport = button(tr("Export portable folder…"), "portableExport", true);
+    cardLayout->addWidget(portableExport);
+    connect(portableExport, &QPushButton::clicked, this, [this] {
+        const auto path = QFileDialog::getSaveFileName(this, tr("New portable folder"), QString(), tr("Portable folder (*)"), nullptr,
+                                                       QFileDialog::DontConfirmOverwrite);
+        if (!path.isEmpty()) send("export-portable", path);
+    });
     auto* cardsButton = new QPushButton(tr("Cards…"), root);
     cardsButton->setObjectName("openCards");
     cardLayout->addWidget(cardsButton);
@@ -850,7 +865,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false;
-        card2Present = card2Inserted = sd2Known = secondStartPending = false; cardSlot = 0; startCards.clear(); runningDevice = frondFirmware::Device::tx;
+        card2Present = card2Inserted = sd2Known = secondStartPending = firstStartPending = false; cardSlot = 0; startCards.clear(); runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
         // A linked card goes back to the drawer once the final save is in, under the session lock.
@@ -1012,11 +1027,22 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             if (command == "hold-state" || command == "hold") { holdKnown = false; refresh(); }
             if (command == "sd-state" || command == "ms-state") sdKnown = false;
             if (command == "sd2-state") sd2Known = false;
-            // Slot 2's card that didn't go in at start stays in the folder for the next start.
-            if (secondStartPending && (command == "sd2-state" || command == "sd2-put-in")) {
+            // A card that didn't go in at start stays in the folder for the next start.
+            if (firstStartPending && (command == cardCommand("state", 0) || command == cardCommand("put-in", 0))) {
+                firstStartPending = false;
+                if (!stopping) {
+                    if (command == cardCommand("put-in", 0)) failure(tr("Couldn't put the card in. %1").arg(frondDanaCards::message(message)));
+                    if (secondSlot()) {
+                        secondStartPending = true;
+                        send("sd2-state");
+                    } else send("network-state");
+                    return;
+                }
+            }
+            if (secondStartPending && (command == "sd2-state" || command == cardCommand("put-in", 1))) {
                 secondStartPending = false;
                 if (!stopping) {
-                    if (command == "sd2-put-in") failure(tr("Couldn't put card 2 in. %1").arg(message));
+                    if (command == cardCommand("put-in", 1)) failure(tr("Couldn't put card 2 in. %1").arg(frondDanaCards::message(message)));
                     send("network-state");
                     return;
                 }
@@ -1087,24 +1113,27 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             send("hold-state");
             return;
         }
+        // frond-68k's state replies go on with the card's key and flags: the first word says it.
+        const auto word = message.section(' ', 0, 0);
         if (command == "sd-state" || command == "ms-state") {
-            sdKnown = message == "none" || message == "inserted" || message == "ejected";
-            cardPresent = sdKnown && message != "none";
-            cardInserted = message == "inserted";
+            sdKnown = word == "none" || word == "inserted" || word == "ejected";
+            cardPresent = sdKnown && word != "none";
+            cardInserted = word == "inserted";
         }
-        else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" ||
-                 command == "ms-create" || command == "ms-insert" || command == "ms-reinsert") cardPresent = cardInserted = true;
+        else if (command == "sd-create" || command == "sd-insert" || command == "sd-reinsert" || command == "sd-attach" ||
+                 command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-attach") cardPresent = cardInserted = true;
         else if (command == "sd-eject" || command == "ms-eject") cardInserted = false;
         else if (command == "sd-take-out" || command == "ms-take-out") cardPresent = cardInserted = false;
         else if (command == "sd-put-in" || command == "ms-put-in") cardPresent = cardInserted = true;
         if ((command.startsWith("sd-") || command.startsWith("ms-")) &&
             command != "sd-state" && command != "ms-state") sdKnown = true;
         if (command == "sd2-state") {
-            sd2Known = message == "none" || message == "inserted" || message == "ejected";
-            card2Present = sd2Known && message != "none";
-            card2Inserted = message == "inserted";
+            sd2Known = word == "none" || word == "inserted" || word == "ejected";
+            card2Present = sd2Known && word != "none";
+            card2Inserted = word == "inserted";
         }
-        else if (command == "sd2-create" || command == "sd2-insert" || command == "sd2-reinsert" || command == "sd2-put-in") card2Present = card2Inserted = true;
+        else if (command == "sd2-create" || command == "sd2-insert" || command == "sd2-reinsert" || command == "sd2-put-in" ||
+                 command == "sd2-attach") card2Present = card2Inserted = true;
         else if (command == "sd2-eject") card2Inserted = false;
         else if (command == "sd2-take-out") card2Present = card2Inserted = false;
         if (command.startsWith("sd2-") && command != "sd2-state") sd2Known = true;
@@ -1164,7 +1193,18 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if (command == "keyboard-state" && !stopping && frondFirmware::capabilities(runningDevice).serial && serialArgument() != "off") { send("serial-state"); return; }
         if ((command == "keyboard-state" || command == "serial-state") && !stopping &&
             frondFirmware::capabilities(runningDevice).usb && usbArgument() != "off") { send("usb-state"); return; }
-        if (command == "sd-state" && !stopping && secondSlot()) {
+        const bool m68k = frondFirmware::runs68k(runningDevice);
+        // frond-68k: slot 1's card goes in by path now when the core left it out at start.
+        bool firstDone = false;
+        if (firstStartPending && !stopping && (command == cardCommand("state", 0) || command == cardCommand("put-in", 0))) {
+            if (command == cardCommand("state", 0)) {
+                const auto argument = cardPresent ? QString() : putInArgument(0, {}, false);
+                if (!argument.isEmpty() && send(cardCommand("put-in", 0), argument)) return;
+            }
+            firstStartPending = false;
+            firstDone = true;
+        }
+        if ((command == "sd-state" || firstDone) && !stopping && secondSlot()) {
             secondStartPending = true;
             send("sd2-state");
             return;
@@ -1172,19 +1212,21 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         // Slot 2's card goes in now when the core left it out at start: changed since the last
         // save, or put in while the machine was off.
         if (secondStartPending && command == "sd2-state" && !stopping) {
-            const auto argument = card2Present ? QString() : frondCards::secondPutIn(sessionFolder(), runningMachineDir());
-            if (!argument.isEmpty() && send("sd2-put-in", argument)) return;
+            const auto argument = card2Present ? QString()
+                                  : m68k       ? putInArgument(1, {}, false)
+                                               : frondCards::secondPutIn(sessionFolder(), runningMachineDir());
+            if (!argument.isEmpty() && send(cardCommand("put-in", 1), argument)) return;
             secondStartPending = false;
             send("network-state");
             return;
         }
-        if (secondStartPending && command == "sd2-put-in" && !stopping) {
+        if (secondStartPending && command == cardCommand("put-in", 1) && !stopping) {
             secondStartPending = false;
             send("network-state");
             return;
         }
-        if ((command == "sd-state" || command == "ms-state") && !stopping) {
-            send(command == "ms-state" && cardPresent ? "ms-protection" : "network-state"); return;
+        if ((command == "sd-state" || command == "ms-state" || firstDone) && !stopping) {
+            send(command == "ms-state" && cardPresent && !m68k ? "ms-protection" : "network-state"); return;
         }
         if (command == "ms-protection" && !stopping) { send("network-state"); return; }
         // The Dana's USB port always gets the machine's choice, Off included, since a session brings the
@@ -1327,9 +1369,6 @@ void MainWindow::refresh() {
     if (caps.wifiOnlyNetwork != networkWifiOnly) fillNetworkModes(caps.wifiOnlyNetwork);
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
     const bool linkedCards = frondFirmware::linkedCards(currentDevice());
-    danaCards->setVisible(linkedCards);
-    danaCards->setText(deviceProfileLinkedStick5(frondFirmware::profile(currentDevice())) ? tr("Memory Stick…") :
-                       deviceProfileCardSlotCount5(frondFirmware::profile(currentDevice())) > 1 ? tr("Cards 1 and 2…") : tr("Card…"));
     // A connector the device has that isn't emulated yet, greyed out.
     const QString pendingUsb = QString::fromLatin1(deviceProfilePendingUsb5(int(currentDevice())));
     auto* pending = findChild<QLabel*>("danaPendingPeripherals");
@@ -1339,10 +1378,9 @@ void MainWindow::refresh() {
     printerPanel->setModuleSupported(caps.builtInWifi);
     printerPanel->setEnabled(running && !stopping);
     irPrint.panel->setEnabled(running && !stopping);
-    danaCards->setEnabled(linkedCards && client.available() && !busy && !stopping);
     const bool linkedStick = linkedCards && deviceProfileLinkedStick5(frondFirmware::profile(currentDevice()));
-    stickFiles->setVisible(linkedStick);
-    stickFiles->setEnabled(linkedStick && client.available() && !busy && !stopping && !stickDialog);
+    portableExport->setVisible(linkedCards && !linkedStick && running);
+    portableExport->setEnabled(client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None);
     const auto reason = tr("Not available on the %1 yet").arg(frondFirmware::deviceName(currentDevice()));
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
     note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
@@ -1440,13 +1478,13 @@ void MainWindow::refresh() {
     hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
     hardResetButton->setToolTip(guest ? QString() : reason);
     hardResetButton->setVisible(palmOs);
-    storageHeading->setVisible(!m68k);
+    storageHeading->setVisible(!m68k || linkedCards);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
     const bool known = sdKnown && running && supported;
     sdStatus->setText(!supported ? tr("Not available yet") : !known ? tr("Not known") : !cardPresent ? tr("No card") : cardInserted ? tr("Inserted") : tr("Ejected"));
     // The picker button already says "No card" or the card's name, and Eject shows it's in.
-    sdStatus->setVisible(!m68k && (!known || (cardPresent && !cardInserted)));
+    sdStatus->setVisible((!m68k || linkedCards) && (!known || (cardPresent && !cardInserted)));
     sdReinsert->setVisible(known && cardPresent && !cardInserted);
     sdExchange->setVisible(known && cardPresent);
     sdEject->setVisible(known && cardInserted);
@@ -1478,6 +1516,10 @@ void MainWindow::refresh() {
         if (!supported) b->setVisible(false);
         b->setEnabled(enabled && supported);
     }
+    // A frond-68k card still linked from where an older Frond kept it (it couldn't be moved into
+    // Cards) can be ejected, put back and exported, but not changed or opened in Files.
+    const auto oldPlace = [&](int n) { return m68k && running && present(n) && frondCards::cardFileIn(runningMachineDir(), n).isEmpty(); };
+    if (oldPlace(0)) for (auto* b : {cardPick, sdExchange}) b->setEnabled(false);
     // Slot 2, as slot 1 above.
     const bool known2 = sd2Known && running && second;
     storage2Heading->setVisible(second);
@@ -1510,7 +1552,9 @@ void MainWindow::refresh() {
     linked2State->setVisible(second && !linked2Text.isEmpty());
     linked2Insert->setVisible(second && linked2Free);
     for (auto* b : {card2Pick, sd2Reinsert, sd2Exchange, sd2Eject, sd2Export, sd2Retry, linked2Insert}) b->setEnabled(enabled && second);
-    cardReadOnly->setVisible(memoryStick && supported && known && cardPresent);
+    if (oldPlace(1)) for (auto* b : {card2Pick, sd2Exchange}) b->setEnabled(false);
+    // frond-68k's stick takes its protection from Cards when it goes in.
+    cardReadOnly->setVisible(memoryStick && supported && known && cardPresent && !m68k);
     cardReadOnly->setEnabled(enabled && protectionKnown && !cardInserted);
     runningRules::State state;
     state.ready = enabled;
@@ -2561,13 +2605,19 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
     if (frondFirmware::profile(startDevice).frontend.clieGamepad && runningPreferences.gamepadSet)
         arguments << "--gamepad" << (runningPreferences.gamepad ? "on" : "off");
     // A saved machine in the managed folder: its slot (a linked card it takes now) gives the card
-    // flags. frond-68k has no cards.
+    // flags. frond-68k takes its cards by path once it runs (firstStartPending), and first the
+    // cards an older Frond kept in dana-cards/ move into the machine and Cards.
     finalSaved = false; linkedWatcher.reset(); linkedWatcherId.clear(); linkedHolder.clear(); cardMove = {};
     linked2Watcher.reset(); linked2WatcherId.clear(); cardSlot = 0; secondStartPending = false;
+    firstStartPending = frondFirmware::linkedCards(startDevice);
     const auto machine = frondSessions::machineDirOf(target);
-    if (!m68k && !sourceSession.isEmpty() && QFileInfo(sourceSession).canonicalFilePath() == QFileInfo(target).canonicalFilePath() &&
+    if ((!m68k || frondFirmware::linkedCards(startDevice)) && !sourceSession.isEmpty() &&
+        QFileInfo(sourceSession).canonicalFilePath() == QFileInfo(target).canonicalFilePath() &&
         QFileInfo(frondCards::sessionsOf(machine)).canonicalFilePath() == QFileInfo(sessionFolder()).canonicalFilePath()) {
-        arguments << frondCards::takeAtStart(sessionFolder(), machine, &linkedHolder);
+        if (m68k)
+            frondCards::moveLinkedIn(sessionFolder(), machine,
+                                     QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/dana-cards"));
+        arguments << frondCards::takeAtStart(sessionFolder(), machine, &linkedHolder, nullptr, m68k);
         for (int n = 0; n < frondCards::slotCount; ++n) {
             const auto slot = frondCards::readSlot(machine, n);
             if (slot.link.isEmpty() || !frondCards::cardFileIn(machine, n).isEmpty()) continue;
@@ -3031,7 +3081,7 @@ void MainWindow::printerSaveRaw(PrintSource& src) {
 QString MainWindow::outputFile(const QString& title, const QString& filter, const QString& defaultName) {
     QFileDialog dialog(this, title, QDir::homePath() + '/' + defaultName, filter);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
-    dialog.setDefaultSuffix(filter.contains("*.frondms") ? "frondms" : filter.contains("*.frond") ? "frond" : filter.contains("*.img") ? "img" : "zip");
+    dialog.setDefaultSuffix(filter.contains("*.frondms") ? "frondms" : filter.contains("*.frondsd") ? "frondsd" : filter.contains("*.frond") ? "frond" : filter.contains("*.img") ? "img" : "zip");
     if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) return {};
     return QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
 }
@@ -3053,13 +3103,13 @@ void MainWindow::saveCopyTo(const QString& path) {
         const bool stick = deviceProfileLinkedStick5(frondFirmware::profile(runningDevice));
         for (const auto* slot : {stick ? "ms-state" : "sd-state", "sd2-state"}) {
             if (!two && QLatin1String(slot) == QLatin1String("sd2-state")) break;
-            const auto result=DanaCardsDialog::requestWithClient(client,slot);
+            const auto result=frondDanaCards::request(client,slot);
             if (!result.ok) return failure(result.message);
             const auto state=frondDanaCards::state(result.message);
             if (!state.known) return failure(two ? tr("Couldn't read both card slots.") : tr("Couldn't read the card slot."));
-            if (state.present) return failure(two ? tr("Use Cards 1 and 2 to export a portable session folder with both cards.") :
-                                              stick ? tr("Export the Memory Stick from Memory Stick… and take it out, then save a copy.") :
-                                                      tr("Use Card to export a portable session folder with its card."));
+            if (state.present) return failure(stick ? tr("Take the Memory Stick out, then save a copy.") :
+                                              two ? tr("Use Export portable folder to copy this machine with its cards.") :
+                                                    tr("Use Export portable folder to copy this machine with its card."));
         }
     }
     const auto dest = frondSessions::exportDestDir(path);
@@ -3409,9 +3459,7 @@ void MainWindow::stop(bool closeApp) {
     if (!client.running()) { if (closeApp) { allowClose = true; close(); } return; }
     if (stopping) return;
     stopping = true; client.cancelFiles(); refresh();
-    if (stickDialog) stickDialog->reject();
-    else if (stickFlow) notify(tr("Waiting to save the session…"));
-    else if (exchangeDialog) exchangeDialog->reject();
+    if (exchangeDialog) exchangeDialog->reject();
     else if (client.available() && exchangeStage == ExchangeStage::None) save();
     else notify(tr("Waiting to save the session…"));
 }
@@ -3471,16 +3519,26 @@ bool MainWindow::memoryStick() const {
     return deviceProfileStorageSlot5(frondFirmware::profile(currentDevice())) == DeviceStorageSlot5::memoryStick;
 }
 bool MainWindow::storageSupported() const {
-    if (frondFirmware::linkedCards(currentDevice())) return false;
+    if (frondFirmware::linkedCards(currentDevice())) return true;
     const auto& frontend = frondFirmware::profile(currentDevice()).frontend;
     return memoryStick() ? frontend.memoryStick : frontend.sdSlot;
 }
 QString MainWindow::cardCommand(const char* operation, int n) const {
-    return (n ? QStringLiteral("sd2-") : memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + QLatin1String(operation);
+    QString op = QLatin1String(operation);
+    // frond-68k inserts an ejected card with insert and takes a card file in with attach.
+    if (frondFirmware::runs68k(currentDevice())) {
+        if (op == "reinsert") op = QStringLiteral("insert");
+        else if (op == "put-in") op = QStringLiteral("attach");
+    }
+    return (n ? QStringLiteral("sd2-") : memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + op;
+}
+QString MainWindow::putInArgument(int n, const QString& identity, bool protect) const {
+    if (frondFirmware::runs68k(currentDevice())) return frondCards::attachArgument(sessionFolder(), runningMachineDir(), n);
+    return identity + (protect ? QStringLiteral(" protected") : QStringLiteral(" writable"));
 }
 bool MainWindow::secondSlot() const { return frondCards::secondSlot(currentDevice()); }
 bool MainWindow::putInStartCard() {
-    if (stopping || busy || secondStartPending || cardMove.stage != CardMove::None || exchangeStage != ExchangeStage::None) return false;
+    if (stopping || busy || secondStartPending || firstStartPending || cardMove.stage != CardMove::None || exchangeStage != ExchangeStage::None) return false;
     while (!startCards.isEmpty()) {
         const int n = frondCards::slotCount - int(startCards.size());
         const auto id = startCards.takeFirst();
@@ -3522,11 +3580,18 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         const auto parts = message.split(' ');
         exchangeIdentity = parts.value(0).size() == 64 ? parts.value(0) : QString(64, '0');
         exchangeProtected = parts.value(1) == "protected";
+        // frond-68k only says taken-out: the card's protection is its Cards entry's.
+        if (frondFirmware::runs68k(runningDevice)) {
+            frondCards::Card card;
+            const auto slot = frondCards::readSlot(runningMachineDir(), cardSlot);
+            exchangeProtected = frondCards::readCard(frondCards::entryDir(frondCards::libraryFor(sessionFolder()), slot.card), &card) &&
+                                card.writeProtected;
+        }
     }
     // Stopping with the card out: it goes back in before the final save.
     if (ok && stopping && stage == ExchangeStage::TakeOut) {
         exchangeStage = ExchangeStage::PutIn;
-        if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) { endExchange(); save(); }
+        if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected))) { endExchange(); save(); }
         return;
     }
     if (!ok || stopping) {
@@ -3568,114 +3633,6 @@ void MainWindow::exchangeResult(bool ok, const QString& message) {
         notify(tr("Card put back in, ejected."));
     }
 }
-void MainWindow::openStickFiles() {
-    if (!client.available() || busy || stopping || stickDialog || sessionPath.isEmpty()) return;
-    auto request = [this](const QString& command, const QString& argument = {}) {
-        return DanaCardsDialog::requestWithClient(client, command, argument);
-    };
-    const auto reply = request("ms-state");
-    const auto state = reply.ok ? frondDanaCards::state(reply.message) : frondDanaCards::State{};
-    if (!state.known) return failure(reply.ok ? tr("Couldn't read the Memory Stick slot.") : reply.message);
-    if (!state.present) return failure(tr("There's no Memory Stick in the slot."));
-    if (state.failed) return failure(tr("The Memory Stick has an I/O error."));
-    const auto file = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + "/dana-cards/" + state.identity + ".frondms";
-    if (!QFileInfo(file).isFile()) return failure(tr("Couldn't find the Memory Stick's file."));
-    if (state.inserted && QMessageBox::question(this, tr("Open the stick's files?"),
-            tr("Close any files open on the Palm first. The stick is ejected while Files is open and goes back in when you close it."),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
-    if (!client.available() || busy || stopping || stickDialog) return;
-    // Each request runs a nested event loop, so the window can start stopping meanwhile; stop()
-    // leaves the save to this flow while stickFlow is set.
-    stickFlow = true; busy = true; refresh();
-    stickProtected = state.protectedCard; stickWasInserted = state.inserted;
-    // Ends the flow with the stick where it started, saving if the window is stopping.
-    auto finish = [this](const QString& message) {
-        stickFlow = false; busy = false; refresh();
-        if (!message.isEmpty()) failure(message);
-        if (stopping && client.available()) save();
-    };
-    // From take-out on: the stick goes back in through stickFilesClosed, which saves if stopping.
-    auto putBack = [this](const QString& message) {
-        stickFlow = false; busy = false;
-        if (!message.isEmpty()) failure(message);
-        stickFilesClosed();
-    };
-    if (state.inserted) {
-        if (const auto r = request("ms-eject"); !r.ok) return finish(frondDanaCards::message(r.message));
-    }
-    if (stopping || !client.available()) {
-        if (state.inserted) request("ms-insert");
-        return finish({});
-    }
-    if (const auto r = request("ms-take-out"); !r.ok) {
-        // A timeout can leave the core finishing the take-out: go by the slot.
-        const auto now = request("ms-state");
-        if (now.ok && now.message == "none") {
-            stickIdentity = state.identity;
-            return putBack(frondDanaCards::message(r.message));
-        }
-        auto message = frondDanaCards::message(r.message);
-        if (state.inserted) {
-            if (const auto back = request("ms-insert"); !back.ok)
-                message += ' ' + tr("The Memory Stick is still ejected: %1").arg(back.message);
-        }
-        return finish(message);
-    }
-    stickIdentity = state.identity;
-    if (stopping || !client.available()) return putBack({});
-    // Saved without the stick: a machine that dies from here on starts with the slot empty and the
-    // stick free in Memory Stick….
-    QString error;
-    if (const auto r = request("save", sessionPath); !r.ok) error = tr("Couldn't save the machine, so the stick wasn't opened. %1").arg(r.message);
-    else {
-        settings.setValue("lastSession", sessionPath); settings.sync();
-        QFile::remove(frondSessions::markerPath(sessionPath));
-        QFile::remove(frondSessions::workPath(sessionPath));
-    }
-    std::unique_ptr<frondCardFile::CardFile> card;
-    if (error.isEmpty()) {
-        try {
-            card = frondCardFile::CardFile::open(file, !stickProtected);
-            frondCardFile::FatImage check(*card);
-        } catch (const frondCardFile::Error& e) {
-            error = e.message;
-            card.reset();
-        }
-    }
-    if (!error.isEmpty() || stopping || !client.available()) {
-        // The stick goes back in as it was.
-        card.reset();
-        return putBack(error);
-    }
-    stickFlow = false; busy = false;
-    auto* dialog = new CardFilesWindow(std::move(card), tr("Memory Stick"), this);
-    dialog->deleteOnClose = true;
-    dialog->setWindowModality(Qt::WindowModal);
-    stickDialog = dialog;
-    connect(dialog, &QDialog::finished, this, &MainWindow::stickFilesClosed);
-    refresh();
-    dialog->QDialog::open();
-}
-// Files closed: the stick's file is closed and goes back in the Palm.
-void MainWindow::stickFilesClosed() {
-    if (stickDialog) { stickDialog->closeCard(); stickDialog->disconnect(this); }
-    stickDialog = nullptr;
-    if (stickIdentity.isEmpty()) return;
-    const auto identity = stickIdentity;
-    stickIdentity.clear();
-    if (!client.available()) {
-        failure(tr("The emulator stopped. The Memory Stick is kept in Memory Stick…, under Attach saved."));
-        return;
-    }
-    busy = true; refresh();
-    const auto put = DanaCardsDialog::requestWithClient(client, "ms-put-in", identity + (stickProtected ? " protected" : " writable"));
-    if (put.ok && !stickWasInserted) DanaCardsDialog::requestWithClient(client, "ms-eject");
-    busy = false; refresh();
-    if (!put.ok)
-        failure(tr("Couldn't put the Memory Stick back in. It's kept in Memory Stick…, under Attach saved. %1").arg(put.message));
-    else notify(stickWasInserted ? tr("Memory Stick put back in.") : tr("Memory Stick put back in, ejected."));
-    if (stopping && client.available()) save();
-}
 // The card is out of the core in the machine folder's card file (sd.frondsd, ms.frondms or
 // ms.frondmsp): opens it in Files.
 void MainWindow::openExchangeCard() {
@@ -3716,7 +3673,7 @@ void MainWindow::exchangeClosed() {
         return;
     }
     exchangeStage = ExchangeStage::PutIn;
-    if (!send(cardCommand("put-in"), exchangeIdentity + (exchangeProtected ? " protected" : " writable"))) exchangeResult(false, tr("Couldn't reach the Palm."));
+    if (!send(cardCommand("put-in", cardSlot), putInArgument(cardSlot, exchangeIdentity, exchangeProtected))) exchangeResult(false, tr("Couldn't reach the Palm."));
 }
 
 // ---- Cards on the running machine ----
@@ -3813,8 +3770,7 @@ void MainWindow::putInCard(const QString& in) {
         return failure(error);
     }
     cardMove = {CardMove::PutIn, in};
-    const auto argument = QString::fromLatin1(card.identity.leftJustified(32, '\0', true).toHex()) +
-                          (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+    const auto argument = putInArgument(cardSlot, QString::fromLatin1(card.identity.leftJustified(32, '\0', true).toHex()), card.writeProtected);
     if (!send(cardCommand("put-in"), argument)) cardMoveFailed(cardCommand("put-in"), tr("Couldn't reach the Palm."));
     if (cardsWindow) cardsWindow->refresh();
 }
@@ -3850,7 +3806,8 @@ bool MainWindow::continueCardMove(const QString& command, const QString& message
                         const auto reported = QByteArray::fromHex(parts[0].toLatin1());
                         if (!frondCards::identityUsed(library, reported, card.id)) card.identity = reported;
                     }
-                    card.writeProtected = parts.value(1) == "protected";
+                    // frond-68k only says taken-out; the entry keeps its protection.
+                    if (parts.size() == 2) card.writeProtected = parts.value(1) == "protected";
                     frondCards::writeCard(frondCards::entryDir(library, card.id), card);
                     error = frondCards::toDrawer(library, dir, card.id, cardSlot);
                 }

@@ -108,7 +108,7 @@ NewCardDialog::NewCardDialog(const QString& sessions, frondFirmware::Device devi
     type->setObjectName("cardType");
     sizes = new QComboBox(this);
     sizes->setObjectName("cardSize");
-    for (const auto& kind : frondCards::kindsTaken())
+    for (const auto& kind : frondCards::typesTaken())
         if (device == frondFirmware::Device::automatic || frondCards::deviceTakesKind(device, kind))
             type->addItem(frondCards::kindName(kind), kind);
     form->addRow(tr("Name"), name);
@@ -230,9 +230,9 @@ LinkDialog::LinkDialog(const QString& sessions, const QString& cardId, const QSt
     QMap<QString, QString> names;
     for (const auto& e : frondCards::entries(frondCards::libraryFor(sessions))) names[e.card.id] = e.card.name;
     for (const auto& m : frondCards::machineSlots(sessions, held)) {
-        if (!frondCards::deviceTakesKind(m.device, card.kind, m.n)) continue;
+        if (!frondCards::deviceTakesKind(m.device, frondCards::takeKind(card), m.n)) continue;
         bool tooBig = false;
-        const bool fits = frondCards::deviceTakes(m.device, card.kind, frondCards::sizeOf(card.kind, card.bytes), &tooBig, m.n);
+        const bool fits = frondCards::deviceTakes(m.device, frondCards::takeKind(card), frondCards::sizeOf(card.kind, card.bytes), &tooBig, m.n);
         if (!fits && !tooBig) continue;
         QString text = m.label() + QStringLiteral(" · ") + frondFirmware::deviceName(m.device);
         bool enabled = true;
@@ -334,9 +334,9 @@ void CardPickerDialog::fill(const QString& select) {
     add(tr("No card"), {}, true);
     const auto mine = QFileInfo(machineDir).canonicalFilePath();
     for (const auto& r : frondCards::rows(sessions, machineDir)) {
-        if (!frondCards::deviceTakesKind(device, r.card.kind, slot)) continue;
+        if (!frondCards::deviceTakesKind(device, frondCards::takeKind(r.card), slot)) continue;
         bool tooBig = false;
-        const bool fits = frondCards::deviceTakes(device, r.card.kind, frondCards::sizeOf(r.card.kind, r.card.bytes), &tooBig, slot);
+        const bool fits = frondCards::deviceTakes(device, frondCards::takeKind(r.card), frondCards::sizeOf(r.card.kind, r.card.bytes), &tooBig, slot);
         if (!fits && !tooBig) continue;
         auto text = r.card.name + QStringLiteral(" · ") + frondCards::cardSizeText(r.card);
         bool enabled = fits;

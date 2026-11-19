@@ -19,6 +19,7 @@
 #include <QLockFile>
 #include <QProcess>
 #include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QStorageInfo>
 #include <QTimer>
@@ -73,7 +74,16 @@ struct Card {
     qint64 bytes{0};                            // logical size
     QByteArray identity;                        // 32 bytes
     bool writeProtected{false};
+    // An SD card's type, "sd" or "mmc" (the Dana and VZ Palms take MMC cards too); missing means sd.
+    QString type{QStringLiteral("sd")};
+    // frond-68k's key for the card (32 lowercase hex), made the first time a 68k machine takes it.
+    // Its saved changes beside the card file are bound to it.
+    QString key;
 };
+inline bool validKey(const QString& key) {
+    static const QRegularExpression hex(QStringLiteral("^[0-9a-f]{32}$"));
+    return hex.match(key).hasMatch();
+}
 inline bool readCard(const QString& dir, Card* card) {
     QFile file(dir + "/card.json");
     if (!file.open(QIODevice::ReadOnly)) return false;
@@ -85,6 +95,8 @@ inline bool readCard(const QString& dir, Card* card) {
              o.value("machine").toString(), qint64(o.value("bytes").toDouble()),
              QByteArray::fromHex(o.value("identity").toString().toLatin1()), o.value("writeProtected").toBool()};
     card->identity = card->identity.leftJustified(32, '\0', true);
+    card->type = kind == "sd" && o.value("type").toString() == "mmc" ? QStringLiteral("mmc") : QStringLiteral("sd");
+    card->key = validKey(o.value("key").toString()) ? o.value("key").toString() : QString();
     return true;
 }
 inline bool writeCard(const QString& dir, const Card& card) {
@@ -92,6 +104,8 @@ inline bool writeCard(const QString& dir, const Card& card) {
                   {"created", card.created}, {"identity", QString::fromLatin1(card.identity.leftJustified(32, '\0', true).toHex())},
                   {"writeProtected", card.writeProtected},
                   {"machine", card.machine.isEmpty() ? QJsonValue() : QJsonValue(card.machine)}};
+    if (card.kind == "sd") o.insert("type", card.type == "mmc" ? "mmc" : "sd");
+    if (validKey(card.key)) o.insert("key", card.key);
     QSaveFile file(dir + "/card.json");
     const auto bytes = QJsonDocument(o).toJson(QJsonDocument::Compact);
     return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
@@ -169,6 +183,72 @@ inline const Descriptor* describedCard(const QList<Descriptor>& cards, const QSt
     for (const auto& d : cards)
         if (d.kind == descriptorKindOf(file)) return &d;
     return nullptr;
+}
+
+// ---- frond-68k sessions ----
+// A frond-68k save (Dana, VZ Palms, T415) starts with a manifest of the card files it links, one
+// row per slot: id (0 card 1, 2 card 2, 1 the stick), kind, "path", key, serial, size, protected,
+// inserted, dev, ino, mtime, protocol (sd or mmc) and the history root.
+inline bool linkedSession(const QString& frond) {
+    QFile file(frond);
+    return file.open(QIODevice::ReadOnly) && file.read(13) == QByteArray("FRONDLINKSD1\n");
+}
+struct LinkedRow {
+    int n{0};  // the library slot: 0 for card 1 or the stick, 1 for card 2
+    bool stick{false}, writeProtected{false};
+    QString path, key, protocol;
+};
+inline QList<LinkedRow> linkedRows(const QString& frond) {
+    QList<LinkedRow> rows;
+    QFile file(frond);
+    if (!file.open(QIODevice::ReadOnly) || file.read(13) != QByteArray("FRONDLINKSD1\n")) return rows;
+    const auto descriptor = file.read(12);
+    if (descriptor.size() != 12) return rows;
+    const auto size = frondSessions::le32(descriptor, 0);
+    if (!size || size > 8192) return rows;
+    const auto lines = QString::fromUtf8(file.read(size)).split('\n', Qt::SkipEmptyParts);
+    static const QRegularExpression word(QStringLiteral("\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s]+"));
+    for (int i = 1; i < lines.size(); ++i) {
+        QStringList f;
+        for (auto m = word.globalMatch(lines[i]); m.hasNext();) f << m.next().captured();
+        if (f.size() != 13 || !f[2].startsWith('"') || f[2].size() < 2) continue;
+        LinkedRow row;
+        row.stick = f[0] == "1" && f[1] == "ms";
+        if (f[0] != "0" && f[0] != "2" && !row.stick) continue;
+        row.n = f[0] == "2" ? 1 : 0;
+        QString path;
+        const auto quoted = f[2].mid(1, f[2].size() - 2);
+        for (int c = 0; c < quoted.size(); ++c) {
+            if (quoted[c] == '\\' && c + 1 < quoted.size()) ++c;
+            path += quoted[c];
+        }
+        row.path = path;
+        row.key = f[3];
+        row.writeProtected = f[6] == "1";
+        row.protocol = f[11] == "mmc" ? QStringLiteral("mmc") : QStringLiteral("sd");
+        rows << row;
+    }
+    return rows;
+}
+inline bool linkedRowFor(const QString& frond, int n, LinkedRow* out = nullptr) {
+    for (const auto& row : linkedRows(frond))
+        if (row.n == n) {
+            if (out) *out = row;
+            return true;
+        }
+    return false;
+}
+// Whether frond-68k left saved changes (.gen-<file>-*) beside a card file, held ones included.
+inline bool hasGenerations(const QString& dir, const QString& file) {
+    for (const auto& name : QDir(dir).entryList(QDir::Files | QDir::Hidden | QDir::System))
+        if (name.startsWith(".gen-" + file + '-') || name.startsWith(".held-.gen-" + file + '-')) return true;
+    return false;
+}
+// Quoted for frond-68k's commands.
+inline QString quotePath(QString path) {
+    path.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+    path.replace(QStringLiteral("\""), QStringLiteral("\\\""));
+    return '"' + path + '"';
 }
 
 // The SD, Pro or classic v2 generation, or a v1 classic stick's change counter, in a card file's header.
@@ -297,6 +377,13 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
     if (freshIdentity) slot.swap = true;
     card.identity = d && !slot.swap ? d->identity : newIdentity();
     card.writeProtected = d && d->writeProtected;
+    // A frond-68k save's row for this slot gives the key its saved changes are bound to.
+    LinkedRow row;
+    if (linkedRowFor(frondSessions::sessionFrondIn(dir), n, &row) && row.stick == (card.kind != "sd")) {
+        card.writeProtected = row.writeProtected;
+        if (card.kind == "sd") card.type = row.protocol;
+        if (!freshIdentity) card.key = row.key;
+    }
     card.name = freeCardName(library, name.isEmpty() ? QFileInfo(dir).fileName() + (n ? " card 2" : " card") : name);
     const auto to = entryDir(library, card.id);
     if (!QDir().mkpath(to) || !writeCard(to, card)) {
@@ -313,6 +400,62 @@ inline bool moveIn(const QString& library, const QString& dir, const QString& fi
     return true;
 }
 
+// The ARM core, which is also the card tool (`frond-core --card ...`); the window sets it.
+// FROND_CARD_TOOL replaces it (the tests use it).
+inline QString& defaultCore() {
+    static QString core;
+    return core;
+}
+inline QString cardTool(const QString& core = {}) {
+    const auto env = qEnvironmentVariable("FROND_CARD_TOOL");
+    return !env.isEmpty() ? env : !core.isEmpty() ? core : defaultCore();
+}
+struct ToolResult {
+    bool ok{false};
+    QString code, message;
+};
+// Runs one card tool operation, passing its progress on; `progress` returning false cancels it
+// (SIGTERM, the tool removes its output). Blocks, so run it off the UI thread.
+inline ToolResult runCardTool(const QString& tool, const QStringList& args, const frondSessions::CopyProgress& progress = {}) {
+    QProcess p;
+    p.setProcessChannelMode(QProcess::SeparateChannels);
+    p.start(tool, QStringList{QStringLiteral("--card")} + args);
+    if (!p.waitForStarted(10000)) return {false, QStringLiteral("start"), QStringLiteral("Couldn't run the card tool.")};
+    QByteArray pending;
+    QString last;
+    bool cancelled = false;
+    qint64 done = 0, total = 0;
+    auto take = [&] {
+        pending += p.readAllStandardOutput();
+        for (int at = pending.indexOf('\n'); at >= 0; at = pending.indexOf('\n')) {
+            const auto line = QString::fromUtf8(pending.left(at));
+            pending.remove(0, at + 1);
+            if (line.startsWith("progress ")) {
+                const auto parts = line.mid(9).split('/');
+                if (parts.size() == 2) { done = parts[0].toLongLong(); total = parts[1].toLongLong(); }
+            } else if (!line.isEmpty()) last = line;
+        }
+    };
+    while (p.state() != QProcess::NotRunning) {
+        p.waitForReadyRead(100);
+        take();
+        if (!cancelled && progress && !progress(done, total)) {
+            cancelled = true;
+            p.terminate();
+        }
+    }
+    p.waitForFinished(-1);
+    take();
+    if (last.startsWith("ok ")) return {true, QStringLiteral("ok"), last.mid(3)};
+    if (cancelled) return {false, QStringLiteral("cancelled"), QStringLiteral("Cancelled.")};
+    if (last.startsWith("error ")) {
+        const auto rest = last.mid(6);
+        const auto space = rest.indexOf(' ');
+        return {false, rest.left(space), space < 0 ? QStringLiteral("The card tool failed.") : rest.mid(space + 1)};
+    }
+    return {false, QStringLiteral("failed"), QStringLiteral("The card tool failed.")};
+}
+
 // Card file from a machine folder into the drawer. The slot gets swap first, so a crash at any
 // point loads with --card-swap; a cut-off move is fixed by reconcile rule 4. Library lock and
 // machine lock held.
@@ -321,6 +464,14 @@ inline QString toDrawer(const QString& library, const QString& dir, const QStrin
     Card card;
     if (file.isEmpty() || !readCard(entryDir(library, id), &card)) return QStringLiteral("Couldn't move the card.");
     if (const auto why = notReady(dir + '/' + file); !why.isEmpty()) return why;
+    // A card frond-68k left saved changes beside goes in with them written into its file.
+    if (linkedSession(frondSessions::sessionFrondIn(dir)) && hasGenerations(dir, file)) {
+        auto key = card.key;
+        LinkedRow row;
+        if (!validKey(key) && linkedRowFor(frondSessions::sessionFrondIn(dir), n, &row)) key = row.key;
+        if (!validKey(key)) return QStringLiteral("The card's saved changes can't be read.");
+        if (const auto r = runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key}); !r.ok) return r.message;
+    }
     auto slot = readSlot(dir, n);
     slot.present = true; slot.swap = true; slot.card = id;
     if (!writeSlot(dir, slot, n)) return QStringLiteral("Couldn't move the card.");
@@ -482,7 +633,8 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
     for (auto& m : machines) {
         quint32 version = 0;
         descriptorsOf(m.frond, &version);
-        if (version < 7) continue;  // a v6 card is inside the .frond until its first run
+        // A v6 card is inside the .frond until its first run. frond-68k saves link card files.
+        if (version < 7 && !linkedSession(m.frond)) continue;
         for (int n = 0; n < slotCount; ++n) {
             auto slot = readSlot(m.dir, n);
             const auto file = cardFileIn(m.dir, n);
@@ -559,7 +711,10 @@ inline void reconcileLocked(const QString& sessions, const QString& held = {}) {
             if (!knownIn.contains(m.dir + '#' + QString::number(n)) || slot.card.isEmpty() || slot.swap) continue;
             quint32 version = 0;
             const auto cards = descriptorsOf(m.frond, &version);
-            if (version < 7 || describedCard(cards, file) || !settled(m.dir, file, false)) continue;
+            const bool linked = linkedSession(m.frond);
+            if ((version < 7 && !linked) || describedCard(cards, file) || (linked && linkedRowFor(m.frond, n)) ||
+                !settled(m.dir, file, false))
+                continue;
             toDrawer(library, m.dir, slot.card, n);
         }
     // Hints of drawer cards.
@@ -583,13 +738,15 @@ inline void startUp(const QString& sessions) {
     reconcile(sessions);
 }
 
-// Card flags for the core, from the slot files and card.json. Never for a 68k machine. A swap in
-// slot 2 needs --card-swap only: the core loads that slot empty when its card changed, and
-// secondPutIn() says what goes in once it runs.
-inline QStringList launchArguments(const QString& sessions, const QString& dir) {
+// Card flags for the core, from the slot files and card.json. A swap in slot 2 needs --card-swap
+// only: the core loads that slot empty when its card changed, and secondPutIn() says what goes in
+// once it runs. frond-68k (`m68k`) only takes --card-swap: it loads a slot whose saved card isn't
+// in the machine folder empty, and attachArgument() says what goes in.
+inline QStringList launchArguments(const QString& sessions, const QString& dir, bool m68k = false) {
     const auto slot = readSlot(dir);
     if (!slot.swap && !readSlot(dir, 1).swap) return {};
     QStringList args{QStringLiteral("--card-swap")};
+    if (m68k) return args;
     const auto file = cardFileIn(dir);
     Card card;
     if (slot.swap && !file.isEmpty() && !slot.card.isEmpty() && readCard(entryDir(libraryFor(sessions), slot.card), &card)) {
@@ -608,10 +765,36 @@ inline QString secondPutIn(const QString& sessions, const QString& dir) {
            (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
 }
 
+// The sd-attach, sd2-attach or ms-attach argument for slot n's library card in a frond-68k
+// machine ("PATH KEY protected|writable [sd|mmc]"), empty when the slot holds none. A card that
+// has no key yet gets one, its serial (the first 8 digits) apart from the other slot's card.
+inline QString attachArgument(const QString& sessions, const QString& dir, int n) {
+    const auto library = libraryFor(sessions);
+    const auto slot = readSlot(dir, n);
+    const auto file = cardFileIn(dir, n);
+    Card card;
+    if (file.isEmpty() || slot.card.isEmpty() || !readCard(entryDir(library, slot.card), &card) || card.kind == "ms-pro") return {};
+    Card other;
+    const auto otherSlot = readSlot(dir, 1 - n);
+    const bool hasOther = !otherSlot.card.isEmpty() && readCard(entryDir(library, otherSlot.card), &other) && validKey(other.key);
+    if (!validKey(card.key) || (hasOther && other.key.left(8) == card.key.left(8))) {
+        // A key in use elsewhere would only clash if both cards were in one machine; this one isn't.
+        if (hasGenerations(dir, file)) return {};
+        do card.key = QString::fromLatin1(newIdentity());
+        while (hasOther && other.key.left(8) == card.key.left(8));
+        if (!writeCard(entryDir(library, card.id), card)) return {};
+    }
+    auto argument = quotePath(QFileInfo(dir + '/' + file).absoluteFilePath()) + ' ' + card.key +
+                    (card.writeProtected ? QStringLiteral(" protected") : QStringLiteral(" writable"));
+    if (card.kind == "sd") argument += ' ' + card.type;
+    return argument;
+}
+
 // Machine start, machine lock held: reconcile, then each linked slot that is empty takes its card
 // if it is in the drawer. Returns the flags for the core; `heldBy` gets, per slot, the holder's
 // name when another machine has the linked card.
-inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr, QString* heldBy2 = nullptr) {
+inline QStringList takeAtStart(const QString& sessions, const QString& dir, QString* heldBy = nullptr, QString* heldBy2 = nullptr,
+                               bool m68k = false) {
     const auto library = libraryFor(sessions);
     // The machine lock is held, so its cards can be settled even if the library is busy.
     for (int n = 0; n < slotCount; ++n)
@@ -631,7 +814,7 @@ inline QStringList takeAtStart(const QString& sessions, const QString& dir, QStr
                 *holder = card.machine;
         }
     }
-    return launchArguments(sessions, dir);
+    return launchArguments(sessions, dir, m68k);
 }
 
 // After the final save of a linked holder, machine lock held: each linked card goes to the drawer.
@@ -656,11 +839,15 @@ inline QString releaseAtClose(const QString& sessions, const QString& dir) {
 // After a save that succeeded, machine lock held. Slot 2 keeps its swap while its card file is one
 // the save doesn't list (left out at start and not put in yet), so the next start still loads.
 inline void clearSwap(const QString& dir) {
+    const auto frond = frondSessions::sessionFrondIn(dir);
+    const bool linked = linkedSession(frond);
     for (int n = 0; n < slotCount; ++n) {
         auto slot = readSlot(dir, n);
         if (!slot.present || !slot.swap) continue;
-        if (n && !cardFileIn(dir, n).isEmpty() &&
-            !describedCard(descriptorsOf(frondSessions::sessionFrondIn(dir)), QStringLiteral("sd2.frondsd")))
+        // frond-68k leaves out any slot whose card didn't go in, either slot.
+        if (linked && !cardFileIn(dir, n).isEmpty() && !linkedRowFor(frond, n)) continue;
+        if (!linked && n && !cardFileIn(dir, n).isEmpty() &&
+            !describedCard(descriptorsOf(frond), QStringLiteral("sd2.frondsd")))
             continue;
         slot.swap = false;
         writeSlot(dir, slot, n);
@@ -724,62 +911,6 @@ inline QString extractV6Card(const QString& frond, const QString& to, bool* none
     if (!error.isEmpty()) { QFile::remove(to); return error; }
     *identity = md5.result().toHex();
     return {};
-}
-
-// The ARM core, which is also the card tool (`frond-core --card ...`); the window sets it.
-// FROND_CARD_TOOL replaces it (the tests use it).
-inline QString& defaultCore() {
-    static QString core;
-    return core;
-}
-inline QString cardTool(const QString& core = {}) {
-    const auto env = qEnvironmentVariable("FROND_CARD_TOOL");
-    return !env.isEmpty() ? env : !core.isEmpty() ? core : defaultCore();
-}
-struct ToolResult {
-    bool ok{false};
-    QString code, message;
-};
-// Runs one card tool operation, passing its progress on; `progress` returning false cancels it
-// (SIGTERM, the tool removes its output). Blocks, so run it off the UI thread.
-inline ToolResult runCardTool(const QString& tool, const QStringList& args, const frondSessions::CopyProgress& progress = {}) {
-    QProcess p;
-    p.setProcessChannelMode(QProcess::SeparateChannels);
-    p.start(tool, QStringList{QStringLiteral("--card")} + args);
-    if (!p.waitForStarted(10000)) return {false, QStringLiteral("start"), QStringLiteral("Couldn't run the card tool.")};
-    QByteArray pending;
-    QString last;
-    bool cancelled = false;
-    qint64 done = 0, total = 0;
-    auto take = [&] {
-        pending += p.readAllStandardOutput();
-        for (int at = pending.indexOf('\n'); at >= 0; at = pending.indexOf('\n')) {
-            const auto line = QString::fromUtf8(pending.left(at));
-            pending.remove(0, at + 1);
-            if (line.startsWith("progress ")) {
-                const auto parts = line.mid(9).split('/');
-                if (parts.size() == 2) { done = parts[0].toLongLong(); total = parts[1].toLongLong(); }
-            } else if (!line.isEmpty()) last = line;
-        }
-    };
-    while (p.state() != QProcess::NotRunning) {
-        p.waitForReadyRead(100);
-        take();
-        if (!cancelled && progress && !progress(done, total)) {
-            cancelled = true;
-            p.terminate();
-        }
-    }
-    p.waitForFinished(-1);
-    take();
-    if (last.startsWith("ok ")) return {true, QStringLiteral("ok"), last.mid(3)};
-    if (cancelled) return {false, QStringLiteral("cancelled"), QStringLiteral("Cancelled.")};
-    if (last.startsWith("error ")) {
-        const auto rest = last.mid(6);
-        const auto space = rest.indexOf(' ');
-        return {false, rest.left(space), space < 0 ? QStringLiteral("The card tool failed.") : rest.mid(space + 1)};
-    }
-    return {false, QStringLiteral("failed"), QStringLiteral("The card tool failed.")};
 }
 
 inline QString keepV6CardOf(const QString& sessions, const QString& dir, const QString& tool, const frondSessions::CopyProgress& progress);
@@ -900,9 +1031,12 @@ inline bool v6HasCard(const QString& frond) {
 // ---- Card types and sizes, from the device profiles ----
 
 // "sd", "ms" (classic Memory Stick) and "ms-pro"; sizes are MiB for SD and Pro, MB for a classic stick.
+// "mmc" stands for an SD-kind card of type mmc wherever a device's slot is asked whether it takes one.
 inline QString kindName(const QString& kind) {
-    return kind == "sd" ? QStringLiteral("SD card") : kind == "ms" ? QStringLiteral("Memory Stick") : QStringLiteral("Memory Stick Pro");
+    return kind == "sd" ? QStringLiteral("SD card") : kind == "mmc" ? QStringLiteral("MMC card") : kind == "ms" ? QStringLiteral("Memory Stick")
+                                                                                                      : QStringLiteral("Memory Stick Pro");
 }
+inline QString takeKind(const Card& card) { return card.kind == "sd" && card.type == "mmc" ? QStringLiteral("mmc") : card.kind; }
 inline QString toolKind(const QString& kind) { return kind == "ms-pro" ? QStringLiteral("mspro") : kind; }
 inline QString sizeLabel(int size) { return size >= 1024 ? QStringLiteral("%1 GB").arg((size + 512) / 1024) : QStringLiteral("%1 MB").arg(size); }
 // A card's size in the units above, from its logical bytes. A classic stick's bytes are a little
@@ -918,15 +1052,23 @@ inline int sizeOf(const QString& kind, qint64 bytes) {
 // "32 MB", or "Pro · 1 GB" for a Memory Stick Pro.
 inline QString cardSizeText(const Card& card) {
     const auto size = sizeLabel(sizeOf(card.kind, card.bytes));
-    return card.kind == "ms-pro" ? QStringLiteral("Pro · ") + size : size;
+    return card.kind == "ms-pro" ? QStringLiteral("Pro · ") + size : takeKind(card) == "mmc" ? QStringLiteral("MMC · ") + size : size;
 }
-// Whether an ARM machine has a second SD slot (the Zodiac).
+// Whether a machine has a second SD slot (the Zodiac and the Dana).
 inline bool secondSlot(frondFirmware::Device device) {
-    return !frondFirmware::runs68k(device) && deviceProfileCardSlotCount5(frondFirmware::profile(device)) > 1;
+    return device != frondFirmware::Device::automatic && deviceProfileCardSlotCount5(frondFirmware::profile(device)) > 1;
 }
 inline int slotsOf(frondFirmware::Device device) { return secondSlot(device) ? 2 : 1; }
 inline bool deviceTakesKind(frondFirmware::Device device, const QString& kind, int n = 0) {
-    if (frondFirmware::runs68k(device)) return false;
+    if (device == frondFirmware::Device::automatic) return false;
+    if (frondFirmware::runs68k(device)) {
+        // frond-68k's linked card files: SD and MMC in the Dana's and VZ Palms' slots, a classic
+        // stick in the T415's.
+        const auto& p = frondFirmware::profile(device);
+        if (deviceProfileLinkedStick5(p)) return kind == "ms" && !n;
+        return deviceProfileLinkedCards5(p) && unsigned(n) < deviceProfileCardSlotCount5(p) && (kind == "sd" || kind == "mmc");
+    }
+    if (kind == "mmc") return false;
     if (n && (!secondSlot(device) || kind != "sd")) return false;
     const auto& p = frondFirmware::profile(device);
     const auto slot = deviceProfileStorageSlot5(p);
@@ -940,7 +1082,12 @@ inline bool deviceTakes(frondFirmware::Device device, const QString& kind, int s
     if (!deviceTakesKind(device, kind, n)) return false;
     const auto& p = frondFirmware::profile(device);
     bool fits, big;
-    if (kind == "sd") {
+    if (frondFirmware::runs68k(device) && kind != "ms") {
+        const auto bytes = quint64(size) << 20;
+        fits = deviceProfileCardSizeValid5(p.deviceType, n ? DeviceCardSlot5::sd2 : DeviceCardSlot5::sd0,
+                                           kind == "mmc" ? DeviceCardFamily5::legacyMmc : DeviceCardFamily5::sdsc, bytes);
+        big = bytes > (kind == "mmc" ? quint64(256) << 20 : p.sdMax);
+    } else if (kind == "sd") {
         const auto bytes = quint64(size) << 20;
         fits = bytes >= p.sdMin && bytes <= p.sdMax;
         big = bytes > p.sdMax;
@@ -956,8 +1103,9 @@ inline bool deviceTakes(frondFirmware::Device device, const QString& kind, int s
 }
 // Sizes some device takes, smallest first.
 inline QList<int> sizesFor(const QString& kind) {
-    QList<int> all = kind == "sd" ? QList<int>{32, 64, 128, 256, 512, 1024, 1886} : kind == "ms" ? QList<int>{4, 8, 16, 32, 64, 128}
-                                                                                                 : QList<int>{256, 512, 1024, 1886};
+    QList<int> all = kind == "sd" || kind == "mmc" ? QList<int>{32, 64, 128, 256, 512, 1024, 1886}
+                     : kind == "ms"                ? QList<int>{4, 8, 16, 32, 64, 128}
+                                                   : QList<int>{256, 512, 1024, 1886};
     QList<int> result;
     for (int size : all)
         if (std::any_of(frondFirmware::devices.cbegin(), frondFirmware::devices.cend(),
@@ -970,6 +1118,12 @@ inline QStringList kindsTaken() {
     QStringList result;
     for (const auto* kind : {"sd", "ms", "ms-pro"})
         if (!sizesFor(QLatin1String(kind)).isEmpty()) result << QLatin1String(kind);
+    return result;
+}
+// What New card offers: the kinds, with MMC after SD when some device takes it.
+inline QStringList typesTaken() {
+    auto result = kindsTaken();
+    if (!sizesFor(QStringLiteral("mmc")).isEmpty()) result.insert(result.indexOf(QStringLiteral("sd")) + 1, QStringLiteral("mmc"));
     return result;
 }
 
@@ -1096,13 +1250,17 @@ inline QString makeCard(const QString& sessions, const QString& name, const QStr
     if (freeCardName(library, name.trimmed()) != name.trimmed()) return QStringLiteral("There's already a card called %1.").arg(name.trimmed());
     NewCopy copy(library);
     if (!copy.ok) return QStringLiteral("Couldn't add the card.");
-    const auto file = copy.dir + '/' + fileOfKind(kind);
-    const auto r = runCardTool(cardTool(), {QStringLiteral("make"), toolKind(kind), QString::number(size), file}, progress);
+    // An MMC card is an SD card file of type mmc.
+    const bool mmc = kind == "mmc";
+    const auto fileKind = mmc ? QStringLiteral("sd") : kind;
+    const auto file = copy.dir + '/' + fileOfKind(fileKind);
+    const auto r = runCardTool(cardTool(), {QStringLiteral("make"), toolKind(fileKind), QString::number(size), file}, progress);
     if (!r.ok) return toolError(r);
     qint64 logical = 0;
     if (!cardHeader(file, nullptr, &logical)) return QStringLiteral("Couldn't add the card.");
-    if (const auto error = adoptNew(library, copy, {{}, name.trimmed(), kind, now(), {}, logical, newIdentity(), false}); !error.isEmpty())
-        return error;
+    Card card{{}, name.trimmed(), fileKind, now(), {}, logical, newIdentity(), false};
+    if (mmc) card.type = QStringLiteral("mmc");
+    if (const auto error = adoptNew(library, copy, card); !error.isEmpty()) return error;
     if (id) *id = copy.id;
     return {};
 }
@@ -1403,7 +1561,7 @@ inline QString setLinks(const QString& sessions, const QString& id, const QStrin
         auto slot = m.slot;
         slot.present = true;
         if (want) {
-            if (!deviceTakes(m.device, card.kind, sizeOf(card.kind, card.bytes), nullptr, m.n)) continue;
+            if (!deviceTakes(m.device, takeKind(card), sizeOf(card.kind, card.bytes), nullptr, m.n)) continue;
             if (!m.cardFile.isEmpty() && slot.card != id) continue;
             if (!slot.link.isEmpty() && moved) *moved << m.label();
             slot.link = id;
@@ -1470,6 +1628,86 @@ class FreeWatcher {
     QTimer timer;
     bool state{false};
 };
+
+
+// ---- frond-68k cards from dana-cards/ ----
+// Before the library, frond-68k cards lived in <app data>/dana-cards/<key>.frondsd (a stick
+// <key>.frondms) with <key>.json ({"protocol", "name"}), linked from a save by path. When a machine
+// opens, each card its save links there moves into its folder with its saved changes (the card
+// tool's move-linked, which never replaces a file and refuses unsettled writes) and gets a library
+// entry. Whatever fails leaves the card where it was, still linked by its old path. Each card
+// gets one line in the machine folder's card-moves.log. Machine lock held. Returns the cards moved.
+inline QString movesLog(const QString& dir) { return dir + QStringLiteral("/card-moves.log"); }
+inline int moveLinkedIn(const QString& sessions, const QString& dir, const QString& oldRoot, const QString& tool = {}) {
+    const auto frond = frondSessions::sessionFrondIn(dir);
+    const auto rows = linkedRows(frond);
+    const auto root = QDir::cleanPath(QFileInfo(oldRoot).absoluteFilePath());
+    QList<LinkedRow> old;
+    for (const auto& row : rows)
+        if (QDir::cleanPath(QFileInfo(row.path).absolutePath()) == root) old << row;
+    if (old.isEmpty()) return 0;
+    const auto library = libraryFor(sessions);
+    QDir().mkpath(library);
+    LibraryLock lock(library);
+    if (!lock.ok) return 0;
+    auto log = [&](const QString& line) {
+        QFile f(movesLog(dir));
+        if (f.open(QIODevice::Append | QIODevice::Text)) f.write((now() + ' ' + line + '\n').toUtf8());
+    };
+    int moved = 0;
+    for (const auto& row : old) {
+        const QString file = row.stick ? QStringLiteral("ms.frondms") : row.n ? QStringLiteral("sd2.frondsd") : QStringLiteral("sd.frondsd");
+        const auto target = dir + '/' + file;
+        const auto meta = QFileInfo(row.path).absolutePath() + '/' + QFileInfo(row.path).completeBaseName() + QStringLiteral(".json");
+        const bool there = QFileInfo::exists(row.path);
+        // A move cut off after the card tool: the card is in the folder, its entry not made yet.
+        const bool resumed = !there && QFileInfo::exists(target) && readSlot(dir, row.n).card.isEmpty() && QFileInfo::exists(meta);
+        if (!there && !resumed) continue;
+        if (there && !cardFileIn(dir, row.n).isEmpty()) {
+            log(QStringLiteral("left %1 in %2: the slot already has a card file").arg(row.key, root));
+            continue;
+        }
+        // A Files change on a stick that a crash cut off is finished first, as attaching it did.
+        if (there && row.stick) frondCardFile::settle(row.path);
+        const auto r = runCardTool(cardTool(tool), {QStringLiteral("move-linked"), row.path, target});
+        if (!r.ok) {
+            log(QStringLiteral("left %1 in %2: %3").arg(row.key, root, r.message));
+            continue;
+        }
+        QJsonObject about;
+        if (QFile f(meta); f.open(QIODevice::ReadOnly)) about = QJsonDocument::fromJson(f.readAll()).object();
+        Card card;
+        card.id = newId();
+        card.kind = row.stick ? QStringLiteral("ms") : QStringLiteral("sd");
+        if (!row.stick) card.type = row.protocol;
+        card.created = now();
+        card.machine = QFileInfo(dir).fileName();
+        qint64 logical = 0;
+        cardHeader(target, nullptr, &logical);
+        card.bytes = logical;
+        do card.identity = newIdentity();
+        while (identityUsed(library, card.identity));
+        card.key = row.key;
+        card.writeProtected = row.writeProtected;
+        const auto name = about.value("name").toString().trimmed();
+        card.name = freeCardName(library, name.isEmpty() ? QFileInfo(dir).fileName() + (row.n ? " card 2" : " card") : name);
+        auto slot = readSlot(dir, row.n);
+        slot.present = true;
+        slot.card = card.id;
+        slot.name = card.name;
+        if (!QDir().mkpath(entryDir(library, card.id)) || !writeCard(entryDir(library, card.id), card) || !writeSlot(dir, slot, row.n)) {
+            // The card stays in the folder, where the save finds it; reconcile gives it an entry.
+            QDir(entryDir(library, card.id)).removeRecursively();
+            log(QStringLiteral("moved %1 to %2, its Cards entry comes later").arg(row.key, file));
+            ++moved;
+            continue;
+        }
+        QFile::remove(meta);
+        log(QStringLiteral("moved %1 to %2 as %3").arg(row.key, file, card.name));
+        ++moved;
+    }
+    return moved;
+}
 
 }  // namespace frondCards
 #endif

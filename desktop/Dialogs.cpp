@@ -137,7 +137,7 @@ void FirmwareDialog::fillCards() {
         cards[n]->clear();
         cards[n]->addItem(tr("No card"), QString());
         for (const auto& e : drawer)
-            if (frondCards::deviceTakes(selected, e.card.kind, frondCards::sizeOf(e.card.kind, e.card.bytes), nullptr, n))
+            if (frondCards::deviceTakes(selected, frondCards::takeKind(e.card), frondCards::sizeOf(e.card.kind, e.card.bytes), nullptr, n))
                 cards[n]->addItem(e.card.name + QStringLiteral(" · ") + frondCards::cardSizeText(e.card), e.card.id);
         cards[n]->setCurrentIndex(std::max(0, cards[n]->findData(keep)));
         form->setRowVisible(cards[n], two);
