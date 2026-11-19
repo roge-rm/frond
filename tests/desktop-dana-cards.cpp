@@ -212,6 +212,49 @@ class DanaCardsTest : public QObject {
         QVERIFY(QFileInfo::exists(dir+"/sd.frondsd")); QVERIFY(QFileInfo::exists(dir+"/sd2.frondsd"));
         QCOMPARE(frondCards::entries(root.filePath("cards")).size(),2);
     }
+    void unlinkedToDrawer() {
+        const auto tool=QDir::cleanPath(QCoreApplication::applicationDirPath()+"/../../out/frond");
+        if (!QFileInfo(tool).isExecutable()) QSKIP("needs out/frond");
+        QTemporaryDir root; const auto sessions=root.filePath("sessions"), dir=sessions+"/Dana", old=root.filePath("Frond/dana-cards");
+        const auto library=root.filePath("cards");
+        QVERIFY(QDir().mkpath(dir)); QVERIFY(QDir().mkpath(old));
+        const QByteArray loose="34567890000000000000000000000000", busy="45678901000000000000000000000000";
+        for (const auto& k : {key,second,loose,busy}) {
+            QProcess p; p.start(tool,{"--card","make","sd","32",old+'/'+k+".frondsd"}); QVERIFY(p.waitForFinished(60000)); QCOMPARE(p.exitCode(),0);
+            QFile meta(old+'/'+k+".json"); QVERIFY(meta.open(QIODevice::WriteOnly));
+            meta.write("{\"protocol\":\""+QByteArray(k==loose?"mmc":"sd")+"\",\"name\":\"Notes "+k.left(2)+"\"}");
+        }
+        // The save links card 1; card 2's row points somewhere else.
+        auto text=manifest(); text.replace("/cards/a.frondsd",(old+'/'+key+".frondsd").toUtf8());
+        write(dir+"/Dana.frond",text);
+        // The loose card has saved changes, which go with it; the other one a write cut off.
+        for (const auto* name : {"-root","-1","-1.idx"}) { QFile g(old+"/.gen-"+loose+".frondsd"+name); QVERIFY(g.open(QIODevice::WriteOnly)); g.write("x"); }
+        { QFile g(old+"/.gen-"+busy+".frondsd-tmp-1-2"); QVERIFY(g.open(QIODevice::WriteOnly)); }
+        QCOMPARE(frondCards::moveUnlinkedIn(sessions,old,tool),2);
+        QVERIFY(QFileInfo::exists(old+'/'+key+".frondsd")); QVERIFY(QFileInfo::exists(old+'/'+key+".json"));
+        QVERIFY(QFileInfo::exists(old+'/'+busy+".frondsd")); QVERIFY(QFileInfo::exists(old+'/'+busy+".json"));
+        QVERIFY(!QFileInfo::exists(old+'/'+loose+".frondsd")); QVERIFY(!QFileInfo::exists(old+'/'+second+".json"));
+        const auto all=frondCards::entries(library);
+        QCOMPARE(all.size(),2);
+        for (const auto& e : all) {
+            QVERIFY(e.inDrawer); QVERIFY(e.card.machine.isEmpty());
+            QVERIFY(e.card.key==QString(loose) || e.card.key==QString(second));
+            if (e.card.key==QString(loose)) {
+                QCOMPARE(e.card.name,QString("Notes 34")); QCOMPARE(e.card.type,QString("mmc")); QCOMPARE(e.card.bytes,32ll<<20);
+                for (const auto* name : {"-root","-1","-1.idx"}) QVERIFY(QFileInfo::exists(e.dir+"/.gen-sd.frondsd"+QString(name)));
+            }
+        }
+        // No machine links them.
+        QVERIFY(frondCards::readSlot(dir,0).link.isEmpty()); QVERIFY(frondCards::readSlot(dir,1).link.isEmpty());
+        QFile log(library+"/card-moves.log"); QVERIFY(log.open(QIODevice::ReadOnly));
+        const auto lines=QString::fromUtf8(log.readAll()).split('\n',Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(),3);
+        QVERIFY(lines.filter("left "+busy).size()==1); QVERIFY(lines.filter("moved "+loose+" to the drawer as Notes 34").size()==1);
+        // Reconcile keeps the drawer cards; a second run moves nothing more.
+        QVERIFY(frondCards::reconcile(sessions).isEmpty());
+        QCOMPARE(frondCards::entries(library).size(),2);
+        QCOMPARE(frondCards::moveUnlinkedIn(sessions,old,tool),0);
+    }
     // Run by tests/dana-card-migrate.py on a real frond-68k save: FROND_MIGRATE="sessions|machine|old".
     void migrateFixture() {
         const auto spec=qEnvironmentVariable("FROND_MIGRATE").split('|');

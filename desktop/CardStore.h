@@ -21,6 +21,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSet>
 #include <QStorageInfo>
 #include <QTimer>
 #include <QUuid>
@@ -731,11 +732,15 @@ inline QString reconcile(const QString& sessions, const QString& held = {}) {
     return {};
 }
 // At start-up: stale copies go, then reconcile.
-inline void startUp(const QString& sessions) {
+inline int moveUnlinkedIn(const QString& sessions, const QString& oldRoot, const QString& tool = {});
+// At start-up: stale copies go, then reconcile, and the cards in `oldRoot` (dana-cards/) that no
+// save links go to the drawer.
+inline void startUp(const QString& sessions, const QString& oldRoot = {}) {
     if (!QFileInfo(sessions).isDir()) return;
     const auto library = libraryFor(sessions);
     removeStaleNew(library);
     reconcile(sessions);
+    if (!oldRoot.isEmpty()) moveUnlinkedIn(sessions, oldRoot);
 }
 
 // Card flags for the core, from the slot files and card.json. A swap in slot 2 needs --card-swap
@@ -1704,6 +1709,74 @@ inline int moveLinkedIn(const QString& sessions, const QString& dir, const QStri
         }
         QFile::remove(meta);
         log(QStringLiteral("moved %1 to %2 as %3").arg(row.key, file, card.name));
+        ++moved;
+    }
+    return moved;
+}
+
+// Cards in `oldRoot` that no save in the sessions folder links go into the drawer, unlinked, so
+// they don't go unseen now that the Dana cards dialog is gone. Every save is read first, so a
+// machine still to move its cards in keeps them. The entry is made before the card tool's
+// move-linked moves the card with its saved changes; a move that fails or is cut off leaves the
+// card where it was (reconcile drops an entry with no card). Each card gets one line in the
+// library's card-moves.log. Returns the cards moved.
+inline int moveUnlinkedIn(const QString& sessions, const QString& oldRoot, const QString& tool) {
+    QStringList files;
+    for (const auto& name : QDir(oldRoot).entryList({QStringLiteral("*.frondsd"), QStringLiteral("*.frondms")}, QDir::Files, QDir::Name))
+        if (validKey(QFileInfo(name).completeBaseName())) files << name;
+    if (files.isEmpty()) return 0;
+    QSet<QString> linked;
+    for (const auto& machine : QDir(sessions).entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+        for (const auto& frond : QDir(sessions + '/' + machine).entryList({QStringLiteral("*.frond")}, QDir::Files))
+            for (const auto& row : linkedRows(sessions + '/' + machine + '/' + frond)) linked.insert(QDir::cleanPath(QFileInfo(row.path).absoluteFilePath()));
+    const auto library = libraryFor(sessions);
+    QDir().mkpath(library);
+    LibraryLock lock(library);
+    if (!lock.ok) return 0;
+    const auto root = QDir::cleanPath(QFileInfo(oldRoot).absoluteFilePath());
+    auto log = [&](const QString& line) {
+        QFile f(movesLog(library));
+        if (f.open(QIODevice::Append | QIODevice::Text)) f.write((now() + ' ' + line + '\n').toUtf8());
+    };
+    int moved = 0;
+    for (const auto& name : files) {
+        const auto from = root + '/' + name;
+        if (linked.contains(from)) continue;
+        const auto key = QFileInfo(name).completeBaseName();
+        const bool stick = name.endsWith(QStringLiteral(".frondms"));
+        const auto meta = root + '/' + key + QStringLiteral(".json");
+        QJsonObject about;
+        if (QFile f(meta); f.open(QIODevice::ReadOnly)) about = QJsonDocument::fromJson(f.readAll()).object();
+        // A Files change on a stick that a crash cut off is finished first, as attaching it did.
+        if (stick) frondCardFile::settle(from);
+        Card card;
+        card.id = newId();
+        card.kind = stick ? QStringLiteral("ms") : QStringLiteral("sd");
+        if (!stick && (about.value("protocol").toString() == "mmc" || about.value("family").toString() == "legacy-mmc-spi"))
+            card.type = QStringLiteral("mmc");
+        card.created = now();
+        qint64 logical = 0;
+        cardHeader(from, nullptr, &logical);
+        card.bytes = logical;
+        do card.identity = newIdentity();
+        while (identityUsed(library, card.identity));
+        card.key = key;
+        const auto title = about.value("name").toString().trimmed();
+        card.name = freeCardName(library, title.isEmpty() ? (stick ? QStringLiteral("Memory Stick ") : QStringLiteral("Card ")) + key.left(8) : title);
+        const auto entry = entryDir(library, card.id);
+        if (!QDir().mkpath(entry) || !writeCard(entry, card)) {
+            QDir(entry).removeRecursively();
+            log(QStringLiteral("left %1 in %2: couldn't make its Cards entry").arg(key, root));
+            continue;
+        }
+        const auto r = runCardTool(cardTool(tool), {QStringLiteral("move-linked"), from, entry + '/' + fileOfKind(card.kind)});
+        if (!r.ok) {
+            QDir(entry).removeRecursively();
+            log(QStringLiteral("left %1 in %2: %3").arg(key, root, r.message));
+            continue;
+        }
+        QFile::remove(meta);
+        log(QStringLiteral("moved %1 to the drawer as %2").arg(key, card.name));
         ++moved;
     }
     return moved;

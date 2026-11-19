@@ -1293,7 +1293,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
     networkTip = network->toolTip(); keyboardTip = keyboard->toolTip(); serialTip = serial->toolTip();
     usbTip = usb->toolTip(); irdaTip=irda->toolTip();
-    frondCards::startUp(sessionFolder());
+    frondCards::startUp(sessionFolder(), QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/dana-cards"));
     refreshSessions();
     notify(tr("Ready. Sessions are saved automatically when you close Frond."));
     QTimer::singleShot(0, this, [this] {
