@@ -24,7 +24,7 @@ public:
     static constexpr uint32_t call68kIndex = 1000;
     // Slots whose arguments or results are dumped (twglue_names.inc order).
     enum Slot : uint32_t {
-        vfsDirEntryEnumerate = 214, vfsVolumeEnumerate = 241, twInputSetFormat = 333, twInputPoll = 336,
+        vfsDirEntryEnumerate = 214, vfsVolumeEnumerate = 241, vfsVolumeInfo = 244, twInputSetFormat = 333, twInputPoll = 336,
         twGfxBlendBlt = 386, twGfxMaskBlendBlt = 387, twGetDBDataDirectory = 472,
     };
     // Polls logged in full per queue, then only the ones that change a value other than 294/295 (time, sequence),
@@ -310,6 +310,30 @@ private:
         return std::string(" attr=") + attr + " name=" + buffer(info[1], info[2] & 0xffff);
     }
 
+    // A four-character code as 'text' and hex; unprintable bytes show as '.'.
+    static std::string code(uint32_t v) {
+        char text[5], s[32];
+        for (int i = 0; i < 4; ++i) {
+            const uint32_t c = (v >> (24 - 8 * i)) & 0xff;
+            text[i] = c >= 0x20 && c < 0x7f ? char(c) : '.';
+        }
+        text[4] = 0;
+        std::snprintf(s, sizeof s, "'%s' (%08x)", text, v);
+        return s;
+    }
+    // The VolumeInfoType the guest wrote (r1): attributes, fsType, fsCreator, mountClass, UInt16 slotLibRefNum and
+    // slotRefNum, mediaType, reserved. Little-endian.
+    std::string volumeInfo(uint32_t address) {
+        uint8_t b[28] = {};
+        if (address < 0x1000 || !read(address, b, 28)) return " info: unreadable";
+        auto u32 = [&](int at) { return uint32_t(b[at] | b[at + 1] << 8 | b[at + 2] << 16 | uint32_t(b[at + 3]) << 24); };
+        char s[256];
+        std::snprintf(s, sizeof s, " info: attr=%08x fsType=%s fsCreator=%s mountClass=%s slotLib=%u slotRef=%u media=%s reserved=%08x",
+                      u32(0), code(u32(4)).c_str(), code(u32(8)).c_str(), code(u32(12)).c_str(), b[16] | b[17] << 8,
+                      b[18] | b[19] << 8, code(u32(20)).c_str(), u32(24));
+        return s;
+    }
+
     void callExtras(uint32_t index, const uint32_t* r, uint32_t& before, std::string& state) {
         switch (index) {
         case twInputSetFormat: {
@@ -350,6 +374,9 @@ private:
             std::fprintf(out, " iter=%08x->%08x%s%s", f.before, word(a[1]), info.c_str(), info == f.state ? " (info unchanged)" : "");
             break;
         }
+        case vfsVolumeInfo:
+            std::fprintf(out, " vol=%u%s", a[0] & 0xffff, volumeInfo(a[1]).c_str());
+            break;
         case twInputPoll: poll(f); break;
         default: break;
         }

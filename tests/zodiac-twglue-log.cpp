@@ -95,9 +95,10 @@ int main() {
     put(table + 333 * 4, setFormat);
     put(table + 336 * 4, poll);
     put(table + 472 * 4, dataDir);
-    constexpr uint32_t dirEnumerate = 0x2800, blend = 0x2900;  // only hand-stepped, never run
+    constexpr uint32_t dirEnumerate = 0x2800, blend = 0x2900, volInfo = 0x2a00;  // only hand-stepped, never run
     put(table + 214 * 4, dirEnumerate);
     put(table + 386 * 4, blend);
+    put(table + 244 * 4, volInfo);
     put(0x3300, 296); put(0x3304, 0); put(0x3308, 297); put(0x330c, 0xffffffff);
     std::memcpy(backing.buffer + text, "Hello glue", 11);
     constexpr uint32_t ttb = 0x10000, coarse = 0xc000;
@@ -196,6 +197,12 @@ int main() {
         std::memcpy(backing.buffer + 0x1ffe8, "/PALM/Programs/Foo-ABCD", 24);
         regs(0, 0x3100, 0x1ffe8, 64);
         at(dataDir); at(0x6000);
+        // 11000 ms: VFSVolumeInfo(2, &info) with a vfat volume.
+        time.ticks = 32768 * 11;
+        const uint32_t vi[7] = {0, 0x76666174, 0x20202020, 0x736c6f74, 0x00020001, 0x73647263, 0};
+        std::memcpy(backing.buffer + 0x3b00, vi, sizeof vi);
+        regs(2, 0x3b00, 0, 0);
+        at(volInfo); at(0x6000);
     }
     std::ifstream in(path);
     std::stringstream all;
@@ -240,6 +247,7 @@ int main() {
     assert(line("7000 ret 214 ").find(" iter=00000080->ffffffff attr=00000020 name=\"B.DAT\"") != std::string::npos);
     assert(line("7000 ret 214 ").find("unchanged") == std::string::npos);
     assert(line("8000 ret 214 ").find(" iter=ffffffff->ffffffff attr=00000020 name=\"B.DAT\" (info unchanged)") != std::string::npos);
+    assert(line("11000 ret 244 ").find(" vol=2 info: attr=00000000 fsType='vfat' (76666174) fsCreator='    ' (20202020) mountClass='slot' (736c6f74) slotLib=1 slotRef=2 media='sdrc' (73647263) reserved=00000000") != std::string::npos);
     assert(line("9000 call 386 TwGfxBlendBlt_").find(" point=[10 -2] rect=[0 4 16 12]") != std::string::npos);
     assert(line("10000 ret 472 ").find(" r2.buf=\"/PALM/Programs/Foo-ABCD\"") != std::string::npos);
     std::remove(path.c_str());
