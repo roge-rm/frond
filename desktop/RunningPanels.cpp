@@ -119,7 +119,8 @@ QStringList AppsPanel::names() const {
 }
 
 void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, const QString& note) {
-    const auto apps = runningRules::applications(all);
+    // An install-only panel has no list, whatever comes in.
+    const auto apps = installOnly ? std::vector<runningRules::Database>{} : runningRules::applications(all);
     const int row = list->currentRow();
     list->clear();
     for (const auto& app : apps) {
@@ -148,6 +149,6 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, con
         list->setItemWidget(item, widget);
     }
     if (row >= 0 && row < list->count()) list->setCurrentRow(row);
-    empty->setText(note.isEmpty() ? tr("No applications") : note);
+    empty->setText(installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
     empty->setVisible(apps.empty());
 }

@@ -849,6 +849,17 @@ class RunningModel(
     var usbCable by mutableStateOf(false)
         private set
 
+    // Reads the cable back from the core's usb-state ("on ..." or "off ..."), so the row matches a session that
+    // was saved or started with it in.
+    fun loadUsbCable() {
+        val l = link ?: return
+        if (!device.usbNetwork) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { runCatching { l.request("usb-state", timeoutSeconds = 5) }.getOrNull() }
+            if (reply != null && reply.ok) usbCable = reply.message.startsWith("on")
+        }
+    }
+
     fun changeUsbCable(on: Boolean) = device("Changing USB", "Couldn't change USB", false) { l ->
         val reply = l.request("usb-mode", if (on) "on" else "off", timeoutSeconds = 30)
         if (reply.ok) activity.runOnUiThread { usbCable = reply.message.startsWith("on") }

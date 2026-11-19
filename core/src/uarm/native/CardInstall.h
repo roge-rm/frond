@@ -11,6 +11,7 @@
 #include <fstream>
 #include <string>
 
+#include "CardInstallCopy.h"
 #include "CardReinsert.h"
 #include "CardSwap.h"
 #include "SoC.h"
@@ -31,7 +32,8 @@ inline bool cabFile(const std::filesystem::path& path) {
     return extension == ".cab";
 }
 
-// Copies source into the card's top folder, over a file of the same name. The card ends up inserted.
+// Copies source into the card's top folder, over a file of the same name. Needs the card in; it ends up in again
+// unless putting it back fails (code card-out).
 inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& folder, const std::string& source) {
     if (!sdCardInitialized()) return {false, "no-card", "Put an SD card in first."};
     if (folder.empty()) return {false, "folder", takeOutNeedsFolder};
@@ -41,10 +43,10 @@ inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& 
     if (error || !std::filesystem::is_regular_file(source, error)) return {false, "read", "Could not read the file."};
     const std::string name = std::filesystem::path(source).filename().string();
 
-    if (soc.SdInserted()) {
-        soc.SdEject();
-        noteEjected(soc);
-    }
+    // A card the user took out stays out.
+    if (!soc.SdInserted()) return {false, "ejected", "Put the SD card back in first."};
+    soc.SdEject();
+    noteEjected(soc);
     CardIdentity identity{};
     const auto out = takeOutFileCard(folder, frondMachine::kindSd, false, identity);
     if (!out.ok) {
@@ -58,21 +60,15 @@ inline CardInstallResult installToSdCard(SoC& soc, const std::filesystem::path& 
         if (!in) throw frondStorage::Error("Could not read the file.");
         frondStorage::CardFile card(folder / frondMachine::fileCardSibling(frondMachine::kindSd), true);
         frondStorage::FatImage fat(card);
-        fat.batch([&] {
-            const std::string path = "/" + name;
-            if (const auto old = fat.find(path)) {
-                if (old->directory) throw frondStorage::Error("The card has a folder named " + name + ".");
-                fat.remove(path);
-            }
-            fat.add("/", name, [&](char* buffer, int64_t n) { in.read(buffer, n); return int64_t(in.gcount()); },
-                    int64_t(size));
-        });
+        copyToCardRoot(fat, name, [&](char* buffer, int64_t n) { in.read(buffer, n); return int64_t(in.gcount()); },
+                       int64_t(size));
     } catch (const std::exception& e) {
         result = {false, "card", e.what()};
     }
     // The card goes back in whether the copy worked or not.
     const auto in = putInSd(folder, soc.GetDeviceType(), identity, false);
-    if (!in.ok) return {false, in.code, in.message};
+    // The card stays out, as the card exchange leaves it; "card-out" tells the frontend to show that.
+    if (!in.ok) return {false, "card-out", in.message};
     soc.SetSdWriteProtect(false);
     settleEject(soc);
     soc.SdInsert();

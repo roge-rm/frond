@@ -146,6 +146,17 @@ test-storage-settle: prepare
 		-o build/test-storage-settle
 	python3 tests/storage-settle.py build/test-storage-settle
 
+.PHONY: test-card-install
+test: test-card-install
+# The card edit behind a Windows CE install: replacing a file keeps the old one whole if the copy fails.
+test-card-install: prepare
+	$(CC) -std=gnu99 -O1 -g -Icore/src/common -c core/src/common/zip/miniz.c \
+		-o build/miniz-card-install.o
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror \
+		-Icore/src/uarm/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/card-install.cpp build/miniz-card-install.o -o build/test-card-install
+	build/test-card-install build
+
 .PHONY: test-storage-fat
 test: test-storage-fat
 # The storage library's FatImage on FAT12: format layouts, FAT32 refused, cut-off changes on a FAT12

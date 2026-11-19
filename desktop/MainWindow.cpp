@@ -975,6 +975,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             internalReply(ok, message);
             return;
         }
+        // Windows CE: install takes the SD card out and puts it back, so once the last file is done the core is
+        // asked where the card is now. One request at a time, so not while the batch goes on.
+        if (command == "install" && frondFirmware::installsToCard(runningDevice)) {
+            if (installTotal > 0 && installResult(ok, code, message)) {
+                if (installTotal == 0 && !stopping) send(cardCommand("state"));
+                return;
+            }
+            if (stopping) return;
+            if (!ok && code != "cancelled") failure(message);
+            else if (ok) notify(message);
+            send(cardCommand("state"));
+            return;
+        }
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -1049,13 +1062,6 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         if ((command == "hold" || command == "reset" || command == "hard-reset") &&
             !stopping && frondFirmware::profile(runningDevice).frontend.holdPresent) {
             send("hold-state");
-            return;
-        }
-        // Windows CE: the core put the file on the SD card and the card back in.
-        if (command == "install" && frondFirmware::installsToCard(runningDevice)) {
-            sdKnown = cardPresent = cardInserted = true;
-            refresh();
-            notify(message);
             return;
         }
         if (command == "sd-state" || command == "ms-state") {
@@ -1362,11 +1368,16 @@ void MainWindow::refresh() {
     if (!frondFirmware::serialAbsent(currentDevice())) serialPort->setVisible(!serial->currentData().toString().startsWith("link:"));
     // Windows CE's USB is a network link (RNDIS): on or off, no endpoint.
     const bool usbNetwork = frondFirmware::usbNetwork(currentDevice());
-    if (auto* view = qobject_cast<QListView*>(usb->view())) {
-        view->setRowHidden(usb->findData("on"), !usbNetwork);
-        view->setRowHidden(usb->findData("pty"), usbNetwork);
-        view->setRowHidden(usb->findData("tcp"), usbNetwork);
-    }
+    // Rows the device doesn't take are hidden in the list and disabled, so the wheel and arrow keys skip them too.
+    const auto offer = [&](const char* data, bool on) {
+        const int row = usb->findData(data);
+        if (auto* model = qobject_cast<QStandardItemModel*>(usb->model()))
+            if (auto* item = model->item(row)) item->setEnabled(on);
+        if (auto* view = qobject_cast<QListView*>(usb->view())) view->setRowHidden(row, !on);
+    };
+    offer("on", usbNetwork);
+    offer("pty", !usbNetwork);
+    offer("tcp", !usbNetwork);
     if ((usb->currentData() == "on") != usbNetwork && usb->currentData() != "off") usb->setCurrentIndex(usb->findData("off"));
     usbLabel->setText(usbNetwork ? tr("USB") : tr("USB HotSync"));
     if (usbNetwork) usbPort->setVisible(false);

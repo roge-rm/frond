@@ -305,6 +305,7 @@ private fun DisplaySheet(model: RunningModel, state: RunningBarState, actions: R
 private fun ConnectionsSheet(model: RunningModel, actions: RunningBarActions) {
     DisposableEffect(Unit) {
         model.startBluetoothRefresh()
+        model.loadUsbCable()
         onDispose { model.stopBluetoothRefresh() }
     }
     var choosing by remember { mutableStateOf<LinkKind?>(null) }
