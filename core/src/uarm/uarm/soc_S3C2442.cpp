@@ -226,7 +226,8 @@ void SocS3C2442::UartSent(unsigned channel, uint8_t byte) {
 // Host work on guest time, at points that don't depend on the run slices. Each UART with a host takes one host byte
 // a character time (10 bits at its rate) while its receiver is on and its FIFO has room. With nothing to take it looks
 // again at the next hostPollNs step of guest time, which is where bytes that came from the host meanwhile enter.
-// The USB host ticks at its own wake times, and the Wi-Fi router is polled at each poll step.
+// The USB host ticks at its own wake times, and the Wi-Fi router is polled at each poll step (hostNetNextNs). All of
+// it goes on while the machine sleeps.
 namespace {
     constexpr uint64_t hostPollNs = 1000000;
     uint64_t nextPoll(uint64_t t) { return (t / hostPollNs + 1) * hostPollNs; }
@@ -242,6 +243,22 @@ void SocS3C2442::PumpUart(unsigned channel, uint64_t t) {
     if (!UartHasHost(channel)) { machine->hostUartNextNs[channel] = UINT64_MAX; return; }
     if (t < machine->hostUartNextNs[channel]) return;
     machine->hostUartNextNs[channel] = nextPoll(t);
+    // ASSUMPTION "UART asleep": in sleep the UART has no power and RXD isn't a wake source, so what the host sent
+    // meanwhile is lost. Taken each poll step, so none of it comes in at the wake.
+    if (machine->asleep()) {
+        for (unsigned n = 0; n < 4096; ++n) {
+            uint_fast16_t value = hostUartNone;
+            if (channel == rx1950SerialUart) {
+                if (serialPort->active && !serialPort->active(serialPort->context)) break;
+                value = serialPort->read(serialPort->context);
+            } else {
+                if (infraredPort->hooks.pending && !infraredPort->hooks.pending(infraredPort->hooks.context)) break;
+                value = infraredPort->hooks.read(infraredPort->hooks.context);
+            }
+            if (value & ~0xffu) break;
+        }
+        return;
+    }
     auto& uart = machine->uarts[channel];
     const uint64_t baud = machine->uartBaud(channel);
     if (!baud || !uart.receiverOn()) return;
@@ -277,8 +294,11 @@ void SocS3C2442::HostService() {
         for (auto& at : machine->hostUartNextNs)
             if (at != UINT64_MAX) at = std::max(at, nextPoll(t));
     }
-    // Wi-Fi frames have their own pause (the network frozen for a checkpoint).
-    if (!halted) PollNetwork();
+    // Wi-Fi frames have their own pause (the network frozen for a checkpoint), polled at the poll steps only.
+    if (!halted && router && !networkSimulation.Frozen() && t >= machine->hostNetNextNs) {
+        machine->hostNetNextNs = nextPoll(t);
+        PollNetwork();
+    }
     // Work still due waits a nanosecond, so the guest moves on between two calls.
     ScheduleHost(t + 1);
 }
@@ -302,8 +322,14 @@ void SocS3C2442::ScheduleHost(uint64_t late) {
         any = true;
         if (usbHostHooks.wake && !UsbHostIoPaused()) next = std::min(next, due(usbHostHooks.wake(usbHostHooks.context)));
     }
-    // Frames from the Wi-Fi router enter at the poll steps.
-    if (router && !networkSimulation.Frozen()) any = true;
+    // Frames from the Wi-Fi router enter at the poll steps. A new router is first polled at the next one.
+    if (!router) {
+        machine->hostNetNextNs = UINT64_MAX;
+    } else if (!networkSimulation.Frozen()) {
+        any = true;
+        if (machine->hostNetNextNs == UINT64_MAX) machine->hostNetNextNs = nextPoll(now);
+        next = std::min(next, due(machine->hostNetNextNs));
+    }
     if (any) next = std::min(next, nextPoll(now));
     machine->hostNextNs = next;
 }
@@ -464,10 +490,11 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
         s->ScheduleHost(s->machine->nanoseconds());
     };
     soc->machine->hostService = [s = soc.get()] { s->HostService(); };
-    // A watchdog reset: the board's inputs and the host side start again at the instruction it happened.
+    // A watchdog reset: the board's inputs, host keys and pen, sound and the host side start again at the
+    // instruction it happened.
     soc->machine->watchdogResetHook = [s = soc.get()] {
         s->ApplyHostInputs();
-        s->RestartHost();
+        s->StateChanged();
     };
     // FROND_RX1950_USB_TRACE: every guest access to the USB device controller and every host packet, to stderr.
     if (std::getenv("FROND_RX1950_USB_TRACE")) {
@@ -601,7 +628,7 @@ bool SocS3C2442::SetHeadphones(bool in) {
     return true;
 }
 
-void SocS3C2442::StateChanged(bool restartHost) {
+void SocS3C2442::StateChanged() {
     const auto stop = machine->stopInfo().stop;
     halted = stop != S3c2442Stop::running && stop != S3c2442Stop::budget;
     framePending = false;
@@ -613,7 +640,7 @@ void SocS3C2442::StateChanged(bool restartHost) {
     pen.clear(*machine);
     // The sound starts again from the new state's next frame.
     sound.restart();
-    if (restartHost) RestartHost();
+    RestartHost();
     if (audioQueue) audioQueueClear(audioQueue);
 }
 
@@ -627,6 +654,7 @@ void SocS3C2442::RestartHost() {
         if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
         std::fill(std::begin(machine->hostUartNextNs), std::end(machine->hostUartNextNs), 0);
         machine->hostNextNs = UINT64_MAX;
+        machine->hostNetNextNs = UINT64_MAX;
     }
     ScheduleHost(nextPoll(machine->nanoseconds()));
 }
@@ -818,7 +846,7 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         penEventQueue->Clear();
         return maxCycles;
     }
-    const uint64_t before = machine->nanoseconds(), resets = machine->watchdogResets();
+    const uint64_t before = machine->nanoseconds();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * 1000000000 / cyclesPerSecond));
     const auto started = std::chrono::steady_clock::now();
     for (;;) {
@@ -847,9 +875,6 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         if (wasAsleep) DisarmMicrophone();
     }
     if (halted) return maxCycles;
-    // The guest reset itself through the watchdog: the board's inputs and host side were redone where it happened
-    // (watchdogResetHook), the rest as after any reset.
-    if (machine->watchdogResets() != resets) StateChanged(false);
     const uint64_t elapsed = machine->nanoseconds() - before;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % 1000000000);

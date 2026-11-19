@@ -232,12 +232,14 @@ class S3c2442Machine {
     // Host work on guest time (bytes from a serial or infrared host, the USB host's ticks): run calls hostService
     // between instructions once nanoseconds() reaches hostNextNs, and busy batches and idle skips both end there, so
     // the work lands at the same instruction whatever the run slices are. UINT64_MAX for none. hostService sets it
-    // again. hostUartNextNs is the owner's per-UART schedule (guest ns of the next look for a host byte). Both are
-    // saved in their own state section while any is set, so a checkpoint restore goes on at the same points; a
-    // state without it loads them as UINT64_MAX.
+    // again. hostUartNextNs is the owner's per-UART schedule (guest ns of the next look for a host byte) and
+    // hostNetNextNs its next network poll. All are saved in their own state section while any is set, so a
+    // checkpoint restore goes on at the same points; a state without it loads them as UINT64_MAX. Host work goes on
+    // while asleep too.
     std::function<void()> hostService;
     uint64_t hostNextNs = UINT64_MAX;
     uint64_t hostUartNextNs[3]{UINT64_MAX, UINT64_MAX, UINT64_MAX};
+    uint64_t hostNetNextNs = UINT64_MAX;
     // Runs right after a watchdog reset, at the instruction where it happens, for the board's inputs and host peers
     // (host side, not saved).
     std::function<void()> watchdogResetHook;

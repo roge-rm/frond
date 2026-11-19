@@ -462,6 +462,35 @@ static void hostServiceTests() {
     }
 }
 
+// Asleep, host work still runs at its guest times, the same in one run and in uneven slices, and doesn't wake it.
+static void hostServiceSleepTests() {
+    // mov r0, #0x4c000000; mov r1, #8; str r1, [r0, #0xc] (CLKCON POWER_OFF); b .
+    const std::vector<uint32_t> program{0xe3a0044c, 0xe3a01008, 0xe580100c, loop};
+    std::vector<std::pair<uint64_t, uint64_t>> seen[2];
+    for (unsigned way = 0; way < 2; ++way) {
+        auto m = make(program);
+        assert(m->run(1000) == S3c2442Stop::budget && m->asleep());
+        const uint64_t start = m->nanoseconds();
+        auto& log = seen[way];
+        m->hostService = [&] {
+            assert(m->asleep());
+            log.emplace_back(m->nanoseconds(), m->idleCycles());
+            m->hostNextNs = m->nanoseconds() + 1000000;
+        };
+        m->hostNextNs = start + 500000;
+        const uint64_t total = 30000000;
+        if (way == 0) {
+            assert(m->run(total) == S3c2442Stop::budget);
+        } else {
+            for (uint64_t done = 0, step = 4321; done < total; done += step, step = step * 7 % 900001 + 1)
+                assert(m->run(std::min(step, total - done)) == S3c2442Stop::budget);
+        }
+        assert(m->asleep() && m->wakeCount() == 0);
+        assert(log.size() > 10 && log[0].first >= start + 500000 && log[0].first < start + 501000);
+    }
+    assert(seen[0] == seen[1]);
+}
+
 // The host schedule goes with a saved state while it's set, and a state saved without one loads with none due.
 static void hostScheduleStateTests() {
     std::vector<uint8_t> state;
@@ -471,14 +500,23 @@ static void hostScheduleStateTests() {
     auto b = make({loop});
     b->hostNextNs = 5;
     b->hostUartNextNs[2] = 7;
+    b->hostNetNextNs = 9;
     assert(b->loadState(state.data(), state.size(), why));
-    assert(b->hostNextNs == UINT64_MAX && b->hostUartNextNs[2] == UINT64_MAX);
+    assert(b->hostNextNs == UINT64_MAX && b->hostUartNextNs[2] == UINT64_MAX && b->hostNetNextNs == UINT64_MAX);
     a->hostNextNs = 1234567;
     a->hostUartNextNs[0] = 2000000;
     assert(a->saveState(state, why));
     auto c = make({loop});
     assert(c->loadState(state.data(), state.size(), why));
     assert(c->hostNextNs == 1234567 && c->hostUartNextNs[0] == 2000000 && c->hostUartNextNs[1] == UINT64_MAX);
+    assert(c->hostNetNextNs == UINT64_MAX);
+    // The network poll alone is enough for the section.
+    auto d = make({loop});
+    d->hostNetNextNs = 3000000;
+    assert(d->saveState(state, why));
+    auto e = make({loop});
+    assert(e->loadState(state.data(), state.size(), why));
+    assert(e->hostNetNextNs == 3000000 && e->hostNextNs == UINT64_MAX);
 }
 
 // A watchdog reset runs the board's hook at the instruction it happens, whatever the run slices.
@@ -555,6 +593,7 @@ static void uartTests() {
 int main() {
     usbTests();
     hostServiceTests();
+    hostServiceSleepTests();
     hostScheduleStateTests();
     watchdogHookTests();
     usbNotifyTests();

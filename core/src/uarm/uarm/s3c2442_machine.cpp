@@ -989,13 +989,26 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
                 wake();
                 continue;
             }
+            // Host work goes on asleep, on guest time as awake. It can't wake the machine by itself: only a wake
+            // source it raises would (wakeSources, checked next time round).
+            if (elapsedNs >= hostNextNs && hostService) {
+                hostNextNs = UINT64_MAX;
+                hostService();
+                continue;
+            }
             if (used >= target) { stopped.stop = S3c2442Stop::budget; break; }
-            // Only the RTC alarm can come by itself; pins come from outside between runs.
+            // Only the RTC alarm and host work can come by itself; pins come from outside between runs.
             uint64_t skip = target - used;
             const uint64_t ticks = rtc.ticksToEvent(false, true);
             if (ticks != UINT64_MAX && cpuHz()) {
                 const __uint128_t need = __uint128_t(ticks) * cpuHz();
                 const uint64_t cycles = need <= rtcRest ? 1 : uint64_t((need - rtcRest + 32767) / 32768);
+                skip = std::min(skip, std::max<uint64_t>(cycles, 1));
+            }
+            // Ends on the first cycle that reaches hostNextNs, counted with the nanosecond remainder as awake.
+            if (hostNextNs != UINT64_MAX && hostService && cpuHz()) {
+                const __uint128_t need = __uint128_t(hostNextNs - elapsedNs) * cpuHz();
+                const uint64_t cycles = need <= nsRest ? 1 : uint64_t((need - nsRest + 999999999) / 1000000000);
                 skip = std::min(skip, std::max<uint64_t>(cycles, 1));
             }
             sleepAdvance(skip);
@@ -1241,9 +1254,9 @@ namespace {
     constexpr uint32_t secUsb = stateFourcc("USBD"), usbStateVersion = 1;
     // The UARTs' delta CTS bits, their own section so states saved before it load with them clear.
     constexpr uint32_t secUartModem = stateFourcc("UMST"), uartModemStateVersion = 1;
-    // The host work schedule (hostNextNs, hostUartNextNs), only while any is set: states without it, or saved with
-    // no host attached, load with none due.
-    constexpr uint32_t secHostSchedule = stateFourcc("HSVC"), hostScheduleStateVersion = 1;
+    // The host work schedule (hostNextNs, hostUartNextNs, hostNetNextNs), only while any is set: states without it,
+    // or saved with no host attached, load with none due. Version 1 had no hostNetNextNs.
+    constexpr uint32_t secHostSchedule = stateFourcc("HSVC"), hostScheduleStateVersion = 2;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1351,11 +1364,12 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
         for (auto& u : uarts) a.DoBool(u.deltaCts);
         file.end();
     }
-    if (hostNextNs != UINT64_MAX || std::any_of(std::begin(hostUartNextNs), std::end(hostUartNextNs),
-                                                [](uint64_t t) { return t != UINT64_MAX; })) {
+    if (hostNextNs != UINT64_MAX || hostNetNextNs != UINT64_MAX ||
+        std::any_of(std::begin(hostUartNextNs), std::end(hostUartNextNs), [](uint64_t t) { return t != UINT64_MAX; })) {
         auto a = file.begin(secHostSchedule, hostScheduleStateVersion);
         a.Do64(hostNextNs);
         for (auto& t : hostUartNextNs) a.Do64(t);
+        a.Do64(hostNetNextNs);
         file.end();
     }
     {
@@ -1473,11 +1487,17 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         for (auto& u : blocks.uarts) u.deltaCts = false;
     }
 
-    uint64_t savedHostNext = UINT64_MAX, savedHostUart[3] = {UINT64_MAX, UINT64_MAX, UINT64_MAX};
-    if (file.find(secHostSchedule)) {
-        if (!open(secHostSchedule, hostScheduleStateVersion, a)) { why = "the saved host schedule is from another version"; return false; }
+    uint64_t savedHostNext = UINT64_MAX, savedHostUart[3] = {UINT64_MAX, UINT64_MAX, UINT64_MAX}, savedHostNet = UINT64_MAX;
+    if (const auto* section = file.find(secHostSchedule)) {
+        const uint32_t version = section->version;
+        if (version != 1 && version != hostScheduleStateVersion) {
+            why = "the saved host schedule is from another version";
+            return false;
+        }
+        a = file.reader(*section);
         a.Do64(savedHostNext);
         for (auto& t : savedHostUart) a.Do64(t);
+        if (version >= 2) a.Do64(savedHostNet);
         if (!done(a, "host schedule")) return false;
     }
 
@@ -1533,6 +1553,7 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     lcd = blocks.lcd;
     hostNextNs = savedHostNext;
     std::copy(std::begin(savedHostUart), std::end(savedHostUart), std::begin(hostUartNextNs));
+    hostNetNextNs = savedHostNet;
     // Older states had no chip: it starts unpowered, or reset if its pins say it has power.
     stateHadWifi = hadWifi;
     {

@@ -119,9 +119,9 @@ class SocS3C2442 : public SoC {
     // The loader's work at power on and at a wake: eboot into SDRAM, the clocks and the pins it sets.
     void BootLoader();
     void PumpInput();
-    // After a load or reset: host input up, sound and frames again, and the host side (RestartHost) unless the
-    // caller has done it.
-    void StateChanged(bool restartHost = true);
+    // After a load or reset (a watchdog reset too, from its hook): host input up, sound and frames again, and the
+    // host side (RestartHost).
+    void StateChanged();
     struct NandPages;
 
     std::vector<uint8_t> rom, saved;
@@ -172,8 +172,8 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<InfraredPort> infraredPort;
     unsigned serialCheckpoints{0};
     // Host bytes into UART0 and UART2 at their bit rates, the USB host's ticks and Wi-Fi frames from the router, on
-    // guest time: the machine calls HostService at machine->hostNextNs, which ScheduleHost sets. Each UART's next
-    // look is machine->hostUartNextNs (UINT64_MAX with no host). RestartHost starts the host side again after a
+    // guest time: the machine calls HostService at machine->hostNextNs, which ScheduleHost sets, asleep too. Each
+    // UART's next look is machine->hostUartNextNs (UINT64_MAX with no host), the router's machine->hostNetNextNs. RestartHost starts the host side again after a
     // load or reset.
     void HostService();
     void ScheduleHost(uint64_t late);
