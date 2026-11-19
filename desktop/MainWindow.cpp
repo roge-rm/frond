@@ -2626,7 +2626,8 @@ void MainWindow::launch(const QString& target, QStringList arguments, frondFirmw
                                                                                          [this](bool) { refresh(); });
         }
     } else if (frondFirmware::linkedCards(startDevice)) {
-        arguments << frondCards::outsideArguments(arguments.value(0));
+        arguments << frondCards::outsideArguments(arguments.value(0), sessionFolder(),
+                                                 QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/dana-cards"));
     }
     // If Frond goes without stopping the Palm, the core saves the working session itself.
     arguments << "--save-on-disconnect" << QFileInfo(target).absoluteFilePath();

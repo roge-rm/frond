@@ -289,19 +289,35 @@ class DanaCardsTest : public QObject {
         auto text=manifest(); text.replace("/cards/a.frondsd",(old+'/'+key+".frondsd").toUtf8());
         text=text.left(text.indexOf("\n2 sd")+1);
         write(a+"/Dana.frond",text); write(b+"/Dana 2.frond",text); write(root.filePath("outside/Dana.frond"),text);
-        QVERIFY(frondCards::outsideArguments(root.filePath("outside/Dana.frond")).isEmpty());
+        QVERIFY(frondCards::outsideArguments(root.filePath("outside/Dana.frond"),sessions,old).isEmpty());
         QCOMPARE(frondCards::moveLinkedIn(sessions,a,old,tool),1);
         QVERIFY(QFileInfo::exists(a+"/sd.frondsd")); QVERIFY(!frondCards::readSlot(a,0).swap);
         QVERIFY(frondCards::launchArguments(sessions,a,true).isEmpty());
+        // A settle mark a crash left beside the card is cleared at start, the card left in its slot.
+        { QFile mark(a+"/.settling-sd.frondsd"); QVERIFY(mark.open(QIODevice::WriteOnly)); mark.write("1 2 3\n"); }
+        qputenv("FROND_CARD_TOOL",tool.toUtf8());
+        frondCards::takeAtStart(sessions,a,nullptr,nullptr,true);
+        qunsetenv("FROND_CARD_TOOL");
+        QVERIFY(!QFileInfo::exists(a+"/.settling-sd.frondsd")); QVERIFY(QFileInfo::exists(a+"/sd.frondsd"));
         QCOMPARE(frondCards::moveLinkedIn(sessions,b,old,tool),0);
         QVERIFY(frondCards::readSlot(b,0).swap); QVERIFY(frondCards::readSlot(b,0).card.isEmpty());
         QCOMPARE(frondCards::launchArguments(sessions,b,true),QStringList({"--card-swap"}));
         QFile log(b+"/card-moves.log"); QVERIFY(log.open(QIODevice::ReadOnly));
         QVERIFY(QString::fromUtf8(log.readAll()).contains("is in Cards as Dana card"));
-        QCOMPARE(frondCards::outsideArguments(root.filePath("outside/Dana.frond")),QStringList({"--card-swap"}));
+        QCOMPARE(frondCards::outsideArguments(root.filePath("outside/Dana.frond"),sessions,old),QStringList({"--card-swap"}));
         // Opening again changes nothing more.
         QCOMPARE(frondCards::moveLinkedIn(sessions,b,old,tool),0);
         QVERIFY(log.seek(0)); QCOMPARE(QString::fromUtf8(log.readAll()).count('\n'),1);
+        // A card gone from somewhere else (a drive not plugged in) and not in Cards keeps the refusal.
+        const auto c=sessions+"/Dana 3";
+        QVERIFY(QDir().mkpath(c));
+        auto away=manifest(); away=away.left(away.indexOf("\n2 sd")+1);
+        away.replace(key,second);
+        write(c+"/Dana 3.frond",away); write(root.filePath("outside/Away.frond"),away);
+        QCOMPARE(frondCards::moveLinkedIn(sessions,c,old,tool),0);
+        QVERIFY(!frondCards::readSlot(c,0).swap);
+        QVERIFY(frondCards::launchArguments(sessions,c,true).isEmpty());
+        QVERIFY(frondCards::outsideArguments(root.filePath("outside/Away.frond"),sessions,old).isEmpty());
     }
     // Run by tests/dana-card-migrate.py on a real frond-68k save: FROND_MIGRATE="sessions|machine|old".
     void migrateFixture() {

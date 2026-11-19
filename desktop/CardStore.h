@@ -529,6 +529,19 @@ inline QString settleGenerations(const QString& library, const QString& dir, int
     return r.ok ? QString() : r.message;
 }
 
+// A settle-linked cut off beside slot n's card (its .settling-<file> mark is there) is finished
+// before frond-68k sees the card, so the card isn't left out of its slot. Machine lock held.
+inline void finishCutOffSettle(const QString& library, const QString& dir, int n) {
+    const auto file = cardFileIn(dir, n);
+    if (file.isEmpty() || !QFileInfo::exists(dir + QStringLiteral("/.settling-") + file)) return;
+    if (hasGenerations(dir, file) && settleGenerations(library, dir, n).isEmpty()) return;
+    // No saved changes left: the tool only clears the mark, and the key isn't used.
+    Card card;
+    const auto slot = readSlot(dir, n);
+    QString key = !slot.card.isEmpty() && readCard(entryDir(library, slot.card), &card) && validKey(card.key) ? card.key : QString(32, '0');
+    runCardTool(cardTool(), {QStringLiteral("settle-linked"), dir + '/' + file, key});
+}
+
 // Hidden copy folders in the library: cards/.new-<id>, locked by cards/.new-<id>.lock while a copy
 // fills them.
 inline void removeStaleNew(const QString& library) {
@@ -770,12 +783,19 @@ inline void startUp(const QString& sessions, const QString& oldRoot = {}) {
     if (!oldRoot.isEmpty()) moveUnlinkedIn(sessions, oldRoot);
 }
 
-// A frond-68k save outside the sessions folder: --card-swap when a card it links is gone (moved
-// into Cards at start-up), so it loads with that slot empty instead of refusing. Under swap its
-// other cards load empty too, as they aren't in its folder.
-inline QStringList outsideArguments(const QString& frond) {
-    for (const auto& row : linkedRows(frond))
-        if (!QFileInfo::exists(row.path)) return {QStringLiteral("--card-swap")};
+// A frond-68k save outside the sessions folder: --card-swap when a card it links is gone into
+// Cards (it was in `oldRoot`, dana-cards/, or Cards has its key), so it loads with that slot empty
+// instead of refusing. A card gone elsewhere keeps the refusal. Under swap its other cards load
+// empty too, as they aren't in its folder.
+inline QStringList outsideArguments(const QString& frond, const QString& sessions, const QString& oldRoot) {
+    const auto root = QDir::cleanPath(QFileInfo(oldRoot).absoluteFilePath());
+    const auto known = entries(libraryFor(sessions));
+    for (const auto& row : linkedRows(frond)) {
+        if (QFileInfo::exists(row.path)) continue;
+        if (QDir::cleanPath(QFileInfo(row.path).absolutePath()) == root ||
+            std::any_of(known.cbegin(), known.cend(), [&](const Entry& e) { return e.card.key == row.key; }))
+            return {QStringLiteral("--card-swap")};
+    }
     return {};
 }
 
@@ -840,6 +860,8 @@ inline QStringList takeAtStart(const QString& sessions, const QString& dir, QStr
     // The machine lock is held, so its cards can be settled even if the library is busy.
     for (int n = 0; n < slotCount; ++n)
         if (const auto file = cardFileIn(dir, n); !file.isEmpty()) frondCardFile::settle(dir + '/' + file);
+    if (m68k)
+        for (int n = 0; n < slotCount; ++n) finishCutOffSettle(library, dir, n);
     LibraryLock lock(library);
     if (lock.ok) {
         reconcileLocked(sessions, dir);
@@ -1709,14 +1731,16 @@ inline int moveLinkedIn(const QString& sessions, const QString& dir, const QStri
         // A move cut off after the card tool: the card is in the folder, its entry not made yet.
         const bool resumed = old && !there && QFileInfo::exists(target) && readSlot(dir, row.n).card.isEmpty() && QFileInfo::exists(meta);
         if (!there && !resumed && cardFileIn(dir, row.n).isEmpty()) {
+            // Only a card that went into Cards: one elsewhere (a drive not plugged in) keeps the
+            // save refusing, so it isn't dropped from it.
+            QString where;
+            for (const auto& e : entries(library))
+                if (e.card.key == row.key) where = e.card.name;
             auto slot = readSlot(dir, row.n);
-            if (!slot.swap) {
+            if (!slot.swap && (old || !where.isEmpty())) {
                 slot.present = true;
                 slot.swap = true;
                 writeSlot(dir, slot, row.n);
-                QString where;
-                for (const auto& e : entries(library))
-                    if (e.card.key == row.key) where = e.card.name;
                 log(where.isEmpty() ? QStringLiteral("%1 isn't at %2, its slot loads empty").arg(row.key, row.path)
                                     : QStringLiteral("%1 isn't at %2, it is in Cards as %3, its slot loads empty").arg(row.key, row.path, where));
             }
