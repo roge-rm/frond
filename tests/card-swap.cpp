@@ -674,9 +674,11 @@ static void SecondSlot() {
     fs::rename(a / frondMachine::sd2Sibling, drawer / frondMachine::sd2Sibling);
     assert(!Load(a, got, nullptr));
     assert(Load(a, got, &swap) && got.media.size() == 1 && got.sd2Swapped);
-    // Another card file there: refused, it goes in with sd2-put-in.
+    // Another card file there: slot 2 loads empty under --card-swap and the card goes in with
+    // sd2-put-in; refused without it.
     WriteSd(a / frondMachine::sd2Sibling, bytes, 0x33, 7, Id(3));
-    assert(!Load(a, got, &swap));
+    assert(!Load(a, got, nullptr));
+    assert(Load(a, got, &swap) && got.media.size() == 1 && got.sd2Swapped && !got.sdSwapped);
     fs::remove(a / frondMachine::sd2Sibling);
     // Put back in while running.
     fs::rename(drawer / frondMachine::sd2Sibling, a / frondMachine::sd2Sibling);
@@ -710,7 +712,8 @@ static void Arguments() {
     assert(!frondNative::parsePutIn(hex.substr(1), id, protect));
     assert(frondNative::identityHex(Id(1)).size() == 64);
     assert(frondNative::takenOutReply(id, true) == hex + " protected");
-    assert(frondMachine::packableName("slot.json") && frondMachine::packableName(frondMachine::sd2Sibling));
+    assert(frondMachine::packableName("slot.json") && frondMachine::packableName("slot2.json") &&
+           frondMachine::packableName(frondMachine::sd2Sibling));
     std::printf("card swap arguments ok\n");
 }
 
