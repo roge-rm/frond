@@ -90,13 +90,13 @@ class SocS3C2442 : public SoC {
 
     // The sync connector's serial port (UART0, rx1950SerialUart) and the infrared port (UART2 in IrDA mode)
     // for HostSerial and HostInfrared. A host on the serial port is a serial cable in: the cable sense (GPF6)
-    // goes high while one is attached. Bytes from the host reach the UART at its bit rate, between run slices.
+    // goes high while one is attached. Bytes from the host reach the UART at its bit rate, on guest time.
     HostUartPort* SerialHostPort() override;
     HostInfraredPort* InfraredHostPort() override;
     void BeginSerialCheckpoint() override { ++serialCheckpoints; }
     void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
     // The USB device controller as a UsbDevicePort, for UsbHostBridge. The bridge's cable is VBUS on GPG5.
-    // Hooks tick between run slices on GetTime's clock; an idle guest's clock runs on to the host's next tick.
+    // Hooks tick on GetTime's clock at their wake times, in the run loop (HostService).
     UsbDevicePort GetUsbPort();
     void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
     bool SetUsbCable(bool attached);
@@ -169,16 +169,21 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<SerialPort> serialPort;
     std::unique_ptr<InfraredPort> infraredPort;
     unsigned serialCheckpoints{0};
-    // Host bytes into UART0 and UART2 at their bit rates, after each slice of ns guest time.
-    void PumpUarts(uint64_t ns);
-    uint64_t uartCredit[3]{};
+    // Host bytes into UART0 and UART2 at their bit rates and the USB host's ticks, on guest time: the machine
+    // calls HostService at machine->hostNextNs, which ScheduleHost sets.
+    void HostService();
+    void ScheduleHost(uint64_t late);
+    bool UartHasHost(unsigned channel) const;
+    void PumpUart(unsigned channel, uint64_t t);
+    // Guest ns at which each UART next looks for a host byte; UINT64_MAX with no host.
+    uint64_t uartNextNs[3]{UINT64_MAX, UINT64_MAX, UINT64_MAX};
     // A load or reset made a new board: the host peers start again; the cable sense follows the serial host.
     void ApplyUartLines();
     void UartSent(unsigned channel, uint8_t byte);
     UsbHostHooks usbHostHooks{};
     void (*usbNotify)(void*){nullptr};
     void* usbNotifyContext{nullptr};
-    void TickUsbHost();
+    void TickUsbHost(uint64_t t);
 };
 
 #endif

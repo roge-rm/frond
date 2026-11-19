@@ -391,7 +391,8 @@ static void usbTests() {
         auto m = make(stores({{0x560000d4, 0x20}, {0x4a000008, ~(1u << s3cIrq::usbd)}}, {0xe321f013, wfi, loop}));
         m->clock.clkcon |= 0x80;
         m->setUsbVbus(true);
-        m->hostWakeNs = 10000000000ull;  // a host poll due later keeps the waiting CPU's clock going
+        m->hostService = [&] {};
+        m->hostNextNs = 10000000000ull;  // host work due later keeps the waiting CPU's clock going
         assert(m->run(1000) == S3c2442Stop::budget && m->usbListening() && mode(*m) == 0x13);
         m->usbDevice.write(0x16c, 0);  // no reset interrupt
         m->usbDevice.busReset();
@@ -413,13 +414,62 @@ static void usbTests() {
         assert(other->usbDevice.ep0Csr == 1 && other->usbDevice.fifo[0].size() == 8 && other->usbDevice.controlOpen);
     }
     {
-        // Host work due keeps the idle clock going instead of stopping with nothing to wake it.
+        // Host work due keeps the idle clock going instead of stopping with nothing to wake it, and runs once due.
         auto m = make({wfi, loop});
-        m->hostWakeNs = 2000000;
-        assert(m->run(10000000) == S3c2442Stop::budget && m->nanoseconds() >= 2000000);
-        m->hostWakeNs = UINT64_MAX;
-        assert(m->run(1000000000ull) == S3c2442Stop::idleNoWake);
+        uint64_t at = 0;
+        m->hostService = [&] { at = m->nanoseconds(); };
+        m->hostNextNs = 2000000;
+        assert(m->run(1000000000ull) == S3c2442Stop::idleNoWake && at >= 2000000 && at < 2001000);
+        assert(m->hostNextNs == UINT64_MAX);
     }
+}
+
+// Host work lands at the same guest time and instruction whatever the run slices: on a busy CPU and an idle one, run
+// in one go or in uneven slices.
+static void hostServiceTests() {
+    for (const bool idle : {false, true}) {
+        // A busy loop (subs r0, r0, #1; b back) or a wait for interrupt.
+        const std::vector<uint32_t> program = idle ? std::vector<uint32_t>{wfi, loop} : std::vector<uint32_t>{0xe2500001, 0xeafffffd};
+        std::vector<std::pair<uint64_t, uint64_t>> seen[2];
+        for (unsigned way = 0; way < 2; ++way) {
+            auto m = make(program);
+            auto& log = seen[way];
+            m->hostService = [&] {
+                log.emplace_back(m->nanoseconds(), m->retired());
+                m->hostNextNs = m->nanoseconds() + 333333;
+            };
+            m->hostNextNs = 100000;
+            const uint64_t total = 3000000;
+            if (way == 0) {
+                assert(m->run(total) == S3c2442Stop::budget);
+            } else {
+                uint64_t done = 0, step = 777;
+                while (done < total) {
+                    const uint64_t n = std::min(step, total - done);
+                    assert(m->run(n) == S3c2442Stop::budget);
+                    done += n;
+                    step = step * 7 % 50021 + 1;
+                }
+            }
+        }
+        assert(seen[0].size() > 3 && seen[0] == seen[1]);
+        assert(seen[0][0].first >= 100000 && seen[0][0].first < 101000);
+    }
+}
+
+// The VBUS pin and the bridge's cable agree after a load: the saved GPG5 level goes, the cable state stays (the board
+// sets GPG5 from usbVbus after a load, SocS3C2442::ApplyHostInputs).
+static void vbusLoadTests() {
+    auto a = make({loop});
+    a->setUsbVbus(true);
+    std::vector<uint8_t> state;
+    std::string why;
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(!b->usbVbus() && !(b->gpio.input[S3cGpio::g] & (1u << 5)));
+    b->setUsbVbus(b->usbVbus());
+    assert(!b->usbVbus() && (b->gpio.input[S3cGpio::g] & (1u << 5)));
 }
 
 // UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
@@ -430,6 +480,10 @@ static void uartTests() {
     const uint64_t fclk = m->clock.fclk();
     assert(m->uartBaud(0) == uint32_t(fclk / 10 / 16 / 16) && m->uartBaud(2) == uint32_t(fclk / 10 / 16 / 192));
     assert(m->uarts[2].infrared() && m->uarts[2].receiverOn());
+    // UCON2 bit 15 off stops the FCLK/n clock: no bit rate on either.
+    m->uarts[2].ucon &= ~0x8000u;
+    assert(m->uartBaud(0) == 0 && m->uartBaud(2) == 0);
+    m->uarts[2].ucon |= 0x8000;
     m->intc.intsubmsk = 0;
     m->uartReceive(2, 0xc0);
     assert((m->intc.srcpnd & (1u << s3cIrq::uart2)) && m->uarts[2].rx.size() == 1);
@@ -437,6 +491,8 @@ static void uartTests() {
 
 int main() {
     usbTests();
+    hostServiceTests();
+    vbusLoadTests();
     uartTests();
     sdTests();
     audioTests();

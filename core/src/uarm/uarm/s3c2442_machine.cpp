@@ -503,6 +503,7 @@ uint32_t S3c2442Machine::uartBaud(unsigned channel) const {
     const auto& u = uarts[channel];
     uint64_t hz = clock.pclk();
     if (((u.ucon >> 10) & 3) == 3) {
+        if (!(uarts[2].ucon & 0x8000)) return 0;  // FCLK/n off: no clock
         const uint32_t n0 = (uarts[0].ucon >> 12) & 15, n1 = (uarts[1].ucon >> 12) & 15, n2 = (uarts[2].ucon >> 12) & 7;
         hz = clock.fclk() / (n0 ? n0 + 6 : n1 ? n1 + 21 : n2 + 36);
     }
@@ -583,10 +584,10 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     // The Wi-Fi chip and access point, in nanoseconds: a frame or scan step can raise its interrupt.
     if (wifiNext != UINT64_MAX)
         best = std::max<uint64_t>(1, wifiNext <= elapsedNs ? 1 : uint64_t((__uint128_t(wifiNext - elapsedNs) * cpuHz + 999999999) / 1000000000));
-    // Host work due (the USB host's next tick): an idle CPU's clock runs on to it, where the owner ticks the host.
-    // One already due waits for the owner's next slice end, at most 1 ms on.
-    if (hostWakeNs != UINT64_MAX)
-        best = std::min(best, std::max<uint64_t>(1, hostWakeNs <= elapsedNs ? cpuHz / 1000 : uint64_t((__uint128_t(hostWakeNs - elapsedNs) * cpuHz + 999999999) / 1000000000)));
+    // Host work, in nanoseconds: run calls hostService once it's due. Counted with the nanosecond remainder, so the
+    // batch ends at the first instruction that reaches it.
+    if (hostNextNs != UINT64_MAX && hostService)
+        consider(hostNextNs <= elapsedNs ? 0 : hostNextNs - elapsedNs, 1000000000, nsRest);
     if (!wakeOnly) {
         consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
@@ -999,6 +1000,12 @@ S3c2442Stop S3c2442Machine::run(uint64_t instructions) {
             sleepAdvance(skip);
             continue;
         }
+        // Host work due: before the budget check, so work due at a slice end still comes before the next slice.
+        if (elapsedNs >= hostNextNs && hostService) {
+            hostNextNs = UINT64_MAX;
+            hostService();
+            continue;
+        }
         if (used >= target) { stopped.stop = S3c2442Stop::budget; break; }
         // IDLE in CLKCON or the ARM920T's wait for interrupt: time goes on to the next event.
         if (clock.idle() || cpuArm920Waiting(cpuCore)) {
@@ -1231,6 +1238,8 @@ namespace {
     // The USB device's endpoints and control stage, its own section so states saved before it load with the
     // endpoints as after a reset.
     constexpr uint32_t secUsb = stateFourcc("USBD"), usbStateVersion = 1;
+    // The UARTs' delta CTS bits, their own section so states saved before it load with them clear.
+    constexpr uint32_t secUartModem = stateFourcc("UMST"), uartModemStateVersion = 1;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1331,6 +1340,11 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
     {
         auto a = file.begin(secUsb, usbStateVersion);
         usbDevice.runState(a);
+        file.end();
+    }
+    {
+        auto a = file.begin(secUartModem, uartModemStateVersion);
+        for (auto& u : uarts) a.DoBool(u.deltaCts);
         file.end();
     }
     {
@@ -1438,6 +1452,14 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         if (!done(a, "USB device")) return false;
     } else {
         blocks.usbDevice.clearRun();
+    }
+
+    if (file.find(secUartModem)) {
+        if (!open(secUartModem, uartModemStateVersion, a)) { why = "the saved UART modem bits are from another version"; return false; }
+        for (auto& u : blocks.uarts) a.DoBool(u.deltaCts);
+        if (!done(a, "UART modem bits")) return false;
+    } else {
+        for (auto& u : blocks.uarts) u.deltaCts = false;
     }
 
     auto savedWifi = std::make_unique<Acx100>();

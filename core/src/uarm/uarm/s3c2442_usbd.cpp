@@ -169,7 +169,7 @@ void S3cUsbDevice::statusDone() {
 
 UsbPacketResult S3cUsbDevice::setup(const uint8_t* data) {
     using R = UsbPacketResult;
-    if (ep0Csr & e0OutReady) return R::Nak;
+    // A device always takes a SETUP, even with the last one unread: the new one replaces it.
     // ASSUMPTION "USB SETUP_END": a SETUP inside an open control transfer ends it with SETUP_END.
     const bool ended = controlOpen;
     fifo[0].assign(data, data + 8);
@@ -238,11 +238,12 @@ UsbPacketResult S3cUsbDevice::out(unsigned ep, const uint8_t* data, unsigned siz
 UsbPacketResult S3cUsbDevice::in(unsigned ep, uint8_t* data, unsigned* size, bool take) {
     using R = UsbPacketResult;
     if (ep > 4) return R::Unsupported;
+    // One packet of at most MAXP bytes; the rest stays in the FIFO for the next IN_PKT_RDY.
     auto give = [&](std::vector<uint8_t>& f) {
-        const unsigned n = unsigned(std::min<size_t>(f.size(), 64));
+        const unsigned n = unsigned(std::min<size_t>(f.size(), packetSize(ep)));
         if (size) *size = n;
         if (take && data && n) std::memcpy(data, f.data(), n);
-        if (take) f.clear();
+        if (take) f.erase(f.begin(), f.begin() + n);
     };
     if (ep == 0) {
         if (ep0Csr & e0SendStall) {
@@ -285,6 +286,8 @@ UsbPacketResult S3cUsbDevice::in(unsigned ep, uint8_t* data, unsigned* size, boo
     give(fifo[ep]);
     if (!take) return R::Ack;
     c &= ~inReady;
+    // AUTO_SET: another full packet left in the FIFO goes out next.
+    if ((inCsr2[ep] & in2AutoSet) && fifo[ep].size() >= packetSize(ep)) c |= inReady;
     ++ins;
     endpointInterrupt(ep);
     return R::Ack;

@@ -499,13 +499,22 @@ class S3cUart {
     // A byte from the far end.
     void receive(uint8_t byte, S3cIntc& intc);
     std::function<void(unsigned channel, uint8_t byte)> sink;
-    // The nCTS input as asserted, from the far end (host side, not saved; asserted with nothing attached).
+    // The nCTS input as asserted, from the far end (host side, not saved; asserted with nothing attached). setCts
+    // sets UMSTAT's delta CTS (bit 2) on a change, which a UMSTAT read clears. ASSUMPTION "no UART modem interrupt":
+    // the S3C2440/2442 UART has no modem status interrupt (only RXD, TXD and ERR sub-sources, no UMCON enable for
+    // one), so a CTS change raises nothing; the driver polls UMSTAT.
     bool cts = true;
-    // Infra-red mode (ULCON bit 6), receiver and transmitter on (UCON modes not 0), FIFO room.
+    bool deltaCts = false;
+    void setCts(bool on) {
+        if (on != cts) deltaCts = true;
+        cts = on;
+    }
+    // Infra-red mode (ULCON bit 6), receiver and transmitter on (UCON modes not 0).
     bool infrared() const { return ulcon & 0x40; }
     bool receiverOn() const { return ucon & 3; }
     bool transmitterOn() const { return ucon & 0xc; }
-    bool rxRoom() const { return rx.size() < 64; }
+    // The FIFO's 64 bytes with UFCON bit 0 set, else the one holding register.
+    bool rxRoom() const { return rx.size() < (ufcon & 1 ? 64u : 1u); }
 
     uint32_t ulcon, ucon, ufcon, umcon, ubrdiv;
     std::deque<uint8_t> rx;

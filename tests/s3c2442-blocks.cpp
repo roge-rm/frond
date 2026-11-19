@@ -411,15 +411,30 @@ static void uartTests() {
     uart.write(0x28, 0x1a, intc);
     assert(uart.read(0x28, v, intc) == S3cAccess::ok && v == 0x1a);
     assert(uart.read(0x2c, v, intc) == S3cAccess::unknown);
-    // UMSTAT follows the far end's CTS; infrared mode is ULCON bit 6 (WM5's IrDA port sets 0x43).
+    // UMSTAT follows the far end's CTS, with delta CTS (bit 2) after a change until the next read; nothing else
+    // pending comes of it. Infrared mode is ULCON bit 6 (WM5's IrDA port sets 0x43).
     assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 1);
-    uart.cts = false;
+    const uint32_t pendingBefore = get(intc, 0x18), srcBefore = get(intc, 0);
+    uart.setCts(false);
+    assert(get(intc, 0x18) == pendingBefore && get(intc, 0) == srcBefore);
+    assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 4);
     assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 0);
+    uart.setCts(false);
+    assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 0);
+    uart.setCts(true);
+    assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 5);
     uart.write(0x00, 0x43, intc);
     assert(uart.infrared() && get(intc, 0) == get(intc, 0));
     uart.write(0x04, 0x8fc5, intc);
     assert(uart.receiverOn() && uart.transmitterOn());
-    for (int i = 0; i < 64; ++i) uart.receive(uint8_t(i), intc);
+    // Room for host bytes: the 64-byte FIFO with UFCON bit 0, else the one holding register.
+    assert(uart.rxRoom());
+    uart.write(0x08, 0, intc);
+    uart.receive(1, intc);
+    assert(!uart.rxRoom());
+    uart.write(0x08, 1, intc);
+    assert(uart.rxRoom());
+    for (int i = 0; i < 63; ++i) uart.receive(uint8_t(i), intc);
     assert(!uart.rxRoom());
 }
 
@@ -439,7 +454,6 @@ static void usbDeviceTests() {
     // GET_DESCRIPTOR(device, 18), MAXP 8.
     const uint8_t getDevice[8] = {0x80, 6, 0, 1, 0, 0, 18, 0};
     assert(usb.setup(getDevice) == R::Ack && usb.irq());
-    assert(usb.setup(getDevice) == R::Nak);  // the first one isn't read yet
     usb.write(0x178, 0);
     assert(get(usb, 0x184) == 0x01 && get(usb, 0x198) == 8 && get(usb, 0x148) == 1);
     for (unsigned i = 0; i < 8; ++i) assert(get(usb, 0x1c0) == getDevice[i]);
@@ -539,6 +553,35 @@ static void usbDeviceTests() {
     assert(usb.out(3, packet, 1) == R::Ack);
     usb.write(0x190, 0x11);
     assert(!(get(usb, 0x190) & 1) && get(usb, 0x198) == 0);
+    // An IN packet is at most MAXP bytes (8 here); the rest stays in the FIFO for the next IN_PKT_RDY. With AUTO_SET a
+    // full packet left goes out next by itself.
+    usb.write(0x178, 2);
+    usb.write(0x180, 1);
+    usb.write(0x188, 0x20);
+    for (unsigned i = 0; i < 20; ++i) usb.write(0x1c8, i);
+    usb.write(0x184, 0x01);
+    assert(usb.in(2, nullptr, &size, false) == R::Ack && size == 8);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 8 && data[7] == 7 && get(usb, 0x198) == 12);
+    assert(!(get(usb, 0x184) & 1) && usb.in(2, data, &size, true) == R::Nak);
+    usb.write(0x184, 0x01);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 8 && data[0] == 8 && get(usb, 0x198) == 4);
+    usb.write(0x184, 0x01);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 4 && data[3] == 19 && get(usb, 0x198) == 0);
+    usb.write(0x188, 0xa0);
+    for (unsigned i = 0; i < 16; ++i) usb.write(0x1c8, i);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 8 && data[0] == 0 && (get(usb, 0x184) & 1));
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 8 && data[0] == 8 && !(get(usb, 0x184) & 1));
+
+    // A SETUP is always taken, even with the last one unread: it replaces it and ends the open transfer with
+    // SETUP_END.
+    usb.write(0x178, 0);
+    assert(usb.setup(getDevice) == R::Ack);
+    const uint8_t getConfig[8] = {0x80, 6, 0, 2, 0, 0, 9, 0};
+    assert(usb.setup(getConfig) == R::Ack && get(usb, 0x184) == 0x11 && get(usb, 0x198) == 8);
+    for (unsigned i = 0; i < 8; ++i) assert(get(usb, 0x1c0) == getConfig[i]);
+    usb.write(0x190, 0xc0);
+    assert(get(usb, 0x184) == 0);
+
     // The endpoint DMA registers keep what's written; the interrupt enables gate the line.
     assert(usb.write(0x200, 0x5) == S3cAccess::ok && get(usb, 0x200) == 0x5 && get(usb, 0x26c) == 0);
     uint32_t v;

@@ -228,8 +228,12 @@ class S3c2442Machine {
     uint32_t usbEnableCount() const { return usbEnables; }
     void usbHostChanged();
     std::function<void()> usbNotify;
-    // Guest ns by which the host has work due (a USB host tick): an idle CPU's skip ends there. UINT64_MAX for none.
-    uint64_t hostWakeNs = UINT64_MAX;
+    // Host work on guest time (bytes from a serial or infrared host, the USB host's ticks): run calls hostService
+    // between instructions once nanoseconds() reaches hostNextNs, and busy batches and idle skips both end there, so
+    // the work lands at the same instruction whatever the run slices are. UINT64_MAX for none. hostService sets it
+    // again; neither is saved, as the owner sets them after a load.
+    std::function<void()> hostService;
+    uint64_t hostNextNs = UINT64_MAX;
 
     // A byte from a UART's far end (host serial or infrared), and the UART's bit rate from UBRDIV and its clock.
     void uartReceive(unsigned channel, uint8_t byte);

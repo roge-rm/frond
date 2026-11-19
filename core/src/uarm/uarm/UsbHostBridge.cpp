@@ -34,7 +34,7 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
             [] { return false; },
             [rx] { return rx->UsbHostIoPaused(); },
             [rx] { return rx->GetTime(); },
-            [] {},  // the host ticks at every run slice end
+            [] {},  // the host ticks on guest time, at least every poll step (SocS3C2442::ScheduleHost)
             [rx](const UsbHostHooks* hooks) { rx->SetUsbHostHooks(hooks); },
             [] { return true; }
         };
