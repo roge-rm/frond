@@ -391,7 +391,12 @@ void SocIMX1::StateChanged() {
     // A load or reset ends a guest call.
     if (machine) EndGuestCall();
     // The guest's Bluetooth starts over; a checkpoint keeps the controller's connection.
-    if (!RestoringCheckpoint()) bluetooth.backend.Close();
+    if (!RestoringCheckpoint()) {
+        bluetooth.backend.Close();
+        bluetooth.started = false;
+        bluetooth.driverR9 = 0;
+        if (machine) ApplyCodeHooks();
+    }
     const auto status = imx1MachineGetStatus(machine);
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
@@ -842,7 +847,10 @@ bool SocIMX1::RunToStop(uint64_t ticks) {
             std::cerr << "zodiac: the machine stopped in a guest call: " << StopText() << std::endl;
             break;
         }
-        if (run.reason == Imx1MachineYield::codeHook) CodeHookHit();
+        if (run.reason == Imx1MachineYield::codeHook) {
+            CodeHookHit();
+            now = imx1MachineGetStatus(machine);
+        }
         if (run.reason == Imx1MachineYield::pcStop || run.reason == Imx1MachineYield::waiting) break;
         if (now.time.ticks - start.time.ticks >= ticks) break;
     }
@@ -950,8 +958,8 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         now = run.total;
         if (run.reason == Imx1MachineYield::codeHook) {
             CodeHookHit();
-            if (halted || now.time.compare(until) >= 0) break;
-            continue;
+            if (halted) break;
+            now = imx1MachineGetStatus(machine);
         }
         // The USB host runs at slice ends, on the guest's clock.
         TickUsbHost();
@@ -985,7 +993,7 @@ void SocIMX1::SetTraceHooks(const std::vector<uint32_t>& pcs) {
 
 void SocIMX1::ApplyCodeHooks() {
     std::vector<uint32_t> pcs = traceHooks;
-    if (!bluetooth.path.empty() && bluetooth.romKnown)
+    if (BluetoothHooksOn())
         pcs.insert(pcs.end(), std::begin(zodiacBluetoothHooks), std::end(zodiacBluetoothHooks));
     if (pcs.size() > imx1MachineMaximumCodeHooks) pcs.resize(imx1MachineMaximumCodeHooks);
     if (!imx1MachineSetCodeHooks(machine, pcs.data(), unsigned(pcs.size())))
@@ -1013,7 +1021,7 @@ void SocIMX1::CodeHookHit() {
         }
         std::cout << std::endl;
     }
-    if (!bluetooth.path.empty() && bluetooth.romKnown && BluetoothHook(pc, r)) return;
+    if (BluetoothHooksOn() && BluetoothHook(pc, r)) return;
     imx1MachineLeaveCodeHook(machine);
 }
 

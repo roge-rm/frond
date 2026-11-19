@@ -312,6 +312,15 @@ bool imx1MachineSetPcStop(Imx1Machine*, uint32_t pc);
 void imx1MachineClearPcStop(Imx1Machine*);
 void imx1MachineLeavePcStop(Imx1Machine*);
 bool imx1MachineAtPcStop(const Imx1Machine*);
+// The pc stops as they are, to put back after a nested call that sets its own (a Bluetooth delivery in a guest
+// call), with leave and hit as they were.
+struct Imx1MachinePcStops {
+    bool armed = false, leave = false, hit = false;
+    unsigned count = 0;
+    uint32_t pcs[imx1MachineMaximumPcStops]{};
+};
+Imx1MachinePcStops imx1MachineSavePcStops(const Imx1Machine*);
+void imx1MachineRestorePcStops(Imx1Machine*, const Imx1MachinePcStops&);
 // Code hooks, between runs only: bounded runs end before the instruction at any of pcs, in either state, with
 // Imx1MachineYield::codeHook, in Exact and Fast alike; unlike pc stops they leave Fast its lean path and JIT, which
 // stop short of the hooks. Leave lets the next run run the instruction at the hook first. Setting replaces the

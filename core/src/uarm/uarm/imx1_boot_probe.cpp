@@ -2561,6 +2561,19 @@ bool imx1MachineAtPcStop(const Imx1Machine* machine) {
     const auto* p = machine->probe;
     return p->pcStop.armed && p->pcStop.hit && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u);
 }
+Imx1MachinePcStops imx1MachineSavePcStops(const Imx1Machine* machine) {
+    const auto& stop = machine->probe->pcStop;
+    Imx1MachinePcStops saved;
+    saved.armed = stop.armed; saved.leave = stop.leave; saved.hit = stop.hit; saved.count = stop.count;
+    std::copy(std::begin(stop.pcs), std::end(stop.pcs), saved.pcs);
+    return saved;
+}
+void imx1MachineRestorePcStops(Imx1Machine* machine, const Imx1MachinePcStops& saved) {
+    auto& stop = machine->probe->pcStop;
+    stop.armed = saved.armed; stop.leave = saved.leave; stop.hit = saved.hit;
+    stop.count = std::min(saved.count, imx1MachineMaximumPcStops);
+    std::copy(std::begin(saved.pcs), std::end(saved.pcs), stop.pcs);
+}
 bool imx1MachineSetCodeHooks(Imx1Machine* machine, const uint32_t* pcs, unsigned count) {
     auto* p = machine->probe;
     if (p->bounds || count > imx1MachineMaximumCodeHooks || !cpuArm920SetCodeHooks(p->cpu, pcs, count)) return false;
