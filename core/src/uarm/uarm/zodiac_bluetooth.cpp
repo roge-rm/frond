@@ -41,7 +41,10 @@ constexpr uint32_t irqCodeAt = irq - 0x10;
 // bits 0-1 clear, bit 4 set or bit 7 clear, or a time not reached) goes round again, waiting for another task to
 // change the byte. BtlsLib's task is switched away from there; a delivery can't be, so a callback that comes back
 // to portWait with the port still not open and no bytes read since is ended there, and the bytes left wait for
-// a later delivery.
+// a later delivery. Each callback's first pass still runs the ROM's checks, so its timed way out (flags bits 0-1
+// set, bit 4 clear, bit 7 set and the port record's time at +0x9c reached: it posts and returns) is taken when it
+// comes. With the other flags the ROM waits for good; the shim gives up after portShutTicks of ended callbacks
+// with nothing taken, dropping the bytes and taking the link down, so a stall is reported.
 constexpr uint32_t driverCallback = 0x200f651f, spinCheckAt = portWait;
 constexpr uint16_t driverCallbackCode[] = {0xb5f1, 0xb0ae, 0x982e, 0x68c7, 0x992e, 0x2000, 0x9024, 0xc903, 0x688d,
                                            0x9523, 0x690a, 0x9222, 0x68ca, 0x9221, 0x680e, 0x4649, 0x68c9, 0x6dc9,
@@ -59,6 +62,8 @@ constexpr unsigned callbacksPerDelivery = 64;
 constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond, irqGapTicks = ticksPerSecond;
 // Guest ticks between start calls that begin a new burst of radio setup (a second).
 constexpr uint64_t startGap = ticksPerSecond;
+// Guest ticks of deliveries ended at the port wait with no bytes taken before the link goes down (5 seconds).
+constexpr uint64_t portShutTicks = 5 * ticksPerSecond;
 // Slices of the callback's run, as RunToStop's (about 1 ms).
 constexpr uint64_t sliceTicks = 32;
 
@@ -203,6 +208,7 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
             opened = bluetooth.backend.Open(bluetooth.path, bluetooth.lastError);
         }
         bluetooth.started = opened;
+        bluetooth.portShutSince = 0;
         if (logOn()) std::fprintf(stderr, "zodiac bt start: %s\n", opened ? "open" : bluetooth.lastError.c_str());
         bluetooth.lastDoze = imx1MachineGetStatus(machine).time.ticks;
         BluetoothReturn(opened ? 0 : errorNoRadio);
@@ -217,6 +223,7 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
         bluetooth.backend.Close();
         bluetooth.started = false;
         bluetooth.driverR9 = {};
+        bluetooth.portShutSince = 0;
         if (logOn()) std::fprintf(stderr, "zodiac bt stop\n");
         BluetoothReturn(0);
         // With no controller set the hooks go once the guest's radio is down.
@@ -250,6 +257,7 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
             }
             if (done && !WriteGuest(r[0], bytes, done)) result = readFailed, done = 0;
             bluetooth.readSincePortWait += done;
+            bluetooth.readInDelivery += done;
             logBytes("<", bytes, done);
         }
         if (r[2]) WriteGuest(r[2], &done, 4);
@@ -279,19 +287,19 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
         if (!bluetooth.backend.Pending()) return false;
         // The callback runs with an r9 the driver's own calls had, one whose table still holds BtlsLib's running
         // globals: at the doze and the IRQ r9 is whichever task's is running, whose table needn't hold them.
+        // A table whose callback isn't the driver's is passed over. Bytes that come while the running flag is clear
+        // but the globals are still there (the guest is on its way to stop) wait for the stop.
         uint32_t globals = 0;
-        bool known = false;
+        bool known = false, present = false;
         for (const uint32_t r9 : bluetooth.driverR9) {
             if (!r9) continue;
             known = true;
-            if (BluetoothRunning(r9, &globals)) {
-                BluetoothDeliver(globals, r9);
-                return false;
-            }
+            if (BluetoothGlobals(r9)) present = true;
+            if (BluetoothRunning(r9, &globals) && BluetoothDeliver(globals, r9)) return false;
         }
-        if (!known && BluetoothRunning(r[9], &globals)) {
-            BluetoothDeliver(globals, r[9]);
-        } else if (known) {
+        if (!known) {
+            if (BluetoothRunning(r[9], &globals)) BluetoothDeliver(globals, r[9]);
+        } else if (!present) {
             // BtlsLib went away from every table the driver used without a stop: its radio goes off with it.
             if (logOn()) std::fprintf(stderr, "zodiac bt library gone, radio off\n");
             bluetooth.backend.Close();
@@ -342,15 +350,15 @@ bool SocIMX1::BluetoothPortOpen(uint32_t r9, uint32_t data) {
 
 // Calls the driver's receive callback until the bytes are taken or the serial queue is full, then puts the
 // registers and any pc stops of a guest call in progress back, and lets the hooked instruction run.
-void SocIMX1::BluetoothDeliver(uint32_t globals, uint32_t r9) {
+bool SocIMX1::BluetoothDeliver(uint32_t globals, uint32_t r9) {
     uint32_t saved[16], cpsr = 0, callback[2] = {};
-    if (!GuestRegisters(saved, &cpsr) || !ReadGuest(globals + callbackAt, callback, 8) || !callback[0]) return;
+    if (!GuestRegisters(saved, &cpsr) || !ReadGuest(globals + callbackAt, callback, 8)) return false;
     // Globals left in memory BtlsLib no longer owns could hold anything: only the driver's own callback is called.
     if (callback[0] != driverCallback) {
-        if (logOn()) std::fprintf(stderr, "zodiac bt callback %08x isn't the driver's, link down\n", callback[0]);
-        BluetoothDown("BtlsLib's receive callback isn't the driver's");
-        return;
+        if (logOn()) std::fprintf(stderr, "zodiac bt r9 %08x: callback %08x isn't the driver's\n", r9, callback[0]);
+        return false;
     }
+    bluetooth.readInDelivery = 0;
     const Imx1MachinePcStops stops = imx1MachineSavePcStops(machine);
     if (logOn())
         std::fprintf(stderr, "zodiac bt deliver at %s%s\n", (saved[15] & ~1u) == doze ? "doze" : "irq",
@@ -392,4 +400,20 @@ void SocIMX1::BluetoothDeliver(uint32_t globals, uint32_t r9) {
         imx1MachineRestorePcStops(machine, stops);
     }
     bluetooth.delivering = false;
+    // Callbacks ended at the port wait with nothing taken: after portShutTicks of that the bytes go and the link
+    // goes down, as the port isn't opening.
+    if (!bluetooth.callbackEnded || bluetooth.readInDelivery) {
+        bluetooth.portShutSince = 0;
+    } else if (!halted) {
+        const uint64_t now = imx1MachineGetStatus(machine).time.ticks;
+        if (!bluetooth.portShutSince || now < bluetooth.portShutSince) {
+            bluetooth.portShutSince = std::max<uint64_t>(now, 1);
+        } else if (now - bluetooth.portShutSince >= portShutTicks) {
+            std::cerr << "zodiac: the Bluetooth serial port stayed shut with bytes waiting; the link is down until "
+                         "the radio is turned on again" << std::endl;
+            bluetooth.portShutSince = 0;
+            BluetoothDown("the guest's serial port stayed shut");
+        }
+    }
+    return true;
 }

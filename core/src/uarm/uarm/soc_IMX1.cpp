@@ -396,6 +396,7 @@ void SocIMX1::StateChanged() {
         bluetooth.started = false;
         bluetooth.driverR9 = {};
         bluetooth.lastStart = 0;
+        bluetooth.portShutSince = 0;
         if (machine) ApplyCodeHooks();
     }
     const auto status = imx1MachineGetStatus(machine);
@@ -426,11 +427,18 @@ std::function<void()> SocIMX1::CapturePeripheralInput() {
         }
     };
     auto fence = std::make_shared<Fence>(*this);
-    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound] {
+    // The Bluetooth shim's guest-time marks go back with the guest; its controller and started state stay the host's.
+    return [this, fence, input = input, cradleDown = cradleDown, hotSyncTicks = hotSyncTicks, sound = pcm.sound,
+            lastDoze = bluetooth.lastDoze, lastStart = bluetooth.lastStart, portShutSince = bluetooth.portShutSince,
+            driverR9 = bluetooth.driverR9] {
         this->input = input;
         this->cradleDown = cradleDown;
         this->hotSyncTicks = hotSyncTicks;
         pcm.sound = sound;
+        bluetooth.lastDoze = lastDoze;
+        bluetooth.lastStart = lastStart;
+        bluetooth.portShutSince = portShutSince;
+        bluetooth.driverR9 = driverR9;
     };
 }
 
