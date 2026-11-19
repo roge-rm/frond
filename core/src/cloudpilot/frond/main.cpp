@@ -188,6 +188,7 @@ struct Options {
     string modemSync{"off"};
     string sdAttach[2];
     string msAttach;
+    bool cardSwap{false};
     uint16_t gdbPort{0};
     bool smooth{false};
     optional<string> desktopSocket;
@@ -526,6 +527,13 @@ bool serializeSession(const DeviceProfile5& profile, const SessionMetadata& meta
     return snapshotSession(profile, metadata, snapshot) && encodeSession(snapshot, out);
 }
 
+// The machine folder a session file's moved cards are looked for in: the folder it is in.
+string cardFolderOf(const string& sessionPath) {
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(sessionPath, ec);
+    return ec ? string() : absolute.parent_path().lexically_normal().string();
+}
+
 // A session file checked as far as possible without touching the running machine.
 struct CheckedSession {
     SessionFile5 file;
@@ -622,6 +630,11 @@ struct CardStateCheck {
     void Load(SavestateLoader<ChunkType>& loader) {
         EmSPISlaveSD first(EmHAL::Slot::sdcard),second(EmHAL::Slot::sdcard2);
         if(sd) { first.Load(loader); second.Load(loader); }
+        // A saved card left out under card swap: its saved key stands for an empty slot.
+        auto dropped=[&](unsigned id,const std::string& key) {
+            for(const auto& d:pair.dropped) if(d.first==id && d.second==key) return true;
+            return false;
+        };
         if (sd && (pair.card[0] && (!first.IsBlockInRange(pair.card[0]->backing->Size()/512) || !first.IsProtocol(pair.card[0]->protocol))) ||
             (pair.card[1] && (!second.IsBlockInRange(pair.card[1]->backing->Size()/512) || !second.IsProtocol(pair.card[1]->protocol))))
             loader.NotifyError();
@@ -645,8 +658,10 @@ struct CardStateCheck {
         }
         if(!chunk->IsAtEnd() || (sd && !keys[1].empty())) loader.NotifyError();
         for(unsigned n=0;n<2;++n)
-            if(keys[n?2:0] != (pair.card[n] && pair.inserted[n]?pair.card[n]->key:"")) loader.NotifyError();
-        if(!sd && keys[1] != (pair.stick && pair.stickInserted?pair.stick->key:"")) loader.NotifyError();
+            if(keys[n?2:0] != (pair.card[n] && pair.inserted[n]?pair.card[n]->key:"") && !(!pair.card[n] && dropped(n?2:0,keys[n?2:0])))
+                loader.NotifyError();
+        if(!sd && keys[1] != (pair.stick && pair.stickInserted?pair.stick->key:"") && !(!pair.stick && dropped(1,keys[1])))
+            loader.NotifyError();
     }
 };
 string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pair) {
@@ -672,7 +687,9 @@ string checkCardState(const CheckedSession& session,const RuntimeCards::Pair& pa
 }
 
 // Replaces the machine with a checked session. On failure the machine is in no useful state.
-string applySession(const CheckedSession& session) {
+// `dropped`: saved cards left out under card swap; their slots come up empty, and the guest sees
+// the card go as a removal.
+string applySession(const CheckedSession& session, const vector<pair<unsigned,string>>& dropped = {}) {
     if (!startCore(*session.profile, static_cast<const uint8_t*>(session.file.GetNor()), session.file.GetNorSize()))
         return "core failed to start";
     if (gSession->GetMemorySize() != session.file.GetMemorySize()) return "session RAM image has the wrong size";
@@ -685,8 +702,12 @@ string applySession(const CheckedSession& session) {
     EmHAL::loadedNewerState = false;
     if (!gSession->Load(savestate.size(), savestate.data()))
         return EmHAL::loadedNewerState ? "session machine state was saved by a newer Frond" : "session machine state is damaged";
+    vector<EmHAL::Slot> emptied;
+    for (const auto& d : dropped)
+        if (const auto slot = gExternalStorage.ForgetSavedKey(d.second); slot != EmHAL::Slot::none) emptied.push_back(slot);
     gExternalStorage.Remount();
     if(gExternalStorage.RemountFailed()) return "session card remount failed";
+    for (const auto slot : emptied) EmHAL::Unmount(slot);
     if (!session.metadata.wholeClocks) gSession->ScaleCycles(2);
     return "";
 }
@@ -1930,7 +1951,7 @@ class Runner {
             if(!argument(path)) return;
             vector<uint8_t> data; string folder; CheckedSession checked; RuntimeCards::Pair pair;
             string error=readSessionInput(path,data,folder)?checkSession(data,profile->name,checked,folder):"cannot read session";
-            if(error.empty()) error=runtimeCards.Stage(checked.manifest,pair);
+            if(error.empty()) error=runtimeCards.Stage(checked.manifest,pair,cardFolderOf(path));
             if(error.empty()) error=checkCardState(checked,pair);
             if(!error.empty()) cout << "peek refused: " << error << endl;
             else cout << "session media: " << bool(pair.card[0])+bool(pair.card[1]) << " SD cards; slots SD0="
@@ -2855,7 +2876,7 @@ class Runner {
         if (!serializeSession(*profile, metadata, backup))
             return void(cout << "session refused: the running machine can't be saved first; machine unchanged" << endl);
         RuntimeCards::Pair next;
-        if(const auto error=runtimeCards.Stage(session.manifest,next); !error.empty())
+        if(const auto error=runtimeCards.Stage(session.manifest,next,cardFolderOf(path)); !error.empty())
             return void(cout << "session refused: " << error << "; machine unchanged" << endl);
         if(const auto error=checkCardState(session,next); !error.empty())
             return void(cout << "session refused: " << error << "; machine unchanged" << endl);
@@ -3713,7 +3734,11 @@ bool parseOptions(int argc, char** argv, Options& options) {
         } else if (arg == "--ms-attach") {
             const char* v=value(); if (!v) return false;
             options.msAttach = v;
-        } else if (arg == "--card-swap" || arg == "--card-identity" || arg == "--card-protected") {
+        } else if (arg == "--card-swap") {
+            // A saved card that isn't in its place loads with its slot empty; the frontend attaches
+            // the slot's card after start.
+            options.cardSwap = true;
+        } else if (arg == "--card-identity" || arg == "--card-protected") {
             options.refused = arg;
             return false;
         } else if (arg == "--hide-jog-controls") {
@@ -3782,9 +3807,10 @@ int main(int argc, char** argv) {
         RuntimeCards::Pair next;
         if(error.empty() && !startCore(*session.profile,static_cast<const uint8_t*>(session.file.GetNor()),session.file.GetNorSize())) error="core failed to start";
         if(error.empty()) runtimeCards.SetDevice(session.profile->deviceType);
-        if(error.empty()) error=runtimeCards.Stage(session.manifest,next);
+        if(error.empty()) error=runtimeCards.Stage(session.manifest,next,cardFolderOf(options.image),options.cardSwap);
         if(error.empty()) error=checkCardState(session,next);
-        if(error.empty()) { runtimeCards.Install(next); error=applySession(session); }
+        if(error.empty()) { runtimeCards.Install(next); error=applySession(session,next.dropped); }
+        for(const auto& d:next.dropped) cout << "card swap: slot " << d.first << " left empty, its saved card isn't there" << endl;
         if(error.empty() && !runtimeCards.Matches(next)) error="manifest and protocol insertion disagree";
         if (!error.empty()) {
             cerr << "session refused: " << error << endl;

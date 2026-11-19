@@ -389,7 +389,7 @@ static void writeFrond(const QString& path, const QString& device, const QList<T
     for (const auto& m : media) {
         QByteArray d(100, '\0');
         putLe(d, 0, m.kind, 4);
-        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : m.kind == 4 ? "nand.frondnand" : "ms.frondmsp";
+        const QByteArray name = m.kind == 1 ? "sd.frondsd" : m.kind == 2 ? "ms.frondms" : m.kind == 4 ? "nand.frondnand" : m.kind == 5 ? "sd2.frondsd" : "ms.frondmsp";
         for (int i = 0; i < name.size(); ++i) d[4 + i] = name[i];
         putLe(d, 36, 1, 4);
         for (int i = 0; i < 32; ++i) d[44 + i] = m.identity.leftJustified(32, '\0', true)[i];
@@ -579,7 +579,9 @@ card='inserted' if any((src.parent/n).exists() for n in cards) else 'none'
 flag=lambda n: pathlib.Path(__file__).with_name(n).exists()
 if card=='inserted' and flag('start-ejected'): card='ejected'
 identity='00'*32
-card2='none'
+# Slot 2 holds its card file unless start-card2-out says the core left it out (changed while off).
+card2='inserted' if (src.parent/'sd2.frondsd').exists() and not flag('start-card2-out') else 'none'
+identity2='00'*32
 for line in s.makefile('rb'):
     i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
     with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
@@ -596,6 +598,8 @@ for line in s.makefile('rb'):
     elif cmd=='sd2-state': message=card2
     elif cmd in ('sd2-create','sd2-reinsert'): card2='inserted'
     elif cmd=='sd2-eject': card2='ejected'
+    elif cmd=='sd2-put-in': card2='inserted'; identity2=arg.split(' ')[0]
+    elif cmd=='sd2-take-out': card2='none'; message=identity2+' writable'
     elif cmd=='sd-put-in': card='inserted'; identity=arg.split(' ')[0]
     elif cmd=='sd-eject': card='ejected'
     elif cmd=='sd-take-out': card='none'; message=identity+' writable'
@@ -604,7 +608,7 @@ for line in s.makefile('rb'):
         dest=pathlib.Path(arg)
         if dest.resolve()!=src.resolve():
             dest.write_bytes(src.read_bytes())
-            for n in cards:
+            for n in cards+('sd2.frondsd',):
                 if (src.parent/n).exists(): shutil.copyfile(src.parent/n, dest.parent/n)
     s.sendall(i+b'\tok\tresult\t'+message.encode().hex().encode()+b'\n')
     if cmd=='sd-take-out' and flag('die-after-take-out'):
@@ -2322,60 +2326,307 @@ for line in s.makefile('rb'):
             QVERIFY(fastDialog.controls->values().fastEngine);
         }
     }
-    // The Zodiac's second SD slot: its own button and dialog, through the sd2- commands; other devices have no button.
+    // The Zodiac's second SD slot: a Card 2 row like the first slot's, a library card picked for it
+    // going in with sd2-put-in, Eject, Insert and back to the drawer; a slot-2 card the core left
+    // out at start goes in once it runs. A one-slot device has no Card 2 row.
     void zodiacSecondCard() {
         cardsReset();
         QSettings().clear(); QSettings().setValue("resume", false);
         QTemporaryDir files;
         const auto core = pickerCore(files.path(), "tapwave-zodiac-2");
         const auto a = cardsMachine("Zodiac", false, "tapwave-zodiac-2");
-        MainWindow window(core);
-        window.show();
-        auto* button = window.findChild<QPushButton*>("secondCard");
-        QVERIFY(button && !button->isEnabled());
-        window.openSession(a + "/Zodiac.frond", true);
-        QTRY_VERIFY_WITH_TIMEOUT(button->isEnabled(), 10000);
-        int step = 0;
-        QStringList errors;
-        auto press = [](QWidget* dialog, const QString& text) {
-            for (auto* b : dialog->findChildren<QPushButton*>())
-                if (b->text() == text && b->isVisibleTo(dialog)) { b->click(); return true; }
-            return false;
-        };
-        auto statusIs = [](QWidget* dialog, const QString& text) {
-            for (auto* l : dialog->findChildren<QLabel*>()) if (l->text() == text) return true;
-            return false;
-        };
-        QTimer poll; poll.setInterval(20);
-        connect(&poll, &QTimer::timeout, &window, [&] {
-            for (auto* box : window.findChildren<QMessageBox*>()) {
-                if (!box->isVisible()) continue;
-                if (box->windowTitle().contains("Eject")) box->button(QMessageBox::Yes)->click();
-                else { errors << box->text(); box->done(QMessageBox::Ok); }
-            }
-            QDialog* dialog = nullptr;
-            for (auto* d : window.findChildren<QDialog*>()) if (d->isVisible() && d->windowTitle() == "SD card 2") dialog = d;
-            if (!dialog) return;
-            // The press runs from its own timer, as the Eject question is modal and this one can't fire inside it.
-            auto later = [&, dialog](int next, const char* text) {
-                step = next;
-                QTimer::singleShot(0, &window, [&, dialog, text] { press(dialog, text); });
-            };
-            if (step == 0 && statusIs(dialog, "No card")) later(1, "New card");
-            else if (step == 1 && statusIs(dialog, "Inserted")) later(2, "Eject");
-            else if (step == 2 && statusIs(dialog, "Ejected")) later(3, "Insert");
-            else if (step == 3 && statusIs(dialog, "Inserted")) { step = 4; dialog->reject(); }
-        });
-        poll.start();
-        button->click();
-        QTRY_COMPARE_WITH_TIMEOUT(step, 4, 10000);
-        poll.stop();
-        QVERIFY2(errors.isEmpty(), qPrintable(errors.join(' ')));
-        QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
-        QStringList got;
-        for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts))
-            if (line.startsWith("sd2-") && !line.startsWith("sd2-state")) got << line.trimmed();
-        QCOMPARE(got, QStringList({"sd2-create\t32", "sd2-eject", "sd2-reinsert"}));
+        QString games;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        {
+            MainWindow window(core);
+            window.show();
+            window.openSession(a + "/Zodiac.frond", true);
+            auto* state = window.findChild<QLabel*>("sd2State");
+            auto* pick = window.findChild<QPushButton*>("card2Pick");
+            auto* heading = window.findChild<QLabel*>("storageHeading");
+            QVERIFY(!window.findChild<QPushButton*>("secondCard"));
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 10000);
+            showCardPanel(pick); QTRY_VERIFY(pick->isVisible() && pick->isEnabled());
+            QCOMPARE(heading->text(), QString("Card 1"));
+            QStringList texts;
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                QCOMPARE(d->windowTitle(), QString("Card 2 for Zodiac"));
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice")) {
+                    texts << r->text();
+                    if (r->property("cardId").toString() == games) r->setChecked(true);
+                }
+                d->accept();
+            });
+            QTimer::singleShot(0, pick, &QPushButton::click);
+            QTRY_COMPARE_WITH_TIMEOUT(pick->text(), QString("Games"), 10000);
+            QCOMPARE(texts, QStringList({"No card", "Games · 64 MB"}));
+            QVERIFY(QFileInfo(a + "/sd2.frondsd").isFile() && !QFileInfo(a + "/sd.frondsd").exists());
+            QCOMPARE(frondCards::readSlot(a, 1).card, games);
+            QVERIFY(frondCards::readSlot(a).card.isEmpty());
+            // Eject and Insert on the row.
+            answerYes();
+            window.findChild<QPushButton*>("sd2Eject")->click();
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("Ejected"), 10000);
+            auto* insert = window.findChild<QPushButton*>("sd2Insert");
+            QTRY_VERIFY(insert->isVisible());
+            insert->click();
+            QTRY_VERIFY_WITH_TIMEOUT(window.findChild<QPushButton*>("sd2Eject")->isVisible(), 10000);
+            // In Cards, it's in the Zodiac's second slot.
+            frondCards::Row row;
+            for (const auto& r : frondCards::rows(cardsSessions(), a)) if (r.card.id == games) row = r;
+            QCOMPARE(frondCards::statusText(row), QString("In Zodiac · Card 2"));
+            // No card: eject after the confirmation, take out, back to the drawer.
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                    if (r->property("cardId").toString().isEmpty()) r->setChecked(true);
+                QTimer::singleShot(0, d, &QDialog::accept);
+                answerYes();
+            });
+            QTimer::singleShot(0, pick, &QPushButton::click);
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(cardsLibrary() + '/' + games + "/sd.frondsd").isFile(), 10000);
+            QTRY_COMPARE(pick->text(), QString("No card"));
+            QVERIFY(frondCards::cardFileIn(a, 1).isEmpty());
+            QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+            QStringList got;
+            for (const auto& line : QString::fromUtf8(trace.readAll()).split('\n', Qt::SkipEmptyParts))
+                if (line.startsWith("sd2-") && !line.startsWith("sd2-state")) got << line.section('\t', 0, 0);
+            QCOMPARE(got, QStringList({"sd2-put-in", "sd2-eject", "sd2-reinsert", "sd2-eject", "sd2-take-out"}));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        // A card put in slot 2 while the machine was off: the core loads the slot empty and it goes in at start.
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(lock.ok && frondCards::toMachine(cardsLibrary(), games, a, 1).isEmpty());
+        }
+        QVERIFY(frondCards::readSlot(a, 1).swap && frondCards::launchArguments(cardsSessions(), a) == QStringList{"--card-swap"});
+        QFile(files.filePath("commands")).remove();
+        QFile flag(files.filePath("start-card2-out")); QVERIFY(flag.open(QIODevice::WriteOnly)); flag.close();
+        {
+            MainWindow window(core);
+            window.show();
+            window.openSession(a + "/Zodiac.frond", true);
+            auto* pick = window.findChild<QPushButton*>("card2Pick");
+            QTRY_COMPARE_WITH_TIMEOUT(pick->text(), QString("Games"), 10000);
+            QFile trace(files.filePath("commands")); QVERIFY(trace.open(QIODevice::ReadOnly));
+            const auto commands = trace.readAll();
+            QVERIFY(commands.indexOf("sd2-state\t") >= 0 && commands.indexOf("sd2-state\t") < commands.indexOf("sd2-put-in\t"));
+            QVERIFY(commands.indexOf("sd2-put-in\t") < commands.indexOf("network-state\t"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        // A one-slot device has no Card 2 row.
+        {
+            const auto e2 = cardsMachine("Tungsten", false, "palm-e2");
+            QFile(files.filePath("commands")).remove();
+            const auto e2core = pickerCore(files.path(), "palm-e2");
+            MainWindow window(e2core);
+            window.show();
+            window.openSession(e2 + "/Tungsten.frond", true);
+            auto* state = window.findChild<QLabel*>("sdState");
+            auto* pick = window.findChild<QPushButton*>("cardPick");
+            QTRY_COMPARE_WITH_TIMEOUT(state->text(), QString("No card"), 10000);
+            showCardPanel(pick);
+            QTRY_VERIFY(pick->isVisible());
+            QVERIFY(!window.findChild<QPushButton*>("card2Pick")->isVisible() && !window.findChild<QLabel*>("storage2Heading")->isVisible());
+            QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("SD card"));
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        QSettings().clear();
+    }
+    // The Dana's two slots on the shared rows: library cards go in by path after start, with a key
+    // and their type, and come out through take-out into the drawer.
+    void danaLibraryCards() {
+        cardsReset();
+        QSettings().clear(); QSettings().setValue("resume", false);
+        QTemporaryDir files;
+        QFile core(files.filePath("dana-core"));
+        QVERIFY(core.open(QIODevice::WriteOnly));
+        core.write(R"PY(#!/usr/bin/python3
+import pathlib,socket,sys
+here=pathlib.Path(__file__)
+here.with_name('args').write_text('\n'.join(sys.argv[1:]))
+trace=here.with_name('commands')
+s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[sys.argv.index('--desktop-socket')+1])
+s.sendall(b'0\tevent\tready\t\n')
+slots={'sd':None,'sd2':None}
+for line in s.makefile('rb'):
+    i,raw,arg=line.rstrip(b'\n').split(b'\t'); cmd=raw.decode(); arg=bytes.fromhex(arg.decode()).decode()
+    with trace.open('a') as t: t.write(cmd+'\t'+arg+'\n')
+    ok,message='ok','done'
+    slot,_,op=cmd.partition('-')
+    if cmd=='device-state': message='alphasmart-dana'
+    elif cmd=='network-state': message='disabled'
+    elif slot in slots:
+        card=slots[slot]
+        if op=='state': message='none' if not card else card['state']+' '+card['key']+' writable'+(' mmc' if card['mmc'] else '')
+        elif op=='attach':
+            words=arg.rsplit(' ',3); slots[slot]={'state':'inserted','key':words[1],'mmc':words[3]=='mmc'}; message='inserted'
+        elif op=='eject': card['state']='ejected'; message='ejected'
+        elif op=='insert': card['state']='inserted'; message='inserted'
+        elif op=='take-out': slots[slot]=None; message='taken-out'
+    elif cmd in ('hold-state','rotate'): ok,message='error','unsupported'
+    s.sendall(i+b'\t'+ok.encode()+b'\tresult\t'+message.encode().hex().encode()+b'\n')
+    if cmd=='quit': break
+)PY");
+        core.close();
+        QVERIFY(core.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto a = cardsMachine("Dana", false, "alphasmart-dana");
+        QString notes, old;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Notes", "sd", 32, {}, &notes).isEmpty());
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Old", "mmc", 64, {}, &old).isEmpty());
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(lock.ok && frondCards::toMachine(cardsLibrary(), notes, a, 0).isEmpty() && frondCards::toMachine(cardsLibrary(), old, a, 1).isEmpty());
+        }
+        auto read = [&](const QString& name) { QFile f(files.filePath(name)); return f.open(QIODevice::ReadOnly) ? QString::fromUtf8(f.readAll()) : QString(); };
+        {
+            MainWindow window(core.fileName(), core.fileName());
+            window.show();
+            window.openSession(a + "/Dana.frond", true);
+            auto* pick = window.findChild<QPushButton*>("cardPick");
+            auto* pick2 = window.findChild<QPushButton*>("card2Pick");
+            QTRY_COMPARE_WITH_TIMEOUT(pick2->text(), QString("Old"), 10000);
+            QCOMPARE(pick->text(), QString("Notes"));
+            QCOMPARE(window.findChild<QLabel*>("storageHeading")->text(), QString("Card 1"));
+            const auto args = read("args").split('\n');
+            QVERIFY(args.contains("--card-swap") && !args.contains("--card-identity"));
+            frondCards::Card n1, n2;
+            QVERIFY(frondCards::readCard(cardsLibrary() + '/' + notes, &n1) && frondCards::readCard(cardsLibrary() + '/' + old, &n2));
+            QVERIFY(frondCards::validKey(n1.key) && frondCards::validKey(n2.key) && n1.key.left(8) != n2.key.left(8));
+            const auto commands = read("commands");
+            const auto real = QFileInfo(a).canonicalFilePath();
+            QVERIFY2(commands.contains("sd-attach\t\"" + real + "/sd.frondsd\" " + n1.key + " writable sd\n"), qPrintable(commands));
+            QVERIFY2(commands.contains("sd2-attach\t\"" + real + "/sd2.frondsd\" " + n2.key + " writable mmc\n"), qPrintable(commands));
+            QVERIFY(commands.indexOf("sd2-attach\t") < commands.indexOf("network-state\t"));
+            // No card in slot 2: eject after the confirmation, take out, to the drawer.
+            showCardPanel(pick2); QTRY_VERIFY(pick2->isVisible() && pick2->isEnabled());
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                    if (r->property("cardId").toString().isEmpty()) r->setChecked(true);
+                QTimer::singleShot(0, d, &QDialog::accept);
+                answerYes();
+            });
+            QTimer::singleShot(0, pick2, &QPushButton::click);
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(cardsLibrary() + '/' + old + "/sd.frondsd").isFile(), 10000);
+            QTRY_COMPARE(pick2->text(), QString("No card"));
+            QVERIFY(frondCards::cardFileIn(a, 1).isEmpty() && frondCards::readSlot(a, 1).swap);
+            const auto after = read("commands");
+            QVERIFY(after.contains("sd2-eject\t\n") && after.contains("sd2-take-out\t\n"));
+            // And back in by path from the picker.
+            whenShown<CardPickerDialog>([&](CardPickerDialog* d) {
+                for (auto* r : d->findChildren<QRadioButton*>("cardChoice"))
+                    if (r->property("cardId").toString() == old) r->setChecked(true);
+                d->accept();
+            });
+            QTimer::singleShot(0, pick2, &QPushButton::click);
+            QTRY_COMPARE_WITH_TIMEOUT(pick2->text(), QString("Old"), 10000);
+            QCOMPARE(read("commands").count("sd2-attach\t"), 2);
+            window.close(); QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
+        }
+        QSettings().clear();
+    }
+    // Add device offers a drawer card per slot for a two-slot machine, and none for others.
+    void addDeviceCardChoice() {
+        cardsReset();
+        QString games, stick;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Stick", "ms", 16, {}, &stick).isEmpty());
+        const frondSessions::Preferences fresh;
+        QTemporaryDir root;
+        FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic, nullptr, &fresh);
+        dialog.offerCards(cardsSessions());
+        dialog.show();
+        auto* device = dialog.findChild<QComboBox*>("device");
+        auto* one = dialog.findChild<QComboBox*>("card1Choice");
+        auto* two = dialog.findChild<QComboBox*>("card2Choice");
+        device->setCurrentIndex(device->findData(QString("tapwave-zodiac-2")));
+        QVERIFY(one->isVisible() && two->isVisible());
+        QStringList texts;
+        for (int i = 0; i < two->count(); ++i) texts << two->itemText(i);
+        QCOMPARE(texts, QStringList({"No card", "Games · 64 MB"}));
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), QString()}));
+        two->setCurrentIndex(1);
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), games}));
+        // The Dana: both slots, SD and MMC cards that fit it.
+        QString notes;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Notes", "mmc", 32, {}, &notes).isEmpty());
+        device->setCurrentIndex(device->findData(QString("alphasmart-dana")));
+        QVERIFY(one->isVisible() && two->isVisible());
+        for (auto* box : {one, two}) {
+            texts.clear();
+            for (int i = 0; i < box->count(); ++i) texts << box->itemText(i);
+            QCOMPARE(texts, QStringList({"No card", "Games · 64 MB", "Notes · MMC · 32 MB"}));
+        }
+        device->setCurrentIndex(device->findData(QString("palm-tx")));
+        QVERIFY(!one->isVisible() && !two->isVisible() && dialog.chosenCards().isEmpty());
+    }
+    // The library with a second slot: an old Zodiac folder's sd2.frondsd moves in as its own card,
+    // each slot is listed and linked on its own, take out and put back by slot, and Delete keeps
+    // both cards.
+    void cardsSecondSlot() {
+        cardsReset();
+        const auto dir = cardsSessions() + "/Zodiac";
+        TestMedia one, two;
+        one.identity = machineIdentity("one"); two.identity = machineIdentity("two"); two.kind = 5;
+        writeFrond(dir + "/Zodiac.frond", "tapwave-zodiac-2", {one, two});
+        QVERIFY(cardTool({"make", "sd", "32", dir + "/sd.frondsd"}));
+        QVERIFY(cardTool({"make", "sd", "32", dir + "/sd2.frondsd"}));
+        QVERIFY(frondCards::reconcile(cardsSessions()).isEmpty());
+        const auto first = cardNamed("Zodiac card"), second = cardNamed("Zodiac card 2");
+        QVERIFY(!first.id.isEmpty() && !second.id.isEmpty());
+        QCOMPARE(frondCards::readSlot(dir).card, first.id);
+        QCOMPARE(frondCards::readSlot(dir, 1).card, second.id);
+        QCOMPARE(second.identity, two.identity);
+        QVERIFY(!frondCards::readSlot(dir, 1).swap && frondCards::launchArguments(cardsSessions(), dir).isEmpty());
+        // Reconcile again changes nothing.
+        QVERIFY(frondCards::reconcile(cardsSessions()).isEmpty());
+        QCOMPARE(frondCards::entries(cardsLibrary()).size(), 2);
+        QStringList labels;
+        for (const auto& m : frondCards::machineSlots(cardsSessions())) labels << m.label();
+        QCOMPARE(labels, QStringList({"Zodiac · Card 1", "Zodiac · Card 2"}));
+        for (const auto& r : frondCards::rows(cardsSessions()))
+            QCOMPARE(frondCards::statusText(r), r.card.id == first.id ? QString("In Zodiac · Card 1") : QString("In Zodiac · Card 2"));
+        // Take card 2 out of the stopped machine: into the drawer as sd.frondsd, slot 2 empty with a swap.
+        QVERIFY(frondCards::takeOutStopped(cardsSessions(), second.id).isEmpty());
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + second.id + "/sd.frondsd").isFile() && !QFileInfo::exists(dir + "/sd2.frondsd"));
+        QVERIFY(QFileInfo(dir + "/sd.frondsd").isFile());
+        QVERIFY(frondCards::readSlot(dir, 1).swap && frondCards::readSlot(dir, 1).card.isEmpty() && !frondCards::readSlot(dir).swap);
+        QCOMPARE(frondCards::launchArguments(cardsSessions(), dir), QStringList{"--card-swap"});
+        QVERIFY(frondCards::secondPutIn(cardsSessions(), dir).isEmpty());
+        // A Memory Stick never goes in slot 2.
+        QString stick;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Stick", "ms", 16, {}, &stick).isEmpty());
+        {
+            frondCards::LibraryLock lock(cardsLibrary());
+            QVERIFY(!frondCards::toMachine(cardsLibrary(), stick, dir, 1).isEmpty());
+            QVERIFY(frondCards::toMachine(cardsLibrary(), second.id, dir, 1).isEmpty());
+        }
+        QVERIFY(QFileInfo(dir + "/sd2.frondsd").isFile());
+        QCOMPARE(frondCards::secondPutIn(cardsSessions(), dir), QString::fromLatin1(two.identity.toHex()) + " writable");
+        // Links per slot: card 2 linked to slot 2 only.
+        QVERIFY(frondCards::setLinks(cardsSessions(), second.id, {dir + "#2"}).isEmpty());
+        QCOMPARE(frondCards::readSlot(dir, 1).link, second.id);
+        QVERIFY(frondCards::readSlot(dir).link.isEmpty());
+        {
+            LinkDialog dialog(cardsSessions(), second.id, {}, {});
+            QStringList texts;
+            for (int i = 0; i < dialog.machines->count(); ++i) texts << dialog.machines->item(i)->text();
+            QCOMPARE(texts, QStringList({"Zodiac · Card 1 · Tapwave Zodiac 2 · Has Zodiac card, take it out first", "Zodiac · Card 2 · Tapwave Zodiac 2"}));
+            QCOMPARE(dialog.linked(), QStringList{dir + "#2"});
+        }
+        // Closing a linked holder: card 2 goes back to the drawer, card 1 stays.
+        QVERIFY(frondCards::releaseAtClose(cardsSessions(), dir).isEmpty());
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + second.id + "/sd.frondsd").isFile() && QFileInfo(dir + "/sd.frondsd").isFile());
+        // At start it comes back into slot 2.
+        QString heldBy;
+        QCOMPARE(frondCards::takeAtStart(cardsSessions(), dir, &heldBy), QStringList{"--card-swap"});
+        QVERIFY(QFileInfo(dir + "/sd2.frondsd").isFile());
+        // Delete keeps both cards.
+        frondSessions::Info info;
+        info.name = "Zodiac"; info.path = dir + "/Zodiac.frond"; info.saved = true;
+        QVERIFY(frondSessions::remove(info).isEmpty());
+        QVERIFY(!QFileInfo::exists(dir));
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + first.id + "/sd.frondsd").isFile());
+        QVERIFY(QFileInfo(cardsLibrary() + '/' + second.id + "/sd.frondsd").isFile());
     }
     // Edit settings: a IIIx has Contrast and Original/Uncapped speed, never the Engine; ARM devices have
     // the speed too, no contrast, and the Engine.

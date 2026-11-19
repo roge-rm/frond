@@ -159,7 +159,7 @@ private fun <T> LinkDialog(
 
 // Asks before ejecting the card, or before opening its files (which ejects it).
 @Composable
-fun CardEjectDialog(model: RunningModel, files: Boolean, onDismiss: () -> Unit) {
+fun CardEjectDialog(model: RunningModel, files: Boolean, n: Int = 0, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Eject the card?") },
@@ -167,7 +167,9 @@ fun CardEjectDialog(model: RunningModel, files: Boolean, onDismiss: () -> Unit) 
         confirmButton = {
             TextButton(onClick = {
                 onDismiss()
-                if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
+                if (model.selectSlot(n)) {
+                    if (files) model.openFiles() else model.job("Ejecting", "Couldn't eject the card") { it.eject() }
+                }
             }) { Text("Eject") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

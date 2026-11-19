@@ -801,7 +801,7 @@ inline bool swappedInCard(const std::filesystem::path& folder, const char* name,
 // the Zodiac's second SD). A saved card whose file is there unchanged, with the same identity when
 // one is given, stays as saved: same SD or Pro generation, same classic stick change counter. A
 // missing file empties the slot; another card, or the same one changed, is checked as a new card,
-// except in the second SD slot, which refuses the load. The device profile check comes later, as
+// except in the second SD slot, which loads empty and takes the card with sd2-put-in. The device profile check comes later, as
 // for any load.
 inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parsed, const CardSwap& swap) {
     std::vector<frondMachine::Media> cards;
@@ -850,12 +850,9 @@ inline bool resolveCardSwap(const std::filesystem::path& folder, Contents& parse
         }
         swapped = true;
         if (!present) continue;
-        // A card file with no saved card there was taken out: the slot loads empty and sd2-put-in brings it back.
-        if (slot == 2 && !saved) continue;
-        if (slot == 2) {
-            std::cerr << "the second SD card file changed while the machine was off; put it in with sd2-put-in" << std::endl;
-            return false;
-        }
+        // Slot 2 loads empty for any card file that isn't the saved card as saved (taken out, another
+        // card, or the same one changed elsewhere); the frontend puts it in with sd2-put-in.
+        if (slot == 2) continue;
         frondMachine::Media card;
         if (!swappedInCard(folder, present, swap, card)) return false;
         cards.push_back(std::move(card));

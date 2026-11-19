@@ -66,14 +66,16 @@ class LinkDialog : public QDialog {
 class CardPickerDialog : public QDialog {
     Q_OBJECT
  public:
+    // `slot` is 1 for a two-slot machine's second slot.
     CardPickerDialog(const QString& sessions, const QString& machineDir, frondFirmware::Device device, const QString& current,
-                     QWidget* parent = nullptr);
+                     QWidget* parent = nullptr, int slot = 0);
     QString chosen() const;  // card id, empty for No card
     void fill(const QString& select);
     QPushButton *newCard, *linkCards;
  private:
     QString sessions, machineDir, current;
     frondFirmware::Device device;
+    int slot;
     QVBoxLayout* choices;
     QList<QRadioButton*> radios;
 };

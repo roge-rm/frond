@@ -2837,6 +2837,13 @@ test-68k-ms: prepare
 	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
 		-f $(CURDIR)/tests/68k-ms.mk FROND_TEST_ROOT=$(CURDIR) ms-test
 
+# frond-68k linked cards moving into the cards library (move-linked, settle-linked, card swap).
+.PHONY: test-68k-card-swap
+test: test-68k-card-swap
+test-68k-card-swap: prepare out/frond
+	$(MAKE) -C core/src/cloudpilot FROND_68K=1 -j4 -f Makefile \
+		-f $(CURDIR)/tests/68k-ms.mk FROND_TEST_ROOT=$(CURDIR) FROND=$(CURDIR)/out/frond card-swap-test
+
 .PHONY: test-68k-card-provider
 test-68k-card-provider: prepare
 	$(MAKE) -C core/src/common bin

@@ -31,6 +31,7 @@ constexpr const char* nandSibling = "nand.frondnand";
 constexpr const char* androidSession = "session.frond";
 // Which card the frontend's slot holds; packed with the machine, never read by the core.
 constexpr const char* slotFile = "slot.json";
+constexpr const char* slot2File = "slot2.json";
 constexpr uint32_t kindSd = 1, kindMs = 2, kindMsPro = 3, kindNand = 4, kindSd2 = 5;
 constexpr size_t nameBytes = 32, identityBytes = 32;
 // v7 descriptors are 92 bytes; v8 adds the SD content generation as a u64 at 92, which for a classic
@@ -88,7 +89,8 @@ inline bool endsWith(std::string_view name, std::string_view suffix) {
 
 inline bool packableName(std::string_view name) {
     if (ignoredName(name)) return false;
-    if (name == sdSibling || name == sd2Sibling || name == msSibling || name == msProSibling || name == nandSibling || name == slotFile)
+    if (name == sdSibling || name == sd2Sibling || name == msSibling || name == msProSibling || name == nandSibling || name == slotFile ||
+        name == slot2File)
         return true;
     // An exported session's NAND, packed (storage/Packed.h); a load unpacks it.
     if (name == std::string(nandSibling) + ".gz") return true;

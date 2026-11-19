@@ -53,8 +53,10 @@ object RunningSheets {
     enum class CardRow { SLOT, LINKED, INSERT_LINKED, FILES, EJECT, INSERT, EXPORT_IMAGE, TRY_AGAIN, WRITE_PROTECT }
 
     // linked: the empty slot has a linked card; linkedFree: that card can go in now.
-    fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean): List<CardRow> {
-        if (!device.cardSupported) return emptyList()
+    // `n` is the slot: 1 for the second SD slot. `oldPlace`: a frond-68k card not in Cards yet,
+    // which doesn't open in Files.
+    fun cardRows(device: Device, state: SdCard.State, linked: Boolean, linkedFree: Boolean, n: Int = 0, oldPlace: Boolean = false): List<CardRow> {
+        if (!device.cardSupported || !Cards.hasSlot(device, n)) return emptyList()
         val rows = mutableListOf(CardRow.SLOT)
         if (state == SdCard.State.NONE && linked) {
             rows += CardRow.LINKED
@@ -70,7 +72,9 @@ object RunningSheets {
             SdCard.State.NONE -> Unit
             SdCard.State.UNKNOWN -> rows += CardRow.TRY_AGAIN
         }
-        if (device.memoryStick && state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT
+        if (oldPlace) rows -= CardRow.FILES
+        // frond-68k's stick takes its protection from Cards when it goes in.
+        if (device.memoryStick && !device.runs68k && n == 0 && state != SdCard.State.NONE && state != SdCard.State.UNKNOWN) rows += CardRow.WRITE_PROTECT
         return rows
     }
 

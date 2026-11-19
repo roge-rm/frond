@@ -105,6 +105,15 @@ void ExternalStorage::Remount() {
     }
 }
 
+EmHAL::Slot ExternalStorage::ForgetSavedKey(const string& key) {
+    for (uint8 slot = 0; slot <= static_cast<uint8>(EmHAL::MAX_SLOT); ++slot)
+        if (!key.empty() && mountedKeysFromSavestate[slot] == key) {
+            mountedKeysFromSavestate[slot].clear();
+            return static_cast<EmHAL::Slot>(slot);
+        }
+    return EmHAL::Slot::none;
+}
+
 bool ExternalStorage::RemountFailed() const { return remountFailed; }
 
 bool ExternalStorage::IsMounted(EmHAL::Slot slot) const {

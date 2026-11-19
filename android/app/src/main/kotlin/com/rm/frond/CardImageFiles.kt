@@ -62,7 +62,7 @@ class CardImageFiles private constructor(private val app: Context, private val s
             val (found, error) = Cards.cardSource(sessions, row.card.id)
             if (found == null) return@runJob error
             val kept = found.card
-            val file = Cards.fileOfKind(kept.kind)
+            val file = if (found.holder == null) Cards.fileOfKind(kept.kind) else Cards.machineFileOf(kept.kind, found.slot)
             if (found.path.name != file) {
                 found.close()
                 return@runJob "Open ${found.holder?.let { Cards.machineName(it) } ?: "the machine"} once to finish its last save."
@@ -80,8 +80,8 @@ class CardImageFiles private constructor(private val app: Context, private val s
             // A machine loads the card as changed from the first write on, even after a crash.
             found.holder?.let { dir ->
                 opened.beforeFirstWrite = {
-                    val slot = Cards.readSlot(dir)
-                    if (!slot.swap && !Cards.writeSlot(dir, slot.copy(swap = true))) throw IOException("Couldn't write the card.")
+                    val slot = Cards.readSlot(dir, found.slot)
+                    if (!slot.swap && !Cards.writeSlot(dir, slot.copy(swap = true), found.slot)) throw IOException("Couldn't write the card.")
                 }
             }
             val shown = try {

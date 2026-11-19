@@ -72,20 +72,17 @@ class SonyT415Test {
         assertTrue(family.accepts(8L shl 20))
         assertFalse(family.accepts(256L shl 20))
         assertFalse(family.accepts(6L shl 20))
-        // The core attaches a stick with no protocol word.
         val id = "1".repeat(32)
-        assertEquals("\"/a.frondms\" $id writable", DanaCardProtocol.attach("/a.frondms", id, false, family))
-        assertEquals("\"/a.frondms\" $id protected", DanaCardProtocol.attach("/a.frondms", id, true, family))
-        val state = DanaCardProtocol.state("inserted $id writable")!!
+        val state = LinkedCards.state("inserted $id writable")!!
         assertTrue(state.inserted && !state.writeProtected)
-        assertNull(DanaCardProtocol.sessionCopyError(listOf("none"), 1))
-        assertNotNull(DanaCardProtocol.sessionCopyError(listOf("inserted $id writable"), 1))
-        // A stick file's header says FRONDMS; an SD card's does not fit.
-        val head = ByteArray(24)
-        "FRONDMS\u0000".toByteArray(Charsets.US_ASCII).copyInto(head)
-        assertTrue(DanaCardProtocol.frondsdFits(head, family))
-        "FRONDSD\u0000".toByteArray(Charsets.US_ASCII).copyInto(head)
-        assertFalse(DanaCardProtocol.frondsdFits(head, family))
+        assertNull(LinkedCards.sessionCopyError(listOf("none"), 1))
+        assertNotNull(LinkedCards.sessionCopyError(listOf("inserted $id writable"), 1))
+        // The library takes classic sticks in its slot, nothing else.
+        assertTrue(Cards.deviceTakes(d, "ms", 8))
+        assertFalse(Cards.deviceTakes(d, "ms", 256))
+        assertFalse(Cards.deviceTakes(d, "sd", 32))
+        assertFalse(Cards.hasSlot(d, 1))
+        assertEquals(listOf("ms"), CardChoices.kindsFor(d))
     }
 
     @Test fun theRomIsToldByItsSonyHeader() {

@@ -53,7 +53,20 @@ fun MachineSettingsScreen(model: HomeModel) {
             if (!editing) Choice("Device", draft.device, Device.shown.sortedBy { it.label.lowercase() }, { it.listLabel }) {
                 model.chooseMachine(it)
             }
-            Header("Display")
+            // A card for each slot of a two-slot machine.
+            if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) {
+                Header("Cards")
+                for (n in 0 until 2) {
+                    val choices = remember(draft.device, n) {
+                        com.rm.frond.CardChoices.startCardChoices(com.rm.frond.Sessions.folder(context), draft.device, n)
+                    }
+                    val value = draft.cards[n].takeIf { id -> choices.any { it.first == id } } ?: ""
+                    Choice("Card ${n + 1}", value, choices.map { it.first }, { v -> choices.first { it.first == v }.second }) {
+                        model.chooseStartCard(n, it)
+                    }
+                }
+            }
+            Header("Display", if (!editing && com.rm.frond.Cards.hasSlot(draft.device, 1)) Modifier.padding(top = 16.dp) else Modifier)
             MachineDisplayRows(draft.device, draft.settings, false) { model.changeMachineSettings(it) }
             val rows = MachineRows.of(draft.device)
             Header("Audio", Modifier.padding(top = 16.dp))

@@ -41,6 +41,9 @@ class ExternalStorage {
     bool Unmount(EmHAL::Slot);
     bool Unmount(const string& key);
     void Remount();
+    // Clears a card the loaded savestate had mounted, so Remount leaves its slot empty. Returns the
+    // slot it was in, or none.
+    EmHAL::Slot ForgetSavedKey(const string& key);
     bool RemountFailed() const;
     bool IsMounted(EmHAL::Slot slot) const;
     bool IsMounted(const string& key) const;

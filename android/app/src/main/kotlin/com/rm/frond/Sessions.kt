@@ -317,7 +317,7 @@ object Sessions {
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
         forPath(context, session)?.device?.takeIf { it.linkedCards }?.let { device ->
             val cards = device.storageSlots.map { link.request(it.commandPrefix + "state") }
-            DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
+            LinkedCards.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
                 ?.let { return refuseOutput(context, to, it) }
         }
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }
@@ -459,11 +459,11 @@ object Sessions {
             }
             if (error != null) return error
             if (header.version >= 7L) {
-                checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap)?.let { return it }
+                checkImportedSiblings(staged, frond, Cards.readSlot(staged).swap || Cards.readSlot(staged, 1).swap)?.let { return it }
             }
             if (frond != File(dest, "session.frond") && !frond.renameTo(File(dest, "session.frond")))
                 return "Couldn't save the session."
-            for (sibling in listOf("sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json")) {
+            for (sibling in listOf("sd.frondsd", "sd2.frondsd", "ms.frondms", "ms.frondmsp", NAND_FILE, "slot.json", "slot2.json")) {
                 File(staged, sibling).takeIf { it.isFile }?.renameTo(File(dest, sibling))
             }
             File(dest, "session.frond.settings.json").takeIf { it.isFile }?.delete()
@@ -704,7 +704,7 @@ internal fun copySavePath(copy: File, runs68k: Boolean): String =
 
 internal fun packableName(name: String): Boolean {
     if (ignoredName(name) || '/' in name || '\\' in name) return false
-    return name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == NAND_FILE || name == "slot.json" ||
+    return name == "sd.frondsd" || name == "sd2.frondsd" || name == "ms.frondms" || name == "ms.frondmsp" || name == NAND_FILE || name == "slot.json" || name == "slot2.json" ||
         name.endsWith(".frond.settings.json") ||
         (name.endsWith(".frond") && !name.endsWith(".frond.new"))
 }
@@ -895,8 +895,8 @@ internal fun copyMachine(from: File, dest: File, free: Long, copyCard: Boolean =
     if (dest.exists()) return "Couldn't duplicate the session."
     val settles = listOfNotNull(if (copyCard) sdSettleOf(from) else null, sdSettleOf(from, nand = true),
         if (copyCard) sdSettleOf(from, second = true) else null)
-    // slot.json is written by the duplicate; card files only when the card is copied.
-    val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" &&
+    // slot.json and slot2.json are written by the duplicate; card files only when the card is copied.
+    val files = from.listFiles()?.filter { it.isFile && packableName(it.name) && it.name != "slot.json" && it.name != "slot2.json" &&
         (copyCard || (it.name !in Cards.cardFiles && it.name != "sd2.frondsd")) }.orEmpty()
     val frond = sessionFile(from)
     val entries = (files.map { file ->
@@ -968,35 +968,50 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
     val failed = "Couldn't duplicate the session."
     val library = Cards.libraryFor(sessions)
     Cards.reconcile(sessions, from)?.let { return it }
-    val slot = Cards.readSlot(from)
-    val cardFile = Cards.cardFileIn(from)
-    val card = if (cardFile != null) slot.card?.let { Cards.readCard(Cards.entryDir(library, it)) } else null
-    val holds = cardFile != null && card != null
-    if (cardFile != null && !holds) return failed
-    val linkTo = slot.link ?: if (holds) slot.card else null
-    if (wanted == CardChoice.COPY && !holds && linkTo != null) return "Its card isn't in it. Link it or leave it out."
-    val hadCard = holds || linkTo != null
+    // Each slot as the first one: its card, the card the copy links to, and whether it had one.
+    class SlotCopy(val slot: Cards.Slot, val card: Cards.Card?, val holds: Boolean, val linkTo: String?)
+    val copies = (0 until Cards.SLOTS).map { n ->
+        val slot = Cards.readSlot(from, n)
+        val cardFile = Cards.cardFileIn(from, n)
+        val card = if (cardFile != null) slot.card?.let { Cards.readCard(Cards.entryDir(library, it)) } else null
+        val holds = cardFile != null && card != null
+        if (cardFile != null && !holds) return failed
+        SlotCopy(slot, card, holds, slot.link ?: if (holds) slot.card else null)
+    }
+    if (wanted == CardChoice.COPY && copies.any { !it.holds && it.linkTo != null }) return "Its card isn't in it. Link it or leave it out."
+    val hadCard = copies.any { it.holds || it.linkTo != null }
     // No library card: whatever the folder has is copied; reconcile moves the copy's card in.
     val choice = if (!hadCard) CardChoice.COPY else wanted
+    // frond-68k's saved changes beside a card go into its file first, so the copy has them.
+    if (choice == CardChoice.COPY)
+        for (n in 0 until Cards.SLOTS) if (copies[n].holds) Cards.settleGenerations(library, from, n)?.let { return it }
     copyMachine(from, dest, Cards.freeSpace(sessions), copyCard = choice == CardChoice.COPY, cancelled = cancelled)?.let { return it }
-    var copySlot = Cards.Slot(present = true, swap = slot.swap || hadCard, link = if (choice == CardChoice.LINK) linkTo else null)
-    if ((slot.present || hadCard) && !Cards.writeSlot(dest, copySlot)) { dest.deleteRecursively(); return failed }
+    val made = mutableListOf<File>()
+    val relinked = mutableListOf<Int>()  // slots of `from` whose link was rewritten
+    fun undo() {
+        relinked.forEach { n -> Cards.writeSlot(from, copies[n].slot, n) }
+        made.forEach { it.deleteRecursively() }
+        dest.deleteRecursively()
+    }
     Cards.LibraryLock(library).use { lock ->
         if (!lock.ok) { dest.deleteRecursively(); return Cards.BUSY }
-        if (choice == CardChoice.COPY && holds && card != null) {
-            val made = card.copy(id = Cards.newId(), identity = Cards.newIdentity(), name = Cards.freeCardName(library, card.name),
-                created = Cards.now(), machine = dest.name)
-            copySlot = copySlot.copy(card = made.id, name = made.name)
-            val entry = Cards.entryDir(library, made.id)
-            if (!Cards.writeSlot(dest, copySlot) || !entry.mkdirs() || !Cards.writeCard(entry, made)) {
-                entry.deleteRecursively()
-                dest.deleteRecursively()
-                return failed
+        copies.forEachIndexed { n, c ->
+            val had = c.holds || c.linkTo != null
+            var copySlot = Cards.Slot(present = true, swap = c.slot.swap || had, link = if (choice == CardChoice.LINK) c.linkTo else null)
+            if (choice == CardChoice.COPY && c.holds && c.card != null) {
+                val card = c.card.copy(id = Cards.newId(), identity = Cards.newIdentity(), name = Cards.freeCardName(library, c.card.name),
+                    created = Cards.now(), machine = dest.name)
+                copySlot = copySlot.copy(card = card.id, name = card.name)
+                val entry = Cards.entryDir(library, card.id)
+                if (!entry.mkdirs() || !Cards.writeCard(entry, card)) { entry.deleteRecursively(); undo(); return failed }
+                made += entry
             }
+            if ((c.slot.present || had) && !Cards.writeSlot(dest, copySlot, n)) { undo(); return failed }
         }
-        if (choice == CardChoice.LINK && slot.link != linkTo && !Cards.writeSlot(from, slot.copy(present = true, link = linkTo))) {
-            dropDuplicate(sessions, dest)
-            return failed
+        copies.forEachIndexed { n, c ->
+            if (choice != CardChoice.LINK || c.linkTo == null || c.slot.link == c.linkTo) return@forEachIndexed
+            if (!Cards.writeSlot(from, c.slot.copy(present = true, link = c.linkTo), n)) { undo(); return failed }
+            relinked += n
         }
     }
     return null
@@ -1005,6 +1020,7 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
 // Removes a duplicate that failed after its card entry was made.
 internal fun dropDuplicate(sessions: File, dest: File) {
     val library = Cards.libraryFor(sessions)
-    Cards.readSlot(dest).card?.let { id -> if (Cards.readCard(Cards.entryDir(library, id))?.machine == dest.name) Cards.entryDir(library, id).deleteRecursively() }
+    for (n in 0 until Cards.SLOTS)
+        Cards.readSlot(dest, n).card?.let { id -> if (Cards.readCard(Cards.entryDir(library, id))?.machine == dest.name) Cards.entryDir(library, id).deleteRecursively() }
     dest.deleteRecursively()
 }

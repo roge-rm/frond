@@ -609,15 +609,16 @@ def check_unix(rom, session, root, probes):
 
 
 def check_card_flags(rom, session, root, probes):
-    """The ARM core's card swap flags are refused with one line, as a IIIx has no card slot."""
-    for flags in (['--card-swap'], ['--card-identity', '0' * 64], ['--card-protected']):
+    """The ARM core's card identity flags are refused with one line, as a IIIx has no card slot.
+    --card-swap is taken: a linked card that isn't in its place loads with its slot empty."""
+    for flags in (['--card-identity', '0' * 64], ['--card-protected']):
         result = subprocess.run([str(palm_boot.CORE_68K), str(session), *flags, '--run-for', '1'],
                                 capture_output=True, text=True, timeout=60)
         lines = result.stderr.splitlines()
         if result.returncode != 2 or result.stdout or len(lines) != 1 or \
                 f'{flags[0]} is not supported' not in lines[0]:
             raise AssertionError(f'{flags[0]}: exit {result.returncode}, {result.stdout!r} {result.stderr!r}')
-    return '--card-swap, --card-identity and --card-protected refused'
+    return '--card-identity and --card-protected refused'
 
 
 def check_ppp(rom, session, root, probes):
