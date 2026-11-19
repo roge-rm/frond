@@ -678,9 +678,68 @@ void SocS3C2442::PollNetwork() {
     for (unsigned n = 0; n < 64 && router->Receive(frame); ++n) machine->wifiEthernetIn(frame.data(), frame.size());
 }
 
+namespace {
+// FROND_RX1950_RNDIS_TRACE: a line for every Ethernet frame on the RNDIS link, to stderr.
+const bool rndisTrace = std::getenv("FROND_RX1950_RNDIS_TRACE");
+void traceFrame(const char* way, const uint8_t* f, size_t n, uint64_t now) {
+    if (!rndisTrace) return;
+    std::fprintf(stderr, "rndis %.6f %s %zu %02x:%02x:%02x:%02x:%02x:%02x <- %02x:%02x:%02x:%02x:%02x:%02x type %02x%02x", now / 1e9,
+                 way, n, f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13]);
+    if (n >= 34 && f[12] == 8 && f[13] == 0) {
+        const uint8_t* ip = f + 14;
+        const unsigned ihl = (ip[0] & 15) * 4;
+        std::fprintf(stderr, " %u.%u.%u.%u -> %u.%u.%u.%u p%u", ip[12], ip[13], ip[14], ip[15], ip[16], ip[17], ip[18], ip[19], ip[9]);
+        if ((ip[9] == 6 || ip[9] == 17) && n >= 14 + ihl + 4) {
+            const uint8_t* t = ip + ihl;
+            std::fprintf(stderr, " %u -> %u", t[0] << 8 | t[1], t[2] << 8 | t[3]);
+            if (ip[9] == 6 && n >= 14 + ihl + 14) std::fprintf(stderr, " flags %02x", t[13]);
+            if (ip[9] == 17 && n >= 14 + ihl + 8 + 243 && (t[2] << 8 | t[3]) >= 67 && (t[2] << 8 | t[3]) <= 68) {
+                // DHCP: op, yiaddr and the message type option.
+                const uint8_t* d = t + 8;
+                std::fprintf(stderr, " dhcp op %u yiaddr %u.%u.%u.%u", d[0], d[16], d[17], d[18], d[19]);
+                for (size_t o = 240; o + 2 < n - 14 - ihl - 8 && d[o] != 255;)
+                    if (d[o] == 0) ++o;
+                    else {
+                        if (d[o] == 53) std::fprintf(stderr, " type %u", d[o + 2]);
+                        o += 2 + d[o + 1];
+                    }
+            }
+        }
+    } else if (n >= 42 && f[12] == 8 && f[13] == 6) {
+        std::fprintf(stderr, " arp op %u %u.%u.%u.%u -> %u.%u.%u.%u", f[21], f[28], f[29], f[30], f[31], f[38], f[39], f[40], f[41]);
+    }
+    std::fprintf(stderr, "\n");
+}
+}  // namespace
+
+void SocS3C2442::UsbEthernetOut(const uint8_t* frame, size_t size, uint64_t now) {
+    if (size < 14 || networkSimulation.Frozen()) return;
+    traceFrame("out", frame, size, now);
+    if (usbDesktop) usbDesktop->Input(frame, size, now);
+}
+
+void SocS3C2442::UsbEthernetPoll(uint64_t now, const uint8_t* mac, uint32_t link) {
+    if (networkSimulation.Frozen()) return;
+    // A new RNDIS link (a restart or a replug, maybe with another MAC) gets a new desktop end and DHCP.
+    if (!usbDesktop || link != usbDesktopLink) {
+        usbDesktop = std::make_unique<frondNet::DesktopLink>(mac);
+        usbDesktopLink = link;
+    }
+    usbDesktop->Poll(now);
+}
+
+bool SocS3C2442::UsbEthernetIn(std::vector<uint8_t>& frame) {
+    if (!usbDesktop || networkSimulation.Frozen() || !usbDesktop->Receive(frame)) return false;
+    traceFrame("in", frame.data(), frame.size(), machine->nanoseconds());
+    return true;
+}
+
 void SocS3C2442::Reset() {
     SoC::Reset();
-    if (!networkSimulation.Frozen()) router.reset();
+    if (!networkSimulation.Frozen()) {
+        router.reset();
+        usbDesktop.reset();
+    }
     DisarmMicrophone();
     machine->reset();
     ApplyHostInputs();
@@ -705,7 +764,10 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
     machine->nand.dropCache();
-    if (!networkSimulation.Frozen()) router.reset();
+    if (!networkSimulation.Frozen()) {
+        router.reset();
+        usbDesktop.reset();
+    }
     LoadCard();
     if (!RestoringCheckpoint()) DisarmMicrophone();
     // A session saved before sound worked has GPA1 as an address line, as the loader pins left it then; the

@@ -9,6 +9,8 @@
 
 #include "UsbDevicePort.h"
 
+class RndisHost;
+
 // Full-speed USB host for the PXA25x/PXA27x UDC, run on emulated time by whoever calls Tick:
 // connect debounce, port reset, enumeration, SET_CONFIGURATION, Palm's
 // GET_EXT_CONNECTION_INFORMATION (vendor request 0x04, or 0x03 if that stalls), then
@@ -25,6 +27,10 @@
 // - Tokens go to the host's idea of the device address; another address gets no answer.
 // - An optional adapter credit query can defer bulk OUT requests before token submission.
 //   Pending bytes stay owned by the host until an actual OUT ACK. Control and IN are independent.
+// - With an RndisHost set, a configuration with an RNDIS control interface (EF/01/01 as ActiveSync
+//   devices list it, 02/02/FF or E0/01/03) and a CDC data interface skips the Palm port list: the host
+//   runs RNDIS's encapsulated commands on EP0, polls the interrupt endpoint once a frame and moves
+//   whole RNDIS transfers on the bulk endpoints, many packets a frame.
 // Nothing here is session state. Every call runs on the emulator thread.
 class UsbBusHost {
    public:
@@ -55,6 +61,10 @@ class UsbBusHost {
     bool ReadStringDescriptor(uint8_t index, uint16_t language);
     void Detach();     // cable out: forgets the device
     void Tick(uint64_t nowNs);
+    // Optional RNDIS host for RNDIS devices; owned by the caller, set before Attach.
+    void SetRndis(RndisHost* host) { rndis = host; }
+    // The RNDIS host while an RNDIS device is configured, else nullptr.
+    const RndisHost* Rndis() const { return rndisMode ? rndis : nullptr; }
     // Emulated time the next Tick is needed by: 0 for at once, UINT64_MAX for none
     // (detached, failed, or waiting for the guest to turn the UDC on).
     uint64_t NextWake() const;
@@ -79,9 +89,9 @@ class UsbBusHost {
     std::function<void(const uint8_t*,const std::vector<uint8_t>&,bool)> controlTrace;
 
    private:
-    enum class Token : uint8_t { none, setup, out0, in0, bulkIn, bulkOut };
+    enum class Token : uint8_t { none, setup, out0, in0, bulkIn, bulkOut, intIn };
     enum class Stage : uint8_t { setup, dataIn, dataOut, statusIn, statusOut };
-    enum class Completion { enumeration, external, clearHalt };
+    enum class Completion { enumeration, external, clearHalt, rndisCommand, rndisResponse };
     struct Control {
         Completion completion{Completion::enumeration};
         bool active{false};
@@ -100,6 +110,8 @@ class UsbBusHost {
     void EnumerationStep(Result result);
     bool ParseConfiguration();
     bool SelectEndpoints();
+    bool FindRndis();
+    void StopRndis();
     bool StartTransaction();
     void FinishTransaction();
     bool Begin(Token token, unsigned bytes);
@@ -138,6 +150,12 @@ class UsbBusHost {
     uint64_t inRequestAt{0}, outRequestAt{0};
     uint32_t enableCount{0};
     uint64_t requeryAt{0};  // the UDC's UDE count when this connection began
+    // RNDIS: the control interface, its interrupt IN endpoint and when it is next polled.
+    RndisHost* rndis{nullptr};
+    bool rndisMode{false};
+    uint8_t rndisInterface{0}, intEndpoint{0}, intMps{0};
+    uint64_t intRequestAt{0};
+    uint8_t interruptMps[16]{};
     Counters counters;
     std::vector<std::string> messages;
 };

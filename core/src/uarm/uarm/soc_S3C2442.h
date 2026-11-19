@@ -10,6 +10,7 @@
 #include "UsbDevicePort.h"
 #include "UsbHostHooks.h"
 #include "net/WifiRouter.h"
+#include "net/DesktopLink.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
 #include "zodiac_audio.h"
@@ -102,6 +103,11 @@ class SocS3C2442 : public SoC {
     bool SetUsbCable(bool attached);
     bool UsbCableAttached() const { return machine->usbVbus(); }
     bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
+    // The desktop behind the USB cable's RNDIS link (UsbHostBridge's ethernet hooks, a DesktopLink): made at the
+    // first poll, dropped at a reset or load, left alone while the network is frozen for a checkpoint.
+    void UsbEthernetOut(const uint8_t* frame, size_t size, uint64_t now);
+    void UsbEthernetPoll(uint64_t now, const uint8_t* mac, uint32_t link);
+    bool UsbEthernetIn(std::vector<uint8_t>& frame);
 
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
@@ -164,6 +170,8 @@ class SocS3C2442 : public SoC {
     // polled on guest time in HostService, dropped at a reset or load. Left alone while the network is frozen for a
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
+    std::unique_ptr<frondNet::DesktopLink> usbDesktop;
+    uint32_t usbDesktopLink{0};  // the RNDIS link number usbDesktop was made for
     void PollNetwork();
 
     struct SerialPort;

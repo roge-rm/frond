@@ -1014,7 +1014,7 @@ static void rx1950() {
     assert(p->sdMin == 32u << 20 && p->sdMax == 2048ull << 20 && deviceProfileSdSizeValid5(p->deviceType, 1024ull << 20) &&
            !deviceProfileSdSizeValid5(p->deviceType, 4096ull << 20));
     const auto& c = p->capabilities;
-    assert(c.network && !c.keyboard && c.serial && !c.usb && !c.fastAudio && c.infrared && !c.bluetooth && c.sound &&
+    assert(c.network && !c.keyboard && c.serial && c.usb && !c.fastAudio && c.infrared && !c.bluetooth && c.sound &&
            c.microphone && !c.builtInWifi && !c.usbWifi);
     // The charge LED in green, red or amber (AttentionState's bits); no vibrate motor.
     assert(c.ledColours == 3 && !c.vibrate && c.wifiOnlyNetwork);

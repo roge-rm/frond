@@ -2510,7 +2510,7 @@
       "microphone": true,
       "serial": true,
       "keyboard": false,
-      "usb": false,
+      "usb": true,
       "infrared": true,
       "bluetooth": false,
       "modem": false,

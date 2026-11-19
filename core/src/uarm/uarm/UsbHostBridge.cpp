@@ -19,7 +19,8 @@ bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error)
         [soc] { return soc->GetTime(); },
         [soc] { soc->KickUsbHost(); },
         [soc](const UsbHostHooks* hooks) { soc->SetUsbHostHooks(hooks); },
-        [soc] { return !soc->GamepadAttached(); }
+        [soc] { return !soc->GamepadAttached(); },
+        {}, {}, {}
     };
     return Start(std::move(backend),config,error);
 }
@@ -36,7 +37,11 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
             [rx] { return rx->GetTime(); },
             [] {},  // the host ticks on guest time, at least every poll step (SocS3C2442::ScheduleHost)
             [rx](const UsbHostHooks* hooks) { rx->SetUsbHostHooks(hooks); },
-            [] { return true; }
+            [] { return true; },
+            // WM5 runs ActiveSync over RNDIS: Frond's host network behind it.
+            [rx](const uint8_t* frame, size_t size, uint64_t now) { rx->UsbEthernetOut(frame, size, now); },
+            [rx](uint64_t now, const uint8_t* mac, uint32_t link) { rx->UsbEthernetPoll(now, mac, link); },
+            [rx](std::vector<uint8_t>& frame) { return rx->UsbEthernetIn(frame); }
         };
         return Start(std::move(backend), config, error);
     }
@@ -53,7 +58,8 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
         [zodiac] { return zodiac->GetTime(); },
         [] {},  // the host ticks at every run slice end
         [zodiac](const UsbHostHooks* hooks) { zodiac->SetUsbHostHooks(hooks); },
-        [] { return true; }
+        [] { return true; },
+        {}, {}, {}
     };
     return Start(std::move(backend), config, error);
 }
