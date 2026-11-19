@@ -32,6 +32,9 @@ class WifiRouter {
     void Poll(uint64_t now);
     // The next Ethernet frame for the guest, if there is one.
     bool Receive(std::vector<uint8_t>&);
+    // Forwards UDP datagrams sent to 127.0.0.1:hostPort on the host to guest:guestPort (host byte order), from
+    // the router's host address. False if the host port can't be bound.
+    bool AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort);
 
    private:
     struct Impl;

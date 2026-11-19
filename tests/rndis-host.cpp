@@ -1,5 +1,10 @@
 // Firmware-free tests for the RNDIS host (RndisHost: control messages, bring-up, keepalives, packet framing on
-// the bulk endpoints) and the desktop end of the link (DesktopLink's DHCP client).
+// the bulk endpoints) and the desktop end of the link (DesktopLink's DHCP client and connect request forward).
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -282,7 +287,7 @@ static void dhcpTests() {
     assert(frondNet::DesktopLink::ParseDhcp(dhcpAnswer(discover, 2).data(), 342, other, 0x1234).type == 0);
 
     // The whole exchange: DISCOVER at the first poll, REQUEST for the offer, bound at the ACK.
-    frondNet::DesktopLink link(mac);
+    frondNet::DesktopLink link(mac, 0);
     Bytes f;
     assert(!link.Receive(f));
     link.Poll(0);
@@ -298,7 +303,7 @@ static void dhcpTests() {
     link.Input(dhcpAnswer(request, 5).data(), 342, 2 * ms);
     assert(link.Address() == 0xa9fe0202 && link.Server() == 0xa9fe0201);
     // No answer: DISCOVER again 4 s later with a new transaction.
-    frondNet::DesktopLink quiet(mac);
+    frondNet::DesktopLink quiet(mac, 0);
     quiet.Poll(0);
     assert(quiet.Receive(f));
     quiet.Poll(frondNet::DesktopLink::discoverNs - 1);
@@ -307,12 +312,81 @@ static void dhcpTests() {
     assert(quiet.Receive(f) && get32(&f[14 + 20 + 8 + 4]) != 0);
 }
 
+// A free UDP port on 127.0.0.1 (bound and let go).
+static uint16_t freeUdpPort() {
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    socklen_t n = sizeof(a);
+    assert(fd >= 0 && bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0);
+    assert(getsockname(fd, reinterpret_cast<sockaddr*>(&a), &n) == 0);
+    close(fd);
+    return ntohs(a.sin_port);
+}
+
+// The desktop's connect request: one UDP byte to the host port reaches the handheld's 5679 from 169.254.2.2.
+static void connectRequestTests() {
+    const uint16_t port = freeUdpPort();
+    frondNet::DesktopLink link(mac, port);
+    Bytes f, request;
+    link.Poll(0);
+    assert(link.Receive(f));
+    link.Input(dhcpAnswer(f, 2).data(), 342, ms);
+    assert(link.Receive(request));
+    link.Input(dhcpAnswer(request, 5).data(), 342, 2 * ms);
+    assert(link.Address() == 0xa9fe0202);
+    // The port is taken now.
+    const int busy = socket(AF_INET, SOCK_DGRAM, 0);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons(port);
+    assert(bind(busy, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0);
+    close(busy);
+    const int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    const uint8_t knock = 0x7f;
+    assert(sendto(fd, &knock, 1, 0, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 1);
+    close(fd);
+    const uint8_t device[6] = {0x82, 0x00, 0x60, 0x0f, 0xe8, 0x00};
+    bool got = false;
+    for (int i = 0; i < 200 && !got; ++i) {
+        usleep(1000);
+        link.Poll((3 + i) * ms);
+        while (link.Receive(f)) {
+            if (f.size() >= 42 && f[12] == 0x08 && f[13] == 0x06 && f[21] == 1) {
+                // slirp asks for the handheld's MAC: answer for 169.254.2.1.
+                Bytes reply = f;
+                std::memcpy(&reply[0], &f[6], 6);
+                std::memcpy(&reply[6], device, 6);
+                reply[21] = 2;
+                std::memcpy(&reply[22], device, 6);
+                std::memcpy(&reply[28], &f[38], 4);
+                std::memcpy(&reply[32], &f[22], 10);
+                link.Input(reply.data(), reply.size(), (3 + i) * ms);
+                continue;
+            }
+            if (f.size() >= 14 + 20 + 8 + 1 && f[12] == 0x08 && f[13] == 0x00 && f[23] == 17) {
+                const uint8_t* ip = &f[14];
+                const uint8_t* udp = ip + (ip[0] & 15) * 4;
+                assert(!std::memcmp(&f[0], device, 6) && !std::memcmp(&f[6], mac, 6));
+                assert(ip[12] == 169 && ip[13] == 254 && ip[14] == 2 && ip[15] == 2);
+                assert(ip[16] == 169 && ip[17] == 254 && ip[18] == 2 && ip[19] == 1);
+                assert((udp[2] << 8 | udp[3]) == 5679 && (udp[4] << 8 | udp[5]) == 9 && udp[8] == 0x7f);
+                got = true;
+            }
+        }
+    }
+    assert(got);
+}
+
 int main() {
     messageTests();
     bringUpTests();
     keepaliveTests();
     bulkTests();
     dhcpTests();
+    connectRequestTests();
     std::puts("rndis-host: ok");
     return 0;
 }

@@ -156,6 +156,13 @@ void WifiRouter::Poll(uint64_t now) {
     const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
     slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
 }
+bool WifiRouter::AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
+    if (!Valid()) return false;
+    in_addr host{}, to{};
+    host.s_addr = htonl(INADDR_LOOPBACK);
+    to.s_addr = htonl(guest);
+    return slirp_add_hostfwd(impl->slirp, 1, host, hostPort, to, guestPort) == 0;
+}
 bool WifiRouter::Receive(std::vector<uint8_t>& bytes) {
     if (impl->incoming.empty()) return false;
     bytes = std::move(impl->incoming.front());

@@ -1,6 +1,7 @@
 #include "DesktopLink.h"
 #ifndef __EMSCRIPTEN__
 #include <algorithm>
+#include <cstdio>
 
 #include "WifiRouter.h"
 
@@ -86,7 +87,9 @@ DesktopLink::Answer DesktopLink::ParseDhcp(const uint8_t* f, size_t size, const 
     return a;
 }
 
-DesktopLink::DesktopLink(const uint8_t* address) { std::copy(address, address + 6, mac); }
+DesktopLink::DesktopLink(const uint8_t* address, uint16_t hostPort) : hostConnectPort(hostPort) {
+    std::copy(address, address + 6, mac);
+}
 DesktopLink::~DesktopLink() = default;
 
 void DesktopLink::Send(std::vector<uint8_t> frame) {
@@ -129,6 +132,10 @@ void DesktopLink::Bind(uint32_t desktop, uint32_t handheld, uint32_t mask) {
     layout.dhcp = false;
     router = std::make_unique<WifiRouter>(layout);
     state = State::bound;
+    // Another Frond on this host may hold the port; the link works without it, the desktop just can't ask.
+    if (hostConnectPort && !router->AddUdpForward(hostConnectPort, server, connectPort))
+        fprintf(stderr, "USB network: UDP port %u on 127.0.0.1 is taken, the desktop can't ask for a connection\n",
+                unsigned(hostConnectPort));
 }
 
 void DesktopLink::Poll(uint64_t now) {

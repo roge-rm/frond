@@ -6,7 +6,9 @@
 // (DISCOVER, OFFER, REQUEST, ACK, a DISCOVER again every 4 s until then) and then puts libslirp behind that
 // address (169.254.2.2 from WM5). The handheld's connections to it go to the same ports on the host's
 // loopback, where the desktop's sync program listens (ActiveSync's 990, DTPT's 5721 and the rest), and
-// anything else goes out through the host like the Wi-Fi router. Whole Ethernet frames in and out;
+// anything else goes out through the host like the Wi-Fi router. WM5 only opens 990 once the desktop asks with
+// one UDP byte (0x7f) to its port 5679, as SynCE's dccm and ActiveSync do, so UDP to the host's
+// 127.0.0.1:5679 is passed to the handheld's 5679. Whole Ethernet frames in and out;
 // single-threaded; time is guest nanoseconds. Built into libcommon-net.a so only the cores link libslirp.
 
 #ifndef __EMSCRIPTEN__
@@ -24,10 +26,12 @@ class DesktopLink {
    public:
     static constexpr uint64_t discoverNs = 4000000000;  // DISCOVER again after this without an OFFER
     static constexpr uint64_t requestNs = 2000000000;   // DISCOVER again after this without an ACK
+    static constexpr uint16_t connectPort = 5679;       // the handheld's UDP port for the desktop's connect request
 
     // mac: the desktop's MAC address. An RNDIS device gives it as its permanent address (OID_802_3_PERMANENT_ADDRESS)
-    // and WM5's DHCP server only answers it. Frames from slirp go out from it too.
-    explicit DesktopLink(const uint8_t* mac);
+    // and WM5's DHCP server only answers it. Frames from slirp go out from it too. hostConnectPort: the host's
+    // UDP port on 127.0.0.1 that goes to the handheld's connectPort once bound (0 for none).
+    explicit DesktopLink(const uint8_t* mac, uint16_t hostConnectPort = connectPort);
     ~DesktopLink();
     // One Ethernet frame from the handheld.
     void Input(const uint8_t* frame, size_t size, uint64_t now);
@@ -55,6 +59,7 @@ class DesktopLink {
     State state{State::discover};
     uint32_t xid{0x46726e64}, offered{0}, offerServer{0}, address{0}, server{0}, netmask{0};
     uint64_t retryAt{0};
+    uint16_t hostConnectPort{0};
     std::deque<std::vector<uint8_t>> outgoing;
     std::unique_ptr<WifiRouter> router;
     uint8_t mac[6]{};
