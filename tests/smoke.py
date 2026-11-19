@@ -102,7 +102,8 @@ class Run:
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(address)
         listener.listen(1)
-        cfg = SMOKE[device]
+        # A device with no smoke entry runs from its session alone.
+        cfg = SMOKE[device] if device in SMOKE or not session else {}
         if session:
             boot = [str(session)] + (['--device', cfg.get('device', device)] if device != 'palm-tx' else [])
         else:
