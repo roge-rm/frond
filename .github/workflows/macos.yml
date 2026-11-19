@@ -33,7 +33,8 @@ jobs:
       - name: Build the cores
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix readline)/lib/pkgconfig:$PKG_CONFIG_PATH"
-          gmake -j"$(sysctl -n hw.ncpu)" BUILD_JOBS="$(sysctl -n hw.ncpu)" out/frond out/frond-68k 2>&1 | tee build.log
+          set -o pipefail
+          gmake -k -j"$(sysctl -n hw.ncpu)" BUILD_JOBS="$(sysctl -n hw.ncpu)" out/frond out/frond-68k 2>&1 | tee build.log
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
