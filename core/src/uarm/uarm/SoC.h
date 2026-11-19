@@ -161,6 +161,8 @@ class SoC {
     // False on a board with no PACE or guest calls: installs, exports, launches and the database list.
     virtual bool GuestServicesSupported() const { return true; }
     virtual bool HardResetSupported() const { return true; }
+    // Install copies the file onto the SD card for the guest's own tools (Windows CE, frondNative::installToSdCard).
+    virtual bool InstallsToCard() const { return false; }
     void KeyDown(enum KeyId key);
     void KeyUp(enum KeyId key);
     // A power press from the host the guest may not have had yet: held, queued or jammed.

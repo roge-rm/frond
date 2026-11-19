@@ -18,6 +18,11 @@ struct Rx1950NandOptions {
     bool debugMessages = false;
 };
 
+// The first physical block of the user store (the FAT partition's FILESYS region): 21 reserved blocks, then the
+// MSFLSH50 XIP region (233 blocks) and READONLY region (1518 blocks), R0. The guest writes nothing below it.
+// A hard reset erases from here to the end.
+constexpr uint32_t rx1950UserStoreBlock = 21 + 233 + 1518;
+
 bool rx1950NandImage(const uint8_t* eboot, size_t ebootSize, const uint8_t* nbf, size_t nbfSize,
                      std::vector<uint8_t>& flash, std::string& error, const Rx1950NandOptions& options = {});
 

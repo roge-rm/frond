@@ -52,6 +52,10 @@ class UsbHostBridge {
     bool Start(SocPXA* soc, const Config& config, std::string& error);
     // The TX, E2, Zire 72 and TG50 as above, or the Zodiac's W4200 USB function through its cradle.
     bool Start(SoC* soc, const Config& config, std::string& error);
+    // A device whose USB link is a network (RNDIS, the rx1950) takes the cable with no host endpoint.
+    static bool NetworkLink(SoC* soc);
+    // The cable in on such a device, with the host network behind it; describes as "on PHASE ...".
+    bool StartCable(SoC* soc, std::string& error);
     void Stop();  // unplugs the cable and closes the endpoint
     // Like Stop, but the host endpoint (a PTY's path, a TCP port) stays open for a Start with
     // the same transport.

@@ -404,12 +404,12 @@ class RunningModel(
             val result = withContext(Dispatchers.IO) {
                 InstallBatch.run(uris, { displayName(it) ?: "A file" }, { n, total ->
                     if (total > 1) activity.runOnUiThread { busy = "Installing $n of $total" }
-                }) { last = d.install(it) }
+                }) { last = d.install(it, if (device.installsToCard) displayName(it) ?: "file" else null) }
             }
             busy = null
             val summary = result.summary()
             if (summary != null) alert = "Couldn't install" to summary
-            else note = if (uris.size == 1) last else "${uris.size} applications installed"
+            else note = if (uris.size == 1) last else if (device.installsToCard) "${uris.size} files copied to the SD card" else "${uris.size} applications installed"
             loadApps()
         }
     }
@@ -843,6 +843,27 @@ class RunningModel(
 
     fun changeUsb(mode: BeamMode) = device("Changing USB HotSync", "Couldn't change USB HotSync", false) { l ->
         UsbLink.set(activity.applicationContext, l, mode)
+    }
+
+    // Windows CE: the USB cable in or out (usb-mode on or off), with the host network behind its RNDIS link.
+    var usbCable by mutableStateOf(false)
+        private set
+
+    // Reads the cable back from the core's usb-state ("on ..." or "off ..."), so the row matches a session that
+    // was saved or started with it in.
+    fun loadUsbCable() {
+        val l = link ?: return
+        if (!device.usbNetwork) return
+        activity.lifecycleScope.launch {
+            val reply = withContext(Dispatchers.IO) { runCatching { l.request("usb-state", timeoutSeconds = 5) }.getOrNull() }
+            if (reply != null && reply.ok) usbCable = reply.message.startsWith("on")
+        }
+    }
+
+    fun changeUsbCable(on: Boolean) = device("Changing USB", "Couldn't change USB", false) { l ->
+        val reply = l.request("usb-mode", if (on) "on" else "off", timeoutSeconds = 30)
+        if (reply.ok) activity.runOnUiThread { usbCable = reply.message.startsWith("on") }
+        if (reply.ok) null else reply.message
     }
 
     // Bluetooth on This Frond's radio or a connection, as BluetoothLink says, and what the core says about

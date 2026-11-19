@@ -82,8 +82,10 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
         return b;
     };
     connect(add(tr("Install…"), "installApp"), &QPushButton::clicked, this, &AppsPanel::installRequested);
-    connect(add(tr("Other…"), "otherApp"), &QPushButton::clicked, this, &AppsPanel::otherRequested);
-    connect(add(tr("Export all…"), "exportRam"), &QPushButton::clicked, this, &AppsPanel::exportAllRequested);
+    otherButton = add(tr("Other…"), "otherApp");
+    connect(otherButton, &QPushButton::clicked, this, &AppsPanel::otherRequested);
+    exportAllButton = add(tr("Export all…"), "exportRam");
+    connect(exportAllButton, &QPushButton::clicked, this, &AppsPanel::exportAllRequested);
     layout->addLayout(buttons);
     list = new QListWidget(this);
     list->setObjectName("appsList");
@@ -98,6 +100,18 @@ AppsPanel::AppsPanel(QWidget* parent) : QWidget(parent) {
     connect(list, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) { emit launchRequested(item->data(Qt::UserRole).toString()); });
 }
 
+void AppsPanel::setInstallOnly(bool on) {
+    if (on == installOnly) return;
+    installOnly = on;
+    otherButton->setEnabled(!on);
+    exportAllButton->setEnabled(!on);
+    list->setEnabled(!on);
+    list->clear();
+    list->setVisible(!on);
+    empty->setText(on ? tr("Not available yet") : tr("No applications"));
+    empty->show();
+}
+
 QStringList AppsPanel::names() const {
     QStringList out;
     for (int i = 0; i < list->count(); ++i) out << list->item(i)->data(Qt::UserRole).toString();
@@ -105,7 +119,8 @@ QStringList AppsPanel::names() const {
 }
 
 void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, const QString& note) {
-    const auto apps = runningRules::applications(all);
+    // An install-only panel has no list, whatever comes in.
+    const auto apps = installOnly ? std::vector<runningRules::Database>{} : runningRules::applications(all);
     const int row = list->currentRow();
     list->clear();
     for (const auto& app : apps) {
@@ -134,6 +149,6 @@ void AppsPanel::setDatabases(const std::vector<runningRules::Database>& all, con
         list->setItemWidget(item, widget);
     }
     if (row >= 0 && row < list->count()) list->setCurrentRow(row);
-    empty->setText(note.isEmpty() ? tr("No applications") : note);
+    empty->setText(installOnly ? tr("Not available yet") : note.isEmpty() ? tr("No applications") : note);
     empty->setVisible(apps.empty());
 }

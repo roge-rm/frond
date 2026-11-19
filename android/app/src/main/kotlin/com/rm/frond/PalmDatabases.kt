@@ -26,13 +26,14 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
         return reply
     }
 
-    // Installs a picked .prc or .pdb and returns the core's result, e.g. "Application installed.".
-    fun install(uri: Uri): String = install { context.contentResolver.openInputStream(uri) }
+    // Installs a picked .prc or .pdb and returns the core's result, e.g. "Application installed.". name is the
+    // file's own name for a device that installs onto its SD card, where the name is kept.
+    fun install(uri: Uri, name: String? = null): String = install(name) { context.contentResolver.openInputStream(uri) }
 
     // The same from any stream, like a file in a picked folder.
-    fun install(open: () -> java.io.InputStream?): String {
+    fun install(name: String? = null, open: () -> java.io.InputStream?): String {
         folder.mkdirs()
-        val copy = File(folder, "install.pdb")
+        val copy = File(folder, name?.let { cardName(it) } ?: "install.pdb")
         try {
             copyIn(open, copy)
             return run("install", copy.path).message
@@ -40,6 +41,10 @@ class PalmDatabases(private val context: Context, private val link: ControlLink)
             copy.delete()
         }
     }
+
+    // A picked file's name as the core gets it: no folders or characters FAT refuses, never empty.
+    private fun cardName(name: String): String =
+        name.substringAfterLast('/').map { if (it < ' ' || it in "\\/:*?\"<>|") '_' else it }.joinToString("").trim().trimEnd('.').ifEmpty { "file" }
 
     fun launch(name: String) {
         val reply = link.request("launch-app", name, timeoutSeconds = 120)

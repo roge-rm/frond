@@ -53,6 +53,7 @@
 #include <QStandardItemModel>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QListView>
 #include <QLineEdit>
 #include <QInputDialog>
 #include <QMenuBar>
@@ -198,7 +199,9 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     appsPanel = new AppsPanel(root);
     appsLayout->addWidget(appsPanel, 1);
     connect(appsPanel, &AppsPanel::installRequested, this, [this] {
-        const auto paths = QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
+        const auto paths = frondFirmware::installsToCard(currentDevice())
+            ? QFileDialog::getOpenFileNames(this, tr("Copy to the SD card"), {}, tr("Windows CE programs (*.cab);;All files (*)"))
+            : QFileDialog::getOpenFileNames(this, tr("Install application"), {}, tr("Palm databases (*.prc *.pdb);;All files (*)"));
         installFiles(paths);
     });
     connect(appsPanel, &AppsPanel::otherRequested, this, &MainWindow::otherDatabase);
@@ -446,6 +449,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     usb = new QComboBox(root);
     usb->setObjectName("usbMode");
     usb->addItem(tr("Off"), "off");
+    usb->addItem(tr("On"), "on");
     usb->addItem(tr("Terminal (PTY)"), "pty");
     usb->addItem(tr("Wait for a peer"), "tcp");
     usb->setToolTip(tr("Plugs the Palm into a host that moves its HotSync bytes to a PTY or TCP port, for pilot-link and the like."));
@@ -971,6 +975,19 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             internalReply(ok, message);
             return;
         }
+        // Windows CE: install takes the SD card out and puts it back, so once the last file is done the core is
+        // asked where the card is now. One request at a time, so not while the batch goes on.
+        if (command == "install" && frondFirmware::installsToCard(runningDevice)) {
+            if (installTotal > 0 && installResult(ok, code, message)) {
+                if (installTotal == 0 && !stopping) send(cardCommand("state"));
+                return;
+            }
+            if (stopping) return;
+            if (!ok && code != "cancelled") failure(message);
+            else if (ok) notify(message);
+            send(cardCommand("state"));
+            return;
+        }
         if (command == "install" && installTotal > 0 && installResult(ok, code, message)) return;
         if (!ok && cardMove.stage != CardMove::None) { cardMoveFailed(command, message); return; }
         if (!ok && exchangeStage != ExchangeStage::None) { exchangeResult(false, message); return; }
@@ -1280,7 +1297,7 @@ void MainWindow::refresh() {
     auto note = [&](QWidget* w, bool supported, const QString& tip) { w->setToolTip(supported ? tip : reason); };
     note(network, caps.network, networkTip); note(keyboard, infraredKeyboard, keyboardTip);
     note(serial, caps.serial, serialTip); note(serialPort, caps.serial, {});
-    note(usb, caps.usb, usbTip); note(usbPort, caps.usb, {});
+    note(usb, caps.usb, frondFirmware::usbNetwork(currentDevice()) ? QString() : usbTip); note(usbPort, caps.usb, {});
     note(irda, caps.infrared, infraredKeyboard ? irdaTip + " " + tr("Detach the infrared keyboard first.") : irdaTip);note(irdaPort,caps.infrared,{});
     const bool enabled = client.available() && !busy && !stopping && exchangeStage == ExchangeStage::None;
     for (auto* w : runningButtons) w->setEnabled(enabled);
@@ -1349,6 +1366,21 @@ void MainWindow::refresh() {
     serial->setEnabled(editable && caps.serial);
     serialPort->setEnabled(caps.serial && serial->currentData() == "tcp"); serialPort->setReadOnly(!editable);
     if (!frondFirmware::serialAbsent(currentDevice())) serialPort->setVisible(!serial->currentData().toString().startsWith("link:"));
+    // Windows CE's USB is a network link (RNDIS): on or off, no endpoint.
+    const bool usbNetwork = frondFirmware::usbNetwork(currentDevice());
+    // Rows the device doesn't take are hidden in the list and disabled, so the wheel and arrow keys skip them too.
+    const auto offer = [&](const char* data, bool on) {
+        const int row = usb->findData(data);
+        if (auto* model = qobject_cast<QStandardItemModel*>(usb->model()))
+            if (auto* item = model->item(row)) item->setEnabled(on);
+        if (auto* view = qobject_cast<QListView*>(usb->view())) view->setRowHidden(row, !on);
+    };
+    offer("on", usbNetwork);
+    offer("pty", !usbNetwork);
+    offer("tcp", !usbNetwork);
+    if ((usb->currentData() == "on") != usbNetwork && usb->currentData() != "off") usb->setCurrentIndex(usb->findData("off"));
+    usbLabel->setText(usbNetwork ? tr("USB") : tr("USB HotSync"));
+    if (usbNetwork) usbPort->setVisible(false);
     usb->setEnabled(editable && caps.usb);
     usbPort->setEnabled(caps.usb && usb->currentData() == "tcp"); usbPort->setReadOnly(!editable);
     irda->setEnabled(editable && caps.infrared && !keyboard->isChecked());
@@ -1364,14 +1396,14 @@ void MainWindow::refresh() {
     storageHeading->setText(memoryStick ? tr("Memory Stick") : tr("SD card"));
     panels->setTitle(1, tr("Storage"));
     internalButton->setEnabled(enabled && !internalFiles);
-    const bool palmOs = frondFirmware::palmOs(currentDevice());
-    const bool guest = palmOs && frondFirmware::guestServices(currentDevice());
-    appsPanel->setEnabled(enabled && guest);
-    appsPanel->setToolTip(guest ? QString() : reason);
+    const auto traits = runningRules::traitsFor(currentDevice());
+    const bool guest = traits.guestServices;
+    appsPanel->setEnabled(enabled && (guest || traits.cardInstall));
+    appsPanel->setInstallOnly(!guest);
+    appsPanel->setToolTip(guest || traits.cardInstall ? QString() : reason);
     installBenchAction->setEnabled(enabled && guest);
-    hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, runningRules::traitsFor(currentDevice())));
-    hardResetButton->setToolTip(guest ? QString() : reason);
-    hardResetButton->setVisible(palmOs);
+    hardResetButton->setEnabled(runningRules::hardResetEnabled(enabled, traits));
+    hardResetButton->setToolTip(traits.hardReset ? QString() : reason);
     storageHeading->setVisible(!m68k);
     storageHeading->setEnabled(supported);
     sdStatus->setEnabled(supported);
@@ -1428,7 +1460,6 @@ void MainWindow::refresh() {
     state.fullScreen = fullScreenOn;
     QList<QPair<QString, QString>> modes;
     for (int i = 0; i < network->count(); i++) modes << qMakePair(network->itemData(i).toString(), network->itemText(i));
-    const auto traits = runningRules::traitsFor(currentDevice());
     updateBarMachine();
     runningBar->apply(traits, state, runningRules::cardIcon(supported, known, cardPresent, cardInserted),
                       caps.sound && runningPreferences.audio, modes);
@@ -1840,10 +1871,9 @@ void MainWindow::runShortcut(runningRules::Shortcut what) {
         case Shortcut::SaveCopy: if (idle) barChosen(runningRules::Id::SaveCopy); break;
         case Shortcut::SaveStop: stopButton->click(); break;
         case Shortcut::Install:
-            if (idle && frondFirmware::palmOs(currentDevice()) && frondFirmware::guestServices(currentDevice()))
-                emit appsPanel->installRequested();
+            if (idle && installDropAllowed()) emit appsPanel->installRequested();
             break;
-        case Shortcut::Applications: if (frondFirmware::palmOs(currentDevice())) togglePanel(0); break;
+        case Shortcut::Applications: togglePanel(0); break;
         case Shortcut::Card: togglePanel(1); break;
         case Shortcut::Display: togglePanel(2); break;
         case Shortcut::Connections: togglePanel(3); break;
@@ -2728,8 +2758,8 @@ QString MainWindow::usbArgument() const {
     const auto mode = usb->currentData().toString();
     return mode == "tcp" ? "tcp:" + QString::number(usbPort->value()) : mode;
 }
-// The core's usb-state reply: "off", "off <error>" or
-// "<pty|tcp> <endpoint> <connected|waiting> <bus phase>".
+// The core's usb-state reply: "off", "off <error>", "<pty|tcp> <endpoint> <connected|waiting> <bus phase>"
+// or, for a network link, "on <bus phase>[ rndis up| rndis starting]".
 void MainWindow::showUsb(const QString& state) {
     const auto parts = state.split(' ');
     if (!state.isEmpty()) {
@@ -2742,6 +2772,9 @@ void MainWindow::showUsb(const QString& state) {
     }
     if (state.isEmpty()) usbState->clear();
     else if (parts[0] == "off") usbState->setText(parts.size() > 1 ? tr("USB: off, %1").arg(state.mid(4)) : QString());
+    else if (parts[0] == "on")
+        usbState->setText(state.endsWith(" rndis up") ? tr("USB: network up") : parts.size() > 1 && parts[1] == "running"
+                          ? tr("USB: %1 enumerated").arg(deviceLabel()) : tr("USB: cable in"));
     else if (parts.size() == 4)
         usbState->setText(tr("USB: %1, %2, %3").arg(parts[1], parts[2] == "connected" ? tr("connected") : tr("waiting for a connection"),
                                                     parts[3] == "running" ? tr("%1 enumerated").arg(deviceLabel()) : tr("%1 %2").arg(deviceLabel(), parts[3])));
@@ -3188,16 +3221,21 @@ void MainWindow::dropEvent(QDropEvent* event) {
     event->acceptProposedAction();
     installFiles(paths);
 }
-// Drops install on the same devices Ctrl+I does: Palm OS with guest services.
+// Drops install on the same devices Ctrl+I does: Palm OS with guest services, or Windows CE onto the SD card.
 bool MainWindow::installDropAllowed() const {
-    return client.running() && frondFirmware::palmOs(currentDevice()) && frondFirmware::guestServices(currentDevice());
+    const auto device = currentDevice();
+    return client.running() && ((frondFirmware::palmOs(device) && frondFirmware::guestServices(device)) ||
+                                frondFirmware::installsToCard(device));
 }
+// Palm databases, or any file for a device that installs onto its SD card.
 QStringList MainWindow::installPaths(const QMimeData* data) const {
+    const bool anyFile = frondFirmware::installsToCard(currentDevice());
     QStringList out;
     for (const auto& url : data->urls()) {
         const auto path = url.toLocalFile();
         const auto suffix = QFileInfo(path).suffix().toLower();
-        if (suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
+        if (path.isEmpty() || !QFileInfo(path).isFile()) continue;
+        if (anyFile || suffix == "prc" || suffix == "pdb" || suffix == "pqa") out << path;
     }
     return out;
 }

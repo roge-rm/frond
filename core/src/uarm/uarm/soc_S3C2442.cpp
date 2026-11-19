@@ -746,6 +746,20 @@ void SocS3C2442::Reset() {
     StateChanged();
 }
 
+void SocS3C2442::HardReset() {
+    SoC::Reset();
+    if (!networkSimulation.Frozen()) {
+        router.reset();
+        usbDesktop.reset();
+    }
+    DisarmMicrophone();
+    if (!machine->nand.eraseBlocks(rx1950UserStoreBlock, S3cNand::blocks - rx1950UserStoreBlock))
+        std::cerr << "rx1950: hard reset couldn't erase the whole user store" << std::endl;
+    machine->powerOnReset();
+    ApplyHostInputs();
+    StateChanged();
+}
+
 bool SocS3C2442::Save() {
     std::string why;
     if (halted || !machine->saveState(saved, why)) {

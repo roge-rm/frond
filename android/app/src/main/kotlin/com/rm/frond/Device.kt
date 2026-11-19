@@ -107,8 +107,14 @@ data class Device internal constructor(
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {
-    // Applications and Hard reset are Palm OS guest services, left out on a Windows CE device.
+    // Applications and Hard reset are Palm OS guest services; a Windows CE device has its own or greys them out.
     val palmOs: Boolean get() = os == "palm-os"
+    // Windows CE: Install copies the file onto the SD card, where the guest's File Explorer opens it (wceload for a
+    // CAB), and Hard reset is a clean boot. The application list stays greyed. The rx1950 only so far.
+    val installsToCard: Boolean get() = rx1950
+    val hardResetWorks: Boolean get() = palmOs || rx1950
+    // The USB link is a network (RNDIS): on or off, with no endpoint.
+    val usbNetwork: Boolean get() = !palmOs
     // The name in the Add device and Import firmware lists.
     val listLabel: String get() = if (experimental) "$label · Work in progress" else label
 

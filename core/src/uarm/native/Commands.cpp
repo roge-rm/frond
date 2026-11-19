@@ -28,6 +28,7 @@
 #include "session/session_file5.h"
 #include "MachineSession.h"
 #include "CardSwap.h"
+#include "CardInstall.h"
 #include "syscall_dispatch.h"
 #include "cputil.h"
 
@@ -463,6 +464,11 @@ namespace {
 
     void CmdInstall(vector<string> args, cli::CommandEnvironment& env, void* context) {
         if (args.size() != 1) return env.PrintUsage();
+        if (auto* c = reinterpret_cast<commands::Context*>(context); c->soc->InstallsToCard()) {
+            const auto result = frondNative::installToSdCard(*c->soc, c->sessionFolder, args[0]);
+            cout << "install: " << (result.ok ? "" : result.code + ", ") << result.message << endl;
+            return;
+        }
         if (!reinterpret_cast<commands::Context*>(context)->soc->GuestServicesSupported()) {
             cout << "not available on this device" << endl;
             return;

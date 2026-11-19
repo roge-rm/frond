@@ -100,6 +100,8 @@ class FirmwareInputTest : public QObject {
         QVERIFY(!frondFirmware::firmwareFileMatches(ceosPath, rx1950Ceos5));
         QVERIFY(!frondFirmware::firmwareFileMatches(dir.filePath("missing"), rx1950Cebl5));
         QVERIFY(!frondFirmware::palmOs(rx1950) && frondFirmware::palmOs(Device::tx) && frondFirmware::fastByDefault(rx1950));
+        QVERIFY(frondFirmware::installsToCard(rx1950) && frondFirmware::ceHardReset(rx1950) && frondFirmware::usbNetwork(rx1950));
+        QVERIFY(!frondFirmware::installsToCard(Device::tx) && !frondFirmware::usbNetwork(Device::tx));
     }
     void txFiles() {
         QTemporaryDir dir;

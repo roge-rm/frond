@@ -176,20 +176,23 @@ class RunningRulesTest : public QObject {
         for (Id id : {Id::Reset, Id::Save, Id::SaveStop, Id::Screenshot, Id::HardReset}) QVERIFY(row(t, s, id).enabled);
         QVERIFY(row(traitsFor(named("palm-tx")), s, Id::HardReset).enabled);
     }
-    // Windows CE has no Palm guest services: no Hard reset row and no Applications button on the rx1950.
+    // Windows CE has no Palm guest services; the rx1950 has its own hard reset (a clean boot) and installs onto
+    // the SD card, and still shows the Applications button with the list greyed.
     void windowsCeRows() {
         const auto t = traitsFor(named("hp-ipaq-rx1950"));
         State s; s.ready = true; s.network = "off";
-        QVERIFY(!t.palmOs && !t.guestServices && !buttons(t, s).applications);
-        for (const auto& r : rows(t, s)) QVERIFY(r.id != Id::HardReset);
+        QVERIFY(!t.palmOs && !t.guestServices && t.cardInstall && t.hardReset && buttons(t, s).applications);
+        QVERIFY(row(t, s, Id::HardReset).enabled);
+        QVERIFY(hardResetEnabled(true, t));
         QVERIFY(buttons(traitsFor(named("palm-tx")), s).applications);
+        QVERIFY(!traitsFor(named("palm-tx")).cardInstall);
     }
     // The panel's Hard reset button goes off with the other running controls, on every device.
     void hardResetButtonFollowsTheControls() {
         for (auto* id : devices()) {
             const auto t = traitsFor(named(id));
             QVERIFY2(!hardResetEnabled(false, t), id);
-            QCOMPARE(hardResetEnabled(true, t), t.guestServices);
+            QCOMPARE(hardResetEnabled(true, t), t.hardReset);
         }
         QVERIFY(hardResetEnabled(true, traitsFor(named("palm-tx"))));
         QVERIFY(hardResetEnabled(true, traitsFor(named("tapwave-zodiac-2"))));

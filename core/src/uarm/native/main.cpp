@@ -480,8 +480,10 @@ bool gFastEngineMissing = false;
             cerr << "--irda must be off, pty, tcp:PORT, unix:PATH, phone or printer" << endl; return false;
         }
         HostSerial::Config usbConfig;
-        if (options.usb && !HostSerial::Parse(*options.usb, usbConfig)) {
-            cerr << "--usb must be off, pty, tcp:PORT (PORT 0..65535) or unix:PATH" << endl;
+        // on: the cable in with no endpoint, for a device whose USB is a network link (the rx1950's RNDIS).
+        const bool usbCable = options.usb && *options.usb == "on";
+        if (options.usb && !usbCable && !HostSerial::Parse(*options.usb, usbConfig)) {
+            cerr << "--usb must be off, on, pty, tcp:PORT (PORT 0..65535) or unix:PATH" << endl;
             return false;
         }
         if (options.audioPeriod < 64 || options.audioPeriod > 8192) {
@@ -1108,12 +1110,18 @@ bool gFastEngineMissing = false;
         }
         UsbHostBridge usb;
         commandContext.usb = &usb;
-        if (usbConfig.kind != HostSerial::Kind::off) {
+        if (usbCable || usbConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.usb) {
-                cerr << "--usb needs a Palm TX, Tungsten E2, Zire 72, TG50 or Zodiac" << endl;
+                cerr << "--usb needs a Palm TX, Tungsten E2, Zire 72, TG50, Zodiac or iPAQ rx1950" << endl;
                 return false;
             }
-            if (!usb.Start(soc, usbConfig, commandContext.usbError))
+            const bool network = UsbHostBridge::NetworkLink(soc);
+            if (network != usbCable) {
+                cerr << (network ? "--usb on the rx1950 takes on or off: its USB is a network link with no endpoint"
+                                 : "--usb on is only for the rx1950; use pty, tcp:PORT or unix:PATH") << endl;
+                return false;
+            }
+            if (usbCable ? !usb.StartCable(soc, commandContext.usbError) : !usb.Start(soc, usbConfig, commandContext.usbError))
                 cerr << "usb: " << commandContext.usbError << endl;
             cout << "usb: " << usb.Describe() << endl;
         } else if (capabilities.usb) {
@@ -1926,8 +1934,9 @@ int main(int argc, char** argv) {
 
     program.add_argument("--usb")
         .help("connect the TX USB HotSync port to a host PTY (pty) or a TCP listener on 127.0.0.1 "
-              "(tcp:PORT, one client at a time) through a built-in USB host; default off")
-        .metavar("<off|pty|tcp:PORT|unix:PATH>");
+              "(tcp:PORT, one client at a time) through a built-in USB host; on puts the rx1950's cable in, "
+              "its RNDIS link going to the host network; default off")
+        .metavar("<off|on|pty|tcp:PORT|unix:PATH>");
 
     program.add_argument("--script").help("execute script on startup").metavar("<script file>");
 

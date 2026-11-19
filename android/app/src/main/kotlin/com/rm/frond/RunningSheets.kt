@@ -6,8 +6,9 @@ object RunningSheets {
     enum class Sheet { APPLICATIONS, CARD, DISPLAY, CONNECTIONS }
 
     // The sheets with a button on the bar, in order.
-    // Storage is on every machine: Internal always, the slot where the device has one. Applications only on Palm OS.
-    fun barSheets(device: Device): List<Sheet> = if (device.palmOs) listOf(Sheet.APPLICATIONS, Sheet.CARD) else listOf(Sheet.CARD)
+    // Storage is on every machine: Internal always, the slot where the device has one.
+    @Suppress("UNUSED_PARAMETER")
+    fun barSheets(device: Device): List<Sheet> = listOf(Sheet.APPLICATIONS, Sheet.CARD)
 
     // The sheet a menu row opens, if any.
     fun menuSheet(id: RunningMenu.Id): Sheet? = when (id) {
@@ -112,7 +113,7 @@ object RunningSheets {
         if (!m68k || device.bluetooth) rows += ConnRow.BLUETOOTH
         if (!device.serialAbsent) rows += ConnRow.SERIAL
         if (!m68k || device.usb) rows += ConnRow.USB
-        if (device.usb && usb == NetRelay.Phase.DISCONNECTED) rows += ConnRow.USB_RETRY
+        if (device.usb && !device.usbNetwork && usb == NetRelay.Phase.DISCONNECTED) rows += ConnRow.USB_RETRY
         if (PrintJob.rowShown(device)) rows += ConnRow.USB_PORT
         if (device.builtInWifi) rows += ConnRow.WIFI_MODULE
         if (debuggerShown) rows += ConnRow.DEBUGGER

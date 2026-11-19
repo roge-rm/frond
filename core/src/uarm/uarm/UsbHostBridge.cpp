@@ -63,4 +63,15 @@ bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
     };
     return Start(std::move(backend), config, error);
 }
+bool UsbHostBridge::NetworkLink(SoC* soc) { return dynamic_cast<SocS3C2442*>(soc) != nullptr; }
+bool UsbHostBridge::StartCable(SoC* soc, std::string& error) {
+    if (!NetworkLink(soc)) {
+        error = "This device's USB needs a pty, tcp or unix endpoint.";
+        return false;
+    }
+    Config config;
+    config.kind = HostSerial::Kind::pty;  // not opened: only says the cable is in
+    impl->cableRequest = true;
+    return Start(soc, config, error);
+}
 #endif

@@ -43,6 +43,9 @@ class S3cNand {
         flash = std::move(image);
         dirty.assign(blocks, false);
     }
+    // Erases count blocks from first as the chip's erase does (store or flash, marked dirty), for a hard reset
+    // done by the host. The controller and chip registers are left alone. False if the store failed.
+    bool eraseBlocks(uint32_t first, uint32_t count);
     // Blocks programmed or erased since the image was set or clearDirty.
     bool blockDirty(uint32_t block) const { return block < dirty.size() && dirty[block]; }
     void clearDirty() { dirty.assign(blocks, false); }

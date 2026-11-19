@@ -13,6 +13,8 @@ struct UsbHostBridge::Impl {
     uint64_t lastNow{0}, netPollAt{0};
     static constexpr uint64_t netPollNs = 1000000;
     bool replaced{false}, plugPending{false}, lastEnabled{false}, linkKept{false};
+    // The cable in with no host endpoint: an RNDIS device's link is the network, not bytes (StartCable).
+    bool cableOnly{false}, cableRequest{false};
     void StopBridge(bool keepLink);
     uint64_t plugAt{0};
     std::vector<std::string> messages;
@@ -78,7 +80,13 @@ UsbHostBridge::UsbHostBridge() : impl(std::make_unique<Impl>()) {}
 UsbHostBridge::~UsbHostBridge() { Stop(); }
 
 bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error) {
-    const bool reuse = impl->linkKept && impl->link.IsOpen() && config.kind != HostSerial::Kind::off &&
+    const bool cable = impl->cableRequest;
+    impl->cableRequest = false;
+    if (cable && config.kind != HostSerial::Kind::off && !soc.ethernetOut) {
+        error = "This device's USB needs a pty, tcp or unix endpoint.";
+        return false;
+    }
+    const bool reuse = !cable && impl->linkKept && impl->link.IsOpen() && config.kind != HostSerial::Kind::off &&
                        HostSerial::Format(impl->link.GetConfig()) == HostSerial::Format(config);
     impl->StopBridge(reuse);
     impl->linkKept = false;
@@ -99,15 +107,20 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
         off();
         return true;
     }
-    if (reuse) impl->link.Clear();
-    if (!reuse && !impl->link.Open(config, error)) {
-        off();
-        return false;
+    if (cable) {
+        if (impl->link.IsOpen()) impl->link.Close();
+    } else {
+        if (reuse) impl->link.Clear();
+        if (!reuse && !impl->link.Open(config, error)) {
+            off();
+            return false;
+        }
     }
     impl->soc = soc;
+    impl->cableOnly = cable;
     const bool wasPlugged = soc.attached();
     impl->Unplug();
-    impl->config = impl->link.GetConfig();
+    impl->config = cable ? Config{} : impl->link.GetConfig();
     auto* link = &impl->link;
     impl->host = std::make_unique<UsbBusHost>(
         [soc] { return soc.port(); },
@@ -154,6 +167,7 @@ void UsbHostBridge::Impl::StopBridge(bool keepLink) {
     if (keepLink) linkKept = true; else impl->link.Close();
     impl->soc = {};
     impl->config = {};
+    impl->cableOnly = false;
     impl->replaced = impl->plugPending = false;
 }
 
@@ -192,6 +206,9 @@ std::string UsbHostBridge::Endpoint() const { return impl->link.Endpoint(); }
 
 std::string UsbHostBridge::Describe() const {
     if (!impl->host) return "off";
+    if (impl->cableOnly)
+        return std::string("on ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
+               (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");
     return std::string(impl->config.kind == HostSerial::Kind::pty ? "pty " : impl->config.kind == HostSerial::Kind::unixSocket ? "unix " : "tcp ") + impl->link.Endpoint() +
            (impl->link.Connected() ? " connected " : " waiting ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
            (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");

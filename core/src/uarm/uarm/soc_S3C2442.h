@@ -48,7 +48,11 @@ class SocS3C2442 : public SoC {
     void JamKey(enum KeyId key, uint32_t durationMsec) override;
     bool PrepareM68kSupport() override { return false; }
     bool GuestServicesSupported() const override { return false; }
-    bool HardResetSupported() const override { return false; }
+    // A clean boot: the user store's NAND blocks erased (rx1950UserStoreBlock on), then a power-on reset with
+    // SDRAM cleared. WM5 formats the empty store and starts as from a new import (welcome, alignment, setup).
+    void HardReset() override;
+    bool HardResetSupported() const override { return true; }
+    bool InstallsToCard() const override { return true; }
     uint64_t GetTime() override { return machine->nanoseconds(); }
     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
     void ResetPendingFrame() override { framePending = false; }
