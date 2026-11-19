@@ -251,8 +251,9 @@ class RuntimeCards {
     }
     // `folder`: the session's machine folder. A saved card no longer at its path is found there under
     // its slot's name when it is the same file (device, inode and change time), as a move into a
-    // machine folder leaves it. With `swap`, a saved card that isn't at its path or there, or was
-    // changed, leaves its slot empty instead of refusing the load (next.dropped).
+    // machine folder leaves it. With `swap` (a machine whose cards are in the library), a saved card
+    // that isn't in `folder`, or was changed, leaves its slot empty instead of refusing the load
+    // (next.dropped): a copied machine never opens the card file of the machine it came from.
     std::string Stage(const std::string& text, Pair& next, const std::string& folder = "", bool swap = false) {
         if(text.empty()) return "";
         if(text.size()>8192 || text.find('\0')!=std::string::npos) return "invalid card manifest";
@@ -278,7 +279,9 @@ class RuntimeCards {
                 const auto moved=(std::filesystem::path(folder)/MachineName(id)).lexically_normal().string();
                 if(same(moved)) path=moved;
             }
-            if(swap && !same(path)) {
+            const bool inFolder=!folder.empty() &&
+                std::filesystem::path(path).parent_path()==std::filesystem::path(folder).lexically_normal();
+            if(swap && (!same(path) || !inFolder)) {
                 for(const auto& d:next.dropped) if(d.first==id) return "duplicate card slot, identity or serial";
                 next.dropped.emplace_back(id,key);
                 continue;

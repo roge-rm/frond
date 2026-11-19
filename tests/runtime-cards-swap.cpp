@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     const uint64_t size = 32ull << 20;
     uint8_t written[512], got[512];
     memset(written, 0x6b, sizeof written);
-    std::string manifest;
+    std::string manifest, inMachine;
     // The Dana writes to the card: the write lands in a generation, the file stays as it was.
     {
         RuntimeCards cards;
@@ -115,6 +115,19 @@ int main(int argc, char** argv) {
         cards.Install(found);
         auto* image = gExternalStorage.GetImage(key);
         assert(image && image->ReadByteRange(got, 1 << 20, sizeof got) && !memcmp(got, written, sizeof got));
+        inMachine = cards.Manifest();
+        assert(inMachine.find(moved.string()) != std::string::npos);
+        cards.Install(RuntimeCards::Pair{});
+    }
+    // Under card swap a card outside the machine folder isn't used, as in a copied machine.
+    {
+        RuntimeCards cards;
+        cards.SetDevice(deviceTypeDana);
+        RuntimeCards::Pair pair;
+        assert(cards.Stage(inMachine, pair, other.string(), true).empty());
+        assert(!pair.card[0] && pair.dropped.size() == 1);
+        RuntimeCards::Pair own;
+        assert(cards.Stage(inMachine, own, machine.string(), true).empty() && own.card[0] && own.dropped.empty());
         cards.Install(RuntimeCards::Pair{});
     }
     // Taken out to the drawer while stopped: under card swap the slot loads empty.
