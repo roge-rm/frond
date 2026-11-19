@@ -137,6 +137,10 @@ struct SocIMX1::SerialPort final : HostUartPort {
         wasOn = Line().receiverOn;
         return true;
     }
+    // The same peer on the UART a checkpoint restore loaded.
+    void Rewire() {
+        if (context) imx1MachineSetUartPeer(soc.machine, 1, Transmit, Pending, Take, this);
+    }
     void Detach() override {
         imx1MachineSetUartPeer(soc.machine, 1, nullptr, nullptr, nullptr, nullptr);
         if (!soc.halted) imx1MachineSetUartRts(soc.machine, 1, false);
@@ -169,11 +173,11 @@ struct SocIMX1::SerialPort final : HostUartPort {
     }
     static void Transmit(void* c, uint8_t character, bool) {
         auto& self = *static_cast<SerialPort*>(c);
-        if (self.write) self.write(character, self.context);
+        if (self.write && !self.soc.serialCheckpoints) self.write(character, self.context);
     }
     static bool Pending(void* c) {
         auto& self = *static_cast<SerialPort*>(c);
-        return self.active && self.active(self.context) && self.Line().ctsLow;
+        return !self.soc.serialCheckpoints && self.active && self.active(self.context) && self.Line().ctsLow;
     }
     static bool Take(void* c, uint8_t& character) {
         auto& self = *static_cast<SerialPort*>(c);
@@ -228,11 +232,12 @@ struct SocIMX1::InfraredPort final : HostInfraredPort {
     bool KeyboardAttached() override { return false; }
     static void Transmit(void* c, uint8_t character, bool infrared) {
         auto& self = *static_cast<InfraredPort*>(c);
-        if (infrared && self.hooks.write) self.hooks.write(character, self.hooks.context);
+        if (infrared && self.hooks.write && !self.soc.serialCheckpoints) self.hooks.write(character, self.hooks.context);
     }
     static bool Pending(void* c) {
         auto& self = *static_cast<InfraredPort*>(c);
-        return self.hooks.pending && self.Line().infrared && self.hooks.pending(self.hooks.context);
+        return !self.soc.serialCheckpoints && self.hooks.pending && self.Line().infrared &&
+               self.hooks.pending(self.hooks.context);
     }
     static bool Take(void* c, uint8_t& character) {
         auto& self = *static_cast<InfraredPort*>(c);
@@ -260,6 +265,11 @@ HostInfraredPort* SocIMX1::InfraredHostPort() {
 // send with CTS flow control waits (the ROM's write loop times out) and USR1 reads as on a real port.
 void SocIMX1::ApplyUartLines() {
     if (halted) return;
+    if (RestoringCheckpoint()) {
+        if (serialPort) serialPort->Rewire();
+        if (infraredPort && infraredPort->hooks.context && !infraredPort->Wire()) infraredPort->hooks = {};
+        return;
+    }
     imx1MachineSetUartRts(machine, 1, false);
     imx1MachineSetUartRts(machine, 2, false);
     if (serialPort) serialPort->Replaced();

@@ -186,9 +186,13 @@ class Machine:
     def install_and_launch(self, prc):
         if self.device == 'palm-tx':
             return self.run.install_and_launch(prc, 'Frond IR probe')
-        # The Zodiac session opens in an app that waits with no timeout, which only a host call's wake moves
-        # on, so there's no guest-ready look first.
-        installed = self.run.control.retry_ready('install', prc, 60)
+        # A soft reset first: the IrDA library registers its _beam scheme at reset only once the serial
+        # manager shows an IrDA port, which a session saved before the Zodiac had one never got. The
+        # session opens in an app that waits with no timeout, which only a host call's wake moves on, so
+        # there's no guest-ready look; a launch during the boot is lost, so it waits the boot out.
+        self.run.require('reset')
+        time.sleep(60)
+        installed = self.run.control.retry_ready('install', prc, 120)
         if installed['code'] == 'needs-reset':
             self.run.require('reset')
         self.run.control.retry_ready('launch-app', 'Frond IR probe', 60)

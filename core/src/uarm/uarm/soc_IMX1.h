@@ -156,6 +156,10 @@ class SocIMX1 : public SoC {
     // only). With no peer both see RTS inactive.
     HostUartPort* SerialHostPort() override;
     HostInfraredPort* InfraredHostPort() override;
+    // A guest read (database list, export) runs between these and is rolled back after: the UARTs neither
+    // take the host's characters nor send theirs meanwhile, and the restore keeps the host peers.
+    void BeginSerialCheckpoint() override { ++serialCheckpoints; }
+    void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
     // The W4200 USB function as a UsbDevicePort, for UsbHostBridge. The bus comes through the cradle, so the
     // bridge's cable puts the cradle in (SetUsbCable). Hooks tick between run slices on GetTime's clock; while
     // the host has work due, an idle guest's clock runs on to it instead of waiting.
@@ -248,7 +252,9 @@ class SocIMX1 : public SoC {
     struct InfraredPort;
     std::unique_ptr<SerialPort> serialPort;
     std::unique_ptr<InfraredPort> infraredPort;
+    unsigned serialCheckpoints{0};
     // Puts the UARTs' RTS inputs and host peers back on the machine after it was made, loaded or reset.
+    // A checkpoint restore wires the same peers to the loaded UARTs, with the RTS levels the state has.
     void ApplyUartLines();
     bool LoadState(const uint8_t* data, size_t size, uint32_t flags);
     // Puts the card in slot 1 or takes it out to match cardIn, card detect pin included. A change the
