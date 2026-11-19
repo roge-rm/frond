@@ -19,6 +19,10 @@
 #include "palmos_errors.h"
 #include "zip.h"
 
+// A callback's registers: the T|X's sessions pass the CPU, the Zodiac's the registers themselves.
+inline uint32_t* nativeRegisters(ArmCpu* cpu) { return cpuGetRegisters(cpu); }
+inline uint32_t* nativeRegisters(uint32_t* registers) { return registers; }
+
 // Native Palm database operations. Session owns a verified UI-task call context;
 // the caller owns a guest transaction spanning construction and destruction.
 // Session::Call restores the stopped CPU after every synchronous native call.
@@ -73,8 +77,8 @@ class NativeDatabase {
         size_t offset = 0;
         bool callbackFailed = false, deleteFailed = false;
         unsigned callbacks = 0;
-        session.RegisterCallback(scratch + 32, [&](ArmCpu* cpu) {
-            auto* r = cpuGetRegisters(cpu);
+        session.RegisterCallback(scratch + 32, [&](auto* cpu) {
+            auto* r = nativeRegisters(cpu);
             uint32_t requested = 0;
             if (++callbacks > maxCallbacks || !session.Read(r[1], &requested, 4)) {
                 callbackFailed = true; r[0] = 1; return;
@@ -85,13 +89,13 @@ class NativeDatabase {
             }
             offset += count; r[0] = 0;
         });
-        session.RegisterCallback(scratch + 36, [&](ArmCpu* cpu) {
-            auto* r = cpuGetRegisters(cpu);
+        session.RegisterCallback(scratch + 36, [&](auto* cpu) {
+            auto* r = nativeRegisters(cpu);
             if (++callbacks > maxCallbacks) { deleteFailed = true; r[0] = 0; return; }
             const uint32_t database = r[2];
             const bool okay = call(0x8148, {database, 0, 0, 0}) == 0;
             deleteFailed |= !okay;
-            cpuGetRegisters(cpu)[0] = okay;
+            nativeRegisters(cpu)[0] = okay;
         });
         Defer unregister([&] { session.UnregisterCallback(scratch + 32); session.UnregisterCallback(scratch + 36); });
         uint32_t zero = 0;
@@ -258,8 +262,8 @@ class NativeDatabase {
     std::vector<uint8_t> exportOne(uint32_t database) {
         std::vector<uint8_t> bytes;
         bool failed = false; unsigned callbacks = 0;
-        session.RegisterCallback(scratch + 32, [&](ArmCpu* cpu) {
-            auto* r = cpuGetRegisters(cpu); uint32_t size = 0;
+        session.RegisterCallback(scratch + 32, [&](auto* cpu) {
+            auto* r = nativeRegisters(cpu); uint32_t size = 0;
             if (++callbacks > maxCallbacks || !session.Read(r[1], &size, 4) ||
                 size > maxDatabaseBytes - bytes.size()) { failed = true; r[0] = 1; return; }
             if (uint64_t(r[0]) + size > 0x100000000ull) { failed = true; r[0] = 1; return; }

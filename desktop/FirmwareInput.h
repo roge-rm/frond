@@ -55,10 +55,8 @@ inline bool linkedCards(Device device) {
 // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
 inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 
-// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
-inline bool guestServices(Device device) {
-    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
-}
+// Install, the application list and hard reset. Every device has them.
+inline bool guestServices(Device) { return true; }
 // New machines of these devices start on the Fast engine: the Zodiac, T|X and Zire 72, which fall behind Original speed on Exact.
 inline bool fastByDefault(Device device) {
     return device == Device::tx || device == Device::zire72 ||

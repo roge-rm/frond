@@ -1,6 +1,6 @@
 // The Zodiac's hard reset and guest calls on the real 1.1 ROM (ZODIAC_ROM) from a bring-up state
 // (ZODIAC_STATE). Skips without them. ZODIAC_TEST_FAST=1 runs the Fast engine. No argument: guest calls in
-// Preferences;
+// Preferences and the launcher;
 // hard-reset-yes and hard-reset-no: a hard reset answered Function or Home.
 // probe MS HOLD_MS DIR: runs MS of guest time, hard resets holding power HOLD_MS and writes a frame a
 // second for 40 s into DIR (PPM), for looking at, pressing key id KEY (keys.h) at 5 s if given.
@@ -183,7 +183,8 @@ bool listed(SocIMX1& soc, const char* name) {
 }
 
 // Install, list and export through the desktop socket's and CLI's own path (GuestDatabaseOps), from a 68k app
-// that waits with no timeout: FrondBench goes in, shows in the list and comes back out byte for byte.
+// that waits with no timeout and then from the native launcher: FrondBench goes in, shows in the list and comes
+// back out byte for byte.
 void databases(SocIMX1& soc, const char* prcPath) {
     auto prc = readFile(prcPath);
     assert(prc.size() > 78);
@@ -212,14 +213,42 @@ void databases(SocIMX1& soc, const char* prcPath) {
     assert(exported == prc);
     runFor(soc, 1000);
     assert(!soc.Halted());
-    // The Tapwave launcher is native ARM and makes no 68k calls, so there's no PACE site to call from: the
-    // preparation (with its wake) gives up and the guest goes on.
+    // GuestDatabaseOps takes the native boundary in a 68k app too; the ROM PACE path still lists it.
+    assert(GuestDatabaseOps::NativePrepare(soc));
+    {
+        GuestExport guest(soc, SYSCALL_PREPARE_WAKE);
+        assert(guest.Ready());
+        DbMetadataList all;
+        assert(dbListGet(soc.GetSyscallDispatch(), all));
+        guest.Finish();
+        bool found = false;
+        for (const auto& db : all) found |= !std::strcmp(db.name, "FrondBench");
+        assert(found);
+    }
+    runFor(soc, 1000);
+    assert(!soc.Halted());
+    // The Tapwave launcher is native ARM: its calls go through the native boundary (ZodiacNative) at its
+    // EvtGetSysEvent wait. List, export, delete and install again from there.
     press(soc, keyIdHome);
     runFor(soc, 3000);
-    DbMetadataList list;
-    assert(!GuestDatabaseOps::List(soc, list, true));
+    assert(listed(soc, "FrondBench"));
+    archive.clear();
+    assert(GuestDatabaseOps::Export(soc, "FrondBench", archive));
+    auto again = unzipOne(archive);
+    for (size_t i = std::strlen(reinterpret_cast<const char*>(again.data())) + 1; again.size() >= 32 && i < 32; ++i)
+        again[i] = prc[i];
+    assert(again == prc);
+    const auto deleted = GuestDatabaseOps::Delete(soc, "FrondBench");
+    assert(deleted && *deleted == DeleteDbResult::deleted);
     runFor(soc, 1000);
-    assert(!soc.Halted() && !soc.GuestCallPending());
+    assert(!listed(soc, "FrondBench"));
+    const int reinstalled = GuestDatabaseOps::Install(soc, prc.size(), prc.data());
+    std::printf("launcher: export %zu bytes, delete, install %d\n", again.size(), reinstalled);
+    assert(reinstalled == DB_INSTALL_RESULT_OK);
+    runFor(soc, 1000);
+    assert(listed(soc, "FrondBench"));
+    runFor(soc, 1000);
+    assert(!soc.Halted());
 }
 
 void calls(SocIMX1& soc) {

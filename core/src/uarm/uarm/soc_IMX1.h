@@ -68,6 +68,22 @@ class SocIMX1 : public SoC {
     bool SkipTrap0Callout() { return SetGuestRegister(15, paceSites.trap0Site + 4); }
     // Wakes the UI task of an idle 68k app, as a nilEvent would: see WakeIdle in soc_IMX1.cpp.
     bool WakeIdle();
+    // Native guest calls (zodiac_native.cpp). RunToGuestPc runs until the guest is about to run pc (either
+    // state) and leaves it stopped there as a pending call, like RunToPaceSyscall; false with none pending.
+    bool RunToGuestPc(uint32_t pc, uint64_t maxCycles, uint64_t cyclesPerSecond);
+    // Runs the native call set up in the registers (pc the entry, lr zodiacInjectedReturn in either state) until
+    // it returns there. It also stops on the callback addresses (ARM, at most 3) and calls callback with the
+    // address, which must move pc on (ReturnFromCallback). The caller puts the registers back.
+    bool ExecuteNative(uint64_t maxCycles, uint64_t cyclesPerSecond, const uint32_t* callbacks, unsigned count,
+                       const std::function<void(uint32_t)>& callback);
+    // Moves pc to target (bit 0 set for Thumb). A change of state goes through a bx r12 in the ROM, run with
+    // interrupts masked, and r12 and the masks are put back after it.
+    bool JumpGuest(uint32_t target);
+    // From an ARM callback stop: returns to lr through a bx lr in the ROM, as the callback itself would.
+    bool ReturnFromCallback();
+    // The pending call's site, set by RunToGuestPc; the machine stops there again after an ExecuteNative.
+    uint32_t NativeSite() const { return nativeSite; }
+    bool RomHas(uint32_t address, const void* code, size_t size) const;
     const ZodiacPaceSites& PaceSites() const { return paceSites; }
     bool GuestCallPending() const { return guestCall; }
     bool GuestRegisters(uint32_t (&registers)[16], uint32_t* cpsr = nullptr) const {
@@ -213,6 +229,7 @@ class SocIMX1 : public SoC {
     void EndGuestCall();
     ZodiacPaceSites paceSites{};
     bool guestCall{false};
+    uint32_t nativeSite{0};
     std::function<bool()> trap0Hook;
     // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();

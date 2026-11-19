@@ -78,8 +78,8 @@ class FirmwareInputTest : public QObject {
                      QStringLiteral("This is a Tapwave Zodiac 2 NOR image. Choose Tapwave Zodiac 2."));
         QVERIFY(!frondFirmware::validateFiles(Device::zire72, path, {}).isEmpty());
         QCOMPARE(frondFirmware::validateFiles(zodiac, path, path), QStringLiteral("This device has no NAND. Leave the NAND image empty."));
-        // No guest calls yet, so no install, application list, hard reset or engine choice.
-        QVERIFY(!frondFirmware::guestServices(zodiac) && frondFirmware::guestServices(Device::tx) && !frondFirmware::runs68k(zodiac));
+        // Install, application list and hard reset, with no 68k-only controls.
+        QVERIFY(frondFirmware::guestServices(zodiac) && frondFirmware::guestServices(Device::tx) && !frondFirmware::runs68k(zodiac));
     }
     void txFiles() {
         QTemporaryDir dir;
