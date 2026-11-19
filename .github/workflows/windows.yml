@@ -46,6 +46,17 @@ jobs:
           set -o pipefail
           make -k -j4 BUILD_JOBS=4 out/frond out/frond-68k 2>&1 | tee build.log
 
+      # While the Windows port is unfinished: compile every core source on its own, so the log lists
+      # all the errors and not only the first library to fail.
+      - name: Compile errors across the cores
+        if: always()
+        continue-on-error: true
+        run: |
+          make -k -j4 -C core/src/common bin 2>&1 | tee -a build.log
+          make -k -j4 -C core/src/uarm bin FROND_DYNARMIC_SRC=$PWD/vendor/dynarmic FROND_DYNARMIC_LIBS=none 2>&1 | tee -a build.log
+          make -k -j4 -C core/src/cloudpilot FROND_68K=1 frond-68k.exe 2>&1 | tee -a build.log
+          grep -E "error:|Error [0-9]" build.log | sort | uniq -c | sort -rn | head -150
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
