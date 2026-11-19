@@ -5,6 +5,7 @@
 #include <poll.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <deque>
 #include <set>
@@ -155,6 +156,16 @@ void WifiRouter::Poll(uint64_t now) {
     slirp_pollfds_fill(impl->slirp, &timeout, Impl::Add, impl.get());
     const int status = poll(impl->descriptors.data(), impl->descriptors.size(), 0);
     slirp_pollfds_poll(impl->slirp, status < 0, Impl::Events, impl.get());
+}
+int WifiRouter::AddUdpForward(uint16_t hostPort, uint32_t guest, uint16_t guestPort) {
+    if (!Valid()) return EINVAL;
+    in_addr host{}, to{};
+    host.s_addr = htonl(INADDR_LOOPBACK);
+    to.s_addr = htonl(guest);
+    // slirp keeps bind's errno when the listen fails.
+    errno = 0;
+    if (slirp_add_hostfwd(impl->slirp, 1, host, hostPort, to, guestPort) == 0) return 0;
+    return errno ? errno : EIO;
 }
 bool WifiRouter::Receive(std::vector<uint8_t>& bytes) {
     if (impl->incoming.empty()) return false;
