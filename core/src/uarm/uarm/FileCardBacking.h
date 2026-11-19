@@ -567,11 +567,15 @@ class FileCardBacking : public CardBacking {
         }
 
         bool flushDir() {
+#ifdef _WIN32
+            return true;  // a folder can't be opened to flush here
+#else
             const int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             if (dfd < 0) return false;
             const int rc = fsync(dfd);
             ::close(dfd);
             return rc == 0;
+#endif
         }
 
         std::filesystem::path tempName(const std::string& rest) const {

@@ -162,6 +162,7 @@ SOURCE_CXX =		 					\
 	uarm/db_backup.cpp					\
 	uarm/LibertasCF.cpp \
 	uarm/HostNetwork.cpp			\
+	uarm/HostNetworkWin.cpp			\
 	uarm/HostSerial.cpp			\
 	uarm/HostInfrared.cpp \
 	uarm/BcspTransport.cpp					\

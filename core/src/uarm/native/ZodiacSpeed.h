@@ -18,7 +18,7 @@ public:
     // Made on the SDL thread, which it reads the CPU time of. windowUsec is how long each window is; label
     // starts the line.
     explicit ZodiacSpeed(uint64_t windowUsec, const char* label = "zodiac speed") : windowUsec(windowUsec), label(label) {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
         sdlClockValid = false;  // no per-thread CPU clock id here
 #else
         if (pthread_getcpuclockid(pthread_self(), &sdlClock) != 0) sdlClockValid = false;

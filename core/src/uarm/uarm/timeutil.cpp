@@ -14,7 +14,11 @@ uint64_t palmEpochSeconds() {
 
     if (now - lastUpdate > REFRESH_TZ_INTERVAL_SECONDS) {
         struct tm loc;
+#ifdef _WIN32
+        localtime_s(&loc, &now);
+#else
         localtime_r(&now, &loc);
+#endif
 
 #ifdef _WIN32
         _tzset();

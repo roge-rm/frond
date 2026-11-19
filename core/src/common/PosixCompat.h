@@ -34,6 +34,14 @@ inline constexpr int kNonblock = 0x20000000;
 inline int Socket(int domain, int type, int protocol) {
 #if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
     return ::socket(domain, type, protocol);
+#elif defined(_WIN32)
+    const SOCKET sock = ::socket(domain, type & ~(kCloexec | kNonblock), protocol);
+    if (sock == INVALID_SOCKET) return -1;
+    if (type & kNonblock) {
+        u_long on = 1;
+        ioctlsocket(sock, FIONBIO, &on);
+    }
+    return int(sock);
 #else
     const int fd = ::socket(domain, type & ~(kCloexec | kNonblock), protocol);
     if (fd < 0) return fd;
@@ -49,7 +57,9 @@ inline int Socket(int domain, int type, int protocol) {
 
 // Modified time of a stat result in nanoseconds.
 inline uint64_t MtimeNs(const struct stat& st) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    return uint64_t(st.st_mtime) * 1000000000ull;
+#elif defined(__APPLE__)
     return uint64_t(st.st_mtimespec.tv_sec) * 1000000000ull + uint64_t(st.st_mtimespec.tv_nsec);
 #else
     return uint64_t(st.st_mtim.tv_sec) * 1000000000ull + uint64_t(st.st_mtim.tv_nsec);
@@ -59,7 +69,9 @@ inline uint64_t MtimeNs(const struct stat& st) {
 // Reserves length bytes of the file like posix_fallocate: 0, ENOSPC when full, or another error
 // number where the file system can't (the caller then writes the bytes).
 inline int Preallocate(int fd, uint64_t length) {
-#ifdef __APPLE__
+#if defined(_WIN32)
+    return _chsize_s(fd, __int64(length));
+#elif defined(__APPLE__)
     fstore_t store{F_ALLOCATEALL | F_ALLOCATECONTIG, F_PEOFPOSMODE, 0, off_t(length), 0};
     if (fcntl(fd, F_PREALLOCATE, &store) == -1) {
         store.fst_flags = F_ALLOCATEALL;
@@ -73,6 +85,11 @@ inline int Preallocate(int fd, uint64_t length) {
 
 // A pipe pair with both ends non-blocking and close-on-exec, for waking a poll() loop.
 inline bool WakePipe(int& readEnd, int& writeEnd) {
+#ifdef _WIN32
+    (void)readEnd;
+    (void)writeEnd;
+    return false;  // only the host serial worker uses it, and that is off here
+#else
     int ends[2];
     if (pipe(ends) != 0) return false;
     for (const int end : ends) {
@@ -82,6 +99,7 @@ inline bool WakePipe(int& readEnd, int& writeEnd) {
     readEnd = ends[0];
     writeEnd = ends[1];
     return true;
+#endif
 }
 
 }  // namespace frondPosix

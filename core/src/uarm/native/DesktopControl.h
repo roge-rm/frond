@@ -11,9 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <memory>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include "BackgroundJob.h"

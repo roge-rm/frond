@@ -24,8 +24,8 @@
 #include "soc_IMX1.h"
 
 namespace {
-constexpr uint32_t start = zodiacBluetoothHooks[0], stop = zodiacBluetoothHooks[1], write = zodiacBluetoothHooks[2],
-                   read = zodiacBluetoothHooks[3], doze = zodiacBluetoothHooks[4], irq = zodiacBluetoothHooks[5],
+constexpr uint32_t start = zodiacBluetoothHooks[0], stop = zodiacBluetoothHooks[1], writeCall = zodiacBluetoothHooks[2],
+                   readCall = zodiacBluetoothHooks[3], doze = zodiacBluetoothHooks[4], irq = zodiacBluetoothHooks[5],
                    portWait = zodiacBluetoothHooks[6];
 constexpr uint32_t exportTable = 0x200f6e48;
 constexpr uint32_t exportCode[] = {0xea00024f, 0xea00025d, 0xea0000a7, 0xea00004c, 0xea00007d, 0xea000052,
@@ -230,7 +230,7 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
         if (!BluetoothHooksOn()) ApplyCodeHooks();
         return true;
     }
-    if (pc == write || pc == read) {
+    if (pc == writeCall || pc == readCall) {
         // Before a start the calls go to BtlsLib, which has no radio to talk to.
         if (!BluetoothRunning(r[9])) return false;
         BluetoothNoteR9(r[9]);
@@ -238,7 +238,7 @@ bool SocIMX1::BluetoothHook(uint32_t pc, const uint32_t (&r)[16]) {
         uint8_t bytes[maxChunk];
         uint32_t done = 0, result = 0;
         const bool up = bluetooth.started && bluetooth.backend.Connected();
-        if (pc == write) {
+        if (pc == writeCall) {
             if (!up || (count && (!ReadGuest(r[0], bytes, count) || !bluetooth.backend.Write(bytes, count)))) {
                 if (up) BluetoothDown("a write to the controller failed");
                 result = writeFailed;

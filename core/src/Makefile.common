@@ -1,4 +1,9 @@
 include $(dir $(lastword $(MAKEFILE_LIST)))Makefile.host
+ifeq ($(HOST_OS),windows)
+# Stand-ins for the POSIX headers (common/winshim) come first on the include path.
+FROND_WINSHIM := $(shell cygpath -m $(abspath $(dir $(lastword $(MAKEFILE_LIST)))common/winshim))
+export CPATH := $(FROND_WINSHIM)$(if $(CPATH),;$(CPATH))
+endif
 
 # The variables below most likely have to be defined
 

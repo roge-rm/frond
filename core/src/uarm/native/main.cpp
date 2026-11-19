@@ -1714,7 +1714,9 @@ bool gFastEngineMissing = false;
 
 int main(int argc, char** argv) {
     // A launcher that dies leaves stdout and stderr without a reader; the core still has to save.
+#ifdef SIGPIPE
     signal(SIGPIPE, SIG_IGN);
+#endif
     // The card tool: make, import or export a card file without starting a machine.
     if (argc >= 2 && std::string(argv[1]) == "--card")
         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));

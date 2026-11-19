@@ -21,7 +21,9 @@
 #include <string_view>
 #include <sys/file.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/statvfs.h>
+#endif
 #include <unistd.h>
 #include <vector>
 
@@ -144,9 +146,15 @@ inline std::string randomIdentity() {
 }
 
 inline bool hasSpace(const std::filesystem::path& folder, uint64_t bytes) {
+#ifdef _WIN32
+    std::error_code ec;
+    const uint64_t free = std::filesystem::space(folder, ec).available;
+    if (ec) return false;
+#else
     struct statvfs fs{};
     if (statvfs(folder.c_str(), &fs) != 0) return false;
     const uint64_t free = uint64_t(fs.f_bavail) * uint64_t(fs.f_frsize);
+#endif
     return free >= bytes + spareBytes;
 }
 

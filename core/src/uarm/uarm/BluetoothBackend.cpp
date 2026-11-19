@@ -1,9 +1,12 @@
+#if defined(__EMSCRIPTEN__) || defined(_WIN32)
+#define FROND_NO_UNIX_BT 1  // Unix socket controllers only
+#endif
 #include "PosixCompat.h"
 #include "BluetoothBackend.h"
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
-#ifndef __EMSCRIPTEN__
+#ifndef FROND_NO_UNIX_BT
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -11,7 +14,7 @@
 #endif
 
 bool BluetoothBackend::Open(const std::string& path,std::string& error) {
-#ifdef __EMSCRIPTEN__
+#ifdef FROND_NO_UNIX_BT
     error="Bluetooth controller endpoints require the native runner.";return false;
 #else
     if(path.empty() || path[0]!='/' || path.find('\0')!=std::string::npos || path.size()>=sizeof(sockaddr_un::sun_path)) {
@@ -35,7 +38,7 @@ bool BluetoothBackend::Open(const std::string& path,std::string& error) {
 #endif
 }
 void BluetoothBackend::Close() {
-#ifndef __EMSCRIPTEN__
+#ifndef FROND_NO_UNIX_BT
     if(fd>=0)close(fd);
 #endif
     fd=-1;incoming.clear();outgoing.clear();received.clear();expected=sentAt=readAt=frameRemaining=0;addressReplyDue=false;
@@ -76,7 +79,7 @@ bool BluetoothBackend::Consume(const uint8_t* bytes,size_t size) {
     return true;
 }
 void BluetoothBackend::Poll(bool receive) {
-#ifndef __EMSCRIPTEN__
+#ifndef FROND_NO_UNIX_BT
     if(!Connected())return;
     // Bounded work per guest callback. A short write keeps its exact suffix.
     for(unsigned tries=0;tries<4 && Queued();++tries) {
