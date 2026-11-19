@@ -120,6 +120,8 @@ void Acx100::memWrite(uint32_t a, const uint8_t* in, size_t n) {
 uint32_t Acx100::read(uint32_t offset, unsigned size, uint64_t now) {
     offset &= 0xfff;
     if ((offset & ~3u) == regMemData) {
+        // A byte read gives that lane of the word and leaves the port where it is.
+        if (size == 1) return (mem32(memAddress & ~3u) >> (8 * (offset & 3))) & 0xff;
         if (size == 4 || !(offset & 2)) {
             // The port works on whole words: the low two address bits are ignored, and the driver's byte and
             // halfword helpers pick their part out of the word.
@@ -144,6 +146,12 @@ uint32_t Acx100::read(uint32_t offset, unsigned size, uint64_t now) {
 void Acx100::write(uint32_t offset, unsigned size, uint32_t value, uint64_t now) {
     offset &= 0xfff;
     if ((offset & ~3u) == regMemData) {
+        if (size == 1) {
+            // A byte write changes that lane of the word and leaves the port where it is.
+            const uint32_t shift = 8 * (offset & 3), at = memAddress & ~3u;
+            setMem32(at, (mem32(at) & ~(0xffu << shift)) | (value & 0xff) << shift);
+            return;
+        }
         if (size == 4) {
             setMem32(memAddress & ~3u, value);
         } else if (!(offset & 2)) {

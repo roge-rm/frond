@@ -339,6 +339,14 @@ static void wifiTests() {
         assert(cpuGetRegExternal(m->cpu(), 2) == 0xffffffffu);
     }
     {
+        // A byte read of the chip ID register (0x04) powered gives its byte lane, not 0xff.
+        const std::vector<uint32_t> readByte = {0xe5d02005, loop};  // ldrb r2, [r0, #5]
+        auto m = make(stores({{0x56000020, 0x50000}, {0x56000024, 0x300}, {0x20000004, 0x900}}, readByte));
+        assert(m->run(10000) == S3c2442Stop::budget);
+        assert(m->wifiLive());
+        assert(cpuGetRegExternal(m->cpu(), 2) == ((Acx100::chipId >> 8) & 0xff));
+    }
+    {
         auto m = make(stores({{0x56000020, 0x50000}, {0x56000024, 0x300}, {0x20000004, 0x900}}, readId));
         assert(m->run(10000) == S3c2442Stop::budget);
         assert(m->wifiLive());

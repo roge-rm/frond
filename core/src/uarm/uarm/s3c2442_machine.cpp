@@ -299,9 +299,9 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
     }
     if ((address & 0xf8000000) == 0x20000000) {
         // nGCS4, the TI ACX100 Wi-Fi MAC. ASSUMPTION "Wi-Fi empty bus": unpowered or in reset, reads give all
-        // ones and writes are dropped, so tiacxwln finds no chip.
+        // ones and writes are dropped (a powered chip sees byte accesses as byte lanes of its 16-bit bus), so tiacxwln finds no chip.
         ++wifiAccesses;
-        if (wifiLive() && (size == 2 || size == 4)) {
+        if (wifiLive() && size <= 4) {
             if (write) wifi.write(address & 0xffff, size, value, elapsedNs);
             else value = wifi.read(address & 0xffff, size, elapsedNs);
             if (wifiBusTrace && (address & 0xfffc) != 0x18)
