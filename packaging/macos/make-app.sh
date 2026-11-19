@@ -37,7 +37,10 @@ if command -v rsvg-convert >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&
     iconutil -c icns "$SET" -o "$APP/Contents/Resources/frond.icns"
 fi
 # Qt frameworks and plugins next to the desktop; the cores only use SDL2 and libslirp.
-macdeployqt "$APP" -always-overwrite
+LIBPATHS="-libpath=$(brew --prefix qt)/lib -libpath=$(brew --prefix)/lib"
+for d in "$(brew --prefix)"/opt/*/lib; do LIBPATHS="$LIBPATHS -libpath=$d"; done
+# shellcheck disable=SC2086
+macdeployqt "$APP" -always-overwrite $LIBPATHS
 # The cores' Homebrew libraries (SDL2, libslirp and what they pull in) go into Frameworks.
 python3 packaging/macos/bundle-libs.py "$APP" "$APP/Contents/MacOS/frond" "$APP/Contents/MacOS/frond-68k"
 codesign --force --deep --sign - "$APP"
