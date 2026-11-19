@@ -13,6 +13,7 @@
 #include "guest_orientation.h"
 #include "imx1_boot_probe.h"
 #include "imx1_i2c_read_window.h"
+#include "pace_patch.h"
 #include "zodiac_audio.h"
 #include "zodiac_input.h"
 #include "zodiac_panel.h"
@@ -32,6 +33,12 @@ Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom);
 // power is let go shows "Erase all data?", Function for yes and Home for no. 500 ms was enough on the 1.1 ROM.
 inline constexpr uint32_t zodiacHardResetHoldMs = 2000;
 
+// The ROM's address in the guest (file offset 0 there).
+inline constexpr uint32_t zodiacRomBase = 0x20000000;
+
+// Where an injected call returns to: never code, as the run stops before fetching it.
+inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
+
 class SocIMX1 : public SoC {
    public:
     // nullptr with the reason in error when the ROM can't run.
@@ -46,8 +53,25 @@ class SocIMX1 : public SoC {
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     // Faster: FCLK times the multiplier in the machine's clock model; guest time still comes from its own clock.
     void SetClockMultiplier(uint32_t num, uint32_t den) override;
-    bool RunToPaceSyscall(uint16_t, uint64_t, uint64_t) override { return false; }
-    bool ExecuteInjected(uint64_t, uint64_t) override { return false; }
+    // Guest calls through the ROM PACE (paceDiscoverZodiac), the ROM unchanged. RunToPaceSyscall runs until the
+    // 68k code calls trap and leaves the machine on the syscall site's bl, with r0 the 68k state and r1 the trap.
+    // The machine then stops there again after every injected call, until the next Run lets it go on. While a
+    // call is pending the machine runs step by step; with none, Exact and Fast run as before.
+    bool RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    // Runs the call set up in the registers (pc the entry, lr zodiacInjectedReturn) until it returns there.
+    bool ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
+    const ZodiacPaceSites& PaceSites() const { return paceSites; }
+    bool GuestCallPending() const { return guestCall; }
+    bool GuestRegisters(uint32_t (&registers)[16], uint32_t* cpsr = nullptr) const {
+        return imx1MachineRegisters(machine, registers, cpsr);
+    }
+    bool SetGuestRegister(unsigned reg, uint32_t value) { return imx1MachineSetRegister(machine, reg, value); }
+    bool ReadGuest(uint32_t address, void* data, uint32_t size) {
+        return imx1MachineAccessMemory(machine, address, data, size, false);
+    }
+    bool WriteGuest(uint32_t address, const void* data, uint32_t size) {
+        return imx1MachineAccessMemory(machine, address, const_cast<void*>(data), size, true);
+    }
     void AnalogStick(float x, float y) override;
     void SetStickHostTurns(int turns) override;
     bool Save() override;
@@ -175,6 +199,11 @@ class SocIMX1 : public SoC {
     SocIMX1() = default;
     void PumpInput();
     void StateChanged();
+    // Runs until the pc stop or for ticks of guest time. True on the stop.
+    bool RunToStop(uint64_t ticks);
+    void EndGuestCall();
+    ZodiacPaceSites paceSites{};
+    bool guestCall{false};
     // Puts the battery, headphone, cradle and cradle button settings on the machine's inputs.
     bool ApplyBattery();
     bool ApplyHeadphones();

@@ -1,5 +1,6 @@
-// The Zodiac's hard reset on the real 1.1 ROM (ZODIAC_ROM) from a bring-up state
-// (ZODIAC_STATE). Skips without them. ZODIAC_TEST_FAST=1 runs the Fast engine.
+// The Zodiac's hard reset and guest calls on the real 1.1 ROM (ZODIAC_ROM) from a bring-up state
+// (ZODIAC_STATE). Skips without them. ZODIAC_TEST_FAST=1 runs the Fast engine. No argument: guest calls in
+// Preferences;
 // hard-reset-yes and hard-reset-no: a hard reset answered Function or Home.
 // probe MS HOLD_MS DIR: runs MS of guest time, hard resets holding power HOLD_MS and writes a frame a
 // second for 40 s into DIR (PPM), for looking at, pressing key id KEY (keys.h) at 5 s if given.
@@ -114,6 +115,75 @@ void hardReset(SocIMX1& soc, bool erase) {
     assert(!soc.Halted() && !after.promptGrey && (erase ? after.blue > 30000 : after.blue < 10000));
 }
 
+constexpr uint16_t trapEvtGetEvent = 0xa11d, trapTimGetTicks = 0xa0f7, trapMemNumCards = 0xa03a;
+
+// The guest at the syscall site: its registers and the 68k state r0 points at.
+struct Site {
+    uint32_t registers[16], cpsr, state;
+    uint8_t m68k[0x4c];
+};
+
+Site atSite(SocIMX1& soc) {
+    Site site{};
+    assert(soc.GuestRegisters(site.registers, &site.cpsr));
+    assert(site.registers[15] == soc.PaceSites().syscallSite);
+    site.state = site.registers[0];
+    assert(soc.ReadGuest(site.state, site.m68k, sizeof(site.m68k)));
+    return site;
+}
+
+void restore(SocIMX1& soc, const Site& site) {
+    assert(soc.WriteGuest(site.state, site.m68k, sizeof(site.m68k)));
+    for (unsigned r = 0; r < 15; ++r) assert(soc.SetGuestRegister(r, site.registers[r]));
+    assert(soc.SetGuestRegister(16, site.cpsr));
+    assert(soc.SetGuestRegister(15, site.registers[15]));
+}
+
+// A 68k trap with no arguments through the ROM's syscall dispatcher, from the site; D0 after it.
+uint32_t call(SocIMX1& soc, const Site& site, uint16_t trap) {
+    assert(soc.SetGuestRegister(1, trap));
+    assert(soc.SetGuestRegister(14, zodiacInjectedReturn));
+    assert(soc.SetGuestRegister(15, soc.PaceSites().calloutSyscall));
+    assert(soc.ExecuteInjected(4 * hz, hz));
+    uint32_t d0;
+    assert(soc.ReadGuest(site.state + 4, &d0, 4));
+    restore(soc, site);
+    return d0;
+}
+
+// A 68k app waiting for events with no timeout never gets back to EvtGetEvent by itself; a left trigger press
+// wakes it.
+bool runToEvtGetEvent(SocIMX1& soc) {
+    soc.KeyDown(keyIdTriggerLeft);
+    const bool reached = soc.RunToPaceSyscall(trapEvtGetEvent, 20 * hz, hz);
+    soc.KeyUp(keyIdTriggerLeft);
+    return reached;
+}
+
+void calls(SocIMX1& soc) {
+    // REA facts of the 1.1 ROM: the syscall frame's bl and the dispatcher veneer it calls.
+    assert(soc.PaceSites().entry == 0x20167b4c);
+    assert(soc.PaceSites().syscallSite == 0x2016d6b8 && soc.PaceSites().calloutSyscall == 0x20176a78);
+    assert(!soc.GuestCallPending());
+    assert(runToEvtGetEvent(soc));
+    assert(soc.GuestCallPending());
+    const Site site = atSite(soc);
+    assert((site.registers[1] & 0xffff) == trapEvtGetEvent);
+    const uint32_t first = call(soc, site, trapTimGetTicks);
+    const uint32_t second = call(soc, site, trapTimGetTicks);
+    const uint32_t cards = call(soc, site, trapMemNumCards) & 0xffff;
+    std::printf("ticks %u then %u, cards %u\n", first, second, cards);
+    assert(first > 0 && second >= first && cards == 1);
+    // Put back exactly, and the guest goes on from the site.
+    const Site after = atSite(soc);
+    assert(!std::memcmp(after.registers, site.registers, sizeof(site.registers)) && after.cpsr == site.cpsr);
+    assert(!std::memcmp(after.m68k, site.m68k, sizeof(site.m68k)));
+    runFor(soc, 2000);
+    assert(!soc.Halted() && !soc.GuestCallPending());
+    assert(runToEvtGetEvent(soc));
+    runFor(soc, 500);
+    assert(!soc.Halted());
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -134,6 +204,14 @@ int main(int argc, char** argv) {
     if (mode == "hard-reset-yes" || mode == "hard-reset-no") {
         hardReset(*soc, mode == "hard-reset-yes");
         std::printf("zodiac %s %s: PASS\n", mode.c_str(), soc->FastEngine() ? "Fast" : "Exact");
+        return 0;
+    }
+    if (mode.empty()) {
+        // The bring-up state's HotSync app is native ARM and makes no 68k calls. A hard reset kept with Home
+        // opens Preferences, which is a 68k app.
+        hardReset(*soc, false);
+        calls(*soc);
+        std::printf("zodiac guest calls %s: PASS\n", soc->FastEngine() ? "Fast" : "Exact");
         return 0;
     }
     std::fprintf(stderr, "unknown mode\n");

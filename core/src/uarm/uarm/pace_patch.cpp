@@ -341,6 +341,35 @@ bool pacePatchInitTg50(PacePatch* patch, uint32_t romBase, const void* original,
     return true;
 }
 
+bool paceDiscoverZodiac(ZodiacPaceSites* sites, uint32_t romBase, const void* rom, size_t size) {
+    if (!sites) return false;
+    *sites = {};
+    if (!rom || size < sizeof(paceStartPattern) || uint64_t(romBase) + size > uint64_t(UINT32_MAX) + 1) return false;
+    const auto* data = static_cast<const uint8_t*>(rom);
+    size_t entry = SIZE_MAX;
+    for (size_t offset = 0; offset + sizeof(paceStartPattern) <= size; offset += 4) {
+        if (memcmp(data + offset, paceStartPattern, sizeof(paceStartPattern))) continue;
+        if (entry != SIZE_MAX) return false;
+        entry = offset;
+    }
+    // The syscall frame sits where the TG50's does; only its bl to the dispatcher differs.
+    constexpr size_t frame = 0x5b4c, call = 0x5b6c;
+    if (entry == SIZE_MAX || size - entry < frame + sizeof(tg50SyscallFrame) ||
+        paceCountDispatch(data, entry, size) != paceDispatchSites) return false;
+    for (size_t i = 0; i < sizeof(tg50SyscallFrame) / sizeof(tg50SyscallFrame[0]); ++i) {
+        const uint32_t word = readLe32(data, entry + frame + 4 * i);
+        if (entry + frame + 4 * i == entry + call ? (word >> 24) != 0xeb : word != tg50SyscallFrame[i]) return false;
+    }
+    const uint32_t instruction = readLe32(data, entry + call);
+    const int64_t target = int64_t(entry + call) + 8 + (int32_t((instruction & 0xffffff) << 8) >> 6);
+    if (target < 0 || uint64_t(target) + 4 > size) return false;
+    sites->entry = romBase + uint32_t(entry);
+    sites->syscallSite = romBase + uint32_t(entry + call);
+    sites->syscallReturn = sites->syscallSite + 4;
+    sites->calloutSyscall = romBase + uint32_t(target);
+    return true;
+}
+
 #ifndef __EMSCRIPTEN__
 bool pacePatchOriginalTg50EntryForDiagnostic(PacePatch* patch, uint32_t romBase,
                                             const void* original, void* shadow, size_t size) {

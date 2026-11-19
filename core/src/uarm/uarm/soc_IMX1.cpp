@@ -289,6 +289,8 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
         error = "the i.MX1 machine's power-on state could not be kept";
         return nullptr;
     }
+    // Guest calls need the ROM PACE; without it they stay unavailable.
+    paceDiscoverZodiac(&soc->paceSites, zodiacRomBase, soc->rom.data(), soc->rom.size());
     soc->pcm.machine = soc->machine;
     imx1MachineSetPcmOutput(soc->machine, ZodiacPcmSink::word, &soc->pcm);
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeZodiac2, DisplayMode::mode_480x320);
@@ -371,6 +373,8 @@ void SocIMX1::SyncSecondCard() {
 }
 
 void SocIMX1::StateChanged() {
+    // A load or reset ends a guest call.
+    if (machine) EndGuestCall();
     pcm.restart();
     const auto status = imx1MachineGetStatus(machine);
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
@@ -782,7 +786,66 @@ std::string SocIMX1::StopText() const {
 // a CS5 wait, a PLL stall or a delay skip can carry a slice a little past its bound. Run only stops at a slice
 // end, so where the calls are cut and how busy the host is change nothing in the machine. A run can pass the
 // time asked for by up to sliceTicks (about 1 ms) and that carry; the time returned counts it.
+bool SocIMX1::RunToStop(uint64_t ticks) {
+    if (halted) return false;
+    PumpInput();
+    const auto start = imx1MachineGetStatus(machine);
+    auto now = start;
+    Imx1MachineBounds bounds;
+    for (;;) {
+        bounds.retired = 4000;
+        bounds.work = 20000;
+        bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
+        const auto run = imx1MachineRunBounded(machine, bounds);
+        now = run.total;
+        if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
+            run.reason == Imx1MachineYield::invalidBounds) {
+            halted = true;
+            std::cerr << "zodiac: the machine stopped in a guest call: " << StopText() << std::endl;
+            break;
+        }
+        if (run.reason == Imx1MachineYield::pcStop || run.reason == Imx1MachineYield::waiting) break;
+        if (now.time.ticks - start.time.ticks >= ticks) break;
+    }
+    input.advance(now.time.ticks - start.time.ticks);
+    return !halted && imx1MachineAtPcStop(machine);
+}
+
+void SocIMX1::EndGuestCall() {
+    imx1MachineClearPcStop(machine);
+    guestCall = false;
+}
+
+bool SocIMX1::RunToPaceSyscall(uint16_t trap, uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!paceSites.syscallSite || halted || !cyclesPerSecond) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    const uint64_t start = imx1MachineGetStatus(machine).time.ticks;
+    if (!imx1MachineSetPcStop(machine, paceSites.syscallSite)) return false;
+    guestCall = true;
+    for (;;) {
+        const uint64_t passed = imx1MachineGetStatus(machine).time.ticks - start;
+        if (passed >= ticks || !RunToStop(ticks - passed)) break;
+        uint32_t registers[16];
+        if (GuestRegisters(registers) && (registers[1] & 0xffff) == trap) return true;
+        imx1MachineLeavePcStop(machine);
+    }
+    EndGuestCall();
+    return false;
+}
+
+bool SocIMX1::ExecuteInjected(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    if (!guestCall || halted || !cyclesPerSecond) return false;
+    const uint64_t ticks = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * ticksPerSecond / cyclesPerSecond));
+    if (!imx1MachineSetPcStop(machine, zodiacInjectedReturn)) return false;
+    const bool returned = RunToStop(ticks);
+    // The caller puts the registers back on the syscall site, where the machine stops again.
+    if (!halted) imx1MachineSetPcStop(machine, paceSites.syscallSite);
+    return returned;
+}
+
 uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
+    // A run after a guest call lets the guest go on from the syscall site.
+    if (guestCall) EndGuestCall();
     if (halted || !cyclesPerSecond) {
         keyEventQueue->Clear();
         penEventQueue->Clear();

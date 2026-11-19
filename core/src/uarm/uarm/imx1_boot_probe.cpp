@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "CPU.h"
+#include "MMU.h"
 #include "arm920_state.h"
 #include "cpu_diagnostics.h"
 #include "machine_state_archive.h"
@@ -139,6 +140,17 @@ struct Probe {
     const Imx1MachineBounds* bounds = nullptr;
     uint64_t sliceWorkStart = 0;
     bool boundedYield = false;
+    // Guest calls: while armed, runs go step by step and end before the instruction at any of pcs. leave lets the
+    // first instruction of a run that starts on one go; hit says the last run ended on one. Host side, not saved.
+    struct PcStop {
+        bool armed = false, leave = false, hit = false;
+        unsigned count = 0;
+        uint32_t pcs[imx1MachineMaximumPcStops]{};
+        bool at(uint32_t pc) const {
+            for (unsigned i = 0; i < count; ++i) if (pcs[i] == pc) return true;
+            return false;
+        }
+    } pcStop;
     // Passes through the wait loop. A host count for tests, the skip makes fewer of them than idle periods.
     uint64_t idleAdvances = 0;
     bool boundReached() {
@@ -229,10 +241,10 @@ struct Probe {
         bool clocks(uint32_t& perBeat) const override { return p.quietWriteClocks(perBeat); }
     } graphicsDma{*this};
     // graphicsGpu, graphicsDma, graphicsUndo and the lean read rates, left out of the saved layout's size, and
-    // mmcsdCardId, saved in a section of its own, and slot 2's card part, saved in its SD2 section.
+    // mmcsdCardId, saved in a section of its own, slot 2's card part, saved in its SD2 section, and the pc stop.
     static constexpr size_t unsavedBytes = sizeof(GraphicsGpu) + sizeof(GraphicsDma) + sizeof(std::string) +
                                            sizeof(Imx1GraphicsCommands::Undo) + 3 * sizeof(Imx1GraphicsRate) +
-                                           Imx1GraphicsSd::unsavedBytes;
+                                           Imx1GraphicsSd::unsavedBytes + sizeof(PcStop);
     // Attaches the GPU to graphics memory as it is now, or lets it go outside Fast.
     void attachGraphicsGpu() {
         const auto mode = Imx1GraphicsGpu::modeFromEnvironment();
@@ -1750,6 +1762,10 @@ Imx1MachineRun imx1MachineInspect(Imx1Machine* machine) {
 // where the slice ends (a stop, a bound or a refused charge).
 static bool runStep(Probe* p, uint64_t idleHclkLimit) {
     if (p->boundReached()) return false;
+    if (p->pcStop.armed) {
+        if (!p->pcStop.leave && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u)) { p->pcStop.hit = true; return false; }
+        p->pcStop.leave = false;
+    }
     const uint64_t step = p->retired;
     if (!p->result.gpioEventApplied && p->options.gpioEventAfterInstructions && step == p->options.gpioEventAfterInstructions) {
         if (!p->chargeDeferred()) { p->clockBoundary(); return false; }
@@ -2042,7 +2058,7 @@ static void runSlice(Imx1Machine* machine, uint32_t retiredBudget, uint64_t idle
             scanHalted = scanHaltOff = false;
             for (;;) {
                 if (quietCycles < leanMinimumSpan || linesPending || p->blPrefix || slice + 1 >= retiredBudget ||
-                    cpuArm920ClockMode(p->cpu) != quietMode) break;
+                    cpuArm920ClockMode(p->cpu) != quietMode || p->pcStop.armed) break;
                 uint64_t hard = retiredBudget - slice - 1;
                 if (p->bounds) {
                     const uint64_t used = p->work - p->sliceWorkStart;
@@ -2341,6 +2357,7 @@ Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine* machine, const Imx1Mach
     if (before.time.compare(bounds.deadline) >= 0) { run.reason = Imx1MachineYield::deadline; return run; }
     if (!bounds.work) { run.reason = Imx1MachineYield::work; return run; }
     p->bounds = &bounds; p->sliceWorkStart = p->work; p->boundedYield = false;
+    p->pcStop.hit = false;
     runSlice(machine, bounds.retired, UINT64_MAX);
     p->bounds = nullptr; p->boundedYield = false;
     run.total = imx1MachineGetStatus(machine);
@@ -2349,11 +2366,74 @@ Imx1MachineBoundedRun imx1MachineRunBounded(Imx1Machine* machine, const Imx1Mach
     run.elapsed = run.total.time.since(before.time);
     if (run.workDelta > bounds.work) run.workOvershoot = run.workDelta - bounds.work;
     if (run.total.time.compare(bounds.deadline) > 0) run.timeOvershoot = run.total.time.intervalSince(bounds.deadline);
-    run.reason = p->terminal ? Imx1MachineYield::terminal :
+    run.reason = p->terminal ? Imx1MachineYield::terminal : p->pcStop.hit ? Imx1MachineYield::pcStop :
         run.total.status == Imx1MachineStatus::waiting ? Imx1MachineYield::waiting :
         run.total.time.compare(bounds.deadline) >= 0 ? Imx1MachineYield::deadline :
         run.workDelta >= bounds.work ? Imx1MachineYield::work : Imx1MachineYield::retired;
     return run;
+}
+
+bool imx1MachineSetPcStops(Imx1Machine* machine, const uint32_t* pcs, unsigned count) {
+    auto* p = machine->probe;
+    if (p->bounds || p->stopped || p->terminal || !count || count > imx1MachineMaximumPcStops) return false;
+    p->pcStop = {};
+    p->pcStop.armed = true;
+    p->pcStop.count = count;
+    for (unsigned i = 0; i < count; ++i) p->pcStop.pcs[i] = pcs[i] & ~1u;
+    return true;
+}
+bool imx1MachineSetPcStop(Imx1Machine* machine, uint32_t pc) { return imx1MachineSetPcStops(machine, &pc, 1); }
+void imx1MachineClearPcStop(Imx1Machine* machine) { machine->probe->pcStop = {}; }
+void imx1MachineLeavePcStop(Imx1Machine* machine) {
+    auto* p = machine->probe;
+    p->pcStop.leave = p->pcStop.armed && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u);
+}
+bool imx1MachineAtPcStop(const Imx1Machine* machine) {
+    const auto* p = machine->probe;
+    return p->pcStop.armed && p->pcStop.hit && p->pcStop.at(cpuGetRegisters(p->cpu)[15] & ~1u);
+}
+bool imx1MachineRegisters(const Imx1Machine* machine, uint32_t (&registers)[16], uint32_t* cpsr) {
+    const auto* p = machine->probe;
+    if (p->bounds || p->stopped || p->terminal) return false;
+    std::memcpy(registers, cpuGetRegisters(p->cpu), sizeof(registers));
+    if (cpuIsThumb(p->cpu)) registers[15] |= 1;
+    if (cpsr) *cpsr = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+    return true;
+}
+bool imx1MachineSetRegister(Imx1Machine* machine, unsigned reg, uint32_t value) {
+    auto* p = machine->probe;
+    if (p->bounds || p->stopped || p->terminal || reg > ARM_REG_NUM_CPSR || p->blPrefix || p->interruptedPrefixCount)
+        return false;
+    // The CPSR keeps its mode and state bits; only the flags and interrupt masks change.
+    if (reg == ARM_REG_NUM_CPSR) {
+        const uint32_t now = cpuGetRegExternal(p->cpu, ARM_REG_NUM_CPSR);
+        value = (value & 0xf00000c0) | (now & ~0xf00000c0u);
+    }
+    cpuSetReg(p->cpu, uint_fast8_t(reg), value);
+    return true;
+}
+bool imx1MachineAccessMemory(Imx1Machine* machine, uint32_t address, void* data, uint32_t size, bool write) {
+    auto* p = machine->probe;
+    if (p->bounds || p->stopped || p->terminal) return false;
+    if (!size) return true;
+    // Only mapped SDRAM and SRAM pages, so a call never reaches a register. The probe maps the whole bus through
+    // one callback, so the CPU's own RAM range checks don't apply.
+    if (uint64_t(address) + size > 0x100000000ull) return false;
+    for (uint64_t va = address; va < uint64_t(address) + size; va = (va | 0x3ff) + 1) {
+        const auto t = mmuTranslateInspect(cpuGetMMU(p->cpu), uint32_t(va), write);
+        if (!MMU_TRANSLATE_RESULT_OK(t)) return false;
+        const uint32_t pa = MMU_TRANSLATE_RESULT_PA(t);
+        const uint32_t last = pa + uint32_t(std::min<uint64_t>(0x3ff - (va & 0x3ff), uint64_t(address) + size - 1 - va));
+        if (!Imx1Bootstrap::isRamAddress(pa) || !Imx1Bootstrap::isRamAddress(last)) return false;
+    }
+    auto* bytes = static_cast<uint8_t*>(data);
+    for (uint32_t i = 0; i < size;) {
+        const uint32_t at = address + i;
+        const uint_fast8_t width = !(at & 3) && size - i >= 4 ? 4 : !(at & 1) && size - i >= 2 ? 2 : 1;
+        if (!cpuMemOpExternal(p->cpu, bytes + i, at, width, write)) return false;
+        i += width;
+    }
+    return true;
 }
 
 uint64_t imx1MachineIdleAdvances(const Imx1Machine* machine) { return machine->probe->idleAdvances; }
