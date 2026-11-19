@@ -12,7 +12,7 @@ find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Network PrintSupport Concurrent
 find_package(ZLIB REQUIRED)
 # xcb sets the X input focus on the embedded Palm window.
 find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
+if(PkgConfig_FOUND AND NOT APPLE AND NOT WIN32)
   pkg_check_modules(XCB IMPORTED_TARGET xcb)
 endif()
 # The link protocol (../link) with Monocypher, the hub and the window side of it.
