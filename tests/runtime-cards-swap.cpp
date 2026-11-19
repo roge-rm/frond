@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -141,10 +142,25 @@ int main(int argc, char** argv) {
         assert(cards.Stage(manifest, empty, machine.string(), true).empty());
         assert(!empty.card[0] && empty.dropped.size() == 1 && empty.dropped[0].first == 0 && empty.dropped[0].second == key);
     }
-    // Settled for another machine: the write is in the file and the generations are gone.
+    // Settled for another machine: the write is in the file and the generations are gone. A settle
+    // cut off before its file replaced the card (temp and mark left) starts again.
     const auto drawer = other / "sd.frondsd";
+    const auto aside = root / "aside";
+    std::filesystem::create_directories(aside);
+    for (const auto& entry : std::filesystem::directory_iterator(other))
+        if (!entry.path().filename().string().rfind(".gen-sd.frondsd-", 0))
+            std::filesystem::copy_file(entry.path(), aside / entry.path().filename());
+    { std::ofstream(other / ".settled-sd.frondsd.tmp") << "partial"; std::ofstream(other / ".settling-sd.frondsd"); }
     assert(run("settle-linked " + drawer.string() + " " + key).rfind("ok settled ", 0) == 0);
     assert(generations(other, "sd.frondsd") == 0);
+    assert(!std::filesystem::exists(other / ".settled-sd.frondsd.tmp") && !std::filesystem::exists(other / ".settling-sd.frondsd"));
+    // Cut off after the file replaced the card (mark left, no temp): the stale generations go.
+    for (const auto& entry : std::filesystem::directory_iterator(aside)) std::filesystem::copy_file(entry.path(), other / entry.path().filename());
+    { std::ofstream(other / ".settling-sd.frondsd"); }
+    assert(generations(other, "sd.frondsd") > 0);
+    assert(run("settle-linked " + drawer.string() + " " + key) == "ok settled 0");
+    assert(generations(other, "sd.frondsd") == 0 && !std::filesystem::exists(other / ".settling-sd.frondsd"));
+    std::filesystem::remove_all(aside);
     {
         frondSdFile::Info info;
         std::vector<uint32_t> table;

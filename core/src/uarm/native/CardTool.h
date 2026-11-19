@@ -22,6 +22,7 @@
 #include <fstream>
 #include <string>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <vector>
 
@@ -416,7 +417,32 @@ inline bool linkedUnsettled(const std::filesystem::path& card) {
         const auto name = it->path().filename().string();
         if (!name.compare(0, 6, ".held-") && FileCardBacking::GeneratedName(tag, name.substr(6))) return true;
     }
+    std::error_code exists;
+    if (std::filesystem::exists(dir / (".settling-" + tag), exists)) return true;
     return frondStorage::hasChanges(card) || !frondStorage::journalFiles(card).empty();
+}
+
+// A settle-linked cut off part way, finished or undone. The settled file is written to
+// .settled-<file>.tmp, then .settling-<file> marks it complete, then it replaces the card and the
+// generations go. With the mark: the temp still there means the card wasn't replaced (the temp
+// goes, the generations stay); no temp means it was (the generations go). Card lock held.
+inline bool finishSettle(const std::filesystem::path& card) {
+    auto dir = card.parent_path();
+    if (dir.empty()) dir = ".";
+    const auto tag = card.filename().string();
+    const auto temp = dir / (".settled-" + tag + ".tmp"), mark = dir / (".settling-" + tag);
+    std::error_code ec;
+    const bool marked = std::filesystem::exists(mark, ec);
+    const bool written = std::filesystem::exists(temp, ec);
+    if (!marked) {
+        if (written) std::filesystem::remove(temp, ec);
+        return true;
+    }
+    if (written) std::filesystem::remove(temp, ec);
+    else FileCardBacking::DiscardGenerations(card);
+    if (!frondStorage::syncDir(dir)) return false;
+    std::filesystem::remove(mark, ec);
+    return !ec && frondStorage::syncDir(dir);
 }
 
 // Writes a linked card's generations into its file and drops them, as frond-68k's take-out does, so
@@ -427,6 +453,7 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
     CardLock lock(card);
     if (lock.fd == -1) return fail("read", "Could not read the card file.");
     if (lock.fd == -2) return fail("busy", "The card is in a running machine.");
+    if (!finishSettle(card)) return fail("write", "Couldn't write the card file.");
     if (linkedUnsettled(card)) return fail("unsettled", frondStorage::unsettledMessage);
     auto dir = card.parent_path();
     if (dir.empty()) dir = ".";
@@ -449,13 +476,33 @@ inline Result settleLinked(const std::filesystem::path& card, const std::string&
     if (!backing) return fail("unsettled", "The card's saved changes can't be read.");
     const uint64_t generation = backing->RootGenerationId();
     std::array<uint8_t, frondMachine::identityBytes> identity{};
+    const auto tag = card.filename().string();
+    const auto temp = dir / (".settled-" + tag + ".tmp"), mark = dir / (".settling-" + tag);
     const bool ok = frondSession::writeSdFromReader(
-        card, backing->Size(), [&](uint64_t off, uint64_t n, void* out) { return backing->Read(off, n, out); }, identity, 1,
+        temp, backing->Size(), [&](uint64_t off, uint64_t n, void* out) { return backing->Read(off, n, out); }, identity, 1,
         info.classic ? frondSession::msShape(size) : frondSession::StoredShape{});
     backing.reset();
-    if (!ok || !frondStorage::syncDir(dir)) return fail("write", "Couldn't write the card file.");
-    FileCardBacking::DiscardGenerations(card);
-    frondStorage::syncDir(dir);
+    if (!ok || !frondStorage::syncDir(dir)) {
+        std::filesystem::remove(temp, ec);
+        return fail("write", "Couldn't write the card file.");
+    }
+    // The mark, then the swap: see finishSettle.
+    {
+        const int m = ::open(mark.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+        const bool made = m >= 0 && ::fsync(m) == 0;
+        if (m >= 0) ::close(m);
+        if (!made || !frondStorage::syncDir(dir)) {
+            std::filesystem::remove(mark, ec);
+            std::filesystem::remove(temp, ec);
+            return fail("write", "Couldn't write the card file.");
+        }
+    }
+    if (::rename(temp.c_str(), card.c_str()) != 0) {
+        std::filesystem::remove(temp, ec);
+        std::filesystem::remove(mark, ec);
+        return fail("write", "Couldn't write the card file.");
+    }
+    if (!frondStorage::syncDir(dir) || !finishSettle(card)) return fail("write", "Couldn't write the card file.");
     return {true, "", "settled " + std::to_string(generation)};
 }
 
@@ -464,11 +511,21 @@ inline bool sameInode(const std::filesystem::path& a, const std::filesystem::pat
     struct stat x{}, y{};
     return ::lstat(a.c_str(), &x) == 0 && ::lstat(b.c_str(), &y) == 0 && x.st_dev == y.st_dev && x.st_ino == y.st_ino;
 }
-// A rename that never replaces `to`. A crash between the link and the unlink leaves both names;
-// the next call finishes it.
+// A rename that never replaces `to`: renameat2 with RENAME_NOREPLACE, or where the kernel or the
+// disk lacks it, a hard link and an unlink, or where there are no hard links either (exFAT), a
+// rename after checking `to` is free (the card lock and the library lock keep others out). A crash
+// between the link and the unlink leaves both names; the next call finishes it.
 inline bool moveNoReplace(const std::filesystem::path& from, const std::filesystem::path& to) {
-    if (::link(from.c_str(), to.c_str()) != 0 && !(errno == EEXIST && sameInode(from, to))) return false;
-    return ::unlink(from.c_str()) == 0;
+    if (sameInode(from, to)) return ::unlink(from.c_str()) == 0;
+#if defined(SYS_renameat2)
+    if (::syscall(SYS_renameat2, AT_FDCWD, from.c_str(), AT_FDCWD, to.c_str(), 1u /* RENAME_NOREPLACE */) == 0) return true;
+    if (errno == EEXIST) return false;
+#endif
+    if (::link(from.c_str(), to.c_str()) == 0) return ::unlink(from.c_str()) == 0;
+    if (errno == EEXIST) return false;
+    struct stat st{};
+    if (::lstat(to.c_str(), &st) == 0 || errno != ENOENT) return false;
+    return ::rename(from.c_str(), to.c_str()) == 0;
 }
 
 // Moves a linked card file and its generations to TO, under TO's name, never replacing a file. The
@@ -487,6 +544,7 @@ inline Result moveLinked(const std::filesystem::path& from, const std::filesyste
     CardLock lock(fromHere ? from : to);
     if (lock.fd == -1) return fail("read", "Could not read the card file.");
     if (lock.fd == -2) return fail("busy", "The card is in a running machine.");
+    if (fromHere && !finishSettle(from)) return fail("write", "Couldn't write the card file.");
     if (fromHere && linkedUnsettled(from)) return fail("unsettled", frondStorage::unsettledMessage);
     struct stat a{}, b{};
     if (::stat(fromDir.c_str(), &a) != 0 || ::stat(toDir.c_str(), &b) != 0) return fail("write", "The output folder doesn't exist.");
@@ -517,7 +575,7 @@ inline Result moveLinked(const std::filesystem::path& from, const std::filesyste
             }
             same = same && x.eof() && y.eof();
         }
-        if (!same || ::link(temp.c_str(), to.c_str()) != 0) { std::filesystem::remove(temp, ec); return fail("write", "Couldn't copy the card file."); }
+        if (!same || !moveNoReplace(temp, to)) { std::filesystem::remove(temp, ec); return fail("write", "Couldn't copy the card file."); }
         std::filesystem::remove(temp, ec);
         frondStorage::syncDir(toDir);
         if (::unlink(from.c_str()) != 0) return fail("write", "The card was copied but the old file couldn't be removed.");
