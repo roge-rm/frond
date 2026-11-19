@@ -3,6 +3,13 @@
 #include <windows.h>
 #include <errno.h>
 #include <io.h>
+#include <fcntl.h>
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 0
+#endif
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW 0
+#endif
 #define LOCK_SH 1
 #define LOCK_EX 2
 #define LOCK_NB 4

@@ -14,7 +14,11 @@
 #include <QStandardPaths>
 #include <QUuid>
 #include <fcntl.h>
+#ifdef _WIN32
+#include "winshim/sys/file.h"
+#else
 #include <sys/file.h>
+#endif
 #include <unistd.h>
 #include "CardStore.h"
 #include "DesktopClient.h"

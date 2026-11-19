@@ -1,5 +1,5 @@
-# The Windows build in MSYS2 UCRT64 (gcc). For now it builds the cores only
-# (out/frond.exe and out/frond-68k.exe).
+# The Windows build in MSYS2 UCRT64 (gcc): the cores, the desktop, a zip and an installer, and a short
+# start of the built programs.
 name: Windows
 
 on:
@@ -40,11 +40,48 @@ jobs:
             libslirp:p
             boost:p
             zlib:p
+            qt6-base:p
+            qt6-tools:p
+            qt6-svg:p
+            qt6-imageformats:p
 
       - name: Build the cores
         run: |
           set -o pipefail
           make -k -j4 BUILD_JOBS=4 out/frond out/frond-68k 2>&1 | tee build.log
+
+      - name: Build the desktop
+        if: always()
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFROND_PREPARED_SOURCE="$PWD/core" 2>&1 | tee -a build.log
+          cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
+
+      - name: Make the zip and the installer
+        run: |
+          set -o pipefail
+          sh packaging/windows/make-package.sh 2>&1 | tee -a build.log
+
+      - name: Start the built programs
+        run: |
+          set -o pipefail
+          cd out/Frond
+          ./frond-68k.exe --version
+          # The ARM core has no version flag; it must start and print its usage, not fail to load.
+          set +e
+          ./frond.exe > core.out 2>&1 < /dev/null
+          code=$?
+          cat core.out
+          # A loader failure (missing DLL) gives a code like 0xC0000135, which is above 126 here.
+          if [ "$code" -ge 126 ]; then echo "core exited with $code"; exit 1; fi
+          # A short run of the desktop: it must stay up for a few seconds.
+          QT_QPA_PLATFORM=offscreen ./frond-desktop.exe &
+          pid=$!
+          sleep 5
+          kill -0 "$pid" || { echo "desktop exited early"; exit 1; }
+          kill "$pid"
 
       # While the Windows port is unfinished: compile every core source on its own, so the log lists
       # all the errors and not only the first library to fail.
@@ -63,3 +100,11 @@ jobs:
           name: build-log-windows
           path: build.log
           if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frond-windows
+          path: |
+            out/Frond-*-windows-x64.zip
+            out/Frond-*-setup.exe
+          if-no-files-found: error
