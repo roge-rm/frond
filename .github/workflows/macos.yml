@@ -41,7 +41,7 @@ jobs:
           set -o pipefail
           cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DFROND_PREPARED_SOURCE="$PWD/core" -DCMAKE_PREFIX_PATH="$(brew --prefix)" 2>&1 | tee -a build.log
-          cmake --build build/desktop --target frond-desktop 2>&1 | tee -a build.log
+          cmake --build build/desktop --target frond-desktop -- -k 0 2>&1 | tee -a build.log
 
       - name: Make the app and the dmg
         run: |
