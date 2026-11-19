@@ -49,6 +49,11 @@ public:
             Restart(now, retired, guestTicks, guestCpu, sdlCpu);
             return false;
         }
+        if (retired < start.retired || guestTicks < start.guestTicks) {  // counters went back, as after a state load
+            draws = frames = drawUsec = 0;
+            Restart(now, retired, guestTicks, guestCpu, sdlCpu);
+            return false;
+        }
         const uint64_t wall = now - start.wall;
         const double seconds = wall / 1e6;
         const uint64_t instructions = retired - start.retired;
