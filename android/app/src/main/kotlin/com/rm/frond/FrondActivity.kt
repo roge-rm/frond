@@ -390,8 +390,9 @@ open class FrondActivity : SDLActivity() {
     // it runs (RunningModel); first the cards an older Frond kept in dana-cards/ move into the
     // machine and Cards. 68k devices with no card slot get nothing. Runs on SDL's thread.
     private fun cardArguments(): List<String> {
-        val folder = machineFolder() ?: return emptyList()
         val device = launchDevice()
+        val folder = machineFolder() ?: return if (device.runs68k && device.linkedCards)
+            sessionPath?.let { Cards.outsideArguments(File(it)) }.orEmpty() else emptyList()
         if ((device.runs68k && !device.linkedCards) || runLock == null) return emptyList()
         return try {
             if (device.runs68k) {

@@ -298,7 +298,9 @@ class DanaCardsTest {
         assertEquals(setOf("Notes", "Photos"), entries.keys)
         val notes = entries["Notes"]!!
         assertTrue(notes.inDrawer); assertEquals("mmc", notes.card.type); assertEquals(second, notes.card.key); assertNull(notes.card.machine)
-        assertTrue(File(notes.dir, ".gen-sd.frondsd-root").isFile)
+        // Its saved changes were written into it before the move.
+        assertTrue(listOf("settle-linked", loose.path, second) in toolCalls)
+        assertFalse(File(notes.dir, ".gen-sd.frondsd-root").exists())
         assertEquals("ms", entries["Photos"]!!.card.kind)
         val log = Cards.movesLog(library).readLines()
         assertEquals(3, log.size)
@@ -306,5 +308,60 @@ class DanaCardsTest {
         assertTrue(log.any { it.contains("left ${busy.nameWithoutExtension} in") && it.endsWith("The card is in use.") })
         // Nothing left behind for the refused card.
         assertEquals(2, library.listFiles { f -> f.isDirectory }!!.size)
+    }
+
+    @Test fun cutOffUnlinkedMoveKeepsItsSavedChanges() {
+        val loose = oldCard(second, "Notes")
+        File(old, ".gen-${loose.name}-root").writeText("root")
+        File(old, ".gen-${loose.name}-1").writeText("one")
+        // The tool moved one generation into the entry, then failed.
+        Cards.tool = { args, l, c ->
+            if (args[0] == "move-linked") {
+                File(old, ".gen-${loose.name}-1").renameTo(File(File(args[2]).parentFile, ".gen-sd.frondsd-1"))
+                "error write Couldn't move the card's saved changes."
+            } else "error unsettled The card's saved changes can't be read."
+        }
+        // Settling fails, so the card stays with its changes.
+        assertEquals(0, Cards.moveUnlinkedIn(sessions, old))
+        assertTrue(File(old, ".gen-${loose.name}-1").isFile)
+        assertTrue(Cards.entries(library).isEmpty())
+        // Settled now (the fake drops nothing), the move is cut off part way: the entry stays.
+        Cards.tool = { args, l, c ->
+            when (args[0]) {
+                "settle-linked" -> "ok settled 0"
+                else -> {
+                    File(old, ".gen-${loose.name}-1").renameTo(File(File(args[2]).parentFile, ".gen-sd.frondsd-1"))
+                    "error write Couldn't move the card's saved changes."
+                }
+            }
+        }
+        assertEquals(0, Cards.moveUnlinkedIn(sessions, old))
+        val entry = Cards.entries(library).single()
+        assertTrue(File(entry.dir, ".gen-sd.frondsd-1").isFile); assertFalse(entry.inDrawer)
+        assertNull(Cards.reconcile(sessions))
+        assertTrue(File(entry.dir, ".gen-sd.frondsd-1").isFile)
+        // The next start-up finishes the move into the same entry.
+        Cards.tool = ::fakeTool
+        assertEquals(1, Cards.moveUnlinkedIn(sessions, old))
+        assertFalse(loose.exists())
+        val done = Cards.entries(library).single()
+        assertEquals(entry.card.id, done.card.id); assertTrue(done.inDrawer)
+        assertTrue(File(done.dir, ".gen-sd.frondsd-1").isFile); assertTrue(File(done.dir, ".gen-sd.frondsd-root").isFile)
+    }
+
+    @Test fun sharedCardOpensInTheSecondSave() {
+        val card = oldCard(key, "Games")
+        val first = machine("Dana", rows = row(0, card, key))
+        val copy = machine("Dana 2", rows = row(0, card, key))
+        assertEquals(1, Cards.moveLinkedIn(sessions, first, old))
+        assertFalse(Cards.readSlot(first).swap)
+        assertEquals(0, Cards.moveLinkedIn(sessions, copy, old))
+        assertTrue(Cards.readSlot(copy).swap); assertNull(Cards.readSlot(copy).card)
+        assertEquals(listOf("--card-swap"), Cards.launchArguments(sessions, copy, true))
+        assertTrue(Cards.movesLog(copy).readText().contains("is in Cards as Games"))
+        // A save outside the sessions folder that links it loads with the slot empty too.
+        val outside = File(tmp.root, "outside.frond")
+        fixture("frond-linked-sd 3\n" + row(0, card, key), into = outside)
+        assertEquals(listOf("--card-swap"), Cards.outsideArguments(outside))
     }
 }

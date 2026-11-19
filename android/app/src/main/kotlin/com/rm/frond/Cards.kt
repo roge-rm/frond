@@ -414,19 +414,35 @@ object Cards {
         val card = readCard(entryDir(library, id))
         if (file == null || card == null) return "Couldn't move the card."
         CardFile.notReady(File(dir, file))?.let { return it }
-        // A card frond-68k left saved changes beside goes in with them written into its file.
-        val frond = sessionFile(dir)
-        if (linkedSession(frond) && hasGenerations(dir, file)) {
-            val key = card.key ?: linkedRowFor(frond, n)?.key?.takeIf { validKey(it) } ?: return "The card's saved changes can't be read."
-            val r = runTool(arrayOf("settle-linked", File(dir, file).path, key))
-            if (!r.ok) return r.message
-        }
         val slot = readSlot(dir, n).copy(present = true, swap = true, card = id)
         if (!writeSlot(dir, slot, n)) return "Couldn't move the card."
+        // A card frond-68k left saved changes beside goes in with them written into its file.
+        settleGenerations(library, dir, n)?.let { return it }
         if (!File(dir, file).renameTo(File(entryDir(library, id), fileOfKind(card.kind)))) return "Couldn't move the card into Cards. $SAME_DISK"
         writeSlot(dir, slot.copy(card = null), n)
         writeCard(entryDir(library, id), card.copy(machine = null))
         return null
+    }
+
+    // Writes the saved changes frond-68k left beside slot n's card file (.gen-<file>-*) into the file,
+    // with the key from the slot's library card or the save's row, so a copy or a move takes them.
+    // The slot gets swap first: the next start loads the changed card empty and attaches it again.
+    // Only frond-68k machines: a frond-68k save, or no save yet and a card with a frond-68k key (the
+    // ARM core keeps its own generations, which its save settles). Machine held. Null on success or
+    // when there are none.
+    fun settleGenerations(library: File, dir: File, n: Int): String? {
+        val file = cardFileIn(dir, n) ?: return null
+        if (!hasGenerations(dir, file)) return null
+        val frond = sessionFile(dir)
+        val linked = linkedSession(frond)
+        if (!linked && frond != null && frond.isFile) return null
+        val slot = readSlot(dir, n)
+        val key = slot.card?.let { readCard(entryDir(library, it)) }?.key?.takeIf { validKey(it) }
+            ?: (if (linked) linkedRowFor(frond, n)?.key?.takeIf { validKey(it) } else null)
+            ?: return if (linked) "The card's saved changes can't be read." else null
+        if (!slot.swap && !writeSlot(dir, slot.copy(present = true, swap = true), n)) return "Couldn't write the card's saved changes."
+        val r = runTool(arrayOf("settle-linked", File(dir, file).path, key))
+        return if (r.ok) null else r.message
     }
 
     // A drawer card into an empty slot. Library lock and machine held.
@@ -519,6 +535,8 @@ object Cards {
                     progress: ((Long, Long) -> Unit)? = null): String? {
         var source = File(dir, file)
         var journal: File? = null
+        // frond-68k's saved changes beside the file: settleGenerations first.
+        if (linkedSession(sessionFile(dir)) && hasGenerations(dir, file)) return "unsettled"
         if (hasJournals(dir, file) || !settled(dir, file, false)) {
             val settle = sdSettleOf(dir, second = file == "sd2.frondsd")
             when {
@@ -632,6 +650,8 @@ object Cards {
         for (e in known) {
             if (e.inDrawer || e.card.id in claimed || e.card.id in skippedClaims) continue
             if (e.card.machine != null && e.card.machine in skippedNames) continue
+            // Saved changes of a card whose move in was cut off: the next start-up finishes it.
+            if (hasGenerations(e.dir, fileOfKind(e.card.kind))) continue
             // A machine that isn't saved yet, holding the card it was given while running.
             val hinted = e.card.machine?.let { File(sessions, it) }
             if (hinted != null && sessionFile(hinted) == null && (0 until SLOTS).any { n ->
@@ -678,6 +698,12 @@ object Cards {
     // and takes it with sd2-put-in (secondPutIn). frond-68k (`m68k`) only takes --card-swap: it
     // loads a slot whose saved card isn't in the machine folder empty, and attachArgument() says
     // what goes in.
+    // A frond-68k save outside the sessions folder: --card-swap when a card it links is gone (moved
+    // into Cards at start-up), so it loads with that slot empty instead of refusing. Under swap its
+    // other cards load empty too, as they aren't in its folder.
+    fun outsideArguments(frond: File): List<String> =
+        if (linkedRows(frond).any { !File(it.path).exists() }) listOf("--card-swap") else emptyList()
+
     fun launchArguments(sessions: File, dir: File, m68k: Boolean = false): List<String> {
         val slot = readSlot(dir)
         if (!slot.swap && !readSlot(dir, 1).swap) return emptyList()
@@ -845,6 +871,7 @@ object Cards {
             val slot = readSlot(dir, n)
             val file = cardFileIn(dir, n) ?: return null
             val id = slot.card ?: return "Couldn't move the card into Cards."
+            settleGenerations(library, dir, n)?.let { return it }
             if (settled(dir, file, slot.swap)) return toDrawer(library, dir, id, n)
         }
         // Copied outside the lock, then renamed in under it.
@@ -1109,6 +1136,7 @@ object Cards {
         val lock = tryRunLock(holder) ?: return null to "${machineName(holder)} is running. Stop it first."
         val held = machineFileOf(card.kind, n)
         CardFile.notReady(File(holder, held))?.let { lock.close(); return null to it }
+        settleGenerations(library, holder, n)?.let { lock.close(); return null to it }
         val slot = readSlot(holder, n)
         if (settled(holder, held, slot.swap)) return Source(File(holder, held), card, holder, lock, n) to null
         val settle = sdSettleOf(holder, second = n != 0)
@@ -1357,31 +1385,45 @@ object Cards {
     } catch (e: Exception) { "sd" }
 
     // When a machine opens, each card its save links in `oldRoot` moves into its folder with its
-    // saved changes and gets a library entry. Run lock held. Returns the cards moved.
+    // saved changes and gets a library entry. A linked card that is gone and not in the machine
+    // folder (another save that linked it moved it first) leaves its slot swapped, so the machine
+    // loads with the slot empty. Run lock held. Returns the cards moved.
     fun moveLinkedIn(sessions: File, dir: File, oldRoot: File): Int {
         val root = oldRoot.absoluteFile.normalize()
-        val old = linkedRows(sessionFile(dir)).filter { File(it.path).absoluteFile.parentFile?.normalize() == root }
-        if (old.isEmpty()) return 0
+        val rows = linkedRows(sessionFile(dir))
+        if (rows.isEmpty()) return 0
         val library = libraryFor(sessions)
         library.mkdirs()
         var moved = 0
         LibraryLock(library).use { lock ->
             if (!lock.ok) return 0
-            for (row in old) {
+            for (row in rows) {
                 val file = if (row.stick) "ms.frondms" else if (row.n != 0) "sd2.frondsd" else "sd.frondsd"
                 val from = File(row.path)
                 val target = File(dir, file)
                 val meta = oldMeta(from)
                 val there = from.isFile
+                val old = from.absoluteFile.parentFile?.normalize() == root
                 // A move cut off after the card tool: the card is in the folder, its entry not made yet.
-                val resumed = !there && target.isFile && readSlot(dir, row.n).card == null && meta.isFile
-                if (!there && !resumed) continue
+                val resumed = old && !there && target.isFile && readSlot(dir, row.n).card == null && meta.isFile
+                if (!there && !resumed && cardFileIn(dir, row.n) == null) {
+                    val slot = readSlot(dir, row.n)
+                    if (!slot.swap) {
+                        writeSlot(dir, slot.copy(present = true, swap = true), row.n)
+                        val where = entries(library).lastOrNull { it.card.key == row.key }?.card?.name
+                        logMove(dir, if (where == null) "${row.key} isn't at ${row.path}, its slot loads empty"
+                            else "${row.key} isn't at ${row.path}, it is in Cards as $where, its slot loads empty")
+                    }
+                    continue
+                }
+                if (!old || (!there && !resumed)) continue
                 if (there && cardFileIn(dir, row.n) != null) {
                     logMove(dir, "left ${row.key} in $root: the slot already has a card file")
                     continue
                 }
                 // A Files change on a stick that a crash cut off is finished first, as attaching it did.
                 if (there && row.stick) try { CardFile.settle(from) } catch (e: Throwable) { }
+                val before = if (there) from.lastModified() else 0L
                 if (there) {
                     val r = runTool(arrayOf("move-linked", from.path, target.path))
                     if (!r.ok) {
@@ -1394,7 +1436,9 @@ object Cards {
                 val name = freeCardName(library, oldName(meta) ?: "${machineName(dir)} card${if (row.n == 0) "" else " 2"}")
                 val card = Card(newId(), name, if (row.stick) "ms" else "sd", now(), dir.name, cardHeader(target)?.second ?: 0L, identity,
                     row.writeProtected, if (row.stick) "sd" else row.protocol, row.key.takeIf { validKey(it) })
-                val slot = readSlot(dir, row.n).copy(present = true, card = card.id, name = card.name)
+                // Copied from another disk: a new file the save doesn't know, so it loads as a swap.
+                val copied = there && target.lastModified() != before
+                val slot = readSlot(dir, row.n).let { it.copy(present = true, card = card.id, name = card.name, swap = it.swap || copied) }
                 val entry = entryDir(library, card.id)
                 if (!entry.mkdirs() || !writeCard(entry, card) || !writeSlot(dir, slot, row.n)) {
                     // The card stays in the folder, where the save finds it; reconcile gives it an entry.
@@ -1413,7 +1457,10 @@ object Cards {
 
     // Cards in `oldRoot` that no save in `sessions` links go into the drawer, unlinked, so they
     // don't go unseen. Not while a machine still to move its cards in could link them: every save
-    // is read first. Logged in the library's card-moves.log. Returns the cards moved.
+    // is read first. Saved changes beside a card are written into it first (settle-linked), then the
+    // entry is made and move-linked moves the card in. An entry that already holds the card or some
+    // of its saved changes is never removed; the next start-up finishes the move into it. Logged in
+    // the library's card-moves.log. Returns the cards moved.
     fun moveUnlinkedIn(sessions: File, oldRoot: File): Int {
         val files = oldRoot.listFiles { f -> f.isFile && (f.name.endsWith(".frondsd") || f.name.endsWith(".frondms")) &&
             validKey(f.nameWithoutExtension) }.orEmpty().sortedBy { it.name }
@@ -1434,14 +1481,35 @@ object Cards {
                 val key = from.nameWithoutExtension
                 val stick = from.name.endsWith(".frondms")
                 val meta = oldMeta(from)
+                val kind = if (stick) "ms" else "sd"
+                if (stick) try { CardFile.settle(from) } catch (e: Throwable) { }
+                // A move cut off part way: its entry, with no card file yet, takes the rest.
+                val resume = entries(library).lastOrNull { !it.inDrawer && it.card.key == key && it.card.machine == null && it.card.kind == kind }
+                if (resume != null) {
+                    val r = runTool(arrayOf("move-linked", from.path, File(resume.dir, fileOfKind(kind)).path))
+                    if (!r.ok) {
+                        logMove(library, "left $key in $root: ${r.message}")
+                        continue
+                    }
+                    meta.delete()
+                    logMove(library, "moved $key to the drawer, finishing an earlier move")
+                    moved++
+                    continue
+                }
+                // Its saved changes are written into it first, so only the card file moves.
+                if (hasGenerations(root, from.name)) {
+                    val r = runTool(arrayOf("settle-linked", from.path, key))
+                    if (!r.ok) {
+                        logMove(library, "left $key in $root: ${r.message}")
+                        continue
+                    }
+                }
                 var identity: ByteArray
                 do identity = newIdentity() while (identityUsed(library, identity))
-                val kind = if (stick) "ms" else "sd"
                 val card = Card(newId(), freeCardName(library, oldName(meta) ?: "${if (stick) "Memory Stick" else "Card"} ${key.take(8)}"), kind,
                     now(), null, cardHeader(from)?.second ?: 0L, identity, false, if (stick) "sd" else oldType(meta), key)
-                if (stick) try { CardFile.settle(from) } catch (e: Throwable) { }
-                // The entry is made first: if the move is cut off, reconcile drops the entry with no
-                // card and the next start tries again.
+                // The entry is made first: if the move is cut off before anything moved, reconcile
+                // drops the entry with no card and the next start tries again.
                 val entry = entryDir(library, card.id)
                 if (!entry.mkdirs() || !writeCard(entry, card)) {
                     entry.deleteRecursively()
@@ -1449,7 +1517,12 @@ object Cards {
                     continue
                 }
                 val r = runTool(arrayOf("move-linked", from.path, File(entry, fileOfKind(kind)).path))
-                if (!r.ok) {
+                if (!r.ok && !File(entry, fileOfKind(kind)).isFile) {
+                    // Never removed while it holds some of the card's saved changes.
+                    if (hasGenerations(entry, fileOfKind(kind))) {
+                        logMove(library, "left $key part way to the drawer: ${r.message}")
+                        continue
+                    }
                     entry.deleteRecursively()
                     logMove(library, "left $key in $root: ${r.message}")
                     continue

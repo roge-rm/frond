@@ -982,9 +982,17 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
     val hadCard = copies.any { it.holds || it.linkTo != null }
     // No library card: whatever the folder has is copied; reconcile moves the copy's card in.
     val choice = if (!hadCard) CardChoice.COPY else wanted
+    // frond-68k's saved changes beside a card go into its file first, so the copy has them.
+    if (choice == CardChoice.COPY)
+        for (n in 0 until Cards.SLOTS) if (copies[n].holds) Cards.settleGenerations(library, from, n)?.let { return it }
     copyMachine(from, dest, Cards.freeSpace(sessions), copyCard = choice == CardChoice.COPY, cancelled = cancelled)?.let { return it }
     val made = mutableListOf<File>()
-    fun undo() { made.forEach { it.deleteRecursively() }; dest.deleteRecursively() }
+    val relinked = mutableListOf<Int>()  // slots of `from` whose link was rewritten
+    fun undo() {
+        relinked.forEach { n -> Cards.writeSlot(from, copies[n].slot, n) }
+        made.forEach { it.deleteRecursively() }
+        dest.deleteRecursively()
+    }
     Cards.LibraryLock(library).use { lock ->
         if (!lock.ok) { dest.deleteRecursively(); return Cards.BUSY }
         copies.forEachIndexed { n, c ->
@@ -1001,8 +1009,9 @@ internal fun duplicateMachine(sessions: File, from: File, dest: File, cancelled:
             if ((c.slot.present || had) && !Cards.writeSlot(dest, copySlot, n)) { undo(); return failed }
         }
         copies.forEachIndexed { n, c ->
-            if (choice == CardChoice.LINK && c.linkTo != null && c.slot.link != c.linkTo &&
-                !Cards.writeSlot(from, c.slot.copy(present = true, link = c.linkTo), n)) { undo(); return failed }
+            if (choice != CardChoice.LINK || c.linkTo == null || c.slot.link == c.linkTo) return@forEachIndexed
+            if (!Cards.writeSlot(from, c.slot.copy(present = true, link = c.linkTo), n)) { undo(); return failed }
+            relinked += n
         }
     }
     return null
