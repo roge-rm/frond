@@ -464,6 +464,11 @@ void SocIMX1::Reset() {
     SyncSecondCard();
 }
 
+void SocIMX1::HardResetHolding(uint32_t holdMs) {
+    Reset();
+    input.jamAfterRelease(unsigned(zodiacControlFor(keyIdPower)), holdMs);
+}
+
 // The DAL shows its logo with the scan unturned and drawn for landscape; the OS starts in landscape.
 unsigned SocIMX1::GuestOrientation() {
     const unsigned orientation = orientationTracker.Update(imx1MachineScanOrientation(machine), imx1MachineStartups(machine));

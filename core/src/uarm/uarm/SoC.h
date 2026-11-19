@@ -103,8 +103,8 @@ class SoC {
     // Next Reset() is a power-on reset; the Zire uses it for a hard reset (clean boot).
     void RequestPowerOnReset() { powerOnReset = true; }
     // A power-on reset on the Zire; on the TX and E2 power held through a reset, which brings up
-    // the erase prompt.
-    void HardReset();
+    // the erase prompt. The Zodiac holds power from its own reset (SocIMX1).
+    virtual void HardReset();
 
     virtual uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) = 0;
     // The core clock in Hz as the guest has set it, 0 where the board has none to follow.

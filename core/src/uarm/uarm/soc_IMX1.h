@@ -26,12 +26,23 @@
 // machine made with these, or with imx1StateAllowBootInputs when only the button levels differ.
 Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom);
 
+// How long a hard reset holds power, in ms of guest time. ROM facts: right after reset the boot ROM (20003948)
+// makes A7, A10 and D12 inputs, waits, then reads Home (A7), power (A10) and Function (D12) in that order, low
+// for pressed; power alone picks boot mode 1. The DAL reads them again at 20085b34 a little later, and once
+// power is let go shows "Erase all data?", Function for yes and Home for no. 500 ms was enough on the 1.1 ROM.
+inline constexpr uint32_t zodiacHardResetHoldMs = 2000;
+
 class SocIMX1 : public SoC {
    public:
     // nullptr with the reason in error when the ROM can't run.
     static SocIMX1* Create(const uint8_t* rom, size_t size, std::string& error);
 
     void Reset() override;
+    // A reset through RESET_IN with power held from it on for zodiacHardResetHoldMs of guest time.
+    void HardReset() override { HardResetHolding(zodiacHardResetHoldMs); }
+    void HardResetHolding(uint32_t holdMs);
+    // Whether the hard reset's power hold is still to start, for tests.
+    bool HardResetHoldPending() const { return input.jamPending(); }
     uint64_t Run(uint64_t maxCycles, uint64_t cyclesPerSecond) override;
     // Faster: FCLK times the multiplier in the machine's clock model; guest time still comes from its own clock.
     void SetClockMultiplier(uint32_t num, uint32_t den) override;
@@ -49,7 +60,7 @@ class SocIMX1 : public SoC {
     void JamKey(enum KeyId key, uint32_t durationMsec) override;
     bool PrepareM68kSupport() override { return false; }
     bool GuestServicesSupported() const override { return false; }
-    bool HardResetSupported() const override { return false; }
+    bool HardResetSupported() const override { return true; }
     uint64_t GetTime() override;
     uint32_t* GetPendingFrame(uint32_t& firstDirtyLine, uint32_t& lastDirtyLine) override;
     void ResetPendingFrame() override { framePending = false; }
