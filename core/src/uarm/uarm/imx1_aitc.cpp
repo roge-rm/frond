@@ -96,8 +96,11 @@ Imx1AitcAccess Imx1Aitc::access(uint32_t address, uint32_t size, bool write, uin
     }
     if (word) {
         if (write) {
-            // Section 10.4.2 explicitly permits writing -1 to disable no levels.
-            if ((value & ~valid) && !(reg == 1 && value == 0xffffffff)) return Imx1AitcAccess::reservedBits;
+            // Section 10.4.2 explicitly permits writing -1 to disable no levels. The DAL's nested IRQ dispatch
+            // (20095bc4 in the Zodiac 1.1 ROM) writes NIVECSR's 16-bit NIPRILVL back, which is 0xffff (-1) when no
+            // normal interrupt is pending. ASSUMPTION: the hardware takes that as -1 too, as the ROM relies on it.
+            const bool minusOne = reg == 1 && (value == 0xffffffff || value == 0xffff);
+            if ((value & ~valid) && !minusOne) return Imx1AitcAccess::reservedBits;
             *word = value & valid;
         } else value = *word;
     } else {
