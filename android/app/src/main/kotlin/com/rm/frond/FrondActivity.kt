@@ -342,6 +342,8 @@ open class FrondActivity : SDLActivity() {
             if (!device.runs68k) session?.let { File(it).parentFile }?.takeIf { (it.isDirectory || it.mkdirs()) && it.canonicalFile != Sessions.folder(this).canonicalFile }?.let {
                 arguments += listOf("--work-folder", it.path)
             }
+            // frond-68k links its cards by path from the machine's folder, which Add device's cards go into.
+            if (device.linkedCards) session?.let { File(it).parentFile }?.takeIf { it.canonicalFile != Sessions.folder(this).canonicalFile }?.mkdirs()
             // Not saved yet: only the run lock, as there's no slot to load.
             cardArguments()
         }
@@ -384,13 +386,19 @@ open class FrondActivity : SDLActivity() {
     }
 
     // Takes a linked card if it is free and gives the core the card flags slot.json asks for, once
-    // getMainFunction has the run lock. ARM machines only; the 68k core doesn't know the flags.
-    // Runs on SDL's thread.
+    // getMainFunction has the run lock. frond-68k takes only --card-swap and its cards by path once
+    // it runs (RunningModel); first the cards an older Frond kept in dana-cards/ move into the
+    // machine and Cards. 68k devices with no card slot get nothing. Runs on SDL's thread.
     private fun cardArguments(): List<String> {
         val folder = machineFolder() ?: return emptyList()
-        if (launchDevice().runs68k || runLock == null) return emptyList()
+        val device = launchDevice()
+        if ((device.runs68k && !device.linkedCards) || runLock == null) return emptyList()
         return try {
-            val start = Cards.takeAtStart(Sessions.folder(this), folder)
+            if (device.runs68k) {
+                val sessions = Sessions.folder(this)
+                Cards.moveLinkedIn(sessions, folder, Cards.oldCardsFor(sessions))
+            }
+            val start = Cards.takeAtStart(Sessions.folder(this), folder, device.runs68k)
             start.heldBy?.let { Log.i(TAG, "linked card is in $it") }
             start.heldBy2?.let { Log.i(TAG, "linked card 2 is in $it") }
             start.arguments
@@ -1577,7 +1585,7 @@ open class FrondActivity : SDLActivity() {
         // Nothing has the card out for the file view once the machine has stopped.
         if (isFinishing) SdCard.editing = null
         // The core has quit after a good final save: a linked card goes back to Cards.
-        if (isFinishing && quitSent && finalSaveOk && runLock != null && !launchDevice().runs68k) {
+        if (isFinishing && quitSent && finalSaveOk && runLock != null && (!launchDevice().runs68k || launchDevice().linkedCards)) {
             machineFolder()?.let { folder ->
                 try {
                     Cards.releaseAtClose(Sessions.folder(this), folder)?.let { Log.w(TAG, "card release: $it") }

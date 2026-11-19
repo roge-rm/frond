@@ -317,7 +317,7 @@ object Sessions {
     fun saveCopy(context: Context, link: ControlLink, to: Uri, session: String? = null): String? {
         forPath(context, session)?.device?.takeIf { it.linkedCards }?.let { device ->
             val cards = device.storageSlots.map { link.request(it.commandPrefix + "state") }
-            DanaCardProtocol.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
+            LinkedCards.sessionCopyError(cards.map { if (it.ok) it.message else null }, device.storageSlots.size)
                 ?.let { return refuseOutput(context, to, it) }
         }
         val folder = File(context.cacheDir, "sessions").also { it.mkdirs() }

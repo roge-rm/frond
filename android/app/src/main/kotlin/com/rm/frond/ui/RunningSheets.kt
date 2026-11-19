@@ -204,17 +204,13 @@ private fun OtherDatabaseDialog(model: RunningModel, onLaunch: (String) -> Unit,
 @Composable
 private fun CardSheet(model: RunningModel, actions: RunningBarActions) {
     LaunchedEffect(Unit) { model.readCard() }
-    if (model.danaCards != null) {
-        DanaCardsRows(model)
-        return
-    }
     for (n in 0 until if (model.twoSlots) 2 else 1) key(n) { CardSlotRows(model, n) }
     Header("Internal", Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp))
     SheetAction("Files…", R.drawable.ic_folder) { model.openInternal() }
 }
 
 // One card slot's rows: the card, a linked card the slot is empty for, Files…, Eject or Insert,
-// Export image and a stick's write protection. Slot `n` 1 is the Zodiac's second SD slot.
+// Export image and a stick's write protection. Slot `n` 1 is the Zodiac's or the Dana's second SD slot.
 @Composable
 private fun CardSlotRows(model: RunningModel, n: Int) {
     var confirmEject by remember { mutableStateOf(false) }
@@ -229,12 +225,12 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
     val state = model.stateOf(n)
     val device = model.device
     val stick = device.memoryStick && n == 0
-    val rows = RunningSheets.cardRows(device, state, shown.linked != null, shown.linked != null && shown.linkedHolder == null, n)
+    val rows = RunningSheets.cardRows(device, state, shown.linked != null, shown.linked != null && shown.linkedHolder == null, n, shown.oldPlace)
     val heading = if (model.twoSlots) "Card ${n + 1}" else device.cardLabel
     if (rows.isNotEmpty()) Header(heading, Modifier.padding(start = 16.dp, end = 16.dp, top = if (n == 0) 8.dp else 16.dp))
     for (row in rows) when (row) {
         CardRow.SLOT -> {
-            val usable = RunningSheets.slotUsable(state, model.busy != null, shown.pending)
+            val usable = RunningSheets.slotUsable(state, model.busy != null, shown.pending) && !shown.oldPlace
             ListItem(
                 headlineContent = {
                     Text(if (state == SdCard.State.UNKNOWN) "Not known" else shown.name,
@@ -261,7 +257,9 @@ private fun CardSlotRows(model: RunningModel, n: Int) {
             if (model.selectSlot(n)) model.job("Inserting", "Couldn't insert the card") { it.reinsert() }
         }
         CardRow.EXPORT_IMAGE -> SheetAction("Export image", R.drawable.ic_export) {
-            saveImage.launch(if (n != 0) "SD card 2.img" else if (model.memoryStickPro) "Memory Stick Pro.img" else if (stick) "Memory Stick.frondms" else "SD card.img")
+            // frond-68k exports a card file.
+            val ext = if (device.runs68k) "frondsd" else "img"
+            saveImage.launch(if (n != 0) "SD card 2.$ext" else if (model.memoryStickPro) "Memory Stick Pro.img" else if (stick) "Memory Stick.frondms" else "SD card.$ext")
         }
         CardRow.TRY_AGAIN -> SheetAction("Try again", icon = Icons.Default.Refresh) { model.refresh() }
         CardRow.WRITE_PROTECT -> {

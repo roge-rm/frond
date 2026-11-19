@@ -38,20 +38,6 @@ class RunningModel(
     // The running session's name, for the copy's file name.
     val name: String,
 ) : FilesModel {
-    val danaCards = if (device.linkedCards && link != null) DanaCards(activity.applicationContext, link, device) else null
-    fun danaJob(work: (DanaCards) -> Unit = {}) {
-        val cards = danaCards ?: return
-        if (busy != null || waiting()) return
-        busy = "Reading cards"
-        activity.lifecycleScope.launch {
-            val error = withContext(Dispatchers.IO) {
-                try { work(cards); null } catch (e: Exception) { e.message ?: "Couldn't change the card." }
-                    .also { cards.refresh() }
-            }
-            busy = null
-            if (error != null) alert = "Cards" to error
-        }
-    }
     var state by mutableStateOf(SdCard.State.UNKNOWN)
         private set
     var writeProtected by mutableStateOf<Boolean?>(null)
@@ -60,8 +46,7 @@ class RunningModel(
     override val canWrite get() = !device.memoryStick || writeProtected == false
     override val leaveLabel get() = "Insert"
     override val prompt = ClashPrompt()
-    // Whether the stick in the slot is a Memory Stick Pro, which exports as a raw image.
-    // The Zodiac's second SD slot.
+    // The second SD slot: the Zodiac's and the Dana's.
     val twoSlots = Cards.hasSlot(device, 1)
     var secondState by mutableStateOf(SdCard.State.UNKNOWN)
         private set
@@ -93,14 +78,34 @@ class RunningModel(
             return
         }
     }
-    private fun secondOf(c: SdCard): SdCard.State {
-        if (!twoSlots) return SdCard.State.UNKNOWN
-        var s = c.stateOf(1)
-        // Slot 2's card the core left out at start (changed while the machine was off) goes in now.
-        if (s == SdCard.State.NONE) machineDir?.let { dir -> Cards.secondPutIn(sessions, dir) }?.let { argument ->
-            try { c.putInSecond(argument); s = c.stateOf(1) } catch (e: Exception) { Log.w(FrondActivity.TAG, "card 2 put-in: ${e.message}") }
+    // Slot `n`'s state. A library card the core left out at start goes in when the first read the
+    // core answers finds the slot empty: the Zodiac's slot 2 card when it changed while the
+    // machine was off, and either slot's card on frond-68k, which takes cards by path once it
+    // runs. Not while the file view has a card out. A put-in that fails is said once.
+    private val startPutIns = BooleanArray(Cards.SLOTS)
+    @Volatile private var startPutInError: Pair<String, String>? = null
+    private fun slotState(c: SdCard, n: Int): SdCard.State = synchronized(startPutIns) { leftOutState(c, n) }
+    private fun leftOutState(c: SdCard, n: Int): SdCard.State {
+        if (n != 0 && !twoSlots) return SdCard.State.UNKNOWN
+        var s = c.stateOf(n)
+        // Only the first read the core answers counts.
+        if (s == SdCard.State.UNKNOWN || startPutIns[n] || SdCard.editing != null) return s
+        startPutIns[n] = true
+        if (s != SdCard.State.NONE || (n == 0 && !device.runs68k)) return s
+        val dir = machineDir ?: return s
+        val argument = if (device.runs68k) Cards.attachArgument(sessions, dir, n) else Cards.secondPutIn(sessions, dir)
+        if (argument != null) try {
+            c.putInAtStart(n, argument)
+            s = c.stateOf(n)
+        } catch (e: Exception) {
+            Log.w(FrondActivity.TAG, "card ${n + 1} put-in: ${e.message}")
+            startPutInError = (if (twoSlots) "Couldn't put card ${n + 1} in" else "Couldn't put the card in") to SdCard.message(e)
         }
         return s
+    }
+    private fun sayStartPutInError() {
+        startPutInError?.let { alert = it }
+        startPutInError = null
     }
     var memoryStickPro by mutableStateOf(false)
         private set
@@ -185,13 +190,12 @@ class RunningModel(
                     } else SdCard.message(e)
                 }
             }
-            val s = withContext(Dispatchers.IO) { c.stateOf(0) }
+            val s = withContext(Dispatchers.IO) { slotState(c, 0) }
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
-            val second = withContext(Dispatchers.IO) { secondOf(c) }
+            val second = withContext(Dispatchers.IO) { slotState(c, 1) }
             val shown2 = withContext(Dispatchers.IO) { if (twoSlots) slotInfo(second, 1) else SlotShown("No card") }
-            danaCards?.let { cards -> withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} } }
             slotShown = slot
             state = s
             secondState = second
@@ -204,30 +208,22 @@ class RunningModel(
             progress = null
             canCancelFiles = false
             cancellingFiles = false
-            if (error != null) alert = failTitle to error
+            if (error != null) alert = failTitle to error else sayStartPutInError()
             nextStartCard()
         }
     }
 
     // The card's state without a busy dialog, for the bar's icon.
     fun readCard() {
-        danaCards?.let { cards ->
-            // Silent: the bar reads this at every start and menu open, before the core may have connected.
-            if (busy != null || waiting()) return
-            activity.lifecycleScope.launch {
-                withContext(Dispatchers.IO) { try { cards.refresh() } catch (_: Exception) {} }
-            }
-            return
-        }
         val c = card ?: return
         if (busy != null || waitingForGdb || !device.cardSupported) return
         activity.lifecycleScope.launch {
-            val s = withContext(Dispatchers.IO) { c.stateOf(0) }
+            val s = withContext(Dispatchers.IO) { slotState(c, 0) }
             val protection = withContext(Dispatchers.IO) { c.protection() }
             val pro = withContext(Dispatchers.IO) { c.memoryStickPro() }
             val slot = withContext(Dispatchers.IO) { slotInfo(s) }
             if (busy != null) return@launch
-            val second = withContext(Dispatchers.IO) { secondOf(c) }
+            val second = withContext(Dispatchers.IO) { slotState(c, 1) }
             val shown2 = withContext(Dispatchers.IO) { if (twoSlots) slotInfo(second, 1) else SlotShown("No card") }
             if (busy != null) return@launch
             slotShown = slot
@@ -236,6 +232,7 @@ class RunningModel(
             secondShown = shown2
             writeProtected = protection
             memoryStickPro = pro
+            sayStartPutInError()
             nextStartCard()
         }
     }
@@ -264,9 +261,11 @@ class RunningModel(
     private val sessions: File get() = Sessions.folder(activity.applicationContext)
 
     // What the card row says: the card's name or "No card"; a linked card the slot is empty for,
-    // with where it is (null when it's free); and whether an SD exchange is pending.
+    // with where it is (null when it's free); whether an SD exchange is pending; and whether it's a
+    // frond-68k card still linked from where an older Frond kept it (it couldn't be moved into
+    // Cards), which can be ejected, put back and exported, but not changed or opened in Files.
     data class SlotShown(val name: String, val linked: String? = null, val linkedId: String? = null,
-                         val linkedHolder: String? = null, val pending: Boolean = false)
+                         val linkedHolder: String? = null, val pending: Boolean = false, val oldPlace: Boolean = false)
     var slotShown by mutableStateOf(SlotShown("No card"))
         private set
 
@@ -278,6 +277,7 @@ class RunningModel(
         val library = Cards.libraryFor(sessions)
         val slot = Cards.readSlot(dir, n)
         val file = Cards.cardFileIn(dir, n)
+        if (device.runs68k && file == null && (s == SdCard.State.INSERTED || s == SdCard.State.EJECTED)) return SlotShown(label, oldPlace = true)
         val name = when {
             s == SdCard.State.NONE -> "No card"
             file != null && slot.card != null -> Cards.readCard(Cards.entryDir(library, slot.card))?.name ?: Cards.kindName(Cards.kindOfFile(file))
@@ -302,7 +302,7 @@ class RunningModel(
 
     fun openPicker(select: String? = null, n: Int = cardSlot) {
         val dir = machineDir ?: return
-        if (busy != null || waiting() || shownOf(n).pending || !selectSlot(n)) return
+        if (busy != null || waiting() || shownOf(n).pending || shownOf(n).oldPlace || !selectSlot(n)) return
         val keep = picker?.selected
         val reopening = picker != null
         activity.lifecycleScope.launch {
@@ -1011,7 +1011,6 @@ class RunningModel(
     }
 
     fun refresh() {
-        if (danaCards != null) { danaJob(); return }
         if (device.cardSupported) job("Reading", "Couldn't read the card") { }
     }
 

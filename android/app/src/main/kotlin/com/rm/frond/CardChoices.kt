@@ -7,8 +7,12 @@ import java.io.File
 object CardChoices {
     // ---- Types and sizes ----
 
-    fun deviceTakesKind(device: Device, kind: String): Boolean = !device.runs68k && when (kind) {
+    // "mmc" is an SD card of type mmc, which only frond-68k's slots take.
+    fun deviceTakesKind(device: Device, kind: String): Boolean = if (device.runs68k)
+        device.storageSlots.indices.any { Cards.linkedFamily(device, kind, it) != null }
+    else when (kind) {
         "sd" -> device.sdSlot
+        "mmc" -> false
         "ms" -> device.memoryStick && device.msSizes.isNotEmpty()
         else -> device.memoryStick && device.msProMax >= 256
     }
@@ -17,20 +21,22 @@ object CardChoices {
     // Sizes in MiB for SD and Pro, MB for a classic stick.
     fun fits(device: Device, kind: String, size: Int, n: Int = 0): Boolean = deviceTakesKind(device, kind, n) && Cards.deviceTakes(device, kind, size, n)
 
-    // Kinds slot `n` takes: the second slot is SD only.
-    fun deviceTakesKind(device: Device, kind: String, n: Int): Boolean = deviceTakesKind(device, kind) && Cards.hasSlot(device, n) && (n == 0 || kind == "sd")
+    // Kinds slot `n` takes: the second slot is SD only (SD or MMC on the Dana).
+    fun deviceTakesKind(device: Device, kind: String, n: Int): Boolean = deviceTakesKind(device, kind) && Cards.hasSlot(device, n) &&
+        if (device.runs68k) Cards.linkedFamily(device, kind, n) != null else (n == 0 || kind == "sd")
 
     fun tooBig(device: Device, kind: String, size: Int, n: Int = 0): Boolean {
         if (!deviceTakesKind(device, kind, n) || fits(device, kind, size, n)) return false
         return when (kind) {
             "sd" -> (size.toLong() shl 20) > device.sdMax
+            "mmc" -> (size.toLong() shl 20) > (256L shl 20)
             "ms" -> size > (device.msSizes.maxOrNull() ?: 0)
             else -> size > device.msProMax
         }
     }
 
     private fun allSizes(kind: String) = when (kind) {
-        "sd" -> Device.SD_SIZES
+        "sd", "mmc" -> Device.SD_SIZES
         "ms" -> Device.MEMORY_STICK_SIZES
         else -> Device.MEMORY_STICK_PRO_SIZES
     }
@@ -43,9 +49,13 @@ object CardChoices {
     fun kindsTaken(devices: List<Device> = Device.entries): List<String> =
         listOf("sd", "ms", "ms-pro").filter { sizesFor(it, devices).isNotEmpty() }
 
+    // What New card offers: the kinds, with MMC after SD when some device takes it.
+    fun typesTaken(devices: List<Device> = Device.entries): List<String> =
+        kindsTaken(devices).toMutableList().apply { if (sizesFor("mmc", devices).isNotEmpty()) add(indexOf("sd") + 1, "mmc") }
+
     // The New card dialog's types: all of them, or the ones `device` takes.
     fun kindsFor(device: Device?, devices: List<Device> = Device.entries): List<String> =
-        kindsTaken(devices).filter { device == null || deviceTakesKind(device, it) }
+        typesTaken(devices).filter { device == null || deviceTakesKind(device, it) }
 
     class SizeOption(val size: Int, val label: String, val enabled: Boolean)
 
@@ -67,7 +77,7 @@ object CardChoices {
     // "32 MB", or "Pro · 1 GB" for a Memory Stick Pro.
     fun sizeText(card: Cards.Card): String {
         val size = Device.sizeLabel(Cards.sizeOf(card.kind, card.bytes))
-        return if (card.kind == "ms-pro") "Pro · $size" else size
+        return if (card.kind == "ms-pro") "Pro · $size" else if (Cards.takeKind(card) == "mmc") "MMC · $size" else size
     }
 
     // What an image file holds from its first bytes and size: "ms" for a Frond stick file, else the
@@ -171,10 +181,11 @@ object CardChoices {
     fun pickerChoices(sessions: File, machineDir: File, device: Device, n: Int = 0): List<Choice> {
         val mine = machineDir.canonicalFile
         return listOf(Choice(null, "No card", true)) + rows(sessions, machineDir).mapNotNull { r ->
-            if (!deviceTakesKind(device, r.card.kind, n)) return@mapNotNull null
+            val kind = Cards.takeKind(r.card)
+            if (!deviceTakesKind(device, kind, n)) return@mapNotNull null
             val size = Cards.sizeOf(r.card.kind, r.card.bytes)
-            val ok = fits(device, r.card.kind, size, n)
-            if (!ok && !tooBig(device, r.card.kind, size, n)) return@mapNotNull null
+            val ok = fits(device, kind, size, n)
+            if (!ok && !tooBig(device, kind, size, n)) return@mapNotNull null
             val here = r.holderDir?.canonicalFile == mine && r.holderSlot == n
             val text = "${r.card.name} · ${sizeText(r.card)}"
             when {
@@ -194,7 +205,7 @@ object CardChoices {
     // No card, then the drawer cards slot `n` of `device` takes, by name: (id or "", text).
     fun startCardChoices(sessions: File, device: Device, n: Int): List<Pair<String, String>> =
         listOf("" to "No card") + Cards.entries(Cards.libraryFor(sessions)).filter { e ->
-            e.inDrawer && fits(device, e.card.kind, Cards.sizeOf(e.card.kind, e.card.bytes), n)
+            e.inDrawer && fits(device, Cards.takeKind(e.card), Cards.sizeOf(e.card.kind, e.card.bytes), n)
         }.sortedBy { it.card.name.lowercase() }.map { it.card.id to "${it.card.name} · ${sizeText(it.card)}" }
 
     // ---- Link dialog ----
@@ -211,10 +222,11 @@ object CardChoices {
         val card = Cards.readCard(Cards.entryDir(library, id)) ?: return emptyList()
         val names = Cards.entries(library).associate { it.card.id to it.card.name }
         val size = Cards.sizeOf(card.kind, card.bytes)
+        val kind = Cards.takeKind(card)
         return machines(sessions, held).mapNotNull { m ->
-            if (!deviceTakesKind(m.device, card.kind, m.n)) return@mapNotNull null
-            val ok = fits(m.device, card.kind, size, m.n)
-            if (!ok && !tooBig(m.device, card.kind, size, m.n)) return@mapNotNull null
+            if (!deviceTakesKind(m.device, kind, m.n)) return@mapNotNull null
+            val ok = fits(m.device, kind, size, m.n)
+            if (!ok && !tooBig(m.device, kind, size, m.n)) return@mapNotNull null
             var text = "${m.label} · ${m.device.label}"
             var enabled = true
             when {

@@ -10,6 +10,9 @@ import java.security.MessageDigest
 // Card images live in the core/session. The file view takes the ejected card out of the core into
 // the machine folder's card file (sd.frondsd, ms.frondms or ms.frondmsp), edits that file in place
 // (CardFile) and puts it back in. Every call blocks; run it off the main thread.
+// frond-68k (the Dana, VZ Palms and T415) links card files by path: its put-in is attach with the
+// file's path and key (Cards.attachArgument), its reinsert is insert, and its state replies go on
+// with the card's key and flags.
 class SdCard(private val context: Context, private val link: ControlLink, private val session: String? = null,
              private val device: Device = Device.TX) {
     // The slot the calls work on: 0, or 1 for the Zodiac's second SD slot (the core's sd2- commands,
@@ -23,10 +26,11 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     }
     private val stickDevice = device.storageSlot == "memory-stick"
     private val memoryStick get() = stickDevice && slot == 0
-    // A 68k stick (the T415) is a linked card file in dana-cards/: take-out frees that file for the
-    // file view and put-in links it again.
-    private val linkedStick get() = device.linkedCards && memoryStick
-    private fun command(operation: String, n: Int = slot) = (if (n != 0) "sd2-" else if (stickDevice) "ms-" else "sd-") + operation
+    private val m68k = device.runs68k
+    private fun command(operation: String, n: Int = slot): String {
+        val op = if (!m68k) operation else when (operation) { "reinsert" -> "insert"; "put-in" -> "attach"; else -> operation }
+        return (if (n != 0) "sd2-" else if (stickDevice) "ms-" else "sd-") + op
+    }
     enum class State { NONE, INSERTED, EJECTED, UNKNOWN }
 
     class Failed(message: String, val code: String? = null) : Exception(message)
@@ -82,11 +86,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun stateOf(n: Int): State {
         val reply = link.request(command("state", n), timeoutSeconds = 30)
         if (!reply.ok) return State.UNKNOWN
-        if (n == 0 && device.linkedCards && stickDevice && reply.message != "none") {
-            val linked = DanaCardProtocol.state(reply.message) ?: return State.UNKNOWN
-            return if (linked.inserted) State.INSERTED else State.EJECTED
-        }
-        return when (reply.message) {
+        // frond-68k's replies go on with the card's key and flags: the first word says it.
+        return when (if (m68k) reply.message.substringBefore(' ') else reply.message) {
             "inserted" -> State.INSERTED
             "ejected" -> State.EJECTED
             "none" -> State.NONE
@@ -103,26 +104,43 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun eject() = run(command("eject"))
     fun reinsert() = run(command("reinsert"))
 
-    // Slot 2's library card, which the core leaves out at start when it changed while the machine
-    // was off: `argument` is Cards.secondPutIn's.
-    fun putInSecond(argument: String) {
-        val reply = link.request("sd2-put-in", argument, timeoutSeconds = 120)
-        if (!reply.ok) throw Failed(reply.message, reply.code)
+    // A library card the core left out at start (changed while the machine was off), slot `n`:
+    // `argument` is Cards.secondPutIn's, or Cards.attachArgument's on frond-68k.
+    fun putInAtStart(n: Int, argument: String) {
+        val reply = link.request(command("put-in", n), argument, timeoutSeconds = 120)
+        if (!reply.ok) throw Failed(message68k(reply.message), reply.code)
     }
 
     // Settles the ejected card in the machine folder's file and empties the slot. Returns the
     // card's serial (64 hex digits) and whether it's write protected, as the core reports them.
+    // frond-68k only says taken-out, so its key and protection are read from the slot first.
     fun takeOut(): Pair<String?, Boolean> {
+        val before = if (m68k) link.request(command("state"), timeoutSeconds = 30).takeIf { it.ok }?.message?.split(' ') else null
         val reply = link.request(command("take-out"), timeoutSeconds = 240)
-        if (!reply.ok) throw Failed(reply.message, reply.code)
+        if (!reply.ok) throw Failed(message68k(reply.message), reply.code)
+        if (before != null) return before.getOrNull(1) to (before.getOrNull(2) == "protected")
         val parts = reply.message.split(' ')
         return parts.getOrNull(0)?.takeIf { it.length == 64 } to (parts.getOrNull(1) == "protected")
     }
 
-    // Opens the card file just moved into the machine folder and inserts it.
+    // Opens the card file just moved into the machine folder and inserts it. frond-68k takes the
+    // file by path, with the key and protection its Cards entry has.
     fun putIn(identity: String, protected: Boolean) {
-        val reply = link.request(command("put-in"), identity + if (protected) " protected" else " writable", timeoutSeconds = 120)
-        if (!reply.ok) throw Failed(reply.message, reply.code)
+        val argument = if (!m68k) identity + if (protected) " protected" else " writable"
+            else attachArgument() ?: throw Failed("Couldn't find the card's file.")
+        val reply = link.request(command("put-in"), argument, timeoutSeconds = 120)
+        if (!reply.ok) throw Failed(message68k(reply.message), reply.code)
+    }
+    private fun attachArgument(): String? {
+        val dir = session?.let { File(it).absoluteFile.parentFile } ?: return null
+        return Cards.attachArgument(Sessions.folder(context), dir, slot)
+    }
+    // Plain text for frond-68k's card refusals; others pass through as they are.
+    private fun message68k(core: String) = when {
+        !m68k -> core
+        "duplicate identity or serial" in core -> "That card is already in the other slot."
+        "cannot lock card file" in core -> "That card is open somewhere else."
+        else -> core
     }
     // Whether the stick in the slot is a Memory Stick Pro ("pro N" from ms-type).
     fun memoryStickPro(): Boolean {
@@ -134,9 +152,10 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     fun protection(): Boolean? {
         if (!memoryStick) return null
         if (cardFile != null) return protectedCard
-        if (linkedStick) {
+        if (m68k) {
             val reply = link.request(command("state"), timeoutSeconds = 30)
-            return if (reply.ok) DanaCardProtocol.state(reply.message)?.writeProtected else null
+            val words = reply.message.split(' ')
+            return if (reply.ok && words.size >= 3) words[2] == "protected" else null
         }
         if (state() == State.NONE) return null
         val reply = link.request("ms-protection", timeoutSeconds = 30)
@@ -151,12 +170,14 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         run("ms-read-only", if (on) "on" else "off")
     }
 
-    // Writes the ejected card's image to a picked document.
+    // Writes the ejected card's image to a picked document. frond-68k writes a card file
+    // (.frondsd or .frondms), only to a new file.
     fun exportImage(to: Uri) {
         folder.mkdirs()
-        val image = File(folder, "export.img")
+        val image = File(folder, if (!m68k) "export.img" else if (memoryStick) "export.frondms" else "export.frondsd")
+        image.delete()
         try {
-            run(command("export"), image.path)
+            run(command("export"), if (m68k) Cards.quotePath(image.absolutePath) else image.path)
             val output = context.contentResolver.openOutputStream(to, "wt") ?: throw Failed("Couldn't write there.")
             output.use { o -> image.inputStream().use { it.copyTo(o, 1 shl 20) } }
         } finally {
@@ -168,7 +189,6 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
     // and takes the card out into the folder's card file, then opens that file. A kill from here on
     // loads the machine with --card-swap and the card as the file holds it.
     fun beginEdit() {
-        if (linkedStick) return beginLinkedEdit()
         folder.mkdirs()
         if (slot == 0 && pendingFor(context, session) != null && !restorePending(context, link, session)) {
             throw Failed("The last edit of this card wasn't put back in the Palm. Close the emulator and open it again.")
@@ -176,6 +196,8 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         discard()
         val path = session ?: throw Failed("Save the machine before opening its card.")
         val dir = File(path).absoluteFile.parentFile ?: throw Failed("Save the machine before opening its card.")
+        // A frond-68k card still linked from where an older Frond kept it opens once it's in Cards.
+        if (m68k && Cards.cardFileIn(dir, slot) == null) throw Failed("Close the machine and open it again to move this card into Cards first.")
         val inserted = state() == State.INSERTED
         wasInserted = inserted
         try {
@@ -207,57 +229,13 @@ class SdCard(private val context: Context, private val link: ControlLink, privat
         changed = false
     }
 
-    // The linked stick: ejects it if needed, takes it out of the core, saves the session without it
-    // (a kill from here on loads the machine with an empty slot and the stick free in dana-cards/),
-    // then opens its file.
-    private fun beginLinkedEdit() {
-        discard()
-        val path = session ?: throw Failed("Save the machine before opening its card.")
-        val reply = link.request(command("state"), timeoutSeconds = 30)
-        val stick = (if (reply.ok) DanaCardProtocol.state(reply.message) else null) ?: throw Failed("There's no Memory Stick in the slot.")
-        if (stick.failed) throw Failed("The Memory Stick has an I/O error.")
-        val file = File(File(context.filesDir, "dana-cards"), "${stick.identity}.frondms")
-        if (!file.isFile) throw Failed("Couldn't find the Memory Stick's file.")
-        wasInserted = stick.inserted
-        protectedCard = stick.writeProtected
-        if (stick.inserted) eject()
-        val out = link.request(command("take-out"), timeoutSeconds = 240, cancelRequested = { jobCancelled })
-        if (!out.ok) {
-            // A cancel or a timeout can leave the core finishing the take-out: go by the slot.
-            val now = link.request(command("state"), timeoutSeconds = 30)
-            val why = out.message
-            if (now.ok && now.message == "none") {
-                identity = stick.identity
-                putBack()
-            } else if (stick.inserted) {
-                val back = link.request(command("insert"), timeoutSeconds = 30)
-                if (!back.ok) throw Failed("$why The Memory Stick is still ejected: ${back.message}", out.code)
-            }
-            throw Failed(if (jobCancelled) "File transfer cancelled." else why, if (jobCancelled) "cancelled" else out.code)
-        }
-        identity = stick.identity
-        try {
-            val saved = link.request("save", path, timeoutSeconds = 120)
-            if (!saved.ok) throw Failed("Couldn't save the machine, so the card wasn't opened. ${saved.message}")
-            cardFile = CardFile.open(file, !protectedCard)
-            FatImage.over(cardFile!!).use { }
-        } catch (e: Exception) {
-            cardFile?.close()
-            cardFile = null
-            putBack()
-            throw Failed(message(e))
-        }
-        changed = false
-    }
-
     // Puts the card file back in the slot, ejected again if it was out when the view opened.
     private fun putBack() {
         val id = identity ?: throw Failed("Couldn't put the card back in.")
         try {
             putIn(id, protectedCard)
         } catch (e: Failed) {
-            throw Failed(if (linkedStick) "Couldn't put the Memory Stick back in. Choose it again from the Memory Stick row. ${e.message}"
-                else "Couldn't put the card back in. It's kept in the machine and goes in at the next start. ${e.message}", e.code)
+            throw Failed("Couldn't put the card back in. It's kept in the machine and goes in at the next start. ${e.message}", e.code)
         }
         identity = null
         editing = null
