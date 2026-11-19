@@ -379,6 +379,8 @@ class MainWindow : public QMainWindow {
     void fillCamera();
     void showCamera(const QString& state);
     void chooseCamera(int index);
+    bool networkWifiOnly = false;
+    void fillNetworkModes(bool wifiOnly);
     QString networkTip, keyboardTip, serialTip, usbTip, irdaTip;
     QWidget* home;
     bool startupHandled{false}, busy{false}, stopping{false}, closeAfterStop{false}, allowClose{false};

@@ -404,12 +404,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     connect(cameraBox, qOverload<int>(&QComboBox::activated), this, [this](int index) { chooseCamera(index); });
     network = new QComboBox(root);
     network->setObjectName("networkMode");
-    network->addItem(tr("Disabled"), "disabled");
-    network->addItem(tr("Virtual Wi-Fi (Frond)"), "wireless");
-    network->addItem(tr("Internet via host"), "internet");
-    network->addItem(tr("Simulated echo server"), "connected");
-    network->addItem(tr("Simulated connection timeout"), "timeout");
-    network->addItem(tr("Simulated disconnection"), "disconnected");
+    fillNetworkModes(false);
     network->setToolTip(tr("Virtual Wi-Fi uses the Palm networking stack and a Frond access point. Internet via host forwards a subset of 68k NetLib calls. Changing mode closes connections."));
     connect(network, qOverload<int>(&QComboBox::activated), this, [this](int index) {
         send("network-mode", network->itemData(index).toString());
@@ -1197,6 +1192,22 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
     });
 }
 // The bar's name and subtitle. With the readout on and the Palm not embedded, the speed goes in the subtitle.
+// The network modes the device supports: all of them, or off and Virtual Wi-Fi only.
+void MainWindow::fillNetworkModes(bool wifiOnly) {
+    const auto current = network->currentData().toString();
+    networkWifiOnly = wifiOnly;
+    network->clear();
+    network->addItem(tr("Disabled"), "disabled");
+    network->addItem(tr("Virtual Wi-Fi (Frond)"), "wireless");
+    if (!wifiOnly) {
+        network->addItem(tr("Internet via host"), "internet");
+        network->addItem(tr("Simulated echo server"), "connected");
+        network->addItem(tr("Simulated connection timeout"), "timeout");
+        network->addItem(tr("Simulated disconnection"), "disconnected");
+    }
+    if (const int at = network->findData(current); at >= 0) network->setCurrentIndex(at);
+}
+
 void MainWindow::updateBarMachine() {
     const auto speed = runningPreferences.showMips && !embedded ? speedText : QString();
     runningBar->setMachine(client.running() && !sessionPath.isEmpty() ? QFileInfo(sessionPath).completeBaseName() : QString(),
@@ -1243,6 +1254,7 @@ void MainWindow::refresh() {
     addButton->setEnabled(!running && !busy);
     stopButton->setEnabled(running && !busy && !stopping);
     const auto caps = frondFirmware::capabilities(currentDevice());
+    if (caps.wifiOnlyNetwork != networkWifiOnly) fillNetworkModes(caps.wifiOnlyNetwork);
     const bool infraredKeyboard = frondFirmware::infraredKeyboard(currentDevice());
     const bool linkedCards = frondFirmware::linkedCards(currentDevice());
     danaCards->setVisible(linkedCards);

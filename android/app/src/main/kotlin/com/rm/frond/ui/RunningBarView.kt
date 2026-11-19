@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import com.rm.frond.R
 import com.rm.frond.BarMode
 import com.rm.frond.Device
+import com.rm.frond.NetworkMode
 import com.rm.frond.NetRelay
 import com.rm.frond.RunningModel
 import com.rm.frond.RunningBar
@@ -256,7 +257,7 @@ private fun MenuDialogs(state: RunningBarState, actions: RunningBarActions) {
             state.dialog = null
             model.hardReset(saveFirst)
         }
-        RunningMenu.Id.NETWORK -> NetworkDialog(model.network, { state.dialog = null }) { mode ->
+        RunningMenu.Id.NETWORK -> NetworkDialog(model.network, NetworkMode.offered(device.wifiOnlyNetwork), { state.dialog = null }) { mode ->
             state.dialog = null
             model.changeNetwork(mode)
         }

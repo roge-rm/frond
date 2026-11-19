@@ -47,6 +47,8 @@ struct DeviceCapabilities5 {
     // The LED the button bar draws (AttentionState colour bits it can show, 0 for none) and a vibrate motor.
     uint8_t ledColours{0};
     bool vibrate{false};
+    // wifiOnlyNetwork: the Network setting offers only Disabled and Virtual Wi-Fi (the Palm modes do nothing).
+    bool wifiOnlyNetwork{false};
 };
 
 // A device's fixed name is what sessions, settings, the control socket and command line use.
@@ -357,7 +359,7 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     // CEOS.nbf at import.
     {deviceTypeRx1950, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::rx1950Nand, DeviceSupport5::experimentalDesktop,
      DeviceDetect5::norSize, 0, 0, DeviceBoard5::s3c2442Rx1950, DeviceArt::hpIpaqRx1950,
-     {true, false, false, false, false, false, false, true, true, false, false, false, false, false, false, 3},
+     {true, false, false, false, false, false, false, true, true, false, false, false, false, false, false, 3, false, true},
      264794, 69206016, 32u << 20, 32u << 20, DisplayMode::mode_240x320, 1u << 4, true,
      DeviceNorLayout5::any, 0, 0, false, 32u << 20, 2048ull << 20,
      {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",

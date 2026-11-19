@@ -49,13 +49,13 @@ fun AlertBox(model: RunningModel) {
 }
 
 @Composable
-fun NetworkDialog(current: NetworkMode?, onDismiss: () -> Unit, onChoose: (NetworkMode) -> Unit) {
+fun NetworkDialog(current: NetworkMode?, modes: List<NetworkMode>, onDismiss: () -> Unit, onChoose: (NetworkMode) -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Network") },
         text = {
             LazyColumn {
-                items(NetworkMode.entries) { mode ->
+                items(modes) { mode ->
                     ListItem(
                         headlineContent = { Text(mode.label) },
                         leadingContent = { RadioButton(selected = mode == current, onClick = null) },

@@ -1017,7 +1017,8 @@ static void rx1950() {
     assert(c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && c.sound &&
            c.microphone && !c.builtInWifi && !c.usbWifi);
     // The charge LED in green, red or amber (AttentionState's bits); no vibrate motor.
-    assert(c.ledColours == 3 && !c.vibrate);
+    assert(c.ledColours == 3 && !c.vibrate && c.wifiOnlyNetwork);
+    for (const auto& other : deviceProfiles5) assert(other.capabilities.wifiOnlyNetwork == (other.deviceType == deviceTypeRx1950));
     // Windows CE, so no Palm guest services.
     assert(deviceProfileOs5(*p) == DeviceOs5::windowsCe && deviceProfileOs5(*deviceProfileNamed5("palm-tx")) == DeviceOs5::palmOs);
     assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes, p->nandSize, false, true) ==

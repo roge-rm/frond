@@ -1,7 +1,7 @@
 package com.rm.frond
 
 // The core's network modes (network-mode and network-state), in the desktop's order and words.
-// The TX has them all; other devices only Disabled.
+// Devices offer all of them, or only Disabled and Virtual Wi-Fi (wifiOnlyNetwork).
 enum class NetworkMode(val id: String, val label: String) {
     DISABLED("disabled", "Disabled"),
     WIRELESS("wireless", "Virtual Wi-Fi (Frond)"),
@@ -12,6 +12,7 @@ enum class NetworkMode(val id: String, val label: String) {
 
     companion object {
         fun byId(id: String?) = entries.firstOrNull { it.id == id }
+        fun offered(wifiOnly: Boolean) = if (wifiOnly) listOf(DISABLED, WIRELESS) else entries
     }
 }
 
@@ -88,6 +89,8 @@ data class Device internal constructor(
     val usbWifi: Boolean = false,
     // The Dana Wireless's built-in 802.11b module, with the network through the core's router.
     val builtInWifi: Boolean = false,
+    // The Network setting offers only Disabled and Virtual Wi-Fi.
+    val wifiOnlyNetwork: Boolean = false,
     // Takes the CLIE game controller (PEGA-GC10) on its interface connector, run by the core.
     val clieGamepad: Boolean = false,
     // DragonBall devices run in libmain68k.so (Frond68kActivity), the others in libmain.so (FrondActivity).
