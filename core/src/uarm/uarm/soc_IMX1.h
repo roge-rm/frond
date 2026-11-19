@@ -43,9 +43,9 @@ inline constexpr uint32_t zodiacInjectedReturn = 0xfffffff0;
 
 // Facts of the 1.1 ROM for the Bluetooth shim (zodiac_bluetooth.cpp): BtlsLib's start, stop, write and read
 // (ARM), the DAL's doze (Thumb) and the IRQ handler's call of the DAL's interrupt dispatch (ARM, SVC mode), where
-// received bytes are handed to the serial driver.
+// received bytes are handed to the serial driver, and the receive callback's wait for its port (Thumb).
 inline constexpr uint32_t zodiacBluetoothHooks[] = {0x200f778c, 0x200f77c8, 0x200f77ec, 0x200f7854, 0x20094534,
-                                                    0x200c9ae8};
+                                                    0x200c9ae8, 0x200f6756};
 
 class SocIMX1 : public SoC {
    public:
@@ -256,16 +256,23 @@ class SocIMX1 : public SoC {
     std::vector<uint32_t> traceHooks;
     // The Bluetooth shim (zodiac_bluetooth.cpp). Host only: the guest's side of it is in guest memory.
     // started: the guest's start went to the backend and no stop came since, so the hooks stay on while it runs
-    // even with no controller set. lastDoze: guest ticks at the last doze entry. address: the radio's BD_ADDR
-    // (least significant byte first), made once for this machine, so it stays the same over every stop and start.
+    // even with no controller set. A started radio whose backend closed is down: its starts are refused until the
+    // guest's stop or its next burst of radio setup. lastStart: guest ticks at the last start call. lastDoze: guest
+    // ticks at the last doze entry. address: the radio's BD_ADDR (least significant byte first), made once for
+    // this machine, so it stays the same over every stop and start.
     struct Bluetooth {
         std::string path, lastError;
         BluetoothBackend backend;
         std::array<uint8_t, 6> address{};
         bool romKnown{false}, started{false}, delivering{false};
-        uint64_t lastDoze{0};
-        // r9 at the driver's last write or read, which finds BtlsLib's globals.
-        uint32_t driverR9{0};
+        // The data of the callback a delivery is running, whether it was ended at its wait for the port, its
+        // passes there and the bytes it read since the last one.
+        uint32_t deliveringData{0}, portWaitHits{0}, readSincePortWait{0};
+        bool callbackEnded{false};
+        uint64_t lastDoze{0}, lastStart{0};
+        // r9 at the driver's writes and reads, most recent first, which find BtlsLib's globals. The stack calls
+        // the driver from more than one task, each with its own table.
+        std::array<uint32_t, 4> driverR9{};
     } bluetooth;
     bool BluetoothHook(uint32_t pc, const uint32_t (&r)[16]);
     bool BluetoothHooksOn() const { return bluetooth.romKnown && (!bluetooth.path.empty() || bluetooth.started); }
@@ -274,9 +281,11 @@ class SocIMX1 : public SoC {
     bool BluetoothRunning(uint32_t r9, uint32_t* globals = nullptr);
     void BluetoothReturn(uint32_t result);
     void BluetoothDeliver(uint32_t globals, uint32_t r9);
+    bool BluetoothPortOpen(uint32_t r9, uint32_t data);
     // Runs a callback the guest was sent to until it returns to zodiacInjectedReturn. False if it doesn't.
     bool BluetoothRunCallback();
     void BluetoothDown(const std::string& why);
+    void BluetoothNoteR9(uint32_t r9);
     void PollBluetooth();
     void EndGuestCall();
     ZodiacPaceSites paceSites{};

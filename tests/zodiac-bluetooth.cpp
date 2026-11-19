@@ -142,7 +142,8 @@ int main(int argc, char** argv) {
     // steps DIR: hard reset to Preferences with Bluetooth on BT, then STEPS, ';' between them: tap X Y WAIT,
     // power, stroke X1 Y1 X2 Y2, install PATH, launch NAME, wait MS, shot NAME, signal NAME (a file in DIR or
     // an absolute path), waitfor NAME MS, calls N (database lists through guest calls), export NAME (checks the
-    // probe's received payload).
+    // probe's received payload), relink (the controller set again, so the link drops), save and load (a
+    // session saved and loaded in this process).
     if (mode == "steps" && argc > 2) {
         SocIMX1* soc = start(rom);
         const std::string dir = argv[2];
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
         toPreferences(*soc);
         paced = std::getenv("BT") != nullptr;
         std::string list = std::getenv("STEPS") ? std::getenv("STEPS") : "";
+        std::vector<uint8_t> session;
         size_t at = 0;
         while (at < list.size()) {
             size_t end = list.find(';', at);
@@ -166,6 +168,19 @@ int main(int argc, char** argv) {
                 tap(*soc, x, y, uint64_t(wait));
             } else if (step == "power") {
                 press(*soc, keyIdPower);
+            } else if (step == "relink") {
+                std::string error;
+                const std::string bt = std::getenv("BT") ? std::getenv("BT") : "";
+                const bool ok = soc->SetBluetooth("", error) && soc->SetBluetooth(bt, error);
+                std::fprintf(stderr, "test relink at %.3f s\n", double(soc->GetTime()) / 1e9);
+                std::printf("relink: %s\n", ok ? "ok" : error.c_str());
+            } else if (step == "save") {
+                std::printf("save: %d\n", soc->Save());
+                const auto buffer = soc->GetSavestate();
+                session.assign(static_cast<const uint8_t*>(buffer.data),
+                               static_cast<const uint8_t*>(buffer.data) + buffer.size);
+            } else if (step == "load") {
+                std::printf("load: %d\n", !session.empty() && soc->Load(session.size(), session.data()));
             } else if (int x2 = 0, y2 = 0; std::sscanf(step.c_str(), "stroke %d %d %d %d", &x, &y, &x2, &y2) == 4) {
                 // A pen stroke in 20 moves, 20 ms apart.
                 for (int i = 0; i <= 20; ++i) {

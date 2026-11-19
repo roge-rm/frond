@@ -394,7 +394,8 @@ void SocIMX1::StateChanged() {
     if (!RestoringCheckpoint()) {
         bluetooth.backend.Close();
         bluetooth.started = false;
-        bluetooth.driverR9 = 0;
+        bluetooth.driverR9 = {};
+        bluetooth.lastStart = 0;
         if (machine) ApplyCodeHooks();
     }
     const auto status = imx1MachineGetStatus(machine);
@@ -955,11 +956,17 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
             break;
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
+        const auto sliceStart = now;
         now = run.total;
         if (run.reason == Imx1MachineYield::codeHook) {
             CodeHookHit();
             if (halted) break;
             now = imx1MachineGetStatus(machine);
+            // The bounds come from the totals, so the next run ends where this slice would have. The end-of-slice
+            // work runs only once a bound is reached, at the same guest points as with no hooks.
+            if (now.retired - sliceStart.retired < bounds.retired && now.work - sliceStart.work < bounds.work &&
+                now.time.compare(bounds.deadline) < 0)
+                continue;
         }
         // The USB host runs at slice ends, on the guest's clock.
         TickUsbHost();
