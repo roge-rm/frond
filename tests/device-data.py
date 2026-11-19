@@ -44,9 +44,9 @@ class DeviceDataTest(unittest.TestCase):
         self.assertEqual((profile['width'], profile['height']), (480, 320))
         self.assertEqual(profile['default_display_mode'], 10)
         self.assertTrue(profile['available'] and profile['runner_eligible'])
-        # Done so far: the screen, pen, buttons, stick, sound and an SD card in slot 1, up to 2 GB.
-        self.assertTrue(profile['sound'])
-        for key in ('runs_68k', 'usb', 'infrared', 'bluetooth', 'serial', 'network', 'microphone'):
+        # Done so far: the screen, pen, buttons, stick, sound, serial, USB, infrared and an SD card in slot 1, up to 2 GB.
+        self.assertTrue(profile['sound'] and profile['serial'] and profile['usb'] and profile['infrared'])
+        for key in ('runs_68k', 'bluetooth', 'network', 'microphone'):
             self.assertFalse(profile[key], key)
         self.assertTrue(profile['sd_slot'])
         self.assertEqual((profile['sd_min_bytes'], profile['sd_max_bytes']), (32 << 20, 2048 << 20))
@@ -227,9 +227,9 @@ class DeviceDataTest(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('frond_run_inventory', ROOT / 'tools/frond-run.py')
         runner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(runner)
-        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'])
+        self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
-        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name not in ('tapwave-zodiac-2', 'hp-ipaq-rx1950')])
+        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name != 'hp-ipaq-rx1950'])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
         self.assertNotIn('palm-iiix', runner.DEVICES)
         for name in ('repalm',):

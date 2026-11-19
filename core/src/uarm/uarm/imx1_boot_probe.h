@@ -286,12 +286,10 @@ void imx1MachineSetPcmOutput(Imx1Machine*, void (*hook)(void*, uint16_t word, un
 // in an optional section; a state without one loads with the chip reset.
 void imx1MachineEnableYmf768(Imx1Machine*);
 // What the board's audio output looks like just now: SSI1's frame rate (frames a second as a fraction, zero
-// while it isn't sending), the PWM duty last written and port D's direction, use, data and OCR2 registers.
+// while it isn't sending) and port D's direction, use, data and OCR2 registers.
 // Safe to call from the PCM output hook; apart from the System PLL's ratio these change only at CPU writes.
 struct Imx1MachineAudio {
     uint64_t rateNumerator = 0, rateDenominator = 0;
-    bool pwmKnown = false;
-    uint32_t pwmHigh = 0, pwmPeriod = 0;
     uint32_t gpioDDirection = 0, gpioDInUse = 0, gpioDData = 0, gpioDOutputSelect = 0;
 };
 Imx1MachineAudio imx1MachineAudio(const Imx1Machine*);
@@ -311,7 +309,9 @@ void imx1MachineAcknowledgeFrame(Imx1Machine*);
 unsigned imx1MachineScanOrientation(const Imx1Machine*);
 // The YMF768's LED and rumble motor outputs as the guest last set them, false while the chip is off. Reads
 // only; for the frontends.
-struct Imx1MachineAttention { bool led = false, motor = false; };
+// The YMF768's LED and motor bits, and the power LED's colour bits (zodiac_led.h). Host side only: reads
+// latched registers, with no time or side effect.
+struct Imx1MachineAttention { bool led = false, motor = false; uint8_t power = 0; };
 Imx1MachineAttention imx1MachineAttention(const Imx1Machine*);
 // How many times the guest has started up from the ROM's entry, by its first register write. Counts a guest
 // reset and a power-on, not sleep and wake.
@@ -324,7 +324,25 @@ Imx1AspPenInputs imx1MachinePenInputs(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineSetAspUInput(Imx1Machine*, uint16_t word);
 uint16_t imx1MachineAspUInput(const Imx1Machine*);
 // A GPIO port's input sample (0 A to 3 D), as the options or the last replace left it.
+// Whether the system clocks are in stop mode (the guest asleep).
+bool imx1MachineSystemStopped(const Imx1Machine*);
 uint32_t imx1MachineGpioInput(const Imx1Machine*, unsigned port);
+// UART1 (unit 1, the connector's serial port) or UART2 (unit 2, infrared) as a host peer sees it.
+struct Imx1MachineUartLine {
+    bool enabled{false};      // UARTEN
+    bool receiverOn{false};   // takes characters now
+    bool infrared{false};     // IREN
+    bool ctsLow{false};       // the CTS output: the guest takes more
+    bool rtsLow{false};       // the RTS input as set
+    uint32_t format{0};       // UCR2 WS, STPB, PROE and PREN
+    uint64_t bitsPerSecond{0};
+};
+Imx1MachineUartLine imx1MachineUartLine(const Imx1Machine*, unsigned unit);
+// Between runs: the RTS input level (low is active), and a peer (Imx1Uart::setPeer and setSource; all
+// null detaches). Refused on a stopped machine.
+Imx1BootstrapAccess imx1MachineSetUartRts(Imx1Machine*, unsigned unit, bool low);
+Imx1BootstrapAccess imx1MachineSetUartPeer(Imx1Machine*, unsigned unit, Imx1UartTransmit transmit,
+                                          Imx1UartPending pending, Imx1UartTake take, void* context);
 // Execution-thread raw physical inputs. Preview validates without changing guest state.
 // Masks must stay within fixed known baselines; reserved/driven GPIO lanes are excluded.
 Imx1BootstrapAccess imx1MachineReplaceGpioInputs(Imx1Machine*, const uint32_t (&values)[4],
@@ -350,6 +368,22 @@ Imx1BootstrapAccess imx1MachineSetGraphicsSdCard(Imx1Machine*, VSD* card, bool c
 VSD* imx1MachineGraphicsSdCard(const Imx1Machine*);
 Imx1BootstrapAccess imx1MachineReplaceGraphicsAxes(Imx1Machine*, uint32_t first, uint32_t second,
                                                  bool commit = true);
+// The graphics chip's aux ADC input (mode 2 on the default route), 0-1023, saved with the state like the axes.
+// On the Zodiac it's the accessory ID line the DAL's 200876b6 reads; the options' graphicsRawAux starts it.
+Imx1BootstrapAccess imx1MachineSetGraphicsAux(Imx1Machine*, uint32_t sample, bool commit = true);
+uint32_t imx1MachineGraphicsAux(const Imx1Machine*);
+// The W4200's USB function from the host side (Imx1GraphicsUsb), between runs. Each change also drives the
+// chip's interrupt line. A stopped machine or a refused line change answers Timeout (false for the reset).
+struct Imx1UsbFunctionState { bool listening = false; uint32_t enableCount = 0; uint8_t address = 0; };
+Imx1UsbFunctionState imx1MachineUsbState(const Imx1Machine*);
+bool imx1MachineUsbBusReset(Imx1Machine*);
+UsbPacketResult imx1MachineUsbSetup(Imx1Machine*, const uint8_t* data);
+// Endpoint 0 is the control endpoint; take false only peeks at an IN packet and changes nothing.
+UsbPacketResult imx1MachineUsbOut(Imx1Machine*, uint8_t endpoint, const uint8_t* data, unsigned size);
+UsbPacketResult imx1MachineUsbIn(Imx1Machine*, uint8_t endpoint, uint8_t* data, unsigned* size, bool take);
+bool imx1MachineUsbOutReady(const Imx1Machine*, uint8_t endpoint);
+// The USB host has a tick due: a waiting guest's clock runs on to the bound instead of waiting.
+void imx1MachineSetUsbHostPending(Imx1Machine*, bool pending);
 // The Zodiac 2's controls. Each is one GPIO input that reads low while pressed (ROM key scan 20084af4).
 // The ROM proves the pins of Home, power, the stick click and the pins and key codes of the triggers and action
 // buttons. The same scan reads A8 as TriggerA (the SDK's left trigger) and A9 as TriggerB (right). The action buttons go A top, then clockwise: the key scan reads A on D9, B on D8, C on D14 and D on D10,

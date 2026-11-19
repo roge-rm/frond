@@ -202,6 +202,10 @@ open class FrondActivity : SDLActivity() {
     // The Zodiac's controllers instead, as SDL game controller events. UI thread only.
     private var zodiacPad: ZodiacPad? = null
     private var rumble: Rumble? = null
+    // The Battery setting sent to the core and kept current; read from the saved machine settings.
+    val battery: BatteryControl by lazy {
+        BatteryControl(applicationContext, link) { Sessions.forPath(applicationContext, sessionPath)?.settings ?: machineSettings }
+    }
     lateinit var runningDevice: Device
         private set
 
@@ -304,6 +308,7 @@ open class FrondActivity : SDLActivity() {
                 }, "FrondLinks").apply { isDaemon = true }.start()
             }
         }
+        battery.start()
         running = this
         resolveRunningDevice()
         if (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) logSpeed()
@@ -345,6 +350,7 @@ open class FrondActivity : SDLActivity() {
         if (launchDevice().isDana()) {
             arguments += listOf("--dana-view", machineSettings.danaView.argument() + " " + currentDanaEnvironment())
         }
+        arguments += listOf("--battery", battery.launchSpec())
         arguments += listOf("--window-background", BACKGROUND_HEX)
         // The core turns the Zodiac's view with its OS only when the app turns with it too.
         if (launchDevice().zodiac && !followsProgram()) arguments += listOf("--view-turn", "window")
@@ -500,11 +506,15 @@ open class FrondActivity : SDLActivity() {
         if (followsProgram()) requestedOrientation = orientationRequest()
     }
 
-    // The guest's alarm LED or vibrate motor changed (the Zodiac's rumble). The LED isn't shown yet.
-    @Suppress("UNUSED_PARAMETER")
+    // The guest's LED or vibrate motor changed (the Zodiac's rumble). ledColour has bits 1 green and 2 red;
+    // the core draws the LED in the button bar, so it is only kept here. lamp is a second lamp output, not shown.
     // The core's latest vibrate state, kept so rumble that is still on comes back when the app does.
     private var guestVibrate = false
-    fun onGuestAttention(led: Boolean, vibrate: Boolean) = runOnUiThread {
+    var guestLedColour = 0
+        private set
+    @Suppress("UNUSED_PARAMETER")
+    fun onGuestAttention(ledColour: Int, vibrate: Boolean, lamp: Boolean) = runOnUiThread {
+        guestLedColour = ledColour
         guestVibrate = vibrate
         if (!leaving && foreground) rumble?.set(vibrate)
     }
@@ -866,10 +876,9 @@ open class FrondActivity : SDLActivity() {
         }
     }
 
-    // Sends a 68k machine's saved Speed to the core, which changes it at once.
+    // Sends the machine's saved Speed to the core, which changes it at once.
     fun applySpeed() {
-        if (!launchDevice().runs68k) return
-        val wanted = (Sessions.forPath(this, sessionPath)?.settings ?: return).speed.arg
+        val wanted = CpuSpeed.forCore((Sessions.forPath(this, sessionPath)?.settings ?: return).speed, launchDevice().runs68k).arg
         Thread({
             val reply = link.request("speed", wanted, timeoutSeconds = 10)
             if (!reply.ok) Log.w(TAG, "speed: ${reply.code} ${reply.message}")
@@ -1527,6 +1536,7 @@ open class FrondActivity : SDLActivity() {
         // core, and a second core can't start in this process, so save the session and end the
         // process instead; the next start loads the save.
         destroyed = true
+        battery.stop()
         rumble?.stop()
         menuModel?.printer?.close()
         menuModel?.irPrinter?.close()

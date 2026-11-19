@@ -42,7 +42,7 @@
 // In the app (android_main.cpp): the guest OS turned its screen, in SysGetOrientation's numbers. Guest thread.
 void frondGuestOrientationChanged(int orientation);
 // In the app: the guest's alarm LED or vibrate motor changed. Guest thread.
-void frondGuestAttentionChanged(bool led, bool vibrate);
+void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
 #endif
 #include "SdlAudioDriver.h"
 #include "SdlMicrophone.h"
@@ -547,10 +547,8 @@ bool gFastEngineMissing = false;
         const bool sizeDetected = deviceProfile5(deviceType) && deviceProfile5(deviceType)->detect == DeviceDetect5::norSize;
         const bool rx1950 = deviceProfile5(deviceType) && deviceProfile5(deviceType)->board == DeviceBoard5::s3c2442Rx1950;
         // The desktop passes saved serial settings; unsupported devices skip them.
-        if (options.desktopSocket && !isTx && !deviceProfileIsE2Board5(deviceType) && deviceType != deviceTypeTG50) {
+        if (options.desktopSocket && !(deviceProfile5(deviceType) && deviceProfile5(deviceType)->capabilities.serial))
             serialConfig = HostSerial::Config{};
-
-        }
         if (options.experimentalFastAudio) {
             const auto digest=md5(static_cast<uint8_t*>(nor.data),nor.size);
             const auto* audioProfile = deviceProfile5(deviceType);
@@ -901,9 +899,10 @@ bool gFastEngineMissing = false;
         // chosen rotation (Rotate) goes on top. Until the guest's is known, landscape, which it starts in.
         const bool followGuest = soc->FrameQuarterTurn() && !options.viewFollowsWindow;
         unsigned guestOrientation = 0;
-#ifdef __ANDROID__
-        SoC::Attention attention{};
-#endif
+        AttentionThrottle attention;
+        // The button bar draws the LED only where the device has one.
+        const auto* attentionProfile = deviceProfile5(soc->GetDeviceType());
+        const uint8_t ledColours = attentionProfile ? attentionProfile->capabilities.ledColours : 0;
         int guestTurns = 0;
 
         float scale = options.windowScale.value_or(options.smallWindow ? 1.f : 0.f);
@@ -1046,12 +1045,15 @@ bool gFastEngineMissing = false;
             commandContext.serialUart = static_cast<SocPXA*>(soc)->GetSerialUart();
             commandContext.serialRoute = static_cast<SocPXA*>(soc)->GetSerialRoute();
         }
+        commandContext.serialPort = soc->SerialHostPort();
         if (serialConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.serial) {
                 cerr << "--serial is not available on this device" << endl;
                 return false;
             }
-            if (!serial.Start(commandContext.serialUart, serialConfig, commandContext.serialError, commandContext.serialRoute))
+            if (!(commandContext.serialPort
+                      ? serial.Start(commandContext.serialPort, serialConfig, commandContext.serialError)
+                      : serial.Start(commandContext.serialUart, serialConfig, commandContext.serialError, commandContext.serialRoute)))
                 cerr << "serial: " << commandContext.serialError << endl;
             cout << "serial: " << serial.Describe() << endl;
         }
@@ -1063,21 +1065,27 @@ bool gFastEngineMissing = false;
             cerr << "game controller: the connector is in use" << endl;
         HostInfrared infrared;
         commandContext.infrared = &infrared;
+        // The board's infrared port where it gives one, else the PXA's IR UART.
+        auto* const infraredPort = soc->InfraredHostPort();
+        auto* const infraredPxa = infraredPort ? nullptr : static_cast<SocPXA*>(soc);
         if (infraredPhone) {
             if (!capabilities.irPhone) commandContext.infraredError = "This device has no infrared phone.";
-            if (!capabilities.irPhone || !infrared.StartPhone(static_cast<SocPXA*>(soc),commandContext.infraredError)) {
+            if (!capabilities.irPhone || !(infraredPort ? infrared.StartPhone(infraredPort,commandContext.infraredError)
+                                                    : infrared.StartPhone(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredPrinter) {
             if (!capabilities.infrared) commandContext.infraredError = "This device has no infrared port.";
-            if (!capabilities.infrared || !infrared.StartPrinter(static_cast<SocPXA*>(soc),commandContext.infraredError)) {
+            if (!capabilities.infrared || !(infraredPort ? infrared.StartPrinter(infraredPort,commandContext.infraredError)
+                                                       : infrared.StartPrinter(infraredPxa,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;
         } else if (infraredConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.infrared ||
-                !infrared.Start(static_cast<SocPXA*>(soc),infraredConfig,commandContext.infraredError)) {
+                !(infraredPort ? infrared.Start(infraredPort,infraredConfig,commandContext.infraredError)
+                               : infrared.Start(infraredPxa,infraredConfig,commandContext.infraredError))) {
                 cerr << "infrared: " << commandContext.infraredError << endl; return false;
             }
             cout << "infrared: " << infrared.Describe() << endl;
@@ -1097,14 +1105,14 @@ bool gFastEngineMissing = false;
         commandContext.usb = &usb;
         if (usbConfig.kind != HostSerial::Kind::off) {
             if (!capabilities.usb) {
-                cerr << "--usb needs a Palm TX, Tungsten E2 or Zire 72" << endl;
+                cerr << "--usb needs a Palm TX, Tungsten E2, Zire 72, TG50 or Zodiac" << endl;
                 return false;
             }
-            if (!usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError))
+            if (!usb.Start(soc, usbConfig, commandContext.usbError))
                 cerr << "usb: " << commandContext.usbError << endl;
             cout << "usb: " << usb.Describe() << endl;
         } else if (capabilities.usb) {
-            usb.Start(static_cast<SocPXA*>(soc), usbConfig, commandContext.usbError);  // off: cable as without USB
+            usb.Start(soc, usbConfig, commandContext.usbError);  // off: cable as without USB
         }
 
         unique_ptr<DesktopControl> desktop;
@@ -1381,7 +1389,9 @@ bool gFastEngineMissing = false;
                     DeviceKeyMask buttons = sdlEventHandler.PressedButtons();
                     // The pad's Hold slide stays over while it's on.
                     if (soc->GamepadHold()) buttons |= deviceKeyBit(keyIdPadHold);
-                    const DeviceStick stick = sdlEventHandler.Stick();
+                    DeviceStick stick = sdlEventHandler.Stick();
+                    stick.lamp = attention.Shown().ledColour;
+                    stick.lampShown = ledColours != 0;
                     const bool redrawRequested = sdlEventHandler.RedrawRequested();
                     if (gate.Pass(frame != nullptr, redrawRequested, buttons, lcdEnabled, stick)) {
                         link.Publish(frame, firstDirtyLine, lastDirtyLine, lcdEnabled, buttons, redrawRequested, stick);
@@ -1409,13 +1419,18 @@ bool gFastEngineMissing = false;
                     SoC::Attention current = soc->GuestAttention();
                     // No rumble while an input replay is paused (or, on the desktop, the window is in the background).
                     if (replayPaused) current.vibrate = false;
+                    current.ledColour &= ledColours;
+                    bool changed = false;
+                    const SoC::Attention& shown = attention.Update(current, timestampUsec(), changed);
 #ifdef __ANDROID__
-                    if (current != attention) frondGuestAttentionChanged(current.led, current.vibrate);
-                    attention = current;
+                    if (changed) frondGuestAttentionChanged(shown.ledColour, shown.vibrate, shown.led);
 #else
                     const bool on = current.vibrate && !options.disableRumble && !sdlEventHandler.InBackground();
                     const bool controller = sdlEventHandler.Rumble(on, timestampUsec());
-                    if (desktop) desktop->rumbleChanged(on && !controller);
+                    if (desktop) {
+                        desktop->rumbleChanged(on && !controller);
+                        if (changed) desktop->attentionChanged(shown);
+                    }
 #endif
                 }
                 // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.

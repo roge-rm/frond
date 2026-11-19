@@ -13,9 +13,11 @@
 
 #include "device_configuration.h"
 #include "imx1_bootstrap.h"
+#include "HostUartPort.h"
 #include "sdcard.h"
 #include "vSD.h"
 #include "zodiac_battery.h"
+#include "zodiac_led.h"
 
 namespace {
     constexpr uint64_t ticksPerSecond = ZodiacInput::ticksPerSecond;
@@ -32,16 +34,28 @@ namespace {
     // B14, the charger input: the DAL's dock status (ROM 20089990) reads it low as external power and
     // charging. zodiacMachineOptions starts it low; ApplyBattery sets it high off the charger.
     constexpr uint32_t chargerPinB = 0x00004000;
+    // B16, headphone detect: the DAL (20097d40) reads it high as headphones in, writes YMF768 reg 25 = 0 and
+    // turns D27 low and D26 to the headphone bass setting; low (Frond's default) is the speaker.
+    constexpr uint32_t headphonePinB = 0x00010000;
+    // A11 is the accessory attach detect (high attached, the DAL's level interrupt at 200899d8), and A1 high with
+    // accessory ID 0x10 makes it the cradle (20089bbc). Both low with nothing attached.
+    constexpr uint32_t accessoryPinsA = 0x00000802;
+    // The accessory ID is the graphics chip's aux ADC sample (200876b6, through the ROM's calibration at chip
+    // globals +0x18c, which turns 900 into 2085 mV and 0 into 12 mV). Over 1796 mV is no accessory, -124 to
+    // 124 mV the cradle. 900 is the sample every Zodiac state was made with.
+    // ASSUMPTION "Zodiac cradle ID": the cradle's ID divider reads the bottom of the range, sample 0.
+    constexpr uint32_t accessorySampleNone = 900, accessorySampleCradle = 0;
 
     // The machine as the input code reaches it. Every change is previewed, then committed.
     struct MachinePort : ZodiacInputPort {
-        explicit MachinePort(Imx1Machine* machine) : machine(machine) {}
+        // cradleHeld keeps the release after a load or reset off D22 once the host's cradle button is down again.
+        MachinePort(Imx1Machine* machine, bool cradleHeld) : machine(machine), cradleHeld(cradleHeld) {}
         bool setControl(unsigned control, bool down) override {
             return imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineSetZodiacControl(machine, Imx1ZodiacControl(control), down, true) == Imx1BootstrapAccess::ok;
         }
         bool releaseControls() override {
-            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | cradlePinD};
+            const uint32_t pins[4] = {buttonPinsA, 0, 0, buttonPinsD | (cradleHeld ? 0 : cradlePinD)};
             return imx1MachineReplaceGpioInputs(machine, pins, pins, false) == Imx1BootstrapAccess::ok &&
                    imx1MachineReplaceGpioInputs(machine, pins, pins, true) == Imx1BootstrapAccess::ok;
         }
@@ -61,7 +75,14 @@ namespace {
                    imx1MachineSetZodiacStick(machine, x, y, true) == Imx1BootstrapAccess::ok;
         }
         Imx1Machine* machine;
+        bool cradleHeld;
     };
+
+    // Previews then commits one set of GPIO input pins.
+    bool replaceGpioInputs(Imx1Machine* machine, const uint32_t (&values)[4], const uint32_t (&masks)[4]) {
+        return imx1MachineReplaceGpioInputs(machine, values, masks, false) == Imx1BootstrapAccess::ok &&
+               imx1MachineReplaceGpioInputs(machine, values, masks, true) == Imx1BootstrapAccess::ok;
+    }
 }  // namespace
 
 static_assert(ZodiacInput::controls == unsigned(Imx1ZodiacControl::count));
@@ -91,6 +112,156 @@ Imx1ProbeOptions zodiacMachineOptions(Imx1I2cBus* eeprom) {
     o.graphicsRawMode1Known = true; o.graphicsRawMode1 = 712;
     o.graphicsVirtualA4SourceOver = true; o.graphicsVirtualPackedMono = true;
     return o;
+}
+
+// UART1 on the connector for HostSerial. The UART takes a character from the host each frame time
+// (Imx1Uart::setSource) while the guest's CTS output is low, so Kick has nothing to do.
+struct SocIMX1::SerialPort final : HostUartPort {
+    explicit SerialPort(SocIMX1& soc) : soc(soc) {}
+    SocIMX1& soc;
+    Read read{};
+    Write write{};
+    Active active{};
+    Detached detached{};
+    void* context{};
+    uint32_t disables{0};
+    bool wasOn{false};
+
+    Imx1MachineUartLine Line() const { return imx1MachineUartLine(soc.machine, 1); }
+    bool Attach(Read r, Write w, Active a, Detached d, void* c) override {
+        if (soc.halted) return false;
+        if (imx1MachineSetUartPeer(soc.machine, 1, Transmit, Pending, Take, this) != Imx1BootstrapAccess::ok) return false;
+        read = r; write = w; active = a; detached = d; context = c;
+        wasOn = Line().receiverOn;
+        return true;
+    }
+    void Detach() override {
+        imx1MachineSetUartPeer(soc.machine, 1, nullptr, nullptr, nullptr, nullptr);
+        if (!soc.halted) imx1MachineSetUartRts(soc.machine, 1, false);
+        read = nullptr; write = nullptr; active = nullptr; detached = nullptr; context = nullptr;
+    }
+    // A load or reset made a new board without the peer: the host attaches again.
+    void Replaced() {
+        if (!context) return;
+        const auto notify = detached;
+        void* const host = context;
+        Detach();
+        if (notify) notify(host);
+    }
+    bool SetInputs(uint8_t asserted) override {
+        return !soc.halted && imx1MachineSetUartRts(soc.machine, 1, asserted & hostUartCts) == Imx1BootstrapAccess::ok;
+    }
+    bool WantsInput() const override { return Line().ctsLow; }
+    bool ReceiverEnabled() const override { return Line().receiverOn; }
+    uint32_t DisableCount() const override {
+        auto& self = const_cast<SerialPort&>(*this);
+        const bool on = Line().receiverOn;
+        if (self.wasOn && !on) ++self.disables;
+        self.wasOn = on;
+        return disables;
+    }
+    void Kick() override {}
+    HostUartMode Mode() const override {
+        const auto line = Line();
+        return {uint32_t(line.bitsPerSecond), line.format, line.receiverOn, line.enabled};
+    }
+    static void Transmit(void* c, uint8_t character, bool) {
+        auto& self = *static_cast<SerialPort*>(c);
+        if (self.write) self.write(character, self.context);
+    }
+    static bool Pending(void* c) {
+        auto& self = *static_cast<SerialPort*>(c);
+        return self.active && self.active(self.context) && self.Line().ctsLow;
+    }
+    static bool Take(void* c, uint8_t& character) {
+        auto& self = *static_cast<SerialPort*>(c);
+        if (!self.read) return false;
+        const auto value = self.read(self.context);
+        if (value & ~0xffu) return false;
+        character = uint8_t(value);
+        return true;
+    }
+};
+
+// UART2 in IrDA mode for HostInfrared.
+// ASSUMPTION "Zodiac IR transceiver": powered while UART2 is enabled with IREN set; the ROM's shutdown
+// pin, if it has one, is not modelled. Asleep is the i.MX1 in stop mode.
+struct SocIMX1::InfraredPort final : HostInfraredPort {
+    explicit InfraredPort(SocIMX1& soc) : soc(soc) {}
+    SocIMX1& soc;
+    SerialHostHooks hooks{};
+
+    Imx1MachineUartLine Line() const { return imx1MachineUartLine(soc.machine, 2); }
+    uint64_t Time() override { return soc.GetTime(); }
+    bool SetHooks(const SerialHostHooks* next) override {
+        if (!next) {
+            hooks = {};
+            imx1MachineSetUartPeer(soc.machine, 2, nullptr, nullptr, nullptr, nullptr);
+            if (!soc.halted) imx1MachineSetUartRts(soc.machine, 2, false);
+            return true;
+        }
+        if (soc.halted) return false;
+        hooks = *next;
+        return Wire();
+    }
+    // The transceiver has no RTS wire: with a peer the transmitter runs whatever UCR2's IRTS says.
+    bool Wire() {
+        return imx1MachineSetUartPeer(soc.machine, 2, Transmit, Pending, Take, this) == Imx1BootstrapAccess::ok &&
+               imx1MachineSetUartRts(soc.machine, 2, true) == Imx1BootstrapAccess::ok;
+    }
+    void Replaced() {
+        if (!hooks.context) return;
+        if (hooks.replaced) hooks.replaced(hooks.context);
+        if (soc.halted || !Wire()) hooks = {};
+    }
+    bool PowerEnabled() override { const auto line = Line(); return line.enabled && line.infrared; }
+    bool ReceiveEnabled() override { const auto line = Line(); return line.receiverOn && line.infrared; }
+    HostUartMode Mode() override {
+        const auto line = Line();
+        return {uint32_t(line.bitsPerSecond), line.format, line.receiverOn && line.infrared, line.enabled && line.infrared};
+    }
+    void Kick() override {}
+    bool HostIoPaused() override { return false; }
+    bool Sleeping() override { return soc.PowerSleeping(); }
+    bool KeyboardAttached() override { return false; }
+    static void Transmit(void* c, uint8_t character, bool infrared) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        if (infrared && self.hooks.write) self.hooks.write(character, self.hooks.context);
+    }
+    static bool Pending(void* c) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        return self.hooks.pending && self.Line().infrared && self.hooks.pending(self.hooks.context);
+    }
+    static bool Take(void* c, uint8_t& character) {
+        auto& self = *static_cast<InfraredPort*>(c);
+        if (!self.hooks.read) return false;
+        const auto value = self.hooks.read(self.hooks.context);
+        if (value & ~0xffu) return false;
+        character = uint8_t(value);
+        return true;
+    }
+};
+
+SocIMX1::~SocIMX1() = default;
+
+HostUartPort* SocIMX1::SerialHostPort() {
+    if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
+    return serialPort.get();
+}
+
+HostInfraredPort* SocIMX1::InfraredHostPort() {
+    if (!infraredPort) infraredPort = std::make_unique<InfraredPort>(*this);
+    return infraredPort.get();
+}
+
+// ASSUMPTION "Zodiac RTS idle": with nothing on the line the RTS inputs read inactive (high), so a
+// send with CTS flow control waits (the ROM's write loop times out) and USR1 reads as on a real port.
+void SocIMX1::ApplyUartLines() {
+    if (halted) return;
+    imx1MachineSetUartRts(machine, 1, false);
+    imx1MachineSetUartRts(machine, 2, false);
+    if (serialPort) serialPort->Replaced();
+    if (infraredPort) infraredPort->Replaced();
 }
 
 SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error) {
@@ -124,6 +295,7 @@ SocIMX1* SocIMX1::Create(const uint8_t* romData, size_t size, std::string& error
     soc->ramSize = 128u << 20;
     soc->ApplyBattery();
     soc->StateChanged();
+    soc->ApplyUartLines();
     // The owner keeps it for the life of the process, like the machine inside.
     return soc.release();
 }
@@ -204,8 +376,64 @@ void SocIMX1::StateChanged() {
     halted = status.status == Imx1MachineStatus::terminal || status.status == Imx1MachineStatus::stopped;
     framePending = false;
     redraw = true;
+    // A load or reset brings the state's own D22 (high unless saved while held); the host's button is up.
+    cradleDown = false;
+    hotSyncTicks = 0;
+    wasStopped = imx1MachineSystemStopped(machine);
     // The host's keys and pen are up now. What the machine still holds is let go in PumpInput.
     input.machineChanged();
+    // A USB host on the bus starts again with the new machine.
+    if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+}
+
+UsbDevicePort SocIMX1::GetUsbPort() {
+    using R = UsbPacketResult;
+    static const UsbDevicePort::Operations ops{
+        [](void* p) { return imx1MachineUsbBusReset(static_cast<SocIMX1*>(p)->machine); },
+        [](void*) { return false; },  // no start-of-frame model
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).listening; },
+        [](void*) { return false; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).enableCount; },
+        [](void* p) { return imx1MachineUsbState(static_cast<SocIMX1*>(p)->machine).address; },
+        [](void*, void (*)(void*), void*) {},
+        [](void* p, const uint8_t* data) { return imx1MachineUsbSetup(static_cast<SocIMX1*>(p)->machine, data); },
+        [](void* p, const uint8_t* data, unsigned size) {
+            return imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, 0, data, size);
+        },
+        [](void* p, uint8_t* data, unsigned* size) {
+            return imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, 0, data, size, true);
+        },
+        [](void* p, uint8_t ep, const uint8_t* data, unsigned size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbOut(static_cast<SocIMX1*>(p)->machine, ep, data, size) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, uint8_t* data, unsigned* size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, data, size, true) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, unsigned* size) {
+            ep &= 0x7f;
+            return ep ? imx1MachineUsbIn(static_cast<SocIMX1*>(p)->machine, ep, nullptr, size, false) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, unsigned) {
+            ep &= 0x7f;
+            return !ep || imx1MachineUsbOutReady(static_cast<SocIMX1*>(p)->machine, ep);
+        }};
+    return {this, ops};
+}
+
+void SocIMX1::TickUsbHost() {
+    if (!usbHostHooks.tick || UsbHostIoPaused()) return;
+    if (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= GetTime())
+        usbHostHooks.tick(usbHostHooks.context, GetTime());
+}
+
+// The host has a tick due (a plug-in, a packet, a retry). Nothing in the machine would wake an idle guest
+// for it, so this counts as an event and the guest's clock runs on to the slice end, where the host ticks.
+bool SocIMX1::UsbHostEventPending() {
+    if (!usbHostHooks.tick || UsbHostIoPaused()) return false;
+    return !usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) != UINT64_MAX;
 }
 
 // Loads the power-on state as a reset through RESET_IN, which keeps RAM, the clock controller and
@@ -228,6 +456,7 @@ void SocIMX1::Reset() {
     StateChanged();
     // After StateChanged, which works out halted again for the loaded state.
     ApplyBattery();
+    ApplyUartLines();
     // The power-on state has the slot empty; a card still in reads as in from the start.
     if (cardIn) { vsdReset(vsd, uint32_t(sdCardSectorCount())); cardSync = true; SyncCard(); }
     if (card2In) vsdReset(vsd2, uint32_t(sdCardStore(1).sectorCount()));
@@ -248,10 +477,15 @@ unsigned SocIMX1::GuestOrientation() {
     return orientation;
 }
 
-// The YMF768's LED and rumble motor.
+// The YMF768's LED and rumble motor, and the power LED's colour (zodiac_led.h).
 SoC::Attention SocIMX1::GuestAttention() {
     const auto outputs = imx1MachineAttention(machine);
-    return {outputs.led, outputs.motor};
+    static_assert(zodiacLedGreen == ledGreen && zodiacLedRed == ledRed);
+    Attention a;
+    a.ledColour = outputs.power;
+    a.vibrate = outputs.motor;
+    a.led = outputs.led;
+    return a;
 }
 
 // A stopped machine can't run again, so its state is not worth keeping over a session that can.
@@ -279,6 +513,7 @@ bool SocIMX1::LoadState(const uint8_t* data, size_t size, uint32_t flags) {
     orientationTracker.Loaded(imx1MachineStartups(machine));
     StateChanged();
     ApplyBattery();
+    ApplyUartLines();
     // A card in carries on from the state's card section, or starts idle without one. With no card in,
     // a card section puts the card store's card back in when it's the saved card (a session saved with
     // its card in). Another card than the saved one is a swap: it goes or stays out, the slot sees the
@@ -346,16 +581,90 @@ bool SocIMX1::SetBattery(const BatteryPower& value) {
 
 // The level as the ASP U word the DAL's battery read takes (zodiac_battery.h); Maximum is the fixed 0x9b00
 // every Zodiac state was made with. Charging pulls B14 low.
-void SocIMX1::ApplyBattery() {
-    if (halted) return;
+bool SocIMX1::ApplyBattery() {
+    if (halted) return false;
     if (imx1MachineSetAspUInput(machine, zodiacBatterySample(battery.Percent())) != Imx1BootstrapAccess::ok)
         std::cerr << "zodiac: the battery level could not be set" << std::endl;
+    // The charger and the headphones go in separately, so one refused pin doesn't hold back the other.
     uint32_t values[4]{}, masks[4]{};
     masks[1] = chargerPinB;
     values[1] = battery.charging ? 0 : chargerPinB;
-    if (imx1MachineReplaceGpioInputs(machine, values, masks, false) != Imx1BootstrapAccess::ok ||
-        imx1MachineReplaceGpioInputs(machine, values, masks, true) != Imx1BootstrapAccess::ok)
-        std::cerr << "zodiac: the charger input could not be set" << std::endl;
+    if (!replaceGpioInputs(machine, values, masks)) std::cerr << "zodiac: the charger input could not be set" << std::endl;
+    const bool cradleSet = ApplyCradle();
+    return ApplyHeadphones() && cradleSet;
+}
+
+bool SocIMX1::ApplyHeadphones() {
+    if (halted) return false;
+    uint32_t values[4]{}, masks[4]{};
+    masks[1] = headphonePinB;
+    values[1] = headphones ? headphonePinB : 0;
+    if (replaceGpioInputs(machine, values, masks)) return true;
+    std::cerr << "zodiac: the headphone input could not be set" << std::endl;
+    return false;
+}
+
+bool SocIMX1::SetHeadphones(bool in) {
+    if (halted) return false;
+    const bool before = headphones;
+    headphones = in;
+    if (ApplyHeadphones()) return true;
+    headphones = before;
+    return false;
+}
+
+// Changes the inputs only where they differ, so a machine with no cradle runs exactly as before. Attaching
+// sets the ID before A11, detaching drops A11 first, so the ROM never reads the ID of the other state.
+bool SocIMX1::ApplyCradle() {
+    if (halted) return false;
+    const bool in = CradleAttached();
+    const uint32_t sample = in ? accessorySampleCradle : accessorySampleNone;
+    uint32_t values[4]{}, masks[4]{};
+    masks[0] = accessoryPinsA;
+    values[0] = in ? accessoryPinsA : 0;
+    const bool pinsSet = (imx1MachineGpioInput(machine, 0) & accessoryPinsA) == values[0];
+    const bool sampleSet = imx1MachineGraphicsAux(machine) == sample;
+    if (pinsSet && sampleSet) return true;
+    const auto setSample = [&] {
+        return sampleSet || (imx1MachineSetGraphicsAux(machine, sample, false) == Imx1BootstrapAccess::ok &&
+                             imx1MachineSetGraphicsAux(machine, sample, true) == Imx1BootstrapAccess::ok);
+    };
+    const bool ok = in ? setSample() && (pinsSet || replaceGpioInputs(machine, values, masks))
+                       : (pinsSet || replaceGpioInputs(machine, values, masks)) && setSample();
+    if (!ok) std::cerr << "zodiac: the cradle inputs could not be set" << std::endl;
+    return ok;
+}
+
+bool SocIMX1::SetCradle(bool attached) { return SetCradleInputs(cradle, attached); }
+bool SocIMX1::SetUsbCable(bool attached) { return SetCradleInputs(usbCable, attached); }
+
+bool SocIMX1::SetCradleInputs(bool& setting, bool attached) {
+    if (halted) return false;
+    const bool before = setting;
+    setting = attached;
+    if (ApplyCradle()) return true;
+    setting = before;
+    ApplyCradle();
+    return false;
+}
+
+// D22 low while held. Without the cradle attached (A11 high and the accessory checks of 20089bae/20089bbc)
+// the awake ROM's key scan (20084af4) ignores it; asleep, its low level interrupt wakes the Zodiac.
+bool SocIMX1::SetCradleButton(bool down) {
+    if (halted) return false;
+    uint32_t values[4]{}, masks[4]{};
+    masks[3] = cradlePinD;
+    values[3] = down ? 0 : cradlePinD;
+    if (!replaceGpioInputs(machine, values, masks)) return false;
+    cradleDown = down;
+    hotSyncTicks = 0;
+    return true;
+}
+
+bool SocIMX1::PressHotSync() {
+    if (halted || cradleDown || !SetCradleButton(true)) return false;
+    hotSyncTicks = ticksPerSecond / 2;
+    return true;
 }
 
 uint64_t SocIMX1::GetTime() {
@@ -418,13 +727,13 @@ void SocIMX1::PushStick() {
 void SocIMX1::JamKey(enum KeyId key, uint32_t durationMsec) {
     const int control = zodiacControlFor(key);
     if (control < 0 || halted) return;
-    MachinePort port(machine);
+    MachinePort port(machine, cradleDown);
     input.jam(port, unsigned(control), durationMsec);
 }
 
 // Hands queued host input to the machine. An input the machine refuses just now stays queued.
 void SocIMX1::PumpInput() {
-    MachinePort port(machine);
+    MachinePort port(machine, cradleDown);
     input.hostTime(uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count()));
     input.pump(port);
@@ -493,6 +802,7 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         // The time asked for is checked between slices. The time bound keeps slices short in stop mode,
         // where each idle period is a CLK32 tick, so input reaches a sleeping guest promptly.
         bounds.deadline = {(now.time.ticks / sliceTicks + 1) * sliceTicks, 0, 1};
+        imx1MachineSetUsbHostPending(machine, UsbHostEventPending());
         const auto run = imx1MachineRunBounded(machine, bounds);
         if (run.reason == Imx1MachineYield::terminal || run.reason == Imx1MachineYield::stopped ||
             run.reason == Imx1MachineYield::invalidBounds) {
@@ -503,6 +813,8 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         }
         if (run.reason == Imx1MachineYield::waiting) { waiting = true; break; }
         now = run.total;
+        // The USB host runs at slice ends, on the guest's clock.
+        TickUsbHost();
         if (now.time.compare(until) >= 0) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
@@ -511,6 +823,15 @@ uint64_t SocIMX1::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
     // still then, and the input holds are timed on the time asked for. A running guest's holds are
     // timed on its own clock alone, however slowly it runs.
     input.advance(waiting ? std::max(wanted, elapsed) : elapsed);
+    if (hotSyncTicks) {
+        const uint64_t passed = waiting ? std::max(wanted, elapsed) : elapsed;
+        hotSyncTicks = passed >= hotSyncTicks ? 0 : hotSyncTicks - passed;
+        // A release the machine refuses just now is tried again after the next run.
+        if (!hotSyncTicks && !SetCradleButton(false)) hotSyncTicks = 1;
+    }
+    const bool stopped = imx1MachineSystemStopped(machine);
+    if (wasStopped && !stopped) ++wakes;
+    wasStopped = stopped;
     if (waiting || halted) return maxCycles;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % ticksPerSecond);

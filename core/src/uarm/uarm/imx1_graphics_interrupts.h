@@ -23,6 +23,27 @@ class Imx1GraphicsInterrupts {
         if (sourceKnown && event) { pending |= displayMask; known |= displayMask; }
         else if (!sourceKnown && !(pending & known & displayMask)) known &= ~displayMask;
     }
+    // The USB function's group (0x50; the driver uses bit 6) as the USB driver drives it: it sets bit 6 and
+    // clears 0x10, 0x20 and 0x80 (20177eae-20177ec2), clears all four and acknowledges what is pending
+    // among them (20177f20-20177f4a).
+    static constexpr uint32_t usbMask = 0x40;
+    void raiseUsb() { pending |= usbMask; known |= usbMask; }
+    Imx1BootstrapAccess usbAccess(uint32_t address, bool write, uint32_t& value) {
+        using A = Imx1BootstrapAccess;
+        if (!write) {
+            if (address == 0x16010204 && known != 0xffffffff) return A::externalInput;
+            value = address == 0x16010200 ? enabled : pending;
+            return A::ok;
+        }
+        if (address == 0x16010200) {
+            if (((value ^ enabled) & ~0xf0u) || (value & 0xb0)) return A::sideEffect;
+            enabled = value;
+        } else {
+            if (value & ~0xf0u) return A::sideEffect;
+            pending &= ~value;
+        }
+        return A::ok;
+    }
     Imx1BootstrapAccess access(uint32_t pc, uint32_t address, uint32_t size, bool write, uint32_t& value,
                               bool emptySdCardEventsKnown = false) {
         using A = Imx1BootstrapAccess;
@@ -55,7 +76,13 @@ class Imx1GraphicsInterrupts {
                 if (pc != 0x20086970 && pc != 0x20086c06 && pc != 0x20086e08 && pc != 0x20087702) return A::externalInput;
                 if ((pc == 0x20086970 || pc == 0x20086c06) && value != 0) return A::sideEffect;
                 if (value & ~nativeMask) return A::reservedBits;
-                if (value & ~(displayMask | (emptySdCardEventsKnown ? 0x02000000u : 0u))) return A::externalInput;
+                // 20086dea (store 20086e08) and 200876ee (store 20087702) read the enable, set or clear one group
+                // (0: 0x50, 1: 0x02000000, 2: bit 0) and write it back. The wake set-up (20086e0c) sets group 0
+                // while the USB driver's handler is registered (DAL globals +0x12c), and the USB driver's bit 6
+                // stays on through either (a sleep and wake during a USB HotSync). Nothing raises bit 4.
+                const uint32_t usbGroup = pc == 0x20086e08 || pc == 0x20087702 ? 0x50u : 0;
+                if (value & ~(displayMask | usbGroup | (emptySdCardEventsKnown ? 0x02000000u : 0u)))
+                    return A::externalInput;
                 if (value & ~known) return A::externalInput;
                 enabled = value;
             }

@@ -185,6 +185,38 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     rumble->setObjectName("rumble");
     soundLayout->addWidget(rumble);
     layout->addWidget(sound);
+    auto* batteryGroup = new QGroupBox(tr("Battery"), this);
+    auto* batteryLayout = new QVBoxLayout(batteryGroup);
+    batteryMode = new QComboBox(batteryGroup);
+    batteryMode->setObjectName("batteryMode");
+    batteryMode->addItem(tr("Maximum"), "max");
+    batteryMode->addItem(tr("Set level"), "level");
+    batteryMode->addItem(tr("Host battery"), "host");
+    batteryMode->setCurrentIndex(std::max(0, batteryMode->findData(prefs.batteryMode)));
+    batteryLevelLabel = new QLabel(batteryGroup);
+    batteryLevel = new QSlider(Qt::Horizontal, batteryGroup);
+    batteryLevel->setObjectName("batteryLevel");
+    batteryLevel->setRange(0, 100);
+    batteryLevel->setPageStep(10);
+    batteryLevel->setValue(prefs.batteryLevel);
+    batteryCharging = new QCheckBox(tr("Charging"), batteryGroup);
+    batteryCharging->setObjectName("batteryCharging");
+    batteryCharging->setChecked(prefs.batteryCharging);
+    batteryLayout->addWidget(batteryMode);
+    batteryLayout->addWidget(batteryLevelLabel);
+    batteryLayout->addWidget(batteryLevel);
+    batteryLayout->addWidget(batteryCharging);
+    auto batteryShow = [this] {
+        const auto mode = batteryMode->currentData().toString();
+        batteryLevelLabel->setText(tr("Level: %1").arg(batteryLevel->value()));
+        batteryLevelLabel->setVisible(mode == "level");
+        batteryLevel->setVisible(mode == "level");
+        batteryCharging->setVisible(mode != "host");
+    };
+    connect(batteryMode, &QComboBox::currentIndexChanged, this, batteryShow);
+    connect(batteryLevel, &QSlider::valueChanged, this, batteryShow);
+    batteryShow();
+    layout->addWidget(batteryGroup);
     auto* speedBox = new QGroupBox(tr("Speed"), this);
     speedGroup = speedBox;
     auto* speedLayout = new QVBoxLayout(speedBox);
@@ -192,9 +224,9 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     speedLabel = new QLabel(tr("Speed"), speedBox);
     speed = new QComboBox(speedBox);
     speed->setObjectName("speed");
-    speed->addItem(tr("Original"), false);
-    speed->addItem(tr("Uncapped"), true);
-    speed->setCurrentIndex(prefs.uncapped ? 1 : 0);
+    chosenSpeed = frondSessions::speedName(prefs);
+    fillSpeedBox(speed, false, chosenSpeed);
+    connect(speed, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { chosenSpeed = speed->currentData().toString(); });
     speedLabel->setBuddy(speed);
     speedRow->addWidget(speedLabel);
     speedRow->addWidget(speed, 1);
@@ -284,6 +316,13 @@ MachineSettings::MachineSettings(const frondSessions::Preferences& prefs, bool a
     scaleLabel->setText(tr("Size: %1×").arg(windowScale->value() / 4.0));
 }
 
+void fillSpeedBox(QComboBox* box, bool m68k, const QString& name) {
+    const QSignalBlocker blocked(box);
+    box->clear();
+    for (const auto& choice : frondSessions::speedChoices(m68k)) box->addItem(frondSessions::speedLabel(choice), choice);
+    box->setCurrentIndex(std::max(0, box->findData(m68k && name == QLatin1String("8x") ? QStringLiteral("uncapped") : name)));
+}
+
 int fittingScaleQuarters(Device device, bool keyboard, frondSessions::JogControls jog) {
     const auto& display = frondFirmware::profile(device).frontend;
     int width = display.width + display.sideTabWidth, height = display.height + display.silkscreenHeight + display.stripHeight;
@@ -316,6 +355,9 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.scale = windowScale->value();
     prefs.smooth = smoothLcd->isChecked();
     prefs.showMips = showMips->isChecked();
+    prefs.batteryMode = batteryMode->currentData().toString();
+    prefs.batteryLevel = batteryLevel->value();
+    prefs.batteryCharging = batteryCharging->isChecked();
     prefs.audio = audio->isChecked();
     prefs.fastAudio = fastAudio->isChecked();
     prefs.rumble = rumble->isChecked();
@@ -325,7 +367,7 @@ frondSessions::Preferences MachineSettings::values() const {
     prefs.fastEngine = engine->currentData().toBool();
     if (contrast->value() != prefs.contrast) prefs.contrastSet = true;
     prefs.contrast = contrast->value();
-    prefs.uncapped = speed->currentData().toBool();
+    frondSessions::setSpeed(&prefs, speed->currentData().toString());
     const auto choice = [](QComboBox* combo, QSpinBox* port) {
         const auto mode = combo->currentData().toString();
         return mode == "tcp" ? "tcp:" + QString::number(port->value()) : mode;
@@ -399,8 +441,9 @@ void MachineSettings::setDevice(Device device) {
     showMips->setVisible(!m68k);
     contrastLabel->setVisible(frondFirmware::lcdContrast(device));
     contrast->setVisible(frondFirmware::lcdContrast(device));
-    // Original/Uncapped for every device; the Engine choice has no JIT to pick on a 68k.
+    // Speed for every device, without 8x on a 68k; the Engine choice has no JIT to pick on a 68k.
     const bool engineShown = !m68k;
+    fillSpeedBox(speed, m68k, chosenSpeed);
     speedLabel->setVisible(true);
     speed->setVisible(true);
     engineLabel->setVisible(engineShown);

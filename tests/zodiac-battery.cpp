@@ -1,6 +1,7 @@
 // The Zodiac's battery setting: the level as the ASP U word on the ROM's own count-to-voltage chain, Maximum
 // exactly the fixed 0x9b00, Charging on GPIO B14, the setting not saved with the state and put back after every load and reset.
-// Made-up ROM, no firmware.
+// Also the headphones, the cradle button and the cradle, and the USB bridge's cable through the cradle. Made-up ROM,
+// no firmware.
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "UsbHostBridge.h"
 #include "soc_IMX1.h"
 #include "zodiac_battery.h"
 
@@ -101,6 +103,102 @@ void machine() {
     assert(soc->SetBattery(battery("max")));
     load(*soc, atLevel);
     assert(soc->BatterySample() == zodiacBatteryFullSample);
+
+    // Headphones: B16 high while in, put back after a load and a reset. B14 stays as set.
+    assert(soc->HeadphonesSupported() && !soc->HeadphonesIn() && !soc->HeadphoneInputHigh());
+    assert(soc->SetHeadphones(true) && soc->HeadphonesIn() && soc->HeadphoneInputHigh() && !soc->ChargerInputLow());
+    load(*soc, atMaximum);
+    assert(soc->HeadphoneInputHigh());
+    soc->Reset();
+    assert(soc->HeadphoneInputHigh());
+    assert(soc->SetBattery(battery("max charging")) && soc->HeadphoneInputHigh() && soc->ChargerInputLow());
+    assert(soc->SetHeadphones(false) && !soc->HeadphoneInputHigh() && soc->ChargerInputLow());
+    assert(soc->SetBattery(battery("max")));
+
+    // The cradle button: D22 low while held, let go by a load.
+    assert(soc->CradleButtonSupported() && !soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->SetCradleButton(true) && soc->CradleButtonDown() && soc->CradleInputLow());
+    assert(soc->SetCradleButton(false) && !soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->SetCradleButton(true));
+    load(*soc, atMaximum);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
+    // Pressed again before the release after a load is pumped: the release leaves D22 low.
+    assert(soc->SetCradleButton(true));
+    soc->Run(1000, 32000000);
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    assert(soc->SetCradleButton(false) && !soc->CradleInputLow());
+    // A HotSync press holds D22 for half a guest second, then lets go by itself; a load lets go at once.
+    assert(soc->PressHotSync() && soc->CradleButtonDown() && soc->CradleInputLow() && !soc->PressHotSync());
+    soc->Run(100000, 1000000);
+    assert(soc->CradleButtonDown() && soc->CradleInputLow());
+    const uint64_t pressed = soc->GetTime();
+    for (int i = 0; i < 2000 && soc->CradleButtonDown(); ++i) soc->Run(100000, 1000000);
+    assert(soc->GetTime() - pressed >= 300000000 && soc->GetTime() - pressed < 600000000);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow());
+    assert(soc->PressHotSync());
+    load(*soc, atMaximum);
+    assert(!soc->CradleButtonDown() && !soc->CradleInputLow() && soc->PressHotSync());
+    assert(soc->SetCradleButton(false));
+    assert(!soc->PowerSleeping());
+
+    // The cradle: A11 and A1 high and the ID sample 0 while attached, put back after a load and a reset.
+    // Detached is the 900 every state was made with, so a machine with no cradle saves as before.
+    assert(soc->CradleSupported() && !soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+    const auto detached = save(*soc);
+    assert(soc->SetCradle(false) && save(*soc) == detached);
+    assert(soc->SetCradle(true) && soc->CradleAttached() && soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
+    const auto attached = save(*soc);
+    assert(attached != detached);
+    load(*soc, atMaximum);
+    assert(soc->AccessoryPinsHigh() && soc->AccessorySample() == 0);
+    soc->Reset();
+    assert(soc->AccessoryPinsHigh() && soc->AccessorySample() == 0 && !soc->HeadphoneInputHigh());
+    assert(soc->SetCradle(false) && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+    load(*soc, attached);
+    assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+
+    // The USB bridge takes out only the cradle it put in. Off, a load, a reset, usb-mode off and Stop keep the
+    // user's cradle.
+    const auto cradleIn = [&] { return soc->CradleAttached() && soc->AccessoryPinsHigh() && soc->AccessorySample() == 0; };
+    // A second of guest time, past the bridge's half second replug.
+    const auto run = [&](UsbHostBridge& usb) {
+        for (const uint64_t start = soc->GetTime(); soc->GetTime() - start < 1000000000;) {
+            soc->Run(100000, 1000000);
+            usb.Service();
+        }
+    };
+    std::string error;
+    {
+        UsbHostBridge usb;
+        assert(soc->SetCradle(true));
+        assert(usb.Start(soc, {HostSerial::Kind::off, 0, {}}, error) && cradleIn());
+        load(*soc, atMaximum);
+        run(usb);
+        assert(cradleIn() && !soc->UsbCableAttached());
+        soc->Reset();
+        run(usb);
+        assert(cradleIn());
+        // On: the cable comes in with the user's cradle, goes out and back after a load, and usb-mode off
+        // leaves the cradle in.
+        assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error));
+        run(usb);
+        assert(soc->UsbCableAttached() && cradleIn());
+        load(*soc, atMaximum);
+        soc->Run(100000, 1000000);
+        assert(!soc->UsbCableAttached() && cradleIn());
+        run(usb);
+        assert(soc->UsbCableAttached() && cradleIn());
+        assert(usb.Start(soc, {HostSerial::Kind::off, 0, {}}, error));
+        run(usb);
+        assert(!soc->UsbCableAttached() && cradleIn());
+        // With no cradle of the user's, the cable alone puts it in and Stop takes it out.
+        assert(soc->SetCradle(false) && !soc->CradleAttached() && !soc->AccessoryPinsHigh());
+        assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error));
+        run(usb);
+        assert(soc->UsbCableAttached() && cradleIn());
+        usb.Stop();
+        assert(!soc->CradleAttached() && !soc->AccessoryPinsHigh() && soc->AccessorySample() == 900);
+    }
 }
 }  // namespace
 
@@ -125,16 +223,47 @@ void halted() {
     soc->Reset();
     assert(!soc->Halted() && soc->BatterySample() == zodiacBatterySample(20) && !soc->ChargerInputLow());
     stop();
+    // Halted, the headphone and cradle commands report the failure and change nothing.
+    assert(!soc->SetHeadphones(true) && !soc->HeadphonesIn());
+    assert(!soc->SetCradleButton(true) && !soc->CradleButtonDown());
+    assert(!soc->PressHotSync() && !soc->CradleButtonDown());
+    assert(!soc->SetCradle(true) && !soc->CradleAttached());
     assert(soc->SetBattery(battery("level 20 charging")));
     soc->Reset();
     assert(soc->ChargerInputLow());
 }
 
+// A guest waiting with nothing to wake it: its clock stands still, but a USB host tick that's due (the plug-in)
+// runs it on to the slice end, where the host plugs in.
+void waiting() {
+    auto image = rom(0xee070f90);        // wait for interrupt
+    put32le(image, 4, 0xeafffffd);       // b 0
+    std::string why;
+    SocIMX1* soc = SocIMX1::Create(image.data(), image.size(), why);
+    assert(soc);
+    soc->Run(100000, 1000000);
+    const uint64_t idle = soc->GetTime();
+    soc->Run(100000, 1000000);
+    assert(soc->GetTime() == idle);
+    UsbHostBridge usb;
+    std::string error;
+    assert(usb.Start(soc, {HostSerial::Kind::pty, 0, {}}, error) && !soc->UsbCableAttached());
+    for (int i = 0; i < 4 && !soc->UsbCableAttached(); ++i) { soc->Run(100000, 1000000); usb.Service(); }
+    assert(soc->UsbCableAttached() && soc->GetTime() > idle);
+    usb.Stop();
+    assert(!soc->CradleAttached());
+}
+
 int main(int argc, char** argv) {
-    // One SocIMX1 per process: the halted case runs as its own process.
+    // One SocIMX1 per process: the halted and waiting cases run as their own processes.
     if (argc > 1 && std::string(argv[1]) == "halted") {
         halted();
         std::puts("zodiac-battery halted: ok");
+        return 0;
+    }
+    if (argc > 1 && std::string(argv[1]) == "waiting") {
+        waiting();
+        std::puts("zodiac-battery waiting: ok");
         return 0;
     }
     curve();

@@ -7,6 +7,9 @@ enum class Imx1UartAccess { ok, unmapped, width, reservedBits, sideEffect, exter
 
 // One character that left the transmitter, with IREN as it was when the frame ended.
 using Imx1UartTransmit = void (*)(void* context, uint8_t character, bool infrared);
+// A peer's next character: pending says one is waiting, take hands it over (false when it went meanwhile).
+using Imx1UartPending = bool (*)(void* context);
+using Imx1UartTake = bool (*)(void* context, uint8_t& character);
 
 // MC9328MX1RM chapter 27. The caller supplies elapsed PERCLK1 edges. A peer attaches with
 // setPeer() and receive(); with none the receiver sees an idle line and sent characters are dropped.
@@ -18,6 +21,12 @@ class Imx1Uart {
     enum Output : uint32_t { rxOutput = 1, txOutput = 2, controlOutput = 4, errorOutput = 8, rtsOutput = 16, dtrOutput = 32 };
 
     void setPeer(Imx1UartTransmit callback, void* context) { transmit = callback; transmitContext = context; }
+    // A peer that sends: one character arrives each frame time while the receiver is on, one is waiting and
+    // the FIFO has room (a full FIFO holds the peer back rather than overrunning). Not session state.
+    void setSource(Imx1UartPending pending, Imx1UartTake take, void* context) {
+        source = {pending, take, context, 0};
+    }
+    bool hasSource() const { return source.take; }
     // A complete frame from the peer. Returns false when the receiver is off and the frame is lost.
     bool receive(uint8_t character, bool frameError = false, bool parityError = false, bool breakFrame = false) {
         if (!running() || !(ucr2 & 2) || resetCycles) return false;
@@ -50,6 +59,15 @@ class Imx1Uart {
         }
         dtrKnown = true; dtrLow = low;
     }
+    bool enabled() const { return ucr1 & 1; }
+    // The receiver takes characters now.
+    bool receiverOn() const { return running() && (ucr2 & 2) && !resetCycles; }
+    // The RTS input as last set: known, and low (active).
+    bool rtsInputKnown() const { return rtsKnown; }
+    bool rtsInputLow() const { return rtsKnown && rtsLow; }
+    // Bits a second for a PERCLK1 of perclk1Hz, and the frame format bits of UCR2 (WS, STPB, PROE, PREN).
+    uint64_t bitsPerSecond(uint64_t perclk1Hz) const { return perclk1Hz * (uint64_t(ubirActive) + 1) / bitPeriod(); }
+    uint32_t frameFormat() const { return ucr2 & 0x1e0; }
     bool ctsLow() const { return (ucr2 & 0x2000) ? rxCount < ((ucr4 >> 10) & 63) : (ucr2 & 0x1000) != 0; }
     bool infrared() const { return ucr1 & 0x80; }
     uint64_t transmittedCharacters() const { return transmitted; }
@@ -85,6 +103,11 @@ class Imx1Uart {
             const uint64_t left = (idleBits < limit ? limit - idleBits : 0) + 1;
             bits = bits ? (left < bits ? left : bits) : left;
         }
+        if (incoming()) {
+            const uint32_t frame = frameBits();
+            const uint64_t left = source.phase < frame ? frame - source.phase : 1;
+            bits = bits ? (left < bits ? left : bits) : left;
+        }
         if (!bits) return 0;
         const __uint128_t need = __uint128_t(bits) * bitPeriod();
         if (need <= bitPhase) return 1;
@@ -108,6 +131,7 @@ class Imx1Uart {
             if (bits > (idleBits < limit ? limit - idleBits : 0)) { usr2 |= 0x1000; idleArmed = false; idleBits = 0; }
             else idleBits += uint32_t(bits);
         }
+        if (source.take) receiveFromSource(bits);
         while (bits) {
             if (!shifting) {
                 if (!txCount || !transmitterOn()) break;
@@ -300,8 +324,38 @@ class Imx1Uart {
         a.Require(rxHead < 32 && rxCount <= 32 && txHead < 32 && txCount <= 32, "uart fifo");
     }
 
+    // Host fields left out of state(): the source and its bit count.
+    struct Source {
+        Imx1UartPending pending = nullptr;
+        Imx1UartTake take = nullptr;
+        void* context = nullptr;
+        uint32_t phase = 0;
+    };
+    static constexpr size_t unsavedBytes = sizeof(Source);
+
    private:
     bool running() const { return (ucr1 & 5) == 5; }
+    uint32_t frameBits() const { return 1 + ((ucr2 & 0x20) ? 8 : 7) + ((ucr2 & 0x100) ? 1 : 0) + ((ucr2 & 0x40) ? 2 : 1); }
+    bool incoming() const {
+        return source.take && receiverOn() && rxCount < 32 && source.pending(source.context);
+    }
+    // Characters from the source land a frame time apart. An idle line holds the count at one frame, so a
+    // character that comes along later is complete on the next bit time.
+    void receiveFromSource(__uint128_t bits) {
+        const uint32_t frame = frameBits();
+        if (!receiverOn()) { source.phase = frame; return; }
+        __uint128_t phase = __uint128_t(source.phase) + bits;
+        while (phase >= frame) {
+            uint8_t character;
+            if (rxCount == 32 || !source.pending(source.context) || !source.take(source.context, character)) {
+                phase = frame;
+                break;
+            }
+            phase -= frame;
+            receive(character);
+        }
+        source.phase = uint32_t(phase);
+    }
     // A waiting character needs the RTS pin's level unless IRTS is set.
     bool rtsNeeded(uint32_t control2) const { return (control2 & 0x4004) == 4 && !rtsKnown; }
     bool transmitterOn() const { return (ucr2 & 4) && ((ucr2 & 0x4000) || (rtsKnown && rtsLow)); }
@@ -371,10 +425,11 @@ class Imx1Uart {
     bool rtsKnown = false, rtsLow = false, dtrKnown = false, dtrLow = false;
     Imx1UartTransmit transmit = nullptr;
     void* transmitContext = nullptr;
+    Source source;
 };
 
 #if defined(__GLIBCXX__) && defined(__x86_64__)
-static_assert(sizeof(Imx1Uart) == 264, "update state() and stateVersion");
+static_assert(sizeof(Imx1Uart) - Imx1Uart::unsavedBytes == 264, "update state() and stateVersion");
 #endif
 
 #endif

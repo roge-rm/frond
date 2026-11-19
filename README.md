@@ -67,6 +67,7 @@ Dan
 | Tungsten E3 | 5.4 | 320×480 colour | SD | yes | yes | | | USB, serial |
 | Zire 72 | 5.2 | 320×320 colour | SD | yes | yes | yes | | USB |
 | Sony CLIÉ TG50 | 5.0 | 320×320 colour | Memory Stick | yes | yes | yes | | USB, serial |
+| Tapwave Zodiac | 5.2 | 480×320 colour | SD | yes | | | | |
 | **Palm OS 3 and 4, 68k** | | | | | | | | |
 | Palm IIIx | 3.1, 3.5 or 4.1 | 160×160 grey | | piezo | yes | | PPP | serial |
 | Palm IIIe | 3.1 | 160×160 grey | | piezo | yes | | PPP | serial |
@@ -85,7 +86,6 @@ Dan
 | **Other** | | | | | | | | |
 | AlphaSmart Dana | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | USB Wi-Fi adapter | |
 | AlphaSmart Dana Wireless | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | built in | |
-| Tapwave Zodiac | 5.2 | 480×320 colour | SD | yes | | | | |
 
 The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3 and Zire 72 also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
 

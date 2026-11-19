@@ -401,16 +401,64 @@ void bootstrap() {
 }
 }
 
+// A peer's characters through setSource: one a frame time, none while the receiver is off, held back
+// rather than overrunning a full FIFO, and the UART stays busy only while one waits.
+struct Feed { std::vector<uint8_t> bytes; size_t next = 0; };
+bool feedPending(void* context) { auto& f = *static_cast<Feed*>(context); return f.next < f.bytes.size(); }
+bool feedTake(void* context, uint8_t& character) {
+    auto& f = *static_cast<Feed*>(context);
+    if (f.next >= f.bytes.size()) return false;
+    character = f.bytes[f.next++];
+    return true;
+}
+void source() {
+    Imx1Uart u(false);
+    open(u);
+    Feed feed;
+    u.setSource(feedPending, feedTake, &feed);
+    assert(u.hasSource() && u.receiverOn() && !u.busy());
+    // 8N1 at 3333.3 PERCLK1 cycles a bit: the first character lands one frame after the source attaches.
+    feed.bytes = {0x31, 0x32, 0x33};
+    assert(u.idleQuietCycles() == 33334);
+    u.advance(33333); assert(feed.next == 0);
+    u.advance(1); assert(feed.next == 1 && (get(u, usr2) & 1));
+    u.advance(33333); assert(feed.next == 2);
+    u.advance(40000); assert(feed.next == 3);
+    assert(get(u, urxd) == 0x8031 && get(u, urxd) == 0x8032 && get(u, urxd) == 0x8033 && !(get(u, usr2) & 1));
+    // After an idle spell the next character completes on the next bit time.
+    u.advance(100000);
+    feed.bytes.push_back(0x34);
+    assert(u.idleQuietCycles() <= 3334);
+    u.advance(u.idleQuietCycles()); assert(feed.next == 4 && get(u, urxd) == 0x8034);
+    // A full FIFO holds the peer back with no overrun; reading one lets the next in.
+    for (uint8_t n = 0; n < 40; ++n) feed.bytes.push_back(n);
+    for (unsigned n = 0; n < 60; ++n) u.advance(33334);
+    assert(feed.next == 4 + 32 && (get(u, uts) & 8) && !(get(u, usr2) & 2));
+    assert(get(u, urxd) == 0x8000);
+    u.advance(3334); assert(feed.next == 4 + 33);
+    // The receiver off takes nothing.
+    assert(put(u, ucr2, 0x60a5) == A::ok && !u.receiverOn());
+    while (get(u, uts) & 0x20 ? false : true) get(u, urxd);
+    for (unsigned n = 0; n < 20; ++n) u.advance(33334);
+    assert(feed.next == 4 + 33);
+    // Detached, the line is idle again.
+    u.setSource(nullptr, nullptr, nullptr);
+    assert(!u.hasSource() && put(u, ucr2, 0x60a7) == A::ok);
+    for (unsigned n = 0; n < 20; ++n) u.advance(33334);
+    assert(feed.next == 4 + 33 && !(get(u, usr2) & 1));
+}
+
 int main() {
     resetValues();
     softwareReset();
     transmit();
     transmitInterrupts();
     receive();
+    source();
     modemPins();
     refusals();
     state();
     bootstrap();
     std::puts("PASS: i.MX1 UART reset values, software reset, baud timing, FIFOs, flags, interrupt outputs, "
-              "modem pins, refusals, state and both UARTs behind the bootstrap");
+              "a peer source, modem pins, refusals, state and both UARTs behind the bootstrap");
 }

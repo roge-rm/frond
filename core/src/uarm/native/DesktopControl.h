@@ -2,6 +2,7 @@
 #define FROND_DESKTOP_CONTROL_H
 
 #include <algorithm>
+#include "AttentionState.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -84,6 +85,15 @@ class DesktopControl {
     void rumbleChanged(bool cue) {
         if (cue == lastRumbleCue) return;
         lastRumbleCue = cue; event("rumble", cue ? "on" : "off");
+    }
+
+    // The guest's LED and vibrate motor (AttentionState.h), "led=green vibrate=1", sent on a change only.
+    void attentionChanged(const AttentionState& state) {
+        if (attentionSent && state == lastAttention) return;
+        // Nothing to say until something first lights or buzzes.
+        if (!attentionSent && state == AttentionState{}) return;
+        attentionSent = true; lastAttention = state;
+        event("attention", state.Describe());
     }
 
     void infraredChanged(commands::Context& ctx) {
@@ -180,6 +190,8 @@ class DesktopControl {
     bool flush() { return channel.Flush(); }
 
     bool lastRumbleCue{false};
+    AttentionState lastAttention{};
+    bool attentionSent{false};
     std::string lastMicrophone, lastCamera, lastSerial, lastUsb, lastInfrared, lastBluetooth;
     static std::string UsbState(commands::Context& ctx) {
         if (!ctx.usb) return "off";
@@ -444,11 +456,11 @@ class DesktopControl {
             command == "ms-mkdir" || command == "ms-delete" || command == "ms-rename";
         const bool fileCommand = command == "save" || command == "install" || (command == "export" || command == "export-db") || command == "sd-insert" || command == "sd-export" || command == "sd2-insert" || command == "sd2-export" || command == "ms-insert" || command == "ms-export" || command == "input-replay";
         if (fileCommand && (path.empty() || path.front() != '/')) return {false, "argument", "An absolute file path is required."};
-        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
+        if (!fileCommand && !msFilesCommand && command != "sd-create" && command != "ms-create" && command != "sd-put-in" && command != "ms-put-in" && command != "sd2-create" && command != "sd2-put-in" && command != "ms-read-only" && command != "launch-app" && command != "delete-db" && command != "db-list" && command != "network-mode" && command != "keyboard-attach" && command != "keyboard-key" && command != "gamepad" && command != "gamepad-key" && command != "serial-mode" && command != "usb-mode" && command != "irda-mode" && command != "irprinter" && command != "printer" && command != "bluetooth-mode" && command != "sound-mode" && command != "display" && command != "microphone-mode" && command != "camera-mode" && command != "hold" && command != "battery" && command != "headphones" && command != "cradle-button" && command != "cradle" && command != "speed" && !path.empty()) return {false, "argument", "This command takes no argument."};
         // A board with no guest calls takes none of the commands that need them, and has no hard reset yet.
         if (!ctx.soc->GuestServicesSupported()) {
             for (const char* needs : {"guest-ready", "launch-app", "delete-db", "install", "export", "export-db", "db-list",
-                                      "guest-orientation", "power-state", "hotsync"})
+                                      "guest-orientation"})
                 if (command == needs) return {false, "unsupported", "This isn't available on this device yet."};
         }
         if (command == "hard-reset" && !ctx.soc->HardResetSupported())
@@ -502,9 +514,8 @@ class DesktopControl {
         }
         if (command == "device-state") return {true, "device", deviceProfile5(ctx.soc->GetDeviceType())->name};
         if (command == "power-state") {
-            const auto* machine = static_cast<SocPXA*>(ctx.soc);
-            return {true, "power", std::string(machine->PowerSleeping() ? "asleep" : "awake") +
-                                       " wakes=" + std::to_string(machine->PowerWakes())};
+            return {true, "power", std::string(ctx.soc->PowerSleeping() ? "asleep" : "awake") +
+                                       " wakes=" + std::to_string(ctx.soc->PowerWakes())};
         }
         const auto& caps = capabilities(ctx);
         if (!caps.serial && command == "serial-mode")
@@ -526,14 +537,15 @@ class DesktopControl {
         if (command == "irda-stats") {
             if (!ctx.infrared || !caps.infrared)
                 return {false,"unsupported","This device has no infrared endpoint."};
-            auto* machine=static_cast<SocPXA*>(ctx.soc);const auto state=pxaUartIrState(machine->GetIrUart());
             if (ctx.infrared->PhoneMode() || ctx.infrared->PrinterMode()) return {true,"infrared",ctx.infrared->PhoneStats()};
+            auto* port=ctx.infrared->Port();
+            const auto state=port?port->Mode():HostUartMode{};
             const auto c=ctx.infrared->GetCounters();
             return {true,"infrared", "rx="+std::to_string(c.received)+" tx="+std::to_string(c.sent)+
                 " rx_drop="+std::to_string(ctx.infrared->DroppedReceive())+" tx_drop="+std::to_string(ctx.infrared->DroppedTransmit())+
                 " pending="+std::to_string(ctx.infrared->PendingReceive())+" baud="+std::to_string(state.baud)+
                 " rx_on="+std::to_string(state.receive)+" tx_on="+std::to_string(state.transmit)+
-                " power="+std::to_string(machine->IrPowerEnabled())+" sleeping="+std::to_string(machine->PowerSleeping())};
+                " power="+std::to_string(port && port->PowerEnabled())+" sleeping="+std::to_string(port && port->Sleeping())};
         }
         if (command == "irda-state") return {true,"infrared",ctx.infrared ? ctx.infrared->Describe() : "off"};
         if (command == "printer") return {false,"unsupported","This device has no USB printer."};
@@ -549,20 +561,23 @@ class DesktopControl {
                 return {false,"unsupported","This device has no infrared port."};
             if (ctx.infrared && path == "phone") {
                 if (!caps.irPhone) return {false,"unsupported","This device has no infrared phone."};
-                const bool ok=ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartPhone(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartPhone(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
             if (ctx.infrared && path == "printer") {
-                const bool ok=ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError);
+                const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->StartPrinter(ctx.soc->InfraredHostPort(),ctx.infraredError):
+                    ctx.infrared->StartPrinter(static_cast<SocPXA*>(ctx.soc),ctx.infraredError));
                 return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
             }
             HostSerial::Config config;
             if (!ctx.infrared || !HostSerial::Parse(path,config)) return {false,"argument","Use off, pty, tcp:PORT, unix:PATH, phone or printer."};
-            const bool ok=ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError);
+            const bool ok=(ctx.soc->InfraredHostPort()?ctx.infrared->Start(ctx.soc->InfraredHostPort(),config,ctx.infraredError):
+                ctx.infrared->Start(static_cast<SocPXA*>(ctx.soc),config,ctx.infraredError));
             return {ok,"infrared",ok?ctx.infrared->Describe():ctx.infraredError};
         }
         if (command == "hotsync") {
-            if (!static_cast<SocPXA*>(ctx.soc)->PressHotSync())
+            if (!ctx.soc->PressHotSync())
                 return {false, "unsupported", "This device has no HotSync button, or one is already being pressed."};
             return {true, "hotsync", "HotSync button pressed."};
         }
@@ -584,6 +599,30 @@ class DesktopControl {
             if (!ctx.soc->SetHoldSwitch(path == "on"))
                 return {false, "unsupported", "This device has no supported Hold switch."};
             return {true, "hold", ctx.soc->HoldSwitchOn() ? "on" : "off"};
+        }
+        if (command == "headphones-state")
+            return {true, "headphones", !ctx.soc->HeadphonesSupported() ? "unavailable" : ctx.soc->HeadphonesIn() ? "in" : "out"};
+        if (command == "headphones") {
+            if (path != "in" && path != "out") return {false, "argument", "Use in or out."};
+            if (!ctx.soc->HeadphonesSupported() || !ctx.soc->SetHeadphones(path == "in"))
+                return {false, "unsupported", "This device has no headphone jack that can be set."};
+            return {true, "headphones", ctx.soc->HeadphonesIn() ? "in" : "out"};
+        }
+        if (command == "cradle-button-state")
+            return {true, "cradle-button", !ctx.soc->CradleButtonSupported() ? "unavailable" : ctx.soc->CradleButtonDown() ? "down" : "up"};
+        if (command == "cradle-button") {
+            if (path != "down" && path != "up") return {false, "argument", "Use down or up."};
+            if (!ctx.soc->CradleButtonSupported() || !ctx.soc->SetCradleButton(path == "down"))
+                return {false, "unsupported", "This device has no cradle button that can be pressed."};
+            return {true, "cradle-button", ctx.soc->CradleButtonDown() ? "down" : "up"};
+        }
+        if (command == "cradle-state")
+            return {true, "cradle", !ctx.soc->CradleSupported() ? "unavailable" : ctx.soc->CradleAttached() ? "attached" : "detached"};
+        if (command == "cradle") {
+            if (path != "attached" && path != "detached") return {false, "argument", "Use attached or detached."};
+            if (!ctx.soc->CradleSupported() || !ctx.soc->SetCradle(path == "attached"))
+                return {false, "unsupported", "This device has no cradle that can be attached."};
+            return {true, "cradle", ctx.soc->CradleAttached() ? "attached" : "detached"};
         }
         if (command == "gamepad-state") return {true, "gamepad", ctx.soc->GamepadState()};
         if (command == "gamepad") {
@@ -625,7 +664,8 @@ class DesktopControl {
             if (!ctx.serial || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
             // A new endpoint detaches the old one first; queued bytes are dropped.
             ctx.serialError.clear();
-            if (!ctx.serial->Start(ctx.serialUart, config, ctx.serialError, ctx.serialRoute)) return {false, "serial", ctx.serialError};
+            if (!(ctx.serialPort ? ctx.serial->Start(ctx.serialPort, config, ctx.serialError)
+                                : ctx.serial->Start(ctx.serialUart, config, ctx.serialError, ctx.serialRoute))) return {false, "serial", ctx.serialError};
             return {true, "serial", SerialState(ctx)};
         }
         if (command == "usb-state") return {true, "usb", UsbState(ctx)};
@@ -635,7 +675,7 @@ class DesktopControl {
             if (!ctx.usb || !HostSerial::Parse(path, config)) return {false, "argument", "Use off, pty, tcp:PORT or unix:PATH."};
             // A new endpoint unplugs the cable first; queued bytes are dropped.
             ctx.usbError.clear();
-            if (!ctx.usb->Start(dynamic_cast<SocPXA*>(ctx.soc), config, ctx.usbError)) return {false, "usb", ctx.usbError};
+            if (!ctx.usb->Start(ctx.soc, config, ctx.usbError)) return {false, "usb", ctx.usbError};
             return {true, "usb", UsbState(ctx)};
         }
         if (command == "network-state") return {true, "network", ctx.soc->networkSimulation.GetModeName()};

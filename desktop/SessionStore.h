@@ -15,6 +15,7 @@
 #include <QStorageInfo>
 #include <QLockFile>
 #include <QString>
+#include <QStringList>
 #include <algorithm>
 #include <filesystem>
 #include <functional>
@@ -120,7 +121,42 @@ struct Preferences {
     bool gamepad{false}, gamepadSet{false};
     // CLIÉ with the game controller: the jog controls in landscape.
     JogLandscape jogLandscape{JogLandscape::beside};
+    // Battery: max, level (batteryLevel) or host (the host's own); charging for max and level.
+    QString batteryMode{"max"};
+    int batteryLevel{100};
+    bool batteryCharging{false};
+    // Speed multiplier of Original (1.5x, 2x, 3x, 4x, 8x) when uncapped is false; empty is Original.
+    QString multiplier;
 };
+// The speed setting as the core names it: original, 1.5x..8x or uncapped.
+inline QString speedName(const Preferences& prefs) {
+    return prefs.uncapped ? QStringLiteral("uncapped") : prefs.multiplier.isEmpty() ? QStringLiteral("original") : prefs.multiplier;
+}
+inline bool validMultiplier(const QString& name) {
+    for (const char* known : {"1.5x", "2x", "3x", "4x", "8x"}) if (name == QLatin1String(known)) return true;
+    return false;
+}
+// Takes a name from speedName; anything unknown is Original.
+inline void setSpeed(Preferences* prefs, const QString& name) {
+    prefs->uncapped = name == QLatin1String("uncapped");
+    prefs->multiplier = validMultiplier(name) ? name : QString();
+}
+// The choices in order; the 68k Palms have no 8x (their Uncapped is the same speed).
+inline QStringList speedChoices(bool m68k) {
+    QStringList names{"original", "1.5x", "2x", "3x", "4x"};
+    if (!m68k) names << "8x";
+    return names << "uncapped";
+}
+inline QString speedLabel(const QString& name) {
+    if (name == QLatin1String("original")) return QObject::tr("Original");
+    if (name == QLatin1String("uncapped")) return QObject::tr("Uncapped");
+    return name;
+}
+// What the core is given: the 68k runner refuses 8x, so there it is Uncapped.
+inline QString speedForCore(const Preferences& prefs, bool m68k) {
+    const auto name = speedName(prefs);
+    return m68k && name == QLatin1String("8x") ? QStringLiteral("uncapped") : name;
+}
 inline QString preferencesPath(const QString& path) { return path + ".settings.json"; }
 inline bool readPreferences(const QString& path, Preferences* result) {
     QFile file(preferencesPath(path));
@@ -135,8 +171,13 @@ inline bool readPreferences(const QString& path, Preferences* result) {
                object.value("engine").toString() == QLatin1String("fast"),
                std::clamp(object.value("contrast").toInt(50), 0, 100),
                object.value("speed").toString() == QLatin1String("uncapped"), object.contains("contrast")};
+    // "speed" stays original or uncapped so earlier versions read a multiplier as Original.
+    if (const auto name = object.value("speedMultiplier").toString(); validMultiplier(name) && !result->uncapped) result->multiplier = name;
     result->barShown = object.value("barShown").toBool(true);
     result->showMips = object.value("showMips").toBool(false);
+    if (const auto mode = object.value("batteryMode").toString(); mode == "level" || mode == "host") result->batteryMode = mode;
+    result->batteryLevel = std::clamp(object.value("batteryLevel").toInt(100), 0, 100);
+    result->batteryCharging = object.value("batteryCharging").toBool(false);
     result->rumble = object.value("rumble").toBool(true);
     result->gamepadSet = object.value("gamepad").isBool();
     result->gamepad = object.value("gamepad").toBool(false);
@@ -164,8 +205,12 @@ inline QString writePreferences(const QString& path, const Preferences& prefs) {
                              {"showJogControls", prefs.jogControls != JogControls::hidden},
                              {"jogControlsLandscape", jogLandscapeName(prefs.jogLandscape)},
                              {"engine", prefs.fastEngine ? "fast" : "exact"}, {"speed", prefs.uncapped ? "uncapped" : "original"}};
+    if (!prefs.uncapped && validMultiplier(prefs.multiplier)) object.insert("speedMultiplier", prefs.multiplier);
     if (!prefs.barShown) object.insert("barShown", false);
     if (prefs.showMips) object.insert("showMips", true);
+    if (prefs.batteryMode != "max") object.insert("batteryMode", prefs.batteryMode);
+    if (prefs.batteryLevel != 100) object.insert("batteryLevel", std::clamp(prefs.batteryLevel, 0, 100));
+    if (prefs.batteryCharging) object.insert("batteryCharging", true);
     if (!prefs.rumble) object.insert("rumble", false);
     if (prefs.gamepadSet) object.insert("gamepad", prefs.gamepad);
     if (prefs.usbPort != "off") object.insert("usbPort", prefs.usbPort);

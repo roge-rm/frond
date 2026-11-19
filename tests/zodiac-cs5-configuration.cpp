@@ -72,7 +72,7 @@ int main() {
         assert(chip.access(wired, 0x200c537c, 0x16010b30, 4, true, value) == Access::ok);
         for (uint32_t on : {1u, 0x400u, 0x401u, 0x80000000u}) {
             value = on;
-            assert(chip.access(wired, 0x20177e60, 0x16010b30, 4, true, value) == Access::sideEffect);
+            assert(chip.access(wired, 0x200c537c, 0x16010b30, 4, true, value) == Access::sideEffect);
         }
         value = 0;
         assert(chip.access(wired, 0x200c5348, 0x16010b30, 2, false, value) == Access::width);
@@ -123,6 +123,53 @@ int main() {
         value = 0;
         assert(chip.access(wired, player, pwrmgt, 4, false, value) == Access::ok && value == (idle ^ 1));
         assert(chip.access(wired, 0x200c4c00, pwrmgt, 4, true, value) == Access::sequence);
+    }
+    {
+        // The USB driver's chip words, the identity and its block wait for the same set-up as every other path:
+        // too early they stop with sequence and leave the value alone.
+        Imx1Eim wired;
+        uint32_t upper = 0x3e00, lower = 0x11111e01;
+        assert(wired.access(0x00220028, 4, true, upper) == Imx1EimAccess::ok);
+        assert(wired.access(0x0022002c, 4, true, lower) == Imx1EimAccess::ok);
+        Imx1Cs5Configuration chip(Imx1GraphicsProfile::virtual5744Compatible8MiB);
+        const auto early = [&] {
+            for (uint32_t address : {0x16010000u, 0x160100a8u, 0x16010b10u, 0x16010b1cu, 0x16010b30u, 0x16010200u,
+                                     0x16201234u, 0x16200000u}) {
+                for (bool write : {false, true}) {
+                    if (write && address == 0x16010000) continue;  // the identity is never written
+                    uint32_t value = 0x76543210;
+                    assert(chip.access(wired, 0x20177e40, address, 4, write, value) == Access::sequence);
+                    assert(value == 0x76543210);
+                }
+            }
+        };
+        early();
+        configureGraphicsInterface(chip, wired);
+        early();
+        assert(!chip.usbState().used());
+    }
+    {
+        // The enable's read-modify-write paths (20086dea, 200876ee) set, keep and clear the USB group (0x50);
+        // other writers still can't.
+        Imx1GraphicsInterrupts interrupts;
+        uint32_t value = 0x51;
+        assert(interrupts.access(0x20086e08, 0x16010200, 4, true, value) == Access::ok && interrupts.enableValue() == 0x51);
+        value = 0;
+        assert(interrupts.access(0x20087702, 0x16010200, 4, true, value) == Access::ok && interrupts.enableValue() == 0);
+        value = 0x40;
+        assert(interrupts.usbAccess(0x16010200, true, value) == Access::ok);
+        for (uint32_t pc : {0x20086e08u, 0x20087702u}) {
+            value = 0x41;
+            assert(interrupts.access(pc, 0x16010200, 4, true, value) == Access::ok && interrupts.enableValue() == 0x41);
+            value = 0x40;
+            assert(interrupts.access(pc, 0x16010200, 4, true, value) == Access::ok && interrupts.enableValue() == 0x40);
+        }
+        value = 0x41;
+        assert(interrupts.access(0x20086970, 0x16010200, 4, true, value) == Access::sideEffect);
+        value = 0x40;
+        assert(interrupts.access(0x200c4c00, 0x16010200, 4, true, value) == Access::externalInput);
+        value = 0x21;
+        assert(interrupts.access(0x20086e08, 0x16010200, 4, true, value) == Access::reservedBits);
     }
     std::puts("PASS: both native aperture paths, exact defaults transaction, unknown full identity/revision and transactional EIM/width/PC/value guards, b30 reads and takes 0");
 }

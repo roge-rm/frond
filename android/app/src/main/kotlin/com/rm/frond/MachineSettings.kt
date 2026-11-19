@@ -32,11 +32,25 @@ enum class Engine(val label: String, val arg: String) {
     FAST("Fast", "fast"),
 }
 
-// A device's speed; arg is the saved name and frond-68k's --speed value. Original runs at the real
-// clock (an ARM device follows the clock its guest sets), Uncapped as fast as the host can; on ARM that is a high --mips (MHz).
+// A device's speed; arg is the saved name and both cores' --speed value. Original runs at the real
+// clock (an ARM device follows the clock its guest sets), a multiplier at that many times it, Uncapped
+// as fast as the host can. An older Frond reads a multiplier as Original.
 enum class CpuSpeed(val label: String, val arg: String) {
     ORIGINAL("Original", "original"),
-    UNCAPPED("Uncapped", "uncapped"),
+    X1_5("1.5x", "1.5x"),
+    X2("2x", "2x"),
+    X3("3x", "3x"),
+    X4("4x", "4x"),
+    X8("8x", "8x"),
+    UNCAPPED("Uncapped", "uncapped");
+
+    companion object {
+        // The 68k core has no 8x; its Uncapped is the same speed.
+        fun options(m68k: Boolean) = entries.filter { !(m68k && it == X8) }
+
+        // What the core is given for this device.
+        fun forCore(speed: CpuSpeed, m68k: Boolean) = if (m68k && speed == X8) UNCAPPED else speed
+    }
 }
 
 // Android: whether the bar over the running machine hides by itself over the Palm or takes its own space.
@@ -75,7 +89,7 @@ data class MachineSettings(
     val jogLandscape: JogLandscape = JogLandscape.BESIDE,
     // Applies at next start.
     val engine: Engine = Engine.EXACT,
-    // 68k devices: LCD contrast 0 to 100, and speed (applies at next start).
+    // 68k devices: LCD contrast 0 to 100. Speed is for every device and applies at once.
     val contrast: Int = DEFAULT_CONTRAST,
     // False until a contrast is chosen, so a session's own saved contrast stays.
     val contrastSet: Boolean = false,
@@ -98,16 +112,25 @@ data class MachineSettings(
     val rumble: Boolean = true,
     // CLIE TG50: the game controller on the connector. null leaves what the session has (nothing was chosen yet).
     val gamepad: Boolean? = null,
+    // The battery the Palm reads: Maximum, a set level (0 to 100), or this phone's. Charging is the Palm on its charger,
+    // used by Maximum and Set level. Applied live and at every start.
+    val batteryMode: BatteryMode = BatteryMode.MAX,
+    val batteryLevel: Int = DEFAULT_BATTERY_LEVEL,
+    val batteryCharging: Boolean = false,
 ) {
     fun json(): JSONObject = JSONObject().put("size", size.name).put("smoothing", smoothing).put("showMips", showMips)
         .put("sound", sound).put("fastAudio", fastAudio).put("microphone", microphone)
         .put("showKeyboard", showKeyboard).put("jogControls", jogControls.arg)
         .put("showJogControls", jogControls != JogControls.HIDDEN).put("jogControlsLandscape", jogLandscape.arg)
-        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) } }
+        .put("engine", engine.arg).put("speed", speed.arg).put("barShown", barShown).put("barMode", barMode.arg).put("infrared", infrared).put("serial", serial).put("bluetooth", bluetooth).put("danaView", danaView.json()).put("usbPort", usbPort).put("usbPrinter", usbPort == UsbPort.PRINTER).put("wifiModule", wifiModule).put("rumble", rumble).also { if (contrastSet) it.put("contrast", contrast); gamepad?.let { on -> it.put("gamepad", on) }
+        // Saved only when not the default.
+        if (batteryMode != BatteryMode.MAX) it.put("batteryMode", batteryMode.arg)
+        if (batteryLevel != DEFAULT_BATTERY_LEVEL) it.put("batteryLevel", batteryLevel)
+        if (batteryCharging) it.put("batteryCharging", true) }
 
     fun applyTo(settings: Settings) = settings.copy(size = size, smoothing = smoothing, sound = sound)
 
-    // m68k: frond-68k's arguments, with contrast and speed and no engine. ARM: Uncapped is a high --mips.
+    // m68k: frond-68k's arguments, with contrast and speed and no engine. both: --speed unless Original.
     // tg50Controls: Show keyboard and the jog controls; jogControls: the jog controls on their own.
     fun arguments(soundSupported: Boolean = true, tg50Controls: Boolean = false, m68k: Boolean = false, colourLcd: Boolean = false,
                   jogControls: Boolean = tg50Controls, gamepadSupported: Boolean = false): List<String> = buildList {
@@ -120,11 +143,8 @@ data class MachineSettings(
         if (!soundSupported || !sound) add("--no-sound")
         if (m68k) {
             if (contrastSet && !colourLcd) addAll(listOf("--contrast", contrast.toString()))
-            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--speed", speed.arg))
-        } else {
-            if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
-            if (speed == CpuSpeed.UNCAPPED) addAll(listOf("--mips", UNCAPPED_MIPS.toString()))
-        }
+        } else if (engine == Engine.FAST) addAll(listOf("--engine", engine.arg))
+        if (speed != CpuSpeed.ORIGINAL) addAll(listOf("--speed", CpuSpeed.forCore(speed, m68k).arg))
     }
 
     // Audio arguments: the host period always, so low-latency limits are sized for Android's
@@ -159,12 +179,10 @@ data class MachineSettings(
 
     companion object {
         const val DEFAULT_CONTRAST = 50
+        const val DEFAULT_BATTERY_LEVEL = 100
 
         // A new machine's settings for a device.
         fun defaults(device: Device) = MachineSettings(engine = device.defaultEngine)
-        // The --mips (MHz) an ARM device gets when Uncapped; the core runs at what the host manages. Well past
-        // the fastest clock, as an instruction takes several clocks.
-        const val UNCAPPED_MIPS = 3000
 
         // Settings saved before the choice only had showJogControls: shown was left of the screen.
         private fun jogControls(json: JSONObject): JogControls =
@@ -198,6 +216,9 @@ data class MachineSettings(
                 wifiModule = json.optBoolean("wifiModule", fallback.wifiModule),
                 rumble = json.optBoolean("rumble", fallback.rumble),
                 gamepad = if (json.has("gamepad")) json.optBoolean("gamepad") else fallback.gamepad,
+                batteryMode = BatteryMode.entries.firstOrNull { it.arg == json.optString("batteryMode") } ?: BatteryMode.MAX,
+                batteryLevel = json.optInt("batteryLevel", DEFAULT_BATTERY_LEVEL).coerceIn(0, 100),
+                batteryCharging = json.optBoolean("batteryCharging", false),
             )
         }
     }

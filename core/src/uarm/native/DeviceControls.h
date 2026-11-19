@@ -125,7 +125,13 @@ static_assert(keyIdCount<=128,"DeviceKeyMask has a bit per key");
 struct DeviceStick {
     float x{0}, y{0};
     bool held{false};
-    bool operator==(const DeviceStick& o) const {return x==o.x && y==o.y && held==o.held;}
+    // Not input: the power LED's colour bits (SoC::Attention::ledColour) the Zodiac's strip shows, carried
+    // here so a change redraws the strip like a stick move.
+    uint8_t lamp{0};
+    bool lampShown{false};  // the device profile has an LED (DeviceCapabilities5::ledColours)
+    bool operator==(const DeviceStick& o) const {
+        return x==o.x && y==o.y && held==o.held && lamp==o.lamp && lampShown==o.lampShown;
+    }
     bool operator!=(const DeviceStick& o) const {return !(*this==o);}
 };
 inline DeviceKeyMask deviceKeyBit(KeyId key) {return DeviceKeyMask(1)<<key;}

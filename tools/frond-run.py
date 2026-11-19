@@ -25,8 +25,10 @@ from palm_boot import DEVICES_68K, FRONTEND_DEVICES, png_rows, setup_device
 from firmware_variants import firmware_variant
 
 # out/frond runs the ARM devices only.
-# The Zodiac has no setup recipe, as nothing is injected into it.
-DEVICES = {name: device for name, device in FRONTEND_DEVICES.items() if name not in DEVICES_68K and device['setup']}
+# The Zodiac has no setup recipe, as nothing is injected into it: it runs from a saved session, or cold from
+# its ROM with no setup (with out/frond-zodiac-developer and FROND_ZODIAC_STATE, a bring-up state).
+DEVICES = {name: device for name, device in FRONTEND_DEVICES.items()
+           if name not in DEVICES_68K and (device['setup'] or name == 'tapwave-zodiac-2')}
 
 
 class RunError(Exception):
@@ -439,7 +441,7 @@ def run(args):
                 if control.line(startup) != ['0', 'event', 'ready', '']:
                     raise RunError('protocol', 'Missing desktop ready event')
                 result['stage'] = 'ready'
-                if not args.session and args.device != 'palm-tx':
+                if not args.session and args.device != 'palm-tx' and device['setup']:
                     result['stage'] = 'setup'
                     setup = SocketBoot(control, root)
                     if variant:

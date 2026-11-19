@@ -85,11 +85,11 @@ class RunningSheetsTest {
         assertFalse(RunningSheets.slotUsable(SdCard.State.NONE, false, true))
     }
 
-    @Test fun rotateIsForArmDevicesAndSpeedFor68k() {
+    @Test fun rotateIsForArmDevicesAndSpeedForAll() {
         for (device in Device.entries) {
             val rows = RunningSheets.displayRows(device)
             assertEquals(device.id, !device.runs68k, DisplayRow.ROTATE in rows)
-            assertEquals(device.id, device.runs68k, DisplayRow.SPEED in rows)
+            assertTrue(device.id, DisplayRow.SPEED in rows)
             assertEquals(device.id, device.lcdContrast, DisplayRow.CONTRAST in rows)
             assertEquals(device.id, device.id == "sony-clie-tg50", DisplayRow.SHOW_KEYBOARD in rows && DisplayRow.JOG in rows)
             assertTrue(DisplayRow.SIZE in rows && DisplayRow.SMOOTH in rows)
