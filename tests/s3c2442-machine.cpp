@@ -369,7 +369,236 @@ static void wifiTests() {
     }
 }
 
+// USB device: VBUS on GPG5 (low with the cable), the host sees the device once GPJDAT bit 5 (the D+ pull-up) and
+// CLKCON's USB device clock are on, a host SETUP raises INT_USBD for the CPU, the endpoint state is saved in its own
+// section and an older state without it loads with the endpoints reset; host work due keeps an idle CPU's clock going.
+static void usbTests() {
+    using R = UsbPacketResult;
+    {
+        auto m = make(stores({{0x560000d4, 0x20}}, {loop}));
+        m->setUsbVbus(true);
+        assert(!(m->gpio.input[S3cGpio::g] & (1u << 5)) && m->usbVbus());
+        m->clock.clkcon &= ~0x80u;
+        assert(m->run(1000) == S3c2442Stop::budget);
+        assert(!m->usbListening());
+        assert(m->clock.write(0x0c, m->clock.clkcon | 0x80) == S3cAccess::ok);
+        assert(m->usbListening());
+        m->setUsbVbus(false);
+        assert(!m->usbListening() && (m->gpio.input[S3cGpio::g] & (1u << 5)));
+    }
+    {
+        // INT_USBD unmasked, IRQs on, wait for interrupt: a host SETUP wakes it into IRQ mode.
+        auto m = make(stores({{0x560000d4, 0x20}, {0x4a000008, ~(1u << s3cIrq::usbd)}}, {0xe321f013, wfi, loop}));
+        m->clock.clkcon |= 0x80;
+        m->setUsbVbus(true);
+        m->hostService = [&] {};
+        m->hostNextNs = 10000000000ull;  // host work due later keeps the waiting CPU's clock going
+        assert(m->run(1000) == S3c2442Stop::budget && m->usbListening() && mode(*m) == 0x13);
+        m->usbDevice.write(0x16c, 0);  // no reset interrupt
+        m->usbDevice.busReset();
+        m->usbHostChanged();
+        assert(!(m->intc.srcpnd & (1u << s3cIrq::usbd)));
+        const uint8_t setup[8] = {0x80, 6, 0, 1, 0, 0, 18, 0};
+        assert(m->usbDevice.setup(setup) == R::Ack);
+        m->usbHostChanged();
+        assert(m->intc.srcpnd & (1u << s3cIrq::usbd));
+        const auto woke = m->run(1000);
+        assert(woke == S3c2442Stop::budget && mode(*m) == 0x12);
+
+        // The pending SETUP survives a save and load.
+        std::vector<uint8_t> state;
+        std::string why;
+        assert(m->saveState(state, why));
+        auto other = make({loop});
+        assert(other->loadState(state.data(), state.size(), why));
+        assert(other->usbDevice.ep0Csr == 1 && other->usbDevice.fifo[0].size() == 8 && other->usbDevice.controlOpen);
+    }
+    {
+        // Host work due keeps the idle clock going instead of stopping with nothing to wake it, and runs once due.
+        auto m = make({wfi, loop});
+        uint64_t at = 0;
+        m->hostService = [&] { at = m->nanoseconds(); };
+        m->hostNextNs = 2000000;
+        assert(m->run(1000000000ull) == S3c2442Stop::idleNoWake && at >= 2000000 && at < 2001000);
+        assert(m->hostNextNs == UINT64_MAX);
+    }
+}
+
+// Host work lands at the same guest time and instruction whatever the run slices: on a busy CPU and an idle one, run
+// in one go or in uneven slices, on Exact and on Fast.
+static void hostServiceTests() {
+    for (const bool fast : {false, true})
+    for (const bool idle : {false, true}) {
+        // A busy loop (subs r0, r0, #1; b back) or a wait for interrupt.
+        const std::vector<uint32_t> program = idle ? std::vector<uint32_t>{wfi, loop} : std::vector<uint32_t>{0xe2500001, 0xeafffffd};
+        std::vector<std::pair<uint64_t, uint64_t>> seen[2];
+        for (unsigned way = 0; way < 2; ++way) {
+            auto m = make(program);
+            if (fast) assert(m->setFastEngine(true));
+            auto& log = seen[way];
+            m->hostService = [&] {
+                log.emplace_back(m->nanoseconds(), m->retired());
+                m->hostNextNs = m->nanoseconds() + 333333;
+            };
+            m->hostNextNs = 100000;
+            const uint64_t total = 3000000;
+            if (way == 0) {
+                assert(m->run(total) == S3c2442Stop::budget);
+            } else {
+                uint64_t done = 0, step = 777;
+                while (done < total) {
+                    const uint64_t n = std::min(step, total - done);
+                    assert(m->run(n) == S3c2442Stop::budget);
+                    done += n;
+                    step = step * 7 % 50021 + 1;
+                }
+            }
+        }
+        assert(seen[0].size() > 3 && seen[0] == seen[1]);
+        assert(seen[0][0].first >= 100000 && seen[0][0].first < 101000);
+        static std::vector<std::pair<uint64_t, uint64_t>> exact[2];
+        if (!fast) exact[idle] = seen[0];
+        else assert(seen[0] == exact[idle]);
+    }
+}
+
+// Asleep, host work still runs at its guest times, the same in one run and in uneven slices, and doesn't wake it.
+static void hostServiceSleepTests() {
+    // mov r0, #0x4c000000; mov r1, #8; str r1, [r0, #0xc] (CLKCON POWER_OFF); b .
+    const std::vector<uint32_t> program{0xe3a0044c, 0xe3a01008, 0xe580100c, loop};
+    std::vector<std::pair<uint64_t, uint64_t>> seen[2];
+    for (unsigned way = 0; way < 2; ++way) {
+        auto m = make(program);
+        assert(m->run(1000) == S3c2442Stop::budget && m->asleep());
+        const uint64_t start = m->nanoseconds();
+        auto& log = seen[way];
+        m->hostService = [&] {
+            assert(m->asleep());
+            log.emplace_back(m->nanoseconds(), m->idleCycles());
+            m->hostNextNs = m->nanoseconds() + 1000000;
+        };
+        m->hostNextNs = start + 500000;
+        const uint64_t total = 30000000;
+        if (way == 0) {
+            assert(m->run(total) == S3c2442Stop::budget);
+        } else {
+            for (uint64_t done = 0, step = 4321; done < total; done += step, step = step * 7 % 900001 + 1)
+                assert(m->run(std::min(step, total - done)) == S3c2442Stop::budget);
+        }
+        assert(m->asleep() && m->wakeCount() == 0);
+        assert(log.size() > 10 && log[0].first >= start + 500000 && log[0].first < start + 501000);
+    }
+    assert(seen[0] == seen[1]);
+}
+
+// The host schedule goes with a saved state while it's set, and a state saved without one loads with none due.
+static void hostScheduleStateTests() {
+    std::vector<uint8_t> state;
+    std::string why;
+    auto a = make({loop});
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    b->hostNextNs = 5;
+    b->hostUartNextNs[2] = 7;
+    b->hostNetNextNs = 9;
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(b->hostNextNs == UINT64_MAX && b->hostUartNextNs[2] == UINT64_MAX && b->hostNetNextNs == UINT64_MAX);
+    a->hostNextNs = 1234567;
+    a->hostUartNextNs[0] = 2000000;
+    assert(a->saveState(state, why));
+    auto c = make({loop});
+    assert(c->loadState(state.data(), state.size(), why));
+    assert(c->hostNextNs == 1234567 && c->hostUartNextNs[0] == 2000000 && c->hostUartNextNs[1] == UINT64_MAX);
+    assert(c->hostNetNextNs == UINT64_MAX);
+    // The network poll alone is enough for the section.
+    auto d = make({loop});
+    d->hostNetNextNs = 3000000;
+    assert(d->saveState(state, why));
+    auto e = make({loop});
+    assert(e->loadState(state.data(), state.size(), why));
+    assert(e->hostNetNextNs == 3000000 && e->hostNextNs == UINT64_MAX);
+}
+
+// A watchdog reset runs the board's hook at the instruction it happens, whatever the run slices.
+static void watchdogHookTests() {
+    // WTCNT 200, then WTCON: on, reset on, interrupt off, prescaler 0, clock /16.
+    const auto program = stores({{0x53000008, 200}, {0x53000000, 0x0021}}, {loop});
+    std::pair<uint64_t, uint64_t> at[2];
+    for (unsigned way = 0; way < 2; ++way) {
+        auto m = make(program);
+        unsigned hooks = 0;
+        m->watchdogResetHook = [&] { at[way] = {m->nanoseconds(), m->retired()}; ++hooks; };
+        if (way == 0) {
+            assert(m->run(200000) == S3c2442Stop::budget);
+        } else {
+            for (uint64_t done = 0, step = 333; done < 200000; done += step, step = step * 5 % 4099 + 1)
+                assert(m->run(std::min(step, 200000 - done)) == S3c2442Stop::budget);
+        }
+        assert(hooks >= 1 && m->watchdogResets() == hooks);
+    }
+    assert(at[0] == at[1]);
+}
+
+// Only accesses that can change what the host sees poke it: writes, and FIFO accesses that hand a packet over.
+static void usbNotifyTests() {
+    S3cUsbDevice d;
+    d.reset();
+    assert(!d.hostVisible(0x184, false) && !d.hostVisible(0x198, false));
+    assert(d.hostVisible(0x184, true) && d.hostVisible(0x178, true));
+    // EP0's FIFO changes hands through EP0_CSR.
+    assert(!d.hostVisible(0x1c0, true) && !d.hostVisible(0x1c0, false));
+    // EP1: a byte read with OUT_PKT_RDY still set isn't seen, the one that clears it is.
+    d.outCsr1[1] = 1;
+    assert(!d.hostVisible(0x1c4, false));
+    d.outCsr1[1] = 0;
+    assert(d.hostVisible(0x1c4, false) && d.hostVisible(0x1c7, false));
+    // A FIFO write is seen once IN_PKT_RDY is set (AUTO_SET).
+    assert(!d.hostVisible(0x1c4, true));
+    d.inCsr1[1] = 1;
+    assert(d.hostVisible(0x1c4, true));
+}
+
+// The VBUS pin and the bridge's cable agree after a load: the saved GPG5 level goes, the cable state stays (the board
+// sets GPG5 from usbVbus after a load, SocS3C2442::ApplyHostInputs).
+static void vbusLoadTests() {
+    auto a = make({loop});
+    a->setUsbVbus(true);
+    std::vector<uint8_t> state;
+    std::string why;
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(!b->usbVbus() && !(b->gpio.input[S3cGpio::g] & (1u << 5)));
+    b->setUsbVbus(b->usbVbus());
+    assert(!b->usbVbus() && (b->gpio.input[S3cGpio::g] & (1u << 5)));
+}
+
+// UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
+static void uartTests() {
+    auto m = make(stores({{0x50000004, 0x4fc5}, {0x50000028, 15}, {0x50008000, 0x43}, {0x50008004, 0x8fc5},
+                          {0x50008028, 191}}, {loop}));
+    assert(m->run(1000) == S3c2442Stop::budget);
+    const uint64_t fclk = m->clock.fclk();
+    assert(m->uartBaud(0) == uint32_t(fclk / 10 / 16 / 16) && m->uartBaud(2) == uint32_t(fclk / 10 / 16 / 192));
+    assert(m->uarts[2].infrared() && m->uarts[2].receiverOn());
+    // UCON2 bit 15 off stops the FCLK/n clock: no bit rate on either.
+    m->uarts[2].ucon &= ~0x8000u;
+    assert(m->uartBaud(0) == 0 && m->uartBaud(2) == 0);
+    m->uarts[2].ucon |= 0x8000;
+    m->intc.intsubmsk = 0;
+    m->uartReceive(2, 0xc0);
+    assert((m->intc.srcpnd & (1u << s3cIrq::uart2)) && m->uarts[2].rx.size() == 1);
+}
+
 int main() {
+    usbTests();
+    hostServiceTests();
+    hostServiceSleepTests();
+    hostScheduleStateTests();
+    watchdogHookTests();
+    usbNotifyTests();
+    vbusLoadTests();
+    uartTests();
     sdTests();
     audioTests();
     wifiTests();

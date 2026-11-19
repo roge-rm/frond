@@ -7,6 +7,7 @@
 #include <iostream>
 
 #include "CPCrc.h"
+#include "HostUartPort.h"
 #include "audio_queue.h"
 #include "device_configuration.h"
 #include "device_profile5.h"
@@ -82,6 +83,348 @@ struct SocS3C2442::NandPages : S3cNand::Store {
     }
 };
 
+// FROND_RX1950_UART_TRACE: every byte UART0 and UART2 send and take from a host, to stderr.
+namespace {
+    const bool uartTrace = std::getenv("FROND_RX1950_UART_TRACE");
+}
+
+// UART0 on the sync connector for HostSerial.
+struct SocS3C2442::SerialPort final : HostUartPort {
+    explicit SerialPort(SocS3C2442& soc) : soc(soc) {}
+    SocS3C2442& soc;
+    Read read{};
+    Write write{};
+    Active active{};
+    Detached detached{};
+    void* context{};
+    uint32_t disables{0};
+    bool wasOn{false};
+
+    S3cUart& Uart() const { return soc.machine->uarts[rx1950SerialUart]; }
+    bool Attach(Read r, Write w, Active a, Detached d, void* c) override {
+        if (soc.halted) return false;
+        read = r; write = w; active = a; detached = d; context = c;
+        wasOn = Uart().receiverOn();
+        soc.ApplyUartLines();
+        return true;
+    }
+    void Detach() override {
+        read = nullptr; write = nullptr; active = nullptr; detached = nullptr; context = nullptr;
+        Uart().setCts(true);
+        if (!soc.halted) soc.ApplyUartLines();
+    }
+    // A load or reset made a new board: the host attaches again.
+    void Replaced() {
+        if (!context) return;
+        const auto notify = detached;
+        void* const host = context;
+        Detach();
+        if (notify) notify(host);
+    }
+    bool SetInputs(uint8_t asserted) override {
+        if (soc.halted) return false;
+        Uart().setCts(asserted & hostUartCts);
+        return true;
+    }
+    // RTS out: UMCON bit 0, or with auto flow control (bit 4) while the FIFO has room. WM5 leaves GPH1 as an
+    // input rather than nRTS0, so the connector has no RTS from the UART: the far end may always send.
+    bool WantsInput() const override {
+        const auto& u = Uart();
+        const bool rtsPin = ((soc.machine->gpio.con[S3cGpio::h] >> 2) & 3) == 2;
+        return u.receiverOn() && u.rxRoom() && (!rtsPin || (u.umcon & 0x10) || (u.umcon & 1));
+    }
+    bool ReceiverEnabled() const override { return Uart().receiverOn(); }
+    uint32_t DisableCount() const override {
+        auto& self = const_cast<SerialPort&>(*this);
+        const bool on = Uart().receiverOn();
+        if (self.wasOn && !on) ++self.disables;
+        self.wasOn = on;
+        return disables;
+    }
+    void Kick() override {}
+    HostUartMode Mode() const override {
+        const auto& u = Uart();
+        return {soc.machine->uartBaud(rx1950SerialUart), u.ulcon & 0x3f, u.receiverOn(), u.transmitterOn()};
+    }
+};
+
+// UART2 in IrDA mode for HostInfrared.
+struct SocS3C2442::InfraredPort final : HostInfraredPort {
+    explicit InfraredPort(SocS3C2442& soc) : soc(soc) {}
+    SocS3C2442& soc;
+    SerialHostHooks hooks{};
+    HostUartMode last{};
+    bool lastPower{false};
+
+    S3cUart& Uart() const { return soc.machine->uarts[rx1950InfraredUart]; }
+    uint64_t Time() override { return soc.GetTime(); }
+    bool SetHooks(const SerialHostHooks* next) override {
+        if (!next) { hooks = {}; return true; }
+        if (soc.halted) return false;
+        hooks = *next;
+        return true;
+    }
+    void Replaced() {
+        if (hooks.context && hooks.replaced) hooks.replaced(hooks.context);
+    }
+    bool PowerEnabled() override { return Uart().infrared(); }
+    bool ReceiveEnabled() override { return Uart().infrared() && Uart().receiverOn(); }
+    HostUartMode Mode() override {
+        const auto& u = Uart();
+        return {soc.machine->uartBaud(rx1950InfraredUart), u.ulcon & 0x7f, u.infrared() && u.receiverOn(),
+                u.infrared() && u.transmitterOn()};
+    }
+    void Kick() override {}
+    bool HostIoPaused() override { return false; }
+    bool Sleeping() override { return soc.PowerSleeping(); }
+    bool KeyboardAttached() override { return false; }
+    // Tells the host when the mode it receives in changes (its receive window).
+    void CheckMode() {
+        if (!hooks.context || !hooks.modeChanged) return;
+        const auto mode = Mode();
+        const bool power = PowerEnabled();
+        if (mode.baud != last.baud || mode.format != last.format || mode.receive != last.receive ||
+            mode.transmit != last.transmit || power != lastPower) {
+            last = mode;
+            lastPower = power;
+            hooks.modeChanged(hooks.context);
+        }
+    }
+};
+
+HostUartPort* SocS3C2442::SerialHostPort() {
+    if (!serialPort) serialPort = std::make_unique<SerialPort>(*this);
+    return serialPort.get();
+}
+
+HostInfraredPort* SocS3C2442::InfraredHostPort() {
+    if (!infraredPort) infraredPort = std::make_unique<InfraredPort>(*this);
+    return infraredPort.get();
+}
+
+// The cable sense follows the serial host; the host's CTS is let go with no host.
+void SocS3C2442::ApplyUartLines() {
+    if (halted) return;
+    const bool cable = serialPort && serialPort->context;
+    machine->setPin(rx1950CablePort, rx1950CableBit, cable);
+    if (!cable) machine->uarts[rx1950SerialUart].setCts(true);
+}
+
+void SocS3C2442::UartSent(unsigned channel, uint8_t byte) {
+    if (uartTrace) {
+        const auto& u = machine->uarts[channel];
+        std::fprintf(stderr, "uart%u %.6f tx %02x (ULCON %02x UCON %04x UMCON %02x GPHCON %08x baud %u)\n", channel,
+                     machine->nanoseconds() / 1e9, byte, u.ulcon, u.ucon, u.umcon, machine->gpio.con[S3cGpio::h],
+                     machine->uartBaud(channel));
+    }
+    if (serialCheckpoints) return;
+    if (channel == rx1950SerialUart && serialPort && serialPort->write) serialPort->write(byte, serialPort->context);
+    if (channel == rx1950InfraredUart && infraredPort && infraredPort->hooks.write && machine->uarts[channel].infrared())
+        infraredPort->hooks.write(byte, infraredPort->hooks.context);
+}
+
+// Host work on guest time, at points that don't depend on the run slices. Each UART with a host takes one host byte
+// a character time (10 bits at its rate) while its receiver is on and its FIFO has room. With nothing to take it looks
+// again at the next hostPollNs step of guest time, which is where bytes that came from the host meanwhile enter.
+// The USB host ticks at its own wake times, and the Wi-Fi router is polled at each poll step (hostNetNextNs). All of
+// it goes on while the machine sleeps.
+namespace {
+    constexpr uint64_t hostPollNs = 1000000;
+    uint64_t nextPoll(uint64_t t) { return (t / hostPollNs + 1) * hostPollNs; }
+}
+
+bool SocS3C2442::UartHasHost(unsigned channel) const {
+    if (channel == rx1950SerialUart) return serialPort && serialPort->read;
+    if (channel == rx1950InfraredUart) return infraredPort && infraredPort->hooks.read;
+    return false;
+}
+
+void SocS3C2442::PumpUart(unsigned channel, uint64_t t) {
+    if (!UartHasHost(channel)) { machine->hostUartNextNs[channel] = UINT64_MAX; return; }
+    if (t < machine->hostUartNextNs[channel]) return;
+    machine->hostUartNextNs[channel] = nextPoll(t);
+    // ASSUMPTION "UART asleep": in sleep the UART has no power and RXD isn't a wake source, so what the host sent
+    // meanwhile is lost. Taken each poll step, so none of it comes in at the wake.
+    if (machine->asleep()) {
+        for (unsigned n = 0; n < 4096; ++n) {
+            uint_fast16_t value = hostUartNone;
+            if (channel == rx1950SerialUart) {
+                if (serialPort->active && !serialPort->active(serialPort->context)) break;
+                value = serialPort->read(serialPort->context);
+            } else {
+                if (infraredPort->hooks.pending && !infraredPort->hooks.pending(infraredPort->hooks.context)) break;
+                value = infraredPort->hooks.read(infraredPort->hooks.context);
+            }
+            if (value & ~0xffu) break;
+        }
+        return;
+    }
+    auto& uart = machine->uarts[channel];
+    const uint64_t baud = machine->uartBaud(channel);
+    if (!baud || !uart.receiverOn()) return;
+    const uint64_t charNs = std::max<uint64_t>(1, 10000000000ull / baud);
+    if (!uart.rxRoom()) { machine->hostUartNextNs[channel] = t + charNs; return; }
+    uint_fast16_t value = hostUartNone;
+    if (channel == rx1950SerialUart) {
+        if (serialPort->active && !serialPort->active(serialPort->context)) return;
+        value = serialPort->read(serialPort->context);
+    } else {
+        if (!uart.infrared()) return;
+        if (infraredPort->hooks.pending && !infraredPort->hooks.pending(infraredPort->hooks.context)) return;
+        value = infraredPort->hooks.read(infraredPort->hooks.context);
+    }
+    if (value & ~0xffu) return;
+    if (uartTrace)
+        std::fprintf(stderr, "uart%u %.6f rx %02x (ULCON %02x UCON %04x UFCON %02x UMCON %02x baud %u)\n", channel,
+                     t / 1e9, unsigned(value), uart.ulcon, uart.ucon, uart.ufcon, uart.umcon, unsigned(baud));
+    machine->uartReceive(channel, uint8_t(value));
+    machine->hostUartNextNs[channel] = t + charNs;
+}
+
+// Called by the machine's run loop once machine->hostNextNs is reached.
+void SocS3C2442::HostService() {
+    const uint64_t t = machine->nanoseconds();
+    if (infraredPort) infraredPort->CheckMode();
+    if (!serialCheckpoints && !halted) {
+        PumpUart(rx1950SerialUart, t);
+        PumpUart(rx1950InfraredUart, t);
+        TickUsbHost(t);
+    } else {
+        // Paused: look again at the next poll step.
+        for (auto& at : machine->hostUartNextNs)
+            if (at != UINT64_MAX) at = std::max(at, nextPoll(t));
+    }
+    // Wi-Fi frames have their own pause (the network frozen for a checkpoint), polled at the poll steps only.
+    if (!halted && router && !networkSimulation.Frozen() && t >= machine->hostNetNextNs) {
+        machine->hostNetNextNs = nextPoll(t);
+        PollNetwork();
+    }
+    // Work still due waits a nanosecond, so the guest moves on between two calls.
+    ScheduleHost(t + 1);
+}
+
+// Brings machine->hostNextNs forward to the earliest host work. Anything due by now goes to late: just after this in
+// the service, now for a guest access to the USB controller, the next poll step from outside the run loop. While any
+// host is attached a service runs at least every poll step, so host-side news (bytes, a kick) enters there.
+void SocS3C2442::ScheduleHost(uint64_t late) {
+    if (!machine) return;
+    const uint64_t now = machine->nanoseconds();
+    auto due = [&](uint64_t at) { return at <= now ? late : at; };
+    uint64_t next = machine->hostNextNs;
+    bool any = false;
+    for (const unsigned channel : {rx1950SerialUart, rx1950InfraredUart}) {
+        if (!UartHasHost(channel)) { machine->hostUartNextNs[channel] = UINT64_MAX; continue; }
+        any = true;
+        if (machine->hostUartNextNs[channel] == UINT64_MAX) machine->hostUartNextNs[channel] = 0;
+        next = std::min(next, due(machine->hostUartNextNs[channel]));
+    }
+    if (usbHostHooks.tick) {
+        any = true;
+        if (usbHostHooks.wake && !UsbHostIoPaused()) next = std::min(next, due(usbHostHooks.wake(usbHostHooks.context)));
+    }
+    // Frames from the Wi-Fi router enter at the poll steps. A new router is first polled at the next one.
+    if (!router) {
+        machine->hostNetNextNs = UINT64_MAX;
+    } else if (!networkSimulation.Frozen()) {
+        any = true;
+        if (machine->hostNetNextNs == UINT64_MAX) machine->hostNetNextNs = nextPoll(now);
+        next = std::min(next, due(machine->hostNetNextNs));
+    }
+    if (any) next = std::min(next, nextPoll(now));
+    machine->hostNextNs = next;
+}
+
+namespace {
+    const bool usbTrace = std::getenv("FROND_RX1950_USB_TRACE");
+    UsbPacketResult usbTraced(S3c2442Machine& m, const char* what, unsigned ep, UsbPacketResult r, unsigned size) {
+        if (usbTrace)
+            std::fprintf(stderr, "usbh %.6f %s ep%u size %u -> %d (csr0 %02x int %02x/%02x INTMSK %08x SRCPND %08x)\n",
+                         m.nanoseconds() / 1e9, what, ep, size, int(r), m.usbDevice.ep0Csr, m.usbDevice.regs[2],
+                         m.usbDevice.regs[(0x15c - 0x140) / 4], m.intc.intmsk, m.intc.srcpnd);
+        return r;
+    }
+}
+
+UsbDevicePort SocS3C2442::GetUsbPort() {
+    using R = UsbPacketResult;
+    auto m = [](void* p) -> S3c2442Machine& { return *static_cast<SocS3C2442*>(p)->machine; };
+    static const UsbDevicePort::Operations ops{
+        [](void* p) {
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            if (!machine.usbListening()) return false;
+            machine.usbDevice.busReset();
+            machine.usbHostChanged();
+            usbTraced(machine, "reset", 0, UsbPacketResult::Ack, 0);
+            return true;
+        },
+        [](void*) { return false; },  // no start-of-frame model
+        [](void* p) { return static_cast<SocS3C2442*>(p)->machine->usbListening(); },
+        [](void* p) { return static_cast<SocS3C2442*>(p)->machine->usbListening(); },
+        [](void*) { return false; },
+        [](void* p) { return static_cast<SocS3C2442*>(p)->machine->usbEnableCount(); },
+        [](void* p) { return static_cast<SocS3C2442*>(p)->machine->usbDevice.address(); },
+        [](void* p, void (*notify)(void*), void* context) {
+            auto& soc = *static_cast<SocS3C2442*>(p);
+            soc.usbNotify = notify;
+            soc.usbNotifyContext = context;
+        },
+        [](void* p, const uint8_t* data) {
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            const auto r = machine.usbDevice.setup(data);
+            machine.usbHostChanged();
+            return usbTraced(machine, "setup", 0, r, 8);
+        },
+        [](void* p, const uint8_t* data, unsigned size) {
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            const auto r = machine.usbDevice.out(0, data, size);
+            machine.usbHostChanged();
+            return usbTraced(machine, "out", 0, r, size);
+        },
+        [](void* p, uint8_t* data, unsigned* size) {
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            const auto r = machine.usbDevice.in(0, data, size, true);
+            machine.usbHostChanged();
+            return usbTraced(machine, "in", 0, r, size ? *size : 0);
+        },
+        [](void* p, uint8_t ep, const uint8_t* data, unsigned size) {
+            ep &= 0x7f;
+            if (!ep) return R::Unsupported;
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            const auto r = machine.usbDevice.out(ep, data, size);
+            machine.usbHostChanged();
+            return r;
+        },
+        [](void* p, uint8_t ep, uint8_t* data, unsigned* size) {
+            ep &= 0x7f;
+            if (!ep) return R::Unsupported;
+            auto& machine = *static_cast<SocS3C2442*>(p)->machine;
+            const auto r = machine.usbDevice.in(ep, data, size, true);
+            machine.usbHostChanged();
+            return r;
+        },
+        [](void* p, uint8_t ep, unsigned* size) {
+            ep &= 0x7f;
+            return ep ? static_cast<SocS3C2442*>(p)->machine->usbDevice.in(ep, nullptr, size, false) : R::Unsupported;
+        },
+        [](void* p, uint8_t ep, unsigned) {
+            ep &= 0x7f;
+            return !ep || static_cast<SocS3C2442*>(p)->machine->usbDevice.outReady(ep);
+        }};
+    (void)m;
+    return {this, ops};
+}
+
+bool SocS3C2442::SetUsbCable(bool attached) {
+    if (halted) return false;
+    machine->setUsbVbus(attached);
+    return true;
+}
+
+void SocS3C2442::TickUsbHost(uint64_t t) {
+    if (!usbHostHooks.tick || UsbHostIoPaused()) return;
+    if (!usbHostHooks.wake || usbHostHooks.wake(usbHostHooks.context) <= t) usbHostHooks.tick(usbHostHooks.context, t);
+}
+
 SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash, size_t flashSize, std::string& error,
                                const BatteryPower& battery) {
     if (!rx1950IsCebl(cebl, size)) {
@@ -137,7 +480,34 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
         if (s->networkSimulation.Frozen()) return;
         if (!s->router) s->router = std::make_unique<frondNet::WifiRouter>();
         s->router->Input(frame, size, s->machine->nanoseconds());
+        // A new router is polled from the next poll step.
+        s->ScheduleHost(nextPoll(s->machine->nanoseconds()));
     };
+    soc->machine->uartSink = [s = soc.get()](unsigned channel, uint8_t byte) { s->UartSent(channel, byte); };
+    // A guest access to the USB controller can bring the host's next tick forward: due now, after this instruction.
+    soc->machine->usbNotify = [s = soc.get()] {
+        if (s->usbNotify) s->usbNotify(s->usbNotifyContext);
+        s->ScheduleHost(s->machine->nanoseconds());
+    };
+    soc->machine->hostService = [s = soc.get()] { s->HostService(); };
+    // A watchdog reset: the board's inputs, host keys and pen, sound and the host side start again at the
+    // instruction it happened.
+    soc->machine->watchdogResetHook = [s = soc.get()] {
+        s->ApplyHostInputs();
+        s->StateChanged();
+    };
+    // FROND_RX1950_USB_TRACE: every guest access to the USB device controller and every host packet, to stderr.
+    if (std::getenv("FROND_RX1950_USB_TRACE")) {
+        soc->machine->mmioTrace = [s = soc.get()](uint32_t pc, uint32_t address, unsigned size, bool write, uint32_t value) {
+            const bool gpio = (address >= 0x560000d0 && address <= 0x560000d8) || address == 0x56000080 ||
+                              (address >= 0x56000060 && address <= 0x56000068) || address == 0x5600008c;
+            if ((address & 0xff000000) != 0x52000000 && !(gpio && write)) return;
+            std::fprintf(stderr, "usbd %.6f pc %08x %s %03x %0*x\n", s->machine->nanoseconds() / 1e9, pc, write ? "W" : "R",
+                         address & 0xfff, int(size * 2), value);
+            if (gpio) std::fprintf(stderr, "  GPJCON %08x GPJDAT %08x CLKCON %08x MISCCR %08x vbus %d\n", s->machine->gpio.con[S3cGpio::j],
+                                   s->machine->gpio.dat[S3cGpio::j], s->machine->clock.clkcon, s->machine->gpio.misccr, s->machine->usbVbus());
+        };
+    }
     soc->BootLoader();
     soc->ApplyHostInputs();
     soc->displayConfiguration = deviceConfigurationDisplayConfigForDevice(deviceTypeRx1950, DisplayMode::mode_240x320);
@@ -185,6 +555,9 @@ std::string SocS3C2442::PcmCaptureSummary() const {
 }
 
 void SocS3C2442::ApplyHostInputs() {
+    ApplyUartLines();
+    // VBUS isn't saved: the bridge's cable decides GPG5 after a load or reset.
+    machine->setUsbVbus(machine->usbVbus());
     rx1950ApplyBattery(*machine, battery);
     machine->setHeadphones(headphones);
     ApplyCardPins();
@@ -267,7 +640,23 @@ void SocS3C2442::StateChanged() {
     pen.clear(*machine);
     // The sound starts again from the new state's next frame.
     sound.restart();
+    RestartHost();
     if (audioQueue) audioQueueClear(audioQueue);
+}
+
+// Host peers start again with the new machine, their work from the next poll step. A checkpoint restore keeps the
+// peers and the schedule the state was saved with (machine->hostNextNs and hostUartNextNs), so a replay services
+// the host at the same points; a peer attached since then starts at the next poll step.
+void SocS3C2442::RestartHost() {
+    if (!RestoringCheckpoint()) {
+        if (serialPort) serialPort->Replaced();
+        if (infraredPort) infraredPort->Replaced();
+        if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+        std::fill(std::begin(machine->hostUartNextNs), std::end(machine->hostUartNextNs), 0);
+        machine->hostNextNs = UINT64_MAX;
+        machine->hostNetNextNs = UINT64_MAX;
+    }
+    ScheduleHost(nextPoll(machine->nanoseconds()));
 }
 
 void SocS3C2442::SetClockMultiplier(uint32_t num, uint32_t den) {
@@ -457,13 +846,16 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         penEventQueue->Clear();
         return maxCycles;
     }
-    const uint64_t before = machine->nanoseconds(), resets = machine->watchdogResets();
+    const uint64_t before = machine->nanoseconds();
     const uint64_t wanted = std::max<uint64_t>(1, uint64_t(__uint128_t(maxCycles) * 1000000000 / cyclesPerSecond));
     const auto started = std::chrono::steady_clock::now();
     for (;;) {
         // Input goes in every slice, so pen and key times are kept in guest time.
         PumpInput();
         machine->setAccessPointOn(networkSimulation.GetMode() == NetworkSimulation::wireless);
+        // A host peer attached since the last slice: its work starts at the next poll step.
+        if (infraredPort) infraredPort->CheckMode();
+        ScheduleHost(nextPoll(machine->nanoseconds()));
         const uint64_t hz = std::max<uint64_t>(CoreHz(), 1000000);
         const uint64_t left = before + wanted - std::min(before + wanted, machine->nanoseconds());
         const uint64_t ns = std::min(sliceNs, std::max<uint64_t>(left, 1));
@@ -474,7 +866,6 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
                       << " instructions" << std::endl;
             break;
         }
-        PollNetwork();
         if (machine->nanoseconds() >= before + wanted) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
@@ -484,11 +875,6 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         if (wasAsleep) DisarmMicrophone();
     }
     if (halted) return maxCycles;
-    // The guest reset itself through the watchdog: the board's inputs as after any reset.
-    if (machine->watchdogResets() != resets) {
-        ApplyHostInputs();
-        StateChanged();
-    }
     const uint64_t elapsed = machine->nanoseconds() - before;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % 1000000000);

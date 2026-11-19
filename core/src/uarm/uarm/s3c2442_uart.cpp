@@ -6,6 +6,7 @@ namespace {
 
 void S3cUart::reset() {
     ulcon = ucon = ufcon = umcon = ubrdiv = 0;
+    deltaCts = false;
     rx.clear();
 }
 
@@ -32,7 +33,10 @@ S3cAccess S3cUart::read(uint32_t offset, uint32_t& value, S3cIntc& intc) {
         case 0x18:
             value = ufcon & 1 ? uint32_t(rx.size() >= fifoSize ? 0x40 : rx.size()) : 0;
             break;
-        case 0x1c: value = 1; break;  // CTS asserted
+        case 0x1c:  // UMSTAT: CTS, delta CTS (cleared by the read)
+            value = (cts ? 1u : 0u) | (deltaCts ? 4u : 0u);
+            deltaCts = false;
+            break;
         case 0x20: value = 0; break;
         case 0x24:
             value = 0;

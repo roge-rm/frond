@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "SoC.h"
+#include "UsbDevicePort.h"
+#include "UsbHostHooks.h"
 #include "net/WifiRouter.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
@@ -86,6 +88,21 @@ class SocS3C2442 : public SoC {
     std::string StopText() const { return halted ? machine->stopText() : std::string(); }
     S3c2442Machine& Machine() { return *machine; }
 
+    // The sync connector's serial port (UART0, rx1950SerialUart) and the infrared port (UART2 in IrDA mode)
+    // for HostSerial and HostInfrared. A host on the serial port is a serial cable in: the cable sense (GPF6)
+    // goes high while one is attached. Bytes from the host reach the UART at its bit rate, on guest time.
+    HostUartPort* SerialHostPort() override;
+    HostInfraredPort* InfraredHostPort() override;
+    void BeginSerialCheckpoint() override { ++serialCheckpoints; }
+    void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
+    // The USB device controller as a UsbDevicePort, for UsbHostBridge. The bridge's cable is VBUS on GPG5.
+    // Hooks tick on GetTime's clock at their wake times, in the run loop (HostService).
+    UsbDevicePort GetUsbPort();
+    void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
+    bool SetUsbCable(bool attached);
+    bool UsbCableAttached() const { return machine->usbVbus(); }
+    bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
+
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
     bool OnSleep() override { return false; }
@@ -102,6 +119,8 @@ class SocS3C2442 : public SoC {
     // The loader's work at power on and at a wake: eboot into SDRAM, the clocks and the pins it sets.
     void BootLoader();
     void PumpInput();
+    // After a load or reset (a watchdog reset too, from its hook): host input up, sound and frames again, and the
+    // host side (RestartHost).
     void StateChanged();
     struct NandPages;
 
@@ -142,10 +161,32 @@ class SocS3C2442 : public SoC {
     struct VSD* vsd{nullptr};
     bool sdProtect{false}, cardSwapped{false};
     // Frond's host network behind the emulated access point (machine->accessPoint): made on the first frame out,
-    // polled after every slice, dropped at a reset or load. Left alone while the network is frozen for a
+    // polled on guest time in HostService, dropped at a reset or load. Left alone while the network is frozen for a
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
     void PollNetwork();
+
+    struct SerialPort;
+    struct InfraredPort;
+    std::unique_ptr<SerialPort> serialPort;
+    std::unique_ptr<InfraredPort> infraredPort;
+    unsigned serialCheckpoints{0};
+    // Host bytes into UART0 and UART2 at their bit rates, the USB host's ticks and Wi-Fi frames from the router, on
+    // guest time: the machine calls HostService at machine->hostNextNs, which ScheduleHost sets, asleep too. Each
+    // UART's next look is machine->hostUartNextNs (UINT64_MAX with no host), the router's machine->hostNetNextNs. RestartHost starts the host side again after a
+    // load or reset.
+    void HostService();
+    void ScheduleHost(uint64_t late);
+    void RestartHost();
+    bool UartHasHost(unsigned channel) const;
+    void PumpUart(unsigned channel, uint64_t t);
+    // A load or reset made a new board: the host peers start again; the cable sense follows the serial host.
+    void ApplyUartLines();
+    void UartSent(unsigned channel, uint8_t byte);
+    UsbHostHooks usbHostHooks{};
+    void (*usbNotify)(void*){nullptr};
+    void* usbNotifyContext{nullptr};
+    void TickUsbHost(uint64_t t);
 };
 
 #endif

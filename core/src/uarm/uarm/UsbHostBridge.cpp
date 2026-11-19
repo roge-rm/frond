@@ -2,6 +2,7 @@
 #include "UsbHostBridge.h"
 #include "soc_PXA.h"
 #include "soc_IMX1.h"
+#include "soc_S3C2442.h"
 #include "../../common/UsbHostBridge.cpp"
 bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error) {
     if(!soc) return Start(Backend{},config,error);
@@ -24,6 +25,21 @@ bool UsbHostBridge::Start(SocPXA* soc, const Config& config, std::string& error)
 }
 bool UsbHostBridge::Start(SoC* soc, const Config& config, std::string& error) {
     if (auto* pxa = dynamic_cast<SocPXA*>(soc)) return Start(pxa, config, error);
+    if (auto* rx = dynamic_cast<SocS3C2442*>(soc)) {
+        // The rx1950's USB device controller; the cable is VBUS on GPG5.
+        Backend backend{
+            [rx] { return rx->GetUsbPort(); },
+            [rx](bool attached) { rx->SetUsbCable(attached); },
+            [rx] { return rx->UsbCableAttached(); },
+            [] { return false; },
+            [rx] { return rx->UsbHostIoPaused(); },
+            [rx] { return rx->GetTime(); },
+            [] {},  // the host ticks on guest time, at least every poll step (SocS3C2442::ScheduleHost)
+            [rx](const UsbHostHooks* hooks) { rx->SetUsbHostHooks(hooks); },
+            [] { return true; }
+        };
+        return Start(std::move(backend), config, error);
+    }
     auto* zodiac = dynamic_cast<SocIMX1*>(soc);
     if (!zodiac) return Start(Backend{}, config, error);
     // The Zodiac's USB comes through the cradle: the cable puts the cradle in, off takes out only that, so a
