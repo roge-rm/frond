@@ -483,5 +483,35 @@ int main() {
         assert(seen[3].second - seen[2].second >= S3cPenPacer::holdNs);
         assert(seen[1].second - seen[0].second < S3cPenPacer::holdNs + 5000000);
     }
+    // Key pacing: a key's down and up queued together reach its pin at least holdNs of guest time apart,
+    // its next down waits gapNs after the up, and another key's events behind it wait their turn.
+    {
+        auto m = make({loop});
+        S3cKeyPacer keys;
+        keys.clear();
+        keys.push(S3cGpio::g, 1, true);
+        keys.push(S3cGpio::g, 1, false);
+        keys.push(S3cGpio::g, 1, true);
+        keys.push(S3cGpio::g, 1, false);
+        keys.push(S3cGpio::f, 2, true);
+        keys.push(S3cGpio::f, 2, false);
+        std::vector<std::pair<bool, uint64_t>> seenG, seenF;
+        bool wasG = false, wasF = false;
+        while (m->nanoseconds() < 500000000) {
+            keys.pump(*m);
+            const bool g = !(m->gpio.input[S3cGpio::g] & 2), f = !(m->gpio.input[S3cGpio::f] & 4);
+            if (g != wasG) seenG.push_back({wasG = g, m->nanoseconds()});
+            if (f != wasF) seenF.push_back({wasF = f, m->nanoseconds()});
+            m->run(1000000);
+        }
+        assert(seenG.size() == 4 && seenF.size() == 2 && keys.empty());
+        assert(seenG[0].first && !seenG[1].first && seenG[2].first && !seenG[3].first);
+        assert(seenG[1].second - seenG[0].second >= S3cKeyPacer::holdNs);
+        assert(seenG[1].second - seenG[0].second < S3cKeyPacer::holdNs + 5000000);
+        assert(seenG[2].second - seenG[1].second >= S3cKeyPacer::gapNs);
+        assert(seenG[3].second - seenG[2].second >= S3cKeyPacer::holdNs);
+        assert(seenF[0].second >= seenG[3].second);
+        assert(seenF[1].second - seenF[0].second >= S3cKeyPacer::holdNs);
+    }
     std::printf("s3c2442 machine: ok\n");
 }

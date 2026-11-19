@@ -90,6 +90,7 @@ class SocS3C2442 : public SoC {
     struct Jam { KeyId key; uint64_t untilNs; };
     std::vector<Jam> jams;
     S3cPenPacer pen;
+    S3cKeyPacer keys;
     std::vector<uint32_t> view, scan;
     bool framePending{false}, redraw{true};
     // Guest ns Run still owes the main loop, as cycles.

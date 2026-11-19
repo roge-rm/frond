@@ -140,6 +140,7 @@ void SocS3C2442::StateChanged() {
     framePending = false;
     redraw = true;
     jams.clear();
+    keys.clear();
     // The host's keys and pen are up now.
     for (const auto& k : rx1950Keys) machine->setPin(k.port, k.bit, true);
     pen.clear(*machine);
@@ -231,8 +232,8 @@ void SocS3C2442::JamKey(enum KeyId key, uint32_t durationMsec) {
     jams.push_back({key, machine->nanoseconds() + uint64_t(durationMsec) * 1000000});
 }
 
-// Hands queued host input to the machine: keys pull their pins low, the pen goes to the touch panel
-// through the pacer, which gives the guest at most one down or up each call, in its own time.
+// Hands queued host input to the machine in the guest's own time: keys pull their pins low through the
+// key pacer, the pen goes to the touch panel through the pen pacer, at most one down or up each call.
 void SocS3C2442::PumpInput() {
     const uint64_t now = machine->nanoseconds();
     for (auto it = jams.begin(); it != jams.end();) {
@@ -243,7 +244,7 @@ void SocS3C2442::PumpInput() {
     while (keyEventQueue->GetSize()) {
         const KeyEvent event = keyEventQueue->Peek();
         keyEventQueue->Pop();
-        if (const auto* k = keyFor(event.key)) machine->setPin(k->port, k->bit, !event.keyDown);
+        if (const auto* k = keyFor(event.key)) keys.push(k->port, k->bit, event.keyDown);
     }
     while (penEventQueue->GetSize()) {
         const PenEvent event = penEventQueue->Peek();
@@ -252,6 +253,7 @@ void SocS3C2442::PumpInput() {
         const unsigned y = unsigned(std::clamp(event.y, 0, int(displayConfiguration.height) - 1));
         pen.push(event.penDown, rx1950TouchRawX(x), rx1950TouchRawY(y));
     }
+    keys.pump(*machine);
     pen.pump(*machine);
 }
 
