@@ -311,10 +311,24 @@ static void gpioTests() {
     gpio.write(0xa8, 1u << 13, intc);
     intc.write(0x00, 1u << 5);
     assert(!(get(gpio, 0xa8) & (1u << 13)) && !(intc.pending() & (1u << 5)));
-    // A GPG pin not set to EINT makes no interrupt.
-    gpio.write(0x60, 0, intc);
+    // A GPG pin set as an output makes no interrupt.
+    gpio.write(0x60, 1u << 10, intc);
     gpio.setInputs(S3cGpio::g, 1u << 5, 0, intc);
     assert(!(get(gpio, 0xa8) & (1u << 13)));
+    gpio.setInputs(S3cGpio::g, 1u << 5, 1u << 5, intc);
+    // EINT16 on GPG8 left as an input, low level, as the rx1950 OAL leaves the Wi-Fi chip's interrupt: the line
+    // going low latches EINTPEND and reaches SRCPND bit 5 (EINT8-23).
+    intc.write(0x00, 1u << 5); intc.write(0x10, 1u << 5);
+    gpio.write(0x60, 0, intc);
+    gpio.write(0x90, 0, intc);
+    gpio.write(0xa4, 0xfffff0 & ~(1u << 16), intc);
+    gpio.setInputs(S3cGpio::g, 1u << 8, 0, intc);
+    assert((get(gpio, 0xa8) & (1u << 16)) && (intc.pending() & (1u << 5)));
+    gpio.setInputs(S3cGpio::g, 1u << 8, 1u << 8, intc);
+    gpio.write(0xa8, 1u << 16, intc);
+    intc.write(0x00, 1u << 5); intc.write(0x10, 1u << 5);
+    assert(!(get(gpio, 0xa8) & (1u << 16)) && !(intc.pending() & (1u << 5)));
+    gpio.write(0xa4, 0xfffff0, intc);
     // EINT5 on GPF5 left as an input, both edges, as the rx1950 OAL sets up SD card detect: the card going in
     // (low) and out (high) each latch EINTPEND and reach SRCPND bit 4 (EINT4-7). As an output it makes none.
     intc.write(0x08, ~(1u << 4));

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "CPU.h"
@@ -113,6 +114,21 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
     nand.reset();
     std::memset(steppingstone, 0, sizeof steppingstone);
     iic.device = &codec;
+    wifi.airSend = [this](const uint8_t* f, size_t n, unsigned ch, uint64_t now) {
+        if (accessPointOn) accessPoint.stationFrame(f, n, ch, now);
+    };
+    wifi.airTuned = [this](unsigned ch, uint64_t now) { if (accessPointOn) accessPoint.tuned(ch, now); };
+    accessPoint.toStation = [this](const uint8_t* f, size_t n, unsigned ch, uint64_t now) {
+        return wifi.airReceive(f, n, ch, now);
+    };
+    accessPoint.ethernetOut = [this](const uint8_t* f, size_t n) { if (wifiEthernetOut) wifiEthernetOut(f, n); };
+    // FROND_ACX_TRACE=1 traces the chip's firmware side, 2 every register access too.
+    if (const char* t = std::getenv("FROND_ACX_TRACE")) {
+        wifiBusTrace = std::atoi(t) >= 2;
+        wifi.trace = [this](const std::string& line) {
+            std::fprintf(stderr, "ACX %.6f %s\n", elapsedNs / 1e9, line.c_str());
+        };
+    }
     // DMA units: SDRAM (repeating through bank 6) and the IIS FIFO. ASSUMPTION "IIS word DMA": a word to or
     // from IISFIFO is two halfwords, the low one first.
     dma.bus = [this](uint32_t pa, unsigned size, bool write, uint32_t& value) {
@@ -282,11 +298,24 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
         return true;
     }
     if ((address & 0xf8000000) == 0x20000000) {
-        // nGCS4, the TI ACX100 Wi-Fi MAC, which isn't modelled yet. ASSUMPTION "Wi-Fi empty bus": reads give
-        // all ones and writes are dropped, so tiacxwln finds no chip.
-        if (!options.wifiBusEmpty) return refuse(address, size, write, value, "nGCS4 Wi-Fi access");
+        // nGCS4, the TI ACX100 Wi-Fi MAC. ASSUMPTION "Wi-Fi empty bus": unpowered or in reset, reads give all
+        // ones and writes are dropped, so tiacxwln finds no chip.
         ++wifiAccesses;
+        if (wifiLive() && (size == 2 || size == 4)) {
+            if (write) wifi.write(address & 0xffff, size, value, elapsedNs);
+            else value = wifi.read(address & 0xffff, size, elapsedNs);
+            if (wifiBusTrace && (address & 0xfffc) != 0x18)
+                std::fprintf(stderr, "ACX bus %c %04x/%u %08x pc %08x\n", write ? 'W' : 'R', address & 0xffff, size, value,
+                             cpuGetCurInstrPC(cpuCore));
+            wifiService();
+            return true;
+        }
+        if (!options.wifiBusEmpty) return refuse(address, size, write, value, "nGCS4 Wi-Fi access");
         if (!write) value = size == 4 ? ~0u : (1u << (8 * size)) - 1;
+        if (wifiBusTrace)
+            std::fprintf(stderr, "ACX empty bus %c %08x/%u pc %08x GPCCON %08x GPCDAT %08x GPACON %08x GPADAT %08x\n",
+                         write ? 'W' : 'R', address, size, cpuGetCurInstrPC(cpuCore), gpio.con[S3cGpio::c],
+                         gpio.dat[S3cGpio::c], gpio.con[S3cGpio::a], gpio.dat[S3cGpio::a]);
         return true;
     }
     switch (base) {
@@ -358,6 +387,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             if (write && result == S3cAccess::ok) {
                 codecPins();
                 sdPowerPins();
+                wifiPins();
             }
             break;
         case 0x52000000:
@@ -487,6 +517,7 @@ void S3c2442Machine::advance(uint64_t cpuCycles) {
         const uint64_t frames = mulDiv(cpuCycles, iisMasterHz(), cpuHz * iis.frameDivider(), iisRest);
         if (frames) audioFrames(frames);
     }
+    if (elapsedNs >= wifiNext) wifiService();
     // A watchdog reset (watchdog.resetRequested) waits for the run loop, as this runs inside SFR accesses.
     updateLines();
 }
@@ -502,6 +533,9 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
         const uint64_t cycles = need <= rest ? 1 : uint64_t((need - rest + hz - 1) / hz);
         best = std::min(best, std::max<uint64_t>(cycles, 1));
     };
+    // The Wi-Fi chip and access point, in nanoseconds: a frame or scan step can raise its interrupt.
+    if (wifiNext != UINT64_MAX)
+        best = std::max<uint64_t>(1, wifiNext <= elapsedNs ? 1 : uint64_t((__uint128_t(wifiNext - elapsedNs) * cpuHz + 999999999) / 1000000000));
     if (!wakeOnly) {
         consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
@@ -581,6 +615,71 @@ void S3c2442Machine::setSdCard(VSD* card) {
     sdPowerWas = sdPowered();
     sdiService();
     updateLines();
+}
+
+bool S3c2442Machine::wifiPowered() const {
+    auto drivenHigh = [&](S3cGpio::Port port, unsigned bit) {
+        return ((gpio.con[port] >> (2 * bit)) & 3) == 1 && (gpio.dat[port] >> bit & 1);
+    };
+    return drivenHigh(S3cGpio::c, 8) && drivenHigh(S3cGpio::c, 9);
+}
+
+bool S3c2442Machine::wifiLive() const {
+    // GPA pins are outputs when their GPACON bit is 0.
+    const bool reset = !(gpio.con[S3cGpio::a] >> 14 & 1) && !(gpio.dat[S3cGpio::a] >> 14 & 1);
+    return wifiPowered() && !reset;
+}
+
+void S3c2442Machine::wifiPins() {
+    const bool live = wifiLive();
+    if (live != wifiLiveWas) {
+        if (wifi.trace) {
+            char line[160];
+            std::snprintf(line, sizeof line, "%s (GPGCON %08x EXTINT2 %08x EINTMASK %08x)",
+                          live ? "power on, out of reset" : "power off or reset", gpio.con[S3cGpio::g], gpio.extint[2],
+                          gpio.eintmask);
+            wifi.trace(line);
+        }
+        wifi.reset();
+        accessPoint.reset();
+        wifiLiveWas = live;
+    }
+    wifiService();
+}
+
+void S3c2442Machine::wifiService() {
+    if (wifiLiveWas) {
+        wifi.advance(elapsedNs);
+        const bool listening = accessPointOn && wifi.listening() == WifiAccessPoint::apChannel;
+        accessPoint.advance(elapsedNs, listening);
+        wifi.advance(elapsedNs);
+        wifiNext = std::min(wifi.nextEvent(), accessPoint.nextEvent(listening));
+    } else {
+        wifiNext = UINT64_MAX;
+    }
+    // Unpowered or in reset, the chip lets the line float up to its pull-up (no interrupt).
+    const bool level = !wifiLiveWas || !wifi.irq();
+    if ((gpio.input[S3cGpio::g] >> 8 & 1) != level) {
+        gpio.setInputs(S3cGpio::g, 1u << 8, level ? 1u << 8 : 0, intc);
+        updateLines();
+        if (wifiBusTrace)
+            std::fprintf(stderr, "ACX irq pin %u GPGCON %08x EXTINT2 %08x EINTMASK %08x EINTPEND %08x INTMSK %08x SRCPND %08x\n",
+                         level, gpio.con[S3cGpio::g], gpio.extint[2], gpio.eintmask, gpio.eintpend, intc.intmsk, intc.srcpnd);
+    }
+}
+
+void S3c2442Machine::setAccessPointOn(bool on) {
+    if (on == accessPointOn) return;
+    accessPointOn = on;
+    // Out of range: the station loses its association and has to find the network again.
+    accessPoint.reset();
+    wifiService();
+}
+
+void S3c2442Machine::wifiEthernetIn(const uint8_t* frame, size_t size) {
+    if (!wifiLiveWas || !accessPointOn) return;
+    accessPoint.ethernetIn(frame, size, elapsedNs);
+    wifiService();
 }
 
 bool S3c2442Machine::sdPowered() const {
@@ -757,6 +856,8 @@ void S3c2442Machine::hardReset(uint32_t cause) {
     gpio.reset(options.chipId, options.resetCause);
     gpio.gstatus[2] = cause;
     std::memcpy(gpio.input, inputs, sizeof inputs);
+    // The Wi-Fi chip's power pins go back to inputs: it loses power.
+    wifiPins();
     stopped = {};
     undefinedPending = false;
     if (resetLoader) resetLoader();
@@ -1073,6 +1174,8 @@ namespace {
         a.DoBool(in).DoVector(id, 64).DoVector(card, 1u << 20).DoBool(powered);
         sdi.runState(a);
     }
+    // The Wi-Fi chip and the access point, its own section so states saved before it load with the chip off.
+    constexpr uint32_t secWifi = stateFourcc("ACXW"), wifiStateVersion = 1;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1171,6 +1274,13 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
         file.end();
     }
     {
+        auto a = file.begin(secWifi, wifiStateVersion);
+        a.DoBool(wifiLiveWas);
+        wifi.state(a);
+        accessPoint.state(a);
+        file.end();
+    }
+    {
         auto a = file.begin(secMachine, stateVersion);
         uint64_t counts[] = {retiredCount, cycleCount, idleCount, elapsedNs, pclkRest, hclkRest, rtcRest, nsRest,
                              irqHeldUntil, sleeps, wakes, vfpProbes, breakpoints, wifiAccesses};
@@ -1262,6 +1372,18 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         blocks.sdi.clearRun();
     }
 
+    auto savedWifi = std::make_unique<Acx100>();
+    WifiAccessPoint savedAccessPoint;
+    bool savedWifiLive = false;
+    const bool hadWifi = file.find(secWifi);
+    if (hadWifi) {
+        if (!open(secWifi, wifiStateVersion, a)) { why = "the saved Wi-Fi chip is from another version"; return false; }
+        a.DoBool(savedWifiLive);
+        savedWifi->state(a);
+        savedAccessPoint.state(a);
+        if (!done(a, "Wi-Fi chip")) return false;
+    }
+
     if (!open(secMachine, stateVersion, a)) { why = "no saved machine counts"; return false; }
     uint64_t counts[14] = {};
     bool flags[5] = {};
@@ -1300,6 +1422,23 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         uarts[c].sink = sink;
     }
     lcd = blocks.lcd;
+    // Older states had no chip: it starts unpowered, or reset if its pins say it has power.
+    stateHadWifi = hadWifi;
+    {
+        auto trace = std::move(wifi.trace);
+        auto send = std::move(wifi.airSend);
+        auto tuned = std::move(wifi.airTuned);
+        wifi = std::move(*savedWifi);
+        wifi.trace = std::move(trace);
+        wifi.airSend = std::move(send);
+        wifi.airTuned = std::move(tuned);
+        auto toStation = std::move(accessPoint.toStation);
+        auto out = std::move(accessPoint.ethernetOut);
+        accessPoint = std::move(savedAccessPoint);
+        accessPoint.toStation = std::move(toStation);
+        accessPoint.ethernetOut = std::move(out);
+        wifiLiveWas = hadWifi ? savedWifiLive : false;
+    }
     // The registers only: the pages, their store and the dirty marks stay this machine's.
     {
         std::vector<uint8_t> bytes;
@@ -1326,5 +1465,6 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
     cpuDropTranslatedCode(cpuCore);
     if (fastOn) cpuArm920LeanReset(cpuCore);
     if (clock.changed) clock.changed();
+    wifiPins();
     return true;
 }

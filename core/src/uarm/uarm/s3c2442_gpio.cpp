@@ -48,17 +48,17 @@ bool S3cGpio::pin(Port port, unsigned bit) const {
 }
 
 // The level of the pin behind an EINT, and whether the EINT sees it (GPF0-7 for EINT0-7, GPG0-15 for
-// EINT8-23). ASSUMPTION "S3C2442 EINT4-7 on inputs": EINT4-7 also see a GPF pin set as an input. The rx1950
-// OAL enables EINT5 (SD card detect) and EINT6 (cable sense) with GPF5 and GPF6 left as inputs, and the SD
-// driver waits on that interrupt alone. EINT0-3 need their pin set to EINT: they go straight to SRCPND and
-// wake the chip whatever INTMSK says, and the OAL leaves GPF3 (charge done, low while charging) an input
-// with EINT3 on low level. EINT8-23 need their GPG pin set to EINT.
+// EINT8-23). ASSUMPTION "S3C2442 EINT4-23 on inputs": EINT4-23 also see a pin set as an input. The rx1950
+// OAL enables EINT5 (SD card detect), EINT6 (cable sense) and EINT16 (the Wi-Fi chip) with GPF5, GPF6 and GPG8
+// left as inputs, and the SD and Wi-Fi drivers wait on those interrupts alone. EINT0-3 need their pin set to
+// EINT: they go straight to SRCPND and wake the chip whatever INTMSK says, and the OAL leaves GPF3 (charge
+// done, low while charging) an input with EINT3 on low level.
 bool S3cGpio::eintPin(unsigned eint, bool& level) const {
     const Port port = eint < 8 ? f : g;
     const unsigned bit = eint < 8 ? eint : eint - 8;
     level = input[port] & (1u << bit);
     const uint32_t mode = (con[port] >> (2 * bit)) & 3;
-    return mode == 2 || (port == f && bit >= 4 && mode == 0);
+    return mode == 2 || (eint >= 4 && mode == 0);
 }
 
 S3cAccess S3cGpio::read(uint32_t offset, uint32_t& value) {

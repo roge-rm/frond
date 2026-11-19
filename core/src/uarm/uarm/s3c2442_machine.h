@@ -12,11 +12,13 @@
 #include <string>
 #include <vector>
 
+#include "acx100.h"
 #include "audio_input.h"
 #include "memory_buffer.h"
 #include "s3c2442_blocks.h"
 #include "s3c2442_nand.h"
 #include "uda1380.h"
+#include "wifi_access_point.h"
 
 struct ArmCpu;
 struct ArmMem;
@@ -36,8 +38,8 @@ struct S3c2442Options {
     // nGCS5 (0x28000000, the debug board on a development unit) is an empty bus: writes are dropped and
     // reads give all ones. Off, any access there is refused.
     bool debugBoardEmpty = true;
-    // nGCS4 (the ACX100 Wi-Fi MAC) as an empty bus until the chip is modelled: writes are dropped and reads
-    // give all ones. Off stops the run at the first access.
+    // nGCS4 (the ACX100 Wi-Fi MAC) while the chip is unpowered or held in reset: writes are dropped and reads
+    // give all ones. Off stops the run at the first such access.
     bool wifiBusEmpty = true;
 };
 
@@ -91,7 +93,7 @@ class S3c2442Machine {
     // exception without a stop.
     uint64_t vfpProbeCount() const { return vfpProbes; }
     uint64_t breakpointCount() const { return breakpoints; }
-    // Accesses to the empty Wi-Fi bus on nGCS4.
+    // Accesses on nGCS4, the Wi-Fi chip's bus, powered or not.
     uint64_t wifiAccesses = 0;
     // Guest time in CPU clock cycles, idle time included, and in nanoseconds.
     uint64_t cycles() const { return cycleCount; }
@@ -192,6 +194,26 @@ class S3c2442Machine {
     // The id saveState keeps with the card, for the owner to tell the same card at a load.
     std::string sdCardId;
 
+    // Wi-Fi: the ACX100 on nGCS4 (acx100.h) and the access point its radio reaches (wifi_access_point.h).
+    // ASSUMPTION "rx1950 Wi-Fi power": the chip is powered while GPC8 and GPC9 are outputs driven high, and held
+    // in reset while GPA14 is an output driven low; losing either resets it. Its interrupt pulls GPG8 (EINT16) low:
+    // the OAL sets EINT16 to low level. The access point's Ethernet frames go to
+    // wifiEthernetOut; the owner feeds frames from the network to wifiEthernetIn.
+    Acx100 wifi;
+    WifiAccessPoint accessPoint;
+    std::function<void(const uint8_t*, size_t)> wifiEthernetOut;
+    void wifiEthernetIn(const uint8_t* frame, size_t size);
+    // After the owner changes the GPIO registers directly.
+    void wifiPinsChanged() { wifiPins(); }
+    // Whether the access point is on the air (the desktop's Virtual Wi-Fi network mode). Turning it off
+    // forgets the station.
+    void setAccessPointOn(bool on);
+    bool accessPointOn = true;
+    bool wifiPowered() const;
+    bool wifiLive() const;
+    // False after loading a state saved before the machine kept the Wi-Fi chip (no "ACXW" section).
+    bool stateHadWifi = true;
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -262,6 +284,11 @@ class S3c2442Machine {
     void sdiService();
     // After a GPIO write: the card's supply (GPJ1).
     void sdPowerPins();
+    // The Wi-Fi chip's power and reset pins after a GPIO change; its events and interrupt pin.
+    void wifiPins();
+    void wifiService();
+    bool wifiLiveWas = false, wifiBusTrace = false;
+    uint64_t wifiNext = UINT64_MAX;
     VSD* sdVsd = nullptr;
     std::unique_ptr<S3cSdCard> sdAdapter;
     bool sdPowerWas = true;
