@@ -226,7 +226,7 @@ void SocS3C2442::UartSent(unsigned channel, uint8_t byte) {
 // Host work on guest time, at points that don't depend on the run slices. Each UART with a host takes one host byte
 // a character time (10 bits at its rate) while its receiver is on and its FIFO has room. With nothing to take it looks
 // again at the next hostPollNs step of guest time, which is where bytes that came from the host meanwhile enter.
-// The USB host ticks at its own wake times.
+// The USB host ticks at its own wake times, and the Wi-Fi router is polled at each poll step.
 namespace {
     constexpr uint64_t hostPollNs = 1000000;
     uint64_t nextPoll(uint64_t t) { return (t / hostPollNs + 1) * hostPollNs; }
@@ -239,14 +239,14 @@ bool SocS3C2442::UartHasHost(unsigned channel) const {
 }
 
 void SocS3C2442::PumpUart(unsigned channel, uint64_t t) {
-    if (!UartHasHost(channel)) { uartNextNs[channel] = UINT64_MAX; return; }
-    if (t < uartNextNs[channel]) return;
-    uartNextNs[channel] = nextPoll(t);
+    if (!UartHasHost(channel)) { machine->hostUartNextNs[channel] = UINT64_MAX; return; }
+    if (t < machine->hostUartNextNs[channel]) return;
+    machine->hostUartNextNs[channel] = nextPoll(t);
     auto& uart = machine->uarts[channel];
     const uint64_t baud = machine->uartBaud(channel);
     if (!baud || !uart.receiverOn()) return;
     const uint64_t charNs = std::max<uint64_t>(1, 10000000000ull / baud);
-    if (!uart.rxRoom()) { uartNextNs[channel] = t + charNs; return; }
+    if (!uart.rxRoom()) { machine->hostUartNextNs[channel] = t + charNs; return; }
     uint_fast16_t value = hostUartNone;
     if (channel == rx1950SerialUart) {
         if (serialPort->active && !serialPort->active(serialPort->context)) return;
@@ -261,7 +261,7 @@ void SocS3C2442::PumpUart(unsigned channel, uint64_t t) {
         std::fprintf(stderr, "uart%u %.6f rx %02x (ULCON %02x UCON %04x UFCON %02x UMCON %02x baud %u)\n", channel,
                      t / 1e9, unsigned(value), uart.ulcon, uart.ucon, uart.ufcon, uart.umcon, unsigned(baud));
     machine->uartReceive(channel, uint8_t(value));
-    uartNextNs[channel] = t + charNs;
+    machine->hostUartNextNs[channel] = t + charNs;
 }
 
 // Called by the machine's run loop once machine->hostNextNs is reached.
@@ -274,9 +274,11 @@ void SocS3C2442::HostService() {
         TickUsbHost(t);
     } else {
         // Paused: look again at the next poll step.
-        for (auto& at : uartNextNs)
+        for (auto& at : machine->hostUartNextNs)
             if (at != UINT64_MAX) at = std::max(at, nextPoll(t));
     }
+    // Wi-Fi frames have their own pause (the network frozen for a checkpoint).
+    if (!halted) PollNetwork();
     // Work still due waits a nanosecond, so the guest moves on between two calls.
     ScheduleHost(t + 1);
 }
@@ -291,15 +293,17 @@ void SocS3C2442::ScheduleHost(uint64_t late) {
     uint64_t next = machine->hostNextNs;
     bool any = false;
     for (const unsigned channel : {rx1950SerialUart, rx1950InfraredUart}) {
-        if (!UartHasHost(channel)) { uartNextNs[channel] = UINT64_MAX; continue; }
+        if (!UartHasHost(channel)) { machine->hostUartNextNs[channel] = UINT64_MAX; continue; }
         any = true;
-        if (uartNextNs[channel] == UINT64_MAX) uartNextNs[channel] = 0;
-        next = std::min(next, due(uartNextNs[channel]));
+        if (machine->hostUartNextNs[channel] == UINT64_MAX) machine->hostUartNextNs[channel] = 0;
+        next = std::min(next, due(machine->hostUartNextNs[channel]));
     }
     if (usbHostHooks.tick) {
         any = true;
         if (usbHostHooks.wake && !UsbHostIoPaused()) next = std::min(next, due(usbHostHooks.wake(usbHostHooks.context)));
     }
+    // Frames from the Wi-Fi router enter at the poll steps.
+    if (router && !networkSimulation.Frozen()) any = true;
     if (any) next = std::min(next, nextPoll(now));
     machine->hostNextNs = next;
 }
@@ -450,6 +454,8 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
         if (s->networkSimulation.Frozen()) return;
         if (!s->router) s->router = std::make_unique<frondNet::WifiRouter>();
         s->router->Input(frame, size, s->machine->nanoseconds());
+        // A new router is polled from the next poll step.
+        s->ScheduleHost(nextPoll(s->machine->nanoseconds()));
     };
     soc->machine->uartSink = [s = soc.get()](unsigned channel, uint8_t byte) { s->UartSent(channel, byte); };
     // A guest access to the USB controller can bring the host's next tick forward: due now, after this instruction.
@@ -458,6 +464,11 @@ SocS3C2442* SocS3C2442::Create(const uint8_t* cebl, size_t size, uint8_t* flash,
         s->ScheduleHost(s->machine->nanoseconds());
     };
     soc->machine->hostService = [s = soc.get()] { s->HostService(); };
+    // A watchdog reset: the board's inputs and the host side start again at the instruction it happened.
+    soc->machine->watchdogResetHook = [s = soc.get()] {
+        s->ApplyHostInputs();
+        s->RestartHost();
+    };
     // FROND_RX1950_USB_TRACE: every guest access to the USB device controller and every host packet, to stderr.
     if (std::getenv("FROND_RX1950_USB_TRACE")) {
         soc->machine->mmioTrace = [s = soc.get()](uint32_t pc, uint32_t address, unsigned size, bool write, uint32_t value) {
@@ -590,7 +601,7 @@ bool SocS3C2442::SetHeadphones(bool in) {
     return true;
 }
 
-void SocS3C2442::StateChanged() {
+void SocS3C2442::StateChanged(bool restartHost) {
     const auto stop = machine->stopInfo().stop;
     halted = stop != S3c2442Stop::running && stop != S3c2442Stop::budget;
     framePending = false;
@@ -602,16 +613,22 @@ void SocS3C2442::StateChanged() {
     pen.clear(*machine);
     // The sound starts again from the new state's next frame.
     sound.restart();
-    // Host peers start again with the new machine; a checkpoint restore keeps them.
+    if (restartHost) RestartHost();
+    if (audioQueue) audioQueueClear(audioQueue);
+}
+
+// Host peers start again with the new machine, their work from the next poll step. A checkpoint restore keeps the
+// peers and the schedule the state was saved with (machine->hostNextNs and hostUartNextNs), so a replay services
+// the host at the same points; a peer attached since then starts at the next poll step.
+void SocS3C2442::RestartHost() {
     if (!RestoringCheckpoint()) {
         if (serialPort) serialPort->Replaced();
         if (infraredPort) infraredPort->Replaced();
         if (usbHostHooks.replaced) usbHostHooks.replaced(usbHostHooks.context);
+        std::fill(std::begin(machine->hostUartNextNs), std::end(machine->hostUartNextNs), 0);
+        machine->hostNextNs = UINT64_MAX;
     }
-    std::fill(std::begin(uartNextNs), std::end(uartNextNs), 0);
-    machine->hostNextNs = UINT64_MAX;
     ScheduleHost(nextPoll(machine->nanoseconds()));
-    if (audioQueue) audioQueueClear(audioQueue);
 }
 
 void SocS3C2442::SetClockMultiplier(uint32_t num, uint32_t den) {
@@ -821,7 +838,6 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
                       << " instructions" << std::endl;
             break;
         }
-        PollNetwork();
         if (machine->nanoseconds() >= before + wanted) break;
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
@@ -831,11 +847,9 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         if (wasAsleep) DisarmMicrophone();
     }
     if (halted) return maxCycles;
-    // The guest reset itself through the watchdog: the board's inputs as after any reset.
-    if (machine->watchdogResets() != resets) {
-        ApplyHostInputs();
-        StateChanged();
-    }
+    // The guest reset itself through the watchdog: the board's inputs and host side were redone where it happened
+    // (watchdogResetHook), the rest as after any reset.
+    if (machine->watchdogResets() != resets) StateChanged(false);
     const uint64_t elapsed = machine->nanoseconds() - before;
     const __uint128_t credit = __uint128_t(elapsed) * cyclesPerSecond + creditRemainder;
     creditRemainder = uint64_t(credit % 1000000000);

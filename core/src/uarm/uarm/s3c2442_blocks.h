@@ -230,6 +230,9 @@ public:
     S3cAccess write(uint32_t offset, uint32_t value);
     // The interrupt line to INT_USBD: an enabled endpoint or bus interrupt is pending.
     bool irq() const;
+    // After a guest access at offset: whether it can have changed what the host sees. Writes but FIFO data, a
+    // FIFO write that left IN_PKT_RDY set (AUTO_SET), a FIFO read with OUT_PKT_RDY clear (AUTO_CLR or no packet).
+    bool hostVisible(uint32_t offset, bool write) const;
 
     // Host side. A bus reset puts the address and endpoints back and raises the reset interrupt.
     void busReset();

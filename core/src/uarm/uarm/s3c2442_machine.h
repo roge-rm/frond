@@ -220,7 +220,8 @@ class S3c2442Machine {
     // controller (Linux's pullup_pin is GPJ5 too), but GPJCON reads 0 in Frond's sessions (the loader's GPJCON isn't
     // known), so the latch decides whatever GPJCON says. The host sees it (usbListening) while
     // VBUS is on, the pull-up is on and CLKCON gives the controller its clock. usbHostChanged after each host
-    // packet updates INT_USBD; usbNotify runs after every guest access to the controller (host side, not saved).
+    // packet updates INT_USBD; usbNotify runs after a guest access that can change what the host sees: writes, and
+    // FIFO accesses that leave a packet for the host or take the last byte of one (host side, not saved).
     void setUsbVbus(bool on);
     bool usbVbus() const { return usbVbusOn; }
     bool usbListening() const;
@@ -231,9 +232,15 @@ class S3c2442Machine {
     // Host work on guest time (bytes from a serial or infrared host, the USB host's ticks): run calls hostService
     // between instructions once nanoseconds() reaches hostNextNs, and busy batches and idle skips both end there, so
     // the work lands at the same instruction whatever the run slices are. UINT64_MAX for none. hostService sets it
-    // again; neither is saved, as the owner sets them after a load.
+    // again. hostUartNextNs is the owner's per-UART schedule (guest ns of the next look for a host byte). Both are
+    // saved in their own state section while any is set, so a checkpoint restore goes on at the same points; a
+    // state without it loads them as UINT64_MAX.
     std::function<void()> hostService;
     uint64_t hostNextNs = UINT64_MAX;
+    uint64_t hostUartNextNs[3]{UINT64_MAX, UINT64_MAX, UINT64_MAX};
+    // Runs right after a watchdog reset, at the instruction where it happens, for the board's inputs and host peers
+    // (host side, not saved).
+    std::function<void()> watchdogResetHook;
 
     // A byte from a UART's far end (host serial or infrared), and the UART's bit rate from UBRDIV and its clock.
     void uartReceive(unsigned channel, uint8_t byte);

@@ -425,14 +425,16 @@ static void usbTests() {
 }
 
 // Host work lands at the same guest time and instruction whatever the run slices: on a busy CPU and an idle one, run
-// in one go or in uneven slices.
+// in one go or in uneven slices, on Exact and on Fast.
 static void hostServiceTests() {
+    for (const bool fast : {false, true})
     for (const bool idle : {false, true}) {
         // A busy loop (subs r0, r0, #1; b back) or a wait for interrupt.
         const std::vector<uint32_t> program = idle ? std::vector<uint32_t>{wfi, loop} : std::vector<uint32_t>{0xe2500001, 0xeafffffd};
         std::vector<std::pair<uint64_t, uint64_t>> seen[2];
         for (unsigned way = 0; way < 2; ++way) {
             auto m = make(program);
+            if (fast) assert(m->setFastEngine(true));
             auto& log = seen[way];
             m->hostService = [&] {
                 log.emplace_back(m->nanoseconds(), m->retired());
@@ -454,7 +456,68 @@ static void hostServiceTests() {
         }
         assert(seen[0].size() > 3 && seen[0] == seen[1]);
         assert(seen[0][0].first >= 100000 && seen[0][0].first < 101000);
+        static std::vector<std::pair<uint64_t, uint64_t>> exact[2];
+        if (!fast) exact[idle] = seen[0];
+        else assert(seen[0] == exact[idle]);
     }
+}
+
+// The host schedule goes with a saved state while it's set, and a state saved without one loads with none due.
+static void hostScheduleStateTests() {
+    std::vector<uint8_t> state;
+    std::string why;
+    auto a = make({loop});
+    assert(a->saveState(state, why));
+    auto b = make({loop});
+    b->hostNextNs = 5;
+    b->hostUartNextNs[2] = 7;
+    assert(b->loadState(state.data(), state.size(), why));
+    assert(b->hostNextNs == UINT64_MAX && b->hostUartNextNs[2] == UINT64_MAX);
+    a->hostNextNs = 1234567;
+    a->hostUartNextNs[0] = 2000000;
+    assert(a->saveState(state, why));
+    auto c = make({loop});
+    assert(c->loadState(state.data(), state.size(), why));
+    assert(c->hostNextNs == 1234567 && c->hostUartNextNs[0] == 2000000 && c->hostUartNextNs[1] == UINT64_MAX);
+}
+
+// A watchdog reset runs the board's hook at the instruction it happens, whatever the run slices.
+static void watchdogHookTests() {
+    // WTCNT 200, then WTCON: on, reset on, interrupt off, prescaler 0, clock /16.
+    const auto program = stores({{0x53000008, 200}, {0x53000000, 0x0021}}, {loop});
+    std::pair<uint64_t, uint64_t> at[2];
+    for (unsigned way = 0; way < 2; ++way) {
+        auto m = make(program);
+        unsigned hooks = 0;
+        m->watchdogResetHook = [&] { at[way] = {m->nanoseconds(), m->retired()}; ++hooks; };
+        if (way == 0) {
+            assert(m->run(200000) == S3c2442Stop::budget);
+        } else {
+            for (uint64_t done = 0, step = 333; done < 200000; done += step, step = step * 5 % 4099 + 1)
+                assert(m->run(std::min(step, 200000 - done)) == S3c2442Stop::budget);
+        }
+        assert(hooks >= 1 && m->watchdogResets() == hooks);
+    }
+    assert(at[0] == at[1]);
+}
+
+// Only accesses that can change what the host sees poke it: writes, and FIFO accesses that hand a packet over.
+static void usbNotifyTests() {
+    S3cUsbDevice d;
+    d.reset();
+    assert(!d.hostVisible(0x184, false) && !d.hostVisible(0x198, false));
+    assert(d.hostVisible(0x184, true) && d.hostVisible(0x178, true));
+    // EP0's FIFO changes hands through EP0_CSR.
+    assert(!d.hostVisible(0x1c0, true) && !d.hostVisible(0x1c0, false));
+    // EP1: a byte read with OUT_PKT_RDY still set isn't seen, the one that clears it is.
+    d.outCsr1[1] = 1;
+    assert(!d.hostVisible(0x1c4, false));
+    d.outCsr1[1] = 0;
+    assert(d.hostVisible(0x1c4, false) && d.hostVisible(0x1c7, false));
+    // A FIFO write is seen once IN_PKT_RDY is set (AUTO_SET).
+    assert(!d.hostVisible(0x1c4, true));
+    d.inCsr1[1] = 1;
+    assert(d.hostVisible(0x1c4, true));
 }
 
 // The VBUS pin and the bridge's cable agree after a load: the saved GPG5 level goes, the cable state stays (the board
@@ -492,6 +555,9 @@ static void uartTests() {
 int main() {
     usbTests();
     hostServiceTests();
+    hostScheduleStateTests();
+    watchdogHookTests();
+    usbNotifyTests();
     vbusLoadTests();
     uartTests();
     sdTests();

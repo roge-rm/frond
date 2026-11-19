@@ -397,7 +397,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             if (write) result = size == 4 ? usbDevice.write(offset, value) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return usbDevice.read(o, v); });
             intc.level(s3cIrq::usbd, usbDevice.irq());
-            if (usbNotify) usbNotify();
+            if (usbNotify && usbDevice.hostVisible(write ? offset : word, write)) usbNotify();
             break;
         case 0x58000000:
             name = "ADC and touch screen";
@@ -895,6 +895,7 @@ void S3c2442Machine::reset() { hardReset(0); }
 void S3c2442Machine::watchdogReset() {
     ++watchdogResetCount;
     hardReset(4);
+    if (watchdogResetHook) watchdogResetHook();
 }
 
 // SDRAM, the RTC and the board's pin inputs are kept; GSTATUS2 is the reset's cause.
@@ -1240,6 +1241,9 @@ namespace {
     constexpr uint32_t secUsb = stateFourcc("USBD"), usbStateVersion = 1;
     // The UARTs' delta CTS bits, their own section so states saved before it load with them clear.
     constexpr uint32_t secUartModem = stateFourcc("UMST"), uartModemStateVersion = 1;
+    // The host work schedule (hostNextNs, hostUartNextNs), only while any is set: states without it, or saved with
+    // no host attached, load with none due.
+    constexpr uint32_t secHostSchedule = stateFourcc("HSVC"), hostScheduleStateVersion = 1;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1345,6 +1349,13 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
     {
         auto a = file.begin(secUartModem, uartModemStateVersion);
         for (auto& u : uarts) a.DoBool(u.deltaCts);
+        file.end();
+    }
+    if (hostNextNs != UINT64_MAX || std::any_of(std::begin(hostUartNextNs), std::end(hostUartNextNs),
+                                                [](uint64_t t) { return t != UINT64_MAX; })) {
+        auto a = file.begin(secHostSchedule, hostScheduleStateVersion);
+        a.Do64(hostNextNs);
+        for (auto& t : hostUartNextNs) a.Do64(t);
         file.end();
     }
     {
@@ -1462,6 +1473,14 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         for (auto& u : blocks.uarts) u.deltaCts = false;
     }
 
+    uint64_t savedHostNext = UINT64_MAX, savedHostUart[3] = {UINT64_MAX, UINT64_MAX, UINT64_MAX};
+    if (file.find(secHostSchedule)) {
+        if (!open(secHostSchedule, hostScheduleStateVersion, a)) { why = "the saved host schedule is from another version"; return false; }
+        a.Do64(savedHostNext);
+        for (auto& t : savedHostUart) a.Do64(t);
+        if (!done(a, "host schedule")) return false;
+    }
+
     auto savedWifi = std::make_unique<Acx100>();
     WifiAccessPoint savedAccessPoint;
     bool savedWifiLive = false;
@@ -1512,6 +1531,8 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         uarts[c].sink = sink;
     }
     lcd = blocks.lcd;
+    hostNextNs = savedHostNext;
+    std::copy(std::begin(savedHostUart), std::end(savedHostUart), std::begin(hostUartNextNs));
     // Older states had no chip: it starts unpowered, or reset if its pins say it has power.
     stateHadWifi = hadWifi;
     {

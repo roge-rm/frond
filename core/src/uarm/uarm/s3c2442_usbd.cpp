@@ -50,6 +50,14 @@ bool S3cUsbDevice::irq() const {
 // MAXP_REG counts 8-byte units (1, 2, 4 or 8).
 unsigned S3cUsbDevice::packetSize(unsigned ep) const { return std::max(1u, unsigned(maxp[ep] & 0x0f)) * 8; }
 
+bool S3cUsbDevice::hostVisible(uint32_t offset, bool write) const {
+    if (!fifoReg(offset & ~3u)) return write;
+    const unsigned e = ((offset & ~3u) - 0x1c0) / 4;
+    // EP0's FIFO only changes hands through EP0_CSR writes.
+    if (!e) return false;
+    return write ? (inCsr1[e] & inReady) != 0 : !(outCsr1[e] & outPktReady);
+}
+
 S3cAccess S3cUsbDevice::read(uint32_t offset, uint32_t& value) {
     if (offset & 3) return S3cAccess::unknown;
     if (offset >= dmaFirst && offset <= dmaLast) { value = dmaRegs[(offset - dmaFirst) / 4]; return S3cAccess::ok; }

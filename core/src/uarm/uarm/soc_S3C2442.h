@@ -119,7 +119,9 @@ class SocS3C2442 : public SoC {
     // The loader's work at power on and at a wake: eboot into SDRAM, the clocks and the pins it sets.
     void BootLoader();
     void PumpInput();
-    void StateChanged();
+    // After a load or reset: host input up, sound and frames again, and the host side (RestartHost) unless the
+    // caller has done it.
+    void StateChanged(bool restartHost = true);
     struct NandPages;
 
     std::vector<uint8_t> rom, saved;
@@ -159,7 +161,7 @@ class SocS3C2442 : public SoC {
     struct VSD* vsd{nullptr};
     bool sdProtect{false}, cardSwapped{false};
     // Frond's host network behind the emulated access point (machine->accessPoint): made on the first frame out,
-    // polled after every slice, dropped at a reset or load. Left alone while the network is frozen for a
+    // polled on guest time in HostService, dropped at a reset or load. Left alone while the network is frozen for a
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
     void PollNetwork();
@@ -169,14 +171,15 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<SerialPort> serialPort;
     std::unique_ptr<InfraredPort> infraredPort;
     unsigned serialCheckpoints{0};
-    // Host bytes into UART0 and UART2 at their bit rates and the USB host's ticks, on guest time: the machine
-    // calls HostService at machine->hostNextNs, which ScheduleHost sets.
+    // Host bytes into UART0 and UART2 at their bit rates, the USB host's ticks and Wi-Fi frames from the router, on
+    // guest time: the machine calls HostService at machine->hostNextNs, which ScheduleHost sets. Each UART's next
+    // look is machine->hostUartNextNs (UINT64_MAX with no host). RestartHost starts the host side again after a
+    // load or reset.
     void HostService();
     void ScheduleHost(uint64_t late);
+    void RestartHost();
     bool UartHasHost(unsigned channel) const;
     void PumpUart(unsigned channel, uint64_t t);
-    // Guest ns at which each UART next looks for a host byte; UINT64_MAX with no host.
-    uint64_t uartNextNs[3]{UINT64_MAX, UINT64_MAX, UINT64_MAX};
     // A load or reset made a new board: the host peers start again; the cable sense follows the serial host.
     void ApplyUartLines();
     void UartSent(unsigned channel, uint8_t byte);
