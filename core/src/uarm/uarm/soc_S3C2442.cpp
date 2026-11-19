@@ -216,6 +216,7 @@ uint64_t SocS3C2442::CoreHz() const {
 // and the loader and eboot start the OS from flash as after a power on.
 void SocS3C2442::Reset() {
     SoC::Reset();
+    DisarmMicrophone();
     machine->reset();
     ApplyHostInputs();
     StateChanged();
@@ -239,12 +240,51 @@ bool SocS3C2442::Load(size_t savestateSize, void* savestateData) {
         return false;
     }
     machine->nand.dropCache();
+    if (!RestoringCheckpoint()) DisarmMicrophone();
     // A session saved before sound worked has GPA1 as an address line, as the loader pins left it then; the
     // speaker amplifier needs it as an output (rx1950LoaderPins).
     if (!machine->stateHadSound) machine->gpio.con[S3cGpio::a] &= ~2u;
     ApplyHostInputs();
     StateChanged();
     return true;
+}
+
+void SocS3C2442::DisarmMicrophone() {
+    if (machine->microphoneFences) microphoneInvalidatePending = true;
+    else { machine->disarmMicrophone(); microphoneInvalidatePending = false; }
+}
+
+void SocS3C2442::SetMicrophoneSource(const AudioInputSource* source) {
+    machine->disarmMicrophone();
+    machine->microphone = source;
+    if (machine->microphoneFences && source && source->fence) source->fence(source->context, true);
+    if (machine->asleep()) DisarmMicrophone();
+}
+
+// Fences the microphone while checkpointed guest work runs; a disarm asked for meanwhile happens at the end.
+std::function<void()> SocS3C2442::CapturePeripheralInput() {
+    struct Fence {
+        SocS3C2442& soc;
+        std::weak_ptr<int> lifetime;
+        bool previous;
+        explicit Fence(SocS3C2442& s) : soc(s), lifetime(s.checkpointLifetime), previous(s.microphoneInvalidatePending) {
+            ++soc.checkpointFenceDepth;
+            soc.machine->fenceMicrophone(true);
+        }
+        ~Fence() {
+            if (lifetime.expired()) return;
+            --soc.checkpointFenceDepth;
+            soc.machine->fenceMicrophone(false);
+            if (!soc.machine->microphoneFences && (soc.microphoneInvalidatePending || soc.machine->asleep()))
+                soc.DisarmMicrophone();
+        }
+    };
+    auto fence = std::make_shared<Fence>(*this);
+    std::weak_ptr<int> lifetime = checkpointLifetime;
+    return [this, fence, lifetime] {
+        if (lifetime.expired()) return;
+        microphoneInvalidatePending = fence->previous;
+    };
 }
 
 bool SocS3C2442::SetBattery(const BatteryPower& value) {
@@ -354,6 +394,10 @@ uint64_t SocS3C2442::Run(uint64_t maxCycles, uint64_t cyclesPerSecond) {
         if (hostTimeLimit && std::chrono::steady_clock::now() - started >= runHostLimit) break;
     }
     runInstructions = machine->retired();
+    if (machine->asleep() != wasAsleep) {
+        wasAsleep = machine->asleep();
+        if (wasAsleep) DisarmMicrophone();
+    }
     if (halted) return maxCycles;
     // The guest reset itself through the watchdog: the board's inputs as after any reset.
     if (machine->watchdogResets() != resets) {

@@ -190,6 +190,30 @@ static void audioTests() {
         for (int i = 0; i < 32; ++i) assert(got[i * 2] == i + 1 && got[i * 2 + 1] == i + 1);
         assert(m->intc.srcpnd & (1u << 18));
     }
+    // The host microphone: a fence reaches the source once for nested fences and shows in the demand, nothing is
+    // pulled while it holds, and a disarm closes the source and lets go of it.
+    {
+        auto m = make({loop});
+        struct Log { int fences = 0, unfences = 0, disarms = 0, pulls = 0; } log;
+        AudioInputSource mic;
+        mic.context = &log;
+        mic.pull = [](void* c, AudioInputRoute, uint32_t, uint32_t) { ++static_cast<Log*>(c)->pulls; return int16_t(1); };
+        mic.fence = [](void* c, bool on) { ++(on ? static_cast<Log*>(c)->fences : static_cast<Log*>(c)->unfences); };
+        mic.disarm = [](void* c) { ++static_cast<Log*>(c)->disarms; };
+        m->microphone = &mic;
+        assert(!m->microphoneDemand().fenced);
+        m->fenceMicrophone(true);
+        m->fenceMicrophone(true);
+        assert(m->microphoneDemand().fenced && log.fences == 1);
+        m->fenceMicrophone(false);
+        assert(m->microphoneDemand().fenced && log.unfences == 0);
+        m->fenceMicrophone(false);
+        assert(!m->microphoneDemand().fenced && log.unfences == 1);
+        m->disarmMicrophone();
+        assert(log.disarms == 1 && !m->microphone);
+        m->disarmMicrophone();
+        assert(log.disarms == 1);
+    }
 }
 
 int main() {

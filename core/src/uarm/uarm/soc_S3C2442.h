@@ -63,10 +63,11 @@ class SocS3C2442 : public SoC {
     bool SetPcmCapture(const std::string& path) override;
     std::string PcmCaptureSummary() const override;
     bool PowerSleeping() const override { return machine->asleep(); }
-    // The microphone feeds the UDA1380's ADC. A sleep, reset or load leaves the source attached; the host
-    // re-arms capture from MicrophoneDemand.
+    // The microphone feeds the UDA1380's ADC. A sleep, reset or load disarms the source (a fresh load stays
+    // disarmed) and the host re-arms capture from MicrophoneDemand. An InputCheckpoint fences it meanwhile.
     AudioInputDemand MicrophoneDemand() override { return machine->microphoneDemand(); }
-    void SetMicrophoneSource(const AudioInputSource* source) override { machine->microphone = source; }
+    void SetMicrophoneSource(const AudioInputSource* source) override;
+    std::function<void()> CapturePeripheralInput() override;
 
     // Exact (the interpreter with the cache models) or Fast (the JIT and lean path). Between Run calls only.
     bool SetFastEngine(bool fast) { return machine->setFastEngine(fast); }
@@ -103,6 +104,10 @@ class SocS3C2442 : public SoC {
     std::unique_ptr<S3c2442Machine> machine;
     std::unique_ptr<NandPages> pages;
     MemoryBuffer nandPageBuffer{};
+    // Disarms now, or when the last checkpoint fence ends.
+    void DisarmMicrophone();
+    unsigned checkpointFenceDepth{0};
+    bool microphoneInvalidatePending{false}, wasAsleep{false};
     bool halted{false}, hostTimeLimit{true}, inputGuestTime{false};
     // Keys held through JamKey, released when the guest's time reaches untilNs.
     struct Jam { KeyId key; uint64_t untilNs; };

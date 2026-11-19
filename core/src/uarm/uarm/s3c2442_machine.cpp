@@ -539,8 +539,22 @@ uint32_t S3c2442Machine::audioGain() const {
     return amplifier || phones ? 65536 : 0;
 }
 
+void S3c2442Machine::fenceMicrophone(bool on) {
+    const bool before = microphoneFences != 0;
+    if (on) ++microphoneFences;
+    else if (microphoneFences) --microphoneFences;
+    if ((microphoneFences != 0) != before && microphone && microphone->fence)
+        microphone->fence(microphone->context, microphoneFences != 0);
+}
+
+void S3c2442Machine::disarmMicrophone() {
+    if (microphone && microphone->disarm) microphone->disarm(microphone->context);
+    microphone = nullptr;
+}
+
 AudioInputDemand S3c2442Machine::microphoneDemand() const {
     AudioInputDemand d;
+    d.fenced = microphoneFences != 0;
     d.active = iis.receiving() && codecPowered() && codec.adcOn();
     d.route = AudioInputRoute::internalMic;
     uint64_t numerator = 0, denominator = 1;
@@ -557,7 +571,7 @@ void S3c2442Machine::audioFrames(uint64_t frames) {
     for (uint64_t i = 0; i < frames; ++i) {
         int16_t in[2] = {0, 0}, out[2] = {0, 0};
         if (listening) {
-            const int16_t sample = microphone && microphone->pull
+            const int16_t sample = microphone && microphone->pull && !microphoneFences
                 ? microphone->pull(microphone->context, AudioInputRoute::internalMic, uint32_t(numerator), uint32_t(denominator))
                 : 0;
             codec.record(sample, in);
@@ -593,7 +607,7 @@ uint64_t S3c2442Machine::audioCyclesToEvent(bool wakeOnly) const {
         if (ch < 0 || !dma.interruptAtEnd(unsigned(ch)) || !dma.unitBytes(unsigned(ch))) return;
         if (wakeOnly && (intc.intmsk & (1u << (s3cIrq::dma0 + unsigned(ch))))) return;
         // A frame moves four bytes through the FIFO, which the DMA keeps topped up.
-        const uint64_t f = (uint64_t(dma.remaining(unsigned(ch))) * dma.unitBytes(unsigned(ch)) + 3) / 4;
+        const uint64_t f = (uint64_t(dma.remaining(unsigned(ch))) * dma.transferBytes(unsigned(ch)) + 3) / 4;
         frames = std::min(frames, std::max<uint64_t>(f, 1));
     };
     check(S3cDmaRequest::iisOut, iis.transmitting() && iis.txDmaOn());

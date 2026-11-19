@@ -163,6 +163,11 @@ class S3c2442Machine {
     uint32_t audioGain() const;
     // The host's microphone for the codec's ADC, pulled one sample a received frame; silence without one.
     const AudioInputSource* microphone = nullptr;
+    // Fences nest; while any is held the microphone isn't pulled and the demand reads fenced.
+    void fenceMicrophone(bool on);
+    // Closes the host source and lets go of it; a load or reset, a sleep or a new source starts disarmed.
+    void disarmMicrophone();
+    unsigned microphoneFences = 0;
     // What the guest asks of the microphone now: on while the IIS receives and the codec's ADC is on.
     AudioInputDemand microphoneDemand() const;
     // Headphones in the jack: GPG12 (EINT20) low while they're in.
