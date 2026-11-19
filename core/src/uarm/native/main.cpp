@@ -67,6 +67,8 @@ void frondGuestAttentionChanged(int ledColour, bool vibrate, bool lamp);
 #include "soc_PXA.h"
 #include "soc_pv.h"
 #include "soc_IMX1.h"
+#include "soc_S3C2442.h"
+#include "rx1950_nand_image.h"
 #include "CPU.h"
 #include "MachineSession.h"
 #include "MsProCards.h"
@@ -333,7 +335,7 @@ bool gFastEngineMissing = false;
         sdSwapped = contents.sdSwapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
-        if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
+        if (profile->detect != DeviceDetect5::norSize && romInfo.GetDeviceType() != sessionDevice) {
             cerr << "session device profile does not match ROM" << endl;
             return false;
         }
@@ -541,6 +543,9 @@ bool gFastEngineMissing = false;
             return false;
         }
         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+        // Devices told by NOR size alone have no card header for RomInfo5.
+        const bool sizeDetected = deviceProfile5(deviceType) && deviceProfile5(deviceType)->detect == DeviceDetect5::norSize;
+        const bool rx1950 = deviceProfile5(deviceType) && deviceProfile5(deviceType)->board == DeviceBoard5::s3c2442Rx1950;
         // The desktop passes saved serial settings; unsupported devices skip them.
         if (options.desktopSocket && !(deviceProfile5(deviceType) && deviceProfile5(deviceType)->capabilities.serial))
             serialConfig = HostSerial::Config{};
@@ -561,12 +566,35 @@ bool gFastEngineMissing = false;
                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
                 return false;
             }
-        } else {
+        } else if (!rx1950) {
             cerr << romInfo;
         }
 
-        if (!isTx && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
+        if (!sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
             return false;
+
+        // A new rx1950 takes HP's CEBL.nbf as its NOR and CEOS.nbf as --nand, made into the 64 MB flash here.
+        if (rx1950 && sessionDevice == deviceTypeInvalid) {
+            if (!rx1950IsCebl(static_cast<const uint8_t*>(nor.data), nor.size)) {
+                cerr << "HP iPAQ rx1950: the NOR must be HP's CEBL.nbf from the WM5 ROM 1.01.00 ENG" << endl;
+                return false;
+            }
+            if (!options.nand || !rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size)) {
+                cerr << "HP iPAQ rx1950: --nand must be HP's CEOS.nbf from the WM5 ROM 1.01.00 ENG" << endl;
+                return false;
+            }
+            vector<uint8_t> flash;
+            string why;
+            if (!rx1950NandImage(static_cast<const uint8_t*>(nor.data) + 0xa5a, 256 * 1024,
+                                 static_cast<const uint8_t*>(nand.data), nand.size, flash, why)) {
+                cerr << "HP iPAQ rx1950: " << why << endl;
+                return false;
+            }
+            delete[] static_cast<uint8_t*>(nand.data);
+            nand.data = new uint8_t[flash.size()];
+            nand.size = flash.size();
+            memcpy(nand.data, flash.data(), flash.size());
+        }
 
         if (options.ramSize) {
             if (ramSize == 0) {
@@ -587,7 +615,8 @@ bool gFastEngineMissing = false;
 
         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
         // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
-        if (!options.ramSize && sessionDevice == deviceTypeInvalid && deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac)
+        if (!options.ramSize && sessionDevice == deviceTypeInvalid &&
+            (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950))
             ramSize = deviceProfile5(deviceType)->minRam;
 
         if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
@@ -629,7 +658,8 @@ bool gFastEngineMissing = false;
             return false;
         }
 
-        if (!deviceProfileRunnerEligible5(deviceType)) {
+        // The rx1950 runs here but isn't a runner device (frond-run, recipes and count-check are Palm OS only).
+        if (!deviceProfileRunnerEligible5(deviceType) && !rx1950) {
             cerr << deviceName5(deviceType) << ": native board is not implemented" << endl;
             return false;
         }
@@ -654,7 +684,7 @@ bool gFastEngineMissing = false;
         const int gdbPort = options.gdbPort ? static_cast<int>(*options.gdbPort) : -1;
 
         if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
-            cerr << "desktop sessions currently support Palm TX, Tungsten E2 and Zire 72 only" << endl;
+            cerr << deviceProfile5(deviceType)->displayName << " doesn't run in the desktop app yet" << endl;
             return false;
         }
         DisplayConfiguration displayConfiguration =
@@ -712,6 +742,23 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+        } else if (board == DeviceBoard5::s3c2442Rx1950) {
+            if (options.gdbPort || options.experimentalFastAudio || options.lowLatencyQueue) {
+                cerr << "--gdb and the low-latency audio options are not available on the rx1950" << endl;
+                return false;
+            }
+            // Its machine sets the engine itself, below.
+            cpuSetFastEngine(false);
+            string why;
+            soc = SocS3C2442::Create(static_cast<const uint8_t*>(nor.data), nor.size,
+                                     static_cast<uint8_t*>(nand.data), nand.size, why, options.battery);
+            if (!soc) {
+                cerr << "HP iPAQ rx1950: " << why << endl;
+                return false;
+            }
+            static_cast<SocS3C2442*>(soc)->SetInputGuestTime(options.emulatedTime);
+            if (options.fastEngine && !static_cast<SocS3C2442*>(soc)->SetFastEngine(true))
+                cerr << "HP iPAQ rx1950: the Fast engine is not available here, running Exact" << endl;
         } else {
             if (gFastEngineMissing) cerr << "the Fast engine isn't built in here, running Exact" << endl;
             soc = (board == DeviceBoard5::paravirtual)
@@ -951,9 +998,11 @@ bool gFastEngineMissing = false;
         if (!options.runFor && !options.desktopSocket) cli::Start(options.script);
         const uint64_t startedAt = timestampUsec();
         auto* const zodiac = dynamic_cast<SocIMX1*>(soc);
+        auto* const rx1950Soc = dynamic_cast<SocS3C2442*>(soc);
         const Imx1MachineCheapStatus zodiacStart = zodiac ? zodiac->Status() : Imx1MachineCheapStatus{};
-        // The Zodiac's speed figures over 5 s windows, made here on the SDL thread.
-        std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000) : nullptr;
+        // The Zodiac's and the rx1950's speed figures over 5 s windows, made here on the SDL thread.
+        std::unique_ptr<ZodiacSpeed> zodiacSpeed = zodiac ? std::make_unique<ZodiacSpeed>(5000000)
+            : rx1950Soc ? std::make_unique<ZodiacSpeed>(5000000, "rx1950 speed") : nullptr;
         uint64_t replayStartedAt = options.emulatedTime ? soc->GetTime() / 1000 : startedAt;
         commands::Context commandContext{
             .soc = soc, .mainLoop = mainLoop, .audioDriver = audioDriver, .rotation = rotation,
@@ -961,6 +1010,7 @@ bool gFastEngineMissing = false;
             .screenWidth = displayConfiguration.width,
             .screenHeight = displayConfiguration.height + displayConfiguration.graffitiHeight};
         commandContext.replayClockLast = replayStartedAt;
+        if (rx1950Soc) commandContext.speedLimitHz = soc->FollowHz();
         commandContext.sessionFolder = sessionFolder;
         commandContext.sessionPath = sessionPath;
 
@@ -1219,10 +1269,12 @@ bool gFastEngineMissing = false;
                     break;
                 }
 
-                // A stopped Zodiac machine can't go on. It ends the run like any other fatal error,
+                // A stopped Zodiac or rx1950 machine can't go on. It ends the run like any other fatal error,
                 // and nothing is saved over the session.
                 if (zodiac && zodiac->Halted())
                     throw runtime_error("Tapwave Zodiac 2: the machine stopped: " + zodiac->StopText());
+                if (rx1950Soc && rx1950Soc->Halted())
+                    throw runtime_error("HP iPAQ rx1950: the machine stopped: " + rx1950Soc->StopText());
 
                 link.TakeInputs(inputs);
                 for (const auto& input : inputs) {
@@ -1384,11 +1436,25 @@ bool gFastEngineMissing = false;
                     }
 #endif
                 }
-                // The Zodiac's speed line goes to the log on Android, and its figures to speed-state.
+                // The Zodiac's and the rx1950's speed line goes to the log on Android, and its figures to
+                // speed-state. The rx1950 reports the clock its guest got (its own clock times guest time
+                // against real time) against the clock it runs at, as MainLoop's figures don't fit its Run.
                 if (zodiacSpeed && zodiacSpeed->Due(now)) {
-                    const auto status = zodiac->Status();
-                    if (zodiacSpeed->Sample(now, status.retired, status.time.ticks)) {
+                    bool sampled = false;
+                    if (zodiac) {
+                        const auto status = zodiac->Status();
+                        sampled = zodiacSpeed->Sample(now, status.retired, status.time.ticks);
+                    } else {
+                        auto& machine = rx1950Soc->Machine();
+                        sampled = zodiacSpeed->Sample(now, machine.retired(),
+                                                      uint64_t(__uint128_t(machine.nanoseconds()) * 32768 / 1000000000));
+                    }
+                    if (sampled) {
                         commandContext.speedIps = zodiacSpeed->Ips();
+                        if (rx1950Soc) {
+                            commandContext.speedLimitHz = soc->FollowHz();
+                            commandContext.speedIps = uint64_t(double(commandContext.speedLimitHz) * zodiacSpeed->RealTime());
+                        }
                         commandContext.speedDetail = zodiacSpeed->Line();
 #ifdef __ANDROID__
                         cout << zodiacSpeed->Line() << endl;
@@ -1642,7 +1708,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::string(argv[1]) == "--card")
         return frondCardTool::cliMain(std::vector<std::string>(argv + 2, argv + argc));
 
-    argparse::ArgumentParser program("frond-core", "0.17.0");
+    argparse::ArgumentParser program("frond-core", "0.18.0");
 
     program.add_description("Frond Palm OS emulator");
 

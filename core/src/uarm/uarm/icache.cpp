@@ -30,6 +30,8 @@ static void icachePrvArm920DropDecoded(struct icache* ic) {
 
 void icacheArm920DropDecoded(struct icache* ic) { icachePrvArm920DropDecoded(ic); }
 
+void icacheArm920SetFcsePid(struct icache* ic, const uint32_t* pid) { ic->fcsePid = pid; }
+
 void icacheArm920SetLeanWord(struct icache* ic, bool (*word)(void*, uint32_t, unsigned, bool, uint32_t*), void* ctx) {
     ic->arm920LeanWord = word;
     ic->arm920LeanWordCtx = ctx;
@@ -65,6 +67,8 @@ bool icacheArm920Fetch(struct icache* ic, uint32_t va, unsigned size, bool privi
         *word = extract(ic->arm920Continuation[0]);
         return true;
     }
+    // FCSE: the continuation above holds the VAs that followed an MMU switch; everything below is by MVA.
+    if (va < 0x02000000u && ic->fcsePid) va |= *ic->fcsePid;
     if (ic->arm920LeanWord && ic->arm920LeanWord(ic->arm920LeanWordCtx, va, size, privileged, word)) return true;
     const auto r = mmuTranslate(ic->memorySystem.mmu, va, privileged, false);
     if (!MMU_TRANSLATE_RESULT_OK(r)) {

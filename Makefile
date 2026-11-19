@@ -1085,6 +1085,16 @@ build/test-zodiac-jit: out/frond tests/zodiac-jit.cpp
 test-zodiac-jit: build/test-zodiac-jit
 	./build/test-zodiac-jit
 
+# The ARM920T's FCSE on the interpreter: the PID remap for fetches and data, FAR, MVA keyed caches.
+.PHONY: test-arm920-fcse
+test: test-arm920-fcse
+build/test-arm920-fcse: out/frond tests/arm920-fcse.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/arm920-fcse-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/arm920-fcse.cpp @build/arm920-fcse-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -o $@
+test-arm920-fcse: build/test-arm920-fcse
+	./build/test-arm920-fcse
+
 # Every option, command, environment variable, tool and target in the sources is in the developer reference.
 .PHONY: check-docs
 check-docs: prepare
@@ -2875,3 +2885,41 @@ test-print-text:
 	mkdir -p build/print-text
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/print-text.cpp -o build/print-text/test-print-text
 	build/print-text/test-print-text
+
+# The S3C2442 machine (the HP iPAQ rx1950): its blocks, its NAND image and the boot tool, which runs the
+# bootloader and keeps the UART output. The core builds them too; the tools here take their own copies.
+S3C2442_SOURCES = core/src/uarm/uarm/s3c2442_intc.cpp core/src/uarm/uarm/s3c2442_clock.cpp \
+	core/src/uarm/uarm/s3c2442_timer.cpp core/src/uarm/uarm/s3c2442_rtc.cpp core/src/uarm/uarm/s3c2442_gpio.cpp \
+	core/src/uarm/uarm/s3c2442_uart.cpp core/src/uarm/uarm/s3c2442_lcd.cpp core/src/uarm/uarm/s3c2442_nand.cpp \
+	core/src/uarm/uarm/s3c2442_sdi.cpp core/src/uarm/uarm/s3c2442_usbd.cpp \
+	core/src/uarm/uarm/s3c2442_adc.cpp core/src/uarm/uarm/s3c2442_audio_bus.cpp
+S3C2442_HEADERS = core/src/uarm/uarm/s3c2442_blocks.h core/src/uarm/uarm/s3c2442_nand.h \
+	core/src/uarm/uarm/s3c2442_machine.h core/src/uarm/uarm/rx1950_nand_image.h core/src/uarm/uarm/rx1950_board.h \
+	core/src/uarm/uarm/rx1950_power.h core/src/uarm/uarm/s3c2442_pen.h
+.PHONY: rx1950-boot test-s3c2442 test-s3c2442-machine test-rx1950-boot
+rx1950-boot: build/rx1950-boot
+build/rx1950-boot: out/frond tools/rx1950-boot.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) \
+		core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp zodiac-rom/ZodiacRom.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 's3c2442_*' ! -name 'rx1950_*' ! -name 'soc_S3C2442*' > build/rx1950-core.rsp
+	$(CXX) -std=c++17 -O2 -g -Wall -Wextra -Werror -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common -Izodiac-rom \
+		tools/rx1950-boot.cpp core/src/uarm/uarm/s3c2442_machine.cpp core/src/uarm/uarm/rx1950_nand_image.cpp zodiac-rom/ZodiacRom.cpp \
+		$(S3C2442_SOURCES) @build/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o $@
+
+# Each block's registers, timer ticks, interrupt priority and sub-source masking, UART output.
+test: test-s3c2442
+test-s3c2442: prepare
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm \
+		tests/s3c2442-blocks.cpp $(S3C2442_SOURCES) core/src/uarm/uarm/rx1950_nand_image.cpp -o build/test-s3c2442
+	./build/test-s3c2442
+
+test: test-s3c2442-machine
+test-s3c2442-machine: out/frond tests/s3c2442-machine.cpp $(S3C2442_SOURCES) $(S3C2442_HEADERS) core/src/uarm/uarm/s3c2442_machine.cpp
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' ! -name 's3c2442_*' ! -name 'rx1950_*' ! -name 'soc_S3C2442*' > build/rx1950-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -UNDEBUG -Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/common \
+		tests/s3c2442-machine.cpp core/src/uarm/uarm/s3c2442_machine.cpp \
+		$(S3C2442_SOURCES) @build/rx1950-core.rsp core/src/common/libcommon.a $(CPU_TEST_LDLIBS) -lz -o build/test-s3c2442-machine
+	./build/test-s3c2442-machine
+
+# The rx1950's bootloader and OS to the kernel's first serial lines, when the firmware is here.
+test-rx1950-boot: build/rx1950-boot
+	python3 tests/rx1950-boot.py build/rx1950-boot

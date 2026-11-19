@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 import json
+import re
 from pathlib import Path
 import sys
 import unittest
@@ -56,6 +57,23 @@ class DeviceDataTest(unittest.TestCase):
             self.assertIn('id = "tapwave-zodiac-2"', kotlin)
             self.assertIn('id = "sony-clie-tg50"', kotlin)
         self.assertEqual(profile['setup'], '')
+
+    def test_rx1950_inventory(self):
+        inventory = json.loads((ROOT / 'tools/device-profiles.json').read_text())
+        profile = next(p for p in inventory['profiles'] if p['name'] == 'hp-ipaq-rx1950')
+        self.assertTrue(profile['available'])
+        self.assertEqual(profile['buttons'], 'app1|app2|app3|app4|up|down|left|right|centre|power')
+        # The Android app lists the rx1950, and checks its two files by the hashes the core has.
+        self.assertNotIn('hp-ipaq-rx1950', generator.DESKTOP_ONLY)
+        for kotlin in (next(data for path, data in generator.outputs(inventory).items() if path.suffix == '.kt'),
+                       (ROOT / 'android/app/src/main/kotlin/com/rm/frond/DeviceInventory.kt').read_text()):
+            self.assertIn('id = "hp-ipaq-rx1950"', kotlin)
+        header = (ROOT / 'core/src/common/device_profile5.h').read_text()
+        firmware = (ROOT / 'android/app/src/main/kotlin/com/rm/frond/Firmware.kt').read_text()
+        for name in ('rx1950Cebl5', 'rx1950Ceos5'):
+            match = re.search(name + r'\{\s*"[^"]+", (\d+), "([0-9a-f]{64})"', header)
+            self.assertIsNotNone(match, name)
+            self.assertIn(f'{match.group(1)}L, "{match.group(2)}"', firmware)
 
     def test_dana_independent_native_card_inventory(self):
         profiles = json.loads((ROOT / 'tools/device-profiles.json').read_text())['profiles']
@@ -211,7 +229,7 @@ class DeviceDataTest(unittest.TestCase):
         spec.loader.exec_module(runner)
         self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50', 'tapwave-zodiac-2'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
-        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K])
+        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name != 'hp-ipaq-rx1950'])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
         self.assertNotIn('palm-iiix', runner.DEVICES)
         for name in ('repalm',):

@@ -89,8 +89,11 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
                 cpuSetReg(cpu, Rx, cp15->control);
                 return true;
             }
-            // C requires translation-table memory attributes. Big endian remains unsupported.
-            if ((val & 0x78) != 0x78 || (val & ~0xc000737fu) ||
+            // Bits 6:3 should be one and read as one: the HP iPAQ rx1950's eboot writes 0x70 to turn the
+            // MMU off before it enters the OS. C requires translation-table memory attributes. Big endian
+            // remains unsupported.
+            val |= 0x78;
+            if ((val & ~0xc000737fu) ||
                 (val & 0xc0000000) == 0x80000000 || ((val & 4) && !(val & 1))) return false;
             if ((val ^ cp15->control) & 1)
                 icacheArm920PrepareMmuSwitch(cp15->ic, cpuGetRegisters(cpu)[15],
@@ -138,8 +141,8 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             }
             if (CRn == 13) {
                 if (read) cpuSetReg(cpu, Rx, cpuGetPid(cpu));
-                else if (val == 0) cpuSetPid(cpu, 0);
-                else return false;  // Nonzero FCSE needs both instruction and data paths.
+                // FCSE PID, bits 31:25; the rest should be zero and is dropped.
+                else cpuSetPid(cpu, val & 0xfe000000u);
                 return true;
             }
         }
@@ -178,6 +181,12 @@ static bool cp15prvCoprocRegXferFunc(struct ArmCpu* cpu, void* userData, bool tw
             return !cp15->dataCache.guard.active;
         }
         if (CRn == 8 && op2 == 0 && (CRm == 5 || CRm == 6 || CRm == 7)) {
+            mmuTlbFlush(cp15->mmu);
+            return true;
+        }
+        // Single entry by MVA for the I or D TLB (DDI0151C 2.3.9); the model's TLB holds both, so all of it
+        // goes and later walks refill it. Windows CE uses these.
+        if (CRn == 8 && op2 == 1 && (CRm == 5 || CRm == 6)) {
             mmuTlbFlush(cp15->mmu);
             return true;
         }

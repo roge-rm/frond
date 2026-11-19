@@ -1,6 +1,6 @@
 #pragma once
 
-// Speed figures for the Zodiac, worked out on the guest thread once per window: instructions per
+// Speed figures for the Zodiac and the rx1950, worked out on the guest thread once per window: instructions per
 // second of real time and per second spent emulating, guest time against real time, frames handed
 // to the SDL thread and drawn there, and the CPU time each of the two threads used. The SDL thread
 // only adds to the draw counters.
@@ -15,8 +15,9 @@
 
 class ZodiacSpeed {
 public:
-    // Made on the SDL thread, which it reads the CPU time of. windowUsec is how long each window is.
-    explicit ZodiacSpeed(uint64_t windowUsec) : windowUsec(windowUsec) {
+    // Made on the SDL thread, which it reads the CPU time of. windowUsec is how long each window is; label
+    // starts the line.
+    explicit ZodiacSpeed(uint64_t windowUsec, const char* label = "zodiac speed") : windowUsec(windowUsec), label(label) {
         if (pthread_getcpuclockid(pthread_self(), &sdlClock) != 0) sdlClockValid = false;
     }
 
@@ -48,18 +49,24 @@ public:
             Restart(now, retired, guestTicks, guestCpu, sdlCpu);
             return false;
         }
+        if (retired < start.retired || guestTicks < start.guestTicks) {  // counters went back, as after a state load
+            draws = frames = drawUsec = 0;
+            Restart(now, retired, guestTicks, guestCpu, sdlCpu);
+            return false;
+        }
         const uint64_t wall = now - start.wall;
         const double seconds = wall / 1e6;
         const uint64_t instructions = retired - start.retired;
         const double guestSeconds = (guestTicks - start.guestTicks) / 32768.0;
         const uint64_t drawn = draws.exchange(0), drawnFrames = frames.exchange(0), drawTime = drawUsec.exchange(0);
         ips = uint64_t(instructions / seconds);
+        realTime = guestSeconds / seconds;
         char text[512];
         std::snprintf(text, sizeof text,
-            "zodiac speed: %.1fM instr/s, %.1fM per emulating second, %.3fx real time; guest thread %.1f%% emulating, "
+            "%s: %.1fM instr/s, %.1fM per emulating second, %.3fx real time; guest thread %.1f%% emulating, "
             "%.1f%% CPU; %.1f frames/s handed over (%.2f ms each), %.1f drawn (%.1f/s merged), %.1f renders/s "
             "(%.2f ms each), SDL thread %.1f%% CPU",
-            instructions / seconds / 1e6,
+            label, instructions / seconds / 1e6,
             window.emulationUsec ? instructions / (window.emulationUsec / 1e6) / 1e6 : 0.0,
             guestSeconds / seconds,
             100.0 * window.emulationUsec / wall,
@@ -79,6 +86,8 @@ public:
     const std::string& Line() const { return line; }
     // Instructions per second of real time in the last window, 0 before the first.
     uint64_t Ips() const { return ips; }
+    // Guest time against real time in the last window, 0 before the first.
+    double RealTime() const { return realTime; }
 
 private:
     struct Window {
@@ -98,11 +107,13 @@ private:
     }
 
     const uint64_t windowUsec;
+    const char* const label;
     clockid_t sdlClock{};
     bool sdlClockValid{true};
     bool started{false};
     Window start, window;
     std::string line;
     uint64_t ips{0};
+    double realTime{0};
     std::atomic<uint64_t> draws{0}, frames{0}, drawUsec{0};
 };

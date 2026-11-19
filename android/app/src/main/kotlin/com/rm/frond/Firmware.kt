@@ -12,10 +12,34 @@ object Firmware {
     fun nor(context: Context, device: Device) = File(folder(context, device), "nor.bin")
     fun nand(context: Context, device: Device) = File(folder(context, device), "nand.bin")
 
+    // The rx1950's files are checked by SHA-256 at import only; here by size, and the core checks their CRC-32 at start.
     fun ready(context: Context, device: Device): Boolean {
         val nor = nor(context, device)
         val nand = nand(context, device)
+        if (device.rx1950) return nor.length() == RX1950_CEBL.bytes && nand.length() == RX1950_CEOS.bytes
         return nor.isFile && (nand.isFile || !device.nandRequired) && check(device, nor, nand.takeIf { it.isFile }) == null
+    }
+
+    // A firmware file Frond takes only as it is, by size and SHA-256 (core/src/common/device_profile5.h).
+    data class KnownFile(val name: String, val bytes: Long, val sha256: String)
+
+    val RX1950_CEBL = KnownFile("CEBL.nbf", 264794L, "33807007a49ab40e8190f2fdb20080d1d7efe6d3a56a6b551422373271a94b3f")
+    val RX1950_CEOS = KnownFile("CEOS.nbf", 67095130L, "764807c7aacd780876462b62a9ca2555226d2f11acccc69e0785fc159be20f6e")
+
+    fun matches(file: File, expected: KnownFile): Boolean =
+        file.length() == expected.bytes && sha256(file) == expected.sha256
+
+    fun sha256(file: File): String? = digest(file, "SHA-256")
+
+    // The rx1950 runs HP's WM5 ROM 1.01.00 ENG only: CEBL.nbf as the NOR and CEOS.nbf as the NAND.
+    // CEOS.nbf picked as the NOR is caught by its size before the NAND is asked for. cebl is for tests, which
+    // have no firmware.
+    internal fun checkRx1950(nor: File, nand: File?, cebl: KnownFile = RX1950_CEBL): String? {
+        if (nor.length() == RX1950_CEOS.bytes) return RX1950_SWAPPED
+        if (nand == null) return "Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."
+        if (!matches(nor, cebl)) return "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."
+        if (!matches(nand, RX1950_CEOS)) return "The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG."
+        return null
     }
 
     // What the NOR's Palm card header says, found the way the core looks for it: every 32 KiB.
@@ -99,6 +123,7 @@ object Firmware {
     }
 
     const val NOT_DETECTED = "Frond can't tell which device this firmware is for. Choose the device."
+    const val RX1950_SWAPPED = "That's CEOS.nbf, the NAND image. Choose CEBL.nbf as the NOR image for the HP iPAQ rx1950."
 
     // A 68k ROM's big-endian card header, read like common/device_profile5.h's deviceProfileInspect68kRom5:
     // only the header, so frond-68k still checks the ROM properly when it starts.
@@ -212,8 +237,13 @@ object Firmware {
     // A picked NOR is copied here first, so the device can be found before the import.
     fun picked(context: Context) = File(File(context.filesDir, "firmware"), "picked-nor.bin")
 
-    // Bigger than any NOR the app takes; anything past it is refused while copying.
+    // Bigger than any NOR the app takes; anything past it is refused while copying. With the rx1950 chosen the
+    // limit is CEOS.nbf's size, so CEOS.nbf picked as the NOR gets its own message from check().
     private const val PICK_LIMIT = 32L shl 20
+    internal fun pickLimit(device: Device?) = if (device?.rx1950 == true) maxOf(PICK_LIMIT, RX1950_CEOS.bytes) else PICK_LIMIT
+    // The message for a picked file over pickLimit: the rx1950's NOR is CEBL.nbf, other devices can't be told.
+    internal fun tooBig(device: Device?) =
+        if (device?.rx1950 == true) "The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG." else NOT_DETECTED
 
     // Copies a picked NOR into picked(). Returns an error message or null. Runs off the main thread.
     // For the Zodiac (or when `device` is not chosen yet) Tapwave's Zodiac 1.1 update, the zip or the PRC, is
@@ -227,13 +257,14 @@ object Firmware {
                 to.outputStream().use { o ->
                     val buffer = ByteArray(1 shl 20)
                     var total = 0L
+                    val limit = pickLimit(device)
                     while (true) {
                         val n = i.read(buffer)
                         if (n < 0) break
                         total += n
-                        if (total > PICK_LIMIT) {
+                        if (total > limit) {
                             to.delete()
-                            return NOT_DETECTED
+                            return tooBig(device)
                         }
                         o.write(buffer, 0, n)
                     }
@@ -268,6 +299,7 @@ object Firmware {
     fun check(device: Device, nor: File, nand: File?): String? {
         if (device.runs68k) return checkRom68k(device, nor, nand)
         if (!nor.canRead()) return "Couldn't read the NOR image."
+        if (device.rx1950) return checkRx1950(nor, nand)
         val rom = try { inspectRom68k(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
         if (rom.device != null) return "This is a ${rom.device.label} ROM. Choose ${rom.device.label}."
         val header = try { header(nor) } catch (e: IOException) { return "Couldn't read the NOR image." }
@@ -445,8 +477,10 @@ object Firmware {
         return md5 != null && md5 in fingerprints
     }
 
-    fun md5(file: File): String? = try {
-        val digest = java.security.MessageDigest.getInstance("MD5")
+    fun md5(file: File): String? = digest(file, "MD5")
+
+    private fun digest(file: File, algorithm: String): String? = try {
+        val digest = java.security.MessageDigest.getInstance(algorithm)
         file.inputStream().use { input ->
             val buffer = ByteArray(1 shl 20)
             while (true) {

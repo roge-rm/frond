@@ -211,6 +211,7 @@ class MainWindow : public QMainWindow {
     void exportDatabase(const QString& name);
     void otherDatabase();
     QStringList installPaths(const QMimeData* data) const;
+    bool installDropAllowed() const;
     // Runs `lines` as an input replay, for Screenshot and Power.
     bool replay(const QString& lines, const QString& kind);
     void screenshot();

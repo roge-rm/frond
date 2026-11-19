@@ -22,6 +22,8 @@ constexpr unsigned ICACHE_FETCH_STATE_WORDS = 19;
 void icacheConfigureArm920(struct icache* ic);
 void icacheArm920Control(struct icache* ic, bool enabled, bool roundRobin);
 // Fast: fetches go to word first and the model keeps no lines; null for Exact.
+// The CPU's FCSE PID, which the ARM920T's fetches add to VAs below 32 MB.
+void icacheArm920SetFcsePid(struct icache* ic, const uint32_t* pid);
 void icacheArm920SetLeanWord(struct icache* ic, bool (*word)(void*, uint32_t, unsigned, bool, uint32_t*), void* ctx);
 // Drops every line of the decode cache.
 void icacheArm920DropDecoded(struct icache* ic);

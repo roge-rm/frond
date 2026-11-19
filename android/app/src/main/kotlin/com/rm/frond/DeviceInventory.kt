@@ -56,6 +56,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
@@ -116,6 +117,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 512L, 1073741824L, "legacy-profile-aligned-512", listOf(), listOf()),
@@ -190,6 +192,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 512L, 1073741824L, "legacy-profile-aligned-512", listOf(), listOf()),
@@ -250,6 +253,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = false,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-profile-aligned-512", listOf(), listOf()),
@@ -310,6 +314,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = false,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(1, 1, "memory-stick", listOf(
             )),
@@ -369,6 +374,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-iiie",
@@ -424,6 +430,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-iiixe",
@@ -479,6 +486,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-v",
@@ -534,6 +542,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-vx",
@@ -589,6 +598,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-m100",
@@ -644,6 +654,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-m105",
@@ -699,6 +710,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
     ),
     Device(
         id = "palm-m125",
@@ -754,6 +766,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -815,6 +828,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -876,6 +890,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -937,6 +952,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = true,
+        os = "palm-os",
     ),
     Device(
         id = "palm-m505",
@@ -992,6 +1008,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = true,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1053,6 +1070,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = true,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1114,6 +1132,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = true,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1175,6 +1194,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "USB HotSync",
         colourLcd = true,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1236,6 +1256,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = false,
         pendingUsb = "USB computer",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1301,6 +1322,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = false,
         pendingUsb = "USB computer",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
                 CardFamily("sdsc", 33554432L, 2147483648L, "legacy-csd-fixed-512", listOf(), listOf(33554432L)),
@@ -1366,6 +1388,7 @@ internal val deviceInventory = listOf(
         hotSyncButton = false,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         experimental = true,
         storageSlots = listOf(
             StorageSlot(0, 1, "sd", listOf(
@@ -1430,9 +1453,66 @@ internal val deviceInventory = listOf(
         hotSyncButton = true,
         pendingUsb = "",
         colourLcd = false,
+        os = "palm-os",
         storageSlots = listOf(
             StorageSlot(1, 1, "memory-stick", listOf(
             )),
         ),
+    ),
+    Device(
+        id = "hp-ipaq-rx1950",
+        label = "HP iPAQ rx1950",
+        cohort = "rx1950-nand",
+        norSize = 264794L,
+        nandSize = 69206016L,
+        nandRequired = true,
+        fastAudioNorMd5 = null,
+        sound = false,
+        storageSlot = "none",
+        sdSlot = false,
+        memoryStick = false,
+        network = false,
+        serialPort = false,
+        microphone = false,
+        camera = false,
+        keyboard = false,
+        usb = false,
+        infrared = false,
+        bluetooth = false,
+        modem = false,
+        irPhone = false,
+        usbPrinter = false,
+        usbWifi = false,
+        builtInWifi = false,
+        clieGamepad = false,
+        detectKind = 1,
+        companyId = 0L,
+        halId = 0L,
+        norLayout = 0,
+        headerOffset = 0L,
+        bigCardOffset = 0L,
+        width = 240,
+        height = 320,
+        sideTabWidth = 0,
+        silkscreenHeight = 0,
+        appNamesText = "Calendar|Contacts|Inbox|Wireless",
+        buttonsText = "app1|app2|app3|app4|up|down|left|right|centre|power",
+        holdPresent = false,
+        holdSupported = false,
+        homeKey = 0,
+        homeX = -1,
+        homeY = -1,
+        menuX = -1,
+        menuY = -1,
+        rotatingStatusBar = false,
+        sdMin = 0L,
+        sdMax = 0L,
+        msSizes = listOf(),
+        msProMax = 0,
+        runs68k = false,
+        hotSyncButton = false,
+        pendingUsb = "",
+        colourLcd = false,
+        os = "windows-ce",
     ),
 )

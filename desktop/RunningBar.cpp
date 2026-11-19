@@ -252,6 +252,7 @@ void RunningBar::apply(const runningRules::Traits& traits, const runningRules::S
     soundAction->setChecked(soundOn);
     soundAction->setIcon(frondIcons::icon(soundOn ? "sound-on" : "sound-off"));
     soundAction->setToolTip(soundOn ? tr("Sound on") : tr("Sound off"));
+    applicationsAction->setVisible(buttons.applications);
     applicationsAction->setEnabled(true);
     stopAction->setEnabled(actions[Id::SaveStop]->isEnabled());
 }

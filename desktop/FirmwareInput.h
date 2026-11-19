@@ -1,8 +1,11 @@
 #ifndef FROND_FIRMWARE_INPUT_H
 #define FROND_FIRMWARE_INPUT_H
 
+#include <QCryptographicHash>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QString>
 #include <vector>
 #include "device_profile5.h"
@@ -59,10 +62,36 @@ inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfil
 inline bool guestServices(Device device) {
     return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
 }
-// New machines of these devices start on the Fast engine: the Zodiac, T|X and Zire 72, which fall behind Original speed on Exact.
+// Install, the application list and hard reset are Palm OS guest services: a Windows CE device has none, so
+// they're hidden for it rather than greyed. Callers check this and guestServices.
+inline bool palmOs(Device device) {
+    return device == Device::automatic || deviceProfileOs5(profile(device)) == DeviceOs5::palmOs;
+}
+// New machines of these devices start on the Fast engine: the Zodiac, rx1950, T|X and Zire 72, which fall behind
+// Original speed on Exact.
 inline bool fastByDefault(Device device) {
     return device == Device::tx || device == Device::zire72 ||
-           (device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac);
+           (device != Device::automatic && (profile(device).board == DeviceBoard5::imx1Zodiac ||
+                                            profile(device).board == DeviceBoard5::s3c2442Rx1950));
+}
+// Whether the file at path is the firmware file by size and SHA-256. The hash of a file is kept by path,
+// size and modified time, so checking the 67 MB CEOS.nbf again (each time the dialog validates) is free.
+// UI thread only.
+inline bool firmwareFileMatches(const QString& path, const DeviceFirmwareFile5& expected) {
+    const QFileInfo info(path);
+    if (!info.isFile() || info.size() != qint64(expected.bytes)) return false;
+    struct Hashed { qint64 size; QDateTime modified; QByteArray sha256; };
+    static QHash<QString, Hashed> hashes;
+    const QString key = info.absoluteFilePath();
+    const QDateTime modified = info.lastModified();
+    auto it = hashes.constFind(key);
+    if (it == hashes.constEnd() || it->size != info.size() || it->modified != modified) {
+        QFile file(path);
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (!file.open(QIODevice::ReadOnly) || !hash.addData(&file)) return false;
+        it = hashes.insert(key, {info.size(), modified, hash.result().toHex()});
+    }
+    return it->sha256 == QByteArray(expected.sha256);
 }
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
@@ -136,6 +165,15 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
         device = detectDevice(norPath);
         if (device == Device::automatic)
             return QStringLiteral("Frond can't tell which device this NOR image is for. Choose the device.");
+    }
+    if (profile(device).board == DeviceBoard5::s3c2442Rx1950) {
+        if (nandPath.isEmpty()) return QStringLiteral("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950.");
+        if (!firmwareFileMatches(norPath, rx1950Cebl5))
+            return QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.");
+        if (!firmwareFileMatches(nandPath, rx1950Ceos5))
+            return QStringLiteral("The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG.");
+        if (resolved) *resolved = device;
+        return {};
     }
     if (runs68k(device)) {
         const auto error = validateRom68k(device, nor, nandPath);

@@ -18,6 +18,8 @@ namespace runningRules {
 struct Traits {
     bool runs68k{false}, holdPresent{false}, holdSupported{false}, keyboard{false}, microphone{false},
         network{false}, sound{false}, powerKey{false}, cardSlot{false}, guestServices{true};
+    // Palm OS: Applications and Hard reset are shown at all (FirmwareInput.h palmOs).
+    bool palmOs{true};
     // Takes the CLIÉ game controller on its connector.
     bool gamepad{false};
 };
@@ -33,7 +35,8 @@ inline Traits traitsFor(frondFirmware::Device device) {
     t.microphone = caps.microphone;
     t.network = caps.network;
     t.sound = caps.sound;
-    t.guestServices = frondFirmware::guestServices(device);
+    t.palmOs = frondFirmware::palmOs(device);
+    t.guestServices = t.palmOs && frondFirmware::guestServices(device);
     t.cardSlot = profile.frontend.sdSlot || profile.frontend.memoryStick;
     t.powerKey = QString::fromLatin1(profile.frontend.buttons).split('|').contains(QLatin1String("power"));
     t.gamepad = profile.frontend.clieGamepad;
@@ -100,7 +103,7 @@ inline std::vector<Row> rows(const Traits& t, const State& s) {
     out.push_back({Id::SaveCopy, QObject::tr("Save a copy…"), std::nullopt, {}, ready, false, 2});
     out.push_back({Id::Log, QObject::tr("Emulator log"), std::nullopt, {}, true, false, 2});
     out.push_back({Id::Reset, QObject::tr("Reset…"), std::nullopt, {}, ready, false, 3});
-    out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.guestServices, true, 3});
+    if (t.palmOs) out.push_back({Id::HardReset, QObject::tr("Hard reset…"), std::nullopt, {}, ready && t.guestServices, true, 3});
     out.push_back({Id::SaveStop, QObject::tr("Save and Stop"), std::nullopt, {}, s.running && ready, false, 4});
     return out;
 }
@@ -224,13 +227,14 @@ inline CardIcon cardIcon(bool slot, bool known, bool present, bool inserted) {
 
 // What the toolbar shows beyond the menu's rows.
 struct Buttons {
-    bool card{false}, power{false}, keyboard{false};
+    bool card{false}, power{false}, keyboard{false}, applications{true};
     bool soundEnabled{false}, powerEnabled{false}, cardEnabled{false};
 };
 inline Buttons buttons(const Traits& t, const State& s) {
     Buttons b;
     // Storage: the slot where there is one, and Internal on every machine.
     b.card = true;
+    b.applications = t.palmOs;
     b.power = t.powerKey;
     b.keyboard = s.keyboardAttached;
     b.soundEnabled = s.ready && t.sound;

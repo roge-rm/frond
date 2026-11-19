@@ -300,6 +300,16 @@ struct ArmCpu {
 
     uint32_t pid;  // for fcse
 
+    // Undefined instruction exceptions taken, and the last one's pc and instruction, for machines that
+    // stop on them (cpuUndefinedTaken).
+    uint64_t undefinedCount;
+    uint32_t undefinedPc, undefinedInstr;
+    // Called on each one as it's taken, or null (cpuSetUndefinedHook).
+    void (*undefinedHook)(void *context, uint32_t pc, uint32_t instr);
+    void *undefinedHookContext;
+    // Failed data accesses are logged only for the first 16 and then every power of two (cpuSetAbortLogLimit).
+    bool abortLogLimited;
+
     uint8_t memorySystemKind;
     union {
         struct ArmMmu *mmu;
@@ -912,6 +922,11 @@ static void cpuPrvException(struct ArmCpu *cpu, uint32_t vector_pc, uint32_t lr,
     cpu->regs[REG_NO_PC] = vector_pc;
 }
 
+// The ARM920T's FCSE: a VA below 32 MB is moved to VA | PID, the MVA its caches, TLB and FAR use.
+static FORCE_INLINE uint32_t cpuPrvMva(const struct ArmCpu *cpu, uint32_t va) {
+    return va < 0x02000000u ? va | cpu->pid : va;
+}
+
 // input addr is VA not MVA
 template <int kind = ARM_KIND_ANY>
 static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bool instrFetch,
@@ -921,15 +936,16 @@ static void cpuPrvHandleMemErr(struct ArmCpu *cpu, uint32_t addr, bool write, bo
     if (cpuPrvArm920<kind>(cpu) &&
         cp15MMUArm920DataCache(cpu->cp15.cp15mmu)->guard.active) {
         // An unmodelled cache/buffer target is a diagnostic trap, with FSR/FAR retained.
+        ++cpu->undefinedCount;
+        cpu->undefinedPc = cpu->curInstrPC;
+        cpu->undefinedInstr = 0;
+        if (cpu->undefinedHook) cpu->undefinedHook(cpu->undefinedHookContext, cpu->curInstrPC, 0);
         cpuPrvException<kind>(cpu, cpu->vectorBase + ARM_VECTOR_OFFT_UND, cpu->curInstrPC + (cpu->T ? 2 : 4),
                         ARM_SR_MODE_UND | ARM_SR_I);
         return;
     }
-// FCSE
-#ifdef SUPPORT_FCSE
-    if (addr < 0x02000000UL)  // report addr is MVA
-        addr |= cpu->pid;
-#endif
+    // FAR gets the MVA. Only the ARM920T path has the FCSE.
+    if (cpuPrvArm920<kind>(cpu)) addr = cpuPrvMva(cpu, addr);
 
     if (cpu->memorySystemKind == ARM_MEMORY_SYSTEM_MMU &&
         !(instrFetch && cpuPrvArm920<kind>(cpu))) {
@@ -1387,7 +1403,9 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
         return false;
     }
     struct ArmMmu *mmu = cpu->memorySystem.mmu;
-    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, va, privileged);
+    // The FCSE: the MMU sees the MVA. The host TLB stays keyed by VA, as cpuSetPid flushes it on a PID change.
+    const uint32_t mva = cpuPrvMva(cpu, va);
+    const MMUTranslateResult r = mmuTranslateCached<write>(mmu, mva, privileged);
     bool counted = false;
     uint8_t *page = MMU_TRANSLATE_RESULT_OK(r) && cpu->leanPage
                         ? cpu->leanPage(cpu->leanContext, MMU_TRANSLATE_RESULT_PA(r) & ~0xfffu, write, &counted)
@@ -1444,7 +1462,7 @@ static __attribute__((noinline)) bool cpuPrvLeanMemOpSlow(struct ArmCpu *cpu, vo
     if constexpr (write) memcpy(host, buf, size); else memcpy(buf, host, size);
     cpu->leanBus += counted;
     // Bit 0 of the addend marks a counted page; host pages are at least 2-byte aligned.
-    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[va >> 12].revision == mmu->revision) &&
+    if ((mmu->transTablPA == MMU_DISABLED_TTP || mmu->tlb[mva >> 12].revision == mmu->revision) &&
         !(uintptr_t(page) & 1) && !codePage) {
         struct HostTlb &t = cpu->mem->hostTlb;
         struct HostTlbEntry &e = (write ? t.write : t.read)[(va >> 12) & (HOST_TLB_SIZE - 1)];
@@ -1502,10 +1520,8 @@ static FORCE_INLINE bool cpuPrvMemOpExModel(struct ArmCpu *cpu, void *buf, uint3
         }
     }
 
-// FCSE
-#ifdef SUPPORT_FCSE
-    if (vaddr < 0x02000000UL) vaddr |= cpu->pid;
-#endif
+    // The ARM920T's FCSE: the TLB and the D-cache model below are keyed by MVA.
+    if constexpr (arm920) vaddr = cpuPrvMva(cpu, vaddr);
 
 #ifndef __EMSCRIPTEN__
     if constexpr (armMemorySystemOf(memorySystemKind) == ARM_MEMORY_SYSTEM_MMU && size <= 8) {
@@ -1623,6 +1639,19 @@ static FORCE_INLINE bool cpuPrvMemOpExGeneric(struct ArmCpu *cpu, void *buf, uin
     }
 }
 
+#ifndef __EMSCRIPTEN__
+// Logs a failed data access, for every one or, with abortLogLimited, the first 16 and then every power of two.
+static void cpuPrvLogAbort(struct ArmCpu *cpu, bool write, unsigned size, uint32_t vaddr, unsigned fsr) {
+    if (cpu->abortLogLimited) {
+        static std::atomic<uint64_t> logged{0};
+        const uint64_t n = logged.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n > 16 && (n & (n - 1))) return;
+    }
+    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
+            (unsigned long)vaddr, cpu->curInstrPC, fsr);
+}
+#endif
+
 // for internal use
 template <int memorySystemKind, int size, bool write>
 static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
@@ -1634,9 +1663,7 @@ static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vad
         return true;
     if (cpu->leanExit) return false;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
-            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
-            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+    cpuPrvLogAbort(cpu, write, unsigned(size), vaddr, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
@@ -1653,9 +1680,7 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
 #else
     if (cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP)) return true;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
-            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
-            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+    cpuPrvLogAbort(cpu, write, unsigned(size), vaddr, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
@@ -1980,8 +2005,7 @@ bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t s
 // interpreter's own, then the data abort.
 static void cpuPrvDataAbort(struct ArmCpu *cpu, uint32_t vaddr, unsigned size, bool write, uint_fast8_t fsr) {
 #ifndef __EMSCRIPTEN__
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
-            (unsigned long)vaddr, cpu->curInstrPC, unsigned(fsr));
+    cpuPrvLogAbort(cpu, write, size, vaddr, unsigned(fsr));
     gdbStubDebugBreakRequested(cpu->debugStub);
 #endif
     cpuPrvHandleMemErr(cpu, vaddr, write, false, fsr);
@@ -2074,9 +2098,11 @@ static void cpuPrvHandlePaceMemoryFault(struct ArmCpu *cpu, const char* origin,
 template <int memorySystemKind, bool wasT>
 static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr);
 
+// On the ARM920T the NV condition forms are undefined, except PLD, which never executes there: the HP
+// iPAQ rx1950's bootloader has PLD in its copy loops and runs on the real ARM920T.
 template <int memorySystemKind, bool wasT>
 static void execFn_noop(struct ArmCpu *cpu, uint32_t instr) {
-    if (armKindIsArm920(memorySystemKind) && (instr >> 28) == 15)
+    if (armKindIsArm920(memorySystemKind) && (instr >> 28) == 15 && (instr & 0x0D70F000UL) != 0x0550F000UL)
         execFn_invalid<memorySystemKind, wasT>(cpu, instr);
 }
 
@@ -2311,6 +2337,10 @@ static void execFn_peephole_ADC_memcpy(struct ArmCpu *cpu, uint32_t instr) {
 
 template <int memorySystemKind, bool wasT>
 static void execFn_invalid(struct ArmCpu *cpu, uint32_t instr) {
+    ++cpu->undefinedCount;
+    cpu->undefinedPc = cpu->curInstrPC;
+    cpu->undefinedInstr = instr;
+    if (cpu->undefinedHook) cpu->undefinedHook(cpu->undefinedHookContext, cpu->curInstrPC, instr);
     // A guest whose own handler takes the exception can loop on it, so the log gets the first 16 and then
     // every power of two, with the count.
     static std::atomic<uint64_t> logged{0};
@@ -2440,7 +2470,7 @@ static void execFn_swb(struct ArmCpu *cpu, uint32_t instr) {
                 ea &= ~3u;
             }
             for (bool writing : {false, true}) {
-                const auto translation = mmuTranslate(cpu->memorySystem.mmu, ea, cpu->privileged, writing);
+                const auto translation = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, ea), cpu->privileged, writing);
                 if (!MMU_TRANSLATE_RESULT_OK(translation))
                     return cpuPrvHandleMemErr<memorySystemKind>(cpu, ea, writing, false, MMU_TRANSLATE_RESULT_FSR(translation));
                 auto* dc = cp15MMUArm920DataCache(cpu->cp15.cp15mmu);
@@ -4650,6 +4680,7 @@ struct ArmCpu *cpuInit(uint32_t pc, struct ArmMem *mem, uint8_t memorySystemKind
     if (memorySystemKind == ARM_MEMORY_SYSTEM_MMU) {
         cpu->memorySystem.mmu = mmuInit(mem, xscale);
         cpu->ic = icacheInit(mem, cpu->memorySystem.mmu);
+        icacheArm920SetFcsePid(cpu->ic, &cpu->pid);
         cpu->cp15.cp15mmu =
             cp15MMUInit(cpu, cpu->memorySystem.mmu, cpu->ic, cpuid, cacheId, xscale, omap);
 
@@ -4756,9 +4787,7 @@ void cpuEndNativeCall(ArmCpu* cpu) {
 // span discontiguous physical pages. MMIO is never read as a side effect.
 static bool nativeSegment(ArmCpu* cpu, uint32_t address, uint32_t size, bool write, uint32_t& pa, bool inspect = false, bool privileged = true) {
     if (cpu->memorySystemKind != ARM_MEMORY_SYSTEM_MMU) return false;
-#ifdef SUPPORT_FCSE
-    if (address < 0x02000000u) address |= cpu->pid;
-#endif
+    if (cpu->model == ArmCpuModel::arm920t) address = cpuPrvMva(cpu, address);
     // Inspected reads skip the permission check so the debugger sees every mapped page.
     auto t = inspect ? (write ? mmuTranslateInspectAccess(cpu->memorySystem.mmu,address,privileged,true) :
                                 mmuTranslateInspect(cpu->memorySystem.mmu,address,false)) :
@@ -5620,6 +5649,7 @@ static void execFn_leanThumbBx(struct ArmCpu *cpu, uint32_t instr) {
 
 // The raw halfword at va if the decode cache holds its line under the current fetch key.
 static bool cpuPrvLeanPeekHalf(const struct ArmCpu *cpu, uint32_t va, uint16_t &half) {
+    va = cpuPrvMva(cpu, va);
     const struct icache *ic = cpu->ic;
     const struct icacheline *line = ic->cache + calculateIndex(va);
     if (line->revision != ic->revision || line->tag != calculateTag(va) ||
@@ -5792,6 +5822,8 @@ static __attribute__((noinline)) bool cpuPrvLeanFetchSlow(struct ArmCpu *cpu, ui
 template <int size>
 static FORCE_INLINE bool cpuPrvLeanFetch(struct ArmCpu *cpu, uint32_t pc, uint32_t &instr, uint32_t &decoded,
                                          uint32_t &cost) {
+    // Lines are by MVA, as the I-cache model keeps them (icacheArm920Word).
+    pc = cpuPrvMva(cpu, pc);
     struct icache *ic = cpu->ic;
     struct icacheline *line = ic->cache + calculateIndex(pc);
     if (likely(!(pc & (size - 1)) && line->revision == ic->revision && line->tag == calculateTag(pc) &&
@@ -5917,6 +5949,8 @@ void cpuArm920SetLeanRead(ArmCpu *cpu, Arm920LeanRead read) { cpu->leanRead = re
 
 void cpuArm920SetLeanWrite(ArmCpu *cpu, Arm920LeanWrite write) { cpu->leanWrite = write; }
 
+bool cpuArm920LeanInJit(const ArmCpu *cpu) { return cpu->leanJit; }
+
 // A DMA or other write over the whole page at pa.
 void cpuArm920LeanStored(ArmCpu *cpu, uint32_t pa) { cpuPrvArm920Stored(cpu, pa & ~0xfffu, 0x1000); }
 
@@ -5949,8 +5983,8 @@ void cpuArm920SetJitAccessPcs(ArmCpu *cpu, const uint32_t *pcs, uint32_t count) 
 }
 
 bool cpuArm920PeekWord(ArmCpu *cpu, uint32_t va, uint32_t *word, uint32_t *pa) {
-    // The lean and JIT loads' translation, with the current mode's permissions.
-    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, va & ~3u, cpu->privileged);
+    // The lean and JIT loads' translation, with the current mode's permissions, of the MVA.
+    const MMUTranslateResult r = mmuTranslateCached<false>(cpu->memorySystem.mmu, cpuPrvMva(cpu, va & ~3u), cpu->privileged);
     if (!MMU_TRANSLATE_RESULT_OK(r)) return false;
     *pa = MMU_TRANSLATE_RESULT_PA(r);
     if (!word) return true;
@@ -5983,6 +6017,7 @@ void cpuArm920LeanStored(ArmCpu *, uint32_t) {}
 void cpuArm920LeanStoredBytes(ArmCpu *, uint32_t, uint32_t) {}
 void cpuArm920SetLeanRead(ArmCpu *, Arm920LeanRead) {}
 void cpuArm920SetLeanWrite(ArmCpu *, Arm920LeanWrite) {}
+bool cpuArm920LeanInJit(const ArmCpu *) { return false; }
 uint32_t cpuArm920LeanGeneration(const ArmCpu *) { return 0; }
 uint64_t cpuArm920LeanCodeDrops(const ArmCpu *) { return 0; }
 #endif
@@ -6118,8 +6153,8 @@ bool cpuJitFetch(ArmCpu *cpu, uint32_t va, uint32_t *word) {
     va &= ~3u;
     if (cpu->model == ArmCpuModel::arm920t) {
         if (cpu->jitBlocks) {
-            // Plain pages only, straight from memory: Fast keeps no I-cache contents.
-            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, va, cpu->privileged, false);
+            // Plain pages only, straight from memory: Fast keeps no I-cache contents. The MMU sees the MVA.
+            const MMUTranslateResult r = mmuTranslate(cpu->memorySystem.mmu, cpuPrvMva(cpu, va), cpu->privileged, false);
             if (!MMU_TRANSLATE_RESULT_OK(r) || !cpu->leanPage) return false;
             bool counted;
             const uint32_t pa = MMU_TRANSLATE_RESULT_PA(r);
@@ -6256,6 +6291,7 @@ uint32_t cpuJitMapGen(ArmCpu *cpu) { return mmuFlushCount(cpu->memorySystem.mmu)
 uint64_t cpuJitPageGen(ArmCpu *cpu) { return cpuPrvJitPageGen(cpu); }
 
 int cpuJitPageClientAccess(ArmCpu *cpu, uint32_t va, bool privileged) {
+    if (cpu->model == ArmCpuModel::arm920t) va = cpuPrvMva(cpu, va);
     return mmuPageClientAccess(cpu->memorySystem.mmu, va, privileged);
 }
 
@@ -7197,6 +7233,14 @@ void cpuArm920DropJit(ArmCpu *cpu) {
 
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *cpu) { return cpu->jit ? jitMaxUnchecked(cpu->jit) : 0; }
 
+unsigned cpuArm920JitPidTags(const ArmCpu *cpu, uint64_t *restarts) {
+    if (!cpu->jit) {
+        if (restarts) *restarts = 0;
+        return 0;
+    }
+    return jitPidTags(cpu->jit, restarts);
+}
+
 // Slow path reasons cpuArm920RunJit clears before it runs: none of them needs the step.
 static constexpr uint32_t arm920JitClearedSlowPath = SLOW_PATH_REASON_INSTRUCTION_SET_CHANGE |
                                                      SLOW_PATH_REASON_RESCHEDULE | SLOW_PATH_REASON_PACE_SYSCALL_BREAK |
@@ -7255,6 +7299,10 @@ bool cpuArm920SetJit(ArmCpu *, bool on) { return !on; }
 bool cpuArm920JitOn(const ArmCpu *) { return false; }
 void cpuArm920DropJit(ArmCpu *) {}
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu *) { return 0; }
+unsigned cpuArm920JitPidTags(const ArmCpu *, uint64_t *restarts) {
+    if (restarts) *restarts = 0;
+    return 0;
+}
 bool cpuArm920JitCanRun(const ArmCpu *) { return false; }
 uint32_t cpuArm920RunJit(ArmCpu *, uint32_t, int *stop, uint32_t, uint32_t *instructions) {
     *stop = arm920JitExit;
@@ -7480,9 +7528,32 @@ void cpuWakeup(struct ArmCpu *cpu) {
     cpuUpdateSlowPath(cpu);
 }
 
-void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) { cpu->pid = pid; }
+void cpuSetPid(struct ArmCpu *cpu, uint32_t pid) {
+    // The ARM920T Fast engine's lean host TLB and its JIT's page table are keyed by VA: a change flushes
+    // them, so none outlives the address space it was filled in. Decode lines are by MVA and stay; Fast
+    // blocks are keyed by PID (jitRun).
+    if (cpu->model == ArmCpuModel::arm920t && pid != cpu->pid) hostTlbFlush(&cpu->mem->hostTlb);
+    cpu->pid = pid;
+}
+
+uint32_t cpuJitCodeMva(const struct ArmCpu *cpu, uint32_t va) {
+    return cpu->model == ArmCpuModel::arm920t ? cpuPrvMva(cpu, va) : va;
+}
 
 uint32_t cpuGetPid(struct ArmCpu *cpu) { return cpu->pid; }
+
+uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *instr) {
+    if (pc) *pc = cpu->undefinedPc;
+    if (instr) *instr = cpu->undefinedInstr;
+    return cpu->undefinedCount;
+}
+
+void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *, uint32_t, uint32_t), void *context) {
+    cpu->undefinedHook = hook;
+    cpu->undefinedHookContext = context;
+}
+
+void cpuSetAbortLogLimit(struct ArmCpu *cpu, bool limited) { cpu->abortLogLimited = limited; }
 
 void cpuSetSlowPath(struct ArmCpu *cpu, uint32_t reason) { cpu->slowPath |= reason; }
 

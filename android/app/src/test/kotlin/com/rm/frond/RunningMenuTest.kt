@@ -15,7 +15,18 @@ class RunningMenuTest {
             RunningMenu.Id.DISPLAY, RunningMenu.Id.CONNECTIONS, RunningMenu.Id.SCREENSHOT, RunningMenu.Id.HIDE_BAR,
             RunningMenu.Id.SAVE_COPY, RunningMenu.Id.LOG, RunningMenu.Id.RESET, RunningMenu.Id.HARD_RESET,
         )
-        for (device in Device.entries) assertEquals(device.id, fixed, ids(device).filter { it in fixed })
+        for (device in Device.entries) {
+            val expected = if (device.palmOs) fixed else fixed - RunningMenu.Id.HARD_RESET
+            assertEquals(device.id, expected, ids(device).filter { it in fixed })
+        }
+    }
+
+    // Hard reset is a Palm OS guest service: the rx1950 (Windows CE) leaves it out.
+    @Test fun windowsCeHasNoHardReset() {
+        val rx1950 = Device.entries.first { it.rx1950 }
+        assertFalse(rx1950.palmOs)
+        assertFalse(RunningMenu.Id.HARD_RESET in ids(rx1950))
+        assertTrue(RunningMenu.Id.HARD_RESET in ids(Device.entries.first { it.id == "palm-tx" }))
     }
 
     @Test fun holdShowsOnlyWhereTheDeviceHasIt() {
@@ -79,7 +90,7 @@ class RunningMenuTest {
     @Test fun onlyHardResetIsRedAndGroupsOnlyGrow() {
         for (device in Device.entries) {
             val rows = rows(device)
-            assertEquals(listOf(RunningMenu.Id.HARD_RESET), rows.filter { it.destructive }.map { it.id })
+            assertEquals(listOfNotNull(RunningMenu.Id.HARD_RESET.takeIf { device.palmOs }), rows.filter { it.destructive }.map { it.id })
             assertEquals(rows.map { it.group }.sorted(), rows.map { it.group })
         }
     }

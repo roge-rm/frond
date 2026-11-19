@@ -927,6 +927,7 @@ While it is on the machine runs one instruction at a time on the interpreter, Fa
 | `SPEED_LOCK` | Lock file for `make count-check`: count runs hold it shared, wall-clock rounds exclusive. |
 | `COUNT_ARGS` | Options for `make count-check`, like `--only tg50-boot` or `--update`. |
 | `SPEED_REAL_MS` | Optional real-device FrondBench times, like `Integer=1000,Memory=500`, for a ratio column. |
+| `RX1950_FIRMWARE`, `RX1950_OUT`, `RX1950_INSTRUCTIONS` | `test-rx1950-boot`: the folder with CEBL.nbf and CEOS.nbf, where the logs go (default `build/rx1950-boot-logs`) and the instruction budget. |
 
 ### Build
 
@@ -958,6 +959,7 @@ All in `tools/`. Most take `--help`.
 | `firmware_variants.py` | Helper module: finds the firmware variant (such as the E2 de-NVFS image) of a NOR file for `frond-run.py`. |
 | `device-profiles.cpp`, `device-profiles.json` | Dumps and holds the device profiles. |
 | `zodiac-boot-probe.cpp` | Experimental SmallROM trace: `build/zodiac-boot-probe ROM [physical\|reset\|linked] [instruction-budget] [exact\|fast]`. Optional `--arm920-icache-index-compatibility` selects a conservative response to the ROM's undocumented CP15 form. Optional `--bootstrap-peripherals`, independent `--gpio-a-input=VALUE`, `--gpio-b-input=VALUE`, `--gpio-d-input=VALUE` and `--ram-mib=32\|128` follow the engine. Optional `--rtc-initial-time=DAY:HH:MM:SS` supplies an opaque retained chip day/time and zero subsecond phase, requiring bootstrap. Optional `--cs4-port0-input=BYTE` enables the private CS4 diagnostic recorder, requiring bootstrap. Optional `--cs5-reset-status-input=BYTE` enables the bounded private W4200 reset echo with an opaque initial byte and immediate bit-3 latch, requiring bootstrap. Reads a private ROM, stops on unsupported CPU or bus behaviour. See Zodiac bring-up and input scenarios. |
+| `rx1950-boot.cpp` | HP iPAQ rx1950 bring-up on the S3C2442 machine: `build/rx1950-boot --cebl CEBL.nbf [--ceos CEOS.nbf] [--out DIR] [--instructions N]` runs eboot from SDRAM and the OS from a NAND made from the NBF, and writes `uart0.log` to `uart2.log` and `nk.log` (the kernel's debug text, with `--debug-messages`). `--nand FILE` keeps the NAND in a store file, made from the NBF the first time, with changed blocks written back at the end. CEBL.nbf and CEOS.nbf have to match the known SHA-256 hashes unless `--any-firmware` is given. `--mmio-trace N` keeps the last N register accesses, `--history N` the last pcs, `--peek VA` prints words and `--walk MVA` the page table walk at the stop, and `--watch PA` (with `--history`) prints each change to an SDRAM word with the pc. The screen at the stop goes to `screen.ppm`. Stops at the first thing the machine doesn't model. |
 | `package-deb.py`, `package_policy.py`, `check-package.py` | Build a Debian package from a fixed file list, and check one. |
 | `check-record.py` | Records each `make test-NAME` result in `build/check-passes.tsv` and picks the checks to rerun from `tests/check-paths.tsv` (`make recheck-list` and `make recheck`, see [testing.md](testing.md)). The targets are `recheck` and `recheck-list`. |
 | `commit-build.sh` | Builds `frond`, `frond-68k` and `benchmark-replay` once per clean commit into `build/out-<hash>/` of the main checkout, copies that folder to tinydeck once, lists and prunes old folders (see [testing.md](testing.md)). |
@@ -1017,6 +1019,7 @@ All in `tools/`. Most take `--help`.
 | `device-session-probe` | Build the device session probe. |
 | `test-zodiac-jit` | ARM920T Exact/Fast instruction checks. Optional `build/test-zodiac-jit ROM` compares private SmallROM traces. |
 | `zodiac-boot-probe`, `test-zodiac-boot-probe` | Build the experimental i.MX1 boot probe or run its firmware-free CPU and memory checks. Outside `make test`. |
+| `rx1950-boot`, `test-rx1950-boot` | Build the HP iPAQ rx1950 boot tool, or run it until the file system writes to NAND (skips without the firmware). Outside `make test`. |
 | `test-zodiac-mmu` | ARM920 TTBR/DACR, abort/reset and retained instruction-cache checks in Exact and Fast. Outside `make test`. |
 | `test-zodiac` | All the Zodiac tests below that are in `make test`. |
 | `test-zodiac-sound` | Zodiac sound words, slots, frame rate against guest time and saved state. |
@@ -1117,8 +1120,8 @@ Tests in `make test`, by area:
 
 | Area | Targets |
 | --- | --- |
-| CPU and engines | `test-cpu`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
-| SoC and timing | `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
+| CPU and engines | `test-cpu`, `test-arm920-fcse`, `test-arm-conditions`, `test-pxa270-wmmx`, `test-instruction-cache`, `test-mmu-fast-path`, `test-xscale-stale-dcache`, `test-mem-region-bounds`, `test-xscale-prefetch`, `test-jit-overshoot`, `test-jit-differential`, `test-jit-compile-thread`, `test-zodiac-jit` |
+| SoC and timing | `test-s3c2442`, `test-s3c2442-machine`, `test-pxa-timer`, `test-pxa-power`, `test-pxa255-udc`, `test-pxa255-udc-clock`, `test-pxa255-udc-dma`, `test-pxa255-udc-dma-state`, `test-pxa270-udc`, `test-scheduler`, `test-microwire64x16` |
 | Device state and sessions | `test-tx-state`, `test-e2-state`, `test-tg50-state`, `test-clie-gamepad`, `test-device-profiles`, `test-device-controls`, `test-e2-family-peripherals`, `test-multi-touch`, `test-68k-frame-bounds`, `test-68k-bus-state`, `test-session-v7`, `test-frond-68k`, `test-checkpoint-input`, `test-export-checkpoint`, `test-replay-snapshot`, `test-lifecycle`, `test-shortcut-keys`, `test-dana-host-keys`, `test-savestate-layout` |
 | Palm databases | `test-native-database`, `test-native-primitives`, `test-native-governor`, `test-db-list`, `test-db-backup` |
 | Storage | `test-sd-image`, `test-sd`, `test-card-backing`, `test-nand-store-fail` (a NAND write the backing refuses reports fail to the guest and the core carries on), `test-memory-stick-controller`, `test-memory-stick-media`, `test-ms-logical-equivalence` (the version 2 stick layout against the flat physical model, `build/test-ms-logical-equivalence SEQUENCES OPERATIONS` for a longer run), `test-memory-stick-pro`, `test-card-tool`, `test-storage-settle` (needs mtools), `test-storage-fat` (needs mtools), `test-storage-ms` (classic stick writes, the settled check and blank stick formats, needs mtools), `test-card-swap` (its firmware part on whichever smoke sessions are in `FROND_ARM_SESSIONS`), `test-card-reinsert` (the same sessions), `test-tg50-sd-refusal` (the TG50 smoke session; `sd-*` commands are refused on a Memory Stick device) |

@@ -57,9 +57,11 @@ namespace commands {
         std::function<std::string()> windowId{};
         // The fitted device's rectangle in the window as "x y width height windowWidth windowHeight", empty without one.
         std::function<std::string()> windowLayout{};
-        // The Zodiac's speed over its last window: instructions per second of real time and the
+        // The Zodiac's or the rx1950's speed over its last window: instructions per second of real time and the
         // whole figures line. 0 and empty on other devices and before the first window.
         uint64_t speedIps{0};
+        // Where set (the rx1950), speedIps is the clock the guest got in Hz and this the clock it runs at.
+        uint64_t speedLimitHz{0};
         std::string speedDetail{};
     };
 

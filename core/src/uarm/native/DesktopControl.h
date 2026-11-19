@@ -964,10 +964,12 @@ class DesktopControl {
             // Same figures as the desktop window title, plus audio underruns since start and the speed setting. The Zodiac
             // gives the instructions it really ran, then its whole speed line.
             char text[128];
-            const uint64_t ipsMax = ctx.mainLoop.GetCurrentIpsMax();
-            const uint64_t ips = ctx.speedDetail.empty() ? ctx.mainLoop.GetCurrentIps() : ctx.speedIps;
+            // The rx1950 gives the clock its guest got against the clock it runs at.
+            const bool clock = ctx.speedLimitHz != 0;
+            const uint64_t ipsMax = clock ? ctx.speedLimitHz : ctx.mainLoop.GetCurrentIpsMax();
+            const uint64_t ips = ctx.speedDetail.empty() && !clock ? ctx.mainLoop.GetCurrentIps() : ctx.speedIps;
             // The clock for the others; the Zodiac's figure is instructions a second.
-            const char* unit = ctx.speedDetail.empty() ? "MHz" : "MIPS";
+            const char* unit = ctx.speedDetail.empty() || clock ? "MHz" : "MIPS";
             std::snprintf(text, sizeof(text), "%.2f %s, limit %.2f %s, %u%%, %llu underruns, %s",
                           ips / 1e6, unit, ipsMax / 1e6, unit, ipsMax ? unsigned(100 * ips / ipsMax) : 0u,
                           static_cast<unsigned long long>(ctx.audioDriver.GetUnderrunCount()),

@@ -17,10 +17,11 @@ class RunningSheetsTest {
     private val off = NetRelay.Phase.OFF
     private val gone = NetRelay.Phase.DISCONNECTED
 
-    // Storage is on every machine, with Internal even where there's no slot.
+    // Storage is on every machine, with Internal even where there's no slot. Applications only on Palm OS.
     @Test fun everyMachineHasStorage() {
         for (device in Device.entries) {
-            assertEquals(device.id, listOf(Sheet.APPLICATIONS, Sheet.CARD), RunningSheets.barSheets(device))
+            val expected = if (device.palmOs) listOf(Sheet.APPLICATIONS, Sheet.CARD) else listOf(Sheet.CARD)
+            assertEquals(device.id, expected, RunningSheets.barSheets(device))
             assertEquals("Storage", RunningSheets.title(Sheet.CARD, device))
         }
         val slotless = Device.entries.first { !it.cardSupported }

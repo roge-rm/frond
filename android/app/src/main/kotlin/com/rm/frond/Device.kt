@@ -99,9 +99,13 @@ data class Device internal constructor(
     val pendingUsb: String = "",
     // A colour LCD, shown as the guest draws it: no contrast setting.
     val colourLcd: Boolean = false,
+    // The OS it runs: "palm-os" or "windows-ce".
+    val os: String = "palm-os",
     val firmwareVariants: List<FirmwareVariant> = emptyList(),
     val storageSlots: List<StorageSlot> = emptyList(),
 ) {
+    // Applications and Hard reset are Palm OS guest services, left out on a Windows CE device.
+    val palmOs: Boolean get() = os == "palm-os"
     // The name in the Add device and Import firmware lists.
     val listLabel: String get() = if (experimental) "$label · Work in progress" else label
 
@@ -138,8 +142,11 @@ data class Device internal constructor(
     // The Tapwave Zodiac: a landscape screen, an engine of its own that runs best on Fast, and an
     // analogue stick and triggers that a controller drives through the core's own mapping.
     val zodiac: Boolean get() = id == ZODIAC_ID
-    // New machines of the Zodiac, T|X and Zire 72 start on Fast; they fall behind Original speed on Exact.
-    val defaultEngine: Engine get() = if (zodiac || id == "palm-tx" || id == "palm-zire-72") Engine.FAST else Engine.EXACT
+    // The HP iPAQ rx1950 (Windows Mobile 5): HP's CEBL.nbf as the NOR and CEOS.nbf as the NAND.
+    val rx1950: Boolean get() = id == RX1950_ID
+    // New machines of the Zodiac, rx1950, T|X and Zire 72 start on Fast; they fall behind Original speed on Exact.
+    val defaultEngine: Engine get() =
+        if (zodiac || rx1950 || id == "palm-tx" || id == "palm-zire-72") Engine.FAST else Engine.EXACT
     val buttons: List<String> get() = buttonsText.split('|')
 
     internal fun unresolvedFirmware(): Device = withFirmware(firmwareVariants.firstOrNull { !it.powerSupported })
@@ -151,6 +158,7 @@ data class Device internal constructor(
     companion object {
         val SD_SIZES = listOf(32, 64, 128, 256, 512, 1024, 1886)
         const val ZODIAC_ID = "tapwave-zodiac-2"
+        const val RX1950_ID = "hp-ipaq-rx1950"
         fun sizeLabel(mib: Int) = if (mib >= 1024) "${(mib + 512) / 1024} GB" else "$mib MB"
         fun sizeLabel(bytes: Long) = if (bytes >= 1L shl 30) "${bytes shr 30} GB" else "${bytes shr 20} MB"
         // Classic Memory Stick physical bytes: each MB is 2048 pages of 512 + 9 bytes.

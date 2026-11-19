@@ -248,6 +248,14 @@ void cpuCoprocessorRegister(struct ArmCpu *cpu, uint8_t cpNum, struct ArmCoproce
 void cpuSetVectorAddr(struct ArmCpu *cpu, uint32_t adr);
 void cpuSetPid(struct ArmCpu *cpu, uint32_t pid);
 uint32_t cpuGetPid(struct ArmCpu *cpu);
+// How many undefined instruction exceptions the CPU has taken, with the last one's pc and instruction.
+uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *instr);
+// Calls hook with the pc and instruction of every undefined instruction exception as it's taken
+// (instruction 0 for a data cache guard trap). Null turns it off.
+void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *context, uint32_t pc, uint32_t instr), void *context);
+// For guests that take data aborts as part of normal running (Windows CE's demand paging): log the first 16
+// failed data accesses and then every power of two.
+void cpuSetAbortLogLimit(struct ArmCpu *cpu, bool limited);
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu);
 void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar);
@@ -367,6 +375,9 @@ void cpuArm920SetLeanRead(ArmCpu*, Arm920LeanRead read);
 using Arm920LeanWrite = bool (*)(void* context, uint32_t pa, uint32_t size, uint32_t value, uint32_t ran,
                                  uint32_t left, uint32_t* cost);
 void cpuArm920SetLeanWrite(ArmCpu*, Arm920LeanWrite write);
+// From a read or write hook: whether translated code made the access (ran then counts the JIT's clocks, a
+// Thumb BL pair as one) rather than the lean path (ran counts instructions).
+bool cpuArm920LeanInJit(const ArmCpu*);
 // Cleans dirty D-cache lines to memory, empties both caches and drops the lean TLB and decoded code. For
 // entering Fast and after a load into it.
 void cpuArm920LeanReset(ArmCpu*);
@@ -394,10 +405,13 @@ uint32_t cpuArm920RunLeanFor(ArmCpu*, uint32_t budget, uint32_t count, uint32_t*
 // CPU has the single-step diagnostic JIT. Turning it on again drops translated code.
 bool cpuArm920SetJit(ArmCpu*, bool on);
 bool cpuArm920JitOn(const ArmCpu*);
-// Frees the Fast blocks JIT, for a CPU that won't run again.
+// Frees the Fast blocks JIT and its compile thread: for a CPU that won't run again, or before a fork(), after
+// which cpuArm920SetJit makes a new one.
 void cpuArm920DropJit(ArmCpu*);
 // Most instructions a JIT run can pass its budget by, plus one.
 uint32_t cpuArm920JitMaxUnchecked(const ArmCpu*);
+// Fast blocks' FCSE PID tags in use and the restarts so far (jitPidTags), 0 without the JIT.
+unsigned cpuArm920JitPidTags(const ArmCpu*, uint64_t* restarts);
 // Fast blocks, from a lean write hook: the pc of the marked access-pc instruction making the access (0 if none).
 uint32_t cpuArm920TakeJitAccessPc(ArmCpu*);
 // Fast blocks, from an access hook: the board charged cycles of the run (the hook's ran) before the access, and
