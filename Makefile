@@ -605,6 +605,14 @@ test-modem: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a
 		$(shell pkg-config --cflags --libs slirp) -o build/test-modem
 	./build/test-modem
 
+.PHONY: test-rndis-host
+test: test-rndis-host
+test-rndis-host: prepare core/src/common/libcommon.a core/src/common/libcommon-net.a
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter -Icore/src/common tests/rndis-host.cpp \
+		core/src/common/libcommon-net.a core/src/common/libcommon.a \
+		$(shell pkg-config --cflags --libs slirp) -o build/test-rndis-host
+	./build/test-rndis-host
+
 .PHONY: test-ir-peer
 test: test-ir-peer
 test-ir-peer: prepare core/src/common/libcommon.a

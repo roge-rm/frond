@@ -1,24 +1,30 @@
 #!/bin/sh
 # Connects a frond-68k serial port to a host PPP endpoint so the guest's Network panel can dial
 # out over it.
-# Usage: tools/palm-pppd.sh [--pppd] [--log DIR] /dev/pts/N|tcp:PORT [speed]
+# Usage: tools/palm-pppd.sh [--pppd] [--activesync] [--log DIR] /dev/pts/N|tcp:PORT [speed]
 # By default it runs slirp (Debian's slirp package): no root, the guest gets 10.0.2.15, slirp's
 # DNS is 10.0.2.3 and slirp makes the guest's connections from the host. --log DIR keeps slirp's
-# debug log (DIR/slirp_debug) and its stats there. --pppd runs pppd instead, which needs root
+# debug log (DIR/slirp_debug) and its stats there. --activesync is for a Windows Mobile device's
+# serial ActiveSync (the rx1950's connector, at 115200): it answers the device's CLIENT with
+# CLIENTSERVER before PPP starts, and the device then connects to the desktop's sync ports (990,
+# 7438) at the PPP peer address, which slirp passes to the same ports on the host's own address.
+# --pppd runs pppd instead, which needs root
 # (or the dip group and /dev/ppp) and IP forwarding with NAT on the host. tcp:PORT needs socat,
 # slirp needs a C compiler for tools/slirp-select-fix.c.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 mode=slirp
 log=
+activesync=
 while [ $# -gt 0 ]; do
     case $1 in
         --pppd) mode=pppd; shift ;;
         --log) log=${2:?--log needs a folder}; shift 2 ;;
+        --activesync) activesync=1; shift ;;
         *) break ;;
     esac
 done
-endpoint=${1:?usage: palm-pppd.sh [--pppd] [--log DIR] /dev/pts/N|tcp:PORT [speed]}
+endpoint=${1:?usage: palm-pppd.sh [--pppd] [--activesync] [--log DIR] /dev/pts/N|tcp:PORT [speed]}
 speed=${2:-57600}
 work=$(mktemp -d "${TMPDIR:-/tmp}/palm-ppp.XXXXXX")
 bridge=
@@ -39,6 +45,19 @@ case $endpoint in
         ;;
     *) tty=$endpoint ;;
 esac
+
+# Windows CE's direct connection: the device sends CLIENT until the host answers CLIENTSERVER.
+if [ -n "$activesync" ]; then
+    python3 -I - "$tty" <<'EOF'
+import os, sys, tty
+fd = os.open(sys.argv[1], os.O_RDWR | os.O_NOCTTY)
+tty.setraw(fd)
+seen = b''
+while b'CLIENT' not in seen:
+    seen = (seen + os.read(fd, 64))[-64:]
+os.write(fd, b'CLIENTSERVER')
+EOF
+fi
 
 if [ "$mode" = slirp ]; then
     dir=${log:-$work}

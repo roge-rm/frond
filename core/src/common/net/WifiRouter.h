@@ -14,9 +14,16 @@
 
 namespace frondNet {
 
+// The virtual network's addresses, host byte order. The default is the 10.0.2.x layout every Frond network uses.
+struct RouterLayout {
+    uint32_t network{0x0a000200}, netmask{0xffffff00}, host{0x0a000202}, dhcpStart{0x0a00020f}, dns{0x0a000203};
+    bool dhcp{true};  // slirp's DHCP server for the guest
+};
+
 class WifiRouter {
    public:
     WifiRouter();
+    explicit WifiRouter(const RouterLayout& layout);
     ~WifiRouter();
     bool Valid() const;
     // One Ethernet frame from the guest, 14 to 1518 bytes.

@@ -12,6 +12,7 @@ SOURCE_CXX = 						\
 	CardImage.cpp 					\
 	CardVolume.cpp 					\
 	CPCrc.cpp 						\
+	RndisHost.cpp					\
 	GunzipContext.cpp 				\
 	GzipContext.cpp 				\
 	CreateZipContext.cpp 			\
@@ -63,7 +64,7 @@ SOURCE_CXX_TEST = 					\
 LIBRARY_NATIVE = libcommon.a
 # libslirp behind PPP and Wi-Fi, a library of its own so only the cores link libslirp.
 LIBRARY_NET = libcommon-net.a
-OBJECTS_NET = $(BUILDDIR_NATIVE)/net/SlirpIp.o $(BUILDDIR_NATIVE)/net/WifiRouter.o
+OBJECTS_NET = $(BUILDDIR_NATIVE)/net/SlirpIp.o $(BUILDDIR_NATIVE)/net/WifiRouter.o $(BUILDDIR_NATIVE)/net/DesktopLink.o
 GARBAGE_EXTRA = $(LIBRARY_NET)
 LIBRARY_EMCC = libcommon-wasm.a
 BINARY_TEST = test/test

@@ -9,6 +9,9 @@ struct UsbHostBridge::Impl {
     Config config;
     HostByteLink link;
     std::unique_ptr<UsbBusHost> host;
+    RndisHost rndis;
+    uint64_t lastNow{0}, netPollAt{0};
+    static constexpr uint64_t netPollNs = 1000000;
     bool replaced{false}, plugPending{false}, lastEnabled{false}, linkKept{false};
     void StopBridge(bool keepLink);
     uint64_t plugAt{0};
@@ -33,13 +36,22 @@ struct UsbHostBridge::Impl {
             self.soc.cable(true);
             self.host->Attach();
         }
+        self.lastNow = now;
+        // RNDIS: frames from the host network enter once a millisecond.
+        if (self.host->Rndis() && self.rndis.Up() && self.soc.ethernetPoll && now >= self.netPollAt) {
+            self.soc.ethernetPoll(now, self.rndis.Mac());
+            std::vector<uint8_t> frame;
+            for (unsigned n = 0; n < 64 && self.soc.ethernetIn(frame); ++n) self.rndis.FrameToDevice(frame.data(), frame.size());
+            self.netPollAt = (now / netPollNs + 1) * netPollNs;
+        }
         self.host->Tick(now);
     }
     static uint64_t Wake(void* context) {
         auto& self = *static_cast<Impl*>(context);
         if (!self.host) return UINT64_MAX;
         if (self.replaced) return 0;
-        const uint64_t wake = self.host->NextWake();
+        uint64_t wake = self.host->NextWake();
+        if (self.host->Rndis() && self.rndis.Up() && self.soc.ethernetPoll) wake = std::min(wake, self.netPollAt);
         return self.plugPending ? std::min(wake, self.plugAt) : wake;
     }
     // Reset or load: the host forgets the device at once; the next tick unplugs the cable.
@@ -107,6 +119,13 @@ bool UsbHostBridge::Start(Backend soc, const Config& config, std::string& error)
     impl->plugPending = true;
     impl->plugAt = soc.time() + (wasPlugged ? replugNs : 0);
     impl->lastPhase = UsbBusHost::Phase::detached;
+    if (soc.ethernetOut) {
+        auto* self = impl.get();
+        impl->rndis.frameFromDevice = [self](const uint8_t* frame, size_t size) {
+            if (self->soc.ethernetOut) self->soc.ethernetOut(frame, size, self->lastNow);
+        };
+        impl->host->SetRndis(&impl->rndis);
+    }
     const UsbHostHooks hooks{impl.get(), Impl::Tick, Impl::Wake, Impl::Replaced, Impl::Notify};
     soc.hooks(&hooks);
     soc.port().SetNotify(Impl::Notify, impl.get());
@@ -130,6 +149,8 @@ void UsbHostBridge::Impl::StopBridge(bool keepLink) {
     if (impl->host) impl->host->Detach();
     impl->soc.cable(impl->soc.defaultCable());
     impl->host.reset();
+    impl->rndis.Stop();
+    impl->rndis.frameFromDevice = nullptr;
     if (keepLink) linkKept = true; else impl->link.Close();
     impl->soc = {};
     impl->config = {};
@@ -158,6 +179,7 @@ void UsbHostBridge::Service() {
     const uint64_t wake = Impl::Wake(impl.get());
     if (wake <= soc.time()) soc.kick();
     for (auto& message : impl->host->TakeMessages()) impl->messages.push_back(std::move(message));
+    for (auto& message : impl->rndis.TakeMessages()) impl->messages.push_back(std::move(message));
     const auto phase = impl->host->GetPhase();
     if (phase != impl->lastPhase) {
         impl->lastPhase = phase;
@@ -171,7 +193,8 @@ std::string UsbHostBridge::Endpoint() const { return impl->link.Endpoint(); }
 std::string UsbHostBridge::Describe() const {
     if (!impl->host) return "off";
     return std::string(impl->config.kind == HostSerial::Kind::pty ? "pty " : impl->config.kind == HostSerial::Kind::unixSocket ? "unix " : "tcp ") + impl->link.Endpoint() +
-           (impl->link.Connected() ? " connected " : " waiting ") + UsbBusHost::PhaseName(impl->host->GetPhase());
+           (impl->link.Connected() ? " connected " : " waiting ") + UsbBusHost::PhaseName(impl->host->GetPhase()) +
+           (impl->host->Rndis() ? impl->rndis.Up() ? " rndis up" : " rndis starting" : "");
 }
 
 const UsbBusHost* UsbHostBridge::Host() const { return impl->host.get(); }

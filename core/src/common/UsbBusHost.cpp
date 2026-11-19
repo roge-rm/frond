@@ -1,5 +1,7 @@
 #include "UsbBusHost.h"
 
+#include "RndisHost.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -73,6 +75,7 @@ void UsbBusHost::Detach() {
     portFunction.clear();
     configDescriptor.clear();
     inMps = outMps = 0;
+    StopRndis();
 }
 
 uint64_t UsbBusHost::NextWake() const {
@@ -84,11 +87,14 @@ uint64_t UsbBusHost::NextWake() const {
     if (pendingAddress) wake = std::min(wake, addressAt);
     auto u = udc();
     if (sofRunning && u && u.SofWanted()) wake = std::min(wake, nextSof);
+    if (rndisMode && inFlight == Token::none && !control.active)
+        wake = std::min(wake, std::max({std::min(intRequestAt, rndis->NextWake()), retryAt, now}));
     return wake;
 }
 
 bool UsbBusHost::LinkWaiting() const {
     if (phase != Phase::running || !inEndpoint || inFlight != Token::none || control.active || poked) return false;
+    if (rndisMode) return !outPending && rndis->OutPending();
     return (!outPending && link.pending && link.pending()) || (waitSpace && link.sendSpace && link.sendSpace() >= inMps);
 }
 
@@ -109,6 +115,7 @@ void UsbBusHost::Restart(const char* why) {
     sofRunning = false;
     clearHalt = false;
     inEndpoint = outEndpoint = inMps = outMps = 0;
+    StopRndis();
     if (++attempts >= maxAttempts) {
         phase = Phase::failed;
         Message("usb: gave up; unplug and plug in again to retry");
@@ -150,6 +157,12 @@ void UsbBusHost::ControlDone(Result result) {
             if (result != Result::ok) Restart("could not clear a halted endpoint");
             break;
         case Completion::external: break;
+        case Completion::rndisCommand:
+            if (rndisMode) rndis->CommandSent(result == Result::ok, now);
+            break;
+        case Completion::rndisResponse:
+            if (rndisMode) rndis->Response(result == Result::ok, completed.data.data(), completed.data.size(), now);
+            break;
     }
     if (controlTrace) controlTrace(completed.setup, completed.data, result == Result::ok);
 }
@@ -158,6 +171,7 @@ void UsbBusHost::ControlDone(Result result) {
 bool UsbBusHost::ParseConfiguration() {
     const auto& d = configDescriptor;
     std::fill(std::begin(endpointMps), std::end(endpointMps), 0);
+    std::fill(std::begin(interruptMps), std::end(interruptMps), 0);
     if (d.size() != configLength || d.size() < 9 || d[0] != 9 || d[1] != 2 ||
         (d[2] | d[3] << 8) != configLength || d[5] != configuration || !configuration || !d[4]) return false;
     bool interfaces[256]{}, activeAddresses[256]{}, addresses[256]{};
@@ -188,6 +202,7 @@ bool UsbBusHost::ParseConfiguration() {
                 if (activeAddresses[e[2]]) return false;
                 activeAddresses[e[2]] = true;
                 if (e[3] == 2) endpointMps[e[2]] = uint8_t(mps);
+                if ((e[3] & 3) == 3 && (e[2] & 0x80) && mps && mps <= 64) interruptMps[e[2] & 15] = uint8_t(mps);
             }
         }
         pos += e[0];
@@ -205,6 +220,44 @@ bool UsbBusHost::SelectEndpoints() {
     inMps = endpointMps[0x80 | inEndpoint];
     outMps = endpointMps[outEndpoint];
     return inMps && outMps;
+}
+
+// An RNDIS control interface (alternate 0) with an interrupt IN endpoint, then a CDC data interface with
+// bulk IN and OUT.
+bool UsbBusHost::FindRndis() {
+    const auto& d = configDescriptor;
+    int control = -1;
+    uint8_t interrupt = 0, in = 0, out = 0;
+    bool data = false, active = false;
+    for (size_t pos = 9; pos + 2 <= d.size() && d[pos] >= 2; pos += d[pos]) {
+        const auto* e = &d[pos];
+        if (e[1] == 4 && e[0] >= 9) {
+            active = e[3] == 0;
+            if (!active) continue;
+            const bool rndisClass = (e[5] == 0xef && e[6] == 1 && e[7] == 1) || (e[5] == 2 && e[6] == 2 && e[7] == 0xff) ||
+                                    (e[5] == 0xe0 && e[6] == 1 && e[7] == 3);
+            if (control < 0 && rndisClass) control = e[2];
+            else if (control >= 0 && !data && e[5] == 0x0a) data = true;
+            else if (control >= 0 && data) break;
+        } else if (e[1] == 5 && e[0] >= 7 && active && control >= 0) {
+            if (!data && (e[3] & 3) == 3 && (e[2] & 0x80)) interrupt = e[2] & 15;
+            if (data && e[3] == 2) ((e[2] & 0x80) ? in : out) = e[2] & 15;
+        }
+    }
+    if (control < 0 || !interrupt || !in || !out || !interruptMps[interrupt]) return false;
+    rndisInterface = uint8_t(control);
+    intEndpoint = interrupt;
+    intMps = interruptMps[interrupt];
+    inEndpoint = in;
+    outEndpoint = out;
+    return SelectEndpoints();
+}
+
+void UsbBusHost::StopRndis() {
+    if (rndisMode && rndis) rndis->Stop();
+    rndisMode = false;
+    intEndpoint = intMps = 0;
+    intRequestAt = 0;
 }
 
 void UsbBusHost::EnumerationStep(Result result) {
@@ -250,6 +303,18 @@ void UsbBusHost::EnumerationStep(Result result) {
             return StartControl(0x00, 9, configuration, 0, 0);
         case 5:
             if (result != Result::ok) return fail("SET_CONFIGURATION");
+            if (rndis && FindRndis()) {
+                phase = Phase::running;
+                attempts = 0;
+                rndisMode = true;
+                intRequestAt = now;
+                rndis->Start(inMps, now);
+                ++counters.enumerations;
+                Message("usb: enumerated " + hex4(vendor) + ":" + hex4(product) + ", RNDIS on interface " +
+                        std::to_string(rndisInterface) + ", IN " + std::to_string(inEndpoint) + " OUT " +
+                        std::to_string(outEndpoint) + " interrupt " + std::to_string(intEndpoint));
+                return;
+            }
             step = 6;
             // GET_EXT_CONNECTION_INFORMATION, as pilot-link and the Linux visor driver ask.
             return StartControl(0xc2, 4, 0, 0, 20);
@@ -354,6 +419,31 @@ bool UsbBusHost::StartTransaction() {
         return false;
     }
     if (phase != Phase::running) return false;
+    if (rndisMode) {
+        if (clearHalt) {
+            StartControl(0x02, 1, 0, haltedEndpoint, 0, Completion::clearHalt);
+            return false;
+        }
+        // EP0 first: a command to send, then a response to fetch; then the interrupt endpoint once a frame.
+        std::vector<uint8_t> message;
+        if (rndis->NextCommand(message, now)) {
+            StartControl(0x21, 0, 0, rndisInterface, uint16_t(message.size()), Completion::rndisCommand);
+            control.out = std::move(message);
+            return false;
+        }
+        if (rndis->WantResponse(now)) {
+            StartControl(0xa1, 1, 0, rndisInterface, 1025, Completion::rndisResponse);
+            return false;
+        }
+        if (now >= intRequestAt) {
+            intRequestAt = (now / frameNs + 1) * frameNs;
+            inFlightEndpoint = uint8_t(0x80 | intEndpoint);
+            if (!Addressed()) return Begin(Token::intIn, unsigned(timeoutBits));
+            unsigned size = 0;
+            const R r = u.PeekIn(inFlightEndpoint, &size);
+            return Begin(Token::intIn, unsigned(r == R::Ack ? transactionBits(std::min<unsigned>(size, intMps)) : r == R::Timeout ? timeoutBits : nakBits));
+        }
+    }
     if (!inEndpoint) {
         if (now < requeryAt) {
             retryAt = requeryAt;
@@ -367,11 +457,13 @@ bool UsbBusHost::StartTransaction() {
         StartControl(0x02, 1, 0, haltedEndpoint, 0, Completion::clearHalt);
         return false;
     }
-    if (!outPending && link.receive) {
+    if (!outPending && rndisMode) {
+        outPending = rndis->BulkOutPacket(outPacket, outMps, outSize);
+    } else if (!outPending && link.receive) {
         outSize = unsigned(link.receive(outPacket, outMps));
         outPending = outSize != 0;
     }
-    const bool wantIn = link.sendSpace && link.sendSpace() >= inMps;
+    const bool wantIn = rndisMode || (link.sendSpace && link.sendSpace() >= inMps);
     // A cooperative adapter may hold this request without putting an OUT token on the bus.
     const bool outReady = outPending && (!Addressed() || u.OutReady(outEndpoint,std::min<unsigned>(outSize,outMps)));
     if (outReady && now >= outRequestAt && (preferOut || !wantIn || now < inRequestAt)) {
@@ -494,8 +586,14 @@ void UsbBusHost::FinishTransaction() {
             if (r == R::Ack) {
                 bulkTimeouts = 0;
                 if (size > inMps) return Restart("oversized bulk IN packet");
-                if (size) link.send(data, size);
                 counters.bytesIn += size;
+                if (rndisMode) {
+                    // RNDIS transfers run packet after packet, ending on a short one.
+                    rndis->BulkInPacket(data, size);
+                    inRequestAt = now;
+                    return;
+                }
+                if (size) link.send(data, size);
                 // Host software policy: retire this one-packet request and resubmit later.
                 inRequestAt = now + frameNs;
                 return;
@@ -510,11 +608,28 @@ void UsbBusHost::FinishTransaction() {
             else retryAt = now + nakRetryNs;
             return;
         }
+        case Token::intIn: {
+            uint8_t data[64];
+            unsigned size = 0;
+            const R r = addressed ? u.EpIn(inFlightEndpoint, data, &size) : R::Timeout;
+            if (r == R::Ack) {
+                if (size > intMps) return Restart("oversized interrupt IN packet");
+                if (rndisMode) rndis->Notification(data, size, now);
+                return;
+            }
+            // A NAK here leaves the bulk endpoints free for the rest of the frame.
+            if (r == R::Nak) { ++counters.naks; return; }
+            if (r == R::Stall) {
+                clearHalt = true;
+                haltedEndpoint = inFlightEndpoint;
+            }
+            return;
+        }
         case Token::bulkOut: {
             const R r = addressed ? u.EpOut(inFlightEndpoint, outPacket, outFlightSize) : R::Timeout;
             if (r == R::Ack) {
                 bulkTimeouts = 0;
-                outRequestAt = now + frameNs;
+                outRequestAt = rndisMode ? now : now + frameNs;
                 counters.bytesOut += outFlightSize;
                 outSize -= outFlightSize;
                 std::memmove(outPacket, outPacket + outFlightSize, outSize);

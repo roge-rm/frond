@@ -54,7 +54,7 @@ struct WifiRouter::Impl {
     std::deque<std::vector<uint8_t>> incoming;
     std::vector<pollfd> descriptors;
     std::set<Timer*> timers;
-    Impl() {
+    explicit Impl(const RouterLayout& layout) {
         callbacks.send_packet = [](const void* bytes, size_t size, void* context) -> slirp_ssize_t {
             auto& self = *static_cast<Impl*>(context);
             if (size >= 14 && size <= 1518 && self.incoming.size() < queueLimit)
@@ -89,11 +89,12 @@ struct WifiRouter::Impl {
         config.version = 4;
         config.in_enabled = true;
         config.vhostname = "frond";
-        config.vnetwork.s_addr = htonl(0x0a000200);
-        config.vnetmask.s_addr = htonl(0xffffff00);
-        config.vhost.s_addr = htonl(hostAddress);
-        config.vdhcp_start.s_addr = htonl(guestAddress);
-        config.vnameserver.s_addr = htonl(dnsAddress);
+        config.vnetwork.s_addr = htonl(layout.network);
+        config.vnetmask.s_addr = htonl(layout.netmask);
+        config.vhost.s_addr = htonl(layout.host);
+        config.vdhcp_start.s_addr = htonl(layout.dhcpStart);
+        config.vnameserver.s_addr = htonl(layout.dns);
+        config.disable_dhcp = !layout.dhcp;
         config.if_mtu = 1500;
         config.if_mru = 1500;
         slirp = slirp_new(&config, &callbacks, this);
@@ -124,7 +125,8 @@ struct WifiRouter::Impl {
         return events;
     }
 };
-WifiRouter::WifiRouter() : impl(std::make_unique<Impl>()) {}
+WifiRouter::WifiRouter() : impl(std::make_unique<Impl>(RouterLayout{})) {}
+WifiRouter::WifiRouter(const RouterLayout& layout) : impl(std::make_unique<Impl>(layout)) {}
 WifiRouter::~WifiRouter() = default;
 bool WifiRouter::Valid() const { return impl->slirp; }
 void WifiRouter::Input(const uint8_t* data, size_t size, uint64_t now) {
