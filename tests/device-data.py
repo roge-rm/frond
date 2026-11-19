@@ -211,7 +211,7 @@ class DeviceDataTest(unittest.TestCase):
         spec.loader.exec_module(runner)
         self.assertEqual(list(runner.DEVICES), ['palm-tx', 'palm-e2', 'palm-e2-franken', 'palm-zire-72', 'sony-clie-tg50'])
         choices = next(action.choices for action in runner.parser()._actions if action.dest == 'device')
-        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name != 'tapwave-zodiac-2'])
+        self.assertEqual(list(choices), [name for name in palm_boot.FRONTEND_DEVICES if name not in palm_boot.DEVICES_68K and name not in ('tapwave-zodiac-2', 'hp-ipaq-rx1950')])
         self.assertIn('palm-iiix', palm_boot.FRONTEND_DEVICES)
         self.assertNotIn('palm-iiix', runner.DEVICES)
         for name in ('repalm',):

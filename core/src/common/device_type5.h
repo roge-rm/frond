@@ -27,6 +27,7 @@ enum DeviceType5 {
     deviceTypeM130 = 22,
     deviceTypeM520 = 23,
     deviceTypeT415 = 24,
+    deviceTypeRx1950 = 25,
     deviceTypeInvalid = -1
 };
 

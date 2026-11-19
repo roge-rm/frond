@@ -62,6 +62,21 @@ SOURCE_CXX =		 					\
 	uarm/imx1_i2c.cpp					\
 	uarm/imx1_asp.cpp					\
 	uarm/imx1_pwm.cpp					\
+	uarm/soc_S3C2442.cpp				\
+	uarm/s3c2442_machine.cpp			\
+	uarm/s3c2442_intc.cpp				\
+	uarm/s3c2442_clock.cpp				\
+	uarm/s3c2442_timer.cpp				\
+	uarm/s3c2442_rtc.cpp				\
+	uarm/s3c2442_gpio.cpp				\
+	uarm/s3c2442_uart.cpp				\
+	uarm/s3c2442_lcd.cpp				\
+	uarm/s3c2442_nand.cpp				\
+	uarm/s3c2442_sdi.cpp				\
+	uarm/s3c2442_usbd.cpp				\
+	uarm/s3c2442_adc.cpp				\
+	uarm/s3c2442_audio_bus.cpp			\
+	uarm/rx1950_nand_image.cpp			\
 	uarm/pv_ic.cpp						\
 	uarm/pv_timer.cpp					\
 	uarm/pv_uart.cpp					\

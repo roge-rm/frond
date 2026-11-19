@@ -1,6 +1,7 @@
 #ifndef FROND_FIRMWARE_INPUT_H
 #define FROND_FIRMWARE_INPUT_H
 
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
@@ -55,14 +56,24 @@ inline bool linkedCards(Device device) {
 // A 68k grey LCD has a contrast setting; a colour one is shown as the guest draws it.
 inline bool lcdContrast(Device device) { return runs68k(device) && !deviceProfileColourLcd5(int(device)); }
 
-// The Zodiac runs with no guest calls yet: no install, application list or hard reset.
+// The Zodiac and the rx1950 run with no guest calls yet: no install, application list or hard reset.
 inline bool guestServices(Device device) {
-    return device == Device::automatic || profile(device).board != DeviceBoard5::imx1Zodiac;
+    return device == Device::automatic ||
+           (profile(device).board != DeviceBoard5::imx1Zodiac && profile(device).board != DeviceBoard5::s3c2442Rx1950);
 }
-// New machines of these devices start on the Fast engine: the Zodiac, T|X and Zire 72, which fall behind Original speed on Exact.
+// New machines of these devices start on the Fast engine: the Zodiac, rx1950, T|X and Zire 72, which fall behind
+// Original speed on Exact.
 inline bool fastByDefault(Device device) {
     return device == Device::tx || device == Device::zire72 ||
-           (device != Device::automatic && profile(device).board == DeviceBoard5::imx1Zodiac);
+           (device != Device::automatic && (profile(device).board == DeviceBoard5::imx1Zodiac ||
+                                            profile(device).board == DeviceBoard5::s3c2442Rx1950));
+}
+// Whether the file at path is the firmware file by size and SHA-256.
+inline bool firmwareFileMatches(const QString& path, const DeviceFirmwareFile5& expected) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly) || file.size() != qint64(expected.bytes)) return false;
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    return hash.addData(&file) && hash.result().toHex() == QByteArray(expected.sha256);
 }
 
 // Hardware a device doesn't have at all, which is left out rather than greyed: the Zire 72 has no serial port.
@@ -136,6 +147,15 @@ inline QString validateFiles(Device chosen, const QString& norPath, const QStrin
         device = detectDevice(norPath);
         if (device == Device::automatic)
             return QStringLiteral("Frond can't tell which device this NOR image is for. Choose the device.");
+    }
+    if (profile(device).board == DeviceBoard5::s3c2442Rx1950) {
+        if (nandPath.isEmpty()) return QStringLiteral("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950.");
+        if (!firmwareFileMatches(norPath, rx1950Cebl5))
+            return QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG.");
+        if (!firmwareFileMatches(nandPath, rx1950Ceos5))
+            return QStringLiteral("The NAND image must be CEOS.nbf from HP's WM5 ROM 1.01.00 ENG.");
+        if (resolved) *resolved = device;
+        return {};
     }
     if (runs68k(device)) {
         const auto error = validateRom68k(device, nor, nandPath);

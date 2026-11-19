@@ -307,6 +307,8 @@ struct ArmCpu {
     // Called on each one as it's taken, or null (cpuSetUndefinedHook).
     void (*undefinedHook)(void *context, uint32_t pc, uint32_t instr);
     void *undefinedHookContext;
+    // Failed data accesses are logged only for the first 16 and then every power of two (cpuSetAbortLogLimit).
+    bool abortLogLimited;
 
     uint8_t memorySystemKind;
     union {
@@ -1637,6 +1639,19 @@ static FORCE_INLINE bool cpuPrvMemOpExGeneric(struct ArmCpu *cpu, void *buf, uin
     }
 }
 
+#ifndef __EMSCRIPTEN__
+// Logs a failed data access, for every one or, with abortLogLimited, the first 16 and then every power of two.
+static void cpuPrvLogAbort(struct ArmCpu *cpu, bool write, unsigned size, uint32_t vaddr, unsigned fsr) {
+    if (cpu->abortLogLimited) {
+        static std::atomic<uint64_t> logged{0};
+        const uint64_t n = logged.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n > 16 && (n & (n - 1))) return;
+    }
+    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
+            (unsigned long)vaddr, cpu->curInstrPC, fsr);
+}
+#endif
+
 // for internal use
 template <int memorySystemKind, int size, bool write>
 static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vaddr,
@@ -1648,9 +1663,7 @@ static FORCE_INLINE bool cpuPrvMemOp(struct ArmCpu *cpu, void *buf, uint32_t vad
         return true;
     if (cpu->leanExit) return false;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
-            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
-            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+    cpuPrvLogAbort(cpu, write, unsigned(size), vaddr, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
@@ -1667,9 +1680,7 @@ static FORCE_INLINE bool cpuPrvMemOpGeneric(struct ArmCpu *cpu, void *buf, uint3
 #else
     if (cpuPrvMemOpExGeneric<size, write>(cpu, buf, vaddr, priviledged, fsrP)) return true;
 
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n",
-            (int)(write ? 'W' : 'R'), (unsigned)size, (unsigned long)vaddr,
-            cpu->curInstrPC, fsrP ? unsigned(*fsrP) : 0);
+    cpuPrvLogAbort(cpu, write, unsigned(size), vaddr, fsrP ? unsigned(*fsrP) : 0);
 
     gdbStubDebugBreakRequested(cpu->debugStub);
 
@@ -1994,8 +2005,7 @@ bool cpuMemOpGuest(struct ArmCpu *cpu, void *buf, uint32_t vaddr, uint_fast8_t s
 // interpreter's own, then the data abort.
 static void cpuPrvDataAbort(struct ArmCpu *cpu, uint32_t vaddr, unsigned size, bool write, uint_fast8_t fsr) {
 #ifndef __EMSCRIPTEN__
-    fprintf(stderr, "%c of %u bytes to 0x%08lx failed (pc=0x%08x, fsr=%u)!\n", (int)(write ? 'W' : 'R'), size,
-            (unsigned long)vaddr, cpu->curInstrPC, unsigned(fsr));
+    cpuPrvLogAbort(cpu, write, size, vaddr, unsigned(fsr));
     gdbStubDebugBreakRequested(cpu->debugStub);
 #endif
     cpuPrvHandleMemErr(cpu, vaddr, write, false, fsr);
@@ -7542,6 +7552,8 @@ void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *, uint32_t, uint
     cpu->undefinedHook = hook;
     cpu->undefinedHookContext = context;
 }
+
+void cpuSetAbortLogLimit(struct ArmCpu *cpu, bool limited) { cpu->abortLogLimited = limited; }
 
 void cpuSetSlowPath(struct ArmCpu *cpu, uint32_t reason) { cpu->slowPath |= reason; }
 

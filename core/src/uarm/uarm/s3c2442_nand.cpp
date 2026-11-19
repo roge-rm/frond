@@ -90,7 +90,6 @@ const uint8_t* S3cNand::page(uint32_t page) {
 void S3cNand::touch(uint32_t page) {
     if (dirty.size() != blocks) dirty.assign(blocks, false);
     dirty[page / pagesPerBlock] = true;
-    if (store) return;
 }
 
 // Programming can only clear bits, so the page register is ANDed in. The B pointer goes back to A after a

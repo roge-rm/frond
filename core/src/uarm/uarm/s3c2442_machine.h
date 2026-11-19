@@ -123,6 +123,9 @@ class S3c2442Machine {
     // inverter bit; with GPB0 a plain output, 0 or 1000 from its level. -1 while asleep.
     int backlightLevel() const;
 
+    // The reset button (nRESET): every block but the RTC to its reset state, then resetLoader as at power on.
+    void reset();
+
     // Faster speed: the CPU runs num / den times its clock, with the timers, RTC and guest time as at 1 / 1.
     void setClockMultiplier(uint32_t num, uint32_t den) {
         multiplierNum = num ? num : 1;
@@ -196,6 +199,7 @@ class S3c2442Machine {
     uint32_t wakeSources() const;
     void sleepAdvance(uint64_t cpuCycles);
     void wake();
+    void resetBlocks();
     // sfrWrite: the change comes from an SFR write, so a new IRQ waits irqWriteLatency instructions.
     void updateLines(bool sfrWrite = false);
 

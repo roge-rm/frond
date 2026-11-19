@@ -82,6 +82,8 @@ std::unique_ptr<S3c2442Machine> S3c2442Machine::create(const S3c2442Options& opt
     cpuArm920EnableWait(m->cpuCore);
     cpuArm920SetMemoryCheck(m->cpuCore, cacheCheck, m.get());
     cpuSetUndefinedHook(m->cpuCore, undefinedTaken, m.get());
+    // Windows CE's demand paging takes data aborts all the time.
+    cpuSetAbortLogLimit(m->cpuCore, true);
     return m;
 }
 
@@ -494,8 +496,37 @@ void S3c2442Machine::sleepAdvance(uint64_t cpuCycles) {
 void S3c2442Machine::wake() {
     const uint32_t sources = intc.srcpnd & (0xfu | (1u << s3cIrq::rtc));
     lastWake = wakeSources();
-    sleeping = false;
     ++wakes;
+    resetBlocks();
+    gpio.gstatus[2] = 2;  // OFFRST
+    for (unsigned n = 0; n < 32; ++n)
+        if (sources & (1u << n)) intc.pulse(n);
+    const uint32_t live = gpio.eintpend & ~gpio.eintmask;
+    intc.level(s3cIrq::eint4to7, live & 0xf0);
+    intc.level(s3cIrq::eint8to23, live & 0xffff00);
+    if (resetLoader) resetLoader();
+    else start(0);
+    updateLines();
+}
+
+// nRESET (the reset button): as power on, but the RTC keeps its time and the board's pin levels stay.
+void S3c2442Machine::reset() {
+    resetBlocks();
+    uint32_t inputs[S3cGpio::ports];
+    std::memcpy(inputs, gpio.input, sizeof inputs);
+    gpio.reset(options.chipId, options.resetCause);
+    std::memcpy(gpio.input, inputs, sizeof inputs);
+    stopped = {};
+    undefinedPending = false;
+    if (resetLoader) resetLoader();
+    else start(0);
+    updateLines();
+}
+
+// Every block but the RTC and GPIO back to its reset state, with the CPU's interrupt lines down and its
+// caches and translated code dropped. ADC inputs (the board's) and the stylus stay.
+void S3c2442Machine::resetBlocks() {
+    sleeping = false;
     cpuArm920LeanReset(cpuCore);
     if (fastOn) {
         // The loader writes SDRAM behind the CPU's back, so translated code goes.
@@ -510,7 +541,7 @@ void S3c2442Machine::wake() {
     watchdog.reset();
     sdi.reset();
     usbDevice.reset();
-    uint16_t inputs[8];  // the board's inputs stay, as does the stylus
+    uint16_t inputs[8];
     std::memcpy(inputs, adc.channel, sizeof inputs);
     adc.reset();
     std::memcpy(adc.channel, inputs, sizeof inputs);
@@ -520,20 +551,12 @@ void S3c2442Machine::wake() {
     for (auto& u : uarts) u.reset();
     lcd.reset();
     nand.reset();
-    gpio.gstatus[2] = 2;  // OFFRST
-    for (unsigned n = 0; n < 32; ++n)
-        if (sources & (1u << n)) intc.pulse(n);
-    const uint32_t live = gpio.eintpend & ~gpio.eintmask;
-    intc.level(s3cIrq::eint4to7, live & 0xf0);
-    intc.level(s3cIrq::eint8to23, live & 0xffff00);
+    nand.dropCache();
     irqHeld = false;
     batchAdvanced = 0;
     if (irqLine) cpuIrq(cpuCore, false, false);
     if (fiqLine) cpuIrq(cpuCore, true, false);
     irqLine = fiqLine = false;
-    if (resetLoader) resetLoader();
-    else start(0);
-    updateLines();
 }
 
 int S3c2442Machine::backlightLevel() const {

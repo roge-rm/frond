@@ -81,6 +81,26 @@ class FirmwareInputTest : public QObject {
         // No guest calls yet, so no install, application list, hard reset or engine choice.
         QVERIFY(!frondFirmware::guestServices(zodiac) && frondFirmware::guestServices(Device::tx) && !frondFirmware::runs68k(zodiac));
     }
+    // The rx1950 by CEBL.nbf's size, then both files by SHA-256; these are the right sizes with the wrong bytes.
+    void rx1950() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const auto ceblPath = dir.filePath("CEBL.nbf"), ceosPath = dir.filePath("CEOS.nbf");
+        QFile cebl(ceblPath), ceos(ceosPath);
+        QVERIFY(cebl.open(QIODevice::WriteOnly) && cebl.resize(qint64(rx1950Cebl5.bytes)));
+        QVERIFY(ceos.open(QIODevice::WriteOnly) && ceos.resize(qint64(rx1950Ceos5.bytes)));
+        cebl.close(); ceos.close();
+        const auto rx1950 = frondFirmware::deviceFromId("hp-ipaq-rx1950");
+        QVERIFY(rx1950 != Device::automatic);
+        QCOMPARE(frondFirmware::detectDevice(ceblPath), rx1950);
+        QCOMPARE(frondFirmware::validateFiles(Device::automatic, ceblPath, {}),
+                 QStringLiteral("Choose CEOS.nbf as the NAND image for the HP iPAQ rx1950."));
+        QCOMPARE(frondFirmware::validateFiles(rx1950, ceblPath, ceosPath),
+                 QStringLiteral("The NOR image must be CEBL.nbf from HP's WM5 ROM 1.01.00 ENG."));
+        QVERIFY(!frondFirmware::firmwareFileMatches(ceosPath, rx1950Ceos5));
+        QVERIFY(!frondFirmware::firmwareFileMatches(dir.filePath("missing"), rx1950Cebl5));
+        QVERIFY(!frondFirmware::guestServices(rx1950) && frondFirmware::fastByDefault(rx1950));
+    }
     void txFiles() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());

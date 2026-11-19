@@ -16,14 +16,15 @@ enum class DisplayMode {
     mode_480x320 = 10, mode_480x640 = 11
 };
 
-enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k, zodiacNor };
+enum class DeviceCohort5 { txNand, e2Nand, patchedE2, paravirtual, zire72Nor, tg50Nor, reserved, ez68k, vz68k, zodiacNor, rx1950Nand };
 enum class DeviceSupport5 { txDesktop, e2Desktop, zire72Desktop, inheritedUnverified, staged, reserved, experimentalDesktop };
 // How a device is told from its firmware: the card header's company and HAL IDs, the NOR size, or a
 // big-endian 68k card header (deviceProfileInspect68kRom5).
 enum class DeviceDetect5 { cardHeader, norSize, none, romHeader68k };
 // Which board model runs it. ez328 and vz328 run in frond-68k, the others in frond. imx1Zodiac is the
-// guarded i.MX1 machine behind SocIMX1.
-enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328, imx1Zodiac };
+// guarded i.MX1 machine behind SocIMX1, s3c2442Rx1950 the S3C2442 machine behind SocS3C2442.
+enum class DeviceBoard5 { pxa255E2, pxa270Tx, pxa270Zire72, paravirtual, none, pxa250SonyTG50, ez328, vz328, imx1Zodiac,
+                          s3c2442Rx1950 };
 // Which button bar and silkscreen art a device gets (native/DeviceControls.h draws them).
 enum class DeviceArt { none, tx, e2, zire72, m515, iiix, tg50, zodiac, hpIpaq210, hpIpaqRx1950, hpIpaqH4350,
                        m125, iiie, iiixe, v, vx, m100, m105, m500, c500, iiic, m505, m130, m520, t415 };
@@ -344,13 +345,34 @@ inline constexpr DeviceProfile5 deviceProfiles5[] = {
     {deviceTypeInvalid, "hp-ipaq-210", "HP iPAQ 210", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaq210, {},
      0, 0, 0, 0, DisplayMode::mode_480x640, 0, false},
-    {deviceTypeInvalid, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::reserved, DeviceSupport5::reserved,
-     DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqRx1950, {},
-     0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
+    // HP iPAQ rx1950 (Windows Mobile 5): a Samsung S3C2442 (ARM920T) at 300 MHz, 32 MB of SDRAM, 64 MB of NAND,
+    // a 240x320 colour panel, an SD slot, 802.11b Wi-Fi, IrDA, USB (device), serial on the connector and
+    // sound with a microphone. Sound, SD, Wi-Fi, IrDA, USB and serial are greyed out until done. The NOR is
+    // HP's bootloader (CEBL.nbf) and the NAND the flash made from it and CEOS.nbf at import.
+    {deviceTypeRx1950, "hp-ipaq-rx1950", "HP iPAQ rx1950", DeviceCohort5::rx1950Nand, DeviceSupport5::experimentalDesktop,
+     DeviceDetect5::norSize, 0, 0, DeviceBoard5::s3c2442Rx1950, DeviceArt::hpIpaqRx1950, {},
+     264794, 69206016, 32u << 20, 32u << 20, DisplayMode::mode_240x320, 1u << 4, true,
+     DeviceNorLayout5::any, 0, 0, false, 0, 0,
+     {true, "", 240, 320, 0, 89, "Calendar|Contacts|Inbox|Wireless",
+      "app1|app2|app3|app4|up|down|left|right|select|power", -1, -1, -1, -1, false, false},
+     0, 0, 296352000},
     {deviceTypeInvalid, "hp-ipaq-h4350", "HP iPAQ h4350", DeviceCohort5::reserved, DeviceSupport5::reserved,
      DeviceDetect5::none, 0, 0, DeviceBoard5::none, DeviceArt::hpIpaqH4350, {},
      0, 0, 0, 0, DisplayMode::mode_240x320, 0, false},
 };
+
+// The HP iPAQ rx1950's firmware Frond runs: HP's WM5 ROM (OS 5.1.1702, ROM 1.01.00 ENG) as the CEBL.nbf
+// bootloader, the NOR, and CEOS.nbf, the NAND at import. The desktop checks the SHA-256, the core the CRC-32.
+struct DeviceFirmwareFile5 {
+    const char* name;
+    size_t bytes;
+    const char* sha256;  // lower case hex
+    uint32_t crc32;
+};
+inline constexpr DeviceFirmwareFile5 rx1950Cebl5{
+    "CEBL.nbf", 264794, "33807007a49ab40e8190f2fdb20080d1d7efe6d3a56a6b551422373271a94b3f", 0x7cd1403a};
+inline constexpr DeviceFirmwareFile5 rx1950Ceos5{
+    "CEOS.nbf", 67095130, "764807c7aacd780876462b62a9ca2555226d2f11acccc69e0785fc159be20f6e", 0x6b53ffbe};
 
 // Firmware variants keep their board's device and session identity.
 struct DeviceFirmwareVariant5 {
@@ -653,11 +675,13 @@ inline DeviceArt deviceArtFor5(int32_t deviceType) {
     return profile ? profile->art : DeviceArt::none;
 }
 
-// Whether frond (the ARM runner) can start it. Native qualification can precede desktop/Android
-// acceptance. Art reservations and inventory-only profiles have no board and cannot enter a runner.
+// Whether frond (the ARM runner) can start it with the Palm OS tools (setup recipes, app runner, benchmark
+// replay). Native qualification can precede desktop/Android acceptance. Art reservations and inventory-only
+// profiles have no board and cannot enter a runner. The rx1950 runs in frond but isn't Palm OS.
 inline bool deviceProfileRunnerEligible5(int32_t deviceType) {
     const auto* profile = deviceProfile5(deviceType);
-    return profile && profile->board != DeviceBoard5::none && profile->board != DeviceBoard5::ez328 && profile->board != DeviceBoard5::vz328;
+    return profile && profile->board != DeviceBoard5::none && profile->board != DeviceBoard5::ez328 &&
+           profile->board != DeviceBoard5::vz328 && profile->board != DeviceBoard5::s3c2442Rx1950;
 }
 
 // Devices frond-68k runs instead of frond.

@@ -23,6 +23,7 @@ static void danaWirelessInventory();
 static void ezProfiles();
 static void vzProfiles();
 static void t415();
+static void rx1950();
 // The VZ Palms: the m125, m500 and WorkPad c500, on the Dana's board.
 static bool vzPalm(const DeviceProfile5& p) { return p.board == DeviceBoard5::vz328 && !deviceTypeIsDana5(p.deviceType); }
 static void originalHz();
@@ -34,7 +35,7 @@ int main() {
     std::set<std::string> names;
     std::set<int> types;
     unsigned desktopCount = 0;
-    const std::vector<std::string> reserved{"hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"};
+    const std::vector<std::string> reserved{"hp-ipaq-210", "hp-ipaq-h4350"};
     for (const auto& p : deviceProfiles5) {
         // Names are unique, short and plain; they go into session headers.
         assert(names.insert(p.name).second && std::strlen(p.name) <= deviceNameMax5);
@@ -54,7 +55,7 @@ int main() {
         assert(deviceProfileSupportsDesktop5(p.deviceType) ==
                (p.deviceType == deviceTypeTX || p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeZire72 ||
                 p.deviceType == deviceTypeTG50 || p.deviceType == deviceTypeZodiac2 || p.board == DeviceBoard5::ez328 ||
-                p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328));
+                p.deviceType == deviceTypeFrankenE2 || p.board == DeviceBoard5::vz328 || p.deviceType == deviceTypeRx1950));
         assert((p.deviceType == deviceTypeZire72) == (p.board == DeviceBoard5::pxa270Zire72));
         assert(deviceConfigurationGetNandSize(p.deviceType) == p.nandSize);
         assert(deviceConfigurationDefaultDisplayMode(p.deviceType) == p.defaultDisplay);
@@ -67,6 +68,7 @@ int main() {
                 : p.deviceType == deviceTypeZodiac2 ? ram == (128u << 20)
                 : p.deviceType == deviceTypeDana ? ram == (8u << 20)
                 : p.deviceType == deviceTypeDanaWireless ? ram == (16u << 20)
+                : p.deviceType == deviceTypeRx1950 ? ram == (32u << 20)
                 : ram == (32u << 20) || (p.deviceType != deviceTypeTX && p.deviceType != deviceTypeZire72 && ram == (16u << 20));
             assert(deviceConfigurationSupportsRamSize(p.deviceType, ram) == expected);
         }
@@ -112,7 +114,7 @@ int main() {
         nor.resize(at + 12);
         assert(!inspect().profile && !inspect().hasHeader);
     }
-    assert(desktopCount == 24 && names.size() == 28 && types.size() == 25);
+    assert(desktopCount == 25 && names.size() == 28 && types.size() == 26);
     assert(std::string(deviceName5(deviceTypeTX)) == "palm-tx" && std::string(deviceName5(deviceTypeE2)) == "palm-e2");
     assert(deviceProfileNamed5("palm-tx")->capabilities.serial && deviceProfileNamed5("palm-e2")->capabilities.serial);
     // Unknown names are refused, including numbers, old ids, case and prefixes.
@@ -120,7 +122,7 @@ int main() {
         assert(!deviceProfileNamed5(name) && deviceTypeNamed5(name) == deviceTypeInvalid);
     }
     assert(!deviceProfileNamed5(nullptr) && !deviceName5(deviceTypeInvalid) && !deviceName5(99));
-    for (int id : {INT_MIN, -1, 25, 99, INT_MAX}) {
+    for (int id : {INT_MIN, -1, 26, 99, INT_MAX}) {
         assert(!deviceProfile5(id) && !deviceProfileSupportsDesktop5(id));
         assert(!deviceProfileSupportsRam5(id, 32u << 20));
         assert(!deviceProfileSupportsDisplay5(id, 6));
@@ -420,11 +422,10 @@ int main() {
             assert(deviceProfileRunnerEligible5(type));
         for (const char* name : {"palm-iiix", "palm-m515", "palm-iiie", "palm-iiixe", "palm-v", "palm-vx", "palm-m100",
                                   "palm-m105", "palm-m125", "palm-m500", "ibm-workpad-c500", "palm-iiic", "palm-m505",
-                                  "palm-m130", "palm-m520", "sony-clie-t415", "hp-ipaq-210", "hp-ipaq-rx1950", "hp-ipaq-h4350"})
+                                  "palm-m130", "palm-m520", "sony-clie-t415", "hp-ipaq-210", "hp-ipaq-h4350"})
             assert(!deviceProfileRunnerEligible5(deviceProfileNamed5(name)->deviceType));
-        // Windows Mobile iPAQs are reserved names with art and their screen's display mode.
+        // The other Windows Mobile iPAQs are reserved names with art and their screen's display mode.
         const std::pair<const char*, DisplayMode> ipaqs[] = {{"hp-ipaq-210", DisplayMode::mode_480x640},
-                                                             {"hp-ipaq-rx1950", DisplayMode::mode_240x320},
                                                              {"hp-ipaq-h4350", DisplayMode::mode_240x320}};
         for (auto [name, mode] : ipaqs) {
             const auto* p = deviceProfileNamed5(name);
@@ -438,6 +439,7 @@ int main() {
 
     palmIIIx();
     ezProfiles();
+    rx1950();
     vzProfiles();
     t415();
     danaInventory();
@@ -559,12 +561,13 @@ static Device68kRomInfo5 inspect68k(const std::vector<uint8_t>& rom) {
 }
 
 // Original's fallback clock before the guest sets one: the profile's CPU clock (312 MHz PXA270, 200 MHz
-// PXA25x), 100 MHz for the rest (the 68k devices run their own clock).
+// PXA25x, 296.35 MHz S3C2442), 100 MHz for the rest (the 68k devices run their own clock).
 static void originalHz() {
     for (const auto& p : deviceProfiles5) {
         const bool pxa270 = p.deviceType == deviceTypeTX || p.deviceType == deviceTypeZire72;
         const bool pxa25x = p.deviceType == deviceTypeE2 || p.deviceType == deviceTypeFrankenE2 || p.deviceType == deviceTypeTG50;
-        assert(deviceProfileOriginalHz5(p.deviceType) == (pxa270 ? 312000000u : pxa25x ? 200000000u : 100000000u));
+        assert(deviceProfileOriginalHz5(p.deviceType) ==
+               (pxa270 ? 312000000u : pxa25x ? 200000000u : p.deviceType == deviceTypeRx1950 ? 296352000u : 100000000u));
     }
     assert(deviceProfileOriginalHz5(deviceTypeInvalid) == 100000000 && deviceProfileOriginalHz5(deviceTypeIIIx) == 100000000);
 }
@@ -989,6 +992,31 @@ static void vzProfiles() {
     for (const auto& p : deviceProfiles5) detecting += p.detect == DeviceDetect5::romHeader68k && vzPalm(p);
     assert(detecting == 7);
     std::cout << "PASS: VZ Palm profiles, ROM header detection, pairing and card slots\n";
+}
+
+// HP iPAQ rx1950: the S3C2442 board, told by its bootloader's size, CEOS.nbf made into the 64 MB NAND, 32 MB of
+// SDRAM, 240x320 and every peripheral greyed out for now.
+static void rx1950() {
+    const auto* p = deviceProfileNamed5("hp-ipaq-rx1950");
+    assert(p && p->deviceType == deviceTypeRx1950 && int(deviceTypeRx1950) == 25 && deviceProfile5(25) == p);
+    assert(deviceTypeNamed5("hp-ipaq-rx1950") == deviceTypeRx1950 && p->art == DeviceArt::hpIpaqRx1950);
+    assert(p->board == DeviceBoard5::s3c2442Rx1950 && p->cohort == DeviceCohort5::rx1950Nand);
+    assert(p->support == DeviceSupport5::experimentalDesktop && !deviceProfileRunnerEligible5(p->deviceType));
+    assert(!deviceProfileRuns68k5(p->deviceType));
+    assert(p->detect == DeviceDetect5::norSize && p->norSize == rx1950Cebl5.bytes && p->nandSize == 69206016);
+    assert(p->requiresExplicitNand && p->minRam == 32u << 20 && p->maxRam == p->minRam && p->cpuHz == 296352000);
+    assert(p->defaultDisplay == DisplayMode::mode_240x320 && p->displayModes == (1u << 4));
+    assert(p->frontend.width == 240 && p->frontend.height == 320 && !p->frontend.silkscreenHeight &&
+           p->frontend.stripHeight == 89 && !p->frontend.sdSlot && p->frontend.available);
+    const auto& c = p->capabilities;
+    assert(!c.network && !c.keyboard && !c.serial && !c.usb && !c.fastAudio && !c.infrared && !c.bluetooth && !c.sound &&
+           !c.microphone && !c.builtInWifi && !c.usbWifi);
+    assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes, p->nandSize, false, true) ==
+           DeviceFirmwareError5::none);
+    assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes, p->nandSize, false, false) ==
+           DeviceFirmwareError5::explicitNand);
+    assert(deviceProfileValidateFirmware5(p->deviceType, rx1950Cebl5.bytes + 1, p->nandSize, false, true) ==
+           DeviceFirmwareError5::norSize);
 }
 
 // Sony CLIE T415: the VZ board with Sony's IDs, staged (frond-68k runs it, the frontends don't list it yet),

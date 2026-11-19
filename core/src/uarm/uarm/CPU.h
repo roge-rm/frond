@@ -253,6 +253,9 @@ uint64_t cpuUndefinedTaken(const struct ArmCpu *cpu, uint32_t *pc, uint32_t *ins
 // Calls hook with the pc and instruction of every undefined instruction exception as it's taken
 // (instruction 0 for a data cache guard trap). Null turns it off.
 void cpuSetUndefinedHook(struct ArmCpu *cpu, void (*hook)(void *context, uint32_t pc, uint32_t instr), void *context);
+// For guests that take data aborts as part of normal running (Windows CE's demand paging): log the first 16
+// failed data accesses and then every power of two.
+void cpuSetAbortLogLimit(struct ArmCpu *cpu, bool limited);
 
 uint16_t cpuGetCPAR(struct ArmCpu *cpu);
 void cpuSetCPAR(struct ArmCpu *cpu, uint16_t cpar);

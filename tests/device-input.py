@@ -126,14 +126,14 @@ class DeviceInputTest(unittest.TestCase):
                           zire['display_mode_mask']), (32 << 20, 32 << 20, 5, 1 << 5))
         self.assertEqual({p['cohort'] for p in data['profiles']},
                          {'tx-nor-nand', 'e2-nor-nand', 'patched-e2', 'paravirtual', 'zire72-nor', 'tg50-nor', 'reserved',
-                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor'})
+                          'ez68k-rom', 'vz68k-rom', 'zodiac-nor', 'rx1950-nand'})
         self.assertEqual(data['profiles'][2]['status'], 'experimental-desktop')
         self.assertEqual(data['profiles'][3]['status'], 'inherited-unverified')
         iiix = data['profiles'][6]
         self.assertEqual((iiix['name'], iiix['status'], iiix['runner_eligible'], iiix['runs_68k'], iiix['available']),
                          ('palm-iiix', 'experimental-desktop', False, True, True))
         self.assertEqual(data['profiles'][24]['status'], 'experimental-desktop')
-        self.assertTrue(all(p['status'] == 'reserved' for p in data['profiles'][25:]))
+        self.assertEqual([p['status'] for p in data['profiles'][25:]], ['reserved', 'experimental-desktop', 'reserved'])
         colour = {p['name'] for p in data['profiles'] if p['colour_lcd']}
         self.assertEqual(colour, {'palm-iiic', 'palm-m505', 'palm-m515', 'palm-m130', 'palm-m520'})
 
@@ -224,7 +224,7 @@ class DeviceInputTest(unittest.TestCase):
             with self.subTest(hal=hal):
                 rom = self.root / 'inherited'
                 rom.write_bytes(header(hal))
-                self.rejected([rom, '--desktop-socket', self.root / 'unused'], 'Palm TX, Tungsten E2 and Zire 72 only')
+                self.rejected([rom, '--desktop-socket', self.root / 'unused'], "doesn't run in the desktop app yet")
 
     def test_e2_replay_bounds_and_physical_app_buttons(self):
         replay = self.root / 'e2.replay'

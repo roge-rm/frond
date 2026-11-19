@@ -8,7 +8,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 # Devices the desktop runs that the Android app has no controls for yet. They stay out of its list.
-DESKTOP_ONLY = set()
+DESKTOP_ONLY = {'hp-ipaq-rx1950'}
 # Devices shipped marked Experimental in the Android device list (the desktop picker checks the same id).
 EXPERIMENTAL = {'tapwave-zodiac-2'}
 

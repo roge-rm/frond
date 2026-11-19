@@ -67,6 +67,8 @@ void frondGuestAttentionChanged(bool led, bool vibrate);
 #include "soc_PXA.h"
 #include "soc_pv.h"
 #include "soc_IMX1.h"
+#include "soc_S3C2442.h"
+#include "rx1950_nand_image.h"
 #include "CPU.h"
 #include "MachineSession.h"
 #include "MsProCards.h"
@@ -333,7 +335,7 @@ bool gFastEngineMissing = false;
         sdSwapped = contents.sdSwapped;
         msSwapped = contents.msSwapped;
         romInfo = RomInfo5(nor.data, nor.size);
-        if (sessionDevice != deviceTypeTX && romInfo.GetDeviceType() != sessionDevice) {
+        if (profile->detect != DeviceDetect5::norSize && romInfo.GetDeviceType() != sessionDevice) {
             cerr << "session device profile does not match ROM" << endl;
             return false;
         }
@@ -541,6 +543,9 @@ bool gFastEngineMissing = false;
             return false;
         }
         const bool isTx = deviceType == DeviceType5::deviceTypeTX;
+        // Devices told by NOR size alone have no card header for RomInfo5.
+        const bool sizeDetected = deviceProfile5(deviceType) && deviceProfile5(deviceType)->detect == DeviceDetect5::norSize;
+        const bool rx1950 = deviceProfile5(deviceType) && deviceProfile5(deviceType)->board == DeviceBoard5::s3c2442Rx1950;
         // The desktop passes saved serial settings; unsupported devices skip them.
         if (options.desktopSocket && !isTx && !deviceProfileIsE2Board5(deviceType) && deviceType != deviceTypeTG50) {
             serialConfig = HostSerial::Config{};
@@ -563,12 +568,35 @@ bool gFastEngineMissing = false;
                 cerr << "TX requires a 16 MiB NOR image and an explicit --nand image" << endl;
                 return false;
             }
-        } else {
+        } else if (!rx1950) {
             cerr << romInfo;
         }
 
-        if (!isTx && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
+        if (!sizeDetected && (!romInfo.IsValid() || deviceType == DeviceType5::deviceTypeInvalid))
             return false;
+
+        // A new rx1950 takes HP's CEBL.nbf as its NOR and CEOS.nbf as --nand, made into the 64 MB flash here.
+        if (rx1950 && sessionDevice == deviceTypeInvalid) {
+            if (!rx1950IsCebl(static_cast<const uint8_t*>(nor.data), nor.size)) {
+                cerr << "HP iPAQ rx1950: the NOR must be HP's CEBL.nbf from the WM5 ROM 1.01.00 ENG" << endl;
+                return false;
+            }
+            if (!options.nand || !rx1950IsCeos(static_cast<const uint8_t*>(nand.data), nand.size)) {
+                cerr << "HP iPAQ rx1950: --nand must be HP's CEOS.nbf from the WM5 ROM 1.01.00 ENG" << endl;
+                return false;
+            }
+            vector<uint8_t> flash;
+            string why;
+            if (!rx1950NandImage(static_cast<const uint8_t*>(nor.data) + 0xa5a, 256 * 1024,
+                                 static_cast<const uint8_t*>(nand.data), nand.size, flash, why)) {
+                cerr << "HP iPAQ rx1950: " << why << endl;
+                return false;
+            }
+            delete[] static_cast<uint8_t*>(nand.data);
+            nand.data = new uint8_t[flash.size()];
+            nand.size = flash.size();
+            memcpy(nand.data, flash.data(), flash.size());
+        }
 
         if (options.ramSize) {
             if (ramSize == 0) {
@@ -589,7 +617,8 @@ bool gFastEngineMissing = false;
 
         if (ramSize == 0) ramSize = isTx ? (32ul << 20) : romInfo.GetRecommendedRamSize();
         // The Zodiac 2 has one RAM size, which its ROM header doesn't give.
-        if (!options.ramSize && sessionDevice == deviceTypeInvalid && deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac)
+        if (!options.ramSize && sessionDevice == deviceTypeInvalid &&
+            (deviceProfile5(deviceType)->board == DeviceBoard5::imx1Zodiac || rx1950))
             ramSize = deviceProfile5(deviceType)->minRam;
 
         if (!deviceConfigurationSupportsRamSize(deviceType, ramSize)) {
@@ -656,7 +685,7 @@ bool gFastEngineMissing = false;
         const int gdbPort = options.gdbPort ? static_cast<int>(*options.gdbPort) : -1;
 
         if (options.desktopSocket && !deviceProfileSupportsDesktop5(deviceType)) {
-            cerr << "desktop sessions currently support Palm TX, Tungsten E2 and Zire 72 only" << endl;
+            cerr << deviceProfile5(deviceType)->displayName << " doesn't run in the desktop app yet" << endl;
             return false;
         }
         DisplayConfiguration displayConfiguration =
@@ -714,6 +743,22 @@ bool gFastEngineMissing = false;
 #endif
             if (options.fastEngine && !static_cast<SocIMX1*>(soc)->SetFastEngine(true))
                 cerr << "Tapwave Zodiac 2: the Fast engine is not available here, running Exact" << endl;
+        } else if (board == DeviceBoard5::s3c2442Rx1950) {
+            if (options.gdbPort || options.experimentalFastAudio || options.lowLatencyQueue) {
+                cerr << "--gdb and the low-latency audio options are not available on the rx1950" << endl;
+                return false;
+            }
+            // Its machine sets the engine itself, below.
+            cpuSetFastEngine(false);
+            string why;
+            soc = SocS3C2442::Create(static_cast<const uint8_t*>(nor.data), nor.size,
+                                     static_cast<uint8_t*>(nand.data), nand.size, why);
+            if (!soc) {
+                cerr << "HP iPAQ rx1950: " << why << endl;
+                return false;
+            }
+            if (options.fastEngine && !static_cast<SocS3C2442*>(soc)->SetFastEngine(true))
+                cerr << "HP iPAQ rx1950: the Fast engine is not available here, running Exact" << endl;
         } else {
             if (gFastEngineMissing) cerr << "the Fast engine isn't built in here, running Exact" << endl;
             soc = (board == DeviceBoard5::paravirtual)
