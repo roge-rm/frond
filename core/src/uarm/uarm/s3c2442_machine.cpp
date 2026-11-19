@@ -122,6 +122,7 @@ S3c2442Machine::S3c2442Machine(const S3c2442Options& options) : clock(options.cr
         return wifi.airReceive(f, n, ch, now);
     };
     accessPoint.ethernetOut = [this](const uint8_t* f, size_t n) { if (wifiEthernetOut) wifiEthernetOut(f, n); };
+    if (const char* v = std::getenv("FROND_DELAY_SKIP")) delaySkip = std::strcmp(v, "0") != 0;
     // FROND_ACX_TRACE=1 traces the chip's firmware side, 2 every register access too.
     if (const char* t = std::getenv("FROND_ACX_TRACE")) {
         wifiBusTrace = std::atoi(t) >= 2;
@@ -1126,6 +1127,13 @@ void S3c2442Machine::runFast(uint64_t n) {
                 left -= std::min<uint64_t>(left, instructions);
                 if (stop == arm920JitBudget || stop == arm920JitHalt) continue;
             }
+            // Stopped at a WTCNT read: a delay loop's passes go at once where they can.
+            if (stop == arm920JitExit && left > slack) {
+                if (const uint64_t skipped = skipDelay(left)) {
+                    left -= skipped;
+                    continue;
+                }
+            }
             // Code not compiled yet, a run that keeps stopping straight away or one stopped at a read the lean
             // path takes (WTCNT) goes to the lean path a while.
             leanCount = stop == arm920JitCold || instructions < 4 ? 32 : stop == arm920JitExit ? 16 : 1;
@@ -1155,6 +1163,89 @@ void S3c2442Machine::runFast(uint64_t n) {
         left -= std::min<uint64_t>(left, ran ? ran : 1);
         if (sfrAccessed) break;
     }
+}
+
+// Fast: the WTCNT delay loops the rx1950's software busy-waits in. Each pass reads WTCNT (counting down) and
+// compares; the branch back is taken while the wait isn't over:
+// - eboot at 8c09b9e4 and 8c09ba58: ldr r3, [r2, #8]; cmp r3, r4; bhs head (until WTCNT is below r4).
+// - wavedev.dll at 017979c0, 1 ms on every WAV_IOControl: ldr r3, [r6, #8]; sub r3, r5, r3; mov r3, r3, lsl #16;
+//   cmp r0, r3, lsr #16; bhs head (until the 16-bit start r5 - WTCNT is above r0).
+// At the load, with its base on WTCNT, the passes that stay in the loop within left go at once as the lean path
+// would run them: one cycle an instruction, each read seeing the count at its own instruction, and the
+// registers and flags as the last of them leaves them. Passes from the first WTCNT reload on aren't taken, so
+// the passes that stay are a run from the first. Returns the instructions passed.
+uint64_t S3c2442Machine::skipDelay(uint64_t left) {
+    struct Loop {
+        uint32_t code[5];
+        unsigned count, base;
+    };
+    static const Loop loops[] = {
+        {{0xe5923008, 0xe1530004, 0x2afffffc}, 3, 2},
+        {{0xe5963008, 0xe0453003, 0xe1a03803, 0xe1500823, 0x2afffffa}, 5, 6},
+    };
+    uint32_t* r = cpuGetRegisters(cpuCore);
+    if (!delaySkip || cpuIsThumb(cpuCore) || !cpuArm920JitCanRun(cpuCore)) return 0;
+    const uint32_t head = r[15];
+    uint32_t word, pa;
+    if (!cpuArm920PeekWord(cpuCore, head, &word, &pa)) return 0;
+    const Loop* l = nullptr;
+    for (const Loop& c : loops)
+        if (word == c.code[0]) l = &c;
+    if (!l) return 0;
+    for (unsigned i = 1; i < l->count; ++i)
+        if (!cpuArm920PeekWord(cpuCore, head + 4 * i, &word, &pa) || word != l->code[i]) return 0;
+    const uint32_t va = r[l->base] + 8;
+    if ((va & 3) || !cpuArm920PeekWord(cpuCore, va, nullptr, &pa) || pa != 0x53000008) return 0;
+    const uint64_t hz = cpuHz(), pclk = clock.pclk(), pass = l->count, most = left / pass;
+    if (!hz || !pclk || most < 2) return 0;
+    const bool eboot = l->count == 3;
+    // The count pass k reads, k passes after this one, as advance() would bring the watchdog there.
+    auto countAt = [&](uint64_t k, uint32_t& v) {
+        return watchdog.countAfter(uint64_t((__uint128_t(k * pass) * pclk + pclkRest) / hz), v);
+    };
+    uint32_t first;
+    if (!countAt(0, first)) return 0;
+    const uint32_t start = (r[5] - first) & 0xffff;
+    // Whether pass k stays in the loop; false too from a reload or a 16-bit wrap of start - WTCNT on.
+    auto stays = [&](uint64_t k) {
+        uint32_t v;
+        if (!countAt(k, v)) return false;
+        if (eboot) return v >= r[4];
+        return start + (first - v) <= 0xffff && r[0] >= ((r[5] - v) & 0xffff);
+    };
+    if (!stays(0)) return 0;
+    // The first pass that leaves, or most when they all stay.
+    uint64_t lo = 1, hi = most;
+    while (lo < hi) {
+        const uint64_t mid = lo + (hi - lo) / 2;
+        if (stays(mid)) lo = mid + 1;
+        else hi = mid;
+    }
+    const uint64_t passes = lo;
+    uint32_t v = 0;
+    countAt(passes - 1, v);
+    uint32_t a, b;
+    if (eboot) {
+        r[3] = v;
+        a = v;
+        b = r[4];
+    } else {
+        r[3] = (r[5] - v) << 16;
+        a = r[0];
+        b = r[3] >> 16;
+    }
+    const uint32_t diff = a - b;
+    const uint32_t nzcv = (diff & 0x80000000u) | (diff ? 0 : 0x40000000u) | (a >= b ? 0x20000000u : 0) |
+                          ((((a ^ b) & (a ^ diff)) >> 31) << 28);
+    cpuSetReg(cpuCore, ARM_REG_NUM_CPSR, (cpuGetRegExternal(cpuCore, ARM_REG_NUM_CPSR) & 0x0fffffffu) | nzcv);
+    // The last instruction run was the branch back.
+    cpuSetCurInstrPC(cpuCore, head + 4 * (l->count - 1));
+    const uint64_t n = passes * pass;
+    retiredCount += n;
+    ++delaySkipCount;
+    delaySkipRetiredCount += n;
+    advance(n);
+    return n;
 }
 
 bool S3c2442Machine::setFastEngine(bool fast) {

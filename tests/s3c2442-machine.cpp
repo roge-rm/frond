@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <iterator>
@@ -603,7 +604,81 @@ static void uartTests() {
     assert((m->intc.srcpnd & (1u << s3cIrq::uart2)) && m->uarts[2].rx.size() == 1);
 }
 
+// Fast passes the WTCNT delay loops of eboot and wavedev.dll at once (skipDelay) with the same registers, flags,
+// instructions and time as Exact at every stop. The same loops with cmp written as subs (same flags, so the same
+// waits) aren't the code it knows, so nothing is skipped there.
+static void delaySkipTests() {
+    // mov r2, #0x53000000; mov r6, r2
+    // ldr r4, [r2, #8]; sub r4, r4, #200
+    // eboot's: ldr r3, [r2, #8]; cmp r3, r4; bhs back
+    // add r7, r7, #1; ldr r5, [r6, #8]; mov r0, #0x40
+    // wavedev's: ldr r3, [r6, #8]; sub r3, r5, r3; mov r3, r3, lsl #16; cmp r0, r3, lsr #16; bhs back
+    // add r8, r8, #1; b to the first ldr
+    const std::vector<uint32_t> base{0xe3a02453, 0xe1a06002, 0xe5924008, 0xe24440c8, 0xe5923008, 0xe1530004, 0x2afffffc,
+                                  0xe2877001, 0xe5965008, 0xe3a00040, 0xe5963008, 0xe0453003, 0xe1a03803, 0xe1500823,
+                                  0x2afffffa, 0xe2888001, 0xeafffff0};
+    // Watchdog setups: WTCON, WTDAT and WTCNT start, whether its interrupt is unmasked (the CPU still has IRQs
+    // masked), and the wavedev loop's variant: wrap has r0 all ones and r5 0x100 up, so the loop stays until the
+    // 16-bit start - WTCNT wraps.
+    struct Setup {
+        uint32_t wtcon, wtcnt;
+        bool irq, wrap;
+    };
+    const Setup setups[] = {
+        {0x0220, 0xffff, false, false},  // no interrupt or reset
+        {0x0224, 0x1000, true, false},   // interrupt: it limits each span
+        {0x0221, 0x3000, false, false},  // reset: the run stops at the first run out
+        {0x0225, 0x0900, true, false},   // both
+        {0x0220, 0xffff, false, true},
+        {0x0224, 0xffff, true, true},
+    };
+    for (const Setup& setup : setups)
+    for (const bool known : {true, false}) {
+        std::vector<uint32_t> program = base;
+        if (setup.wrap) {
+            program[9] = 0xe3e00000;  // mvn r0, #0
+            program.insert(program.begin() + 10, 0xe2855c01);  // add r5, r5, #0x100
+            program.back() = 0xeaffffef;  // b to the first ldr
+        }
+        if (!known) {
+            program[5] = 0xe0539004;   // subs r9, r3, r4
+            program[program.size() - 4] = 0xe0509823;  // subs r9, r0, r3, lsr #16
+        }
+        auto exact = make(program), fast = make(program);
+        if (!fast->setFastEngine(true)) return;
+        for (auto* m : {exact.get(), fast.get()}) {
+            m->watchdog.wtdat = m->watchdog.wtcnt = setup.wtcnt;
+            m->watchdog.wtcon = setup.wtcon;  // prescaler 2, divide by 16, counting
+            if (setup.irq) {
+                m->intc.intmsk &= ~(1u << s3cIrq::wdtAc97);
+                m->intc.intsubmsk &= ~(1u << s3cSubIrq::wdt);
+            }
+        }
+        for (const uint64_t slice : {1u, 7u, 1000u, 33333u, 250000u, 1000000u, 5000000u, 20000000u}) {
+            exact->run(slice);
+            fast->run(slice);
+            for (unsigned r = 0; r < 17; ++r)
+                if (cpuGetRegExternal(exact->cpu(), r) != cpuGetRegExternal(fast->cpu(), r)) {
+                    std::fprintf(stderr, "delay skip: r%u %08x against %08x after %" PRIu64 " (pc %08x %08x, skips %" PRIu64 ")\n", r,
+                                 cpuGetRegExternal(exact->cpu(), r), cpuGetRegExternal(fast->cpu(), r), exact->retired(),
+                                 exact->pc(), fast->pc(), fast->delaySkips());
+                    assert(false);
+                }
+            assert(exact->retired() == fast->retired() && exact->nanoseconds() == fast->nanoseconds());
+            assert(exact->watchdog.wtcnt == fast->watchdog.wtcnt && exact->watchdog.phase == fast->watchdog.phase);
+        }
+        if (!known) assert(fast->delaySkips() == 0);
+        else if (setup.wrap) assert(fast->delaySkips() > 2);
+        else if (setup.wtcon == 0x0220) {
+            // Both loops went round many times, through WTCNT reloads too.
+            assert(cpuGetRegExternal(fast->cpu(), 7) > 50 && cpuGetRegExternal(fast->cpu(), 8) > 50);
+            assert(fast->delaySkips() > 100 && fast->delaySkipRetired() > fast->retired() / 2);
+        } else assert(fast->delaySkips() > 0);
+    }
+}
+
 int main() {
+    delaySkipTests();
     usbTests();
     hostServiceTests();
     hostServiceSleepTests();
@@ -794,6 +869,28 @@ int main() {
             m->run(100000);
             assert(m->adc.read(0x0c, adcdat) == S3cAccess::ok && (adcdat & 0x3ff) == m->adc.channel[0]);
             assert(rx1950BatteryState(b) == b.Describe() && rx1950BatteryState(b).find("no-charging") == std::string::npos);
+        }
+        // The USB cable is AC: GPF2 low and the charger on below 100% with the setting on battery, EINT2 on
+        // plugging in and pulling out, and back to the setting's own state after.
+        {
+            BatteryPower b;
+            assert(BatteryPower::Parse("level 60", b));
+            rx1950ApplyBattery(*m, b);
+            m->intc.srcpnd = 0;
+            uint32_t gpf = 0;
+            m->setUsbVbus(true);
+            rx1950ApplyBattery(*m, b);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && !(gpf & 4) && !(gpf & 8));
+            assert(m->intc.srcpnd & (1u << s3cIrq::eint2));
+            m->intc.srcpnd = 0;
+            BatteryPower full;
+            rx1950ApplyBattery(*m, full);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && !(gpf & 4) && (gpf & 8));
+            m->setUsbVbus(false);
+            rx1950ApplyBattery(*m, b);
+            assert(m->gpio.read(0x54, gpf) == S3cAccess::ok && (gpf & 4) && (gpf & 8));
+            assert(m->intc.srcpnd & (1u << s3cIrq::eint2));
+            m->intc.srcpnd = 0;
         }
         // Pack ID 0 (500-700 mV, no 1.3191 divider) and the thermistor at 25 C.
         const unsigned packMv = rx1950PackIdCount * 3300 / 1023;

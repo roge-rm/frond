@@ -83,15 +83,17 @@ struct Rx1950PowerInputs {
     bool chargeDone;   // GPF3 high
 };
 
-inline Rx1950PowerInputs rx1950PowerInputs(const BatteryPower& battery) {
+// usb: the USB cable is in. ASSUMPTION "rx1950 USB charging": the rx1950 charges from USB, so USB power reads
+// as AC on GPF2 (battdrvr has no separate USB source) and the charger runs until the battery is full.
+inline Rx1950PowerInputs rx1950PowerInputs(const BatteryPower& battery, bool usb = false) {
     Rx1950PowerInputs in{};
     in.adc[0] = rx1950BatteryAin0(battery.Percent());
     in.adc[1] = rx1950CurrentCount;
     in.adc[2] = rx1950ThermistorCount;
     in.adc[3] = rx1950PackIdCount;
-    in.acLow = battery.ExternalPower();
+    in.acLow = battery.ExternalPower() || usb;
     // ASSUMPTION "rx1950 charge done off the charger": GPF3 reads high with no AC, as every pin did before.
-    in.chargeDone = !battery.charging || battery.Percent() >= 100;
+    in.chargeDone = !in.acLow || battery.Percent() >= 100;
     return in;
 }
 
@@ -103,9 +105,10 @@ inline void rx1950BatteryPins(const BatteryPower& battery, S3c2442Options& optio
     f = in.chargeDone ? f | (1u << rx1950ChargeDoneBit) : f & ~(1u << rx1950ChargeDoneBit);
 }
 
-// The ADC inputs and pins on a running machine; a change of AC raises EINT2 for the next run.
+// The ADC inputs and pins on a running machine, with the USB cable as AC; a change of AC raises EINT2 for the
+// next run.
 inline void rx1950ApplyBattery(S3c2442Machine& machine, const BatteryPower& battery) {
-    const auto in = rx1950PowerInputs(battery);
+    const auto in = rx1950PowerInputs(battery, machine.usbVbus());
     for (unsigned c = 0; c < 4; ++c) machine.adc.channel[c] = in.adc[c];
     machine.setPin(rx1950AcPort, rx1950ChargeDoneBit, in.chargeDone);
     machine.setPin(rx1950AcPort, rx1950AcBit, !in.acLow);

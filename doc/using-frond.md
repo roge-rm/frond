@@ -6,11 +6,11 @@ How to run Palm machines in Frond on Linux and Android. The two apps have the sa
 
 Each Palm you run is a machine on the Devices list (Home on Android). Frond works out the device from the NOR image and never changes your files.
 
-- **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. The 68k Palms take one ROM file each (see Firmware in the [README](../README.md)), shown as ROM image, and no NAND. The Zodiac also takes Tapwave's Zodiac 1.1 update, the zip or the PRC in it, as its NOR image. Frond makes the ROM from it and stops if it isn't that update. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
-- The first start runs Palm OS setup. If taps land in the wrong place, calibrate the screen in Prefs.
+- **Firmware…** (File menu on Linux, the menu on Android) imports a NOR image and, where the device has one, a NAND image. **Add device** does the same and then starts a new machine. Device can detect the model from the NOR image, or you can choose it. The 68k Palms take one ROM file each (see Firmware in the [README](../README.md)), shown as ROM image, and no NAND. The Zodiac also takes Tapwave's Zodiac 1.1 update, the zip or the PRC in it, as its NOR image. Frond makes the ROM from it and stops if it isn't that update. The HP iPAQ rx1950 takes `CEBL.nbf` from HP's Windows Mobile 5 ROM 1.01.00 ENG as its NOR image and `CEOS.nbf` from the same ROM as its NAND image. A NOR image that belongs to another device than the one chosen is refused. The images are copied into `~/.local/share/frond/firmware/<device>/` on Linux, so you can move the originals.
+- The first start runs Palm OS setup. If taps land in the wrong place, calibrate the screen in Prefs. The rx1950 starts with Windows Mobile's screen alignment, then its setup.
 - **Edit settings…** changes a machine's display and sound settings while it's stopped. Cancel keeps the old ones. Two machines of the same model can have different settings.
 - **Rename…**, **Duplicate**, **Export…** and **Delete** are in the row's menu (right-click or the … button on Linux). **Import session…** in the File menu (Import session in the Android menu) brings an exported machine back. A row shows the device, when it was saved and its size. "Saved by an older Frond" rows can only be deleted.
-- **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X, E2, E3, TG50, the 68k Palms and Dana then ask whether to erase all data, press up to erase. The Zire 72 erases at once and starts at calibration.
+- **Hard reset** erases everything on the Palm. **Save first** in its prompt saves the machine before erasing. The T|X, E2, E3, TG50, the 68k Palms and Dana then ask whether to erase all data, press up to erase. The Zire 72 erases at once and starts at calibration. The rx1950 erases its storage (your files, programs and settings) and starts at Windows Mobile's first screen.
 - **Reset…** (a soft reset) is in the Machine menu on Linux and the ⋮ menu on Android.
 
 On Linux each machine is a folder, `~/.local/share/frond/sessions/<name>/`, with the session (`<name>.frond`), its settings (`<name>.frond.settings.json`), a lock file, the card files (`sd.frondsd`, `ms.frondms` or `ms.frondmsp`) and, on a device with NAND, its internal NAND (`nand.frondnand`). A machine that was never saved has a `<name>.frond.new` marker instead of the session. Export writes the same folder with the NAND packed as `nand.frondnand.gz`, so keep the settings with it when you move it. A T|X exports at about 43 MB though its folder is about 160 MB, and an E2 at about 9 MB against 40 MB. Android exports the folder as a zip, and both apps import either. Android keeps the same folders in the app's storage. A machine is locked while it's open, so two windows can't overwrite it.
@@ -64,6 +64,8 @@ Under Applications (the Linux panel or the Android sheet):
 - **Export all…** writes a ZIP of everything in RAM, other apps and your data included.
 
 Close Palm dialogs first if an install or export can't get through.
+
+On the rx1950 **Install…** copies files onto the SD card's top folder, so it needs a card in the slot. Windows Mobile sees the card go out and come back. To install a CAB, open Storage Card in File Explorer and tap it. The application list, Launch, Export, Other… and Export all… are greyed. Use Files under Storage to copy files off the card.
 
 ### FrondBench
 
@@ -180,7 +182,7 @@ Panning is manual.
 
 ## Storage cards
 
-The T|X, E2, E3 and Zire 72 take an SD card, the TG50 a Memory Stick. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Dana's cards below. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
+The T|X, E2, E3, Zire 72 and rx1950 take an SD card, the TG50 a Memory Stick. The rx1950 takes cards from 32 MB to 2 GB. Format a new one as FAT16 on your computer first. The m125, m130, m500, c500, m505, m515 and m520 take one SD or MMC card, handled like the Dana's cards below. A card is its own thing, kept in the Cards drawer, and sits in one machine at a time. Delete a machine and its card stays in the drawer.
 
 While a machine runs, Storage (the bar button, Ctrl+2 on Linux) lists its card slot, where the device has one, and Internal, the Palm's own databases. Each has Files…, the same file manager, see [Files](#files).
 
@@ -460,6 +462,20 @@ Modem and phone by device:
 
 Plugs the Palm's USB port into the computer. On Android use Wait for a peer, then `link-pty.py PHONE:5034 --link /tmp/palm-usb` on a computer. Start HotSync on the Palm (Local, Cradle/Cable), then run pilot-link, for example `pilot-xfer -p /dev/pts/7 -l`. The status line shows the bus step, and "enumerated" means it's ready. HotSync takes 15 to 20 seconds to start. pilot-link only opens serial devices, so for a TCP port or a Unix socket put a PTY in front with `tools/link-pty.py PORT` or `tools/link-pty.py unix:PATH` (a plain `socat` PTY doesn't work). pilot-link can also start a few seconds after HotSync. Changing the setting or loading a session unplugs the cable and plugs it back in.
 
+### ActiveSync
+
+The rx1950 syncs with ActiveSync's desktop side. On Linux that's SynCE (`synce-core`: `dccm` and tools like `pls`, `pcp` and `pstatus`). `dccm` runs as root, as SynCE installs it, since it listens on port 990. Frond doesn't make the udev event SynCE waits for, so tell `dccm` about the device yourself:
+
+```
+dbus-send --system --print-reply --dest=org.synce.dccm /org/synce/dccm/DeviceManagerControl \
+  org.synce.dccm.DeviceManager.Control.DeviceConnected string:/frond0 string:DEVICE_IP string:LOCAL_IP boolean:RNDIS
+```
+
+- **USB.** Set USB to On. Windows Mobile's USB is a network link (RNDIS), and its connections to the computer come out on 127.0.0.1. Once it has its address (a few seconds after the cable goes in), send the call above with `127.0.0.1`, `127.0.0.1` and `true`. `dccm` then sends its connect request to 127.0.0.1:5679, which Frond passes to the handheld, and ActiveSync connects. Only one Frond can take port 5679 at a time; another one says so in the log and connects without it.
+- **Serial.** Set Serial to a PTY and run `tools/palm-pppd.sh --activesync /dev/pts/N 115200` on it. The handheld's connections go to 10.0.0.233, so give the computer that address first (`sudo ip addr add 10.0.0.233/32 dev lo`). Send the call above with `10.0.2.15`, `10.0.0.233` and `false`, then put the cable in.
+
+Once connected, `pls` lists the handheld's files and `pstatus` shows its version, memory and power. With the USB cable in, Windows Mobile shows the battery charging, as the rx1950 charges from USB. Only RAPI is tried: a partnership with Outlook data needs a sync engine, which isn't part of `synce-core`.
+
 The common USB host submits the next request in a direction 1 ms after completing
 the previous request. This limits transfers to roughly 8–64 kB/s per
 endpoint direction, depending on packet size, across all common-host devices.
@@ -510,28 +526,30 @@ and a USB Wi-Fi adapter. The Dana Wireless has the same, with built-in Wi-Fi
 instead of the adapter. Its USB computer transport is available through the
 native localhost debug path. The app's USB computer controls stay disabled.
 
-| | T\|X | E2 | E3 | Zire 72 | TG50 | 68k Palms |
-|---|---|---|---|---|---|---|
-| Sound | yes | yes | yes | yes | yes, see below | yes, piezo |
-| Low-latency audio | yes | yes | yes | yes | shorter queue | |
-| Microphone | | | | yes | yes | |
-| Network | yes | | | | | PPP over serial |
-| Serial port | yes | yes | yes | not offered | yes | yes |
-| USB HotSync | yes | yes | yes | yes | yes | |
-| Infrared beaming | yes | yes | yes | yes | yes | yes |
-| Infrared keyboard | yes | yes | yes | yes | yes | |
-| Mobile phone (infrared) | yes | yes | | yes | yes | yes |
-| Dial-up modem | | | | | | yes, not m100, m105 |
-| Bluetooth | yes | yes | | yes | yes | |
-| Camera | | | | yes | | |
-| Hold | | | | | yes | |
-| Card | SD | SD | SD | SD | Memory Stick, Pro | SD or MMC on the m125, m130, m500, c500, m505, m515, m520, else none |
+| | T\|X | E2 | E3 | Zire 72 | TG50 | 68k Palms | rx1950 |
+|---|---|---|---|---|---|---|---|
+| Sound | yes | yes | yes | yes | yes, see below | yes, piezo | yes |
+| Low-latency audio | yes | yes | yes | yes | shorter queue | | |
+| Microphone | | | | yes | yes | | yes |
+| Network | yes | | | | | PPP over serial | Virtual Wi-Fi |
+| Serial port | yes | yes | yes | not offered | yes | yes | ActiveSync |
+| USB HotSync | yes | yes | yes | yes | yes | | ActiveSync |
+| Infrared beaming | yes | yes | yes | yes | yes | yes | yes |
+| Infrared keyboard | yes | yes | yes | yes | yes | | |
+| Mobile phone (infrared) | yes | yes | | yes | yes | yes | |
+| Dial-up modem | | | | | | yes, not m100, m105 | |
+| Bluetooth | yes | yes | | yes | yes | | |
+| Camera | | | | yes | | | |
+| Hold | | | | | yes | | |
+| Card | SD | SD | SD | SD | Memory Stick, Pro | SD or MMC on the m125, m130, m500, c500, m505, m515, m520, else none | SD |
 
 The Zire 72's Camera shows a test pattern, a picture or the phone's back camera on Android, or a webcam on Linux desktop: pick it in the Camera row of the Display panel or sheet (Webcam is greyed when there is no /dev/video device you can open). It goes back to the test pattern on a save, sleep, or when the webcam goes away or the app is left, and the row says why. Video isn't tested with a picture or camera. Its microphone is the built-in one that Voice Memo uses, with no choice of input. The TG50 plays beeps, alarms and Sony Voice Recorder audio. Standard Palm SndStream (not in its firmware), the remote control, MagicGate and Memory Stick audio aren't there. Serial works at 9600, 57600 and 115200 baud. HotSync over the serial port isn't tested on the TG50 or the T|X.
 
 On the 68k Palms, serial HotSync is tested with pilot-link on a 68k Palm (install, fetch, backup). They have no Fast engine and no Bluetooth or Wi-Fi, as on the real ones, and their USB HotSync isn't done yet. The m125, m130, m500, c500, m505, m515 and m520 have an SD or MMC slot, the others have no card. The IIIc, m130, m505, m515 and m520 have colour screens, the rest are grey. The grey ones show the backlight as a green panel.
 
-Microphone (Zire 72 and TG50) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
+The HP iPAQ rx1950 runs Windows Mobile 5. Its Wi-Fi joins Frond's access point in the Virtual Wi-Fi network mode, and infrared beams files to another rx1950 or a Palm. It has no Bluetooth, same as the real one. The installed program list isn't done yet.
+
+Microphone (Zire 72, TG50 and rx1950) is off each time it starts. Turn it on under Microphone in the ⋮ menu (Android) or the Machine menu (Linux) while the machine runs. Android asks for permission the first time and arms it when you return to the device. Saving, file work, stopping, reset, sleep and leaving the app turn it off again. On Linux, hiding the device window does too.
 
 ## Troubleshooting
 

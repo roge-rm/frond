@@ -417,6 +417,8 @@ UsbDevicePort SocS3C2442::GetUsbPort() {
 bool SocS3C2442::SetUsbCable(bool attached) {
     if (halted) return false;
     machine->setUsbVbus(attached);
+    // USB power is AC to the battery driver.
+    rx1950ApplyBattery(*machine, battery);
     return true;
 }
 
