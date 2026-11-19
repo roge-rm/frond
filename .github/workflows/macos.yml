@@ -1,5 +1,5 @@
 # The macOS builds, one on each kind of Mac: Apple silicon (arm64) and Intel (x86_64).
-# For now they build the cores only (out/frond and out/frond-68k).
+# They build the cores and the desktop, make Frond.app and a dmg, and start the built app.
 name: macOS
 
 on:
@@ -28,13 +28,51 @@ jobs:
           persist-credentials: false
 
       - name: Install dependencies
-        run: brew install sdl2 sdl2_image libslirp boost ninja cmake pkg-config readline make
+        run: brew install sdl2 sdl2_image libslirp boost ninja cmake pkg-config readline make qt librsvg
 
       - name: Build the cores
         run: |
           export PKG_CONFIG_PATH="$(brew --prefix readline)/lib/pkgconfig:$PKG_CONFIG_PATH"
           set -o pipefail
           gmake -k -j"$(sysctl -n hw.ncpu)" BUILD_JOBS="$(sysctl -n hw.ncpu)" out/frond out/frond-68k 2>&1 | tee build.log
+
+      - name: Build the desktop
+        run: |
+          set -o pipefail
+          cmake -S desktop -B build/desktop -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DFROND_PREPARED_SOURCE="$PWD/core" -DCMAKE_PREFIX_PATH="$(brew --prefix)" 2>&1 | tee -a build.log
+          cmake --build build/desktop --target frond-desktop 2>&1 | tee -a build.log
+
+      - name: Make the app and the dmg
+        run: |
+          set -o pipefail
+          export PATH="$(brew --prefix qt)/bin:$PATH"
+          sh packaging/macos/make-app.sh 2>&1 | tee -a build.log
+
+      - name: Start the built app
+        run: |
+          set -o pipefail
+          APP=out/Frond.app/Contents/MacOS
+          QT_QPA_PLATFORM=offscreen "$APP/Frond" --version
+          "$APP/frond-68k" --version
+          # The ARM core has no version flag; it must start and print its usage, not fail to load.
+          set +e
+          "$APP/frond" > core.out 2>&1 < /dev/null
+          code=$?
+          cat core.out
+          if [ "$code" -ge 126 ]; then echo "core exited with $code"; exit 1; fi
+          # A short run of the desktop: it must stay up for a few seconds.
+          QT_QPA_PLATFORM=offscreen "$APP/Frond" &
+          pid=$!
+          sleep 5
+          kill -0 "$pid" || { echo "desktop exited early"; exit 1; }
+          kill "$pid"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frond-macos-${{ matrix.arch }}
+          path: out/Frond-*.dmg
+          if-no-files-found: error
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

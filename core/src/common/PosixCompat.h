@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -12,6 +13,10 @@
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0  // the mains ignore SIGPIPE
+#endif
+
+#ifndef POLLRDHUP
+#define POLLRDHUP 0  // no peer-close event here; POLLHUP and a zero-length read show it
 #endif
 
 namespace frondPosix {
