@@ -3,6 +3,7 @@
 #include <cmath>
 #include "Dialogs.h"
 #include "FirmwareStore.h"
+#include "CardStore.h"
 #include "AudioQualification.h"
 #include <QCheckBox>
 #include <QComboBox>
@@ -31,7 +32,7 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
                                const frondSessions::Preferences* initialSettings, bool automaticScale) : QDialog(parent), root(root) {
     setWindowTitle(tr("Import firmware"));
     setObjectName("firmwareDialog");
-    auto* form = new QFormLayout;
+    form = new QFormLayout;
     device = new QComboBox(this);
     device->setObjectName("device");
     // Items hold the device's fixed name; empty detects.
@@ -84,6 +85,9 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     import->setDefault(true);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     connect(import, &QPushButton::clicked, this, [this] {
+        const auto chosen = chosenCards();
+        if (chosen.size() == 2 && !chosen[0].isEmpty() && chosen[0] == chosen[1])
+            return void(QMessageBox::critical(this, tr("Frond"), tr("Pick a different card for each slot.")));
         const auto error = importImages();
         if (error.isEmpty()) accept();
         else QMessageBox::critical(this, tr("Frond"), error);
@@ -106,6 +110,43 @@ FirmwareDialog::FirmwareDialog(const QString& root, Device preselect, QWidget* p
     layout->addWidget(buttons);
 }
 
+void FirmwareDialog::offerCards(const QString& folder) {
+    sessions = folder;
+    for (int n = 0; n < 2; ++n) {
+        cards[n] = new QComboBox(this);
+        cards[n]->setObjectName(n ? "card2Choice" : "card1Choice");
+        form->addRow(n ? tr("Card 2") : tr("Card 1"), cards[n]);
+    }
+    connect(device, &QComboBox::currentIndexChanged, this, &FirmwareDialog::fillCards);
+    connect(nor, &QLineEdit::textChanged, this, &FirmwareDialog::fillCards);
+    fillCards();
+}
+// No card, then the drawer cards slot n takes, by name; shown only for a two-slot machine.
+void FirmwareDialog::fillCards() {
+    if (!cards[0]) return;
+    auto selected = frondFirmware::deviceFromId(device->currentData().toString());
+    if (selected == Device::automatic) selected = frondFirmware::detectPicked(nor->text());
+    const bool two = frondCards::secondSlot(selected);
+    QList<frondCards::Entry> drawer;
+    if (two)
+        for (const auto& e : frondCards::entries(frondCards::libraryFor(sessions)))
+            if (e.inDrawer) drawer << e;
+    std::sort(drawer.begin(), drawer.end(), [](const auto& a, const auto& b) { return a.card.name.localeAwareCompare(b.card.name) < 0; });
+    for (int n = 0; n < 2; ++n) {
+        const auto keep = cards[n]->currentData().toString();
+        cards[n]->clear();
+        cards[n]->addItem(tr("No card"), QString());
+        for (const auto& e : drawer)
+            if (frondCards::deviceTakes(selected, e.card.kind, frondCards::sizeOf(e.card.kind, e.card.bytes), nullptr, n))
+                cards[n]->addItem(e.card.name + QStringLiteral(" · ") + frondCards::cardSizeText(e.card), e.card.id);
+        cards[n]->setCurrentIndex(std::max(0, cards[n]->findData(keep)));
+        form->setRowVisible(cards[n], two);
+    }
+}
+QStringList FirmwareDialog::chosenCards() const {
+    if (!cards[0] || !cards[0]->isVisibleTo(this)) return {};
+    return {cards[0]->currentData().toString(), cards[1]->currentData().toString()};
+}
 QString FirmwareDialog::importImages() {
     auto chosen = frondFirmware::deviceFromId(device->currentData().toString());
     const auto error = frondFirmware::importImages(root, chosen, nor->text(), nand->isEnabled() ? nand->text() : QString(), &chosen);

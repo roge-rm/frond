@@ -75,6 +75,7 @@ class MachineSettingsDialog : public QDialog {
 };
 
 // Copies firmware images into the firmware folder under 'root'.
+class QFormLayout;
 class FirmwareDialog : public QDialog {
     Q_OBJECT
  public:
@@ -84,8 +85,15 @@ class FirmwareDialog : public QDialog {
     // Validates and copies; returns an error message, or empty once the images are stored.
     QString importImages();
     frondFirmware::Device imported() const { return stored; }
+    // A card for each slot of a two-slot machine, from the drawer of the Cards library beside
+    // `sessions`; chosenCards() has a card id or an empty string per slot.
+    void offerCards(const QString& sessions);
+    QStringList chosenCards() const;
  private:
-    QString root;
+    void fillCards();
+    QString root, sessions;
+    QFormLayout* form{nullptr};
+    QComboBox* cards[2]{};
     QComboBox* device;
     QLineEdit *nor, *nand;
     QLabel* norLabel{nullptr};

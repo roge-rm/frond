@@ -2432,6 +2432,31 @@ for line in s.makefile('rb'):
         }
         QSettings().clear();
     }
+    // Add device offers a drawer card per slot for a two-slot machine, and none for others.
+    void addDeviceCardChoice() {
+        cardsReset();
+        QString games, stick;
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Games", "sd", 64, {}, &games).isEmpty());
+        QVERIFY(frondCards::makeCard(cardsSessions(), "Stick", "ms", 16, {}, &stick).isEmpty());
+        const frondSessions::Preferences fresh;
+        QTemporaryDir root;
+        FirmwareDialog dialog(root.path(), frondFirmware::Device::automatic, nullptr, &fresh);
+        dialog.offerCards(cardsSessions());
+        dialog.show();
+        auto* device = dialog.findChild<QComboBox*>("device");
+        auto* one = dialog.findChild<QComboBox*>("card1Choice");
+        auto* two = dialog.findChild<QComboBox*>("card2Choice");
+        device->setCurrentIndex(device->findData(QString("tapwave-zodiac-2")));
+        QVERIFY(one->isVisible() && two->isVisible());
+        QStringList texts;
+        for (int i = 0; i < two->count(); ++i) texts << two->itemText(i);
+        QCOMPARE(texts, QStringList({"No card", "Games · 64 MB"}));
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), QString()}));
+        two->setCurrentIndex(1);
+        QCOMPARE(dialog.chosenCards(), QStringList({QString(), games}));
+        device->setCurrentIndex(device->findData(QString("palm-tx")));
+        QVERIFY(!one->isVisible() && !two->isVisible() && dialog.chosenCards().isEmpty());
+    }
     // The library with a second slot: an old Zodiac folder's sd2.frondsd moves in as its own card,
     // each slot is listed and linked on its own, take out and put back by slot, and Delete keeps
     // both cards.

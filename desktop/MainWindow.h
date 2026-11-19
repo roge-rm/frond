@@ -379,6 +379,9 @@ class MainWindow : public QMainWindow {
     int cardSlot{0};
     // Start: slot 2's card goes in once the core is up, if the core left it out.
     bool secondStartPending{false};
+    // Add device: the cards picked per slot, put in once the new machine runs; empty when none.
+    QStringList startCards;
+    bool putInStartCard();
     bool secondSlot() const;
     bool msExportPending{false};
     // The running device selects the available peripheral controls.

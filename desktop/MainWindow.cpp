@@ -850,7 +850,7 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
         microphoneArmed = false; microphoneState->clear();
         installQueue.clear(); installTotal = 0; installFailed.clear(); installHint = 0;
         busy = false; stopping = false; hardResetAfterSave = false; cardPresent = cardInserted = false;
-        card2Present = card2Inserted = sd2Known = secondStartPending = false; cardSlot = 0; runningDevice = frondFirmware::Device::tx;
+        card2Present = card2Inserted = sd2Known = secondStartPending = false; cardSlot = 0; startCards.clear(); runningDevice = frondFirmware::Device::tx;
         copyLock.reset(); savingPath.clear();
         frondSessions::removeStaging(copyStaging); copyStaging.clear(); pendingCopy.clear();
         // A linked card goes back to the drawer once the final save is in, under the session lock.
@@ -1210,6 +1210,8 @@ MainWindow::MainWindow(const QString& core, const QString& core68k)
             }
         }
         if ((command == "ms-create" || command == "ms-insert" || command == "ms-reinsert" || command == "ms-put-in") && !stopping) { send("ms-protection"); return; }
+        // A new machine's cards go in one slot after another once its start replies are in.
+        if (!startCards.isEmpty() && command != "save" && putInStartCard()) return;
         notify(command == "save" ? tr("Saved.") : tr("Running. Sessions save automatically on close."));
         const bool savedWorkingCopy = command == "save" && savingPath == sessionPath;
         if (command == "save") {
@@ -2356,8 +2358,10 @@ void MainWindow::addDevice() {
         : frondFirmware::deviceFromId(infoFor(sessionFile()).device);
     const auto prefs = defaultPreferences(selected);
     FirmwareDialog dialog(firmwareRoot(), selected, this, &prefs, !settings.contains("windowScale"));
+    dialog.offerCards(sessionFolder());
     if (dialog.exec() != QDialog::Accepted) return;
     const auto device = dialog.imported();
+    const auto chosenCards = dialog.chosenCards();
     const auto name = frondSessions::reserve(sessionFolder(), frondFirmware::deviceName(device), frondFirmware::deviceId(device));
     if (name.isEmpty())
         return failure(tr("Could not create the session storage directory."));
@@ -2371,6 +2375,7 @@ void MainWindow::addDevice() {
     lock.unlock();
     refreshSessions(path);
     startSession(infoFor(path));
+    if (client.running()) startCards = chosenCards;
 }
 // The command line and resume: a session file anywhere. One outside the managed folder runs
 // from a new folder in it and is saved there.
@@ -3474,6 +3479,18 @@ QString MainWindow::cardCommand(const char* operation, int n) const {
     return (n ? QStringLiteral("sd2-") : memoryStick() ? QStringLiteral("ms-") : QStringLiteral("sd-")) + QLatin1String(operation);
 }
 bool MainWindow::secondSlot() const { return frondCards::secondSlot(currentDevice()); }
+bool MainWindow::putInStartCard() {
+    if (stopping || busy || secondStartPending || cardMove.stage != CardMove::None || exchangeStage != ExchangeStage::None) return false;
+    while (!startCards.isEmpty()) {
+        const int n = frondCards::slotCount - int(startCards.size());
+        const auto id = startCards.takeFirst();
+        if (id.isEmpty() || present(n) || (n ? !sd2Known : !sdKnown)) continue;
+        cardSlot = n;
+        changeCard(id);
+        if (cardMove.stage != CardMove::None) return true;
+    }
+    return false;
+}
 void MainWindow::beginExchange(int n) {
     if (!client.available() || stopping || !present(n) || exchangeStage != ExchangeStage::None || cardMove.stage != CardMove::None) return;
     if (inserted(n) && QMessageBox::question(this, tr("Open the card's files?"),
