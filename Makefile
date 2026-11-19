@@ -1062,6 +1062,18 @@ test-zodiac-guest-calls: out/frond
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-guest-calls
 	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-guest-calls
 
+.PHONY: test-zodiac-resume
+# Save and resume on the real ROM from a bring-up state (ZODIAC_ROM, ZODIAC_STATE), Exact and sync Fast: the run that
+# saved and the save loaded again end byte for byte the same. Skipped without them.
+test-zodiac-resume: out/frond
+	find core/src/uarm/.build -name '*.o' ! -path '*/native/*' > build/zodiac-resume-core.rsp
+	$(CXX) -std=c++17 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter \
+		-Icore/src/uarm/uarm -Icore/src/uarm -Icore/src/uarm/native -Icore/src/common \
+		tests/zodiac-resume.cpp @build/zodiac-resume-core.rsp core/src/common/libcommon.a \
+		$(CPU_TEST_LDLIBS) -lz -o build/test-zodiac-resume
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ./build/test-zodiac-resume
+	ZODIAC_ROM="$(ZODIAC_ROM)" ZODIAC_STATE="$(ZODIAC_STATE)" ZODIAC_TEST_FAST=1 ./build/test-zodiac-resume
+
 .PHONY: test-zodiac-bluetooth
 # The Zodiac's Bluetooth HCI shim on the real ROM from a bring-up state (ZODIAC_ROM, ZODIAC_STATE): radio on and an
 # OPP send to bluetooth-opp-peer through btvirt, Fast then Exact. Skipped without them or the peers.

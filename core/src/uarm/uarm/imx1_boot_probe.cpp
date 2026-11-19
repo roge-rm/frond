@@ -3529,8 +3529,10 @@ Imx1StateStatus imx1MachineSaveState(Imx1Machine* machine, std::vector<uint8_t>&
     if (p->graphicsFrame.frameAcquired()) return S::notAtBoundary;
     auto cpu = std::make_unique<Arm920SavedState>();
     if (!cpuArm920CaptureState(p->cpu, *cpu)) return S::unsupportedConfiguration;
-    // The loaded machine starts without translated code, so this one carries on without it too.
+    // The loaded machine starts without translated code, and on Fast with its caches cleaned and emptied, so
+    // this one carries on the same way.
     cpuDropTranslatedCode(p->cpu);
+    if (p->fastEngine) cpuArm920LeanReset(p->cpu);
     uint64_t jitBlocks = 0, jitInstructions = 0;
     const bool jit = cpuJitExecutionCounts(p->cpu, &jitBlocks, &jitInstructions);
     const bool ring = !p->recent.empty();
@@ -3672,7 +3674,9 @@ Imx1StateInfo imx1MachineLoadState(Imx1Machine* machine, const uint8_t* data, si
     // starts again with no transfer.
     VSD* const card = p->peripherals.mmcsdCard();
     staged.board->takePcmOutput(p->peripherals);
-    if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768(staged.ymfSection);
+    // B15 stays as saved: the saving machine kept it on the chip's line, or at an older state's level the guest hasn't
+    // touched the chip since, so driving it here would make a load differ from the run that saved.
+    if (p->peripherals.ymf768Enabled()) staged.board->enableYmf768(false);
     // The Faster multiplier belongs to the run, not the state.
     staged.board->setCpuClockMultiplier(p->peripherals.cpuClockMultiplierNum(), p->peripherals.cpuClockMultiplierDen());
     p->peripherals = std::move(*staged.board);
