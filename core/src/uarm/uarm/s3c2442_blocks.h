@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "../../common/UsbPacketResult.h"
+
 // unknown is a register the block doesn't have, unsupported a known one set to something not modelled.
 enum class S3cAccess : uint8_t { ok, unknown, unsupported };
 
@@ -214,18 +216,60 @@ private:
     void push(unsigned bytes, uint32_t value);
 };
 
-// USB device controller at 0x52000000 (manual chapter 13) with no cable: registers 0x140 to 0x200 keep what's
-// written, the interrupt registers clear by writing one, and the endpoint FIFOs are empty. No host ever
-// resets the bus, so nothing else happens until the USB work.
+// USB device controller at 0x52000000 (manual chapter 13): five endpoints, EP0 for control with a 16-byte
+// FIFO and EP1-4 as bulk IN or OUT (IN_CSR2 MODE_IN) with 64-byte FIFOs, driven by the CPU through the
+// FIFO registers. The host side (UsbHostBridge through SocS3C2442) hands it whole packets: setup, out and in
+// return Ack, Nak or Stall as the endpoint's CSR bits say, and raise the endpoint interrupt like the real one.
+// Registers are bytes at word addresses. The endpoint DMA registers (0x200 to 0x26c) keep what's written;
+// a transfer with DMA_MODE_EN set isn't modelled (ASSUMPTION "USB endpoint DMA unused": WM5's
+// sc2440usbfn.dll was seen moving every packet through the FIFO registers, see the R8 notes).
 class S3cUsbDevice {
 public:
     void reset();
     S3cAccess read(uint32_t offset, uint32_t& value);
     S3cAccess write(uint32_t offset, uint32_t value);
+    // The interrupt line to INT_USBD: an enabled endpoint or bus interrupt is pending.
+    bool irq() const;
+
+    // Host side. A bus reset puts the address and endpoints back and raises the reset interrupt.
+    void busReset();
+    UsbPacketResult setup(const uint8_t* data);
+    UsbPacketResult out(unsigned ep, const uint8_t* data, unsigned size);
+    // take false only peeks (size of the packet ready).
+    UsbPacketResult in(unsigned ep, uint8_t* data, unsigned* size, bool take);
+    bool outReady(unsigned ep) const;
+    // The address the device answers to: FUNC_ADDR once the status stage that set it is over.
+    uint8_t address() const { return activeAddress; }
+    // Counts of host packets taken and given, for tests and traces.
+    uint64_t setups{0}, outs{0}, ins{0};
+
+    // The register file 0x140 to 0x1fc, as states before R8 saved it.
     template <class A> void state(A& a) { a.DoBuffer32(regs, 0x30); }
+    // Everything else (endpoint CSRs, FIFOs, the control stage, the active address), its own state section.
+    template <class A> void runState(A& a) {
+        a.DoBuffer(maxp, 5).DoBuffer(inCsr1, 5).DoBuffer(inCsr2, 5).DoBuffer(outCsr1, 5).DoBuffer(outCsr2, 5);
+        for (auto& f : fifo) a.DoVector(f, 256);
+        a.DoBuffer32(dmaRegs, 0x1c).Do8(activeAddress).Do8(ep0Csr).DoBool(controlOpen).DoBool(addressPending).DoBool(setupIn);
+    }
+    // States saved before R8: endpoints as after a reset, keeping the register file.
+    void clearRun();
+
+    uint32_t regs[0x30];  // 0x140 to 0x1fc, by word; the indexed registers live in the arrays below
+    uint8_t maxp[5]{}, inCsr1[5]{}, inCsr2[5]{}, outCsr1[5]{}, outCsr2[5]{};
+    uint8_t ep0Csr{0};
+    std::vector<uint8_t> fifo[5];
+    uint32_t dmaRegs[0x1c]{};  // 0x200 to 0x26c
+    uint8_t activeAddress{0};
+    // A control transfer is between its SETUP and its status stage.
+    bool controlOpen{false}, addressPending{false}, setupIn{false};
 
 private:
-    uint32_t regs[0x30];  // 0x140 to 0x1fc, by word
+    uint32_t& reg(uint32_t offset) { return regs[(offset - 0x140) / 4]; }
+    uint32_t reg(uint32_t offset) const { return regs[(offset - 0x140) / 4]; }
+    void endpointInterrupt(unsigned ep) { reg(0x148) |= 1u << ep; }
+    void statusDone();
+    unsigned index() const { return reg(0x178) & 7; }
+    unsigned packetSize(unsigned ep) const;
 };
 
 // ADC and touch screen at 0x58000000 (manual chapter 16), counted in PCLK ticks. A conversion takes
@@ -455,6 +499,13 @@ class S3cUart {
     // A byte from the far end.
     void receive(uint8_t byte, S3cIntc& intc);
     std::function<void(unsigned channel, uint8_t byte)> sink;
+    // The nCTS input as asserted, from the far end (host side, not saved; asserted with nothing attached).
+    bool cts = true;
+    // Infra-red mode (ULCON bit 6), receiver and transmitter on (UCON modes not 0), FIFO room.
+    bool infrared() const { return ulcon & 0x40; }
+    bool receiverOn() const { return ucon & 3; }
+    bool transmitterOn() const { return ucon & 0xc; }
+    bool rxRoom() const { return rx.size() < 64; }
 
     uint32_t ulcon, ucon, ufcon, umcon, ubrdiv;
     std::deque<uint8_t> rx;

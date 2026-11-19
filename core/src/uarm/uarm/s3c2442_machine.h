@@ -214,6 +214,27 @@ class S3c2442Machine {
     // False after loading a state saved before the machine kept the Wi-Fi chip (no "ACXW" section).
     bool stateHadWifi = true;
 
+    // USB device. ASSUMPTION "rx1950 VBUS on GPG5": the cable's VBUS reaches GPG5 (EINT13) inverted, low while a
+    // cable is in (Linux's rx1950 board file has vbus_pin_inverted). ASSUMPTION "rx1950 D+ pull-up on GPJ5": the
+    // device shows itself to the host while GPJDAT bit 5 is set. sc2440usbfn.dll sets it when it starts the
+    // controller (Linux's pullup_pin is GPJ5 too), but GPJCON reads 0 in Frond's sessions (the loader's GPJCON isn't
+    // known), so the latch decides whatever GPJCON says. The host sees it (usbListening) while
+    // VBUS is on, the pull-up is on and CLKCON gives the controller its clock. usbHostChanged after each host
+    // packet updates INT_USBD; usbNotify runs after every guest access to the controller (host side, not saved).
+    void setUsbVbus(bool on);
+    bool usbVbus() const { return usbVbusOn; }
+    bool usbListening() const;
+    // Times usbListening went on since the machine was made, for the host to see a reconnect.
+    uint32_t usbEnableCount() const { return usbEnables; }
+    void usbHostChanged();
+    std::function<void()> usbNotify;
+    // Guest ns by which the host has work due (a USB host tick): an idle CPU's skip ends there. UINT64_MAX for none.
+    uint64_t hostWakeNs = UINT64_MAX;
+
+    // A byte from a UART's far end (host serial or infrared), and the UART's bit rate from UBRDIV and its clock.
+    void uartReceive(unsigned channel, uint8_t byte);
+    uint32_t uartBaud(unsigned channel) const;
+
     // Bytes each UART sends: channel, byte.
     std::function<void(unsigned, uint8_t)> uartSink;
     // Every SFR access, for traces: pc, physical address, size, write, value.
@@ -284,6 +305,10 @@ class S3c2442Machine {
     void sdiService();
     // After a GPIO write: the card's supply (GPJ1).
     void sdPowerPins();
+    // After a GPIO or clock write: whether the host sees the USB device, counting each time it shows up.
+    void usbPins();
+    bool usbVbusOn = false, usbListeningWas = false;
+    uint32_t usbEnables = 0;
     // The Wi-Fi chip's power and reset pins after a GPIO change; its events and interrupt pin.
     void wifiPins();
     void wifiService();

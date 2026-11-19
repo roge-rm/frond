@@ -369,7 +369,75 @@ static void wifiTests() {
     }
 }
 
+// USB device: VBUS on GPG5 (low with the cable), the host sees the device once GPJDAT bit 5 (the D+ pull-up) and
+// CLKCON's USB device clock are on, a host SETUP raises INT_USBD for the CPU, the endpoint state is saved in its own
+// section and an older state without it loads with the endpoints reset; host work due keeps an idle CPU's clock going.
+static void usbTests() {
+    using R = UsbPacketResult;
+    {
+        auto m = make(stores({{0x560000d4, 0x20}}, {loop}));
+        m->setUsbVbus(true);
+        assert(!(m->gpio.input[S3cGpio::g] & (1u << 5)) && m->usbVbus());
+        m->clock.clkcon &= ~0x80u;
+        assert(m->run(1000) == S3c2442Stop::budget);
+        assert(!m->usbListening());
+        assert(m->clock.write(0x0c, m->clock.clkcon | 0x80) == S3cAccess::ok);
+        assert(m->usbListening());
+        m->setUsbVbus(false);
+        assert(!m->usbListening() && (m->gpio.input[S3cGpio::g] & (1u << 5)));
+    }
+    {
+        // INT_USBD unmasked, IRQs on, wait for interrupt: a host SETUP wakes it into IRQ mode.
+        auto m = make(stores({{0x560000d4, 0x20}, {0x4a000008, ~(1u << s3cIrq::usbd)}}, {0xe321f013, wfi, loop}));
+        m->clock.clkcon |= 0x80;
+        m->setUsbVbus(true);
+        m->hostWakeNs = 10000000000ull;  // a host poll due later keeps the waiting CPU's clock going
+        assert(m->run(1000) == S3c2442Stop::budget && m->usbListening() && mode(*m) == 0x13);
+        m->usbDevice.write(0x16c, 0);  // no reset interrupt
+        m->usbDevice.busReset();
+        m->usbHostChanged();
+        assert(!(m->intc.srcpnd & (1u << s3cIrq::usbd)));
+        const uint8_t setup[8] = {0x80, 6, 0, 1, 0, 0, 18, 0};
+        assert(m->usbDevice.setup(setup) == R::Ack);
+        m->usbHostChanged();
+        assert(m->intc.srcpnd & (1u << s3cIrq::usbd));
+        const auto woke = m->run(1000);
+        assert(woke == S3c2442Stop::budget && mode(*m) == 0x12);
+
+        // The pending SETUP survives a save and load.
+        std::vector<uint8_t> state;
+        std::string why;
+        assert(m->saveState(state, why));
+        auto other = make({loop});
+        assert(other->loadState(state.data(), state.size(), why));
+        assert(other->usbDevice.ep0Csr == 1 && other->usbDevice.fifo[0].size() == 8 && other->usbDevice.controlOpen);
+    }
+    {
+        // Host work due keeps the idle clock going instead of stopping with nothing to wake it.
+        auto m = make({wfi, loop});
+        m->hostWakeNs = 2000000;
+        assert(m->run(10000000) == S3c2442Stop::budget && m->nanoseconds() >= 2000000);
+        m->hostWakeNs = UINT64_MAX;
+        assert(m->run(1000000000ull) == S3c2442Stop::idleNoWake);
+    }
+}
+
+// UART bit rates from the FCLK/n clock WM5 picks, and a byte from the far end raising the receive interrupt.
+static void uartTests() {
+    auto m = make(stores({{0x50000004, 0x4fc5}, {0x50000028, 15}, {0x50008000, 0x43}, {0x50008004, 0x8fc5},
+                          {0x50008028, 191}}, {loop}));
+    assert(m->run(1000) == S3c2442Stop::budget);
+    const uint64_t fclk = m->clock.fclk();
+    assert(m->uartBaud(0) == uint32_t(fclk / 10 / 16 / 16) && m->uartBaud(2) == uint32_t(fclk / 10 / 16 / 192));
+    assert(m->uarts[2].infrared() && m->uarts[2].receiverOn());
+    m->intc.intsubmsk = 0;
+    m->uartReceive(2, 0xc0);
+    assert((m->intc.srcpnd & (1u << s3cIrq::uart2)) && m->uarts[2].rx.size() == 1);
+}
+
 int main() {
+    usbTests();
+    uartTests();
     sdTests();
     audioTests();
     wifiTests();

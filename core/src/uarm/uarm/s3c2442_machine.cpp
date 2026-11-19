@@ -333,6 +333,7 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
             name = "clock and power";
             if (write) result = size == 4 ? clock.write(offset, value) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return clock.read(o, v); });
+            if (write && result == S3cAccess::ok) usbPins();
             if (write && result == S3cAccess::ok && clock.powerOff()) {
                 // Sleep mode from the next instruction: the interpreter call ends here (RESCHEDULE above).
                 sleeping = true;
@@ -388,12 +389,15 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
                 codecPins();
                 sdPowerPins();
                 wifiPins();
+                usbPins();
             }
             break;
         case 0x52000000:
             name = "USB device";
             if (write) result = size == 4 ? usbDevice.write(offset, value) : S3cAccess::unsupported;
             else readWord([&](uint32_t o, uint32_t& v) { return usbDevice.read(o, v); });
+            intc.level(s3cIrq::usbd, usbDevice.irq());
+            if (usbNotify) usbNotify();
             break;
         case 0x58000000:
             name = "ADC and touch screen";
@@ -460,6 +464,49 @@ bool S3c2442Machine::mmio(uint32_t address, unsigned size, bool write, uint32_t&
 void S3c2442Machine::setPin(S3cGpio::Port port, unsigned bit, bool level) {
     gpio.setInputs(port, 1u << bit, level ? 1u << bit : 0, intc);
     updateLines();
+}
+
+void S3c2442Machine::setUsbVbus(bool on) {
+    usbVbusOn = on;
+    setPin(S3cGpio::g, 5, !on);
+    usbPins();
+}
+
+bool S3c2442Machine::usbListening() const {
+    const bool pullup = gpio.dat[S3cGpio::j] >> 5 & 1;
+    return usbVbusOn && !sleeping && (clock.clkcon & 0x80) && pullup;
+}
+
+void S3c2442Machine::usbPins() {
+    const bool on = usbListening();
+    if (on && !usbListeningWas) ++usbEnables;
+    usbListeningWas = on;
+}
+
+void S3c2442Machine::usbHostChanged() {
+    intc.level(s3cIrq::usbd, usbDevice.irq());
+    updateLines();
+}
+
+void S3c2442Machine::uartReceive(unsigned channel, uint8_t byte) {
+    if (channel > 2) return;
+    uarts[channel].receive(byte, intc);
+    updateLines();
+}
+
+// UCON bits 11:10 pick the clock: PCLK (00, 10), UEXTCLK (01, taken as PCLK) or FCLK/n (11). The FCLK/n divider is
+// shared by the three UARTs: UCON0 bits 15:12 plus 6 when not 0, else UCON1's plus 21, else UCON2 bits 14:12 plus 36;
+// UCON2 bit 15 turns the FCLK/n clock on. ASSUMPTION "UART FCLK divider": WM5 sets UCON0 0x4fc5 with UBRDIV0 15 and
+// UCON2 0x8fc5 with UBRDIV2 191, which give 115.7 and 9.6 kbit/s from 296 MHz this way.
+uint32_t S3c2442Machine::uartBaud(unsigned channel) const {
+    if (channel > 2) return 0;
+    const auto& u = uarts[channel];
+    uint64_t hz = clock.pclk();
+    if (((u.ucon >> 10) & 3) == 3) {
+        const uint32_t n0 = (uarts[0].ucon >> 12) & 15, n1 = (uarts[1].ucon >> 12) & 15, n2 = (uarts[2].ucon >> 12) & 7;
+        hz = clock.fclk() / (n0 ? n0 + 6 : n1 ? n1 + 21 : n2 + 36);
+    }
+    return uint32_t(hz / ((uint64_t(u.ubrdiv) + 1) * 16));
 }
 
 void S3c2442Machine::setStylus(bool down, uint16_t x, uint16_t y) {
@@ -536,6 +583,10 @@ uint64_t S3c2442Machine::cyclesToEvent(bool wakeOnly) const {
     // The Wi-Fi chip and access point, in nanoseconds: a frame or scan step can raise its interrupt.
     if (wifiNext != UINT64_MAX)
         best = std::max<uint64_t>(1, wifiNext <= elapsedNs ? 1 : uint64_t((__uint128_t(wifiNext - elapsedNs) * cpuHz + 999999999) / 1000000000));
+    // Host work due (the USB host's next tick): an idle CPU's clock runs on to it, where the owner ticks the host.
+    // One already due waits for the owner's next slice end, at most 1 ms on.
+    if (hostWakeNs != UINT64_MAX)
+        best = std::min(best, std::max<uint64_t>(1, hostWakeNs <= elapsedNs ? cpuHz / 1000 : uint64_t((__uint128_t(hostWakeNs - elapsedNs) * cpuHz + 999999999) / 1000000000)));
     if (!wakeOnly) {
         consider(std::min({pwm.ticksToEvent(), watchdog.ticksToEvent(), adc.ticksToEvent()}), clock.pclk(), pclkRest);
         consider(lcd.ticksToEvent(), clock.hclk(), hclkRest);
@@ -886,6 +937,7 @@ void S3c2442Machine::resetBlocks() {
     if (sdVsd) vsdPowerOff(sdVsd);
     intc.level(s3cIrq::sdi, false);
     usbDevice.reset();
+    intc.level(s3cIrq::usbd, false);
     uint16_t inputs[8];
     std::memcpy(inputs, adc.channel, sizeof inputs);
     adc.reset();
@@ -1176,6 +1228,9 @@ namespace {
     }
     // The Wi-Fi chip and the access point, its own section so states saved before it load with the chip off.
     constexpr uint32_t secWifi = stateFourcc("ACXW"), wifiStateVersion = 1;
+    // The USB device's endpoints and control stage, its own section so states saved before it load with the
+    // endpoints as after a reset.
+    constexpr uint32_t secUsb = stateFourcc("USBD"), usbStateVersion = 1;
     constexpr uint64_t s3cLayout = stateLayoutMix(stateLayoutMix(0xcbf29ce484222325ull, 0x53334332), S3c2442Machine::stateVersion);
 }
 
@@ -1271,6 +1326,11 @@ bool S3c2442Machine::saveState(std::vector<uint8_t>& out, std::string& why) {
         std::vector<uint8_t> id(sdCardId.begin(), sdCardId.end()), card;
         if (in) vsdMachineSave(sdVsd, card);
         cardState(a, in, id, card, sdPowerWas, sdi);
+        file.end();
+    }
+    {
+        auto a = file.begin(secUsb, usbStateVersion);
+        usbDevice.runState(a);
         file.end();
     }
     {
@@ -1370,6 +1430,14 @@ bool S3c2442Machine::loadState(const uint8_t* data, size_t size, std::string& wh
         savedCard.id.assign(id.begin(), id.end());
     } else {
         blocks.sdi.clearRun();
+    }
+
+    if (file.find(secUsb)) {
+        if (!open(secUsb, usbStateVersion, a)) { why = "the saved USB device is from another version"; return false; }
+        blocks.usbDevice.runState(a);
+        if (!done(a, "USB device")) return false;
+    } else {
+        blocks.usbDevice.clearRun();
     }
 
     auto savedWifi = std::make_unique<Acx100>();

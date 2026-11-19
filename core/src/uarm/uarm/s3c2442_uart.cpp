@@ -32,7 +32,7 @@ S3cAccess S3cUart::read(uint32_t offset, uint32_t& value, S3cIntc& intc) {
         case 0x18:
             value = ufcon & 1 ? uint32_t(rx.size() >= fifoSize ? 0x40 : rx.size()) : 0;
             break;
-        case 0x1c: value = 1; break;  // CTS asserted
+        case 0x1c: value = cts ? 1 : 0; break;  // UMSTAT: CTS
         case 0x20: value = 0; break;
         case 0x24:
             value = 0;

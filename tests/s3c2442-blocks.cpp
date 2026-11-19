@@ -411,6 +411,146 @@ static void uartTests() {
     uart.write(0x28, 0x1a, intc);
     assert(uart.read(0x28, v, intc) == S3cAccess::ok && v == 0x1a);
     assert(uart.read(0x2c, v, intc) == S3cAccess::unknown);
+    // UMSTAT follows the far end's CTS; infrared mode is ULCON bit 6 (WM5's IrDA port sets 0x43).
+    assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 1);
+    uart.cts = false;
+    assert(uart.read(0x1c, v, intc) == S3cAccess::ok && v == 0);
+    uart.write(0x00, 0x43, intc);
+    assert(uart.infrared() && get(intc, 0) == get(intc, 0));
+    uart.write(0x04, 0x8fc5, intc);
+    assert(uart.receiverOn() && uart.transmitterOn());
+    for (int i = 0; i < 64; ++i) uart.receive(uint8_t(i), intc);
+    assert(!uart.rxRoom());
+}
+
+// The USB device controller as WM5's sc2440usbfn.dll drives it (R8 trace): a bus reset, a SETUP read from the EP0
+// FIFO, SERVICED_OUT_PKT_RDY through OUT_CSR1 with INDEX 0, the reply loaded with IN_PKT_RDY and DATA_END, the status
+// stage; SET_ADDRESS taking effect after its status; a stall; bulk IN and OUT on EP2 and EP3; AUTO_SET; FIFO counts.
+static void usbDeviceTests() {
+    using R = UsbPacketResult;
+    S3cUsbDevice usb;
+    usb.reset();
+    assert(get(usb, 0x16c) == 0x04 && !usb.irq());
+    usb.busReset();
+    assert((get(usb, 0x158) & 4) && usb.irq());
+    usb.write(0x158, 4);
+    assert(!usb.irq());
+
+    // GET_DESCRIPTOR(device, 18), MAXP 8.
+    const uint8_t getDevice[8] = {0x80, 6, 0, 1, 0, 0, 18, 0};
+    assert(usb.setup(getDevice) == R::Ack && usb.irq());
+    assert(usb.setup(getDevice) == R::Nak);  // the first one isn't read yet
+    usb.write(0x178, 0);
+    assert(get(usb, 0x184) == 0x01 && get(usb, 0x198) == 8 && get(usb, 0x148) == 1);
+    for (unsigned i = 0; i < 8; ++i) assert(get(usb, 0x1c0) == getDevice[i]);
+    usb.write(0x148, 1);
+    uint8_t data[64];
+    unsigned size = 0;
+    assert(usb.in(0, data, &size, true) == R::Nak);  // OUT_PKT_RDY still set
+    usb.write(0x190, 0x40);                            // SERVICED_OUT_PKT_RDY through OUT_CSR1
+    assert(get(usb, 0x184) == 0);
+    usb.write(0x184, 0);  // the driver's read-back write changes nothing
+    for (unsigned i = 0; i < 8; ++i) usb.write(0x1c0, 0x10 + i);
+    usb.write(0x184, 0x02);
+    assert(usb.in(0, nullptr, &size, false) == R::Ack && size == 8);
+    assert(usb.in(0, data, &size, true) == R::Ack && size == 8 && data[0] == 0x10 && data[7] == 0x17);
+    assert(get(usb, 0x184) == 0 && (get(usb, 0x148) & 1));
+    usb.write(0x148, 1);
+    assert(usb.in(0, data, &size, true) == R::Nak);
+    // The last packet with DATA_END, then the host's status OUT.
+    for (unsigned i = 0; i < 2; ++i) usb.write(0x1c0, 0x20 + i);
+    usb.write(0x184, 0x0a);
+    assert(usb.in(0, data, &size, true) == R::Ack && size == 2);
+    assert(get(usb, 0x184) == 0x08);
+    assert(usb.out(0, nullptr, 0) == R::Ack && get(usb, 0x184) == 0 && !usb.controlOpen);
+
+    // A host status stage before the CPU is done ends the transfer with SETUP_END.
+    assert(usb.setup(getDevice) == R::Ack);
+    usb.write(0x190, 0x40);
+    usb.write(0x1c0, 0x12);
+    usb.write(0x184, 0x02);
+    assert(usb.in(0, data, &size, true) == R::Ack);
+    usb.write(0x1c0, 0x34);
+    usb.write(0x184, 0x0a);
+    assert(usb.out(0, nullptr, 0) == R::Ack && get(usb, 0x184) == 0x10 && get(usb, 0x1c0 + 0) == 0);
+    usb.write(0x190, 0x80);  // SERVICED_SETUP_END
+    assert(get(usb, 0x184) == 0);
+
+    // SET_ADDRESS 5: the address counts after the status IN.
+    const uint8_t setAddress[8] = {0x00, 5, 5, 0, 0, 0, 0, 0};
+    assert(usb.setup(setAddress) == R::Ack);
+    usb.write(0x190, 0x40);
+    usb.write(0x140, 0x85);
+    assert(usb.address() == 0 && (get(usb, 0x140) & 0x7f) == 5);
+    assert(usb.in(0, data, &size, true) == R::Nak);  // no DATA_END yet
+    usb.write(0x184, 0x08);
+    assert(usb.in(0, data, &size, true) == R::Ack && size == 0 && usb.address() == 5 && get(usb, 0x140) == 5);
+
+    // A request the CPU stalls.
+    const uint8_t vendor[8] = {0xc2, 4, 0, 0, 0, 0, 20, 0};
+    assert(usb.setup(vendor) == R::Ack);
+    usb.write(0x190, 0x40);
+    usb.write(0x184, 0x20);
+    assert(usb.in(0, data, &size, true) == R::Stall && (get(usb, 0x184) & 0x04) && !(get(usb, 0x184) & 0x20));
+    usb.write(0x184, 0);
+    assert(!(get(usb, 0x184) & 0x04));
+
+    // EP2 bulk IN (MODE_IN), EP3 bulk OUT, 64-byte packets.
+    usb.write(0x148, 0x1f);
+    usb.write(0x178, 2);
+    usb.write(0x180, 8);
+    usb.write(0x188, 0x20);
+    assert(get(usb, 0x180) == 8 && get(usb, 0x188) == 0x20);
+    assert(usb.out(2, data, 4) == R::Unsupported && usb.in(2, data, &size, true) == R::Nak);
+    for (unsigned i = 0; i < 5; ++i) usb.write(0x1c8, 'a' + i);
+    usb.write(0x184, 0x01);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 5 && data[4] == 'e' && (get(usb, 0x148) & 4));
+    assert(!(get(usb, 0x184) & 1));
+    // AUTO_SET: the 64th byte sends the packet.
+    usb.write(0x188, 0xa0);
+    for (unsigned i = 0; i < 64; ++i) usb.write(0x1c8, i);
+    assert(get(usb, 0x184) & 1);
+    assert(usb.in(2, data, &size, true) == R::Ack && size == 64 && data[63] == 63);
+    // SEND_STALL on IN, cleared by the CPU.
+    usb.write(0x184, 0x10);
+    assert(usb.in(2, data, &size, true) == R::Stall && (get(usb, 0x184) & 0x20));
+    usb.write(0x184, 0);
+    assert(get(usb, 0x184) == 0);
+    usb.write(0x178, 3);
+    usb.write(0x180, 8);
+    usb.write(0x188, 0);
+    const uint8_t packet[3] = {1, 2, 3};
+    assert(usb.outReady(3) && usb.out(3, packet, 3) == R::Ack && !usb.outReady(3));
+    assert(usb.out(3, packet, 3) == R::Nak);
+    assert((get(usb, 0x190) & 1) && get(usb, 0x198) == 3 && get(usb, 0x19c) == 0 && (get(usb, 0x148) & 8));
+    assert(get(usb, 0x1cc) == 1 && get(usb, 0x1cc) == 2);
+    usb.write(0x190, 0);  // OUT_PKT_RDY cleared by a write of 0, the rest dropped
+    assert(!(get(usb, 0x190) & 1) && get(usb, 0x198) == 0 && usb.outReady(3));
+    // AUTO_CLR: reading the last byte frees the endpoint.
+    usb.write(0x194, 0x80);
+    assert(usb.out(3, packet, 2) == R::Ack);
+    get(usb, 0x1cc);
+    get(usb, 0x1cc);
+    assert(!(get(usb, 0x190) & 1));
+    // OUT stall and FIFO flush.
+    usb.write(0x190, 0x20);
+    assert(usb.out(3, packet, 1) == R::Stall && (get(usb, 0x190) & 0x40));
+    usb.write(0x190, 0);
+    assert(usb.out(3, packet, 1) == R::Ack);
+    usb.write(0x190, 0x11);
+    assert(!(get(usb, 0x190) & 1) && get(usb, 0x198) == 0);
+    // The endpoint DMA registers keep what's written; the interrupt enables gate the line.
+    assert(usb.write(0x200, 0x5) == S3cAccess::ok && get(usb, 0x200) == 0x5 && get(usb, 0x26c) == 0);
+    uint32_t v;
+    assert(usb.read(0x270, v) == S3cAccess::unknown);
+    usb.write(0x148, 0x1f);
+    usb.write(0x15c, 0);
+    assert(usb.out(3, packet, 1) == R::Ack && !usb.irq());
+    usb.write(0x15c, 0x1f);
+    assert(usb.irq());
+    // A bus reset drops the address and the endpoints' packets.
+    usb.busReset();
+    assert(usb.address() == 0 && get(usb, 0x140) == 0 && !(get(usb, 0x190) & 1));
 }
 
 static void lcdTests() {
@@ -1134,6 +1274,7 @@ int main() {
     rtcTests();
     gpioTests();
     uartTests();
+    usbDeviceTests();
     lcdTests();
     nandTests();
     nandImageTests();

@@ -67,4 +67,13 @@ constexpr size_t rx1950MaxCardSectors = size_t(2048) << 11;
 constexpr S3cGpio::Port rx1950CablePort = S3cGpio::f;
 constexpr unsigned rx1950CableBit = 6;
 
+// The sync connector's serial port is UART0: with the cable sense high, ser2410's CRADLE2410 instance (COM1)
+// sends ActiveSync's "CLIENT" probe there every second (R3). ASSUMPTION "rx1950 COM1 on UART0": the registry's
+// IoBase 0x50004000 for CRADLE2410 isn't what the driver uses; the traffic decides.
+constexpr unsigned rx1950SerialUart = 0;
+// The infrared port is UART2 in IrDA mode (IRDA2410, COM2, IoBase 0x50008000).
+// ASSUMPTION "rx1950 IR transceiver": the transceiver is powered while UART2 is in infrared mode (ULCON bit 6);
+// no shutdown pin turned up in R0's GPIO list.
+constexpr unsigned rx1950InfraredUart = 2;
+
 #endif

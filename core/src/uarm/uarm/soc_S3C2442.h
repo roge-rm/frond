@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "SoC.h"
+#include "UsbDevicePort.h"
+#include "UsbHostHooks.h"
 #include "net/WifiRouter.h"
 #include "s3c2442_machine.h"
 #include "s3c2442_pen.h"
@@ -86,6 +88,21 @@ class SocS3C2442 : public SoC {
     std::string StopText() const { return halted ? machine->stopText() : std::string(); }
     S3c2442Machine& Machine() { return *machine; }
 
+    // The sync connector's serial port (UART0, rx1950SerialUart) and the infrared port (UART2 in IrDA mode)
+    // for HostSerial and HostInfrared. A host on the serial port is a serial cable in: the cable sense (GPF6)
+    // goes high while one is attached. Bytes from the host reach the UART at its bit rate, between run slices.
+    HostUartPort* SerialHostPort() override;
+    HostInfraredPort* InfraredHostPort() override;
+    void BeginSerialCheckpoint() override { ++serialCheckpoints; }
+    void EndSerialCheckpoint() override { if (serialCheckpoints) --serialCheckpoints; }
+    // The USB device controller as a UsbDevicePort, for UsbHostBridge. The bridge's cable is VBUS on GPG5.
+    // Hooks tick between run slices on GetTime's clock; an idle guest's clock runs on to the host's next tick.
+    UsbDevicePort GetUsbPort();
+    void SetUsbHostHooks(const UsbHostHooks* hooks) { usbHostHooks = hooks ? *hooks : UsbHostHooks{}; }
+    bool SetUsbCable(bool attached);
+    bool UsbCableAttached() const { return machine->usbVbus(); }
+    bool UsbHostIoPaused() const { return halted || serialCheckpoints || PowerSleeping(); }
+
    protected:
     void OnSetFramebufferDirty() override { redraw = true; }
     bool OnSleep() override { return false; }
@@ -146,6 +163,22 @@ class SocS3C2442 : public SoC {
     // checkpoint.
     std::unique_ptr<frondNet::WifiRouter> router;
     void PollNetwork();
+
+    struct SerialPort;
+    struct InfraredPort;
+    std::unique_ptr<SerialPort> serialPort;
+    std::unique_ptr<InfraredPort> infraredPort;
+    unsigned serialCheckpoints{0};
+    // Host bytes into UART0 and UART2 at their bit rates, after each slice of ns guest time.
+    void PumpUarts(uint64_t ns);
+    uint64_t uartCredit[3]{};
+    // A load or reset made a new board: the host peers start again; the cable sense follows the serial host.
+    void ApplyUartLines();
+    void UartSent(unsigned channel, uint8_t byte);
+    UsbHostHooks usbHostHooks{};
+    void (*usbNotify)(void*){nullptr};
+    void* usbNotifyContext{nullptr};
+    void TickUsbHost();
 };
 
 #endif
