@@ -76,6 +76,8 @@ SOURCE_CXX =		 					\
 	uarm/s3c2442_usbd.cpp				\
 	uarm/s3c2442_adc.cpp				\
 	uarm/s3c2442_audio_bus.cpp			\
+	uarm/acx100.cpp					\
+	uarm/wifi_access_point.cpp			\
 	uarm/rx1950_nand_image.cpp			\
 	uarm/pv_ic.cpp						\
 	uarm/pv_timer.cpp					\
