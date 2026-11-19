@@ -1218,7 +1218,7 @@ bool gFastEngineMissing = false;
         // frame and nothing changed is skipped.
         auto drawPending = [&]() {
             if (appBackground || !sdlRenderer->Valid()) return;
-            DrawState draw;
+            RenderDrawState draw;
             const bool taken = link.TakeDraw(draw);
             if (!taken && !redraw && !redrawAll) return;
             if (!taken) {
