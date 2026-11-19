@@ -86,6 +86,8 @@ Dan
 | **Other** | | | | | | | | |
 | AlphaSmart Dana | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | USB Wi-Fi adapter | |
 | AlphaSmart Dana Wireless | 4.1 | 560×160 grey | two SD or MMC | yes | yes | | built in | |
+| **Windows Mobile, ARM** | | | | | | | | |
+| HP iPAQ rx1950 | Windows Mobile 5 | 240×320 colour | SD | yes | yes | | virtual Wi-Fi | ActiveSync, USB and serial |
 
 The ARM devices have an Exact or a Fast engine. The 68k ones only have Exact. The cradle serial port goes to a PTY or TCP port for terminal programs and HotSync, and the T|X, E2, E3 and Zire 72 also have USB HotSync over a PTY or TCP port. The Zire 72 has no serial port, same as the real one. The 68k Palms have the cradle's HotSync button, and their USB HotSync isn't done yet.
 
@@ -102,6 +104,8 @@ The infrared keyboard and beaming share the port. Take the keyboard off before y
 The TG50 plays beeps, alarms and Sony Voice Recorder audio. Its microphone is off each time it starts, and saving, stopping or going to the background turns it off again. Android asks for permission the first time. Bluetooth is tested with serial (SPP) and object exchange. Its early Palm OS 5 has no SndStream, same as the real one, so SunVox needs Modern Clie Audio 2 installed first. The remote control, MagicGate and Memory Stick audio aren't there yet.
 
 The Tapwave Zodiac plays sound and takes an SD card. Its other peripherals aren't done.
+
+The HP iPAQ rx1950 runs Windows Mobile 5, with sound and the microphone, an SD card, infrared beaming and Wi-Fi through Virtual Wi-Fi. It syncs with SynCE's ActiveSync tools over USB or the serial cable on Linux. Install copies a file onto the SD card, where File Explorer installs a CAB. Hard reset erases its storage and starts at Windows Mobile's first screen. The installed program list isn't done yet. See [ActiveSync](doc/using-frond.md#activesync).
 
 ## Sessions
 
@@ -142,7 +146,7 @@ You can also type with an emulated Palm infrared keyboard, once Palm's keyboard 
 
 <img src="doc/images/android-internal-files.png" width="200" alt="The T|X's internal databases listed in Files on Android">
 
-Install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. Each app's row has Launch, Export and Delete.
+Install PRC and PDB files with Install…, from the Applications panel on Linux or the sheet on Android. On the rx1950 Install… copies a file onto the SD card instead. Each app's row has Launch, Export and Delete.
 
 FrondBench, a small speed test, installs from the Help menu on the desktop or the Applications sheet on Android, or saves as a PRC for a real Palm; see [FrondBench](doc/using-frond.md#frondbench).
 
@@ -240,6 +244,7 @@ It needs FUSE, which most desktops have. If it won't start, install `fuse3`, or 
 | Palm IIIx, IIIe, IIIxe, IIIc, V, Vx, m100 and m105 | one ROM file, 1.2 to 2.1 MB | none |
 | Palm m125, m130, m500, m505, m515, m520 and IBM WorkPad c500 | one ROM file, 2.4 to 4.2 MB | none |
 | AlphaSmart Dana and Dana Wireless | one ROM file, 6 MiB | none |
+| HP iPAQ rx1950 | `CEBL.nbf` from HP's WM5 ROM 1.01.00 ENG (264,794 bytes) | `CEOS.nbf` from the same ROM (67,095,130 bytes) |
 
 The IIIx takes the OS 3.1 ROM (retail or debug), a generic OS 3.5 EZ ROM (retail or debug), or the IIIx/V OS 4.1 ROM. The IIIe has no ROM of its own and runs the IIIx's OS 3.1 ROM (1,212,416 bytes). The IIIxe takes its OS 3.5 ROM (1,605,632 bytes), the V the OS 3.1, 3.3 or 4.1 ROMs, the Vx the OS 3.3 or 4.1 ROM (2 MiB), and the IIIc its OS 4.1 ROM (1,736,704 bytes). The m100 and m105 take the OS 3.5.1 ROM (2 MiB), and Frond offers the m100 when it sees one, so choose the m105 yourself. The m125 takes its OS 4.0.1 ROM (3 MiB), the m130 its OS 4.0 ROM (4 MiB), the m500 its OS 4.1 ROM (2,424,832 bytes) and the c500 the WorkPad ROM (2,621,440 bytes) or the m500's, so choose the c500 yourself. The m505, m515 and m520 take their own OS 4.1 ROMs (4 MiB), and none of these four takes another's. Both Danas use the same ROM, so choose AlphaSmart Dana Wireless when you add one, as the ROM itself says Dana. For the Zodiac, pick Tapwave's `Zodiac_1.1_ROM_Update.zip` (or the `.prc` in it) as the NOR image and Frond takes the ROM out of it. `tools/zodiac-rom.py UPDATE OUT.rom` does the same on its own.
 
