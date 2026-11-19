@@ -516,13 +516,15 @@ int main(int argc, char** argv) {
         } else if (c == "power") {
             const auto leds = rx1950Leds(*machine);
             std::printf("power: %s, %" PRIu64 " sleeps, %" PRIu64 " wakes (last by %08x), GSTATUS2 %x, backlight %d/1000, LEDs green %d red %d blue %d blinking %d notification %d"
-                        " (GPACON %07x GPADAT %07x GPBCON %06x GPBDAT %03x GPJDAT %04x TCON %06x TCNTB0 %u TCMPB0 %u)\n",
+                        " (GPACON %07x GPADAT %07x GPBCON %06x GPBDAT %03x GPJDAT %04x TCON %06x TCNTB0 %u TCMPB0 %u GPFCON %04x GPFDAT %02x EXTINT0 %08x EINTMASK %06x SRCPND %08x INTMSK %08x)\n",
                         machine->asleep() ? "asleep" : "awake", machine->sleepCount(), machine->wakeCount(), machine->lastWakeSources(),
                         machine->gpio.gstatus[2], machine->backlightLevel(), leds.green, leds.red, leds.blue, leds.blinking,
                         rx1950NotificationLed(*machine),
                         machine->gpio.con[S3cGpio::a], machine->gpio.dat[S3cGpio::a], machine->gpio.con[S3cGpio::b],
                         machine->gpio.dat[S3cGpio::b], machine->gpio.dat[S3cGpio::j], machine->pwm.tcon,
-                        machine->pwm.timers[0].buffer, machine->pwm.timers[0].compare);
+                        machine->pwm.timers[0].buffer, machine->pwm.timers[0].compare,
+                        machine->gpio.con[S3cGpio::f], machine->gpio.input[S3cGpio::f] & 0xff, machine->gpio.extint[0],
+                        machine->gpio.eintmask, machine->intc.srcpnd, machine->intc.intmsk);
         } else if (c == "battery-state") {
             std::printf("battery %s\n", rx1950BatteryState(battery).c_str());
         } else if (c == "battery") {
